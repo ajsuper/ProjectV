@@ -40,7 +40,7 @@ Currently only supports Linux
 Linux:
 ```bash
 $ git clone https://github.com/ajsuper/ProjectV
-$ cd /path/to/ProjectV-vX.X
+$ cd /path/to/ProjectV
 $ make
 ```
 
@@ -52,13 +52,13 @@ $ make
 
 > **Warning** rm -r can be dangerous when used incorrectly. Ensure it is used on the desired file path.
 ```bash
-$ rm -r /path/to/ProjectV-vX.X
+$ rm -r /path/to/ProjectV
 ```
 
 #### Only build files (Keeps the source code and file structure):
 
 ```bash
-$ cd /path/to/projectV-vX.X
+$ cd /path/to/projectV
 $ make clean
 ```
 
@@ -155,7 +155,7 @@ Steps to setting up a project using ProjectV:
         > **Note** ***Graphics*** requires `-lGL` and ***core*** requires `-lglfw3` and `-lGLEW`
 
         ```bash
-        $ g++ -o myProject main.cpp -I/path/to/ProjectV-vX.X/include/ -L/path/to/ProjectV-vX.X/lib/ -lprojectV-utils -lprojectV-core -lprojectV-graphics -lglfw -lGL -lGLEW
+        $ g++ -o myProject main.cpp -I/path/to/ProjectV/include/ -L/path/to/ProjectV/lib/ -lprojectV-utils -lprojectV-core -lprojectV-graphics -lglfw -lGL -lGLEW
         ```
 
 For more detailed instructions in the form of commented code, please see our examples using the ProjectV. [Examples](/docs/examples)
