@@ -1,11 +1,15 @@
-# Compiled Object files
+# Ignore build artifacts
 *.o
-*.obj
-
-# Compiled Static libraries
 *.a
+*.bin
 
-# Executables
-*.exe
-*.out
-*.app
+# Ignore generated files and folders
+obj/
+lib/
+
+# Ignore example build outputs
+docs/examples/*/main.o
+docs/examples/*/octree.bin
+docs/examples/*/voxelTypeData.bin
+
+
