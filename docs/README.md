@@ -39,7 +39,7 @@ Currently only supports Linux
 
 Linux:
 ```bash
-$ git clone INSERT THE LINK
+$ git clone https://github.com/ajsuper/ProjectV
 $ cd /path/to/ProjectV-vX.X
 $ make
 ```
