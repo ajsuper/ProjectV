@@ -158,7 +158,7 @@ Steps to setting up a project using ProjectV:
         $ g++ -o myProject main.cpp -I/path/to/ProjectV-vX.X/include/ -L/path/to/ProjectV-vX.X/lib/ -lprojectV-utils -lprojectV-core -lprojectV-graphics -lglfw -lGL -lGLEW
         ```
 
-For more detailed instructions in the form of commented code, please see ADD THE LINK
+For more detailed instructions in the form of commented code, please see our examples using the ProjectV. [Examples](docs/examples)
 
 ### Contributing
 
