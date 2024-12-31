@@ -1,4 +1,4 @@
-// Last edited on: 31-12-2024
+// Last edited on: 31-12-2024.
 
 #include "graphics.h"
 #include "camera.h"

@@ -1,4 +1,4 @@
-// Last edited on: 31-12-2024
+// Last edited on: 31-12-2024.
 // Data structures explained in (docs/data_structures/octree_data_structure.md) and (docs/data_structures/voxel_type_data_structure.md).
 
 #include "utils.h"

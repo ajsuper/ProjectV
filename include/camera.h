@@ -1,6 +1,6 @@
 #ifndef CAMERA_H
 #define CAMERA_H
-// Last edited on: 31-12-2024
+// Last edited on: 31-12-2024.
 
 namespace projv{
     /**
