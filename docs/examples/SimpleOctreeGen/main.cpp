@@ -1,4 +1,4 @@
-//Last edited on: 31-12-2024
+// Last edited on: 31-12-2024.
 
 /*
 This example demonstrates how you can create an octree and its corresponding voxel type data and store them into binary files.
