@@ -1,4 +1,5 @@
 # Last edited on: 31-12-2024
+# Temporary Makefile for linux development. Ideally use CMake or some cross platform alternative for first release.
 # Compiler and flags
 CXX = g++
 CXXFLAGS = -I./include -Wall -Wextra -g -O3
