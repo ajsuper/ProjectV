@@ -1,4 +1,3 @@
-//Last edited on: 31-12-2024
 // Data structures explained in (docs/data_structures/octree_data_structure.md) and (docs/data_structures/voxel_type_data_structure.md).
 // The algorithm this shader uses is depicted in the Nvidia paper in (docs/SOURCES.md).
 
