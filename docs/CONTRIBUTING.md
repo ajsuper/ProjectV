@@ -27,22 +27,31 @@ If you find a bug or have a feature request, please create an issue on our GitHu
 To contribute code, please follow these steps:
 
 1. Fork the repository.
-2. Create a new branch for your feature or bugfix.
-3. Make your changes in the new branch.
+2. Make your changes to your fork.
 4. Ensure your code follows the coding standards outlined below.
-5. Write tests for your changes (if applicable).
-6. Commit your changes with a clear and descriptive commit message.
-7. Push your changes to your forked repository.
-8. Create a pull request to the main repository.
+5. Commit your changes with a clear and descriptive commit message. If addressing an issue, please include the issue number. (Issue #XX)
+6. Push your changes to your forked repository.
+7. Create a pull request to the main repository.
+8. Positively collaborate and discuss with anyone who comments on your pull request.
 
 ### Coding Standards
 
 To maintain consistency in the codebase, please adhere to the following coding standards:
 
-- Use meaningful variable and function names.
+- Use meaningful variable and function names, both in camelCase.
+- Use snake_case for any sort of callbacks.
 - Write clear and concise comments.
-- Follow the existing code style and formatting.
-- Ensure your code is well-documented.
+- Use: `// Text here.` for inline comments.
+- Use:
+```cpp
+/**
+  * This is a comment for describing a function or struct.
+  *
+  * @param nameOfParameter is what I take in.
+  * @return nameOfOutput is what I return.
+  */
+```
+  as comments above functions or structs to allow for code editors to supply function descriptions and information.
 
 ### Code Review Process
 
@@ -52,6 +61,7 @@ All pull requests will be reviewed by a project maintainer. During the review pr
 
 If your changes include anything that should be cited, please include it in the [SOURCES.md](/docs/SOURCES.md). Use this format
 ```
+### What It's Used For
   - [Name of source](Link to source) - Accesed on day/month/year
 ```
 
