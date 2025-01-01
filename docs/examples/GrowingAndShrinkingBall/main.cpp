@@ -1,4 +1,4 @@
-//Last edited on: 31-12-2024
+// Last edited on: 31-12-2024.
 
 /*
 This is an example piece of code using ProjectV that generates a sphere, converts it to an octree, passes this to the shader, and then changes the radius and does it again.
