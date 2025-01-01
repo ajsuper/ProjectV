@@ -29,7 +29,7 @@ To contribute code, please follow these steps:
 1. Fork the repository.
 2. Make your changes to your fork.
 4. Ensure your code follows the coding standards outlined below.
-5. Commit your changes with a clear and descriptive commit message. If addressing an issue, please include the issue number. (Issue #XX)
+5. Commit your changes with a clear and descriptive commit message. If addressing an issue, please include the issue number. (Issue #XX). Same goes for pull requests.
 6. Push your changes to your forked repository.
 7. Create a pull request to the main repository.
 8. Positively collaborate and discuss with anyone who comments on your pull request.
