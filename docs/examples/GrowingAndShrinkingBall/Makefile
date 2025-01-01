@@ -1,4 +1,3 @@
-# Last edited on: 31-12-2024
 # This is an example Makefile for the GrowingAndShrinkingBall example.
 
 # Directory variables that we will use to compile the project.

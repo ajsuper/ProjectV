@@ -22,6 +22,3 @@ Each voxel is sorted based off of it's VoxelID from least to greatest to allow f
 ### More
 
 For more information on this project, visit our [README.md](/docs/README.md)
-
-Last edited on: 31-12-2024
-

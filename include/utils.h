@@ -1,7 +1,6 @@
 
 #ifndef PROJECTV_UTILS_H
 #define PROJECTV_UTILS_H
-// Last edited on: 31-12-2024.
 
 #include <iostream>
 #include <fstream>

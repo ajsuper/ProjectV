@@ -1,4 +1,3 @@
-//Last edited on: 31-12-2024
 // Simple vertex shader for rendering the output of our fragment shader (ray marcher).
 
 #version 460 core

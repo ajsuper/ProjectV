@@ -1,6 +1,5 @@
 #ifndef PROJECTV_GRAPHICS_H
 #define PROJECTV_GRAPHICS_H
-// Last edited on: 31-12-2024.
 
 #include <fstream>
 #include <sstream>

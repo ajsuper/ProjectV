@@ -169,5 +169,3 @@ This is my first time open sourcing any project, and my first project on this sc
 We highly encourage contributors to cite their sources in our [SOURCES.md](/docs/SOURCES.md). ProjectV does not require citations; However, they are greatly appreciated and reccommended if you intend for others to be looking at and editing your code. 
 
 Thank you for using ProjectV!!
-
-Last edited on: 31-12-2024

@@ -1,6 +1,5 @@
 #ifndef PROJECTV_CORE_H
 #define PROJECTV_CORE_H
-// Last edited on: 31-12-2024.
 
 #include <fstream>
 #include <sstream>
