@@ -162,10 +162,10 @@ For more detailed instructions in the form of commented code, please see our exa
 
 ### Contributing
 
-This is my first time open sourcing any project, and my first project on this scale. If there is anything that I should've done differently, or if something could be greatly improved, please feel free to change it or let me know! ProjectV is open source under the [MIT License](/docs/LICENSE.md) and is welcoming as many contributors as possible! All contributions are welcome, whether it's features additions, optimizations, or just spelling corrections. If you choose to contribute, please visit the [MIT License](/docs/LICENSE.md). Also be sure to visit [CONTRIBUTING](/docs/CONTRIBUTING.md) to get instructions on how to contribute! Thank you!!
+This is my first time open sourcing any project, and my first project on this scale. If there is anything that I should've done differently, or if something could be greatly improved, please feel free to change it or let me know! ProjectV is open source under the [MIT License](/docs/LICENSE.md) and is welcoming as many contributors as possible! All contributions are welcome, whether it's features additions, optimizations, or just spelling corrections. If you choose to contribute, please visit the [MIT License](/docs/LICENSE.md) and make sure you read the [CODE_OF_CONDUCT](/docs/CODE_OF_CONDUCT.md). Also be sure to visit [CONTRIBUTING](/docs/CONTRIBUTING.md) to get instructions on how to contribute! Thank you!!
 
 #### Citations
 
-We highly encourage contributors to cite their sources in our [SOURCES.md](/docs/SOURCES.md). ProjectV does not require citations; However, they are greatly appreciated and reccommended if you intend for others to be looking at and editing your code. 
+We highly encourage contributors to cite their sources in our [SOURCES.md](/docs/SOURCES.md). ProjectV does not require citations; However, they are greatly appreciated and recommended if you intend for others to be looking at and editing your code. 
 
 Thank you for using ProjectV!!
