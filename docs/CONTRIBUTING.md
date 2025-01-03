@@ -1,5 +1,5 @@
 # Welcome!
-Hello!! Thank you for visiting our contributions file! If you choose to contribute, then please read the rest of this file to gather the necessary information to help out the project! If you haven't already, please visit our [README.md](/docs/README.md) to get an overview of the project! Also be sure to visit the copy of the [MIT License](/docs/LICENSE.md).
+Hello!! Thank you for visiting our contributions file! If you choose to contribute, then please read the rest of this file to gather the necessary information to help out the project! Please read over our [CODE_OF_CONDUCT.md](/docs/CODE_OF_CONDUCT) before contributing, and if you haven't already, visit our [README.md](/docs/README.md) to get an overview of the project! Also be sure to visit the copy of the [MIT License](/docs/LICENSE.md).
 
 ### Philosophy
 
