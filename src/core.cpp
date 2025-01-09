@@ -13,28 +13,6 @@
 #include <cmath>
 
 namespace projv{
-
-    /**
-     * Error callback for GLFW.
-     * 
-     * @param error The error code.
-     * @param description A description of the error.
-     */
-    void error_callback(int error, const char* description) {
-        std::cerr << "GLFW Error (" << error << "): " << description << std::endl;
-    }
-
-    /**
-     * Frame size callback for GLFW.
-     * 
-     * @param window The GLFW window.
-     * @param width The new width of the framebuffer.
-     * @param height The new height of the framebuffer.
-     */
-    void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
-        glViewport(0, 0, width, height);
-    }
-
     /**
      * Move/Rotate the camera from WASD QE SPACE/SHIFT (R and F to change movement speeds).
      * 
@@ -167,7 +145,6 @@ namespace projv{
             return false;
         }
         glfwMakeContextCurrent(window);
-        glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 
         glewExperimental = GL_TRUE;  // Enable modern OpenGL features
         if (glewInit() != GLEW_OK) {

@@ -15,7 +15,23 @@ namespace projv{
 
     // Global variables
     extern GLuint shaderProgram;
+    extern GLuint postProcessingShaderProgram;
     extern GLuint VAO, VBO;  // Vertex Array Object and Vertex Buffer Object
+    extern GLuint FBO, colorBuffer, depthBuffer, normalBuffer, albedoBuffer;
+    extern GLuint FBO2, colorBuffer2, depthBuffer2, normalBuffer2, albedoBuffer2;
+    extern int frameCount;
+
+    /**
+     * Creates our post processing and main rendering pass shader objects.
+     */
+    void createShaders();
+
+    /**
+     * Initializes our FBO and FBO2 for post processing.
+     * 
+     * @param window The window for which to generate the framebuffer's off of. (Depicts buffer size)
+     */
+    void createPostProcessingFrameBuffers(GLFWwindow* window);
 
     /**
      * Renders a frame to the given window.
@@ -29,6 +45,12 @@ namespace projv{
      * Creates a quad for rendering to the whole window.
      */
     void createRenderQuad();
+
+
+    /**
+     * Updates the time variable in the shader.
+     */
+    void updateTimeInShader();
 
     /**
      * Updates the camera position and direction in the shader.
@@ -68,6 +90,11 @@ namespace projv{
      * Compiles the vertex and fragment shaders and links them into a shader program.
      */
     void compileAndUseVertexAndFragShader();
+
+    /**
+     * Compiles the vertex shader and post processing fragment shader and links them into a shader program called postProccesingShaderProgram.
+     */
+    void compileAndUseVertexAndPostProcessingShader();
 }
 
 #endif
