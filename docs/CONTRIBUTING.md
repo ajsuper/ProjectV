@@ -57,6 +57,10 @@ To maintain consistency in the codebase, please adhere to the following coding s
 
 All pull requests will be reviewed by a project maintainer. During the review process, you may be asked to make changes to your code. Please be responsive to feedback and make the necessary updates.
 
+### Adding of Data Structures
+
+If you add any data structure to the project that the user might want to interact with directly *(not through any functions or innacesable data structures)* then please include an explanation in the [data_structures](/docs/data_structures) folder.
+
 ### Citations
 
 If your changes include anything that should be cited, please include it in the [SOURCES.md](/docs/SOURCES.md). Use this format
