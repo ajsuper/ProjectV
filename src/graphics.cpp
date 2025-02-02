@@ -16,67 +16,109 @@ namespace projv{
     int frameCount = 0;
     // Global variables
     GLuint VAO, VBO;  // Vertex Array Object and Vertex Buffer Object
-    
-    FrameBuffer createFrameBufferObject(int width, int height){
-        FrameBuffer frameBufferObject;
 
-        glGenFramebuffers(1, &frameBufferObject.buffer);
+    void addTextureToFrameBuffer(FrameBuffer &frameBuffer, GLuint internalFormat, std::string textureName) {
+        int width = frameBuffer.width;  // Get framebuffer dimensions
+        int height = frameBuffer.height;
 
-        // Create our color buffer.
-        glGenTextures(1, &frameBufferObject.colorTexture);
-        glBindTexture(GL_TEXTURE_2D, frameBufferObject.colorTexture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); 
+        Texture customTexture;
 
-        // Create our depth buffer.
-        glGenTextures(1, &frameBufferObject.colorTexture2);
-        glBindTexture(GL_TEXTURE_2D, frameBufferObject.colorTexture2);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); 
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // Generate and bind the texture
+        glGenTextures(1, &customTexture.textureID);
+        glBindTexture(GL_TEXTURE_2D, customTexture.textureID);
 
-        // Create our normal buffer.
-        glGenTextures(1, &frameBufferObject.normalTexture);
-        glBindTexture(GL_TEXTURE_2D, frameBufferObject.normalTexture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); 
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // Determine the appropriate base format and type
+        GLenum baseFormat;
+        GLenum type;
 
-        //Create our color buffer.
-        glGenTextures(1, &frameBufferObject.positionTexture);
-        glBindTexture(GL_TEXTURE_2D, frameBufferObject.positionTexture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); 
+        switch (internalFormat) {
+            case GL_R8:
+            case GL_R16:
+                baseFormat = GL_RED;
+                type = GL_UNSIGNED_BYTE;
+                break;
 
-        // Bind the framebuffer and attach the color buffer, depth buffer, and normal buffer.
-        glBindFramebuffer(GL_FRAMEBUFFER, frameBufferObject.buffer);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, frameBufferObject.colorTexture, 0);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, frameBufferObject.colorTexture2, 0);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, frameBufferObject.normalTexture, 0);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D, frameBufferObject.positionTexture, 0);
+            case GL_R16F:
+            case GL_R32F:
+                baseFormat = GL_RED;
+                type = GL_FLOAT;
+                break;
+            
+            case GL_RGB8:
+            case GL_RGB16:
+                baseFormat = GL_RGB;
+                type = GL_UNSIGNED_BYTE;
+                break;
 
-        // Tell OpenGL which color attachments we'll use (of this framebuffer) for rendering.
-        GLenum drawBuffers[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
-        glDrawBuffers(4, drawBuffers);
- 
-        if(glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE){
-            std::cerr << "Framebuffer is not complete!" << std::endl;
+            case GL_RGB16F:
+            case GL_RGB32F:
+                baseFormat = GL_RGB;
+                type = GL_FLOAT;
+                break;
+
+            case GL_RGBA8:
+            case GL_RGBA16:
+                baseFormat = GL_RGBA;
+                type = GL_UNSIGNED_BYTE;
+                break;
+
+            case GL_RGBA16F:
+            case GL_RGBA32F:
+                baseFormat = GL_RGBA;
+                type = GL_FLOAT;
+                break;
+
+            default:
+                    std::cerr << "Unsupported format: " << internalFormat << ". Supported formats are: GL_R8, GL_R16F, GL_R32F, GL_RGB8, GL_RGB16, GL_RGB16F, GL_RGB32F, GL_RGBA8, GL_RGBA16, GL_RGBA16F, GL_RGBA32F." << std::endl;
+                return;  // Exit the function on unsupported format
         }
 
-        // Unbind the framebuffer.
+        // Specify the texture image
+        glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, baseFormat, type, nullptr);
+
+        // Set texture parameters
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        // Assign properties to the customTexture object and add it to the buffers texture list.
+        customTexture.name = textureName;
+        customTexture.format = internalFormat;
+        frameBuffer.textures.push_back(customTexture);
+
+        // Get the number of textures in our frame buffer object
+        int numberOfTextures = frameBuffer.textures.size();
+
+        // Create our color attatchments aray and bind our buffer.
+        GLenum drawBuffers[numberOfTextures];
+        glBindFramebuffer(GL_FRAMEBUFFER, frameBuffer.buffer);
+
+        // Re-bind all of the textures.
+        for(int i = 0; i < numberOfTextures; i++){
+            Texture texture = frameBuffer.textures[i]; // Fetch the texture
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, texture.textureID, 0); // Set this textureID to a color attatchment.
+            drawBuffers[i] = GL_COLOR_ATTACHMENT0 + i;
+
+            std::cout << "[INFO | addTextureToFrameBuffer] Texture " << texture.name << " added at location " << i << std::endl;
+        }
+
+        glDrawBuffers(numberOfTextures, drawBuffers);
+
+        // Unbind the texture and framebuffer.
+        glBindTexture(GL_TEXTURE_2D, 0);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-        return frameBufferObject;
+        return;
+    }
+
+    
+    FrameBuffer createFrameBufferObjectAdvanced(int width, int height){
+        FrameBuffer FBO;
+        glGenFramebuffers(1, &FBO.buffer);
+        FBO.width = width;
+        FBO.height = height;
+        return FBO;
     }
 
     void renderFragmentShaderToTargetBuffer(GLuint shaderProgram, FrameBuffer targetBuffer){
@@ -103,17 +145,24 @@ namespace projv{
         // Clear the framebuffer
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // Use the post-processing shader program
+        // Use the shader program
         glUseProgram(shaderProgram);
 
         // Bind the quad VAO
         glBindVertexArray(VAO);
 
+        for(int i = 0; i < inputBuffer1.textures.size(); i++){
+            glActiveTexture(GL_TEXTURE0 + i);
+            glBindTexture(GL_TEXTURE_2D, inputBuffer1.textures[i].textureID);
+            std::string fullTextureName = "inputBuffer1_" + inputBuffer1.textures[i].name;
+            glUniform1i(glGetUniformLocation(shaderProgram, fullTextureName.c_str()), i);
+        }
+
+        /*
         // Bind textures for buffer 1
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, inputBuffer1.colorTexture);
         glUniform1i(glGetUniformLocation(shaderProgram, "buffer1ScreenTexture"), 0);
-
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, inputBuffer1.colorTexture2);
         glUniform1i(glGetUniformLocation(shaderProgram, "buffer1ColorTexture2"), 1);
@@ -124,7 +173,8 @@ namespace projv{
 
         glActiveTexture(GL_TEXTURE3);
         glBindTexture(GL_TEXTURE_2D, inputBuffer1.positionTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer1PositionTexture"), 3);
+        glUniform1i(glGetUniformLocation(shaderProgram, "buffer1PositionTexture"), 3);        
+        */
 
         // Draw the full-screen quad
         glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -135,51 +185,31 @@ namespace projv{
         return;
     }
 
-    void renderFragmentShaderToTargetBufferWithTwoInputBuffers(GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer inputBuffer2, FrameBuffer targetBuffer){
+    void renderFragmentShaderToTargetBufferWithTwoInputBuffersAdvanced(GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer inputBuffer2, FrameBuffer targetBuffer){
         glBindFramebuffer(GL_FRAMEBUFFER, targetBuffer.buffer);
 
         // Clear the framebuffer
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // Use the post-processing shader program
+        // Use the shader program
         glUseProgram(shaderProgram);
 
         // Bind the quad VAO
         glBindVertexArray(VAO);
 
-        // Bind textures for buffer 1
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, inputBuffer1.colorTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer1ScreenTexture"), 0);
+        for(int i = 0; i < inputBuffer1.textures.size(); i++){
+            glActiveTexture(GL_TEXTURE0 + i);
+            glBindTexture(GL_TEXTURE_2D, inputBuffer1.textures[i].textureID);
+            std::string fullTextureName = "inputBuffer1_" + inputBuffer1.textures[i].name;
+            glUniform1i(glGetUniformLocation(shaderProgram, fullTextureName.c_str()), i);
+        }
 
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, inputBuffer1.colorTexture2);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer1ColorTexture2"), 1);
-
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, inputBuffer1.normalTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer1NormalTexture"), 2);
-
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, inputBuffer1.positionTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer1PositionTexture"), 3);
-
-        // Bind textures for buffer 2
-        glActiveTexture(GL_TEXTURE4);
-        glBindTexture(GL_TEXTURE_2D, inputBuffer2.colorTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer2ScreenTexture"), 4);
-
-        glActiveTexture(GL_TEXTURE5);
-        glBindTexture(GL_TEXTURE_2D, inputBuffer2.colorTexture2);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer2ColorTexture2"), 5);
-
-        glActiveTexture(GL_TEXTURE6);
-        glBindTexture(GL_TEXTURE_2D, inputBuffer2.normalTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer2NormalTexture"), 6);
-
-        glActiveTexture(GL_TEXTURE7);
-        glBindTexture(GL_TEXTURE_2D, inputBuffer2.positionTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer2PositionTexture"), 7);
+        for(int i = 0; i < inputBuffer2.textures.size(); i++){
+            glActiveTexture(GL_TEXTURE0 + i + inputBuffer1.textures.size());
+            glBindTexture(GL_TEXTURE_2D, inputBuffer2.textures[i].textureID);
+            std::string fullTextureName = "inputBuffer2_" + inputBuffer2.textures[i].name;
+            glUniform1i(glGetUniformLocation(shaderProgram, fullTextureName.c_str()), inputBuffer1.textures.size()+i);
+        }
 
         // Draw the full-screen quad
         glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -189,9 +219,20 @@ namespace projv{
 
         return;
     }
-    
 
     void renderMultipassFragmentShaderToTargetBuffer(int numberOfPasses, GLuint multiPassShaderProgram, FrameBuffer frameBuffer1, FrameBuffer frameBuffer2, FrameBuffer targetBuffer){
+        // Ensure the frame buffers have the same texture attatchments.
+        if(frameBuffer1.textures.size() != frameBuffer2.textures.size()) {
+            std::cerr << "[ERROR | renderMultipassFragmentShaderToTargetBuffer] Mismatch in number of texture attatchments between inputBuffer1 and inputBuffer2" << std::endl;    
+            //return;
+        }
+        for(int i = 0; i < frameBuffer1.textures.size(); i++){
+            if(frameBuffer1.textures[i].name != frameBuffer2.textures[i].name) {
+                std::cerr << "[ERROR | renderMultipassFragmentShaderToTargetBuffer] Mismatch between textures. frameBuffer1 contains " << frameBuffer1.textures[i].name << " while frameBuffer2 contains" << frameBuffer2.textures[i].name << std::endl;
+                //return;
+            }
+        }
+
         // Multi-Pass denoiser.
         for (int pass = 0; pass < numberOfPasses; ++pass) {
 
@@ -211,7 +252,7 @@ namespace projv{
             // Clear the framebuffer
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            // Use the post-processing shader program
+            // Use the multiPassShaderProgram shader program
             glUseProgram(multiPassShaderProgram);
 
             GLint passLocation = glGetUniformLocation(multiPassShaderProgram, "PassNumber");
@@ -221,21 +262,14 @@ namespace projv{
             glBindVertexArray(VAO);
 
             // Bind textures
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, (pass % 2 == 0) ? frameBuffer1.colorTexture : frameBuffer2.colorTexture);
-            glUniform1i(glGetUniformLocation(multiPassShaderProgram, "screenTexture"), 0);
+            FrameBuffer activeFrameBuffer = (pass % 2 == 0) ? frameBuffer1 : frameBuffer2;
 
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, (pass % 2 == 0) ? frameBuffer1.colorTexture2 : frameBuffer2.colorTexture2);
-            glUniform1i(glGetUniformLocation(multiPassShaderProgram, "colorTexture2"), 1);
-
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_2D, (pass % 2 == 0) ? frameBuffer1.normalTexture : frameBuffer2.normalTexture);
-            glUniform1i(glGetUniformLocation(multiPassShaderProgram, "normalTexture"), 2);
-
-            glActiveTexture(GL_TEXTURE3);
-            glBindTexture(GL_TEXTURE_2D, (pass % 2 == 0) ? frameBuffer1.positionTexture : frameBuffer2.positionTexture);
-            glUniform1i(glGetUniformLocation(multiPassShaderProgram, "positionTexture"), 3);
+            for(int i = 0; i < activeFrameBuffer.textures.size(); i++){
+                glActiveTexture(GL_TEXTURE0 + i);
+                glBindTexture(GL_TEXTURE_2D, activeFrameBuffer.textures[i].textureID);
+                std::string fullTextureName = "inputBuffer1_" + activeFrameBuffer.textures[i].name;
+                glUniform1i(glGetUniformLocation(multiPassShaderProgram, fullTextureName.c_str()), i);          
+            }
 
             // Draw the full-screen quad
             glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -299,7 +333,7 @@ namespace projv{
 
         // Check if the uniform location is valid
         if (floatLoc == -1) {
-            std::cerr << "Failed to get uniform location for time" << std::endl;
+            std::cerr << "Failed to get uniform location for " << variableNameInShader << std::endl;
             return;
         }
 
