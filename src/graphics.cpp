@@ -158,24 +158,6 @@ namespace projv{
             glUniform1i(glGetUniformLocation(shaderProgram, fullTextureName.c_str()), i);
         }
 
-        /*
-        // Bind textures for buffer 1
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, inputBuffer1.colorTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer1ScreenTexture"), 0);
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, inputBuffer1.colorTexture2);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer1ColorTexture2"), 1);
-
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, inputBuffer1.normalTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer1NormalTexture"), 2);
-
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, inputBuffer1.positionTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "buffer1PositionTexture"), 3);        
-        */
-
         // Draw the full-screen quad
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
@@ -224,12 +206,10 @@ namespace projv{
         // Ensure the frame buffers have the same texture attatchments.
         if(frameBuffer1.textures.size() != frameBuffer2.textures.size()) {
             std::cerr << "[ERROR | renderMultipassFragmentShaderToTargetBuffer] Mismatch in number of texture attatchments between inputBuffer1 and inputBuffer2" << std::endl;    
-            //return;
         }
         for(int i = 0; i < frameBuffer1.textures.size(); i++){
             if(frameBuffer1.textures[i].name != frameBuffer2.textures[i].name) {
                 std::cerr << "[ERROR | renderMultipassFragmentShaderToTargetBuffer] Mismatch between textures. frameBuffer1 contains " << frameBuffer1.textures[i].name << " while frameBuffer2 contains" << frameBuffer2.textures[i].name << std::endl;
-                //return;
             }
         }
 
