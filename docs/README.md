@@ -1,6 +1,3 @@
-# ATTENTION!
-This branch is experimental, use is not currently reccomended.
-
 # ProjectV
 
 'ProjectV' provides functionalities that allow for easy manipulation and rendering of voxel data.

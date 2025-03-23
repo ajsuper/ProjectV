@@ -12,6 +12,24 @@
 #include <cmath>
 
 namespace projv{
+
+    /**
+     * Error callback for GLFW.
+     * 
+     * @param error The error code.
+     * @param description A description of the error.
+     */
+    void error_callback(int error, const char* description);
+
+    /**
+     * Frame size callback for GLFW.
+     * 
+     * @param window The GLFW window.
+     * @param width The new width of the framebuffer.
+     * @param height The new height of the framebuffer.
+     */
+    void framebuffer_size_callback(GLFWwindow* window, int width, int height);
+
     /**
      * Move/Rotate the camera from WASD QE SPACE/SHIFT (R and F to change movement speeds).
      * 

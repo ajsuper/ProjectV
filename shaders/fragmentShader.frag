@@ -1,8 +1,14 @@
+// Data structures explained in (docs/data_structures/octree_data_structure.md) and (docs/data_structures/voxel_type_data_structure.md).
+// The algorithm this shader uses is depicted in the Nvidia paper in (docs/SOURCES.md).
+
+/*
+This shader is responsible for casting rays through the octree and rendering the scene. It uses an effecient heirarchical ray marching algorithm that is similar to the DDA algorithm used for effecient voxel traversal,
+but with modifications to allow for use with sparse data structures. The algorithm is relatively fast and memory effecient, allowing for real-time rendering of large voxel scenes. Customize what is rendered by changing the code in main.
+Ideally implement a more user friendly approach in the future.
+*/
+
 #version 460 core
-layout (location = 0) out vec4 FragColor;
-layout (location = 1) out float FragDepth;
-layout (location = 2) out vec3 FragNormal;
-layout (location = 3) out vec4 FragAlbedo;
+out vec4 FragColor;
 in vec2 TexCoords;
 uniform float time;
 uniform vec2 resolution;
@@ -11,7 +17,7 @@ uniform vec3 cameraDir;
 
 #define MAX_STACK_SIZE 13
 #define MAX_RAY_STEPS 800
-#define RENDER_MODE 3 //1-8
+#define RENDER_MODE 1 //1-8
 #define OCTREE_HEADER_SIZE 0
 #define VOXEL_TYPEDATA_SLICES 3
 
@@ -64,45 +70,32 @@ uint octant1Stack[MAX_STACK_SIZE];
 int nodeIndexStackQuantity = 0;
 int octant1StackQuantity = 0;
 
-
 //Given an intersectedSide and whether or not the normal is positive, return a vector pointing in the normal direction.
 vec3 calculateAABBNormal(float intersectedSide, float isNormalPositive){
     vec3 normal = vec3(0, 0, 0);
-    float isNormalPositiveMultiplier = isNormalPositive*2-1;
-    normal[int(intersectedSide-1)] = isNormalPositiveMultiplier;
+    if(isNormalPositive == 1){
+        if(intersectedSide == 1){
+            normal = vec3(1, 0, 0);
+        } else
+        if(intersectedSide == 2){
+            normal = vec3(0, 1, 0);
+        } else
+        if(intersectedSide == 3){
+            normal = vec3(0, 0, 1);
+        } 
+    } else{
+        if(intersectedSide == 1){
+            normal = vec3(-1, 0, 0);
+        } else
+        if(intersectedSide == 2){
+            normal = vec3(0, -1, 0);
+        } else
+        if(intersectedSide == 3){
+            normal = vec3(0, 0, -1);
+        }        
+    }
     return normal;
 }
-
-float rayPlaneIntersectionX(float planeX, Ray ray) {
-    // Check if the ray is parallel to the X plane
-    if (abs(ray.direction.x) > 1e-6) {
-        // Calculate t using the X component
-        float t = (planeX - ray.origin.x) / ray.direction.x;
-        return t;
-    }
-    return -1; // No intersection
-}
-
-float rayPlaneIntersectionY(float planeY, Ray ray) {
-    // Check if the ray is parallel to the Y plane
-    if (abs(ray.direction.y) > 1e-6) {
-        // Calculate t using the Y component
-        float t = (planeY - ray.origin.y) / ray.direction.y;
-        return t;
-    }
-    return -1; // No intersection
-}
-
-float rayPlaneIntersectionZ(float planeZ, Ray ray) {
-    // Check if the ray is parallel to the Z plane
-    if (abs(ray.direction.z) > 1e-6) {
-        // Calculate t using the Z component
-        float t = (planeZ - ray.origin.z) / ray.direction.z;
-        return t;
-    }
-    return -1; // No intersection
-}
-
 
 //Given an integer x, y, z, and the resolution of the voxel grid, return the ZOrderIndex of that point.
 uint calculateZOrderIndex(uint x, uint y, uint z, uint octreeWholeResolution){
@@ -130,12 +123,11 @@ float randomFloat0to1(vec2 uv, float timeX) {
 
 //Calculate the starting ray direction for the inital ray trace
 vec3 rayStartDirection(vec2 uv, vec2 res, vec3 cameraPosition, vec3 cameraDirection, float fov){
-    vec2 uvNegativeOneToOne = uv * 2.0 - 1.0;
     float aspectRatio = res.x / res.y;
     float scale = tan(radians(fov * 0.5));
     vec2 pixelNDC = vec2(
-        ((-uvNegativeOneToOne.x) * scale) * aspectRatio,
-        uvNegativeOneToOne.y * scale
+        ((-uv.x) * scale) * aspectRatio,
+        uv.y * scale
     );
     vec3 targetPosition = cameraPosition + cameraDirection;
     vec3 lookat = normalize(targetPosition - cameraPosition);
@@ -161,10 +153,10 @@ void pushOctant1Stack(uint octant1ToBePushed) {
     }
 }
 
-uint moveOctant1(uint octant1, uint sideToMoveTo){
-    return octant1 ^ (1 << (3-sideToMoveTo));
-    // Equivalent to:
-    /*
+//Moves an octant to its adjacent octant
+uint moveOctant1(uint octant1, uint sideToMoveTo) {
+    uint newOctant1 = 0;
+
     if(sideToMoveTo == 1) {
         return octant1 ^ (1 << 2);
     } else if(sideToMoveTo == 2) {     
@@ -172,36 +164,10 @@ uint moveOctant1(uint octant1, uint sideToMoveTo){
     } else if(sideToMoveTo == 3) {
         return octant1 ^ 1;
     }
-    */
+    
+    return newOctant1;
 }
 
-float boxRayDistance(BoxAABB box, Ray castedRay) {
-    vec3 rayInverse = 1.0/castedRay.direction;
-    vec3 t0 = (box.position - castedRay.origin) * rayInverse;
-    vec3 t1 = (box.position + box.size - castedRay.origin) * rayInverse;
-
-    vec3 tsmaller = min(t0, t1);
-    vec3 tbigger = max(t0, t1);
-
-    float tmin_candidate = max(max(tsmaller.x, tsmaller.y), tsmaller.z);
-    float tmax_candidate = min(min(tbigger.x, tbigger.y), tbigger.z);
-
-    //Check if the ray origin is inside the box.
-    bool isInside = all(greaterThanEqual(castedRay.origin, box.position)) &&
-                    all(lessThanEqual(castedRay.origin, box.position + box.size));
-
-    //Adjust tmin_candidate if the ray starts inside the box.
-    if (isInside) {
-        tmin_candidate = 0.0;
-    }
-
-    //Check if there is a valid intersection.
-    if (tmin_candidate > tmax_candidate || tmax_candidate < 0.0) {
-        return -1.0;  //No valid intersection.
-    }
-
-    return tmin_candidate;
-}
 //Calculates the closest intersect point of a box and the side it enters it in.
 vec3 boxRayIntersect(BoxAABB box, Ray castedRay) {
     vec3 rayInverse = 1.0/castedRay.direction;
@@ -248,68 +214,43 @@ vec3 boxRayIntersect(BoxAABB box, Ray castedRay) {
 
     return vec3(tmin_candidate, float(intersectedSide), isNormalPositive);
 }
-vec2 boxRayIntersectInverted2(BoxAABB box, Ray castedRay) {
-    vec3 invDir = 1.0 / castedRay.direction;
-    vec3 boxMin = box.position;
-    vec3 boxMax = box.position + box.size;
 
-    // Compute t values for all slabs (x, y, z planes)
-    vec3 tMin = (boxMin - castedRay.origin) * invDir;
-    vec3 tMax = (boxMax - castedRay.origin) * invDir;
-
-    // Ensure tMin < tMax for each axis
-    vec3 tNear = min(tMin, tMax);
-    vec3 tFar = max(tMin, tMax);
-
-    // Find the intersection interval [tEntry, tExit]
-    float tEntry = max(max(tNear.x, tNear.y), tNear.z);
-    float tExit = min(min(tFar.x, tFar.y), tFar.z);
-
-    // Determine exit side
-    uint exitSide = tExit == tFar.x ? 1u : (tExit == tFar.y ? 2u : 3u);
-
-    // Check if the ray is outside the box or goes away from it
-    if (tEntry > tExit || tExit < 0.0) {
-        return vec2(-1.0, float(exitSide));
-    }
-
-    // Check if the ray starts inside the box
-    bool isInside = all(greaterThanEqual(castedRay.origin, boxMin)) &&
-                    all(lessThanEqual(castedRay.origin, boxMax));
-
-    // If inside the box, set tEntry to 0
-    if (isInside) {
-        tEntry = 0.0;
-    }
-
-    return vec2(tExit, float(exitSide));
-}
-
+//Calculates the distance to the exit point of a box and the side it exits it from.
 vec2 boxRayIntersectInverted(BoxAABB box, Ray castedRay) {
-    vec3 invDir = 1.0 / castedRay.direction;
-    vec3 boxMax = box.position + box.size;
+    //BUG: Occasionally will advance in the wrong direction resulting in holes in the rendered image.
+    vec3 rayInverse = 1.0/castedRay.direction;
+    highp vec3 t0 = (box.position - castedRay.origin) * rayInverse;
+    highp vec3 t1 = (box.position + box.size - castedRay.origin) * rayInverse;
 
-    // Compute t values for exiting the box (only the "far" values matter)
-    vec3 tFar = (boxMax - castedRay.origin) * invDir;
+    highp vec3 tsmaller = min(t0, t1);
+    highp vec3 tbigger = max(t0, t1);
 
-    // Handle potential negative directions
-    vec3 tMin = (box.position - castedRay.origin) * invDir;
-    vec3 tMax = max(tMin, tFar);
+    highp float tmin_candidate = max(max(tsmaller.x, tsmaller.y), tsmaller.z);
+    highp float tmax_candidate = min(min(tbigger.x, tbigger.y), tbigger.z);
 
-    // Find the axis with the largest t value (the exit point)
-    float tExit = min(min(tMax.x, tMax.y), tMax.z);
+    uint exitSide = 3u; //Default to Z-axis.
+    if (tmax_candidate == tbigger.x) {
+        exitSide = 1u; //X-axis.
+    } else if (tmax_candidate == tbigger.y) {
+        exitSide = 2u; //Y-axis.
+    }
 
-    // Determine which side is exited
-    uint exitSide = tExit == tMax.x ? 1u : (tExit == tMax.y ? 2u : 3u);
+    //Check if the ray origin is inside the box.
+    bool isInside = all(greaterThanEqual(castedRay.origin, box.position)) &&
+                    all(lessThanEqual(castedRay.origin, box.position + box.size));
 
-    // Check if the ray misses the box entirely
-    if (tExit < 0.0) {
+    //Adjust tmin_candidate if the ray starts inside the box.
+    if (isInside) {
+        tmin_candidate = 0.0;
+    }
+
+    if (tmin_candidate > tmax_candidate || tmax_candidate < 0.0) {
         return vec2(-1.0, float(exitSide));
     }
 
-    return vec2(tExit, float(exitSide));
+    //Return tmax_candidate and exitSide.
+    return vec2(tmax_candidate, float(exitSide));
 }
-
 
 //Calculates the octant of a vector of unit components in a box
 uint calculateOctant1BasedOfEdgePos(vec3 rayEdgePos) {
@@ -334,8 +275,8 @@ uint calculateSiblingsBeforeThisOctant1(uint node, uint checkOctant1) {
 
 //Calulates the octant that a ray intersects a box in
 uint rayBoxOctant1(Ray ray, BoxAABB box) {
-    float intersectData = boxRayDistance(box, ray);
-    vec3 intersectPosition = ray.origin+ray.direction*intersectData;
+    vec3 intersectData = boxRayIntersect(box, ray);
+    vec3 intersectPosition = ray.origin+ray.direction*intersectData[0];
     vec3 intersectPositionUV = (intersectPosition-box.position)/box.size;
     uint octant1 = calculateOctant1BasedOfEdgePos(intersectPositionUV);
     return octant1;
@@ -409,14 +350,14 @@ uint push(Ray ray) {
 //0-> continueMarching = false, leaveChild = false
 //1-> cotinueMarching = true, leaveChild = false
 //2-> continueMarching = true, leaveChild = true 
-uint advance2(Ray ray) {
+uint advance(Ray ray) {
     uint parentNodeData = octree[nodeIndexStack[nodeIndexStackQuantity - 1u]];
     uint parentValidMask = (parentNodeData >> 1u) & 0x000000FF;
     uint leafMask = parentNodeData & 0x1;
     uint lastOctant1 = octant1Stack[octant1StackQuantity - 1u];
     vec2 parentIntersectData = boxRayIntersectInverted(masterParentBox, ray);
     //Loop over each possible octant.
-    for (uint i = 0u; i < 3u; i++) {
+    for (uint i = 0u; i < 4u; i++) {
         //Find which axis to move along to get the next intersected box.
         vec2 intersectData = boxRayIntersectInverted(masterChildBox, ray);
 
@@ -440,10 +381,9 @@ uint advance2(Ray ray) {
             }
         }             
     }
-    //octant1Stack[octant1StackQuantity - 1u] = lastOctant1;
-    return 2u; //cotinueMarching = true, leaveChild = false. Continue traversal
+    octant1Stack[octant1StackQuantity - 1u] = lastOctant1;
+    return 1u; //cotinueMarching = true, leaveChild = false. Continue traversal
 }
-
 
 //Splits the 0-2 value returned by push into its bool continueMarching and successfullyPushed flags
 void splitPushCase(uint pushCase, inout bool continueMarching, inout bool successfullyPushed) {
@@ -496,6 +436,8 @@ BoxAABB marchRayThroughOctree(Ray ray, BoxAABB boundingBox, vec3 uvInBoundingBox
     bool continueMarching = true;
     bool successfullyPushed = false;
     bool leaveChild = false;
+    bool rayInsideMasterChild = (boxRayIntersect(masterChildBox, ray).x == 0);
+
     //Reset the stacks
     nodeIndexStackQuantity = 0;
     octant1StackQuantity = 0;
@@ -507,28 +449,34 @@ BoxAABB marchRayThroughOctree(Ray ray, BoxAABB boundingBox, vec3 uvInBoundingBox
     pushNodeIndexStack(OCTREE_HEADER_SIZE);
     pushOctant1Stack(firstChildOctant1); 
     
+    //Perform as many pushes as possible after initial push.
+    while(octant1StackQuantity < MAX_STACK_SIZE-1){
+        splitPushCase(push(ray), continueMarching, successfullyPushed);
+        if(!successfullyPushed || !continueMarching){
+            break;
+        }
+    }
+
     //Main ray marching loop.
     int raySteps = 0;
     for(int rayStep = 0; rayStep < rayStepLimit; rayStep++){
         //Break if break conditions are met.
-        if(!continueMarching){
+        if(!continueMarching && !rayInsideMasterChild){
             break;                
         }
         //Push as far as possible
-        
         while(octant1StackQuantity < MAX_STACK_SIZE-1){
             splitPushCase(push(ray), continueMarching, successfullyPushed);
             if(!successfullyPushed || !continueMarching){
                 break;
             }
-        }        
-        
+        }
         //Once push is no longer possible, advance.
         if(!successfullyPushed){
             //Gather advance data.
-            splitAdvanceCase(advance2(ray), continueMarching, leaveChild);
-            //If it needs to pop, pop until it can succesfully advance or needs to exit the octree.
-            while(leaveChild){
+            splitAdvanceCase(advance(ray), continueMarching, leaveChild);
+            //If it needs to pop, pop until it can ssuccesffuly advance or needs to exit the octree.
+            while(leaveChild == true){
                 //Exit the octree if the ray leaves the octree.
                 if(octant1StackQuantity < 2){
                     BoxAABB falseBox;
@@ -540,7 +488,7 @@ BoxAABB marchRayThroughOctree(Ray ray, BoxAABB boundingBox, vec3 uvInBoundingBox
                 masterParentBox = newParentFromChildAndOctant1(masterChildBox, octant1Stack[octant1StackQuantity-2]);
                 octant1StackQuantity -= 1;
                 nodeIndexStackQuantity -= 1;
-                splitAdvanceCase(advance2(ray), continueMarching, leaveChild); 
+                splitAdvanceCase(advance(ray), continueMarching, leaveChild); 
             }
         }
         raySteps += 1;
@@ -548,10 +496,10 @@ BoxAABB marchRayThroughOctree(Ray ray, BoxAABB boundingBox, vec3 uvInBoundingBox
     return masterChildBox;     
 }
 
-
 //Cast the ray through the octree bounding box.
 BoxAABB castRayThroughOctree(Ray ray, BoxAABB octreeBoundingBox) {
-    float tBB = boxRayDistance(octreeBoundingBox, ray);
+    vec3 octreeBoundingBoxIntersectData = boxRayIntersect(octreeBoundingBox, ray);
+    float tBB = octreeBoundingBoxIntersectData[0];
     vec3 uvInBoundingBox;
     vec3 intersectionPoint = ray.origin + ray.direction * tBB;
     uvInBoundingBox = abs((octreeBoundingBox.position - intersectionPoint)) / octreeBoundingBox.size;
@@ -662,6 +610,7 @@ vec3 cosineWeightedRandomDirection(vec3 normal, vec2 randomSeed) {
 
 //Setup the ray and cast it into our scene and return the results from the cast as colors.
 vec4 castRay(){
+    //return vec4(1, 0, 0, 0);
     Ray ray;
     ray.direction = rayStartDirection(TexCoords, resolution, cameraPos, normalize(vec3(cameraDir.x, 0, cameraDir.z)), 100);
     ray.origin = cameraPos;
@@ -672,25 +621,20 @@ vec4 castRay(){
     octreeBoundingBox.size = 20.0;
     vec4 color = vec4(1);
 
-    vec3 sunDirection = normalize(vec3(0.3, abs(cos(float(time*0.01f))), sin(float(time*0.01f))));
-    //vec3 sunDirection = normalize(vec3(0.4, 1, 0.1));
-    //vec3 sunDirection = normalize(vec3(1, 0, 0));
+    vec3 sunDirection = normalize(vec3(cos(float(time*10)), sin(float(time*10)), 2));
     if (RENDER_MODE == 1){
         BoxAABB firstBox = castRayThroughOctree(ray, octreeBoundingBox);
         vec3 firstIntersectData = boxRayIntersect(firstBox, ray);
-        FragDepth = firstIntersectData.x;
         //return vec4(ray.direction.x, ray.direction.y, ray.direction.z, 1);
         if(firstIntersectData.x < 0.0f){
             return vec4(0.3, 0.5, 0.9, 1.0);
         }
         
-        vec3 normal = calculateAABBNormal(firstIntersectData.y, firstIntersectData.z);
-        FragNormal = normal;
-        ray.origin = ray.origin + ray.direction*(firstIntersectData.x);
-        ray.origin += normal*0.001f;
+        ray.origin = ray.origin + ray.direction*(firstIntersectData.x*0.999f);
         ray.direction = sunDirection;
         BoxAABB sunBox = castRayThroughOctree(ray, octreeBoundingBox);
         vec3 sunIntersectData = boxRayIntersect(sunBox, ray);
+        vec3 normal = calculateAABBNormal(firstIntersectData.y, firstIntersectData.z);
         
         Voxel hitVoxelData;
         ivec3 voxelGridPos;
@@ -703,72 +647,11 @@ vec4 castRay(){
         } else {
             return color*0.5f*((dot(sunDirection, normal)+1)/1.6);
         }
-    } else if (RENDER_MODE == 3){
-        vec4 accumulatedColor = vec4(0.0);
-        int numSamples = 1; // Increase the number of samples for better anti-aliasing
-        for(int i = 0; i < numSamples; i++) {
-            float skyBrightness = max(pow(sunDirection.y, 0.92)+0.1, 0.2);
-            ray.origin = cameraPos;
-            ray.direction = rayStartDirection(TexCoords + vec2(randomFloat0to1(TexCoords, float(i)), randomFloat0to1(TexCoords, float(i+1))) / resolution, resolution, cameraPos, normalize(vec3(cameraDir.x, 0, cameraDir.z)), 100);
-            BoxAABB box = castRayThroughOctree(ray, octreeBoundingBox);
-            vec3 intersectData = boxRayIntersect(box, ray);
-            if (intersectData.x < 0.0f){
-                accumulatedColor += vec4(0.3, 0.5, 0.9, 1.0) * skyBrightness; // Reduce ambient lighting contribution
-                return accumulatedColor;
-            }
-            vec3 normal = calculateAABBNormal(intersectData.y, intersectData.z);
-            FragNormal = normal;
-            FragDepth = intersectData.x;
-            FragAlbedo = vec4(ray.origin + ray.direction*intersectData.x, 0);
-            vec4 color = vec4(1.0);
-            float pathEnergy = 1.3;
-            float brightness = 0.0;
-            int maxBounces = 4; // Increase the number of bounces for more accurate global illumination
-            for(int j = 0; j < maxBounces; j++){
-                //if (j > 2 && randomFloat0to1(TexCoords, float(j)) > pathEnergy) break;
-
-                Voxel hitVoxelData;
-                ivec3 voxelGridPos;
-                voxelGridPos = voxelGridPosition(box, octreeBoundingBox, 256);
-                uint hitVoxelIndex = findVoxelTypeDataIndex(voxelGridPos.x, voxelGridPos.y, voxelGridPos.z, 256);
-                hitVoxelData = fetchVoxelData(hitVoxelIndex);
-                color *= vec4(hitVoxelData.color, 0);
-                ray.origin = ray.origin + ray.direction * (intersectData.x * 0.999f);
-                normal = calculateAABBNormal(intersectData.y, intersectData.z);
-                float dotOfSunDirAndNorm = dot(sunDirection, normal);
-                if(dotOfSunDirAndNorm > 0.0){
-                    //j <= 1 && dot(sunDirection, normal) > 0.0
-                    ray.direction = sunDirection;
-                    box = castRayThroughOctree(ray, octreeBoundingBox);
-                    intersectData = boxRayIntersect(box, ray);
-                    if(intersectData.x < 0.0f){
-                        float sunIntensity = max(dotOfSunDirAndNorm*sin(sunDirection.y), 0)*1.2;
-                        color += vec4(1, 0.5, 0.2, 1)*sunIntensity; // Increase sunlight contribution
-                        brightness += sunIntensity + skyBrightness;
-                        break;  
-                    }                
-                }
-                ray.direction = cosineWeightedRandomDirection(normal, TexCoords * 0.01f * 1 + vec2(float(j)));
-                box = castRayThroughOctree(ray, octreeBoundingBox);
-                intersectData = boxRayIntersect(box, ray);
-                
-                if(intersectData.x < 0.0f){
-                    brightness += skyBrightness;
-                    break;
-                }
-                pathEnergy *= 0.99;
-            }
-            accumulatedColor += color*brightness*pathEnergy;
-            
-        }
-        return accumulatedColor / float(numSamples);
     }
+    return vec4(color);
 }
 
 void main(){
-    //FragColor = vec4(1.0, 0.0, 1.0, 0.0);
-    FragNormal = vec3(0.0, 0.0, 0.0);
-    FragDepth = 0.0;
     FragColor = castRay();
 }
 

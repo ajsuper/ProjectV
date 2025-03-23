@@ -11,7 +11,7 @@ namespace projv{
         float direction[3] = {1.0, 0, 0.0};
         float up[3] = { 0, 1, 0 };
         float movementSpeed = 1.0f;
-        float rotationSpeed = 0.018f;
+        float rotationSpeed = 0.01f;
     };
 
     // Global camera to be used throughout the project.
