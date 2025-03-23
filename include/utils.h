@@ -12,34 +12,33 @@
 #include <cstdint>
 #include <algorithm>
 #include <chrono>
+#include <json.hpp>
+
+#include "data_structures/color.h"
+#include "data_structures/voxel.h"
+#include "data_structures/scene.h"
 
 namespace projv{
-
-    /**
-     * @struct Color
-     * @brief An RGB value with all channels from 0.0-1.0
-     */
-    struct Color {
-        uint8_t r;
-        uint8_t g;
-        uint8_t b;
-    };
-
-    /**
-     * @brief This structure contains the properties of a voxel. It contains filled and a Color.
-     * @struct voxel
-     */
-    struct voxel {
-        bool filled;
-        Color color;
-    };
-
      /**
      * Initiates an empty grid of voxel's of size resolution.
      * @param size A power of 2 size of the voxel grid.
      * @return A grid with xyz dimensions of size and all voxel initialized to white and empty.
      */
     std::vector<std::vector<std::vector<voxel>>> createVoxelGrid(int size);
+
+    /**
+     * Converts a 3D vector to a single uint32_t storing that position.
+     * @param x, y, z The 3d vector to convert to a single uint32_t.
+     * @return A single uint32_t storing the 3D vector.
+     */
+    uint32_t convertVec3ToHeaderPosition(uint32_t x, uint32_t y, uint32_t z);
+
+    /**
+     * Converts a single uint32_t storing a 3D vector to an std::array<int, 3>.
+     * @param headerPosition A single uint32_t storing a 3D vector.
+     * @return An std::array<int, 3> containing the 3D vector.
+     */
+    std::array<int, 3> convertHeaderPositionToVec3(uint32_t headerPosition);
 
     /**
      * Writes an std::vector<uint32_t> to a file directory.
@@ -49,11 +48,38 @@ namespace projv{
     void writeUint32Vector(std::vector<uint32_t> vector, std::string fileDirectory);
 
     /**
-     * Reads a vector of Uint32_t's from a file directory.
+     * Reads a vector of uint32_t's from a file directory.
      * @param fileDirectory An std::string containing the directory of the file to be read.
      * @return An std::vector<uint32_t> containing the uint32_t's in order from the file.
      */
     std::vector<uint32_t> readUint32Vector(std::string fileDirectory);
+
+    /**
+     * Writes the headers for a scene into a file directory.
+     * @param chunkHeaders An std::vector<chunkHeader> containing the headers to be written.
+     * @param fileDirectory An std::string containing the parent directory to write the headers to.
+     */
+    void writeHeadersJSON(const std::vector<chunkHeader>& chunkHeaders, const std::string& fileDirectory);
+
+    /**
+     * Reads the headers for a scene from a file directory.
+     * @param fileDirectory An std::string containing the directory of the file to be read.
+     * @return An std::vector<chunkHeader> containing the chunk headers in order from the file.
+     */
+    std::vector<chunkHeader> readHeadersJSON(const std::string& fileDirectory);
+    /**
+     * Writes a scene to a file directory.
+     * @param scene The scene to be written to the file.
+     * @param fileDirectory An std::string containing the directory to write the scene to.
+     */
+    void writeScene(scene scene, std::string fileDirectory);
+
+    /**
+     * Reads a scene from a file directory.
+     * @param fileDirectory An std::string containing the directory of the file to be read.
+     * @return A scene containing the data from the file.
+     */
+    scene readScene(std::string fileDirectory);
 
     /**
      * Finds how many filled voxels are within boundsMin and boundsMax in the 3D voxel vector.

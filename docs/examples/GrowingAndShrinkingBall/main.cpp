@@ -1,3 +1,5 @@
+// ATTENTION: CURRENTLY NON FUNCTIONAL!
+
 /*
 This is an example piece of code using ProjectV that generates a sphere, converts it to an octree, passes this to the shader, and then changes the radius and does it again.
 This example covers many of the C++ side features of ProjectV that makes it powerful and easy to use.
@@ -31,9 +33,19 @@ void createSphere(std::vector<std::vector<std::vector<projv::voxel>>> &voxels, i
     }
 }
 
+void error_callback(int error, const char* description) {
+    std::cerr << "GLFW Error (" << error << "): " << description << std::endl;
+}
+
+void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
+    int width1, height1;
+    glfwGetFramebufferSize(window, &width1, &height1);
+    glViewport(0, 0, width1, height1);
+    projv::createPostProcessingFrameBuffers(window);
+}
+
 int main(){
-    
-    glfwSetErrorCallback(projv::error_callback); // Allows for GLFW to print errors to the console.
+    glfwSetErrorCallback(error_callback); // Allows for GLFW to print errors to the console.
     GLFWwindow* window; // The window that our program will use.
     if(!projv::initializeGLFWandGLEWWindow(window, 900, 900, "window!!")){ // Initializes GLFW and creates a window. Prints if initialization fails.
         std::cerr << "Failed to initialize GLFW and GLEW" << std::endl;
@@ -41,8 +53,10 @@ int main(){
     }
 
     projv::compileAndUseVertexAndFragShader(); // Compiles the shaders so they can be run.
+    projv::compileAndUseVertexAndPostProcessingShader();
     projv::createRenderQuad(); // Creates a quad (2 triangles that cover the whole screen) to render to.
-    
+    projv::createPostProcessingFrameBuffers(window);
+
     std::vector<std::vector<std::vector<projv::voxel>>> voxels = projv::createVoxelGrid(128); // Creates a 128x128x128 voxel grid.
 
     std::vector<uint32_t> octree; // Defines our octree that will store the scene.

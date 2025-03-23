@@ -2,24 +2,9 @@
 // Data structures explained in (docs/data_structures/octree_data_structure.md) and (docs/data_structures/voxel_type_data_structure.md).
 
 #include "utils.h"
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <array>
-#include <stdint.h>
-#include <bitset>
-#include <math.h>
-#include <cstdint>
-#include <algorithm>
-#include <chrono>
 
 namespace projv{
-    /**
-     * Initiates an empty grid of voxel's of size resolution.
-     * 
-     * @param size A power of 2 size of the voxel grid.
-     * @return A grid with xyz dimensions of size and all voxel initialized to white and empty.
-     */
+    
     std::vector<std::vector<std::vector<voxel>>> createVoxelGrid(int size) {
         // Initialize the 3D vector with `voxel` instances.
         std::vector<std::vector<std::vector<voxel>>> voxels(
@@ -41,16 +26,18 @@ namespace projv{
         return voxels;
     }
 
-    /**
-     * Writes an std::vector<uint32_t> to a file directory.
-     * 
-     * @param vector An std::vector<uint32_t> to be written to the file in fileDirectory.
-     * @param fileDirectory An std::string containgin the directory to write the file.
-     */
+    uint32_t convertVec3ToHeaderPosition(uint32_t x, uint32_t y, uint32_t z){
+        return (x & 0x3FF) | ((y & 0x3FF) << 10) | ((z & 0x3FF) << 20);
+    }
+
+    std::array<int, 3> convertHeaderPositionToVec3(uint32_t headerPosition){
+        return {headerPosition & 0x3FF, (headerPosition >> 10) & 0x3FF, (headerPosition >> 20) & 0x3FF};
+    }
+
     void writeUint32Vector(std::vector<uint32_t> vector, std::string fileDirectory){
         std::ofstream outFile(fileDirectory, std::ios::binary);
         if(!outFile){
-            std::cout << "ERROR in 'writeUint8Vector': Failed to open " << fileDirectory << std::endl;
+            std::cout << "ERROR in 'writeUint32Vector': Failed to open " << fileDirectory << std::endl;
             return;
         }
         size_t size = vector.size();
@@ -59,16 +46,10 @@ namespace projv{
         outFile.close();
     }
 
-    /**
-     * Reads a vector of Uint32_t's from a file directory.
-     * 
-     * @param fileDirectory An std::string containing the directory of the file to be read.
-     * @return An std::vector<uint32_t> containing the uint32_t's in order from the file.
-     */
     std::vector<uint32_t> readUint32Vector(std::string fileDirectory){
         std::ifstream inFile(fileDirectory, std::ios::binary);  
         if (!inFile) {
-            std::cerr << "Error opening file for reading." << std::endl;
+            std::cerr << "Error in 'readUint32Vector': Failed to open" << std::endl;
         }
         size_t size;
         inFile.read(reinterpret_cast<char*>(&size), sizeof(size));
@@ -82,6 +63,117 @@ namespace projv{
             //std::cout << std::bitset<32>(num) << std::endl;
         } 
         return readNumbers; 
+    }
+
+    void writeHeadersJSON(const std::vector<chunkHeader>& chunkHeaders, const std::string& fileDirectory) {
+        nlohmann::json jsonOutput;
+        jsonOutput["chunkHeaders"] = nlohmann::json::array();
+
+        for (const auto& header : chunkHeaders) {
+            jsonOutput["chunkHeaders"].push_back({
+                {"ID", header.ID},
+                {"position x", convertHeaderPositionToVec3(header.position)[0]},
+                {"position y", convertHeaderPositionToVec3(header.position)[1]},
+                {"position z", convertHeaderPositionToVec3(header.position)[2]},
+                {"scale", header.scale},
+                {"resolution", header.resolution},
+                {"geometryStartIndex", header.geometryStartIndex},
+                {"geometryEndIndex", header.geometryEndIndex},
+                {"voxelTypeDataStartIndex", header.voxelTypeDataStartIndex},
+                {"voxelTypeDataEndIndex", header.voxelTypeDataEndIndex}
+            });
+        }
+
+        std::ofstream outFile(fileDirectory);
+        if (!outFile) {
+            std::cerr << "ERROR in 'writeHeadersJSON': Failed to open " << fileDirectory << std::endl;
+            return;
+        }
+
+        outFile << jsonOutput.dump(4);  // Pretty-print with 4 spaces for readability
+        outFile.close();
+    }
+
+    std::vector<chunkHeader> readHeadersJSON(const std::string& fileDirectory) {
+        std::ifstream inFile(fileDirectory);
+        if (!inFile) {
+            std::cerr << "Error in 'readHeadersJSON': Failed to open " << fileDirectory << std::endl;
+            return {};
+        }
+
+        nlohmann::json jsonInput;
+        inFile >> jsonInput;  // Read JSON file into json object
+        inFile.close();
+
+        std::vector<chunkHeader> headers;
+        if (!jsonInput.contains("chunkHeaders") || !jsonInput["chunkHeaders"].is_array()) {
+            std::cerr << "Error in 'readHeadersJSON': Invalid JSON format" << std::endl;
+            return {};
+        }
+
+        for (const auto& jHeader : jsonInput["chunkHeaders"]) {
+            chunkHeader header;
+            header.ID = jHeader.value("ID", 0);
+            uint x = jHeader.value("position x", 0);
+            uint y = jHeader.value("position y", 0);
+            uint z = jHeader.value("position z", 0);
+            header.position = convertVec3ToHeaderPosition(x, y, z);
+            header.scale = jHeader.value("scale", 0);
+            header.resolution = jHeader.value("resolution", 0);
+            header.geometryStartIndex = jHeader.value("geometryStartIndex", 0);
+            header.geometryEndIndex = jHeader.value("geometryEndIndex", 0);
+            header.voxelTypeDataStartIndex = jHeader.value("voxelTypeDataStartIndex", 0);
+            header.voxelTypeDataEndIndex = jHeader.value("voxelTypeDataEndIndex", 0);
+            
+            headers.push_back(header);
+        }
+
+        return headers;
+    }
+
+    void writeSceneMetaData(scene scene, std::string fileDirectory){
+        nlohmann::json jsonOutput;
+
+        jsonOutput["meta"] = nlohmann::json::array();
+
+        jsonOutput["meta"].push_back({
+            {"version", scene.version}
+        });
+
+        std::ofstream outFile(fileDirectory);
+        if (!outFile) {
+            std::cerr << "ERROR in 'writeSceneMetaData': Failed to open " << fileDirectory << std::endl;
+            return;
+        }
+
+        outFile << jsonOutput.dump(4);  // Pretty-print with 4 spaces for readability
+        outFile.close();
+    }
+
+    void writeScene(scene scene, std::string fileDirectory){
+        std::cout << "Writing scene to " << fileDirectory << std::endl;
+
+        // Writes the chunk headers.
+        std::cout << "Writing scene with " << scene.chunkHeaders.size()*(sizeof(uint32_t)*8)/4 << " bytes of chunk headers" << std::endl;
+        writeUint32Vector(scene.serializedGeometry, fileDirectory + "/geometry.bin");
+
+        // Writes our octrees.
+        std::cout << "Writing scene with " << scene.serializedGeometry.size()*(sizeof(uint32_t))/4 << " bytes of geometry" << std::endl;
+        writeUint32Vector(scene.serializedVoxelTypeData, fileDirectory + "/voxelTypeData.bin");
+        
+        // Writes the voxelTypeData.
+        std::cout << "Writing scene with " << scene.serializedVoxelTypeData.size()*(sizeof(uint32_t))/4 << " bytes of voxel type data" << std::endl;
+        writeHeadersJSON(scene.chunkHeaders, fileDirectory + "/headers.json");
+
+        return;
+    }
+
+    scene readScene(std::string fileDirectory){
+        scene scene;
+        scene.serializedGeometry = readUint32Vector(fileDirectory + "/geometry.bin");
+        scene.serializedVoxelTypeData = readUint32Vector(fileDirectory + "/voxelTypeData.bin");
+        scene.chunkHeaders = readHeadersJSON(fileDirectory + "/headers.json");
+        return scene;
     }
 
     /**

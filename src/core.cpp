@@ -1,5 +1,3 @@
-// Last edited on: 31-12-2024.
-
 #include "core.h"
 #include "camera.h"
 #include <fstream>
@@ -13,28 +11,6 @@
 #include <cmath>
 
 namespace projv{
-
-    /**
-     * Error callback for GLFW.
-     * 
-     * @param error The error code.
-     * @param description A description of the error.
-     */
-    void error_callback(int error, const char* description) {
-        std::cerr << "GLFW Error (" << error << "): " << description << std::endl;
-    }
-
-    /**
-     * Frame size callback for GLFW.
-     * 
-     * @param window The GLFW window.
-     * @param width The new width of the framebuffer.
-     * @param height The new height of the framebuffer.
-     */
-    void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
-        glViewport(0, 0, width, height);
-    }
-
     /**
      * Move/Rotate the camera from WASD QE SPACE/SHIFT (R and F to change movement speeds).
      * 
@@ -46,7 +22,7 @@ namespace projv{
         float up[3] = {0.0f, 1.0f, 0.0f};
 
         // Handle Rotations First.
-        if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) {
+        if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) {
             float angle = cam.rotationSpeed;
             float oldDirX = cam.direction[0];
             float oldDirZ = cam.direction[2];
@@ -64,7 +40,8 @@ namespace projv{
                 cam.direction[2] /= dirNorm;
             }
         }
-        if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) {
+        
+        if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) {
             float angle = -cam.rotationSpeed;
             float oldDirX = cam.direction[0];
             float oldDirZ = cam.direction[2];
@@ -103,7 +80,7 @@ namespace projv{
             cam.position[1] += cam.direction[1] * scaledDownCameraMovementSpeed;
             cam.position[2] += cam.direction[2] * scaledDownCameraMovementSpeed;
         }
-        if(glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS){
+        if(glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS){
             cam.position[0] -= right[0] * scaledDownCameraMovementSpeed;
             cam.position[1] -= right[1] * scaledDownCameraMovementSpeed;
             cam.position[2] -= right[2] * scaledDownCameraMovementSpeed;
@@ -113,7 +90,7 @@ namespace projv{
             cam.position[1] -= cam.direction[1] * scaledDownCameraMovementSpeed;
             cam.position[2] -= cam.direction[2] * scaledDownCameraMovementSpeed;
         }
-        if(glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS){
+        if(glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS){
             cam.position[0] += right[0] * scaledDownCameraMovementSpeed;
             cam.position[1] += right[1] * scaledDownCameraMovementSpeed;
             cam.position[2] += right[2] * scaledDownCameraMovementSpeed;
@@ -167,7 +144,6 @@ namespace projv{
             return false;
         }
         glfwMakeContextCurrent(window);
-        glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 
         glewExperimental = GL_TRUE;  // Enable modern OpenGL features
         if (glewInit() != GLEW_OK) {

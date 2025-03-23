@@ -1,3 +1,5 @@
+//ATTENTION!! CURRENTLY NON FUNCTIONAL!!!
+
 /*
 This example demonstrates how you can create an octree and its corresponding voxel type data and store them into binary files.
 */
