@@ -419,7 +419,7 @@ namespace projv{
         
         // Pass the resolution uniform
         GLint resolutionLoc = glGetUniformLocation(shader, "resolution");
-        float res[2] = { static_cast<float>(width), static_cast<float>(height) };
+        float res[2] = { float(width), float(height) };
         glUniform2fv(resolutionLoc, 1, res);
 
         return;
@@ -449,6 +449,30 @@ namespace projv{
         glBufferData(GL_SHADER_STORAGE_BUFFER, octree.size() * sizeof(uint32_t), octree.data(), GL_STATIC_DRAW);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssbo);
 
+        return;
+    }
+
+    void passSceneToFrag(scene& sceneToRender) {
+        GLuint chunkHeaderSSBO;
+        glGenBuffers(1, &chunkHeaderSSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, chunkHeaderSSBO);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sceneToRender.chunkHeaders.size() * sizeof(chunkHeader), sceneToRender.chunkHeaders.data(), GL_STATIC_DRAW);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, chunkHeaderSSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        GLuint geometrySSBO;
+        glGenBuffers(1, &geometrySSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, geometrySSBO);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sceneToRender.serializedGeometry.size() * sizeof(uint32_t), sceneToRender.serializedGeometry.data(), GL_STATIC_DRAW);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, geometrySSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+        GLuint voxelTypeDataSSBO;
+        glGenBuffers(1, &voxelTypeDataSSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, voxelTypeDataSSBO);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sceneToRender.serializedVoxelTypeData.size() * sizeof(uint32_t), sceneToRender.serializedVoxelTypeData.data(), GL_STATIC_DRAW);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, voxelTypeDataSSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);        
+        
         return;
     }
 

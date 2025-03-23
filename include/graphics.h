@@ -11,29 +11,15 @@
 #include <vector>
 #include <cmath>
 
+#include "data_structures/texture.h"
+#include "data_structures/framebuffer.h"
+#include "data_structures/scene.h"
+
 namespace projv{
 
     // Global variables
     extern GLuint VAO, VBO;  // Vertex Array Object and Vertex Buffer Object
     extern int frameCount;
-
-    /**
-     * Contains a textureID, format, and name for a texture to be used in a FrameBufferObject.
-     */
-    struct Texture {
-        GLuint textureID;
-        GLuint format;
-        std::string name = {};
-    };
-
-    /**
-     * Contains a width, height, buffer for storing it's OpenGL ID, and textures - a vector of Texture objects that we have added to the FrameBuffer.
-     */
-    struct FrameBuffer {
-        int width, height;
-        GLuint buffer;
-        std::vector<Texture> textures;
-    };
 
     /**
      * Adds a texture to the frameBuffer with the specified format and name.
@@ -175,6 +161,8 @@ namespace projv{
      * @param octree The octree data to pass.
      */
     void passOctreeToFrag(std::vector<uint32_t> octree);
+
+    void passSceneToFrag(scene& sceneToRender);
 
     /**
      * Passes voxel type data to the fragment shader.
