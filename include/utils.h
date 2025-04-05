@@ -13,10 +13,12 @@
 #include <algorithm>
 #include <chrono>
 #include <json.hpp>
+#include <unordered_map>
 
 #include "data_structures/color.h"
 #include "data_structures/voxel.h"
 #include "data_structures/scene.h"
+#include "data_structures/nodeStructure.h"
 
 namespace projv{
      /**
@@ -59,28 +61,30 @@ namespace projv{
      * @param chunkHeaders An std::vector<chunkHeader> containing the headers to be written.
      * @param fileDirectory An std::string containing the parent directory to write the headers to.
      */
-    void writeHeadersJSON(const std::vector<chunkHeader>& chunkHeaders, const std::string& fileDirectory);
+    void writeHeadersJSON(const std::vector<CPUChunkHeader>& chunkHeaders, const std::string& fileDirectory);
 
     /**
      * Reads the headers for a scene from a file directory.
      * @param fileDirectory An std::string containing the directory of the file to be read.
      * @return An std::vector<chunkHeader> containing the chunk headers in order from the file.
      */
-    std::vector<chunkHeader> readHeadersJSON(const std::string& fileDirectory);
+    std::vector<CPUChunkHeader> readHeadersJSON2(const std::string& fileDirectory);
+
     /**
      * Writes a scene to a file directory.
      * @param scene The scene to be written to the file.
      * @param fileDirectory An std::string containing the directory to write the scene to.
      */
-    void writeScene(scene scene, std::string fileDirectory);
+    void writeScene(Scene scene, std::string fileDirectory);
 
     /**
      * Reads a scene from a file directory.
      * @param fileDirectory An std::string containing the directory of the file to be read.
      * @return A scene containing the data from the file.
      */
-    scene readScene(std::string fileDirectory);
+    Scene readScene(std::string fileDirectory);
 
+    Scene readScene2(std::string fileDirectory);
     /**
      * Finds how many filled voxels are within boundsMin and boundsMax in the 3D voxel vector.
      * @param voxels A 3D vector of voxel's.
@@ -117,15 +121,6 @@ namespace projv{
     std::array<int, 3> reverseZOrderIndex(uint64_t z_order, int bitDepth);
 
     /**
-     * Build all of the masks for the current depth in the octree. Does not return anything, but modifies the octree parameter to add the masks.
-     * @param octree An empty std::vector<uint32_t> that contains the nodes of our octree.
-     * @param voxels A 3D vector of voxel's to generate the masks from.
-     * @param depthInOctree The depth at which we are building masks.
-     * @param voxelWholeResolution The resolution of the entire 3D voxel vector.
-     */
-    void buildMasksForWholeDepth(std::vector<uint32_t>& octree, std::vector<std::vector<std::vector<voxel>>>& voxels, int depthInOctree, int voxelWholeResolution);
-
-    /**
      * Generate the relative child pointers and combine them with a partially constructed octree containing only the masks.
      * @param octree An std::vector<uint32_t> that has all of it's masks to which we are going to be adding the pointers.
      * @return Returns an optional reference to the octree.
@@ -140,7 +135,7 @@ namespace projv{
      * @param octreeID 
      * @return Returns an std::vector<uint32_t> containing the entire octree structure.
      */
-    std::vector<uint32_t> createOctree(std::vector<std::vector<std::vector<voxel>>>& voxels, int voxelWholeResolution, uint32_t octreeID);
+    std::vector<uint32_t> createOctree(std::vector<std::vector<std::vector<voxel>>>& voxels, int voxelWholeResolution);
 
     /**
      * Generates voxel type data that stores 8 bytes of data per voxel. Currently, a color and 3 8 bit sections of extra data.
@@ -155,6 +150,44 @@ namespace projv{
 
     //TEMPORARY
     bool isInSierpinskiCube(int x, int y, int z);
+
+    /**
+     * Loads a chunk from disk given the scene file directory and chunk header.
+     * @param sceneFileDirectory The directory of the scene file.
+     * @param chunkHeader The header of the chunk to be loaded.
+     * @return A chunkData object containing the loaded chunk data.
+     */
+    RuntimeChunkData loadChunkFromDisk(std::string sceneFileDirectory, CPUChunkHeader chunkHeader);
+
+    /**
+     * Writes a chunk to disk given the scene file directory and chunk data.
+     * @param sceneFileDirectory The directory of the scene file.
+     * @param chunk The chunk data to be written.
+     */
+    void writeChunkToDisk(std::string sceneFileDirectory, RuntimeChunkData chunk); // Writes our chunkHeader and geometry and voxelTypeData.
+
+    /**
+     * Loads a scene from disk given the scene file directory.
+     * @param sceneFileDirectory The directory of the scene file.
+     * @return A scene object containing the loaded scene data.
+     */
+    Scene loadSceneFromDisk(std::string sceneFileDirectory); // Just a bunch of loadChunkFromDisk calls
+
+    /**
+     * Writes a scene to disk given the scene file directory and scene data.
+     * @param sceneFileDirectory The directory of the scene file.
+     * @param scene The scene data to be written.
+     */
+    void writeSceneToDisk(std::string sceneFileDirectory, Scene& scene); // Just a bunch of writeChunkToDisk calls
+
+    /**
+     * Updates the LOD of a chunk and re-reads the full resolution version if necessary.
+     * @param chunk The chunk data to be updated.
+     * @param targetLOD The target LOD to be set.
+     * @param sceneFilePath The file path of the scene.
+     * @param forceReload Whether to force reload the chunk from disk. (false by default)
+     */
+    void updateLOD(RuntimeChunkData& chunk, uint32_t targetLOD, const std::string& sceneFilePath, bool forceReload = false);
 }
 
 #endif

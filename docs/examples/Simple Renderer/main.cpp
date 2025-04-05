@@ -86,8 +86,8 @@ int main(){
 
     // Load the scene
     projv::scene SceneToRender;
-    SceneToRender = projv::readScene("/home/andrew/Development/CPP/Simple Renderer/Sibenik-Scene");
-    projv::writeScene(SceneToRender, "/home/andrew/Development/CPP/Simple Renderer/Sibenik-Scene");
+    SceneToRender = projv::readScene("Sibenik-Scene");
+    projv::writeScene(SceneToRender, "Sibenik-Scene");
     std::cout << SceneToRender.version << std::endl;
     projv::passSceneToFrag(SceneToRender);
 

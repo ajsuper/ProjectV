@@ -69,6 +69,14 @@
         "ios": "cpp",
         "locale": "cpp",
         "print": "cpp",
-        "numbers": "cpp"
+        "numbers": "cpp",
+        "deque": "cpp",
+        "any": "cpp",
+        "map": "cpp",
+        "numeric": "cpp",
+        "ranges": "cpp",
+        "valarray": "cpp",
+        "__node_handle": "cpp",
+        "__tree": "cpp"
     }
 }

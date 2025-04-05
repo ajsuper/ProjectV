@@ -46,6 +46,7 @@ struct chunkHeader {
     uint position;
     uint scale;
     uint resolution;
+    uint LOD;
     uint geometryStartIndex;
     uint geometryEndIndex;
     uint voxelTypeDataStartIndex;

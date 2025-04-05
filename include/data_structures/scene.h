@@ -5,8 +5,14 @@
 #include <stdint.h>
 
 namespace projv{
-    struct chunkHeader {
-        uint32_t ID;
+    struct CPUChunkHeader { // Designed to be user interfacable on CPU. Stored in disk. Only the necessary information for loading the chunk.
+        uint32_t chunkID;
+        uint32_t position;
+        uint32_t scale;
+        uint32_t resolution;
+    };
+
+    struct GPUChunkHeader { // Not designed to be user interfacable on CPU. Only exists during runtime, mainly on GPU. Only the necessary information for rendering.
         uint32_t position;
         uint32_t scale;
         uint32_t resolution;
@@ -15,12 +21,16 @@ namespace projv{
         uint32_t voxelTypeDataStartIndex;
         uint32_t voxelTypeDataEndIndex;
     };
-
-    struct scene {
-        uint32_t version;
-        std::vector<chunkHeader> chunkHeaders; // Index should correspond with corresponding serializedGeometry for most optimization.
-        std::vector<uint32_t> serializedGeometry;
-        std::vector<uint32_t> serializedVoxelTypeData;
+    
+    struct RuntimeChunkData { // Only exists during runtime. Contains all of the header data and our geometry and color data, along with any extra runtime data not used in rendering.
+        CPUChunkHeader header;
+        std::vector<uint32_t> geometryData;
+        std::vector<uint32_t> voxelTypeData;
+        uint32_t LOD;
+    };
+    
+    struct Scene {
+        std::vector<RuntimeChunkData> chunks;
     };
 }
 

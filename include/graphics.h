@@ -10,6 +10,7 @@
 #include <chrono>
 #include <vector>
 #include <cmath>
+#include <cstring>
 
 #include "data_structures/texture.h"
 #include "data_structures/framebuffer.h"
@@ -156,20 +157,11 @@ namespace projv{
     std::string loadShaderSource(const char* filepath);
 
     /**
-     * Passes octree data to the fragment shader.
+     * Passes the scene to the fragment shader, very costly as it updates entire scene every time it is sent.
      * 
-     * @param octree The octree data to pass.
+     * @param sceneToRender The scene to be passed to the fragment shader.
      */
-    void passOctreeToFrag(std::vector<uint32_t> octree);
-
-    void passSceneToFrag(scene& sceneToRender);
-
-    /**
-     * Passes voxel type data to the fragment shader.
-     * 
-     * @param voxelTypeData The voxel type data to pass.
-     */
-    void passVoxelTypeDataToFrag(std::vector<uint32_t> voxelTypeData);
+    void passSceneToFrag(Scene& sceneToRender);
 
     /**
      * Creates an OpenGL shader program for a vertex and fragment shader.

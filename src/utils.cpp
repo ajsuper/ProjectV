@@ -36,14 +36,19 @@ namespace projv{
 
     void writeUint32Vector(std::vector<uint32_t> vector, std::string fileDirectory){
         std::ofstream outFile(fileDirectory, std::ios::binary);
-        if(!outFile){
-            std::cout << "ERROR in 'writeUint32Vector': Failed to open " << fileDirectory << std::endl;
+        if (!outFile) {
+            std::cerr << "ERROR in 'writeUint32Vector': Failed to open " << fileDirectory << std::endl;
             return;
         }
+    
         size_t size = vector.size();
         outFile.write(reinterpret_cast<const char*>(&size), sizeof(size));
-        outFile.write(reinterpret_cast<const char*>(vector.data()), vector.size() * sizeof(uint32_t));
-        outFile.close();
+    
+        if (size > 0) {
+            outFile.write(reinterpret_cast<const char*>(vector.data()), size * sizeof(uint32_t));
+        }
+    
+        outFile.close(); // Always creates the file
     }
 
     std::vector<uint32_t> readUint32Vector(std::string fileDirectory){
@@ -59,28 +64,54 @@ namespace projv{
         inFile.read(reinterpret_cast<char*>(readNumbers.data()), size * sizeof(uint32_t));
         inFile.close();
 
-        for (uint32_t num : readNumbers) {
-            //std::cout << std::bitset<32>(num) << std::endl;
-        } 
         return readNumbers; 
     }
 
-    void writeHeadersJSON(const std::vector<chunkHeader>& chunkHeaders, const std::string& fileDirectory) {
+    std::vector<CPUChunkHeader> readHeadersJSON2(const std::string& fileDirectory) {
+        std::ifstream inFile(fileDirectory);
+        if (!inFile) {
+            std::cerr << "Error in 'readHeadersJSON': Failed to open " << fileDirectory << std::endl;
+            return {};
+        }
+
+        nlohmann::json jsonInput;
+        inFile >> jsonInput;  // Read JSON file into json object
+        inFile.close();
+
+        std::vector<CPUChunkHeader> headers;
+        headers.reserve(jsonInput["chunkHeaders"].size());
+        if (!jsonInput.contains("chunkHeaders") || !jsonInput["chunkHeaders"].is_array()) {
+            std::cerr << "Error in 'readHeadersJSON': Invalid JSON format" << std::endl;
+            return {};
+        }
+
+        for (const auto& jHeader : jsonInput["chunkHeaders"]) {
+            CPUChunkHeader header;
+            header.chunkID = jHeader.value("ID", 0);
+            uint x = jHeader.value("position x", 0);
+            uint y = jHeader.value("position y", 0);
+            uint z = jHeader.value("position z", 0);
+            header.position = convertVec3ToHeaderPosition(x, y, z);
+            header.scale = jHeader.value("scale", 0);
+            header.resolution = jHeader.value("resolution", 0);            
+            headers.push_back(header);
+        }
+
+        return headers;
+    }
+
+    void writeHeadersJSON2(const std::vector<CPUChunkHeader>& chunkHeaders, const std::string& fileDirectory) {
         nlohmann::json jsonOutput;
         jsonOutput["chunkHeaders"] = nlohmann::json::array();
 
         for (const auto& header : chunkHeaders) {
             jsonOutput["chunkHeaders"].push_back({
-                {"ID", header.ID},
+                {"ID", header.chunkID},
                 {"position x", convertHeaderPositionToVec3(header.position)[0]},
                 {"position y", convertHeaderPositionToVec3(header.position)[1]},
                 {"position z", convertHeaderPositionToVec3(header.position)[2]},
                 {"scale", header.scale},
                 {"resolution", header.resolution},
-                {"geometryStartIndex", header.geometryStartIndex},
-                {"geometryEndIndex", header.geometryEndIndex},
-                {"voxelTypeDataStartIndex", header.voxelTypeDataStartIndex},
-                {"voxelTypeDataEndIndex", header.voxelTypeDataEndIndex}
             });
         }
 
@@ -92,88 +123,6 @@ namespace projv{
 
         outFile << jsonOutput.dump(4);  // Pretty-print with 4 spaces for readability
         outFile.close();
-    }
-
-    std::vector<chunkHeader> readHeadersJSON(const std::string& fileDirectory) {
-        std::ifstream inFile(fileDirectory);
-        if (!inFile) {
-            std::cerr << "Error in 'readHeadersJSON': Failed to open " << fileDirectory << std::endl;
-            return {};
-        }
-
-        nlohmann::json jsonInput;
-        inFile >> jsonInput;  // Read JSON file into json object
-        inFile.close();
-
-        std::vector<chunkHeader> headers;
-        if (!jsonInput.contains("chunkHeaders") || !jsonInput["chunkHeaders"].is_array()) {
-            std::cerr << "Error in 'readHeadersJSON': Invalid JSON format" << std::endl;
-            return {};
-        }
-
-        for (const auto& jHeader : jsonInput["chunkHeaders"]) {
-            chunkHeader header;
-            header.ID = jHeader.value("ID", 0);
-            uint x = jHeader.value("position x", 0);
-            uint y = jHeader.value("position y", 0);
-            uint z = jHeader.value("position z", 0);
-            header.position = convertVec3ToHeaderPosition(x, y, z);
-            header.scale = jHeader.value("scale", 0);
-            header.resolution = jHeader.value("resolution", 0);
-            header.geometryStartIndex = jHeader.value("geometryStartIndex", 0);
-            header.geometryEndIndex = jHeader.value("geometryEndIndex", 0);
-            header.voxelTypeDataStartIndex = jHeader.value("voxelTypeDataStartIndex", 0);
-            header.voxelTypeDataEndIndex = jHeader.value("voxelTypeDataEndIndex", 0);
-            
-            headers.push_back(header);
-        }
-
-        return headers;
-    }
-
-    void writeSceneMetaData(scene scene, std::string fileDirectory){
-        nlohmann::json jsonOutput;
-
-        jsonOutput["meta"] = nlohmann::json::array();
-
-        jsonOutput["meta"].push_back({
-            {"version", scene.version}
-        });
-
-        std::ofstream outFile(fileDirectory);
-        if (!outFile) {
-            std::cerr << "ERROR in 'writeSceneMetaData': Failed to open " << fileDirectory << std::endl;
-            return;
-        }
-
-        outFile << jsonOutput.dump(4);  // Pretty-print with 4 spaces for readability
-        outFile.close();
-    }
-
-    void writeScene(scene scene, std::string fileDirectory){
-        std::cout << "Writing scene to " << fileDirectory << std::endl;
-
-        // Writes the chunk headers.
-        std::cout << "Writing scene with " << scene.chunkHeaders.size()*(sizeof(uint32_t)*8)/4 << " bytes of chunk headers" << std::endl;
-        writeUint32Vector(scene.serializedGeometry, fileDirectory + "/geometry.bin");
-
-        // Writes our octrees.
-        std::cout << "Writing scene with " << scene.serializedGeometry.size()*(sizeof(uint32_t))/4 << " bytes of geometry" << std::endl;
-        writeUint32Vector(scene.serializedVoxelTypeData, fileDirectory + "/voxelTypeData.bin");
-        
-        // Writes the voxelTypeData.
-        std::cout << "Writing scene with " << scene.serializedVoxelTypeData.size()*(sizeof(uint32_t))/4 << " bytes of voxel type data" << std::endl;
-        writeHeadersJSON(scene.chunkHeaders, fileDirectory + "/headers.json");
-
-        return;
-    }
-
-    scene readScene(std::string fileDirectory){
-        scene scene;
-        scene.serializedGeometry = readUint32Vector(fileDirectory + "/geometry.bin");
-        scene.serializedVoxelTypeData = readUint32Vector(fileDirectory + "/voxelTypeData.bin");
-        scene.chunkHeaders = readHeadersJSON(fileDirectory + "/headers.json");
-        return scene;
     }
 
     /**
@@ -320,7 +269,10 @@ namespace projv{
      * @param depthInOctree The depth at which we are building masks.
      * @param voxelWholeResolution The resolution of the entire 3D voxel vector.
      */
-    void buildMasksForWholeDepth(std::vector<uint32_t>& octree, std::vector<std::vector<std::vector<voxel>>>& voxels, int depthInOctree, int voxelWholeResolution){
+
+    std::vector<nodeStructure> buildMasksForWholeDepth(std::vector<std::vector<std::vector<voxel>>>& voxels, int depthInOctree, int voxelWholeResolution){
+        auto startWhole = std::chrono::high_resolution_clock::now();
+        std::vector<nodeStructure> nodes;
         int voxelDepthResolution = pow(2, depthInOctree);
         int wholeResToDepthResRatio = voxelWholeResolution/voxelDepthResolution;
         int index = 0;
@@ -331,11 +283,18 @@ namespace projv{
             std::array<int, 3> coord = reverseZOrderIndex(i, bitLength);
             
             uint16_t temporaryMask = buildMask(voxels, wholeResToDepthResRatio*coord[0], wholeResToDepthResRatio*coord[1], wholeResToDepthResRatio*coord[2], wholeResToDepthResRatio, voxelWholeResolution);
+            nodeStructure node;
+            node.standardNode = temporaryMask; // Remove the leaf flag.
+            node.ZOrderIndex = i;
             //std::cout << std::bitset<16>(temporaryMask) << " " << coord[0]*wholeResToDepthResRatio << " " << coord[1]*wholeResToDepthResRatio << " " << coord[2]*wholeResToDepthResRatio << " " << std::endl;
             if(temporaryMask != 0){
-                octree.push_back(temporaryMask);
+                nodes.push_back(node);
             }
         }
+        auto end = std::chrono::high_resolution_clock::now();
+        double elapsed = std::chrono::duration<double, std::milli>(end - startWhole).count();
+
+        return nodes;
     }
 
     /**
@@ -368,48 +327,71 @@ namespace projv{
                 childPointer = 0;
             }
             if(childPointer >= 0b11111111111111111111111){
-                std::cerr << "[OCTREE SUB] [addPointers] Child pointer too large!" << std::bitset<32>(childPointer) << std::endl;
+                std::cerr << "[addPointers] Child pointer too large! Likely too much data in octree or corrupt octree" << std::bitset<32>(childPointer) << std::endl;
             }
             octree[address] = (*current & 0b111111111) | (childPointer << 9);
         }
         return octree;
     }
 
-    /**
-     * Generates an octree following a modified version of the version from Nvidia's paper "Effecient Sparse Voxel Octrees"
-     * following this format [23-bit relative child pointer][8-bit valid mask][1-bit leaf flag]
-     * 
-     * @param voxels An std::vector<std::vector<std::vector<voxel>>>& containing the scene to be converted to a sparse voxel octree.
-     * @param voxelWholeResolution
-     * @param octreeID 
-     * @return Returns an std::vector<uint32_t> containing the entire octree structure.
-     */
-    std::vector<uint32_t> createOctree(std::vector<std::vector<std::vector<voxel>>>& voxels, int voxelWholeResolution, uint32_t octreeID){
-        auto startWhole = std::chrono::high_resolution_clock::now();
-        int levelsOfDepth = int(log2(voxelWholeResolution));
-
-        std::cerr << "[OCTREE MAIN] [createOctree] Generating raw octree..." << std::endl;
-        std::cerr << "[OCTREE MAIN] [createOctree] Total depths: " << levelsOfDepth << std::endl;
-        std::cerr << "[OCTREE MAIN] [createOctree] Voxel grid resolution: " << voxelWholeResolution << std::endl;
-        std::cerr << "[OCTREE MAIN] [createOctree] Generating masks..." << std::endl;
-        std::vector<uint32_t> octree;
-        //octree.emplace_back(octreeID);
-        for(int depthInOctree = 0; depthInOctree < levelsOfDepth; depthInOctree++){
-            std::cerr << "[OCTREE SUB] [createOctree] Depth completions/Depth: " << ((depthInOctree+0.001)/levelsOfDepth)*100 << "% | " << depthInOctree << std::endl;
-            buildMasksForWholeDepth(octree, voxels, depthInOctree, voxelWholeResolution);
+    std::vector<nodeStructure> agregateLevel(std::vector<nodeStructure>& oldLevel) {
+        std::vector<nodeStructure> newLevel;
+        std::unordered_map<int, int> indexMap; // Maps newIndex to index in newLevel
+    
+        for (const auto& node : oldLevel) {
+            int newIndex = node.ZOrderIndex / 8;
+            uint32_t relativeZOrder = node.ZOrderIndex % 8;
+            uint32_t bitToSet = (1 << (8 - relativeZOrder));
+    
+            if (indexMap.find(newIndex) != indexMap.end()) {
+                // Update existing node
+                newLevel[indexMap[newIndex]].standardNode |= bitToSet;
+            } else {
+                // Create new node
+                nodeStructure newNode = {0, newIndex};
+                newNode.standardNode |= bitToSet;
+                newNode.standardNode &= 0b111111110; // Clear leaf bit if needed
+                newLevel.push_back(newNode);
+                indexMap[newIndex] = newLevel.size() - 1;
+            }
         }
+    
+        return newLevel;
+    }
+    
+    std::vector<uint32_t> createOctree(std::vector<std::vector<std::vector<voxel>>>& voxels, int voxelWholeResolution){
+        std::chrono::high_resolution_clock::time_point startWhole = std::chrono::high_resolution_clock::now();
+        std::cout << "[createOctree] Octree generation started with size of " << voxelWholeResolution << std::endl;
+        int levelsOfDepth = int(log2(voxelWholeResolution));
+        std::vector<nodeStructure> octree;
+        std::vector<nodeStructure> levelInProgress;
+        levelInProgress = buildMasksForWholeDepth(voxels, levelsOfDepth - 1, voxelWholeResolution); // Builds mask for the lowest resolution. GOOD
+        //buildMasksForWholeDepth(testLevel, voxels, levelsOfDepth - 2, voxelWholeResolution); // Builds mask for the lowest resolution.
+
+        std::reverse(levelInProgress.begin(), levelInProgress.end());
+        for(int i = 0; i < levelInProgress.size(); i++){ // Puts it on the octree in reverse order since were starting at the lowest level.
+            //std::cout << "Node: " << std::bitset<32>(levelInProgress[i].standardNode) << " | ZOrder: " << std::bitset<32>(levelInProgress[i].ZOrderIndex) << std::endl;
+            octree.push_back(levelInProgress[i]); // Puts our data on the octree
+        }
+
+        for(int i = 0; i < levelsOfDepth - 1; i++){ // Loops over all the levels of depth
+            levelInProgress = agregateLevel(levelInProgress); // Agregates the previous level. GOOD
+    
+            for(int j = 0; j < levelInProgress.size(); j++){
+                levelInProgress[j].standardNode &= 0b111111110; // Removes the leaf flag from the node.
+                octree.push_back(levelInProgress[j]);
+            }
+        }
+        std::vector<uint32_t> octreeSimplified;
+        for(int i = octree.size() - 1; i >= 0; i--){
+            octreeSimplified.push_back(octree[i].standardNode);
+        }
+
+        octreeSimplified = addPointers(octreeSimplified);
         auto end = std::chrono::high_resolution_clock::now();
         double elapsed = std::chrono::duration<double, std::milli>(end - startWhole).count();
-        std::cerr << "[OCTREE SUB] [createOctree] Depth completions: 100%" << std::endl;
-        std::cerr << "[OCTREE SUB] [createOctree] Masks finished in: " << elapsed << " ms\n" << std::endl;  
-        
-        std::cerr << "[OCTREE MAIN] [createOctree] Generating pointers..." << std::endl;
-        octree = addPointers(octree);
-        end = std::chrono::high_resolution_clock::now();
-        elapsed = std::chrono::duration<double, std::milli>(end - startWhole).count();
-        std::cerr << "[OCTREE MAIN] [createOctree] Octree finished in: " << elapsed << " ms\n" << std::endl;
-
-        return octree;
+        std::cerr << "[createOctree] Octree finished in: " << elapsed << " ms\n" << std::endl;
+        return octreeSimplified;
     }
 
     /**
@@ -420,13 +402,13 @@ namespace projv{
      * @param voxelCount Optional paramater that reserves memory space to potentially decrease generation times from re-reserving during creation. 
      */
     std::vector<uint32_t> createVoxelTypeData(std::vector<std::vector<std::vector<voxel>>>& voxels, int voxelWholeResolution, int voxelCount) {
-        std::cerr << "[VTD MAIN] [createVoxelTypeData] Creating voxel type data..." << std::endl;
+        std::cerr << "[createVoxelTypeData] Creating voxel type data..." << std::endl;
         std::vector<uint32_t> voxelTypeData;
         auto startWhole = std::chrono::high_resolution_clock::now();
         if(voxelCount > 0){
             voxelTypeData.reserve(voxelCount*3);
         }
-        std::cerr << "[VTD SUB] [createVoxelTypeData] Check Point #1" << std::endl;
+        std::cerr << "[createVoxelTypeData] Check Point #1" << std::endl;
         int bitLength = log2(voxelWholeResolution); // Number of bits for the coordinate
         //Loop over each of the coordinates and create a mask then add that to the whole list of masks.
         for(int i = 0; i < (voxelWholeResolution*voxelWholeResolution*voxelWholeResolution ); i++){
@@ -459,11 +441,11 @@ namespace projv{
                 voxelTypeData.emplace_back(SerializedNormal);
             }
         }    
-        std::cerr << "[VTD SUB] Size of vector: " << voxelTypeData.size() << std::endl;
-        std::cerr << "[VTD SUB] [createVoxelTypeData] Check Point #2" << std::endl;
+        std::cerr << "[createVoxelTypeData] Size of vector: " << voxelTypeData.size() << std::endl;
+        std::cerr << "[createVoxelTypeData] Check Point #2" << std::endl;
         auto end = std::chrono::high_resolution_clock::now();
         auto elapsed = std::chrono::duration<double, std::milli>(end - startWhole).count();
-        std::cerr << "[VTD MAIN] [createVoxelTypeData] Voxel type data finished in: " << elapsed << " ms\n" << std::endl;
+        std::cerr << "[createVoxelTypeData] Voxel type data finished in: " << elapsed << " ms\n" << std::endl;
         return voxelTypeData;
     }
 
@@ -499,5 +481,190 @@ namespace projv{
 
         // If the point has passed through all levels without falling into a void.
         return true;
+    }
+
+    RuntimeChunkData loadChunkFromDisk(std::string sceneFileDirectory, uint32_t chunkID) {
+        std::cout << "[loadChunkFromDisk] Loading chunk " << chunkID << " from disk...";
+        auto start = std::chrono::high_resolution_clock::now();
+
+        // Find the header for the inputted chunkID.
+        RuntimeChunkData chunkData;
+        std::vector<CPUChunkHeader> chunkHeaders = readHeadersJSON2(sceneFileDirectory + "/headers.json");
+        auto it = std::find_if(chunkHeaders.begin(), chunkHeaders.end(), [chunkID](const CPUChunkHeader& header) {
+            return header.chunkID == chunkID;
+        });
+
+        // If the header is found, Assign it to the chunkData.
+        if (it != chunkHeaders.end()) {
+            chunkData.header = *it;
+        } else {
+            std::cerr << "[loadChunkFromDisk] Chunk ID " << chunkID << " not found in headers." << std::endl;
+            return chunkData; // Return empty chunkData
+        }
+
+        // Read the octree and voxelTypeData from disk.
+        chunkData.geometryData = readUint32Vector(sceneFileDirectory + "/octree/" + std::to_string(chunkData.header.chunkID) + ".bin");
+        chunkData.voxelTypeData = readUint32Vector(sceneFileDirectory + "/voxelTypeData/" + std::to_string(chunkData.header.chunkID) + ".bin");
+
+        chunkData.LOD = 0;
+
+        auto end = std::chrono::high_resolution_clock::now();
+        double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
+        std::cout << "[loadChunkFromDisk] Chunk loaded in " << elapsed << " ms" << std::endl;
+        return chunkData;
+    }
+
+    void writeChunkToDisk(std::string sceneFileDirectory, RuntimeChunkData chunk) {
+        // Reads the header data if it exists.
+        std::vector<CPUChunkHeader> chunkHeaders;
+        std::ifstream inFile(sceneFileDirectory + "/headers.json");
+        if (inFile.peek() != std::ifstream::traits_type::eof()) { 
+            chunkHeaders = readHeadersJSON2(sceneFileDirectory + "/headers.json");
+        }
+        inFile.close();
+
+        // Iterates over all headers and finds the matching one, if there is none it flags that.
+        bool headerFound = false;
+        int headerIndex = 0;
+        for(; headerIndex < chunkHeaders.size(); headerIndex++){ 
+            if(chunkHeaders[headerIndex].chunkID == chunk.header.chunkID){
+                chunkHeaders[headerIndex] = chunk.header;
+                headerFound = true;
+                break;
+            }
+        }
+
+        // If the header isn't found then we add it to the list, otherwise we replace the old one.
+        if(!headerFound){ 
+            chunkHeaders.push_back(chunk.header);
+        } else {
+            chunkHeaders[headerIndex] = chunk.header;
+        }
+
+        // Writes our octree and voxelTypeData and creates it if it exists. Also writes headers.
+        writeHeadersJSON2(chunkHeaders, sceneFileDirectory + "/headers.json");
+        writeUint32Vector(chunk.geometryData, sceneFileDirectory + "/octree/" + std::to_string(chunk.header.chunkID) + ".bin");
+        writeUint32Vector(chunk.voxelTypeData, sceneFileDirectory + "/voxelTypeData/" + std::to_string(chunk.header.chunkID) + ".bin");
+    }
+
+    void writeSceneToDisk(std::string sceneFileDirectory, Scene& scene){
+        std::cout << "[writeSceneToDisk] Writing scene to file directory: " << sceneFileDirectory << std::endl;
+
+        // Delete all files in the octree and voxelTypeData subdirectories
+        std::filesystem::remove_all(sceneFileDirectory + "/");
+
+        // Recreate the directories after deletion
+        std::filesystem::create_directory(sceneFileDirectory);
+        std::filesystem::create_directory(sceneFileDirectory + "/octree");
+        std::filesystem::create_directory(sceneFileDirectory + "/voxelTypeData");
+
+        // Delete the headers.json file
+        std::filesystem::remove(sceneFileDirectory + "/headers.json");
+
+        // Writes all of the chunks
+        for(int i = 0; i < scene.chunks.size(); i++){
+            writeChunkToDisk(sceneFileDirectory, scene.chunks[i]);
+        }
+
+        std::cout << "[writeSceneToDisk] Scene written to disk." << std::endl;
+    }
+
+    Scene loadSceneFromDisk(std::string sceneFileDirectory){
+        Scene scene;
+
+        // Loads our chunk headers into memory.
+        std::vector<CPUChunkHeader> chunkHeaders = readHeadersJSON2(sceneFileDirectory + "/headers.json");
+
+        // Loops over all of the chunk headers and loads the corresponding octree and voxelTypeData.
+        for(int i = 0; i < chunkHeaders.size(); i++){ 
+            RuntimeChunkData chunk = loadChunkFromDisk(sceneFileDirectory, chunkHeaders[i].chunkID);
+            scene.chunks.push_back(chunk);
+        }
+        return scene;
+    }
+
+    void updateLOD(RuntimeChunkData& chunk, uint32_t targetLOD, const std::string& sceneFilePath, bool forceReload) {
+        auto start = std::chrono::high_resolution_clock::now();
+        std::cout << "[updateLOD] Updating LOD of chunk " << chunk.header.chunkID << " to " << targetLOD << "...";
+
+        // Exits if the chunk is already at the targetLOD and forceReload is false.
+        if (chunk.LOD == targetLOD && !forceReload) {
+            std::cout << "[updateLOD] Chunk already at target LOD." << std::endl;
+            return;
+        }
+
+        if(targetLOD == 0){
+            chunk = std::move(loadChunkFromDisk(sceneFilePath, chunk.header.chunkID));
+            return;
+        }
+
+        // Loads the chunk if the targetLOD is a higher resolution (lower value) than the current LOD.
+        RuntimeChunkData chunkToBeChanged;
+        if(chunk.LOD > targetLOD || forceReload){
+            chunkToBeChanged = loadChunkFromDisk(sceneFilePath, chunk.header.chunkID);
+        } else {
+            chunkToBeChanged = chunk;
+        }
+
+        if(chunkToBeChanged.geometryData.size() == 0){
+            std::cerr << "[updateLOD] Chunk geometry data is empty. Cannot update LOD." << std::endl;
+            chunkToBeChanged.LOD = targetLOD;
+            chunk = chunkToBeChanged;
+            return;
+        }
+
+        // Traverses the octree to find the parents of the leaves and removes them.
+        int depthToTheParentsOfTheLeaves = log2(chunkToBeChanged.header.resolution/pow(2, targetLOD));
+        int parentsOfTheParentsOfTheLeavesStartIndex = 0;
+        int parentsOfTheLeavesStartIndex;
+        int currentNodeIndex = 0;
+        uint32_t currentNodeData = chunkToBeChanged.geometryData[currentNodeIndex];
+        for(int i = 0; i < depthToTheParentsOfTheLeaves; i++){ // Tree traversal to find the parents of the leaves.
+            int currentNodePointer = (currentNodeData >> 9) & 0b11111111111111111111111;
+            currentNodeIndex += currentNodePointer;
+            currentNodeData = chunkToBeChanged.geometryData[currentNodeIndex];
+            if(i < depthToTheParentsOfTheLeaves - 1){
+                parentsOfTheParentsOfTheLeavesStartIndex = currentNodeIndex;
+            }
+        }
+
+        // Makes the previous leaf grandparents into leaf parents.
+        parentsOfTheLeavesStartIndex = currentNodeIndex;
+        chunkToBeChanged.geometryData.erase(chunkToBeChanged.geometryData.begin() + parentsOfTheLeavesStartIndex, chunkToBeChanged.geometryData.end()); // Deletes the parents of the leaves
+        for(int i = parentsOfTheParentsOfTheLeavesStartIndex; i < chunkToBeChanged.geometryData.size(); i++){ // Loops over the parents of the parents of the leaves
+            uint32_t currentNodeData = chunkToBeChanged.geometryData[i];
+            currentNodeData = currentNodeData & 0b111111111; // Clears the child pointer
+            currentNodeData = currentNodeData | 0b1; // Sets the leaf flag to 1.
+            chunkToBeChanged.geometryData[i] = currentNodeData;
+        }
+
+        // Scales the voxel type data down to the new resolution.
+        uint32_t lastZOrder = 0;
+        std::vector<uint32_t> newVoxelTypeData;
+        int resolutionScale = pow(2, targetLOD - chunkToBeChanged.LOD);
+        for(int i = 0; i < chunkToBeChanged.voxelTypeData.size(); i += 3){
+            chunkToBeChanged.voxelTypeData[i] /= (resolutionScale*resolutionScale*resolutionScale);
+
+            uint32_t currentVoxelTypeDataZOrder = chunkToBeChanged.voxelTypeData[i];
+            if(currentVoxelTypeDataZOrder == lastZOrder && i != 0){
+                continue;
+            } else {
+                newVoxelTypeData.push_back(currentVoxelTypeDataZOrder);
+                newVoxelTypeData.push_back(chunkToBeChanged.voxelTypeData[i+1]);
+                newVoxelTypeData.push_back(chunkToBeChanged.voxelTypeData[i+2]);
+            }
+            lastZOrder = currentVoxelTypeDataZOrder;
+        }
+
+        // Updates the chunk with the new data
+        chunkToBeChanged.voxelTypeData = newVoxelTypeData;
+        chunkToBeChanged.LOD = targetLOD;
+        chunk = chunkToBeChanged;
+
+        auto end = std::chrono::high_resolution_clock::now();
+        double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
+        std::cout << "[updateLOD] updated in " << elapsed << " ms" << std::endl;
+
+        return;
     }
 }
