@@ -52,6 +52,7 @@ namespace projv{
     }
 
     std::vector<uint32_t> readUint32Vector(std::string fileDirectory){
+        std::cout << "[readUint32Vector] Reading uint32_t vector from " << fileDirectory << std::endl;
         std::ifstream inFile(fileDirectory, std::ios::binary);  
         if (!inFile) {
             std::cerr << "Error in 'readUint32Vector': Failed to open" << std::endl;
@@ -68,6 +69,7 @@ namespace projv{
     }
 
     std::vector<CPUChunkHeader> readHeadersJSON2(const std::string& fileDirectory) {
+        std::cout << "[readHeadersJSON] Reading headers from " << fileDirectory << std::endl;
         std::ifstream inFile(fileDirectory);
         if (!inFile) {
             std::cerr << "Error in 'readHeadersJSON': Failed to open " << fileDirectory << std::endl;
@@ -101,6 +103,7 @@ namespace projv{
     }
 
     void writeHeadersJSON2(const std::vector<CPUChunkHeader>& chunkHeaders, const std::string& fileDirectory) {
+        std::cout << "[writeHeadersJSON] Writing headers to " << fileDirectory << std::endl;
         nlohmann::json jsonOutput;
         jsonOutput["chunkHeaders"] = nlohmann::json::array();
 

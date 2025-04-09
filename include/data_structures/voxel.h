@@ -12,6 +12,10 @@ namespace projv{
         bool filled;
         Color color;
     };
+
+    struct voxelGrid {
+        std::vector<voxel> voxels;
+    };
 }
 
 #endif
