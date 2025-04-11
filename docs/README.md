@@ -38,7 +38,7 @@ Voxels have unique properties that make them ideal for advanced rendering while 
 
 Currently only supports Linux
 
-> **Warning** On MacOS, OpenGL support only goes up to 4.1, not the 4.6 that is required for the library to function. Execution will fail even though the dependencies are available.
+> **Warning** On MacOS, OpenGL support only goes up to 4.1, not the 4.6 that is required for the library to function. Execution will fail even though the dependencies are available. Windows is currently not supported, however Windows was in mind when choosing the libraries we use and it should be able to work just fine and should be coming soon.
 
 Linux:
 ```bash
