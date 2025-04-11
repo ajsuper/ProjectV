@@ -1,5 +1,5 @@
 # ATTENTION!
-This branch is experimental, use is not currently reccomended.
+ProjectV is under very early development, data structures and functionalities will change frequently so don't currently invest too much time into generating data or programs unless you plan on sticking with a version.
 
 # ProjectV
 
