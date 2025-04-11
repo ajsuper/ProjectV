@@ -13,6 +13,10 @@ ProjectV aims to allow upmost flexibility to the user, allowing them to easily u
 
 Designed with functional programming in mind due to its flexibility and the fact that the most complex parts of the code are writen in GLSL which doesn't support objects. Object Oriented features are welcome aslong as it can be proven to be a better decision over a functional approach.
 
+### Details:
+- Seperation of concerns. If you have a struct or class, it should only store data. To add functionality you must create a function that takes this struct or class as input.
+- Mutable parameters are allowed for performance reasons. However avoid them if it is not necessary.
+
 ### Reporting Issues
 
 If you find a bug or have a feature request, please create an issue on our GitHub repository. When reporting an issue, please include:
