@@ -36,11 +36,10 @@ To contribute code, please follow these steps:
 
 1. Fork the repository.
 2. Make your changes to your fork.
-4. Ensure your code follows the coding standards outlined below.
-5. Commit your changes with a clear and descriptive commit message. If addressing an issue, please include the issue number. (Issue #XX). Same goes for pull requests.
-6. Push your changes to your forked repository.
-7. Create a pull request to the main repository.
-8. Positively collaborate and discuss with anyone who comments on your pull request.
+4. Ensure your code follows the coding standards outlined below and the paradigm outlined above and is tested for correct functionality.
+5. Push your changes to your forked repository.
+6. Create a pull request to the main repository.
+7. Positively collaborate and discuss with anyone who comments on your pull request.
 
 ### Coding Standards
 
@@ -59,7 +58,7 @@ To maintain consistency in the codebase, please adhere to the following coding s
   * @return nameOfOutput is what I return.
   */
 ```
-  as comments above functions or structs to allow for code editors to supply function descriptions and information.
+  add comments above functions or structs to allow for code editors to supply function descriptions and information.
 
 ### Code Review Process
 
@@ -67,7 +66,7 @@ All pull requests will be reviewed by a project maintainer. During the review pr
 
 ### Adding of Data Structures
 
-If you add any data structure to the project that the user might want to interact with directly *(not through any functions or innacesable data structures)* then please include an explanation in the [data_structures](/docs/data_structures) folder.
+If you add any data structure to the project that are significant enough that they require more explanation, then please include an explanation in the [data_structures](/docs/data_structures) folder.
 
 ### Citations
 
