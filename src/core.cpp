@@ -3,6 +3,11 @@
 
 namespace projv{
     namespace ECS{
+        World createWorld() {
+            World world;
+            return world;
+        }
+
         // Creats an application with default startup, update, and render functions.
         Application createApp() {
             Application app;
@@ -15,6 +20,7 @@ namespace projv{
             app.Render = []() {
                 std::cout << "Default Render!" << std::endl;
             };
+            app.world = createWorld();
             return app;
         }
     

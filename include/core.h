@@ -34,6 +34,7 @@ namespace projv{
         // Main world object that stores the state of the world.
         struct World {  
                 Entity nextEntityID = 0;
+                std::unordered_map<std::type_index, std::any> globalResources;
                 std::unordered_map<std::type_index, std::any> componentStorages;
         };
 
@@ -48,20 +49,44 @@ namespace projv{
             std::function<void()> Render;
         };
 
+        World createWorld();
+
         // Creats an application with default startup, update, and render functions.
         Application createApp();
     
         // Adds an entity to our world.
         Entity createEntity(World& world);
+
+        template<typename T>
+        void createGlobalResource(World& world, T resource) {
+            std::type_index typeIndex = std::type_index(typeid(T));
+            auto it = world.globalResources.find(typeIndex);
+            if (it == world.globalResources.end()) {
+                world.globalResources.emplace(typeIndex, std::move(resource));
+            } else {
+                std::cout << "Resource already exists!" << std::endl;
+            }
+        }
+        
+
+        template<typename T>
+        void deleteGlobalResource(World& world) {
+            std::type_index typeIndex = std::type_index(typeid(T));
+            world.globalResources.erase(typeIndex);
+        }
     
         // fetches the component storage for a specific type, creates it if it doesn't exist.
         template<typename T>
         ComponentStorage<T>& getOrCreateStorage(World& world) {
             std::type_index type = std::type_index(typeid(T));
-            if (world.componentStorages.find(type) == world.componentStorages.end()) {
+            auto it = world.componentStorages.find(type);
+            if (it == world.componentStorages.end()) {
+                auto [newIt, _] = world.componentStorages.emplace(type, ComponentStorage<T>());
+                return std::any_cast<ComponentStorage<T>&>(newIt->second);
                 world.componentStorages[type] = ComponentStorage<T>();
+            } else {
+                return std::any_cast<ComponentStorage<T>&>(it->second);
             }
-            return std::any_cast<ComponentStorage<T>&>(world.componentStorages[type]);
         }
     
         // Attempts to get the component storage for  specific type, returns nullptr if it doesn't exist.
@@ -99,6 +124,15 @@ namespace projv{
         T& getComponent(World& world, Entity entity) {
             auto& storage = getOrCreateStorage<T>(world);
             return storage.at(entity);
+        }
+
+        template<typename T>
+        T& getGlobalResource(World& world) {
+            auto it = world.globalResources.find(std::type_index(typeid(T)));
+            if (it == world.globalResources.end()) {
+                std::cout << "Resource not found!" << std::endl;
+            }
+            return std::any_cast<T&>(it->second);
         }
     
         // Loops over all the entities with the specified components and calls the function.
