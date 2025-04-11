@@ -1,6 +1,10 @@
 # Welcome!
 Hello!! Thank you for visiting our contributions file! If you choose to contribute, then please read the rest of this file to gather the necessary information to help out the project! Please read over our [CODE_OF_CONDUCT.md](/docs/CODE_OF_CONDUCT.md) before contributing, and if you haven't already, visit our [README.md](/docs/README.md) to get an overview of the project! Also be sure to visit the copy of the [MIT License](/docs/LICENSE.md).
 
+### Changes to the API:
+
+If you make any changes to the API that might interfere with existing programs, please ensure that these changes are reflected in the examples section [EXAMPLES](examples)
+
 ### Philosophy
 
 #### This is the design philosophy we follow:
@@ -13,7 +17,7 @@ ProjectV aims to allow upmost flexibility to the user, allowing them to easily u
 
 Designed with functional programming in mind due to its flexibility and the fact that the most complex parts of the code are writen in GLSL which doesn't support objects. Object Oriented features are welcome aslong as it can be proven to be a better decision over a functional approach.
 
-### Details:
+#### Details:
 - Seperation of concerns. If you have a struct or class, it should only store data. To add functionality you must create a function that takes this struct or class as input.
 - Mutable parameters are allowed for performance reasons. However avoid them if it is not necessary.
 
