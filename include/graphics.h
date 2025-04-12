@@ -120,11 +120,6 @@ namespace projv{
     void renderMultipassFragmentShaderToTargetBuffer(RenderInstance renderInstance, int numberOfPasses, GLuint multiPassShaderProgram, FrameBuffer frameBuffer1, FrameBuffer frameBuffer2, FrameBuffer targetBuffer);
 
     /**
-     * Creates a quad for rendering to the whole window.
-     */
-    void createRenderQuad();
-
-    /**
      * Finds a floating point uniform in our shaders and passes the floating point variable to it.
      * 
      * @param shader The GLSL shader program to update the variable in.

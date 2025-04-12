@@ -3,6 +3,7 @@
 
 #include <GLFW/glfw3.h>
 #include <math.h>
+#include <unordered_map>
 
 #include "data_structures/framebuffer.h"
 

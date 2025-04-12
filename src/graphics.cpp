@@ -6,41 +6,7 @@ namespace projv
 {
     int frameCount = 0;
     // Global variables
-
-    void createRenderQuad(RenderInstance& renderInstance)
-    {
-        // Define vertices for a window filling quad
-        float vertices[] = {
-            // positions   // texCoords
-            -1.0f, -1.0f, 0.0f, 0.0f,
-            1.0f, -1.0f, 1.0f, 0.0f,
-            -1.0f, 1.0f, 0.0f, 1.0f,
-            -1.0f, 1.0f, 0.0f, 1.0f,
-            1.0f, -1.0f, 1.0f, 0.0f,
-            1.0f, 1.0f, 1.0f, 1.0f};
-
-        glGenVertexArrays(1, &renderInstance.VAO);
-        glGenBuffers(1, &renderInstance.VBO);
-
-        // Bind and set buffer data
-        glBindVertexArray(renderInstance.VAO);
-
-        glBindBuffer(GL_ARRAY_BUFFER, renderInstance.VBO);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-        // Position attribute (location = 0)
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)0);
-        glEnableVertexAttribArray(0);
-
-        // Texture Coord attribute (location = 1)
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)(2 * sizeof(float)));
-        glEnableVertexAttribArray(1);
-
-        glBindVertexArray(0);
-
-        return;
-    }
-
+    
     void addTextureToFrameBuffer(FrameBuffer &frameBuffer, GLuint internalFormat, std::string textureName)
     {
         int width = frameBuffer.width; // Get framebuffer dimensions

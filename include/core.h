@@ -62,17 +62,19 @@ namespace projv{
         Entity createEntity(World& world);
 
         template<typename T>
-        void createGlobalResource(World& world, T resource) {
+        T& createGlobalResource(World& world) {
             std::type_index typeIndex = std::type_index(typeid(T));
             auto it = world.globalResources.find(typeIndex);
             if (it == world.globalResources.end()) {
-                world.globalResources.emplace(typeIndex, std::move(resource));
+                T resource;
+                auto [insertedIt, _] = world.globalResources.emplace(typeIndex, std::move(resource));
+                return std::any_cast<T&>(insertedIt->second);
             } else {
                 std::cout << "Resource already exists!" << std::endl;
+                return std::any_cast<T&>(it->second);
             }
         }
         
-
         template<typename T>
         void deleteGlobalResource(World& world) {
             std::type_index typeIndex = std::type_index(typeid(T));
@@ -175,6 +177,22 @@ namespace projv{
     bool initializeGLFWandGLEWWindow(GLFWwindow*& window, int windowWidth, int windowHeight, const std::string& windowName);
 
     RenderInstance initializeRenderInstance(int windowWidth, int windowHeight, const std::string& windowName);
+
+    void setErrorCallback(RenderInstance& renderInstance, void (*error_callback)(int error_code, const char* description));
+
+    void setFrameBufferSizeCallback(RenderInstance& renderInstance, void (*framebuffer_callback)(GLFWwindow* window, int width, int height));
+
+    void addShaderToRenderInstance(RenderInstance& renderInstance, GLuint shader, std::string shaderName);
+
+    void removeShaderFromRenderInstance(RenderInstance& renderInstance, std::string shaderName);
+
+    GLuint getShaderFromRenderInstance(RenderInstance& renderInstance, std::string shaderName);
+
+    void addFramebufferToRenderInstance(RenderInstance& renderInstance, const FrameBuffer& framebuffer, const std::string& name);
+
+    void removeFramebufferFromRenderInstance(RenderInstance& renderInstance, const std::string& name);
+
+    FrameBuffer getFramebufferFromRenderInstance(RenderInstance& renderInstance, const std::string& name);
 }
 
 #endif
