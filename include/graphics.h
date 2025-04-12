@@ -1,20 +1,23 @@
 #ifndef PROJECTV_GRAPHICS_H
 #define PROJECTV_GRAPHICS_H
 
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+
 #include <fstream>
 #include <sstream>
 #include <iostream>
-#include <GL/glew.h>
-#include <GLFW/glfw3.h>
 #include <bitset>
 #include <chrono>
 #include <vector>
 #include <cmath>
 #include <cstring>
+#include "camera.h"
 
 #include "data_structures/texture.h"
 #include "data_structures/framebuffer.h"
 #include "data_structures/scene.h"
+#include "data_structures/renderInstance.h"
 
 namespace projv{
 
@@ -46,7 +49,7 @@ namespace projv{
      * @param shaderProgram The shader that will be used to render to the targetBuffer.
      * @param targetBuffer What the shaderProgram will render to.
      */
-    void renderFragmentShaderToTargetBuffer(GLuint shaderProgram, FrameBuffer targetBuffer);
+    void renderFragmentShaderToTargetBuffer(RenderInstance renderInstance, GLuint shaderProgram, FrameBuffer targetBuffer);
 
     /**
      * @brief Renders a fragment/vertex shader program to the target buffer at its resolution.
@@ -86,7 +89,7 @@ namespace projv{
      * @param inputBuffer1 The buffer that will be passed to the shader program as a texture input.
      * @param targetBuffer The buffer where the shader program will render its output.
      */
-    void renderFragmentShaderToTargetBufferWithOneInputBuffer(GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer targetBuffer);
+    void renderFragmentShaderToTargetBufferWithOneInputBuffer(RenderInstance renderInstance, GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer targetBuffer);
 
     /**
      * Renders a fragment/vertex shader shader program to the targetBuffer at it's resolution.
@@ -101,7 +104,7 @@ namespace projv{
      * @param inputBuffer2 The second buffer that will be passed to the shaderProgram as a texture input.
      * @param targetBuffer What the shaderProgram will render to.
      */
-    void renderFragmentShaderToTargetBufferWithTwoInputBuffersAdvanced(GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer inputBuffer2, FrameBuffer targetBuffer);
+    void renderFragmentShaderToTargetBufferWithTwoInputBuffers(RenderInstance renderInstance, GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer inputBuffer2, FrameBuffer targetBuffer);
 
     //void renderFragmentShaderToTargetBufferWithTwoInputBuffers(GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer inputBuffer2, FrameBuffer targetBuffer);
 
@@ -114,7 +117,7 @@ namespace projv{
      * @param frameBuffer2 The intermediate buffer that is first outputed to the shader.
      * @param targetBuffer The final buffer that the last pass will output to.
      */
-    void renderMultipassFragmentShaderToTargetBuffer(int numberOfPasses, GLuint multiPassShaderProgram, FrameBuffer frameBuffer1, FrameBuffer frameBuffer2, FrameBuffer targetBuffer);
+    void renderMultipassFragmentShaderToTargetBuffer(RenderInstance renderInstance, int numberOfPasses, GLuint multiPassShaderProgram, FrameBuffer frameBuffer1, FrameBuffer frameBuffer2, FrameBuffer targetBuffer);
 
     /**
      * Creates a quad for rendering to the whole window.

@@ -1,22 +1,45 @@
 // Last edited on: 31-12-2024.
 
 #include "graphics.h"
-#include "camera.h"
-#include "data_structures/renderInstance.h"
-#include <fstream>
-#include <sstream>
-#include <iostream>
-#include <GL/glew.h>
-#include <GLFW/glfw3.h>
-#include <bitset>
-#include <chrono>
-#include <vector>
-#include <cmath>
 
 namespace projv
 {
     int frameCount = 0;
     // Global variables
+
+    void createRenderQuad(RenderInstance& renderInstance)
+    {
+        // Define vertices for a window filling quad
+        float vertices[] = {
+            // positions   // texCoords
+            -1.0f, -1.0f, 0.0f, 0.0f,
+            1.0f, -1.0f, 1.0f, 0.0f,
+            -1.0f, 1.0f, 0.0f, 1.0f,
+            -1.0f, 1.0f, 0.0f, 1.0f,
+            1.0f, -1.0f, 1.0f, 0.0f,
+            1.0f, 1.0f, 1.0f, 1.0f};
+
+        glGenVertexArrays(1, &renderInstance.VAO);
+        glGenBuffers(1, &renderInstance.VBO);
+
+        // Bind and set buffer data
+        glBindVertexArray(renderInstance.VAO);
+
+        glBindBuffer(GL_ARRAY_BUFFER, renderInstance.VBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+        // Position attribute (location = 0)
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)0);
+        glEnableVertexAttribArray(0);
+
+        // Texture Coord attribute (location = 1)
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)(2 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+
+        glBindVertexArray(0);
+
+        return;
+    }
 
     void addTextureToFrameBuffer(FrameBuffer &frameBuffer, GLuint internalFormat, std::string textureName)
     {
@@ -175,7 +198,7 @@ namespace projv
         return;
     }
 
-    void renderFragmentShaderToTargetBufferWithTwoInputBuffersAdvanced(RenderInstance renderInstance, GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer inputBuffer2, FrameBuffer targetBuffer)
+    void renderFragmentShaderToTargetBufferWithTwoInputBuffers(RenderInstance renderInstance, GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer inputBuffer2, FrameBuffer targetBuffer)
     {
         glBindFramebuffer(GL_FRAMEBUFFER, targetBuffer.buffer);
 

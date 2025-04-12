@@ -1,6 +1,4 @@
 #include "core.h"
-#include "camera.h"
-#include "data_structures/renderInstance.h"
 
 namespace projv{
     namespace ECS{
@@ -261,11 +259,15 @@ namespace projv{
         return renderInstance;
     }
 
-    void setErrorCallback(RenderInstance renderInstance, void (*error_callback)(int error_code, const char* description)){
+    void setErrorCallback(RenderInstance& renderInstance, void (*error_callback)(int error_code, const char* description)){
         glfwSetErrorCallback(error_callback);
     }
 
-    void setFrameBufferSizeCallback(RenderInstance renderInstance, void (*framebuffer_callback)(GLFWwindow* window, int width, int height)){
+    void setFrameBufferSizeCallback(RenderInstance& renderInstance, void (*framebuffer_callback)(GLFWwindow* window, int width, int height)){
         void framebuffer_size_callback(GLFWwindow *window, int width, int height);
+    }
+
+    void addShaderToRenderInstance(RenderInstance& renderInstance, GLuint shader, std::string shaderName){
+        
     }
 }

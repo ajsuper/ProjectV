@@ -1,14 +1,17 @@
 #ifndef PROJECTV_CORE_H
 #define PROJECTV_CORE_H
 
+
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+
 #include "core.h"
 #include "camera.h"
+#include "data_structures/renderInstance.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
 #include <functional>
-#include <GL/glew.h>
-#include <GLFW/glfw3.h>
 #include <bitset>
 #include <chrono>
 #include <unordered_map>
@@ -16,6 +19,7 @@
 #include <typeindex>
 #include <vector>
 #include <cmath>
+
 
 namespace projv{
     namespace ECS {    
@@ -169,6 +173,8 @@ namespace projv{
      * @return true if initialization and window creation were successful, false otherwise.
      */
     bool initializeGLFWandGLEWWindow(GLFWwindow*& window, int windowWidth, int windowHeight, const std::string& windowName);
+
+    RenderInstance initializeRenderInstance(int windowWidth, int windowHeight, const std::string& windowName);
 }
 
 #endif
