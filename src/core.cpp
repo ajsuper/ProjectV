@@ -245,18 +245,26 @@ namespace projv{
 
         renderInstance.window = glfwCreateWindow(windowWidth, windowHeight, windowName.c_str(), NULL, NULL);
         if (!renderInstance.window) {
-            std::cerr << "[CORE] Function: initializeGLFWandGLEWWindow, Failed to create GLFW window!" << std::endl;
+            std::cerr << "[initializeRenderInstance] Failed to create GLFW window!" << std::endl;
             glfwTerminate();
         }
         glfwMakeContextCurrent(renderInstance.window);
 
         glewExperimental = GL_TRUE;  // Enable modern OpenGL features
         if (glewInit() != GLEW_OK) {
-            std::cerr << "[CORE] Function: initializeGLFWandGLEWWindow, Failed to initialize GLEW!" << std::endl;
+            std::cerr << "[initializeRenderInstance] Failed to initialize GLEW!" << std::endl;
         } 
 
         createRenderQuad(renderInstance);
 
         return renderInstance;
+    }
+
+    void setErrorCallback(RenderInstance renderInstance, void (*error_callback)(int error_code, const char* description)){
+        glfwSetErrorCallback(error_callback);
+    }
+
+    void setFrameBufferSizeCallback(RenderInstance renderInstance, void (*framebuffer_callback)(GLFWwindow* window, int width, int height)){
+        void framebuffer_size_callback(GLFWwindow *window, int width, int height);
     }
 }

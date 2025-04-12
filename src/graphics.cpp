@@ -2,6 +2,7 @@
 
 #include "graphics.h"
 #include "camera.h"
+#include "data_structures/renderInstance.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -16,7 +17,6 @@ namespace projv
 {
     int frameCount = 0;
     // Global variables
-    GLuint VAO, VBO; // Vertex Array Object and Vertex Buffer Object
 
     void addTextureToFrameBuffer(FrameBuffer &frameBuffer, GLuint internalFormat, std::string textureName)
     {
@@ -125,7 +125,7 @@ namespace projv
         return FBO;
     }
 
-    void renderFragmentShaderToTargetBuffer(GLuint shaderProgram, FrameBuffer targetBuffer)
+    void renderFragmentShaderToTargetBuffer(RenderInstance renderInstance, GLuint shaderProgram, FrameBuffer targetBuffer)
     {
         glBindFramebuffer(GL_FRAMEBUFFER, targetBuffer.buffer);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -138,14 +138,14 @@ namespace projv
             std::cerr << "OpenGL error after shader program usage: " << error << std::endl;
         }
 
-        glBindVertexArray(VAO);
+        glBindVertexArray(renderInstance.VAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glBindVertexArray(0);
 
         return;
     }
 
-    void renderFragmentShaderToTargetBufferWithOneInputBuffer(GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer targetBuffer)
+    void renderFragmentShaderToTargetBufferWithOneInputBuffer(RenderInstance renderInstance, GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer targetBuffer)
     {
         glBindFramebuffer(GL_FRAMEBUFFER, targetBuffer.buffer);
 
@@ -156,7 +156,7 @@ namespace projv
         glUseProgram(shaderProgram);
 
         // Bind the quad VAO
-        glBindVertexArray(VAO);
+        glBindVertexArray(renderInstance.VAO);
 
         for (int i = 0; i < inputBuffer1.textures.size(); i++)
         {
@@ -175,7 +175,7 @@ namespace projv
         return;
     }
 
-    void renderFragmentShaderToTargetBufferWithTwoInputBuffersAdvanced(GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer inputBuffer2, FrameBuffer targetBuffer)
+    void renderFragmentShaderToTargetBufferWithTwoInputBuffersAdvanced(RenderInstance renderInstance, GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer inputBuffer2, FrameBuffer targetBuffer)
     {
         glBindFramebuffer(GL_FRAMEBUFFER, targetBuffer.buffer);
 
@@ -186,7 +186,7 @@ namespace projv
         glUseProgram(shaderProgram);
 
         // Bind the quad VAO
-        glBindVertexArray(VAO);
+        glBindVertexArray(renderInstance. VAO);
 
         for (int i = 0; i < inputBuffer1.textures.size(); i++)
         {
@@ -213,7 +213,7 @@ namespace projv
         return;
     }
 
-    void renderMultipassFragmentShaderToTargetBuffer(int numberOfPasses, GLuint multiPassShaderProgram, FrameBuffer frameBuffer1, FrameBuffer frameBuffer2, FrameBuffer targetBuffer)
+    void renderMultipassFragmentShaderToTargetBuffer(RenderInstance renderInstance, int numberOfPasses, GLuint multiPassShaderProgram, FrameBuffer frameBuffer1, FrameBuffer frameBuffer2, FrameBuffer targetBuffer)
     {
         // Ensure the frame buffers have the same texture attatchments.
         if (frameBuffer1.textures.size() != frameBuffer2.textures.size())
@@ -261,7 +261,7 @@ namespace projv
             glUniform1i(passLocation, pass);
 
             // Bind the quad VAO
-            glBindVertexArray(VAO);
+            glBindVertexArray(renderInstance.VAO);
 
             // Bind textures
             FrameBuffer activeFrameBuffer = (pass % 2 == 0) ? frameBuffer1 : frameBuffer2;
@@ -280,40 +280,6 @@ namespace projv
             // Unbind VAO
             glBindVertexArray(0);
         }
-    }
-
-    void createRenderQuad()
-    {
-        // Define vertices for a window filling quad
-        float vertices[] = {
-            // positions   // texCoords
-            -1.0f, -1.0f, 0.0f, 0.0f,
-            1.0f, -1.0f, 1.0f, 0.0f,
-            -1.0f, 1.0f, 0.0f, 1.0f,
-            -1.0f, 1.0f, 0.0f, 1.0f,
-            1.0f, -1.0f, 1.0f, 0.0f,
-            1.0f, 1.0f, 1.0f, 1.0f};
-
-        glGenVertexArrays(1, &VAO);
-        glGenBuffers(1, &VBO);
-
-        // Bind and set buffer data
-        glBindVertexArray(VAO);
-
-        glBindBuffer(GL_ARRAY_BUFFER, VBO);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-        // Position attribute (location = 0)
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)0);
-        glEnableVertexAttribArray(0);
-
-        // Texture Coord attribute (location = 1)
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)(2 * sizeof(float)));
-        glEnableVertexAttribArray(1);
-
-        glBindVertexArray(0);
-
-        return;
     }
 
     void updateFloatInShader(GLuint shader, float variable, const char variableNameInShader[24])
