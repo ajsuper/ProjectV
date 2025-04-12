@@ -6,6 +6,7 @@
 # Ignore generated files and folders
 obj/
 lib/
+build/
 
 # Ignore example build outputs
 docs/examples/*/main.o
