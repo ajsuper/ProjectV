@@ -158,7 +158,7 @@ namespace projv{
      * 
      * @param sceneToRender The scene to be passed to the fragment shader.
      */
-    void passSceneToFrag(Scene& sceneToRender);
+    void passSceneToOpenGL(Scene& sceneToRender);
 
     /**
      * Creates an OpenGL shader program for a vertex and fragment shader.

@@ -447,7 +447,7 @@ namespace projv
         return "";
     }
 
-    void passSceneToFrag(Scene& sceneToRender) {
+    void passSceneToOpenGL(Scene& sceneToRender) {
         std::vector<GPUChunkHeader> chunkHeaders;
         std::vector<uint32_t> serializedGeometry;
         std::vector<uint32_t> serializedVoxelTypeData;
