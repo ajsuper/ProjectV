@@ -19,7 +19,6 @@
 namespace projv{
 
     // Global variables
-    extern GLuint VAO, VBO;  // Vertex Array Object and Vertex Buffer Object
     extern int frameCount;
 
     /**
