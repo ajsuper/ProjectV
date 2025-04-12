@@ -50,6 +50,7 @@ namespace projv{
         void runApplication(Application& app) {
             app.Startup();
             while(!app.closeAppFlag) {
+                glfwPollEvents();
                 app.Update();
                 app.Render();
                 app.frameCount++;
