@@ -176,22 +176,79 @@ namespace projv{
      */
     bool initializeGLFWandGLEWWindow(GLFWwindow*& window, int windowWidth, int windowHeight, const std::string& windowName);
 
+    /**
+     * Initializes GLFW, GLEW, our fullscreen render quad, and creates a window.
+     * 
+     * @param windowWidth The width of the window.
+     * @param windowHeight The height of the window.
+     * @param windowName The name of the window.
+     * @return Returns a RenderInstance with the initialized variables.
+     */
     RenderInstance initializeRenderInstance(int windowWidth, int windowHeight, const std::string& windowName);
 
+    /**
+     * Sets the error callback(what happens when an OpenGL error occurs) that OpenGL will use
+     * 
+     * @param renderInstance The renderInstance that we want to set the callback for.
+     * @param error_callback A function pointer that stores the user defined function to handle error's.
+     */
     void setErrorCallback(RenderInstance& renderInstance, void (*error_callback)(int error_code, const char* description));
 
+    /**
+     * Sets the frame buffer size callback(what happens on window resize) that OpenGL will use.
+     */
     void setFrameBufferSizeCallback(RenderInstance& renderInstance, void (*framebuffer_callback)(GLFWwindow* window, int width, int height));
 
+    /**
+     * Adds an OpenGL shader to our render instance. Useful when using the ECS system to pass shaders globally.
+     * 
+     * @param renderInstance The RenderInstance to which the shader will be added.
+     * @param shader The OpenGL shader ID to be added.
+     * @param shaderName The name of the shader to be used as a key for retrieval.
+     */
     void addShaderToRenderInstance(RenderInstance& renderInstance, GLuint shader, std::string shaderName);
 
+    /**
+     * Removes an OpenGL shader from our render instance.
+     * 
+     * @param renderInstance The RenderInstance from which the shader will be removed.
+     * @param shaderName The name of the shader to be removed.
+     */
     void removeShaderFromRenderInstance(RenderInstance& renderInstance, std::string shaderName);
 
+    /**
+     * Retrieves an OpenGL shader from our render instance.
+     * 
+     * @param renderInstance The RenderInstance from which the shader will be retrieved.
+     * @param shaderName The name of the shader to retrieve.
+     * @return The OpenGL shader ID associated with the given shader name.
+     */
     GLuint getShaderFromRenderInstance(RenderInstance& renderInstance, std::string shaderName);
 
+    /**
+     * Adds a framebuffer to our render instance.
+     * 
+     * @param renderInstance The RenderInstance to which the framebuffer will be added.
+     * @param framebuffer The FrameBuffer object to be added.
+     * @param name The name of the framebuffer to be used as a key for retrieval.
+     */
     void addFramebufferToRenderInstance(RenderInstance& renderInstance, const FrameBuffer& framebuffer, const std::string& name);
 
+    /**
+     * Removes a framebuffer from our render instance.
+     * 
+     * @param renderInstance The RenderInstance from which the framebuffer will be removed.
+     * @param name The name of the framebuffer to be removed.
+     */
     void removeFramebufferFromRenderInstance(RenderInstance& renderInstance, const std::string& name);
 
+    /**
+     * Retrieves a framebuffer from our render instance.
+     * 
+     * @param renderInstance The RenderInstance from which the framebuffer will be retrieved.
+     * @param name The name of the framebuffer to retrieve.
+     * @return The FrameBuffer object associated with the given name.
+     */
     FrameBuffer getFramebufferFromRenderInstance(RenderInstance& renderInstance, const std::string& name);
 }
 
