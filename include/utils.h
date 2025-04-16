@@ -26,7 +26,7 @@ namespace projv{
      * @param size A power of 2 size of the voxel grid.
      * @return A grid with xyz dimensions of size and all voxel initialized to white and empty.
      */
-    std::vector<std::vector<std::vector<voxel>>> createVoxelGrid(int size);
+    VoxelGrid createVoxelGrid();
 
     /**
      * Converts a 3D vector to a single uint32_t storing that position.
@@ -93,7 +93,6 @@ namespace projv{
      * @param boundsMax The larger of the 2 bounds to check against.
      * @return Returns the number of voxels within the bounds.
      */
-    int voxInBounds(std::vector<std::vector<std::vector<voxel>>>& voxels, int wholeVoxelResolution, int boundsMin[3], int boundsMax[3]);
 
     /**
      * Calculates the masks for a section of voxels based off of the minimum xyz. The depthResolution/2 gives the size of the child nodes and is used to create the octants corresponding to their parent.
@@ -102,7 +101,6 @@ namespace projv{
      * @param wholeVoxelResolution The resolution of the voxel grid at its highest resolution. A voxel grid of 256^3 would be 256^3.
      * @return A 9 bit mask stored in a uint16_t. The rightmost bit is to indicate if the nodes are leaf nodes. The 8 to the left of that indicate whether they are non-empty nodes.
      */
-    uint16_t buildMask(std::vector<std::vector<std::vector<voxel>>>& voxels, const int& checkX, const int& checkY, const int& checkZ, const int& depthResolution, int wholeVoxelResolution);
 
     /**
      * Creates the Z-Order Index of a point in 3D space with a certain bit depth.
@@ -135,7 +133,7 @@ namespace projv{
      * @param octreeID 
      * @return Returns an std::vector<uint32_t> containing the entire octree structure.
      */
-    std::vector<uint32_t> createOctree(std::vector<std::vector<std::vector<voxel>>>& voxels, int voxelWholeResolution);
+    std::vector<uint32_t> createOctree(VoxelGrid& voxels, int voxelWholeResolution);
 
     /**
      * Generates voxel type data that stores 8 bytes of data per voxel. Currently, a color and 3 8 bit sections of extra data.
@@ -143,7 +141,7 @@ namespace projv{
      * @param voxelWholeResolution The resolution of the entire 3D voxel vector.
      * @param voxelCount Optional paramater that reserves memory space to potentially decrease generation times from re-reserving during creation. 
      */
-    std::vector<uint32_t> createVoxelTypeData(std::vector<std::vector<std::vector<voxel>>>& voxels, int voxelWholeResolution, int voxelCount = -1);
+    std::vector<uint32_t> createVoxelTypeData(VoxelGrid& voxels);
 
     //TEMPORARY
     bool isInSierpinskiTriangle(int x, int y, int z);
@@ -188,6 +186,10 @@ namespace projv{
      * @param forceReload Whether to force reload the chunk from disk. (false by default)
      */
     void updateLOD(RuntimeChunkData& chunk, uint32_t targetLOD, const std::string& sceneFilePath, bool forceReload = false);
+
+    void addVoxel(VoxelGrid& voxels, std::array<int, 3> position, Color color);
+
+    void addVoxelBatch(VoxelGrid& voxels, std::vector<Voxel>& voxelBatch);
 }
 
 #endif

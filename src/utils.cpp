@@ -5,24 +5,10 @@
 
 namespace projv{
     
-    std::vector<std::vector<std::vector<voxel>>> createVoxelGrid(int size) {
+    VoxelGrid createVoxelGrid() {
         // Initialize the 3D vector with `voxel` instances.
-        std::vector<std::vector<std::vector<voxel>>> voxels(
-            size, std::vector<std::vector<voxel>>(
-                size, std::vector<voxel>(size, voxel{})));
-
-        // Set default values of white and empty for each voxel.
-        for (int x = 0; x < size; x++) {
-            for (int y = 0; y < size; y++) {
-                for (int z = 0; z < size; z++) {
-                    voxels[x][y][z].filled = false;
-                    voxels[x][y][z].color.r = 255;
-                    voxels[x][y][z].color.g = 255;
-                    voxels[x][y][z].color.b = 255;
-                }
-            }
-        }
-
+        VoxelGrid voxels;
+        voxels.max = 0;
         return voxels;
     }
 
@@ -129,91 +115,6 @@ namespace projv{
     }
 
     /**
-     * Finds how many filled voxels are within boundsMin and boundsMax in the 3D voxel vector.
-     * 
-     * @param voxels A 3D vector of voxel's.
-     * @param voxelWholeResolution The resolution of the entire voxels vector.
-     * @param boundsMin The smaller of the 2 bounds to check against.
-     * @param boundsMax The larger of the 2 bounds to check against.
-     * @return Returns the number of voxels within the bounds.
-     */
-    int voxInBounds(std::vector<std::vector<std::vector<voxel>>>& voxels, int wholeVoxelResolution, int boundsMin[3], int boundsMax[3]){
-        int voxCountInBounds = 0;
-
-        for (int x = 0; x < 3; x++){
-            if(boundsMax[x] > wholeVoxelResolution || boundsMin[x] < 0){
-                return 0;
-            }
-        }
-
-        for(int x = boundsMin[0]; x < boundsMax[0]; x++){
-            for(int y = boundsMin[1]; y < boundsMax[1]; y++){
-                for(int z = boundsMin[2]; z < boundsMax[2]; z++){
-                    if(voxels[x][y][z].filled){
-                        voxCountInBounds += 1;
-                    }
-                }
-            }
-        }
-
-        return voxCountInBounds;
-    }
-
-    /**
-     * Calculates the masks for a section of voxels based off of the minimum xyz. The depthResolution/2 gives the size of the child nodes and is used to create the octants corresponding to their parent.
-     * 
-     * @param voxels A 3D vector of voxel's.
-     * @param depthResolution The resolution of the voxel grid at a certain depth. Depth 1 is 2x2x2, depth 2 is 4x4x4. Essentially pow(2, depth)
-     * @param wholeVoxelResolution The resolution of the voxel grid at its highest resolution. A voxel grid of 256^3 would be 256^3.
-     * @return A 9 bit mask stored in a uint16_t. The rightmost bit is to indicate if the nodes are leaf nodes. The 8 to the left of that indicate whether they are non-empty nodes.
-     */
-    uint16_t buildMask(std::vector<std::vector<std::vector<voxel>>>& voxels, const int& checkX, const int& checkY, const int& checkZ, const int& depthResolution, int wholeVoxelResolution){
-        // TODO: combine checkX, checkY, and checkZ into one check array or vec3.
-        uint16_t mask = 0;
-        int childSize = int(depthResolution/2);
-        int x = 0;
-        int y = 1;
-        int z = 2;
-
-        int octants[8][3] = {
-            {checkX, checkY, checkZ},
-            {checkX, checkY, checkZ+childSize},
-            {checkX, checkY+childSize, checkZ},
-            {checkX, checkY+childSize, checkZ+childSize},
-            {checkX+childSize, checkY, checkZ},
-            {checkX+childSize, checkY, checkZ+childSize},
-            {checkX+childSize, checkY+childSize, checkZ},
-            {checkX+childSize, checkY+childSize, checkZ+childSize}
-        };
-
-        // TODO: replace size check with more sophisticated check allowing for large filled sections to be sparseified just like large empty sections. Complex, involvwes render changes.
-        // If child is not at leaf resolution.
-        if(childSize > 1){
-            for(int i = 0; i < 8; i++){
-                int octantPosition[3] = {octants[i][x], octants[i][y], octants[i][z]};
-                int octantPositionExtents[3] = {octants[i][x]+childSize, octants[i][y]+childSize, octants[i][z]+childSize};
-                if(voxInBounds(voxels, wholeVoxelResolution, octantPosition, octantPositionExtents) > 0){
-                    mask |= (1 << (8-i));
-                }
-            }
-        }
-
-        // If child is at leaf resolution.
-        if(childSize == 1){
-            for(int i = 0; i < 8; i++){
-                int octantPosition[3] = {octants[i][x], octants[i][y], octants[i][z]};
-                int octantPositionExtents[3] = {octants[i][x]+childSize, octants[i][y]+childSize, octants[i][z]+childSize};
-                if(voxInBounds(voxels, wholeVoxelResolution, octantPosition, octantPositionExtents) > 0){
-                    mask = mask | (1 << (8-i));
-                    mask = mask | (1);
-                }
-            }
-        }
-
-        return mask;
-    }
-
-    /**
      * Creates the Z-Order Index of a point in 3D space with a certain bit depth.
      * 
      * @param x, y, z Position in 3D space to calculate Z-Order of.
@@ -273,32 +174,16 @@ namespace projv{
      * @param voxelWholeResolution The resolution of the entire 3D voxel vector.
      */
 
-    std::vector<nodeStructure> buildMasksForWholeDepth(std::vector<std::vector<std::vector<voxel>>>& voxels, int depthInOctree, int voxelWholeResolution){
-        auto startWhole = std::chrono::high_resolution_clock::now();
+     std::vector<nodeStructure> convertVoxelsToGeometry(VoxelGrid& voxels) {
         std::vector<nodeStructure> nodes;
-        int voxelDepthResolution = pow(2, depthInOctree);
-        int wholeResToDepthResRatio = voxelWholeResolution/voxelDepthResolution;
-        int index = 0;
-        int bitLength = log2(voxelDepthResolution);
-
-        //Loop over each of the coordinates and create a mask then add that to the whole list of masks.
-        for(uint64_t i = 0; i < (voxelDepthResolution*voxelDepthResolution*voxelDepthResolution); i++){
-            std::array<int, 3> coord = reverseZOrderIndex(i, bitLength);
-            
-            uint16_t temporaryMask = buildMask(voxels, wholeResToDepthResRatio*coord[0], wholeResToDepthResRatio*coord[1], wholeResToDepthResRatio*coord[2], wholeResToDepthResRatio, voxelWholeResolution);
+        for(int i = 0; i < voxels.voxels.size(); i++) {
             nodeStructure node;
-            node.standardNode = temporaryMask; // Remove the leaf flag.
-            node.ZOrderIndex = i;
-            //std::cout << std::bitset<16>(temporaryMask) << " " << coord[0]*wholeResToDepthResRatio << " " << coord[1]*wholeResToDepthResRatio << " " << coord[2]*wholeResToDepthResRatio << " " << std::endl;
-            if(temporaryMask != 0){
-                nodes.push_back(node);
-            }
+            node.ZOrderIndex = voxels.voxels[i].ZOrderPosition;
+            auto position = reverseZOrderIndex(node.ZOrderIndex, 15);
+            nodes.emplace_back(node);
         }
-        auto end = std::chrono::high_resolution_clock::now();
-        double elapsed = std::chrono::duration<double, std::milli>(end - startWhole).count();
-
         return nodes;
-    }
+     }
 
     /**
      * Generate the relative child pointers and combine them with a partially constructed octree containing only the masks.
@@ -337,7 +222,7 @@ namespace projv{
         return octree;
     }
 
-    std::vector<nodeStructure> agregateLevel(std::vector<nodeStructure>& oldLevel) {
+    std::vector<nodeStructure> agregateLevel(std::vector<nodeStructure>& oldLevel, bool childParent = false) {
         std::vector<nodeStructure> newLevel;
         std::unordered_map<int, int> indexMap; // Maps newIndex to index in newLevel
     
@@ -354,6 +239,7 @@ namespace projv{
                 nodeStructure newNode = {0, newIndex};
                 newNode.standardNode |= bitToSet;
                 newNode.standardNode &= 0b111111110; // Clear leaf bit if needed
+                if(childParent) newNode.standardNode |= 0b1;
                 newLevel.push_back(newNode);
                 indexMap[newIndex] = newLevel.size() - 1;
             }
@@ -362,21 +248,25 @@ namespace projv{
         return newLevel;
     }
     
-    std::vector<uint32_t> createOctree(std::vector<std::vector<std::vector<voxel>>>& voxels, int voxelWholeResolution){
+    std::vector<uint32_t> createOctree(VoxelGrid& voxels, int voxelWholeResolution){
         std::chrono::high_resolution_clock::time_point startWhole = std::chrono::high_resolution_clock::now();
         std::cout << "[createOctree] Octree generation started with size of " << voxelWholeResolution << std::endl;
         int levelsOfDepth = int(log2(voxelWholeResolution));
         std::vector<nodeStructure> octree;
         std::vector<nodeStructure> levelInProgress;
-        levelInProgress = buildMasksForWholeDepth(voxels, levelsOfDepth - 1, voxelWholeResolution); // Builds mask for the lowest resolution. GOOD
-        //buildMasksForWholeDepth(testLevel, voxels, levelsOfDepth - 2, voxelWholeResolution); // Builds mask for the lowest resolution.
+        std::cout << "Here!" << std::endl;
 
+        levelInProgress = convertVoxelsToGeometry(voxels); // Builds mask for the lowest resolution. GOOD
+        //buildMasksForWholeDepth(testLevel, voxels, levelsOfDepth - 2, voxelWholeResolution); // Builds mask for the lowest resolution.
+        
         std::reverse(levelInProgress.begin(), levelInProgress.end());
+        levelInProgress = agregateLevel(levelInProgress, true);
+        std::cout << "Just reversed" << std::endl;
         for(int i = 0; i < levelInProgress.size(); i++){ // Puts it on the octree in reverse order since were starting at the lowest level.
             //std::cout << "Node: " << std::bitset<32>(levelInProgress[i].standardNode) << " | ZOrder: " << std::bitset<32>(levelInProgress[i].ZOrderIndex) << std::endl;
             octree.push_back(levelInProgress[i]); // Puts our data on the octree
         }
-
+        std::cout << "Just put first level on octree" << std::endl;
         for(int i = 0; i < levelsOfDepth - 1; i++){ // Loops over all the levels of depth
             levelInProgress = agregateLevel(levelInProgress); // Agregates the previous level. GOOD
     
@@ -385,6 +275,8 @@ namespace projv{
                 octree.push_back(levelInProgress[j]);
             }
         }
+
+        std::cout << "Just aggregated all levels" << std::endl;
         std::vector<uint32_t> octreeSimplified;
         for(int i = octree.size() - 1; i >= 0; i--){
             octreeSimplified.push_back(octree[i].standardNode);
@@ -404,51 +296,32 @@ namespace projv{
      * @param voxelWholeResolution The resolution of the entire 3D voxel vector.
      * @param voxelCount Optional paramater that reserves memory space to potentially decrease generation times from re-reserving during creation. 
      */
-    std::vector<uint32_t> createVoxelTypeData(std::vector<std::vector<std::vector<voxel>>>& voxels, int voxelWholeResolution, int voxelCount) {
-        std::cerr << "[createVoxelTypeData] Creating voxel type data..." << std::endl;
+    std::vector<uint32_t> createVoxelTypeData(VoxelGrid& voxels) {
         std::vector<uint32_t> voxelTypeData;
-        auto startWhole = std::chrono::high_resolution_clock::now();
-        if(voxelCount > 0){
-            voxelTypeData.reserve(voxelCount*3);
+        for(int i = 0; i < voxels.voxels.size(); i++){
+            Voxel voxel = voxels.voxels[i];
+            //std::cout << i << "ZOrderIndex" << std::endl;
+            voxelTypeData.emplace_back(voxel.ZOrderPosition);
+            int R10 = (voxel.color.r)*4;
+            int G10 = (voxel.color.g)*4;
+            int B10 = (voxel.color.b)*4;
+            float normalX = 0;
+            float normalY = 0;
+            float normalZ = 0;
+            uint8_t normalXSign = 1;
+            uint8_t normalYSign = 1;
+            uint8_t normalZSign = 1;
+            if(normalX < 0) normalXSign = 0;
+            if(normalY < 0) normalYSign = 0;
+            if(normalZ < 0) normalZSign = 0;
+            int normalX9 = int(abs(normalX)*511) & 0x1FF;
+            int normalY9 = int(abs(normalY)*511) & 0x1FF;
+            int normalZ9 = int(abs(normalZ)*511) & 0x1FF;
+            uint32_t SerializedColor = uint32_t(R10 << 20 | G10 << 10 | B10);
+            uint32_t SerializedNormal = uint32_t((normalXSign << 29) | (normalX9 << 20) | (normalYSign << 19) | (normalY9 << 10) | (normalZSign << 9) | normalZ9);
+            voxelTypeData.emplace_back(SerializedColor);
+            voxelTypeData.emplace_back(SerializedNormal);
         }
-        std::cerr << "[createVoxelTypeData] Check Point #1" << std::endl;
-        int bitLength = log2(voxelWholeResolution); // Number of bits for the coordinate
-        //Loop over each of the coordinates and create a mask then add that to the whole list of masks.
-        for(int i = 0; i < (voxelWholeResolution*voxelWholeResolution*voxelWholeResolution ); i++){
-            std::array<int, 3> coord = reverseZOrderIndex(i, bitLength);
-            if(voxels[coord[0]][coord[1]][coord[2]].filled){
-                voxel voxel = voxels[coord[0]][coord[1]][coord[2]];
-                //std::cout << i << "ZOrderIndex" << std::endl;
-                voxelTypeData.emplace_back(i);
-                int x = coord[0];
-                int y = coord[1];
-                int z = coord[2];
-                int R10 = (voxel.color.r)*4;
-                int G10 = (voxel.color.g)*4;
-                int B10 = (voxel.color.b)*4;
-                float normalX = 0;
-                float normalY = 0;
-                float normalZ = 0;
-                uint8_t normalXSign = 1;
-                uint8_t normalYSign = 1;
-                uint8_t normalZSign = 1;
-                if(normalX < 0) normalXSign = 0;
-                if(normalY < 0) normalYSign = 0;
-                if(normalZ < 0) normalZSign = 0;
-                int normalX9 = int(abs(normalX)*511) & 0x1FF;
-                int normalY9 = int(abs(normalY)*511) & 0x1FF;
-                int normalZ9 = int(abs(normalZ)*511) & 0x1FF;
-                uint32_t SerializedColor = uint32_t(R10 << 20 | G10 << 10 | B10);
-                uint32_t SerializedNormal = uint32_t((normalXSign << 29) | (normalX9 << 20) | (normalYSign << 19) | (normalY9 << 10) | (normalZSign << 9) | normalZ9);
-                voxelTypeData.emplace_back(SerializedColor);
-                voxelTypeData.emplace_back(SerializedNormal);
-            }
-        }    
-        std::cerr << "[createVoxelTypeData] Size of vector: " << voxelTypeData.size() << std::endl;
-        std::cerr << "[createVoxelTypeData] Check Point #2" << std::endl;
-        auto end = std::chrono::high_resolution_clock::now();
-        auto elapsed = std::chrono::duration<double, std::milli>(end - startWhole).count();
-        std::cerr << "[createVoxelTypeData] Voxel type data finished in: " << elapsed << " ms\n" << std::endl;
         return voxelTypeData;
     }
 
@@ -669,5 +542,47 @@ namespace projv{
         std::cout << "[updateLOD] updated in " << elapsed << " ms" << std::endl;
 
         return;
+    }
+
+    void addVoxel(VoxelGrid& voxels, std::array<int, 3> position, Color color) {
+        Voxel voxel;
+        voxel.ZOrderPosition = createZOrderIndex(
+            std::clamp(position[0], 1, 511),
+            std::clamp(position[1], 1, 511),
+            std::clamp(position[2], 1, 511),
+            15
+        );
+        voxel.color = color;
+    
+        int beginIndex = 0;
+        int endIndex = voxels.voxels.size();
+    
+        while (beginIndex < endIndex) {
+            int middleIndex = (beginIndex + endIndex) / 2;
+            uint64_t midZ = voxels.voxels[middleIndex].ZOrderPosition;
+    
+            if (midZ < voxel.ZOrderPosition) {
+                beginIndex = middleIndex + 1;
+            } else if (midZ > voxel.ZOrderPosition) {
+                endIndex = middleIndex;
+            } else {
+                // Match found: update color and exit
+                voxels.voxels[middleIndex].color = voxel.color;
+                return;
+            }
+        }
+    
+        // Not found: insert at correct position to maintain sort
+        voxels.voxels.insert(voxels.voxels.begin() + beginIndex, voxel);
+    }
+
+    void addVoxelBatch(VoxelGrid& voxels, std::vector<Voxel>& voxelBatch) {
+        for(int i = 0; i < voxelBatch.size(); i++){
+            voxels.voxels.emplace_back(voxelBatch[i]);
+        }
+
+        std::sort(voxels.voxels.begin(), voxels.voxels.end(), [](const Voxel& a, const Voxel& b) {
+            return a.ZOrderPosition < b.ZOrderPosition;
+        });
     }
 }

@@ -8,13 +8,14 @@ namespace projv{
      * @brief This structure contains the properties of a voxel. It contains filled and a Color.
      * @struct voxel
      */
-    struct voxel {
-        bool filled;
+    struct Voxel {
+        uint32_t ZOrderPosition;
         Color color;
     };
 
-    struct voxelGrid {
-        std::vector<voxel> voxels;
+    struct VoxelGrid {
+        uint max;
+        std::vector<Voxel> voxels;
     };
 }
 
