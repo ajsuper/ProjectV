@@ -21,6 +21,12 @@ namespace projv{
     }
 
     void writeUint32Vector(std::vector<uint32_t> vector, std::string fileDirectory){
+        // Ensure the directory exists
+        std::filesystem::path pathDirectory = std::filesystem::path(fileDirectory).parent_path();
+        if (!std::filesystem::exists(pathDirectory)) {
+            std::filesystem::create_directories(pathDirectory);
+        }
+
         std::ofstream outFile(fileDirectory, std::ios::binary);
         if (!outFile) {
             std::cerr << "ERROR in 'writeUint32Vector': Failed to open " << fileDirectory << std::endl;
@@ -254,19 +260,15 @@ namespace projv{
         int levelsOfDepth = int(log2(voxelWholeResolution));
         std::vector<nodeStructure> octree;
         std::vector<nodeStructure> levelInProgress;
-        std::cout << "Here!" << std::endl;
 
         levelInProgress = convertVoxelsToGeometry(voxels); // Builds mask for the lowest resolution. GOOD
-        //buildMasksForWholeDepth(testLevel, voxels, levelsOfDepth - 2, voxelWholeResolution); // Builds mask for the lowest resolution.
-        
         std::reverse(levelInProgress.begin(), levelInProgress.end());
         levelInProgress = agregateLevel(levelInProgress, true);
-        std::cout << "Just reversed" << std::endl;
+
         for(int i = 0; i < levelInProgress.size(); i++){ // Puts it on the octree in reverse order since were starting at the lowest level.
-            //std::cout << "Node: " << std::bitset<32>(levelInProgress[i].standardNode) << " | ZOrder: " << std::bitset<32>(levelInProgress[i].ZOrderIndex) << std::endl;
             octree.push_back(levelInProgress[i]); // Puts our data on the octree
         }
-        std::cout << "Just put first level on octree" << std::endl;
+
         for(int i = 0; i < levelsOfDepth - 1; i++){ // Loops over all the levels of depth
             levelInProgress = agregateLevel(levelInProgress); // Agregates the previous level. GOOD
     
@@ -276,7 +278,6 @@ namespace projv{
             }
         }
 
-        std::cout << "Just aggregated all levels" << std::endl;
         std::vector<uint32_t> octreeSimplified;
         for(int i = octree.size() - 1; i >= 0; i--){
             octreeSimplified.push_back(octree[i].standardNode);
@@ -544,7 +545,7 @@ namespace projv{
         return;
     }
 
-    void addVoxel(VoxelGrid& voxels, std::array<int, 3> position, Color color) {
+    void addVoxelToVoxels(VoxelGrid& voxels, std::array<int, 3> position, Color color) {
         Voxel voxel;
         voxel.ZOrderPosition = createZOrderIndex(
             std::clamp(position[0], 1, 511),
@@ -576,7 +577,7 @@ namespace projv{
         voxels.voxels.insert(voxels.voxels.begin() + beginIndex, voxel);
     }
 
-    void addVoxelBatch(VoxelGrid& voxels, std::vector<Voxel>& voxelBatch) {
+    void addVoxelBatchToVoxels(VoxelGrid& voxels, VoxelBatch& voxelBatch) {
         for(int i = 0; i < voxelBatch.size(); i++){
             voxels.voxels.emplace_back(voxelBatch[i]);
         }
@@ -584,5 +585,15 @@ namespace projv{
         std::sort(voxels.voxels.begin(), voxels.voxels.end(), [](const Voxel& a, const Voxel& b) {
             return a.ZOrderPosition < b.ZOrderPosition;
         });
+    }
+
+    VoxelBatch createVoxelBatch() {
+        VoxelBatch voxelBatch;
+        return voxelBatch;
+    }
+
+    void addVoxelToBatch(Voxel voxel, VoxelBatch& voxelBatch) {
+        voxelBatch.emplace_back(voxel);
+        return;
     }
 }

@@ -17,6 +17,8 @@ namespace projv{
         uint max;
         std::vector<Voxel> voxels;
     };
+
+    using VoxelBatch = std::vector<Voxel>;
 }
 
 #endif

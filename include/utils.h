@@ -187,9 +187,33 @@ namespace projv{
      */
     void updateLOD(RuntimeChunkData& chunk, uint32_t targetLOD, const std::string& sceneFilePath, bool forceReload = false);
 
-    void addVoxel(VoxelGrid& voxels, std::array<int, 3> position, Color color);
+    /**
+     * Adds a voxel to a VoxelGrid. Expensive because it has to insert it in the correct sorted order.
+     * @param voxels The VoxelGrid to add the voxel too.
+     * @param position The position at which the voxel resides in the VoxelGrid
+     * @param color The color of the voxel in the VoxelGrid
+     */
+    void addVoxelToVoxels(VoxelGrid& voxels, std::array<int, 3> position, Color color);
 
-    void addVoxelBatch(VoxelGrid& voxels, std::vector<Voxel>& voxelBatch);
+    /**
+     * Adds a VoxelBatch to a VoxelGrid. Faster than addVoxelToVoxels for large amounts of voxels, but slower for small amounts of voxels.
+     * @param voxels VoxelGrid to add VoxelBatch to.
+     * @param voxelBatch voxelBatch to add to VoxelGrid
+     */
+    void addVoxelBatchToVoxels(VoxelGrid& voxels, VoxelBatch& voxelBatch);
+
+    /**
+     * Creates a VoxelBatch
+     * @return Returns an empty VoxelBatch
+     */
+    VoxelBatch createVoxelBatch();
+
+    /**
+     * Adds a voxel to a voxel batch
+     * @param voxel Voxel to add to VoxelBatch
+     * @param voxelBatch VoxelBatch to have the voxel added too.
+     */
+    void addVoxelToBatch(Voxel voxel, VoxelBatch& voxelBatch);
 }
 
 #endif
