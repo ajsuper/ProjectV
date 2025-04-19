@@ -78,6 +78,10 @@
         "valarray": "cpp",
         "__node_handle": "cpp",
         "__tree": "cpp",
-        "typeindex": "cpp"
+        "typeindex": "cpp",
+        "queue": "cpp",
+        "stack": "cpp",
+        "__hash_table": "cpp",
+        "filesystem": "cpp"
     }
 }

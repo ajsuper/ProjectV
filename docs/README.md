@@ -95,71 +95,74 @@ ProjectV uses a modular structure, each module contains functionalities you can 
 ---
 ### Utils
 
-Provides functions and data structures for handling voxel data.
+Provides functions and data structures for handling voxel data. For more information and a full list of util modules see [utils.md](../include/utils/utils.md)
 
-Linker Flag:
->-lprojctV-utils
-
-Include Statement:
+Include Statement Example:
 
 ```C++
-#include "utils.h"
+#include "utils/voxel_math.h"
 ```
+
+Linker Flag:
+>-lprojectV-voxel_math
 
 ---
 ### Core
 
-Provides functions for creating an OpenGL instance and GLFW Window, along with handling user input.
-
-Linker Flag:
->-lprojctV-core
+Provides functions for handling a projv::Application. For more information and a full list of core modules see [core.md](../include/core/core.md)
 
 ```C++
-#include "core.h"
+#include "core/ecs.h"
 ```
+
+Linker Flag:
+>-lprojectV-ecs
 
 ---
 ### Graphics
 
-Provides functions to load, compile, and render shaders to an OpenGL GLFW window. Also provides functions to update camera postiion, resoltuion and pass data to be rendered to the shaders.
-
-Linker Flag:
->-lprojctV-graphics
+Provides functions to load, compile, and render shaders to an OpenGL GLFW window. Also provides functions to update camera postiion, resoltuion and pass data to be rendered to the shaders. For more information and a full list of core modules see [graphics.md](../include/graphics/graphics.md)
 
 ```C++
-#include "graphics.h"
+#include "graphics/render.h"
 ```
+
+Linker Flag:
+>-lprojctV-render
 
 ### Usage
 
 Steps to setting up a project using ProjectV:
 
 1. **Assess Necessary Modules**:
-    - Review the documentation to determine which modules are required for your project.
+    - Review the documentation to determine which modules are required for your project. To assess necessary modules, please see: 
+        - [utils.md](../include/utils/utils.md)
+        - [core.md](../include/core/core.md)
+        - [graphics.md](../include/graphics/graphics.md)
 
-    > **Attention!** If you are using the graphics module, ensure the source file `shaders` from ProjectV is included in the same directory as the cpp file using it.
+    > **Attention!** If you are using the graphics module, it is recommended to copy the source folder `shaders` from ProjectV since this includes highly complex shaders required for rendering.
 
 2. **Include Header Files**:
     - Include the header files for the modules you want to use in your project. For example:
         ```cpp
-        #include "utils.h"
-        #include "core.h"
-        #include "graphics.h"
+        #include "utils/voxel_math.h"
+        #include "core/ecs.h"
+        #include "graphics/window.h"
         ```
 
 3. **Namespace Usage**:
     - Ensure all references to ProjectV functionalities and variables use the `projv` namespace. For example:
         ```cpp
-        projv::functionName();
+        projv::core::functionName();
+        // or
+        projv::utils::functionName();
+        // or
+        projv::graphics::functionName();
         ```
 
 4. **Compile with Necessary Flags**:
     - Compile your project with the necessary linker flags for the modules you are using. For example:
-        > **Note** ***Graphics*** requires `-lGL` and ***core*** requires `-lglfw3` and `-lGLEW`
-
-        ```bash
-        $ g++ -o myProject main.cpp -I/path/to/ProjectV/include/ -L/path/to/ProjectV/lib/ -lprojectV-utils -lprojectV-core -lprojectV-graphics -lglfw -lGL -lGLEW
-        ```
+        > **Note** ***Graphics*** requires `-lGL`, `-lglfw3`, and `-lGLEW`
 
 For more detailed instructions in the form of commented code, please see our examples using the ProjectV. [Examples](/docs/examples)
 
@@ -169,6 +172,6 @@ This is my first time open sourcing any project, and my first project on this sc
 
 #### Citations
 
-We highly encourage contributors to cite their sources in our [SOURCES.md](/docs/SOURCES.md). ProjectV does not require citations; However, they are greatly appreciated and recommended if you intend for others to be looking at and editing your code. 
+Contributors must cite sources that require it in our [SOURCES.md](/docs/SOURCES.md). You are not required to cite ProjectV when using it; however, it is highly recommended as the credit is appreciated and it helps people find out about the engine!
 
 Thank you for using ProjectV!!

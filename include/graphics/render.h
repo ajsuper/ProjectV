@@ -1,48 +1,14 @@
-#ifndef PROJECTV_GRAPHICS_H
-#define PROJECTV_GRAPHICS_H
+#ifndef PROJECTV_RENDER_H
+#define PROJECTV_RENDER_H
 
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
-
-#include <fstream>
-#include <sstream>
 #include <iostream>
-#include <bitset>
-#include <chrono>
-#include <vector>
-#include <cmath>
-#include <cstring>
-#include "camera.h"
 
-#include "data_structures/texture.h"
-#include "data_structures/framebuffer.h"
-#include "data_structures/scene.h"
 #include "data_structures/renderInstance.h"
+#include "data_structures/framebuffer.h"
 
-namespace projv{
-
-    // Global variables
-    extern int frameCount;
-
-    /**
-     * Adds a texture to the frameBuffer with the specified format and name.
-     * 
-     * @param frameBuffer The frame buffer to add the texture to.
-     * @param format The format of the texture. (Prints an error when non-supported formats are used)
-     * @param textureName The name of the texture. Used whenever you use the texture as a sampler2D in a shader. inputBuffer(buffer #)_ will pe prepended to the name specified when used as inputs.
-     */
-    void addTextureToFrameBuffer(FrameBuffer &frameBuffer, GLuint format, std::string textureName);
-
-    /**
-     * Creates a frame buffer object with the specified width and height.
-     * 
-     * @param width The width of the frame buffer object.
-     * @param height The height of the frame buffer object.
-     */
-    FrameBuffer createFrameBufferObjectAdvanced(int width, int height);
-
-    Texture loadPNGIntoTexture(std::string filePath, std::string textureName, GLuint format);
-
+namespace projv::graphics {
     /**
      * Renders a fragment/vertex shader shader program to the targetBuffer.
      * 
@@ -106,8 +72,6 @@ namespace projv{
      */
     void renderFragmentShaderToTargetBufferWithTwoInputBuffers(RenderInstance renderInstance, GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer inputBuffer2, FrameBuffer targetBuffer);
 
-    //void renderFragmentShaderToTargetBufferWithTwoInputBuffers(GLuint shaderProgram, FrameBuffer inputBuffer1, FrameBuffer inputBuffer2, FrameBuffer targetBuffer);
-
     /**
      * Uses a ping-pong method to switch between frameBuffer1 and frameBuffer2 to perform operations that require multiple passes.
      * 
@@ -118,57 +82,6 @@ namespace projv{
      * @param targetBuffer The final buffer that the last pass will output to.
      */
     void renderMultipassFragmentShaderToTargetBuffer(RenderInstance renderInstance, int numberOfPasses, GLuint multiPassShaderProgram, FrameBuffer frameBuffer1, FrameBuffer frameBuffer2, FrameBuffer targetBuffer);
-
-    /**
-     * Finds a floating point uniform in our shaders and passes the floating point variable to it.
-     * 
-     * @param shader The GLSL shader program to update the variable in.
-     * @param variable The floating point number to send to the shader.
-     * @param variableNameInShader The name of the variable in our GLSL shader that our float will be assigned to.
-     */
-    void updateFloatInShader(GLuint shader, float variable, const char variableNameInShader[24]);
-
-    /**
-     * Updates the time variable in the shader.
-     */
-    void updateTimeInShader(GLuint shader);
-
-    /**
-     * Updates the camera position and direction in the shader.
-     */
-    void updateCameraInShader(GLuint shader);
-
-    /**
-     * Updates the resolution in the shader.
-     * 
-     * @param window The GLFW window to get the framebuffer size from.
-     */
-    void updateResolutionInShader(GLuint shader, GLFWwindow* window);
-
-    /**
-     * Loads GLSL shader source code from a file.
-     * 
-     * @param filepath The path to the shader file.
-     * @return The shader source code as a string.
-     */
-    std::string loadShaderSource(const char* filepath);
-
-    /**
-     * Passes the scene to the fragment shader, very costly as it updates entire scene every time it is sent.
-     * 
-     * @param sceneToRender The scene to be passed to the fragment shader.
-     */
-    void passSceneToOpenGL(Scene& sceneToRender);
-
-    /**
-     * Creates an OpenGL shader program for a vertex and fragment shader.
-     * 
-     * @param vertexPath The file path of our vertex shader.
-     * @param fragmentPath The file path of our fragment shader.
-     * 
-     * @return A GLuint shader program with our compiled vertex and fragment shaders.
-     */
-    GLuint compileVertexAndFragmentShaders(const char* vertexPath, const char* fragmentPath);
 }
 
 #endif

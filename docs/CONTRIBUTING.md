@@ -15,11 +15,12 @@ ProjectV aims to allow upmost flexibility to the user, allowing them to easily u
 
 #### This is the programming paradigm we loosely try to stick to:
 
-Designed with functional programming in mind due to its flexibility and the fact that the most complex parts of the code are writen in GLSL which doesn't support objects. Object Oriented features are welcome aslong as it can be proven to be a better decision over a functional approach.
+Designed with functional programming in mind due to its flexibility and the fact that the most complex parts of the code are writen in GLSL which doesn't support complex objects. Object Oriented features are used though because they can greatly enhance the code quality and performance in certain use cases.
 
 #### Details:
 - Seperation of concerns. If you have a struct or class, it should only store data. To add functionality you must create a function that takes this struct or class as input.
-- Mutable parameters are allowed for performance reasons. However avoid them if it is not necessary.
+- Mutable parameters are allowed for performance reasons.
+- Structs should never have methods inside of them. No constructors, instead use factory functions.
 
 ### Reporting Issues
 
@@ -47,18 +48,40 @@ To maintain consistency in the codebase, please adhere to the following coding s
 
 - Use meaningful variable and function names, both in camelCase.
 - Use snake_case for any sort of callbacks.
-- Write clear and concise comments.
+- Write clear and concise inline comments and save large comments for the .h files.
+- Tabs = 4 spaces
 - Use: `// Text here.` for inline comments.
 - Use:
 ```cpp
 /**
-  * This is a comment for describing a function or struct.
+  * This is a comment for describing a function or struct. Much larger, these are the ones in the .h files.
   *
   * @param nameOfParameter is what I take in.
   * @return nameOfOutput is what I return.
   */
 ```
-  add comments above functions or structs to allow for code editors to supply function descriptions and information.
+  to add comments above functions or structs to allow for code editors to supply function descriptions and information.
+```cpp
+void thisIsAFunctionDefinition(int oneSpaceAfterThisParenthesis->) {
+    int codeStartsRightAway; // Unrelated blocks are followed by one blank line.
+
+    float Foo; // These 3 are related
+    oneSpaceAfterTheLastThing(std::string weDoSomethingSimilarSoWereTogether, Foo);
+    toEnsureItIsClearWhichThingsAreWhat(std::string weDoSomethingSimilarSoWereTogether, Foo); // I needed a comment, but they're still closely related, thus the comment goes to the right to ensure they're together.
+
+    // This does something else in the function.
+    if(usingIfStatements) {
+        similarFormattingAsFunction
+        doAThing(); // All a related block of code
+        return conditionA;
+    } 
+
+    for(forLoopsDoTheSame) {
+        a += index;
+    }
+    return conditionB;
+}
+```
 
 ### Code Review Process
 
@@ -67,6 +90,15 @@ All pull requests will be reviewed by a project maintainer. During the review pr
 ### Adding of Data Structures
 
 If you add any data structure to the project that are significant enough that they require more explanation, then please include an explanation in the [data_structures](/docs/data_structures) folder.
+
+### Modules
+
+Please see:         
+- [utils.md](../include/utils/utils.md)
+- [core.md](../include/core/core.md)
+- [graphics.md](../include/graphics/graphics.md)
+
+To assess where your changes belong. Also please add any new modules to their respective .md file for documentation purpouses.
 
 ### Citations
 
