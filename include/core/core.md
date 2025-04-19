@@ -16,3 +16,7 @@ projv::core::initializeWindow();
 
 ### Core modules:
 - ecs -> Contains the core functionalities for a ProjectV application, such as creating and managing an application, creating entities, managing components and systems.
+
+### More
+
+For more information on this project, visit our [README.md](/docs/README.md)

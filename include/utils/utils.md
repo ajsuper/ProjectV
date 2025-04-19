@@ -22,3 +22,7 @@ projv::utils::convertVoxelPositionToWorldPosition();
 - voxel_io -> Handles reading/writing of voxel data to and from disk.
 - voxel_management -> Handles the voxel data, responsible for creating and converting voxel data structures.
 - voxel_math -> Responsible for all of the voxel related math functionalities.
+
+### More
+
+For more information on this project, visit our [README.md](/docs/README.md)

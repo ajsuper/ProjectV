@@ -25,3 +25,7 @@ projv::graphics::passSceneToOpenGL();
 - uniforms -> Passing variables from the CPU to the GPU.
 - user_input -> Handling the inputs from the user.
 - window -> Handles creating our window, render instance, and callbacks.
+
+### More
+
+For more information on this project, visit our [README.md](/docs/README.md)
