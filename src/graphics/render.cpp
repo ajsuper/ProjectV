@@ -32,8 +32,7 @@ namespace projv::graphics {
         // Bind the quad VAO
         glBindVertexArray(renderInstance.VAO);
 
-        for (int i = 0; i < inputBuffer1.textures.size(); i++)
-        {
+        for (size_t i = 0; i < inputBuffer1.textures.size(); i++) {
             glActiveTexture(GL_TEXTURE0 + i);
             glBindTexture(GL_TEXTURE_2D, inputBuffer1.textures[i].textureID);
             std::string fullTextureName = "inputBuffer1_" + inputBuffer1.textures[i].name;
@@ -61,16 +60,14 @@ namespace projv::graphics {
         // Bind the quad VAO
         glBindVertexArray(renderInstance. VAO);
 
-        for (int i = 0; i < inputBuffer1.textures.size(); i++)
-        {
+        for (size_t i = 0; i < inputBuffer1.textures.size(); i++) {
             glActiveTexture(GL_TEXTURE0 + i);
             glBindTexture(GL_TEXTURE_2D, inputBuffer1.textures[i].textureID);
             std::string fullTextureName = "inputBuffer1_" + inputBuffer1.textures[i].name;
             glUniform1i(glGetUniformLocation(shaderProgram, fullTextureName.c_str()), i);
         }
 
-        for (int i = 0; i < inputBuffer2.textures.size(); i++)
-        {
+        for (size_t i = 0; i < inputBuffer2.textures.size(); i++) {
             glActiveTexture(GL_TEXTURE0 + i + inputBuffer1.textures.size());
             glBindTexture(GL_TEXTURE_2D, inputBuffer2.textures[i].textureID);
             std::string fullTextureName = "inputBuffer2_" + inputBuffer2.textures[i].name;
@@ -88,37 +85,27 @@ namespace projv::graphics {
 
     void renderMultipassFragmentShaderToTargetBuffer(RenderInstance renderInstance, int numberOfPasses, GLuint multiPassShaderProgram, FrameBuffer frameBuffer1, FrameBuffer frameBuffer2, FrameBuffer targetBuffer) {
         // Ensure the frame buffers have the same texture attatchments.
-        if (frameBuffer1.textures.size() != frameBuffer2.textures.size())
-        {
+        if (frameBuffer1.textures.size() != frameBuffer2.textures.size()) {
             std::cerr << "[ERROR | renderMultipassFragmentShaderToTargetBuffer] Mismatch in number of texture attatchments between inputBuffer1 and inputBuffer2" << std::endl;
         }
-        for (int i = 0; i < frameBuffer1.textures.size(); i++)
-        {
-            if (frameBuffer1.textures[i].name != frameBuffer2.textures[i].name)
-            {
+        for (size_t i = 0; i < frameBuffer1.textures.size(); i++) {
+            if (frameBuffer1.textures[i].name != frameBuffer2.textures[i].name) {
                 std::cerr << "[ERROR | renderMultipassFragmentShaderToTargetBuffer] Mismatch between textures. frameBuffer1 contains " << frameBuffer1.textures[i].name << " while frameBuffer2 contains" << frameBuffer2.textures[i].name << std::endl;
             }
         }
 
         // Multi-Pass denoiser.
-        for (int pass = 0; pass < numberOfPasses; ++pass)
-        {
-
+        for (int pass = 0; pass < numberOfPasses; ++pass) {
             // Decide which framebuffer to bind
-            if (pass < numberOfPasses - 1)
-            {
+            if (pass < numberOfPasses - 1) {
                 // Alternate between FBO and FBO2 for intermediate passes
-                if (pass % 2 == 0)
-                {
+                if (pass % 2 == 0) {
                     glBindFramebuffer(GL_FRAMEBUFFER, frameBuffer2.buffer);
                 }
-                else
-                {
+                else {
                     glBindFramebuffer(GL_FRAMEBUFFER, frameBuffer1.buffer);
                 }
-            }
-            else
-            {
+            } else {
                 // For the final pass, render to the default framebuffer
                 glBindFramebuffer(GL_FRAMEBUFFER, targetBuffer.buffer);
             }
@@ -138,8 +125,7 @@ namespace projv::graphics {
             // Bind textures
             FrameBuffer activeFrameBuffer = (pass % 2 == 0) ? frameBuffer1 : frameBuffer2;
 
-            for (int i = 0; i < activeFrameBuffer.textures.size(); i++)
-            {
+            for (size_t i = 0; i < activeFrameBuffer.textures.size(); i++) {
                 glActiveTexture(GL_TEXTURE0 + i);
                 glBindTexture(GL_TEXTURE_2D, activeFrameBuffer.textures[i].textureID);
                 std::string fullTextureName = "inputBuffer1_" + activeFrameBuffer.textures[i].name;

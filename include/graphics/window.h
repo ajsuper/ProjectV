@@ -37,7 +37,7 @@ namespace projv::graphics {
      * @param renderInstance The renderInstance that we want to set the callback for.
      * @param error_callback A function pointer that stores the user defined function to handle error's.
      */
-    void setErrorCallback(RenderInstance& renderInstance, void (*error_callback)(int error_code, const char* description)); // Graphics
+    void setErrorCallback(void (*error_callback)(int error_code, const char* description)); // Graphics
 
     /**
      * Sets the frame buffer size callback(what happens on window resize) that OpenGL will use.

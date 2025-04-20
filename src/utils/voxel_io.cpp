@@ -116,7 +116,7 @@ namespace projv::utils {
         std::filesystem::remove(sceneFileDirectory + "/headers.json");
 
         // Writes all of the chunks
-        for(int i = 0; i < scene.chunks.size(); i++){
+        for(size_t i = 0; i < scene.chunks.size(); i++){
             writeChunkToDisk(sceneFileDirectory, scene.chunks[i]);
         }
 
@@ -166,7 +166,7 @@ namespace projv::utils {
 
         // Iterates over all headers and finds the matching one, if there is none it flags that.
         bool headerFound = false;
-        int headerIndex = 0;
+        size_t headerIndex = 0;
         for(; headerIndex < chunkHeaders.size(); headerIndex++){ 
             if(chunkHeaders[headerIndex].chunkID == chunk.header.chunkID){
                 chunkHeaders[headerIndex] = chunk.header;
@@ -195,7 +195,7 @@ namespace projv::utils {
         std::vector<CPUChunkHeader> chunkHeaders = readHeadersJSON(sceneFileDirectory + "/headers.json");
 
         // Loops over all of the chunk headers and loads the corresponding octree and voxelTypeData.
-        for(int i = 0; i < chunkHeaders.size(); i++){ 
+        for(size_t i = 0; i < chunkHeaders.size(); i++){ 
             RuntimeChunkData chunk = loadChunkFromDisk(sceneFileDirectory, chunkHeaders[i]);
             scene.chunks.push_back(chunk);
         }

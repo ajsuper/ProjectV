@@ -49,7 +49,7 @@ namespace projv::utils {
         // Makes the previous leaf grandparents into leaf parents.
         parentsOfTheLeavesStartIndex = currentNodeIndex;
         chunkToBeChanged.geometryData.erase(chunkToBeChanged.geometryData.begin() + parentsOfTheLeavesStartIndex, chunkToBeChanged.geometryData.end()); // Deletes the parents of the leaves
-        for(int i = parentsOfTheParentsOfTheLeavesStartIndex; i < chunkToBeChanged.geometryData.size(); i++){ // Loops over the parents of the parents of the leaves
+        for(size_t i = parentsOfTheParentsOfTheLeavesStartIndex; i < chunkToBeChanged.geometryData.size(); i++){ // Loops over the parents of the parents of the leaves
             uint32_t currentNodeData = chunkToBeChanged.geometryData[i];
             currentNodeData = currentNodeData & 0b111111111; // Clears the child pointer
             currentNodeData = currentNodeData | 0b1; // Sets the leaf flag to 1.
@@ -60,7 +60,7 @@ namespace projv::utils {
         uint32_t lastZOrder = 0;
         std::vector<uint32_t> newVoxelTypeData;
         int resolutionScale = pow(2, targetLOD - chunkToBeChanged.LOD);
-        for(int i = 0; i < chunkToBeChanged.voxelTypeData.size(); i += 3){
+        for(size_t i = 0; i < chunkToBeChanged.voxelTypeData.size(); i += 3){
             chunkToBeChanged.voxelTypeData[i] /= (resolutionScale*resolutionScale*resolutionScale);
 
             uint32_t currentVoxelTypeDataZOrder = chunkToBeChanged.voxelTypeData[i];

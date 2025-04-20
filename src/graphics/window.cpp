@@ -88,11 +88,11 @@ namespace projv::graphics {
         return renderInstance;
     }
 
-    void setErrorCallback(RenderInstance& renderInstance, void (*error_callback)(int error_code, const char* description)) {
+    void setErrorCallback(void (*error_callback)(int error_code, const char* description)) {
         glfwSetErrorCallback(error_callback);
     }
 
     void setFrameBufferSizeCallback(RenderInstance& renderInstance, void (*framebuffer_callback)(GLFWwindow* window, int width, int height)) {
-        void framebuffer_size_callback(GLFWwindow *window, int width, int height);
+        glfwSetFramebufferSizeCallback(renderInstance.window, framebuffer_callback);
     }
 }

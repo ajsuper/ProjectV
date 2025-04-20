@@ -15,7 +15,7 @@ namespace projv::utils {
         uint16_t lefMaskMask = 0b000000001;
         int parentCount = 0;
         int childCounter = 0;
-        for(int address = 0; address < octree.size(); address++){
+        for(size_t address = 0; address < octree.size(); address++){
             uint32_t* current = &octree[address];
             uint32_t childPointer;
             uint8_t validMask = (*current & vldMaskMask) >> 1;
@@ -45,7 +45,7 @@ namespace projv::utils {
         std::unordered_map<int, int> indexMap; // Maps newIndex to index in newLevel
     
         for (const auto& node : oldLevel) {
-            int newIndex = node.ZOrderIndex / 8;
+            uint32_t newIndex = node.ZOrderIndex / 8;
             uint32_t relativeZOrder = node.ZOrderIndex % 8;
             uint32_t bitToSet = (1 << (8 - relativeZOrder));
     
@@ -68,10 +68,9 @@ namespace projv::utils {
 
     std::vector<nodeStructure> convertVoxelsToGeometry(VoxelGrid& voxels) {
         std::vector<nodeStructure> nodes;
-        for(int i = 0; i < voxels.voxels.size(); i++) {
+        for(size_t i = 0; i < voxels.voxels.size(); i++) {
             nodeStructure node;
             node.ZOrderIndex = voxels.voxels[i].ZOrderPosition;
-            auto position = reverseZOrderIndex(node.ZOrderIndex, 15);
             nodes.emplace_back(node);
         }
         return nodes;
@@ -88,14 +87,14 @@ namespace projv::utils {
         std::reverse(levelInProgress.begin(), levelInProgress.end());
         levelInProgress = agregateLevel(levelInProgress, true);
 
-        for(int i = 0; i < levelInProgress.size(); i++){ // Puts it on the octree in reverse order since were starting at the lowest level.
+        for(size_t i = 0; i < levelInProgress.size(); i++){ // Puts it on the octree in reverse order since were starting at the lowest level.
             octree.push_back(levelInProgress[i]); // Puts our data on the octree
         }
 
         for(int i = 0; i < levelsOfDepth - 1; i++){ // Loops over all the levels of depth
             levelInProgress = agregateLevel(levelInProgress); // Agregates the previous level. GOOD
     
-            for(int j = 0; j < levelInProgress.size(); j++){
+            for(size_t j = 0; j < levelInProgress.size(); j++){
                 levelInProgress[j].standardNode &= 0b111111110; // Removes the leaf flag from the node.
                 octree.push_back(levelInProgress[j]);
             }
@@ -115,7 +114,7 @@ namespace projv::utils {
 
     std::vector<uint32_t> createVoxelTypeData(VoxelGrid& voxels) {
         std::vector<uint32_t> voxelTypeData;
-        for(int i = 0; i < voxels.voxels.size(); i++){
+        for(size_t i = 0; i < voxels.voxels.size(); i++){
             Voxel voxel = voxels.voxels[i];
             //std::cout << i << "ZOrderIndex" << std::endl;
             voxelTypeData.emplace_back(voxel.ZOrderPosition);
@@ -170,7 +169,7 @@ namespace projv::utils {
     }
 
     void addVoxelBatchToVoxelGrid(VoxelGrid& voxels, VoxelBatch& voxelBatch) {
-        for(int i = 0; i < voxelBatch.size(); i++) {
+        for(size_t i = 0; i < voxelBatch.size(); i++) {
             voxels.voxels.emplace_back(voxelBatch[i]);
         }
 

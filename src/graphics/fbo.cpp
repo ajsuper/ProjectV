@@ -117,7 +117,12 @@ namespace projv::graphics {
         if (it != renderInstance.frameBufferObjects.end()) {
             return it->second;
         } else {
-            std::cerr << "Frame buffer doesn't exist " << name << std::endl;
+            std::cerr << "Frame buffer doesn't exist: " << name << ". Returning a default framebuffer." << std::endl;
+            FrameBuffer fallback = createFrameBufferObjectAdvanced(1, 1); // Return a default 1x1 framebuffer
+            fallback.buffer = -1;
+            fallback.height = -1;
+            fallback.width = -1;
+            return fallback;
         }
     }
 }
