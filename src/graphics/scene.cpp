@@ -25,7 +25,9 @@ namespace projv::graphics {
                 continue; // Skip empty chunks
             }
             GPUChunkHeader shaderChunkHeader;
-            shaderChunkHeader.position = chunk.header.position;
+            shaderChunkHeader.positionX = chunk.header.position.x;
+            shaderChunkHeader.positionY = chunk.header.position.y;
+            shaderChunkHeader.positionZ = chunk.header.position.z;
             shaderChunkHeader.scale = chunk.header.scale;
             shaderChunkHeader.resolution = chunk.header.resolution / pow(2, chunk.LOD);
             shaderChunkHeader.geometryStartIndex = serializedGeometry.size();
@@ -92,7 +94,7 @@ namespace projv::graphics {
         
         // Update each SSBO with the new data using persistent mapping.
         updateBuffer(chunkHeaderSSBO, chunkHeaderMappedPtr, chunkHeaderCapacity,
-                     chunkHeaderSize, 3, chunkHeaders.data());
+                    chunkHeaderSize, 3, chunkHeaders.data());
         updateBuffer(geometrySSBO, geometryMappedPtr, geometryCapacity,
                      geometrySize, 4, serializedGeometry.data());
         updateBuffer(voxelTypeDataSSBO, voxelTypeDataMappedPtr, voxelTypeDataCapacity,

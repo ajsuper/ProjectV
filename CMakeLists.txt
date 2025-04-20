@@ -19,6 +19,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${LIBRARY_OUTPUT_PATH})
 
 # Core
 add_library(projectV-ecs STATIC ${CORE_SRC_DIR}/ecs.cpp)
+add_library(projectV-math STATIC ${CORE_SRC_DIR}/math.cpp)
 
 # Graphics
 add_library(projectV-fbo STATIC ${GRAPHICS_SRC_DIR}/fbo.cpp)

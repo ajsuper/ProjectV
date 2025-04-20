@@ -12,6 +12,7 @@
 
 #include "data_structures/voxel.h"
 #include "data_structures/nodeStructure.h"
+#include "core/math.h"
 #include "voxel_math.h"
 
 namespace projv::utils {
@@ -46,7 +47,7 @@ namespace projv::utils {
      * @param position The position at which the voxel resides in the VoxelGrid
      * @param color The color of the voxel in the VoxelGrid
      */
-    void addVoxelToVoxelGrid(VoxelGrid& voxels, std::array<int, 3> position, Color color);
+    void addVoxelToVoxelGrid(VoxelGrid& voxels, core::ivec3 position, Color color);
 
     /**
      * Adds a VoxelBatch to a VoxelGrid. Faster than addVoxelToVoxels for large amounts of voxels, but slower for small amounts of voxels.

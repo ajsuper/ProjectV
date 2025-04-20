@@ -142,14 +142,9 @@ namespace projv::utils {
         return voxelTypeData;
     }
 
-    void addVoxelToVoxelGrid(VoxelGrid& voxels, std::array<int, 3> position, Color color) {
+    void addVoxelToVoxelGrid(VoxelGrid& voxels, core::ivec3 position, Color color) {
         Voxel voxel;
-        voxel.ZOrderPosition = createZOrderIndex(
-            std::clamp(position[0], 1, 511),
-            std::clamp(position[1], 1, 511),
-            std::clamp(position[2], 1, 511),
-            15
-        );
+        voxel.ZOrderPosition = createZOrderIndex(position, 15);
         voxel.color = color;
     
         int beginIndex = 0;
@@ -175,7 +170,7 @@ namespace projv::utils {
     }
 
     void addVoxelBatchToVoxelGrid(VoxelGrid& voxels, VoxelBatch& voxelBatch) {
-        for(int i = 0; i < voxelBatch.size(); i++){
+        for(int i = 0; i < voxelBatch.size(); i++) {
             voxels.voxels.emplace_back(voxelBatch[i]);
         }
 

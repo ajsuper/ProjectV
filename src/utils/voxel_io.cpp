@@ -49,9 +49,9 @@ namespace projv::utils {
         for (const auto& header : chunkHeaders) {
             jsonOutput["chunkHeaders"].push_back({
                 {"ID", header.chunkID},
-                {"position x", convertHeaderPositionToVec3(header.position)[0]},
-                {"position y", convertHeaderPositionToVec3(header.position)[1]},
-                {"position z", convertHeaderPositionToVec3(header.position)[2]},
+                {"position x", header.position.x},
+                {"position y", header.position.y},
+                {"position z", header.position.z},
                 {"scale", header.scale},
                 {"resolution", header.resolution},
             });
@@ -89,10 +89,10 @@ namespace projv::utils {
         for (const auto& jHeader : jsonInput["chunkHeaders"]) {
             CPUChunkHeader header;
             header.chunkID = jHeader.value("ID", 0);
-            uint x = jHeader.value("position x", 0);
-            uint y = jHeader.value("position y", 0);
-            uint z = jHeader.value("position z", 0);
-            header.position = convertVec3ToHeaderPosition(x, y, z);
+            float x = jHeader.value("position x", 0);
+            float y = jHeader.value("position y", 0);
+            float z = jHeader.value("position z", 0);
+            header.position = core::vec3(x, y, z);
             header.scale = jHeader.value("scale", 0);
             header.resolution = jHeader.value("resolution", 0);            
             headers.push_back(header);

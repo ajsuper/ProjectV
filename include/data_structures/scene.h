@@ -4,16 +4,20 @@
 #include <vector>
 #include <stdint.h>
 
+#include "core/math.h"
+
 namespace projv{
     struct CPUChunkHeader { // Designed to be user interfacable on CPU. Stored in disk. Only the necessary information for loading the chunk.
         uint32_t chunkID;
-        uint32_t position;
+        core::vec3 position;
         uint32_t scale;
         uint32_t resolution;
     };
 
     struct GPUChunkHeader { // Not designed to be user interfacable on CPU. Only exists during runtime, mainly on GPU. Only the necessary information for rendering.
-        uint32_t position;
+        float positionX;
+        float positionY;
+        float positionZ;
         uint32_t scale;
         uint32_t resolution;
         uint32_t geometryStartIndex;

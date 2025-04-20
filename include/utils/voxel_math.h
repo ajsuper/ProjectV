@@ -3,21 +3,22 @@
 
 #include <array>
 #include <stdint.h>
+#include "core/math.h"
 
 namespace projv::utils {
     /**
      * Converts a 3D vector to a single uint32_t storing that position.
-     * @param x, y, z The 3d vector to convert to a single uint32_t.
+     * @param vec3 The 3d vector to convert to a single uint32_t.
      * @return A single uint32_t storing the 3D vector.
      */
-    uint32_t convertVec3ToHeaderPosition(uint32_t x, uint32_t y, uint32_t z);
+    uint32_t convertVec3ToHeaderPosition(core::ivec3 vec3);
 
     /**
      * Converts a single uint32_t storing a 3D vector to an std::array<int, 3>.
      * @param headerPosition A single uint32_t storing a 3D vector.
-     * @return An std::array<int, 3> containing the 3D vector.
+     * @return A core::ivec3 containing the 3D vector.
      */
-    std::array<int, 3> convertHeaderPositionToVec3(uint32_t headerPosition);
+    core::ivec3 convertHeaderPositionToVec3(uint32_t headerPosition);
 
     /**
      * Creates the Z-Order Index of a point in 3D space with a certain bit depth.
@@ -25,7 +26,7 @@ namespace projv::utils {
      * @param bitDepth How many bits the index takes up.
      * @return Retruns the Z-Order
      */
-    uint64_t createZOrderIndex(const int& x, const int& y, const int& z, const int& bitDepth);
+    uint64_t createZOrderIndex(core::ivec3 vec3, const int& bitDepth);
 
     /**
      * Creates a 3D point from a Z-Order index and the number of bits the index takes up.
@@ -33,7 +34,7 @@ namespace projv::utils {
      * @param bitDepth The number of bits the index takes up.
      * @return Returns an std::array<int, 3> containg the 3D point given from the Z-Order index.
      */
-    std::array<int, 3> reverseZOrderIndex(uint64_t z_order, int bitDepth);
+    core::ivec3 reverseZOrderIndex(uint64_t z_order, int bitDepth);
 }
 
 #endif
