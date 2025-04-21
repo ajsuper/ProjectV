@@ -1,9 +1,9 @@
 # Welcome!
-Hello!! Thank you for visiting our contributions file! If you choose to contribute, then please read the rest of this file to gather the necessary information to help out the project! Please read over our [CODE_OF_CONDUCT.md](/docs/CODE_OF_CONDUCT.md) before contributing, and if you haven't already, visit our [README.md](/docs/README.md) to get an overview of the project! Also be sure to visit the copy of the [MIT License](/docs/LICENSE.md).
+Hello!! Thank you for visiting our contributions file! If you choose to contribute, then please read the rest of this file to gather the necessary information to help out the project! Please read over our [CODE_OF_CONDUCT.md](/CODE_OF_CONDUCT.md) before contributing, and if you haven't already, visit our [README.md](/README.md) to get an overview of the project! Also be sure to visit the copy of the [MIT License](/LICENSE.md).
 
 ### Changes to the API:
 
-If you make any changes to the API that might interfere with existing programs, please ensure that these changes are reflected in the examples section [EXAMPLES](examples)
+If you make any changes to the API that might interfere with existing programs, please ensure that these changes are reflected in the examples section [EXAMPLES](/docs/examples)
 
 ### Philosophy
 
@@ -89,20 +89,20 @@ All pull requests will be reviewed by a project maintainer. During the review pr
 
 ### Adding of Data Structures
 
-If you add any data structure to the project that are significant enough that they require more explanation, then please include an explanation in the [data_structures](/docs/data_structures) folder.
+If you add any data structure to the project that are significant enough that they require more explanation, then please include an explanation in the [data_structures](/data_structures) folder.
 
 ### Modules
 
 Please see:         
-- [utils.md](../include/utils/utils.md)
-- [core.md](../include/core/core.md)
-- [graphics.md](../include/graphics/graphics.md)
+- [utils.md](/include/utils/utils.md)
+- [core.md](/include/core/core.md)
+- [graphics.md](/include/graphics/graphics.md)
 
 To assess where your changes belong. Also please add any new modules to their respective .md file for documentation purpouses.
 
 ### Citations
 
-If your changes include anything that should be cited, please include it in the [SOURCES.md](/docs/SOURCES.md). Use this format
+If your changes include anything that should be cited, please include it in the [SOURCES.md](/SOURCES.md). Use this format
 ```
 ### What It's Used For
   - [Name of source](Link to source) - Accesed on day/month/year
@@ -112,4 +112,4 @@ Thank you for contributing to ProjectV! Your help is greatly appreciated.
 
 ### More
 
-For more information on this project, visit our [README.md](/docs/README.md)
+For more information on this project, visit our [README.md](/README.md)

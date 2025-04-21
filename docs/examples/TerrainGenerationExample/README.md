@@ -38,5 +38,7 @@ make
 cd ..
 ./build/TerrainGenerator
 ```
+### More
 
+For more information on this project, visit our main [README.md](/README.md)
 

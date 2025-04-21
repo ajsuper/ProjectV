@@ -25,4 +25,4 @@ projv::utils::convertVoxelPositionToWorldPosition();
 
 ### More
 
-For more information on this project, visit our [README.md](/docs/README.md)
+For more information on this project, visit our [README.md](/README.md)
