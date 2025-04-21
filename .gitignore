@@ -7,11 +7,10 @@
 obj/
 lib/
 build/
+SceneTest/
 
 # Ignore example build outputs
 docs/examples/*/main.o
-docs/examples/*/octree.bin
-docs/examples/*/voxelTypeData.bin
-docs/examples/*/main.o
+
 
 
