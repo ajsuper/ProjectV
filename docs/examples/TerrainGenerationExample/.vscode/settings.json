@@ -77,6 +77,11 @@
         "cinttypes": "cpp",
         "__node_handle": "cpp",
         "__tree": "cpp",
-        "print": "cpp"
-    }
+        "print": "cpp",
+        "any": "cpp",
+        "ranges": "cpp",
+        "valarray": "cpp",
+        "semaphore": "cpp"
+    },
+    "C_Cpp.errorSquiggles": "enabled",
 }
