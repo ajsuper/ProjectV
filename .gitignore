@@ -12,5 +12,8 @@ SceneTest/
 # Ignore example build outputs
 docs/examples/*/main.o
 
+# Ignore VS Code config files
+.vscode/
+
 
 
