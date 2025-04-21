@@ -42,11 +42,11 @@ struct CombinedNode{
 };
 
 struct chunkHeader {
-    uint ID;
-    uint position;
+    float positionX;
+    float positionY;
+    float positionZ;
     uint scale;
     uint resolution;
-    uint LOD;
     uint geometryStartIndex;
     uint geometryEndIndex;
     uint voxelTypeDataStartIndex;
@@ -154,13 +154,6 @@ uint calculateZOrderIndex(uint x, uint y, uint z, uint octreeWholeResolution){
     return ZOrder;
 }
 
-
-vec3 convertHeaderPositionToVec3(uint position){
-    float x = float(position & 0x3FF);
-    float y = float((position >> 10) & 0x3FF);
-    float z = float((position >> 20) & 0x3FF);
-    return vec3(x, y, z);
-}
 // Near Plane: 0.1
 // Far Plane: 100.0
 
@@ -617,7 +610,7 @@ BoxAABB castRayThroughOctree(Ray ray, uint headerIndex) {
     uint voxelTypeDataEndIndex = header.voxelTypeDataEndIndex;
 
     BoxAABB octreeBoundingBox;
-    octreeBoundingBox.position = convertHeaderPositionToVec3(header.position);
+    octreeBoundingBox.position = vec3(header.positionX, header.positionY, header.positionZ);
     octreeBoundingBox.size = header.scale;
 
 
@@ -641,7 +634,7 @@ sceneIntersectData castRayThroughScene(Ray ray){
     uint closestHeaderIndex = -1;
     for(int i = 0; i < headers.length(); i++){
         BoxAABB octreeBoundingBox;
-        octreeBoundingBox.position = convertHeaderPositionToVec3(headers[i].position);
+        octreeBoundingBox.position = vec3(headers[i].positionX, headers[i].positionY, headers[i].positionZ);
         octreeBoundingBox.size = headers[i].scale;
         float tBB = boxRayDistance(octreeBoundingBox, ray);
         if(tBB < 0 || tBB >= closestDistance) continue;
@@ -712,7 +705,7 @@ ivec3 voxelGridPosition(BoxAABB voxelBoundingBox, BoxAABB voxelGridBoundingBox, 
 uint findVoxelIndex(BoxAABB voxelBoundingBox, uint headerIndex){
     uint voxelGridResolution = headers[headerIndex].resolution;
     BoxAABB voxelGridBoundingBox;
-    voxelGridBoundingBox.position = convertHeaderPositionToVec3(headers[headerIndex].position);
+    voxelGridBoundingBox.position = vec3(headers[headerIndex].positionX, headers[headerIndex].positionY, headers[headerIndex].positionZ);
     voxelGridBoundingBox.size = headers[headerIndex].scale;
     ivec3 voxelGridPos = voxelGridPosition(voxelBoundingBox, voxelGridBoundingBox, voxelGridResolution);
     uint voxelTypeDataIndex = findVoxelTypeDataIndex(voxelGridPos.x, voxelGridPos.y, voxelGridPos.z, voxelGridResolution, headers[headerIndex].voxelTypeDataStartIndex, headers[headerIndex].voxelTypeDataEndIndex);
@@ -746,8 +739,70 @@ Voxel fetchVoxelData(BoxAABB voxelBoundingBox, uint headerIndex){
 }
 
 //Setup the ray and cast it into our scene and return the results from the cast as colors.
+vec4 castRayWithOffset(vec2 offset){
+    Ray ray;
+    ray.direction = rayStartDirection(TexCoords + offset, resolution, cameraPos, normalize(vec3(cameraDir.x, 0, cameraDir.z)), 65);
+    ray.origin = cameraPos;
+
+    //Define the root box for the octree
+    BoxAABB octreeBoundingBox;
+    octreeBoundingBox.position = vec3(0.0, 0.0, 0.0);
+    octreeBoundingBox.size = 40;
+    vec4 color = vec4(1);
+
+    //vec3 sunDirection = normalize(vec3((cos(float(time*0.01f))), abs(sin(float(time*0.01f))), 0.2));
+    vec3 sunDirection = normalize(vec3(0.7, 0.99, -0.9));
+
+    sceneIntersectData intersectData = castRayThroughScene(ray);
+    vec3 firstIntersectData = boxRayIntersect(intersectData.foundBox, ray);
+
+    if(firstIntersectData.x < 0.0){
+        return vec4(0, 0.0, 1.0, 1.0);
+    }
+
+    vec3 normal = calculateAABBNormal(firstIntersectData.y, firstIntersectData.z);
+    ray.origin = ray.origin + ray.direction*(firstIntersectData.x);
+    ray.origin += normal*0.001f;
+    ray.direction = sunDirection;
+    sceneIntersectData sunIntersect;
+    if(dot(sunDirection, normal) > 0.0){
+        sunIntersect = castRayThroughScene(ray);
+    }
+    vec3 sunIntersectData = boxRayIntersect(sunIntersect.foundBox, ray);
+    Voxel hitVoxelData;
+    ivec3 voxelGridPos;
+
+    hitVoxelData = fetchVoxelData(intersectData.foundBox, intersectData.headerIndex);
+    color *= vec4(hitVoxelData.color, 0);
+    //color *= vec4(1, 0.8, 0.8, 0);
+    if(sunIntersectData.x < 0.0f && dot(sunDirection, normal) > 0.0){
+        return color * (dot(sunDirection, normal)/2+0.5);
+    } else {
+        return color * (dot(normal, vec3(0, 1, 0))/2+0.5)/2;
+    }
+    return color;
+}
+
 vec4 castRay(){
-    return vec4(1.0, 0.0, 0.0, 1.0);
+    vec4 color = vec4(0.0);
+
+    // Define the number of anti-aliasing points (must be a perfect square)
+    const int AA_POINTS = 1;
+    const int AA_DIM = int(sqrt(float(AA_POINTS)));
+
+    // Accumulate colors from each offset
+    for(int y = 0; y < AA_DIM; y++){
+        for(int x = 0; x < AA_DIM; x++){
+            vec2 offset = vec2(
+                ((float(x) / float(AA_DIM) - 0.5) / float(AA_DIM)) * 2.0,
+                ((float(y) / float(AA_DIM) - 0.5) / float(AA_DIM)) * 2.0
+            );
+            color += castRayWithOffset(offset / resolution);
+        }
+    }
+
+    // Average the accumulated colors
+    return color / float(AA_POINTS);
 }
 
 void main(){
