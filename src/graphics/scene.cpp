@@ -21,7 +21,7 @@ namespace projv::graphics {
         // Gather data and compute chunk header indices
         for (const auto &chunk : sceneToRender.chunks) {
             if(chunk.geometryData.empty() || chunk.voxelTypeData.empty()) {
-                std::cerr << "Chunk " << chunk.header.chunkID << " has empty geometry or voxel type data." << std::endl;
+                //std::cerr << "Chunk " << chunk.header.chunkID << " has empty geometry or voxel type data." << std::endl;
                 continue; // Skip empty chunks
             }
             GPUChunkHeader shaderChunkHeader;

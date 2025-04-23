@@ -13,6 +13,7 @@
 #include "data_structures/voxel.h"
 #include "data_structures/nodeStructure.h"
 #include "core/math.h"
+#include "data_structures/scene.h"
 #include "voxel_math.h"
 
 namespace projv::utils {
@@ -68,6 +69,10 @@ namespace projv::utils {
      * @param voxelBatch VoxelBatch to have the voxel added too.
      */
     void addVoxelToBatch(Voxel voxel, VoxelBatch& voxelBatch);
+
+    CPUChunkHeader createChunkHeader(core::vec3 position, float scale, int resolutionPowOf2);
+
+    RuntimeChunkData createChunk(CPUChunkHeader chunkHeader, std::vector<uint32_t>& chunkOctree, std::vector<uint32_t>& chunkVoxelTypeData);
 }
 
 #endif

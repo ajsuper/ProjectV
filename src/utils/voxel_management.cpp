@@ -187,4 +187,34 @@ namespace projv::utils {
         voxelBatch.emplace_back(voxel);
         return;
     }
+
+    CPUChunkHeader createChunkHeader(core::vec3 position, float scale, int resolutionPowOf2) {
+        if(resolutionPowOf2 > 512) {
+            std::cout << "[createChunkHeader] Warning: resolutionPowOf2 is higher than the recommended maximum of 512." << std::endl;
+        }
+        if(core::fract(log2(resolutionPowOf2)) != 0) {
+            std::cout << "[createChunkHeader] Warning: resolutionPowOf2 is not a power of 2. Rounding down nearest power of 2." << std::endl;
+        }
+        if(scale < 3) {
+            std::cout << "[createChunkHeader] Warning: scale is lower than 3 which may cause floating point imprecisions." << std::endl;
+        }
+
+        int accuratePowerOf2 = std::pow(2, std::ceil(std::log2(resolutionPowOf2)));
+
+        projv::CPUChunkHeader chunkHeader;
+        chunkHeader.position = position;
+        chunkHeader.scale = scale;
+        chunkHeader.resolution = accuratePowerOf2;
+
+        return chunkHeader;
+    }
+
+    RuntimeChunkData createChunk(CPUChunkHeader chunkHeader, std::vector<uint32_t>& chunkOctree, std::vector<uint32_t>& chunkVoxelTypeData) {
+        RuntimeChunkData chunk;
+        chunk.header = chunkHeader;
+        chunk.geometryData = chunkOctree;
+        chunk.voxelTypeData = chunkVoxelTypeData;
+        chunk.LOD = 0;
+        return chunk;
+    }
 }
