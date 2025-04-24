@@ -9,6 +9,8 @@
 #include <iostream>
 #include "data_structures/application.h"
 
+#include "core/log.h"
+
 namespace projv::core {
     World createWorld();
 

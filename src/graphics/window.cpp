@@ -1,9 +1,9 @@
 #include "graphics/window.h"
 
 namespace projv::graphics {
-    bool initializeGLFWandGLEWWindow(GLFWwindow*& window, int windowWidth, int windowHeight, const std::string& windowName){ //CORE
+    bool initializeGLFWandGLEWWindow(GLFWwindow*& window, int windowWidth, int windowHeight, const std::string& windowName) { // CORE
         if (!glfwInit()) {
-            std::cerr << "[CORE] Function: initializeGLFWandGLEWWindow, Failed to initialize GLFW!" << std::endl;
+            core::error("[CORE] Function: initializeGLFWandGLEWWindow, Failed to initialize GLFW!");
             return false;
         }
 
@@ -13,7 +13,7 @@ namespace projv::graphics {
 
         window = glfwCreateWindow(windowWidth, windowHeight, windowName.c_str(), NULL, NULL);
         if (!window) {
-            std::cerr << "[CORE] Function: initializeGLFWandGLEWWindow, Failed to create GLFW window!" << std::endl;
+            core::error("[CORE] Function: initializeGLFWandGLEWWindow, Failed to create GLFW window!");
             glfwTerminate();
             return false;
         }
@@ -21,14 +21,13 @@ namespace projv::graphics {
 
         glewExperimental = GL_TRUE;  // Enable modern OpenGL features
         if (glewInit() != GLEW_OK) {
-            std::cerr << "[CORE] Function: initializeGLFWandGLEWWindow, Failed to initialize GLEW!" << std::endl;
+            core::error("[CORE] Function: initializeGLFWandGLEWWindow, Failed to initialize GLEW!");
             return false;
-        } 
+        }
         return true;
     }
 
-    void createRenderQuad(RenderInstance& renderInstance)
-    {
+    void createRenderQuad(RenderInstance& renderInstance) {
         // Define vertices for a window filling quad
         float vertices[] = {
             // positions   // texCoords
@@ -61,10 +60,10 @@ namespace projv::graphics {
         return;
     }
 
-    RenderInstance initializeRenderInstance(int windowWidth, int windowHeight, const std::string& windowName){ //CORE
+    RenderInstance initializeRenderInstance(int windowWidth, int windowHeight, const std::string& windowName) { // CORE
         RenderInstance renderInstance;
         if (!glfwInit()) {
-            std::cerr << "[initializeRenderInstance] Failed to initialize GLFW!" << std::endl;
+            core::error("[initializeRenderInstance] Failed to initialize GLFW!");
         }
 
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -73,15 +72,15 @@ namespace projv::graphics {
 
         renderInstance.window = glfwCreateWindow(windowWidth, windowHeight, windowName.c_str(), NULL, NULL);
         if (!renderInstance.window) {
-            std::cerr << "[initializeRenderInstance] Failed to create GLFW window!" << std::endl;
+            core::error("[initializeRenderInstance] Failed to create GLFW window!");
             glfwTerminate();
         }
         glfwMakeContextCurrent(renderInstance.window);
 
         glewExperimental = GL_TRUE;  // Enable modern OpenGL features
         if (glewInit() != GLEW_OK) {
-            std::cerr << "[initializeRenderInstance] Failed to initialize GLEW!" << std::endl;
-        } 
+            core::error("[initializeRenderInstance] Failed to initialize GLEW!");
+        }
 
         createRenderQuad(renderInstance);
 

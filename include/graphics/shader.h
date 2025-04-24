@@ -9,6 +9,7 @@
 #include <iostream>
 
 #include "data_structures/renderInstance.h"
+#include "core/log.h"
 
 namespace projv::graphics {
     /**

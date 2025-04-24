@@ -8,6 +8,7 @@
 
 #include "data_structures/scene.h"
 #include "data_structures/renderInstance.h" // Include the header defining RenderInstance
+#include "core/log.h"
 
 namespace projv::graphics {
     /**

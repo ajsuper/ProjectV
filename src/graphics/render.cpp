@@ -8,9 +8,8 @@ namespace projv::graphics {
         glUseProgram(shaderProgram);
 
         GLenum error = glGetError();
-        if (error != GL_NO_ERROR)
-        {
-            std::cerr << "OpenGL error after shader program usage: " << error << std::endl;
+        if (error != GL_NO_ERROR) {
+            core::error("OpenGL error after shader program usage: {}", error);
         }
 
         glBindVertexArray(renderInstance.VAO);
@@ -58,7 +57,7 @@ namespace projv::graphics {
         glUseProgram(shaderProgram);
 
         // Bind the quad VAO
-        glBindVertexArray(renderInstance. VAO);
+        glBindVertexArray(renderInstance.VAO);
 
         for (size_t i = 0; i < inputBuffer1.textures.size(); i++) {
             glActiveTexture(GL_TEXTURE0 + i);
@@ -84,13 +83,13 @@ namespace projv::graphics {
     }
 
     void renderMultipassFragmentShaderToTargetBuffer(RenderInstance renderInstance, int numberOfPasses, GLuint multiPassShaderProgram, FrameBuffer frameBuffer1, FrameBuffer frameBuffer2, FrameBuffer targetBuffer) {
-        // Ensure the frame buffers have the same texture attatchments.
+        // Ensure the frame buffers have the same texture attachments.
         if (frameBuffer1.textures.size() != frameBuffer2.textures.size()) {
-            std::cerr << "[ERROR | renderMultipassFragmentShaderToTargetBuffer] Mismatch in number of texture attatchments between inputBuffer1 and inputBuffer2" << std::endl;
+            core::error("[renderMultipassFragmentShaderToTargetBuffer] Mismatch in number of texture attachments between inputBuffer1 and inputBuffer2");
         }
         for (size_t i = 0; i < frameBuffer1.textures.size(); i++) {
             if (frameBuffer1.textures[i].name != frameBuffer2.textures[i].name) {
-                std::cerr << "[ERROR | renderMultipassFragmentShaderToTargetBuffer] Mismatch between textures. frameBuffer1 contains " << frameBuffer1.textures[i].name << " while frameBuffer2 contains" << frameBuffer2.textures[i].name << std::endl;
+                core::error("[renderMultipassFragmentShaderToTargetBuffer] Mismatch between textures. frameBuffer1 contains {} while frameBuffer2 contains {}", frameBuffer1.textures[i].name, frameBuffer2.textures[i].name);
             }
         }
 

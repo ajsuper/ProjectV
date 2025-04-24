@@ -8,17 +8,17 @@ namespace projv::core {
         return world;
     }
 
-    // Creats an application with default startup, update, and render functions.
+    // Creates an application with default startup, update, and render functions.
     Application createApp() {
         Application app;
         app.Startup = []() {
-            std::cout << "Default Startup!" << std::endl;
+            core::info("Default Startup!");
         };
         app.Update = []() {
-            std::cout << "Default Update!" << std::endl;
+            core::info("Default Update!");
         };
         app.Render = []() {
-            std::cout << "Default Render!" << std::endl;
+            core::info("Default Render!");
         };
         app.world = createWorld();
         return app;

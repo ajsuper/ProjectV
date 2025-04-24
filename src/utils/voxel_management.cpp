@@ -15,6 +15,7 @@ namespace projv::utils {
         uint16_t lefMaskMask = 0b000000001;
         int parentCount = 0;
         int childCounter = 0;
+        bool childPointerTooLarge = false;
         for(size_t address = 0; address < octree.size(); address++){
             uint32_t* current = &octree[address];
             uint32_t childPointer;
@@ -33,9 +34,13 @@ namespace projv::utils {
                 childPointer = 0;
             }
             if(childPointer >= 0b11111111111111111111111){
-                std::cerr << "[addPointers] Child pointer too large! Likely too much data in octree or corrupt octree" << std::bitset<32>(childPointer) << std::endl;
+                childPointerTooLarge = true;
             }
             octree[address] = (*current & 0b111111111) | (childPointer << 9);
+        }
+
+        if(childPointerTooLarge) {
+            core::error("Function: addPointers. Child pointer too large! May cause corrupt octree. Decrease the amount of data in 1 octree");
         }
         return octree;
     }
@@ -78,7 +83,8 @@ namespace projv::utils {
     
     std::vector<uint32_t> createOctree(VoxelGrid& voxels, int voxelWholeResolution){
         std::chrono::high_resolution_clock::time_point startWhole = std::chrono::high_resolution_clock::now();
-        std::cout << "[createOctree] Octree generation started with size of " << voxelWholeResolution << std::endl;
+        //std::cout << "[createOctree] Octree generation started with size of " << voxelWholeResolution << std::endl;
+        core::info("Function: createOctree. Octree generation started with size of: " + std::to_string(voxelWholeResolution));
         int levelsOfDepth = int(log2(voxelWholeResolution));
         std::vector<nodeStructure> octree;
         std::vector<nodeStructure> levelInProgress;
@@ -108,7 +114,7 @@ namespace projv::utils {
         octreeSimplified = addPointers(octreeSimplified);
         auto end = std::chrono::high_resolution_clock::now();
         double elapsed = std::chrono::duration<double, std::milli>(end - startWhole).count();
-        std::cerr << "[createOctree] Octree finished in: " << elapsed << " ms\n" << std::endl;
+        core::info("Function: createOctree. Octree generation finished in: " + std::to_string(elapsed) + "ms");
         return octreeSimplified;
     }
 
@@ -190,13 +196,13 @@ namespace projv::utils {
 
     CPUChunkHeader createChunkHeader(core::vec3 position, float scale, int resolutionPowOf2) {
         if(resolutionPowOf2 > 512) {
-            std::cout << "[createChunkHeader] Warning: resolutionPowOf2 is higher than the recommended maximum of 512." << std::endl;
+            core::warn("Function: createChunkHeader. resolutionPowOf2 is higher than the recommended maximum of 512.");
         }
         if(core::fract(log2(resolutionPowOf2)) != 0) {
-            std::cout << "[createChunkHeader] Warning: resolutionPowOf2 is not a power of 2. Rounding down nearest power of 2." << std::endl;
+            core::warn("Function: createChunkHeader. resolutionPowOf2 isn't a power of 2! rounding the next highest power of 2.");
         }
         if(scale < 3) {
-            std::cout << "[createChunkHeader] Warning: scale is lower than 3 which may cause floating point imprecisions." << std::endl;
+            core::warn("Function: createChunkHeader. scale is lower than 3 which may cause floating point imprecisions.");
         }
 
         int accuratePowerOf2 = std::pow(2, std::ceil(std::log2(resolutionPowOf2)));

@@ -10,7 +10,7 @@ namespace projv::utils {
 
         std::ofstream outFile(fileDirectory, std::ios::binary);
         if (!outFile) {
-            std::cerr << "ERROR in 'writeUint32Vector': Failed to open " << fileDirectory << std::endl;
+            core::warn("Function: writeUint32Vector. Failed to open {}", fileDirectory);
             return;
         }
     
@@ -25,10 +25,11 @@ namespace projv::utils {
     }
 
     std::vector<uint32_t> readUint32Vector(std::string fileDirectory){
-        std::cout << "[readUint32Vector] Reading uint32_t vector from " << fileDirectory << std::endl;
+        core::info("Function: readUint32Vector. Reading uint32_t vector from {}", fileDirectory);
         std::ifstream inFile(fileDirectory, std::ios::binary);  
         if (!inFile) {
-            std::cerr << "Error in 'readUint32Vector': Failed to open" << std::endl;
+            core::error("Function: readUint32Vector. Failed to open {}", fileDirectory);
+            return {};
         }
         size_t size;
         inFile.read(reinterpret_cast<char*>(&size), sizeof(size));
@@ -42,7 +43,7 @@ namespace projv::utils {
     }
 
     void writeHeadersJSON(const std::vector<CPUChunkHeader>& chunkHeaders, const std::string& fileDirectory) {
-        std::cout << "[writeHeadersJSON] Writing headers to " << fileDirectory << std::endl;
+        core::info("Function: writeHeadersJSON. Writing headers to {}", fileDirectory);
         nlohmann::json jsonOutput;
         jsonOutput["chunkHeaders"] = nlohmann::json::array();
 
@@ -60,6 +61,7 @@ namespace projv::utils {
         std::ofstream outFile(fileDirectory);
         if (!outFile) {
             std::cerr << "ERROR in 'writeHeadersJSON': Failed to open " << fileDirectory << std::endl;
+            core::error("Function: writeHeadersJSON. Failed to open {}", fileDirectory);
             return;
         }
 
@@ -68,10 +70,10 @@ namespace projv::utils {
     }
 
     std::vector<CPUChunkHeader> readHeadersJSON(const std::string& fileDirectory) {
-        std::cout << "[readHeadersJSON] Reading headers from " << fileDirectory << std::endl;
+        core::info("Function: readHeadersJSON. Reading headers from {}", fileDirectory);
         std::ifstream inFile(fileDirectory);
         if (!inFile) {
-            std::cerr << "Error in 'readHeadersJSON': Failed to open " << fileDirectory << std::endl;
+            core::error("Function: readHeadersJSON. Failed to open {}", fileDirectory);
             return {};
         }
 
@@ -102,7 +104,7 @@ namespace projv::utils {
     }
 
     void writeSceneToDisk(std::string sceneFileDirectory, Scene& scene){
-        std::cout << "[writeSceneToDisk] Writing scene to file directory: " << sceneFileDirectory << std::endl;
+        core::info("Function: writeSceneToDisk. Writing scene to: {}", sceneFileDirectory);
 
         // Delete all files in the octree and voxelTypeData subdirectories
         std::filesystem::remove_all(sceneFileDirectory + "/");
@@ -120,12 +122,13 @@ namespace projv::utils {
             writeChunkToDisk(sceneFileDirectory, scene.chunks[i]);
         }
 
-        std::cout << "[writeSceneToDisk] Scene written to disk." << std::endl;
+        core::info("Function: writeSceneToDisk. Scene written to disk");
     }
 
     RuntimeChunkData loadChunkFromDisk(std::string sceneFileDirectory, CPUChunkHeader chunk) {
         uint32_t chunkID = chunk.chunkID;
         std::cout << "[loadChunkFromDisk] Loading chunk " << chunkID << " from disk...";
+        core::info("Function: loadChunkFromDisk. Loading chunk " + std::to_string(chunkID) + "from disk...");
         auto start = std::chrono::high_resolution_clock::now();
 
         // Find the header for the inputted chunkID.
@@ -140,6 +143,7 @@ namespace projv::utils {
             chunkData.header = *it;
         } else {
             std::cerr << "[loadChunkFromDisk] Chunk ID " << chunkID << " not found in headers." << std::endl;
+            core::error("Function: loadChunkFromDisk. ChunkID " + std::to_string(chunkID) + " not found in headers.");
             return chunkData; // Return empty chunkData
         }
 
@@ -151,7 +155,7 @@ namespace projv::utils {
 
         auto end = std::chrono::high_resolution_clock::now();
         double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
-        std::cout << "[loadChunkFromDisk] Chunk loaded in " << elapsed << " ms" << std::endl;
+        core::info("Function: loadChunkFromDisk. Loaded chunk " + std::to_string(chunkID) + "in " + std::to_string(elapsed) + "ms");
         return chunkData;
     }
 

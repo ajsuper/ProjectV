@@ -53,7 +53,7 @@ namespace projv::graphics {
                 break;
 
             default:
-                std::cerr << "Unsupported format: " << internalFormat << ". Supported formats are: GL_R8, GL_R16F, GL_R32F, GL_RGB8, GL_RGB16, GL_RGB16F, GL_RGB32F, GL_RGBA8, GL_RGBA16, GL_RGBA16F, GL_RGBA32F." << std::endl;
+                core::error("[addTextureToFrameBuffer] Unsupported format: {}. Supported formats are: GL_R8, GL_R16F, GL_R32F, GL_RGB8, GL_RGB16, GL_RGB16F, GL_RGB32F, GL_RGBA8, GL_RGBA16, GL_RGBA16F, GL_RGBA32F.", internalFormat);
                 return; // Exit the function on unsupported format
         }
 
@@ -74,17 +74,17 @@ namespace projv::graphics {
         // Get the number of textures in our frame buffer object
         int numberOfTextures = frameBuffer.textures.size();
 
-        // Create our color attatchments aray and bind our buffer.
+        // Create our color attachments array and bind our buffer.
         GLenum drawBuffers[numberOfTextures];
         glBindFramebuffer(GL_FRAMEBUFFER, frameBuffer.buffer);
 
         // Re-bind all of the textures.
         for (int i = 0; i < numberOfTextures; i++) {
             Texture texture = frameBuffer.textures[i];                                                             // Fetch the texture
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, texture.textureID, 0); // Set this textureID to a color attatchment.
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, texture.textureID, 0); // Set this textureID to a color attachment.
             drawBuffers[i] = GL_COLOR_ATTACHMENT0 + i;
 
-            std::cout << "[INFO | addTextureToFrameBuffer] Texture " << texture.name << " added at location " << i << std::endl;
+            core::info("[addTextureToFrameBuffer] Texture {} added at location {}", texture.name, i);
         }
 
         glDrawBuffers(numberOfTextures, drawBuffers);
@@ -117,7 +117,7 @@ namespace projv::graphics {
         if (it != renderInstance.frameBufferObjects.end()) {
             return it->second;
         } else {
-            std::cerr << "Frame buffer doesn't exist: " << name << ". Returning a default framebuffer." << std::endl;
+            core::warn("[getFramebufferFromRenderInstance] Frame buffer doesn't exist: {}. Returning a default framebuffer.", name);
             FrameBuffer fallback = createFrameBufferObjectAdvanced(1, 1); // Return a default 1x1 framebuffer
             fallback.buffer = -1;
             fallback.height = -1;

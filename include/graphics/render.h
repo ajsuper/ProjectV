@@ -7,6 +7,7 @@
 
 #include "data_structures/renderInstance.h"
 #include "data_structures/framebuffer.h"
+#include "core/log.h"
 
 namespace projv::graphics {
     /**

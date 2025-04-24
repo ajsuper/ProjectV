@@ -6,7 +6,7 @@ namespace projv::graphics {
         if (glIsProgram(shader)) {
             glUseProgram(shader);
         } else {
-            std::cerr << "Invalid shader program" << std::endl;
+            core::error("Invalid shader program.");
             return;
         }
 
@@ -16,12 +16,12 @@ namespace projv::graphics {
         // Check for OpenGL errors
         GLenum error = glGetError();
         if (error != GL_NO_ERROR) {
-            std::cerr << "OpenGL error after glUseProgram: " << error << std::endl;
+            core::error("OpenGL error after glUseProgram: {}", error);
         }
 
         // Check if the uniform location is valid
         if (floatLoc == -1) {
-            std::cerr << "Failed to get uniform location for " << variableNameInShader << std::endl;
+            core::error("Failed to get uniform location for {}", variableNameInShader);
             return;
         }
 
@@ -31,7 +31,7 @@ namespace projv::graphics {
         // Check for OpenGL errors
         error = glGetError();
         if (error != GL_NO_ERROR) {
-            std::cerr << "OpenGL error after glUniform1f: " << error << std::endl;
+            core::error("OpenGL error after glUniform1f: {}", error);
         }
 
         return;
@@ -42,14 +42,14 @@ namespace projv::graphics {
         if (glIsProgram(shader)) {
             glUseProgram(shader);
         } else {
-            std::cerr << "Invalid shader program" << std::endl;
+            core::error("Invalid shader program.");
             return;
         }
 
         // Check for OpenGL errors
         GLenum error = glGetError();
         if (error != GL_NO_ERROR) {
-            std::cerr << "OpenGL error after glUseProgram: " << error << std::endl;
+            core::error("OpenGL error after glUseProgram: {}", error);
         }
 
         // Get uniform locations
@@ -59,16 +59,16 @@ namespace projv::graphics {
         // Check for OpenGL errors
         error = glGetError();
         if (error != GL_NO_ERROR) {
-            std::cerr << "OpenGL error after glGetUniformLocation: " << error << std::endl;
+            core::error("OpenGL error after glGetUniformLocation: {}", error);
         }
 
         // Check if the uniform locations are valid
         if (cameraPosLoc == -1) {
-            std::cerr << "Failed to get uniform location for cameraPos" << std::endl;
+            core::error("Failed to get uniform location for cameraPos.");
             return;
         }
         if (cameraDirLoc == -1) {
-            std::cerr << "Failed to get uniform location for cameraDir" << std::endl;
+            core::error("Failed to get uniform location for cameraDir.");
             return;
         }
 
@@ -79,7 +79,7 @@ namespace projv::graphics {
         // Check for OpenGL errors
         error = glGetError();
         if (error != GL_NO_ERROR) {
-            std::cerr << "OpenGL error after glUniform3fv: " << error << std::endl;
+            core::error("OpenGL error after glUniform3fv: {}", error);
         }
         
         return;
@@ -91,8 +91,19 @@ namespace projv::graphics {
 
         // Pass the resolution uniform
         GLint resolutionLoc = glGetUniformLocation(shader, "resolution");
+        if (resolutionLoc == -1) {
+            core::warn("Failed to get uniform location for resolution.");
+            return;
+        }
+
         float res[2] = {float(width), float(height)};
         glUniform2fv(resolutionLoc, 1, res);
+
+        // Check for OpenGL errors
+        GLenum error = glGetError();
+        if (error != GL_NO_ERROR) {
+            core::error("OpenGL error after glUniform2fv: {}", error);
+        }
 
         return;
     }

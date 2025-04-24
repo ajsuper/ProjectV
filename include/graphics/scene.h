@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "data_structures/scene.h"
+#include "core/log.h"
 
 namespace projv::graphics {
     /**

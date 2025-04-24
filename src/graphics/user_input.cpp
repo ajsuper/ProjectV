@@ -60,42 +60,42 @@ namespace projv::graphics {
 
         // Movement Logic.
 
-        if(glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS){
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
             cam.position[0] += cam.direction[0] * scaledDownCameraMovementSpeed;
             cam.position[1] += cam.direction[1] * scaledDownCameraMovementSpeed;
             cam.position[2] += cam.direction[2] * scaledDownCameraMovementSpeed;
         }
-        if(glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS){
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
             cam.position[0] -= right[0] * scaledDownCameraMovementSpeed;
             cam.position[1] -= right[1] * scaledDownCameraMovementSpeed;
             cam.position[2] -= right[2] * scaledDownCameraMovementSpeed;
         }
-        if(glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS){
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
             cam.position[0] -= cam.direction[0] * scaledDownCameraMovementSpeed;
             cam.position[1] -= cam.direction[1] * scaledDownCameraMovementSpeed;
             cam.position[2] -= cam.direction[2] * scaledDownCameraMovementSpeed;
         }
-        if(glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS){
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
             cam.position[0] += right[0] * scaledDownCameraMovementSpeed;
             cam.position[1] += right[1] * scaledDownCameraMovementSpeed;
             cam.position[2] += right[2] * scaledDownCameraMovementSpeed;
         }
 
         // Vertical movement with SPACE and LEFT SHIFT
-        if(glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS){
+        if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) {
             cam.position[1] -= scaledDownCameraMovementSpeed;
         }
-        if(glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS){
+        if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
             cam.position[1] += scaledDownCameraMovementSpeed;
         }
 
         // Adjust movement speed
-        if(glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS){
+        if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
             cam.movementSpeed += 0.1f;
         }
-        if(glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS){
+        if (glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS) {
             cam.movementSpeed -= 0.1f;
-            if(cam.movementSpeed <= 0.001f){
+            if (cam.movementSpeed <= 0.001f) {
                 cam.movementSpeed = 0.001f;
             }
         }

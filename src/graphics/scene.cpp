@@ -21,7 +21,7 @@ namespace projv::graphics {
         // Gather data and compute chunk header indices
         for (const auto &chunk : sceneToRender.chunks) {
             if(chunk.geometryData.empty() || chunk.voxelTypeData.empty()) {
-                //std::cerr << "Chunk " << chunk.header.chunkID << " has empty geometry or voxel type data." << std::endl;
+                core::warn("Chunk {} has empty geometry or voxel type data. Skipping.", chunk.header.chunkID);
                 continue; // Skip empty chunks
             }
             GPUChunkHeader shaderChunkHeader;
@@ -58,7 +58,7 @@ namespace projv::graphics {
         auto updateBuffer = [&](GLuint &ssbo, void* &mappedPtr, size_t &capacity, size_t requiredSize,
                                   GLenum bindingPoint, const void* data) {
             if (ssbo == 0 || capacity < requiredSize) {
-                std::cout << "Resizing SSBO" << std::endl;
+                core::info("Resizing SSBO to accommodate {} bytes.", requiredSize);
                 // If already created but not large enough, delete it.
                 if (ssbo != 0) {
                     glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
@@ -73,7 +73,7 @@ namespace projv::graphics {
                 // Map the entire buffer persistently.
                 mappedPtr = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, capacity, storageFlags);
                 if (!mappedPtr) {
-                    std::cerr << "Failed to map buffer persistently!" << std::endl;
+                    core::error("Failed to map buffer persistently!");
                     // Handle error appropriately.
                 }
             } else {

@@ -12,7 +12,7 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 # Add spdlog submodule (this assumes you've added it correctly as a submodule)
 add_subdirectory(external/spdlog)
 
-include_directories(${CMAKE_SOURCE_DIR}/external)
+include_directories(${CMAKE_SOURCE_DIR}/external/spdlog/include)
 
 # Source files
 set(CORE_SRC_DIR ${CMAKE_SOURCE_DIR}/src/core)

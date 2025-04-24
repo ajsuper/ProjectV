@@ -8,6 +8,7 @@
 #include <iostream>
 #include <filesystem>
 
+#include "core/log.h"
 #include "dependencies/json.hpp"
 #include "data_structures/scene.h"
 #include "voxel_math.h"

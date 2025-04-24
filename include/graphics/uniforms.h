@@ -6,6 +6,7 @@
 #include <iostream>
 
 #include <data_structures/camera.h>
+#include "core/log.h"
 
 namespace projv::graphics {
     /**

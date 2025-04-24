@@ -13,6 +13,7 @@
 #include "data_structures/voxel.h"
 #include "data_structures/nodeStructure.h"
 #include "core/math.h"
+#include "core/log.h"
 #include "data_structures/scene.h"
 #include "voxel_math.h"
 
