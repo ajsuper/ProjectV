@@ -19,27 +19,68 @@ namespace projv::graphics {
         serializedVoxelTypeData.reserve(totalVoxelTypeDataSize);
     
         // Gather data and compute chunk header indices
-        for (const auto &chunk : sceneToRender.chunks) {
-            if(chunk.geometryData.empty() || chunk.voxelTypeData.empty()) {
+
+        std::vector<GPUChunkHeader> tempChunkHeaders(sceneToRender.chunks.size());
+        std::vector<std::vector<uint32_t>> tempSerializedGeometry(sceneToRender.chunks.size());
+        std::vector<std::vector<uint32_t>> tempSerializedVoxelTypeData(sceneToRender.chunks.size());
+
+        auto startTime = std::chrono::high_resolution_clock::now();
+
+        omp_set_num_threads(30); // or whatever number is appropriate
+        std::cout << "Max threads: " << omp_get_max_threads() << std::endl;
+        #pragma omp parallel for
+        for (size_t i = 0; i < sceneToRender.chunks.size(); ++i) {
+            const auto &chunk = sceneToRender.chunks[i];
+            bool skip = false;
+            if (chunk.geometryData.empty() || chunk.voxelTypeData.empty()) {
+                #pragma omp critical
                 core::warn("Chunk {} has empty geometry or voxel type data. Skipping.", chunk.header.chunkID);
-                continue; // Skip empty chunks
+                skip = true;
             }
+            if (skip) continue;
+            
             GPUChunkHeader shaderChunkHeader;
             shaderChunkHeader.positionX = chunk.header.position.x;
             shaderChunkHeader.positionY = chunk.header.position.y;
             shaderChunkHeader.positionZ = chunk.header.position.z;
             shaderChunkHeader.scale = chunk.header.scale;
             shaderChunkHeader.resolution = chunk.header.resolution / pow(2, chunk.LOD);
-            shaderChunkHeader.geometryStartIndex = serializedGeometry.size();
-            shaderChunkHeader.voxelTypeDataStartIndex = serializedVoxelTypeData.size();
-    
-            serializedGeometry.insert(serializedGeometry.end(), chunk.geometryData.begin(), chunk.geometryData.end());
-            serializedVoxelTypeData.insert(serializedVoxelTypeData.end(), chunk.voxelTypeData.begin(), chunk.voxelTypeData.end());
-    
-            shaderChunkHeader.geometryEndIndex = serializedGeometry.size();
-            shaderChunkHeader.voxelTypeDataEndIndex = serializedVoxelTypeData.size();
-    
-            chunkHeaders.emplace_back(shaderChunkHeader);
+
+            shaderChunkHeader.geometryStartIndex = 0; // Placeholder, will adjust later
+            shaderChunkHeader.voxelTypeDataStartIndex = 0; // Placeholder, will adjust later
+
+            tempSerializedGeometry[i] = std::move(chunk.geometryData);
+            tempSerializedVoxelTypeData[i] = std::move(chunk.voxelTypeData);
+
+            shaderChunkHeader.geometryEndIndex = tempSerializedGeometry[i].size();
+            shaderChunkHeader.voxelTypeDataEndIndex = tempSerializedVoxelTypeData[i].size();
+
+            tempChunkHeaders[i] = shaderChunkHeader;
+
+            int thread_id = omp_get_thread_num();
+            std::cout << "Thread " << thread_id << " processing chunk " << i << std::endl;        
+        }
+
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+        core::info("Profiling: Gathering data and computing chunk header indices took {} ms.", duration);
+
+        // Combine results in the correct order
+        for (size_t i = 0; i < tempChunkHeaders.size(); ++i) {
+            if (tempSerializedGeometry[i].empty() || tempSerializedVoxelTypeData[i].empty()) {
+                continue; // Skip empty chunks
+            }
+
+            tempChunkHeaders[i].geometryStartIndex = serializedGeometry.size();
+            tempChunkHeaders[i].voxelTypeDataStartIndex = serializedVoxelTypeData.size();
+
+            serializedGeometry.insert(serializedGeometry.end(), tempSerializedGeometry[i].begin(), tempSerializedGeometry[i].end());
+            serializedVoxelTypeData.insert(serializedVoxelTypeData.end(), tempSerializedVoxelTypeData[i].begin(), tempSerializedVoxelTypeData[i].end());
+
+            tempChunkHeaders[i].geometryEndIndex = serializedGeometry.size();
+            tempChunkHeaders[i].voxelTypeDataEndIndex = serializedVoxelTypeData.size();
+
+            chunkHeaders.emplace_back(tempChunkHeaders[i]);
         }
         
         // Use static variables for persistent mapped buffers and capacity tracking.

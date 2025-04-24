@@ -3,7 +3,7 @@ project(ProjectV)
 
 # Compiler flags
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -g -O3")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -g -O3 -fopenmp")
 
 message(STATUS "CMAKE_SOURCE_DIR: ${CMAKE_SOURCE_DIR}")
 
@@ -32,6 +32,9 @@ add_library(projectV-log STATIC ${CORE_SRC_DIR}/log.cpp)
 add_library(projectV-fbo STATIC ${GRAPHICS_SRC_DIR}/fbo.cpp)
 add_library(projectV-render STATIC ${GRAPHICS_SRC_DIR}/render.cpp)
 add_library(projectV-scene STATIC ${GRAPHICS_SRC_DIR}/scene.cpp)
+find_package(OpenMP REQUIRED)
+target_link_libraries(projectV-scene PRIVATE OpenMP::OpenMP_CXX)
+
 add_library(projectV-shader STATIC ${GRAPHICS_SRC_DIR}/shader.cpp)
 add_library(projectV-uniforms STATIC ${GRAPHICS_SRC_DIR}/uniforms.cpp)
 add_library(projectV-user_input STATIC ${GRAPHICS_SRC_DIR}/user_input.cpp)
@@ -40,6 +43,7 @@ add_library(projectV-window STATIC ${GRAPHICS_SRC_DIR}/window.cpp)
 # Utils
 add_library(projectV-lod STATIC ${UTILS_SRC_DIR}/lod.cpp)
 target_link_libraries(projectV-lod PRIVATE projectV-voxel_io)
+
 add_library(projectV-voxel_io STATIC ${UTILS_SRC_DIR}/voxel_io.cpp)
 add_library(projectV-voxel_management STATIC ${UTILS_SRC_DIR}/voxel_management.cpp)
 add_library(projectV-voxel_math STATIC ${UTILS_SRC_DIR}/voxel_math.cpp)

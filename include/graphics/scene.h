@@ -6,6 +6,7 @@
 #include <iostream>
 #include <math.h>
 #include <cstring>
+#include <omp.h>
 
 #include "data_structures/scene.h"
 #include "core/log.h"
