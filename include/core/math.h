@@ -1,3 +1,5 @@
+#ifndef PROJV_CORE_MATH_H
+#define PROJV_CORE_MATH_H
 // This is a wrapper for the glm library, to provide consistency accross the engine.
 #include "dependencies/glm/glm/glm.hpp"
 
@@ -64,3 +66,5 @@ namespace projv::core {
      */
     float evaluateCurve(float input, std::vector<vec2> points);
 }
+
+#endif
