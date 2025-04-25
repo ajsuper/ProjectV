@@ -46,7 +46,7 @@ namespace projv::utils {
         core::info("Function: writeHeadersJSON. Writing headers to {}", fileDirectory);
         nlohmann::json jsonOutput;
         jsonOutput["chunkHeaders"] = nlohmann::json::array();
-
+    
         for (const auto& header : chunkHeaders) {
             jsonOutput["chunkHeaders"].push_back({
                 {"ID", header.chunkID},
@@ -57,18 +57,21 @@ namespace projv::utils {
                 {"resolution", header.resolution},
             });
         }
-
+    
+        // Create parent directory if needed
+        std::filesystem::path path(fileDirectory);
+        std::filesystem::create_directories(path.parent_path());
+    
         std::ofstream outFile(fileDirectory);
         if (!outFile) {
-            std::cerr << "ERROR in 'writeHeadersJSON': Failed to open " << fileDirectory << std::endl;
-            core::error("Function: writeHeadersJSON. Failed to open {}", fileDirectory);
+            core::warn("Function: writeHeadersJSON. Still failed to open {}", fileDirectory);
             return;
         }
-
-        outFile << jsonOutput.dump(4);  // Pretty-print with 4 spaces for readability
+    
+        outFile << jsonOutput.dump(4);
         outFile.close();
     }
-
+    
     std::vector<CPUChunkHeader> readHeadersJSON(const std::string& fileDirectory) {
         core::info("Function: readHeadersJSON. Reading headers from {}", fileDirectory);
         std::ifstream inFile(fileDirectory);
