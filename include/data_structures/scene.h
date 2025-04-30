@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "core/math.h"
+#include "data_structures/voxel.h"
 
 namespace projv{
     struct CPUChunkHeader { // Designed to be user interfacable on CPU. Stored in disk. Only the necessary information for loading the chunk.
@@ -30,6 +31,7 @@ namespace projv{
         CPUChunkHeader header;
         std::vector<uint32_t> geometryData;
         std::vector<uint32_t> voxelTypeData;
+        VoxelBatch voxelQueue;
         uint32_t LOD;
     };
     

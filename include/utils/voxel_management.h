@@ -63,6 +63,7 @@ namespace projv::utils {
      * @return Returns an empty VoxelBatch
      */
     VoxelBatch createVoxelBatch();
+    // Not exist
 
     /**
      * Adds a voxel to a voxel batch
@@ -74,6 +75,14 @@ namespace projv::utils {
     CPUChunkHeader createChunkHeader(core::vec3 position, float scale, int resolutionPowOf2);
 
     RuntimeChunkData createChunk(CPUChunkHeader chunkHeader, std::vector<uint32_t>& chunkOctree, std::vector<uint32_t>& chunkVoxelTypeData);
+
+    void addVoxelToChunkQueue(Voxel& voxel, RuntimeChunkData& Chunk);
+    void addChunkQueToNewChunk(VoxelBatch& voxelBatch, RuntimeChunkData& chunk);
+    VoxelBatch& getChunkQueue(RuntimeChunkData& chunk, bool convertCompressedData = true);
+    void mergeVoxelQueues(VoxelBatch& voxelQueueA, VoxelBatch& voxelQueueB);
+    void updateChunkFromItsQueue(RuntimeChunkData& chunk, bool clearQueue = true);
+
+
 }
 
 #endif
