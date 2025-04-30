@@ -81,8 +81,6 @@ namespace projv::utils {
     VoxelBatch& getChunkQueue(RuntimeChunkData& chunk, bool convertCompressedData = true);
     void mergeVoxelQueues(VoxelBatch& voxelQueueA, VoxelBatch& voxelQueueB);
     void updateChunkFromItsQueue(RuntimeChunkData& chunk, bool clearQueue = true);
-
-
 }
 
 #endif
