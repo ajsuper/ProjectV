@@ -1,7 +1,7 @@
-#include "utils/lod.h"
+#include "utils/lod.h" // Ensure RuntimeChunkData is included
 
 namespace projv::utils {
-    void updateLOD(RuntimeChunkData& chunk, uint32_t targetLOD, const std::string& sceneFilePath, bool forceReload) {
+    void updateLOD(Chunk& chunk, uint32_t targetLOD, const std::string& sceneFilePath, bool forceReload) {
         auto start = std::chrono::high_resolution_clock::now();
         core::info("[updateLOD] Updating LOD of chunk {} to {}...", chunk.header.chunkID, targetLOD);
 
@@ -17,7 +17,7 @@ namespace projv::utils {
         }
 
         // Loads the chunk if the targetLOD is a higher resolution (lower value) than the current LOD.
-        RuntimeChunkData chunkToBeChanged;
+        Chunk chunkToBeChanged;
         if (chunk.LOD > targetLOD || forceReload) {
             chunkToBeChanged = loadChunkFromDisk(sceneFilePath, chunk.header);
         } else {

@@ -189,38 +189,182 @@ namespace projv::utils {
         return voxelBatch;
     }
 
-    void addVoxelToBatch(Voxel voxel, VoxelBatch& voxelBatch) {
-        voxelBatch.emplace_back(voxel);
-        return;
+    float createChunkScaleFromVoxelScaleAndResolution(float voxelScale, int resolutionPowerOf2) {
+        return resolutionPowerOf2 * (voxelScale * 0.0390625); // * 0.0390625 is to adjust it so that a voxel size of 1 and a resolution of 512 results in a chunk size of roughly 20. This is done for precision reasons.
     }
 
-    CPUChunkHeader createChunkHeader(core::vec3 position, float scale, int resolutionPowOf2) {
+    ChunkHeader createChunkHeader(core::vec3 position, float voxelScale, int resolutionPowOf2) {
         if(resolutionPowOf2 > 512) {
             core::warn("Function: createChunkHeader. resolutionPowOf2 is higher than the recommended maximum of 512.");
         }
-        if(core::fract(log2(resolutionPowOf2)) != 0) {
-            core::warn("Function: createChunkHeader. resolutionPowOf2 isn't a power of 2! rounding the next highest power of 2.");
-        }
-        if(scale < 3) {
-            core::warn("Function: createChunkHeader. scale is lower than 3 which may cause floating point imprecisions.");
-        }
-
         int accuratePowerOf2 = std::pow(2, std::ceil(std::log2(resolutionPowOf2)));
+        if(core::fract(log2(resolutionPowOf2)) != 0) {
+            core::warn("Function: createChunkHeader. resolutionPowOf2 isn't a power of 2! rounding the next highest power of 2: {}", accuratePowerOf2);
+        }
+        float chunkScale = createChunkScaleFromVoxelScaleAndResolution(voxelScale, resolutionPowOf2);
+        if(chunkScale < 3) {
+            core::warn("Function: createChunkHeader. chunkScale is lower than 3 which may cause floating point imprecisions. Increase voxel scale.");
+        }
 
-        projv::CPUChunkHeader chunkHeader;
+        projv::ChunkHeader chunkHeader;
         chunkHeader.position = position;
-        chunkHeader.scale = scale;
+        chunkHeader.scale = chunkScale;
+        chunkHeader.voxelScale = voxelScale;
         chunkHeader.resolution = accuratePowerOf2;
 
         return chunkHeader;
     }
 
-    RuntimeChunkData createChunk(CPUChunkHeader chunkHeader, std::vector<uint32_t>& chunkOctree, std::vector<uint32_t>& chunkVoxelTypeData) {
-        RuntimeChunkData chunk;
+    Chunk createChunk(ChunkHeader chunkHeader) {
+        Chunk chunk;
         chunk.header = chunkHeader;
-        chunk.geometryData = chunkOctree;
-        chunk.voxelTypeData = chunkVoxelTypeData;
         chunk.LOD = 0;
         return chunk;
+    }
+
+
+    void addVoxelToVoxelBatch(Voxel& voxel, VoxelBatch& voxelBatch) {
+        voxelBatch.emplace_back(voxel);
+        return;
+    }
+
+    void copyVoxelBatchToChunk(VoxelBatch& voxelBatch, Chunk& chunk) {
+        chunk.chunkQueue = voxelBatch;
+        return;
+    }
+
+    Color unserializeColor(uint32_t serializedColor) {
+        uint32_t R10 = (serializedColor >> 20) & 0x3FF; // 10 bits
+        uint32_t G10 = (serializedColor >> 10) & 0x3FF; // 10 bits
+        uint32_t B10 = serializedColor & 0x3FF;         // 10 bits
+    
+        projv::Color color;
+        color.r = static_cast<uint8_t>(R10 / 4); // Convert back from 10-bit to 8-bit
+        color.g = static_cast<uint8_t>(G10 / 4);
+        color.b = static_cast<uint8_t>(B10 / 4);
+    
+        return color;
+    }
+
+    VoxelBatch getChunkVoxelBatch(Chunk& chunk, bool convertCompressedData) {
+        if(!convertCompressedData) {
+            return chunk.chunkQueue;
+        }
+
+        VoxelBatch decompressedVoxels;
+        size_t count = chunk.voxelTypeData.size() / 3;
+        decompressedVoxels.resize(count);
+        
+        core::info("Getting {} voxels from chunk.", count);
+        for (size_t i = 0; i < count; ++i) {
+            uint32_t ZOrderPosition = chunk.voxelTypeData[i * 3];
+            uint32_t SerializedColor = chunk.voxelTypeData[i * 3 + 1];
+            uint32_t SerializedNormal = chunk.voxelTypeData[i * 3 + 2];
+    
+            Voxel voxel;
+            voxel.ZOrderPosition = ZOrderPosition;
+    
+            // Deserialize color.
+            voxel.color = unserializeColor(SerializedColor);
+        
+            decompressedVoxels[i] = voxel;
+        }
+
+        std::cout << "Size of voxels" << decompressedVoxels.size() << std::endl;
+
+        return decompressedVoxels;
+    }
+
+    void addVoxelBatchAToVoxelBatchB(VoxelBatch& voxelBatchA, VoxelBatch& voxelBatchB, core::ivec3 voxelBatchAPosition) {
+        for(size_t i = 0; i < voxelBatchA.size(); i++) {
+            core::ivec3 currentPosition = reverseZOrderIndex(voxelBatchA[i].ZOrderPosition, 15);
+            core::ivec3 newPosition = currentPosition + voxelBatchAPosition;
+            projv::Voxel copiedVoxel = voxelBatchA[i];
+            copiedVoxel.ZOrderPosition = createZOrderIndex(newPosition, 15);
+            voxelBatchB.emplace_back(copiedVoxel);
+        }
+    }
+
+    void sortVoxelBatch(VoxelBatch& voxelBatch) {
+        std::sort(voxelBatch.begin(), voxelBatch.end(), [](const Voxel& a, const Voxel& b) {
+            return a.ZOrderPosition < b.ZOrderPosition;
+        });
+        return;
+    }
+
+    VoxelGrid createVoxelGridFromChunksQueue(const Chunk& chunk) {
+        VoxelGrid voxelGrid;
+        voxelGrid.voxels = chunk.chunkQueue;
+        std::sort(voxelGrid.voxels.begin(), voxelGrid.voxels.end(), [](const Voxel& a, const Voxel& b) {
+            return a.ZOrderPosition < b.ZOrderPosition;
+        });
+        return voxelGrid;
+    }
+
+    void updateChunkFromItsVoxelBatch(Chunk& chunk, bool clearBatch) {
+        // Get farthest voxel.
+        VoxelGrid voxelGrid = createVoxelGridFromChunksQueue(chunk);
+
+        // Compute resolution.
+        Voxel farthestVoxel = voxelGrid.voxels[voxelGrid.voxels.size() - 1];
+        core::ivec3 position = reverseZOrderIndex(farthestVoxel.ZOrderPosition, 15);
+        int farthestCoordinate = std::max({position.x, position.y, position.z});
+        int resolutionToTheNearestPowOfTwo = std::pow(2, std::ceil(std::log2(farthestCoordinate + 1)));
+        if(resolutionToTheNearestPowOfTwo > 512) {
+            core::warn("resoltuion of chunk {} is greater than 512 ({}). Caused by voxel positions inside chunk being too large. ", chunk.header.chunkID, chunk.header.resolution);
+        }
+
+        // Update the chunk.
+        chunk.geometryData = createOctree(voxelGrid, resolutionToTheNearestPowOfTwo);
+        chunk.voxelTypeData = createVoxelTypeData(voxelGrid);
+        chunk.LOD = 0;
+
+        chunk.header.resolution = resolutionToTheNearestPowOfTwo;
+        chunk.header.scale = createChunkScaleFromVoxelScaleAndResolution(chunk.header.voxelScale, resolutionToTheNearestPowOfTwo);
+
+        // Clear our queue.
+        if(clearBatch) {
+            VoxelBatch emptyChunkQueue;
+            chunk.chunkQueue = emptyChunkQueue;
+        }
+        return;
+    }
+
+    void removeVoxelBatchAFromVoxelBatchB(VoxelBatch& voxelBatchA, VoxelBatch& voxelBatchB, core::ivec3 positionOffset) {
+        // Sort both voxel queues by ZOrderPosition for efficient comparison.
+        std::sort(voxelBatchA.begin(), voxelBatchA.end(), [](const Voxel& a, const Voxel& b) {
+            return a.ZOrderPosition < b.ZOrderPosition;
+        });
+
+        std::sort(voxelBatchB.begin(), voxelBatchB.end(), [](const Voxel& a, const Voxel& b) {
+            return a.ZOrderPosition < b.ZOrderPosition;
+        });
+
+        VoxelBatch editedVoxelBatch;
+        size_t removeIndex = 0;
+
+        for (const auto& voxel : voxelBatchB) {
+            // Adjust the ZOrderIndex of the current voxel in voxelQueueToRemove.
+            while (removeIndex < voxelBatchB.size()) {
+                core::ivec3 adjustedPosition = reverseZOrderIndex(voxelBatchB[removeIndex].ZOrderPosition, 15) + positionOffset;
+                uint64_t adjustedZOrderIndex = createZOrderIndex(adjustedPosition, 15);
+
+                if (adjustedZOrderIndex < voxel.ZOrderPosition) {
+                    ++removeIndex; // Move to the next voxel in voxelQueueToRemove.
+                } else if (adjustedZOrderIndex == voxel.ZOrderPosition) {
+                    break; // Found a match, skip adding this voxel.
+                } else {
+                    editedVoxelBatch.emplace_back(voxel); // No match, add to the result.
+                    break;
+                }
+            }
+
+            if (removeIndex >= voxelBatchB.size()) {
+                // If we've exhausted voxelQueueToRemove, add the remaining voxels.
+                editedVoxelBatch.emplace_back(voxel);
+            }
+        }
+
+        voxelBatchB = editedVoxelBatch;
     }
 }

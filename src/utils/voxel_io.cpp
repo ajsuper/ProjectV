@@ -42,7 +42,7 @@ namespace projv::utils {
         return readNumbers; 
     }
 
-    void writeHeadersJSON(const std::vector<CPUChunkHeader>& chunkHeaders, const std::string& fileDirectory) {
+    void writeHeadersJSON(const std::vector<ChunkHeader>& chunkHeaders, const std::string& fileDirectory) {
         core::info("Function: writeHeadersJSON. Writing headers to {}", fileDirectory);
         nlohmann::json jsonOutput;
         jsonOutput["chunkHeaders"] = nlohmann::json::array();
@@ -53,7 +53,7 @@ namespace projv::utils {
                 {"position x", header.position.x},
                 {"position y", header.position.y},
                 {"position z", header.position.z},
-                {"scale", header.scale},
+                {"voxel scale", header.voxelScale},
                 {"resolution", header.resolution},
             });
         }
@@ -72,7 +72,7 @@ namespace projv::utils {
         outFile.close();
     }
     
-    std::vector<CPUChunkHeader> readHeadersJSON(const std::string& fileDirectory) {
+    std::vector<ChunkHeader> readHeadersJSON(const std::string& fileDirectory) {
         core::info("Function: readHeadersJSON. Reading headers from {}", fileDirectory);
         std::ifstream inFile(fileDirectory);
         if (!inFile) {
@@ -84,7 +84,7 @@ namespace projv::utils {
         inFile >> jsonInput;  // Read JSON file into json object
         inFile.close();
 
-        std::vector<CPUChunkHeader> headers;
+        std::vector<ChunkHeader> headers;
         headers.reserve(jsonInput["chunkHeaders"].size());
         if (!jsonInput.contains("chunkHeaders") || !jsonInput["chunkHeaders"].is_array()) {
             std::cerr << "Error in 'readHeadersJSON': Invalid JSON format" << std::endl;
@@ -92,14 +92,15 @@ namespace projv::utils {
         }
 
         for (const auto& jHeader : jsonInput["chunkHeaders"]) {
-            CPUChunkHeader header;
+            ChunkHeader header;
             header.chunkID = jHeader.value("ID", 0);
             float x = jHeader.value("position x", 0);
             float y = jHeader.value("position y", 0);
             float z = jHeader.value("position z", 0);
             header.position = core::vec3(x, y, z);
-            header.scale = jHeader.value("scale", 0);
-            header.resolution = jHeader.value("resolution", 0);            
+            header.resolution = jHeader.value("resolution", 0); 
+            header.voxelScale = jHeader.value("voxel scale", 0);
+            header.scale = header.resolution * header.voxelScale * 0.0390625; // * 0.0390625 is to adjust it so that a voxel size of 1 and a resolution of 512 results in a chunk size of roughly 20. This is done for precision reasons.           
             headers.push_back(header);
         }
 
@@ -128,16 +129,16 @@ namespace projv::utils {
         core::info("Function: writeSceneToDisk. Scene written to disk");
     }
 
-    RuntimeChunkData loadChunkFromDisk(std::string sceneFileDirectory, CPUChunkHeader chunk) {
+    Chunk loadChunkFromDisk(std::string sceneFileDirectory, ChunkHeader chunk) {
         uint32_t chunkID = chunk.chunkID;
         std::cout << "[loadChunkFromDisk] Loading chunk " << chunkID << " from disk...";
         core::info("Function: loadChunkFromDisk. Loading chunk " + std::to_string(chunkID) + "from disk...");
         auto start = std::chrono::high_resolution_clock::now();
 
         // Find the header for the inputted chunkID.
-        RuntimeChunkData chunkData;
-        std::vector<CPUChunkHeader> chunkHeaders = readHeadersJSON(sceneFileDirectory + "/headers.json");
-        auto it = std::find_if(chunkHeaders.begin(), chunkHeaders.end(), [chunkID](const CPUChunkHeader& header) {
+        Chunk chunkData;
+        std::vector<ChunkHeader> chunkHeaders = readHeadersJSON(sceneFileDirectory + "/headers.json");
+        auto it = std::find_if(chunkHeaders.begin(), chunkHeaders.end(), [chunkID](const ChunkHeader& header) {
             return header.chunkID == chunkID;
         });
 
@@ -162,9 +163,9 @@ namespace projv::utils {
         return chunkData;
     }
 
-    void writeChunkToDisk(std::string sceneFileDirectory, RuntimeChunkData chunk) {
+    void writeChunkToDisk(std::string sceneFileDirectory, Chunk chunk) {
         // Reads the header data if it exists.
-        std::vector<CPUChunkHeader> chunkHeaders;
+        std::vector<ChunkHeader> chunkHeaders;
         std::ifstream inFile(sceneFileDirectory + "/headers.json");
         if (inFile.peek() != std::ifstream::traits_type::eof()) { 
             chunkHeaders = readHeadersJSON(sceneFileDirectory + "/headers.json");
@@ -199,11 +200,11 @@ namespace projv::utils {
         Scene scene;
 
         // Loads our chunk headers into memory.
-        std::vector<CPUChunkHeader> chunkHeaders = readHeadersJSON(sceneFileDirectory + "/headers.json");
+        std::vector<ChunkHeader> chunkHeaders = readHeadersJSON(sceneFileDirectory + "/headers.json");
 
         // Loops over all of the chunk headers and loads the corresponding octree and voxelTypeData.
         for(size_t i = 0; i < chunkHeaders.size(); i++){ 
-            RuntimeChunkData chunk = loadChunkFromDisk(sceneFileDirectory, chunkHeaders[i]);
+            Chunk chunk = loadChunkFromDisk(sceneFileDirectory, chunkHeaders[i]);
             scene.chunks.push_back(chunk);
         }
         return scene;

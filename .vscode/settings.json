@@ -82,6 +82,8 @@
         "queue": "cpp",
         "stack": "cpp",
         "__hash_table": "cpp",
-        "filesystem": "cpp"
+        "filesystem": "cpp",
+        "regex": "cpp",
+        "semaphore": "cpp"
     }
 }

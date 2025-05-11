@@ -18,7 +18,7 @@ namespace projv::utils {
      * @param sceneFilePath The file path of the scene.
      * @param forceReload Whether to force reload the chunk from disk. (false by default)
      */
-    void updateLOD(RuntimeChunkData& chunk, uint32_t targetLOD, const std::string& sceneFilePath, bool forceReload = false); // LOD
+    void updateLOD(Chunk& chunk, uint32_t targetLOD, const std::string& sceneFilePath, bool forceReload = false); // LOD
 }
 
 #endif

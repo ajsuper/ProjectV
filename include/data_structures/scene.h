@@ -8,10 +8,11 @@
 #include "data_structures/voxel.h"
 
 namespace projv{
-    struct CPUChunkHeader { // Designed to be user interfacable on CPU. Stored in disk. Only the necessary information for loading the chunk.
+    struct ChunkHeader { // Designed to be user interfacable on CPU. Stored in disk. Only the necessary information for loading the chunk.
         uint32_t chunkID;
         core::vec3 position;
-        uint32_t scale;
+        float scale;
+        float voxelScale;
         uint32_t resolution;
     };
 
@@ -27,16 +28,16 @@ namespace projv{
         uint32_t voxelTypeDataEndIndex;
     };
     
-    struct RuntimeChunkData { // Only exists during runtime. Contains all of the header data and our geometry and color data, along with any extra runtime data not used in rendering.
-        CPUChunkHeader header;
+    struct Chunk { // Only exists during runtime. Contains all of the header data and our geometry and color data, along with any extra runtime data not used in rendering.
+        ChunkHeader header;
         std::vector<uint32_t> geometryData;
         std::vector<uint32_t> voxelTypeData;
-        VoxelBatch voxelQueue;
+        VoxelBatch chunkQueue;
         uint32_t LOD;
     };
     
     struct Scene {
-        std::vector<RuntimeChunkData> chunks;
+        std::vector<Chunk> chunks;
     };
 }
 

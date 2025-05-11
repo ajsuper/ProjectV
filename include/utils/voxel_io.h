@@ -33,14 +33,14 @@ namespace projv::utils {
      * @param chunkHeaders An std::vector<chunkHeader> containing the headers to be written.
      * @param fileDirectory An std::string containing the parent directory to write the headers to.
      */
-    void writeHeadersJSON(const std::vector<CPUChunkHeader>& chunkHeaders, const std::string& fileDirectory);
+    void writeHeadersJSON(const std::vector<ChunkHeader>& chunkHeaders, const std::string& fileDirectory);
 
     /**
      * Reads the headers for a scene from a file directory.
      * @param fileDirectory An std::string containing the directory of the file to be read.
      * @return An std::vector<chunkHeader> containing the chunk headers in order from the file.
      */
-    std::vector<CPUChunkHeader> readHeadersJSON(const std::string& fileDirectory);
+    std::vector<ChunkHeader> readHeadersJSON(const std::string& fileDirectory);
 
     /**
      * Loads a chunk from disk given the scene file directory and chunk header.
@@ -48,14 +48,14 @@ namespace projv::utils {
      * @param chunkHeader The header of the chunk to be loaded.
      * @return A chunkData object containing the loaded chunk data.
      */
-    RuntimeChunkData loadChunkFromDisk(std::string sceneFileDirectory, CPUChunkHeader chunkHeader);
+    Chunk loadChunkFromDisk(std::string sceneFileDirectory, ChunkHeader chunkHeader);
 
     /**
      * Writes a chunk to disk given the scene file directory and chunk data.
      * @param sceneFileDirectory The directory of the scene file.
      * @param chunk The chunk data to be written.
      */
-    void writeChunkToDisk(std::string sceneFileDirectory, RuntimeChunkData chunk);
+    void writeChunkToDisk(std::string sceneFileDirectory, Chunk chunk);
 
     /**
      * Loads a scene from disk given the scene file directory.
