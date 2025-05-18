@@ -3,7 +3,7 @@ ProjectV is under very early development, data structures and functionalities wi
 
 # ProjectV
 
-'ProjectV' provides functionalities that allow for easy manipulation and rendering of voxel data.
+'ProjectV' is a game engine that simplifies the process of making voxel games and allows for complex and effecient rendering.
 
 # Contents
 
