@@ -47,59 +47,87 @@ namespace projv::utils {
 
     std::vector<nodeStructure> agregateLevel(std::vector<nodeStructure>& oldLevel, bool childParent = false) {
         std::vector<nodeStructure> newLevel;
-        std::unordered_map<int, int> indexMap; // Maps newIndex to index in newLevel
-    
-        for (const auto& node : oldLevel) {
+
+        for(int i = 0; i < oldLevel.size(); i++) { // Looping over verey voxel
+            nodeStructure& node = oldLevel[i];
             uint32_t newIndex = node.ZOrderIndex / 8;
             uint32_t relativeZOrder = node.ZOrderIndex % 8;
             uint32_t bitToSet = (1 << (8 - relativeZOrder));
-    
-            if (indexMap.find(newIndex) != indexMap.end()) {
+            bool parentExists = false;
+            int parentIndex = -1;
+
+            // Check the last node to see if it is the parent for this node.
+            if(newLevel.size() > 0 && newLevel[newLevel.size()-1].ZOrderIndex == newIndex) {
+                parentExists = true;
+                parentIndex = newLevel.size()-1;
+            }
+
+            if (parentExists) {
                 // Update existing node
-                newLevel[indexMap[newIndex]].standardNode |= bitToSet;
+                newLevel[parentIndex].standardNode |= bitToSet;
             } else {
                 // Create new node
                 nodeStructure newNode = {0, newIndex};
                 newNode.standardNode |= bitToSet;
                 newNode.standardNode &= 0b111111110; // Clear leaf bit if needed
-                if(childParent) newNode.standardNode |= 0b1;
+                if(childParent) newNode.standardNode |= 0b1; // Set leaf mask if this node is the parent of leaf's
                 newLevel.push_back(newNode);
-                indexMap[newIndex] = newLevel.size() - 1;
             }
         }
     
         return newLevel;
     }
 
-    std::vector<nodeStructure> convertVoxelsToGeometry(VoxelGrid& voxels) {
-        std::vector<nodeStructure> nodes;
-        for(size_t i = 0; i < voxels.voxels.size(); i++) {
-            nodeStructure node;
-            node.ZOrderIndex = voxels.voxels[i].ZOrderPosition;
-            nodes.emplace_back(node);
+    std::vector<nodeStructure> agregateLevelFromVoxelGrid(VoxelGrid& oldLevel, bool childParent = false) {
+        std::vector<nodeStructure> newLevel;
+
+        for(int i = oldLevel.voxels.size() - 1; i >= 0; i--) { // Looping over every voxel in reverse
+            Voxel& voxel = oldLevel.voxels[i];
+            uint32_t newIndex = voxel.ZOrderPosition / 8;
+            uint32_t relativeZOrder = voxel.ZOrderPosition % 8;
+            uint32_t bitToSet = (1 << (8 - relativeZOrder));
+            bool parentExists = false;
+            int parentIndex = -1;
+
+            // Check the last node to see if it is the parent for this node.
+            if(newLevel.size() > 0 && newLevel[newLevel.size()-1].ZOrderIndex == newIndex) {
+                parentExists = true;
+                parentIndex = newLevel.size()-1;
+            }
+
+            if (parentExists) {
+                // Update existing node
+                newLevel[parentIndex].standardNode |= bitToSet;
+            } else {
+                // Create new node
+                nodeStructure newNode = {0, newIndex};
+                newNode.standardNode |= bitToSet;
+                newNode.standardNode &= 0b111111110; // Clear leaf bit if needed
+                if(childParent) newNode.standardNode |= 0b1; // Set leaf mask if this node is the parent of leaf's
+                newLevel.push_back(newNode);
+            }
         }
-        return nodes;
+    
+        return newLevel;
     }
+
     
     std::vector<uint32_t> createOctree(VoxelGrid& voxels, int voxelWholeResolution){
         std::chrono::high_resolution_clock::time_point startWhole = std::chrono::high_resolution_clock::now();
-        //std::cout << "[createOctree] Octree generation started with size of " << voxelWholeResolution << std::endl;
         core::info("Function: createOctree. Octree generation started with size of: " + std::to_string(voxelWholeResolution));
         int levelsOfDepth = int(log2(voxelWholeResolution));
         std::vector<nodeStructure> octree;
         std::vector<nodeStructure> levelInProgress;
 
-        levelInProgress = convertVoxelsToGeometry(voxels); // Builds mask for the lowest resolution. GOOD
-        std::reverse(levelInProgress.begin(), levelInProgress.end());
-        levelInProgress = agregateLevel(levelInProgress, true);
+        levelInProgress = agregateLevelFromVoxelGrid(voxels, true);
 
         for(size_t i = 0; i < levelInProgress.size(); i++){ // Puts it on the octree in reverse order since were starting at the lowest level.
             octree.push_back(levelInProgress[i]); // Puts our data on the octree
         }
 
         for(int i = 0; i < levelsOfDepth - 1; i++){ // Loops over all the levels of depth
-            levelInProgress = agregateLevel(levelInProgress); // Agregates the previous level. GOOD
-    
+            levelInProgress = agregateLevel(levelInProgress); // Agregates the previous level.
+
             for(size_t j = 0; j < levelInProgress.size(); j++){
                 levelInProgress[j].standardNode &= 0b111111110; // Removes the leaf flag from the node.
                 octree.push_back(levelInProgress[j]);
@@ -112,8 +140,9 @@ namespace projv::utils {
         }
 
         octreeSimplified = addPointers(octreeSimplified);
-        auto end = std::chrono::high_resolution_clock::now();
-        double elapsed = std::chrono::duration<double, std::milli>(end - startWhole).count();
+
+        auto endWhole = std::chrono::high_resolution_clock::now();
+        double elapsed = std::chrono::duration<double, std::milli>(endWhole - startWhole).count();
         core::info("Function: createOctree. Octree generation finished in: " + std::to_string(elapsed) + "ms");
         return octreeSimplified;
     }
@@ -274,13 +303,15 @@ namespace projv::utils {
 
         return decompressedVoxels;
     }
-
+    
     void addVoxelBatchAToVoxelBatchB(VoxelBatch& voxelBatchA, VoxelBatch& voxelBatchB, core::ivec3 voxelBatchAPosition) {
         for(size_t i = 0; i < voxelBatchA.size(); i++) {
-            core::ivec3 currentPosition = reverseZOrderIndex(voxelBatchA[i].ZOrderPosition, 15);
+            core::ivec3 currentPosition = reverseZOrderIndex(voxelBatchA[i].ZOrderPosition, 9);
             core::ivec3 newPosition = currentPosition + voxelBatchAPosition;
+            uint64_t newZOrderPosition = createZOrderIndex(newPosition, 9);
+
             projv::Voxel copiedVoxel = voxelBatchA[i];
-            copiedVoxel.ZOrderPosition = createZOrderIndex(newPosition, 15);
+            copiedVoxel.ZOrderPosition = newZOrderPosition;
             voxelBatchB.emplace_back(copiedVoxel);
         }
     }
