@@ -9,6 +9,8 @@
 #include <chrono>
 #include <algorithm>
 #include <bitset>
+#include <unordered_set>
+
 
 #include "data_structures/voxel.h"
 #include "data_structures/nodeStructure.h"
@@ -132,6 +134,8 @@ namespace projv::utils {
      * @param positionOffset An optional positional offset to apply when comparing voxels.
      */
     void removeVoxelBatchAFromVoxelBatchB(VoxelBatch& voxelBatchA, VoxelBatch& voxelBatchB, core::ivec3 positionOffset = {0, 0, 0});
+
+    Voxel createVoxel(Color color, core::ivec3 position);
 }
 
 #endif

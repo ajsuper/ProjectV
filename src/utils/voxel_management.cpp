@@ -9,7 +9,7 @@ namespace projv::utils {
     }
 
     // Generate the relative child pointers and combine them with a partially constructed octree containing only the masks.
-    std::vector<uint32_t> addPointers(std::vector<uint32_t>& octree){
+    void addPointers(std::vector<uint32_t>& octree) {
         // TODO: Remove the return of the reference and make it only modify the octree directly.
         uint16_t vldMaskMask = 0b111111110;
         uint16_t lefMaskMask = 0b000000001;
@@ -42,7 +42,6 @@ namespace projv::utils {
         if(childPointerTooLarge) {
             core::error("Function: addPointers. Child pointer too large! May cause corrupt octree. Decrease the amount of data in 1 octree");
         }
-        return octree;
     }
 
     std::vector<nodeStructure> agregateLevel(std::vector<nodeStructure>& oldLevel, bool childParent = false) {
@@ -79,8 +78,10 @@ namespace projv::utils {
     }
 
     std::vector<nodeStructure> agregateLevelFromVoxelGrid(VoxelGrid& oldLevel, bool childParent = false) {
-        std::vector<nodeStructure> newLevel;
+        auto start = std::chrono::high_resolution_clock::now();
 
+        std::vector<nodeStructure> newLevel;
+        newLevel.reserve(oldLevel.voxels.size());
         for(int i = oldLevel.voxels.size() - 1; i >= 0; i--) { // Looping over every voxel in reverse
             Voxel& voxel = oldLevel.voxels[i];
             uint32_t newIndex = voxel.ZOrderPosition / 8;
@@ -104,10 +105,14 @@ namespace projv::utils {
                 newNode.standardNode |= bitToSet;
                 newNode.standardNode &= 0b111111110; // Clear leaf bit if needed
                 if(childParent) newNode.standardNode |= 0b1; // Set leaf mask if this node is the parent of leaf's
-                newLevel.push_back(newNode);
+                newLevel.emplace_back(newNode);
             }
         }
-    
+
+        auto end = std::chrono::high_resolution_clock::now();
+        double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
+        core::info("Function: agregateLevelFromVoxelGrid. Execution time: " + std::to_string(elapsed) + "ms");
+
         return newLevel;
     }
 
@@ -119,31 +124,70 @@ namespace projv::utils {
         std::vector<nodeStructure> octree;
         std::vector<nodeStructure> levelInProgress;
 
+        auto startAgregateFromVoxelGrid = std::chrono::high_resolution_clock::now();
         levelInProgress = agregateLevelFromVoxelGrid(voxels, true);
+        auto endAgregateFromVoxelGrid = std::chrono::high_resolution_clock::now();
+        double elapsedAgregateFromVoxelGrid = std::chrono::duration<double, std::milli>(endAgregateFromVoxelGrid - startAgregateFromVoxelGrid).count();
 
-        for(size_t i = 0; i < levelInProgress.size(); i++){ // Puts it on the octree in reverse order since were starting at the lowest level.
-            octree.push_back(levelInProgress[i]); // Puts our data on the octree
-        }
+        std::chrono::high_resolution_clock::duration pushBackDuration(0);
+        std::chrono::high_resolution_clock::duration loopDuration(0);
+
+        auto startPushBack = std::chrono::high_resolution_clock::now();
+        octree = levelInProgress; // Puts our data on the octree
+        auto endPushBack = std::chrono::high_resolution_clock::now();
+        pushBackDuration += (endPushBack - startPushBack);
 
         for(int i = 0; i < levelsOfDepth - 1; i++){ // Loops over all the levels of depth
+            auto startLoop = std::chrono::high_resolution_clock::now();
+
+            auto startAgregateLevel = std::chrono::high_resolution_clock::now();
             levelInProgress = agregateLevel(levelInProgress); // Agregates the previous level.
+            auto endAgregateLevel = std::chrono::high_resolution_clock::now();
+            double elapsedAgregateLevel = std::chrono::duration<double, std::milli>(endAgregateLevel - startAgregateLevel).count();
 
             for(size_t j = 0; j < levelInProgress.size(); j++){
+                auto startInnerLoop = std::chrono::high_resolution_clock::now();
                 levelInProgress[j].standardNode &= 0b111111110; // Removes the leaf flag from the node.
-                octree.push_back(levelInProgress[j]);
+                auto startPushBackInner = std::chrono::high_resolution_clock::now();
+                octree.emplace_back(levelInProgress[j]);
+                auto endPushBackInner = std::chrono::high_resolution_clock::now();
+                pushBackDuration += (endPushBackInner - startPushBackInner);
+                auto endInnerLoop = std::chrono::high_resolution_clock::now();
+                loopDuration += (endInnerLoop - startInnerLoop);
             }
+
+            auto endLoop = std::chrono::high_resolution_clock::now();
+            double elapsedLoop = std::chrono::duration<double, std::milli>(endLoop - startLoop).count();
+            core::info("Function: createOctree. Loop " + std::to_string(i) + " completed in: " + std::to_string(elapsedLoop) + "ms");
+            core::info("Function: createOctree. Aggregation time for loop " + std::to_string(i) + ": " + std::to_string(elapsedAgregateLevel) + "ms");
         }
 
+        auto startSimplify = std::chrono::high_resolution_clock::now();
         std::vector<uint32_t> octreeSimplified;
-        for(int i = octree.size() - 1; i >= 0; i--){
-            octreeSimplified.push_back(octree[i].standardNode);
+        octreeSimplified.reserve(octree.size()); // Reserve memory to avoid reallocations
+        for (auto it = octree.rbegin(); it != octree.rend(); ++it) { // Use reverse iterator for efficiency
+            octreeSimplified.emplace_back(it->standardNode);
         }
+        auto endSimplify = std::chrono::high_resolution_clock::now();
+        double elapsedSimplify = std::chrono::duration<double, std::milli>(endSimplify - startSimplify).count();
 
-        octreeSimplified = addPointers(octreeSimplified);
+        auto startAddPointers = std::chrono::high_resolution_clock::now();
+        addPointers(octreeSimplified);
+        auto endAddPointers = std::chrono::high_resolution_clock::now();
+        double elapsedAddPointers = std::chrono::duration<double, std::milli>(endAddPointers - startAddPointers).count();
 
         auto endWhole = std::chrono::high_resolution_clock::now();
-        double elapsed = std::chrono::duration<double, std::milli>(endWhole - startWhole).count();
-        core::info("Function: createOctree. Octree generation finished in: " + std::to_string(elapsed) + "ms");
+        double elapsedWhole = std::chrono::duration<double, std::milli>(endWhole - startWhole).count();
+        double pushBackElapsed = std::chrono::duration<double, std::milli>(pushBackDuration).count();
+        double loopElapsed = std::chrono::duration<double, std::milli>(loopDuration).count();
+
+        core::info("Function: createOctree. Octree generation finished in: " + std::to_string(elapsedWhole) + "ms");
+        core::info("Function: createOctree. Time spent on agregateLevelFromVoxelGrid: " + std::to_string(elapsedAgregateFromVoxelGrid) + "ms");
+        core::info("Function: createOctree. Total time spent on push_back operations: " + std::to_string(pushBackElapsed) + "ms");
+        core::info("Function: createOctree. Total time spent inside loops: " + std::to_string(loopElapsed) + "ms");
+        core::info("Function: createOctree. Time spent on simplifying octree: " + std::to_string(elapsedSimplify) + "ms");
+        core::info("Function: createOctree. Time spent on adding pointers: " + std::to_string(elapsedAddPointers) + "ms");
+
         return octreeSimplified;
     }
 
@@ -326,9 +370,18 @@ namespace projv::utils {
     VoxelGrid createVoxelGridFromChunksQueue(const Chunk& chunk) {
         VoxelGrid voxelGrid;
         voxelGrid.voxels = chunk.chunkQueue;
+
+        // Sort the voxels by ZOrderPosition
         std::sort(voxelGrid.voxels.begin(), voxelGrid.voxels.end(), [](const Voxel& a, const Voxel& b) {
             return a.ZOrderPosition < b.ZOrderPosition;
         });
+
+        // Remove duplicates, keeping the last occurrence in the unsorted list
+        auto last = std::unique(voxelGrid.voxels.begin(), voxelGrid.voxels.end(), [](const Voxel& a, const Voxel& b) {
+            return a.ZOrderPosition == b.ZOrderPosition;
+        });
+        voxelGrid.voxels.erase(last, voxelGrid.voxels.end());
+
         return voxelGrid;
     }
 
@@ -362,40 +415,34 @@ namespace projv::utils {
     }
 
     void removeVoxelBatchAFromVoxelBatchB(VoxelBatch& voxelBatchA, VoxelBatch& voxelBatchB, core::ivec3 positionOffset) {
-        // Sort both voxel queues by ZOrderPosition for efficient comparison.
-        std::sort(voxelBatchA.begin(), voxelBatchA.end(), [](const Voxel& a, const Voxel& b) {
-            return a.ZOrderPosition < b.ZOrderPosition;
-        });
+        // Create a set of adjusted Z-order indices from voxelBatchA for O(1) lookups.
+        std::unordered_set<uint64_t> adjustedAIndices;
+        adjustedAIndices.reserve(voxelBatchA.size());
 
-        std::sort(voxelBatchB.begin(), voxelBatchB.end(), [](const Voxel& a, const Voxel& b) {
-            return a.ZOrderPosition < b.ZOrderPosition;
-        });
+        for (const auto& voxelA : voxelBatchA) {
+            core::ivec3 adjustedPosition = reverseZOrderIndex(voxelA.ZOrderPosition, 9) + positionOffset;
+            uint64_t adjustedZOrderIndex = createZOrderIndex(adjustedPosition, 9);
+            adjustedAIndices.insert(adjustedZOrderIndex);
+        }
 
+        // Filter voxelBatchB to keep only those not in adjustedAIndices
         VoxelBatch editedVoxelBatch;
-        size_t removeIndex = 0;
+        editedVoxelBatch.reserve(voxelBatchB.size()); // reserve to avoid multiple allocations
 
-        for (const auto& voxel : voxelBatchB) {
-            // Adjust the ZOrderIndex of the current voxel in voxelQueueToRemove.
-            while (removeIndex < voxelBatchB.size()) {
-                core::ivec3 adjustedPosition = reverseZOrderIndex(voxelBatchB[removeIndex].ZOrderPosition, 15) + positionOffset;
-                uint64_t adjustedZOrderIndex = createZOrderIndex(adjustedPosition, 15);
-
-                if (adjustedZOrderIndex < voxel.ZOrderPosition) {
-                    ++removeIndex; // Move to the next voxel in voxelQueueToRemove.
-                } else if (adjustedZOrderIndex == voxel.ZOrderPosition) {
-                    break; // Found a match, skip adding this voxel.
-                } else {
-                    editedVoxelBatch.emplace_back(voxel); // No match, add to the result.
-                    break;
-                }
-            }
-
-            if (removeIndex >= voxelBatchB.size()) {
-                // If we've exhausted voxelQueueToRemove, add the remaining voxels.
-                editedVoxelBatch.emplace_back(voxel);
+        for (const auto& voxelB : voxelBatchB) {
+            if (adjustedAIndices.find(voxelB.ZOrderPosition) == adjustedAIndices.end()) {
+                editedVoxelBatch.emplace_back(voxelB);
             }
         }
 
-        voxelBatchB = editedVoxelBatch;
+        voxelBatchB = std::move(editedVoxelBatch);
+    }
+
+
+    Voxel createVoxel(Color color, core::ivec3 position) {
+        Voxel voxel;
+        voxel.color = color;
+        voxel.ZOrderPosition = createZOrderIndex(position, 9);
+        return voxel;
     }
 }

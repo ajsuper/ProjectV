@@ -28,6 +28,17 @@ namespace projv::graphics {
                 type = GL_FLOAT;
                 break;
 
+            case GL_RG8:
+            case GL_RG16:
+                baseFormat = GL_RG;
+                type = GL_UNSIGNED_BYTE;
+                break;
+
+            case GL_RG16F:
+            case GL_RG32F:
+                baseFormat = GL_RG;
+                type = GL_FLOAT;
+
             case GL_RGB8:
             case GL_RGB16:
                 baseFormat = GL_RGB;
@@ -96,11 +107,31 @@ namespace projv::graphics {
         return;
     }
 
-    FrameBuffer createFrameBufferObjectAdvanced(int width, int height) {
+    FrameBuffer createFrameBufferObject(int width, int height) {
         FrameBuffer FBO;
         glGenFramebuffers(1, &FBO.buffer);
         FBO.width = width;
         FBO.height = height;
+        return FBO;
+    }
+
+    FrameBuffer createDefaultFrameBufferObject(int width, int height) {
+        FrameBuffer FBO;
+        glGenFramebuffers(1, &FBO.buffer);
+        FBO.width = width;
+        FBO.height = height;
+        // Voxel identity
+        addTextureToFrameBuffer(FBO, GL_RG32F, "voxelIdentity");
+        // Surface Info
+        addTextureToFrameBuffer(FBO, GL_RGBA32F, "surfaceInfo");
+        // Color
+        addTextureToFrameBuffer(FBO, GL_RGBA16F, "color");
+        return FBO;
+    }
+
+    FrameBuffer createWindowFrameBufferObject() {
+        FrameBuffer FBO;
+        FBO.buffer = 0;
         return FBO;
     }
 
@@ -112,13 +143,13 @@ namespace projv::graphics {
         renderInstance.frameBufferObjects.erase(name);
     }
 
-    FrameBuffer getFramebufferFromRenderInstance(RenderInstance& renderInstance, const std::string& name) {
+    FrameBuffer& getFramebufferFromRenderInstance(RenderInstance& renderInstance, const std::string& name) {
         auto it = renderInstance.frameBufferObjects.find(name);
         if (it != renderInstance.frameBufferObjects.end()) {
             return it->second;
         } else {
-            core::warn("[getFramebufferFromRenderInstance] Frame buffer doesn't exist: {}. Returning a default framebuffer.", name);
-            FrameBuffer fallback = createFrameBufferObjectAdvanced(1, 1); // Return a default 1x1 framebuffer
+            core::warn("[getFramebufferFromRenderInstance] Frame buffer doesn't exist: {}. Returning a fallback framebuffer.", name);
+            FrameBuffer fallback = createFrameBufferObject(1, 1); // Return a default 1x1 framebuffer
             fallback.buffer = -1;
             fallback.height = -1;
             fallback.width = -1;

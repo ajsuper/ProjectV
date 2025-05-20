@@ -26,7 +26,26 @@ namespace projv::graphics {
      * @param width The width of the frame buffer object.
      * @param height The height of the frame buffer object.
      */
-    FrameBuffer createFrameBufferObjectAdvanced(int width, int height);
+    FrameBuffer createFrameBufferObject(int width, int height);
+
+    /**
+     * Creates a FBO with the following textures:
+     * voxelIdentity = vec2(chunkID, voxelZorder) (location = 0)
+     * surfaceInfo = vec4(normalX, normalY, normalZ, depth) (location = 1)
+     * color = vec4(r, g, b, emissivity) (location = 2)
+     * 
+     * @param width The width of the frame buffer
+     * @param height The height of the frame buffer
+     * @return A FBO with the voxelIdentity, surfaceInfo, and color.
+     */
+    FrameBuffer createDefaultFrameBufferObject(int width, int height);
+
+    /**
+     * Creates the frame buffer object for the window. Simply a normal FBO with a bufferID of 0.
+     * 
+     * @return A FBO with a bufferID of 0.
+     */
+    FrameBuffer createWindowFrameBufferObject();
 
     /**
      * Adds a framebuffer to our render instance.
@@ -52,7 +71,7 @@ namespace projv::graphics {
      * @param name The name of the framebuffer to retrieve.
      * @return The FrameBuffer object associated with the given name.
      */
-    FrameBuffer getFramebufferFromRenderInstance(RenderInstance& renderInstance, const std::string& name);
+    FrameBuffer& getFramebufferFromRenderInstance(RenderInstance& renderInstance, const std::string& name);
 }
 
 #endif

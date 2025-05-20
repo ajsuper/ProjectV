@@ -5,37 +5,35 @@ namespace projv::graphics {
         std::vector<GPUChunkHeader> chunkHeaders;
         std::vector<uint32_t> serializedGeometry;
         std::vector<uint32_t> serializedVoxelTypeData;
-                    
+
         chunkHeaders.reserve(sceneToRender.chunks.size());
         size_t totalGeometrySize = 0;
         size_t totalVoxelTypeDataSize = 0;
-    
+
+        auto startPrecomputeTime = std::chrono::high_resolution_clock::now();
         // Precompute total sizes to reserve memory
         for (const auto &chunk : sceneToRender.chunks) {
             totalGeometrySize += chunk.geometryData.size();
             totalVoxelTypeDataSize += chunk.voxelTypeData.size();
         }
+
         serializedGeometry.reserve(totalGeometrySize);
         serializedVoxelTypeData.reserve(totalVoxelTypeDataSize);
-    
-        // Gather data and compute chunk header indices
+        auto endPrecomputeTime = std::chrono::high_resolution_clock::now();
+        core::info("Profiling: Precomputing total sizes took {} ms.",
+               std::chrono::duration_cast<std::chrono::milliseconds>(endPrecomputeTime - startPrecomputeTime).count());
 
-        std::vector<GPUChunkHeader> tempChunkHeaders(sceneToRender.chunks.size());
-        std::vector<std::vector<uint32_t>> tempSerializedGeometry(sceneToRender.chunks.size());
-        std::vector<std::vector<uint32_t>> tempSerializedVoxelTypeData(sceneToRender.chunks.size());
+        auto startGatherTime = std::chrono::high_resolution_clock::now();
+        // Gather data and create the result directly
+        size_t currentGeometryIndex = 0;
+        size_t currentVoxelTypeDataIndex = 0;
 
-        omp_set_num_threads(omp_get_max_threads()); // or whatever number is appropriate
-        #pragma omp parallel for
-        for (size_t i = 0; i < sceneToRender.chunks.size(); ++i) {
-            const auto &chunk = sceneToRender.chunks[i];
-            bool skip = false;
+        for (const auto &chunk : sceneToRender.chunks) {
             if (chunk.geometryData.empty() || chunk.voxelTypeData.empty()) {
-                #pragma omp critical
                 core::warn("Chunk {} has empty geometry or voxel type data. Skipping.", chunk.header.chunkID);
-                skip = true;
+                continue;
             }
-            if (skip) continue;
-            
+
             GPUChunkHeader shaderChunkHeader;
             shaderChunkHeader.positionX = chunk.header.position.x;
             shaderChunkHeader.positionY = chunk.header.position.y;
@@ -43,47 +41,26 @@ namespace projv::graphics {
             shaderChunkHeader.scale = chunk.header.scale;
             shaderChunkHeader.resolution = chunk.header.resolution / pow(2, chunk.LOD);
 
-            shaderChunkHeader.geometryStartIndex = 0; // Placeholder, will adjust later
-            shaderChunkHeader.voxelTypeDataStartIndex = 0; // Placeholder, will adjust later
+            shaderChunkHeader.geometryStartIndex = currentGeometryIndex;
+            shaderChunkHeader.voxelTypeDataStartIndex = currentVoxelTypeDataIndex;
 
-            tempSerializedGeometry[i] = std::move(chunk.geometryData);
-            tempSerializedVoxelTypeData[i] = std::move(chunk.voxelTypeData);
+            serializedGeometry.insert(serializedGeometry.end(), chunk.geometryData.begin(), chunk.geometryData.end());
+            serializedVoxelTypeData.insert(serializedVoxelTypeData.end(), chunk.voxelTypeData.begin(), chunk.voxelTypeData.end());
 
-            shaderChunkHeader.geometryEndIndex = tempSerializedGeometry[i].size();
-            shaderChunkHeader.voxelTypeDataEndIndex = tempSerializedVoxelTypeData[i].size();
+            shaderChunkHeader.geometryEndIndex = serializedGeometry.size();
+            shaderChunkHeader.voxelTypeDataEndIndex = serializedVoxelTypeData.size();
 
-            tempChunkHeaders[i] = shaderChunkHeader;
+            currentGeometryIndex = shaderChunkHeader.geometryEndIndex;
+            currentVoxelTypeDataIndex = shaderChunkHeader.voxelTypeDataEndIndex;
 
-            int thread_id = omp_get_thread_num(); 
+            chunkHeaders.emplace_back(shaderChunkHeader);
         }
 
-        auto startTime = std::chrono::high_resolution_clock::now();
+        auto endGatherTime = std::chrono::high_resolution_clock::now();
+        core::info("Profiling: Gathering data and creating result directly took {} ms.",
+               std::chrono::duration_cast<std::chrono::milliseconds>(endGatherTime - startGatherTime).count());
 
-        // Combine results in the correct order
-        for (size_t i = 0; i < tempChunkHeaders.size(); ++i) {
-            std::vector<uint32_t>& geometry = tempSerializedGeometry[i];
-            std::vector<uint32_t>& typeData = tempSerializedVoxelTypeData[i];
-            GPUChunkHeader& chunkHeader = tempChunkHeaders[i];
-            if (geometry.empty() || typeData.empty()) {
-                continue; // Skip empty chunks
-            }
-
-            chunkHeader.geometryStartIndex = serializedGeometry.size();
-            chunkHeader.voxelTypeDataStartIndex = serializedVoxelTypeData.size();
-
-            serializedGeometry.insert(serializedGeometry.end(), geometry.begin(), geometry.end());
-            serializedVoxelTypeData.insert(serializedVoxelTypeData.end(), typeData.begin(), typeData.end());
-
-            chunkHeader.geometryEndIndex = serializedGeometry.size();
-            chunkHeader.voxelTypeDataEndIndex = serializedVoxelTypeData.size();
-
-            chunkHeaders.emplace_back(tempChunkHeaders[i]);
-        }     
-        
-        auto endTime = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
-        core::info("Profiling: Gathering data and computing chunk header indices took {} ms.", duration);
-
+        auto startBufferUpdateTime = std::chrono::high_resolution_clock::now();
         // Outputs our:
         // Serialized Geometry
         // Serialized Voxel type data
@@ -101,8 +78,7 @@ namespace projv::graphics {
         const GLbitfield storageFlags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
         
         // Helper lambda to update or allocate a buffer with persistent mapping.
-        auto updateBuffer = [&](GLuint &ssbo, void* &mappedPtr, size_t &capacity, size_t requiredSize,
-                                  GLenum bindingPoint, const void* data) {
+        auto updateBuffer = [&](GLuint &ssbo, void* &mappedPtr, size_t &capacity, size_t requiredSize, GLenum bindingPoint, const void* data) {
             if (ssbo == 0 || capacity < requiredSize) {
                 core::info("Resizing SSBO to accommodate {} bytes.", requiredSize);
                 // If already created but not large enough, delete it.
@@ -113,14 +89,15 @@ namespace projv::graphics {
                 }
                 glGenBuffers(1, &ssbo);
                 glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
-                capacity = requiredSize * 1.5;
+                capacity = requiredSize * 2.5;
+
                 // Allocate persistent storage once with no initial data.
                 glBufferStorage(GL_SHADER_STORAGE_BUFFER, capacity, nullptr, storageFlags);
+
                 // Map the entire buffer persistently.
                 mappedPtr = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, capacity, storageFlags);
                 if (!mappedPtr) {
                     core::error("Failed to map buffer persistently!");
-                    // Handle error appropriately.
                 }
             } else {
                 // Bind if no reallocation is needed.
@@ -139,11 +116,11 @@ namespace projv::graphics {
         size_t voxelTypeDataSize = serializedVoxelTypeData.size() * sizeof(uint32_t);
         
         // Update each SSBO with the new data using persistent mapping.
-        updateBuffer(chunkHeaderSSBO, chunkHeaderMappedPtr, chunkHeaderCapacity,
-                    chunkHeaderSize, 3, chunkHeaders.data());
-        updateBuffer(geometrySSBO, geometryMappedPtr, geometryCapacity,
-                     geometrySize, 4, serializedGeometry.data());
-        updateBuffer(voxelTypeDataSSBO, voxelTypeDataMappedPtr, voxelTypeDataCapacity,
-                     voxelTypeDataSize, 5, serializedVoxelTypeData.data());
+        updateBuffer(chunkHeaderSSBO, chunkHeaderMappedPtr, chunkHeaderCapacity, chunkHeaderSize, 3, chunkHeaders.data());
+        updateBuffer(geometrySSBO, geometryMappedPtr, geometryCapacity, geometrySize, 4, serializedGeometry.data());
+        updateBuffer(voxelTypeDataSSBO, voxelTypeDataMappedPtr, voxelTypeDataCapacity, voxelTypeDataSize, 5, serializedVoxelTypeData.data());
+
+        auto endBufferUpdateTime = std::chrono::high_resolution_clock::now();
+        core::info("Profiling: Updating buffers took {} ms.", std::chrono::duration_cast<std::chrono::milliseconds>(endBufferUpdateTime - startBufferUpdateTime).count());
     }
 }
