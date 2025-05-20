@@ -3,6 +3,8 @@
 
 #include <array>
 #include <stdint.h>
+#include <iostream>
+#include <map>
 #include "core/math.h"
 
 namespace projv::utils {

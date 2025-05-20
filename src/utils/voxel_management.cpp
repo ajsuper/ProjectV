@@ -78,8 +78,6 @@ namespace projv::utils {
     }
 
     std::vector<nodeStructure> agregateLevelFromVoxelGrid(VoxelGrid& oldLevel, bool childParent = false) {
-        auto start = std::chrono::high_resolution_clock::now();
-
         std::vector<nodeStructure> newLevel;
         newLevel.reserve(oldLevel.voxels.size());
         for(int i = oldLevel.voxels.size() - 1; i >= 0; i--) { // Looping over every voxel in reverse
@@ -108,11 +106,6 @@ namespace projv::utils {
                 newLevel.emplace_back(newNode);
             }
         }
-
-        auto end = std::chrono::high_resolution_clock::now();
-        double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
-        core::info("Function: agregateLevelFromVoxelGrid. Execution time: " + std::to_string(elapsed) + "ms");
-
         return newLevel;
     }
 
@@ -124,69 +117,30 @@ namespace projv::utils {
         std::vector<nodeStructure> octree;
         std::vector<nodeStructure> levelInProgress;
 
-        auto startAgregateFromVoxelGrid = std::chrono::high_resolution_clock::now();
         levelInProgress = agregateLevelFromVoxelGrid(voxels, true);
-        auto endAgregateFromVoxelGrid = std::chrono::high_resolution_clock::now();
-        double elapsedAgregateFromVoxelGrid = std::chrono::duration<double, std::milli>(endAgregateFromVoxelGrid - startAgregateFromVoxelGrid).count();
-
-        std::chrono::high_resolution_clock::duration pushBackDuration(0);
-        std::chrono::high_resolution_clock::duration loopDuration(0);
-
-        auto startPushBack = std::chrono::high_resolution_clock::now();
         octree = levelInProgress; // Puts our data on the octree
-        auto endPushBack = std::chrono::high_resolution_clock::now();
-        pushBackDuration += (endPushBack - startPushBack);
 
         for(int i = 0; i < levelsOfDepth - 1; i++){ // Loops over all the levels of depth
-            auto startLoop = std::chrono::high_resolution_clock::now();
-
-            auto startAgregateLevel = std::chrono::high_resolution_clock::now();
             levelInProgress = agregateLevel(levelInProgress); // Agregates the previous level.
-            auto endAgregateLevel = std::chrono::high_resolution_clock::now();
-            double elapsedAgregateLevel = std::chrono::duration<double, std::milli>(endAgregateLevel - startAgregateLevel).count();
 
             for(size_t j = 0; j < levelInProgress.size(); j++){
-                auto startInnerLoop = std::chrono::high_resolution_clock::now();
                 levelInProgress[j].standardNode &= 0b111111110; // Removes the leaf flag from the node.
-                auto startPushBackInner = std::chrono::high_resolution_clock::now();
                 octree.emplace_back(levelInProgress[j]);
-                auto endPushBackInner = std::chrono::high_resolution_clock::now();
-                pushBackDuration += (endPushBackInner - startPushBackInner);
-                auto endInnerLoop = std::chrono::high_resolution_clock::now();
-                loopDuration += (endInnerLoop - startInnerLoop);
             }
-
-            auto endLoop = std::chrono::high_resolution_clock::now();
-            double elapsedLoop = std::chrono::duration<double, std::milli>(endLoop - startLoop).count();
-            core::info("Function: createOctree. Loop " + std::to_string(i) + " completed in: " + std::to_string(elapsedLoop) + "ms");
-            core::info("Function: createOctree. Aggregation time for loop " + std::to_string(i) + ": " + std::to_string(elapsedAgregateLevel) + "ms");
         }
 
-        auto startSimplify = std::chrono::high_resolution_clock::now();
         std::vector<uint32_t> octreeSimplified;
         octreeSimplified.reserve(octree.size()); // Reserve memory to avoid reallocations
         for (auto it = octree.rbegin(); it != octree.rend(); ++it) { // Use reverse iterator for efficiency
             octreeSimplified.emplace_back(it->standardNode);
         }
-        auto endSimplify = std::chrono::high_resolution_clock::now();
-        double elapsedSimplify = std::chrono::duration<double, std::milli>(endSimplify - startSimplify).count();
 
-        auto startAddPointers = std::chrono::high_resolution_clock::now();
         addPointers(octreeSimplified);
-        auto endAddPointers = std::chrono::high_resolution_clock::now();
-        double elapsedAddPointers = std::chrono::duration<double, std::milli>(endAddPointers - startAddPointers).count();
 
         auto endWhole = std::chrono::high_resolution_clock::now();
         double elapsedWhole = std::chrono::duration<double, std::milli>(endWhole - startWhole).count();
-        double pushBackElapsed = std::chrono::duration<double, std::milli>(pushBackDuration).count();
-        double loopElapsed = std::chrono::duration<double, std::milli>(loopDuration).count();
 
         core::info("Function: createOctree. Octree generation finished in: " + std::to_string(elapsedWhole) + "ms");
-        core::info("Function: createOctree. Time spent on agregateLevelFromVoxelGrid: " + std::to_string(elapsedAgregateFromVoxelGrid) + "ms");
-        core::info("Function: createOctree. Total time spent on push_back operations: " + std::to_string(pushBackElapsed) + "ms");
-        core::info("Function: createOctree. Total time spent inside loops: " + std::to_string(loopElapsed) + "ms");
-        core::info("Function: createOctree. Time spent on simplifying octree: " + std::to_string(elapsedSimplify) + "ms");
-        core::info("Function: createOctree. Time spent on adding pointers: " + std::to_string(elapsedAddPointers) + "ms");
 
         return octreeSimplified;
     }
@@ -415,13 +369,15 @@ namespace projv::utils {
     }
 
     void removeVoxelBatchAFromVoxelBatchB(VoxelBatch& voxelBatchA, VoxelBatch& voxelBatchB, core::ivec3 positionOffset) {
+        auto start = std::chrono::high_resolution_clock::now();
+
         // Create a set of adjusted Z-order indices from voxelBatchA for O(1) lookups.
         std::unordered_set<uint64_t> adjustedAIndices;
         adjustedAIndices.reserve(voxelBatchA.size());
 
         for (const auto& voxelA : voxelBatchA) {
-            core::ivec3 adjustedPosition = reverseZOrderIndex(voxelA.ZOrderPosition, 9) + positionOffset;
-            uint64_t adjustedZOrderIndex = createZOrderIndex(adjustedPosition, 9);
+            core::ivec3 adjustedPosition = reverseZOrderIndex(voxelA.ZOrderPosition, 9);
+            uint64_t adjustedZOrderIndex = createZOrderIndex(adjustedPosition + positionOffset, 9);
             adjustedAIndices.insert(adjustedZOrderIndex);
         }
 
@@ -436,6 +392,10 @@ namespace projv::utils {
         }
 
         voxelBatchB = std::move(editedVoxelBatch);
+
+        auto end = std::chrono::high_resolution_clock::now();
+        double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
+        core::info("Function: removeVoxelBatchAFromVoxelBatchB. Time taken: " + std::to_string(elapsed) + "ms");
     }
 
 
