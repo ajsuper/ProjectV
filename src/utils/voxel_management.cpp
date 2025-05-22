@@ -373,7 +373,7 @@ namespace projv::utils {
         double totalReverseZOrderTime = 0.0; // Initialize the variable to track time
 
         // Create a set of adjusted Z-order indices from voxelBatchA for O(1) lookups.
-        robin_hood::unordered_flat_set<uint32_t> adjustedAIndices;
+        std::unordered_set<uint32_t> adjustedAIndices;
         adjustedAIndices.reserve(voxelBatchA.size());
 
         auto loopStart = std::chrono::high_resolution_clock::now();

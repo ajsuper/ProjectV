@@ -1,7 +1,7 @@
 #ifndef PROJV_CORE_MATH_H
 #define PROJV_CORE_MATH_H
 // This is a wrapper for the glm library, to provide consistency accross the engine.
-#include "dependencies/glm/glm/glm.hpp"
+#include <glm/glm.hpp>
 
 namespace projv::core {
     using vec1 = glm::vec1;

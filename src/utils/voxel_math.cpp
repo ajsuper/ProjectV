@@ -1,5 +1,4 @@
 #include "utils/voxel_math.h"
-#include "dependencies/glm/glm/glm.hpp"
 
 namespace projv::utils {
     uint32_t convertVec3ToHeaderPosition(core::ivec3 vec3) {
