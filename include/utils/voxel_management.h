@@ -11,14 +11,12 @@
 #include <bitset>
 #include <unordered_set>
 
-
 #include "data_structures/voxel.h"
 #include "data_structures/nodeStructure.h"
 #include "core/math.h"
 #include "core/log.h"
 #include "data_structures/scene.h"
 #include "voxel_math.h"
-//#include "robin.h"
 
 namespace projv::utils {
     /**
@@ -103,7 +101,7 @@ namespace projv::utils {
      * @param voxelBatch The source VoxelBatch containing voxel data.
      * @param chunk The destination Chunk to receive the voxel data.
      */
-    void copyVoxelBatchToChunk(VoxelBatch& voxelBatch, Chunk& chunk);
+    void moveVoxelBatchToChunk(VoxelBatch& voxelBatch, Chunk& chunk);
 
     /**
      * Retrieves a VoxelBatch representing the contents of a Chunk.

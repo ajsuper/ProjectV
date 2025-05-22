@@ -255,8 +255,8 @@ namespace projv::utils {
         return;
     }
 
-    void copyVoxelBatchToChunk(VoxelBatch& voxelBatch, Chunk& chunk) {
-        chunk.chunkQueue = voxelBatch;
+    void moveVoxelBatchToChunk(VoxelBatch& voxelBatch, Chunk& chunk) {
+        chunk.chunkQueue = std::move(voxelBatch);
         return;
     }
 
@@ -306,12 +306,16 @@ namespace projv::utils {
         for(size_t i = 0; i < voxelBatchA.size(); i++) {
             core::ivec3 currentPosition = reverseZOrderIndex(voxelBatchA[i].ZOrderPosition, 9);
             core::ivec3 newPosition = currentPosition + voxelBatchAPosition;
+            newPosition.x = std::clamp(newPosition.x, 0, 511);
+            newPosition.y = std::clamp(newPosition.y, 0, 511);
+            newPosition.z = std::clamp(newPosition.z, 0, 511);
             uint64_t newZOrderPosition = createZOrderIndex(newPosition, 9);
 
             projv::Voxel copiedVoxel = voxelBatchA[i];
             copiedVoxel.ZOrderPosition = newZOrderPosition;
             voxelBatchB.emplace_back(copiedVoxel);
         }
+        
     }
 
     void sortVoxelBatch(VoxelBatch& voxelBatch) {
@@ -370,45 +374,44 @@ namespace projv::utils {
 
     void removeVoxelBatchAFromVoxelBatchB(VoxelBatch& voxelBatchA, VoxelBatch& voxelBatchB, core::ivec3 positionOffset) {
         auto start = std::chrono::high_resolution_clock::now();
-        double totalReverseZOrderTime = 0.0; // Initialize the variable to track time
-
-        // Create a set of adjusted Z-order indices from voxelBatchA for O(1) lookups.
-        std::unordered_set<uint32_t> adjustedAIndices;
-        adjustedAIndices.reserve(voxelBatchA.size());
-
+    
+        constexpr size_t ZORDER_RANGE = 512 * 512 * 512; // 134217728
+        std::vector<bool> zOrderMask(ZORDER_RANGE, false); // Bitmask for A's Z-order positions
+    
+        // Preprocessing voxelBatchA
         auto loopStart = std::chrono::high_resolution_clock::now();
-
+    
         for (const auto& voxelA : voxelBatchA) {
             core::ivec3 adjustedPosition = reverseZOrderIndex(voxelA.ZOrderPosition, 9);
-            uint64_t adjustedZOrderIndex = createZOrderIndex(adjustedPosition + positionOffset, 9);
-            adjustedAIndices.insert(adjustedZOrderIndex);
+            uint32_t adjustedZOrderIndex = createZOrderIndex(adjustedPosition + positionOffset, 9);
+            zOrderMask[adjustedZOrderIndex] = true; // Mark this index as to-remove
         }
-
+    
         auto loopEnd = std::chrono::high_resolution_clock::now();
         double loopElapsed = std::chrono::duration<double, std::milli>(loopEnd - loopStart).count();
-        core::info("Time spent in loop processing voxelBatchA: " + std::to_string(loopElapsed) + "ms");
-
-        // Filter voxelBatchB to keep only those not in adjustedAIndices
+        core::info("Time spent processing voxelBatchA: " + std::to_string(loopElapsed) + "ms");
+    
+        // filtering voxelBatchB
         auto filterStart = std::chrono::high_resolution_clock::now();
-        int index = 0;
-
+    
+        size_t index = 0;
         for (size_t i = 0; i < voxelBatchB.size(); ++i) {
-            if (adjustedAIndices.find(voxelBatchB[i].ZOrderPosition) == adjustedAIndices.end()) {
-                voxelBatchB[index] = voxelBatchB[i];
-                index += 1;
+            uint32_t zIndex = voxelBatchB[i].ZOrderPosition;
+            if (zIndex >= ZORDER_RANGE || !zOrderMask[zIndex]) {
+                voxelBatchB[index++] = voxelBatchB[i];
             }
         }
-
-        voxelBatchB.resize(index+1);
-
+        voxelBatchB.resize(index);
+    
         auto filterEnd = std::chrono::high_resolution_clock::now();
         double filterElapsed = std::chrono::duration<double, std::milli>(filterEnd - filterStart).count();
         core::info("Time spent filtering voxelBatchB: " + std::to_string(filterElapsed) + "ms");
-
+    
         auto end = std::chrono::high_resolution_clock::now();
-        double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
-        core::info("Function: removeVoxelBatchAFromVoxelBatchB. Time taken: " + std::to_string(elapsed) + "ms");
+        double totalElapsed = std::chrono::duration<double, std::milli>(end - start).count();
+        core::info("Function: removeVoxelBatchAFromVoxelBatchB. Time taken: " + std::to_string(totalElapsed) + "ms");
     }
+    
 
 
     Voxel createVoxel(Color color, core::ivec3 position) {
