@@ -85,6 +85,8 @@
         "filesystem": "cpp",
         "regex": "cpp",
         "semaphore": "cpp",
-        "execution": "cpp"
+        "execution": "cpp",
+        "set": "cpp",
+        "unordered_set": "cpp"
     }
 }

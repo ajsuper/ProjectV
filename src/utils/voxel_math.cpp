@@ -66,10 +66,10 @@ namespace projv::utils {
         return reverseArray;
     };
 
-    core::ivec3 reverseZOrderIndex(uint64_t z_order, int bitDepth) {
+    core::ivec3 reverseZOrderIndex2(uint64_t z_order, int bitDepth) {
         // Forward LUTs
         static std::array<uint32_t, 512> xArray = precalculateArray(1);
-        static std::array<uint32_t, 512> yArray = precalculateArray(2); // GOOD
+        static std::array<uint32_t, 512> yArray = precalculateArray(2);
         static std::array<uint32_t, 512> zArray = precalculateArray(3);
 
         // Reverse LUTs (maps partial z_order  -> coordinate)
@@ -78,11 +78,34 @@ namespace projv::utils {
         static std::unordered_map<uint32_t, uint16_t> revZArray = createReverseLUT(zArray);
 
         core::ivec3 coordinate;
+        uint32_t xMasked = z_order & 0b100100100100100100100100100;
+        uint32_t yMasked = z_order & 0b010010010010010010010010010;
+        uint32_t zMasked = z_order & 0b001001001001001001001001001;
 
-        coordinate.x = revXArray[z_order & 0b100100100100100100100100100];
-        coordinate.y = revYArray[z_order & 0b010010010010010010010010010];
-        coordinate.z = revZArray[z_order & 0b001001001001001001001001001];
+        coordinate.x = revXArray[xMasked];
+        coordinate.y = revYArray[yMasked];
+        coordinate.z = revZArray[zMasked];
         return coordinate;
+    }
+    
+    // Deinterleave every third bit starting from given offset (0 = Y, 1 = X, 2 = Z)
+    inline uint32_t compactBits(uint64_t code, int offset) {
+        uint64_t x = code >> offset;
+        x &= 0x1249249249249249ULL; // Keep every third bit
+        x = (x ^ (x >> 2))  & 0x10C30C30C30C30C3ULL;
+        x = (x ^ (x >> 4))  & 0x100F00F00F00F00FULL;
+        x = (x ^ (x >> 8))  & 0x1F0000FF0000FFULL;
+        x = (x ^ (x >> 16)) & 0x1F00000000FFFFULL;
+        x = (x ^ (x >> 32)) & 0x1FFFFF;
+        return static_cast<uint32_t>(x);
+    }
+
+    core::ivec3 reverseZOrderIndex(uint64_t z_order, int bitDepth) {
+        return {
+            compactBits(z_order, 2),  // x came from bit positions 1, 4, 7, ...
+            compactBits(z_order, 1),  // y came from bit positions 0, 3, 6, ...
+            compactBits(z_order, 0)   // z came from bit positions 2, 5, 8, ...
+        };
     }
 
 }

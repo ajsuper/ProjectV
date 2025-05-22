@@ -370,10 +370,13 @@ namespace projv::utils {
 
     void removeVoxelBatchAFromVoxelBatchB(VoxelBatch& voxelBatchA, VoxelBatch& voxelBatchB, core::ivec3 positionOffset) {
         auto start = std::chrono::high_resolution_clock::now();
+        double totalReverseZOrderTime = 0.0; // Initialize the variable to track time
 
         // Create a set of adjusted Z-order indices from voxelBatchA for O(1) lookups.
-        std::unordered_set<uint64_t> adjustedAIndices;
+        robin_hood::unordered_flat_set<uint32_t> adjustedAIndices;
         adjustedAIndices.reserve(voxelBatchA.size());
+
+        auto loopStart = std::chrono::high_resolution_clock::now();
 
         for (const auto& voxelA : voxelBatchA) {
             core::ivec3 adjustedPosition = reverseZOrderIndex(voxelA.ZOrderPosition, 9);
@@ -381,17 +384,26 @@ namespace projv::utils {
             adjustedAIndices.insert(adjustedZOrderIndex);
         }
 
-        // Filter voxelBatchB to keep only those not in adjustedAIndices
-        VoxelBatch editedVoxelBatch;
-        editedVoxelBatch.reserve(voxelBatchB.size()); // reserve to avoid multiple allocations
+        auto loopEnd = std::chrono::high_resolution_clock::now();
+        double loopElapsed = std::chrono::duration<double, std::milli>(loopEnd - loopStart).count();
+        core::info("Time spent in loop processing voxelBatchA: " + std::to_string(loopElapsed) + "ms");
 
-        for (const auto& voxelB : voxelBatchB) {
-            if (adjustedAIndices.find(voxelB.ZOrderPosition) == adjustedAIndices.end()) {
-                editedVoxelBatch.emplace_back(voxelB);
+        // Filter voxelBatchB to keep only those not in adjustedAIndices
+        auto filterStart = std::chrono::high_resolution_clock::now();
+        int index = 0;
+
+        for (size_t i = 0; i < voxelBatchB.size(); ++i) {
+            if (adjustedAIndices.find(voxelBatchB[i].ZOrderPosition) == adjustedAIndices.end()) {
+                voxelBatchB[index] = voxelBatchB[i];
+                index += 1;
             }
         }
 
-        voxelBatchB = std::move(editedVoxelBatch);
+        voxelBatchB.resize(index+1);
+
+        auto filterEnd = std::chrono::high_resolution_clock::now();
+        double filterElapsed = std::chrono::duration<double, std::milli>(filterEnd - filterStart).count();
+        core::info("Time spent filtering voxelBatchB: " + std::to_string(filterElapsed) + "ms");
 
         auto end = std::chrono::high_resolution_clock::now();
         double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
