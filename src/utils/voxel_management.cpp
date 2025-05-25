@@ -238,6 +238,7 @@ namespace projv::utils {
         chunkHeader.scale = chunkScale;
         chunkHeader.voxelScale = voxelScale;
         chunkHeader.resolution = accuratePowerOf2;
+        chunkHeader.chunkID = std::rand();
 
         return chunkHeader;
     }
@@ -315,7 +316,6 @@ namespace projv::utils {
             copiedVoxel.ZOrderPosition = newZOrderPosition;
             voxelBatchB.emplace_back(copiedVoxel);
         }
-        
     }
 
     void sortVoxelBatch(VoxelBatch& voxelBatch) {
@@ -327,33 +327,53 @@ namespace projv::utils {
 
     VoxelGrid createVoxelGridFromChunksQueue(const Chunk& chunk) {
         VoxelGrid voxelGrid;
-        voxelGrid.voxels = chunk.chunkQueue;
-
-        // Sort the voxels by ZOrderPosition
-        std::sort(voxelGrid.voxels.begin(), voxelGrid.voxels.end(), [](const Voxel& a, const Voxel& b) {
-            return a.ZOrderPosition < b.ZOrderPosition;
-        });
-
-        // Remove duplicates, keeping the last occurrence in the unsorted list
-        auto last = std::unique(voxelGrid.voxels.begin(), voxelGrid.voxels.end(), [](const Voxel& a, const Voxel& b) {
-            return a.ZOrderPosition == b.ZOrderPosition;
-        });
-        voxelGrid.voxels.erase(last, voxelGrid.voxels.end());
-
+    
+        const auto& chunkQueue = chunk.chunkQueue;
+        std::unordered_map<int, Voxel> originalGridAsMap;
+    
+        // Keep the last occurrence for each ZOrderPosition
+        for (const auto& voxel : chunkQueue) {
+            originalGridAsMap[voxel.ZOrderPosition] = voxel;
+        }
+    
+        // Extract and sort only the keys
+        std::vector<int> sortedKeys;
+        sortedKeys.reserve(originalGridAsMap.size());
+        for (const auto& [key, _] : originalGridAsMap) {
+            sortedKeys.push_back(key);
+        }
+    
+        auto sortStart = std::chrono::high_resolution_clock::now();
+        std::sort(sortedKeys.begin(), sortedKeys.end());
+        auto sortEnd = std::chrono::high_resolution_clock::now();
+        double sortElapsed = std::chrono::duration<double, std::milli>(sortEnd - sortStart).count();
+        core::info("Time spent sorting ZOrder keys: " + std::to_string(sortElapsed) + "ms");
+    
+        // Rebuild voxel list using sorted keys
+        voxelGrid.voxels.reserve(sortedKeys.size());
+        for (int key : sortedKeys) {
+            voxelGrid.voxels.push_back(std::move(originalGridAsMap[key]));
+        }
+    
         return voxelGrid;
     }
+    
 
     void updateChunkFromItsVoxelBatch(Chunk& chunk, bool clearBatch) {
         // Get farthest voxel.
+        auto start = std::chrono::high_resolution_clock::now();
         VoxelGrid voxelGrid = createVoxelGridFromChunksQueue(chunk);
+        auto end = std::chrono::high_resolution_clock::now();
+        double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
+        core::info("Time taken to create VoxelGrid from chunk queue: " + std::to_string(elapsed) + "ms");
 
         // Compute resolution.
         Voxel farthestVoxel = voxelGrid.voxels[voxelGrid.voxels.size() - 1];
         core::ivec3 position = reverseZOrderIndex(farthestVoxel.ZOrderPosition, 15);
         int farthestCoordinate = std::max({position.x, position.y, position.z});
         int resolutionToTheNearestPowOfTwo = std::pow(2, std::ceil(std::log2(farthestCoordinate + 1)));
-        if(resolutionToTheNearestPowOfTwo > 512) {
-            core::warn("resoltuion of chunk {} is greater than 512 ({}). Caused by voxel positions inside chunk being too large. ", chunk.header.chunkID, chunk.header.resolution);
+        if(resolutionToTheNearestPowOfTwo > 256) {
+            core::warn("resoltuion of chunk {} is greater than 256 ({}). Caused by voxel positions inside chunk being too large. ", chunk.header.chunkID, chunk.header.resolution);
         }
 
         // Update the chunk.
@@ -412,8 +432,6 @@ namespace projv::utils {
         core::info("Function: removeVoxelBatchAFromVoxelBatchB. Time taken: " + std::to_string(totalElapsed) + "ms");
     }
     
-
-
     Voxel createVoxel(Color color, core::ivec3 position) {
         Voxel voxel;
         voxel.color = color;
