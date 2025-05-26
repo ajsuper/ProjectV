@@ -42,6 +42,10 @@ namespace projv::core {
             case SystemStage::Render:
                 app.Render = [=, &app]() { system(app); };
                 break;
+            case SystemStage::Shutdown:
+                app.Shutdown = [=, &app]() { system(app); };
+                break;
+
         }
     }
 
@@ -53,6 +57,7 @@ namespace projv::core {
             app.Render();
             app.frameCount++;
         }
+        app.Shutdown();
         return;
     }
 }

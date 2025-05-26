@@ -16,7 +16,8 @@ namespace projv {
     enum class SystemStage {
         Startup,
         Update,
-        Render
+        Render,
+        Shutdown
     };
 
     // Main world object that stores the state of the world.
@@ -35,6 +36,7 @@ namespace projv {
         std::function<void()> Startup;
         std::function<void()> Update;
         std::function<void()> Render;
+        std::function<void()> Shutdown;
     };
 }
 
