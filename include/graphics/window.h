@@ -12,17 +12,6 @@
 
 namespace projv::graphics {
     /**
-     * Initializes GLFW and GLEW, and creates a window.
-     * 
-     * @param window A reference to the GLFWwindow pointer that will be initialized.
-     * @param windowWidth The width of the window to be created.
-     * @param windowHeight The height of the window to be created.
-     * @param windowName The title of the window to be created.
-     * @return true if initialization and window creation were successful, false otherwise.
-     */
-    bool initializeGLFWandGLEWWindow(GLFWwindow*& window, int windowWidth, int windowHeight, const std::string& windowName); // Graphics
-
-    /**
      * Initializes GLFW, GLEW, our fullscreen render quad, and creates a window.
      * 
      * @param windowWidth The width of the window.
