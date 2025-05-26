@@ -327,37 +327,24 @@ namespace projv::utils {
 
     VoxelGrid createVoxelGridFromChunksQueue(const Chunk& chunk) {
         VoxelGrid voxelGrid;
-    
-        const auto& chunkQueue = chunk.chunkQueue;
-        std::unordered_map<int, Voxel> originalGridAsMap;
-    
-        // Keep the last occurrence for each ZOrderPosition
-        for (const auto& voxel : chunkQueue) {
-            originalGridAsMap[voxel.ZOrderPosition] = voxel;
+        std::unordered_set<int> seen;
+        std::vector<Voxel> filtered;
+
+        // Reverse iterate to keep the last occurrence
+        for (auto it = chunk.chunkQueue.rbegin(); it != chunk.chunkQueue.rend(); ++it) {
+            if (seen.insert(it->ZOrderPosition).second) {
+                filtered.push_back(*it);
+            }
         }
-    
-        // Extract and sort only the keys
-        std::vector<int> sortedKeys;
-        sortedKeys.reserve(originalGridAsMap.size());
-        for (const auto& [key, _] : originalGridAsMap) {
-            sortedKeys.push_back(key);
-        }
-    
-        auto sortStart = std::chrono::high_resolution_clock::now();
-        std::sort(sortedKeys.begin(), sortedKeys.end());
-        auto sortEnd = std::chrono::high_resolution_clock::now();
-        double sortElapsed = std::chrono::duration<double, std::milli>(sortEnd - sortStart).count();
-        core::info("Time spent sorting ZOrder keys: " + std::to_string(sortElapsed) + "ms");
-    
-        // Rebuild voxel list using sorted keys
-        voxelGrid.voxels.reserve(sortedKeys.size());
-        for (int key : sortedKeys) {
-            voxelGrid.voxels.push_back(std::move(originalGridAsMap[key]));
-        }
-    
+
+        // Now sort the filtered voxels by ZOrderPosition
+        std::sort(filtered.begin(), filtered.end(), [](const Voxel& a, const Voxel& b) {
+            return a.ZOrderPosition < b.ZOrderPosition;
+        });
+
+        voxelGrid.voxels = std::move(filtered);
         return voxelGrid;
     }
-    
 
     void updateChunkFromItsVoxelBatch(Chunk& chunk, bool clearBatch) {
         // Get farthest voxel.
