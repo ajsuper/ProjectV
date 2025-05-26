@@ -326,23 +326,24 @@ namespace projv::utils {
     }
 
     VoxelGrid createVoxelGridFromChunksQueue(const Chunk& chunk) {
-        VoxelGrid voxelGrid;
-        std::unordered_set<int> seen;
-        std::vector<Voxel> filtered;
+        VoxelGrid voxelGrid = {};
 
-        // Reverse iterate to keep the last occurrence
-        for (auto it = chunk.chunkQueue.rbegin(); it != chunk.chunkQueue.rend(); ++it) {
-            if (seen.insert(it->ZOrderPosition).second) {
-                filtered.push_back(*it);
-            }
-        }
+        // Copy chunkQueue to work on it directly
+        std::vector<Voxel> voxels = chunk.chunkQueue;
 
-        // Now sort the filtered voxels by ZOrderPosition
-        std::sort(filtered.begin(), filtered.end(), [](const Voxel& a, const Voxel& b) {
+        // Sort by ZOrderPosition (we don't care which duplicate is kept)
+        std::sort(voxels.begin(), voxels.end(), [](const Voxel& a, const Voxel& b) {
             return a.ZOrderPosition < b.ZOrderPosition;
         });
 
-        voxelGrid.voxels = std::move(filtered);
+        // Remove duplicates: keep first occurrence after sorting
+        auto last = std::unique(voxels.begin(), voxels.end(), [](const Voxel& a, const Voxel& b) {
+            return a.ZOrderPosition == b.ZOrderPosition;
+        });
+        voxels.erase(last, voxels.end());
+
+        // Assign to VoxelGrid
+        voxelGrid.voxels = std::move(voxels);
         return voxelGrid;
     }
 
