@@ -2,6 +2,7 @@
 
 namespace projv::graphics {
     std::string loadShaderSource(const char *filepath) {
+        core::info("loadShaderSource: Loading shader: {}", filepath);
         std::ifstream shaderFile;
         shaderFile.exceptions(std::ifstream::failbit | std::ifstream::badbit);
         try
@@ -14,13 +15,15 @@ namespace projv::graphics {
         }
         catch (std::ifstream::failure &e)
         {
-            core::error("Shader Loading ERROR. Failed to load: {}", filepath);
+            core::error("loadShaderSource: Shader Loading ERROR. Failed to load: {}", filepath);
             return "";
         }
         return "";
     }
 
     GLuint compileVertexAndFragmentShaders(const char *vertexPath, const char *fragmentPath) {
+        core::info("Compiling shaders:\nVertex: {}\nFragment: {}", vertexPath, fragmentPath);
+
         GLuint shader = glCreateProgram();
 
         std::string vertCode = loadShaderSource(vertexPath);
@@ -41,7 +44,7 @@ namespace projv::graphics {
         if (!success)
         {
             glGetShaderInfoLog(vertexShader, 512, NULL, infoLog);
-            core::error("Vertex Shader compilation failed:\n{}", infoLog);
+            core::error("Vertex Shader compilation failed: {}", infoLog);
         }
 
         // Compile fragment shader
@@ -53,7 +56,7 @@ namespace projv::graphics {
         if (!success)
         {
             glGetShaderInfoLog(fragmentShader, 512, NULL, infoLog);
-            core::error("Fragment Shader compilation failed:\n{}", infoLog);
+            core::error("Fragment Shader compilation failed: {}", infoLog);
         }
 
         // Link shaders into a program
@@ -65,7 +68,7 @@ namespace projv::graphics {
         if (!success)
         {
             glGetProgramInfoLog(shader, 512, NULL, infoLog);
-            core::error("Shader Program linking failed:\n{}", infoLog);
+            core::error("Shader Program linking failed: {}", infoLog);
         }
 
         // Clean up shaders
