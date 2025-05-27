@@ -112,7 +112,7 @@ namespace projv::core {
     }
 
     // Adds a system to our application for a specific stage.
-    void addSystem(Application& app, SystemStage stage, std::function<void(Application&)> system);
+    void assignSystemStage(Application& app, SystemStage stage, std::function<void(Application&)> system);
 
     // Runs the specified application and starts the loop.
     void runApplication(Application& app);

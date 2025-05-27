@@ -31,7 +31,7 @@ namespace projv::core {
     }
     
     // Adds a system to our application for a specific stage.
-    void addSystem(Application& app, SystemStage stage, std::function<void(Application&)> system) {
+    void assignSystemStage(Application& app, SystemStage stage, std::function<void(Application&)> system) {
         switch (stage) {
             case SystemStage::Startup:
                 app.Startup = [=, &app]() { system(app); };
