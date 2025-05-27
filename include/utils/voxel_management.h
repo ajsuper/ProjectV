@@ -27,39 +27,6 @@ namespace projv::utils {
     VoxelGrid createVoxelGrid();
 
     /**
-     * Generates an octree following a modified version of the version from Nvidia's paper "Effecient Sparse Voxel Octrees"
-     * following this format [23-bit relative child pointer][8-bit valid mask][1-bit leaf flag]
-     * @param voxels An std::vector<std::vector<std::vector<voxel>>>& containing the scene to be converted to a sparse voxel octree.
-     * @param voxelWholeResolution
-     * @param octreeID 
-     * @return Returns an std::vector<uint32_t> containing the entire octree structure.
-     */
-    std::vector<uint32_t> createOctree(VoxelGrid& voxels, int voxelWholeResolution);
-
-    /**
-     * Generates voxel type data that stores 8 bytes of data per voxel. Currently, a color and 3 8 bit sections of extra data.
-     * @param voxels The 3D voxel std::vector that contains all of the voxels in the scene.
-     * @param voxelWholeResolution The resolution of the entire 3D voxel vector.
-     * @param voxelCount Optional paramater that reserves memory space to potentially decrease generation times from re-reserving during creation. 
-     */
-    std::vector<uint32_t> createVoxelTypeData(VoxelGrid& voxels);
-
-    /**
-     * Adds a voxel to a VoxelGrid. Expensive because it has to insert it in the correct sorted order.
-     * @param voxels The VoxelGrid to add the voxel too.
-     * @param position The position at which the voxel resides in the VoxelGrid
-     * @param color The color of the voxel in the VoxelGrid
-     */
-    void addVoxelToVoxelGrid(VoxelGrid& voxels, core::ivec3 position, Color color);
-
-    /**
-     * Adds a VoxelBatch to a VoxelGrid. Faster than addVoxelToVoxels for large amounts of voxels, but slower for small amounts of voxels.
-     * @param voxels VoxelGrid to add VoxelBatch to.
-     * @param voxelBatch voxelBatch to add to VoxelGrid
-     */
-    void addVoxelBatchToVoxelGrid(VoxelGrid& voxels, VoxelBatch& voxelBatch);
-
-    /**
      * Creates a VoxelBatch
      * @return Returns an empty VoxelBatch
      */
@@ -134,6 +101,12 @@ namespace projv::utils {
      */
     void removeVoxelBatchAFromVoxelBatchB(VoxelBatch& voxelBatchA, VoxelBatch& voxelBatchB, core::ivec3 positionOffset = {0, 0, 0});
 
+    /**
+     * Creates a Voxel with the specified color and position.
+     * @param color The color to assign to the voxel.
+     * @param position The 3D integer coordinates where the voxel will be placed.
+     * @return Voxel The newly created voxel with the specified attributes.
+     */
     Voxel createVoxel(Color color, core::ivec3 position);
 }
 
