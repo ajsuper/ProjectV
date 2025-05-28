@@ -39,7 +39,7 @@ namespace projv::utils {
      * @param resolutionPowOf2 The resolution of the chunk, given as a power of 2 (e.g., 7 for 128^3 voxels).
      * @return A populated ChunkHeader with the specified parameters.
      */
-    ChunkHeader createChunkHeader(core::vec3 position, float voxelScale, int resolutionPowOf2);
+    ChunkHeader createChunkHeader(std::vector<ChunkHeader>& sceneChunkHeaders, core::vec3 position, float voxelScale, int resolutionPowOf2);
 
     /**
      * Creates a Chunk object using an existing ChunkHeader.

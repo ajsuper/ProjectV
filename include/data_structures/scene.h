@@ -17,6 +17,7 @@ namespace projv{
     };
 
     struct GPUChunkHeader { // Not designed to be user interfacable on CPU. Only exists during runtime, mainly on GPU. Only the necessary information for rendering.
+        uint32_t chunkID;
         float positionX;
         float positionY;
         float positionZ;

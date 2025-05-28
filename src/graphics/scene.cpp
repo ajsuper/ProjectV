@@ -42,6 +42,7 @@ namespace projv::graphics {
             }
 
             GPUChunkHeader shaderChunkHeader;
+            shaderChunkHeader.chunkID = chunk.header.chunkID;
             shaderChunkHeader.positionX = chunk.header.position.x;
             shaderChunkHeader.positionY = chunk.header.position.y;
             shaderChunkHeader.positionZ = chunk.header.position.z;

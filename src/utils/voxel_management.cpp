@@ -220,9 +220,9 @@ namespace projv::utils {
         return resolutionPowerOf2 * (voxelScale * 0.0390625); // * 0.0390625 is to adjust it so that a voxel size of 1 and a resolution of 512 results in a chunk size of roughly 20. This is done for precision reasons.
     }
 
-    ChunkHeader createChunkHeader(core::vec3 position, float voxelScale, int resolutionPowOf2) {
+    ChunkHeader createChunkHeader(std::vector<ChunkHeader>& sceneChunkHeaders, core::vec3 position, float voxelScale, int resolutionPowOf2) {
         if(resolutionPowOf2 > 512) {
-            core::warn("Function: createChunkHeader. resolutionPowOf2 is higher than the recommended maximum of 512.");
+            core::warn("Function: createChunkHeader. resolutionPowOf2 is higher than the recommended maximum of 256.");
         }
         int accuratePowerOf2 = std::pow(2, std::ceil(std::log2(resolutionPowOf2)));
         if(core::fract(log2(resolutionPowOf2)) != 0) {
@@ -238,8 +238,19 @@ namespace projv::utils {
         chunkHeader.scale = chunkScale;
         chunkHeader.voxelScale = voxelScale;
         chunkHeader.resolution = accuratePowerOf2;
-        chunkHeader.chunkID = std::rand();
+        
+        // Convert our existing chunk id's into an unorderd_set for fast look up to see if the newly generated random ID exists or not.
+        std::unordered_set<uint32_t> existingIDs;
+        for(int i = 0; i < sceneChunkHeaders.size(); i++) {
+            existingIDs.insert(sceneChunkHeaders[i].chunkID);
+        }
 
+        // Generate a unique ID.
+        uint32_t randomID = std::rand();
+        while(existingIDs.find(randomID) != existingIDs.end()) {
+            chunkHeader.chunkID = randomID;
+            randomID = std::rand();
+        }
         return chunkHeader;
     }
 
