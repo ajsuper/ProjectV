@@ -70,6 +70,10 @@ namespace projv::utils {
      * @param scene The scene data to be written.
      */
     void writeSceneToDisk(std::string sceneFileDirectory, Scene& scene);
+
+    std::vector<ChunkHeader> loadChunkHeadersFromDisk(std::string sceneFileDirectory);
+
+    std::vector<ChunkHeader> getChunkHeadersFromScene(Scene& scene);
 }
 
 #endif

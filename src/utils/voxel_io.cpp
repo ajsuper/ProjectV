@@ -196,7 +196,7 @@ namespace projv::utils {
         writeUint32Vector(chunk.voxelTypeData, sceneFileDirectory + "/voxelTypeData/" + std::to_string(chunk.header.chunkID) + ".bin");
     }
 
-    Scene loadSceneFromDisk(std::string sceneFileDirectory){
+    Scene loadSceneFromDisk(std::string sceneFileDirectory) {
         Scene scene;
 
         // Loads our chunk headers into memory.
@@ -208,5 +208,20 @@ namespace projv::utils {
             scene.chunks.push_back(chunk);
         }
         return scene;
+    }
+
+    std::vector<ChunkHeader> loadChunkHeadersFromDisk(std::string sceneFileDirectory) {
+        std::vector<ChunkHeader> sceneHeaders;
+        std::vector<ChunkHeader> chunkHeaders = readHeadersJSON(sceneFileDirectory + "/headers.json");
+        return sceneHeaders;
+    }
+
+    std::vector<ChunkHeader> getChunkHeadersFromScene(Scene& scene) {
+        std::vector<ChunkHeader> sceneHeaders;
+        for(int i = 0; i < scene.chunks.size(); i++) {
+            ChunkHeader chunkHeader = scene.chunks[i].header;
+            sceneHeaders.emplace_back(chunkHeader);
+        }
+        return sceneHeaders;
     }
 }
