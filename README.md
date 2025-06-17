@@ -77,12 +77,19 @@ Please ensure the latest of the following are installed to use.
 
 #### Install dependencies:
 
-Linux:
+Debian/Ubuntu:
 
 ```bash
-$ sudo apt-get install libglfw3
-$ sudo apt-get install libglfw3-dev
-$ sudo apt-get install libglew-dev
+sudo apt-get install libglfw3
+sudo apt-get install libglfw3-dev
+sudo apt-get install libglew-dev
+```
+
+Fedora:
+```bash
+sudo dnf install glfw
+sudo dnf install glfw-devel
+sudo dnf install glew-devel
 ```
 Update graphics drivers for GL
 
