@@ -10,7 +10,6 @@ namespace projv::utils {
 
     // Generate the relative child pointers and combine them with a partially constructed octree containing only the masks.
     void addPointers(std::vector<uint32_t>& octree) {
-        // TODO: Remove the return of the reference and make it only modify the octree directly.
         uint16_t vldMaskMask = 0b111111110;
         uint16_t lefMaskMask = 0b000000001;
         int parentCount = 0;
