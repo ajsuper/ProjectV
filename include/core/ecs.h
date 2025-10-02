@@ -25,7 +25,7 @@ namespace projv::core {
         std::type_index typeIndex = std::type_index(typeid(T));
         auto it = world.globalResources.find(typeIndex);
         if (it == world.globalResources.end()) {
-            T resource;
+            std::any resource(std::in_place_type<T>);
             auto [insertedIt, _] = world.globalResources.emplace(typeIndex, std::move(resource));
             return std::any_cast<T&>(insertedIt->second);
         } else {
