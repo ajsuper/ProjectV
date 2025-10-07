@@ -27,6 +27,7 @@ namespace projv{
         uint32_t geometryEndIndex;
         uint32_t voxelTypeDataStartIndex;
         uint32_t voxelTypeDataEndIndex;
+        uint32_t padding[2];
     };
     
     struct Chunk { // Only exists during runtime. Contains all of the header data and our geometry and color data, along with any extra runtime data not used in rendering.
