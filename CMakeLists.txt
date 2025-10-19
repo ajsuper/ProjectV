@@ -51,28 +51,28 @@ add_library(projectV-log STATIC ${CORE_SRC_DIR}/log.cpp)
 link_common_includes(projectV-log)
 
 # Graphics Libraries
-add_library(projectV-fbo STATIC ${GRAPHICS_SRC_DIR}/fbo.cpp)
-link_common_includes(projectV-fbo)
+#add_library(projectV-fbo STATIC ${GRAPHICS_SRC_DIR}/fbo.cpp)
+#link_common_includes(projectV-fbo)
 
-add_library(projectV-render STATIC ${GRAPHICS_SRC_DIR}/render.cpp)
-link_common_includes(projectV-render)
+#add_library(projectV-render STATIC ${GRAPHICS_SRC_DIR}/render.cpp)
+#link_common_includes(projectV-render)
 
-add_library(projectV-scene STATIC ${GRAPHICS_SRC_DIR}/scene.cpp)
+#add_library(projectV-scene STATIC ${GRAPHICS_SRC_DIR}/scene.cpp)
 #find_package(OpenMP REQUIRED)
 #target_link_libraries(projectV-scene PRIVATE OpenMP::OpenMP_CXX)
-link_common_includes(projectV-scene)
+#link_common_includes(projectV-scene)
 
-add_library(projectV-shader STATIC ${GRAPHICS_SRC_DIR}/shader.cpp)
-link_common_includes(projectV-shader)
+#add_library(projectV-shader STATIC ${GRAPHICS_SRC_DIR}/shader.cpp)
+#link_common_includes(projectV-shader)
 
-add_library(projectV-uniforms STATIC ${GRAPHICS_SRC_DIR}/uniforms.cpp)
-link_common_includes(projectV-uniforms)
+#add_library(projectV-uniforms STATIC ${GRAPHICS_SRC_DIR}/uniforms.cpp)
+#link_common_includes(projectV-uniforms)
 
-add_library(projectV-user_input STATIC ${GRAPHICS_SRC_DIR}/user_input.cpp)
-link_common_includes(projectV-user_input)
+#add_library(projectV-user_input STATIC ${GRAPHICS_SRC_DIR}/user_input.cpp)
+#link_common_includes(projectV-user_input)
 
-add_library(projectV-window STATIC ${GRAPHICS_SRC_DIR}/window.cpp)
-link_common_includes(projectV-window)
+#add_library(projectV-window STATIC ${GRAPHICS_SRC_DIR}/window.cpp)
+#link_common_includes(projectV-window)
 
 # Utils Libraries
 add_library(projectV-voxel_io STATIC ${UTILS_SRC_DIR}/voxel_io.cpp)
