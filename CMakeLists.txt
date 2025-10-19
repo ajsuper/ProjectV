@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
 project(ProjectV)
 
+include(ExternalProject)
+
 # Compiler settings
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
@@ -30,6 +32,9 @@ set(CORE_SRC_DIR ${CMAKE_SOURCE_DIR}/src/core)
 set(GRAPHICS_SRC_DIR ${CMAKE_SOURCE_DIR}/src/graphics)
 set(UTILS_SRC_DIR ${CMAKE_SOURCE_DIR}/src/utils)
 
+# External directory
+set(EXTERNAL_DIR ${CMAKE_SOURCE_DIR}/external)
+
 # Macro for linking includes
 function(link_common_includes TARGET_NAME)
     target_include_directories(${TARGET_NAME} PRIVATE
@@ -39,6 +44,38 @@ function(link_common_includes TARGET_NAME)
         ${GLM_INCLUDE}
     )
 endfunction()
+
+# bgfx, bx, and bimg
+if(APPLE)
+    set(BGFX_MAKE_TARGET "osx-arm64")
+elseif(WIN32)
+    set(BGFX_MAKE_TARGET "mingw-gcc")
+else()
+    set(BGFX_MAKE_TARGET "linux-gcc")
+endif()
+
+# Build bgfx with it's make file
+ExternalProject_Add(
+    bgfx_build
+    SOURCE_DIR ${EXTERNAL_DIR}/bgfx
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND make -C ${EXTERNAL_DIR}/bgfx ${BGFX_MAKE_TARGET}
+    BUILD_IN_SOURCE 1
+    INSTALL_COMMAND ""
+)
+
+# Create imported library targets
+add_library(bgfx STATIC IMPORTED)
+add_library(bx STATIC IMPORTED)
+add_library(bimg STATIC IMPORTED)
+
+# Set compiled bgfx library location
+set_target_properties(bgfx PROPERTIES
+    IMPORTED_LOCATION ${EXTERNAL_DIR}/bgfx/.build/osx64_clang/bin/libbgfxRelease.a
+    INTERFACE_INCLUDE_DIRECTORIES ${EXTERNAL_DIR}/bgfx/include
+)
+
+add_dependencies(bgfx bgfx_build)
 
 # Core Libraries
 add_library(projectV-ecs STATIC ${CORE_SRC_DIR}/ecs.cpp)
