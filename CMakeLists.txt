@@ -23,6 +23,7 @@ add_subdirectory(external/glm)
 set(SPDLOG_INCLUDE ${CMAKE_SOURCE_DIR}/external/spdlog/include)
 set(JSON_INCLUDE ${CMAKE_SOURCE_DIR}/external/json/single_include)
 set(GLM_INCLUDE ${CMAKE_SOURCE_DIR}/external/glm)
+set(BGFX_INCLUDE ${CMAKE_SOURCE_DIR}/external/bgfx/include)
 
 # Header include paths (local)
 set(LOCAL_INCLUDE ${CMAKE_SOURCE_DIR}/include)
@@ -42,6 +43,7 @@ function(link_common_includes TARGET_NAME)
         ${SPDLOG_INCLUDE}
         ${JSON_INCLUDE}
         ${GLM_INCLUDE}
+        ${BGFX_INCLUDE}
     )
 endfunction()
 
