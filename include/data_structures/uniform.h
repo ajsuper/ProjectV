@@ -3,12 +3,14 @@
 
 #include <string>
 
-enum UniformType {Vec4, Mat3x3, Mat4x4};
+namespace projv {
+    enum UniformType {Vec4, Mat3x3, Mat4x4};
 
-struct Uniform {
-    unsigned int uniformID;
-    UniformType type;
-    std::string name;
-};
+    struct Uniform {
+        unsigned int uniformID;
+        UniformType type;
+        std::string name;
+    };
+}
 
 #endif

@@ -6,9 +6,11 @@
 #include "resources.h"
 #include "dependencyGraph.h"
 
-struct RendererSpecification {
-    Resources resources;
-    DependencyGraph dependencyGraph;
-};
+namespace projv {
+    struct RendererSpecification {
+        Resources resources;
+        DependencyGraph dependencyGraph;
+    };
+}
 
 #endif

@@ -5,16 +5,18 @@
 
 #include "../../external/bgfx/include/bgfx/bgfx.h"
 
-enum TextureOrigin { CreateNew, CPUBuffer };
+namespace projv{
+    enum TextureOrigin { CreateNew, CPUBuffer };
 
-struct Texture {
-    unsigned int textureID;
-    std::string name;
-    bgfx::TextureFormat::Enum format;
-    int resolutionX;
-    int resolutionY;
-    bool resizable;
-    TextureOrigin origin;
-};
+    struct Texture {
+        unsigned int textureID;
+        std::string name;
+        bgfx::TextureFormat::Enum format;
+        int resolutionX;
+        int resolutionY;
+        bool resizable;
+        TextureOrigin origin;
+    };
+}
 
 #endif

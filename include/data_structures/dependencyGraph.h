@@ -3,15 +3,17 @@
 
 #include <vector>
 
-struct RenderPass {
-    uint shaderID;
-    std::vector<uint> frameBufferInputIDs;
-    std::vector<uint> textureResourceIDs;
-    int frameBufferOutputID;
-};
+namespace projv {
+    struct RenderPass {
+        uint shaderID;
+        std::vector<uint> frameBufferInputIDs;
+        std::vector<uint> textureResourceIDs;
+        int frameBufferOutputID;
+    };
 
-struct DependencyGraph {
-    std::vector<RenderPass> renderPasses;
-};
+    struct DependencyGraph {
+        std::vector<RenderPass> renderPasses;
+    };
+}
 
 #endif

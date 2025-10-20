@@ -7,12 +7,14 @@
 #include "rendererSpecification.h"
 #include "constructedRenderer.h"
 
-struct RenderInstance {
-    std::unordered_map<uint, RendererSpecification> renderers;
-    ConstructedRenderer constructedRenderer;
-    GLFWwindow *window;
-    bgfx::VertexBufferHandle vertexBuffer;
-    bgfx::IndexBufferHandle indexBuffer;
-};
+namespace projv {
+    struct RenderInstance {
+        std::unordered_map<uint, RendererSpecification> renderers;
+        ConstructedRenderer constructedRenderer;
+        GLFWwindow *window;
+        bgfx::VertexBufferHandle vertexBuffer;
+        bgfx::IndexBufferHandle indexBuffer;
+    };
+}
 
 #endif

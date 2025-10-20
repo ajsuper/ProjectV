@@ -8,11 +8,13 @@
 #include "texture.h"
 #include "framebuffer.h"
 
-struct Resources {
-    std::vector<Uniform> uniforms;
-    std::vector<Shader> shaders;
-    std::vector<Texture> textures;
-    std::vector<FrameBuffer> FrameBuffers;
-};
+namespace projv {
+    struct Resources {
+        std::vector<Uniform> uniforms;
+        std::vector<Shader> shaders;
+        std::vector<Texture> textures;
+        std::vector<FrameBuffer> FrameBuffers;
+    };
+}
 
 #endif

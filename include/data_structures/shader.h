@@ -4,10 +4,12 @@
 #include <vector>
 #include <string>
 
-struct Shader {
-    uint shaderID;
-    std::string filePath;
-    std::vector<char> shaderFileContents;
-};
+namespace projv {
+    struct Shader {
+        uint shaderID;
+        std::string filePath;
+        std::vector<char> shaderFileContents;
+    };
+}
 
 #endif
