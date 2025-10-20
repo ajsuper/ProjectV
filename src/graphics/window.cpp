@@ -1,6 +1,6 @@
 #include "graphics/window.h"
 
-namespace projv {
+namespace projv::graphics {
     RenderInstance initializeRenderInstance(int width, int height, std::string name) {
         RenderInstance renderInstance;
         glfwInit();

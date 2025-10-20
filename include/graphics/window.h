@@ -9,7 +9,7 @@
 #define GLFW_EXPOSE_NATIVE_COCOA
 #include "/opt/homebrew/Cellar/glfw/3.4/include/GLFW/glfw3native.h"
 
-namespace projv {
+namespace projv::graphics {
     RenderInstance initializeRenderInstance(int width, int height, std::string name);
 }
 
