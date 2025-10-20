@@ -105,6 +105,10 @@ add_library(projectV-window STATIC ${GRAPHICS_SRC_DIR}/window.cpp)
 target_link_libraries(projectV-window PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
 link_common_includes(projectV-window)
 
+add_library(projectV-render_specification STATIC ${GRAPHICS_SRC_DIR}/render_specification.cpp)
+target_link_libraries(projectV-render_specification PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
+link_common_includes(projectV-render_specification)
+
 #add_library(projectV-fbo STATIC ${GRAPHICS_SRC_DIR}/fbo.cpp)
 #link_common_includes(projectV-fbo)
 
