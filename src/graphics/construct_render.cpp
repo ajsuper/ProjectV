@@ -169,5 +169,17 @@ namespace projv::graphics {
 
         return constructedRenderer;
     }
+
+    void useConstructedRenderer(RenderInstance &renderInstance, ConstructedRenderer &constructedRenderer) {
+        renderInstance.constructedRenderer = constructedRenderer;
+    }
+
+    void moveRendererSpecification(RenderInstance &renderInstance, RendererSpecification &rendererSpecification, uint rendererID) {
+        renderInstance.renderers[rendererID] = std::move(rendererSpecification);
+    }
+
+    RendererSpecification &getRendererSpecification(RenderInstance &renderInstance, uint rendererID) {
+        return renderInstance.renderers[rendererID];
+    }
 }
 
