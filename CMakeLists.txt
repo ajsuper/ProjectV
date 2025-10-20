@@ -90,6 +90,9 @@ add_library(projectV-log STATIC ${CORE_SRC_DIR}/log.cpp)
 link_common_includes(projectV-log)
 
 # Graphics Libraries
+add_library(projectV-renderer_loader STATIC ${GRAPHICS_SRC_DIR}/renderer_loader.cpp)
+link_common_includes(projectV-renderer_loader)
+
 #add_library(projectV-fbo STATIC ${GRAPHICS_SRC_DIR}/fbo.cpp)
 #link_common_includes(projectV-fbo)
 
