@@ -50,6 +50,14 @@ endfunction()
 # bgfx, bx, and bimg
 if(APPLE)
     set(BGFX_MAKE_TARGET "osx-arm64")
+
+    # Add macOS system frameworks
+    set(MACOS_FRAMEWORKS
+        "-framework Cocoa"
+        "-framework Metal"
+        "-framework IOKit"
+        "-framework QuartzCore"
+    )
 elseif(WIN32)
     set(BGFX_MAKE_TARGET "mingw-gcc")
 else()
@@ -92,6 +100,10 @@ link_common_includes(projectV-log)
 # Graphics Libraries
 add_library(projectV-renderer_loader STATIC ${GRAPHICS_SRC_DIR}/renderer_loader.cpp)
 link_common_includes(projectV-renderer_loader)
+
+add_library(projectV-window STATIC ${GRAPHICS_SRC_DIR}/window.cpp)
+target_link_libraries(projectV-window PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
+link_common_includes(projectV-window)
 
 #add_library(projectV-fbo STATIC ${GRAPHICS_SRC_DIR}/fbo.cpp)
 #link_common_includes(projectV-fbo)
