@@ -69,7 +69,7 @@ ExternalProject_Add(
     bgfx_build
     SOURCE_DIR ${EXTERNAL_DIR}/bgfx
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND make -C ${EXTERNAL_DIR}/bgfx ${BGFX_MAKE_TARGET}
+    BUILD_COMMAND make -C ${EXTERNAL_DIR}/bgfx ${BGFX_MAKE_TARGET} -j$(nproc)
     BUILD_IN_SOURCE 1
     INSTALL_COMMAND ""
 )
@@ -118,7 +118,7 @@ target_link_libraries(projectV-scene PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
 link_common_includes(projectV-scene)
 
 add_library(projectV-resource_management STATIC ${GRAPHICS_SRC_DIR}/resource_management.cpp)
-target_link_Libraries(proejctV-resource_management PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
+target_link_libraries(projectV-resource_management PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
 link_common_includes(projectV-resource_management)
 
 #add_library(projectV-fbo STATIC ${GRAPHICS_SRC_DIR}/fbo.cpp)
