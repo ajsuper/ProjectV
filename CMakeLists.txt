@@ -117,6 +117,10 @@ add_library(projectV-scene STATIC ${GRAPHICS_SRC_DIR}/scene.cpp)
 target_link_libraries(projectV-scene PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
 link_common_includes(projectV-scene)
 
+add_library(projectV-resource_management STATIC ${GRAPHICS_SRC_DIR}/resource_management.cpp)
+target_link_Libraries(proejctV-resource_management PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
+link_common_includes(projectV-resource_management)
+
 #add_library(projectV-fbo STATIC ${GRAPHICS_SRC_DIR}/fbo.cpp)
 #link_common_includes(projectV-fbo)
 
