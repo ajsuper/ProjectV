@@ -109,6 +109,14 @@ add_library(projectV-construct_render STATIC ${GRAPHICS_SRC_DIR}/construct_rende
 target_link_libraries(projectV-construct_render PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
 link_common_includes(projectV-construct_render)
 
+add_library(projectV-render STATIC ${GRAPHICS_SRC_DIR}/render.cpp)
+target_link_libraries(projectV-render PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
+link_common_includes(projectV-render)
+
+add_library(projectV-scene STATIC ${GRAPHICS_SRC_DIR}/scene.cpp)
+target_link_libraries(projectV-scene PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
+link_common_includes(projectV-scene)
+
 #add_library(projectV-fbo STATIC ${GRAPHICS_SRC_DIR}/fbo.cpp)
 #link_common_includes(projectV-fbo)
 
