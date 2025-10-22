@@ -16,13 +16,6 @@ namespace projv::graphics {
     void performRenderPasses(ConstructedRenderer& constructedRenderer, RenderInstance& renderInstance, int windowWidth, int windowHeight, void *viewMat, void *projMat, GPUData* gpuData = nullptr);
 
     void renderIt(RenderInstance &renderInstance, ConstructedRenderer &constructedRenderer, void *viewMat, void *projMat, GPUData* gpuData = nullptr);
-
-    template <typename T>
-    void setUniformToValue(ConstructedRenderer& constructedRenderer, std::string uniformName, T& data) {
-        bgfx::UniformHandle& uniform = constructedRenderer.resources.uniformHandles[uniformName];
-        constructedRenderer.resources.uniformValues[uniformName].resize(sizeof(T));
-        memcpy(constructedRenderer.resources.uniformValues[uniformName].data(), &data, sizeof(T));
-    }
 }
 
 #endif
