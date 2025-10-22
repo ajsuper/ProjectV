@@ -16,21 +16,23 @@
 namespace projv::graphics {
     bgfx::ShaderHandle loadShader(const std::string &path);
 
-    std::vector<bgfx::Attachment> getTextureAttachments(ConstructedRenderer &constructedRenderer, std::vector<uint> textureIDs);
+    std::vector<bgfx::Attachment> getTextureAttachments(const std::unordered_map<uint, bgfx::TextureHandle>& textureHandles, std::vector<uint> textureIDs);
 
     bgfx::UniformType::Enum mapUniformType(UniformType uniformType);
 
-    std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(RendererSpecification &rendererSpecification, ConstructedRenderer &constructedRenderer, RenderPass &renderPass);
+    std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(const RendererSpecification &rendererSpecification, ConstructedRenderer &constructedRenderer, RenderPass &renderPass);
 
     bgfx::ProgramHandle createShaderProgram(bgfx::ShaderHandle vertexShader, bgfx::ShaderHandle fragmentShaderHandle);
 
-    void constructFramebuffers(ConstructedRenderer& constructedRenderer, RendererSpecification& renderer, Resources& resources);
+    void constructTextures(ConstructedRenderer& constructedRenderer, const Resources& resources);
 
-    void constructUniforms(ConstructedRenderer& constructedRenderer, RendererSpecification& renderer, Resources& resources);
+    void constructFramebuffers(ConstructedRenderer& constructedRenderer, const Resources& resources);
 
-    void constructShaders(ConstructedRenderer& constructedRenderer, RendererSpecification& renderer, Resources& resources);
+    void constructUniforms(ConstructedRenderer& constructedRenderer, const Resources& resources);
 
-    void constructRenderPasses(ConstructedRenderer& constructedRenderer, RendererSpecification& renderer, std::vector<RenderPass>& renderPasses);
+    void constructShaders(ConstructedRenderer& constructedRenderer, const Resources& resources);
+
+    void constructRenderPasses(ConstructedRenderer& constructedRenderer, const RendererSpecification& renderer, std::vector<RenderPass>& renderPasses);
 
     ConstructedRenderer constructRendererSpecification(RendererSpecification &renderer, bgfx::ShaderHandle vertexShader);
 

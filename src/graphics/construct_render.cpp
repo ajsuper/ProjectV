@@ -25,10 +25,10 @@ namespace projv::graphics {
         return bgfx::createShader(fileMemory);
     }
 
-    std::vector<bgfx::Attachment> getTextureAttachments(ConstructedRenderer &constructedRenderer, std::vector<uint> textureIDs) {
+    std::vector<bgfx::Attachment> getTextureAttachments(const std::unordered_map<uint, bgfx::TextureHandle>& textureHandles, std::vector<uint> textureIDs) {
         std::vector<bgfx::TextureHandle> textures;
         for (size_t i = 0; i < textureIDs.size(); i++) {
-            textures.emplace_back(constructedRenderer.resources.textureHandles.at(textureIDs[i]));
+            textures.emplace_back(textureHandles.at(textureIDs[i]));
         }
 
         std::vector<bgfx::Attachment> attachments;
@@ -51,7 +51,7 @@ namespace projv::graphics {
         return uniformMap.at(uniformType);
     };
 
-    std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(RendererSpecification &rendererSpecification, ConstructedRenderer &constructedRenderer, RenderPass &renderPass) {
+    std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(const RendererSpecification &rendererSpecification, ConstructedRenderer &constructedRenderer, RenderPass &renderPass) {
         std::cout << "Getting dependencies!" << std::endl;
         std::vector<std::pair<bgfx::UniformHandle, uint>> dependencies;
 
@@ -84,7 +84,7 @@ namespace projv::graphics {
         return shaderProgram;
     }
 
-    void constructTextures(ConstructedRenderer& constructedRenderer, RendererSpecification& renderer, Resources& resources) {
+    void constructTextures(ConstructedRenderer& constructedRenderer, const Resources& resources) {
         for (size_t i = 0; i < resources.textures.size(); i++) {
             Texture texture = resources.textures[i];
             uint resX = texture.resolutionX;
@@ -110,7 +110,7 @@ namespace projv::graphics {
         }
     }
 
-    void constructFramebuffers(ConstructedRenderer& constructedRenderer, RendererSpecification& renderer, Resources& resources) {
+    void constructFramebuffers(ConstructedRenderer& constructedRenderer, const Resources& resources) {
         for (size_t i = 0; i < resources.FrameBuffers.size(); i++) {
             FrameBuffer frameBuffer = resources.FrameBuffers[i];
             std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedRenderer, frameBuffer.TextureIDs);
@@ -120,21 +120,21 @@ namespace projv::graphics {
         constructedRenderer.resources.frameBufferHandles[-1] = BGFX_INVALID_HANDLE;
     }
 
-    void constructUniforms(ConstructedRenderer& constructedRenderer, RendererSpecification& renderer, Resources& resources) {
+    void constructUniforms(ConstructedRenderer& constructedRenderer, const Resources& resources) {
         for (size_t i = 0; i < resources.uniforms.size(); i++) {
             Uniform uniform = resources.uniforms[i];
             constructedRenderer.resources.uniformHandles[uniform.name] = bgfx::createUniform(uniform.name.c_str(), mapUniformType(uniform.type));
         }
     }
 
-    void constructShaders(ConstructedRenderer& constructedRenderer, RendererSpecification& renderer, Resources& resources) {
+    void constructShaders(ConstructedRenderer& constructedRenderer, const Resources& resources) {
         for (size_t i = 0; i < resources.shaders.size(); i++) {
             Shader shader = resources.shaders[i];
             constructedRenderer.resources.shaderHandles[shader.shaderID] = loadShader(shader.filePath);
         }
     }
 
-    void constructRenderPasses(ConstructedRenderer& constructedRenderer, RendererSpecification& renderer, std::vector<RenderPass>& renderPasses) {
+    void constructRenderPasses(ConstructedRenderer& constructedRenderer, const RendererSpecification& renderer, std::vector<RenderPass>& renderPasses) {
         for (size_t i = 0; i < renderPasses.size(); i++) {
             RenderPass &renderPass = renderPasses[i];
             if (constructedRenderer.resources
@@ -160,11 +160,11 @@ namespace projv::graphics {
         Resources &resources = renderer.resources;
         std::vector<RenderPass> &renderPasses = renderer.dependencyGraph.renderPasses;
 
-        constructTextures(constructedRenderer, renderer, resources);
-        constructFramebuffers(constructedRenderer, renderer, resources); // Failed here
+        constructTextures(constructedRenderer, resources);
+        constructFramebuffers(constructedRenderer, resources); // Failed here
         std::cout << "Did darn did it!" << std::endl;
-        constructUniforms(constructedRenderer, renderer, resources);
-        constructShaders(constructedRenderer, renderer, resources);
+        constructUniforms(constructedRenderer, resources);
+        constructShaders(constructedRenderer, resources);
         constructRenderPasses(constructedRenderer, renderer, renderPasses);
 
         return constructedRenderer;
