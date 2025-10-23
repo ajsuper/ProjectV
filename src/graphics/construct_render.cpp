@@ -84,10 +84,10 @@ namespace projv::graphics {
         return shaderProgram;
     }
 
-    ConstructedTextures constructTextures(const Resources& resources) {
+    ConstructedTextures constructTextures(const std::vector<Texture>& textures) {
         ConstructedTextures constructedTextures;
-        for (size_t i = 0; i < resources.textures.size(); i++) {
-            Texture texture = resources.textures[i];
+        for (size_t i = 0; i < textures.size(); i++) {
+            Texture texture = textures[i];
             uint resX = texture.resolutionX;
             uint resY = texture.resolutionY;
             if (resX <= 0 || resY <= 0) {
@@ -164,7 +164,7 @@ namespace projv::graphics {
         Resources &resources = renderer.resources;
         std::vector<RenderPass> &renderPasses = renderer.dependencyGraph.renderPasses;
 
-        constructedRenderer.resources.textures = constructTextures(resources);
+        constructedRenderer.resources.textures = constructTextures(resources.textures);
         constructFramebuffers(constructedRenderer, resources); // Failed here
         std::cout << "Did darn did it!" << std::endl;
         constructUniforms(constructedRenderer, resources);

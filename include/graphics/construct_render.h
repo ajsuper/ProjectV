@@ -25,7 +25,7 @@ namespace projv::graphics {
 
     bgfx::ProgramHandle createShaderProgram(bgfx::ShaderHandle vertexShader, bgfx::ShaderHandle fragmentShaderHandle);
 
-    ConstructedTextures constructTextures(const Resources& resources);
+    ConstructedTextures constructTextures(const std::vector<Texture>& textures);
 
     void constructFramebuffers(ConstructedRenderer& constructedRenderer, const Resources& resources);
 
