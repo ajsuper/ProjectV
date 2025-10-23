@@ -24,7 +24,7 @@ namespace projv::graphics {
 
             for (auto &frameBuffer : constructedRenderer.resources.frameBufferTextureMapping) {
                 int frameBufferID = frameBuffer.first; //std::pair<int, std::vector<uint>> first = frameBufferID, second = vector of textureIDs
-                std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedRenderer, frameBuffer.second);
+                std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedRenderer.resources.textureHandles, frameBuffer.second);
                 constructedRenderer.resources.frameBufferHandles[frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.second.size()), attachments.data(), true); // Bindings in GLSL are determined by the textureID order.
                 constructedRenderer.resources.frameBufferTextureMapping[frameBufferID] = frameBuffer.second;
             }

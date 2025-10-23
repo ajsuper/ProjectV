@@ -20,7 +20,7 @@ namespace projv::graphics {
 
     bgfx::UniformType::Enum mapUniformType(UniformType uniformType);
 
-    std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(const RendererSpecification &rendererSpecification, ConstructedRenderer &constructedRenderer, RenderPass &renderPass);
+    std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(const std::vector<FrameBuffer>& frameBuffers, const std::unordered_map<uint, bgfx::UniformHandle>& textureSamplerHandles, RenderPass &renderPass);
 
     bgfx::ProgramHandle createShaderProgram(bgfx::ShaderHandle vertexShader, bgfx::ShaderHandle fragmentShaderHandle);
 

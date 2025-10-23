@@ -51,7 +51,7 @@ namespace projv::graphics {
         return uniformMap.at(uniformType);
     };
 
-    std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(const RendererSpecification &rendererSpecification, ConstructedRenderer &constructedRenderer, RenderPass &renderPass) {
+    std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(const std::vector<FrameBuffer>& frameBuffers, const std::unordered_map<uint, bgfx::UniformHandle>& textureSamplerHandles, RenderPass &renderPass) {
         std::cout << "Getting dependencies!" << std::endl;
         std::vector<std::pair<bgfx::UniformHandle, uint>> dependencies;
 
@@ -61,9 +61,9 @@ namespace projv::graphics {
 
         uint frameBufferInputID = renderPass.frameBufferInputIDs[0];
         std::vector<uint> textureIDs;
-        for (size_t i = 0; i < rendererSpecification.resources.FrameBuffers.size(); i++) {
-            if (rendererSpecification.resources.FrameBuffers[i].frameBufferID == frameBufferInputID) {
-                textureIDs = rendererSpecification.resources.FrameBuffers[i].TextureIDs;
+        for (size_t i = 0; i < frameBuffers.size(); i++) {
+            if (frameBuffers[i].frameBufferID == frameBufferInputID) {
+                textureIDs = frameBuffers[i].TextureIDs;
             }
         }
 
@@ -72,7 +72,7 @@ namespace projv::graphics {
         }
 
         for (size_t i = 0; i < textureIDs.size(); i++) {
-            dependencies.emplace_back(constructedRenderer.resources.textureSamplerHandles[textureIDs[i]], textureIDs[i]);
+            dependencies.emplace_back(textureSamplerHandles.at(textureIDs[i]), textureIDs[i]);
         }
 
         std::cout << "Acquired Dependencies!!" << std::endl;
@@ -113,7 +113,7 @@ namespace projv::graphics {
     void constructFramebuffers(ConstructedRenderer& constructedRenderer, const Resources& resources) {
         for (size_t i = 0; i < resources.FrameBuffers.size(); i++) {
             FrameBuffer frameBuffer = resources.FrameBuffers[i];
-            std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedRenderer, frameBuffer.TextureIDs);
+            std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedRenderer.resources.textureHandles, frameBuffer.TextureIDs);
             constructedRenderer.resources.frameBufferHandles[frameBuffer.frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.TextureIDs.size()), attachments.data(), true); //Bindings in GLSL are determined by the texture order.
             constructedRenderer.resources.frameBufferTextureMapping[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;
         }
@@ -144,7 +144,7 @@ namespace projv::graphics {
             }
 
             BGFXDependencyGraph dependencyGraph;
-            dependencyGraph.depdendencies = getDependenciesList(renderer, constructedRenderer, renderPass);
+            dependencyGraph.depdendencies = getDependenciesList(renderer.resources.FrameBuffers, constructedRenderer.resources.textureSamplerHandles, renderPass);
             dependencyGraph.windowWidth = 1;
             dependencyGraph.windowHeight = 1;
             dependencyGraph.targetFrameBufferID = renderPass.frameBufferOutputID;
