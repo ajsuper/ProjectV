@@ -22,11 +22,11 @@ namespace projv::graphics {
                 constructedRenderer.resources.textures.textureHandles[textureID] = bgfx::createTexture2D(windowWidth, windowHeight, false, 1,textureFormat, BGFX_TEXTURE_RT);
             }
 
-            for (auto &frameBuffer : constructedRenderer.resources.frameBufferTextureMapping) {
+            for (auto &frameBuffer : constructedRenderer.resources.framebuffers.frameBufferTextureMapping) {
                 int frameBufferID = frameBuffer.first; //std::pair<int, std::vector<uint>> first = frameBufferID, second = vector of textureIDs
                 std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedRenderer.resources.textures.textureHandles, frameBuffer.second);
-                constructedRenderer.resources.frameBufferHandles[frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.second.size()), attachments.data(), true); // Bindings in GLSL are determined by the textureID order.
-                constructedRenderer.resources.frameBufferTextureMapping[frameBufferID] = frameBuffer.second;
+                constructedRenderer.resources.framebuffers.frameBufferHandles[frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.second.size()), attachments.data(), true); // Bindings in GLSL are determined by the textureID order.
+                constructedRenderer.resources.framebuffers.frameBufferTextureMapping[frameBufferID] = frameBuffer.second;
             }
         }
     }
@@ -38,7 +38,7 @@ namespace projv::graphics {
             bgfx::setViewTransform(renderPass.renderPassID, viewMat, projMat);
             bgfx::setViewRect(renderPass.renderPassID, 0, 0, windowWidth, windowHeight);
             std::cout << "Check1" << std::endl;
-            bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer.resources.frameBufferHandles[renderPass.targetFrameBufferID]);
+            bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer.resources.framebuffers.frameBufferHandles[renderPass.targetFrameBufferID]);
             bgfx::setViewClear(renderPass.renderPassID, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000FF, 1.0f, 0);
             bgfx::setVertexBuffer(0, renderInstance.vertexBuffer);
             bgfx::setIndexBuffer(renderInstance.indexBuffer);

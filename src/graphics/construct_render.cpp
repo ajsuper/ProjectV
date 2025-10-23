@@ -114,14 +114,15 @@ namespace projv::graphics {
         return constructedTextures;
     }
 
-    void constructFramebuffers(ConstructedRenderer& constructedRenderer, const Resources& resources) {
-        for (size_t i = 0; i < resources.FrameBuffers.size(); i++) {
-            FrameBuffer frameBuffer = resources.FrameBuffers[i];
-            std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedRenderer.resources.textures.textureHandles, frameBuffer.TextureIDs);
-            constructedRenderer.resources.frameBufferHandles[frameBuffer.frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.TextureIDs.size()), attachments.data(), true); //Bindings in GLSL are determined by the texture order.
-            constructedRenderer.resources.frameBufferTextureMapping[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;
+    ConstructedFramebuffers constructFramebuffers(const std::vector<FrameBuffer>& frameBuffers, const ConstructedTextures& constructedTextures) {
+        ConstructedFramebuffers constructedFramebuffers;
+        for (size_t i = 0; i < frameBuffers.size(); i++) {
+            FrameBuffer frameBuffer = frameBuffers[i];
+            std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedTextures.textureHandles, frameBuffer.TextureIDs);
+            constructedFramebuffers.frameBufferHandles[frameBuffer.frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.TextureIDs.size()), attachments.data(), true); //Bindings in GLSL are determined by the texture order.
+            constructedFramebuffers.frameBufferTextureMapping[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;
         }
-        constructedRenderer.resources.frameBufferHandles[-1] = BGFX_INVALID_HANDLE;
+        constructedFramebuffers.frameBufferHandles[-1] = BGFX_INVALID_HANDLE;
     }
 
     void constructUniforms(ConstructedRenderer& constructedRenderer, const Resources& resources) {
@@ -141,10 +142,9 @@ namespace projv::graphics {
     void constructRenderPasses(ConstructedRenderer& constructedRenderer, const RendererSpecification& renderer, std::vector<RenderPass>& renderPasses) {
         for (size_t i = 0; i < renderPasses.size(); i++) {
             RenderPass &renderPass = renderPasses[i];
-            if (constructedRenderer.resources
+            if (constructedRenderer.resources.framebuffers
                     .frameBufferHandles[renderPass.frameBufferOutputID]
                     .idx != bgfx::kInvalidHandle) {
-            //std::cout << "XCV Notcorrect!!" << std::endl;
             }
 
             BGFXDependencyGraph dependencyGraph;
@@ -165,7 +165,7 @@ namespace projv::graphics {
         std::vector<RenderPass> &renderPasses = renderer.dependencyGraph.renderPasses;
 
         constructedRenderer.resources.textures = constructTextures(resources.textures);
-        constructFramebuffers(constructedRenderer, resources); // Failed here
+        constructedRenderer.resources.framebuffers = constructFramebuffers(resources.FrameBuffers, constructedRenderer.resources.textures);
         std::cout << "Did darn did it!" << std::endl;
         constructUniforms(constructedRenderer, resources);
         constructShaders(constructedRenderer, resources);

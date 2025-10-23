@@ -12,7 +12,7 @@ namespace projv {
         std::vector<uint> TextureIDs;
     };
 
-    struct ConstructedFramebuffer {
+    struct ConstructedFramebuffers {
         std::unordered_map<int, bgfx::FrameBufferHandle> frameBufferHandles;
         std::unordered_map<int, std::vector<uint>> frameBufferTextureMapping;
     };

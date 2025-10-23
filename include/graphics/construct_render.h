@@ -9,6 +9,7 @@
 #include "data_structures/texture.h"
 #include "data_structures/renderInstance.h"
 #include "data_structures/texture.h"
+#include "data_structures/framebuffer.h"
 #include "renderer_loader.h"
 #include "data_structures/constructedRenderer.h"
 #include "data_structures/rendererSpecification.h"
@@ -27,7 +28,7 @@ namespace projv::graphics {
 
     ConstructedTextures constructTextures(const std::vector<Texture>& textures);
 
-    void constructFramebuffers(ConstructedRenderer& constructedRenderer, const Resources& resources);
+    ConstructedFramebuffers constructFramebuffers(const Resources& resources);
 
     void constructUniforms(ConstructedRenderer& constructedRenderer, const Resources& resources);
 
