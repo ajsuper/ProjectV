@@ -3,6 +3,7 @@
 
 #include <string>
 
+#include "core/math.h"
 #include "../../external/bgfx/include/bgfx/bgfx.h"
 
 namespace projv{
@@ -16,6 +17,15 @@ namespace projv{
         int resolutionY;
         bool resizable;
         TextureOrigin origin;
+    };
+
+    struct ConstructedTexture {
+        bgfx::TextureHandle textureHandle;
+        bgfx::UniformHandle textureSamplerHandle;
+        bool resizedWithWindow = false;
+        bool resizedWithResourceTextures = false;
+        projv::core::ivec2 resolution;
+        bgfx::TextureFormat::Enum textureFormat;
     };
 }
 
