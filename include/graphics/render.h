@@ -4,9 +4,9 @@
 #include <iostream>
 
 #include "data_structures/constructedRenderer.h"
-#include "data_structures/renderInstance.h"
 #include "data_structures/gpuData.h"
 #include "construct_render.h"
+#include "render_instance.h"
 
 namespace projv::graphics {
     void updateUniforms(ConstructedRenderer& constructedRenderer);
@@ -15,7 +15,7 @@ namespace projv::graphics {
 
     void performRenderPasses(ConstructedRenderer& constructedRenderer, RenderInstance& renderInstance, int windowWidth, int windowHeight, void *viewMat, void *projMat, GPUData* gpuData = nullptr);
 
-    void renderIt(RenderInstance &renderInstance, ConstructedRenderer &constructedRenderer, void *viewMat, void *projMat, GPUData* gpuData = nullptr);
+    void renderIt(RenderInstance &renderInstance, std::shared_ptr<ConstructedRenderer> constructedRenderer, void *viewMat, void *projMat, GPUData* gpuData = nullptr);
 }
 
 #endif

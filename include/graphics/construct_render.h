@@ -4,13 +4,14 @@
 #include <vector>
 #include <unordered_map>
 #include <iostream>
+#include <memory>
 
 #include "data_structures/uniform.h"
 #include "data_structures/texture.h"
-#include "data_structures/renderInstance.h"
 #include "data_structures/texture.h"
 #include "data_structures/framebuffer.h"
 #include "renderer_loader.h"
+#include "render_instance.h"
 #include "data_structures/constructedRenderer.h"
 #include "data_structures/rendererSpecification.h"
 #include "../../external/bgfx/include/bgfx/bgfx.h"
@@ -36,13 +37,7 @@ namespace projv::graphics {
 
     std::vector<BGFXDependencyGraph> constructRenderPasses(const BGFXResources& constructedResources, const std::vector<FrameBuffer>& frameBuffers, const std::vector<RenderPass>& renderPasses);
 
-    ConstructedRenderer constructRendererSpecification(RendererSpecification &renderer, bgfx::ShaderHandle vertexShader);
-
-    void useConstructedRenderer(RenderInstance &renderInstance, ConstructedRenderer &constructedRenderer);
-
-    void moveRendererSpecification(RenderInstance &renderInstance, RendererSpecification &rendererSpecification, uint rendererID);
-
-    RendererSpecification &getRendererSpecification(RenderInstance &renderInstance, uint rendererID);
+    std::shared_ptr<ConstructedRenderer> constructRendererSpecification(RendererSpecification &renderer, bgfx::ShaderHandle vertexShader);
 }
 
 #endif

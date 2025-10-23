@@ -166,7 +166,7 @@ namespace projv::graphics {
         return dependencyGraphs;
     }
 
-    ConstructedRenderer constructRendererSpecification(RendererSpecification &renderer, bgfx::ShaderHandle vertexShader) {
+    std::shared_ptr<ConstructedRenderer> constructRendererSpecification(RendererSpecification &renderer, bgfx::ShaderHandle vertexShader) {
         ConstructedRenderer constructedRenderer;
         constructedRenderer.resources.defaultVertexShader = vertexShader;
         const Resources &resources = renderer.resources;
@@ -178,19 +178,7 @@ namespace projv::graphics {
         constructedRenderer.resources.shaderHandles = constructShaders(resources.shaders);
         constructedRenderer.dependencyGraph = constructRenderPasses(constructedRenderer.resources, resources.FrameBuffers, renderPasses);
 
-        return constructedRenderer;
-    }
-
-    void useConstructedRenderer(RenderInstance &renderInstance, ConstructedRenderer &constructedRenderer) {
-        renderInstance.constructedRenderer = constructedRenderer;
-    }
-
-    void moveRendererSpecification(RenderInstance &renderInstance, RendererSpecification &rendererSpecification, uint rendererID) {
-        renderInstance.renderers[rendererID] = std::move(rendererSpecification);
-    }
-
-    RendererSpecification &getRendererSpecification(RenderInstance &renderInstance, uint rendererID) {
-        return renderInstance.renderers[rendererID];
+        return std::make_shared<ConstructedRenderer>(constructedRenderer);
     }
 }
 

@@ -6,8 +6,12 @@ namespace projv::graphics {
         this->constructedRenderer = constructedRendererToUse;
     }
 
-    void RenderInstance::addRendererSpecification(uint rendererID, const RendererSpecification &constructedRendererToUse) {
-        this->renderers[rendererID] = constructedRendererToUse;
+    std::shared_ptr<ConstructedRenderer> RenderInstance::getActiveRenderer() {
+        return this->constructedRenderer;
+    }
+
+    void RenderInstance::addRendererSpecification(uint rendererID, const RendererSpecification &rendererSpecification) {
+        this->renderers[rendererID] = rendererSpecification;
     }
 
     void RenderInstance::removeRendererSpecification(uint rendererID) {

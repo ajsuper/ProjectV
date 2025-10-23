@@ -8,13 +8,13 @@
 
 namespace projv::graphics {
     template <typename T>
-    void setUniformToValue(ConstructedRenderer& constructedRenderer, std::string uniformName, T& data) {
-        bgfx::UniformHandle& uniform = constructedRenderer.resources.uniformHandles[uniformName];
-        constructedRenderer.resources.uniformValues[uniformName].resize(sizeof(T));
-        memcpy(constructedRenderer.resources.uniformValues[uniformName].data(), &data, sizeof(T));
+    void setUniformToValue(std::shared_ptr<ConstructedRenderer> constructedRenderer, std::string uniformName, T& data) {
+        bgfx::UniformHandle& uniform = constructedRenderer->resources.uniformHandles[uniformName];
+        constructedRenderer->resources.uniformValues[uniformName].resize(sizeof(T));
+        memcpy(constructedRenderer->resources.uniformValues[uniformName].data(), &data, sizeof(T));
     }
 
-    void setTextureToData(ConstructedRenderer& constructedRenderer, uint textureID, unsigned char * data, uint textureWidth, uint textureHeight);
+    void setTextureToData(std::shared_ptr<ConstructedRenderer> constructedRenderer, uint textureID, unsigned char * data, uint textureWidth, uint textureHeight);
 }
 
 #endif

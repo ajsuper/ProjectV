@@ -15,8 +15,9 @@ namespace projv::graphics {
             bgfx::IndexBufferHandle indexBuffer;
 
             void setActiveRenderer(const std::shared_ptr<ConstructedRenderer>& constructedRendererToUse);
+            std::shared_ptr<ConstructedRenderer> getActiveRenderer();
 
-            void addRendererSpecification(uint rendererID, const RendererSpecification &constructedRendererToUse);
+            void addRendererSpecification(uint rendererID, const RendererSpecification &rendererSpecification);
             void removeRendererSpecification(uint rendererID);
             RendererSpecification &getRendererSpecification(uint rendererID);
 
