@@ -1,32 +1,32 @@
 #include "graphics/render.h"
 
 namespace projv::graphics {
-    void updateUniforms(std::shared_ptr<ConstructedRenderer> constructedRenderer) {
-        for(auto& uniform : constructedRenderer->resources.uniformHandles) {
+    void updateUniforms(const std::unordered_map<std::string, bgfx::UniformHandle>& uniformHandles, const std::unordered_map<std::string, std::vector<uint8_t>>& uniformValues) {
+        for(auto& uniform : uniformHandles) {
             std::string name = uniform.first;
             std::cout << "Name: " << name << std::endl;
-            bgfx::setUniform(uniform.second, constructedRenderer->resources.uniformValues.at(name).data());
+            bgfx::setUniform(uniform.second, uniformValues.at(name).data());
         }
     }
 
-    void resizeFramebuffersAndTheirTextures(std::shared_ptr<ConstructedRenderer> constructedRenderer, int windowWidth, int windowHeight, int prevWindowWidth, int prevWindowHeight) {
+    void resizeFramebuffersAndTheirTexturesIfNeeded(ConstructedTextures& textures, ConstructedFramebuffers& frameBuffers, int windowWidth, int windowHeight, int prevWindowWidth, int prevWindowHeight) {
         bgfx::reset(windowWidth, windowHeight, BGFX_RESET_NONE, bgfx::TextureFormat::Count);
         if (true && (prevWindowWidth != windowWidth || prevWindowHeight != windowHeight)) {
-            for (size_t i = 0; i < constructedRenderer->resources.textures.texturesResizedWithWindow.size(); i++) {
-                uint textureID = constructedRenderer->resources.textures.texturesResizedWithWindow[i];
-                bgfx::TextureHandle handle = constructedRenderer->resources.textures.textureHandles.at(textureID);
+            for (size_t i = 0; i < textures.texturesResizedWithWindow.size(); i++) {
+                uint textureID = textures.texturesResizedWithWindow.at(i);
+                bgfx::TextureHandle handle = textures.textureHandles.at(textureID);
                 if (bgfx::isValid(handle)) {
                     bgfx::destroy(handle);
                 }
-                bgfx::TextureFormat::Enum textureFormat = constructedRenderer->resources.textures.textureFormats[textureID];
-                constructedRenderer->resources.textures.textureHandles[textureID] = bgfx::createTexture2D(windowWidth, windowHeight, false, 1,textureFormat, BGFX_TEXTURE_RT);
+                bgfx::TextureFormat::Enum textureFormat = textures.textureFormats[textureID];
+                textures.textureHandles.at(textureID) = bgfx::createTexture2D(windowWidth, windowHeight, false, 1,textureFormat, BGFX_TEXTURE_RT);
             }
 
-            for (auto &frameBuffer : constructedRenderer->resources.framebuffers.frameBufferTextureMapping) {
+            for (auto &frameBuffer : frameBuffers.frameBufferTextureMapping) {
                 int frameBufferID = frameBuffer.first; //std::pair<int, std::vector<uint>> first = frameBufferID, second = vector of textureIDs
-                std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedRenderer->resources.textures.textureHandles, frameBuffer.second);
-                constructedRenderer->resources.framebuffers.frameBufferHandles[frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.second.size()), attachments.data(), true); // Bindings in GLSL are determined by the textureID order.
-                constructedRenderer->resources.framebuffers.frameBufferTextureMapping[frameBufferID] = frameBuffer.second;
+                std::vector<bgfx::Attachment> attachments = getTextureAttachments(textures.textureHandles, frameBuffer.second);
+                frameBuffers.frameBufferHandles[frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.second.size()), attachments.data(), true); // Bindings in GLSL are determined by the textureID order.
+                frameBuffers.frameBufferTextureMapping[frameBufferID] = frameBuffer.second;
             }
         }
     }
@@ -58,15 +58,15 @@ namespace projv::graphics {
         }
     }
 
-    void renderIt(RenderInstance &renderInstance, std::shared_ptr<ConstructedRenderer> constructedRenderer, void *viewMat, void *projMat, GPUData* gpuData) {
+    void renderConstructedRenderer(RenderInstance &renderInstance, std::shared_ptr<ConstructedRenderer> constructedRenderer, void *viewMat, void *projMat, GPUData* gpuData) {
         static int windowWidth = 0;
         static int windowHeight = 0;
         static int prevWindowWidth = 0;
         static int prevWindowHeight = 0;
         glfwGetWindowSize(renderInstance.window, &windowWidth, &windowHeight);
 
-        updateUniforms(constructedRenderer);
-        resizeFramebuffersAndTheirTextures(constructedRenderer, windowWidth, windowHeight, prevWindowWidth, prevWindowHeight);
+        updateUniforms(constructedRenderer->resources.uniformHandles, constructedRenderer->resources.uniformValues);
+        resizeFramebuffersAndTheirTexturesIfNeeded(constructedRenderer->resources.textures, constructedRenderer->resources.framebuffers, windowWidth, windowHeight, prevWindowWidth, prevWindowHeight);
         performRenderPasses(constructedRenderer, renderInstance, windowWidth, windowHeight, viewMat, projMat, gpuData);
 
         prevWindowWidth = windowWidth;
