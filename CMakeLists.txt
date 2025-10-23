@@ -101,10 +101,6 @@ link_common_includes(projectV-log)
 add_library(projectV-renderer_loader STATIC ${GRAPHICS_SRC_DIR}/renderer_loader.cpp)
 link_common_includes(projectV-renderer_loader)
 
-add_library(projectV-window STATIC ${GRAPHICS_SRC_DIR}/window.cpp)
-target_link_libraries(projectV-window PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
-link_common_includes(projectV-window)
-
 add_library(projectV-construct_render STATIC ${GRAPHICS_SRC_DIR}/construct_render.cpp)
 target_link_libraries(projectV-construct_render PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
 link_common_includes(projectV-construct_render)
