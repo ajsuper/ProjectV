@@ -84,7 +84,8 @@ namespace projv::graphics {
         return shaderProgram;
     }
 
-    void constructTextures(ConstructedRenderer& constructedRenderer, const Resources& resources) {
+    ConstructedTextures constructTextures(const Resources& resources) {
+        ConstructedTextures constructedTextures;
         for (size_t i = 0; i < resources.textures.size(); i++) {
             Texture texture = resources.textures[i];
             uint resX = texture.resolutionX;
@@ -95,25 +96,28 @@ namespace projv::graphics {
             }
 
             if (texture.resizable == true && texture.origin == TextureOrigin::CreateNew) {
-                constructedRenderer.resources.texturesResizedWithWindow.push_back(texture.textureID);
+                //constructedRenderer.resources.texturesResizedWithWindow.push_back(texture.textureID);
+                constructedTextures.texturesResizedWithWindow[texture.textureID] = true;
             }
             if (texture.resizable == true && texture.origin == TextureOrigin::CPUBuffer) {
-                constructedRenderer.resources.texturesResizedWithResourceTextures.push_back(texture.textureID);
+                constructedTextures.texturesResizedWithResourceTextures[texture.textureID] = true;
             }
 
             uint16_t textureWidth = uint16_t(std::max(1, texture.resolutionX)); 
             uint16_t textureHeight = uint16_t(std::max(1, texture.resolutionY));
-            constructedRenderer.resources.textureHandles[texture.textureID] = bgfx::createTexture2D(textureWidth, textureHeight, false, 1, texture.format, BGFX_TEXTURE_RT);
-            constructedRenderer.resources.textureSamplerHandles[texture.textureID] = bgfx::createUniform(texture.name.c_str(), bgfx::UniformType::Sampler);
-            constructedRenderer.resources.textureFormats[texture.textureID] = texture.format;
-            constructedRenderer.resources.textureResolutions[texture.textureID] = projv::core::ivec2(texture.resolutionX, texture.resolutionY);
+            constructedTextures.textureHandles[texture.textureID] = bgfx::createTexture2D(textureWidth, textureHeight, false, 1, texture.format, BGFX_TEXTURE_RT);
+            constructedTextures.textureSamplerHandles[texture.textureID] = bgfx::createUniform(texture.name.c_str(), bgfx::UniformType::Sampler);
+            constructedTextures.textureFormats[texture.textureID] = texture.format;
+            constructedTextures.textureResolutions[texture.textureID] = projv::core::ivec2(texture.resolutionX, texture.resolutionY);
         }
+
+        return constructedTextures;
     }
 
     void constructFramebuffers(ConstructedRenderer& constructedRenderer, const Resources& resources) {
         for (size_t i = 0; i < resources.FrameBuffers.size(); i++) {
             FrameBuffer frameBuffer = resources.FrameBuffers[i];
-            std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedRenderer.resources.textureHandles, frameBuffer.TextureIDs);
+            std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedRenderer.resources.textures.textureHandles, frameBuffer.TextureIDs);
             constructedRenderer.resources.frameBufferHandles[frameBuffer.frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.TextureIDs.size()), attachments.data(), true); //Bindings in GLSL are determined by the texture order.
             constructedRenderer.resources.frameBufferTextureMapping[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;
         }
@@ -144,7 +148,7 @@ namespace projv::graphics {
             }
 
             BGFXDependencyGraph dependencyGraph;
-            dependencyGraph.depdendencies = getDependenciesList(renderer.resources.FrameBuffers, constructedRenderer.resources.textureSamplerHandles, renderPass);
+            dependencyGraph.depdendencies = getDependenciesList(renderer.resources.FrameBuffers, constructedRenderer.resources.textures.textureSamplerHandles, renderPass);
             dependencyGraph.windowWidth = 1;
             dependencyGraph.windowHeight = 1;
             dependencyGraph.targetFrameBufferID = renderPass.frameBufferOutputID;
@@ -160,7 +164,7 @@ namespace projv::graphics {
         Resources &resources = renderer.resources;
         std::vector<RenderPass> &renderPasses = renderer.dependencyGraph.renderPasses;
 
-        constructTextures(constructedRenderer, resources);
+        constructedRenderer.resources.textures = constructTextures(resources);
         constructFramebuffers(constructedRenderer, resources); // Failed here
         std::cout << "Did darn did it!" << std::endl;
         constructUniforms(constructedRenderer, resources);

@@ -5,7 +5,8 @@
 #include <string.h>
 #include <vector>
 
-#include "../core/math.h"
+#include "core/math.h"
+#include "data_structures/texture.h"
 #include "../../external/bgfx/include/bgfx/bgfx.h"
 
 namespace projv {
@@ -14,14 +15,9 @@ namespace projv {
         std::unordered_map<std::string, bgfx::UniformHandle> uniformHandles;
         std::unordered_map<std::string, std::vector<uint8_t>> uniformValues;
         std::unordered_map<uint, bgfx::ShaderHandle> shaderHandles;
-        std::unordered_map<uint, bgfx::TextureHandle> textureHandles;
-        std::unordered_map<uint, bgfx::UniformHandle> textureSamplerHandles;
-        std::vector<int> texturesResizedWithWindow;
-        std::vector<int> texturesResizedWithResourceTextures;
-        std::unordered_map<uint, projv::core::ivec2> textureResolutions;
-        std::unordered_map<uint, bgfx::TextureFormat::Enum> textureFormats;
         std::unordered_map<int, bgfx::FrameBufferHandle> frameBufferHandles;
         std::unordered_map<int, std::vector<uint>> frameBufferTextureMapping;
+        ConstructedTextures textures;
     };
 
     struct BGFXDependencyGraph {

@@ -2,6 +2,7 @@
 #define TEXTURE_H
 
 #include <string>
+#include <unordered_map>
 
 #include "core/math.h"
 #include "../../external/bgfx/include/bgfx/bgfx.h"
@@ -19,13 +20,13 @@ namespace projv{
         TextureOrigin origin;
     };
 
-    struct ConstructedTexture {
-        bgfx::TextureHandle textureHandle;
-        bgfx::UniformHandle textureSamplerHandle;
-        bool resizedWithWindow = false;
-        bool resizedWithResourceTextures = false;
-        projv::core::ivec2 resolution;
-        bgfx::TextureFormat::Enum textureFormat;
+    struct ConstructedTextures {
+        std::unordered_map<uint, bgfx::TextureHandle> textureHandles;
+        std::unordered_map<uint, bgfx::UniformHandle> textureSamplerHandles;
+        std::unordered_map<uint, bool> texturesResizedWithWindow;
+        std::unordered_map<uint, bool> texturesResizedWithResourceTextures;
+        std::unordered_map<uint, projv::core::ivec2> textureResolutions;
+        std::unordered_map<uint, bgfx::TextureFormat::Enum> textureFormats;
     };
 }
 

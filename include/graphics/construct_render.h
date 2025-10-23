@@ -8,6 +8,7 @@
 #include "data_structures/uniform.h"
 #include "data_structures/texture.h"
 #include "data_structures/renderInstance.h"
+#include "data_structures/texture.h"
 #include "renderer_loader.h"
 #include "data_structures/constructedRenderer.h"
 #include "data_structures/rendererSpecification.h"
@@ -24,7 +25,7 @@ namespace projv::graphics {
 
     bgfx::ProgramHandle createShaderProgram(bgfx::ShaderHandle vertexShader, bgfx::ShaderHandle fragmentShaderHandle);
 
-    void constructTextures(ConstructedRenderer& constructedRenderer, const Resources& resources);
+    ConstructedTextures constructTextures(const Resources& resources);
 
     void constructFramebuffers(ConstructedRenderer& constructedRenderer, const Resources& resources);
 

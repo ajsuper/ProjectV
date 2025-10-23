@@ -12,19 +12,19 @@ namespace projv::graphics {
     void resizeFramebuffersAndTheirTextures(ConstructedRenderer& constructedRenderer, int windowWidth, int windowHeight, int prevWindowWidth, int prevWindowHeight) {
         bgfx::reset(windowWidth, windowHeight, BGFX_RESET_NONE, bgfx::TextureFormat::Count);
         if (true && (prevWindowWidth != windowWidth || prevWindowHeight != windowHeight)) {
-            for (size_t i = 0; i < constructedRenderer.resources.texturesResizedWithWindow.size(); i++) {
-                uint textureID = constructedRenderer.resources.texturesResizedWithWindow[i];
-                bgfx::TextureHandle handle = constructedRenderer.resources.textureHandles.at(textureID);
+            for (size_t i = 0; i < constructedRenderer.resources.textures.texturesResizedWithWindow.size(); i++) {
+                uint textureID = constructedRenderer.resources.textures.texturesResizedWithWindow[i];
+                bgfx::TextureHandle handle = constructedRenderer.resources.textures.textureHandles.at(textureID);
                 if (bgfx::isValid(handle)) {
                     bgfx::destroy(handle);
                 }
-                bgfx::TextureFormat::Enum textureFormat = constructedRenderer.resources.textureFormats[textureID];
-                constructedRenderer.resources.textureHandles[textureID] = bgfx::createTexture2D(windowWidth, windowHeight, false, 1,textureFormat, BGFX_TEXTURE_RT);
+                bgfx::TextureFormat::Enum textureFormat = constructedRenderer.resources.textures.textureFormats[textureID];
+                constructedRenderer.resources.textures.textureHandles[textureID] = bgfx::createTexture2D(windowWidth, windowHeight, false, 1,textureFormat, BGFX_TEXTURE_RT);
             }
 
             for (auto &frameBuffer : constructedRenderer.resources.frameBufferTextureMapping) {
                 int frameBufferID = frameBuffer.first; //std::pair<int, std::vector<uint>> first = frameBufferID, second = vector of textureIDs
-                std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedRenderer.resources.textureHandles, frameBuffer.second);
+                std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedRenderer.resources.textures.textureHandles, frameBuffer.second);
                 constructedRenderer.resources.frameBufferHandles[frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.second.size()), attachments.data(), true); // Bindings in GLSL are determined by the textureID order.
                 constructedRenderer.resources.frameBufferTextureMapping[frameBufferID] = frameBuffer.second;
             }
@@ -46,7 +46,7 @@ namespace projv::graphics {
             // bgfx::setTexture(0, u_texColor, colorTexture);
             for (size_t j = 0; j < renderPass.depdendencies.size(); j++) {
                 std::cout << "Sampling from texture index:" << j << std::endl;
-                bgfx::setTexture(j, renderPass.depdendencies[j].first, constructedRenderer.resources.textureHandles.at(renderPass.depdendencies[j].second));
+                bgfx::setTexture(j, renderPass.depdendencies[j].first, constructedRenderer.resources.textures.textureHandles.at(renderPass.depdendencies[j].second));
             }
 
             bgfx::setTexture(13, gpuData->octreeSampler, gpuData->octreeTexture);

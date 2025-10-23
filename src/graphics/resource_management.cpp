@@ -2,10 +2,10 @@
 
 namespace projv::graphics {
     void setTextureToData(ConstructedRenderer& constructedRenderer, uint textureID, unsigned char * data, uint textureWidth, uint textureHeight) {  
-        projv::core::ivec2 textureDimensions = constructedRenderer.resources.textureResolutions.at(textureID);  
+        projv::core::ivec2 textureDimensions = constructedRenderer.resources.textures.textureResolutions.at(textureID);  
         bool textureIsResizable = false;
-        for(size_t i = 0; i < constructedRenderer.resources.texturesResizedWithResourceTextures.size(); i++) {
-            if(constructedRenderer.resources.texturesResizedWithResourceTextures[i] == textureID) {
+        for(size_t i = 0; i < constructedRenderer.resources.textures.texturesResizedWithResourceTextures.size(); i++) {
+            if(constructedRenderer.resources.textures.texturesResizedWithResourceTextures[i] == textureID) {
                 textureIsResizable = true;
             }
         }
@@ -37,7 +37,7 @@ namespace projv::graphics {
         
         // Then update the texture with this memory  
         bgfx::updateTexture2D(  
-            constructedRenderer.resources.textureHandles[textureID],  
+            constructedRenderer.resources.textures.textureHandles[textureID],  
             0,      // layer  
             0,      // mip  
             0,      // x  
