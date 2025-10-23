@@ -24,7 +24,7 @@ namespace projv::graphics {
 
     std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(const std::vector<FrameBuffer>& frameBuffers, const std::unordered_map<uint, bgfx::UniformHandle>& textureSamplerHandles, RenderPass &renderPass);
 
-    bgfx::ProgramHandle createShaderProgram(bgfx::ShaderHandle vertexShader, bgfx::ShaderHandle fragmentShaderHandle);
+    bgfx::ProgramHandle createShaderProgram(const bgfx::ShaderHandle& vertexShader, const bgfx::ShaderHandle& fragmentShaderHandle);
 
     ConstructedTextures constructTextures(const std::vector<Texture>& textures);
 
@@ -34,7 +34,7 @@ namespace projv::graphics {
 
     std::unordered_map<uint, bgfx::ShaderHandle> constructShaders(const std::vector<Shader>& shaders);
 
-    void constructRenderPasses(ConstructedRenderer& constructedRenderer, const RendererSpecification& renderer, std::vector<RenderPass>& renderPasses);
+    std::vector<BGFXDependencyGraph> constructRenderPasses(const BGFXResources& constructedResources, const std::vector<FrameBuffer>& frameBuffers, const std::vector<RenderPass>& renderPasses);
 
     ConstructedRenderer constructRendererSpecification(RendererSpecification &renderer, bgfx::ShaderHandle vertexShader);
 

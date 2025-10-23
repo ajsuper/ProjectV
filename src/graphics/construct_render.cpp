@@ -1,4 +1,5 @@
 #include "graphics/construct_render.h"
+#include "data_structures/constructedRenderer.h"
 
 namespace projv::graphics {
     bgfx::ShaderHandle loadShader(const std::string &path) {
@@ -51,7 +52,7 @@ namespace projv::graphics {
         return uniformMap.at(uniformType);
     };
 
-    std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(const std::vector<FrameBuffer>& frameBuffers, const std::unordered_map<uint, bgfx::UniformHandle>& textureSamplerHandles, RenderPass &renderPass) {
+    std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(const std::vector<FrameBuffer>& frameBuffers, const std::unordered_map<uint, bgfx::UniformHandle>& textureSamplerHandles, const RenderPass &renderPass) {
         std::cout << "Getting dependencies!" << std::endl;
         std::vector<std::pair<bgfx::UniformHandle, uint>> dependencies;
 
@@ -79,7 +80,7 @@ namespace projv::graphics {
         return dependencies;
     }
 
-    bgfx::ProgramHandle createShaderProgram(bgfx::ShaderHandle vertexShader, bgfx::ShaderHandle fragmentShaderHandle) {
+    bgfx::ProgramHandle createShaderProgram(const bgfx::ShaderHandle& vertexShader, const bgfx::ShaderHandle& fragmentShaderHandle) {
         bgfx::ProgramHandle shaderProgram = bgfx::createProgram(vertexShader, fragmentShaderHandle, true);
         return shaderProgram;
     }
@@ -144,36 +145,38 @@ namespace projv::graphics {
         return constructedShaderHandles;
     }
 
-    void constructRenderPasses(ConstructedRenderer& constructedRenderer, const RendererSpecification& renderer, std::vector<RenderPass>& renderPasses) {
+    std::vector<BGFXDependencyGraph> constructRenderPasses(const BGFXResources& constructedResources, const std::vector<FrameBuffer>& frameBuffers, const std::vector<RenderPass>& renderPasses) {
+        std::vector<BGFXDependencyGraph> dependencyGraphs;
         for (size_t i = 0; i < renderPasses.size(); i++) {
-            RenderPass &renderPass = renderPasses[i];
-            if (constructedRenderer.resources.framebuffers
-                    .frameBufferHandles[renderPass.frameBufferOutputID]
+            const RenderPass &renderPass = renderPasses[i];
+            if (constructedResources.framebuffers
+                    .frameBufferHandles.at(renderPass.frameBufferOutputID)
                     .idx != bgfx::kInvalidHandle) {
             }
 
             BGFXDependencyGraph dependencyGraph;
-            dependencyGraph.depdendencies = getDependenciesList(renderer.resources.FrameBuffers, constructedRenderer.resources.textures.textureSamplerHandles, renderPass);
+            dependencyGraph.depdendencies = getDependenciesList(frameBuffers, constructedResources.textures.textureSamplerHandles, renderPass);
             dependencyGraph.windowWidth = 1;
             dependencyGraph.windowHeight = 1;
             dependencyGraph.targetFrameBufferID = renderPass.frameBufferOutputID;
-            dependencyGraph.shaderProgram = createShaderProgram(constructedRenderer.resources.defaultVertexShader, constructedRenderer.resources.shaderHandles[renderPass.shaderID]);
+            dependencyGraph.shaderProgram = createShaderProgram(constructedResources.defaultVertexShader, constructedResources.shaderHandles.at(renderPass.shaderID));
             dependencyGraph.renderPassID = uint(i);
-            constructedRenderer.dependencyGraph.push_back(dependencyGraph);
+            dependencyGraphs.push_back(dependencyGraph);
         }
+        return dependencyGraphs;
     }
 
     ConstructedRenderer constructRendererSpecification(RendererSpecification &renderer, bgfx::ShaderHandle vertexShader) {
         ConstructedRenderer constructedRenderer;
         constructedRenderer.resources.defaultVertexShader = vertexShader;
-        Resources &resources = renderer.resources;
-        std::vector<RenderPass> &renderPasses = renderer.dependencyGraph.renderPasses;
+        const Resources &resources = renderer.resources;
+        const std::vector<RenderPass> &renderPasses = renderer.dependencyGraph.renderPasses;
 
         constructedRenderer.resources.textures = constructTextures(resources.textures);
         constructedRenderer.resources.framebuffers = constructFramebuffers(resources.FrameBuffers, constructedRenderer.resources.textures);
         constructedRenderer.resources.uniformHandles = constructUniforms(resources.uniforms);
         constructedRenderer.resources.shaderHandles = constructShaders(resources.shaders);
-        constructRenderPasses(constructedRenderer, renderer, renderPasses);
+        constructedRenderer.dependencyGraph = constructRenderPasses(constructedRenderer.resources, resources.FrameBuffers, renderPasses);
 
         return constructedRenderer;
     }
