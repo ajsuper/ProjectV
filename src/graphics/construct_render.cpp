@@ -123,6 +123,7 @@ namespace projv::graphics {
             constructedFramebuffers.frameBufferTextureMapping[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;
         }
         constructedFramebuffers.frameBufferHandles[-1] = BGFX_INVALID_HANDLE;
+        return constructedFramebuffers;
     }
 
     void constructUniforms(ConstructedRenderer& constructedRenderer, const Resources& resources) {
