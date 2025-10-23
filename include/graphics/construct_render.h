@@ -30,9 +30,9 @@ namespace projv::graphics {
 
     ConstructedFramebuffers constructFramebuffers(const Resources& resources);
 
-    void constructUniforms(ConstructedRenderer& constructedRenderer, const Resources& resources);
+    std::unordered_map<std::string, bgfx::UniformHandle> constructUniforms(const std::vector<Uniform>& uniforms);
 
-    void constructShaders(ConstructedRenderer& constructedRenderer, const Resources& resources);
+    std::unordered_map<uint, bgfx::ShaderHandle> constructShaders(const std::vector<Shader>& shaders);
 
     void constructRenderPasses(ConstructedRenderer& constructedRenderer, const RendererSpecification& renderer, std::vector<RenderPass>& renderPasses);
 

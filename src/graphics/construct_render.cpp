@@ -126,18 +126,22 @@ namespace projv::graphics {
         return constructedFramebuffers;
     }
 
-    void constructUniforms(ConstructedRenderer& constructedRenderer, const Resources& resources) {
-        for (size_t i = 0; i < resources.uniforms.size(); i++) {
-            Uniform uniform = resources.uniforms[i];
-            constructedRenderer.resources.uniformHandles[uniform.name] = bgfx::createUniform(uniform.name.c_str(), mapUniformType(uniform.type));
+    std::unordered_map<std::string, bgfx::UniformHandle> constructUniforms(const std::vector<Uniform>& uniforms) {
+        std::unordered_map<std::string, bgfx::UniformHandle> constructedUniformHandles;
+        for (size_t i = 0; i < uniforms.size(); i++) {
+            Uniform uniform = uniforms[i];
+            constructedUniformHandles[uniform.name] = bgfx::createUniform(uniform.name.c_str(), mapUniformType(uniform.type));
         }
+        return constructedUniformHandles;
     }
 
-    void constructShaders(ConstructedRenderer& constructedRenderer, const Resources& resources) {
-        for (size_t i = 0; i < resources.shaders.size(); i++) {
-            Shader shader = resources.shaders[i];
-            constructedRenderer.resources.shaderHandles[shader.shaderID] = loadShader(shader.filePath);
+    std::unordered_map<uint, bgfx::ShaderHandle> constructShaders(const std::vector<Shader>& shaders) {
+        std::unordered_map<uint, bgfx::ShaderHandle> constructedShaderHandles;
+        for (size_t i = 0; i < shaders.size(); i++) {
+            Shader shader = shaders[i];
+            constructedShaderHandles[shader.shaderID] = loadShader(shader.filePath);
         }
+        return constructedShaderHandles;
     }
 
     void constructRenderPasses(ConstructedRenderer& constructedRenderer, const RendererSpecification& renderer, std::vector<RenderPass>& renderPasses) {
@@ -167,9 +171,8 @@ namespace projv::graphics {
 
         constructedRenderer.resources.textures = constructTextures(resources.textures);
         constructedRenderer.resources.framebuffers = constructFramebuffers(resources.FrameBuffers, constructedRenderer.resources.textures);
-        std::cout << "Did darn did it!" << std::endl;
-        constructUniforms(constructedRenderer, resources);
-        constructShaders(constructedRenderer, resources);
+        constructedRenderer.resources.uniformHandles = constructUniforms(resources.uniforms);
+        constructedRenderer.resources.shaderHandles = constructShaders(resources.shaders);
         constructRenderPasses(constructedRenderer, renderer, renderPasses);
 
         return constructedRenderer;
