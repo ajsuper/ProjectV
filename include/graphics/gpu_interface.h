@@ -2,6 +2,7 @@
 #define PROJV_GPU_INTERFACE_H
 
 #include <vector>
+#include <iostream>
 
 #include "data_structures/constructedRenderer.h"
 #include "data_structures/gpuData.h"

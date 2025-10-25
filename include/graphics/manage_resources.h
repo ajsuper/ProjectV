@@ -2,12 +2,16 @@
 #define PROJV_MANAGE_RESOURCES_H
 
 #include <vector>
+#include <iostream>
 
 #include "data_structures/texture.h"
 #include "data_structures/framebuffer.h"
 #include "data_structures/resources.h"
 #include "data_structures/constructedRenderer.h"
 #include "data_structures/rendererSpecification.h"
+
+#include "graphics/type_mapping.h"
+#include "graphics/disk_io.h"
 
 #include "bgfx/bgfx.h"
 

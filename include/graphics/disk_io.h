@@ -3,6 +3,8 @@
 
 #include <vector>
 #include <string>
+#include <iostream>
+#include <fstream>
 
 #include "data_structures/uniform.h"
 #include "data_structures/shader.h"
@@ -10,6 +12,8 @@
 #include "data_structures/framebuffer.h"
 #include "data_structures/rendererSpecification.h"
 #include "data_structures/dependencyGraph.h"
+
+#include "graphics/type_mapping.h"
 
 #include "nlohmann/json.hpp"
 
