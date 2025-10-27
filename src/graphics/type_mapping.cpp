@@ -2,7 +2,6 @@
 
 namespace projv::graphics {
     bgfx::UniformType::Enum mapUniformType(UniformType uniformType) {
-        bgfx::UniformType bgfxUniformType;
         const std::unordered_map<UniformType, bgfx::UniformType::Enum> uniformMap = {
             {UniformType::Vec4, bgfx::UniformType::Vec4},
             {UniformType::Mat3x3, bgfx::UniformType::Mat3},

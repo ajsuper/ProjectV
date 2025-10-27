@@ -10,7 +10,7 @@ namespace projv::graphics {
             }
         }
 
-        if(textureDimensions.x != textureWidth || textureDimensions.y != textureHeight) {
+        if(textureDimensions.x != int(textureWidth) || textureDimensions.y != int(textureHeight)) {
             if(textureIsResizable) {
                 std::invalid_argument(
                     "Passed texture dimensions don't match. Expected: (" + 
