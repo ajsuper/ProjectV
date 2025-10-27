@@ -98,51 +98,25 @@ add_library(projectV-log STATIC ${CORE_SRC_DIR}/log.cpp)
 link_common_includes(projectV-log)
 
 # Graphics Libraries
-add_library(projectV-renderer_loader STATIC ${GRAPHICS_SRC_DIR}/renderer_loader.cpp)
-link_common_includes(projectV-renderer_loader)
+add_library(projectV-disk_io STATIC ${GRAPHICS_SRC_DIR}/disk_io.cpp)
+target_link_libraries(projectV-disk_io PRIVATE bgfx glfw ${MACOS_FRAMEWORKS} projectV-type_mapping)
+link_common_includes(projectV-disk_io)
 
-add_library(projectV-construct_render STATIC ${GRAPHICS_SRC_DIR}/construct_render.cpp)
-target_link_libraries(projectV-construct_render PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
-link_common_includes(projectV-construct_render)
+add_library(projectV-gpu_interface STATIC ${GRAPHICS_SRC_DIR}/gpu_interface.cpp)
+target_link_libraries(projectV-gpu_interface PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
+link_common_includes(projectV-gpu_interface)
 
-add_library(projectV-render STATIC ${GRAPHICS_SRC_DIR}/render.cpp)
-target_link_libraries(projectV-render PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
-link_common_includes(projectV-render)
+add_library(projectV-manage_resources STATIC ${GRAPHICS_SRC_DIR}/manage_resources.cpp)
+target_link_libraries(projectV-manage_resources PRIVATE bgfx glfw ${MACOS_FRAMEWORKS} projectV-type_mapping projectV-disk_io)
+link_common_includes(projectV-manage_resources)
 
-add_library(projectV-scene STATIC ${GRAPHICS_SRC_DIR}/scene.cpp)
-target_link_libraries(projectV-scene PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
-link_common_includes(projectV-scene)
+add_library(projectV-perform_renderer STATIC ${GRAPHICS_SRC_DIR}/perform_renderer.cpp)
+target_link_libraries(projectV-perform_renderer PRIVATE bgfx glfw ${MACOS_FRAMEWORKS} projectV-manage_resources)
+link_common_includes(projectV-perform_renderer)
 
-add_library(projectV-resource_management STATIC ${GRAPHICS_SRC_DIR}/resource_management.cpp)
-target_link_libraries(projectV-resource_management PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
-link_common_includes(projectV-resource_management)
-
-add_library(projectV-render_instance STATIC ${GRAPHICS_SRC_DIR}/render_instance.cpp)
-target_link_libraries(projectV-render_instance PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
-link_common_includes(projectV-render_instance)
-
-#add_library(projectV-fbo STATIC ${GRAPHICS_SRC_DIR}/fbo.cpp)
-#link_common_includes(projectV-fbo)
-
-#add_library(projectV-render STATIC ${GRAPHICS_SRC_DIR}/render.cpp)
-#link_common_includes(projectV-render)
-
-#add_library(projectV-scene STATIC ${GRAPHICS_SRC_DIR}/scene.cpp)
-#find_package(OpenMP REQUIRED)
-#target_link_libraries(projectV-scene PRIVATE OpenMP::OpenMP_CXX)
-#link_common_includes(projectV-scene)
-
-#add_library(projectV-shader STATIC ${GRAPHICS_SRC_DIR}/shader.cpp)
-#link_common_includes(projectV-shader)
-
-#add_library(projectV-uniforms STATIC ${GRAPHICS_SRC_DIR}/uniforms.cpp)
-#link_common_includes(projectV-uniforms)
-
-#add_library(projectV-user_input STATIC ${GRAPHICS_SRC_DIR}/user_input.cpp)
-#link_common_includes(projectV-user_input)
-
-#add_library(projectV-window STATIC ${GRAPHICS_SRC_DIR}/window.cpp)
-#link_common_includes(projectV-window)
+add_library(projectV-type_mapping STATIC ${GRAPHICS_SRC_DIR}/type_mapping.cpp)
+target_link_libraries(projectV-type_mapping PRIVATE bgfx glfw ${MACOS_FRAMEWORKS} )
+link_common_includes(projectV-type_mapping)
 
 # Utils Libraries
 add_library(projectV-voxel_io STATIC ${UTILS_SRC_DIR}/voxel_io.cpp)
