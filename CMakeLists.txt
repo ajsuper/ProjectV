@@ -100,6 +100,10 @@ add_library(projectV-log STATIC ${CORE_SRC_DIR}/log.cpp)
 link_common_includes(projectV-log)
 
 # Graphics Libraries
+add_library(projectV-render_instance STATIC ${GRAPHICS_SRC_DIR}/render_instance.cpp)
+target_link_libraries(projectV-render_instance PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
+link_common_includes(projectV-render_instance)
+
 add_library(projectV-disk_io STATIC ${GRAPHICS_SRC_DIR}/disk_io.cpp)
 target_link_libraries(projectV-disk_io PRIVATE bgfx glfw ${MACOS_FRAMEWORKS} projectV-type_mapping)
 link_common_includes(projectV-disk_io)

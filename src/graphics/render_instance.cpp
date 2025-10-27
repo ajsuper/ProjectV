@@ -1,6 +1,5 @@
 #include "graphics/render_instance.h"
 
-
 namespace projv::graphics {
     void RenderInstance::setActiveRenderer(const std::shared_ptr<ConstructedRenderer>& constructedRendererToUse) {
         this->constructedRenderer = constructedRendererToUse;
@@ -76,5 +75,12 @@ namespace projv::graphics {
         this->indexBuffer = bgfx::createIndexBuffer(bgfx::makeRef(quadTriList, sizeof(quadTriList)));
 
         this->window = window;
+    }
+
+    core::ivec2 RenderInstance::getWindowResolution() {
+        int width;
+        int height;
+        glfwGetWindowSize(this->window, &width, &height);
+        return core::ivec2(width, height);
     }
 }
