@@ -24,6 +24,7 @@ set(SPDLOG_INCLUDE ${CMAKE_SOURCE_DIR}/external/spdlog/include)
 set(JSON_INCLUDE ${CMAKE_SOURCE_DIR}/external/json/single_include)
 set(GLM_INCLUDE ${CMAKE_SOURCE_DIR}/external/glm)
 set(BGFX_INCLUDE ${CMAKE_SOURCE_DIR}/external/bgfx/include)
+set(BX_INCLUDE ${CMAKE_SOURCE_DIR}/external/bx/include)
 
 # Header include paths (local)
 set(LOCAL_INCLUDE ${CMAKE_SOURCE_DIR}/include)
@@ -44,6 +45,7 @@ function(link_common_includes TARGET_NAME)
         ${JSON_INCLUDE}
         ${GLM_INCLUDE}
         ${BGFX_INCLUDE}
+        ${BX_INCLUDE}
     )
 endfunction()
 
