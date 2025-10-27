@@ -2,6 +2,7 @@
 #define PROJV_CORE_MATH_H
 // This is a wrapper for the glm library, to provide consistency accross the engine.
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace projv::core {
     using vec1 = glm::vec1;
@@ -55,6 +56,8 @@ namespace projv::core {
     using glm::pow;
     using glm::log;
     using glm::log2;
+
+    using glm::lookAt;
     
     /**
      * A simple spline function that takes in an input that is modified by the points vector.
