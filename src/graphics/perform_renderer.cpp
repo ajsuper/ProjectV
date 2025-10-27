@@ -11,11 +11,11 @@ namespace projv::graphics {
         }
     }
 
-    void performRenderPasses(std::shared_ptr<ConstructedRenderer> constructedRenderer, RenderInstance& renderInstance, int windowWidth, int windowHeight, void *viewMat, void *projMat, GPUData* gpuData) {
+    void performRenderPasses(std::shared_ptr<ConstructedRenderer> constructedRenderer, RenderInstance& renderInstance, int windowWidth, int windowHeight, core::mat4 viewMat, core::mat4 projMat, GPUData* gpuData) {
         for (size_t i = 0; i < constructedRenderer->dependencyGraph.size(); i++) {
             BGFXDependencyGraph &renderPass = constructedRenderer->dependencyGraph[i];
             std::cout << "RenderPassID: " << renderPass.renderPassID << std::endl;
-            bgfx::setViewTransform(renderPass.renderPassID, viewMat, projMat);
+            bgfx::setViewTransform(renderPass.renderPassID, glm::value_ptr(viewMat), glm::value_ptr(projMat));
             bgfx::setViewRect(renderPass.renderPassID, 0, 0, windowWidth, windowHeight);
             std::cout << "Check1" << std::endl;
             bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandles[renderPass.targetFrameBufferID]);
@@ -38,16 +38,21 @@ namespace projv::graphics {
         }
     }
 
-    void renderConstructedRenderer(RenderInstance &renderInstance, std::shared_ptr<ConstructedRenderer> constructedRenderer, void *viewMat, void *projMat, GPUData* gpuData) {
+    void renderConstructedRenderer(RenderInstance &renderInstance, std::shared_ptr<ConstructedRenderer> constructedRenderer, GPUData* gpuData) {
         static int windowWidth = 0;
         static int windowHeight = 0;
         static int prevWindowWidth = 0;
         static int prevWindowHeight = 0;
+
+        glfwPollEvents();
         glfwGetWindowSize(renderInstance.window, &windowWidth, &windowHeight);
 
+        projv::core::mat4 view = core::mat4(1.0f);
+        projv::core::mat4 proj = core::mat4(1.0f);
+ 
         updateUniforms(constructedRenderer->resources.uniformHandles, constructedRenderer->resources.uniformValues);
         resizeFramebuffersAndTheirTexturesIfNeeded(constructedRenderer->resources.textures, constructedRenderer->resources.framebuffers, windowWidth, windowHeight, prevWindowWidth, prevWindowHeight);
-        performRenderPasses(constructedRenderer, renderInstance, windowWidth, windowHeight, viewMat, projMat, gpuData);
+        performRenderPasses(constructedRenderer, renderInstance, windowWidth, windowHeight, view, proj, gpuData);
 
         prevWindowWidth = windowWidth;
         prevWindowHeight = windowHeight;
