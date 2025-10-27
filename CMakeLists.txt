@@ -96,9 +96,6 @@ link_common_includes(projectV-ecs)
 add_library(projectV-math STATIC ${CORE_SRC_DIR}/math.cpp)
 link_common_includes(projectV-math)
 
-add_library(projectV-log STATIC ${CORE_SRC_DIR}/log.cpp)
-link_common_includes(projectV-log)
-
 # Graphics Libraries
 add_library(projectV-render_instance STATIC ${GRAPHICS_SRC_DIR}/render_instance.cpp)
 target_link_libraries(projectV-render_instance PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
