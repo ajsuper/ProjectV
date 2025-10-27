@@ -218,7 +218,7 @@ namespace projv::utils {
 
     std::vector<ChunkHeader> getChunkHeadersFromScene(Scene& scene) {
         std::vector<ChunkHeader> sceneHeaders;
-        for(int i = 0; i < scene.chunks.size(); i++) {
+        for(size_t i = 0; i < scene.chunks.size(); i++) {
             ChunkHeader chunkHeader = scene.chunks[i].header;
             sceneHeaders.emplace_back(chunkHeader);
         }

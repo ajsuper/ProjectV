@@ -12,7 +12,7 @@ namespace projv::utils {
         }
 
         if (targetLOD == 0) {
-            chunk = std::move(loadChunkFromDisk(sceneFilePath, chunk.header));
+            chunk = loadChunkFromDisk(sceneFilePath, chunk.header);
             return;
         }
 

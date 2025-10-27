@@ -12,7 +12,6 @@ namespace projv::utils {
     void addPointers(std::vector<uint32_t>& octree) {
         uint16_t vldMaskMask = 0b111111110;
         uint16_t lefMaskMask = 0b000000001;
-        int parentCount = 0;
         int childCounter = 0;
         bool childPointerTooLarge = false;
         for(size_t address = 0; address < octree.size(); address++){
@@ -23,7 +22,6 @@ namespace projv::utils {
             if(validMask != 0 && leafMask == 0){ 
                 childPointer = childCounter-address+1;    
                 
-                parentCount += 1;
                 for(uint8_t i = 0; i < 8; i++){
                     if((validMask & (1 << i)) != 0){
                         childCounter += 1;
@@ -46,7 +44,7 @@ namespace projv::utils {
     std::vector<nodeStructure> agregateLevel(std::vector<nodeStructure>& oldLevel, bool childParent = false) {
         std::vector<nodeStructure> newLevel;
 
-        for(int i = 0; i < oldLevel.size(); i++) { // Looping over verey voxel
+        for(size_t i = 0; i < oldLevel.size(); i++) { // Looping over verey voxel
             nodeStructure& node = oldLevel[i];
             uint32_t newIndex = node.ZOrderIndex / 8;
             uint32_t relativeZOrder = node.ZOrderIndex % 8;
@@ -240,7 +238,7 @@ namespace projv::utils {
         
         // Convert our existing chunk id's into an unorderd_set for fast look up to see if the newly generated random ID exists or not.
         std::unordered_set<uint32_t> existingIDs;
-        for(int i = 0; i < sceneChunkHeaders.size(); i++) {
+        for(size_t i = 0; i < sceneChunkHeaders.size(); i++) {
             existingIDs.insert(sceneChunkHeaders[i].chunkID);
         }
 
@@ -297,7 +295,7 @@ namespace projv::utils {
         for (size_t i = 0; i < count; ++i) {
             uint32_t ZOrderPosition = chunk.voxelTypeData[i * 3];
             uint32_t SerializedColor = chunk.voxelTypeData[i * 3 + 1];
-            uint32_t SerializedNormal = chunk.voxelTypeData[i * 3 + 2];
+            //uint32_t SerializedNormal = chunk.voxelTypeData[i * 3 + 2];
     
             Voxel voxel;
             voxel.ZOrderPosition = ZOrderPosition;

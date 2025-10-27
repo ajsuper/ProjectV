@@ -20,7 +20,7 @@
 namespace projv::graphics {
     bgfx::ShaderHandle loadShader(const std::string &path);
 
-    static std::vector<char> readFile(const std::string &filename);
+    std::vector<char> readFile(const std::string &filename);
 
     std::vector<Uniform> loadUniformTypes(nlohmann::json& resourceData);
 
