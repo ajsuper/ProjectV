@@ -16,6 +16,11 @@
 #include "bgfx/bgfx.h"
 
 namespace projv::graphics {
+    /**
+     * 
+     * @param path The path of the shader file to be loaded.
+     * @return Returns a bgfx::ShaderHandle created from the shader.
+     */
     std::vector<bgfx::Attachment> getTextureAttachments(const std::unordered_map<uint, bgfx::TextureHandle>& textureHandles, std::vector<uint> textureIDs);
 
     bgfx::ProgramHandle createShaderProgram(const bgfx::ShaderHandle& vertexShader, const bgfx::ShaderHandle& fragmentShaderHandle);

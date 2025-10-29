@@ -34,4 +34,4 @@ Here is an image with an example drawing of how this sturcture works: [Example](
 
 ### More
 
-For more information on this project, visit our [README.md](/docs/README.md)
+For more information on this project, visit our [README.md](README.md)
