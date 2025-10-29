@@ -67,7 +67,7 @@ This is where rendering logic is specified. No resources are created. Render pas
         {
             "shaderID": 2,
             "frameBufferInputIDs": [1],
-            "resourceTextures": [],
+            "resourceTextures": [1],
             "frameBufferOutputID": -1
         }
     ]
