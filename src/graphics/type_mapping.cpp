@@ -88,6 +88,7 @@ namespace projv::graphics {
             return dependencies;
         }
 
+        // Adds the CreateNew/frame buffer texture ID's to the textureIDs.
         uint frameBufferInputID = renderPass.frameBufferInputIDs[0];
         std::vector<uint> textureIDs;
         for (size_t i = 0; i < frameBuffers.size(); i++) {
@@ -96,10 +97,12 @@ namespace projv::graphics {
             }
         }
 
+        // Adds the CPUBuffer/resourceTexture ID's to the textureIDs.
         for (size_t i = 0; i < renderPass.textureResourceIDs.size(); i++) {
             textureIDs.emplace_back(renderPass.textureResourceIDs[i]);
         }
 
+        // Adds our texture handle and it's textureID as the std::pair. Actually getting the texture handles the pass depends on.
         for (size_t i = 0; i < textureIDs.size(); i++) {
             dependencies.emplace_back(textureSamplerHandles.at(textureIDs[i]), textureIDs[i]);
         }
