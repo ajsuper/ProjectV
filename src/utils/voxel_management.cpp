@@ -173,7 +173,7 @@ namespace projv::utils {
 
     void addVoxelToVoxelGrid(VoxelGrid& voxels, core::ivec3 position, Color color) {
         Voxel voxel;
-        voxel.ZOrderPosition = createZOrderIndex(position, 15);
+        voxel.ZOrderPosition = createZOrderIndex(position);
         voxel.color = color;
     
         int beginIndex = 0;
@@ -313,12 +313,12 @@ namespace projv::utils {
     
     void addVoxelBatchAToVoxelBatchB(VoxelBatch& voxelBatchA, VoxelBatch& voxelBatchB, core::ivec3 voxelBatchAPosition) {
         for(size_t i = 0; i < voxelBatchA.size(); i++) {
-            core::ivec3 currentPosition = reverseZOrderIndex(voxelBatchA[i].ZOrderPosition, 9);
+            core::ivec3 currentPosition = reverseZOrderIndex(voxelBatchA[i].ZOrderPosition);
             core::ivec3 newPosition = currentPosition + voxelBatchAPosition;
             newPosition.x = std::clamp(newPosition.x, 0, 511);
             newPosition.y = std::clamp(newPosition.y, 0, 511);
             newPosition.z = std::clamp(newPosition.z, 0, 511);
-            uint64_t newZOrderPosition = createZOrderIndex(newPosition, 9);
+            uint64_t newZOrderPosition = createZOrderIndex(newPosition);
 
             projv::Voxel copiedVoxel = voxelBatchA[i];
             copiedVoxel.ZOrderPosition = newZOrderPosition;
@@ -365,7 +365,7 @@ namespace projv::utils {
 
         // Compute resolution.
         Voxel farthestVoxel = voxelGrid.voxels[voxelGrid.voxels.size() - 1];
-        core::ivec3 position = reverseZOrderIndex(farthestVoxel.ZOrderPosition, 15);
+        core::ivec3 position = reverseZOrderIndex(farthestVoxel.ZOrderPosition);
         int farthestCoordinate = std::max({position.x, position.y, position.z});
         int resolutionToTheNearestPowOfTwo = std::pow(2, std::ceil(std::log2(farthestCoordinate + 1)));
         if(resolutionToTheNearestPowOfTwo > 256) {
@@ -398,8 +398,8 @@ namespace projv::utils {
         auto loopStart = std::chrono::high_resolution_clock::now();
     
         for (const auto& voxelA : voxelBatchA) {
-            core::ivec3 adjustedPosition = reverseZOrderIndex(voxelA.ZOrderPosition, 9);
-            uint32_t adjustedZOrderIndex = createZOrderIndex(adjustedPosition + positionOffset, 9);
+            core::ivec3 adjustedPosition = reverseZOrderIndex(voxelA.ZOrderPosition);
+            uint32_t adjustedZOrderIndex = createZOrderIndex(adjustedPosition + positionOffset);
             zOrderMask[adjustedZOrderIndex] = true; // Mark this index as to-remove
         }
     
@@ -431,7 +431,7 @@ namespace projv::utils {
     Voxel createVoxel(Color color, core::ivec3 position) {
         Voxel voxel;
         voxel.color = color;
-        voxel.ZOrderPosition = createZOrderIndex(position, 9);
+        voxel.ZOrderPosition = createZOrderIndex(position);
         return voxel;
     }
 }
