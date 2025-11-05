@@ -29,7 +29,7 @@ namespace projv::utils {
      * @param bitDepth How many bits the index takes up.
      * @return Retruns the Z-Order
      */
-    uint64_t createZOrderIndex(core::ivec3 vec3, const int& bitDepth);
+    uint64_t createZOrderIndex(core::ivec3 vec3);
 
     /**
      * Creates a 3D point from a Z-Order index and the number of bits the index takes up.
@@ -37,7 +37,7 @@ namespace projv::utils {
      * @param bitDepth The number of bits the index takes up.
      * @return Returns an std::array<int, 3> containg the 3D point given from the Z-Order index.
      */
-    core::ivec3 reverseZOrderIndex(uint64_t z_order, int bitDepth);
+    core::ivec3 reverseZOrderIndex(uint64_t z_order);
 }
 
 #endif

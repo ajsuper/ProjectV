@@ -54,5 +54,4 @@ namespace projv::graphics {
     void renderConstructedRenderer(RenderInstance &renderInstance, std::shared_ptr<ConstructedRenderer> constructedRenderer, GPUData* gpuData);
 }
 
-
 #endif

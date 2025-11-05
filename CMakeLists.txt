@@ -134,3 +134,13 @@ link_common_includes(projectV-voxel_management)
 
 add_library(projectV-voxel_math STATIC ${UTILS_SRC_DIR}/voxel_math.cpp)
 link_common_includes(projectV-voxel_math)
+
+# Create tools directory.
+file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/build/tools)
+
+# Add shaderc tool.
+set(SHADERC_BUILD_DIRECTORY ${CMAKE_SOURCE_DIR}/external/bgfx/.build/osx-arm64/bin/)
+
+file(COPY ${SHADERC_BUILD_DIRECTORY}/shadercRelease DESTINATION ${CMAKE_SOURCE_DIR}/build/tools/)
+file(COPY ${SHADERC_BUILD_DIRECTORY}/shadercDebug DESTINATION ${CMAKE_SOURCE_DIR}/build/tools/)
+
