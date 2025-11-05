@@ -33,7 +33,7 @@ namespace projv::graphics {
 #elif defined(__linux__)
             platformData.nwh = glfwGetWaylandWindow(window);
             platformData.type = bgfx::NativeWindowHandleType::Wayland;
-            platformData.ndt = bgfx::glfwGetWaylandDisplay();
+            platformData.ndt = glfwGetWaylandDisplay();
 #endif
         // platformData.ndt = glfwGetCocoaDisplay();
         bgfx::setPlatformData(platformData);
@@ -42,7 +42,7 @@ namespace projv::graphics {
 #if defined(__APPLE__)
         bgfxInit.type = bgfx::RendererType::Metal;
 #elif defined(__linux__)
-        bgfxInit.type = bgfx::RenderType::Vulkan;
+        bgfxInit.type = bgfx::RendererType::Vulkan;
 #endif
         bgfxInit.resolution.width = width;
         bgfxInit.resolution.height = height;

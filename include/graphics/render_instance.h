@@ -11,10 +11,19 @@
 #include "core/math.h"
 
 #include "../../external/bgfx/include/bgfx/platform.h"
-#include "/opt/homebrew/Cellar/glfw/3.4/include/GLFW/glfw3.h"
+#include "GLFW/glfw3.h"
 #include <bgfx/platform.h>
-#define GLFW_EXPOSE_NATIVE_COCOA
-#include "/opt/homebrew/Cellar/glfw/3.4/include/GLFW/glfw3native.h"
+// Define the correct platform-specific macro
+#if defined(_WIN32)
+    #define GLFW_EXPOSE_NATIVE_WIN32
+#elif defined(__APPLE__)
+    #define GLFW_EXPOSE_NATIVE_COCOA
+#elif defined(__linux__)
+    #define GLFW_EXPOSE_NATIVE_WAYLAND
+#else
+    #error "Unsupported platform for GLFW native access"
+#endif
+#include "GLFW/glfw3native.h"
 
 namespace projv::graphics {
 
