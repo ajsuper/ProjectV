@@ -49,15 +49,20 @@ namespace projv::graphics {
     }
 
     bgfx::TextureHandle createArbitraryTexture(std::vector<uint32_t>& data) {
+        int textureHeight = 4096;
         int maxTextureSize = bgfx::getCaps()->limits.maxTextureSize;
+        if(maxTextureSize < textureHeight) {
+            textureHeight = maxTextureSize;
+        }
         int pixelSize = data.size() / 4;
-        int dataWidth = (pixelSize / maxTextureSize);
+        int dataWidth = (pixelSize / textureHeight);
+        std::cout << "Data height: " << textureHeight << std::endl;
         std::cout << "Data width: " << dataWidth << std::endl;
-        if(pixelSize % maxTextureSize != 0) {
+        if(pixelSize % textureHeight != 0) {
             dataWidth += 1;
         } 
-        const bgfx::Memory* dataMemory = bgfx::copy(data.data(), dataWidth * maxTextureSize * sizeof(uint32_t) * 4);
-        bgfx::TextureHandle dataTexture = bgfx::createTexture2D(dataWidth, maxTextureSize, false, 1, bgfx::TextureFormat::RGBA32U, BGFX_TEXTURE_NONE|BGFX_SAMPLER_POINT, dataMemory);
+        const bgfx::Memory* dataMemory = bgfx::copy(data.data(), dataWidth * textureHeight * sizeof(uint32_t) * 4);
+        bgfx::TextureHandle dataTexture = bgfx::createTexture2D(dataWidth, textureHeight, false, 1, bgfx::TextureFormat::RGBA32U, BGFX_TEXTURE_NONE|BGFX_SAMPLER_POINT, dataMemory);
         return dataTexture;
     }
 
@@ -86,6 +91,9 @@ namespace projv::graphics {
         std::vector<projv::GPUChunkHeader> gpuChunkHeaderData;
         // Combine the voxelTypeData, octree, and headers for each chunk into just 3 vectors.
         for(size_t i = 0; i < scene.chunks.size(); i++) {
+            std::cout << "Serializing data for chunk " << scene.chunks[i].header.chunkID << std::endl;
+            std::cout << "Octree size for chunk: " << scene.chunks[i].geometryData.size() << std::endl;
+            std::cout << "Voxel Type Data size for chunk: " << scene.chunks[i].voxelTypeData.size() << std::endl;
             int octreeStartIndex = octreeData.size();
             int voxelTypeDataStartIndex = voxelTypeData.size();
 
@@ -114,9 +122,12 @@ namespace projv::graphics {
 
             gpuChunkHeaderData.emplace_back(gpuChunkHeader);
         }
-
+        
+        std::cout << "Creating octree texture. std::vector<uint32_t> size: " << octreeData.size() << std::endl;
         gpuData.octreeTexture = createArbitraryTexture(octreeData);
+        std::cout << "Creating voxel type data texture. std::vector<uint32_t> size: " << voxelTypeData.size() << std::endl;
         gpuData.voxelTypeDataTexture = createArbitraryTexture(voxelTypeData);
+        std::cout << "Creating header texture. std::vector<projv::GPUChunkHeader> size: " << gpuChunkHeaderData.size() << std::endl;
         gpuData.headerTexture = createHeaderTexture(gpuChunkHeaderData);
         
         gpuData.octreeSampler = bgfx::createUniform("octreeData", bgfx::UniformType::Sampler);
