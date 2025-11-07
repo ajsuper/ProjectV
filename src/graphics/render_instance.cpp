@@ -34,6 +34,9 @@ namespace projv::graphics {
             platformData.nwh = glfwGetWaylandWindow(window);
             platformData.type = bgfx::NativeWindowHandleType::Wayland;
             platformData.ndt = glfwGetWaylandDisplay();
+            if (platformData.nwh == NULL) {  
+                std::cerr << "ERROR: glfwGetWaylandWindow() returned NULL. GLFW may not be compiled with Wayland support." << std::endl;  
+            }
 #endif
         // platformData.ndt = glfwGetCocoaDisplay();
         bgfx::setPlatformData(platformData);

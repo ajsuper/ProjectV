@@ -2,6 +2,7 @@
 #define PROJV_RENDER_INSTANCE_H
 
 #include <memory>
+#include <iostream>
 
 #include "data_structures/rendererSpecification.h"
 #include "data_structures/constructedRenderer.h"
