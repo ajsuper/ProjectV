@@ -139,7 +139,13 @@ link_common_includes(projectV-voxel_math)
 file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/build/tools)
 
 # Add shaderc tool.
-set(SHADERC_BUILD_DIRECTORY ${CMAKE_SOURCE_DIR}/external/bgfx/.build/osx-arm64/bin/)
+if(APPLE)
+    set(SHADERC_BUILD_DIRECTORY ${CMAKE_SOURCE_DIR}/external/bgfx/.build/osx-arm64/bin)
+elseif(WIN32)
+    #set(SHADERC_BUILD_DIRECTORY ${CMAKE_SOURCE_DIR}/external/bgfx/.build/osx-arm64/bin)
+else()
+    set(SHADERC_BUILD_DIRECTORY ${CMAKE_SOURCE_DIR}/external/bgfx/.build/linux64_gcc/bin)
+endif()
 
 file(COPY ${SHADERC_BUILD_DIRECTORY}/shadercRelease DESTINATION ${CMAKE_SOURCE_DIR}/build/tools/)
 file(COPY ${SHADERC_BUILD_DIRECTORY}/shadercDebug DESTINATION ${CMAKE_SOURCE_DIR}/build/tools/)
