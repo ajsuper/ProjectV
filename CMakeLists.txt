@@ -37,18 +37,6 @@ set(UTILS_SRC_DIR ${CMAKE_SOURCE_DIR}/src/utils)
 # External directory
 set(EXTERNAL_DIR ${CMAKE_SOURCE_DIR}/external)
 
-# Macro for linking includes
-function(link_common_includes TARGET_NAME)
-    target_include_directories(${TARGET_NAME} PRIVATE
-        ${LOCAL_INCLUDE}
-        ${SPDLOG_INCLUDE}
-        ${JSON_INCLUDE}
-        ${GLM_INCLUDE}
-        ${BGFX_INCLUDE}
-        ${BX_INCLUDE}
-    )
-endfunction()
-
 # bgfx, bx, and bimg
 if(APPLE)
     set(BGFX_MAKE_TARGET "osx-arm64")
@@ -60,18 +48,34 @@ if(APPLE)
         "-framework IOKit"
         "-framework QuartzCore"
     )
+
+    # MacOS homebrew GLFW path:
+    set(MACOS_GLFW_HOMEBREW /opt/homebrew/Cellar/glfw/3.4/include/)
 elseif(WIN32)
     set(BGFX_MAKE_TARGET "mingw-gcc")
 else()
     set(BGFX_MAKE_TARGET "linux-gcc")
 endif()
 
+# Macro for linking includes
+function(link_common_includes TARGET_NAME)
+    target_include_directories(${TARGET_NAME} PRIVATE
+        ${LOCAL_INCLUDE}
+        ${SPDLOG_INCLUDE}
+        ${JSON_INCLUDE}
+        ${GLM_INCLUDE}
+        ${BGFX_INCLUDE}
+        ${BX_INCLUDE}
+        ${MACOS_GLFW_HOMEBREW}
+    )
+endfunction()
+
 # Build bgfx with it's make file
 ExternalProject_Add(
     bgfx_build
     SOURCE_DIR ${EXTERNAL_DIR}/bgfx
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND make -C ${EXTERNAL_DIR}/bgfx ${BGFX_MAKE_TARGET} -j4
+    BUILD_COMMAND make -C ${EXTERNAL_DIR}/bgfx ${BGFX_MAKE_TARGET} -j$(nproc)
     BUILD_IN_SOURCE 1
     INSTALL_COMMAND ""
 )
@@ -147,6 +151,18 @@ else()
     set(SHADERC_BUILD_DIRECTORY ${CMAKE_SOURCE_DIR}/external/bgfx/.build/linux64_gcc/bin)
 endif()
 
-file(COPY ${SHADERC_BUILD_DIRECTORY}/shadercRelease DESTINATION ${CMAKE_SOURCE_DIR}/build/tools/)
-file(COPY ${SHADERC_BUILD_DIRECTORY}/shadercDebug DESTINATION ${CMAKE_SOURCE_DIR}/build/tools/)
+add_custom_command(
+    TARGET bgfx_build  # Replace this with your actual target
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${SHADERC_BUILD_DIRECTORY}/shadercRelease"
+        "${CMAKE_SOURCE_DIR}/build/tools/"
+)
 
+add_custom_command(
+    TARGET bgfx_build  # Replace this with your actual target
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${SHADERC_BUILD_DIRECTORY}/shadercDebug"
+        "${CMAKE_SOURCE_DIR}/build/tools/"
+)
