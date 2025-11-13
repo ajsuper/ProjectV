@@ -121,14 +121,13 @@ namespace projv::graphics {
     void resizeFramebuffersAndTheirTexturesIfNeeded(ConstructedTextures& textures, ConstructedFramebuffers& frameBuffers, int windowWidth, int windowHeight, int prevWindowWidth, int prevWindowHeight) {
         bgfx::reset(windowWidth, windowHeight, BGFX_RESET_NONE, bgfx::TextureFormat::Count);
         if (true && (prevWindowWidth != windowWidth || prevWindowHeight != windowHeight)) {
-            for (size_t i = 0; i < textures.texturesResizedWithWindow.size(); i++) {
-                uint textureID = textures.texturesResizedWithWindow.at(i);
-                bgfx::TextureHandle handle = textures.textureHandles.at(textureID);
+            for (auto textureID : textures.texturesResizedWithWindow) {
+                bgfx::TextureHandle handle = textures.textureHandles.at(textureID.first);
                 if (bgfx::isValid(handle)) {
                     bgfx::destroy(handle);
                 }
-                bgfx::TextureFormat::Enum textureFormat = textures.textureFormats[textureID];
-                textures.textureHandles.at(textureID) = bgfx::createTexture2D(windowWidth, windowHeight, false, 1,textureFormat, BGFX_TEXTURE_RT);
+                bgfx::TextureFormat::Enum textureFormat = textures.textureFormats[textureID.first];
+                textures.textureHandles.at(textureID.first) = bgfx::createTexture2D(windowWidth, windowHeight, false, 1,textureFormat, BGFX_TEXTURE_RT);
             }
 
             for (auto &frameBuffer : frameBuffers.frameBufferTextureMapping) {

@@ -49,7 +49,7 @@ namespace projv::graphics {
 
         projv::core::mat4 view = core::mat4(1.0f);
         projv::core::mat4 proj = core::mat4(1.0f);
- 
+
         updateUniforms(constructedRenderer->resources.uniformHandles, constructedRenderer->resources.uniformValues);
         resizeFramebuffersAndTheirTexturesIfNeeded(constructedRenderer->resources.textures, constructedRenderer->resources.framebuffers, windowWidth, windowHeight, prevWindowWidth, prevWindowHeight);
         performRenderPasses(constructedRenderer, renderInstance, windowWidth, windowHeight, view, proj, gpuData);
