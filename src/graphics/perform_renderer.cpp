@@ -17,15 +17,16 @@ namespace projv::graphics {
             std::cout << "RenderPassID: " << renderPass.renderPassID << std::endl;
             bgfx::setViewTransform(renderPass.renderPassID, glm::value_ptr(viewMat), glm::value_ptr(projMat));
             bgfx::setViewRect(renderPass.renderPassID, 0, 0, windowWidth, windowHeight);
-            std::cout << "Check1" << std::endl;
             bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandles[renderPass.targetFrameBufferID]);
             bgfx::setViewClear(renderPass.renderPassID, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000FF, 1.0f, 0);
             bgfx::setVertexBuffer(0, renderInstance.vertexBuffer);
             bgfx::setIndexBuffer(renderInstance.indexBuffer);
-            std::cout << "Check2" << std::endl;
-            // bgfx::setTexture(0, u_texColor, colorTexture);
+
             for (size_t j = 0; j < renderPass.depdendencies.size(); j++) {
-                std::cout << "Sampling from texture index:" << j << std::endl;
+                bgfx::UniformInfo info;
+                bgfx::getUniformInfo(renderPass.depdendencies[j].first, info);
+                std::cout << "Sampling from texture name: " << info.name << std::endl;
+                std::cout << "That texture is bound to: " << j << std::endl;
                 bgfx::setTexture(j, renderPass.depdendencies[j].first, constructedRenderer->resources.textures.textureHandles.at(renderPass.depdendencies[j].second));
             }
 
@@ -33,7 +34,6 @@ namespace projv::graphics {
             bgfx::setTexture(14, gpuData->voxelTypeDataSampler, gpuData->voxelTypeDataTexture);
             bgfx::setTexture(15, gpuData->headerSampler, gpuData->headerTexture);
 
-            std::cout << "Check3" << std::endl;
             bgfx::submit(renderPass.renderPassID, renderPass.shaderProgram);
         }
     }
