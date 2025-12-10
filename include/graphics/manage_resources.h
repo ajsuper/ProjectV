@@ -87,6 +87,8 @@ namespace projv::graphics {
     * @param prevWindowHeight The previous height of the rendering window (for comparison).
     */
     void resizeFramebuffersAndTheirTexturesIfNeeded(ConstructedTextures& textures, ConstructedFramebuffers& frameBuffers, int windowWidth, int windowHeight, int prevWindowWidth, int prevWindowHeight);
+
+    void setFrameBufferPrimaryOrAlternate(bool primary, ConstructedFramebuffers& framebuffers, ConstructedTextures& textures);
 }
 
 #endif

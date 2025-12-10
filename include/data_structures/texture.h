@@ -25,7 +25,7 @@ namespace projv{
         std::unordered_map<uint, bgfx::TextureHandle> textureHandles;
         std::unordered_map<uint, bgfx::UniformHandle> textureSamplerHandles;
         std::unordered_map<uint, bgfx::TextureHandle> textureHandlesAlternate; // Used in ping-poing rendering.
-        std::unordered_map<uint, bgfx::TextureHandle> textureSamplerHandlesAlternate; // Used in ping-pong rendering.
+        std::unordered_map<uint, bgfx::UniformHandle> textureSamplerHandlesAlternate; // Used in ping-pong rendering.
         std::unordered_map<uint, bool> texturesResizedWithWindow;
         std::unordered_map<uint, bool> texturesResizedWithResourceTextures;
         std::unordered_map<uint, projv::core::ivec2> textureResolutions;
