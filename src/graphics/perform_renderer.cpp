@@ -1,8 +1,6 @@
 #include "graphics/perform_renderer.h"
 
 namespace projv::graphics {
-    
-
     void updateUniforms(const std::unordered_map<std::string, bgfx::UniformHandle>& uniformHandles, const std::unordered_map<std::string, std::vector<uint8_t>>& uniformValues) {
         for(auto& uniform : uniformHandles) {
             std::string name = uniform.first;
