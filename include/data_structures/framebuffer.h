@@ -10,11 +10,14 @@ namespace projv {
     struct FrameBuffer {
         uint frameBufferID;
         std::vector<uint> TextureIDs;
+        bool pingPongFBO = false;
     };
 
     struct ConstructedFramebuffers {
         std::unordered_map<int, bgfx::FrameBufferHandle> frameBufferHandles;
         std::unordered_map<int, std::vector<uint>> frameBufferTextureMapping;
+        std::unordered_map<int, bgfx::FrameBufferHandle> frameBufferHandlesAlternate;
+        std::unordered_map<int, std::vector<uint>> frameBufferTextureMappingAlternate;
     };
 }
 

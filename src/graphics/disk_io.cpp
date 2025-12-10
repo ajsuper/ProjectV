@@ -78,52 +78,40 @@ namespace projv::graphics {
         throw std::runtime_error("Failed to find frame buffer");
     }
 
-    bool doesTextureNeedPingPong(uint textureID, const std::vector<RenderPass>& renderPasses, const std::vector<FrameBuffer>& frameBuffers) {
-        bool writtenTo = false;
-        bool readFrom = false;
+    bool doesFrameBufferNeedPingPong(uint frameBufferID, const std::vector<RenderPass>& renderPasses) {
         for (size_t i = 0; i < renderPasses.size(); i++) {
             RenderPass renderPass = renderPasses[i];
-            std::vector<uint> textureDependencyIDs;
-            std::vector<uint> textureOutputIDs;
-            for (size_t j = 0; j < renderPass.frameBufferInputIDs.size(); j++) { // Get the textures from framebuffer dependencies.
-                std::vector<uint> attachedTextures = getFrameBuffer(renderPass.frameBufferInputIDs[j], frameBuffers).TextureIDs;
-                for (size_t k = 0; k < attachedTextures.size(); k++) {
-                    textureDependencyIDs.emplace_back(attachedTextures[k]);
+            uint frameBufferOutputID = renderPass.frameBufferOutputID;
+            for (size_t j = 0; j < renderPass.frameBufferInputIDs.size(); j++) {
+                if (renderPass.frameBufferInputIDs[i] == frameBufferOutputID) {
+                    return true;
                 }
-            }
-
-            for (size_t j = 0; j < renderPass.textureResourceIDs.size(); j++) { // Get the textures from our texture resources.
-                textureDependencyIDs.emplace_back(renderPass.textureResourceIDs[j]);
-            }
-            
-            textureOutputIDs = getFrameBuffer(renderPass.frameBufferOutputID, frameBuffers).TextureIDs;
-
-            for (size_t j = 0; j < textureDependencyIDs.size(); j++) {
-                if (textureDependencyIDs[j] == textureID) {
-                    readFrom = true;
-                }
-            }
-
-            for (size_t j = 0; j < textureOutputIDs.size(); j++) {
-                if (textureOutputIDs[j] == textureID) {
-                    writtenTo = true;
-                }
-            }
-    
-            if (writtenTo && readFrom) {
-                return true;
             }
         }
         return false;
     }
 
-    std::vector<Texture> setPingPongTextures(const std::vector<Texture>& textures, const std::vector<RenderPass>& renderPasses, const std::vector<FrameBuffer>& frameBuffers) {
-        std::vector<Texture> correctedTextures;
-        for (size_t i = 0; i < textures.size(); i++) {
-            correctedTextures.emplace_back(textures[i]);
-            correctedTextures[i].pingPongFlag = doesTextureNeedPingPong(textures[i].textureID, renderPasses, frameBuffers);
+    std::vector<Texture> setPingPongTextures(const std::vector<Texture>& texturesOld, const std::vector<RenderPass>& renderPasses, const std::vector<FrameBuffer>& frameBuffers) {
+        std::vector<Texture> texturesNew = texturesOld;
+        for (size_t i = 0; i < frameBuffers.size(); i++) {
+            FrameBuffer frameBuffer = frameBuffers[i];
+            if (frameBuffer.pingPongFBO) {
+                for (size_t j = 0; j < frameBuffer.TextureIDs.size(); j++) {
+                    for (size_t k = 0; k < texturesNew.size(); k++) {
+                        texturesNew[k].pingPongFlag = true;
+                    }
+                }
+            }
         }
-        return correctedTextures;
+        return texturesNew;
+    }
+
+    std::vector<FrameBuffer> setPingPongFrameBuffers(const std::vector<FrameBuffer>& frameBuffersOld, const std::vector<RenderPass>& renderPasses) {
+        std::vector<FrameBuffer> frameBuffersNew = frameBuffersOld;
+        for (size_t i = 0; i < frameBuffersNew.size(); i++) {
+            frameBuffersNew[i].pingPongFBO = doesFrameBufferNeedPingPong(frameBuffersNew[i].frameBufferID, renderPasses);    
+        }
+        return frameBuffersNew;
     }
 
     std::vector<Texture> loadTextures(nlohmann::json& resourceData) {
@@ -203,6 +191,7 @@ namespace projv::graphics {
         renderer.resources.FrameBuffers = loadFrameBuffers(resourceData);
         renderer.dependencyGraph.renderPasses = loadRenderPasses(dependencyGraphData);
         renderer.resources.textures = setPingPongTextures(renderer.resources.textures, renderer.dependencyGraph.renderPasses, renderer.resources.FrameBuffers); // Ping pong textures depend on other resources to be specified.
+        renderer.resources.FrameBuffers = setPingPongFrameBuffers(renderer.resources.FrameBuffers, renderer.dependencyGraph.renderPasses);
 
         return renderer;
     }

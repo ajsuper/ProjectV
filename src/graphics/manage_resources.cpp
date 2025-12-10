@@ -135,14 +135,18 @@ namespace projv::graphics {
 
             for (auto &frameBuffer : frameBuffers.frameBufferTextureMapping) {
                 int frameBufferID = frameBuffer.first; //std::pair<int, std::vector<uint>> first = frameBufferID, second = vector of textureIDs
-                setFrameBufferPrimaryOrAlternate(true, frameBuffers, textures); // Bindings in GLSL are determined by the textureID order.
+                std::vector<bgfx::Attachment> attachments = getTextureAttachments(textures.textureHandles, frameBuffer.second);
+                frameBuffers.frameBufferHandles[frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.second.size()), attachments.data(), true); // Bindings in GLSL are determined by the textureID order.
                 frameBuffers.frameBufferTextureMapping[frameBufferID] = frameBuffer.second;
             }
         }
     }
 
+    /*
     void setFrameBufferPrimaryOrAlternate(bool primary, ConstructedFramebuffers& framebuffers, ConstructedTextures& textures) {
         for (auto& frameBuffer : framebuffers.frameBufferTextureMapping) {
+            bgfx::FrameBufferHandle frameBufferHandle = framebuffers.frameBufferHandles.at(frameBuffer.first);
+            bool needsSwapped = false;
             std::vector<bgfx::Attachment> attachments;
             for (size_t i = 0; i < frameBuffer.second.size(); i++) { // Loop over each of the textures connected to this frame buffer.
                 uint textureID = frameBuffer.second.at(i);
@@ -155,6 +159,7 @@ namespace projv::graphics {
                     continue;
                 }
 
+                needsSwapped = true; 
                 if (primary) {
                     attachment.init(textures.textureHandles.at(textureID));
                     attachments.emplace_back(attachment);
@@ -168,4 +173,5 @@ namespace projv::graphics {
             framebuffers.frameBufferHandles[frameBuffer.first] = bgfx::createFrameBuffer(uint16_t(frameBuffer.second.size()), attachments.data(), true); //Bindings in GLSL are determined by the texture order.
         }
     }
+    */
 }

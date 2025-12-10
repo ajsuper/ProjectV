@@ -41,7 +41,6 @@ namespace projv::graphics {
         static int windowHeight = 0;
         static int prevWindowWidth = 0;
         static int prevWindowHeight = 0;
-        static bool renderToPrimaryFBO = true;
 
         glfwPollEvents();
         glfwGetWindowSize(renderInstance.window, &windowWidth, &windowHeight);
@@ -50,7 +49,6 @@ namespace projv::graphics {
         projv::core::mat4 proj = core::mat4(1.0f);
 
         updateUniforms(constructedRenderer->resources.uniformHandles, constructedRenderer->resources.uniformValues);
-        setFrameBufferPrimaryOrAlternate(renderToPrimaryFBO, constructedRenderer->resources.framebuffers, constructedRenderer->resources.textures);
         resizeFramebuffersAndTheirTexturesIfNeeded(constructedRenderer->resources.textures, constructedRenderer->resources.framebuffers, windowWidth, windowHeight, prevWindowWidth, prevWindowHeight);
         performRenderPasses(constructedRenderer, renderInstance, windowWidth, windowHeight, view, proj, gpuData);
 
@@ -58,6 +56,5 @@ namespace projv::graphics {
         prevWindowHeight = windowHeight;
 
         bgfx::frame();
-        renderToPrimaryFBO = !renderToPrimaryFBO;
     }
 }
