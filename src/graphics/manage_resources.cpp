@@ -34,7 +34,6 @@ namespace projv::graphics {
             }
 
             if (texture.resizable == true && texture.origin == TextureOrigin::CreateNew) {
-                //constructedRenderer.resources.texturesResizedWithWindow.push_back(texture.textureID);
                 constructedTextures.texturesResizedWithWindow[texture.textureID] = true;
             }
             if (texture.resizable == true && texture.origin == TextureOrigin::CPUBuffer) {
