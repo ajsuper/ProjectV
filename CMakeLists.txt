@@ -75,7 +75,7 @@ ExternalProject_Add(
     bgfx_build
     SOURCE_DIR ${EXTERNAL_DIR}/bgfx
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND make -C ${EXTERNAL_DIR}/bgfx ${BGFX_MAKE_TARGET} -j$(nproc)
+    BUILD_COMMAND make -C ${EXTERNAL_DIR}/bgfx ${BGFX_MAKE_TARGET} -j4
     BUILD_IN_SOURCE 1
     INSTALL_COMMAND ""
 )
