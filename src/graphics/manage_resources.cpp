@@ -44,9 +44,11 @@ namespace projv::graphics {
             uint16_t textureHeight = uint16_t(std::max(1, texture.resolutionY));
             constructedTextures.textureHandles[texture.textureID] = bgfx::createTexture2D(textureWidth, textureHeight, false, 1, texture.format, BGFX_TEXTURE_RT);
             constructedTextures.textureSamplerHandles[texture.textureID] = bgfx::createUniform(texture.name.c_str(), bgfx::UniformType::Sampler);
+            constructedTextures.pingPongFlags[texture.textureID] = false;
             if (texture.pingPongFlag == true) {
                 constructedTextures.textureHandlesAlternate[texture.textureID] = bgfx::createTexture2D(textureWidth, textureHeight, false, 1, texture.format, BGFX_TEXTURE_RT);
                 constructedTextures.textureSamplerHandlesAlternate[texture.textureID] = bgfx::createUniform(texture.name.c_str(), bgfx::UniformType::Sampler);
+                constructedTextures.pingPongFlags[texture.textureID] = true;
             }
             constructedTextures.textureFormats[texture.textureID] = texture.format;
             constructedTextures.textureResolutions[texture.textureID] = projv::core::ivec2(texture.resolutionX, texture.resolutionY);
@@ -62,10 +64,15 @@ namespace projv::graphics {
             std::vector<bgfx::Attachment> attachments = getTextureAttachments(constructedTextures.textureHandles, frameBuffer.TextureIDs);
             constructedFramebuffers.frameBufferHandles[frameBuffer.frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.TextureIDs.size()), attachments.data(), true); //Bindings in GLSL are determined by the texture order.
             constructedFramebuffers.frameBufferTextureMapping[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;
+            constructedFramebuffers.pingPongFBOs[frameBuffer.frameBufferID] = false;
+            std::cout << "Created frame buffer" << std::endl;
             if (frameBuffer.pingPongFBO == true) {
                 std::vector<bgfx::Attachment> attachmentsAlternate = getTextureAttachments(constructedTextures.textureHandlesAlternate, frameBuffer.TextureIDs);
+                std::cout << "Got alternate texture attachments" << std::endl;
                 constructedFramebuffers.frameBufferHandlesAlternate[frameBuffer.frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.TextureIDs.size()), attachmentsAlternate.data(), true); //Bindings in GLSL are determined by the texture order.
                 constructedFramebuffers.frameBufferTextureMappingAlternate[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;               
+                constructedFramebuffers.pingPongFBOs[frameBuffer.frameBufferID] = true;
+                std::cout << "Created alternate frame buffer" << std::endl;
             }
         }
         constructedFramebuffers.frameBufferHandles[-1] = BGFX_INVALID_HANDLE;
@@ -118,10 +125,15 @@ namespace projv::graphics {
         const std::vector<RenderPass> &renderPasses = renderer.dependencyGraph.renderPasses;
 
         constructedRenderer.resources.textures = constructTextures(resources.textures);
+        std::cout << "Constructed textures!" << std::endl;
         constructedRenderer.resources.framebuffers = constructFramebuffers(resources.FrameBuffers, constructedRenderer.resources.textures);
+        std::cout << "Constructed frame buffers!" << std::endl;
         constructedRenderer.resources.uniformHandles = constructUniforms(resources.uniforms);
+        std::cout << "Constructed uniform handles!" << std::endl;
         constructedRenderer.resources.shaderHandles = constructShaders(resources.shaders);
+        std::cout << "Constructed shaders!" << std::endl;
         constructedRenderer.dependencyGraph = constructRenderPasses(constructedRenderer.resources, resources.FrameBuffers, renderPasses);
+        std::cout << "Constructed render passes!" << std::endl;
 
         return std::make_shared<ConstructedRenderer>(constructedRenderer);
     }
@@ -142,6 +154,25 @@ namespace projv::graphics {
                 int frameBufferID = frameBuffer.first; //std::pair<int, std::vector<uint>> first = frameBufferID, second = vector of textureIDs
                 std::vector<bgfx::Attachment> attachments = getTextureAttachments(textures.textureHandles, frameBuffer.second);
                 frameBuffers.frameBufferHandles[frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.second.size()), attachments.data(), true); // Bindings in GLSL are determined by the textureID order.
+                frameBuffers.frameBufferTextureMapping[frameBufferID] = frameBuffer.second;
+            }
+
+            // Handle alternate FBO's and textures.
+            for (auto textureID : textures.texturesResizedWithWindow) {
+                if (textures.pingPongFlags.at(textureID.first) == false) continue;
+                bgfx::TextureHandle handle = textures.textureHandlesAlternate.at(textureID.first);
+                if (bgfx::isValid(handle)) {
+                    bgfx::destroy(handle);
+                }
+                bgfx::TextureFormat::Enum textureFormat = textures.textureFormats[textureID.first];
+                textures.textureHandlesAlternate.at(textureID.first) = bgfx::createTexture2D(windowWidth, windowHeight, false, 1,textureFormat, BGFX_TEXTURE_RT);
+            }
+
+            for (auto &frameBuffer : frameBuffers.frameBufferTextureMapping) {
+                if (frameBuffers.pingPongFBOs.at(frameBuffer.first) == false) continue;
+                int frameBufferID = frameBuffer.first; //std::pair<int, std::vector<uint>> first = frameBufferID, second = vector of textureIDs
+                std::vector<bgfx::Attachment> attachments = getTextureAttachments(textures.textureHandlesAlternate, frameBuffer.second);
+                frameBuffers.frameBufferHandlesAlternate[frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.second.size()), attachments.data(), true); // Bindings in GLSL are determined by the textureID order.
                 frameBuffers.frameBufferTextureMapping[frameBufferID] = frameBuffer.second;
             }
         }

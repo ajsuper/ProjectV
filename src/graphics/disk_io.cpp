@@ -190,8 +190,8 @@ namespace projv::graphics {
         renderer.resources.textures = loadTextures(resourceData);
         renderer.resources.FrameBuffers = loadFrameBuffers(resourceData);
         renderer.dependencyGraph.renderPasses = loadRenderPasses(dependencyGraphData);
-        renderer.resources.textures = setPingPongTextures(renderer.resources.textures, renderer.dependencyGraph.renderPasses, renderer.resources.FrameBuffers); // Ping pong textures depend on other resources to be specified.
         renderer.resources.FrameBuffers = setPingPongFrameBuffers(renderer.resources.FrameBuffers, renderer.dependencyGraph.renderPasses);
+        renderer.resources.textures = setPingPongTextures(renderer.resources.textures, renderer.dependencyGraph.renderPasses, renderer.resources.FrameBuffers); // Ping pong textures depend on other resources to be specified.
 
         return renderer;
     }
