@@ -195,5 +195,4 @@ namespace projv::graphics {
 
         return renderer;
     }
-
 }

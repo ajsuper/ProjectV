@@ -9,23 +9,37 @@ namespace projv::graphics {
         }
     }
 
-    void performRenderPasses(std::shared_ptr<ConstructedRenderer> constructedRenderer, RenderInstance& renderInstance, int windowWidth, int windowHeight, core::mat4 viewMat, core::mat4 projMat, GPUData* gpuData) {
+    void performRenderPasses(bool renderToPrimary, std::shared_ptr<ConstructedRenderer> constructedRenderer, RenderInstance& renderInstance, int windowWidth, int windowHeight, core::mat4 viewMat, core::mat4 projMat, GPUData* gpuData) {
         for (size_t i = 0; i < constructedRenderer->dependencyGraph.size(); i++) {
             BGFXDependencyGraph &renderPass = constructedRenderer->dependencyGraph[i];
             std::cout << "RenderPassID: " << renderPass.renderPassID << std::endl;
             bgfx::setViewTransform(renderPass.renderPassID, glm::value_ptr(viewMat), glm::value_ptr(projMat));
             bgfx::setViewRect(renderPass.renderPassID, 0, 0, windowWidth, windowHeight);
-            bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandles[renderPass.targetFrameBufferID]);
+            if (renderToPrimary || !constructedRenderer->resources.framebuffers.pingPongFBOs.at(renderPass.targetFrameBufferID)) {
+                bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandles[renderPass.targetFrameBufferID]);
+            } else {
+                bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandlesAlternate[renderPass.targetFrameBufferID]);
+            }
             bgfx::setViewClear(renderPass.renderPassID, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000FF, 1.0f, 0);
             bgfx::setVertexBuffer(0, renderInstance.vertexBuffer);
             bgfx::setIndexBuffer(renderInstance.indexBuffer);
 
             for (size_t j = 0; j < renderPass.depdendencies.size(); j++) {
                 bgfx::UniformInfo info;
-                bgfx::getUniformInfo(renderPass.depdendencies[j].first, info);
+                uint textureID = renderPass.depdendencies.at(j).second;
+                if (renderToPrimary || !constructedRenderer->resources.textures.pingPongFlags.at(textureID)) {
+                    bgfx::UniformHandle textureUniformHandle = constructedRenderer->resources.textures.textureSamplerHandles.at(textureID);
+                    bgfx::TextureHandle textureHandle = constructedRenderer->resources.textures.textureHandles.at(textureID);
+                    bgfx::getUniformInfo(textureUniformHandle, info);
+                    bgfx::setTexture(j, renderPass.depdendencies[j].first, textureHandle);
+                } else {
+                    bgfx::UniformHandle textureUniformHandleAlternate = constructedRenderer->resources.textures.textureSamplerHandlesAlternate.at(textureID);
+                    bgfx::TextureHandle textureHandleAlternate = constructedRenderer->resources.textures.textureHandlesAlternate.at(textureID);
+                    bgfx::getUniformInfo(textureUniformHandleAlternate, info);
+                    bgfx::setTexture(j, renderPass.depdendencies[j].first, textureHandleAlternate);
+                }
                 std::cout << "Sampling from texture name: " << info.name << std::endl;
                 std::cout << "That texture is bound to: " << j << std::endl;
-                bgfx::setTexture(j, renderPass.depdendencies[j].first, constructedRenderer->resources.textures.textureHandles.at(renderPass.depdendencies[j].second));
             }
 
             bgfx::setTexture(13, gpuData->octreeSampler, gpuData->octreeTexture);
@@ -50,7 +64,7 @@ namespace projv::graphics {
 
         updateUniforms(constructedRenderer->resources.uniformHandles, constructedRenderer->resources.uniformValues);
         resizeFramebuffersAndTheirTexturesIfNeeded(constructedRenderer->resources.textures, constructedRenderer->resources.framebuffers, windowWidth, windowHeight, prevWindowWidth, prevWindowHeight);
-        performRenderPasses(constructedRenderer, renderInstance, windowWidth, windowHeight, view, proj, gpuData);
+        performRenderPasses(true, constructedRenderer, renderInstance, windowWidth, windowHeight, view, proj, gpuData);
 
         prevWindowWidth = windowWidth;
         prevWindowHeight = windowHeight;

@@ -18,6 +18,7 @@ namespace projv {
         std::unordered_map<int, std::vector<uint>> frameBufferTextureMapping;
         std::unordered_map<int, bgfx::FrameBufferHandle> frameBufferHandlesAlternate;
         std::unordered_map<int, std::vector<uint>> frameBufferTextureMappingAlternate;
+        std::unordered_map<int, bool> pingPongFBOs;
     };
 }
 

@@ -39,7 +39,7 @@ namespace projv::graphics {
      * @param projMat A 4x4 matrix representing the projection transformation.
      * @param gpuData A pointer to our projv::Scene serialized as projv::GPUData.
      */
-    void performRenderPasses(std::shared_ptr<ConstructedRenderer> constructedRenderer, RenderInstance& renderInstance, int windowWidth, int windowHeight, core::mat4 viewMat, core::mat4 projMat, GPUData* gpuData);
+    void performRenderPasses(bool renderToPrimary, std::shared_ptr<ConstructedRenderer> constructedRenderer, RenderInstance& renderInstance, int windowWidth, int windowHeight, core::mat4 viewMat, core::mat4 projMat, GPUData* gpuData);
 
     /**
      * Renders a ConstructedRenderer by executing all its render passes.
