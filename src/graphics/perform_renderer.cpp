@@ -15,19 +15,20 @@ namespace projv::graphics {
             std::cout << "RenderPassID: " << renderPass.renderPassID << std::endl;
             bgfx::setViewTransform(renderPass.renderPassID, glm::value_ptr(viewMat), glm::value_ptr(projMat));
             bgfx::setViewRect(renderPass.renderPassID, 0, 0, windowWidth, windowHeight);
-            if (renderToPrimary || !constructedRenderer->resources.framebuffers.pingPongFBOs.at(renderPass.targetFrameBufferID)) {
+            if (renderToPrimary || (constructedRenderer->resources.framebuffers.pingPongFBOs.at(renderPass.targetFrameBufferID) == false)) {
                 bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandles[renderPass.targetFrameBufferID]);
             } else {
                 bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandlesAlternate[renderPass.targetFrameBufferID]);
             }
-            bgfx::setViewClear(renderPass.renderPassID, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000FF, 1.0f, 0);
+            //bgfx::setViewClear(renderPass.renderPassID, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000FF, 1.0f, 0);
+            bgfx::setViewClear(renderPass.renderPassID, BGFX_CLEAR_NONE, 0xFF00FFFF, 1.0f, 0);
             bgfx::setVertexBuffer(0, renderInstance.vertexBuffer);
             bgfx::setIndexBuffer(renderInstance.indexBuffer);
 
             for (size_t j = 0; j < renderPass.depdendencies.size(); j++) {
                 bgfx::UniformInfo info;
                 uint textureID = renderPass.depdendencies.at(j).second;
-                if (renderToPrimary || !constructedRenderer->resources.textures.pingPongFlags.at(textureID)) {
+                if (!renderToPrimary || (constructedRenderer->resources.textures.pingPongFlags.at(textureID) == false)) {
                     bgfx::UniformHandle textureUniformHandle = constructedRenderer->resources.textures.textureSamplerHandles.at(textureID);
                     bgfx::TextureHandle textureHandle = constructedRenderer->resources.textures.textureHandles.at(textureID);
                     bgfx::getUniformInfo(textureUniformHandle, info);
@@ -46,6 +47,7 @@ namespace projv::graphics {
             bgfx::setTexture(14, gpuData->voxelTypeDataSampler, gpuData->voxelTypeDataTexture);
             bgfx::setTexture(15, gpuData->headerSampler, gpuData->headerTexture);
 
+            bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);  
             bgfx::submit(renderPass.renderPassID, renderPass.shaderProgram);
         }
     }
@@ -55,6 +57,7 @@ namespace projv::graphics {
         static int windowHeight = 0;
         static int prevWindowWidth = 0;
         static int prevWindowHeight = 0;
+        static bool renderToPrimary = true;
 
         glfwPollEvents();
         glfwGetWindowSize(renderInstance.window, &windowWidth, &windowHeight);
@@ -64,7 +67,9 @@ namespace projv::graphics {
 
         updateUniforms(constructedRenderer->resources.uniformHandles, constructedRenderer->resources.uniformValues);
         resizeFramebuffersAndTheirTexturesIfNeeded(constructedRenderer->resources.textures, constructedRenderer->resources.framebuffers, windowWidth, windowHeight, prevWindowWidth, prevWindowHeight);
-        performRenderPasses(true, constructedRenderer, renderInstance, windowWidth, windowHeight, view, proj, gpuData);
+        performRenderPasses(renderToPrimary, constructedRenderer, renderInstance, windowWidth, windowHeight, view, proj, gpuData);
+
+        renderToPrimary = !renderToPrimary;
 
         prevWindowWidth = windowWidth;
         prevWindowHeight = windowHeight;

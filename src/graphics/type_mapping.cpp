@@ -89,14 +89,18 @@ namespace projv::graphics {
         }
 
         // Adds the CreateNew/frame buffer texture ID's to the textureIDs.
-        uint frameBufferInputID = renderPass.frameBufferInputIDs[0];
         std::vector<uint> textureIDs;
-        for (size_t i = 0; i < frameBuffers.size(); i++) {
-            if (frameBuffers[i].frameBufferID == frameBufferInputID) {
-                textureIDs = frameBuffers[i].TextureIDs;
+        for (size_t j = 0; j < renderPass.frameBufferInputIDs.size(); j++) {
+            uint frameBufferInputID = renderPass.frameBufferInputIDs[j];
+            for (size_t i = 0; i < frameBuffers.size(); i++) {
+                if (frameBuffers[i].frameBufferID == frameBufferInputID) {
+                    for (size_t k = 0; k < frameBuffers[i].TextureIDs.size(); k++) {
+                        textureIDs.emplace_back(frameBuffers[i].TextureIDs[k]);
+                    }
+                }
             }
         }
-
+        
         // Adds the CPUBuffer/resourceTexture ID's to the textureIDs.
         for (size_t i = 0; i < renderPass.textureResourceIDs.size(); i++) {
             textureIDs.emplace_back(renderPass.textureResourceIDs[i]);
