@@ -68,6 +68,7 @@ namespace projv::graphics {
             constructedFramebuffers.frameBufferHandles[frameBuffer.frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.TextureIDs.size()), attachments.data(), false); //Bindings in GLSL are determined by the texture order.
             constructedFramebuffers.frameBufferTextureMapping[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;
             constructedFramebuffers.pingPongFBOs[frameBuffer.frameBufferID] = false;
+            constructedFramebuffers.frameBufferTextureMapping[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;
             std::cout << "Created frame buffer" << std::endl;
             constructedFramebuffers.frameBufferHandlesAlternate[frameBuffer.frameBufferID] = BGFX_INVALID_HANDLE;
             if (frameBuffer.pingPongFBO == true) {
@@ -80,6 +81,7 @@ namespace projv::graphics {
             }
         }
         constructedFramebuffers.frameBufferHandles[-1] = BGFX_INVALID_HANDLE;
+        constructedFramebuffers.pingPongFBOs[-1] = false;
         return constructedFramebuffers;
     }
 

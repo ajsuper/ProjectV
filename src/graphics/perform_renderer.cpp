@@ -16,8 +16,10 @@ namespace projv::graphics {
             bgfx::setViewTransform(renderPass.renderPassID, glm::value_ptr(viewMat), glm::value_ptr(projMat));
             bgfx::setViewRect(renderPass.renderPassID, 0, 0, windowWidth, windowHeight);
             if (renderToPrimary || (constructedRenderer->resources.framebuffers.pingPongFBOs.at(renderPass.targetFrameBufferID) == false)) {
+                std::cout << "Rendering too primary FBO" << std::endl;
                 bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandles[renderPass.targetFrameBufferID]);
             } else {
+                std::cout << "Rendering too alternate FBO" << std::endl;
                 bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandlesAlternate[renderPass.targetFrameBufferID]);
             }
             //bgfx::setViewClear(renderPass.renderPassID, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000FF, 1.0f, 0);
@@ -29,11 +31,13 @@ namespace projv::graphics {
                 bgfx::UniformInfo info;
                 uint textureID = renderPass.depdendencies.at(j).second;
                 if (!renderToPrimary || (constructedRenderer->resources.textures.pingPongFlags.at(textureID) == false)) {
+                    std::cout << "Rendering from primary" << std::endl;
                     bgfx::UniformHandle textureUniformHandle = constructedRenderer->resources.textures.textureSamplerHandles.at(textureID);
                     bgfx::TextureHandle textureHandle = constructedRenderer->resources.textures.textureHandles.at(textureID);
                     bgfx::getUniformInfo(textureUniformHandle, info);
                     bgfx::setTexture(j, renderPass.depdendencies[j].first, textureHandle);
                 } else {
+                    std::cout << "Rendering from alternate" << std::endl;
                     bgfx::UniformHandle textureUniformHandleAlternate = constructedRenderer->resources.textures.textureSamplerHandlesAlternate.at(textureID);
                     bgfx::TextureHandle textureHandleAlternate = constructedRenderer->resources.textures.textureHandlesAlternate.at(textureID);
                     bgfx::getUniformInfo(textureUniformHandleAlternate, info);

@@ -83,7 +83,8 @@ namespace projv::graphics {
             RenderPass renderPass = renderPasses[i];
             uint frameBufferOutputID = renderPass.frameBufferOutputID;
             for (size_t j = 0; j < renderPass.frameBufferInputIDs.size(); j++) {
-                if (renderPass.frameBufferInputIDs[i] == frameBufferOutputID) {
+                if (frameBufferID == frameBufferOutputID && (renderPass.frameBufferInputIDs[j] == frameBufferOutputID)) {
+                    std::cout << "Ping pong frame buffer detected!" << std::endl;
                     return true;
                 }
             }
@@ -98,7 +99,10 @@ namespace projv::graphics {
             if (frameBuffer.pingPongFBO) {
                 for (size_t j = 0; j < frameBuffer.TextureIDs.size(); j++) {
                     for (size_t k = 0; k < texturesNew.size(); k++) {
-                        texturesNew[k].pingPongFlag = true;
+                        if (frameBuffer.TextureIDs[j] == texturesNew[k].textureID) {
+                            std::cout << "Ping pong texture detected!" << std::endl;
+                            texturesNew[k].pingPongFlag = true;
+                        }
                     }
                 }
             }
