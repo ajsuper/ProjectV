@@ -14,6 +14,7 @@
 #include "data_structures/dependencyGraph.h"
 
 #include "graphics/type_mapping.h"
+#include "core/log.h"
 
 #include "nlohmann/json.hpp"
 

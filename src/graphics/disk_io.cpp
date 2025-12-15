@@ -4,20 +4,20 @@ namespace projv::graphics {
     bgfx::ShaderHandle loadShader(const std::string &path) {
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         if (!file.is_open()) {
-            fprintf(stderr, "Failed to open shader: %s\n", path.c_str());
+            core::error("Failed to open shader: {}", path);
             return BGFX_INVALID_HANDLE;
         }
 
         std::streamsize fileSize = file.tellg();
         if (fileSize <= 0) {
-            fprintf(stderr, "Shader file is empty or error reading size: %s\n", path.c_str());
+            core::error("Shader file is empty or error reading size: {}", path);
             return BGFX_INVALID_HANDLE;
         }
         file.seekg(0, std::ios::beg);
 
         std::vector<char> loadedBuffer(fileSize);
         if (!file.read(loadedBuffer.data(), fileSize)) {
-            fprintf(stderr, "Failed to read shader: %s\n", path.c_str());
+            core::error("Failed to read shader: {}", path);
             return BGFX_INVALID_HANDLE;
         }
 
@@ -26,6 +26,7 @@ namespace projv::graphics {
     }
 
     std::vector<char> readFile(const std::string &filename) {
+        core::info("Openning file {}...", filename);
         std::ifstream file(filename, std::ios::ate | std::ios::binary);
 
         if (!file.is_open()) {
@@ -44,9 +45,10 @@ namespace projv::graphics {
     }
 
     std::vector<Uniform> loadUniformTypes(nlohmann::json& resourceData) {
+        core::info("Loading uniform types...");
         std::vector<Uniform> uniforms;
         for (const auto &uniform : resourceData["uniforms"]) {
-            std::cout << "Uniform:: name: " << uniform["name"] << ", Type: " << uniform["type"] << std::endl;
+            core::info("Uniform:: name: {} , Type: {}", uniform["name"].dump(), uniform["type"].dump());
             Uniform uniformResource;
             uniformResource.type = getUniformType(uniform["type"]);
             uniformResource.name = uniform["name"];
@@ -56,12 +58,13 @@ namespace projv::graphics {
     }
 
     std::vector<Shader> loadShaders(nlohmann::json& resourceData, std::string rendererPath) {
+        core::info("Loading shaders...");
         std::vector<Shader> shaders;
         for (const auto &shader : resourceData["shaders"]) {
-            std::cout << "Shader:: shaderID: " << shader["shaderID"] << ", path: " << shader["path"] << std::endl;
+            core::info("Shader:: shaderID: {}, path: {}", shader["shaderID"].dump(), shader["path"].dump());
             Shader shaderResource;
             shaderResource.shaderID = shader["shaderID"];
-            if(shader["shaderID"] <= 0) std::cout << "ERROR: ShaderID less than 0! : " << shader["shaderID"] << std::endl;
+            if(shader["shaderID"] <= 0) core::error("ShaderID {} is less than 0!", shader["shaderID"].dump());
             shaderResource.filePath = shader["path"];
             shaderResource.shaderFileContents = readFile(rendererPath);
             shaders.emplace_back(shaderResource);
@@ -84,7 +87,7 @@ namespace projv::graphics {
             uint frameBufferOutputID = renderPass.frameBufferOutputID;
             for (size_t j = 0; j < renderPass.frameBufferInputIDs.size(); j++) {
                 if (frameBufferID == frameBufferOutputID && (renderPass.frameBufferInputIDs[j] == frameBufferOutputID)) {
-                    std::cout << "Ping pong frame buffer detected!" << std::endl;
+                    core::info("{} detected as a ping pong frame buffer.", frameBufferID);
                     return true;
                 }
             }
@@ -100,7 +103,7 @@ namespace projv::graphics {
                 for (size_t j = 0; j < frameBuffer.TextureIDs.size(); j++) {
                     for (size_t k = 0; k < texturesNew.size(); k++) {
                         if (frameBuffer.TextureIDs[j] == texturesNew[k].textureID) {
-                            std::cout << "Ping pong texture detected!" << std::endl;
+                            core::info("{} detected as a ping pong texture.", texturesNew[k].textureID);
                             texturesNew[k].pingPongFlag = true;
                         }
                     }
@@ -121,15 +124,12 @@ namespace projv::graphics {
     std::vector<Texture> loadTextures(nlohmann::json& resourceData) {
         std::vector<Texture> textures;
         for (const auto &texture : resourceData["textures"]) {
-            std::cout << "Uniform:: texID: " << texture["texID"]
-                    << ", name: " << texture["name"]
-                    << ", format: " << texture["format"] << ", resolution: ("
-                    << texture["resX"] << ", " << texture["resY"]
-                    << ") , resizable: " << texture["resizable"]
-                    << ", origin: " << texture["origin"] << std::endl;
+            core::info("Uniform:: texID: {} , name: {} , format: {} , resolution: ({}, {}) , resizable: {} , origin: {}", 
+                        texture["texID"].dump(), texture["name"].dump(), texture["format"].dump(), texture["resX"].dump(), texture["resY"].dump(), 
+                        texture["resizable"].dump(), texture["origin"].dump());
             Texture textureResource;
             textureResource.textureID = texture["texID"];
-            if(texture["texID"] <= 0) {std::cout << "ERROR: Invalid textureID! : " << texture["texID"] << std::endl;}
+            if(texture["texID"] <= 0) core::error("TextureID {} is less than 0!", texture["texID"].dump());
             textureResource.name = texture["name"];
             textureResource.format = getFormat(texture["format"]);
             textureResource.resolutionX = texture["resX"];
@@ -144,7 +144,10 @@ namespace projv::graphics {
     std::vector<FrameBuffer> loadFrameBuffers(nlohmann::json& resourceData) {
         std::vector<FrameBuffer> frameBuffers;
         for (const auto &frameBuffer : resourceData["framebuffers"]) {
-            std::cout << "FrameBuffer:: fboID: " << frameBuffer["fboID"] << ", textureIDs: " << frameBuffer["textureIDs"] << std::endl;
+            const std::string logFormat = "Framebuffer:: fboID: {} , textureIDs: {}";
+            spdlog::info(logFormat,
+                        frameBuffer["fboID"].dump(), 
+                        frameBuffer["textureIDs"].dump());
             FrameBuffer frameBufferResource;
             frameBufferResource.frameBufferID = frameBuffer["fboID"];
             for (auto &textureID : frameBuffer["textureIDs"]) {
@@ -158,11 +161,16 @@ namespace projv::graphics {
     std::vector<RenderPass> loadRenderPasses(nlohmann::json& dependencyGraphData) {
         std::vector<RenderPass> renderPasses;
         for (const auto &renderPass : dependencyGraphData["renderer"]) {
-            std::cout << "RenderPass:: shaderID: " << renderPass["shaderID"]
-                    << ", frameBufferInputIDs: " << renderPass["frameBufferInputIDs"]
-                    << ", resourceTexturesIDs: " << renderPass["resourceTextures"]
-                    << ", frameBufferOutputID: " << renderPass["frameBufferOutputID"]
-                    << std::endl;
+            const std::string logFormat = 
+                "{shaderID}: {} , "
+                "frameBufferInputIDs: {} , "
+                "resourceTexturesIDs: {} , "
+                "frameBufferOutputID: {}";
+            spdlog::info(logFormat,
+                        renderPass["shaderID"].dump(), 
+                        renderPass["frameBufferInputIDs"].dump(),
+                        renderPass["resourceTexturesIDs"].dump(),
+                        renderPass["frameBufferOutputID"].dump());
             RenderPass renderPassDescription;
             renderPassDescription.shaderID = renderPass["shaderID"];
 

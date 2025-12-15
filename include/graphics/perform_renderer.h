@@ -9,10 +9,10 @@
 #include "data_structures/gpuData.h"
 
 #include "graphics/manage_resources.h"
+#include "core/log.h"
 
 #include "render_instance.h"
 #include "bgfx/bgfx.h"
-
 
 namespace projv::graphics {
 

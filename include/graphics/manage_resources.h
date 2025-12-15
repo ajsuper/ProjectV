@@ -12,6 +12,7 @@
 
 #include "graphics/type_mapping.h"
 #include "graphics/disk_io.h"
+#include "core/log.h"
 
 #include "bgfx/bgfx.h"
 

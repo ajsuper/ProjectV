@@ -10,6 +10,7 @@
 #include "data_structures/posTexVertex.h"
 
 #include "core/math.h"
+#include "core/log.h"
 
 #include "../../external/bgfx/include/bgfx/platform.h"
 #include "GLFW/glfw3.h"

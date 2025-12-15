@@ -11,6 +11,7 @@
 #include "data_structures/dependencyGraph.h"
 #include "bgfx/bgfx.h"
 
+#include "core/log.h"
 
 namespace projv::graphics {
     /**
