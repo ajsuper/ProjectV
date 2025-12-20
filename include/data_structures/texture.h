@@ -31,6 +31,7 @@ namespace projv{
         std::unordered_map<uint, projv::core::ivec2> textureResolutions;
         std::unordered_map<uint, bgfx::TextureFormat::Enum> textureFormats;
         std::unordered_map<uint, bool> pingPongFlags;
+        std::unordered_map<uint, uint> textureIDToFrameBufferID;
     };
 }
 

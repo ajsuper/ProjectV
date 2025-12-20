@@ -160,17 +160,20 @@ namespace projv::graphics {
 
     std::vector<RenderPass> loadRenderPasses(nlohmann::json& dependencyGraphData) {
         std::vector<RenderPass> renderPasses;
+        uint renderPassID;
         for (const auto &renderPass : dependencyGraphData["renderer"]) {
             const std::string logFormat = 
                 "{shaderID}: {} , "
                 "frameBufferInputIDs: {} , "
                 "resourceTexturesIDs: {} , "
-                "frameBufferOutputID: {}";
+                "frameBufferOutputID: {} , "
+                "multiPass: {}";
             spdlog::info(logFormat,
                         renderPass["shaderID"].dump(), 
                         renderPass["frameBufferInputIDs"].dump(),
                         renderPass["resourceTexturesIDs"].dump(),
-                        renderPass["frameBufferOutputID"].dump());
+                        renderPass["frameBufferOutputID"].dump(),
+                        renderPass["multiPass"].dump());
             RenderPass renderPassDescription;
             renderPassDescription.shaderID = renderPass["shaderID"];
 
@@ -183,8 +186,12 @@ namespace projv::graphics {
             }
 
             renderPassDescription.frameBufferOutputID = renderPass["frameBufferOutputID"];
-
+            renderPassDescription.multiPass = renderPass["multiPass"];
+            
             renderPasses.emplace_back(renderPassDescription);
+            for(size_t i = 0; i < renderPassDescription.multiPass; i++) {
+                renderPasses.emplace_back(renderPassDescription);
+            }
         }
         return renderPasses;
     }

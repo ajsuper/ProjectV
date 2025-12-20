@@ -1,4 +1,5 @@
 #include "graphics/manage_resources.h"
+#include "data_structures/texture.h"
 #include <bgfx/bgfx.h>
 
 namespace projv::graphics {
@@ -71,6 +72,7 @@ namespace projv::graphics {
             constructedFramebuffers.frameBufferTextureMapping[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;
             std::cout << "Created frame buffer" << std::endl;
             constructedFramebuffers.frameBufferHandlesAlternate[frameBuffer.frameBufferID] = BGFX_INVALID_HANDLE;
+            constructedFramebuffers.primaryWasLastRenderedToo[frameBuffer.frameBufferID] = true;
             if (frameBuffer.pingPongFBO == true) {
                 std::vector<bgfx::Attachment> attachmentsAlternate = getTextureAttachments(constructedTextures.textureHandlesAlternate, frameBuffer.TextureIDs);
                 std::cout << "Got alternate texture attachments" << std::endl;
@@ -83,6 +85,17 @@ namespace projv::graphics {
         constructedFramebuffers.frameBufferHandles[-1] = BGFX_INVALID_HANDLE;
         constructedFramebuffers.pingPongFBOs[-1] = false;
         return constructedFramebuffers;
+    }
+
+    ConstructedTextures assignTexturesToTheirFramebuffers(const ConstructedFramebuffers& frameBuffers, const ConstructedTextures& textures) {
+        ConstructedTextures texturesNew = textures;
+        for (auto& frameBuffer : frameBuffers.frameBufferTextureMapping) {
+            for (size_t i = 0; i < frameBuffer.second.size(); i++) {
+                uint textureID = frameBuffer.second[i];
+                texturesNew.textureIDToFrameBufferID[textureID] = frameBuffer.first;
+            }
+        }
+        return texturesNew;
     }
 
     std::unordered_map<std::string, bgfx::UniformHandle> constructUniforms(const std::vector<Uniform>& uniforms) {
@@ -119,6 +132,7 @@ namespace projv::graphics {
             dependencyGraph.targetFrameBufferID = renderPass.frameBufferOutputID;
             dependencyGraph.shaderProgram = createShaderProgram(constructedResources.defaultVertexShader, constructedResources.shaderHandles.at(renderPass.shaderID));
             dependencyGraph.renderPassID = uint(i);
+
             dependencyGraphs.push_back(dependencyGraph);
         }
         return dependencyGraphs;
@@ -140,6 +154,7 @@ namespace projv::graphics {
         std::cout << "Constructed shaders!" << std::endl;
         constructedRenderer.dependencyGraph = constructRenderPasses(constructedRenderer.resources, resources.FrameBuffers, renderPasses);
         std::cout << "Constructed render passes!" << std::endl;
+        constructedRenderer.resources.textures = assignTexturesToTheirFramebuffers(constructedRenderer.resources.framebuffers, constructedRenderer.resources.textures);
 
         return std::make_shared<ConstructedRenderer>(constructedRenderer);
     }

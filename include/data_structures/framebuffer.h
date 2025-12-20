@@ -19,6 +19,7 @@ namespace projv {
         std::unordered_map<int, bgfx::FrameBufferHandle> frameBufferHandlesAlternate;
         std::unordered_map<int, std::vector<uint>> frameBufferTextureMappingAlternate;
         std::unordered_map<int, bool> pingPongFBOs;
+        std::unordered_map<int, bool> primaryWasLastRenderedToo; // If the primary frame buffer was last rendered to.
     };
 }
 
