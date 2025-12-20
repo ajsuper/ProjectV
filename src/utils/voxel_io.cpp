@@ -10,7 +10,7 @@ namespace projv::utils {
 
         std::ofstream outFile(fileDirectory, std::ios::binary);
         if (!outFile) {
-            core::warn("Function: writeUint32Vector. Failed to open {}", fileDirectory);
+            core::warn("writeUint32Vector: Failed to open file for writing: {} (permission denied or path does not exist)", fileDirectory);
             return;
         }
     
@@ -25,10 +25,10 @@ namespace projv::utils {
     }
 
     std::vector<uint32_t> readUint32Vector(std::string fileDirectory){
-        core::info("Function: readUint32Vector. Reading uint32_t vector from {}", fileDirectory);
+        core::info("readUint32Vector: Reading {} uint32_t values from file: {}", "vector", fileDirectory);
         std::ifstream inFile(fileDirectory, std::ios::binary);  
         if (!inFile) {
-            core::error("Function: readUint32Vector. Failed to open {}", fileDirectory);
+            core::error("readUint32Vector: Failed to open file for reading: {} (file does not exist or permission denied)", fileDirectory);
             return {};
         }
         size_t size;
@@ -43,7 +43,7 @@ namespace projv::utils {
     }
 
     void writeHeadersJSON(const std::vector<ChunkHeader>& chunkHeaders, const std::string& fileDirectory) {
-        core::info("Function: writeHeadersJSON. Writing headers to {}", fileDirectory);
+        core::info("writeHeadersJSON: Writing {} chunk headers to file: {}", "headers", fileDirectory);
         nlohmann::json jsonOutput;
         jsonOutput["chunkHeaders"] = nlohmann::json::array();
     
@@ -64,7 +64,7 @@ namespace projv::utils {
     
         std::ofstream outFile(fileDirectory);
         if (!outFile) {
-            core::warn("Function: writeHeadersJSON. Still failed to open {}", fileDirectory);
+            core::warn("writeHeadersJSON: Failed to open headers file after multiple attempts: {}", fileDirectory);
             return;
         }
     
@@ -73,10 +73,10 @@ namespace projv::utils {
     }
     
     std::vector<ChunkHeader> readHeadersJSON(const std::string& fileDirectory) {
-        core::info("Function: readHeadersJSON. Reading headers from {}", fileDirectory);
+        core::info("readHeadersJSON: Reading {} chunk headers from file: {}", "headers", fileDirectory);
         std::ifstream inFile(fileDirectory);
         if (!inFile) {
-            core::error("Function: readHeadersJSON. Failed to open {}", fileDirectory);
+            core::error("readHeadersJSON: Failed to open headers file for reading: {} (corrupted file or missing)", fileDirectory);
             return {};
         }
 
@@ -87,7 +87,7 @@ namespace projv::utils {
         std::vector<ChunkHeader> headers;
         headers.reserve(jsonInput["chunkHeaders"].size());
         if (!jsonInput.contains("chunkHeaders") || !jsonInput["chunkHeaders"].is_array()) {
-            core::error("Error in readHeadersJSON: Invalid JSON format");
+            core::error("readHeadersJSON: Invalid JSON format - file may be corrupted or modified incorrectly");
             return {};
         }
 
@@ -108,7 +108,7 @@ namespace projv::utils {
     }
 
     void writeSceneToDisk(std::string sceneFileDirectory, Scene& scene){
-        core::info("Function: writeSceneToDisk. Writing scene to: {}", sceneFileDirectory);
+        core::info("writeSceneToDisk: Writing scene with {} chunks to directory: {}", "multiple", sceneFileDirectory);
 
         // Delete all files in the octree and voxelTypeData subdirectories
         std::filesystem::remove_all(sceneFileDirectory + "/");
@@ -126,13 +126,13 @@ namespace projv::utils {
             writeChunkToDisk(sceneFileDirectory, scene.chunks[i]);
         }
 
-        core::info("Function: writeSceneToDisk. Scene written to disk");
+        core::info("writeSceneToDisk: Successfully wrote scene data to disk");
     }
 
     Chunk loadChunkFromDisk(std::string sceneFileDirectory, ChunkHeader chunk) {
         uint32_t chunkID = chunk.chunkID;
         core::info("[loadChunkFromDisk] Loading chunk {} from disk...", chunkID);
-        core::info("Function: loadChunkFromDisk. Loading chunk " + std::to_string(chunkID) + "from disk...");
+        core::info("loadChunkFromDisk: Starting chunk {} load operation", chunkID);
         auto start = std::chrono::high_resolution_clock::now();
 
         // Find the header for the inputted chunkID.
@@ -146,7 +146,7 @@ namespace projv::utils {
         if (it != chunkHeaders.end()) {
             chunkData.header = *it;
         } else {
-            core::error("[loadChunkFromDisk] Chunk ID {} not found in headers.", chunkID);
+            core::error("loadChunkFromDisk: Chunk {} not found in headers file - invalid chunk ID", chunkID);
             core::error("Function: loadChunkFromDisk. ChunkID " + std::to_string(chunkID) + " not found in headers.");
             return chunkData; // Return empty chunkData
         }
@@ -159,7 +159,7 @@ namespace projv::utils {
 
         auto end = std::chrono::high_resolution_clock::now();
         double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
-        core::info("Function: loadChunkFromDisk. Loaded chunk " + std::to_string(chunkID) + "in " + std::to_string(elapsed) + "ms");
+        core::info("loadChunkFromDisk: Successfully loaded chunk {} in {:.2f}ms", chunkID, elapsed);
         return chunkData;
     }
 

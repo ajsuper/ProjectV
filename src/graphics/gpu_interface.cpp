@@ -56,8 +56,8 @@ namespace projv::graphics {
         }
         int pixelSize = data.size() / 4;
         int dataWidth = (pixelSize / textureHeight);
-        core::info("Data height: {}", textureHeight);
-        core::info("Data width: {}", dataWidth);
+        core::info("createArbitraryTexture: Creating texture with height {}px", textureHeight);
+        core::info("createArbitraryTexture: Creating texture with width {}px", dataWidth);
         if(pixelSize % textureHeight != 0) {
             dataWidth += 1;
         } 
@@ -91,9 +91,7 @@ namespace projv::graphics {
         std::vector<projv::GPUChunkHeader> gpuChunkHeaderData;
         // Combine the voxelTypeData, octree, and headers for each chunk into just 3 vectors.
         for(size_t i = 0; i < scene.chunks.size(); i++) {
-            core::info("Serializing data for chunk {}", scene.chunks[i].header.chunkID);
-            core::info("Octree size for chunk: {}", scene.chunks[i].geometryData.size());
-            core::info("Voxel Type Data size for chunk: {}", scene.chunks[i].voxelTypeData.size());
+            core::info("createTexturesForScene: Serializing chunk {} data (octree: {} values, voxel types: {} values)", scene.chunks[i].header.chunkID, scene.chunks[i].geometryData.size(), scene.chunks[i].voxelTypeData.size());
             int octreeStartIndex = octreeData.size();
             int voxelTypeDataStartIndex = voxelTypeData.size();
 
@@ -123,11 +121,11 @@ namespace projv::graphics {
             gpuChunkHeaderData.emplace_back(gpuChunkHeader);
         }
         
-        core::info("Creating octree texture. std::vector<uint32_t> size: {}", octreeData.size());
+        core::info("createTexturesForScene: Creating octree texture ({} values)", octreeData.size());
         gpuData.octreeTexture = createArbitraryTexture(octreeData);
-        core::info("Creating voxel type data texture. std::vector<uint32_t> size: {}", voxelTypeData.size());
+        core::info("createTexturesForScene: Creating voxel type texture ({} values)", voxelTypeData.size());
         gpuData.voxelTypeDataTexture = createArbitraryTexture(voxelTypeData);
-        core::info("Creating header texture. std::vector<projv::GPUChunkHeader> size: {}", gpuChunkHeaderData.size());
+        core::info("createTexturesForScene: Creating chunk header texture ({} chunks)", gpuChunkHeaderData.size());
         gpuData.headerTexture = createHeaderTexture(gpuChunkHeaderData);
         
         gpuData.octreeSampler = bgfx::createUniform("octreeData", bgfx::UniformType::Sampler);

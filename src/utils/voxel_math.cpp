@@ -58,7 +58,7 @@ namespace projv::utils {
     }
 
     std::unordered_map<uint32_t, uint16_t> createReverseLUT(const std::array<uint32_t, 512>& forwardArray) {
-        core::info("CreatingLUT!!!");
+        core::info("createReverseLUT: Generating reverse lookup table for {} Z-order values", 512);
         std::unordered_map<uint32_t, uint16_t> reverseArray{};
         for(size_t i = 0; i < 512; i++) {
             reverseArray[forwardArray[i]] = i;

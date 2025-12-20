@@ -37,7 +37,7 @@ namespace projv::utils {
         }
 
         if(childPointerTooLarge) {
-            core::error("Function: addPointers. Child pointer too large! May cause corrupt octree. Decrease the amount of data in 1 octree");
+            core::error("addPointers: Child pointer too large (exceeds 21 bits)! Octree may be corrupted. Consider reducing data size or increasing resolution levels");
         }
     }
 
@@ -109,7 +109,7 @@ namespace projv::utils {
     
     std::vector<uint32_t> createOctree(VoxelGrid& voxels, int voxelWholeResolution){
         std::chrono::high_resolution_clock::time_point startWhole = std::chrono::high_resolution_clock::now();
-        core::info("Function: createOctree. Octree generation started with size of: " + std::to_string(voxelWholeResolution));
+        core::info("createOctree: Starting octree generation with resolution {}x{}x{} ({} voxels total)", voxelWholeResolution, voxelWholeResolution, voxelWholeResolution, voxelWholeResolution * voxelWholeResolution * voxelWholeResolution);
         int levelsOfDepth = int(log2(voxelWholeResolution));
         std::vector<nodeStructure> octree;
         std::vector<nodeStructure> levelInProgress;
@@ -137,7 +137,7 @@ namespace projv::utils {
         auto endWhole = std::chrono::high_resolution_clock::now();
         double elapsedWhole = std::chrono::duration<double, std::milli>(endWhole - startWhole).count();
 
-        core::info("Function: createOctree. Octree generation finished in: " + std::to_string(elapsedWhole) + "ms");
+        core::info("createOctree: Completed octree generation in {:.2f}ms for {} voxels", elapsedWhole, voxelWholeResolution * voxelWholeResolution * voxelWholeResolution);
 
         return octreeSimplified;
     }
@@ -219,15 +219,15 @@ namespace projv::utils {
 
     ChunkHeader createChunkHeader(std::vector<ChunkHeader>& sceneChunkHeaders, core::vec3 position, float voxelScale, int resolutionPowOf2) {
         if(resolutionPowOf2 > 512) {
-            core::warn("Function: createChunkHeader. resolutionPowOf2 is higher than the recommended maximum of 256.");
+            core::warn("createChunkHeader: Resolution {} exceeds recommended maximum of 256 (may impact performance)", resolutionPowOf2);
         }
         int accuratePowerOf2 = std::pow(2, std::ceil(std::log2(resolutionPowOf2)));
         if(core::fract(log2(resolutionPowOf2)) != 0) {
-            core::warn("Function: createChunkHeader. resolutionPowOf2 isn't a power of 2! rounding the next highest power of 2: {}", accuratePowerOf2);
+            core::warn("createChunkHeader: Resolution {} is not power of 2, rounding up to {}", resolutionPowOf2, accuratePowerOf2);
         }
         float chunkScale = createChunkScaleFromVoxelScaleAndResolution(voxelScale, resolutionPowOf2);
         if(chunkScale < 3) {
-            core::warn("Function: createChunkHeader. chunkScale is lower than 3 which may cause floating point imprecisions. Increase voxel scale.");
+            core::warn("createChunkHeader: Chunk scale {:.2f} is below 3.0 (may cause floating point precision issues)", chunkScale);
         }
 
         projv::ChunkHeader chunkHeader;
@@ -291,7 +291,7 @@ namespace projv::utils {
         size_t count = chunk.voxelTypeData.size() / 3;
         decompressedVoxels.resize(count);
         
-        core::info("Getting {} voxels from chunk.", count);
+        core::info("getChunkVoxelBatch: Decompressing {} voxels from chunk", count);
         for (size_t i = 0; i < count; ++i) {
             uint32_t ZOrderPosition = chunk.voxelTypeData[i * 3];
             uint32_t SerializedColor = chunk.voxelTypeData[i * 3 + 1];
@@ -306,7 +306,7 @@ namespace projv::utils {
             decompressedVoxels[i] = voxel;
         }
 
-        core::info("Size of voxels: {}", decompressedVoxels.size());
+        core::info("getChunkVoxelBatch: Decompressed {} voxels from chunk storage", decompressedVoxels.size());
 
         return decompressedVoxels;
     }
@@ -361,7 +361,7 @@ namespace projv::utils {
         VoxelGrid voxelGrid = createVoxelGridFromChunksQueue(chunk);
         auto end = std::chrono::high_resolution_clock::now();
         double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
-        core::info("Time taken to create VoxelGrid from chunk queue: " + std::to_string(elapsed) + "ms");
+        core::info("createVoxelGridFromChunksQueue: Processed chunk queue in {:.2f}ms", elapsed);
 
         // Compute resolution.
         Voxel farthestVoxel = voxelGrid.voxels[voxelGrid.voxels.size() - 1];
@@ -369,7 +369,7 @@ namespace projv::utils {
         int farthestCoordinate = std::max({position.x, position.y, position.z});
         int resolutionToTheNearestPowOfTwo = std::pow(2, std::ceil(std::log2(farthestCoordinate + 1)));
         if(resolutionToTheNearestPowOfTwo > 256) {
-            core::warn("resoltuion of chunk {} is greater than 256 ({}). Caused by voxel positions inside chunk being too large. ", chunk.header.chunkID, chunk.header.resolution);
+            core::warn("updateChunkFromItsVoxelBatch: Chunk {} resolution {} exceeds recommended 256 (voxel positions too large)", chunk.header.chunkID, chunk.header.resolution);
         }
 
         // Update the chunk.
