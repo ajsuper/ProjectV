@@ -1,3 +1,4 @@
+#include "core/log.h"
 #include "utils/voxel_math.h"
 
 namespace projv::utils {
