@@ -29,7 +29,7 @@ namespace projv::core {
             auto [insertedIt, _] = world.globalResources.emplace(typeIndex, std::move(resource));
             return std::any_cast<T&>(insertedIt->second);
         } else {
-            std::cout << "Resource already exists!" << std::endl;
+            core::warn("Resource already exists!");
             return std::any_cast<T&>(it->second);
         }
     }
@@ -95,7 +95,7 @@ namespace projv::core {
     T& getGlobalResource(World& world) {
         auto it = world.globalResources.find(std::type_index(typeid(T)));
         if (it == world.globalResources.end()) {
-            std::cout << "Resource not found!" << std::endl;
+            core::warn("Resource not found!");
         }
         return std::any_cast<T&>(it->second);
     }

@@ -70,16 +70,16 @@ namespace projv::graphics {
             constructedFramebuffers.frameBufferTextureMapping[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;
             constructedFramebuffers.pingPongFBOs[frameBuffer.frameBufferID] = false;
             constructedFramebuffers.frameBufferTextureMapping[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;
-            std::cout << "Created frame buffer" << std::endl;
+            core::info("Created frame buffer");
             constructedFramebuffers.frameBufferHandlesAlternate[frameBuffer.frameBufferID] = BGFX_INVALID_HANDLE;
             constructedFramebuffers.primaryWasLastRenderedToo[frameBuffer.frameBufferID] = true;
             if (frameBuffer.pingPongFBO == true) {
                 std::vector<bgfx::Attachment> attachmentsAlternate = getTextureAttachments(constructedTextures.textureHandlesAlternate, frameBuffer.TextureIDs);
-                std::cout << "Got alternate texture attachments" << std::endl;
+                core::info("Got alternate texture attachments");
                 constructedFramebuffers.frameBufferHandlesAlternate[frameBuffer.frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.TextureIDs.size()), attachmentsAlternate.data(), false); //Bindings in GLSL are determined by the texture order.
                 constructedFramebuffers.frameBufferTextureMappingAlternate[frameBuffer.frameBufferID] = frameBuffer.TextureIDs;               
                 constructedFramebuffers.pingPongFBOs[frameBuffer.frameBufferID] = true;
-                std::cout << "Created alternate frame buffer" << std::endl;
+                core::info("Created alternate frame buffer");
             }
         }
         constructedFramebuffers.frameBufferHandles[-1] = BGFX_INVALID_HANDLE;
@@ -145,15 +145,15 @@ namespace projv::graphics {
         const std::vector<RenderPass> &renderPasses = renderer.dependencyGraph.renderPasses;
 
         constructedRenderer.resources.textures = constructTextures(resources.textures);
-        std::cout << "Constructed textures!" << std::endl;
+        core::info("Constructed textures!");
         constructedRenderer.resources.framebuffers = constructFramebuffers(resources.FrameBuffers, constructedRenderer.resources.textures);
-        std::cout << "Constructed frame buffers!" << std::endl;
+        core::info("Constructed frame buffers!");
         constructedRenderer.resources.uniformHandles = constructUniforms(resources.uniforms);
-        std::cout << "Constructed uniform handles!" << std::endl;
+        core::info("Constructed uniform handles!");
         constructedRenderer.resources.shaderHandles = constructShaders(resources.shaders);
-        std::cout << "Constructed shaders!" << std::endl;
+        core::info("Constructed shaders!");
         constructedRenderer.dependencyGraph = constructRenderPasses(constructedRenderer.resources, resources.FrameBuffers, renderPasses);
-        std::cout << "Constructed render passes!" << std::endl;
+        core::info("Constructed render passes!");
         constructedRenderer.resources.textures = assignTexturesToTheirFramebuffers(constructedRenderer.resources.framebuffers, constructedRenderer.resources.textures);
 
         return std::make_shared<ConstructedRenderer>(constructedRenderer);

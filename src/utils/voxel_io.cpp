@@ -87,7 +87,7 @@ namespace projv::utils {
         std::vector<ChunkHeader> headers;
         headers.reserve(jsonInput["chunkHeaders"].size());
         if (!jsonInput.contains("chunkHeaders") || !jsonInput["chunkHeaders"].is_array()) {
-            std::cerr << "Error in 'readHeadersJSON': Invalid JSON format" << std::endl;
+            core::error("Error in readHeadersJSON: Invalid JSON format");
             return {};
         }
 
@@ -131,7 +131,7 @@ namespace projv::utils {
 
     Chunk loadChunkFromDisk(std::string sceneFileDirectory, ChunkHeader chunk) {
         uint32_t chunkID = chunk.chunkID;
-        std::cout << "[loadChunkFromDisk] Loading chunk " << chunkID << " from disk...";
+        core::info("[loadChunkFromDisk] Loading chunk {} from disk...", chunkID);
         core::info("Function: loadChunkFromDisk. Loading chunk " + std::to_string(chunkID) + "from disk...");
         auto start = std::chrono::high_resolution_clock::now();
 
@@ -146,7 +146,7 @@ namespace projv::utils {
         if (it != chunkHeaders.end()) {
             chunkData.header = *it;
         } else {
-            std::cerr << "[loadChunkFromDisk] Chunk ID " << chunkID << " not found in headers." << std::endl;
+            core::error("[loadChunkFromDisk] Chunk ID {} not found in headers.", chunkID);
             core::error("Function: loadChunkFromDisk. ChunkID " + std::to_string(chunkID) + " not found in headers.");
             return chunkData; // Return empty chunkData
         }

@@ -146,7 +146,7 @@ namespace projv::utils {
         std::vector<uint32_t> voxelTypeData;
         for(size_t i = 0; i < voxels.voxels.size(); i++){
             Voxel voxel = voxels.voxels[i];
-            //std::cout << i << "ZOrderIndex" << std::endl;
+            //core::debug("{} ZOrderIndex", i);
             voxelTypeData.emplace_back(voxel.ZOrderPosition);
             int R10 = (voxel.color.r)*4;
             int G10 = (voxel.color.g)*4;
@@ -306,7 +306,7 @@ namespace projv::utils {
             decompressedVoxels[i] = voxel;
         }
 
-        std::cout << "Size of voxels" << decompressedVoxels.size() << std::endl;
+        core::info("Size of voxels: {}", decompressedVoxels.size());
 
         return decompressedVoxels;
     }

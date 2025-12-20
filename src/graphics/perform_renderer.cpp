@@ -4,7 +4,7 @@ namespace projv::graphics {
     void updateUniforms(const std::unordered_map<std::string, bgfx::UniformHandle>& uniformHandles, const std::unordered_map<std::string, std::vector<uint8_t>>& uniformValues) {
         for(auto& uniform : uniformHandles) {
             std::string name = uniform.first;
-            std::cout << "Name: " << name << std::endl;
+            core::info("Name: {}", name);
             bgfx::setUniform(uniform.second, uniformValues.at(name).data());
         }
     }
@@ -12,19 +12,19 @@ namespace projv::graphics {
     void performRenderPasses(bool renderToPrimaryNotNeeded, std::shared_ptr<ConstructedRenderer> constructedRenderer, RenderInstance& renderInstance, int windowWidth, int windowHeight, core::mat4 viewMat, core::mat4 projMat, GPUData* gpuData) {
         for (size_t i = 0; i < constructedRenderer->dependencyGraph.size(); i++) {
             BGFXDependencyGraph &renderPass = constructedRenderer->dependencyGraph[i];
-            std::cout << "RenderPassID: " << renderPass.renderPassID << std::endl;
+            core::info("RenderPassID: {}", renderPass.renderPassID);
             bgfx::setViewTransform(renderPass.renderPassID, glm::value_ptr(viewMat), glm::value_ptr(projMat));
             bgfx::setViewRect(renderPass.renderPassID, 0, 0, windowWidth, windowHeight);
             
             // If its not a ping pong buffer, render to primary. If it is, then it depends on when they were last swapped.
             if (!(constructedRenderer->resources.framebuffers.pingPongFBOs.at(renderPass.targetFrameBufferID))) {
-                std::cout << "Rendering too primary FBO (default): " << renderPass.targetFrameBufferID << std::endl;
+                core::info("Rendering to primary FBO (default): {}", renderPass.targetFrameBufferID);
                 bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandles[renderPass.targetFrameBufferID]);
             } else if (!constructedRenderer->resources.framebuffers.primaryWasLastRenderedToo.at(renderPass.targetFrameBufferID)) {
-                std::cout << "Rendering too primary FBO: " << renderPass.targetFrameBufferID << std::endl;
+                core::info("Rendering to primary FBO: {}", renderPass.targetFrameBufferID);
                 bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandles[renderPass.targetFrameBufferID]);
             } else {
-                std::cout << "Rendering too alternate FBO: " << renderPass.targetFrameBufferID << std::endl;
+                core::info("Rendering to alternate FBO: {}", renderPass.targetFrameBufferID);
                 bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandlesAlternate[renderPass.targetFrameBufferID]);
             }
 
@@ -37,27 +37,27 @@ namespace projv::graphics {
                 bgfx::UniformInfo info;
                 uint textureID = renderPass.depdendencies.at(j).second;
                 if (!(constructedRenderer->resources.textures.pingPongFlags.at(textureID))) {
-                    std::cout << "Rendering from primary textureID (default): " << textureID << std::endl;
+                    core::info("Rendering from primary textureID (default): {}", textureID);
                     bgfx::UniformHandle textureUniformHandle = constructedRenderer->resources.textures.textureSamplerHandles.at(textureID);
                     bgfx::TextureHandle textureHandle = constructedRenderer->resources.textures.textureHandles.at(textureID);
                     bgfx::getUniformInfo(textureUniformHandle, info);
                     bgfx::setTexture(j, renderPass.depdendencies[j].first, textureHandle);
                 } else if (!constructedRenderer->resources.framebuffers.primaryWasLastRenderedToo.at(constructedRenderer->resources.textures.textureIDToFrameBufferID.at(textureID))) {
-                    std::cout << "Rendering from alternate textureID: " << textureID << std::endl;
+                    core::info("Rendering from alternate textureID: {}", textureID);
                     bgfx::UniformHandle textureUniformHandleAlternate = constructedRenderer->resources.textures.textureSamplerHandlesAlternate.at(textureID);
                     bgfx::TextureHandle textureHandleAlternate = constructedRenderer->resources.textures.textureHandlesAlternate.at(textureID);
                     bgfx::getUniformInfo(textureUniformHandleAlternate, info);
                     bgfx::setTexture(j, renderPass.depdendencies[j].first, textureHandleAlternate);
                 } else {
-                    std::cout << "Rendering from primary textureID: " << textureID << std::endl;
+                    core::info("Rendering from primary textureID: {}", textureID);
                     bgfx::UniformHandle textureUniformHandle = constructedRenderer->resources.textures.textureSamplerHandles.at(textureID);
                     bgfx::TextureHandle textureHandle = constructedRenderer->resources.textures.textureHandles.at(textureID);
                     bgfx::getUniformInfo(textureUniformHandle, info);
                     bgfx::setTexture(j, renderPass.depdendencies[j].first, textureHandle);
                 }
 
-                std::cout << "Sampling from texture name: " << info.name << std::endl;
-                std::cout << "That texture is bound to: " << j << std::endl;
+                core::info("Sampling from texture name: {}", info.name);
+                core::info("That texture is bound to: {}", j);
             }
 
             if (constructedRenderer->resources.framebuffers.pingPongFBOs.at(renderPass.targetFrameBufferID)) {

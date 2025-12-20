@@ -81,7 +81,7 @@ namespace projv::graphics {
     }
 
     std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(const std::vector<FrameBuffer>& frameBuffers, const std::unordered_map<uint, bgfx::UniformHandle>& textureSamplerHandles, const RenderPass &renderPass) {
-        std::cout << "Getting dependencies!" << std::endl;
+        core::info("Getting dependencies!");
         std::vector<std::pair<bgfx::UniformHandle, uint>> dependencies;
 
         if (renderPass.frameBufferInputIDs.size() == 0) {
@@ -111,7 +111,7 @@ namespace projv::graphics {
             dependencies.emplace_back(textureSamplerHandles.at(textureIDs[i]), textureIDs[i]);
         }
 
-        std::cout << "Acquired Dependencies!!" << std::endl;
+        core::info("Acquired Dependencies!!");
         return dependencies;
     } 
 }
