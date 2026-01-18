@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.10)
 project(ProjectV)
 
+include(ExternalProject)
+
 # Compiler settings
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -g -O3 -fopenmp")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -g -O3")
 
 message(STATUS "CMAKE_SOURCE_DIR: ${CMAKE_SOURCE_DIR}")
 
@@ -20,6 +23,8 @@ add_subdirectory(external/glm)
 set(SPDLOG_INCLUDE ${CMAKE_SOURCE_DIR}/external/spdlog/include)
 set(JSON_INCLUDE ${CMAKE_SOURCE_DIR}/external/json/single_include)
 set(GLM_INCLUDE ${CMAKE_SOURCE_DIR}/external/glm)
+set(BGFX_INCLUDE ${CMAKE_SOURCE_DIR}/external/bgfx/include)
+set(BX_INCLUDE ${CMAKE_SOURCE_DIR}/external/bx/include)
 
 # Header include paths (local)
 set(LOCAL_INCLUDE ${CMAKE_SOURCE_DIR}/include)
@@ -29,6 +34,29 @@ set(CORE_SRC_DIR ${CMAKE_SOURCE_DIR}/src/core)
 set(GRAPHICS_SRC_DIR ${CMAKE_SOURCE_DIR}/src/graphics)
 set(UTILS_SRC_DIR ${CMAKE_SOURCE_DIR}/src/utils)
 
+# External directory
+set(EXTERNAL_DIR ${CMAKE_SOURCE_DIR}/external)
+
+# bgfx, bx, and bimg
+if(APPLE)
+    set(BGFX_MAKE_TARGET "osx-arm64")
+
+    # Add macOS system frameworks
+    set(MACOS_FRAMEWORKS
+        "-framework Cocoa"
+        "-framework Metal"
+        "-framework IOKit"
+        "-framework QuartzCore"
+    )
+
+    # MacOS homebrew GLFW path:
+    set(MACOS_GLFW_HOMEBREW /opt/homebrew/Cellar/glfw/3.4/include/)
+elseif(WIN32)
+    set(BGFX_MAKE_TARGET "mingw-gcc")
+else()
+    set(BGFX_MAKE_TARGET "linux-gcc")
+endif()
+
 # Macro for linking includes
 function(link_common_includes TARGET_NAME)
     target_include_directories(${TARGET_NAME} PRIVATE
@@ -36,8 +64,34 @@ function(link_common_includes TARGET_NAME)
         ${SPDLOG_INCLUDE}
         ${JSON_INCLUDE}
         ${GLM_INCLUDE}
+        ${BGFX_INCLUDE}
+        ${BX_INCLUDE}
+        ${MACOS_GLFW_HOMEBREW}
     )
 endfunction()
+
+# Build bgfx with it's make file
+ExternalProject_Add(
+    bgfx_build
+    SOURCE_DIR ${EXTERNAL_DIR}/bgfx
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND make -C ${EXTERNAL_DIR}/bgfx ${BGFX_MAKE_TARGET} -j4
+    BUILD_IN_SOURCE 1
+    INSTALL_COMMAND ""
+)
+
+# Create imported library targets
+add_library(bgfx STATIC IMPORTED)
+add_library(bx STATIC IMPORTED)
+add_library(bimg STATIC IMPORTED)
+
+# Set compiled bgfx library location
+set_target_properties(bgfx PROPERTIES
+    IMPORTED_LOCATION ${EXTERNAL_DIR}/bgfx/.build/osx64_clang/bin/libbgfxRelease.a
+    INTERFACE_INCLUDE_DIRECTORIES ${EXTERNAL_DIR}/bgfx/include
+)
+
+add_dependencies(bgfx bgfx_build)
 
 # Core Libraries
 add_library(projectV-ecs STATIC ${CORE_SRC_DIR}/ecs.cpp)
@@ -46,32 +100,30 @@ link_common_includes(projectV-ecs)
 add_library(projectV-math STATIC ${CORE_SRC_DIR}/math.cpp)
 link_common_includes(projectV-math)
 
-add_library(projectV-log STATIC ${CORE_SRC_DIR}/log.cpp)
-link_common_includes(projectV-log)
-
 # Graphics Libraries
-add_library(projectV-fbo STATIC ${GRAPHICS_SRC_DIR}/fbo.cpp)
-link_common_includes(projectV-fbo)
+add_library(projectV-render_instance STATIC ${GRAPHICS_SRC_DIR}/render_instance.cpp)
+target_link_libraries(projectV-render_instance PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
+link_common_includes(projectV-render_instance)
 
-add_library(projectV-render STATIC ${GRAPHICS_SRC_DIR}/render.cpp)
-link_common_includes(projectV-render)
+add_library(projectV-disk_io STATIC ${GRAPHICS_SRC_DIR}/disk_io.cpp)
+target_link_libraries(projectV-disk_io PRIVATE bgfx glfw ${MACOS_FRAMEWORKS} projectV-type_mapping)
+link_common_includes(projectV-disk_io)
 
-add_library(projectV-scene STATIC ${GRAPHICS_SRC_DIR}/scene.cpp)
-find_package(OpenMP REQUIRED)
-target_link_libraries(projectV-scene PRIVATE OpenMP::OpenMP_CXX)
-link_common_includes(projectV-scene)
+add_library(projectV-gpu_interface STATIC ${GRAPHICS_SRC_DIR}/gpu_interface.cpp)
+target_link_libraries(projectV-gpu_interface PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
+link_common_includes(projectV-gpu_interface)
 
-add_library(projectV-shader STATIC ${GRAPHICS_SRC_DIR}/shader.cpp)
-link_common_includes(projectV-shader)
+add_library(projectV-manage_resources STATIC ${GRAPHICS_SRC_DIR}/manage_resources.cpp)
+target_link_libraries(projectV-manage_resources PRIVATE bgfx glfw ${MACOS_FRAMEWORKS} projectV-type_mapping projectV-disk_io)
+link_common_includes(projectV-manage_resources)
 
-add_library(projectV-uniforms STATIC ${GRAPHICS_SRC_DIR}/uniforms.cpp)
-link_common_includes(projectV-uniforms)
+add_library(projectV-perform_renderer STATIC ${GRAPHICS_SRC_DIR}/perform_renderer.cpp)
+target_link_libraries(projectV-perform_renderer PRIVATE bgfx glfw ${MACOS_FRAMEWORKS} projectV-manage_resources)
+link_common_includes(projectV-perform_renderer)
 
-add_library(projectV-user_input STATIC ${GRAPHICS_SRC_DIR}/user_input.cpp)
-link_common_includes(projectV-user_input)
-
-add_library(projectV-window STATIC ${GRAPHICS_SRC_DIR}/window.cpp)
-link_common_includes(projectV-window)
+add_library(projectV-type_mapping STATIC ${GRAPHICS_SRC_DIR}/type_mapping.cpp)
+target_link_libraries(projectV-type_mapping PRIVATE bgfx glfw ${MACOS_FRAMEWORKS} )
+link_common_includes(projectV-type_mapping)
 
 # Utils Libraries
 add_library(projectV-voxel_io STATIC ${UTILS_SRC_DIR}/voxel_io.cpp)
@@ -86,3 +138,31 @@ link_common_includes(projectV-voxel_management)
 
 add_library(projectV-voxel_math STATIC ${UTILS_SRC_DIR}/voxel_math.cpp)
 link_common_includes(projectV-voxel_math)
+
+# Create tools directory.
+file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/build/tools)
+
+# Add shaderc tool.
+if(APPLE)
+    set(SHADERC_BUILD_DIRECTORY ${CMAKE_SOURCE_DIR}/external/bgfx/.build/osx-arm64/bin)
+elseif(WIN32)
+    #set(SHADERC_BUILD_DIRECTORY ${CMAKE_SOURCE_DIR}/external/bgfx/.build/osx-arm64/bin)
+else()
+    set(SHADERC_BUILD_DIRECTORY ${CMAKE_SOURCE_DIR}/external/bgfx/.build/linux64_gcc/bin)
+endif()
+
+add_custom_command(
+    TARGET bgfx_build  # Replace this with your actual target
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${SHADERC_BUILD_DIRECTORY}/shadercRelease"
+        "${CMAKE_SOURCE_DIR}/build/tools/"
+)
+
+add_custom_command(
+    TARGET bgfx_build  # Replace this with your actual target
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${SHADERC_BUILD_DIRECTORY}/shadercDebug"
+        "${CMAKE_SOURCE_DIR}/build/tools/"
+)

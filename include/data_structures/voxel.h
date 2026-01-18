@@ -1,6 +1,7 @@
 #ifndef VOXEL_H
 #define VOXEL_H
 
+#include <vector>
 #include "color.h"
 
 namespace projv{

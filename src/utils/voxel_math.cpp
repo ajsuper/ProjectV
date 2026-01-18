@@ -1,3 +1,4 @@
+#include "core/log.h"
 #include "utils/voxel_math.h"
 
 namespace projv::utils {
@@ -48,7 +49,7 @@ namespace projv::utils {
         return LUT;
     }
 
-    uint64_t createZOrderIndex(core::ivec3 vec3, const int& bitDepth){
+    uint64_t createZOrderIndex(core::ivec3 vec3){
         static std::array<uint32_t, 512> xArray = precalculateArray(1);
         static std::array<uint32_t, 512> yArray = precalculateArray(2);
         static std::array<uint32_t, 512> zArray = precalculateArray(3);
@@ -57,7 +58,7 @@ namespace projv::utils {
     }
 
     std::unordered_map<uint32_t, uint16_t> createReverseLUT(const std::array<uint32_t, 512>& forwardArray) {
-        std::cout << "CreatingLUT!!!" << std::endl;
+        core::info("createReverseLUT: Generating reverse lookup table for {} Z-order values", 512);
         std::unordered_map<uint32_t, uint16_t> reverseArray{};
         for(size_t i = 0; i < 512; i++) {
             reverseArray[forwardArray[i]] = i;
@@ -65,7 +66,7 @@ namespace projv::utils {
         return reverseArray;
     };
 
-    core::ivec3 reverseZOrderIndex2(uint64_t z_order, int bitDepth) {
+    core::ivec3 reverseZOrderIndex2(uint64_t z_order) {
         // Forward LUTs
         static std::array<uint32_t, 512> xArray = precalculateArray(1);
         static std::array<uint32_t, 512> yArray = precalculateArray(2);
@@ -99,7 +100,7 @@ namespace projv::utils {
         return static_cast<uint32_t>(x);
     }
 
-    core::ivec3 reverseZOrderIndex(uint64_t z_order, int bitDepth) {
+    core::ivec3 reverseZOrderIndex(uint64_t z_order) {
         return {
             compactBits(z_order, 2),  // x came from bit positions 1, 4, 7, ...
             compactBits(z_order, 1),  // y came from bit positions 0, 3, 6, ...

@@ -15,5 +15,8 @@ docs/examples/*/main.o
 # Ignore VS Code config files
 .vscode/
 
+# Ignore clangd cache
+.cache/
+
 
 

@@ -36,15 +36,22 @@ Voxels have unique properties that make them ideal for advanced rendering while 
 
 ---
 
-Currently only supports Linux
+Supports Linux and MacOS! Windows support should be straightforward as all of the libraries and dependencies are cross platform. However, there are no installation instructions for MacOS since it is not currently the main focus, but it has been tested and performs well. On Linux it currently only supports wayland but it should be a few small tweaks to support x11.
 
-> **Warning** On MacOS, OpenGL support only goes up to 4.1, not the 4.6 that is required for the library to function. Execution will fail even though the dependencies are available. Windows is currently not supported, however Windows was in mind when choosing the libraries we use and it should be able to work just fine and should be coming soon.
-
-Linux:
+Fedora:
 ```bash
-$ git clone https://github.com/ajsuper/ProjectV
-$ cd /path/to/ProjectV
-$ make
+sudo dnf install g++ cmake git glew-devel glfw glfw-devel wayland-devel
+
+git clone https://github.com/ajsuper/ProjectV.git
+git submodule update --init
+
+cd ProjectV
+
+mkdir build
+cd build
+
+cmake ..
+make
 ```
 
 ### Uninstallation
@@ -55,43 +62,30 @@ $ make
 
 > **Warning** rm -r can be dangerous when used incorrectly. Ensure it is used on the desired file path.
 ```bash
-$ rm -r /path/to/ProjectV
+rm -r /path/to/ProjectV
 ```
 
 #### Only build files (Keeps the source code and file structure):
 
 ```bash
-$ cd /path/to/projectV
-$ make clean
+cd /path/to/projectV/build
+make clean
 ```
 
 ### Dependencies
 
 ---
 
-Please ensure the latest of the following are installed to use.
-
-- `glfw`
-- `GLEW`
-- `GL`
-
-#### Install dependencies:
-
-Debian/Ubuntu:
-
-```bash
-sudo apt-get install libglfw3
-sudo apt-get install libglfw3-dev
-sudo apt-get install libglew-dev
-```
+Please ensure the latest of the following are installed to use. Also ensure graphics drivers are up to date.
 
 Fedora:
-```bash
-sudo dnf install glfw
-sudo dnf install glfw-devel
-sudo dnf install glew-devel
-```
-Update graphics drivers for GL
+- `g++`
+- `cmake`
+- `git`
+- `glew-devel`
+- `glfw`
+- `glfw-devel`
+- `wayland-devel`
 
 ### Modules
 

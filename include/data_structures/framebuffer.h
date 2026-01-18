@@ -1,20 +1,25 @@
 #ifndef FRAMEBUFFER_H
 #define FRAMEBUFFER_H
 
-#include <GL/glew.h>
-#include <string>
 #include <vector>
+#include <unordered_map>
 
-#include "texture.h"
+#include "../../external/bgfx/include/bgfx/bgfx.h"
 
-namespace projv{
-    /**
-     * Contains a width, height, buffer for storing it's OpenGL ID, and textures - a vector of Texture objects that we have added to the FrameBuffer.
-     */
+namespace projv {
     struct FrameBuffer {
-        int width, height;
-        GLuint buffer;
-        std::vector<Texture> textures;
+        uint frameBufferID;
+        std::vector<uint> TextureIDs;
+        bool pingPongFBO = false;
+    };
+
+    struct ConstructedFramebuffers {
+        std::unordered_map<int, bgfx::FrameBufferHandle> frameBufferHandles;
+        std::unordered_map<int, std::vector<uint>> frameBufferTextureMapping;
+        std::unordered_map<int, bgfx::FrameBufferHandle> frameBufferHandlesAlternate;
+        std::unordered_map<int, std::vector<uint>> frameBufferTextureMappingAlternate;
+        std::unordered_map<int, bool> pingPongFBOs;
+        std::unordered_map<int, bool> primaryWasLastRenderedToo; // If the primary frame buffer was last rendered to.
     };
 }
 
