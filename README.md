@@ -46,8 +46,6 @@ git clone https://github.com/ajsuper/ProjectV.git
 cd ProjectV
 git submodule update --init
 
-cd ProjectV
-
 mkdir build
 cd build
 
