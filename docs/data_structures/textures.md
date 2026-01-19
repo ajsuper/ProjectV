@@ -35,7 +35,7 @@ Assume this render pass:
 {
     "shaderID": 1,
     "frameBufferInputIDs": [],
-    "resourceTextures": [],
+    "resourceTextures": [3],
     "frameBufferOutputID": 1
 }
 ```
@@ -56,8 +56,8 @@ Reading from these textures is simple. This is your GLSL shader:
 ```c
 // Create our samplers.
 SAMPLER2D(dirtPathTexture, 0); // SAMPLER2D will return all channels from 0-1, USAMPLER2D will return the value as an integer, but must be sampled with texelFetch.
-SAMPLER2D(colorTexture, 1); // The first parameter sets the name of the texture for you to use in your shader later.
-SAMPLER2D(normalTexture, 2); // The second parameter is the binding point, it is essentially the index of the texture.
+SAMPLER2D(normalTexture, 1); // The first parameter sets the name of the texture for you to use in your shader later.
+SAMPLER2D(colorTexture, 2); // The second parameter is the binding point, it is essentially the index of the texture.
 // The binding point MUST start at 0 and increment by 1 for each texture.
 // The textures MUST be in the order that they were in the frame buffer.
 
