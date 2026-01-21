@@ -1,4 +1,5 @@
 #include "utils/voxel_management.h"
+#include "data_structures/nodeStructure.h"
 
 namespace projv::utils {
     VoxelGrid createVoxelGrid() {
@@ -140,6 +141,158 @@ namespace projv::utils {
         core::info("createOctree: Completed octree generation in {:.2f}ms for {} voxels", elapsedWhole, voxelWholeResolution * voxelWholeResolution * voxelWholeResolution);
 
         return octreeSimplified;
+    }
+
+    void addPointersTree64(std::vector<uint32_t>& tree64) {
+        uint32_t pointerMask = 0b11111111111111111111111111111110;
+        int childCounter = 0;
+        bool childPointerTooLarge = false;
+        assert(tree64.size() % 3 == 0);
+        // Divide by 3 because each node takes up 3 indecies.
+        core::info("Adding pointers to tree64!");
+        for(size_t address = 0; address < tree64.size() / 3; address++){
+            uint32_t validMask1 = tree64[address * 3];
+            uint32_t validMask2 = tree64[address * 3 + 1];
+            uint32_t childPointer = tree64[address * 3 + 2] & pointerMask;
+            uint32_t leafFlag = tree64[address * 3 + 2] & 0b1;
+            if((validMask1 != 0 || validMask2 != 0) && leafFlag == 0){ // If it children and they are not leaves.
+                childPointer = childCounter-address+1;
+                
+                for(uint32_t i = 0; i < 64; i++){
+                    uint64_t combinedValidMask = (uint64_t(validMask1) << 32) | uint64_t(validMask2);
+                    if((combinedValidMask & (1 << i)) != 0){
+                        childCounter += 1;
+                    }
+                }
+            } else { // If it has no children or it is a leaf.
+                childPointer = 0;
+            }
+            if(childPointer > pointerMask){
+                childPointerTooLarge = true;
+            }
+            tree64[address * 3 + 2] = childPointer << 1;
+        }
+
+        if(childPointerTooLarge) {
+            core::error("addPointers: Child pointer too large (exceeds 21 bits)! Octree may be corrupted. Consider reducing data size or increasing resolution levels");
+        }
+    }
+
+    std::vector<nodeStructureTree64> aggregateLevelTree64(std::vector<nodeStructureTree64> oldLevel, bool childParent = false) {
+        std::vector<nodeStructureTree64> newLevel;
+
+        for(size_t i = 0; i < oldLevel.size(); i++) { // Looping over verey voxel
+            nodeStructureTree64& node = oldLevel[i];
+            uint32_t newIndex = node.ZOrderIndex / 64;
+            uint32_t relativeZOrder = node.ZOrderIndex % 64;
+            uint64_t bitToSet = (1ull << (63 - relativeZOrder));
+            bool parentExists = false;
+            int parentIndex = -1;
+
+            // Check the last node to see if it is the parent for this node.
+            if(newLevel.size() > 0) {
+                if (newLevel[newLevel.size()-1].ZOrderIndex == newIndex) {
+                    parentExists = true;
+                    parentIndex = newLevel.size()-1;
+                }
+            }
+
+            if (parentExists) {
+                // Update existing node
+                if (newLevel.empty()) core::warn("New level is empty!");
+                uint32_t firstMask = uint32_t(bitToSet & 0b11111111111111111111111111111111);
+                uint32_t secondMask = uint32_t((bitToSet >> 32) & 0b11111111111111111111111111111111);
+                newLevel.back().mask1 |= firstMask;
+                newLevel.back().mask2 |= secondMask;
+            } else {
+                // Create new node
+                nodeStructureTree64 newNode = {0, 0, 0, newIndex};
+
+                newNode.mask1 |= uint32_t(bitToSet & 0b11111111111111111111111111111111);
+                newNode.mask2 |= uint32_t((bitToSet >> 32) & 0b11111111111111111111111111111111);
+                newNode.pointerAndLeafFlag = 0; // Clear leaf bit if needed
+                if(childParent) newNode.pointerAndLeafFlag |= 0b1; // Set leaf mask if this node is the parent of leaf's
+                newLevel.emplace_back(newNode);
+            }
+        }
+    
+        return newLevel;
+    }
+
+    std::vector<nodeStructureTree64> aggregateLevelFromVoxelGridTree64(VoxelGrid& oldLevel, bool childParent = false) {
+        std::vector<nodeStructureTree64> newLevel;
+        //newLevel.reserve(oldLevel.voxels.size());
+        for(int i = oldLevel.voxels.size() - 1; i >= 0; i--) { // Looping over every voxel in reverse
+            Voxel voxel = oldLevel.voxels[i];
+            uint32_t newIndex = voxel.ZOrderPosition / 64;
+            uint32_t relativeZOrder = (voxel.ZOrderPosition % 64);
+            uint64_t bitToSet = (1ull << (63 - relativeZOrder));
+            bool parentExists = false;
+            int parentIndex = -1;
+
+            // Check the last node to see if it is the parent for this node.
+            if(newLevel.size() > 0) {
+                if(newLevel[newLevel.size()-1].ZOrderIndex == newIndex) {
+                    parentExists = true;
+                    parentIndex = newLevel.size()-1;
+                }
+            }
+
+            if (parentExists) {
+                 // Update existing node
+                newLevel.back().mask1 |= bitToSet & 0b11111111111111111111111111111111;
+                newLevel.back().mask2 |= (bitToSet >> 32u) & 0b11111111111111111111111111111111;
+           } else {
+                // Create new node
+                nodeStructureTree64 newNode = {0, 0, 0, newIndex};
+                // Update existing node
+                newNode.mask1 |= uint32_t(bitToSet & 0b11111111111111111111111111111111);
+                newNode.mask2 |= uint32_t((bitToSet >> 32u) & 0b11111111111111111111111111111111);
+
+                newNode.pointerAndLeafFlag = 0b0; // Clear leaf bit if needed
+                if(childParent) newNode.pointerAndLeafFlag |= 0b1; // Set leaf mask if this node is the parent of leaf's
+                newLevel.emplace_back(newNode);
+            }
+        }
+        return newLevel;
+    }
+
+    std::vector<uint32_t> createTree64(VoxelGrid& voxels, int gridResolution) {
+        std::chrono::high_resolution_clock::time_point startWhole = std::chrono::high_resolution_clock::now();
+        core::info("createOctree: Starting tree64 generation with resolution {}x{}x{} ({} voxels total)", gridResolution, gridResolution, gridResolution, gridResolution * gridResolution * gridResolution);
+        int levelsOfDepth = int(log(gridResolution)/log(4));
+        std::vector<nodeStructureTree64> tree64;
+        std::vector<nodeStructureTree64> levelInProgress;
+
+        levelInProgress = aggregateLevelFromVoxelGridTree64(voxels, true);
+        tree64 = levelInProgress; // Puts our data on the octree
+
+        for(int i = 0; i < levelsOfDepth - 1; i++){ // Loops over all the levels of depth
+            levelInProgress = aggregateLevelTree64(levelInProgress); // Agregates the previous level.
+
+            for(size_t j = 0; j < levelInProgress.size(); j++){
+                levelInProgress[j].pointerAndLeafFlag &= 0b11111111111111111111111111111110; // Removes the leaf flag from the node.
+                tree64.emplace_back(levelInProgress[j]);
+            }
+        }
+
+        // The tree64 is in reverse order. So we loop over it in reverse order when emplacing our uint32_t's to the actually tree64Simplified storing the serialized structure.
+        std::vector<uint32_t> tree64Simplified;
+        tree64Simplified.reserve(tree64.size()); // Reserve memory to avoid reallocations
+        for (auto it = tree64.rbegin(); it != tree64.rend(); ++it) { // Use reverse iterator for efficiency
+            tree64Simplified.emplace_back(it->mask1);
+            tree64Simplified.emplace_back(it->mask2);
+            tree64Simplified.emplace_back(it->pointerAndLeafFlag);
+        }
+
+        addPointersTree64(tree64Simplified);
+
+        auto endWhole = std::chrono::high_resolution_clock::now();
+        double elapsedWhole = std::chrono::duration<double, std::milli>(endWhole - startWhole).count();
+
+        core::info("createTree64: Completed tree-64 generation in {:.2f}ms for {} voxels", elapsedWhole, gridResolution * gridResolution * gridResolution);
+
+        return tree64Simplified;
     }
 
     std::vector<uint32_t> createVoxelTypeData(VoxelGrid& voxels) {
@@ -374,6 +527,7 @@ namespace projv::utils {
 
         // Update the chunk.
         chunk.geometryData = createOctree(voxelGrid, resolutionToTheNearestPowOfTwo);
+        createTree64(voxelGrid, resolutionToTheNearestPowOfTwo);
         chunk.voxelTypeData = createVoxelTypeData(voxelGrid);
         chunk.LOD = 0;
 
