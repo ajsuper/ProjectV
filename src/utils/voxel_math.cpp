@@ -16,12 +16,12 @@ namespace projv::utils {
         // TODO: Correct the ordering/naming. For some reason it only works when flipped. Changes requried in generator and renderer.
         for (int i = 0; i < bitDepth; ++i) {
             // Swapping x and y axes
-            uint64_t bitY = (vec3.z >> i) & 1;
-            uint64_t bitX = (vec3.y >> i) & 1; 
-            uint64_t bitZ = (vec3.x >> i) & 1;
+            uint64_t bitX = (vec3.x >> i) & 1;
+            uint64_t bitY = (vec3.y >> i) & 1; 
+            uint64_t bitZ = (vec3.z >> i) & 1;
     
             // Interleave them with swapped x and y (y -> x -> z).
-            z_order |= (bitY << (3 * i)) | (bitX << (3 * i + 1)) | (bitZ << (3 * i + 2));
+            z_order |= (bitX << (3 * i)) | (bitY << (3 * i + 1)) | (bitZ << (3 * i + 2));
         }
     
         return z_order;
@@ -102,9 +102,9 @@ namespace projv::utils {
 
     core::ivec3 reverseZOrderIndex(uint64_t z_order) {
         return {
-            compactBits(z_order, 2),  // x came from bit positions 1, 4, 7, ...
-            compactBits(z_order, 1),  // y came from bit positions 0, 3, 6, ...
-            compactBits(z_order, 0)   // z came from bit positions 2, 5, 8, ...
+            compactBits(z_order, 0),  // x came from bit positions 0, 3, 6, ...
+            compactBits(z_order, 1),  // y came from bit positions 1, 4, 7, ...
+            compactBits(z_order, 2)   // z came from bit positions 2, 5, 8, ...
         };
     }
 

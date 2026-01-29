@@ -66,6 +66,66 @@ namespace projv::graphics {
         return dataTexture;
     }
 
+
+    bgfx::TextureHandle createArbitraryTextureRGB(std::vector<uint32_t>& data)
+    {
+        int textureHeight = 4096;
+        int maxTextureSize = bgfx::getCaps()->limits.maxTextureSize;
+        if (maxTextureSize < textureHeight) {
+            textureHeight = maxTextureSize;
+        }
+
+        constexpr uint32_t valuesPerPixel = 3;
+
+        uint32_t pixelCount =
+            (data.size() + valuesPerPixel - 1) / valuesPerPixel;
+
+        int dataWidth = pixelCount / textureHeight;
+        if (pixelCount % textureHeight != 0) {
+            dataWidth += 1;
+        }
+
+        core::info("createArbitraryTextureRGB: Creating texture with height {}px", textureHeight);
+        core::info("createArbitraryTextureRGB: Creating texture with width {}px", dataWidth);
+
+        // RGBA32U requires 4 uint32 per pixel
+        std::vector<uint32_t> packed(dataWidth * textureHeight * 4, 0);
+
+        uint32_t src = 0;
+        uint32_t dst = 0;
+
+        while (src < data.size()) {
+            // R
+            packed[dst + 0] = data[src++];
+
+            // G
+            if (src < data.size())
+                packed[dst + 1] = data[src++];
+
+            // B
+            if (src < data.size())
+                packed[dst + 2] = data[src++];
+
+            // A stays 0
+            packed[dst + 3] = 0;
+
+            dst += 4;
+        }
+
+        const bgfx::Memory* mem =
+            bgfx::copy(packed.data(), packed.size() * sizeof(uint32_t));
+
+        return bgfx::createTexture2D(
+            dataWidth,
+            textureHeight,
+            false,
+            1,
+            bgfx::TextureFormat::RGBA32U,
+            BGFX_TEXTURE_NONE | BGFX_SAMPLER_POINT,
+            mem
+        );
+    }
+
     bgfx::TextureHandle createHeaderTexture(std::vector<projv::GPUChunkHeader>& headers) {
         const bgfx::Memory* headerMemory = bgfx::copy(  
             headers.data(),  
@@ -122,7 +182,7 @@ namespace projv::graphics {
         }
         
         core::info("createTexturesForScene: Creating octree texture ({} values)", octreeData.size());
-        gpuData.octreeTexture = createArbitraryTexture(octreeData);
+        gpuData.octreeTexture = createArbitraryTextureRGB(octreeData);
         core::info("createTexturesForScene: Creating voxel type texture ({} values)", voxelTypeData.size());
         gpuData.voxelTypeDataTexture = createArbitraryTexture(voxelTypeData);
         core::info("createTexturesForScene: Creating chunk header texture ({} chunks)", gpuChunkHeaderData.size());
