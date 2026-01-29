@@ -15,7 +15,6 @@ namespace projv::utils {
         bool childPointerTooLarge = false;
         assert(tree64.size() % 3 == 0);
         // Divide by 3 because each node takes up 3 indecies.
-        core::info("Adding pointers to tree64!");
         for(size_t address = 0; address < tree64.size() / 3; address++){
             uint32_t validMask1 = tree64[address * 3];
             uint32_t validMask2 = tree64[address * 3 + 1];
@@ -41,7 +40,7 @@ namespace projv::utils {
         }
 
         if(childPointerTooLarge) {
-            core::error("addPointers: Child pointer too large (exceeds 21 bits)! Octree may be corrupted. Consider reducing data size or increasing resolution levels");
+            core::error("addPointersTree64: Child pointer too large (exceeds 31 bits)! Octree may be corrupted. Consider reducing data size or increasing resolution levels");
         }
     }
 
