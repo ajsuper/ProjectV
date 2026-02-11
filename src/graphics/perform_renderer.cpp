@@ -33,6 +33,7 @@ namespace projv::graphics {
             bgfx::setVertexBuffer(0, renderInstance.vertexBuffer);
             bgfx::setIndexBuffer(renderInstance.indexBuffer);
 
+            core::info("Render pass # of dependencies: {}", renderPass.depdendencies.size());
             for (size_t j = 0; j < renderPass.depdendencies.size(); j++) {
                 bgfx::UniformInfo info;
                 uint textureID = renderPass.depdendencies.at(j).second;

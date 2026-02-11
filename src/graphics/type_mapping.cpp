@@ -84,7 +84,7 @@ namespace projv::graphics {
         core::info("type_mapping: Loading resource dependencies...");
         std::vector<std::pair<bgfx::UniformHandle, uint>> dependencies;
 
-        if (renderPass.frameBufferInputIDs.size() == 0) {
+        if (renderPass.frameBufferInputIDs.size() == 0 && renderPass.textureResourceIDs.size() == 0) {
             return dependencies;
         }
 
@@ -101,8 +101,10 @@ namespace projv::graphics {
             }
         }
         
+        core::info("# of resource textures: {}", renderPass.textureResourceIDs.size());
         // Adds the CPUBuffer/resourceTexture ID's to the textureIDs.
         for (size_t i = 0; i < renderPass.textureResourceIDs.size(); i++) {
+            core::info("Added resource texture {} as a dependency.", renderPass.textureResourceIDs[i]);
             textureIDs.emplace_back(renderPass.textureResourceIDs[i]);
         }
 
