@@ -9,6 +9,7 @@ namespace projv {
         std::vector<uint> frameBufferInputIDs;
         std::vector<uint> textureResourceIDs;
         int frameBufferOutputID;
+        uint multiPassPassNumber; // 0 if multipass is 0.
         uint multiPass;
     };
 

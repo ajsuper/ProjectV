@@ -27,6 +27,8 @@ namespace projv {
         int targetFrameBufferID;
         bgfx::ProgramHandle shaderProgram;
         uint renderPassID;
+        uint multiPassPassNumber;
+        bgfx::UniformHandle multiPassPassNumberUniform;
     };
 
     struct ConstructedRenderer {

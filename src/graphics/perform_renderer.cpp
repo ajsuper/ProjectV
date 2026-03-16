@@ -61,6 +61,16 @@ namespace projv::graphics {
                 core::info("That texture is bound to: {}", j);
             }
 
+            // Set multi pass pass number.
+            float multiPassPassNumberVector[4] = {  
+                (float)renderPass.multiPassPassNumber,  // x component  
+                0.0f,           // y component    
+                0.0f,           // z component  
+                0.0f            // w component  
+            };
+
+            bgfx::setUniform(renderPass.multiPassPassNumberUniform, multiPassPassNumberVector);
+
             if (constructedRenderer->resources.framebuffers.pingPongFBOs.at(renderPass.targetFrameBufferID)) {
                 constructedRenderer->resources.framebuffers.primaryWasLastRenderedToo[renderPass.targetFrameBufferID] = !constructedRenderer->resources.framebuffers.primaryWasLastRenderedToo[renderPass.targetFrameBufferID];
             }

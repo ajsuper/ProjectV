@@ -182,9 +182,12 @@ namespace projv::graphics {
 
             renderPassDescription.frameBufferOutputID = renderPass["frameBufferOutputID"];
             renderPassDescription.multiPass = renderPass["multiPass"];
+            renderPassDescription.multiPassPassNumber = 1; // 0 Unless specified below.
             
             renderPasses.emplace_back(renderPassDescription);
-            for(size_t i = 0; i < renderPassDescription.multiPass; i++) {
+            // i = 1 because multiPassPassNumber should be 1 for the second pass of the shader.
+            for(size_t i = 1; i <= renderPassDescription.multiPass; i++) {
+                renderPassDescription.multiPassPassNumber = i;
                 renderPasses.emplace_back(renderPassDescription);
             }
         }

@@ -132,6 +132,8 @@ namespace projv::graphics {
             dependencyGraph.targetFrameBufferID = renderPass.frameBufferOutputID;
             dependencyGraph.shaderProgram = createShaderProgram(constructedResources.defaultVertexShader, constructedResources.shaderHandles.at(renderPass.shaderID));
             dependencyGraph.renderPassID = uint(i);
+            dependencyGraph.multiPassPassNumber = renderPass.multiPassPassNumber;
+            dependencyGraph.multiPassPassNumberUniform = bgfx::createUniform(("multiPassPassNumber" + std::to_string(i)).c_str(), bgfx::UniformType::Vec4);
 
             dependencyGraphs.push_back(dependencyGraph);
         }
