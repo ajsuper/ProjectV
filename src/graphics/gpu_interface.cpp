@@ -67,6 +67,71 @@ namespace projv::graphics {
     }
 
 
+    bool verifyTextureWithReadback(bgfx::TextureHandle texture,
+                                const std::vector<uint32_t>& originalData,
+                                int textureWidth,
+                                int textureHeight)
+    {
+        constexpr uint32_t valuesPerPixel = 3;
+
+        uint32_t pixelCount =
+            (originalData.size() + valuesPerPixel - 1) / valuesPerPixel;
+
+        int expectedWidth =
+            (pixelCount + textureHeight - 1) / textureHeight;
+
+        if (expectedWidth != textureWidth) {
+            core::error("Width mismatch before readback.");
+            return false;
+        }
+
+        size_t totalElements = size_t(textureWidth) * textureHeight * 4;
+
+        std::vector<uint32_t> gpuData(totalElements, 0);
+
+        // Request readback
+        uint32_t frame = bgfx::readTexture(texture, gpuData.data());
+
+        // Wait until frame is ready
+        while (bgfx::frame() < frame) {
+            // spin until GPU catches up
+        }
+
+        // Rebuild expected packed data
+        std::vector<uint32_t> expected(totalElements, 0);
+
+        uint32_t src = 0;
+        uint32_t dst = 0;
+
+        while (src < originalData.size()) {
+            expected[dst + 0] = originalData[src++];
+
+            if (src < originalData.size())
+                expected[dst + 1] = originalData[src++];
+
+            if (src < originalData.size())
+                expected[dst + 2] = originalData[src++];
+
+            expected[dst + 3] = 0;
+
+            dst += 4;
+        }
+
+        // Compare
+        for (size_t i = 0; i < totalElements; ++i) {
+            if (gpuData[i] != expected[i]) {
+                core::error(
+                    "Mismatch at {}: GPU={}, CPU={}",
+                    i, gpuData[i], expected[i]
+                );
+                return false;
+            }
+        }
+
+        core::info("GPU texture matches original data.");
+        return true;
+    }
+
     bgfx::TextureHandle createArbitraryTextureRGB(std::vector<uint32_t>& data)
     {
         int textureHeight = 4096;
@@ -115,7 +180,7 @@ namespace projv::graphics {
         const bgfx::Memory* mem =
             bgfx::copy(packed.data(), packed.size() * sizeof(uint32_t));
 
-        return bgfx::createTexture2D(
+        bgfx::TextureHandle texture = bgfx::createTexture2D(
             dataWidth,
             textureHeight,
             false,
@@ -124,6 +189,8 @@ namespace projv::graphics {
             BGFX_TEXTURE_NONE | BGFX_SAMPLER_POINT,
             mem
         );
+
+        return texture;
     }
 
     bgfx::TextureHandle createHeaderTexture(std::vector<projv::GPUChunkHeader>& headers) {
@@ -166,8 +233,8 @@ namespace projv::graphics {
 
             projv::GPUChunkHeader gpuChunkHeader;
             gpuChunkHeader.chunkID = scene.chunks[i].header.chunkID;
-            gpuChunkHeader.geometryStartIndex = octreeStartIndex;
-            gpuChunkHeader.geometryEndIndex = octreeEndIndex;
+            gpuChunkHeader.geometryStartIndex = octreeStartIndex / 3;
+            gpuChunkHeader.geometryEndIndex = octreeEndIndex / 3;
             gpuChunkHeader.voxelTypeDataStartIndex = voxelTypeDataStartIndex;
             gpuChunkHeader.voxelTypeDataEndIndex = voxelTypeDataEndIndex;
             gpuChunkHeader.positionX = scene.chunks[i].header.position.x;
@@ -180,6 +247,16 @@ namespace projv::graphics {
 
             gpuChunkHeaderData.emplace_back(gpuChunkHeader);
         }
+        if (octreeData.size() % 3 != 0) {
+            core::error("Geometry not a multiple of 3!");
+        } else {
+            core::error("Geometry is a multiple of 3!");
+        }
+
+        std::cout << "Debug for createTexturesForScene POIU:" << std::endl;
+        std::cout << "Chunk geometry start indexies: {0, 1}: {" << gpuChunkHeaderData[0].geometryStartIndex << ", " << gpuChunkHeaderData[1].geometryStartIndex << std::endl;
+        std::cout << "Data at chunk 0 first index: " << octreeData[gpuChunkHeaderData[0].geometryEndIndex - 1] << std::endl;
+        std::cout << "Data at chunk 1 first index: " << octreeData[gpuChunkHeaderData[1].geometryEndIndex - 1] << std::endl;
         
         core::info("createTexturesForScene: Creating octree texture ({} values)", octreeData.size());
         gpuData.octreeTexture = createArbitraryTextureRGB(octreeData);

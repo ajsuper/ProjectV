@@ -93,14 +93,14 @@ namespace projv::utils {
 
         for (const auto& jHeader : jsonInput["chunkHeaders"]) {
             ChunkHeader header;
-            header.chunkID = jHeader.value("ID", 0);
-            float x = jHeader.value("position x", 0);
-            float y = jHeader.value("position y", 0);
-            float z = jHeader.value("position z", 0);
+            header.chunkID = jHeader.value("ID", 0.0f);
+            float x = jHeader.value("position x", 0.0f);
+            float y = jHeader.value("position y", 0.0f);
+            float z = jHeader.value("position z", 0.0f);
             header.position = core::vec3(x, y, z);
-            header.resolution = jHeader.value("resolution", 0); 
-            header.voxelScale = jHeader.value("voxel scale", 0);
-            header.scale = header.resolution * header.voxelScale * 0.0390625; // * 0.0390625 is to adjust it so that a voxel size of 1 and a resolution of 512 results in a chunk size of roughly 20. This is done for precision reasons.           
+            header.resolution = jHeader.value("resolution", 0.0f); 
+            header.voxelScale = jHeader.value("voxel scale", 0.0f);
+            header.scale = header.resolution * header.voxelScale;
             headers.push_back(header);
         }
 

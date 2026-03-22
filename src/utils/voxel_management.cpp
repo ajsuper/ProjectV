@@ -237,7 +237,7 @@ namespace projv::utils {
     }
 
     float createChunkScaleFromVoxelScaleAndResolution(float voxelScale, int resolutionPowerOf2) {
-        return resolutionPowerOf2 * (voxelScale * 0.0390625); // * 0.0390625 is to adjust it so that a voxel size of 1 and a resolution of 512 results in a chunk size of roughly 20. This is done for precision reasons.
+        return resolutionPowerOf2 * (voxelScale);    
     }
 
     ChunkHeader createChunkHeader(std::vector<ChunkHeader>& sceneChunkHeaders, core::vec3 position, float voxelScale, int resolutionPowOf2) {
