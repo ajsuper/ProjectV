@@ -247,17 +247,7 @@ namespace projv::graphics {
 
             gpuChunkHeaderData.emplace_back(gpuChunkHeader);
         }
-        if (octreeData.size() % 3 != 0) {
-            core::error("Geometry not a multiple of 3!");
-        } else {
-            core::error("Geometry is a multiple of 3!");
-        }
-
-        std::cout << "Debug for createTexturesForScene POIU:" << std::endl;
-        std::cout << "Chunk geometry start indexies: {0, 1}: {" << gpuChunkHeaderData[0].geometryStartIndex << ", " << gpuChunkHeaderData[1].geometryStartIndex << std::endl;
-        std::cout << "Data at chunk 0 first index: " << octreeData[gpuChunkHeaderData[0].geometryEndIndex - 1] << std::endl;
-        std::cout << "Data at chunk 1 first index: " << octreeData[gpuChunkHeaderData[1].geometryEndIndex - 1] << std::endl;
-        
+ 
         core::info("createTexturesForScene: Creating octree texture ({} values)", octreeData.size());
         gpuData.octreeTexture = createArbitraryTextureRGB(octreeData);
         core::info("createTexturesForScene: Creating voxel type texture ({} values)", voxelTypeData.size());
