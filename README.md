@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="docs/images/Path_Trace_Renders/San_Miguel_Hallway.png" width="18%" />
+  <img src="docs/images/Path_Trace_Renders/Amazon-Lumberyard-Sunset.png" width="18%" />
+  <img src="docs/images/Path_Trace_Renders/San_Miguel_Hallway_Sun.png" width="18%" />
+</p>
+
 # ATTENTION!
 ProjectV is under very early development, data structures and functionalities will change frequently so don't currently invest too much time into generating data or programs unless you plan on sticking with a version.
 
