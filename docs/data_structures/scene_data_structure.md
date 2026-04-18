@@ -1,13 +1,13 @@
 ## SCENE - v0.0
 
-The 'Scene' data structure is designed to allow for rendering and handling of multiple octrees.
+The 'Scene' data structure is designed to allow for rendering and handling of multiple tree64s.
 
 
 ### Structure in Memory
 Each **Scene** object simply contains an std::vector<**RuntimeChunkData**>.
 **RuntimeChunkData** is a structure than only exists during runtime and contains a **CPUChunkHeader**, **geometryData**, **voxelTypeData** and **LOD**
 - **CPUChunkHeader** - contains the **chunkID** ***(Used to link to the geometry and voxelType data's)***, **position** ***(all 3 axis stored in one uint32_t)***, **scale**, and **resolution**
-- **geometryData** - Simply the octree structure defined in [octree_data_structure.md](/docs/data_structures/octree_data_structure.md)
+- **geometryData** - Simply the tree64 structure defined in [tree64_data_structure.md](/docs/data_structures/tree64_data_structure.md)
 - **voxelTypeData** - Simply the voxel type data structure defined in [voxel_type_data_structure.md](/docs/data_structures/voxel_type_data_structure.md)
 - **LOD** - A integer representing how many levels of detail the chunk has been lowered ***(0 is the highest, 2 is lower etc.)***.
 
@@ -15,7 +15,7 @@ Each **Scene** object simply contains an std::vector<**RuntimeChunkData**>.
 Files are as follows:
 ComplexDataStructureTest
 ├── headers.json  
-├── octree  
+├── tree64  
 │   ├── 1.bin  
 │   ├── 2.bin  
 │   ├── 3.bin  
@@ -24,7 +24,7 @@ ComplexDataStructureTest
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ├── 2.bin  
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ├── 3.bin  
 - **headers.json** contains the headers for a file. Please see [scene.h](/include/data_structures/scene.h)
-- **octree** contains .bin files with the name being the corresponding chunkID
+- **tree64** contains .bin files with the name being the corresponding chunkID
 - **voxelTypeData** contains .bin files with the name being the corresponding chunkID.
 
 #### Note

@@ -213,28 +213,28 @@ namespace projv::graphics {
 
     GPUData createTexturesForScene(projv::Scene& scene) {
         GPUData gpuData;
-        std::vector<uint32_t> octreeData;
+        std::vector<uint32_t> tree64Data;
         std::vector<uint32_t> voxelTypeData;
         std::vector<projv::GPUChunkHeader> gpuChunkHeaderData;
-        // Combine the voxelTypeData, octree, and headers for each chunk into just 3 vectors.
+        // Combine the voxelTypeData, tree64, and headers for each chunk into just 3 vectors.
         for(size_t i = 0; i < scene.chunks.size(); i++) {
-            core::info("createTexturesForScene: Serializing chunk {} data (octree: {} values, voxel types: {} values)", scene.chunks[i].header.chunkID, scene.chunks[i].geometryData.size(), scene.chunks[i].voxelTypeData.size());
-            int octreeStartIndex = octreeData.size();
+            core::info("createTexturesForScene: Serializing chunk {} data (tree64: {} values, voxel types: {} values)", scene.chunks[i].header.chunkID, scene.chunks[i].geometryData.size(), scene.chunks[i].voxelTypeData.size());
+            int tree64StartIndex = tree64Data.size();
             int voxelTypeDataStartIndex = voxelTypeData.size();
 
-            octreeData.insert(octreeData.end(), scene.chunks[i].geometryData.begin(), scene.chunks[i].geometryData.end());
+            tree64Data.insert(tree64Data.end(), scene.chunks[i].geometryData.begin(), scene.chunks[i].geometryData.end());
             for(size_t j = 0; j < scene.chunks[i].geometryData.size(); j++) {
-                //octreeData.emplace_back(scene.chunks[i].geometryData[j]);
+                //tree64Data.emplace_back(scene.chunks[i].geometryData[j]);
             }
             voxelTypeData.insert(voxelTypeData.end(), scene.chunks[i].voxelTypeData.begin(), scene.chunks[i].voxelTypeData.end());
 
-            int octreeEndIndex = octreeData.size();
+            int tree64EndIndex = tree64Data.size();
             int voxelTypeDataEndIndex = voxelTypeData.size();
 
             projv::GPUChunkHeader gpuChunkHeader;
             gpuChunkHeader.chunkID = scene.chunks[i].header.chunkID;
-            gpuChunkHeader.geometryStartIndex = octreeStartIndex / 3;
-            gpuChunkHeader.geometryEndIndex = octreeEndIndex / 3;
+            gpuChunkHeader.geometryStartIndex = tree64StartIndex / 3;
+            gpuChunkHeader.geometryEndIndex = tree64EndIndex / 3;
             gpuChunkHeader.voxelTypeDataStartIndex = voxelTypeDataStartIndex;
             gpuChunkHeader.voxelTypeDataEndIndex = voxelTypeDataEndIndex;
             gpuChunkHeader.positionX = scene.chunks[i].header.position.x;
@@ -248,14 +248,14 @@ namespace projv::graphics {
             gpuChunkHeaderData.emplace_back(gpuChunkHeader);
         }
  
-        core::info("createTexturesForScene: Creating octree texture ({} values)", octreeData.size());
-        gpuData.octreeTexture = createArbitraryTextureRGB(octreeData);
+        core::info("createTexturesForScene: Creating tree64 texture ({} values)", tree64Data.size());
+        gpuData.tree64Texture = createArbitraryTextureRGB(tree64Data);
         core::info("createTexturesForScene: Creating voxel type texture ({} values)", voxelTypeData.size());
         gpuData.voxelTypeDataTexture = createArbitraryTexture(voxelTypeData);
         core::info("createTexturesForScene: Creating chunk header texture ({} chunks)", gpuChunkHeaderData.size());
         gpuData.headerTexture = createHeaderTexture(gpuChunkHeaderData);
-        
-        gpuData.octreeSampler = bgfx::createUniform("octreeData", bgfx::UniformType::Sampler);
+
+        gpuData.tree64Sampler = bgfx::createUniform("tree64Data", bgfx::UniformType::Sampler);
         gpuData.voxelTypeDataSampler = bgfx::createUniform("voxelTypeData", bgfx::UniformType::Sampler);
         gpuData.headerSampler = bgfx::createUniform("headerData", bgfx::UniformType::Sampler);
 

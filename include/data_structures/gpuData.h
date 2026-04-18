@@ -5,11 +5,11 @@
 
 namespace projv {
     struct GPUData {
-        bgfx::TextureHandle octreeTexture;
+        bgfx::TextureHandle tree64Texture;
         bgfx::TextureHandle voxelTypeDataTexture;
         bgfx::TextureHandle headerTexture;
 
-        bgfx::UniformHandle octreeSampler;
+        bgfx::UniformHandle tree64Sampler;
         bgfx::UniformHandle voxelTypeDataSampler;
         bgfx::UniformHandle headerSampler;
     };

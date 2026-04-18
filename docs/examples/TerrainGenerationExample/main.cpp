@@ -88,13 +88,13 @@ void createScene(int xSize, int ySize, int zSize, int resolution, int scale) {
                         }
                     }
                 }
-                // Add the voxels to the grid so they can be converted into an octree. This ensures proper sorting of the voxels.
+                // Add the voxels to the grid so they can be converted into a tree64. This ensures proper sorting of the voxels.
                 projv::VoxelGrid voxels = projv::utils::createVoxelGrid();  
                 projv::utils::addVoxelBatchToVoxelGrid(voxels, voxelBatch);
-                std::vector<uint32_t> chunkGeometry = projv::utils::createOctree(voxels, chunkHeader.resolution); // Handles geometry
+                std::vector<uint32_t> chunkGeometry = projv::utils::createTree64(voxels, chunkHeader.resolution); // Handles geometry
                 std::vector<uint32_t> voxelTypeData = projv::utils::createVoxelTypeData(voxels); // Handles colors and other extra data.
 
-                // Stores all the data for this octree.
+                // Stores all the data for this tree64.
                 projv::RuntimeChunkData chunkData;
                 chunkData.header = chunkHeader;
                 chunkData.geometryData = chunkGeometry;

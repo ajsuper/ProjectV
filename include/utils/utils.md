@@ -8,7 +8,7 @@ Note: Below are mock functions; they don't exist in the engine.
 ```
 ```cpp
 // ✅ This would belong in utils as it directly pertains to creating a voxel data structure.
-projv::utils::createOctree()
+projv::utils::createTree64()
 
 // ❌ This would not utils as it does not pertain directly to handling voxel data.
 projv::utils::createApplication();

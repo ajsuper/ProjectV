@@ -31,7 +31,7 @@ namespace projv::utils {
             return;
         }
 
-        // Traverses the octree to find the parents of the leaves and removes them.
+        // Traverses the tree64 to find the parents of the leaves and removes them.
         int depthToTheParentsOfTheLeaves = log2(chunkToBeChanged.header.resolution / pow(2, targetLOD));
         int parentsOfTheParentsOfTheLeavesStartIndex = 0;
         int parentsOfTheLeavesStartIndex;

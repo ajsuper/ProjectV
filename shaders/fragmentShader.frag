@@ -68,7 +68,7 @@ layout(std430, binding = 3) buffer HeaderBuffer {
 };
 
 layout(std430, binding = 4) buffer GeometryBuffer {
-    uint octrees[];
+    uint tree64s[];
 };
 
 layout(std430, binding = 5) buffer VoxelTypeDatasBuffer {
@@ -80,7 +80,7 @@ BoxAABB masterParentBox;
 BoxAABB masterChildBox;
 //Global constants that change between frames
 vec3 inverseRayDirection;
-//The arrays that will act like stacks that are used to march the ray through the sparse voxel octrees (Ideally allocate once but that isn't yet implemented)
+//The arrays that will act like stacks that are used to march the ray through the sparse voxel tree64s (Ideally allocate once but that isn't yet implemented)
 //uint nodeIndexStack[MAX_STACK_SIZE];
 //uint octant1Stack[MAX_STACK_SIZE];
 CombinedNode combinedNodeStack[MAX_STACK_SIZE];
@@ -142,9 +142,9 @@ float rayPlaneIntersectionZ(float planeZ, Ray ray) {
 
 
 //Given an integer x, y, z, and the resolution of the voxel grid, return the ZOrderIndex of that point.
-uint calculateZOrderIndex(uint x, uint y, uint z, uint octreeWholeResolution){
+uint calculateZOrderIndex(uint x, uint y, uint z, uint tree64WholeResolution){
     uint ZOrder = 0;
-    for(int i = 0; i < log2(octreeWholeResolution); i++){
+    for(int i = 0; i < log2(tree64WholeResolution); i++){
         uint bitY = (z >> i) & 1u;
         uint bitX = (y >> i) & 1u;
         uint bitZ = (x >> i) & 1u;
@@ -184,7 +184,7 @@ vec3 rayStartDirection(vec2 uv, vec2 res, vec3 cameraPosition, vec3 cameraDirect
     return rayDirection;
 }
 
-//Pushes the indexies of a node in the octree buffer into it's stack.
+//Pushes the indexies of a node in the tree64 buffer into it's stack.
 
 /*
 void pushNodeIndexStack(uint nodeToBePushed) {
@@ -431,7 +431,7 @@ uint push(Ray ray) {
     uint checkOctant1 = node.octant1;
     //uint lastNodeIndex = nodeIndexStack[nodeIndexStackQuantity-1];
     uint lastNodeIndex = node.nodeIndex;
-    uint lastNodeData = octrees[lastNodeIndex];
+    uint lastNodeData = tree64s[lastNodeIndex];
 
     //If octant we are checking is a valid node.
     if((lastNodeData & (1 << 8-checkOctant1)) != 0){
@@ -463,9 +463,9 @@ uint push(Ray ray) {
 //1-> cotinueMarching = true, leaveChild = false
 //2-> continueMarching = true, leaveChild = true 
 uint advance2(Ray ray) {
-    //uint parentNodeData = octree[nodeIndexStack[nodeIndexStackQuantity - 1u]];
+    //uint parentNodeData = tree64[nodeIndexStack[nodeIndexStackQuantity - 1u]];
     CombinedNode node = combinedNodeStack[combinedNodeStackQuantity - 1u];
-    uint parentNodeData = octrees[node.nodeIndex];
+    uint parentNodeData = tree64s[node.nodeIndex];
     uint parentValidMask = (parentNodeData >> 1u) & 0x000000FF;
     uint leafMask = parentNodeData & 0x1;
     //uint lastOctant1 = octant1Stack[octant1StackQuantity - 1u];
@@ -532,7 +532,7 @@ void splitAdvanceCase(uint advanceCase, inout bool continueMarching, inout bool 
 }
 
 
-BoxAABB marchRayThroughOctree(Ray ray, BoxAABB boundingBox, vec3 uvInBoundingBox, uint octreeStartIndex, uint octreeEndIndex) {    
+BoxAABB marchRayThroughTree64(Ray ray, BoxAABB boundingBox, vec3 uvInBoundingBox, uint tree64StartIndex, uint tree64EndIndex) {
     int rayStepLimit = MAX_RAY_STEPS;
 
     //Avoid even ray origins to avoid the rays starting directly on the boundary of 2 nodes.
@@ -553,8 +553,8 @@ BoxAABB marchRayThroughOctree(Ray ray, BoxAABB boundingBox, vec3 uvInBoundingBox
     uint firstChildOctant1 = calculateOctant1BasedOfEdgePos(uvInBoundingBox);
     masterChildBox = newChildFromParentAndOctant1(boundingBox, firstChildOctant1);
     masterParentBox = boundingBox;
-    pushCombinedNodeStack(firstChildOctant1, octreeStartIndex);
-    //pushNodeIndexStack(OCTREE_HEADER_SIZE); 
+    pushCombinedNodeStack(firstChildOctant1, tree64StartIndex);
+    //pushNodeIndexStack(TREE64_HEADER_SIZE);
     //pushOctant1Stack(firstChildOctant1); 
     
     //Main ray marching loop.
@@ -577,15 +577,15 @@ BoxAABB marchRayThroughOctree(Ray ray, BoxAABB boundingBox, vec3 uvInBoundingBox
         if(!successfullyPushed){
             //Gather advance data.
             splitAdvanceCase(advance2(ray), continueMarching, leaveChild);
-            //If it needs to pop, pop until it can succesfully advance or needs to exit the octree.
+            //If it needs to pop, pop until it can succesfully advance or needs to exit the tree64.
             while(leaveChild){
-                //Exit the octree if the ray leaves the octree.
+                //Exit the tree64 if the ray leaves the tree64.
                 if(combinedNodeStackQuantity < 2){
                     BoxAABB falseBox;
                     falseBox.size = -1.0;
                     return falseBox;
                 }
-                //If ray doesn't exit octree, continue to pop and repeat.
+                //If ray doesn't exit tree64, continue to pop and repeat.
                 masterChildBox = masterParentBox;
                 masterParentBox = newParentFromChildAndOctant1(masterChildBox, combinedNodeStack[combinedNodeStackQuantity-2].octant1);
                 //octant1StackQuantity -= 1;
@@ -599,32 +599,31 @@ BoxAABB marchRayThroughOctree(Ray ray, BoxAABB boundingBox, vec3 uvInBoundingBox
     return masterChildBox;     
 }
 
-//Cast the ray through the octree bounding box2.
-BoxAABB castRayThroughOctree(Ray ray, uint headerIndex) {
+//Cast the ray through the tree64 bounding box.
+BoxAABB castRayThroughTree64(Ray ray, uint headerIndex) {
     chunkHeader header = headers[headerIndex];
 
-    uint octreeStartIndex = header.geometryStartIndex;
-    uint octreeEndIndex = header.geometryEndIndex;
+    uint tree64StartIndex = header.geometryStartIndex;
+    uint tree64EndIndex = header.geometryEndIndex;
 
     uint voxelTypeDataStartIndex = header.voxelTypeDataStartIndex;
     uint voxelTypeDataEndIndex = header.voxelTypeDataEndIndex;
 
-    BoxAABB octreeBoundingBox;
-    octreeBoundingBox.position = vec3(header.positionX, header.positionY, header.positionZ);
-    octreeBoundingBox.size = header.scale;
+    BoxAABB tree64BoundingBox;
+    tree64BoundingBox.position = vec3(header.positionX, header.positionY, header.positionZ);
+    tree64BoundingBox.size = header.scale;
 
-
-    float tBB = boxRayDistance(octreeBoundingBox, ray);
+    float tBB = boxRayDistance(tree64BoundingBox, ray);
     vec3 uvInBoundingBox;
     vec3 intersectionPoint = ray.origin + ray.direction * tBB;
-    uvInBoundingBox = abs((octreeBoundingBox.position - intersectionPoint)) / octreeBoundingBox.size;
-    
-    BoxAABB octreeMarchData;
-    octreeMarchData.size = -1;
+    uvInBoundingBox = abs((tree64BoundingBox.position - intersectionPoint)) / tree64BoundingBox.size;
+
+    BoxAABB tree64MarchData;
+    tree64MarchData.size = -1;
     if(tBB >= 0){
-        octreeMarchData = marchRayThroughOctree(ray, octreeBoundingBox, uvInBoundingBox, octreeStartIndex, octreeEndIndex);
+        tree64MarchData = marchRayThroughTree64(ray, tree64BoundingBox, uvInBoundingBox, tree64StartIndex, tree64EndIndex);
     }
-    return octreeMarchData;
+    return tree64MarchData;
 }
 
 
@@ -633,17 +632,17 @@ sceneIntersectData castRayThroughScene(Ray ray){
     BoxAABB closestBox;
     uint closestHeaderIndex = -1;
     for(int i = 0; i < headers.length(); i++){
-        BoxAABB octreeBoundingBox;
-        octreeBoundingBox.position = vec3(headers[i].positionX, headers[i].positionY, headers[i].positionZ);
-        octreeBoundingBox.size = headers[i].scale;
-        float tBB = boxRayDistance(octreeBoundingBox, ray);
+        BoxAABB tree64BoundingBox;
+        tree64BoundingBox.position = vec3(headers[i].positionX, headers[i].positionY, headers[i].positionZ);
+        tree64BoundingBox.size = headers[i].scale;
+        float tBB = boxRayDistance(tree64BoundingBox, ray);
         if(tBB < 0 || tBB >= closestDistance) continue;
 
-        BoxAABB octreeMarchBox = castRayThroughOctree(ray, i);
-        vec3 intersectData = boxRayIntersect(octreeMarchBox, ray);
-        if(octreeMarchBox.size > 0 && intersectData.x > 0 && intersectData.x < closestDistance){
+        BoxAABB tree64MarchBox = castRayThroughTree64(ray, i);
+        vec3 intersectData = boxRayIntersect(tree64MarchBox, ray);
+        if(tree64MarchBox.size > 0 && intersectData.x > 0 && intersectData.x < closestDistance){
             closestDistance = intersectData.x;
-            closestBox = octreeMarchBox;
+            closestBox = tree64MarchBox;
             closestHeaderIndex = i;
         }
     }
@@ -744,10 +743,10 @@ vec4 castRayWithOffset(vec2 offset){
     ray.direction = rayStartDirection(TexCoords + offset, resolution, cameraPos, normalize(vec3(cameraDir.x, 0, cameraDir.z)), 65);
     ray.origin = cameraPos;
 
-    //Define the root box for the octree
-    BoxAABB octreeBoundingBox;
-    octreeBoundingBox.position = vec3(0.0, 0.0, 0.0);
-    octreeBoundingBox.size = 40;
+    //Define the root box for the tree64
+    BoxAABB tree64BoundingBox;
+    tree64BoundingBox.position = vec3(0.0, 0.0, 0.0);
+    tree64BoundingBox.size = 40;
     vec4 color = vec4(1);
 
     //vec3 sunDirection = normalize(vec3((cos(float(time*0.01f))), abs(sin(float(time*0.01f))), 0.2));

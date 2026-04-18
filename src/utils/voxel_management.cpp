@@ -40,7 +40,7 @@ namespace projv::utils {
         }
 
         if(childPointerTooLarge) {
-            core::error("addPointersTree64: Child pointer too large (exceeds 31 bits)! Octree may be corrupted. Consider reducing data size or increasing resolution levels");
+            core::error("addPointersTree64: Child pointer too large (exceeds 31 bits)! Tree64 may be corrupted. Consider reducing data size or increasing resolution levels");
         }
     }
 
@@ -124,13 +124,13 @@ namespace projv::utils {
 
     std::vector<uint32_t> createTree64(VoxelGrid& voxels, int gridResolution) {
         std::chrono::high_resolution_clock::time_point startWhole = std::chrono::high_resolution_clock::now();
-        core::info("createOctree: Starting tree64 generation with resolution {}x{}x{} ({} voxels total)", gridResolution, gridResolution, gridResolution, gridResolution * gridResolution * gridResolution);
+        core::info("createTree64: Starting tree64 generation with resolution {}x{}x{} ({} voxels total)", gridResolution, gridResolution, gridResolution, gridResolution * gridResolution * gridResolution);
         int levelsOfDepth = int(log10(gridResolution)/log10(4));
         std::vector<nodeStructureTree64> tree64;
         std::vector<nodeStructureTree64> levelInProgress;
 
         levelInProgress = aggregateLevelFromVoxelGridTree64(voxels, true);
-        tree64 = levelInProgress; // Puts our data on the octree
+        tree64 = levelInProgress; // Puts our data on the tree64
         std::cout << "Levels of depth: " << levelsOfDepth << std::endl;
 
         for(int i = 0; i < levelsOfDepth - 1; i++){ // Loops over all the levels of depth

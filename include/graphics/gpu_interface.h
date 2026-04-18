@@ -66,14 +66,14 @@ namespace projv::graphics {
     void setTextureToData(std::shared_ptr<ConstructedRenderer> constructedRenderer, uint textureID, unsigned char * data, uint textureWidth, uint textureHeight);
 
     /**
-     * Creates a bgfx::TextureHandle from an std::vector<uint32_t>. It is row-major, RGBA32U. Examples of how to read from it can be found in the uint octrees(int index); function in the octree traversal shader.
+     * Creates a bgfx::TextureHandle from an std::vector<uint32_t>. It is row-major, RGBA32U. Examples of how to read from it can be found in the uint tree64s(int index); function in the tree64 traversal shader.
      * @param data The std::vector<uint32_t>& to create the texture based on. It is copied by bgfx.
      * @return Returns a bgfx::TextureHandle for the texture created from the data.
      */
     bgfx::TextureHandle createArbitraryTexture(std::vector<uint32_t>& data);
 
     /**
-     * Creates a bgfx::TextureHandle from a collection of projv::GPUChunkHeader. It is row-major, RGBA32U. Examples of how to read from it can be found in the chunkHeader headers(int index); function in the octree traversal shader.
+     * Creates a bgfx::TextureHandle from a collection of projv::GPUChunkHeader. It is row-major, RGBA32U. Examples of how to read from it can be found in the chunkHeader headers(int index); function in the tree64 traversal shader.
      * @param data The std::vector<uint32_t>& to create the texture based on. It is copied by bgfx.
      * @return Returns a bgfx::TextureHandle for the texture created from the data.
      */

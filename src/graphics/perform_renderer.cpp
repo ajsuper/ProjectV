@@ -75,7 +75,7 @@ namespace projv::graphics {
                 constructedRenderer->resources.framebuffers.primaryWasLastRenderedToo[renderPass.targetFrameBufferID] = !constructedRenderer->resources.framebuffers.primaryWasLastRenderedToo[renderPass.targetFrameBufferID];
             }
 
-            bgfx::setTexture(13, gpuData->octreeSampler, gpuData->octreeTexture);
+            bgfx::setTexture(13, gpuData->tree64Sampler, gpuData->tree64Texture);
             bgfx::setTexture(14, gpuData->voxelTypeDataSampler, gpuData->voxelTypeDataTexture);
             bgfx::setTexture(15, gpuData->headerSampler, gpuData->headerTexture);
 

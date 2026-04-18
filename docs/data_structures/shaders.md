@@ -43,7 +43,7 @@ You simply run the tool ``shadercDebug`` (``shadercRelease`` for release builds)
 
 ### Shader that uses ProjectV data structures.
 ProjectV has a shader that is provided that you use to actually render the ProjectV scene. It has 3 textures already defined:
-- octreeData, at binding point 13.
+- tree64Data, at binding point 13.
 - voxelTypeData, at binding point 14.
 - headerData, at binding point 15.
 

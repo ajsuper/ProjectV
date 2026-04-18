@@ -1,5 +1,5 @@
-#ifndef OCTREE_H
-#define OCTREE_H
+#ifndef SCENE_H
+#define SCENE_H
 
 #include <vector>
 #include <stdint.h>

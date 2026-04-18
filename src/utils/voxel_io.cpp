@@ -110,12 +110,12 @@ namespace projv::utils {
     void writeSceneToDisk(std::string sceneFileDirectory, Scene& scene){
         core::info("writeSceneToDisk: Writing scene with {} chunks to directory: {}", "multiple", sceneFileDirectory);
 
-        // Delete all files in the octree and voxelTypeData subdirectories
+        // Delete all files in the tree64 and voxelTypeData subdirectories
         std::filesystem::remove_all(sceneFileDirectory + "/");
 
         // Recreate the directories after deletion
         std::filesystem::create_directory(sceneFileDirectory);
-        std::filesystem::create_directory(sceneFileDirectory + "/octree");
+        std::filesystem::create_directory(sceneFileDirectory + "/tree64");
         std::filesystem::create_directory(sceneFileDirectory + "/voxelTypeData");
 
         // Delete the headers.json file
@@ -151,8 +151,8 @@ namespace projv::utils {
             return chunkData; // Return empty chunkData
         }
 
-        // Read the octree and voxelTypeData from disk.
-        chunkData.geometryData = readUint32Vector(sceneFileDirectory + "/octree/" + std::to_string(chunkData.header.chunkID) + ".bin");
+        // Read the tree64 and voxelTypeData from disk.
+        chunkData.geometryData = readUint32Vector(sceneFileDirectory + "/tree64/" + std::to_string(chunkData.header.chunkID) + ".bin");
         chunkData.voxelTypeData = readUint32Vector(sceneFileDirectory + "/voxelTypeData/" + std::to_string(chunkData.header.chunkID) + ".bin");
 
         chunkData.LOD = 0;
@@ -190,9 +190,9 @@ namespace projv::utils {
             chunkHeaders[headerIndex] = chunk.header;
         }
 
-        // Writes our octree and voxelTypeData and creates it if it exists. Also writes headers.
+        // Writes our tree64 and voxelTypeData and creates it if it exists. Also writes headers.
         writeHeadersJSON(chunkHeaders, sceneFileDirectory + "/headers.json");
-        writeUint32Vector(chunk.geometryData, sceneFileDirectory + "/octree/" + std::to_string(chunk.header.chunkID) + ".bin");
+        writeUint32Vector(chunk.geometryData, sceneFileDirectory + "/tree64/" + std::to_string(chunk.header.chunkID) + ".bin");
         writeUint32Vector(chunk.voxelTypeData, sceneFileDirectory + "/voxelTypeData/" + std::to_string(chunk.header.chunkID) + ".bin");
     }
 
@@ -202,7 +202,7 @@ namespace projv::utils {
         // Loads our chunk headers into memory.
         std::vector<ChunkHeader> chunkHeaders = readHeadersJSON(sceneFileDirectory + "/headers.json");
 
-        // Loops over all of the chunk headers and loads the corresponding octree and voxelTypeData.
+        // Loops over all of the chunk headers and loads the corresponding tree64 and voxelTypeData.
         for(size_t i = 0; i < chunkHeaders.size(); i++){ 
             Chunk chunk = loadChunkFromDisk(sceneFileDirectory, chunkHeaders[i]);
             scene.chunks.push_back(chunk);
