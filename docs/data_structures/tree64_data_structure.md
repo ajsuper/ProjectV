@@ -23,7 +23,7 @@ There are no leaf nodes because the leaf's do not actually take up data, they ar
 
 ### Splitting up of a grid into this structure.
 
-Here is an image with an example drawing of how this sturcture works: [Example](/docs/images/IMG_9025.jpeg). In this illustration, we are in 2D so there are only 4 bits for the Valid Mask instead of 8. Our relative pointer uses a decimal representation instead of a binary representation for simplicity. Also please visit my [Python Quadtree Ray Marcher](https://github.com/ajsuper/PythonQuadtreeRayMarcher) For a 2D example of our tree64 and ray marching algorithm.
+Here is an image with an example drawing of how this sturcture works: [Example](/docs/images/IMG_9025.jpeg). In this illustration, we are in 2D so there are only 4 bits for the Valid Mask instead of 64 — a branching factor of 2 per axis in 2D gives 2x2 = 4 children per node, whereas our tree64 uses a branching factor of 4 per axis in 3D giving 4x4x4 = 64 children per node. Our relative pointer uses a decimal representation instead of a binary representation for simplicity. Also please visit my [Python Quadtree Ray Marcher](https://github.com/ajsuper/PythonQuadtreeRayMarcher) for a 2D example of the traversal logic and ray marching algorithm. Note that a quadtree uses a branching factor of 2 per axis (2x2 = 4 children per node in 2D) rather than the 4 per axis (4x4x4 = 64 children per node in 3D) of our tree64, so it is not a direct analogue — however the core logic and ideas are exactly the same, just with a different branching factor.
 
 ### File structure
 - A single std::vector<uint32_t>
