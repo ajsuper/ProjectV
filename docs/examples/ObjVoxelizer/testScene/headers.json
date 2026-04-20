@@ -1,0 +1,516 @@
+{
+    "chunkHeaders": [
+        {
+            "ID": 0,
+            "position x": 0.0,
+            "position y": 0.0,
+            "position z": 0.0,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 1,
+            "position x": 9.302135467529297,
+            "position y": 0.0,
+            "position z": 0.0,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 2,
+            "position x": 0.0,
+            "position y": 9.302135467529297,
+            "position z": 0.0,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 3,
+            "position x": 9.302135467529297,
+            "position y": 9.302135467529297,
+            "position z": 0.0,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 4,
+            "position x": 0.0,
+            "position y": 0.0,
+            "position z": 9.302135467529297,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 5,
+            "position x": 9.302135467529297,
+            "position y": 0.0,
+            "position z": 9.302135467529297,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 6,
+            "position x": 0.0,
+            "position y": 9.302135467529297,
+            "position z": 9.302135467529297,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 7,
+            "position x": 9.302135467529297,
+            "position y": 9.302135467529297,
+            "position z": 9.302135467529297,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 8,
+            "position x": 18.604270935058594,
+            "position y": 0.0,
+            "position z": 0.0,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 9,
+            "position x": 27.90640640258789,
+            "position y": 0.0,
+            "position z": 0.0,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 10,
+            "position x": 18.604270935058594,
+            "position y": 9.302135467529297,
+            "position z": 0.0,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 11,
+            "position x": 27.90640640258789,
+            "position y": 9.302135467529297,
+            "position z": 0.0,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 12,
+            "position x": 18.604270935058594,
+            "position y": 0.0,
+            "position z": 9.302135467529297,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 13,
+            "position x": 27.90640640258789,
+            "position y": 0.0,
+            "position z": 9.302135467529297,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 14,
+            "position x": 18.604270935058594,
+            "position y": 9.302135467529297,
+            "position z": 9.302135467529297,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 15,
+            "position x": 27.90640640258789,
+            "position y": 9.302135467529297,
+            "position z": 9.302135467529297,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 16,
+            "position x": 0.0,
+            "position y": 18.604270935058594,
+            "position z": 0.0,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 17,
+            "position x": 9.302135467529297,
+            "position y": 18.604270935058594,
+            "position z": 0.0,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 18,
+            "position x": 0.0,
+            "position y": 27.90640640258789,
+            "position z": 0.0,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 19,
+            "position x": 9.302135467529297,
+            "position y": 27.90640640258789,
+            "position z": 0.0,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 20,
+            "position x": 0.0,
+            "position y": 18.604270935058594,
+            "position z": 9.302135467529297,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 21,
+            "position x": 9.302135467529297,
+            "position y": 18.604270935058594,
+            "position z": 9.302135467529297,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 22,
+            "position x": 0.0,
+            "position y": 27.90640640258789,
+            "position z": 9.302135467529297,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 23,
+            "position x": 9.302135467529297,
+            "position y": 27.90640640258789,
+            "position z": 9.302135467529297,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 24,
+            "position x": 18.604270935058594,
+            "position y": 18.604270935058594,
+            "position z": 0.0,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 25,
+            "position x": 27.90640640258789,
+            "position y": 18.604270935058594,
+            "position z": 0.0,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 26,
+            "position x": 18.604270935058594,
+            "position y": 27.90640640258789,
+            "position z": 0.0,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 27,
+            "position x": 27.90640640258789,
+            "position y": 27.90640640258789,
+            "position z": 0.0,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 28,
+            "position x": 18.604270935058594,
+            "position y": 18.604270935058594,
+            "position z": 9.302135467529297,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 29,
+            "position x": 27.90640640258789,
+            "position y": 18.604270935058594,
+            "position z": 9.302135467529297,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 30,
+            "position x": 18.604270935058594,
+            "position y": 27.90640640258789,
+            "position z": 9.302135467529297,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 31,
+            "position x": 27.90640640258789,
+            "position y": 27.90640640258789,
+            "position z": 9.302135467529297,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 32,
+            "position x": 0.0,
+            "position y": 0.0,
+            "position z": 18.604270935058594,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 33,
+            "position x": 9.302135467529297,
+            "position y": 0.0,
+            "position z": 18.604270935058594,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 34,
+            "position x": 0.0,
+            "position y": 9.302135467529297,
+            "position z": 18.604270935058594,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 35,
+            "position x": 9.302135467529297,
+            "position y": 9.302135467529297,
+            "position z": 18.604270935058594,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 36,
+            "position x": 0.0,
+            "position y": 0.0,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 37,
+            "position x": 9.302135467529297,
+            "position y": 0.0,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 38,
+            "position x": 0.0,
+            "position y": 9.302135467529297,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 39,
+            "position x": 9.302135467529297,
+            "position y": 9.302135467529297,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 40,
+            "position x": 18.604270935058594,
+            "position y": 0.0,
+            "position z": 18.604270935058594,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 41,
+            "position x": 27.90640640258789,
+            "position y": 0.0,
+            "position z": 18.604270935058594,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 42,
+            "position x": 18.604270935058594,
+            "position y": 9.302135467529297,
+            "position z": 18.604270935058594,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 43,
+            "position x": 27.90640640258789,
+            "position y": 9.302135467529297,
+            "position z": 18.604270935058594,
+            "resolution": 256,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 44,
+            "position x": 18.604270935058594,
+            "position y": 0.0,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 45,
+            "position x": 27.90640640258789,
+            "position y": 0.0,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 46,
+            "position x": 18.604270935058594,
+            "position y": 9.302135467529297,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 47,
+            "position x": 27.90640640258789,
+            "position y": 9.302135467529297,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 48,
+            "position x": 0.0,
+            "position y": 18.604270935058594,
+            "position z": 18.604270935058594,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 49,
+            "position x": 9.302135467529297,
+            "position y": 18.604270935058594,
+            "position z": 18.604270935058594,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 50,
+            "position x": 0.0,
+            "position y": 27.90640640258789,
+            "position z": 18.604270935058594,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 51,
+            "position x": 9.302135467529297,
+            "position y": 27.90640640258789,
+            "position z": 18.604270935058594,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 52,
+            "position x": 0.0,
+            "position y": 18.604270935058594,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 53,
+            "position x": 9.302135467529297,
+            "position y": 18.604270935058594,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 54,
+            "position x": 0.0,
+            "position y": 27.90640640258789,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 55,
+            "position x": 9.302135467529297,
+            "position y": 27.90640640258789,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 56,
+            "position x": 18.604270935058594,
+            "position y": 18.604270935058594,
+            "position z": 18.604270935058594,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 57,
+            "position x": 27.90640640258789,
+            "position y": 18.604270935058594,
+            "position z": 18.604270935058594,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 58,
+            "position x": 18.604270935058594,
+            "position y": 27.90640640258789,
+            "position z": 18.604270935058594,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 59,
+            "position x": 27.90640640258789,
+            "position y": 27.90640640258789,
+            "position z": 18.604270935058594,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 60,
+            "position x": 18.604270935058594,
+            "position y": 18.604270935058594,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 61,
+            "position x": 27.90640640258789,
+            "position y": 18.604270935058594,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 62,
+            "position x": 18.604270935058594,
+            "position y": 27.90640640258789,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        },
+        {
+            "ID": 63,
+            "position x": 27.90640640258789,
+            "position y": 27.90640640258789,
+            "position z": 27.90640640258789,
+            "resolution": 2,
+            "voxel scale": 0.036336466670036316
+        }
+    ]
+}

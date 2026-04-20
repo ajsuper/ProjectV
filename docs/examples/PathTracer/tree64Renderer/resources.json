@@ -1,0 +1,27 @@
+{
+    "uniforms": [
+        {"name": "windowRes", "type": "vec4"},
+        {"name": "cameraPos", "type": "vec4"},
+        {"name": "cameraDir", "type": "vec4"},
+        {"name": "frameCount", "type": "vec4"},
+        {"name": "texelSize", "type": "vec4"}
+    ],
+    "shaders": [
+        {"shaderID": 1, "path": "./tree64Renderer/pathTracerShaders/path_trace.bin"},
+        {"shaderID": 2, "path": "./tree64Renderer/pathTracerShaders/denoise_ao_gi.bin"},
+        {"shaderID": 3, "path": "./tree64Renderer/pathTracerShaders/accumulate.bin"},
+        {"shaderID": 4, "path": "./tree64Renderer/pathTracerShaders/post_and_display.bin"}
+    ],
+    "textures": [
+        {"texID": 1, "name": "resourceTexture", "format": "RGBA8", "resX": 256, "resY": 256, "resizable": true, "origin": "CPUBuffer"},
+        {"texID": 2, "name": "globalIllumination", "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
+        {"texID": 3, "name": "directIllumination", "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
+        {"texID": 4, "name": "normal", "format": "RGBA8", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
+        {"texID": 5, "name": "albedo", "format": "RGBA8", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
+        {"texID": 6, "name": "accumulatedRender", "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"}
+    ],
+    "framebuffers": [
+        {"fboID": 1, "textureIDs": [2, 3, 4, 5]},
+        {"fboID": 2, "textureIDs": [6]}
+    ]
+}
