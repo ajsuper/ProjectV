@@ -66,7 +66,7 @@ namespace projv::graphics {
             shaderResource.shaderID = shader["shaderID"];
             if(shader["shaderID"] <= 0) core::error("ShaderID {} is less than 0!", shader["shaderID"].dump());
             shaderResource.filePath = shader["path"];
-            shaderResource.shaderFileContents = readFile(rendererPath);
+            shaderResource.shaderFileContents = readFile(shaderResource.filePath);
             shaders.emplace_back(shaderResource);
         }
         return shaders;
