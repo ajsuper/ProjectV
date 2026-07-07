@@ -25,6 +25,7 @@ LIB_DIR := -L$(PROJECTV_DIR)/lib \
 USED_LIBRARIES := \
     -lprojectV-ecs \
     -lprojectV-lod \
+    -lprojectV-compose_io \
     -lprojectV-voxel_io \
     -lprojectV-voxel_management \
     -lprojectV-voxel_math \

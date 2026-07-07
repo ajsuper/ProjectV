@@ -6,7 +6,7 @@
 // ProjectV Engine Features Used:
 //   - Core Math       : vec2/vec3/ivec3, dot, cross, min/max/clamp — used for intersection math and UV sampling
 //   - Logging         : info/warn/error via spdlog wrapper for structured, leveled output
-//   - Voxel I/O       : writeChunkToDisk for serializing voxel chunks to the ProjectV scene format
+//   - Compose I/O     : writeDataFile + a compose.json for the Compose scene-graph format
 //   - Voxel Mgmt      : ChunkHeader, VoxelBatch, createChunk, moveVoxelBatchToChunk, updateChunkFromItsVoxelBatch
 //   - Z-Order Indexing: createZOrderIndex / reverseZOrderIndex for Morton-coded spatial layout within chunks
 //   - ECS             : core ECS types included as the foundation for all ProjectV scene objects
@@ -16,6 +16,7 @@
 #include "core/log.h"
 #include "utils/voxel_io.h"
 #include "utils/voxel_management.h"
+#include "utils/compose_io.h"
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "include/tiny_obj_loader.h"
@@ -307,6 +308,12 @@ void voxelizeObjFile(std::filesystem::path modelObjDirectory, std::string modelM
     size_t totalVoxels = 0;
     uint logStep = std::max(1u, totalChunks / 10);
 
+    // Accumulate every occupied chunk into a single grid-volume .data container.
+    projv::DataFile dataFile;
+    dataFile.resolution = 256;
+    dataFile.voxelScale = voxelScale;
+    dataFile.hasVoxelTypeData = true;
+
     for (int chunkIndex = 0; chunkIndex < (int)totalChunks; chunkIndex++) {
         if (totalChunks == 1 || chunkIndex % logStep == 0) {
             info("  Chunk {}/{} ({:.0f}%)", chunkIndex + 1, totalChunks,
@@ -440,11 +447,45 @@ void voxelizeObjFile(std::filesystem::path modelObjDirectory, std::string modelM
         size_t chunkVoxels = voxelBatch.size() > 0 ? voxelBatch.size() - 1 : 0;
         totalVoxels += chunkVoxels;
 
+        // Skip chunks that received no real geometry (only the sentinel corner voxel), so
+        // the grid volume's block count equals the number of occupied cells.
+        if (chunkVoxels == 0) {
+            continue;
+        }
+
         projv::Chunk chunk = projv::utils::createChunk(chunkHeader);
         projv::utils::moveVoxelBatchToChunk(voxelBatch, chunk);
         projv::utils::updateChunkFromItsVoxelBatch(chunk);
-        projv::utils::writeChunkToDisk(outputDirectory, chunk);
+
+        projv::DataBlock block;
+        block.gridX = chunkIndexPosition.x;
+        block.gridY = chunkIndexPosition.y;
+        block.gridZ = chunkIndexPosition.z;
+        block.geometry = std::move(chunk.geometryData);
+        block.voxelTypeData = std::move(chunk.voxelTypeData);
+        dataFile.blocks.push_back(std::move(block));
     }
+
+    // Write the grid-volume .data container and a compose.json that references it.
+    std::string modelName = modelObjDirectory.stem().string();
+    if (modelName.empty()) modelName = "model";
+
+    projv::utils::writeDataFile(outputDirectory + "/model.data", dataFile);
+
+    nlohmann::json compose;
+    compose["version"] = 1;
+    compose["name"] = modelName;
+    compose["components"] = nlohmann::json::array();
+    compose["components"].push_back({
+        {"type", "data"},
+        {"source", "model.data"},
+        {"position", {0.0f, 0.0f, 0.0f}},
+        {"mutability", "direct"}
+    });
+    std::filesystem::create_directories(outputDirectory);
+    std::ofstream composeOut(outputDirectory + "/compose.json");
+    composeOut << compose.dump(4);
+    composeOut.close();
 
     // Free all loaded texture data
     for (auto& [name, tex] : textures) {
@@ -468,7 +509,8 @@ void voxelizeObjFile(std::filesystem::path modelObjDirectory, std::string modelM
     info("  Chunks:          {} ({} per axis)", totalChunks, numberOfChunksPerAxis);
     info("  Voxel size:      {:.5f} world units", voxelScale);
     info("  Total voxels:    {}", totalVoxels);
-    info("  Output:          {}", outputDirectory);
+    info("  Occupied blocks: {}", dataFile.blocks.size());
+    info("  Output:          {}/model.data + {}/compose.json", outputDirectory, outputDirectory);
     info("--------------------------------------------");
     if (texturesFailed > 0)
         projv::core::warn("{} texture(s) could not be loaded — affected surfaces used material color fallback.", texturesFailed);

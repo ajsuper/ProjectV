@@ -1,0 +1,273 @@
+## COMPOSE - v0.0
+
+The **Compose** system describes *where physical objects live in a scene* and *how they are assembled from reusable pieces*. It is a folder-based, recursive scene-graph format. It deliberately describes **only the physical layout** (geometry + transforms). Gameplay, state, and behavior are **not** part of this format — see [Non-Goals](#non-goals).
+
+This format supersedes the flat `headers.json` layout described in [scene_data_structure.md](/docs/data_structures/scene_data_structure.md) for authored scenes. See [Relationship to `headers.json`](#relationship-to-the-old-headersjson-format).
+
+- [Core Concept](#core-concept)
+- [`compose.json` Format](#composejson-format)
+  - [Top-level fields](#top-level-fields)
+  - [Component fields](#component-fields)
+  - [Transforms](#transforms)
+  - [Mutability](#mutability)
+- [`.data` Container Format](#data-container-format)
+- [Loading Rules](#loading-rules)
+  - [Path resolution](#path-resolution)
+  - [Instancing / deduplication](#instancing--deduplication)
+  - [Recursion safety](#recursion-safety)
+- [Relationship to the old `headers.json` format](#relationship-to-the-old-headersjson-format)
+- [Non-Goals](#non-goals)
+- [Worked Example](#worked-example)
+- [Open Questions](#open-questions)
+
+---
+
+### Core Concept
+
+**A folder is the unit of composition.** Every composable folder contains a `compose.json`. Pointing the engine at *any* such folder loads its `compose.json` and recursively constructs everything it references. There is no engine-level difference between a "scene" and an "asset" — both are just folders with a `compose.json`. This means:
+
+- Loading `Example 1/Scene/` loads the whole world.
+- Loading `Example 1/Assets/Bird/` loads just the bird, standalone.
+- The same asset folder can be referenced by many scenes.
+
+A `compose.json` lists **components**. A component is one of two kinds:
+
+- `data` — references a **`.data`** file: raw voxel geometry + voxel-type data (a tree64, or a grid of tree64s). This is a leaf.
+- `asset` — references **another folder** (which has its own `compose.json`). This recurses.
+
+Every component carries a **transform** (position / rotation / scale) applied relative to its parent. This produces a standard scene graph.
+
+---
+
+### `compose.json` Format
+
+The wire format is **strict JSON** (RFC 8259). The loader is configured with `ignore_comments = true`, so `//` line comments and `/* */` block comments are permitted **for authoring convenience only** — commas are still mandatory. `#` comments are **not** valid. Do not rely on comments surviving a load/save round-trip.
+
+#### Top-level fields
+
+```json
+{
+    "version": 1,
+    "name": "Square Earth Theory",
+    "components": [ /* ... */ ]
+}
+```
+
+| Field | Type | Required | Meaning |
+|-------|------|----------|---------|
+| `version` | integer | **yes** | Format version. Current: `1`. Lets the loader reject/upgrade old files. |
+| `name` | string | no | Human identification only. The engine assigns an internal ID on load; `name` has no runtime meaning and need not be unique. |
+| `components` | array | **yes** | The list of components (see below). May be empty. |
+
+#### Component fields
+
+```json
+{
+    "type": "data",
+    "source": "terrain.data",
+    "position": [0.0, 0.0, 0.0],
+    "rotation": [0.0, 0.0, 0.0],
+    "scale": 1.0,
+    "mutability": "direct"
+}
+```
+
+| Field | Type | Required | Meaning |
+|-------|------|----------|---------|
+| `type` | `"data"` \| `"asset"` | **yes** | `data` → `source` is a `.data` file. `asset` → `source` is a folder containing a `compose.json`. |
+| `source` | string | **yes** | Path to the file (`data`) or folder (`asset`), resolved relative to **this** `compose.json`'s directory. See [Path resolution](#path-resolution). |
+| `position` | `[x, y, z]` float | no (default `[0,0,0]`) | Translation, relative to the parent. |
+| `rotation` | float array | no (default identity) | Length **3** = Euler degrees `[x, y, z]`; length **4** = quaternion `[x, y, z, w]`. See [Transforms](#transforms). |
+| `scale` | number \| `[x,y,z]` | no (default `1.0`) | A single number is uniform scale. A 3-array is per-axis scale. |
+| `mutability` | `"locked"` \| `"direct"` \| `"copy"` | no (default `"locked"`) | Only meaningful for `type: data`. See [Mutability](#mutability). Ignored on `asset` (each inner `data` declares its own). |
+
+> **Note on `source` naming:** the key is `source`, not `data`, because it points to a *file* for `type:data` but a *folder* for `type:asset`. One key, two resolutions, disambiguated by `type`.
+
+#### Transforms
+
+Each component's local transform is composed **T · R · S** (scale first, then rotate, then translate) and applied relative to its parent:
+
+```
+worldMatrix(component) = worldMatrix(parent) · Translate(position) · Rotate(rotation) · Scale(scale)
+```
+
+For an `asset` component, `worldMatrix(component)` becomes the parent transform for **everything inside that asset's `compose.json`**. Asset transforms stack multiplicatively down the tree.
+
+**Rotation encoding** is disambiguated by array length:
+- **3 elements** → Euler angles in **degrees**, applied intrinsically in order **X (pitch) → Y (yaw) → Z (roll)**. Converted to a quaternion internally.
+- **4 elements** → a quaternion `[x, y, z, w]`, used directly. Preferred when authored by tools, since it avoids gimbal ambiguity.
+
+> The engine stores rotation internally as a quaternion (or matrix). Euler input is a convenience for hand-authoring. This is a change from the current renderer, which assumes axis-aligned chunks and has **no** rotation support — see [Open Questions](#open-questions).
+
+#### Mutability
+
+`mutability` governs what happens when a `data` component's voxel data is **modified at runtime and persisted**. It applies only to `type: data`.
+
+| Value | On persist | Loader may alias one buffer across instances? | Intended for |
+|-------|-----------|-----------------------------------------------|--------------|
+| `locked` *(default)* | Nothing is written back. Runtime edits are in-memory only and are never saved to the source `.data`. | **Yes** | Reusable library assets instanced many times (Bird, Cow). Guarantees the master is never mutated and permits a single shared buffer. |
+| `direct` | Edits are written **in place** to the source `.data`. **No copy is made.** | No (single owner) | Large single-instance data you edit and keep, e.g. **terrain**. |
+| `copy` | Edits are written to a **new** `.data`; the original is left untouched (copy-on-write). The runtime/ECS records the override that points the affected instance at the new file. | No (own buffer once diverged) | A unique object that diverges from a shared source, e.g. a damaged bird you want to keep alongside the pristine one. |
+
+Notes:
+- The original source `.data` on disk is **never destroyed** by `copy`, and **never** touched at all by `locked`. Only `direct` writes through to it — by explicit opt-in.
+- Mutability is a **policy the loader and runtime enforce**, not stored state about "which version is current." Version/override bookkeeping (which instance points at which `.data`) lives in the runtime/ECS, not in this static description.
+
+---
+
+### `.data` Container Format
+
+A `.data` file holds the **intrinsic** voxel data for one component: one tree64, or a grid of equally-sized, grid-aligned tree64s. It carries an index so individual blocks can be **seeked/streamed without reading the whole file**. Placement (position/rotation/scale) is **not** stored here — it lives in `compose.json`.
+
+Binary layout, little-endian:
+
+```
+Offset  Size  Field
+------  ----  -----
+0       4     magic         = "PVDT" (0x50 0x56 0x44 0x54)
+4       4     uint32 version        (current: 1)
+8       4     uint32 flags          (bit0: voxelTypeData present)
+12      4     uint32 blockCount     (1 for a simple asset; N for a grid volume)
+16      4     uint32 resolution     (edge resolution; shared by all blocks)
+20      4     float  voxelScale     (world size of one voxel at resolution)
+24      ...   BlockEntry[blockCount] (block table, see below)
+...     ...   blob region: raw uint32 arrays, referenced by offsets below
+```
+
+`BlockEntry` (fixed 40 bytes):
+
+```
+int32  gridX, gridY, gridZ     grid coordinate of this block (0,0,0 for a single-block asset)
+uint64 geometryOffset          byte offset into the file of this block's tree64 uint32[]
+uint32 geometryLength          length of the tree64 array, in uint32 units
+uint64 voxelTypeOffset         byte offset of this block's voxelTypeData uint32[] (0 if absent)
+uint32 voxelTypeLength         length in uint32 units (0 if absent)
+```
+
+This one format covers both cases the plan needs:
+
+- **Simple asset** (bird, cow): `blockCount = 1`, one block at `(0,0,0)`.
+- **Grid volume** (large terrain): `blockCount = N`, one block per occupied grid cell, all sharing `resolution`/`voxelScale`. The DDA acceleration structure walks the grid at the top level; the block table lets the streamer `seek`/`mmap` and load **only** the cells near the camera — solving the "must I load the whole file to stream one chunk?" problem. One file, still streamable.
+
+> The grid-volume path is the optimization target from the plan (grid-aligned chunks for efficient DDA instead of brute-forcing every chunk). It is intentionally *separate* from the asset/transform graph, which is for sparse, movable objects placed by arbitrary transform. See [Open Questions](#open-questions) for what still needs deciding there.
+
+---
+
+### Loading Rules
+
+#### Path resolution
+
+`source` is always resolved relative to the directory containing the `compose.json` that names it. `../` is permitted (e.g. a `Scene` referencing `../Assets/Bird/`). The loader canonicalizes each resolved path (absolute, symlinks and `..` collapsed) before use — this canonical path is the key for dedup and cycle detection below.
+
+#### Instancing / deduplication
+
+The loader maintains a cache keyed by canonical path:
+
+- A `.data` file loaded once is reused for every component that references it. With `mutability: locked`, all instances **share one buffer**. With `direct`/`copy`, an instance gets its own buffer when (and only when) it is edited.
+- An `asset` folder loaded once can be re-instanced by transform without re-parsing.
+
+This is how instancing works: **one component entry = one instance (one transform)**, and sharing happens automatically at the data layer. There is intentionally no "instance count" field in v0.0; an optional `transforms: [ ... ]` array on a component may be added later as pure authoring sugar (see [Open Questions](#open-questions)).
+
+#### Recursion safety
+
+`asset` references can form cycles (A composes B composes A) or pathological depth. The loader:
+
+1. Maintains a stack of canonical folder paths currently being expanded. If `source` resolves to a path already on the stack → **cycle error**, abort that branch and log the path chain.
+2. Enforces a maximum recursion depth (default **32**, configurable). Exceeding it is an error.
+
+Recursion is a supported feature (it enables interesting composed/repeated structures), but it is bounded by the two checks above so it cannot run away.
+
+---
+
+### Relationship to the old `headers.json` format
+
+| Concern | `headers.json` (current) | Compose (this doc) |
+|---------|--------------------------|--------------------|
+| Placement | `position` baked into each `ChunkHeader` | Lives in `compose.json` transforms |
+| Rotation | none | `rotation` per component |
+| Intrinsic data | `tree64/<id>.bin` + `voxelTypeData/<id>.bin`, `resolution`/`voxelScale` in header | Bundled in a `.data` container |
+| Reuse / hierarchy | none (flat list) | `asset` references + scene graph |
+| Chunk ID | authored in file | assigned internally on load |
+
+The intrinsic fields a `.data` must carry (`resolution`, `voxelScale`, geometry `uint32[]`, `voxelTypeData` `uint32[]`) are exactly the per-chunk fields the current `loadChunkFromDisk` reads today — so a converter from `headers.json` + `tree64/` + `voxelTypeData/` to `.data` + `compose.json` is mechanical.
+
+---
+
+### Non-Goals
+
+Compose describes **physical objects only**. It does **not** describe:
+
+- Gameplay state, scripts, health, AI, or any per-entity behavior.
+- ECS component assignment beyond what a scene graph implies.
+
+Loading a `compose.json` **emits entities into the ECS**: each `data` component becomes an entity with a transform and a geometry/chunk-reference component; the asset `name` becomes a tag/archetype. Other systems, keyed on that tag, attach behavior and state separately. This keeps the scene format a pure, reusable description and keeps game logic out of it.
+
+---
+
+### Worked Example
+
+```
+Example 1/
+├── Scene/
+│   ├── compose.json     # references terrain.data, water.data, ../Assets/Bird/, ../Assets/Cow/
+│   ├── terrain.data
+│   └── water.data
+└── Assets/
+    ├── Bird/
+    │   ├── compose.json # references bird.data
+    │   └── bird.data
+    └── Cow/
+        ├── compose.json # references cow.data
+        └── cow.data
+```
+
+`Scene/compose.json`:
+
+```json
+{
+    "version": 1,
+    "name": "Square Earth Theory",
+    "components": [
+        { "type": "data",  "source": "terrain.data",     "position": [0, 0, 0],       "mutability": "direct" },
+        { "type": "data",  "source": "water.data",       "position": [0, 0, 0],       "mutability": "direct" },
+        { "type": "asset", "source": "../Assets/Bird/",  "position": [110, 240, 30],  "rotation": [45, 5, 0] },
+        { "type": "asset", "source": "../Assets/Cow/",   "position": [45, 80, 150],   "rotation": [90, 0, 0], "scale": 1.2 }
+    ]
+}
+```
+
+`Assets/Bird/compose.json`:
+
+```json
+{
+    "version": 1,
+    "name": "Bird",
+    "components": [
+        { "type": "data", "source": "bird.data", "position": [0, 0, 0], "mutability": "locked" }
+    ]
+}
+```
+
+Loading `Scene/` yields: terrain + water as directly-editable grid volumes at the origin, one bird instanced at (110,240,30) rotated (45°,5°), and one cow at (45,80,150) rotated 90° and scaled 1.2×. Loading `Assets/Bird/` alone yields just the bird at the origin.
+
+---
+
+### Open Questions
+
+These are unresolved and intentionally *not* locked down in v0.0:
+
+1. **Renderer rotation support.** The current renderer assumes axis-aligned chunks and has no rotation. Supporting `rotation` on a `data` leaf requires transforming the ray into chunk-local space during marching. Decide whether rotation is a true leaf capability or is baked in by resampling geometry at author time. (`asset`-level rotation of composed sub-trees is cheaper to reason about than rotating a raw tree64.)
+
+2. **Multi-instance authoring sugar.** v0.0 keeps one component = one instance. If copy-pasting transform blocks becomes painful, add an optional `transforms: [ [pos,rot,scale], ... ]` array on a component. This is sugar over N instances sharing one `source`; it does not change the data model.
+
+3. **Grid-volume acceleration details.** The `.data` block table gives streaming + grid coordinates, but the top-level structure the renderer walks over blocks (uniform-grid DDA vs. a coarse tree64-of-blocks) is not yet specified, nor is the streaming/eviction policy (how many blocks resident, prefetch radius).
+
+4. **Per-axis vs uniform scale + non-uniform scale under rotation.** Allowing `[x,y,z]` scale interacts awkwardly with rotation (shear). May restrict `data` leaves to uniform scale and allow per-axis only on `asset` nodes, or forbid non-uniform scale entirely for v0.0.
+
+5. **`mutability` cardinality.** Specced as three values (`locked`/`direct`/`copy`). If the shared-buffer guarantee of `locked` is not wanted, this collapses to the two the plan originally proposed (`direct`/`copy`).
+
+---
+
+### More
+
+For more information on this project, visit our [README.md](/README.md). Related: [scene_data_structure.md](/docs/data_structures/scene_data_structure.md), [tree64_data_structure.md](/docs/data_structures/tree64_data_structure.md), [voxel_type_data_structure.md](/docs/data_structures/voxel_type_data_structure.md).

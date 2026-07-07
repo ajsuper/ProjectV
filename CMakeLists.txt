@@ -129,6 +129,10 @@ link_common_includes(projectV-type_mapping)
 add_library(projectV-voxel_io STATIC ${UTILS_SRC_DIR}/voxel_io.cpp)
 link_common_includes(projectV-voxel_io)
 
+add_library(projectV-compose_io STATIC ${UTILS_SRC_DIR}/compose_io.cpp)
+target_link_libraries(projectV-compose_io PRIVATE projectV-voxel_management)
+link_common_includes(projectV-compose_io)
+
 add_library(projectV-lod STATIC ${UTILS_SRC_DIR}/lod.cpp)
 target_link_libraries(projectV-lod PRIVATE projectV-voxel_io)
 link_common_includes(projectV-lod)
