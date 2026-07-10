@@ -42,15 +42,18 @@ namespace projv::graphics {
                 constructedTextures.texturesResizedWithResourceTextures[texture.textureID] = true;
             }
 
-            uint16_t textureWidth = uint16_t(std::max(1, texture.resolutionX)); 
+            uint16_t textureWidth = uint16_t(std::max(1, texture.resolutionX));
             uint16_t textureHeight = uint16_t(std::max(1, texture.resolutionY));
-            constructedTextures.textureHandles[texture.textureID] = bgfx::createTexture2D(textureWidth, textureHeight, false, 1, texture.format, BGFX_TEXTURE_RT);
+            // Opt-in (Texture::readBack): lets this texture be blitted into and read back to the CPU
+            // via bgfx::readTexture. Off by default so every other texture is unaffected.
+            uint64_t textureFlags = BGFX_TEXTURE_RT | (texture.readBack ? (BGFX_TEXTURE_READ_BACK | BGFX_TEXTURE_BLIT_DST) : 0);
+            constructedTextures.textureHandles[texture.textureID] = bgfx::createTexture2D(textureWidth, textureHeight, false, 1, texture.format, textureFlags);
             constructedTextures.textureSamplerHandles[texture.textureID] = bgfx::createUniform(texture.name.c_str(), bgfx::UniformType::Sampler);
             constructedTextures.textureHandlesAlternate[texture.textureID] = BGFX_INVALID_HANDLE;
             constructedTextures.textureSamplerHandlesAlternate[texture.textureID] = BGFX_INVALID_HANDLE;
             constructedTextures.pingPongFlags[texture.textureID] = false;
             if (texture.pingPongFlag == true) {
-                constructedTextures.textureHandlesAlternate[texture.textureID] = bgfx::createTexture2D(textureWidth, textureHeight, false, 1, texture.format, BGFX_TEXTURE_RT);
+                constructedTextures.textureHandlesAlternate[texture.textureID] = bgfx::createTexture2D(textureWidth, textureHeight, false, 1, texture.format, textureFlags);
                 constructedTextures.textureSamplerHandlesAlternate[texture.textureID] = bgfx::createUniform(texture.name.c_str(), bgfx::UniformType::Sampler);
                 constructedTextures.pingPongFlags[texture.textureID] = true;
             }

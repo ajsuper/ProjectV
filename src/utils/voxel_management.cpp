@@ -304,27 +304,34 @@ namespace projv::utils {
         return color;
     }
 
-    VoxelBatch getChunkVoxelBatch(Chunk& chunk, bool convertCompressedData) {
+    VoxelBatch getChunkVoxelBatch(Scene& scene, Chunk& chunk, bool convertCompressedData) {
         if(!convertCompressedData) {
             return chunk.chunkQueue;
         }
 
+        // Pooled chunks (geometryPoolIndex >= 0 -- every compose-loaded chunk) keep
+        // chunk.voxelTypeData deliberately empty; the real data lives in the shared pool blob.
+        const std::vector<uint32_t>& sourceVoxelTypeData =
+            (chunk.geometryPoolIndex >= 0 && chunk.geometryPoolIndex < static_cast<int32_t>(scene.geometryPool.size()))
+                ? scene.geometryPool[chunk.geometryPoolIndex].voxelTypeData
+                : chunk.voxelTypeData;
+
         VoxelBatch decompressedVoxels;
-        size_t count = chunk.voxelTypeData.size() / 3;
+        size_t count = sourceVoxelTypeData.size() / 3;
         decompressedVoxels.resize(count);
-        
+
         core::info("getChunkVoxelBatch: Decompressing {} voxels from chunk", count);
         for (size_t i = 0; i < count; ++i) {
-            uint32_t ZOrderPosition = chunk.voxelTypeData[i * 3];
-            uint32_t SerializedColor = chunk.voxelTypeData[i * 3 + 1];
-            //uint32_t SerializedNormal = chunk.voxelTypeData[i * 3 + 2];
-    
+            uint32_t ZOrderPosition = sourceVoxelTypeData[i * 3];
+            uint32_t SerializedColor = sourceVoxelTypeData[i * 3 + 1];
+            //uint32_t SerializedNormal = sourceVoxelTypeData[i * 3 + 2];
+
             Voxel voxel;
             voxel.ZOrderPosition = ZOrderPosition;
-    
+
             // Deserialize color.
             voxel.color = unserializeColor(SerializedColor);
-        
+
             decompressedVoxels[i] = voxel;
         }
 
@@ -386,9 +393,11 @@ namespace projv::utils {
         core::info("createVoxelGridFromChunksQueue: Processed chunk queue in {:.2f}ms", elapsed);
 
         // Compute resolution.
-        Voxel farthestVoxel = voxelGrid.voxels[voxelGrid.voxels.size() - 1];
-        core::ivec3 position = reverseZOrderIndex(farthestVoxel.ZOrderPosition);
-        int farthestCoordinate = std::max({position.x, position.y, position.z});
+        int farthestCoordinate = 0;
+        for (const Voxel& v : voxelGrid.voxels) {
+            core::ivec3 pos = reverseZOrderIndex(v.ZOrderPosition);
+            farthestCoordinate = std::max(farthestCoordinate, std::max({pos.x, pos.y, pos.z}));
+        }
         int resolutionToTheNearestPowOfTwo = std::pow(2, std::ceil(std::log2(farthestCoordinate + 1)));
         if(resolutionToTheNearestPowOfTwo > 256) {
             core::warn("updateChunkFromItsVoxelBatch: Chunk {} resolution {} exceeds recommended 256 (voxel positions too large)", chunk.header.chunkID, chunk.header.resolution);

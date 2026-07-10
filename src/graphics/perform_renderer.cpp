@@ -78,6 +78,9 @@ namespace projv::graphics {
             bgfx::setTexture(13, gpuData->tree64Sampler, gpuData->tree64Texture);
             bgfx::setTexture(14, gpuData->voxelTypeDataSampler, gpuData->voxelTypeDataTexture);
             bgfx::setTexture(15, gpuData->headerSampler, gpuData->headerTexture);
+            bgfx::setTexture(11, gpuData->gridInfoSampler, gpuData->gridInfoTexture);
+            bgfx::setTexture(12, gpuData->cellMapSampler, gpuData->cellMapTexture);
+            bgfx::setTexture(10, gpuData->looseListSampler, gpuData->looseListTexture);
 
             bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);  
             bgfx::submit(renderPass.renderPassID, renderPass.shaderProgram);

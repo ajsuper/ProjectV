@@ -24,7 +24,8 @@ for i in ./tree64Renderer/pathTracerShaders/*.sc; do
         --type v \
         --platform $PLATFORM \
         --profile $PROFILE \
-        -i $PROJECTV_DIR/external/bgfx/src
+        -i $PROJECTV_DIR/external/bgfx/src \
+        -i ./sharedShaders
 done
 
 for i in ./tree64Renderer/pathTracerShaders/*.frag; do
@@ -38,6 +39,7 @@ for i in ./tree64Renderer/pathTracerShaders/*.frag; do
         --type f \
         --platform $PLATFORM \
         --profile $PROFILE \
-        -i $PROJECTV_DIR/external/bgfx/src
+        -i $PROJECTV_DIR/external/bgfx/src \
+        -i ./sharedShaders
 done
 

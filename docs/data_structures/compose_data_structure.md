@@ -103,15 +103,17 @@ For an `asset` component, `worldMatrix(component)` becomes the parent transform 
 
 `mutability` governs what happens when a `data` component's voxel data is **modified at runtime and persisted**. It applies only to `type: data`.
 
-| Value | On persist | Loader may alias one buffer across instances? | Intended for |
-|-------|-----------|-----------------------------------------------|--------------|
-| `locked` *(default)* | Nothing is written back. Runtime edits are in-memory only and are never saved to the source `.data`. | **Yes** | Reusable library assets instanced many times (Bird, Cow). Guarantees the master is never mutated and permits a single shared buffer. |
-| `direct` | Edits are written **in place** to the source `.data`. **No copy is made.** | No (single owner) | Large single-instance data you edit and keep, e.g. **terrain**. |
-| `copy` | Edits are written to a **new** `.data`; the original is left untouched (copy-on-write). The runtime/ECS records the override that points the affected instance at the new file. | No (own buffer once diverged) | A unique object that diverges from a shared source, e.g. a damaged bird you want to keep alongside the pristine one. |
+| Value | On persist | Aliases one buffer across instances? | Intended for |
+|-------|-----------|--------------------------------------|--------------|
+| `locked` *(default)* | Nothing is written back. Runtime edits are in-memory only and are never saved to the source `.data`. | **Yes** (same-policy) | Reusable library assets instanced many times (Bird, Cow). Guarantees the source master is never persisted-over. |
+| `direct` | Edits are written **in place** to the source `.data`. | **Yes** (same-policy) | Large data you edit and keep, e.g. **terrain**. Edits are shared across all `direct` instances of the source (they *are* the same block) and written through to the source `.data`. |
+| `copy` | Edits are written to a **new** `.data`; the original is left untouched (copy-on-write). The runtime records the override that points the affected instance at the new file. | **Yes, until first edited**, then a private buffer | A unique object that diverges from a shared source, e.g. a damaged bird you want to keep alongside the pristine one. |
+
+The dedup key includes `mutability` (see [Instancing / deduplication](#instancing--deduplication)), so the **same source referenced with two different policies gets two separate buffers** — a `direct` edit can never mutate a `locked` sibling. Within one policy, instances share.
 
 Notes:
 - The original source `.data` on disk is **never destroyed** by `copy`, and **never** touched at all by `locked`. Only `direct` writes through to it — by explicit opt-in.
-- Mutability is a **policy the loader and runtime enforce**, not stored state about "which version is current." Version/override bookkeeping (which instance points at which `.data`) lives in the runtime/ECS, not in this static description.
+- Mutability is a **policy the loader and runtime enforce**, not stored state about "which version is current." Version/override bookkeeping (which instance points at which `.data`) lives in the runtime, not in this static description.
 
 ---
 
@@ -161,21 +163,41 @@ This one format covers both cases the plan needs:
 
 #### Instancing / deduplication
 
-The loader maintains a cache keyed by canonical path:
+The loader maintains a cache keyed by canonical path, and a geometry pool keyed by **(canonical path, block grid coords, mutability)**:
 
-- A `.data` file loaded once is reused for every component that references it. With `mutability: locked`, all instances **share one buffer**. With `direct`/`copy`, an instance gets its own buffer when (and only when) it is edited.
+- A `.data` file loaded once is reused for every component that references it. Its per-block geometry is stored **once** in the pool and shared by every instance that resolves to the same key. `locked` and `direct` instances of a source thus **share one buffer** (a `direct` edit is meant to be seen by all of them); a `copy` instance shares too, **until it is first edited**, at which point it forks a private buffer (copy-on-write). Because `mutability` is part of the key, the **same source referenced with two different policies gets separate buffers** — the differing group is a forced copy.
 - An `asset` folder loaded once can be re-instanced by transform without re-parsing.
 
 This is how instancing works: **one component entry = one instance (one transform)**, and sharing happens automatically at the data layer. There is intentionally no "instance count" field in v0.0; an optional `transforms: [ ... ]` array on a component may be added later as pure authoring sugar (see [Open Questions](#open-questions)).
 
 #### Recursion safety
 
-`asset` references can form cycles (A composes B composes A) or pathological depth. The loader:
+`asset` references can form cycles (A composes B composes A) or pathological depth. Cyclic dependencies are **allowed** — each level re-applies the asset transform, producing repeated / fractal structures — and are kept safe purely by a depth bound:
 
-1. Maintains a stack of canonical folder paths currently being expanded. If `source` resolves to a path already on the stack → **cycle error**, abort that branch and log the path chain.
-2. Enforces a maximum recursion depth (default **32**, configurable). Exceeding it is an error.
+1. The loader maintains a stack of canonical folder paths currently being expanded. If `source` resolves to a path already on the stack, it logs a **one-time warning** (per distinct cycle) that the dependency is cyclic and will be capped, then keeps recursing.
+2. It enforces a maximum recursion depth (default **32**, configurable). Reaching it stops the descent for that branch.
 
-Recursion is a supported feature (it enables interesting composed/repeated structures), but it is bounded by the two checks above so it cannot run away.
+So recursion — cyclic or not — is a supported feature bounded by the depth cap, so it cannot run away. A cycle through a node that contains a `data` leaf emits one instance of that geometry per level, each at the accumulated transform.
+
+#### Runtime representation
+
+A loaded `Scene` is designed so chunks can be added, edited, and removed at runtime (streaming, live edits) without rebuilding everything — one **stable handle scheme** spans CPU and GPU:
+
+- **Stable handles.** A chunk's index into `Scene.chunks` is a **`ChunkHandle`** that never moves: it is also the chunk's row in the GPU header texture and the value stored in grid cells and the loose list. Removing a chunk marks its slot dead and recycles the handle via a free list (the array never shifts), so grid `cellToChunk` entries and loose-list handles stay valid across add/remove.
+- **Loose vs grid, decoupled from order.** Loose (transform-placed) chunks are an explicit `looseChunks` handle list the renderer iterates, not a positional prefix — so a loose chunk can be inserted or dropped with no reordering. Grid blocks are reached only through `SceneGrid.cellToChunk`, and each chunk carries its residency key (`gridIndex`, `cellIndex`) for O(1) eviction.
+- **Refcounted geometry pool.** Shared geometry lives once in `Scene.geometryPool` (deduped by canonical path + block coords + mutability). Each blob tracks a `refCount` of the chunks using it; at zero its GPU range is freed and the pool slot recycled, so a long dynamic session doesn't leak.
+- **Managed GPU pools.** The geometry, voxel-type, and header textures are **suballocated** with headroom rather than packed exactly to content. A persistent allocation table (per-blob GPU ranges + free-list allocators) lets a blob be uploaded, resized, or freed in place; a texture is only reallocated when a pool overflows its capacity. This replaces the earlier one-shot build that discarded its layout and could not be updated incrementally.
+
+#### Streaming (mechanism, not policy)
+
+Grid volumes can be loaded **lazily**: `loadComposeFromDisk(folder, &streamingContext)` builds the full grid topology (every `SceneGrid` descriptor) but loads **no grid geometry** — each cell starts empty — while single-block (loose) assets still load eagerly. Cells become resident on demand. This follows ProjectV's rule that the **engine provides mechanisms, the user supplies policy** (as with the ECS and the render pipeline):
+
+- **Per-block IO.** `readDataFileHeader` reads only a `.data`'s header + block table (grid coords + byte offsets/lengths, ~40 bytes/block, no geometry); `readDataBlock` seeks and reads exactly one block. The block table already in the `.data` format *is* the streaming index.
+- **Materialize / release.** `materializeGridCell(scene, ctx, grid, cell)` reads a cell's block, dedup-or-interns its refcounted blob, synthesizes the chunk header from the grid descriptor, and enqueues an add; `releaseGridCell` enqueues a remove. Both are coordinate-level and **policy-free**.
+- **Apply seam.** Producers enqueue `PendingSceneMutation`s; `applySceneMutations` drains them through the incremental GPU primitives and rebuilds the small scene tables **once per frame** (not once per cell). Live edits feed the same seam via `applyChunkEdit`.
+- **Residency is user policy.** *Which* cells should be resident is decided by a user system — keyed on one camera, several (split-screen), networked interest, portals, predicted paths, anything. The engine ships **no default**; the PathTracer example includes one interest-source policy (`residencyPolicy.h`), selectable/replaceable like a renderer module.
+
+**Memory & scaling.** The engine's mandatory footprint is only `O(#grids)` descriptors plus the resident set; the on-disk block-table index is read on demand and held in a **budgeted** LRU cache (a policy choice), never fully pinned. The remaining per-grid ceiling is the dense `SceneGrid.cellToChunk` (and its GPU `cellMap`), sized by a grid's cell count — so worlds scale by composing **many bounded grid volumes**, each streamed independently. Lifting that ceiling for a single unbounded volume would need sparse/hierarchical grids (deferred).
 
 ---
 
@@ -260,7 +282,7 @@ These are unresolved and intentionally *not* locked down in v0.0:
 
 2. **Multi-instance authoring sugar.** v0.0 keeps one component = one instance. If copy-pasting transform blocks becomes painful, add an optional `transforms: [ [pos,rot,scale], ... ]` array on a component. This is sugar over N instances sharing one `source`; it does not change the data model.
 
-3. **Grid-volume acceleration details.** The `.data` block table gives streaming + grid coordinates, but the top-level structure the renderer walks over blocks (uniform-grid DDA vs. a coarse tree64-of-blocks) is not yet specified, nor is the streaming/eviction policy (how many blocks resident, prefetch radius).
+3. **Grid-volume acceleration details.** The streaming *mechanisms* and *policy split* are now resolved (see [Streaming](#streaming-mechanism-not-policy)): per-block seek IO + materialize/release + a per-frame apply seam, with residency left to a user policy (the example ships one). What remains open is the **top-level acceleration structure** the renderer walks over blocks — the current per-grid uniform-grid DDA vs. a coarse tree64-of-blocks for very large or sparse volumes.
 
 4. **Per-axis vs uniform scale + non-uniform scale under rotation.** Allowing `[x,y,z]` scale interacts awkwardly with rotation (shear). May restrict `data` leaves to uniform scale and allow per-axis only on `asset` nodes, or forbid non-uniform scale entirely for v0.0.
 

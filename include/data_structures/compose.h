@@ -6,16 +6,12 @@
 #include <stdint.h>
 
 #include "core/math.h"
+#include "data_structures/scene.h" // for projv::Mutability (runtime home)
 
 // In-memory representations for the Compose scene-graph system.
 // See docs/data_structures/compose_data_structure.md for the on-disk formats.
 namespace projv {
-    // Governs what happens when a `data` component's voxel data is modified and persisted.
-    enum class Mutability {
-        Locked, // Never written back; loader may alias one shared buffer across instances.
-        Direct, // Edits are written in place to the source .data.
-        Copy    // Edits are written to a new .data (copy-on-write); original untouched.
-    };
+    // Mutability lives in scene.h (runtime data home); ComposeComponent below references it.
 
     // --- .data (PVDT) container, in-memory form ---
 
@@ -35,6 +31,28 @@ namespace projv {
         float    voxelScale = 0.0f;   // world size of one voxel at `resolution`
         bool     hasVoxelTypeData = true;
         std::vector<DataBlock> blocks;
+    };
+
+    // One entry of a .data block table: a block's grid coordinate and where its arrays live in the file.
+    // Read cheaply (without the blob region) via readDataFileHeader, so a streamer can decide what to
+    // load and then readDataBlock exactly the blocks it wants. Byte offsets are absolute into the file.
+    struct BlockEntry {
+        int32_t  gridX = 0, gridY = 0, gridZ = 0; // grid coordinate of this block
+        uint64_t geometryOffset = 0;              // byte offset of the tree64 uint32[]
+        uint32_t geometryLength = 0;              // length in uint32 units
+        uint64_t voxelTypeOffset = 0;             // byte offset of voxelTypeData uint32[] (0 if absent)
+        uint32_t voxelTypeLength = 0;             // length in uint32 units (0 if absent)
+    };
+
+    // The header + block table of a .data container, WITHOUT the blob region. Lets a streamer learn a
+    // file's shared params (resolution/voxelScale) and every block's grid coord + size/offset without
+    // reading any geometry — the cheap index that drives per-block streaming.
+    struct DataFileHeader {
+        uint32_t version = 1;
+        uint32_t resolution = 0;
+        float    voxelScale = 0.0f;
+        bool     hasVoxelTypeData = true;
+        std::vector<BlockEntry> blocks;
     };
 
     // --- compose.json, in-memory form ---

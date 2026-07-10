@@ -136,6 +136,7 @@ namespace projv::graphics {
             textureResource.resolutionY = texture["resY"];
             textureResource.resizable = texture["resizable"];
             textureResource.origin = getOrigin(texture["origin"]);
+            textureResource.readBack = texture.value("readBack", false);
             textures.emplace_back(textureResource);
         }
         return textures;

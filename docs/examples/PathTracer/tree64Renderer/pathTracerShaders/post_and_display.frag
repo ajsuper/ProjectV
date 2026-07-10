@@ -11,7 +11,11 @@ SAMPLER2D(globalIllumination, 0);
 SAMPLER2D(directIllumination, 1);
 SAMPLER2D(normal, 2);
 SAMPLER2D(albedo, 3);
-SAMPLER2D(accumulatedRender, 4);
+// Slot 4 is pickBuffer (fbo1's 5th texture, unused by this pass) now that this pass reads
+// frameBufferInputIDs [1, 2] — getDependenciesList concatenates fbo1's textures (2,3,4,5,7) then
+// fbo2's (6) in order, so accumulatedRender (fbo2) shifted from slot 4 to slot 5. See
+// tree64Renderer/resources.json.
+SAMPLER2D(accumulatedRender, 5);
 
 vec3 acesToneMap(vec3 x) {
     const float a = 2.51;

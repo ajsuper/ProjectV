@@ -203,10 +203,17 @@ namespace projv::utils {
         std::vector<ChunkHeader> chunkHeaders = readHeadersJSON(sceneFileDirectory + "/headers.json");
 
         // Loops over all of the chunk headers and loads the corresponding tree64 and voxelTypeData.
-        for(size_t i = 0; i < chunkHeaders.size(); i++){ 
+        // Legacy scenes are a flat list of loose chunks with no grids and no shared geometry: intern
+        // each chunk's owned geometry into the refcounted pool (unifying with the compose path) and
+        // register it in the explicit loose-handle list the renderer iterates.
+        for(size_t i = 0; i < chunkHeaders.size(); i++){
             Chunk chunk = loadChunkFromDisk(sceneFileDirectory, chunkHeaders[i]);
-            scene.chunks.push_back(chunk);
+            ChunkHandle handle = static_cast<ChunkHandle>(scene.chunks.size());
+            scene.chunks.push_back(std::move(chunk));
+            internChunkGeometry(scene, scene.chunks[handle]);
+            scene.looseChunks.push_back(handle);
         }
+        scene.looseChunkCount = static_cast<uint32_t>(scene.looseChunks.size());
         return scene;
     }
 

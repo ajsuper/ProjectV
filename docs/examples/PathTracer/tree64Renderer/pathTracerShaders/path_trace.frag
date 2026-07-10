@@ -6,6 +6,10 @@ $input v_texcoord0
 SAMPLER2D(resourceTexture, 0);
 #include <pjv_utils_DDA.sc>
 
+// Sun / sky description lives in pjv_sun_sky.sc, shared by all three
+// renderers so they read as the same scene under the same light.
+#include <pjv_sun_sky.sc>
+
 uniform vec4 windowRes;
 uniform vec4 cameraPos;
 uniform vec4 frameCount;
@@ -57,6 +61,7 @@ float diffuseBRDF() {
 struct GBuffer {
     vec4 albedo; // 4th value is depth.
     vec4 normal; // 4th value is ray steps.
+    vec4 pick;   // xyz = world-space hit point, w = chunk handle (headerIndex) as float, or -1 on miss.
 };
 
 float specularBRDF(vec3 incomingDirection, vec3 outgoingDirection, vec3 normal, float specularSmoothness, float specularChance) {
@@ -81,7 +86,7 @@ returnStruct castRay(vec2 uv_coord, GBuffer gBuffer) {
         uv_coord,
         windowRes.xy,
         cameraPos.xyz,
-        normalize(vec3(cameraDir.x, 0.0, cameraDir.z)),
+        normalize(cameraDir.xyz),
         60.0
     );
 
@@ -89,14 +94,16 @@ returnStruct castRay(vec2 uv_coord, GBuffer gBuffer) {
     vec3 radiance = vec3(0.0);
     vec3 throughput = vec3(1.0);
 
-    //vec3 sunDirection = normalize(vec3(1.4, 4.0, -1.5));
-    vec3 sunDirection = normalize(vec3(-0.5, 0.9, 0.6));
-    //vec3 sunDirection = normalize(vec3(sin(frameCount.x/100) * 5, cos(frameCount.x/100) * 5, -1));
-    float sunSolidAngle = PI/1200;
-    // sunSolidAngle: total solid angle of the sun in steradians
-    float thetaMax = acos(1.0 - sunSolidAngle / (2.0 * PI));
-    //vec3 sunRadiance = vec3(1.0, 0.4, 0.2) * 9000; // Assuming incoming radiance Li from the sky is uniform.
-    vec3 sunRadiance = vec3(1.0, 0.8, 0.4) * 19000;
+    // Direction, angular size and colour come from pjv_sun_sky.sc so this renderer
+    // matches the other two. thetaMax/sunSolidAngle are derived from the shared
+    // SUN_ANGULAR half-angle (rather than picking an independent solid angle) so the
+    // disk is the same apparent size everywhere; sunRadiance is the actual radiance
+    // of that disk such that integrating it over its own solid angle reproduces the
+    // shared SUN_COLOR irradiance used by the other renderers' NdotL*albedo/PI term.
+    vec3 sunDirection = SUN_DIR;
+    float thetaMax = SUN_ANGULAR;
+    float sunSolidAngle = 2.0 * PI * (1.0 - cos(SUN_ANGULAR));
+    vec3 sunRadiance = SUN_COLOR / sunSolidAngle;
 
     vec3 color;
     float balenceHeuristicBRDF = 1;
@@ -104,23 +111,34 @@ returnStruct castRay(vec2 uv_coord, GBuffer gBuffer) {
         RayQuery intersectRQ;
         intersectRQ.maxRaySteps = 200;
         intersectRQ.startLOD = 0;
-        intersectRQ.finishLOD = 2;
-        intersectRQ.distanceToFinishLOD = 30;
+        intersectRQ.finishLOD = 1;
+        intersectRQ.distanceToFinishLOD = 200;
         if (step > 0) {
+            intersectRQ.startLOD = 0;
+            intersectRQ.finishLOD = 2;
+            intersectRQ.distanceToFinishLOD = 90;
             //intersectRQ.maxRaySteps = randomFloat0to1(vec2(uv_coord), frameCount.x % 200) * 3 + 5;
         }
 
         SceneIntersectData intersectHit = raySceneIntersect(ray, intersectRQ);
-        IntersectionResult voxelIntersection = getRayBoxEntry(ray, intersectHit.foundBox);
-        if (voxelIntersection.distance <= 0) { // Ray hits the sky.
+        if (intersectHit.foundBox.size < 0) { // Explicit miss from the march: the ray hits the sky.
             if (dot(sunDirection, ray.direction) >= cos(thetaMax)) {
-                // Li(x, wo) = vec3(2.0, 1.9, 0.8) + (rest of equation equates to 0 for simplicity). Light coming from a point x at direction wo if we hit the sky is j
+                // Looking straight at the sun disk: its actual radiance, not the
+                // NEE-integrated irradiance used elsewhere.
                 radiance += balenceHeuristicBRDF * throughput * sunRadiance; // Hit sky
             } else {
-                vec3 skyRadiance = vec3(0.3, 0.45, 0.9) * 9.0; // Assuming incoming radiance Li from the sky is uniform.
-                radiance += throughput * skyRadiance; // Hit sky
+                radiance += throughput * skyGradient(ray.direction); // Hit sky
             }
             break;
+        }
+        // Hit distance and entry-face normal come straight from the DDA. Re-intersecting
+        // foundBox with getRayBoxEntry here misclassified boundary-exact hits as sky
+        // (distance <= 0 or a ULP miss on a grazed box) — the firefly source.
+        IntersectionResult voxelIntersection;
+        voxelIntersection.distance = intersectHit.rayT;
+        voxelIntersection.normal = intersectHit.normal;
+        if (voxelIntersection.distance <= 0.0 || dot(voxelIntersection.normal, voxelIntersection.normal) < 0.5) {
+            break; // Ray started on/inside geometry: occluded, gathers no light.
         }
         // Calculate the world space point that our ray intersects the scene. Do a small offset by the normal to account for imprecision in ray marching algorithm.
         vec3 intersectPoint = ray.origin + ray.direction * voxelIntersection.distance + voxelIntersection.normal * 0.01f;
@@ -269,10 +287,9 @@ returnStruct castRay(vec2 uv_coord, GBuffer gBuffer) {
         }
 
         Ray NEERay;
-        NEERay.origin = intersectPoint + voxelIntersection.normal * 0.0001f;
+        NEERay.origin = intersectPoint + voxelIntersection.normal * (0.0001f * WORLD_SCALE);
         NEERay.direction = NEEDirection;
         SceneIntersectData NEEIntersect = raySceneIntersect(NEERay, intersectRQ);
-        IntersectionResult NEEVoxelIntersection = getRayBoxEntry(NEERay, NEEIntersect.foundBox);
         float balenceHeuristicNEE = pow(pdfNEE, 2) / (pdfNEE*pdfNEE + pdfBRDFforNEE*pdfBRDFforNEE);
         if (NEEIntersect.foundBox.size < 0 && dot(NEEDirection, voxelIntersection.normal) > 0) {
             radiance += max(0, balenceHeuristicNEE * sunRadiance * (throughput * NEEBRDF)/pdfNEE);
@@ -283,7 +300,7 @@ returnStruct castRay(vec2 uv_coord, GBuffer gBuffer) {
         //throughput *= brdf;
         // simplifies to throughput *= brdf * PI; for cosine weighted.
         
-        ray.origin = intersectPoint + voxelIntersection.normal * 0.0001f;
+        ray.origin = intersectPoint + voxelIntersection.normal * (0.0001f * WORLD_SCALE);
         ray.direction = randomDirectionOverHemisphere;
     }
     returnStruct returnValues;
@@ -301,7 +318,7 @@ GBuffer renderGBuffer(vec2 uv_coord) {
         uv_coord,
         windowRes.xy,
         cameraPos.xyz,
-        normalize(vec3(cameraDir.x, 0.0, cameraDir.z)),
+        normalize(cameraDir.xyz),
         60.0
     );
 
@@ -313,10 +330,13 @@ GBuffer renderGBuffer(vec2 uv_coord) {
     intersectRQ.distanceToFinishLOD = 100;
 
     SceneIntersectData intersectHit = raySceneIntersect(ray, intersectRQ);
-    IntersectionResult voxelIntersection = getRayBoxEntry(ray, intersectHit.foundBox);
-    if (voxelIntersection.distance <= 0) { // Ray hits the sky.
-        gBuffer.albedo = vec4(1, 1, 1, voxelIntersection.distance);
+    IntersectionResult voxelIntersection;
+    voxelIntersection.distance = intersectHit.rayT;
+    voxelIntersection.normal = intersectHit.normal;
+    if (intersectHit.foundBox.size < 0 || voxelIntersection.distance <= 0) { // Ray hits the sky.
+        gBuffer.albedo = vec4(1, 1, 1, -1.0);
         gBuffer.normal = vec4(0, 0, 0, intersectHit.steps);
+        gBuffer.pick   = vec4(0.0, 0.0, 0.0, -1.0);
         return gBuffer;
     }
     // Calculate the world space point that our ray intersects the scene. Do a small offset by the normal to account for imprecision in ray marching algorithm.
@@ -328,6 +348,9 @@ GBuffer renderGBuffer(vec2 uv_coord) {
 
     gBuffer.albedo = vec4(albedo, voxelIntersection.distance);
     gBuffer.normal = vec4(voxelIntersection.normal.rgb, 0.0);
+    // Picking payload for voxel editing: world-space hit point + which chunk was hit. PathTracer's
+    // main.cpp reads this back (see voxelEditing.h) to resolve add/remove sphere edits on click.
+    gBuffer.pick = vec4(intersectPoint, float(intersectHit.headerIndex));
     return gBuffer;
 }
 
@@ -353,4 +376,5 @@ void main(){
     gl_FragData[1] = vec4(returnValues.directIllumination.rgb, 1.0);
     gl_FragData[2] = vec4((gBuffer.normal.rgb + 1) / 2, 1.0);
     gl_FragData[3] = vec4(gBuffer.albedo.rgb, 1.0);
+    gl_FragData[4] = gBuffer.pick;
 }

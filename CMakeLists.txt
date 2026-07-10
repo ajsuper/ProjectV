@@ -133,6 +133,10 @@ add_library(projectV-compose_io STATIC ${UTILS_SRC_DIR}/compose_io.cpp)
 target_link_libraries(projectV-compose_io PRIVATE projectV-voxel_management)
 link_common_includes(projectV-compose_io)
 
+add_library(projectV-streaming STATIC ${UTILS_SRC_DIR}/streaming.cpp)
+target_link_libraries(projectV-streaming PRIVATE projectV-compose_io projectV-voxel_management)
+link_common_includes(projectV-streaming)
+
 add_library(projectV-lod STATIC ${UTILS_SRC_DIR}/lod.cpp)
 target_link_libraries(projectV-lod PRIVATE projectV-voxel_io)
 link_common_includes(projectV-lod)

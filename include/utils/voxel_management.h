@@ -71,12 +71,17 @@ namespace projv::utils {
     void moveVoxelBatchToChunk(VoxelBatch& voxelBatch, Chunk& chunk);
 
     /**
-     * Retrieves a VoxelBatch representing the contents of a Chunk.
+     * Retrieves a VoxelBatch representing the contents of a Chunk. Pool-aware: a pooled chunk
+     * (geometryPoolIndex >= 0 -- every compose-loaded chunk) keeps its real geometry in
+     * scene.geometryPool, not chunk.voxelTypeData (which is left deliberately empty once pooled), so
+     * this decompresses from the pool blob in that case and falls back to chunk.voxelTypeData only
+     * for a legacy (unpooled) chunk.
+     * @param scene The scene owning the chunk (needed to reach the pool when the chunk is pooled).
      * @param chunk The source chunk.
      * @param convertCompressedData Whether to decompress chunk data before converting it to a VoxelBatch.
      * @return A VoxelBatch containing the voxel data from the chunk.
      */
-    VoxelBatch getChunkVoxelBatch(Chunk& chunk, bool convertCompressedData = true);
+    VoxelBatch getChunkVoxelBatch(Scene& scene, Chunk& chunk, bool convertCompressedData = true);
 
     /**
      * Merges voxel data from voxelBatchA into voxelBatchB with an optional positional offset.

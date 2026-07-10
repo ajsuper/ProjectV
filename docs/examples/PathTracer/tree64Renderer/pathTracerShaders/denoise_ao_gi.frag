@@ -11,6 +11,11 @@ SAMPLER2D(globalIllumination, 0);
 SAMPLER2D(directIllumination, 1);
 SAMPLER2D(normals, 2);
 SAMPLER2D(albedos, 3);
+// pickBuffer (fbo1's 5th texture) isn't used by this pass, but this pass ALSO writes fbo1 (its
+// frameBufferOutputID is 1), so it must still write gl_FragData[4] every pixel — otherwise that
+// attachment goes unwritten on this full-screen draw and its previous (path_trace.frag) contents
+// get clobbered to black. Pass it straight through unchanged. See tree64Renderer/resources.json.
+SAMPLER2D(pickBuffer, 4);
 
 void main() {
     vec2 texCord = v_texcoord0;
@@ -75,4 +80,5 @@ void main() {
     gl_FragData[1] = diValue;           // Direct Illumination
     gl_FragData[2] = normal;            // Normals
     gl_FragData[3] = texture2D(albedos, texCord); // Albedo
+    gl_FragData[4] = texture2D(pickBuffer, texCord); // Pick data, passed through unchanged
 }

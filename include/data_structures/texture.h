@@ -19,6 +19,10 @@ namespace projv{
         bool resizable;
         TextureOrigin origin;
         bool pingPongFlag = false; // Allows cyclic dependencies to be possible.
+        // Opt-in: creates this texture with BGFX_TEXTURE_READ_BACK | BGFX_TEXTURE_BLIT_DST so it can
+        // be blitted into and read back to the CPU via bgfx::readTexture. Default false so every
+        // existing resources.json (which never declares "readBack") is unaffected.
+        bool readBack = false;
     };
 
     struct ConstructedTextures {

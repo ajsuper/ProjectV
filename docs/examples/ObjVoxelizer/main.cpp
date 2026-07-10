@@ -227,8 +227,6 @@ void voxelizeObjFile(std::filesystem::path modelObjDirectory, std::string modelM
                     attributes.vertices[3 * index.vertex_index + 1],
                     attributes.vertices[3 * index.vertex_index + 2]
                 };
-                position *= vec3(0.01);
-
                 projv::core::vec3 normal = {0, 0, 0};
                 if (index.normal_index >= 0) {
                     normal = {
@@ -294,13 +292,18 @@ void voxelizeObjFile(std::filesystem::path modelObjDirectory, std::string modelM
     info("  Extents (W/H/D): {:.3f} x {:.3f} x {:.3f}  (largest axis: {:.3f})",
         modelExtents.x, modelExtents.y, modelExtents.z, largestDistanceTotal);
 
+    uint numberOfChunksPerAxis = std::ceil(voxelizationResolution / 256.0f);
+    float voxelScale = 1.0f;                                    // Each voxel is exactly 1 world unit.
+    float chunkScale = voxelScale * 256.0f;                     // 256 world units per chunk.
+    float totalWorldSize = numberOfChunksPerAxis * chunkScale;  // World span of the grid along the largest axis.
+    // Normalize the model so its largest extent fills the grid while keeping voxels unit-sized.
+    // (Position/voxelScale/scale are then all in the same world units — 1 unit = 1 voxel.)
+    float modelScaleFactor = largestDistanceTotal > 0.0f ? totalWorldSize / largestDistanceTotal : 1.0f;
+
     for (size_t vertexIndex = 0; vertexIndex < vertices.size(); vertexIndex++) {
-        vertices[vertexIndex].position -= verticesMin;
+        vertices[vertexIndex].position = (vertices[vertexIndex].position - verticesMin) * modelScaleFactor;
     }
 
-    uint numberOfChunksPerAxis = std::ceil(voxelizationResolution / 256.0f);
-    float chunkScale = largestDistanceTotal / numberOfChunksPerAxis;
-    float voxelScale = chunkScale / 256.0f;
     uint totalChunks = numberOfChunksPerAxis * numberOfChunksPerAxis * numberOfChunksPerAxis;
 
     info("Voxelizing: {} chunk(s) ({} per axis), voxel size: {:.5f}", totalChunks, numberOfChunksPerAxis, voxelScale);
