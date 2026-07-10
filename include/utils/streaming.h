@@ -95,7 +95,7 @@ namespace projv::utils {
      * their exact world position -- cellToChunk is re-indexed into the new array and origin/
      * cellCoordOffset are corrected by the same shift, so nothing already placed moves.
      */
-    void expandGridToInclude(SceneGrid& grid, core::ivec3 cellCoord);
+    void expandGridToInclude(Scene& scene, SceneGrid& grid, core::ivec3 cellCoord);
 
     /**
      * THE editing mechanism, addressed by component (see ComponentHandle, data_structures/scene.h)

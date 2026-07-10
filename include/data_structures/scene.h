@@ -79,7 +79,8 @@ namespace projv{
         uint32_t LOD;
         // Instancing: when >= 0, this chunk's geometry lives once in Scene.geometryPool[idx]
         // (shared across every instance of the same .data block) and geometryData/voxelTypeData
-        // above are left empty. -1 = legacy per-chunk ownership (loadSceneFromDisk, voxelizer, LOD).
+        // above are left empty. -1 = unpooled (interned into the pool by internChunkGeometry before
+        // any GPU work; see internChunkGeometry in scene.h).
         int32_t geometryPoolIndex = -1;
         // Persistence policy for this instance (from its compose.json component). Drives whether an
         // edit is written back (Direct), copied off (Copy), or in-memory only (Locked).
@@ -181,10 +182,10 @@ namespace projv{
         return idx;
     }
 
-    // Moves a legacy chunk's owned geometry (geometryPoolIndex < 0) into a fresh refcount-1 pool blob
+    // Moves an unpooled chunk's owned geometry (geometryPoolIndex < 0) into a fresh refcount-1 pool blob
     // and points the chunk at it, so every chunk flows through the single pooled path. No-op (returns
-    // the existing index) if the chunk is already pooled. Used by the non-compose loaders (voxelizer,
-    // loadSceneFromDisk) and defensively by the GPU builder.
+    // the existing index) if the chunk is already pooled. Used by the voxelizer and defensively by
+    // the GPU builder to guarantee no chunk reaches the GPU with geometryPoolIndex < 0.
     inline int32_t internChunkGeometry(Scene& scene, Chunk& chunk) {
         if (chunk.geometryPoolIndex >= 0) return chunk.geometryPoolIndex;
         GeometryBlob blob;
@@ -225,7 +226,7 @@ namespace projv{
         int cellY = rem / grid.dims.x;
         int cellX = rem % grid.dims.x;
         core::ivec3 cellCoord(cellX, cellY, cellZ);
-        return { grid.componentHandle, cellCoord * static_cast<int>(chunk.header.resolution) };
+        return { grid.componentHandle, (cellCoord + grid.cellCoordOffset) * static_cast<int>(chunk.header.resolution) };
     }
 }
 

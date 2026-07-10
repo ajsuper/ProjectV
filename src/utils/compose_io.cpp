@@ -1,5 +1,6 @@
 #include "utils/compose_io.h"
 
+#include <chrono>
 #include <fstream>
 #include <filesystem>
 #include <functional>
@@ -430,9 +431,13 @@ namespace projv::utils {
                             core::vec3 sc1 = core::vec3(world[1]);
                             core::vec3 sc2 = core::vec3(world[2]);
                             float usx = core::length(sc0), usy = core::length(sc1), usz = core::length(sc2);
+                            // v0.0: non-uniform scale on a data leaf is rejected. See
+                            // compose_data_structure.md (Open Question 4).
                             if (std::abs(usx - usy) > 1e-4f || std::abs(usx - usz) > 1e-4f) {
-                                core::warn("loadComposeFromDisk: Non-uniform scale on streamed grid '{}' "
-                                           "({}, {}, {}); using X axis as uniform scale.", resolved, usx, usy, usz);
+                                core::error("loadComposeFromDisk: Non-uniform scale on streamed grid '{}' "
+                                            "({}, {}, {}); rejected. Use uniform scale on data leaves (v0.0).",
+                                            resolved, usx, usy, usz);
+                                continue;
                             }
                             float uniformScale = usx;
                             core::mat3 gridRotMat = core::mat3(sc0 / usx, sc1 / usy, sc2 / usz);
@@ -486,9 +491,13 @@ namespace projv::utils {
                     float sx = core::length(col0);
                     float sy = core::length(col1);
                     float sz = core::length(col2);
+                    // v0.0: non-uniform scale on a data leaf is rejected. See
+                    // compose_data_structure.md (Open Question 4).
                     if (std::abs(sx - sy) > 1e-4f || std::abs(sx - sz) > 1e-4f) {
-                        core::warn("loadComposeFromDisk: Non-uniform scale on data leaf '{}' "
-                                   "({}, {}, {}); using X axis as uniform scale.", resolved, sx, sy, sz);
+                        core::error("loadComposeFromDisk: Non-uniform scale on data leaf '{}' "
+                                    "({}, {}, {}); rejected. Use uniform scale on data leaves (v0.0).",
+                                    resolved, sx, sy, sz);
+                        continue;
                     }
                     float uniformScale = sx;
 
@@ -659,28 +668,29 @@ namespace projv::utils {
     }
 
     int32_t makeChunkGeometryWritable(Scene& scene, Chunk& chunk) {
+        auto t0 = std::chrono::high_resolution_clock::now();
         int32_t idx = chunk.geometryPoolIndex;
         if (idx < 0 || idx >= static_cast<int32_t>(scene.geometryPool.size())) {
             core::warn("makeChunkGeometryWritable: chunk {} is not pooled; nothing to make writable", chunk.header.chunkID);
             return -1;
         }
-        // Copy-on-write: a Copy instance forks a private duplicate the first time it is made writable.
-        // Locked/Direct edit their shared blob directly (visible to same-policy instances); cross-policy
-        // instances are already separate pool entries (mutability is part of the load-time dedup key).
         if (chunk.mutability == Mutability::Copy && !chunk.copyDiverged) {
-            GeometryBlob fork = scene.geometryPool[idx]; // deep copy: geometry + voxelType + provenance
-            // The fork still points at the inherited original source; it doesn't own a file until its
-            // first persist writes one. (Guards against writing edits back to the shared original.)
+            GeometryBlob fork = scene.geometryPool[idx];
             fork.ownsSourceFile = false;
-            fork.refCount = 1;                       // this one chunk now references the private blob
-            if (scene.geometryPool[idx].refCount > 0) // ...and no longer the shared original
+            fork.refCount = 1;
+            if (scene.geometryPool[idx].refCount > 0)
                 scene.geometryPool[idx].refCount--;
             int32_t newIdx = poolInsertBlob(scene, std::move(fork));
             chunk.geometryPoolIndex = newIdx;
             chunk.copyDiverged = true;
-            core::info("makeChunkGeometryWritable: chunk {} (copy) forked geometry blob {} -> {}", chunk.header.chunkID, idx, newIdx);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            core::warn("[PERF] makeChunkGeometryWritable: chunk {} forked {} -> {}: {:.2f}ms", chunk.header.chunkID, idx, newIdx, ms);
             return newIdx;
         }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        core::warn("[PERF] makeChunkGeometryWritable: chunk {} no-fork: {:.2f}ms", chunk.header.chunkID, ms);
         return chunk.geometryPoolIndex;
     }
 
@@ -693,17 +703,24 @@ namespace projv::utils {
             core::warn("editChunkVoxels: chunk {} has an empty edit queue; nothing to do", chunk.header.chunkID);
             return;
         }
+        auto t0 = std::chrono::high_resolution_clock::now();
         int32_t idx = makeChunkGeometryWritable(scene, chunk);
         if (idx < 0) return;
-        // Regenerate geometry from the queue via the standard chunk path, then move the result into the
-        // pool blob so the chunk's own vectors stay empty (the pooled invariant). Full regeneration.
-        updateChunkFromItsVoxelBatch(chunk); // fills chunk.geometryData / voxelTypeData from chunkQueue
+        auto t1 = std::chrono::high_resolution_clock::now();
+        updateChunkFromItsVoxelBatch(chunk);
+        auto t2 = std::chrono::high_resolution_clock::now();
         GeometryBlob& blob = scene.geometryPool[idx];
         blob.geometry = std::move(chunk.geometryData);
         blob.voxelTypeData = std::move(chunk.voxelTypeData);
         chunk.geometryData.clear();
         chunk.voxelTypeData.clear();
-        core::info("editChunkVoxels: chunk {} regenerated geometry into pool blob {} ({} values)", chunk.header.chunkID, idx, blob.geometry.size());
+        auto t3 = std::chrono::high_resolution_clock::now();
+        double cowMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        double treeMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        double moveMs = std::chrono::duration<double, std::milli>(t3 - t2).count();
+        double totalMs = std::chrono::duration<double, std::milli>(t3 - t0).count();
+        core::warn("[PERF] editChunkVoxels chunk={}: cow={:.2f}ms tree64={:.2f}ms move={:.2f}ms total={:.2f}ms",
+                   chunk.header.chunkID, cowMs, treeMs, moveMs, totalMs);
     }
 
     bool persistChunkData(Scene& scene, Chunk& chunk, const std::string& copyDestPath) {

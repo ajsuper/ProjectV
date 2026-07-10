@@ -14,7 +14,6 @@
 #include "core/ecs.h"
 #include "core/math.h"
 #include "core/log.h"
-#include "utils/voxel_io.h"
 #include "utils/voxel_management.h"
 #include "utils/compose_io.h"
 

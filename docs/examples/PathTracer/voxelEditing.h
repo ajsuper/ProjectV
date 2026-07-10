@@ -60,6 +60,7 @@ struct VoxelEditState {
     bool pending            = false;
     bool pendingIsAdd       = false;
     int  pendingIssuedFrame = 0;
+    int  lastIssueFrame     = -1000000; // sentinel: first hold-driven issue never gated by elapsed time
     int  pendingWidth       = 0;
     int  pendingHeight      = 0;
 
@@ -73,6 +74,13 @@ struct VoxelEditState {
 // bgfx::readTexture's returned "ready" frame isn't threaded out of renderConstructedRenderer, so we
 // just wait a fixed number of app ticks (each tick is one bgfx::frame()) before trusting the buffer.
 static constexpr int kVoxelEditReadbackLatencyFrames = 3;
+
+// While the mouse button is held, re-issue a pick (and thus add/remove another sphere) every
+// kVoxelEditRepeatIntervalFrames frames. The readback above stalls the pipeline for a moment, so the
+// repeat rate is intentionally coarser than the per-frame rate — at 5 frames/issue and ~60fps that's
+// ~12 spheres/sec, which is fast enough to feel continuous to a held click without saturating the
+// GPU with full-frame readbacks.
+static constexpr int kVoxelEditRepeatIntervalFrames = 5;
 
 namespace projv_internal {
     inline uint32_t findTextureIDByName(const std::vector<projv::Texture>& textures, const std::string& name) {
@@ -181,7 +189,8 @@ inline void applyPendingVoxelEdit(VoxelEditState& state, projv::Scene& scene, pr
 }
 
 // Called once per frame from render(), after renderConstructedRenderer(...). Resolves any
-// previously-issued pick, then issues a new one on a left/right click edge (add / remove).
+// previously-issued pick, then issues a new one on a left/right click edge (add / remove), and
+// continues to re-issue every kVoxelEditRepeatIntervalFrames frames while the button is held.
 inline void updateVoxelEditing(VoxelEditState& state, projv::Scene& scene, projv::GPUData& gpuData,
                                 projv::utils::StreamingContext& streaming,
                                 std::shared_ptr<projv::ConstructedRenderer> renderer,
@@ -198,7 +207,22 @@ inline void updateVoxelEditing(VoxelEditState& state, projv::Scene& scene, projv
     state.prevLeftDown  = leftDown;
     state.prevRightDown = rightDown;
 
-    if (!state.pending && (leftClicked || rightClicked)) {
+    // Decide whether to issue a new pick this frame:
+    //   1) on the click edge (preserves the original single-click behaviour), OR
+    //   2) while the button is still held, once every kVoxelEditRepeatIntervalFrames frames.
+    // Gated on !state.pending so we never overlap a readback that's still in flight (the GPU is
+    // stalled on each readback, and the API doesn't promise concurrent ones are safe).
+    bool wantIssue = false;
+    bool wantAdd   = false;
+    if (leftClicked)       { wantIssue = true; wantAdd = true;  }
+    if (rightClicked)      { wantIssue = true; wantAdd = false; }
+    if (!state.pending && !wantIssue && (leftDown || rightDown) &&
+        (frameCount - state.lastIssueFrame) >= kVoxelEditRepeatIntervalFrames) {
+        wantIssue = true;
+        wantAdd   = leftDown; // leftDown implies !rightDown here in practice; mirror the click edge
+    }
+
+    if (wantIssue) {
         state.pendingWidth  = windowResolution.x;
         state.pendingHeight = windowResolution.y;
         size_t pixelCount = static_cast<size_t>(state.pendingWidth) * state.pendingHeight;
@@ -212,8 +236,9 @@ inline void updateVoxelEditing(VoxelEditState& state, projv::Scene& scene, projv
         bgfx::readTexture(normalTexture, state.normalBufferData.data());
 
         state.pending            = true;
-        state.pendingIsAdd       = leftClicked;
+        state.pendingIsAdd       = wantAdd;
         state.pendingIssuedFrame = frameCount;
+        state.lastIssueFrame     = frameCount;
     }
 }
 

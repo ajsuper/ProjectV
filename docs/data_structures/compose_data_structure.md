@@ -2,7 +2,7 @@
 
 The **Compose** system describes *where physical objects live in a scene* and *how they are assembled from reusable pieces*. It is a folder-based, recursive scene-graph format. It deliberately describes **only the physical layout** (geometry + transforms). Gameplay, state, and behavior are **not** part of this format — see [Non-Goals](#non-goals).
 
-This format supersedes the flat `headers.json` layout described in [scene_data_structure.md](/docs/data_structures/scene_data_structure.md) for authored scenes. See [Relationship to `headers.json`](#relationship-to-the-old-headersjson-format).
+This format supersedes the flat `headers.json` layout described in [scene_data_structure.md](/docs/data_structures/scene_data_structure.md) for authored scenes. The legacy `headers.json` format has been **removed** from the engine (the old `loadSceneFromDisk` / `writeSceneToDisk` entry points and the `voxel_io` / `lod` modules no longer exist); Compose is the only on-disk scene format. See [Relationship to the old `headers.json` format](#relationship-to-the-old-headersjson-format).
 
 - [Core Concept](#core-concept)
 - [`compose.json` Format](#composejson-format)
@@ -203,15 +203,16 @@ Grid volumes can be loaded **lazily**: `loadComposeFromDisk(folder, &streamingCo
 
 ### Relationship to the old `headers.json` format
 
-| Concern | `headers.json` (current) | Compose (this doc) |
+| Concern | `headers.json` (removed) | Compose (current) |
 |---------|--------------------------|--------------------|
 | Placement | `position` baked into each `ChunkHeader` | Lives in `compose.json` transforms |
 | Rotation | none | `rotation` per component |
 | Intrinsic data | `tree64/<id>.bin` + `voxelTypeData/<id>.bin`, `resolution`/`voxelScale` in header | Bundled in a `.data` container |
 | Reuse / hierarchy | none (flat list) | `asset` references + scene graph |
 | Chunk ID | authored in file | assigned internally on load |
+| Status | **Removed** — no loader/writer remains in the engine | Current; produced by ObjVoxelizer, loaded by `loadComposeFromDisk` |
 
-The intrinsic fields a `.data` must carry (`resolution`, `voxelScale`, geometry `uint32[]`, `voxelTypeData` `uint32[]`) are exactly the per-chunk fields the current `loadChunkFromDisk` reads today — so a converter from `headers.json` + `tree64/` + `voxelTypeData/` to `.data` + `compose.json` is mechanical.
+The legacy loader/writer (`utils/voxel_io.h` / `loadSceneFromDisk` / `writeSceneToDisk`) was removed because the per-chunk `.bin` layout offered nothing Compose doesn't, and the only existing scenes can be regenerated from their source meshes via [ObjVoxelizer](/docs/examples/ObjVoxelizer). The intrinsic fields a `.data` carries (`resolution`, `voxelScale`, geometry `uint32[]`, `voxelTypeData` `uint32[]`) are exactly the per-chunk fields the old `loadChunkFromDisk` read.
 
 ---
 
@@ -276,17 +277,39 @@ Loading `Scene/` yields: terrain + water as directly-editable grid volumes at th
 
 ### Open Questions
 
-These are unresolved and intentionally *not* locked down in v0.0:
+These were unresolved in earlier revisions of this document. The status below reflects the decisions
+locked in for v0.0.
 
-1. **Renderer rotation support.** The current renderer assumes axis-aligned chunks and has no rotation. Supporting `rotation` on a `data` leaf requires transforming the ray into chunk-local space during marching. Decide whether rotation is a true leaf capability or is baked in by resampling geometry at author time. (`asset`-level rotation of composed sub-trees is cheaper to reason about than rotating a raw tree64.)
+1. **Renderer rotation support.** ✅ **Resolved.** The shader transforms rays into chunk-local
+   space via `rotationFromQuat` (`pjv_utils_DDA.sc`) and the loader bakes the world rotation into
+   each `Chunk` / `SceneGrid` header. Rotated chunks and rotated grids both render correctly.
 
-2. **Multi-instance authoring sugar.** v0.0 keeps one component = one instance. If copy-pasting transform blocks becomes painful, add an optional `transforms: [ [pos,rot,scale], ... ]` array on a component. This is sugar over N instances sharing one `source`; it does not change the data model.
+2. **Multi-instance authoring sugar.** ⏸ **Deferred.** v0.0 keeps one component = one instance.
+   The data model supports it (sharing happens automatically at the geometry-pool layer); an
+   optional `transforms: [ [pos,rot,scale], ... ]` array on a component may be added later as pure
+   authoring sugar. Not needed yet.
 
-3. **Grid-volume acceleration details.** The streaming *mechanisms* and *policy split* are now resolved (see [Streaming](#streaming-mechanism-not-policy)): per-block seek IO + materialize/release + a per-frame apply seam, with residency left to a user policy (the example ships one). What remains open is the **top-level acceleration structure** the renderer walks over blocks — the current per-grid uniform-grid DDA vs. a coarse tree64-of-blocks for very large or sparse volumes.
+3. **Grid-volume acceleration structure.** ✅ **Decided: uniform-grid DDA.** The v0.0 top-level
+   structure is the uniform-grid DDA implemented in `marchGrid` (`pjv_utils_DDA.sc`). The
+   tree64-of-blocks alternative for very large or sparse volumes is left as a future
+   optimization — the current DDA is sufficient for the example scenes and is paired with
+   per-cell streaming (BlockTableCache + materialize/release) so even a large grid never has to
+   be fully resident.
 
-4. **Per-axis vs uniform scale + non-uniform scale under rotation.** Allowing `[x,y,z]` scale interacts awkwardly with rotation (shear). May restrict `data` leaves to uniform scale and allow per-axis only on `asset` nodes, or forbid non-uniform scale entirely for v0.0.
+4. **Per-axis vs uniform scale + non-uniform scale under rotation.** ✅ **Decided: uniform scale
+   only in v0.0.** Non-uniform scale on a `data` leaf is rejected by the loader
+   (`loadComposeFromDisk`) with an error and the component is skipped. The 3-array form of
+   `scale` is parsed and accepted on input (so JSON is forward-compatible) but only used when the
+   three axis scales match. Per-axis scale may be revisited on `asset` nodes in a future
+   revision; for v0.0 the simplification is the right call — non-uniform scale under rotation
+   shears geometry, which is almost never what the user actually wanted.
 
-5. **`mutability` cardinality.** Specced as three values (`locked`/`direct`/`copy`). If the shared-buffer guarantee of `locked` is not wanted, this collapses to the two the plan originally proposed (`direct`/`copy`).
+5. **`mutability` cardinality.** ✅ **Decided: three values (`locked`/`direct`/`copy`).** The
+   shared-buffer guarantee of `locked` is kept because it is the mechanism that makes "100
+   instanced library assets edited through one source" cheap. `direct` covers large editable
+   volumes (terrain) where every instance should see the same edits. `copy` covers unique
+   divergent instances. The `mutability` part of the loader's dedup key guarantees the three
+   policies never accidentally share a buffer across a policy boundary.
 
 ---
 

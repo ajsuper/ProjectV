@@ -22,8 +22,9 @@ namespace projv::utils {
     void writeDataFile(const std::string& path, const DataFile& data);
 
     /**
-     * Reads a .data (PVDT) container from disk into a DataFile. Reads the whole file;
-     * per-block seeking/streaming is not yet implemented.
+     * Reads a .data (PVDT) container from disk into a DataFile. Reads the whole file; for per-block
+     * seeking/streaming (the cheap path used by the streaming residency layer), see
+     * readDataFileHeader + readDataBlock below.
      * @param path The path of the .data file to read.
      * @return A DataFile containing all blocks. Empty on error.
      */
@@ -64,7 +65,7 @@ namespace projv::utils {
     /**
      * Loads a Compose scene folder (containing a compose.json) and flattens it into a Scene.
      * Recursively expands `asset` references, bakes world transforms into each chunk, and
-     * emits one Chunk per .data block. A drop-in alternative to loadSceneFromDisk.
+     * emits one Chunk per .data block.
      * @param folderPath The path of the folder containing the root compose.json.
      * @param streaming When non-null, grid volumes (multi-block .data) are NOT loaded: only their
      *        SceneGrid descriptor is built (all cells empty) and a per-grid streaming record is pushed

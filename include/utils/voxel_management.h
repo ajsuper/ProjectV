@@ -33,15 +33,6 @@ namespace projv::utils {
     VoxelBatch createVoxelBatch();
 
     /**
-     * Creates a ChunkHeader based on a position, voxel scale, and resolution.
-     * @param position The world-space position of the chunk.
-     * @param voxelScale The size of a single voxel in world units.
-     * @param resolutionPowOf2 The resolution of the chunk, given as a power of 2 (e.g., 7 for 128^3 voxels).
-     * @return A populated ChunkHeader with the specified parameters.
-     */
-    ChunkHeader createChunkHeader(std::vector<ChunkHeader>& sceneChunkHeaders, core::vec3 position, float voxelScale, int resolutionPowOf2);
-
-    /**
      * Creates a Chunk object using an existing ChunkHeader.
      * @param chunkHeader The metadata describing the chunk's location, scale, and resolution.
      * @return A new Chunk initialized with the given header.

@@ -85,7 +85,10 @@ inline void updateSceneResidency(projv::Scene& scene, projv::GPUData& gpuData,
         const DataFileHeader& table = utils::streamGridBlockTable(streaming, scene, gi);
         for (const BlockEntry& e : table.blocks) {
             if (e.gridX < 0 || e.gridY < 0 || e.gridZ < 0) continue;
-            int cell = e.gridX + g.dims.x * (e.gridY + g.dims.y * e.gridZ);
+            int gx = e.gridX - g.cellCoordOffset.x;
+            int gy = e.gridY - g.cellCoordOffset.y;
+            int gz = e.gridZ - g.cellCoordOffset.z;
+            int cell = gx + g.dims.x * (gy + g.dims.y * gz);
             if (cell < 0 || cell >= static_cast<int>(g.cellToChunk.size())) continue;
 
             // World-space centre of this cell (corner + half a cell along the grid's rotated axes).

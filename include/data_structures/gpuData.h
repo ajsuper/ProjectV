@@ -55,13 +55,6 @@ namespace projv {
 
         // Per-pool-blob GPU location; parallel to Scene.geometryPool.
         std::vector<GPUBlobRange> blobRanges;
-
-        // Bumped whenever the set of resident blobs changes (a new blob is uploaded, or one is freed).
-        // applySceneMutations watches this to rebuild the data+header textures via the proven bulk pack
-        // when — and only when — the blob set actually changed, instead of trusting the incremental
-        // per-blob upload for that (rare) case. Chunk-instance churn that only shares existing blobs
-        // leaves this untouched, so moving through a scene stays cheap (just header rows + tables).
-        uint32_t blobEpoch = 0;
     };
 }
 

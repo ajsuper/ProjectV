@@ -2,6 +2,7 @@
 
 #include <string>
 #include <algorithm>
+#include <chrono>
 #include <unordered_map>
 
 #include <glm/gtc/quaternion.hpp>
@@ -105,6 +106,7 @@ namespace projv::utils {
         // chunk's own local coordinate space), and pushes exactly one Update mutation.
         void mergeVoxelsIntoChunk(Scene& scene, StreamingContext& ctx, ChunkHandle handle,
                                    VoxelBatch localVoxels, bool isAdd) {
+            auto t0 = std::chrono::high_resolution_clock::now();
             if (handle >= scene.chunks.size() || !scene.chunks[handle].alive) {
                 core::warn("mergeVoxelsIntoChunk: handle {} is not a live chunk", handle);
                 return;
@@ -115,26 +117,25 @@ namespace projv::utils {
                 return;
             }
             VoxelBatch existing = getChunkVoxelBatch(scene, chunk, /*convertCompressedData=*/true);
-            core::warn("VOXELEDIT: mergeVoxelsIntoChunk: handle={} isAdd={} poolIdx={} localVoxels={} existing(before)={}",
-                       handle, isAdd, chunk.geometryPoolIndex, localVoxels.size(), existing.size());
+            auto t1 = std::chrono::high_resolution_clock::now();
             removeVoxelBatchAFromVoxelBatchB(localVoxels, existing); // clear the target cells either way
             if (isAdd) {
                 addVoxelBatchAToVoxelBatchB(localVoxels, existing);
             }
-            core::warn("VOXELEDIT: mergeVoxelsIntoChunk: existing(after)={}", existing.size());
+            auto t2 = std::chrono::high_resolution_clock::now();
             if (existing.empty()) {
-                // updateChunkFromItsVoxelBatch indexes the farthest voxel unconditionally and can't
-                // handle an empty batch; emptying a chunk entirely stays out of scope, same as today.
-                core::warn("VOXELEDIT: mergeVoxelsIntoChunk: edit would empty chunk {} entirely; skipped", handle);
+                core::warn("mergeVoxelsIntoChunk: edit would empty chunk {} entirely; skipped", handle);
                 return;
             }
             moveVoxelBatchToChunk(existing, chunk);
             applyChunkEdit(scene, ctx.mutations, handle);
-            core::warn("VOXELEDIT: mergeVoxelsIntoChunk: applyChunkEdit done, geometryPoolIndex={} newGeomSize={} newResolution={} newScale={}",
-                       chunk.geometryPoolIndex,
-                       (chunk.geometryPoolIndex >= 0 && chunk.geometryPoolIndex < (int32_t)scene.geometryPool.size())
-                           ? scene.geometryPool[chunk.geometryPoolIndex].geometry.size() : 0,
-                       chunk.header.resolution, chunk.header.scale);
+            auto t3 = std::chrono::high_resolution_clock::now();
+            double readMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            double mergeMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
+            double bakeMs = std::chrono::duration<double, std::milli>(t3 - t2).count();
+            double totalMs = std::chrono::duration<double, std::milli>(t3 - t0).count();
+            core::warn("[PERF] mergeVoxelsIntoChunk handle={} isAdd={}: read={:.2f}ms merge={:.2f}ms bake={:.2f}ms total={:.2f}ms",
+                       handle, isAdd, readMs, mergeMs, bakeMs, totalMs);
         }
     }
 
@@ -251,16 +252,17 @@ namespace projv::utils {
                                         rec.resolution, rec.dataVoxelScale * rec.uniformScale);
     }
 
-    void expandGridToInclude(SceneGrid& grid, core::ivec3 cellCoord) {
-        bool inBounds = cellCoord.x >= 0 && cellCoord.x < grid.dims.x &&
-                         cellCoord.y >= 0 && cellCoord.y < grid.dims.y &&
-                         cellCoord.z >= 0 && cellCoord.z < grid.dims.z;
+    void expandGridToInclude(Scene& scene, SceneGrid& grid, core::ivec3 cellCoord) {
+        core::ivec3 localCoord = cellCoord - grid.cellCoordOffset;
+        bool inBounds = localCoord.x >= 0 && localCoord.x < grid.dims.x &&
+                         localCoord.y >= 0 && localCoord.y < grid.dims.y &&
+                         localCoord.z >= 0 && localCoord.z < grid.dims.z;
         if (inBounds) return;
 
-        core::ivec3 newMin(std::min(0, cellCoord.x), std::min(0, cellCoord.y), std::min(0, cellCoord.z));
-        core::ivec3 newMax(std::max(grid.dims.x - 1, cellCoord.x),
-                            std::max(grid.dims.y - 1, cellCoord.y),
-                            std::max(grid.dims.z - 1, cellCoord.z));
+        core::ivec3 newMin(std::min(0, localCoord.x), std::min(0, localCoord.y), std::min(0, localCoord.z));
+        core::ivec3 newMax(std::max(grid.dims.x - 1, localCoord.x),
+                            std::max(grid.dims.y - 1, localCoord.y),
+                            std::max(grid.dims.z - 1, localCoord.z));
         core::ivec3 newDims = newMax - newMin + core::ivec3(1);
 
         std::vector<int32_t> newCellToChunk(
@@ -271,7 +273,9 @@ namespace projv::utils {
                     int32_t v = grid.cellToChunk[x + grid.dims.x * (y + grid.dims.y * z)];
                     if (v < 0) continue;
                     int nx = x - newMin.x, ny = y - newMin.y, nz = z - newMin.z;
-                    newCellToChunk[nx + newDims.x * (ny + newDims.y * nz)] = v;
+                    int newLinear = nx + newDims.x * (ny + newDims.y * nz);
+                    newCellToChunk[newLinear] = v;
+                    scene.chunks[v].cellIndex = newLinear;
                 }
             }
         }
@@ -280,7 +284,7 @@ namespace projv::utils {
         // already-resident cells keep their exact world position) and cellCoordOffset (so
         // materializeGridCell's on-disk block lookup keeps finding the right file coordinate).
         grid.origin += glm::mat3_cast(grid.rotation) * (core::vec3(newMin) * grid.cellSize);
-        grid.cellCoordOffset -= newMin;
+        grid.cellCoordOffset += newMin;
         grid.dims = newDims;
         grid.cellToChunk = std::move(newCellToChunk);
     }
@@ -307,19 +311,20 @@ namespace projv::utils {
 
     void addVoxelsToComponent(Scene& scene, StreamingContext& ctx, ComponentHandle component,
                                const EditVoxelBatch& voxels) {
+        auto t0 = std::chrono::high_resolution_clock::now();
         if (component >= scene.components.size()) {
             core::warn("addVoxelsToComponent: component {} out of range", component);
             return;
         }
         const ComponentRecord& rec = scene.components[component];
-        core::warn("DIAG addVoxelsToComponent: component={} kind={} chunkHandle={} gridIndex={} voxels={}",
-                   component, rec.kind == ComponentKind::Chunk ? "Chunk" : "Grid", rec.chunkHandle,
-                   rec.gridIndex, voxels.size());
         if (rec.kind == ComponentKind::Chunk) {
             VoxelBatch localVoxels;
             localVoxels.reserve(voxels.size());
             for (const EditVoxel& v : voxels) localVoxels.push_back(createVoxel(v.color, v.position));
             mergeVoxelsIntoChunk(scene, ctx, rec.chunkHandle, std::move(localVoxels), /*isAdd=*/true);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            core::warn("[PERF] addVoxelsToComponent component={} (Chunk) voxels={} total={:.2f}ms", component, voxels.size(), ms);
             return;
         }
 
@@ -334,24 +339,23 @@ namespace projv::utils {
         // Grow the grid first (as needed) so bucketing below uses the final dims/cellCoordOffset.
         if (grid.resizeToFitVoxels) {
             for (const EditVoxel& v : voxels) {
-                expandGridToInclude(grid, voxelToCellCoordLocal(v.position, resolution));
+                expandGridToInclude(scene, grid, voxelToCellCoordLocal(v.position, resolution));
             }
         }
 
-        // Bucket by cell -- one merge (and one Update mutation) per cell actually touched, not one
-        // per voxel. Positions are converted to local Voxels only now, once safely within one cell's
-        // resolution-bounded range.
+        // Bucket by cell.
         std::unordered_map<int, VoxelBatch> perCellAdds;
         for (const EditVoxel& v : voxels) {
             core::ivec3 cellCoord = voxelToCellCoordLocal(v.position, resolution);
-            if (cellCoord.x < 0 || cellCoord.x >= grid.dims.x ||
-                cellCoord.y < 0 || cellCoord.y >= grid.dims.y ||
-                cellCoord.z < 0 || cellCoord.z >= grid.dims.z) {
+            core::ivec3 localCoord = cellCoord - grid.cellCoordOffset;
+            if (localCoord.x < 0 || localCoord.x >= grid.dims.x ||
+                localCoord.y < 0 || localCoord.y >= grid.dims.y ||
+                localCoord.z < 0 || localCoord.z >= grid.dims.z) {
                 core::warn("addVoxelsToComponent: voxel outside grid bounds and resizeToFitVoxels is "
                            "false; skipped");
                 continue;
             }
-            int linear = cellCoord.x + grid.dims.x * (cellCoord.y + grid.dims.y * cellCoord.z);
+            int linear = localCoord.x + grid.dims.x * (localCoord.y + grid.dims.y * localCoord.z);
             core::ivec3 local = voxelToLocalPositionLocal(v.position, resolution);
             perCellAdds[linear].push_back(createVoxel(v.color, local));
         }
@@ -361,7 +365,6 @@ namespace projv::utils {
                 ? static_cast<ChunkHandle>(grid.cellToChunk[linear])
                 : materializeGridCell(scene, ctx, gridIndex, linear);
             if (handle == INVALID_CHUNK_HANDLE) {
-                // No on-disk block for this cell -- genuinely empty grid space. Create one.
                 handle = materializeEmptyGridCell(scene, ctx, gridIndex, linear);
             }
             if (handle == INVALID_CHUNK_HANDLE) {
@@ -370,23 +373,28 @@ namespace projv::utils {
             }
             mergeVoxelsIntoChunk(scene, ctx, handle, std::move(batch), /*isAdd=*/true);
         }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        core::warn("[PERF] addVoxelsToComponent component={} (Grid) voxels={} cells={} total={:.2f}ms",
+                   component, voxels.size(), perCellAdds.size(), ms);
     }
 
     void removeVoxelsFromComponent(Scene& scene, StreamingContext& ctx, ComponentHandle component,
                                     const EditVoxelBatch& voxels) {
+        auto t0 = std::chrono::high_resolution_clock::now();
         if (component >= scene.components.size()) {
             core::warn("removeVoxelsFromComponent: component {} out of range", component);
             return;
         }
         const ComponentRecord& rec = scene.components[component];
-        core::warn("DIAG removeVoxelsFromComponent: component={} kind={} chunkHandle={} gridIndex={} voxels={}",
-                   component, rec.kind == ComponentKind::Chunk ? "Chunk" : "Grid", rec.chunkHandle,
-                   rec.gridIndex, voxels.size());
         if (rec.kind == ComponentKind::Chunk) {
             VoxelBatch localVoxels;
             localVoxels.reserve(voxels.size());
             for (const EditVoxel& v : voxels) localVoxels.push_back(createVoxel(v.color, v.position));
             mergeVoxelsIntoChunk(scene, ctx, rec.chunkHandle, std::move(localVoxels), /*isAdd=*/false);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            core::warn("[PERF] removeVoxelsFromComponent component={} (Chunk) voxels={} total={:.2f}ms", component, voxels.size(), ms);
             return;
         }
 
@@ -398,17 +406,17 @@ namespace projv::utils {
             return;
         }
 
-        // Never grows/materializes -- a cell with nothing resident has nothing to remove.
         std::unordered_map<int, VoxelBatch> perCellRemoves;
         for (const EditVoxel& v : voxels) {
             core::ivec3 cellCoord = voxelToCellCoordLocal(v.position, resolution);
-            if (cellCoord.x < 0 || cellCoord.x >= grid.dims.x ||
-                cellCoord.y < 0 || cellCoord.y >= grid.dims.y ||
-                cellCoord.z < 0 || cellCoord.z >= grid.dims.z) {
+            core::ivec3 localCoord = cellCoord - grid.cellCoordOffset;
+            if (localCoord.x < 0 || localCoord.x >= grid.dims.x ||
+                localCoord.y < 0 || localCoord.y >= grid.dims.y ||
+                localCoord.z < 0 || localCoord.z >= grid.dims.z) {
                 continue;
             }
-            int linear = cellCoord.x + grid.dims.x * (cellCoord.y + grid.dims.y * cellCoord.z);
-            if (grid.cellToChunk[linear] < 0) continue; // not resident -- nothing to remove
+            int linear = localCoord.x + grid.dims.x * (localCoord.y + grid.dims.y * localCoord.z);
+            if (grid.cellToChunk[linear] < 0) continue;
             core::ivec3 local = voxelToLocalPositionLocal(v.position, resolution);
             perCellRemoves[linear].push_back(createVoxel(v.color, local));
         }
@@ -417,5 +425,9 @@ namespace projv::utils {
             ChunkHandle handle = static_cast<ChunkHandle>(grid.cellToChunk[linear]);
             mergeVoxelsIntoChunk(scene, ctx, handle, std::move(batch), /*isAdd=*/false);
         }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        core::warn("[PERF] removeVoxelsFromComponent component={} (Grid) voxels={} cells={} total={:.2f}ms",
+                   component, voxels.size(), perCellRemoves.size(), ms);
     }
 }

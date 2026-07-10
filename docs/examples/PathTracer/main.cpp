@@ -33,8 +33,6 @@
 //   A/D       — strafe left / right
 //   R/F       — move up / down
 //   Mouse     — look around (cursor is captured; Esc releases it, left-click re-captures)
-//   Left-click / right-click — add / remove a sphere of voxels at the crosshair
-//                              (renderer 1, tree64, only — see voxelEditing.h)
 
 #include <functional>
 #include <string>
@@ -50,20 +48,10 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/type_mapping.h"
-#include "graphics/scene_dynamics.h"
 #include "utils/compose_io.h"
-#include "utils/streaming.h"
-
-#include "residencyPolicy.h"
-#include "voxelEditing.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-
-// Streaming toggle. false = load the whole scene eagerly up front and render it statically (use this to
-// confirm the render is unchanged vs. before the dynamics round). true = lazy grid-volume load + the
-// example camera-driven residency policy (see residencyPolicy.h).
-static constexpr bool kUseStreaming = true;
 
 // Mouse scroll wheel drives the sun's elevation (a day cycle -- see render()). GLFW scroll
 // callbacks are plain C function pointers, so the accumulated wheel offset lives at file scope.
@@ -98,9 +86,6 @@ struct RendererModule {
     // Uploads this renderer's per-frame uniforms. Must set every uniform the
     // renderer's resources.json declares (and may ignore the rest).
     std::function<void(std::shared_ptr<projv::ConstructedRenderer>, const FrameContext&)> uploadUniforms;
-    // Whether this renderer's resources.json declares the pickBuffer/pickResult/normalResult
-    // textures voxelEditing.h needs. Only tree64Renderer does today (see voxelEditing.h).
-    bool supportsEditing = false;
 };
 
 // Uniforms shared by every renderer in the project.
@@ -144,8 +129,7 @@ static std::vector<RendererModule> buildRendererRegistry() {
         "tree64 (accumulation)",
         "./tree64Renderer/",
         "./tree64Renderer/pathTracerShaders/vs_quad.bin",
-        uploadTree64Uniforms,
-        /*supportsEditing=*/true
+        uploadTree64Uniforms
     });
     registry.push_back({
         "reprojection (temporal)",
@@ -247,15 +231,11 @@ void startup(projv::Application& app) {
     float& cameraPhi         = projv::core::createGlobalResource<float>(app.world);
     projv::GPUData& gpuData  = projv::core::createGlobalResource<projv::GPUData>(app.world);
     RendererModule& selectedRenderer = projv::core::createGlobalResource<RendererModule>(app.world);
-    projv::utils::StreamingContext& streaming =
-        projv::core::createGlobalResource<projv::utils::StreamingContext>(app.world);
 
     cameraPhi = 3.14 / 2 + 0.4;
 
-    // Streaming load builds the full grid topology but loads NO grid geometry up front; grid cells become
-    // resident on demand via the example residency policy in render(). Eager (nullptr) loads everything as
-    // before. Toggle with kUseStreaming above.
-    scene = projv::utils::loadComposeFromDisk("./SponzaScene/", kUseStreaming ? &streaming : nullptr);
+    // Eager load: loads all scene geometry up front.
+    scene = projv::utils::loadComposeFromDisk("./SponzaScene/");
 
     std::vector<RendererModule> registry = buildRendererRegistry();
     selectedRenderer = registry[promptForRenderer(registry)];
@@ -275,12 +255,6 @@ void startup(projv::Application& app) {
 
     renderInstance.setActiveRenderer(constructedRenderer);
     gpuData = projv::graphics::createTexturesForScene(scene);
-
-    // Sphere add/remove voxel editing (left/right click) — tree64Renderer only. See voxelEditing.h.
-    VoxelEditState& voxelEdit = projv::core::createGlobalResource<VoxelEditState>(app.world);
-    if (selectedRenderer.supportsEditing) {
-        initVoxelEditing(voxelEdit, rendererSpec);
-    }
 }
 
 // Update: frame timing profiler.
@@ -300,8 +274,6 @@ void render(projv::Application& app) {
     projv::GPUData& gpuData          = projv::core::getGlobalResource<projv::GPUData>(app.world);
     float& cameraPhi                 = projv::core::getGlobalResource<float>(app.world);
     RendererModule& selectedRenderer = projv::core::getGlobalResource<RendererModule>(app.world);
-    projv::Scene& scene              = projv::core::getGlobalResource<projv::Scene>(app.world);
-    projv::utils::StreamingContext& streaming = projv::core::getGlobalResource<projv::utils::StreamingContext>(app.world);
 
     static projv::core::vec3 cameraPosition = projv::core::vec3(1018.0, 413.0, -330.0);
 
@@ -429,24 +401,7 @@ void render(projv::Application& app) {
 
     selectedRenderer.uploadUniforms(renderInstance.getActiveRenderer(), ctx);
 
-    // Camera-driven streaming (EXAMPLE policy — see residencyPolicy.h). One interest source at the camera;
-    // the policy scales its load/evict distance per grid by that grid's cellSize, so the same rule works
-    // across a scene whose cells span orders of magnitude. Multiple cameras / networked interest would
-    // simply push more sources into this vector. Skipped when loading eagerly (those cells are already
-    // resident and must not be evicted).
-    if (kUseStreaming) {
-        std::vector<InterestSource> interest = { { cameraPosition } };
-        updateSceneResidency(scene, gpuData, streaming, interest);
-    }
-
     projv::graphics::renderConstructedRenderer(renderInstance, renderInstance.getActiveRenderer(), &gpuData);
-
-    // Sphere add/remove voxel editing (left/right click) — tree64Renderer only. See voxelEditing.h.
-    if (selectedRenderer.supportsEditing) {
-        VoxelEditState& voxelEdit = projv::core::getGlobalResource<VoxelEditState>(app.world);
-        updateVoxelEditing(voxelEdit, scene, gpuData, streaming, renderInstance.getActiveRenderer(), renderInstance.window,
-                            mouseCaptured, renderInstance.getWindowResolution(), app.frameCount);
-    }
 
     // Remember this frame's camera for next frame's reprojection.
     prevCameraPosition  = cameraPosition;

@@ -161,6 +161,7 @@ namespace projv::utils {
         double elapsedWhole = std::chrono::duration<double, std::milli>(endWhole - startWhole).count();
 
         core::info("createTree64: Completed tree-64 generation in {:.2f}ms for {} voxels", elapsedWhole, gridResolution * gridResolution * gridResolution);
+        core::warn("[PERF] createTree64: resolution={} voxels={} levels={}: {:.2f}ms", gridResolution, gridResolution * gridResolution * gridResolution, levelsOfDepth, elapsedWhole);
 
         return tree64Simplified;
     }
@@ -238,40 +239,6 @@ namespace projv::utils {
 
     float createChunkScaleFromVoxelScaleAndResolution(float voxelScale, int resolutionPowerOf2) {
         return resolutionPowerOf2 * (voxelScale);    
-    }
-
-    ChunkHeader createChunkHeader(std::vector<ChunkHeader>& sceneChunkHeaders, core::vec3 position, float voxelScale, int resolutionPowOf2) {
-        if(resolutionPowOf2 > 512) {
-            core::warn("createChunkHeader: Resolution {} exceeds recommended maximum of 256 (may impact performance)", resolutionPowOf2);
-        }
-        int accuratePowerOf2 = std::pow(2, std::ceil(std::log2(resolutionPowOf2)));
-        if(core::fract(log2(resolutionPowOf2)) != 0) {
-            core::warn("createChunkHeader: Resolution {} is not power of 2, rounding up to {}", resolutionPowOf2, accuratePowerOf2);
-        }
-        float chunkScale = createChunkScaleFromVoxelScaleAndResolution(voxelScale, resolutionPowOf2);
-        if(chunkScale < 3) {
-            core::warn("createChunkHeader: Chunk scale {:.2f} is below 3.0 (may cause floating point precision issues)", chunkScale);
-        }
-
-        projv::ChunkHeader chunkHeader;
-        chunkHeader.position = position;
-        chunkHeader.scale = chunkScale;
-        chunkHeader.voxelScale = voxelScale;
-        chunkHeader.resolution = accuratePowerOf2;
-        
-        // Convert our existing chunk id's into an unorderd_set for fast look up to see if the newly generated random ID exists or not.
-        std::unordered_set<uint32_t> existingIDs;
-        for(size_t i = 0; i < sceneChunkHeaders.size(); i++) {
-            existingIDs.insert(sceneChunkHeaders[i].chunkID);
-        }
-
-        // Generate a unique ID.
-        uint32_t randomID = std::rand();
-        while(existingIDs.find(randomID) != existingIDs.end()) {
-            chunkHeader.chunkID = randomID;
-            randomID = std::rand();
-        }
-        return chunkHeader;
     }
 
     Chunk createChunk(ChunkHeader chunkHeader) {
@@ -385,14 +352,13 @@ namespace projv::utils {
     }
 
     void updateChunkFromItsVoxelBatch(Chunk& chunk, bool clearBatch) {
-        // Get farthest voxel.
+        auto t0 = std::chrono::high_resolution_clock::now();
         auto start = std::chrono::high_resolution_clock::now();
         VoxelGrid voxelGrid = createVoxelGridFromChunksQueue(chunk);
         auto end = std::chrono::high_resolution_clock::now();
         double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
-        core::info("createVoxelGridFromChunksQueue: Processed chunk queue in {:.2f}ms", elapsed);
+        core::warn("[PERF] updateChunkFromItsVoxelBatch: createVoxelGridFromChunksQueue: {:.2f}ms", elapsed);
 
-        // Compute resolution.
         int farthestCoordinate = 0;
         for (const Voxel& v : voxelGrid.voxels) {
             core::ivec3 pos = reverseZOrderIndex(v.ZOrderPosition);
@@ -400,23 +366,30 @@ namespace projv::utils {
         }
         int resolutionToTheNearestPowOfTwo = std::pow(2, std::ceil(std::log2(farthestCoordinate + 1)));
         if(resolutionToTheNearestPowOfTwo > 256) {
-            core::warn("updateChunkFromItsVoxelBatch: Chunk {} resolution {} exceeds recommended 256 (voxel positions too large)", chunk.header.chunkID, chunk.header.resolution);
+            core::warn("updateChunkFromItsVoxelBatch: Chunk {} resolution {} exceeds recommended 256", chunk.header.chunkID, chunk.header.resolution);
         }
 
-        // Update the chunk.
+        auto t1 = std::chrono::high_resolution_clock::now();
         chunk.geometryData = createTree64(voxelGrid, resolutionToTheNearestPowOfTwo);
-        //createTree64(voxelGrid, resolutionToTheNearestPowOfTwo);
+        auto t2 = std::chrono::high_resolution_clock::now();
         chunk.voxelTypeData = createVoxelTypeData(voxelGrid);
+        auto t3 = std::chrono::high_resolution_clock::now();
         chunk.LOD = 0;
 
         chunk.header.resolution = resolutionToTheNearestPowOfTwo;
         chunk.header.scale = createChunkScaleFromVoxelScaleAndResolution(chunk.header.voxelScale, resolutionToTheNearestPowOfTwo);
 
-        // Clear our queue.
         if(clearBatch) {
             VoxelBatch emptyChunkQueue;
             chunk.chunkQueue = emptyChunkQueue;
         }
+        auto t4 = std::chrono::high_resolution_clock::now();
+        double parseMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        double treeMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        double typeMs = std::chrono::duration<double, std::milli>(t3 - t2).count();
+        double totalMs = std::chrono::duration<double, std::milli>(t4 - t0).count();
+        core::warn("[PERF] updateChunkFromItsVoxelBatch: parse={:.2f}ms tree64={:.2f}ms voxelType={:.2f}ms total={:.2f}ms",
+                   parseMs, treeMs, typeMs, totalMs);
         return;
     }
 
