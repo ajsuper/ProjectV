@@ -12,7 +12,6 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include "utils/voxel_management.h"
-#include "utils/streaming.h"
 #include "nlohmann/json.hpp"
 
 namespace projv::utils {
@@ -363,9 +362,8 @@ namespace projv::utils {
         return doc;
     }
 
-    Scene loadComposeFromDisk(const std::string& folderPath, StreamingContext* streaming) {
-        core::info("loadComposeFromDisk: Loading compose scene from folder: {} ({} mode)",
-                   folderPath, streaming ? "streaming" : "eager");
+    Scene loadComposeFromDisk(const std::string& folderPath) {
+        core::info("loadComposeFromDisk: Loading compose scene from folder: {}", folderPath);
         Scene scene;
 
         std::unordered_map<std::string, DataFile> dataCache;
@@ -383,10 +381,6 @@ namespace projv::utils {
         std::vector<Chunk> looseChunks;
         struct PendingGrid { SceneGrid grid; std::vector<Chunk> blocks; std::string sourcePath; };
         std::vector<PendingGrid> pendingGrids;
-        // Streaming mode: grid volumes become descriptor-only (no chunks); their streaming records are
-        // collected here and pushed into `streaming` at assembly so they stay parallel to Scene.grids.
-        struct PendingStreamGrid { SceneGrid grid; GridStreamRecord record; };
-        std::vector<PendingStreamGrid> pendingStreamGrids;
 
         std::function<void(const std::string&, const core::mat4&, int, bool)> expand =
             [&](const std::string& folder, const core::mat4& parentWorld, int depth, bool ancestorRotated) {
@@ -415,60 +409,6 @@ namespace projv::utils {
                 if (c.type == ComponentType::Data) {
                     std::string resolved = std::filesystem::weakly_canonical(
                         std::filesystem::path(folder) / c.source).string();
-
-                    // Streaming mode: a grid volume (multi-block .data) is deferred to descriptor-only —
-                    // read just the block table, build the SceneGrid + streaming record, load NO geometry
-                    // and create NO chunks. A single-block asset falls through to the eager load below.
-                    if (streaming) {
-                        DataFileHeader hdr = readDataFileHeader(resolved);
-                        if (hdr.resolution == 0 || hdr.blocks.empty()) {
-                            core::warn("loadComposeFromDisk: .data at {} is empty or invalid - skipping", resolved);
-                            continue;
-                        }
-                        if (hdr.blocks.size() > 1) {
-                            // Same world-matrix decomposition as the eager path (uniform scale + rotation).
-                            core::vec3 sc0 = core::vec3(world[0]);
-                            core::vec3 sc1 = core::vec3(world[1]);
-                            core::vec3 sc2 = core::vec3(world[2]);
-                            float usx = core::length(sc0), usy = core::length(sc1), usz = core::length(sc2);
-                            // v0.0: non-uniform scale on a data leaf is rejected. See
-                            // compose_data_structure.md (Open Question 4).
-                            if (std::abs(usx - usy) > 1e-4f || std::abs(usx - usz) > 1e-4f) {
-                                core::error("loadComposeFromDisk: Non-uniform scale on streamed grid '{}' "
-                                            "({}, {}, {}); rejected. Use uniform scale on data leaves (v0.0).",
-                                            resolved, usx, usy, usz);
-                                continue;
-                            }
-                            float uniformScale = usx;
-                            core::mat3 gridRotMat = core::mat3(sc0 / usx, sc1 / usy, sc2 / usz);
-                            core::quat gridRotation = glm::quat_cast(gridRotMat);
-                            float localBlockScale = createChunkScaleFromVoxelScaleAndResolution(
-                                hdr.voxelScale, static_cast<int>(hdr.resolution));
-
-                            PendingStreamGrid psg;
-                            psg.grid.origin = core::vec3(world[3]);
-                            psg.grid.cellSize = localBlockScale * uniformScale;
-                            psg.grid.rotation = gridRotation;
-                            core::ivec3 dims(0);
-                            for (const BlockEntry& e : hdr.blocks) {
-                                dims.x = std::max(dims.x, e.gridX + 1);
-                                dims.y = std::max(dims.y, e.gridY + 1);
-                                dims.z = std::max(dims.z, e.gridZ + 1);
-                            }
-                            psg.grid.dims = dims;
-                            psg.grid.cellToChunk.assign(
-                                static_cast<size_t>(dims.x) * dims.y * dims.z, -1);
-                            psg.record = GridStreamRecord{resolved, hdr.resolution, hdr.voxelScale,
-                                                          uniformScale, c.mutability};
-                            pendingStreamGrids.push_back(std::move(psg));
-
-                            // Seed the block-table cache (warm, LRU-evictable — not pinned).
-                            streaming->blockTables.lastUsed[resolved] = ++streaming->blockTables.tick;
-                            streaming->blockTables.tables[resolved] = std::move(hdr);
-                            continue;
-                        }
-                        // Single-block asset: fall through to the eager load path below.
-                    }
 
                     auto cacheIt = dataCache.find(resolved);
                     if (cacheIt == dataCache.end()) {
@@ -632,30 +572,16 @@ namespace projv::utils {
             int32_t gridIndex = static_cast<int32_t>(scene.grids.size());
             int32_t base = static_cast<int32_t>(scene.chunks.size());
             for (Chunk& c : pg.blocks) {
-                c.gridIndex = gridIndex; // cellIndex was set at block creation
+                c.gridIndex = gridIndex;
                 scene.chunks.push_back(std::move(c));
             }
             for (int32_t& idx : pg.grid.cellToChunk) {
                 if (idx >= 0) idx += base;
             }
-            // One component owns every cell of this grid (gridIndex is only known here).
             ComponentHandle componentHandle = static_cast<ComponentHandle>(scene.components.size());
             scene.components.push_back(ComponentRecord{ComponentKind::Grid, 0, gridIndex, pg.sourcePath});
             pg.grid.componentHandle = componentHandle;
             scene.grids.push_back(std::move(pg.grid));
-            // Keep streaming->gridRecords parallel to scene.grids even for eager grids (default record;
-            // an eager grid is already fully resident, so it is never materialized from disk).
-            if (streaming) streaming->gridRecords.push_back(GridStreamRecord{});
-        }
-        // Streamed grid volumes: descriptor only, no chunks; their cells materialize on demand.
-        for (PendingStreamGrid& psg : pendingStreamGrids) {
-            int32_t gridIndex = static_cast<int32_t>(scene.grids.size());
-            ComponentHandle componentHandle = static_cast<ComponentHandle>(scene.components.size());
-            scene.components.push_back(ComponentRecord{
-                ComponentKind::Grid, 0, gridIndex, psg.record.sourceDataPath});
-            psg.grid.componentHandle = componentHandle;
-            scene.grids.push_back(std::move(psg.grid));
-            if (streaming) streaming->gridRecords.push_back(std::move(psg.record));
         }
 
         // Pool indices are absolute and stable (never rebased, unlike cellToChunk), so we can hand
@@ -667,121 +593,4 @@ namespace projv::utils {
         return scene;
     }
 
-    int32_t makeChunkGeometryWritable(Scene& scene, Chunk& chunk) {
-        auto t0 = std::chrono::high_resolution_clock::now();
-        int32_t idx = chunk.geometryPoolIndex;
-        if (idx < 0 || idx >= static_cast<int32_t>(scene.geometryPool.size())) {
-            core::warn("makeChunkGeometryWritable: chunk {} is not pooled; nothing to make writable", chunk.header.chunkID);
-            return -1;
-        }
-        if (chunk.mutability == Mutability::Copy && !chunk.copyDiverged) {
-            GeometryBlob fork = scene.geometryPool[idx];
-            fork.ownsSourceFile = false;
-            fork.refCount = 1;
-            if (scene.geometryPool[idx].refCount > 0)
-                scene.geometryPool[idx].refCount--;
-            int32_t newIdx = poolInsertBlob(scene, std::move(fork));
-            chunk.geometryPoolIndex = newIdx;
-            chunk.copyDiverged = true;
-            auto t1 = std::chrono::high_resolution_clock::now();
-            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            core::warn("[PERF] makeChunkGeometryWritable: chunk {} forked {} -> {}: {:.2f}ms", chunk.header.chunkID, idx, newIdx, ms);
-            return newIdx;
-        }
-        auto t1 = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        core::warn("[PERF] makeChunkGeometryWritable: chunk {} no-fork: {:.2f}ms", chunk.header.chunkID, ms);
-        return chunk.geometryPoolIndex;
     }
-
-    void editChunkVoxels(Scene& scene, Chunk& chunk) {
-        if (chunk.geometryPoolIndex < 0) {
-            core::warn("editChunkVoxels: chunk {} is not pooled; skipping", chunk.header.chunkID);
-            return;
-        }
-        if (chunk.chunkQueue.empty()) {
-            core::warn("editChunkVoxels: chunk {} has an empty edit queue; nothing to do", chunk.header.chunkID);
-            return;
-        }
-        auto t0 = std::chrono::high_resolution_clock::now();
-        int32_t idx = makeChunkGeometryWritable(scene, chunk);
-        if (idx < 0) return;
-        auto t1 = std::chrono::high_resolution_clock::now();
-        updateChunkFromItsVoxelBatch(chunk);
-        auto t2 = std::chrono::high_resolution_clock::now();
-        GeometryBlob& blob = scene.geometryPool[idx];
-        blob.geometry = std::move(chunk.geometryData);
-        blob.voxelTypeData = std::move(chunk.voxelTypeData);
-        chunk.geometryData.clear();
-        chunk.voxelTypeData.clear();
-        auto t3 = std::chrono::high_resolution_clock::now();
-        double cowMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        double treeMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
-        double moveMs = std::chrono::duration<double, std::milli>(t3 - t2).count();
-        double totalMs = std::chrono::duration<double, std::milli>(t3 - t0).count();
-        core::warn("[PERF] editChunkVoxels chunk={}: cow={:.2f}ms tree64={:.2f}ms move={:.2f}ms total={:.2f}ms",
-                   chunk.header.chunkID, cowMs, treeMs, moveMs, totalMs);
-    }
-
-    bool persistChunkData(Scene& scene, Chunk& chunk, const std::string& copyDestPath) {
-        if (chunk.geometryPoolIndex < 0) {
-            core::warn("persistChunkData: chunk {} is not pooled; skipping", chunk.header.chunkID);
-            return false;
-        }
-        if (chunk.mutability == Mutability::Locked) {
-            core::info("persistChunkData: chunk {} is Locked; edits are in-memory only, not persisted", chunk.header.chunkID);
-            return false;
-        }
-
-        // For Copy, ensure the instance owns a private blob before we touch provenance/geometry.
-        int32_t idx = chunk.mutability == Mutability::Copy ? makeChunkGeometryWritable(scene, chunk)
-                                                           : chunk.geometryPoolIndex;
-        if (idx < 0) return false;
-        GeometryBlob& blob = scene.geometryPool[idx];
-
-        // Read the source .data (so sibling blocks are preserved), swap in this block's current geometry.
-        DataFile data = readDataFile(blob.sourceDataPath);
-        if (data.blocks.empty()) {
-            core::error("persistChunkData: could not read source .data '{}' for chunk {}", blob.sourceDataPath, chunk.header.chunkID);
-            return false;
-        }
-        bool replaced = false;
-        for (DataBlock& b : data.blocks) {
-            if (b.gridX == blob.sourceBlockCoord.x && b.gridY == blob.sourceBlockCoord.y &&
-                b.gridZ == blob.sourceBlockCoord.z) {
-                b.geometry = blob.geometry;
-                b.voxelTypeData = blob.voxelTypeData;
-                replaced = true;
-                break;
-            }
-        }
-        if (!replaced) {
-            core::error("persistChunkData: block ({},{},{}) not found in '{}'", blob.sourceBlockCoord.x,
-                        blob.sourceBlockCoord.y, blob.sourceBlockCoord.z, blob.sourceDataPath);
-            return false;
-        }
-
-        std::string dest;
-        if (chunk.mutability == Mutability::Direct) {
-            dest = blob.sourceDataPath; // in place
-        } else { // Copy
-            if (blob.ownsSourceFile) {
-                dest = blob.sourceDataPath; // already owns its copy file; write in place
-            } else {
-                // First persist of this copy: write a new file (never the inherited original), then own it.
-                dest = copyDestPath;
-                if (dest.empty()) {
-                    std::filesystem::path src(blob.sourceDataPath);
-                    dest = (src.parent_path() / (src.stem().string() + "_copy" +
-                            std::to_string(chunk.header.chunkID) + ".data")).string();
-                }
-                blob.sourceDataPath = dest;
-                blob.ownsSourceFile = true;
-            }
-        }
-        writeDataFile(dest, data);
-        core::info("persistChunkData: chunk {} ({}) persisted to '{}'", chunk.header.chunkID,
-                   chunk.mutability == Mutability::Direct ? "direct" : "copy", dest);
-        return true;
-    }
-}

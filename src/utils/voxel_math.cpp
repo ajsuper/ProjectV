@@ -108,4 +108,17 @@ namespace projv::utils {
         };
     }
 
+    int32_t floorDiv(int32_t a, int32_t b) {
+        int32_t q = a / b;
+        int32_t r = a % b;
+        if ((r != 0) && ((r < 0) != (b < 0))) --q;
+        return q;
+    }
+
+    int32_t floorMod(int32_t a, int32_t b) {
+        int32_t r = a % b;
+        if ((r != 0) && ((r < 0) != (b < 0))) r += b;
+        return r;
+    }
+
 }

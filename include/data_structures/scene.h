@@ -16,13 +16,32 @@ namespace projv{
 
     // Stable handle for a compose component (one `data` leaf instance from a compose.json -- see
     // ComposeComponent in compose.h). A component becomes exactly one of: a single loose Chunk, or a
-    // whole SceneGrid (when its .data file has more than one block). Editing is addressed by
-    // component (see utils::addVoxelsToComponent/removeVoxelsFromComponent in utils/streaming.h) so
-    // callers never need to know or care which of the two a given component turned out to be.
+    // whole SceneGrid (when its .data file has more than one block).
     using ComponentHandle = uint32_t;
     static constexpr ComponentHandle INVALID_COMPONENT_HANDLE = 0xFFFFFFFFu;
 
     enum class ComponentKind { Chunk, Grid };
+
+    // One queued edit. Continuous component-space coords (not Z-order). P1: append via
+    // queueVoxelAdd/queueVoxelRemove, drained by updateScene.
+    struct PendingVoxelOp {
+        bool         isAdd;
+        core::ivec3  position;
+        Color        color;
+    };
+
+    // Per-component edit queue. P1: drained by updateScene; cleared after drain.
+    struct ComponentEditQueue {
+        std::vector<PendingVoxelOp> ops;
+    };
+
+    // Reference to the .data file backing a component. One entry per unique
+    // (path, resolution, voxelScale). P1: allocated lazily by updateScene on first edit.
+    struct DataReference {
+        std::string sourceDataPath;
+        uint32_t    resolution;
+        float       voxelScale;
+    };
 
     // One entry per loaded component, in Scene.components, indexed by ComponentHandle. Populated by
     // loadComposeFromDisk at the same two sites that create a loose Chunk or push a SceneGrid.
@@ -31,6 +50,10 @@ namespace projv{
         ChunkHandle   chunkHandle = 0;  // valid when kind == ComponentKind::Chunk
         int32_t       gridIndex = -1;   // valid when kind == ComponentKind::Grid
         std::string   sourcePath;       // provenance/debugging, mirrors GeometryBlob::sourceDataPath
+
+        // P1 additions: per-component edit queue and lazily-assigned data reference.
+        ComponentEditQueue editQueue;
+        int32_t            dataRefID = -1;   // index into Scene.dataReferences; -1 = unassigned
     };
 
     // Governs what happens when a `data` component's voxel data is modified and persisted.
@@ -85,11 +108,8 @@ namespace projv{
         // Persistence policy for this instance (from its compose.json component). Drives whether an
         // edit is written back (Direct), copied off (Copy), or in-memory only (Locked).
         Mutability mutability = Mutability::Locked;
-        // Copy-on-write bookkeeping: set once a Copy instance has forked its own private pool blob.
-        bool copyDiverged = false;
-        // Slot liveness. A removed chunk keeps its slot in Scene.chunks (so no handle shifts) but is
-        // marked dead and its handle recycled via Scene.chunkFreeList. Dead slots get a degenerate GPU
-        // header row (scale <= 0) that the shader skips. Loaders create chunks alive.
+        // Slot liveness. Dead slots get a degenerate GPU header row (scale <= 0) that the shader
+        // skips. Loaders create chunks alive.
         bool alive = true;
         // Residency key: which grid + cell this chunk fills, or -1/-1 when it is a loose
         // (transform-placed) leaf. Gives O(1) chunk->cell so eviction can clear the right
@@ -131,24 +151,11 @@ namespace projv{
         std::vector<int32_t> cellToChunk;   // dims.x*dims.y*dims.z entries; index into Scene.chunks, or -1 if empty.
         // The compose component that owns this grid (every cell shares one component identity).
         ComponentHandle componentHandle = INVALID_COMPONENT_HANDLE;
-        // Whether utils::addVoxelsToComponent may grow this grid's dims/cellToChunk (and shift
-        // origin) to include a voxel outside current bounds, rather than skipping it. Default on --
-        // flip off for a grid that should stay a fixed size no matter what an edit asks for.
-        bool resizeToFitVoxels = true;
-        // How far this grid's local cell index 0 has drifted from the on-disk block table's (0,0,0)
-        // -- i.e. fileBlockCoord = localCellCoord + cellCoordOffset. Starts at zero (local index ==
-        // file coord, today's assumption); utils::expandGridToInclude updates it whenever growth
-        // shifts the local coordinate origin (e.g. growing in a negative direction), so
-        // materializeGridCell's on-disk block lookup stays correct after a resize.
-        core::ivec3 cellCoordOffset = core::ivec3(0);
     };
 
     struct Scene {
         // Slot-indexed with holes: a chunk's index is its stable ChunkHandle and its GPU header row.
-        // Removed chunks are marked !alive and their slots pushed to chunkFreeList for reuse; the
-        // vector never shifts, so grids[] and looseChunks[] handles stay valid across add/remove.
         std::vector<Chunk> chunks;
-        std::vector<ChunkHandle> chunkFreeList; // recycled dead chunk slots (LIFO).
         std::vector<SceneGrid> grids;
         // Explicit set of loose (transform-placed) chunk handles. The shader iterates this list
         // instead of a positional [0, looseChunkCount) prefix, so a loose chunk can be added or
@@ -159,13 +166,14 @@ namespace projv{
         // ordering of Scene.chunks is no longer load-bearing. Prefer looseChunks.size().
         uint32_t looseChunkCount = 0;
         // Shared geometry for .data blocks; chunks reference entries via Chunk.geometryPoolIndex.
-        // Refcounted (GeometryBlob.refCount); empty slots recycled via blobFreeList so live pool
-        // indices stay stable (never compacted).
+        // Refcounted (GeometryBlob.refCount); empty slots recycled via blobFreeList.
         std::vector<GeometryBlob> geometryPool;
         std::vector<uint32_t> blobFreeList; // recycled empty geometryPool slots (LIFO).
         // One entry per loaded compose component, indexed by ComponentHandle. Populated by
         // loadComposeFromDisk; never compacted or reordered (handles are stable for the Scene's life).
         std::vector<ComponentRecord> components;
+        // P1 addition: lazily populated by editing::updateScene on first edit per source.
+        std::vector<DataReference>   dataReferences;
     };
 
     // Inserts a blob into the pool, reusing a recycled slot when one is free so live pool indices
@@ -198,36 +206,20 @@ namespace projv{
         return chunk.geometryPoolIndex;
     }
 
-    // What resolveComponentLocation resolves a ChunkHandle to: which component owns it, and how to
-    // promote a coordinate local to THAT SPECIFIC CHUNK into the component's own voxel space (add
-    // this to a chunk-local coordinate to get a component-voxel-space coordinate).
-    struct ComponentLocation {
-        ComponentHandle component;
-        core::ivec3 voxelSpaceOrigin;
-    };
-
-    // Resolves a ChunkHandle (e.g. from GPU picking, which is inherently chunk-granular -- the
-    // handle IS the GPU header row) to the component that owns it. A loose chunk's voxel space
-    // already IS its component's voxel space (identity origin); a grid-resident chunk's component is
-    // the whole grid, so its origin is that cell's placement within the grid's voxel space (this
-    // cell's coordinate, decomposed from Chunk.cellIndex the same way streaming.cpp's internal
-    // cellToCoord does, times the shared per-cell resolution already on Chunk.header). Callers (e.g.
-    // PathTracer's picking) do their own chunk-local coordinate math exactly as before and only need
-    // this once, right before calling utils::addVoxelsToComponent/removeVoxelsFromComponent.
-    inline ComponentLocation resolveComponentLocation(const Scene& scene, ChunkHandle handle) {
-        const Chunk& chunk = scene.chunks[handle];
-        if (chunk.gridIndex < 0) {
-            return { chunk.componentHandle, core::ivec3(0) };
+    // Copy-on-write fork of a pool blob (P1 editing primitive). Creates a new GeometryBlob that is a
+    // deep copy of geometryPool[srcIndex], with refCount = 1 (the editing chunk owns it). Does NOT
+    // decrement the original's refCount -- other chunks may still share it. The caller is responsible
+    // for pointing the editing chunk at the returned index. Returns srcIndex unchanged if it is
+    // out of range (caller should intern the chunk first via internChunkGeometry).
+    inline int32_t forkBlob(Scene& scene, int32_t srcIndex) {
+        if (srcIndex < 0 || srcIndex >= static_cast<int32_t>(scene.geometryPool.size())) {
+            return srcIndex;
         }
-        const SceneGrid& grid = scene.grids[chunk.gridIndex];
-        int plane = grid.dims.x * grid.dims.y;
-        int cellZ = chunk.cellIndex / plane;
-        int rem = chunk.cellIndex % plane;
-        int cellY = rem / grid.dims.x;
-        int cellX = rem % grid.dims.x;
-        core::ivec3 cellCoord(cellX, cellY, cellZ);
-        return { grid.componentHandle, (cellCoord + grid.cellCoordOffset) * static_cast<int>(chunk.header.resolution) };
+        GeometryBlob fork = scene.geometryPool[srcIndex]; // deep copy of vecs + string
+        fork.refCount = 1;
+        return poolInsertBlob(scene, std::move(fork));
     }
-}
+
+    }
 
 #endif

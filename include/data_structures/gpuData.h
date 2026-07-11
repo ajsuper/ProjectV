@@ -45,8 +45,7 @@ namespace projv {
         uint32_t tree64Width = 0, tree64Height = 0;
         uint32_t voxelTypeWidth = 0, voxelTypeHeight = 0;
 
-        // Header texture is a single row of (capacity*4) texels; a chunk's handle IS its 4-texel slot
-        // (managed by Scene.chunkFreeList). headerCapacity is how many slots fit before a grow.
+        // Header texture is a single row of (capacity*4) texels; a chunk's handle IS its 4-texel slot.
         uint32_t headerCapacity = 0;
 
         // Loose-list texture (RGBA, 4 handles per texel), a compact list of `looseCount` live handles.

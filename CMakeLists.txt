@@ -130,15 +130,15 @@ add_library(projectV-compose_io STATIC ${UTILS_SRC_DIR}/compose_io.cpp)
 target_link_libraries(projectV-compose_io PRIVATE projectV-voxel_management)
 link_common_includes(projectV-compose_io)
 
-add_library(projectV-streaming STATIC ${UTILS_SRC_DIR}/streaming.cpp)
-target_link_libraries(projectV-streaming PRIVATE projectV-compose_io projectV-voxel_management)
-link_common_includes(projectV-streaming)
-
 add_library(projectV-voxel_management STATIC ${UTILS_SRC_DIR}/voxel_management.cpp)
 link_common_includes(projectV-voxel_management)
 
 add_library(projectV-voxel_math STATIC ${UTILS_SRC_DIR}/voxel_math.cpp)
 link_common_includes(projectV-voxel_math)
+
+add_library(projectV-editing STATIC ${UTILS_SRC_DIR}/editing.cpp)
+target_link_libraries(projectV-editing PRIVATE projectV-voxel_management projectV-voxel_math)
+link_common_includes(projectV-editing)
 
 # Create tools directory.
 file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/build/tools)

@@ -38,6 +38,25 @@ namespace projv::utils {
      * @return Returns an std::array<int, 3> containg the 3D point given from the Z-Order index.
      */
     core::ivec3 reverseZOrderIndex(uint64_t z_order);
+
+    /**
+     * Floor-style integer division (truncation toward -infinity). C++ `/` on negative ints truncates
+     * toward 0, which is wrong for cell bucketing (e.g. (-5) / 256 should be -1, not 0). Only valid
+     * for `b > 0` -- the only case the editing system uses.
+     * @param a The numerator.
+     * @param b The denominator (must be > 0).
+     * @return The floor-divisor quotient.
+     */
+    int32_t floorDiv(int32_t a, int32_t b);
+
+    /**
+     * Floor-style integer modulo (always in [0, b)). Pairs with floorDiv so that for every (a, b),
+     * a == b * floorDiv(a, b) + floorMod(a, b). Only valid for `b > 0`.
+     * @param a The numerator.
+     * @param b The modulus (must be > 0).
+     * @return The non-negative floor-modulo remainder.
+     */
+    int32_t floorMod(int32_t a, int32_t b);
 }
 
 #endif

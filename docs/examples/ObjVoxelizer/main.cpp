@@ -16,6 +16,7 @@
 #include "core/log.h"
 #include "utils/voxel_management.h"
 #include "utils/compose_io.h"
+#include "nlohmann/json.hpp"
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "include/tiny_obj_loader.h"

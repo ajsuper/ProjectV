@@ -1,5 +1,4 @@
 #include "graphics/gpu_interface.h"
-#include "graphics/scene_dynamics.h"
 
 #include <chrono>
 #include <cstring>
@@ -38,43 +37,6 @@ namespace projv::graphics {
                                          BGFX_TEXTURE_NONE | BGFX_SAMPLER_POINT, mem);
         }
 
-        // Upload `texelData` (RGBA32U, 4 uints per texel) to `tex` starting at linear texel
-        // `startTexel`. A linear range wraps rows, but instead of one updateTexture2D PER ROW (which for
-        // a large blob is thousands of calls per frame and floods bgfx's transient memory -> silently
-        // dropped/corrupted uploads), we upload the contiguous full-width middle as a SINGLE rectangular
-        // update, with at most a partial head row and partial tail row around it (<= 3 calls total).
-        // No-op when the texture is invalid, so the CPU bookkeeping is headless-testable.
-        void uploadTexelRange(bgfx::TextureHandle tex, uint32_t texWidth, uint32_t startTexel,
-                              const std::vector<uint32_t>& texelData) {
-            if (!bgfx::isValid(tex) || texWidth == 0) return;
-            auto t0 = std::chrono::high_resolution_clock::now();
-            uint32_t numTexels = static_cast<uint32_t>(texelData.size() / 4);
-            uint32_t t = startTexel, src = 0, remaining = numTexels;
-            int calls = 0;
-            while (remaining > 0) {
-                uint32_t x = t % texWidth;
-                uint32_t y = t / texWidth;
-                if (x == 0 && remaining >= texWidth) {
-                    uint32_t rows = remaining / texWidth;
-                    const bgfx::Memory* mem =
-                        bgfx::copy(&texelData[size_t(src) * 4], size_t(texWidth) * rows * 4 * sizeof(uint32_t));
-                    bgfx::updateTexture2D(tex, 0, 0, uint16_t(x), uint16_t(y), uint16_t(texWidth), uint16_t(rows), mem);
-                    uint32_t consumed = texWidth * rows;
-                    t += consumed; src += consumed; remaining -= consumed;
-                    calls++;
-                } else {
-                    uint32_t run = std::min(remaining, texWidth - x);
-                    const bgfx::Memory* mem = bgfx::copy(&texelData[size_t(src) * 4], run * 4 * sizeof(uint32_t));
-                    bgfx::updateTexture2D(tex, 0, 0, uint16_t(x), uint16_t(y), uint16_t(run), 1, mem);
-                    t += run; src += run; remaining -= run;
-                    calls++;
-                }
-            }
-            auto t1 = std::chrono::high_resolution_clock::now();
-            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            core::warn("[PERF] uploadTexelRange: {} texels {} bgfxCalls: {:.2f}ms", numTexels, calls, ms);
-        }
-
         // A dead/unused header row: scale <= 0 makes the shader's broadphase reject it.
         GPUChunkHeader degenerateHeader() {
             GPUChunkHeader h{};
@@ -101,11 +63,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r) {
     g.rotationY = chunk.header.rotation.y;
     g.rotationZ = chunk.header.rotation.z;
     g.rotationW = chunk.header.rotation.w;
-    
-    core::warn("EDITTEST: makeHeader: chunkID={}, geomStart={}, geomEnd={}, typeStart={}, typeEnd={}, resolution={}, scale={}",
-               g.chunkID, g.geometryStartIndex, g.geometryEndIndex, g.voxelTypeDataStartIndex, g.voxelTypeDataEndIndex,
-               g.resolution, g.scale);
-    
+
     return g;
 }
 
@@ -377,13 +335,6 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r) {
     }
 
     namespace {
-        // Grow the geometry-pool ranges vector to match the scene's pool size, so a blob added since
-        // the last GPU touch (COW fork, intern) has a slot. New slots start not-uploaded.
-        void ensureBlobRanges(const projv::Scene& scene, GPUData& gpuData) {
-            if (gpuData.blobRanges.size() < scene.geometryPool.size())
-                gpuData.blobRanges.resize(scene.geometryPool.size());
-        }
-
         // Compute the loose-handle list the shader iterates. Compose scenes carry it explicitly (may
         // be empty when every chunk is gridded); a legacy scene with neither loose list nor grids
         // treats all live chunks as loose.
@@ -399,8 +350,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r) {
         }
 
         // (Re)build the three small scene tables (gridInfo counts+descriptors, cellMap, looseList)
-        // from current CPU state. Small and off the hot path, so a membership change just rebuilds
-        // them; old handles are destroyed to avoid leaking.
+        // from current CPU state.
         void syncSceneTables(projv::Scene& scene, GPUData& gpuData) {
             auto t0 = std::chrono::high_resolution_clock::now();
             std::vector<uint32_t> looseList = computeLooseList(scene);
@@ -440,109 +390,11 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r) {
             core::warn("[PERF] syncSceneTables: {} grids {} loose {} chunks: {:.2f}ms",
                        scene.grids.size(), looseList.size(), scene.chunks.size(), ms);
         }
-
-        // Write one chunk's 4-texel header slot (row == handle). No-op if the header texture is
-        // invalid (headless).
-        void writeHeaderRow(GPUData& gpuData, ChunkHandle handle, const GPUChunkHeader& h) {
-            if (!bgfx::isValid(gpuData.headerTexture)) return;
-            const bgfx::Memory* mem = bgfx::copy(&h, sizeof(GPUChunkHeader));
-            bgfx::updateTexture2D(gpuData.headerTexture, 0, 0, uint16_t(handle * 4), 0, 4, 1, mem);
-        }
-
-        // Enlarge a data texture in place, preserving every existing blob's linear offset (the shader
-        // addresses texels by linear index, so a width change is transparent). Adds the new tail to
-        // the allocator. Rebuilds the backing texture from the pool when it is live; pure bookkeeping
-        // when headless.
-        void growDataTexture(projv::Scene& scene, GPUData& gpuData, bool tree64, uint32_t minExtraTexels) {
-            auto t0 = std::chrono::high_resolution_clock::now();
-            RangeAllocator& alloc = tree64 ? gpuData.tree64Alloc : gpuData.voxelTypeAlloc;
-            uint32_t& tw = tree64 ? gpuData.tree64Width : gpuData.voxelTypeWidth;
-            uint32_t& th = tree64 ? gpuData.tree64Height : gpuData.voxelTypeHeight;
-            bgfx::TextureHandle& tex = tree64 ? gpuData.tree64Texture : gpuData.voxelTypeDataTexture;
-
-            uint32_t oldCap = tw * th;
-            uint32_t target = oldCap + std::max(minExtraTexels, oldCap / 2 + 1024);
-            uint32_t w, h;
-            uint32_t maxSz = bgfx::isValid(tex) ? maxTexSize() : 0xFFFFFFFFu;
-            uint32_t newCap = chooseDataDims(target, w, h, maxSz);
-            if (newCap <= oldCap) newCap = oldCap + minExtraTexels; // best effort under the size cap
-            if (newCap <= oldCap) { core::error("growDataTexture: cannot grow past max texture size"); auto t1 = std::chrono::high_resolution_clock::now(); double ms = std::chrono::duration<double, std::milli>(t1 - t0).count(); core::warn("[PERF] growDataTexture {}: FAILED {:.2f}ms", tree64?"tree64":"voxelType", ms); return; }
-
-            if (bgfx::isValid(tex)) {
-                std::vector<uint32_t> buf(static_cast<size_t>(w) * h * 4, 0u);
-                int liveCount = 0;
-                for (size_t b = 0; b < scene.geometryPool.size(); b++) {
-                    const GPUBlobRange& r = gpuData.blobRanges[b];
-                    if (!r.uploaded) continue;
-                    liveCount++;
-                    std::vector<uint32_t> texels = tree64 ? packGeometryTexels(scene.geometryPool[b].geometry)
-                                                          : packVoxelTypeTexels(scene.geometryPool[b].voxelTypeData);
-                    uint32_t off = tree64 ? r.geomTexelOffset : r.typeTexelOffset;
-                    std::copy(texels.begin(), texels.end(), buf.begin() + size_t(off) * 4);
-                }
-                bgfx::destroy(tex);
-                tex = createDataTexture(w, h, buf);
-                auto t1 = std::chrono::high_resolution_clock::now();
-                double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                core::warn("[PERF] growDataTexture {}: oldCap={} newCap={} liveBlobs={} {:.2f}ms",
-                           tree64?"tree64":"voxelType", oldCap, newCap, liveCount, ms);
-            }
-            tw = w; th = h;
-            alloc.capacity = newCap;
-            alloc.free(oldCap, newCap - oldCap);
-        }
-
-        // Allocate `texels` from a data texture, growing it if the pool is full.
-        uint32_t allocOrGrow(projv::Scene& scene, GPUData& gpuData, bool tree64, uint32_t texels) {
-            RangeAllocator& alloc = tree64 ? gpuData.tree64Alloc : gpuData.voxelTypeAlloc;
-            uint32_t off = alloc.alloc(texels);
-            if (off == RangeAllocator::INVALID) {
-                growDataTexture(scene, gpuData, tree64, texels);
-                off = alloc.alloc(texels);
-            }
-            return off;
-        }
-
-        // Ensure the header texture can hold `handle` as a slot, growing (rebuilding from all chunks)
-        // if needed.
-        void ensureHeaderCapacity(projv::Scene& scene, GPUData& gpuData, ChunkHandle handle) {
-            if (handle < gpuData.headerCapacity) return;
-            bool live = bgfx::isValid(gpuData.headerTexture);
-            uint32_t maxSlots = live ? maxTexSize() / 4 : 0x3FFFFFFFu;
-            uint32_t newCap = std::min(withHeadroom(handle + 1), maxSlots);
-            if (newCap <= handle) { core::error("ensureHeaderCapacity: header slot {} exceeds max texture width", handle); return; }
-            gpuData.headerCapacity = newCap;
-            if (!live) return; // headless: just track the capacity
-            std::vector<GPUChunkHeader> headers(newCap, degenerateHeader());
-            for (uint32_t h = 0; h < scene.chunks.size() && h < newCap; h++) {
-                const Chunk& c = scene.chunks[h];
-                if (c.alive && c.geometryPoolIndex >= 0)
-                    headers[h] = makeHeader(c, gpuData.blobRanges[c.geometryPoolIndex]);
-            }
-            bgfx::destroy(gpuData.headerTexture);
-            gpuData.headerTexture = createHeaderTexture(headers);
-        }
-
-// Upload a blob's geometry to its (already-allocated) GPU range.
-void uploadBlobGeometry(GPUData& gpuData, const GeometryBlob& blob, const GPUBlobRange& r) {
-    auto t0 = std::chrono::high_resolution_clock::now();
-    uploadTexelRange(gpuData.tree64Texture, gpuData.tree64Width, r.geomTexelOffset,
-                     packGeometryTexels(blob.geometry));
-    uploadTexelRange(gpuData.voxelTypeDataTexture, gpuData.voxelTypeWidth, r.typeTexelOffset,
-                     packVoxelTypeTexels(blob.voxelTypeData));
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    core::warn("[PERF] uploadBlobGeometry: {} geom {} type: {:.2f}ms",
-               blob.geometry.size(), blob.voxelTypeData.size(), ms);
-}
     }
 
     // Build (or rebuild) the tree64/voxelType/header textures from current scene state via one contiguous
-    // bulk pack + a single createTexture2D per texture — the proven, always-correct upload the eager path
-    // uses. Reassigns every blob's GPU range and reseeds the allocators. Used both for the initial build
-    // and, from applySceneMutations, whenever the resident blob set changes (so streaming never depends on
-    // the incremental per-blob upload for a blob's *contents*). Destroys the old data/header textures first;
-    // leaves samplers and the small scene tables alone.
+    // bulk pack + a single createTexture2D per texture. Reassigns every blob's GPU range and reseeds the
+    // allocators. Destroys the old data/header textures first; leaves samplers and the small scene tables alone.
     static void buildDataAndHeaderTextures(projv::Scene& scene, GPUData& gpuData) {
         auto t0 = std::chrono::high_resolution_clock::now();
         // 1. Assign each live blob a contiguous GPU range and pack the linear texel buffers.
@@ -596,36 +448,11 @@ void uploadBlobGeometry(GPUData& gpuData, const GeometryBlob& blob, const GPUBlo
                    liveBlobs, scene.chunks.size(), geomUsed, typeUsed, ms);
     }
 
-    // Rebuild ONLY the header texture from current chunk state, in one bulk upload. Used after a batch
-    // that changed chunk membership but not the blob set (e.g. a second instance sharing existing blobs
-    // loading/unloading): the shared-blob instances' header rows would otherwise depend on the incremental
-    // per-chunk writeHeaderRow path, which desyncs. A no-op until the header texture exists (headless/pre-build).
-    static void rebuildHeaderTexture(projv::Scene& scene, GPUData& gpuData) {
-        auto t0 = std::chrono::high_resolution_clock::now();
-        uint32_t maxSlots = maxTexSize() / 4;
-        gpuData.headerCapacity = std::min(withHeadroom(static_cast<uint32_t>(scene.chunks.size())), maxSlots);
-        if (!bgfx::isValid(gpuData.headerTexture)) return;
-        std::vector<GPUChunkHeader> headers(gpuData.headerCapacity, degenerateHeader());
-        for (uint32_t h = 0; h < scene.chunks.size() && h < gpuData.headerCapacity; h++) {
-            const Chunk& c = scene.chunks[h];
-            if (c.alive && c.geometryPoolIndex >= 0) {
-                if (static_cast<size_t>(c.geometryPoolIndex) >= gpuData.blobRanges.size()) continue;
-                headers[h] = makeHeader(c, gpuData.blobRanges[c.geometryPoolIndex]);
-            }
-        }
-        bgfx::destroy(gpuData.headerTexture);
-        gpuData.headerTexture = createHeaderTexture(headers);
-        auto t1 = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        core::warn("[PERF] rebuildHeaderTexture: {} chunks capacity={} {:.2f}ms",
-                   scene.chunks.size(), gpuData.headerCapacity, ms);
-    }
-
     GPUData createTexturesForScene(projv::Scene& scene) {
         GPUData gpuData;
 
         // Single-model: fold any chunk still owning geometry (legacy loaders) into the refcounted pool
-        // so the build and every incremental primitive read only from Scene.geometryPool.
+        // so the build reads only from Scene.geometryPool.
         for (Chunk& c : scene.chunks)
             if (c.alive && c.geometryPoolIndex < 0) internChunkGeometry(scene, c);
 
@@ -644,184 +471,6 @@ void uploadBlobGeometry(GPUData& gpuData, const GeometryBlob& blob, const GPUBlo
         gpuData.looseListSampler = bgfx::createUniform("looseList", bgfx::UniformType::Sampler);
 
         return gpuData;
-    }
-
-    // No-sync core of addChunkToGPU: does everything except rebuilding the small scene tables, so a
-    // batch (applySceneMutations) can apply many adds and sync once. The public wrapper syncs per call.
-    static void addChunkToGPUCore(projv::Scene& scene, GPUData& gpuData, ChunkHandle handle) {
-        if (handle >= scene.chunks.size()) { core::warn("addChunkToGPU: handle {} out of range", handle); return; }
-        Chunk& chunk = scene.chunks[handle];
-        if (!chunk.alive) { core::warn("addChunkToGPU: chunk {} is not alive", handle); return; }
-        auto t0 = std::chrono::high_resolution_clock::now();
-        internChunkGeometry(scene, chunk);
-        ensureBlobRanges(scene, gpuData);
-        int32_t b = chunk.geometryPoolIndex;
-        GPUBlobRange& r = gpuData.blobRanges[b];
-        if (!r.uploaded) {
-            const GeometryBlob& blob = scene.geometryPool[b];
-            uint32_t nodes = static_cast<uint32_t>(blob.geometry.size() / 3);
-            uint32_t typeTexels = static_cast<uint32_t>((blob.voxelTypeData.size() + 3) / 4);
-            uint32_t go = allocOrGrow(scene, gpuData, true, nodes);
-            uint32_t to = allocOrGrow(scene, gpuData, false, typeTexels);
-            r = GPUBlobRange{go, nodes, to, typeTexels, static_cast<uint32_t>(blob.voxelTypeData.size()), true};
-            uploadBlobGeometry(gpuData, blob, r);
-        }
-        ensureHeaderCapacity(scene, gpuData, handle);
-        writeHeaderRow(gpuData, handle, makeHeader(chunk, r));
-
-        if (chunk.gridIndex < 0) {
-            if (std::find(scene.looseChunks.begin(), scene.looseChunks.end(), handle) == scene.looseChunks.end())
-                scene.looseChunks.push_back(handle);
-        } else if (chunk.gridIndex < static_cast<int32_t>(scene.grids.size())) {
-            SceneGrid& g = scene.grids[chunk.gridIndex];
-            if (chunk.cellIndex >= 0 && chunk.cellIndex < static_cast<int32_t>(g.cellToChunk.size()))
-                g.cellToChunk[chunk.cellIndex] = static_cast<int32_t>(handle);
-        }
-        scene.looseChunkCount = static_cast<uint32_t>(scene.looseChunks.size());
-        auto t1 = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        core::warn("[PERF] addChunkToGPUCore handle={} poolIdx={}: {:.2f}ms", handle, b, ms);
-    }
-
-    void addChunkToGPU(projv::Scene& scene, GPUData& gpuData, ChunkHandle handle) {
-        addChunkToGPUCore(scene, gpuData, handle);
-        syncSceneTables(scene, gpuData);
-    }
-
-void updateChunkGeometryOnGPU(projv::Scene& scene, GPUData& gpuData, ChunkHandle handle) {
-    auto t0 = std::chrono::high_resolution_clock::now();
-    if (handle >= scene.chunks.size()) { core::warn("updateChunkGeometryOnGPU: handle {} out of range", handle); return; }
-    Chunk& chunk = scene.chunks[handle];
-    if (!chunk.alive || chunk.geometryPoolIndex < 0) { core::warn("updateChunkGeometryOnGPU: chunk {} not renderable", handle); return; }
-    ensureBlobRanges(scene, gpuData);
-    int32_t b = chunk.geometryPoolIndex;
-    const GeometryBlob& blob = scene.geometryPool[b];
-    GPUBlobRange& r = gpuData.blobRanges[b];
-    uint32_t nodes = static_cast<uint32_t>(blob.geometry.size() / 3);
-    uint32_t typeTexels = static_cast<uint32_t>((blob.voxelTypeData.size() + 3) / 4);
-
-        uint32_t oldGeomOff = r.geomTexelOffset, oldGeomLen = r.geomTexelLen;
-        uint32_t oldTypeOff = r.typeTexelOffset, oldTypeLen = r.typeTexelLen;
-        bool wasUploaded = r.uploaded;
-
-        r.uploaded = false;
-
-        bool geomRelocated = !wasUploaded || nodes > oldGeomLen;
-        if (geomRelocated) {
-            r.geomTexelOffset = allocOrGrow(scene, gpuData, true, nodes);
-            if (wasUploaded) gpuData.tree64Alloc.free(oldGeomOff, oldGeomLen);
-        }
-        r.geomTexelLen = nodes;
-        bool typeRelocated = !wasUploaded || typeTexels > oldTypeLen;
-        if (typeRelocated) {
-            r.typeTexelOffset = allocOrGrow(scene, gpuData, false, typeTexels);
-            if (wasUploaded) gpuData.voxelTypeAlloc.free(oldTypeOff, oldTypeLen);
-        }
-    r.typeTexelLen = typeTexels;
-    r.typeUintLen = static_cast<uint32_t>(blob.voxelTypeData.size());
-    r.uploaded = true;
-    uploadBlobGeometry(gpuData, blob, r);
-
-    bool relocated = wasUploaded && (r.geomTexelOffset != oldGeomOff || r.typeTexelOffset != oldTypeOff);
-
-    if (relocated && scene.geometryPool[b].refCount > 1) {
-        int rewritten = 0;
-        for (uint32_t h = 0; h < scene.chunks.size(); h++) {
-            const Chunk& c = scene.chunks[h];
-            if (c.alive && c.geometryPoolIndex == b) {
-                writeHeaderRow(gpuData, h, makeHeader(c, r));
-                rewritten++;
-            }
-        }
-    } else {
-        writeHeaderRow(gpuData, handle, makeHeader(chunk, r));
-    }
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    core::warn("[PERF] updateChunkGeometryOnGPU handle={} poolIdx={} nodes={} relocated={}: {:.2f}ms",
-               handle, b, nodes, relocated, ms);
-}
-
-    // No-sync core of removeChunkFromGPU (see addChunkToGPUCore). The public wrapper syncs per call.
-    static void removeChunkFromGPUCore(projv::Scene& scene, GPUData& gpuData, ChunkHandle handle) {
-        auto t0 = std::chrono::high_resolution_clock::now();
-        if (handle >= scene.chunks.size()) { core::warn("removeChunkFromGPU: handle {} out of range", handle); return; }
-        Chunk& chunk = scene.chunks[handle];
-        if (!chunk.alive) return;
-        ensureBlobRanges(scene, gpuData);
-        int32_t b = chunk.geometryPoolIndex;
-        if (b >= 0) {
-            GeometryBlob& blob = scene.geometryPool[b];
-            if (blob.refCount > 0) blob.refCount--;
-            if (blob.refCount == 0) {
-                GPUBlobRange& r = gpuData.blobRanges[b];
-                if (r.uploaded) {
-                    gpuData.tree64Alloc.free(r.geomTexelOffset, r.geomTexelLen);
-                    gpuData.voxelTypeAlloc.free(r.typeTexelOffset, r.typeTexelLen);
-                    r = GPUBlobRange{};
-                }
-                blob = GeometryBlob{};
-                scene.blobFreeList.push_back(static_cast<uint32_t>(b));
-            }
-        }
-
-        if (chunk.gridIndex >= 0 && chunk.gridIndex < static_cast<int32_t>(scene.grids.size())) {
-            SceneGrid& g = scene.grids[chunk.gridIndex];
-            if (chunk.cellIndex >= 0 && chunk.cellIndex < static_cast<int32_t>(g.cellToChunk.size()))
-                g.cellToChunk[chunk.cellIndex] = -1;
-        } else {
-            auto it = std::find(scene.looseChunks.begin(), scene.looseChunks.end(), handle);
-            if (it != scene.looseChunks.end()) scene.looseChunks.erase(it);
-        }
-
-        writeHeaderRow(gpuData, handle, degenerateHeader());
-        chunk.alive = false;
-        chunk.geometryPoolIndex = -1;
-        scene.chunkFreeList.push_back(handle);
-        scene.looseChunkCount = static_cast<uint32_t>(scene.looseChunks.size());
-        auto t1 = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        core::warn("[PERF] removeChunkFromGPUCore handle={} poolIdx={} {:.2f}ms", handle, b, ms);
-    }
-
-    void removeChunkFromGPU(projv::Scene& scene, GPUData& gpuData, ChunkHandle handle) {
-        removeChunkFromGPUCore(scene, gpuData, handle);
-        syncSceneTables(scene, gpuData);
-    }
-
-    // Drains a mutation queue with a single table sync at the end (see scene_dynamics.h). The Add/Remove
-    // cores skip their per-call syncSceneTables; Update never changes membership, so it needs no sync.
-    void applySceneMutations(projv::Scene& scene, GPUData& gpuData, std::vector<PendingSceneMutation>& queue) {
-        auto t0 = std::chrono::high_resolution_clock::now();
-        int adds = 0, updates = 0, removes = 0;
-        bool membershipChanged = false;
-        for (const PendingSceneMutation& m : queue) {
-            switch (m.kind) {
-                case SceneMutationKind::Add:    addChunkToGPUCore(scene, gpuData, m.handle); membershipChanged = true; adds++; break;
-                case SceneMutationKind::Update: updateChunkGeometryOnGPU(scene, gpuData, m.handle); updates++; break;
-                case SceneMutationKind::Remove: removeChunkFromGPUCore(scene, gpuData, m.handle); membershipChanged = true; removes++; break;
-            }
-        }
-        auto t1 = std::chrono::high_resolution_clock::now();
-        // The Add/Update/Remove cores each maintain the data + header textures incrementally
-        // (allocate/relocate a blob's range, grow only on genuine capacity overflow, and rewrite
-        // affected header rows for every sharer of a relocated blob). A membership change still
-        // runs the header-only rebuildHeaderTexture so shared-blob instances' rows stay in sync
-        // (they otherwise depend on the per-chunk writeHeaderRow, which can desync); this is
-        // header-only and cheap.
-        if (membershipChanged) {
-            rebuildHeaderTexture(scene, gpuData);
-        }
-        auto t2 = std::chrono::high_resolution_clock::now();
-        if (!queue.empty()) syncSceneTables(scene, gpuData);
-        auto t3 = std::chrono::high_resolution_clock::now();
-        double mutMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        double rebuildMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
-        double syncMs = std::chrono::duration<double, std::milli>(t3 - t2).count();
-        double totalMs = std::chrono::duration<double, std::milli>(t3 - t0).count();
-        // core::warn("[PERF] applySceneMutations: {}add {}update {}remove mut={:.2f}ms rebuild={:.2f}ms sync={:.2f}ms total={:.2f}ms",
-        //            adds, updates, removes, mutMs, rebuildMs, syncMs, totalMs);
-        queue.clear();
     }
 
     void destroyGPUData(GPUData& gpuData) {

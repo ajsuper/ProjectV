@@ -91,38 +91,6 @@ namespace projv::graphics {
     GPUData createTexturesForScene(projv::Scene& scene);
 
     /**
-     * Uploads a chunk that is not yet resident on the GPU: allocates a GPU range for its geometry-pool
-     * blob if this is the blob's first resident reference (else reuses the shared range), writes the
-     * chunk's header row (== its handle), and registers it in the loose list or a grid cell per its
-     * residency key. Grows a data texture if an allocation overflows. Safe to call headless (skips the
-     * bgfx uploads when the textures are invalid) so the allocation bookkeeping is unit-testable.
-     * @param scene The scene owning the chunk and geometry pool.
-     * @param gpuData The GPU data/allocation table to mutate.
-     * @param handle The chunk to upload (index into scene.chunks; must be alive and pooled).
-     */
-    void addChunkToGPU(projv::Scene& scene, GPUData& gpuData, ChunkHandle handle);
-
-    /**
-     * Reflects an in-memory geometry edit (e.g. a mutability edit) on the GPU: re-fits the chunk's
-     * blob into its GPU range (in place if it still fits, else frees and reallocates), re-uploads the
-     * geometry, and rewrites the single header row. No grid/loose membership change.
-     * @param scene The scene owning the chunk and geometry pool.
-     * @param gpuData The GPU data/allocation table to mutate.
-     * @param handle The chunk whose pool blob changed.
-     */
-    void updateChunkGeometryOnGPU(projv::Scene& scene, GPUData& gpuData, ChunkHandle handle);
-
-    /**
-     * Removes a chunk from the GPU: decrements its blob's refcount (freeing the blob's GPU range and
-     * recycling its pool slot at zero), writes a degenerate header row (scale <= 0) the shader skips,
-     * clears its loose-list/grid-cell entry, and recycles the chunk slot via scene.chunkFreeList.
-     * @param scene The scene owning the chunk and geometry pool.
-     * @param gpuData The GPU data/allocation table to mutate.
-     * @param handle The chunk to remove.
-     */
-    void removeChunkFromGPU(projv::Scene& scene, GPUData& gpuData, ChunkHandle handle);
-
-    /**
      * Destroys every texture and uniform held by a GPUData and resets its layout state. Fixes the
      * leak from repeatedly rebuilding a scene; call before reloading.
      * @param gpuData The GPU data to tear down.
