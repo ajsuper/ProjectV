@@ -296,6 +296,152 @@ int main(int argc, char** argv) {
               "programmatic: dataRefID in range");
     }
 
+    // --- Programmatic loose-chunk overflow → grid conversion test ---
+    {
+        // Build a Scene with one loose chunk (64^3, 5 seed voxels) and queue an add
+        // that overflows the chunk's resolution. updateScene should convert the loose
+        // chunk to a 1-cell grid, expand it to accommodate the overflow, and process
+        // both the in-bounds and overflow edit via the Grid cell-bucketing path.
+        projv::Scene testScene;
+
+        projv::ChunkHeader hdr;
+        hdr.chunkID     = 1;
+        hdr.position    = projv::core::vec3(0.0f);
+        hdr.scale       = 32.0f;
+        hdr.voxelScale  = 0.5f;
+        hdr.resolution  = 64;
+        hdr.rotation    = projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f);
+
+        projv::Chunk chunk;
+        chunk.header = hdr;
+        chunk.LOD    = 0;
+        chunk.alive  = true;
+
+        // Seed with 5 voxels.
+        projv::VoxelBatch seed;
+        for (int i = 0; i < 5; ++i)
+            seed.push_back(projv::utils::createVoxel(
+                projv::Color{128, 128, 128},
+                projv::core::ivec3(i * 2, i * 2, i * 2)));
+        projv::utils::moveVoxelBatchToChunk(seed, chunk);
+        projv::utils::updateChunkFromItsVoxelBatch(chunk, true);
+        chunk.header.resolution = 64;
+        chunk.header.scale = 32.0f;
+
+        int32_t blobIdx = projv::internChunkGeometry(testScene, chunk);
+        check(blobIdx >= 0, "p3-convert: internChunkGeometry succeeded");
+        testScene.chunks.push_back(std::move(chunk));
+
+        // Loose component.
+        projv::ComponentHandle h =
+            static_cast<projv::ComponentHandle>(testScene.components.size());
+        testScene.components.push_back(projv::ComponentRecord{
+            projv::ComponentKind::Chunk,
+            0,                              // chunkHandle
+            -1,                             // gridIndex
+            "internal/p3-convert.data",
+            {},
+            -1
+        });
+        testScene.looseChunks.push_back(0);
+        testScene.looseChunkCount = 1;
+
+        check(testScene.components.size() == 1, "p3-convert: one component");
+        check(testScene.looseChunkCount == 1, "p3-convert: one loose chunk");
+
+        // Queue two adds: one in-bounds (10,10,10), one overflowing (70,0,0).
+        // 70 >= 64 triggers overflow conversion.
+        std::vector<projv::PendingVoxelOp> adds{
+            {false, {10, 10, 10}, projv::Color{255, 0, 0}},
+            {false, {70, 0, 0},   projv::Color{0, 255, 0}},
+        };
+        bool ok = projv::utils::queueVoxelAdd(testScene, h, adds);
+        check(ok, "p3-convert: queueVoxelAdd returned true");
+        check(testScene.components[0].editQueue.ops.size() == 2,
+              "p3-convert: 2 ops queued");
+
+        // Initial component kind is Chunk.
+        check(testScene.components[0].kind == projv::ComponentKind::Chunk,
+              "p3-convert: kind is Chunk before updateScene");
+
+        uint32_t processed = projv::utils::updateScene(testScene);
+        check(processed >= 1, "p3-convert: updateScene processed >= 1");
+
+        // Post-edit: component should now be a Grid.
+        check(testScene.components[0].kind == projv::ComponentKind::Grid,
+              "p3-convert: kind converted to Grid");
+        check(testScene.components[0].gridIndex >= 0,
+              "p3-convert: gridIndex assigned");
+        check(testScene.components[0].editQueue.ops.empty(),
+              "p3-convert: editQueue cleared");
+
+        int32_t gridIdx = testScene.components[0].gridIndex;
+        const projv::SceneGrid& grid = testScene.grids[gridIdx];
+
+        // Grid should have dims (2,1,1) — original cell 0 + overflow cell 1.
+        check(grid.dims == projv::core::ivec3(2, 1, 1),
+              "p3-convert: grid dims expanded to (2,1,1)");
+        check(grid.cellToChunk.size() == 2,
+              "p3-convert: cellToChunk size == 2");
+
+        // Cell 0 should still point at the original chunk.
+        check(grid.cellToChunk[0] == 0,
+              "p3-convert: cell 0 points at original chunk");
+        check(testScene.chunks[0].gridIndex == gridIdx,
+              "p3-convert: chunk 0 gridIndex matches");
+        check(testScene.chunks[0].cellIndex == 0,
+              "p3-convert: chunk 0 cellIndex == 0");
+
+        // Cell 1 should have a new chunk.
+        int32_t cell1Chunk = grid.cellToChunk[1];
+        check(cell1Chunk >= 0, "p3-convert: cell 1 has new chunk");
+        int32_t cell1Pool = testScene.chunks[cell1Chunk].geometryPoolIndex;
+        check(cell1Pool >= 0, "p3-convert: cell 1 chunk has pool blob");
+        check(testScene.chunks[cell1Chunk].gridIndex == gridIdx,
+              "p3-convert: new chunk gridIndex matches");
+        check(testScene.chunks[cell1Chunk].cellIndex == 1,
+              "p3-convert: new chunk cellIndex == 1");
+
+        // The original chunk should have forked its pool blob (COW).
+        check(testScene.chunks[0].geometryPoolIndex != blobIdx,
+              "p3-convert: chunk 0 COW forked");
+
+        // Original blob refCount unchanged.
+        if (static_cast<size_t>(blobIdx) < testScene.geometryPool.size()) {
+            check(testScene.geometryPool[blobIdx].refCount == 1,
+                  "p3-convert: original blob refCount unchanged");
+        }
+
+        // Forked blob at cell 0: 5 seed + 1 add (in-bounds) = 6 voxels.
+        int32_t newPool0 = testScene.chunks[0].geometryPoolIndex;
+        if (newPool0 >= 0 && static_cast<size_t>(newPool0) < testScene.geometryPool.size()) {
+            size_t vc = testScene.geometryPool[newPool0].voxelTypeData.size() / 3;
+            check(vc == 6, "p3-convert: cell 0 has 6 voxels (5 seed + 1 add)");
+        }
+
+        // New cell at cell 1: 1 add (the overflow at local (6,0,0)).
+        if (cell1Pool >= 0 && static_cast<size_t>(cell1Pool) < testScene.geometryPool.size()) {
+            size_t vc = testScene.geometryPool[cell1Pool].voxelTypeData.size() / 3;
+            check(vc == 1, "p3-convert: cell 1 has 1 voxel (overflow add)");
+            check(testScene.geometryPool[cell1Pool].refCount == 1,
+                  "p3-convert: cell 1 blob refCount == 1");
+        }
+
+        // Loose chunk count decreased (chunk no longer loose).
+        check(testScene.looseChunkCount == 0,
+              "p3-convert: loose chunk count decremented");
+
+        // dataRefID assigned.
+        check(testScene.components[0].dataRefID >= 0,
+              "p3-convert: dataRefID assigned");
+        check(static_cast<size_t>(testScene.components[0].dataRefID) <
+                  testScene.dataReferences.size(),
+              "p3-convert: dataRefID in range");
+
+        // Grid origin unchanged — the chunk didn't move.
+        check(grid.origin.x == 0.0f, "p3-convert: grid origin x unchanged");
+    }
+
     // --- Programmatic grid component test ---
     {
         projv::Scene testScene;
@@ -481,10 +627,10 @@ int main(int argc, char** argv) {
     }
 
     if (g_failures == 0) {
-        projv::core::info("Phase 2 editing: all checks passed.");
+        projv::core::info("Phase 3 editing: all checks passed.");
         return 0;
     } else {
-        projv::core::error("Phase 2 editing: {} check(s) failed.", g_failures);
+        projv::core::error("Phase 3 editing: {} check(s) failed.", g_failures);
         return 1;
     }
 }

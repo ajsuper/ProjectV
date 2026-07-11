@@ -6,6 +6,7 @@
 
 #include <unordered_map>
 #include <unordered_set>
+#include <algorithm>
 #include <glm/gtc/quaternion.hpp>
 
 namespace projv::utils {
@@ -57,8 +58,12 @@ namespace projv::utils {
             int32_t oldIdx = chunk.geometryPoolIndex;
             int32_t newIdx = forkBlob(scene, oldIdx);
             chunk.geometryPoolIndex = newIdx;
+            core::warn("[EDIT] applyEditsToChunk: chunkHandle={} oldPool={} newPool={} adds={} removes={}",
+                       chunk.cellIndex, oldIdx, newIdx, adds.size(), removes.size());
 
             VoxelBatch current = getChunkVoxelBatch(scene, chunk, true);
+            size_t preVoxelCount = current.size();
+            core::warn("[EDIT] applyEditsToChunk: pre-edit voxels={}", preVoxelCount);
 
             if (!removes.empty()) {
                 VoxelBatch rmBatch;
@@ -73,12 +78,24 @@ namespace projv::utils {
                 addVoxelBatchAToVoxelBatchB(addBatch, current, {0, 0, 0});
             }
 
+            core::warn("[EDIT] applyEditsToChunk: post-edit voxels={}", current.size());
+
             moveVoxelBatchToChunk(current, chunk);
             updateChunkFromItsVoxelBatch(chunk, /*clearBatch=*/true);
+
+            core::warn("[EDIT] applyEditsToChunk: done finalRes={} scale={} geomNodes={} voxelTypes={}",
+                       chunk.header.resolution, chunk.header.scale,
+                       chunk.geometryData.size() / 3,
+                       chunk.voxelTypeData.size());
 
             GeometryBlob& fork = scene.geometryPool[chunk.geometryPoolIndex];
             fork.geometry      = chunk.geometryData;
             fork.voxelTypeData = chunk.voxelTypeData;
+
+            core::warn("[EDIT] applyEditsToChunk: done res={} geomNodes={} voxelType={}",
+                       chunk.header.resolution,
+                       chunk.geometryData.size() / 3,
+                       chunk.voxelTypeData.size());
         }
 
         // Drain one component's queue. Handles both Chunk (loose) and Grid components.
@@ -92,44 +109,70 @@ namespace projv::utils {
             if (comp.kind == ComponentKind::Chunk) {
                 Chunk& chunk = scene.chunks[comp.chunkHandle];
 
-                // COW fork.
-                int32_t oldIdx = chunk.geometryPoolIndex;
-                int32_t newIdx = forkBlob(scene, oldIdx);
-                chunk.geometryPoolIndex = newIdx;
-
-                VoxelBatch current = getChunkVoxelBatch(scene, chunk, true);
-
-                VoxelBatch adds, removes;
-                adds.reserve(comp.editQueue.ops.size());
-                removes.reserve(comp.editQueue.ops.size());
-                for (const PendingVoxelOp& op : comp.editQueue.ops) {
-                    core::ivec3 local{
-                        floorMod(op.position.x, static_cast<int32_t>(res)),
-                        floorMod(op.position.y, static_cast<int32_t>(res)),
-                        floorMod(op.position.z, static_cast<int32_t>(res))
-                    };
-                    if (local.x < 0 || local.y < 0 || local.z < 0 ||
-                        local.x >= static_cast<int32_t>(res) ||
-                        local.y >= static_cast<int32_t>(res) ||
-                        local.z >= static_cast<int32_t>(res)) {
-                        continue;
+                // P3: Check if any op overflows the chunk's resolution. If so, convert to Grid.
+                bool overflows = false;
+                for (const auto& op : comp.editQueue.ops) {
+                    if (op.position.x >= static_cast<int32_t>(res) ||
+                        op.position.y >= static_cast<int32_t>(res) ||
+                        op.position.z >= static_cast<int32_t>(res) ||
+                        op.position.x < 0 || op.position.y < 0 || op.position.z < 0) {
+                        overflows = true;
+                        break;
                     }
-                    Voxel v = createVoxel(op.color, local);
-                    (op.isAdd ? adds : removes).push_back(v);
                 }
 
-                if (!removes.empty()) removeVoxelBatchAFromVoxelBatchB(removes, current);
-                if (!adds.empty())    addVoxelBatchAToVoxelBatchB(adds, current, {0, 0, 0});
+                if (overflows) {
+                    core::warn("[EDIT] Chunk overflow detected at chunkHandle={} res={} -- converting to Grid",
+                               comp.chunkHandle, res);
+                    convertChunkToGrid(scene, h);
+                    core::warn("[EDIT] Chunk converted: new gridIndex={} dims=({},{},{})",
+                               scene.components[h].gridIndex,
+                               scene.grids[scene.components[h].gridIndex].dims.x,
+                               scene.grids[scene.components[h].gridIndex].dims.y,
+                               scene.grids[scene.components[h].gridIndex].dims.z);
+                    // Fall through to Grid path below with the same editQueue.
+                } else {
+                    core::warn("[EDIT] Chunk path: processing {} ops on chunkHandle={} res={}",
+                               comp.editQueue.ops.size(), comp.chunkHandle, res);
+                    // COW fork.
+                    int32_t oldIdx = chunk.geometryPoolIndex;
+                    int32_t newIdx = forkBlob(scene, oldIdx);
+                    chunk.geometryPoolIndex = newIdx;
 
-                moveVoxelBatchToChunk(current, chunk);
-                updateChunkFromItsVoxelBatch(chunk, /*clearBatch=*/true);
+                    VoxelBatch current = getChunkVoxelBatch(scene, chunk, true);
 
-                GeometryBlob& fork = scene.geometryPool[chunk.geometryPoolIndex];
-                fork.geometry      = chunk.geometryData;
-                fork.voxelTypeData = chunk.voxelTypeData;
+                    VoxelBatch adds, removes;
+                    adds.reserve(comp.editQueue.ops.size());
+                    removes.reserve(comp.editQueue.ops.size());
+                    for (const PendingVoxelOp& op : comp.editQueue.ops) {
+                        core::ivec3 local{
+                            floorMod(op.position.x, static_cast<int32_t>(res)),
+                            floorMod(op.position.y, static_cast<int32_t>(res)),
+                            floorMod(op.position.z, static_cast<int32_t>(res))
+                        };
+                        if (local.x < 0 || local.y < 0 || local.z < 0 ||
+                            local.x >= static_cast<int32_t>(res) ||
+                            local.y >= static_cast<int32_t>(res) ||
+                            local.z >= static_cast<int32_t>(res)) {
+                            continue;
+                        }
+                        Voxel v = createVoxel(op.color, local);
+                        (op.isAdd ? adds : removes).push_back(v);
+                    }
 
-                comp.editQueue.ops.clear();
-                return true;
+                    if (!removes.empty()) removeVoxelBatchAFromVoxelBatchB(removes, current);
+                    if (!adds.empty())    addVoxelBatchAToVoxelBatchB(adds, current, {0, 0, 0});
+
+                    moveVoxelBatchToChunk(current, chunk);
+                    updateChunkFromItsVoxelBatch(chunk, /*clearBatch=*/true);
+
+                    GeometryBlob& fork = scene.geometryPool[chunk.geometryPoolIndex];
+                    fork.geometry      = chunk.geometryData;
+                    fork.voxelTypeData = chunk.voxelTypeData;
+
+                    comp.editQueue.ops.clear();
+                    return true;
+                }
             }
 
             // --- Grid component path ---
@@ -155,6 +198,10 @@ namespace projv::utils {
                     std::max(overallNewMax.z, cellCoord.z)
                 );
             }
+            core::warn("[EDIT] Grid path: comp={} ops={} res={} cellBounds min=({},{},{}) max=({},{},{})",
+                       h, comp.editQueue.ops.size(), res,
+                       overallNewMin.x, overallNewMin.y, overallNewMin.z,
+                       overallNewMax.x, overallNewMax.y, overallNewMax.z);
 
             // 2. Expand grid to include both extremes.
             expandGridToInclude(grid, overallNewMax, scene, comp.gridIndex);
@@ -195,6 +242,11 @@ namespace projv::utils {
                 const auto& adds    = perCellAdds[lin];
                 const auto& removes = perCellRemoves[lin];
 
+                core::warn("[EDIT] Grid path: cell lin={} chunkIdx={} adds={} removes={} dims=({},{},{}) originCell=({},{},{})",
+                           lin, chunkIdx, adds.size(), removes.size(),
+                           grid.dims.x, grid.dims.y, grid.dims.z,
+                           originCell.x, originCell.y, originCell.z);
+
                 if (chunkIdx < 0) {
                     // New cell: create an empty chunk.
                     if (!removes.empty()) {
@@ -225,16 +277,36 @@ namespace projv::utils {
                     VoxelBatch batch;
                     batch.reserve(adds.size());
                     for (auto& v : adds) batch.push_back(v);
+
+                    core::warn("[EDIT] Grid path: creating new chunk lin={} pos=({},{},{}) initRes={} voxelsInBatch={}",
+                               lin, chunkPos.x, chunkPos.y, chunkPos.z,
+                               newHdr.resolution, batch.size());
+
                     moveVoxelBatchToChunk(batch, newChunk);
                     updateChunkFromItsVoxelBatch(newChunk, /*clearBatch=*/true);
+
+                    core::warn("[EDIT] Grid path: after updateChunkFromItsVoxelBatch: finalRes={} scale={} geomNodes={} voxelTypes={}",
+                               newChunk.header.resolution, newChunk.header.scale,
+                               newChunk.geometryData.size() / 3,
+                               newChunk.voxelTypeData.size());
+
                     internChunkGeometry(scene, newChunk);
 
                     ChunkHandle newHandle = static_cast<ChunkHandle>(scene.chunks.size());
                     scene.chunks.push_back(std::move(newChunk));
                     grid.cellToChunk[lin] = static_cast<int32_t>(newHandle);
+
+                    core::warn("[EDIT] Grid path: created new chunk handle={} at cell lin={} pos=({},{},{}) res={} voxels={}",
+                               newHandle, lin, chunkPos.x, chunkPos.y, chunkPos.z,
+                               newHdr.resolution, batch.size());
                 } else {
                     // Existing cell: COW fork + apply edits.
                     Chunk& existingChunk = scene.chunks[chunkIdx];
+                    core::warn("[EDIT] Grid path: editing existing chunk handle={} cellLin={} pool={} oldRes={} forcing to {}",
+                               chunkIdx, existingChunk.cellIndex,
+                               existingChunk.geometryPoolIndex,
+                               existingChunk.header.resolution, res);
+                    existingChunk.header.resolution = res;
                     applyEditsToChunk(scene, existingChunk, adds, removes);
                 }
             }
@@ -247,6 +319,8 @@ namespace projv::utils {
     void expandGridToInclude(SceneGrid& grid, core::ivec3 cellCoord,
                              Scene& scene, int gridIndex) {
         (void)gridIndex;
+        core::ivec3 oldDims = grid.dims;
+        core::ivec3 oldOriginCell = grid.originCellCoord;
         core::ivec3 newMin(
             std::min(0, cellCoord.x),
             std::min(0, cellCoord.y),
@@ -259,6 +333,13 @@ namespace projv::utils {
         );
         core::ivec3 newDims = newMax - newMin + core::ivec3(1);
         if (newDims == grid.dims && newMin == core::ivec3(0)) return;
+
+        core::warn("[EDIT] expandGridToInclude: cellCoord=({},{},{}) oldDims=({},{},{}) newDims=({},{},{}) newMin=({},{},{}) oldOriginCell=({},{},{})",
+                   cellCoord.x, cellCoord.y, cellCoord.z,
+                   oldDims.x, oldDims.y, oldDims.z,
+                   newDims.x, newDims.y, newDims.z,
+                   newMin.x, newMin.y, newMin.z,
+                   oldOriginCell.x, oldOriginCell.y, oldOriginCell.z);
 
         std::vector<int32_t> newMap(newDims.x * newDims.y * newDims.z, -1);
         for (int z = 0; z < grid.dims.z; z++) {
@@ -278,6 +359,35 @@ namespace projv::utils {
         grid.originCellCoord = grid.originCellCoord + newMin;
         grid.dims = newDims;
         grid.cellToChunk = std::move(newMap);
+    }
+
+    void convertChunkToGrid(Scene& scene, ComponentHandle compHandle) {
+        ComponentRecord& comp = scene.components[compHandle];
+        Chunk& chunk = scene.chunks[comp.chunkHandle];
+
+        SceneGrid g;
+        g.origin    = chunk.header.position;
+        g.cellSize  = chunk.header.scale;
+        g.rotation  = chunk.header.rotation;
+        g.dims      = core::ivec3(1);
+        g.cellToChunk = {static_cast<int32_t>(comp.chunkHandle)};
+
+        int32_t gridIdx = static_cast<int32_t>(scene.grids.size());
+        chunk.gridIndex = gridIdx;
+        chunk.cellIndex = 0;
+        g.componentHandle = compHandle;
+        scene.grids.push_back(std::move(g));
+
+        // Remove from loose chunk tracking.
+        auto it = std::find(scene.looseChunks.begin(), scene.looseChunks.end(), comp.chunkHandle);
+        if (it != scene.looseChunks.end()) {
+            scene.looseChunks.erase(it);
+            scene.looseChunkCount = static_cast<uint32_t>(scene.looseChunks.size());
+        }
+
+        comp.kind = ComponentKind::Grid;
+        comp.gridIndex = gridIdx;
+        // chunkHandle stays valid — points at the chunk now resident in grid cell 0.
     }
 
     bool queueVoxelAdd(Scene& scene, ComponentHandle h,

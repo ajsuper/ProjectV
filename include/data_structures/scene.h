@@ -85,7 +85,8 @@ namespace projv{
         uint32_t geometryEndIndex;
         uint32_t voxelTypeDataStartIndex;
         uint32_t voxelTypeDataEndIndex;
-        uint32_t padding[2];
+        uint32_t dataRefID;
+        uint32_t padding[1];
         // 4th texel: world rotation quaternion [x, y, z, w]. Identity = (0,0,0,1).
         float rotationX;
         float rotationY;

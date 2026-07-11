@@ -46,7 +46,8 @@ namespace projv::graphics {
         }
 
 // Build the GPU header for a live chunk from its pool blob's current GPU range.
-GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r) {
+GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
+                              const Scene& scene) {
     GPUChunkHeader g{};
     g.chunkID = chunk.header.chunkID;
     g.geometryStartIndex = r.geomTexelOffset;
@@ -58,7 +59,12 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r) {
     g.positionZ = chunk.header.position.z;
     g.resolution = chunk.header.resolution;
     g.scale = chunk.header.scale;
-    g.padding[0] = 0; g.padding[1] = 0;
+    g.dataRefID = 0;
+    if (chunk.componentHandle < scene.components.size()) {
+        int32_t rid = scene.components[chunk.componentHandle].dataRefID;
+        if (rid >= 0) g.dataRefID = static_cast<uint32_t>(rid);
+    }
+    g.padding[0] = 0;
     g.rotationX = chunk.header.rotation.x;
     g.rotationY = chunk.header.rotation.y;
     g.rotationZ = chunk.header.rotation.z;
@@ -438,7 +444,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r) {
         for (uint32_t h = 0; h < scene.chunks.size() && h < gpuData.headerCapacity; h++) {
             const Chunk& c = scene.chunks[h];
             if (c.alive && c.geometryPoolIndex >= 0)
-                headers[h] = makeHeader(c, gpuData.blobRanges[c.geometryPoolIndex]);
+                headers[h] = makeHeader(c, gpuData.blobRanges[c.geometryPoolIndex], scene);
         }
         if (bgfx::isValid(gpuData.headerTexture)) bgfx::destroy(gpuData.headerTexture);
         gpuData.headerTexture = createHeaderTexture(headers);
@@ -471,6 +477,16 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r) {
         gpuData.looseListSampler = bgfx::createUniform("looseList", bgfx::UniformType::Sampler);
 
         return gpuData;
+    }
+
+    void rebuildSceneTextures(projv::Scene& scene, GPUData& gpuData) {
+        // 1-3. Rebuild data + header textures (destroys old, creates new).
+        buildDataAndHeaderTextures(scene, gpuData);
+
+        // 4. Rebuild small scene tables (gridInfo / cellMap / looseList).
+        syncSceneTables(scene, gpuData);
+
+        // Samplers are preserved from the initial createTexturesForScene call.
     }
 
     void destroyGPUData(GPUData& gpuData) {

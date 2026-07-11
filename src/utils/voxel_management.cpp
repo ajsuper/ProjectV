@@ -365,6 +365,14 @@ namespace projv::utils {
             farthestCoordinate = std::max(farthestCoordinate, std::max({pos.x, pos.y, pos.z}));
         }
         int resolutionToTheNearestPowOfTwo = std::pow(2, std::ceil(std::log2(farthestCoordinate + 1)));
+
+        // Grid-resident chunks: the resolution is fixed by the grid cell metadata
+        // (set on the chunk header before this call). Do not shrink it to fit the
+        // voxel span — the tree64 requires power-of-4 resolutions and the grid cell
+        // size must stay consistent.
+        if (chunk.gridIndex >= 0) {
+            resolutionToTheNearestPowOfTwo = chunk.header.resolution;
+        }
         if(resolutionToTheNearestPowOfTwo > 256) {
             core::warn("updateChunkFromItsVoxelBatch: Chunk {} resolution {} exceeds recommended 256", chunk.header.chunkID, chunk.header.resolution);
         }

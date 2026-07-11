@@ -123,7 +123,8 @@ struct GPUChunkHeader { // Not designed to be user interfacable on CPU. Only exi
     uint geometryEndIndex;
     uint voxelTypeDataStartIndex;
     uint voxelTypeDataEndIndex;
-    uint padding[2];
+    uint dataRefID;
+    uint padding[1];
 };
 
 struct Voxel {

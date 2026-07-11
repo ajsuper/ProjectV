@@ -21,6 +21,14 @@ namespace projv::utils {
                              Scene& scene, int gridIndex);
 
     /**
+     * Convert a loose Chunk-kind component to a 1-cell Grid. Called automatically by updateScene
+     * when an edit overflows the chunk's resolution. The existing chunk becomes grid cell 0.
+     * @param scene     The owning scene.
+     * @param component The ComponentHandle of the loose chunk to convert.
+     */
+    void convertChunkToGrid(Scene& scene, ComponentHandle component);
+
+    /**
      * Append add operations to a component's edit queue. Voxel positions are component-space
      * continuous integer coords (NOT Z-order). Accepts both Chunk and Grid components.
      * @param scene The scene owning the component.

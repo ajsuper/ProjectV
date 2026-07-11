@@ -91,6 +91,16 @@ namespace projv::graphics {
     GPUData createTexturesForScene(projv::Scene& scene);
 
     /**
+     * Rebuild data/header textures and scene tables from current CPU state, reusing an existing
+     * GPUData's samplers and layout state. Destroys old data textures and creates new ones via
+     * buildDataAndHeaderTextures + syncSceneTables. The caller must ensure samplers are valid
+     * (first-time callers use createTexturesForScene; subsequent edits call this).
+     * @param scene  The scene with edited chunks/geometry.
+     * @param gpuData Existing GPUData to rebuild the texture content of (samplers preserved).
+     */
+    void rebuildSceneTextures(projv::Scene& scene, GPUData& gpuData);
+
+    /**
      * Destroys every texture and uniform held by a GPUData and resets its layout state. Fixes the
      * leak from repeatedly rebuilding a scene; call before reloading.
      * @param gpuData The GPU data to tear down.

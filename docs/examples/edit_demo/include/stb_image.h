@@ -1,0 +1,1 @@
+../../PathTracer/include/stb_image.h
