@@ -151,6 +151,10 @@ namespace projv{
         std::vector<int32_t> cellToChunk;   // dims.x*dims.y*dims.z entries; index into Scene.chunks, or -1 if empty.
         // The compose component that owns this grid (every cell shares one component identity).
         ComponentHandle componentHandle = INVALID_COMPONENT_HANDLE;
+        // Phase 2: cell coordinate (in the original .data block space) that sits at grid.origin.
+        // After negative expansion this shifts away from (0,0,0). Used to linearize floorDiv'd
+        // cell coordinates into the cellToChunk array.
+        core::ivec3 originCellCoord{0};
     };
 
     struct Scene {

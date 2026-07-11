@@ -1,11 +1,12 @@
-// Phase 1 editing test driver.
+// Phase 1 + Phase 2 editing test driver.
 //
-// Loads a compose scene (folder arg or default SponzaScene), then exercises the new editing API:
-//   1. queueVoxelAdd / queueVoxelRemove on a loose (Chunk-kind) component.
-//   2. queueVoxelAdd on a Grid-kind component -- must return false (P2 territory).
-//   3. updateScene -- must drain the loose component's queue, fork its blob, and rebuild.
-//   4. After update, the component's queue is empty and its chunk's geometryPoolIndex points
-//      at a fork with refCount == 1 and non-empty geometry.
+// Loads a compose scene (folder arg or default SponzaScene), then exercises the editing API:
+//   1. floorDiv/floorMod sanity.
+//   2. queueVoxelAdd / queueVoxelRemove on a loose (Chunk-kind) component.
+//   3. queueVoxelAdd on a Grid-kind component (P2: accepted and drained with cell bucketing).
+//   4. updateScene on both Chunk and Grid components.
+//   5. Programmatic loose chunk test (full COW fork / refCount / dataRefID).
+//   6. Programmatic grid test (grid expansion, cell bucketing, new cell creation, COW fork).
 //
 // CPU-only. No GPU. The driver prints assertions; exits 0 on success, non-zero on failure.
 
@@ -152,19 +153,41 @@ int main(int argc, char** argv) {
               "dataRefID in range");
     }
 
-    // Grid-kind rejection.
+    // Grid-kind acceptance (P2: queue and drain with cell bucketing).
     if (grid != projv::INVALID_COMPONENT_HANDLE) {
         projv::ComponentRecord& gcomp = scene.components[grid];
-        std::vector<projv::PendingVoxelOp> ops{
-            {false, {0, 0, 0}, projv::Color{255, 255, 255}}
-        };
         size_t before = gcomp.editQueue.ops.size();
-        bool ok = projv::utils::queueVoxelAdd(scene, grid, ops);
-        check(!ok, "queueVoxelAdd on Grid component returned false (P1 scope)");
-        check(gcomp.editQueue.ops.size() == before,
-              "Grid component's queue unchanged after rejected queueVoxelAdd");
+        std::vector<projv::PendingVoxelOp> gops{
+            {false, {5, 5, 5}, projv::Color{255, 0, 0}},
+            {false, {10, 10, 10}, projv::Color{0, 255, 0}},
+        };
+        bool ok = projv::utils::queueVoxelAdd(scene, grid, gops);
+        check(ok, "queueVoxelAdd on Grid component returned true (P2 scope)");
+        check(gcomp.editQueue.ops.size() == before + gops.size(),
+              "Grid component's queue grew after queueVoxelAdd");
+
+        // Drain the grid queue.
+        uint32_t processed = projv::utils::updateScene(scene);
+        check(processed >= 1, "updateScene processed Grid component");
+        check(gcomp.editQueue.ops.empty(),
+              "Grid component's edit queue cleared after updateScene");
+
+        // Verify dataRefID was assigned to the grid component.
+        check(gcomp.dataRefID >= 0, "Grid component dataRefID assigned");
+        check(static_cast<size_t>(gcomp.dataRefID) < scene.dataReferences.size(),
+              "Grid component dataRefID in range");
+
+        // The grid must not have expanded (both voxels land in existing cell 0).
+        // Sponza grid is (2,1,2) -- 4 blocks in a 2x1x2 arrangement.
+        const projv::SceneGrid& sponzaGrid = scene.grids[gcomp.gridIndex];
+        check(sponzaGrid.dims == projv::core::ivec3(2, 1, 2),
+              "Sponza grid dims unchanged after in-bounds edit");
+
+        // The edited chunk (cell 0) should still exist.
+        int32_t cell0Chunk = sponzaGrid.cellToChunk[0];
+        check(cell0Chunk >= 0, "Grid cell 0 has a chunk");
     } else {
-        projv::core::info("No Grid component in scene -- grid-rejection path skipped.");
+        projv::core::info("No Grid component in scene -- grid acceptance path skipped.");
     }
 
     // queueVoxelRemove on a non-existent component returns false.
@@ -273,11 +296,195 @@ int main(int argc, char** argv) {
               "programmatic: dataRefID in range");
     }
 
+    // --- Programmatic grid component test ---
+    {
+        projv::Scene testScene;
+
+        // Helper to create a chunk with seed voxels and intern it.
+        // Ensures the chunk's header resolution stays at 64 (the grid's data-file
+        // resolution) even though updateChunkFromItsVoxelBatch shrinks it to fit
+        // the seed span.
+        auto makeChunk = [&](int id, const projv::core::vec3& pos,
+                             const std::vector<projv::core::ivec3>& seedPositions,
+                             int32_t cellIdx, int32_t gridIdx,
+                             projv::ComponentHandle compHandle) -> projv::ChunkHandle {
+            projv::ChunkHeader hdr;
+            hdr.chunkID     = id;
+            hdr.position    = pos;
+            hdr.scale       = 32.0f;
+            hdr.voxelScale  = 0.5f;
+            hdr.resolution  = 64;
+            hdr.rotation    = projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f);
+            projv::Chunk chunk;
+            chunk.header = hdr;
+            chunk.LOD    = 0;
+            chunk.alive  = true;
+            chunk.gridIndex = gridIdx;
+            chunk.cellIndex = cellIdx;
+            chunk.componentHandle = compHandle;
+
+            projv::VoxelBatch seed;
+            for (auto& p : seedPositions)
+                seed.push_back(projv::utils::createVoxel(
+                    projv::Color{128, 128, 128}, p));
+            projv::utils::moveVoxelBatchToChunk(seed, chunk);
+            projv::utils::updateChunkFromItsVoxelBatch(chunk, true);
+            // Override resolution back to 64 (updateChunkFromItsVoxelBatch shrinks
+            // it to fit the seed span; grid cells need the full data-file resolution).
+            chunk.header.resolution = 64;
+            chunk.header.scale = 32.0f;
+            projv::internChunkGeometry(testScene, chunk);
+            projv::ChunkHandle h = static_cast<projv::ChunkHandle>(testScene.chunks.size());
+            testScene.chunks.push_back(std::move(chunk));
+            return h;
+        };
+
+        // Create grid component handle (advance past any existing components).
+        projv::ComponentHandle gridH =
+            static_cast<projv::ComponentHandle>(testScene.components.size());
+
+        // Two cells (2x1x1), 3 voxels in cell 0, 2 voxels in cell 1.
+        projv::ChunkHandle c0 = makeChunk(0, {0, 0, 0},
+            {{0,0,0}, {1,0,0}, {2,0,0}}, 0, 0, gridH);
+        projv::ChunkHandle c1 = makeChunk(1, {32, 0, 0},
+            {{0,0,0}, {1,0,0}}, 1, 0, gridH);
+
+        // SceneGrid: 2x1x1, origin (0,0,0), cellSize 32.
+        projv::SceneGrid sgrid;
+        sgrid.origin         = projv::core::vec3(0.0f);
+        sgrid.cellSize       = 32.0f;
+        sgrid.dims           = projv::core::ivec3(2, 1, 1);
+        sgrid.rotation       = projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        sgrid.cellToChunk    = {static_cast<int32_t>(c0), static_cast<int32_t>(c1)};
+        sgrid.componentHandle = gridH;
+        sgrid.originCellCoord = projv::core::ivec3(0);
+        int32_t gridIdx = static_cast<int32_t>(testScene.grids.size());
+        testScene.grids.push_back(std::move(sgrid));
+
+        // Component record.
+        testScene.components.push_back(projv::ComponentRecord{
+            projv::ComponentKind::Grid, // kind
+            0,                          // chunkHandle (not used for Grid)
+            gridIdx,                    // gridIndex
+            "grid/test.data",           // sourcePath
+            {},                         // editQueue
+            -1                          // dataRefID
+        });
+
+        // Track pre-edit state.
+        int32_t origPool0 = testScene.chunks[c0].geometryPoolIndex;
+        int32_t origPool1 = testScene.chunks[c1].geometryPoolIndex;
+        uint32_t origRefCount0 = (origPool0 >= 0) ? testScene.geometryPool[origPool0].refCount : 0;
+        uint32_t origRefCount1 = (origPool1 >= 0) ? testScene.geometryPool[origPool1].refCount : 0;
+        size_t origGridCells = testScene.grids[gridIdx].cellToChunk.size();
+
+        // Queue adds: 2 in cell 0 (positions (5,5,5), (10,10,10)),
+        // 1 in cell 1 (position (70,5,5)),
+        // 1 requiring negative expansion (position (-5,5,5), cellCoord = (-1,0,0)).
+        // With res=64: floorDiv(5,64)=0, floorDiv(10,64)=0, floorDiv(70,64)=1, floorDiv(-5,64)=-1.
+        std::vector<projv::PendingVoxelOp> adds{
+            {false, {5, 5, 5},    projv::Color{255, 0, 0}},
+            {false, {10, 10, 10}, projv::Color{0, 255, 0}},
+            {false, {70, 5, 5},   projv::Color{0, 0, 255}},
+            {false, {-5, 5, 5},   projv::Color{255, 255, 0}},
+        };
+        bool ok = projv::utils::queueVoxelAdd(testScene, gridH, adds);
+        check(ok, "grid-test: queueVoxelAdd returned true");
+        check(testScene.components[0].editQueue.ops.size() == 4,
+              "grid-test: 4 ops queued");
+
+        uint32_t processed = projv::utils::updateScene(testScene);
+        check(processed >= 1, "grid-test: updateScene processed >= 1");
+
+        // Post-edit checks.
+        check(testScene.components[0].editQueue.ops.empty(),
+              "grid-test: editQueue cleared");
+
+        projv::SceneGrid& grid = testScene.grids[gridIdx];
+
+        // Grid expanded: dims (3,1,1), originCellCoord (-1,0,0).
+        check(grid.dims == projv::core::ivec3(3, 1, 1),
+              "grid-test: dims expanded to (3,1,1)");
+        check(grid.originCellCoord == projv::core::ivec3(-1, 0, 0),
+              "grid-test: originCellCoord shifted to (-1,0,0)");
+        check(grid.cellToChunk.size() == 3,
+              "grid-test: cellToChunk size == 3");
+        check(grid.cellToChunk.size() == origGridCells + 1,
+              "grid-test: cellToChunk grew by 1");
+
+        // Cell 0 (new, lin=0): must have a chunk.
+        check(grid.cellToChunk[0] >= 0, "grid-test: cell 0 has chunk");
+
+        // Cell 1 (lin=1, was original cell 0): chunk handle unchanged (same index in Scene.chunks).
+        check(grid.cellToChunk[1] == static_cast<int32_t>(c0),
+              "grid-test: cell 1 still points at chunk 0");
+
+        // Cell 2 (lin=2, was original cell 1): chunk handle unchanged.
+        check(grid.cellToChunk[2] == static_cast<int32_t>(c1),
+              "grid-test: cell 2 still points at chunk 1");
+
+        // Chunks at cells 1 and 2 have forked to new pool blobs.
+        check(testScene.chunks[c0].geometryPoolIndex != origPool0,
+              "grid-test: chunk 0 COW forked to new pool blob");
+        check(testScene.chunks[c1].geometryPoolIndex != origPool1,
+              "grid-test: chunk 1 COW forked to new pool blob");
+
+        // Original blob refCounts unchanged.
+        if (static_cast<size_t>(origPool0) < testScene.geometryPool.size()) {
+            check(testScene.geometryPool[origPool0].refCount == origRefCount0,
+                  "grid-test: original blob 0 refCount unchanged");
+        }
+        if (static_cast<size_t>(origPool1) < testScene.geometryPool.size()) {
+            check(testScene.geometryPool[origPool1].refCount == origRefCount1,
+                  "grid-test: original blob 1 refCount unchanged");
+        }
+
+        // Forked blobs have refCount 1.
+        int32_t newPool0 = testScene.chunks[c0].geometryPoolIndex;
+        int32_t newPool1 = testScene.chunks[c1].geometryPoolIndex;
+        if (newPool0 >= 0 && static_cast<size_t>(newPool0) < testScene.geometryPool.size()) {
+            check(testScene.geometryPool[newPool0].refCount == 1,
+                  "grid-test: fork 0 refCount == 1");
+            // Chunk 0 had 3 seed + 2 adds = 5 voxels.
+            size_t voxCount0 = testScene.geometryPool[newPool0].voxelTypeData.size() / 3;
+            check(voxCount0 == 5, "grid-test: chunk 0 has 5 voxels (3 seed + 2 adds)");
+        }
+        if (newPool1 >= 0 && static_cast<size_t>(newPool1) < testScene.geometryPool.size()) {
+            check(testScene.geometryPool[newPool1].refCount == 1,
+                  "grid-test: fork 1 refCount == 1");
+            // Chunk 1 had 2 seed + 1 add = 3 voxels.
+            size_t voxCount1 = testScene.geometryPool[newPool1].voxelTypeData.size() / 3;
+            check(voxCount1 == 3, "grid-test: chunk 1 has 3 voxels (2 seed + 1 add)");
+        }
+
+        // New cell (cell 0, lin=0) should have 1 voxel (the negative expansion add at (-5,5,5)).
+        // localPos = floorMod(-5, 64) = 59, floorMod(5, 64) = 5, so position (59,5,5).
+        int32_t newChunkIdx = grid.cellToChunk[0];
+        check(newChunkIdx >= 0, "grid-test: new cell chunk exists");
+        int32_t newPoolIdx = testScene.chunks[newChunkIdx].geometryPoolIndex;
+        if (newPoolIdx >= 0 && static_cast<size_t>(newPoolIdx) < testScene.geometryPool.size()) {
+            size_t voxCount = testScene.geometryPool[newPoolIdx].voxelTypeData.size() / 3;
+            check(voxCount == 1, "grid-test: new cell has 1 voxel");
+            check(testScene.geometryPool[newPoolIdx].refCount == 1,
+                  "grid-test: new cell blob refCount == 1");
+        }
+
+        // dataRefID assigned.
+        check(testScene.components[0].dataRefID >= 0,
+              "grid-test: dataRefID assigned");
+        check(static_cast<size_t>(testScene.components[0].dataRefID) <
+                  testScene.dataReferences.size(),
+              "grid-test: dataRefID in range");
+
+        // Origin shifted due to negative expansion: origin(-5) = -1 * cellSize.
+        check(grid.origin.x == -32.0f, "grid-test: origin shifted to x=-32");
+    }
+
     if (g_failures == 0) {
-        projv::core::info("Phase 1 editing: all checks passed.");
+        projv::core::info("Phase 2 editing: all checks passed.");
         return 0;
     } else {
-        projv::core::error("Phase 1 editing: {} check(s) failed.", g_failures);
+        projv::core::error("Phase 2 editing: {} check(s) failed.", g_failures);
         return 1;
     }
 }

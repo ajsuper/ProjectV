@@ -32,9 +32,9 @@ Run from project root:
 - `editQueue` on ComponentRecord is the new per-component edit queue (P1+).
 - `forkBlob` creates a COW copy without decrementing the original's refCount.
 
-## Phase 1 Status (2026-07-10)
+## Phase 1 + 2 Status (2026-07-10)
 
-### Delivered
+### Delivered (Phase 1)
 - `scene.h`: Added `PendingVoxelOp`, `ComponentEditQueue`, `DataReference`, `ComponentRecord::editQueue`/`dataRefID`, `Scene::dataReferences`, `forkBlob()`.
 - `voxel_math.h/cpp`: Added `floorDiv`/`floorMod` for correct negative-coordinate cell bucketing.
 - `include/utils/editing.h` + `src/utils/editing.cpp`: `queueVoxelAdd`, `queueVoxelRemove`, `updateScene` (loose chunks only, always-COW, CPU-only).
@@ -42,8 +42,15 @@ Run from project root:
 - `docs/examples/editing_p1/{main.cpp,Makefile}`: Test driver.
 - `AGENTS.md`: This file.
 
-### What's Next (Phase 2+)
-- P2: Grid expansion (both directions via `expandGridToInclude`), cell bucketing with `floorDiv`/`floorMod`.
+### Delivered (Phase 2)
+- `expandGridToInclude(SceneGrid&, core::ivec3, Scene&, int)` — expands a grid in both directions, shifts origin so existing chunks don't move, maintains `originCellCoord` for linearization.
+- `SceneGrid::originCellCoord` — tracks the block-space coordinate at grid.origin after (possibly negative) expansion.
+- `queueVoxelAdd`/`queueVoxelRemove` now accept both Chunk and Grid components.
+- `applyComponentQueue` extended for Grid components: cell bucketing via `floorDiv`/`floorMod`, grid expansion, per-cell COW fork + rebuild, automatic new-cell chunk creation.
+- `ensureDataReference` extended for Grid components (reads resolution from first populated cell).
+- Test driver updated with Sponza grid acceptance test + full programmatic grid test (expansion, COW fork, refCount, dataRefID, origin shift, voxel counts).
+
+### What's Next (Phase 3+)
 - P3: Loose chunk → 1-cell grid conversion on overflow.
 - P4: `rebuildSceneTextures` from existing `createTexturesForScene` logic.
 - P5+: Removal of legacy `chunkQueue`, incremental GPU upload, mutability policies, persistence.
