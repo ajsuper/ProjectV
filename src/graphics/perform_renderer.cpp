@@ -13,7 +13,12 @@ namespace projv::graphics {
         }
 #endif
         for(auto& uniform : uniformHandles) {
-            bgfx::setUniform(uniform.second, uniformValues.at(uniform.first).data());
+            auto it = uniformValues.find(uniform.first);
+            if (it == uniformValues.end()) {
+                core::error("Missing uniform value: '{}'. Maybe you are passing a const reference to setUniformToValue?", uniform.first);
+                continue;
+            }
+            bgfx::setUniform(uniform.second, it->second.data());
         }
     }
 

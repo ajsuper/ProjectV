@@ -48,7 +48,7 @@ namespace projv::graphics {
             buffer.resize(sizeof(float[16]));
             memcpy(buffer.data(), &data, sizeof(float[16]));
         } else {
-            core::error("Function: setUniformToValue. Typename T for data is unkown.");
+            core::error("Function: setUniformToValue. Typename T for data is unknown. Maybe you are passing a const reference (e.g. const vec3& from a const struct member)? Copy to a local variable first.");
             return;
         }
 
