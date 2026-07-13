@@ -337,7 +337,6 @@ static void scrollCallback(GLFWwindow* window, double /*xoffset*/, double yoffse
 // =============================================================================
 
 void startup(projv::Application& app) {
-    spdlog::set_level(spdlog::level::warn);
 
     // Change to the PathTracer directory so relative paths to renderer resources
     // and the Sponza scene resolve correctly.
@@ -435,11 +434,26 @@ void startup(projv::Application& app) {
 }
 
 void update(projv::Application& app) {
+#if defined(PROJV_ENABLE_PERF)
     static auto lastFrameTime = std::chrono::high_resolution_clock::now();
     auto currentFrameTime = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> frameDuration = currentFrameTime - lastFrameTime;
     lastFrameTime = currentFrameTime;
-    projv::core::warn("PROFILING: Frame time {:.2f}ms", frameDuration.count() * 1000.0);
+
+    static int frameCount = 0;
+    static double frameTimes[100];
+    frameTimes[frameCount % 100] = frameDuration.count() * 1000.0;
+    if (++frameCount % 100 == 0) {
+        double sum = 0, mn = 1e9, mx = 0;
+        for (int i = 0; i < 100; i++) {
+            sum += frameTimes[i];
+            mn = std::min(mn, frameTimes[i]);
+            mx = std::max(mx, frameTimes[i]);
+        }
+        core::perf("Frame stats (last 100): avg={:.2f}ms min={:.2f}ms max={:.2f}ms",
+                   sum / 100.0, mn, mx);
+    }
+#endif
 }
 
 void render(projv::Application& app) {
@@ -648,7 +662,7 @@ void render(projv::Application& app) {
     if (glfwGetKey(renderInstance.window, GLFW_KEY_R)) { cameraPosition[1] += moveSpeed; cameraMoved = true; }
     if (glfwGetKey(renderInstance.window, GLFW_KEY_F)) { cameraPosition[1] -= moveSpeed; cameraMoved = true; }
 
-    projv::core::warn("Pos: ({:.2f}, {:.2f}, {:.2f})  SphereRadius: {}  Color: {}",
+    core_info_every(60, "Pos: ({:.2f}, {:.2f}, {:.2f})  SphereRadius: {}  Color: {}",
                       cameraPosition[0], cameraPosition[1], cameraPosition[2],
                       editState.sphereRadius, editState.voxelColorIndex);
 

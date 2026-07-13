@@ -267,14 +267,71 @@ uint32_t addEntity(World& world, const Entity& entity) {
   ```
 
 ### Logging
-- Use the project's logging system for debug and informational messages
-  ```cpp
-  #include "core/log.h"
-  
-  core::info("Successfully created voxel at position ({}, {}, {})", x, y, z);
-  core::warn("Texture file not found, using default texture");
-  core::error("Failed to initialize GPU interface");
-  ```
+
+Use the category functions in `projv::core` (declared in `include/core/log.h`):
+
+| Function | Tag  | Use for |
+|----------|------|---------|
+| `core::trace`  | `[TRC]` | Extremely detailed step-by-step tracing. Off in release. |
+| `core::perf`   | `[PRF]` | Performance measurements and timing. |
+| `core::edit`   | `[EDT]` | Editing pathway (voxel add/remove, chunk/grid ops). |
+| `core::render` | `[RND]` | Rendering pathway (render passes, GPU state). |
+| `core::info`   | `[INF]` | General informational messages. |
+| `core::warn`   | `[WRN]` | Warnings — something unusual but recoverable. |
+| `core::error`  | `[ERR]` | Errors — something failed. |
+
+Tags are prepended automatically by the function. **Do not add them manually**
+in format strings.
+
+Do not print per-frame information unconditionally. Gate per-frame logging
+with caller-side logic:
+
+```cpp
+#if defined(PROJV_ENABLE_RENDER)
+    if (stateChanged) {
+        core::render("Render graph: {} passes", passCount);
+    }
+#endif
+```
+
+For periodic perf summaries (every N frames), accumulate stats and emit on
+a counter. Wrap the **entire block** (including stats) in `#if defined(...)` so
+there is zero overhead when the category is disabled.
+
+For simple call-site throttling without manual counter arrays, use the
+`_every(N, ...)` macros. Each macro expansion gets its own call-site-local
+counter, so `core_perf_every(60, "stats: {}", x)` prints at most once per
+second at 60fps, with zero per-call overhead when the category is compiled out.
+
+```cpp
+core_perf_every(60, "uploadDirtyBlobs: {} dirty: {:.2f}ms", count, ms);
+core_warn_every(120, "Repeated warning: {}", detail);
+core_info_every(60, "Pos: ({:.2f}, {:.2f}, {:.2f})", x, y, z);
+```
+
+Macros available: `core_trace_every`, `core_perf_every`, `core_edit_every`,
+`core_render_every`, `core_info_every`, `core_warn_every`, `core_error_every`.
+
+For time-based throttling (frame-rate independent), use the `_every_ms`
+variants. The first parameter is milliseconds between prints:
+
+```cpp
+core_perf_every_ms(2000, "flushSceneUpdates: {} pools: {:.2f}ms", n, ms);
+core_info_every_ms(5000, "Status: {} active", count);
+```
+
+```cpp
+#include "core/log.h"
+
+core::info("Successfully created voxel at position ({}, {}, {})", x, y, z);
+core::warn("Texture file not found, using default texture");
+core::error("Failed to initialize GPU interface");
+```
+
+Categories are toggled at compile time via CMake:
+```bash
+cmake -DPROJV_LOG_TRACE=OFF -DPROJV_LOG_MINIMAL=ON ..
+```
 
 ## Memory Management
 

@@ -19,6 +19,55 @@ add_subdirectory(external/spdlog)
 add_subdirectory(external/json)
 add_subdirectory(external/glm)
 
+# --- Logging categories (all ON by default) ---
+option(PROJV_LOG_TRACE  "Enable trace logging"           ON)
+option(PROJV_LOG_PERF   "Enable performance logging"      ON)
+option(PROJV_LOG_EDIT   "Enable editing pathway logging"  ON)
+option(PROJV_LOG_RENDER "Enable rendering pathway logging" ON)
+option(PROJV_LOG_INFO   "Enable info logging"             ON)
+option(PROJV_LOG_WARN   "Enable warning logging"          ON)
+option(PROJV_LOG_ERROR  "Enable error logging"            ON)
+
+# Preset: disable everything except WARN+ERROR for release/production builds.
+# Usage: cmake -DPROJV_LOG_MINIMAL=ON ..
+option(PROJV_LOG_MINIMAL "Disable all optional logging (keep only WARN+ERROR)" OFF)
+if(PROJV_LOG_MINIMAL)
+    set(PROJV_LOG_TRACE  OFF CACHE BOOL "" FORCE)
+    set(PROJV_LOG_PERF   OFF CACHE BOOL "" FORCE)
+    set(PROJV_LOG_EDIT   OFF CACHE BOOL "" FORCE)
+    set(PROJV_LOG_RENDER OFF CACHE BOOL "" FORCE)
+    set(PROJV_LOG_INFO   OFF CACHE BOOL "" FORCE)
+endif()
+
+# Build the list of preprocessor defines for enabled categories
+set(PROJV_LOG_DEFS "")
+if(PROJV_LOG_TRACE)
+    list(APPEND PROJV_LOG_DEFS PROJV_ENABLE_TRACE)
+endif()
+if(PROJV_LOG_PERF)
+    list(APPEND PROJV_LOG_DEFS PROJV_ENABLE_PERF)
+endif()
+if(PROJV_LOG_EDIT)
+    list(APPEND PROJV_LOG_DEFS PROJV_ENABLE_EDIT)
+endif()
+if(PROJV_LOG_RENDER)
+    list(APPEND PROJV_LOG_DEFS PROJV_ENABLE_RENDER)
+endif()
+if(PROJV_LOG_INFO)
+    list(APPEND PROJV_LOG_DEFS PROJV_ENABLE_INFO)
+endif()
+if(PROJV_LOG_WARN)
+    list(APPEND PROJV_LOG_DEFS PROJV_ENABLE_WARN)
+endif()
+if(PROJV_LOG_ERROR)
+    list(APPEND PROJV_LOG_DEFS PROJV_ENABLE_ERROR)
+endif()
+
+# Apply to all targets in this directory and subdirectories
+add_compile_definitions(${PROJV_LOG_DEFS})
+
+message(STATUS "ProjectV logging categories: ${PROJV_LOG_DEFS}")
+
 # Header include paths (external)
 set(SPDLOG_INCLUDE ${CMAKE_SOURCE_DIR}/external/spdlog/include)
 set(JSON_INCLUDE ${CMAKE_SOURCE_DIR}/external/json/single_include)

@@ -146,7 +146,7 @@ namespace projv::graphics {
         std::vector<FrameBuffer> frameBuffers;
         for (const auto &frameBuffer : resourceData["framebuffers"]) {
             const std::string logFormat = "Framebuffer:: fboID: {} , textureIDs: {}";
-            spdlog::info(logFormat,
+            core::info(logFormat,
                         frameBuffer["fboID"].dump(), 
                         frameBuffer["textureIDs"].dump());
             FrameBuffer frameBufferResource;
@@ -164,7 +164,7 @@ namespace projv::graphics {
         uint renderPassID;
         for (const auto &renderPass : dependencyGraphData["renderer"]) {
             const std::string logFormat = "RenderPass:: shaderID: {}, frameBufferInputIDs: {}, resourceTexturesIDs: {}, frameBufferOutputID: {}, multiPass: {}";
-            spdlog::info(logFormat,
+            core::info(logFormat,
                         renderPass["shaderID"].dump(), 
                         renderPass["frameBufferInputIDs"].dump(),
                         renderPass["resourceTexturesIDs"].dump(),
@@ -196,6 +196,7 @@ namespace projv::graphics {
     }
 
     RendererSpecification loadRendererSpecification(std::string rendererPath) {
+        core::info("loadRendererSpecification: loading from \"{}\"", rendererPath);
         RendererSpecification renderer;
         std::ifstream resourceJSON(rendererPath + "/resources.json");
         std::ifstream dependencyGraphJSON(rendererPath + "/render.json");
@@ -210,6 +211,12 @@ namespace projv::graphics {
         renderer.dependencyGraph.renderPasses = loadRenderPasses(dependencyGraphData);
         renderer.resources.FrameBuffers = setPingPongFrameBuffers(renderer.resources.FrameBuffers, renderer.dependencyGraph.renderPasses);
         renderer.resources.textures = setPingPongTextures(renderer.resources.textures, renderer.dependencyGraph.renderPasses, renderer.resources.FrameBuffers); // Ping pong textures depend on other resources to be specified.
+
+        core::render("loadRendererSpecification: {} shaders {} textures {} framebuffers {} renderpasses",
+                     renderer.resources.shaders.size(),
+                     renderer.resources.textures.size(),
+                     renderer.resources.FrameBuffers.size(),
+                     renderer.dependencyGraph.renderPasses.size());
 
         return renderer;
     }

@@ -24,17 +24,17 @@ namespace projv::graphics {
     void setUniformToValue(std::shared_ptr<ConstructedRenderer> constructedRenderer, std::string uniformName, T& data) {
         std::vector<uint8_t> buffer;
         if constexpr (std::is_same_v<T, float>) {
-            core::warn("Function: setUniformToValue. Typename T for data is a float. float is not supported, it will be passed as a vec4");
+            core::trace("Function: setUniformToValue. Typename T for data is a float. float is not supported, it will be passed as a vec4");
             buffer.resize(sizeof(float[4]));
             core::vec4 temp(data, 0.0f, 0.0f, 0.0f);
             memcpy(buffer.data(), &temp, sizeof(float[4]));
         } else if constexpr (std::is_same_v<T, core::vec2>) {
-            core::warn("Function: setUniformToValue. Typename T for data is a vec2. vec2 is not supported, it will be passed as a vec4");
+            core::trace("Function: setUniformToValue. Typename T for data is a vec2. vec2 is not supported, it will be passed as a vec4");
             buffer.resize(sizeof(float[4]));
             core::vec4 temp(data.x, data.y, 0.0f, 0.0f);
             memcpy(buffer.data(), &temp, sizeof(float[4]));
         } else if constexpr (std::is_same_v<T, core::vec3>) {
-            core::warn("Function: setUniformToValue. Typename T for data is a vec3. vec3 is not supported, it will be passed as a vec4");
+            core::trace("Function: setUniformToValue. Typename T for data is a vec3. vec3 is not supported, it will be passed as a vec4");
             buffer.resize(sizeof(float[4]));
             core::vec4 temp(data.x, data.y, data.z, 0.0f);
             memcpy(buffer.data(), &temp, sizeof(float[4]));

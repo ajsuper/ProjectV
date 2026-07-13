@@ -124,7 +124,7 @@ namespace projv::utils {
 
     std::vector<uint32_t> createTree64(VoxelGrid& voxels, int gridResolution) {
         std::chrono::high_resolution_clock::time_point startWhole = std::chrono::high_resolution_clock::now();
-        core::info("createTree64: Starting tree64 generation with resolution {}x{}x{} ({} voxels total)", gridResolution, gridResolution, gridResolution, gridResolution * gridResolution * gridResolution);
+        core::perf("createTree64: Starting tree64 generation with resolution {}x{}x{} ({} voxels total)", gridResolution, gridResolution, gridResolution, gridResolution * gridResolution * gridResolution);
         int levelsOfDepth = int(log10(gridResolution)/log10(4));
         std::vector<nodeStructureTree64> tree64;
         std::vector<nodeStructureTree64> levelInProgress;
@@ -160,8 +160,8 @@ namespace projv::utils {
         auto endWhole = std::chrono::high_resolution_clock::now();
         double elapsedWhole = std::chrono::duration<double, std::milli>(endWhole - startWhole).count();
 
-        core::info("createTree64: Completed tree-64 generation in {:.2f}ms for {} voxels", elapsedWhole, gridResolution * gridResolution * gridResolution);
-        core::warn("[PERF] createTree64: resolution={} voxels={} levels={}: {:.2f}ms", gridResolution, gridResolution * gridResolution * gridResolution, levelsOfDepth, elapsedWhole);
+        core::perf("createTree64: Completed tree-64 generation in {:.2f}ms for {} voxels", elapsedWhole, gridResolution * gridResolution * gridResolution);
+        core::perf("createTree64: resolution={} voxels={} levels={}: {:.2f}ms", gridResolution, gridResolution * gridResolution * gridResolution, levelsOfDepth, elapsedWhole);
 
         return tree64Simplified;
     }
@@ -357,7 +357,7 @@ namespace projv::utils {
         VoxelGrid voxelGrid = createVoxelGridFromChunksQueue(chunk);
         auto end = std::chrono::high_resolution_clock::now();
         double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
-        core::warn("[PERF] updateChunkFromItsVoxelBatch: createVoxelGridFromChunksQueue: {:.2f}ms", elapsed);
+        core::perf("updateChunkFromItsVoxelBatch: createVoxelGridFromChunksQueue: {:.2f}ms", elapsed);
 
         int farthestCoordinate = 0;
         for (const Voxel& v : voxelGrid.voxels) {
@@ -394,7 +394,7 @@ namespace projv::utils {
         double treeMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
         double typeMs = std::chrono::duration<double, std::milli>(t3 - t2).count();
         double totalMs = std::chrono::duration<double, std::milli>(t4 - t0).count();
-        core::warn("[PERF] updateChunkFromItsVoxelBatch: parse={:.2f}ms tree64={:.2f}ms voxelType={:.2f}ms total={:.2f}ms",
+        core::perf("updateChunkFromItsVoxelBatch: parse={:.2f}ms tree64={:.2f}ms voxelType={:.2f}ms total={:.2f}ms",
                    parseMs, treeMs, typeMs, totalMs);
         return;
     }
@@ -416,7 +416,7 @@ namespace projv::utils {
     
         auto loopEnd = std::chrono::high_resolution_clock::now();
         double loopElapsed = std::chrono::duration<double, std::milli>(loopEnd - loopStart).count();
-        core::info("Time spent processing voxelBatchA: " + std::to_string(loopElapsed) + "ms");
+        core::perf("Time spent processing voxelBatchA: {}ms", loopElapsed);
     
         // filtering voxelBatchB
         auto filterStart = std::chrono::high_resolution_clock::now();
@@ -432,11 +432,11 @@ namespace projv::utils {
     
         auto filterEnd = std::chrono::high_resolution_clock::now();
         double filterElapsed = std::chrono::duration<double, std::milli>(filterEnd - filterStart).count();
-        core::info("Time spent filtering voxelBatchB: " + std::to_string(filterElapsed) + "ms");
+        core::perf("Time spent filtering voxelBatchB: {}ms", filterElapsed);
     
         auto end = std::chrono::high_resolution_clock::now();
         double totalElapsed = std::chrono::duration<double, std::milli>(end - start).count();
-        core::info("Function: removeVoxelBatchAFromVoxelBatchB. Time taken: " + std::to_string(totalElapsed) + "ms");
+        core::perf("Function: removeVoxelBatchAFromVoxelBatchB. Time taken: {}ms", totalElapsed);
     }
     
     Voxel createVoxel(Color color, core::ivec3 position) {

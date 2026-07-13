@@ -100,7 +100,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             }
             auto t1 = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            core::warn("[PERF] packGeometryTexels: {} nodes: {:.2f}ms", nodes, ms);
+            core::perf("packGeometryTexels: {} nodes: {:.2f}ms", nodes, ms);
             return out;
         }
 
@@ -112,7 +112,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             std::copy(data.begin(), data.end(), out.begin());
             auto t1 = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            core::warn("[PERF] packVoxelTypeTexels: {} texels: {:.2f}ms", texels, ms);
+            core::perf("packVoxelTypeTexels: {} texels: {:.2f}ms", texels, ms);
             return out;
         }
     }
@@ -396,7 +396,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             }
 
             gpuData.looseCapacity = static_cast<uint32_t>(looseList.size());
-            if (!bgfx::isValid(gpuData.headerTexture)) { auto t1 = std::chrono::high_resolution_clock::now(); double ms = std::chrono::duration<double, std::milli>(t1 - t0).count(); core::warn("[PERF] syncSceneTables (headless): {:.2f}ms", ms); return; }
+            if (!bgfx::isValid(gpuData.headerTexture)) { auto t1 = std::chrono::high_resolution_clock::now(); double ms = std::chrono::duration<double, std::milli>(t1 - t0).count(); core::perf("syncSceneTables (headless): {:.2f}ms", ms); return; }
             if (bgfx::isValid(gpuData.gridInfoTexture)) bgfx::destroy(gpuData.gridInfoTexture);
             if (bgfx::isValid(gpuData.cellMapTexture)) bgfx::destroy(gpuData.cellMapTexture);
             if (bgfx::isValid(gpuData.looseListTexture)) bgfx::destroy(gpuData.looseListTexture);
@@ -405,7 +405,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             gpuData.looseListTexture = createCellMapTexture(looseList);
             auto t1 = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            core::warn("[PERF] syncSceneTables: {} grids {} loose {} chunks: {:.2f}ms",
+            core_perf_every(60, "syncSceneTables: {} grids {} loose {} chunks: {:.2f}ms",
                        scene.grids.size(), looseList.size(), scene.chunks.size(), ms);
         }
     }
@@ -447,7 +447,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        core::warn("[PERF] uploadTexelSpan: {} texels across {} rows: {:.2f}ms",
+        core::perf("uploadTexelSpan: {} texels across {} rows: {:.2f}ms",
                    texelCount, (row - static_cast<uint16_t>(texelOffset / texWidth)), ms);
     }
 
@@ -520,7 +520,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        core::warn("[PERF] growDataTextures: {} geomUsed {} typeUsed dims ({}x{})/({}x{}): {:.2f}ms",
+        core::perf("growDataTextures: {} geomUsed {} typeUsed dims ({}x{})/({}x{}): {:.2f}ms",
                    geomUsed, typeUsed,
                    gpuData.tree64Width, gpuData.tree64Height,
                    gpuData.voxelTypeWidth, gpuData.voxelTypeHeight, ms);
@@ -580,7 +580,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 uint32_t tOff = gpuData.voxelTypeAlloc.alloc(tAlloc);
                 if (gOff == RangeAllocator::INVALID || tOff == RangeAllocator::INVALID) {
                     // Allocator full — caller must grow. old range was freed above, blob stays dirty.
-                    core::warn("[PERF] uploadDirtyBlobs: allocator full at blob {} (geom={} type={})",
+                    core::perf("uploadDirtyBlobs: allocator full at blob {} (geom={} type={})",
                                b, nodes, typeTexels);
                     return std::nullopt;  // signals "grow needed"
                 }
@@ -616,7 +616,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        core::warn("[PERF] uploadDirtyBlobs: {} dirty blobs: {:.2f}ms", dirtyUploaded, ms);
+        core_perf_every(60, "uploadDirtyBlobs: {} dirty blobs: {:.2f}ms", dirtyUploaded, ms);
         return uploadedPools;
     }
 
@@ -642,7 +642,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         gpuData.headerTexture = createHeaderTexture(headers);
         if (newCap > gpuData.uploadedChunkCount)
             gpuData.uploadedChunkCount = static_cast<uint32_t>(scene.chunks.size());
-        core::warn("[PERF] growHeaderTexture: new capacity {}", newCap);
+        core::perf("growHeaderTexture: new capacity {}", newCap);
     }
 
     // Rewrite the GPU header row for chunks that are new or whose geometryPoolIndex points at a
@@ -675,7 +675,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 // grow rewrote all headers; we're done.
                 auto t1 = std::chrono::high_resolution_clock::now();
                 double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                core::warn("[PERF] updateDirtyHeaders (via grow): all {} rows: {:.2f}ms", scene.chunks.size(), ms);
+                core::perf("updateDirtyHeaders (via grow): all {} rows: {:.2f}ms", scene.chunks.size(), ms);
                 return;
             }
 
@@ -698,7 +698,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        core::warn("[PERF] updateDirtyHeaders: {} rows: {:.2f}ms", updated, ms);
+        core_perf_every(60, "updateDirtyHeaders: {} rows: {:.2f}ms", updated, ms);
     }
 
     // Build (or rebuild) the tree64/voxelType/header textures from current scene state via one contiguous
@@ -764,11 +764,14 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         gpuData.headerTexture = createHeaderTexture(headers);
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        core::warn("[PERF] buildDataAndHeaderTextures: {} liveBlobs {} chunks {} geomTexels {} typeTexels: {:.2f}ms",
+        core::perf("buildDataAndHeaderTextures: {} liveBlobs {} chunks {} geomTexels {} typeTexels: {:.2f}ms",
                    liveBlobs, scene.chunks.size(), geomUsed, typeUsed, ms);
     }
 
     GPUData createTexturesForScene(projv::Scene& scene) {
+        core::render("createTexturesForScene: {} chunks {} grids {} blobs",
+                     scene.chunks.size(), scene.grids.size(), scene.geometryPool.size());
+
         GPUData gpuData;
 
         // Single-model: fold any chunk still owning geometry (legacy loaders) into the refcounted pool
@@ -790,11 +793,17 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         gpuData.cellMapSampler = bgfx::createUniform("cellMap", bgfx::UniformType::Sampler);
         gpuData.looseListSampler = bgfx::createUniform("looseList", bgfx::UniformType::Sampler);
 
+        core::render("createTexturesForScene: done geomTex=({}x{}) typeTex=({}x{}) headers={} grids={} loose={}",
+                     gpuData.tree64Width, gpuData.tree64Height,
+                     gpuData.voxelTypeWidth, gpuData.voxelTypeHeight,
+                     gpuData.headerCapacity, scene.grids.size(), scene.looseChunkCount);
+
         return gpuData;
     }
 
     void flushSceneUpdates(projv::Scene& scene, GPUData& gpuData) {
         auto t0 = std::chrono::high_resolution_clock::now();
+        core_render_every(60, "flushSceneUpdates: start chunks={} blobs={}", scene.chunks.size(), scene.geometryPool.size());
 
         // 1. Incremental blob upload (or full grow fallback).
         auto maybePools = uploadDirtyBlobs(scene, gpuData);
@@ -803,7 +812,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         if (maybePools.has_value()) {
             uploadedPools = std::move(maybePools.value());
         } else {
-            core::warn("[PERF] flushSceneUpdates: allocator full, growing data textures");
+            core::perf("flushSceneUpdates: allocator full, growing data textures");
             growDataTextures(scene, gpuData);
             for (size_t b = 0; b < scene.geometryPool.size(); b++)
                 if (scene.geometryPool[b].refCount > 0)
@@ -818,8 +827,10 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        core::warn("[PERF] flushSceneUpdates: {} pools uploaded: {:.2f}ms",
+        core_perf_every_ms(2000, "flushSceneUpdates: {} pools uploaded: {:.2f}ms",
                    uploadedPools.size(), ms);
+        core_render_every(60, "flushSceneUpdates: done pools={} chunks={} grids={}",
+                     uploadedPools.size(), scene.chunks.size(), scene.grids.size());
     }
 
     void rebuildSceneTextures(projv::Scene& scene, GPUData& gpuData) {

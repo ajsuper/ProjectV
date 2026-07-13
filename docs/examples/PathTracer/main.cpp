@@ -208,15 +208,6 @@ static size_t promptForRenderer(const std::vector<RendererModule>& registry) {
 // Startup: pick the renderer, create the window, load the scene and renderer,
 // and upload all GPU resources.
 void startup(projv::Application& app) {
-    // Silence the engine's per-pass render logging. perform_renderer.cpp emits a
-    // block of core::info() lines FOR EVERY PASS, EVERY FRAME (pass name/id, target
-    // FBO, and one line per bound texture) -- ~100 synchronous terminal writes per
-    // frame with this 6-pass renderer. That made the whole app run at the terminal's
-    // scroll speed, completely masking GPU cost (shrinking the AO ray, the blur, and
-    // even the primary ray all changed nothing because the frame was stalled on
-    // stdout). Raising the level to warn drops all of it; our own per-frame
-    // frame-time / position lines are emitted at warn below so they still show.
-    spdlog::set_level(spdlog::level::warn);
 
     projv::graphics::RenderInstance& renderInstance = projv::core::createGlobalResource<projv::graphics::RenderInstance>(app.world);
     renderInstance.initialize(1920, 1080, "hengry!");
@@ -259,12 +250,26 @@ void startup(projv::Application& app) {
 
 // Update: frame timing profiler.
 void update(projv::Application& app) {
+#if defined(PROJV_ENABLE_PERF)
     static auto lastFrameTime = std::chrono::high_resolution_clock::now();
-
     auto currentFrameTime = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> frameDuration = currentFrameTime - lastFrameTime;
     lastFrameTime = currentFrameTime;
-    projv::core::warn("PROFILING: Frame time {:.2f}ms", frameDuration.count() * 1000.0);
+
+    static int frameCount = 0;
+    static double frameTimes[100];
+    frameTimes[frameCount % 100] = frameDuration.count() * 1000.0;
+    if (++frameCount % 100 == 0) {
+        double sum = 0, mn = 1e9, mx = 0;
+        for (int i = 0; i < 100; i++) {
+            sum += frameTimes[i];
+            mn = std::min(mn, frameTimes[i]);
+            mx = std::max(mx, frameTimes[i]);
+        }
+        core::perf("Frame stats (last 100): avg={:.2f}ms min={:.2f}ms max={:.2f}ms",
+                   sum / 100.0, mn, mx);
+    }
+#endif
 }
 
 // Render: handle camera input, then hand off per-frame uniform upload to the

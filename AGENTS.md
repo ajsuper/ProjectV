@@ -98,6 +98,26 @@ Controls: WASD/R/F + mouse to fly, E to add voxel (cycles colors), Q to remove,
 - `docs/examples/editing_p1/Makefile`: Link `projectV-scene_query`.
 - `AGENTS.md`: This entry.
 
+### Delivered (Logging System)
+- `include/core/log.h`: Replaced spdlog re-export with category-based template
+  functions (`trace`, `perf`, `edit`, `render`, `info`, `warn`, `error`). Each
+  gated by `#if defined(PROJV_ENABLE_*)` — empty body when disabled, eliminated
+  by compiler. Tags (`[TRC]`, `[PRF]`, `[EDT]`, `[RND]`, `[INF]`, `[WRN]`,
+  `[ERR]`) baked into functions.
+- `CMakeLists.txt`: Seven `option()` calls (all ON by default) +
+  `PROJV_LOG_MINIMAL` preset (disables everything except WARN+ERROR) +
+  `add_compile_definitions` to emit defines project-wide.
+- Migrated all existing call sites: manual `[PERF]`/`[EDIT]` tags removed,
+  `core::debug` → `core::trace`, `core::critical` → `core::error`, direct
+  `spdlog::` calls → `core::` wrapper, `spdlog::set_level()` calls removed.
+- `perform_renderer.cpp`: Per-frame render logging gated with `#if` + on-change
+  detection (static bool renders once).
+- `docs/examples/edit_demo/main.cpp` & `docs/examples/PathTracer/main.cpp`:
+  Frame-time perf summary every 100 frames with `#if defined(PROJV_ENABLE_PERF)` guard.
+- `CODING_STYLE.md`: Updated logging section with category table and gating
+  guidance.
+- `AGENTS.md`: This entry.
+
 ### What's Next (Phase 7+)
 - Removal of legacy `chunkQueue`, mutability policies, persistence.
 

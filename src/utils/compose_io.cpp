@@ -384,11 +384,12 @@ namespace projv::utils {
                 ComponentHandle parentHandle, int depth,
                 std::unordered_set<std::string> siblingNames) {
             if (depth > MAX_RECURSION_DEPTH) {
-                core::debug("loadComposeFromDisk: Recursion depth cap ({}) reached at {}", MAX_RECURSION_DEPTH, folder);
+                core::trace("loadComposeFromDisk: Recursion depth cap ({}) reached at {}", MAX_RECURSION_DEPTH, folder);
                 return;
             }
 
             std::string composeJsonPath = (std::filesystem::path(folder) / "compose.json").string();
+            core::trace("loadComposeFromDisk: processing folder=\"{}\" depth={}", folder, depth);
             ComposeDoc doc = parseComposeJson(composeJsonPath);
             if (doc.version == 0) {
                 core::error("loadComposeFromDisk: Failed to load compose.json at {}", folder);
@@ -396,6 +397,9 @@ namespace projv::utils {
             }
 
             for (ComposeComponent& c : doc.components) {
+                core::trace("loadComposeFromDisk:   component type={} source=\"{}\" name=\"{}\"",
+                            c.type == ComponentType::Data ? "data" : "asset",
+                            c.source, c.name.empty() ? "(auto)" : c.name);
                 // P6.2b: Auto-generate name if absent.
                 if (c.name.empty()) {
                     if (c.type == ComponentType::Data) {
