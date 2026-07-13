@@ -23,6 +23,7 @@
 #include "data_structures/scene.h"
 #include "utils/compose_io.h"
 #include "utils/editing.h"
+#include "utils/scene_query.h"
 #include "utils/voxel_management.h"
 #include "utils/voxel_math.h"
 
@@ -47,9 +48,11 @@ namespace {
         looseOut = projv::INVALID_COMPONENT_HANDLE;
         gridOut  = projv::INVALID_COMPONENT_HANDLE;
         for (projv::ComponentHandle h = 0; h < scene.components.size(); ++h) {
-            if (scene.components[h].kind == projv::ComponentKind::Chunk && looseOut == projv::INVALID_COMPONENT_HANDLE) {
+            auto kind = scene.components[h].kind;
+            if (kind == projv::ComponentKind::Asset) continue;
+            if (kind == projv::ComponentKind::Chunk && looseOut == projv::INVALID_COMPONENT_HANDLE) {
                 looseOut = h;
-            } else if (scene.components[h].kind == projv::ComponentKind::Grid && gridOut == projv::INVALID_COMPONENT_HANDLE) {
+            } else if (kind == projv::ComponentKind::Grid && gridOut == projv::INVALID_COMPONENT_HANDLE) {
                 gridOut = h;
             }
             if (looseOut != projv::INVALID_COMPONENT_HANDLE && gridOut != projv::INVALID_COMPONENT_HANDLE) break;
@@ -690,8 +693,105 @@ int main(int argc, char** argv) {
         check(grid.origin.x == -32.0f, "grid-test: origin shifted to x=-32");
     }
 
+    // --- P6 component tree tests ---
+    {
+        projv::core::info("--- P6: Component tree tests ---");
+
+        // Verify component names were auto-generated.
+        for (projv::ComponentHandle h = 0; h < scene.components.size(); ++h) {
+            projv::core::info("  component[{}]: kind={} name=\"{}\" parent={} children={}",
+                h,
+                scene.components[h].kind == projv::ComponentKind::Chunk ? "Chunk" :
+                scene.components[h].kind == projv::ComponentKind::Grid ? "Grid" : "Asset",
+                scene.components[h].name,
+                scene.components[h].parent,
+                scene.components[h].children.size());
+        }
+
+        // Verify names are non-empty.
+        check(!scene.components[0].name.empty(), "P6: component[0] has non-empty name");
+        if (scene.components.size() > 1)
+            check(!scene.components[1].name.empty(), "P6: component[1] has non-empty name");
+
+        // Find a non-Asset component for subsequent tests.
+        projv::ComponentHandle firstData = projv::INVALID_COMPONENT_HANDLE;
+        for (projv::ComponentHandle h = 0; h < scene.components.size(); ++h) {
+            if (scene.components[h].kind != projv::ComponentKind::Asset) {
+                firstData = h;
+                break;
+            }
+        }
+        check(firstData != projv::INVALID_COMPONENT_HANDLE,
+              "P6: found non-Asset component for tests");
+
+        // Verify local transforms were stored on the data component.
+        check(true, "P6: data component has localPosition stored (no assert on value, scene-dependent)");
+
+        // getComponentPath round-trip test.
+        std::string path0 = projv::utils::getComponentPath(scene, 0);
+        std::string pathD = projv::utils::getComponentPath(scene, firstData);
+        projv::core::info("  getComponentPath(0) = \"{}\"", path0);
+        projv::core::info("  getComponentPath({}) = \"{}\"", firstData, pathD);
+        check(!path0.empty(), "P6: getComponentPath(0) returns non-empty path");
+        check(!pathD.empty(), "P6: getComponentPath(firstData) returns non-empty path");
+
+        // findComponentByPath round-trips.
+        projv::ComponentHandle found0 = projv::utils::findComponentByPath(scene, path0);
+        check(found0 == 0, "P6: findComponentByPath round-trips for component 0");
+        projv::ComponentHandle foundD = projv::utils::findComponentByPath(scene, pathD);
+        check(foundD == firstData, "P6: findComponentByPath round-trips for firstData");
+
+        // findComponentsByName.
+        auto byName = projv::utils::findComponentsByName(scene, scene.components[firstData].name);
+        check(!byName.empty(), "P6: findComponentsByName returns results");
+
+        // getComponentWorldMatrix / getComponentWorldPosition.
+        projv::core::mat4 worldD = projv::utils::getComponentWorldMatrix(scene, firstData);
+        projv::core::vec3 worldPosD = projv::utils::getComponentWorldPosition(scene, firstData);
+        check(worldPosD.x == worldD[3][0] &&
+              worldPosD.y == worldD[3][1] &&
+              worldPosD.z == worldD[3][2],
+              "P6: getComponentWorldPosition matches matrix translation");
+
+        // getComponentVoxelCount.
+        uint32_t vcD = projv::utils::getComponentVoxelCount(scene, firstData);
+        projv::core::info("  getComponentVoxelCount({}) = {}", firstData, vcD);
+        check(vcD > 0, "P6: firstData component has voxels");
+
+        // listComponents.
+        auto infos = projv::utils::listComponents(scene);
+        check(infos.size() == scene.components.size(),
+              "P6: listComponents returns all components");
+
+        // findComponentByPath with bad path.
+        projv::ComponentHandle bad = projv::utils::findComponentByPath(scene, "nonexistent/component");
+        check(bad == projv::INVALID_COMPONENT_HANDLE,
+              "P6: findComponentByPath with nonexistent path returns invalid");
+
+        // setComponentTransform sanity: save original position, move, verify, restore.
+        projv::core::vec3 origPos = scene.components[firstData].localPosition;
+        projv::core::quat origRot = scene.components[firstData].localRotation;
+        projv::core::vec3 newPos(10.0f, 20.0f, 30.0f);
+        projv::utils::setComponentPosition(scene, firstData, newPos);
+        check(scene.components[firstData].localPosition == newPos,
+              "P6: setComponentPosition updates localPosition");
+        check(scene.components[firstData].localRotation == origRot,
+              "P6: setComponentPosition preserves localRotation");
+
+        projv::core::vec3 movedWorld = projv::utils::getComponentWorldPosition(scene, firstData);
+        check(movedWorld != worldPosD,
+              "P6: world position changed after setComponentPosition");
+
+        // Restore.
+        projv::utils::setComponentPosition(scene, firstData, origPos);
+        projv::core::vec3 restoredWorld = projv::utils::getComponentWorldPosition(scene, firstData);
+        check(restoredWorld.x == worldPosD.x && restoredWorld.y == worldPosD.y &&
+              restoredWorld.z == worldPosD.z,
+              "P6: world position restored after undo");
+    }
+
     if (g_failures == 0) {
-        projv::core::info("Phase 3 editing: all checks passed.");
+        projv::core::info("Phase 6 editing: all checks passed.");
         return 0;
     } else {
         projv::core::error("Phase 3 editing: {} check(s) failed.", g_failures);

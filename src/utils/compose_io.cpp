@@ -42,12 +42,7 @@ namespace projv::utils {
             return value;
         }
 
-        bool isIdentityQuat(const core::quat& q) {
-            constexpr float eps = 1e-5f;
-            return std::abs(q.w - 1.0f) < eps && std::abs(q.x) < eps &&
-                   std::abs(q.y) < eps && std::abs(q.z) < eps;
         }
-    }
 
     void writeDataFile(const std::string& path, const DataFile& data) {
         core::info("writeDataFile: Writing .data container with {} block(s) to: {}", data.blocks.size(), path);
@@ -318,6 +313,11 @@ namespace projv::utils {
             }
             c.source = jc["source"].get<std::string>();
 
+            // Optional human-readable local name.
+            if (jc.contains("name") && jc["name"].is_string()) {
+                c.name = jc["name"].get<std::string>();
+            }
+
             if (jc.contains("position") && jc["position"].is_array() && jc["position"].size() == 3) {
                 c.position = core::vec3(jc["position"][0].get<float>(),
                                         jc["position"][1].get<float>(),
@@ -376,17 +376,14 @@ namespace projv::utils {
         std::unordered_set<std::string> warnedCycles;
         uint32_t nextChunkID = 0;
 
-        // Loose (transform-placed) leaves and grid volumes are collected separately, then
-        // assembled loose-first so the shader's brute-force loop covers only [0, looseChunkCount).
-        std::vector<Chunk> looseChunks;
-        struct PendingGrid { SceneGrid grid; std::vector<Chunk> blocks; std::string sourcePath; };
-        std::vector<PendingGrid> pendingGrids;
-
-        std::function<void(const std::string&, const core::mat4&, int, bool)> expand =
-            [&](const std::string& folder, const core::mat4& parentWorld, int depth, bool ancestorRotated) {
+        // P6: expand now creates component records for every compose.json entry, including
+        // Asset folders, and links parent/children. Chunks are created directly in scene.chunks.
+        std::function<void(const std::string&, const core::mat4&,
+                           ComponentHandle, int, std::unordered_set<std::string>)> expand =
+            [&](const std::string& folder, const core::mat4& parentWorld,
+                ComponentHandle parentHandle, int depth,
+                std::unordered_set<std::string> siblingNames) {
             if (depth > MAX_RECURSION_DEPTH) {
-                // Expected terminus for intentional cyclic dependencies (a warning was already
-                // logged where the cycle was entered); also the safety bound for pathological depth.
                 core::debug("loadComposeFromDisk: Recursion depth cap ({}) reached at {}", MAX_RECURSION_DEPTH, folder);
                 return;
             }
@@ -398,17 +395,49 @@ namespace projv::utils {
                 return;
             }
 
-            for (const ComposeComponent& c : doc.components) {
+            for (ComposeComponent& c : doc.components) {
+                // P6.2b: Auto-generate name if absent.
+                if (c.name.empty()) {
+                    if (c.type == ComponentType::Data) {
+                        std::filesystem::path p(c.source);
+                        c.name = p.stem().string();
+                    } else {
+                        std::filesystem::path p(c.source);
+                        c.name = p.filename().string();
+                    }
+                }
+                // Disambiguate siblings at the same level.
+                std::string disambiguated = c.name;
+                for (int suffix = 2; !siblingNames.insert(disambiguated).second; ++suffix) {
+                    disambiguated = c.name + "_" + std::to_string(suffix);
+                }
+
                 // Local transform: T * R * S (scale first, then rotate, then translate).
                 core::mat4 local = glm::translate(core::mat4(1.0f), c.position)
                                  * glm::mat4_cast(c.rotation)
                                  * glm::scale(core::mat4(1.0f), c.scale);
                 core::mat4 world = parentWorld * local;
-                bool rotated = ancestorRotated || !isIdentityQuat(c.rotation);
+
+                // P6.3b: Always create a ComponentRecord.
+                ComponentHandle myHandle = static_cast<ComponentHandle>(scene.components.size());
+                scene.components.push_back(ComponentRecord{});
+                ComponentRecord& rec = scene.components.back();
+                rec.name           = disambiguated;
+                rec.sourcePath     = "";
+                rec.localPosition  = c.position;
+                rec.localRotation  = c.rotation;
+                rec.localScale     = c.scale.x; // uniform scale, v0.0
+                rec.parent         = parentHandle;
+
+                // Link to parent.
+                if (parentHandle != INVALID_COMPONENT_HANDLE) {
+                    scene.components[parentHandle].children.push_back(myHandle);
+                }
 
                 if (c.type == ComponentType::Data) {
                     std::string resolved = std::filesystem::weakly_canonical(
                         std::filesystem::path(folder) / c.source).string();
+                    rec.sourcePath = resolved;
 
                     auto cacheIt = dataCache.find(resolved);
                     if (cacheIt == dataCache.end()) {
@@ -421,18 +450,13 @@ namespace projv::utils {
                         continue;
                     }
 
-                    (void)rotated;
-
                     // Decompose the world matrix into scale (per basis vector) + pure rotation.
-                    // Uniform scale is assumed; the shader ray transform is uniform-scale + rotation.
                     core::vec3 col0 = core::vec3(world[0]);
                     core::vec3 col1 = core::vec3(world[1]);
                     core::vec3 col2 = core::vec3(world[2]);
                     float sx = core::length(col0);
                     float sy = core::length(col1);
                     float sz = core::length(col2);
-                    // v0.0: non-uniform scale on a data leaf is rejected. See
-                    // compose_data_structure.md (Open Question 4).
                     if (std::abs(sx - sy) > 1e-4f || std::abs(sx - sz) > 1e-4f) {
                         core::error("loadComposeFromDisk: Non-uniform scale on data leaf '{}' "
                                     "({}, {}, {}); rejected. Use uniform scale on data leaves (v0.0).",
@@ -441,17 +465,12 @@ namespace projv::utils {
                     }
                     float uniformScale = sx;
 
-                    // Pure world rotation: strip per-axis scale from the basis, then cast to a quaternion.
                     core::mat3 rotMat = core::mat3(col0 / sx, col1 / sy, col2 / sz);
                     core::quat worldRotation = glm::quat_cast(rotMat);
 
-                    // Note: createChunkScaleFromVoxelScaleAndResolution multiplies by the raw
-                    // resolution value (not its log2), matching how chunk scales are computed elsewhere.
                     float localBlockScale = createChunkScaleFromVoxelScaleAndResolution(
                         dataFile.voxelScale, static_cast<int>(dataFile.resolution));
 
-                    // Builds one chunk from a block, placing its local corner through the full
-                    // world matrix (T * R * S) so rotation about the grid/asset origin is baked here.
                     auto makeChunk = [&](const DataBlock& block) {
                         Chunk chunk;
                         chunk.header.chunkID = nextChunkID++;
@@ -463,12 +482,6 @@ namespace projv::utils {
                         chunk.header.position = core::vec3(world * core::vec4(blockLocalCorner, 1.0f));
                         chunk.header.rotation = worldRotation;
                         chunk.mutability = c.mutability;
-                        // Share geometry across instances: dedup this block into the pool by its
-                        // canonical path + grid coords + mutability. Same source + same policy shares
-                        // one buffer; the same source referenced with a *different* policy lands in a
-                        // separate entry (a forced copy) so, e.g., a Direct edit never touches a Locked
-                        // sibling's buffer. The chunk references the pool entry and keeps its own
-                        // geometryData/voxelTypeData empty (populated only for legacy chunks).
                         std::string poolKey = resolved + "#" + std::to_string(block.gridX) + "_" +
                                               std::to_string(block.gridY) + "_" + std::to_string(block.gridZ) +
                                               "#" + std::to_string(static_cast<int>(c.mutability));
@@ -481,66 +494,61 @@ namespace projv::utils {
                             poolIt = poolKeyToIndex.emplace(poolKey, idx).first;
                         }
                         chunk.geometryPoolIndex = poolIt->second;
-                        // One more live instance references this blob (drives GPU range lifetime).
                         geometryPool[chunk.geometryPoolIndex].refCount++;
                         chunk.LOD = 0;
                         return chunk;
                     };
 
-                    // A multi-block .data is a grid volume (top-level DDA); a single block is a
-                    // loose transform-placed asset (brute-force loop).
+                    // P6.3c: Create chunks directly in scene.chunks (tree order).
                     if (dataFile.blocks.size() > 1) {
-                        PendingGrid pg;
-                        pg.sourcePath = resolved;
-                        pg.grid.origin = core::vec3(world[3]);
-                        pg.grid.cellSize = localBlockScale * uniformScale;
-                        pg.grid.rotation = worldRotation;
+                        rec.kind = ComponentKind::Grid;
+                        rec.gridIndex = static_cast<int32_t>(scene.grids.size());
+
+                        SceneGrid grid;
+                        grid.origin    = core::vec3(world[3]);
+                        grid.cellSize  = localBlockScale * uniformScale;
+                        grid.rotation  = worldRotation;
                         core::ivec3 dims(0);
                         for (const DataBlock& b : dataFile.blocks) {
                             dims.x = std::max(dims.x, b.gridX + 1);
                             dims.y = std::max(dims.y, b.gridY + 1);
                             dims.z = std::max(dims.z, b.gridZ + 1);
                         }
-                        pg.grid.dims = dims;
-                        pg.grid.cellToChunk.assign(
+                        grid.dims = dims;
+                        grid.cellToChunk.assign(
                             static_cast<size_t>(dims.x) * dims.y * dims.z, -1);
+                        grid.componentHandle = myHandle;
+                        grid.originCellCoord = core::ivec3(0);
+
                         for (const DataBlock& block : dataFile.blocks) {
                             if (block.gridX < 0 || block.gridY < 0 || block.gridZ < 0) {
                                 core::warn("loadComposeFromDisk: negative grid coord in '{}' - skipping block", resolved);
                                 continue;
                             }
-                            // Store the block's ordinal within this grid; rebased to an absolute
-                            // Scene.chunks index after traversal (see assembly below).
                             int lin = block.gridX + dims.x * (block.gridY + dims.y * block.gridZ);
-                            pg.grid.cellToChunk[lin] = static_cast<int32_t>(pg.blocks.size());
-                            pg.blocks.push_back(makeChunk(block));
-                            // Residency key: this block fills cell `lin`. gridIndex is stamped at
-                            // assembly (final grid index isn't known until grids are appended).
-                            pg.blocks.back().cellIndex = lin;
+                            Chunk chunk = makeChunk(block);
+                            chunk.gridIndex       = rec.gridIndex;
+                            chunk.cellIndex       = lin;
+                            chunk.componentHandle = myHandle;
+                            grid.cellToChunk[lin] = static_cast<int32_t>(scene.chunks.size());
+                            scene.chunks.push_back(std::move(chunk));
                         }
-                        pendingGrids.push_back(std::move(pg));
+                        scene.grids.push_back(std::move(grid));
                     } else {
-                        // Single-block .data -> exactly one loose chunk -> exactly one component.
-                        // The final Scene.chunks index is predictable here: loose chunks are moved
-                        // into Scene.chunks first, in this exact order, at assembly below.
-                        ComponentHandle componentHandle = static_cast<ComponentHandle>(scene.components.size());
-                        ChunkHandle predictedHandle = static_cast<ChunkHandle>(looseChunks.size());
-                        scene.components.push_back(ComponentRecord{
-                            ComponentKind::Chunk, predictedHandle, -1, resolved});
+                        rec.kind = ComponentKind::Chunk;
                         for (const DataBlock& block : dataFile.blocks) {
                             Chunk chunk = makeChunk(block);
-                            chunk.componentHandle = componentHandle;
-                            looseChunks.push_back(std::move(chunk));
+                            chunk.componentHandle = myHandle;
+                            rec.chunkHandle = static_cast<ChunkHandle>(scene.chunks.size());
+                            scene.chunks.push_back(std::move(chunk));
                         }
                     }
                 } else { // Asset
+                    rec.kind = ComponentKind::Asset;
                     std::string resolved = std::filesystem::weakly_canonical(
                         std::filesystem::path(folder) / c.source).string();
+                    rec.sourcePath = resolved;
 
-                    // Cyclic asset dependencies are allowed — they produce fun repeated/fractal
-                    // structures as each level re-applies the asset transform — and are kept safe
-                    // by the depth cap above. Warn once per distinct cycle so the log isn't spammed
-                    // at every level of the descent.
                     if (std::find(folderStack.begin(), folderStack.end(), resolved) != folderStack.end()) {
                         if (warnedCycles.insert(resolved).second) {
                             core::warn("loadComposeFromDisk: Cyclic asset dependency at '{}' — allowed, "
@@ -549,7 +557,8 @@ namespace projv::utils {
                     }
 
                     folderStack.push_back(resolved);
-                    expand(resolved, world, depth + 1, rotated);
+                    expand(resolved, world, myHandle, depth + 1,
+                           std::unordered_set<std::string>{});
                     folderStack.pop_back();
                 }
             }
@@ -557,39 +566,23 @@ namespace projv::utils {
 
         std::string rootCanonical = std::filesystem::weakly_canonical(folderPath).string();
         folderStack.push_back(rootCanonical);
-        expand(rootCanonical, core::mat4(1.0f), 0, false);
+        expand(rootCanonical, core::mat4(1.0f), INVALID_COMPONENT_HANDLE, 0,
+               std::unordered_set<std::string>{});
         folderStack.pop_back();
 
-        // Assemble loose-first, then each grid's blocks. Handles are just Scene.chunks indices, so we
-        // keep the loose-first order, but nothing depends on it anymore: the loose set is an explicit
-        // handle list and grid cells store handles. Rebase every grid's cellToChunk from per-grid
-        // ordinals to absolute handles, and stamp each grid block's residency (gridIndex, cellIndex).
-        scene.chunks = std::move(looseChunks);
-        scene.looseChunkCount = static_cast<uint32_t>(scene.chunks.size());
-        scene.looseChunks.resize(scene.looseChunkCount);
-        for (ChunkHandle h = 0; h < scene.looseChunkCount; h++) scene.looseChunks[h] = h;
-        for (PendingGrid& pg : pendingGrids) {
-            int32_t gridIndex = static_cast<int32_t>(scene.grids.size());
-            int32_t base = static_cast<int32_t>(scene.chunks.size());
-            for (Chunk& c : pg.blocks) {
-                c.gridIndex = gridIndex;
-                scene.chunks.push_back(std::move(c));
-            }
-            for (int32_t& idx : pg.grid.cellToChunk) {
-                if (idx >= 0) idx += base;
-            }
-            ComponentHandle componentHandle = static_cast<ComponentHandle>(scene.components.size());
-            scene.components.push_back(ComponentRecord{ComponentKind::Grid, 0, gridIndex, pg.sourcePath});
-            pg.grid.componentHandle = componentHandle;
-            scene.grids.push_back(std::move(pg.grid));
+        // P6.3c: Rebuild loose list from tree (chunks with gridIndex < 0).
+        for (ChunkHandle h = 0; h < scene.chunks.size(); ++h) {
+            if (scene.chunks[h].alive && scene.chunks[h].gridIndex < 0)
+                scene.looseChunks.push_back(h);
         }
+        scene.looseChunkCount = static_cast<uint32_t>(scene.looseChunks.size());
 
-        // Pool indices are absolute and stable (never rebased, unlike cellToChunk), so we can hand
-        // the pool over as-is.
+        // Pool indices are absolute and stable.
         scene.geometryPool = std::move(geometryPool);
 
-        core::info("loadComposeFromDisk: Loaded {} chunk(s) ({} loose, {} grid(s), {} unique geometry blob(s)) from compose scene",
-                   scene.chunks.size(), scene.looseChunkCount, scene.grids.size(), scene.geometryPool.size());
+        core::info("loadComposeFromDisk: Loaded {} chunk(s) ({} loose, {} grid(s), {} unique geometry blob(s), {} component(s)) from compose scene",
+                   scene.chunks.size(), scene.looseChunkCount, scene.grids.size(),
+                   scene.geometryPool.size(), scene.components.size());
         return scene;
     }
 

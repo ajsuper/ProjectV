@@ -86,7 +86,19 @@ Controls: WASD/R/F + mouse to fly, E to add voxel (cycles colors), Q to remove,
 - `docs/examples/edit_demo/main.cpp` — switched to `flushSceneUpdates`.
 - `docs/examples/editing_p1/main.cpp` — 8 new P5 dirty-flag assertions (all pass).
 
-### What's Next (Phase 6+)
+### Delivered (Phase 6)
+- `scene.h`: Added `ComponentKind::Asset`. Added `name`, `parent`, `children`, `localPosition`, `localRotation`, `localScale` to `ComponentRecord`.
+- `compose.h`: Added `name` to `ComposeComponent`.
+- `compose_io.cpp`: Parse `"name"` from compose.json. Auto-generate names from filenames with sibling disambiguation. Rewrote `loadComposeFromDisk` to create `ComponentRecord`s for every compose.json entry (including Asset folders). Parent/child linking. Direct chunk creation in `scene.chunks` (tree order). Rebuild `looseChunks` list from tree after assembly.
+- `include/utils/scene_query.h` + `src/utils/scene_query.cpp`: New module — `getComponentPath`, `findComponentByPath`, `findComponentsByName`, `listComponents`, `getComponentVoxelCount`, `getComponentWorldMatrix`/`Position`/`Rotation`, `setComponentPosition`, `setComponentRotation`, `setComponentTransform` (with subtree rebake).
+- `src/utils/editing.cpp`: Skip `ComponentKind::Asset` in `applyComponentQueue`.
+- `CMakeLists.txt`: Added `projectV-scene_query` library target.
+- `docs/examples/editing_p1/main.cpp`: 21 P6 assertions (names, paths, transforms, world matrix, voxel counts, listComponents, transform mutation + restore). Skip Asset kinds in `findComponents`.
+- `docs/examples/edit_demo/main.cpp`: Skip Asset kinds in component search.
+- `docs/examples/editing_p1/Makefile`: Link `projectV-scene_query`.
+- `AGENTS.md`: This entry.
+
+### What's Next (Phase 7+)
 - Removal of legacy `chunkQueue`, mutability policies, persistence.
 
 

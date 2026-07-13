@@ -20,7 +20,7 @@ namespace projv{
     using ComponentHandle = uint32_t;
     static constexpr ComponentHandle INVALID_COMPONENT_HANDLE = 0xFFFFFFFFu;
 
-    enum class ComponentKind { Chunk, Grid };
+    enum class ComponentKind { Chunk, Grid, Asset };
 
     // One queued edit. Continuous component-space coords (not Z-order). P1: append via
     // queueVoxelAdd/queueVoxelRemove, drained by updateScene.
@@ -54,6 +54,18 @@ namespace projv{
         // P1 additions: per-component edit queue and lazily-assigned data reference.
         ComponentEditQueue editQueue;
         int32_t            dataRefID = -1;   // index into Scene.dataReferences; -1 = unassigned
+
+        // P6: Identity
+        std::string name;                    // local name (from compose.json or auto-generated)
+
+        // P6: Hierarchy (Chunk, Grid, Asset -- all three participate)
+        ComponentHandle parent = INVALID_COMPONENT_HANDLE;
+        std::vector<ComponentHandle> children;   // populated for Asset; empty for Chunk/Grid
+
+        // P6: Local transform (relative to parent; all three use this)
+        core::vec3 localPosition = core::vec3(0.0f);
+        core::quat localRotation = core::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        float      localScale = 1.0f;            // uniform only (v0.0)
     };
 
     // Governs what happens when a `data` component's voxel data is modified and persisted.
@@ -112,6 +124,9 @@ namespace projv{
         // Slot liveness. Dead slots get a degenerate GPU header row (scale <= 0) that the shader
         // skips. Loaders create chunks alive.
         bool alive = true;
+        // P6: true when the chunk's header (position/rotation) changed since the last GPU
+        // sync. Set by rebakeSubtree, cleared by flushSceneUpdates → updateDirtyHeaders.
+        bool headerDirty = false;
         // Residency key: which grid + cell this chunk fills, or -1/-1 when it is a loose
         // (transform-placed) leaf. Gives O(1) chunk->cell so eviction can clear the right
         // SceneGrid.cellToChunk slot without scanning. gridIndex indexes Scene.grids.

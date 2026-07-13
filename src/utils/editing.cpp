@@ -103,6 +103,12 @@ namespace projv::utils {
             ComponentRecord& comp = scene.components[h];
             if (comp.editQueue.ops.empty()) return true;
 
+            // P6: Asset components should never have edit ops, but be defensive.
+            if (comp.kind == ComponentKind::Asset) {
+                comp.editQueue.ops.clear();
+                return true;
+            }
+
             ensureDataReference(scene, comp);
             uint32_t res = scene.dataReferences[comp.dataRefID].resolution;
 

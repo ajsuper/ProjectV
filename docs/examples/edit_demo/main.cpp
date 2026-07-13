@@ -40,10 +40,13 @@
 #include "graphics/type_mapping.h"
 #include "utils/compose_io.h"
 #include "utils/editing.h"
+#include "utils/scene_query.h"
 #include "utils/voxel_management.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+
+#include <glm/gtc/quaternion.hpp>
 
 namespace fs = std::filesystem;
 
@@ -92,6 +95,19 @@ struct EditState {
     int sphereRadius = 8;    // radius of the placed/removed sphere, in voxels
     int fallbackDistance = 15; // where to place when the crosshair ray misses all geometry
     int voxelColorIndex = 0;
+
+    // P6: four Sponza instances, selected with keys 1-4.
+    // sponzas[i] = Grid handle (edit target), sponzaAssets[i] = Asset handle (rotate target).
+    projv::ComponentHandle sponzas[4] = {projv::INVALID_COMPONENT_HANDLE,
+                                          projv::INVALID_COMPONENT_HANDLE,
+                                          projv::INVALID_COMPONENT_HANDLE,
+                                          projv::INVALID_COMPONENT_HANDLE};
+    projv::ComponentHandle sponzaAssets[4] = {projv::INVALID_COMPONENT_HANDLE,
+                                               projv::INVALID_COMPONENT_HANDLE,
+                                               projv::INVALID_COMPONENT_HANDLE,
+                                               projv::INVALID_COMPONENT_HANDLE};
+    int selectedSponza = 0;          // 0-3 index into sponzas[]
+    float rotationAngle = 0.0f;      // accumulated Y-axis rotation (radians)
 };
 
 // =============================================================================
@@ -337,17 +353,41 @@ void startup(projv::Application& app) {
     EditState& editState    = projv::core::createGlobalResource<EditState>(app.world);
     PreviewState& preview   = projv::core::createGlobalResource<PreviewState>(app.world);
 
-    // Load the Sponza scene.
-    scene = projv::utils::loadComposeFromDisk("./SponzaScene/");
+    // Load the QuadSponza scene.
+    scene = projv::utils::loadComposeFromDisk("./QuadSponza/");
+    projv::core::info("Edit demo: loaded {} components, {} chunks, {} grids",
+                      scene.components.size(), scene.chunks.size(), scene.grids.size());
 
-    // Find the first Grid component (the Sponza scene has one).
+    // Log the component tree.
     for (projv::ComponentHandle h = 0; h < scene.components.size(); ++h) {
-        if (scene.components[h].kind == projv::ComponentKind::Grid) {
-            editState.component = h;
-            break;
+        const auto& c = scene.components[h];
+        projv::core::info("  [{}] kind={} name=\"{}\" parent={} children={} path=\"{}\"",
+            h,
+            c.kind == projv::ComponentKind::Asset ? "Asset" :
+            c.kind == projv::ComponentKind::Grid ? "Grid" : "Chunk",
+            c.name, c.parent, c.children.size(),
+            projv::utils::getComponentPath(scene, h));
+    }
+
+    // P6: find the four Sponza Grid components by name under each Asset.
+    const char* names[4] = {"sponza_a", "sponza_b", "sponza_c", "sponza_d"};
+    for (int i = 0; i < 4; ++i) {
+        // Find the Asset parent by path: "sponza_X"
+        editState.sponzaAssets[i] = projv::utils::findComponentByPath(scene, names[i]);
+        // Find the Grid child by path: "sponza_X/model"
+        std::string path = std::string(names[i]) + "/model";
+        editState.sponzas[i] = projv::utils::findComponentByPath(scene, path);
+        if (editState.sponzas[i] != projv::INVALID_COMPONENT_HANDLE) {
+            projv::core::info("  Sponza {}: Asset[{}] Grid[{}] path=\"{}\" voxels={}",
+                i+1, editState.sponzaAssets[i], editState.sponzas[i], path,
+                projv::utils::getComponentVoxelCount(scene, editState.sponzas[i]));
+        } else {
+            projv::core::error("  Sponza {}: NOT FOUND at path \"{}\"", i+1, path);
         }
     }
-    projv::core::info("Edit demo: targeting component {}", editState.component);
+    editState.component = editState.sponzas[0];
+    editState.selectedSponza = 0;
+    projv::core::info("Edit demo: targeting sponza 1, component {}", editState.component);
 
     // Load the fast renderer (direct + AO, TAA).
     projv::RendererSpecification rendererSpec = projv::graphics::loadRendererSpecification(
@@ -427,12 +467,25 @@ void render(projv::Application& app) {
 
     // --- Editing keybindings (processed up front, before cursor capture check) ---
 
-    // Change sphere radius (in voxels): 1-5.
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_1) == GLFW_PRESS) editState.sphereRadius = 4;
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_2) == GLFW_PRESS) editState.sphereRadius = 8;
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_3) == GLFW_PRESS) editState.sphereRadius = 12;
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_4) == GLFW_PRESS) editState.sphereRadius = 20;
+    // P6: keys 1-4 select which Sponza to edit.
+    for (int i = 0; i < 4; ++i) {
+        if (glfwGetKey(renderInstance.window, GLFW_KEY_1 + i) == GLFW_PRESS) {
+            if (editState.selectedSponza != i &&
+                editState.sponzas[i] != projv::INVALID_COMPONENT_HANDLE) {
+                editState.selectedSponza = i;
+                editState.component = editState.sponzas[i];
+                editState.rotationAngle = 0.0f; // reset rotation on switch
+                projv::core::warn("SELECTED Sponza {} (component {}) path=\"{}\"",
+                    i+1, editState.component,
+                    projv::utils::getComponentPath(scene, editState.component));
+            }
+        }
+    }
+
+    // Key 5: largest sphere radius.
     if (glfwGetKey(renderInstance.window, GLFW_KEY_5) == GLFW_PRESS) editState.sphereRadius = 32;
+
+    // Change sphere radius (in voxels): scrollwheel or key 5.
 
     // Scrollwheel also changes the radius (scaled so one notch ≈ ±2 voxels).
     {
@@ -517,6 +570,25 @@ void render(projv::Application& app) {
 
     // --- Preview sphere update (static — no per-frame updates) ---
     // Preview chunk was created at startup at position (0,0,0). No header updates here.
+
+    // --- P6: Continuous Y-axis rotation of the selected Sponza Asset ---
+    {
+        // Rotate at ~90 degrees/second (pi/2 rad/s). At 60fps that's ~0.026 rad/frame.
+        constexpr float kRotationSpeed = 0.02618f; // pi/2 / 60
+        editState.rotationAngle += kRotationSpeed;
+        if (editState.rotationAngle > 6.28318f) editState.rotationAngle -= 6.28318f;
+
+        projv::ComponentHandle assetH = editState.sponzaAssets[editState.selectedSponza];
+        if (assetH != projv::INVALID_COMPONENT_HANDLE && assetH < scene.components.size()) {
+            projv::core::quat yRot = glm::angleAxis(editState.rotationAngle,
+                                                     projv::core::vec3(0.0f, 1.0f, 0.0f));
+            // CPU: update transforms + mark affected chunk headers dirty.
+            projv::utils::setComponentRotation(scene, assetH, yRot);
+            // GPU: detect dirty headers + sync grid tables automatically.
+            projv::graphics::flushSceneUpdates(scene, gpuData);
+            cameraMoved = true;
+        }
+    }
 
     // --- Cursor capture toggle ---
     static bool mouseCaptured = true;

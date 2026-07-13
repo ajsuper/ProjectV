@@ -658,6 +658,9 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             if (!c.alive) continue;
 
             bool needsUpdate = (h >= gpuData.uploadedChunkCount);  // brand new chunk
+            if (!needsUpdate && c.headerDirty) {
+                needsUpdate = true;                       // header changed (P6 transform)
+            }
             if (!needsUpdate && c.geometryPoolIndex >= 0) {
                 // Existing chunk — check if its pool blob was just uploaded.
                 uint32_t pIdx = static_cast<uint32_t>(c.geometryPoolIndex);
@@ -685,6 +688,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             uint16_t x = static_cast<uint16_t>(h * 4);
             const bgfx::Memory* mem = bgfx::copy(&hdr, sizeof(hdr));
             bgfx::updateTexture2D(gpuData.headerTexture, 0, 0, x, 0, 4, 1, mem);
+            scene.chunks[h].headerDirty = false;   // P6: clear after sync
             updated++;
         }
 

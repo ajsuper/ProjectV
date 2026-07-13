@@ -140,6 +140,10 @@ add_library(projectV-editing STATIC ${UTILS_SRC_DIR}/editing.cpp)
 target_link_libraries(projectV-editing PRIVATE projectV-voxel_management projectV-voxel_math)
 link_common_includes(projectV-editing)
 
+add_library(projectV-scene_query STATIC ${UTILS_SRC_DIR}/scene_query.cpp)
+target_link_libraries(projectV-scene_query PRIVATE projectV-voxel_management projectV-math)
+link_common_includes(projectV-scene_query)
+
 # Create tools directory.
 file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/build/tools)
 

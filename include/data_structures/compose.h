@@ -67,6 +67,7 @@ namespace projv {
     struct ComposeComponent {
         ComponentType type = ComponentType::Data;
         std::string   source;                        // file (data) or folder (asset), unresolved
+        std::string   name;                          // from "name" in JSON, or auto-generated
         core::vec3    position = core::vec3(0.0f);
         core::quat    rotation = core::quat(1.0f, 0.0f, 0.0f, 0.0f); // identity (w,x,y,z)
         core::vec3    scale = core::vec3(1.0f);
