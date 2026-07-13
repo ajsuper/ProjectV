@@ -12,13 +12,20 @@ namespace projv {
     // Scene.geometryPool (indexed by the same pool index). This is the layout map the old one-shot
     // createTexturesForScene threw away — keeping it is what makes incremental add/update/remove
     // possible. Offsets are in texels (the allocation unit), matching the shader's texel addressing.
+    //
+    // P6: per-blob over-allocation (geomTexelAllocated / typeTexelAllocated) rounds up the GPU range
+    // so that in-place COW edits that grow the blob slightly can stay in the same range without
+    // reallocation. The extra slack is sized relative to the blob's actual data (e.g. 25% + 64 min).
+    // The allocator and texture headroom both account for this padding via `withHeadroom(paddedUsed)`.
     struct GPUBlobRange {
-        uint32_t geomTexelOffset = 0;  // start texel in the tree64 texture; == header.geometryStartIndex
-        uint32_t geomTexelLen = 0;     // node count (1 node = 1 RGB texel)
-        uint32_t typeTexelOffset = 0;  // start texel in the voxelType texture; *4 == header voxelType start
-        uint32_t typeTexelLen = 0;     // texels reserved (ceil(typeUintLen / 4); texel-aligned so uploads never clobber a neighbour)
-        uint32_t typeUintLen = 0;      // actual voxelType uint count (header end = start + this)
-        bool uploaded = false;         // false for an unreferenced/free pool slot
+        uint32_t geomTexelOffset = 0;     // start texel in the tree64 texture; == header.geometryStartIndex
+        uint32_t geomTexelLen = 0;        // node count actually used (1 node = 1 RGB texel)
+        uint32_t geomTexelAllocated = 0;  // padded allocation; >= geomTexelLen; range is [offset, offset+allocated)
+        uint32_t typeTexelOffset = 0;     // start texel in the voxelType texture; *4 == header voxelType start
+        uint32_t typeTexelLen = 0;        // used texels (ceil(typeUintLen / 4))
+        uint32_t typeTexelAllocated = 0;  // padded allocation; >= typeTexelLen
+        uint32_t typeUintLen = 0;         // actual voxelType uint count (header end = start + this)
+        bool uploaded = false;            // false for an unreferenced/free pool slot
     };
 
     struct GPUData {
@@ -51,6 +58,10 @@ namespace projv {
         // Loose-list texture (RGBA, 4 handles per texel), a compact list of `looseCount` live handles.
         uint32_t looseCount = 0;
         uint32_t looseCapacity = 0;
+
+        // P5: chunk handles < uploadedChunkCount have been uploaded at least once.
+        // New chunks (handle >= this watermark) need their first header row written.
+        uint32_t uploadedChunkCount = 0;
 
         // Per-pool-blob GPU location; parallel to Scene.geometryPool.
         std::vector<GPUBlobRange> blobRanges;

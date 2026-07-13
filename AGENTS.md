@@ -45,7 +45,7 @@ Controls: WASD/R/F + mouse to fly, E to add voxel (cycles colors), Q to remove,
 - `editQueue` on ComponentRecord is the new per-component edit queue (P1+).
 - `forkBlob` creates a COW copy without decrementing the original's refCount.
 
-## Phase 1 + 2 Status (2026-07-10)
+## Phase 1–5 Status (2026-07-11)
 
 ### Delivered (Phase 1)
 - `scene.h`: Added `PendingVoxelOp`, `ComponentEditQueue`, `DataReference`, `ComponentRecord::editQueue`/`dataRefID`, `Scene::dataReferences`, `forkBlob()`.
@@ -75,9 +75,19 @@ Controls: WASD/R/F + mouse to fly, E to add voxel (cycles colors), Q to remove,
 - `rebuildSceneTextures(Scene&, GPUData&)` — calls `buildDataAndHeaderTextures` + `syncSceneTables` to rebuild GPU texture content from CPU state after edits, reusing existing samplers. Declared in `gpu_interface.h`.
 - Shader `GPUChunkHeader` in `pjv_utils_DDA.sc`: updated to match CPU struct (`uint dataRefID; uint padding[1]`).
 
-### What's Next (Phase 5+)
-- P5+: Removal of legacy `chunkQueue`, incremental GPU upload, mutability policies, persistence.
-Full plan can be found in docs/plans/edit.md
+### Delivered (Phase 5)
+- `GeometryBlob::dirty` (in `scene.h`) — per-blob flag set when a blob is new or changed (set in `forkBlob()` and `internChunkGeometry()`).
+- `GPUData::uploadedChunkCount` (in `gpuData.h`) — watermark for new-chunk header detection.
+- `flushSceneUpdates(Scene&, GPUData&)` (in `gpu_interface.h/cpp`) — incremental GPU upload:
+  - `uploadDirtyBlobs` — iterates dirty blobs, allocates ranges from persistent `RangeAllocator`, uploads only changed texels via `bgfx::updateTexture2D` with row-by-row wrapping.
+  - `updateDirtyHeaders` — rewrites only header rows for chunks whose pool blob was just uploaded or that are new.
+  - `growDataTextures` / `growHeaderTexture` — full repack fallback when allocators are full (rare, amortized O(1) via `withHeadroom`).
+- `rebuildSceneTextures` kept as documented fallback.
+- `docs/examples/edit_demo/main.cpp` — switched to `flushSceneUpdates`.
+- `docs/examples/editing_p1/main.cpp` — 8 new P5 dirty-flag assertions (all pass).
+
+### What's Next (Phase 6+)
+- Removal of legacy `chunkQueue`, mutability policies, persistence.
 
 
 <!-- headroom:rtk-instructions -->

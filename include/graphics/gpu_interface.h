@@ -101,6 +101,28 @@ namespace projv::graphics {
     void rebuildSceneTextures(projv::Scene& scene, GPUData& gpuData);
 
     /**
+     * P5: Incremental GPU update after utils::updateScene. Uploads only pool blobs flagged
+     * dirty (new forks / interned chunks) and rewrites only the affected header rows, reusing
+     * the persistent RangeAllocator / GPUBlobRange state in gpuData. Grows the data / header
+     * textures only when an allocator is full (rare, amortized O(1)). The small scene tables
+     * (gridInfo / cellMap / looseList) are still rebuilt in full (they are tiny).
+     *
+     * First-time setup is done by createTexturesForScene; subsequent edits call this instead
+     * of rebuildSceneTextures.
+     */
+    void flushSceneUpdates(projv::Scene& scene, GPUData& gpuData);
+
+    /**
+     * Updates a single chunk's GPU header row after modifying its position or other header
+     * fields. This is a lightweight direct write to the header texture — it does NOT go through
+     * the full flushSceneUpdates pipeline. Useful for moving a preview chunk each frame.
+     * @param scene  The scene containing the chunk.
+     * @param gpuData GPU data with the header texture and blobRanges.
+     * @param chunkHandle  Handle of the chunk whose header row to rewrite.
+     */
+    void updateChunkHeader(projv::Scene& scene, GPUData& gpuData, ChunkHandle chunkHandle);
+
+    /**
      * Destroys every texture and uniform held by a GPUData and resets its layout state. Fixes the
      * leak from repeatedly rebuilding a scene; call before reloading.
      * @param gpuData The GPU data to tear down.

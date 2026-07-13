@@ -140,6 +140,9 @@ namespace projv{
         // decremented on chunk removal / COW fork-away. At 0 the blob's GPU range is freed and its pool
         // slot is recycled via Scene.blobFreeList. Bounds pool growth over a long dynamic session.
         uint32_t refCount = 0;
+        // P5: true when the blob's GPU content is stale (newly forked, interned, or content changed).
+        // Cleared by flushSceneUpdates after the incremental upload.
+        bool dirty = false;
     };
     
     // A uniform grid of equal, grid-aligned chunks (one .data grid volume). Enables a
@@ -205,6 +208,7 @@ namespace projv{
         blob.geometry = std::move(chunk.geometryData);
         blob.voxelTypeData = std::move(chunk.voxelTypeData);
         blob.refCount = 1;
+        blob.dirty = true; // P5: new blob, needs GPU upload
         chunk.geometryData.clear();
         chunk.voxelTypeData.clear();
         chunk.geometryPoolIndex = poolInsertBlob(scene, std::move(blob));
@@ -216,12 +220,23 @@ namespace projv{
     // decrement the original's refCount -- other chunks may still share it. The caller is responsible
     // for pointing the editing chunk at the returned index. Returns srcIndex unchanged if it is
     // out of range (caller should intern the chunk first via internChunkGeometry).
+    //
+    // P6 optimization: if the blob's refCount is exactly 1 (sole owner), skip the copy and edit
+    // in-place. The blob is marked dirty for the next GPU flush, and the same index is returned.
+    // This avoids allocating a new pool entry and GPU range on every edit, which is the dominant
+    // source of allocator pressure in sustained editing sessions.
     inline int32_t forkBlob(Scene& scene, int32_t srcIndex) {
         if (srcIndex < 0 || srcIndex >= static_cast<int32_t>(scene.geometryPool.size())) {
             return srcIndex;
         }
+        // Sole owner — no copy needed, edit in place.
+        if (scene.geometryPool[srcIndex].refCount == 1) {
+            scene.geometryPool[srcIndex].dirty = true;
+            return srcIndex;
+        }
         GeometryBlob fork = scene.geometryPool[srcIndex]; // deep copy of vecs + string
         fork.refCount = 1;
+        fork.dirty = true; // P5: new blob, no GPU range yet
         return poolInsertBlob(scene, std::move(fork));
     }
 

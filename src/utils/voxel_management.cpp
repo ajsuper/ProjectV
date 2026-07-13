@@ -364,28 +364,26 @@ namespace projv::utils {
             core::ivec3 pos = reverseZOrderIndex(v.ZOrderPosition);
             farthestCoordinate = std::max(farthestCoordinate, std::max({pos.x, pos.y, pos.z}));
         }
-        int resolutionToTheNearestPowOfTwo = std::pow(2, std::ceil(std::log2(farthestCoordinate + 1)));
-
-        // Grid-resident chunks: the resolution is fixed by the grid cell metadata
-        // (set on the chunk header before this call). Do not shrink it to fit the
-        // voxel span — the tree64 requires power-of-4 resolutions and the grid cell
-        // size must stay consistent.
-        if (chunk.gridIndex >= 0) {
-            resolutionToTheNearestPowOfTwo = chunk.header.resolution;
+        // Tree64 is a 4-ary tree (each node splits into 4x4x4 children), so the resolution
+        // must be a power of 4. Grid-resident chunks preserve their existing resolution.
+        int resolution = chunk.gridIndex >= 0 ? chunk.header.resolution : 1;
+        if (chunk.gridIndex < 0) {
+            while (resolution < farthestCoordinate + 1) resolution *= 4;
         }
-        if(resolutionToTheNearestPowOfTwo > 256) {
+
+        if (resolution > 256) {
             core::warn("updateChunkFromItsVoxelBatch: Chunk {} resolution {} exceeds recommended 256", chunk.header.chunkID, chunk.header.resolution);
         }
 
         auto t1 = std::chrono::high_resolution_clock::now();
-        chunk.geometryData = createTree64(voxelGrid, resolutionToTheNearestPowOfTwo);
+        chunk.geometryData = createTree64(voxelGrid, resolution);
         auto t2 = std::chrono::high_resolution_clock::now();
         chunk.voxelTypeData = createVoxelTypeData(voxelGrid);
         auto t3 = std::chrono::high_resolution_clock::now();
         chunk.LOD = 0;
 
-        chunk.header.resolution = resolutionToTheNearestPowOfTwo;
-        chunk.header.scale = createChunkScaleFromVoxelScaleAndResolution(chunk.header.voxelScale, resolutionToTheNearestPowOfTwo);
+        chunk.header.resolution = resolution;
+        chunk.header.scale = createChunkScaleFromVoxelScaleAndResolution(chunk.header.voxelScale, resolution);
 
         if(clearBatch) {
             VoxelBatch emptyChunkQueue;

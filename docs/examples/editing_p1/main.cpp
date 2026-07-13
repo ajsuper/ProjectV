@@ -123,7 +123,16 @@ int main(int argc, char** argv) {
         check(comp.editQueue.ops.empty(), "edit queue cleared after updateScene");
 
         int32_t newPoolIdx = chunk.geometryPoolIndex;
-        check(newPoolIdx != origPoolIdx, "chunk points at a NEW pool index (COW fork)");
+
+        // COW optimization: if the chunk was the sole blob owner (refCount==1), forkBlob
+        // edits in-place and returns the same index. Otherwise a new fork blob is created.
+        if (origRefCount == 1) {
+            check(newPoolIdx == origPoolIdx,
+                  "chunk edits in-place when sole blob owner (refCount==1)");
+        } else {
+            check(newPoolIdx != origPoolIdx,
+                  "chunk forks to new pool index when blob is shared (refCount>1)");
+        }
 
         // The original blob's refCount must NOT be decremented (forkBlob spec).
         if (origPoolIdx >= 0 && static_cast<size_t>(origPoolIdx) < scene.geometryPool.size()) {
@@ -131,21 +140,35 @@ int main(int argc, char** argv) {
                   "original blob refCount unchanged (fork spec)");
         }
 
-        // The new fork must have refCount == 1 and a populated geometry array.
+        // Verify the blob at newPoolIdx has the edited content.
         if (newPoolIdx >= 0 && static_cast<size_t>(newPoolIdx) < scene.geometryPool.size()) {
-            const projv::GeometryBlob& fork = scene.geometryPool[newPoolIdx];
-            check(fork.refCount == 1, "forked blob refCount == 1");
-            check(!fork.geometry.empty(), "forked blob has non-empty geometry");
+            const projv::GeometryBlob& blob = scene.geometryPool[newPoolIdx];
+            // In-place: refCount == origRefCount. Forked: refCount == 1.
+            bool isInPlace = (newPoolIdx == origPoolIdx && origRefCount == 1);
+            if (isInPlace) {
+                check(blob.refCount == origRefCount,
+                      "in-place blob refCount unchanged");
+            } else {
+                check(blob.refCount == 1,
+                      "forked blob refCount == 1");
+            }
+            check(blob.dirty, "blob marked dirty after edit");
+            check(!blob.geometry.empty(), "blob has non-empty geometry");
 
             // Three adds were applied (the OOB op was skipped). Voxel count must have grown.
-            size_t newVoxelCount = fork.voxelTypeData.size() / 3;
+            size_t newVoxelCount = blob.voxelTypeData.size() / 3;
             check(newVoxelCount > origVoxelCount,
                   "voxel count grew after adds (orig -> new)");
         }
 
-        // Pool grew by at least one entry.
-        check(scene.geometryPool.size() > origBlobCount,
-              "geometryPool size grew (fork added)");
+        // Pool grew only if a new fork blob was created.
+        if (newPoolIdx != origPoolIdx) {
+            check(scene.geometryPool.size() > origBlobCount,
+                  "geometryPool size grew (fork added)");
+        } else {
+            check(scene.geometryPool.size() == origBlobCount,
+                  "geometryPool size unchanged (in-place edit)");
+        }
 
         // DataReference for this component was allocated.
         check(comp.dataRefID >= 0, "component.dataRefID assigned");
@@ -225,6 +248,8 @@ int main(int argc, char** argv) {
         // Intern into a pool blob.
         int32_t blobIdx = projv::internChunkGeometry(testScene, chunk);
         check(blobIdx >= 0, "programmatic: internChunkGeometry succeeded");
+        check(testScene.geometryPool[blobIdx].dirty,
+              "programmatic: interned blob is dirty (P5)");
         testScene.chunks.push_back(std::move(chunk));
 
         // Component pointing at chunk handle 0.
@@ -250,6 +275,9 @@ int main(int argc, char** argv) {
             testScene.geometryPool[0].voxelTypeData.size() / 3u;
         check(origVoxelCount == 5, "programmatic: seed has 5 voxels");
 
+        // Simulate prior GPU flush: clear dirty flags so only the fork is dirty.
+        for (auto& blob : testScene.geometryPool) blob.dirty = false;
+
         // Queue 3 adds at positions that don't collide with the seed (seed has 0,2,4,6,8).
         std::vector<projv::PendingVoxelOp> adds{
             {false, {10, 10, 10}, projv::Color{255, 0, 0}},
@@ -269,15 +297,16 @@ int main(int argc, char** argv) {
               "programmatic: editQueue cleared");
 
         int32_t newPoolIdx = testScene.chunks[0].geometryPoolIndex;
-        check(newPoolIdx != blobIdx, "programmatic: COW fork to new blob index");
+        // refCount was 1, so forkBlob edits in-place (same index).
+        check(newPoolIdx == blobIdx, "programmatic: in-place edit (sole owner)");
 
-        // Original blob refCount unchanged.
+        // Original blob refCount unchanged (in-place, same blob).
         if (static_cast<size_t>(blobIdx) < testScene.geometryPool.size()) {
             check(testScene.geometryPool[blobIdx].refCount == 1,
                   "programmatic: original blob refCount unchanged");
         }
 
-        // Forked blob exists with refCount 1 and non-empty geometry.
+        // Edited blob has refCount 1 and non-empty geometry.
         if (newPoolIdx >= 0 && static_cast<size_t>(newPoolIdx) < testScene.geometryPool.size()) {
             const projv::GeometryBlob& fork = testScene.geometryPool[newPoolIdx];
             check(fork.refCount == 1, "programmatic: fork refCount == 1");
@@ -294,6 +323,18 @@ int main(int argc, char** argv) {
         check(static_cast<size_t>(testScene.components[0].dataRefID) <
                   testScene.dataReferences.size(),
               "programmatic: dataRefID in range");
+
+        // P5 dirty-flag checks.
+        if (newPoolIdx >= 0 && static_cast<size_t>(newPoolIdx) < testScene.geometryPool.size()) {
+            check(testScene.geometryPool[newPoolIdx].dirty,
+                  "programmatic: edited blob is dirty (P5)");
+            // In-place: original IS the edited blob (same index, dirty == true).
+            // Forked: original is a separate blob (dirty == false).
+            if (newPoolIdx != blobIdx) {
+                check(!testScene.geometryPool[blobIdx].dirty,
+                      "programmatic: original blob NOT dirty after fork (P5)");
+            }
+        }
     }
 
     // --- Programmatic loose-chunk overflow → grid conversion test ---
@@ -402,17 +443,17 @@ int main(int argc, char** argv) {
         check(testScene.chunks[cell1Chunk].cellIndex == 1,
               "p3-convert: new chunk cellIndex == 1");
 
-        // The original chunk should have forked its pool blob (COW).
-        check(testScene.chunks[0].geometryPoolIndex != blobIdx,
-              "p3-convert: chunk 0 COW forked");
+        // The original chunk edits its blob in-place (sole owner, refCount==1).
+        check(testScene.chunks[0].geometryPoolIndex == blobIdx,
+              "p3-convert: chunk 0 edits in-place");
 
-        // Original blob refCount unchanged.
+        // Blob refCount unchanged (in-place edit).
         if (static_cast<size_t>(blobIdx) < testScene.geometryPool.size()) {
             check(testScene.geometryPool[blobIdx].refCount == 1,
-                  "p3-convert: original blob refCount unchanged");
+                  "p3-convert: blob refCount unchanged");
         }
 
-        // Forked blob at cell 0: 5 seed + 1 add (in-bounds) = 6 voxels.
+        // Cell 0 blob: 5 seed + 1 add (in-bounds) = 6 voxels.
         int32_t newPool0 = testScene.chunks[0].geometryPoolIndex;
         if (newPool0 >= 0 && static_cast<size_t>(newPool0) < testScene.geometryPool.size()) {
             size_t vc = testScene.geometryPool[newPool0].voxelTypeData.size() / 3;
@@ -517,6 +558,9 @@ int main(int argc, char** argv) {
             -1                          // dataRefID
         });
 
+        // Simulate prior GPU flush: clear dirty flags so only fork blobs are dirty.
+        for (auto& blob : testScene.geometryPool) blob.dirty = false;
+
         // Track pre-edit state.
         int32_t origPool0 = testScene.chunks[c0].geometryPoolIndex;
         int32_t origPool1 = testScene.chunks[c1].geometryPoolIndex;
@@ -569,13 +613,13 @@ int main(int argc, char** argv) {
         check(grid.cellToChunk[2] == static_cast<int32_t>(c1),
               "grid-test: cell 2 still points at chunk 1");
 
-        // Chunks at cells 1 and 2 have forked to new pool blobs.
-        check(testScene.chunks[c0].geometryPoolIndex != origPool0,
-              "grid-test: chunk 0 COW forked to new pool blob");
-        check(testScene.chunks[c1].geometryPoolIndex != origPool1,
-              "grid-test: chunk 1 COW forked to new pool blob");
+        // Chunks edit their blobs in-place (sole owners, refCount==1).
+        check(testScene.chunks[c0].geometryPoolIndex == origPool0,
+              "grid-test: chunk 0 edits in-place");
+        check(testScene.chunks[c1].geometryPoolIndex == origPool1,
+              "grid-test: chunk 1 edits in-place");
 
-        // Original blob refCounts unchanged.
+        // Original blob refCounts unchanged (in-place edit).
         if (static_cast<size_t>(origPool0) < testScene.geometryPool.size()) {
             check(testScene.geometryPool[origPool0].refCount == origRefCount0,
                   "grid-test: original blob 0 refCount unchanged");
@@ -585,7 +629,7 @@ int main(int argc, char** argv) {
                   "grid-test: original blob 1 refCount unchanged");
         }
 
-        // Forked blobs have refCount 1.
+        // Edited blobs have refCount 1 (in-place, sole owners).
         int32_t newPool0 = testScene.chunks[c0].geometryPoolIndex;
         int32_t newPool1 = testScene.chunks[c1].geometryPoolIndex;
         if (newPool0 >= 0 && static_cast<size_t>(newPool0) < testScene.geometryPool.size()) {
@@ -613,6 +657,26 @@ int main(int argc, char** argv) {
             check(voxCount == 1, "grid-test: new cell has 1 voxel");
             check(testScene.geometryPool[newPoolIdx].refCount == 1,
                   "grid-test: new cell blob refCount == 1");
+            check(testScene.geometryPool[newPoolIdx].dirty,
+                  "grid-test: new cell blob is dirty (P5)");
+        }
+
+        // P5 dirty-flag checks on fork blobs.
+        if (newPool0 >= 0 && static_cast<size_t>(newPool0) < testScene.geometryPool.size()) {
+            check(testScene.geometryPool[newPool0].dirty,
+                  "grid-test: fork 0 blob is dirty (P5)");
+        }
+        if (newPool1 >= 0 && static_cast<size_t>(newPool1) < testScene.geometryPool.size()) {
+            check(testScene.geometryPool[newPool1].dirty,
+                  "grid-test: fork 1 blob is dirty (P5)");
+        }
+        if (static_cast<size_t>(origPool0) < testScene.geometryPool.size() && origPool0 != newPool0) {
+            check(!testScene.geometryPool[origPool0].dirty,
+                  "grid-test: original blob 0 NOT dirty (P5)");
+        }
+        if (static_cast<size_t>(origPool1) < testScene.geometryPool.size() && origPool1 != newPool1) {
+            check(!testScene.geometryPool[origPool1].dirty,
+                  "grid-test: original blob 1 NOT dirty (P5)");
         }
 
         // dataRefID assigned.

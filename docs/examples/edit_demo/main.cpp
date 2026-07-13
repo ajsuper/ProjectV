@@ -2,7 +2,7 @@
 //
 // An interactive real-time demo that loads the Sponza scene and lets you add/remove
 // voxels while the scene is rendered. Demonstrates the full editing pipeline:
-// queueVoxelAdd/Remove -> updateScene -> rebuildSceneTextures -> render.
+// queueVoxelAdd/Remove -> updateScene -> flushSceneUpdates -> render.
 //
 // Placement is SURFACE-PICKED: pressing E/Q shoots the crosshair ray into the scene and
 // drops a voxel SPHERE onto the geometry the camera is actually looking at, instead of a
@@ -15,13 +15,13 @@
 // re-trace is required.
 //
 // Controls:
-//   W/S       — move forward / backward
-//   A/D       — strafe left / right
-//   R/F       — move up / down
-//   Mouse     — look around (cursor is captured; Esc releases it, left-click re-captures)
-//   E         — ADD a voxel sphere on the surface under the crosshair
-//   Q         — REMOVE (carve) a voxel sphere from the surface under the crosshair
-//   1-4       — switch sphere radius (2, 4, 6, 10 voxels)
+    //   W/S       — move forward / backward
+    //   A/D       — strafe left / right
+    //   R/F       — move up / down
+    //   Mouse     — look around (cursor is captured; Esc releases it, left-click re-captures)
+    //   E (hold)  — ADD voxel spheres on the surface under the crosshair (repeats every 10 frames)
+    //   Q (hold)  — REMOVE (carve) voxel spheres from the surface under the crosshair (repeats every 10 frames)
+    //   1-5       — switch sphere radius (4, 8, 12, 20, 32 voxels)
 
 #include <functional>
 #include <string>
@@ -40,6 +40,7 @@
 #include "graphics/type_mapping.h"
 #include "utils/compose_io.h"
 #include "utils/editing.h"
+#include "utils/voxel_management.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -88,9 +89,21 @@ static void uploadCommonUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
 // Global editing state, stored in a global resource so it persists across frames.
 struct EditState {
     projv::ComponentHandle component = projv::INVALID_COMPONENT_HANDLE;
-    int sphereRadius = 4;    // radius of the placed/removed sphere, in voxels
+    int sphereRadius = 8;    // radius of the placed/removed sphere, in voxels
     int fallbackDistance = 15; // where to place when the crosshair ray misses all geometry
     int voxelColorIndex = 0;
+};
+
+// =============================================================================
+// Preview sphere state
+// =============================================================================
+
+// A pre-voxelized yellow sphere rendered as a loose chunk that follows the
+// crosshair target, showing where the next edit sphere will go. The sphere
+// is re-voxelized only when the radius changes (scrollwheel / key press).
+struct PreviewState {
+    projv::ChunkHandle chunk = static_cast<projv::ChunkHandle>(-1);
+    int currentRadius = 0;   // radius the chunk was built with; 0 = not yet built
 };
 
 // Cycle through visible colors so edits are easy to spot.
@@ -119,8 +132,9 @@ static projv::Color editColor(int index) {
 static constexpr uint32_t kGPosTextureID = 3;
 
 struct PickResult {
-    bool             hit;      // true if the crosshair ray landed on real geometry
-    projv::core::vec3 worldPos; // world-space hit position (valid when hit == true)
+    bool             hit;          // true if the crosshair ray landed on real geometry
+    projv::core::vec3 worldPos;    // world-space hit position (valid when hit == true)
+    uint32_t         headerIndex;  // header index of the hit chunk
 };
 
 // Reads the single crosshair-center texel of the gPos G-buffer target back to the CPU.
@@ -130,7 +144,7 @@ struct PickResult {
 // consistent with the current camera. The blit copies just one texel into a 1x1 staging
 // texture, so the read-back is tiny even though gPos is full-screen.
 static PickResult pickCrosshairWorldPos(projv::graphics::RenderInstance& renderInstance) {
-    PickResult miss{false, projv::core::vec3(0.0f)};
+    PickResult miss{false, projv::core::vec3(0.0f), 0xFFFFFFFFu};
 
     std::shared_ptr<projv::ConstructedRenderer> renderer = renderInstance.getActiveRenderer();
     auto texIt = renderer->resources.textures.textureHandles.find(kGPosTextureID);
@@ -139,33 +153,32 @@ static PickResult pickCrosshairWorldPos(projv::graphics::RenderInstance& renderI
     }
     bgfx::TextureHandle gPos = texIt->second;
 
-    // 1x1 RGBA32F staging texture, created once. BLIT_DST lets gPos be blitted into it and
-    // READ_BACK lets bgfx::readTexture pull it to the CPU.
+    projv::core::ivec2 res = renderInstance.getWindowResolution();
+    if (res.x <= 0 || res.y <= 0) return miss;
+    uint16_t crosshairX = static_cast<uint16_t>(res.x / 2);
+    uint16_t crosshairY = static_cast<uint16_t>(res.y / 2);
+
+    // 1x1 RGBA32F staging texture, created once.
     static bgfx::TextureHandle staging = BGFX_INVALID_HANDLE;
     if (!bgfx::isValid(staging)) {
         staging = bgfx::createTexture2D(1, 1, false, 1, bgfx::TextureFormat::RGBA32F,
                                         BGFX_TEXTURE_BLIT_DST | BGFX_TEXTURE_READ_BACK);
     }
 
-    projv::core::ivec2 res = renderInstance.getWindowResolution();
-    if (res.x <= 0 || res.y <= 0) return miss;
-    uint16_t crosshairX = static_cast<uint16_t>(res.x / 2);
-    uint16_t crosshairY = static_cast<uint16_t>(res.y / 2);
-
-    // Blit the crosshair texel of gPos into the staging texture and read it back. The blit
-    // view id sits above the renderer's own view ids so it executes after any pending work.
+    // gPos stores: xyz = world-space hit position, w = float(headerIndex).
+    // Sky misses encode headerIndex = 0xFFFFFFFF → 4294967296.0f, well above any
+    // real geometry headerIndex (0–4), so the same >= 1e4 threshold still works.
     const bgfx::ViewId kPickView = 250;
     bgfx::blit(kPickView, staging, 0, 0, gPos, crosshairX, crosshairY, 1, 1);
 
     float texel[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     uint32_t readyFrame = bgfx::readTexture(staging, texel);
-    while (bgfx::frame() < readyFrame) {
-        // Spin until the GPU has produced the copy (same pattern as verifyTextureWithReadback).
-    }
+    while (bgfx::frame() < readyFrame) {}
 
-    // .w is the ray distance; the sky path writes 1e5, so anything near that is a miss.
     if (texel[3] >= 1.0e4f) return miss;
-    return PickResult{true, projv::core::vec3(texel[0], texel[1], texel[2])};
+
+    uint32_t headerIdx = static_cast<uint32_t>(texel[3]);
+    return PickResult{true, projv::core::vec3(texel[0], texel[1], texel[2]), headerIdx};
 }
 
 // Build the set of edit ops filling a solid voxel sphere of the given radius (in voxels)
@@ -188,6 +201,122 @@ static std::vector<projv::PendingVoxelOp> makeSphereOps(projv::core::ivec3 cente
 }
 
 // =============================================================================
+// Preview sphere (loose chunk)
+// =============================================================================
+
+static projv::ChunkHandle buildPreviewSphere(projv::Scene& scene, projv::GPUData& gpuData,
+                                              int radius, const projv::core::vec3& position) {
+    // Fixed 256³ volume (power of 4, correct for tree64 traversal).
+    constexpr int     kRes    = 256;
+    constexpr float   kScale  = 256.0f;
+    constexpr int     kCenter = 127;   // sphere center in local voxel coords
+
+    float voxelScale = 1.0f;
+
+    projv::ChunkHeader hdr;
+    hdr.chunkID    = 0xFFFF;  // preview marker
+    hdr.position   = position;
+    hdr.scale      = kScale;
+    hdr.voxelScale = voxelScale;
+    hdr.resolution = kRes;
+    hdr.rotation   = projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f);
+
+    projv::Chunk chunk;
+    chunk.header = hdr;
+    chunk.LOD    = 0;
+    chunk.alive  = true;
+
+    // Voxelize a yellow sphere centered at (127,127,127).
+    projv::VoxelBatch batch;
+    int r2 = radius * radius;
+    for (int dz = -radius; dz <= radius; ++dz) {
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                if (dx * dx + dy * dy + dz * dz > r2) continue;
+                batch.push_back(projv::utils::createVoxel(
+                    projv::Color{255, 255, 0},
+                    projv::core::ivec3(kCenter + dx, kCenter + dy, kCenter + dz)));
+            }
+        }
+    }
+    projv::utils::moveVoxelBatchToChunk(batch, chunk);
+    projv::utils::updateChunkFromItsVoxelBatch(chunk, true);
+
+    // Pool the geometry and register as a loose chunk.
+    int32_t poolIdx = projv::internChunkGeometry(scene, chunk);
+    (void)poolIdx;
+    projv::ChunkHandle h = static_cast<projv::ChunkHandle>(scene.chunks.size());
+    scene.chunks.push_back(std::move(chunk));
+
+    if (static_cast<size_t>(scene.looseChunkCount) >= scene.looseChunks.size())
+        scene.looseChunks.push_back(static_cast<int32_t>(h));
+    else
+        scene.looseChunks[scene.looseChunkCount] = static_cast<int32_t>(h);
+    scene.looseChunkCount++;
+
+    // Flush so the GPU knows about the new chunk and its blob.
+    projv::graphics::flushSceneUpdates(scene, gpuData);
+
+    return h;
+}
+
+// Rebuild the preview sphere geometry in-place when the radius changes.
+// The chunk's blob (refCount == 1) is replaced with new voxel data.
+// Resolution is fixed at 256, sphere centred at (127,127,127), so the chunk
+// position stays the same — no recalculation needed.
+static void rebuildPreviewSphere(projv::Scene& scene, projv::GPUData& gpuData,
+                                  projv::ChunkHandle h, int radius) {
+    projv::Chunk& preview = scene.chunks[h];
+
+    constexpr int     kRes    = 256;
+    constexpr float   kScale  = 256.0f;
+    constexpr int     kCenter = 127;
+
+    // Build a temporary chunk with the new sphere.
+    projv::Chunk temp;
+    temp.header = preview.header;
+    temp.header.resolution = kRes;
+    temp.header.scale = kScale;
+    temp.LOD   = 0;
+    temp.alive = true;
+
+    projv::VoxelBatch batch;
+    int r2 = radius * radius;
+    for (int dz = -radius; dz <= radius; ++dz) {
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                if (dx * dx + dy * dy + dz * dz > r2) continue;
+                batch.push_back(projv::utils::createVoxel(
+                    projv::Color{255, 255, 0},
+                    projv::core::ivec3(kCenter + dx, kCenter + dy, kCenter + dz)));
+            }
+        }
+    }
+    projv::utils::moveVoxelBatchToChunk(batch, temp);
+    projv::utils::updateChunkFromItsVoxelBatch(temp, true);
+
+    // Replace the blob content in-place (sole owner, refCount == 1).
+    int32_t poolIdx = preview.geometryPoolIndex;
+    if (poolIdx >= 0 && static_cast<size_t>(poolIdx) < scene.geometryPool.size()) {
+        projv::GeometryBlob& blob = scene.geometryPool[poolIdx];
+        blob.geometry = std::move(temp.geometryData);
+        blob.voxelTypeData = std::move(temp.voxelTypeData);
+        blob.dirty = true;
+    }
+
+    // Resolution/scale are fixed — no header fields to update.
+    // Flush the dirty blob.
+    projv::graphics::flushSceneUpdates(scene, gpuData);
+}
+
+// GLFW scroll callback — accumulates scroll offset for sphere radius changes.
+static double g_scrollAccum = 0.0;
+static void scrollCallback(GLFWwindow* window, double /*xoffset*/, double yoffset) {
+    (void)window;
+    g_scrollAccum += yoffset;
+}
+
+// =============================================================================
 // Application stages
 // =============================================================================
 
@@ -206,6 +335,7 @@ void startup(projv::Application& app) {
     projv::Scene& scene    = projv::core::createGlobalResource<projv::Scene>(app.world);
     projv::GPUData& gpuData = projv::core::createGlobalResource<projv::GPUData>(app.world);
     EditState& editState    = projv::core::createGlobalResource<EditState>(app.world);
+    PreviewState& preview   = projv::core::createGlobalResource<PreviewState>(app.world);
 
     // Load the Sponza scene.
     scene = projv::utils::loadComposeFromDisk("./SponzaScene/");
@@ -238,6 +368,30 @@ void startup(projv::Application& app) {
 
     renderInstance.setActiveRenderer(constructedRenderer);
     gpuData = projv::graphics::createTexturesForScene(scene);
+
+    // Create the preview sphere (yellow ghost showing where the next edit will go).
+    {
+        constexpr float kCenter = 127.0f;
+        projv::core::vec3 targetCenter = projv::core::vec3(1006.6f, 413.0f, -302.4f);
+        projv::core::vec3 chunkPos(
+            targetCenter.x - kCenter,
+            targetCenter.y - kCenter,
+            targetCenter.z - kCenter);
+        preview.chunk = buildPreviewSphere(scene, gpuData, editState.sphereRadius, chunkPos);
+        preview.currentRadius = editState.sphereRadius;
+        projv::core::warn("PREVIEW: chunk={} alive={} poolIdx={} res={} scale={} pos=({},{},{})",
+                          preview.chunk,
+                          scene.chunks[preview.chunk].alive,
+                          scene.chunks[preview.chunk].geometryPoolIndex,
+                          scene.chunks[preview.chunk].header.resolution,
+                          scene.chunks[preview.chunk].header.scale,
+                          scene.chunks[preview.chunk].header.position.x,
+                          scene.chunks[preview.chunk].header.position.y,
+                          scene.chunks[preview.chunk].header.position.z);
+    }
+
+    // Set up scroll callback for sphere radius changes.
+    glfwSetScrollCallback(renderInstance.window, scrollCallback);
 }
 
 void update(projv::Application& app) {
@@ -253,6 +407,7 @@ void render(projv::Application& app) {
     projv::Scene& scene        = projv::core::getGlobalResource<projv::Scene>(app.world);
     projv::GPUData& gpuData    = projv::core::getGlobalResource<projv::GPUData>(app.world);
     EditState& editState       = projv::core::getGlobalResource<EditState>(app.world);
+    PreviewState& preview      = projv::core::getGlobalResource<PreviewState>(app.world);
 
     static projv::core::vec3 cameraPosition = projv::core::vec3(1018.0, 413.0, -330.0);
     static projv::core::vec3 prevCameraPosition  = cameraPosition;
@@ -272,11 +427,32 @@ void render(projv::Application& app) {
 
     // --- Editing keybindings (processed up front, before cursor capture check) ---
 
-    // Change sphere radius (in voxels): 1-4.
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_1) == GLFW_PRESS) editState.sphereRadius = 2;
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_2) == GLFW_PRESS) editState.sphereRadius = 4;
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_3) == GLFW_PRESS) editState.sphereRadius = 6;
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_4) == GLFW_PRESS) editState.sphereRadius = 10;
+    // Change sphere radius (in voxels): 1-5.
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_1) == GLFW_PRESS) editState.sphereRadius = 4;
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_2) == GLFW_PRESS) editState.sphereRadius = 8;
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_3) == GLFW_PRESS) editState.sphereRadius = 12;
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_4) == GLFW_PRESS) editState.sphereRadius = 20;
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_5) == GLFW_PRESS) editState.sphereRadius = 32;
+
+    // Scrollwheel also changes the radius (scaled so one notch ≈ ±2 voxels).
+    {
+        static constexpr int kMinRadius = 2;
+        static constexpr int kMaxRadius = 64;
+        int scrollDelta = static_cast<int>(std::round(g_scrollAccum * 2.0));
+        if (scrollDelta != 0) {
+            g_scrollAccum = 0.0;
+            editState.sphereRadius = std::clamp(editState.sphereRadius + scrollDelta,
+                                                 kMinRadius, kMaxRadius);
+        }
+    }
+
+    // Rebuild the preview sphere if radius changed.
+    if (preview.chunk != static_cast<projv::ChunkHandle>(-1) &&
+        editState.sphereRadius != preview.currentRadius) {
+        preview.currentRadius = editState.sphereRadius;
+        rebuildPreviewSphere(scene, gpuData, preview.chunk, editState.sphereRadius);
+        projv::core::warn("PREVIEW REBUILD: radius={}", editState.sphereRadius);
+    }
 
     // Resolve the sphere centre by picking the surface the crosshair is looking at. When the
     // ray misses all geometry (aiming at the sky) fall back to a fixed distance so E still does
@@ -285,10 +461,19 @@ void render(projv::Application& app) {
         PickResult pick = pickCrosshairWorldPos(renderInstance);
         projv::core::vec3 worldPos;
         if (pick.hit) {
-            worldPos = pick.worldPos;
+            // If the pick lands on the preview sphere, use the sphere's centre
+            // instead of its surface — the centre sits on the real geometry the
+            // sphere was placed on.
+            if (pick.headerIndex == static_cast<uint32_t>(preview.chunk)) {
+                constexpr float kCenter = 127.0f;
+                worldPos = scene.chunks[preview.chunk].header.position +
+                           projv::core::vec3(kCenter, kCenter, kCenter);
+            } else {
+                worldPos = pick.worldPos;
+            }
             // Nudge an ADD sphere back toward the camera by half its radius so it visibly sits
             // ON the surface instead of being buried halfway inside it. A REMOVE (carve) stays
-            // centred on the hit so it scoops a crater out of the surface.
+            // centered on the hit so it scoops a crater out of the surface.
             if (addingToSurface) {
                 worldPos = worldPos - cameraDirection * (static_cast<float>(editState.sphereRadius) * 0.5f);
             }
@@ -300,37 +485,38 @@ void render(projv::Application& app) {
                                   static_cast<int>(std::floor(worldPos.z)));
     };
 
-    // E: add a voxel sphere on the surface under the crosshair.
-    static bool prevE = false;
-    bool currentE = glfwGetKey(renderInstance.window, GLFW_KEY_E) == GLFW_PRESS;
-    if (currentE && !prevE && editState.component != projv::INVALID_COMPONENT_HANDLE) {
-        projv::core::ivec3 center = sphereCenter(/*addingToSurface=*/true);
-        std::vector<projv::PendingVoxelOp> ops =
-            makeSphereOps(center, editState.sphereRadius, editColor(editState.voxelColorIndex++), true);
-        projv::utils::queueVoxelAdd(scene, editState.component, ops);
+    // E: add a voxel sphere on the surface under the crosshair (repeats every 10 frames while held).
+    // Q: remove (carve) a voxel sphere from the surface under the crosshair (same repeat).
+    static int editFrameCountdown = 0;
+    static constexpr int kEditRepeatInterval = 10;
+
+    bool wantsAdd    = glfwGetKey(renderInstance.window, GLFW_KEY_E) == GLFW_PRESS;
+    bool wantsRemove = glfwGetKey(renderInstance.window, GLFW_KEY_Q) == GLFW_PRESS;
+    bool doEdit = (wantsAdd || wantsRemove) && --editFrameCountdown <= 0;
+
+    if (doEdit && editState.component != projv::INVALID_COMPONENT_HANDLE) {
+        editFrameCountdown = kEditRepeatInterval;
+
+        bool isAdd = wantsAdd; // remove is only active when add is not
+        projv::core::ivec3 center = sphereCenter(isAdd);
+        auto ops = makeSphereOps(center, editState.sphereRadius,
+                                 isAdd ? editColor(editState.voxelColorIndex++) : projv::Color{0, 0, 0},
+                                 isAdd);
+        if (isAdd) {
+            projv::utils::queueVoxelAdd(scene, editState.component, ops);
+        } else {
+            projv::utils::queueVoxelRemove(scene, editState.component, ops);
+        }
         projv::utils::updateScene(scene);
-        projv::graphics::rebuildSceneTextures(scene, gpuData);
-        projv::core::warn("ADD sphere r={} at ({}, {}, {}) ({} voxels)",
+        projv::graphics::flushSceneUpdates(scene, gpuData);
+        projv::core::warn("{} sphere r={} at ({}, {}, {}) ({} voxels)",
+                          isAdd ? "ADD" : "REMOVE",
                           editState.sphereRadius, center.x, center.y, center.z, ops.size());
         cameraMoved = true; // force TAA reset so the new voxels are immediately visible
     }
-    prevE = currentE;
 
-    // Q: remove (carve) a voxel sphere from the surface under the crosshair.
-    static bool prevQ = false;
-    bool currentQ = glfwGetKey(renderInstance.window, GLFW_KEY_Q) == GLFW_PRESS;
-    if (currentQ && !prevQ && editState.component != projv::INVALID_COMPONENT_HANDLE) {
-        projv::core::ivec3 center = sphereCenter(/*addingToSurface=*/false);
-        std::vector<projv::PendingVoxelOp> ops =
-            makeSphereOps(center, editState.sphereRadius, projv::Color{0, 0, 0}, false);
-        projv::utils::queueVoxelRemove(scene, editState.component, ops);
-        projv::utils::updateScene(scene);
-        projv::graphics::rebuildSceneTextures(scene, gpuData);
-        projv::core::warn("REMOVE sphere r={} at ({}, {}, {}) ({} voxels)",
-                          editState.sphereRadius, center.x, center.y, center.z, ops.size());
-        cameraMoved = true;
-    }
-    prevQ = currentQ;
+    // --- Preview sphere update (static — no per-frame updates) ---
+    // Preview chunk was created at startup at position (0,0,0). No header updates here.
 
     // --- Cursor capture toggle ---
     static bool mouseCaptured = true;
@@ -419,6 +605,25 @@ void render(projv::Application& app) {
 
     uploadCommonUniforms(renderInstance.getActiveRenderer(), ctx);
     projv::graphics::renderConstructedRenderer(renderInstance, renderInstance.getActiveRenderer(), &gpuData);
+
+    // --- Preview sphere follow (surface-picked position) ---
+    // Only update when the pick lands on real scene geometry, not the preview
+    // sphere itself (headerIndex == preview.chunk), to avoid the feedback loop
+    // where the sphere is repeatedly moved onto its own surface.
+    if (preview.chunk != static_cast<projv::ChunkHandle>(-1)) {
+        PickResult pick = pickCrosshairWorldPos(renderInstance);
+        if (pick.hit && pick.headerIndex != static_cast<uint32_t>(preview.chunk)) {
+            // Sphere centre sits at (127,127,127) in local voxel coords, so
+            // chunkPos = floor(hitPos) - 127 puts the centre on the picked voxel.
+            constexpr float kCenter = 127.0f;
+            projv::core::vec3 newPos(
+                static_cast<float>(static_cast<int>(std::floor(pick.worldPos.x))) - kCenter,
+                static_cast<float>(static_cast<int>(std::floor(pick.worldPos.y))) - kCenter,
+                static_cast<float>(static_cast<int>(std::floor(pick.worldPos.z))) - kCenter);
+            scene.chunks[preview.chunk].header.position = newPos;
+            projv::graphics::updateChunkHeader(scene, gpuData, preview.chunk);
+        }
+    }
 
     prevCameraPosition  = cameraPosition;
     prevCameraDirection = cameraDirection;

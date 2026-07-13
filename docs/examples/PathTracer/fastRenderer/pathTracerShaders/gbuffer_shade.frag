@@ -66,6 +66,7 @@ struct Hit {
     vec3  normal;
     vec3  albedo;
     float distance;
+    uint  headerIndex;
 };
 
 Hit traceScene(Ray ray, uint maxSteps) {
@@ -91,6 +92,7 @@ Hit traceScene(Ray ray, uint maxSteps) {
         h.normal = vec3(0.0);
         h.albedo = vec3(0.0);
         h.position = ray.origin + ray.direction * 1e5;
+        h.headerIndex = 0xFFFFFFFFu;
         return h;
     }
     h.hit = true;
@@ -99,6 +101,7 @@ Hit traceScene(Ray ray, uint maxSteps) {
     h.position = ray.origin + ray.direction * sceneHit.rayT;
     Voxel voxel = fetchVoxelData(sceneHit.foundBox, sceneHit.headerIndex);
     h.albedo = voxel.color;
+    h.headerIndex = sceneHit.headerIndex;
     return h;
 }
 
@@ -177,8 +180,10 @@ void main() {
     }
 
     // Raw albedo, to be multiplied by the sky irradiance gathered in the next pass.
+    // gPos.w stores the headerIndex so the crosshair picker can identify the hit
+    // chunk. Sky misses encode 0xFFFFFFFF → NaN, which the picker detects via isnan().
     gl_FragData[0] = vec4(direct,  1.0);
-    gl_FragData[1] = vec4(p, primary.distance);
+    gl_FragData[1] = vec4(p, float(primary.headerIndex));
     gl_FragData[2] = vec4(n, 0.0);
     gl_FragData[3] = vec4(albedo, 1.0);
 }
