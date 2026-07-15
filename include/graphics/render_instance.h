@@ -21,7 +21,11 @@
 #elif defined(__APPLE__)
     #define GLFW_EXPOSE_NATIVE_COCOA
 #elif defined(__linux__)
-    #define GLFW_EXPOSE_NATIVE_WAYLAND
+    #if defined(PROJV_USE_X11)
+        #define GLFW_EXPOSE_NATIVE_X11
+    #else
+        #define GLFW_EXPOSE_NATIVE_WAYLAND
+    #endif
 #else
     #error "Unsupported platform for GLFW native access"
 #endif

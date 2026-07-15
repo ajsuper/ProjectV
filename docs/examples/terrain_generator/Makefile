@@ -38,10 +38,11 @@ USED_LIBRARIES := \
     -lprojectV-render_instance
 
 BGFX_LIBRARIES := \
-    -lbgfxRelease \
-    -lbimgRelease \
-    -lbxRelease \
-    -lglfw
+    -lbgfxDebug \
+    -lbimgDebug \
+    -lbxDebug \
+    -lglfw \
+    -ldl
 
 # ========================
 # Compiler and Flags

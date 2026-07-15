@@ -46,3 +46,9 @@ other or with the original.
 | `04_move_lut_arithmetic.md` | Replace MOVE_LUT with Z-order arithmetic | `_noLUT` | 1.1–1.3× on ALU-bound GPUs |
 | `05_voxeltype_direct_address.md` | Direct-addressed voxelTypeData (no binary search) | `_directVoxelType` | Eliminates ~100 fetches per hit (verify no regression) |
 | `06_fix_voxeltype_fallback.md` | Fix the findVoxelTypeDataIndex fallback bug | `_fixFallback` | Correctness fix, no perf change |
+| `07_forward_mask_skip.md` | Ray-direction-aware forward mask skip in tree64 nodes | `_fwdskip` | 1.2–2× on sparse scenes, shader-only, no CPU changes |
+| `08_cache_node_data.md` | Cache parent node data in nodeStack (eliminate fetch on pop) | `_cachedstack` | Eliminates 1 texture fetch per pop — uses existing unused `cachedData` field |
+| `09_maxdistance_early_exit.md` | Pass maxDistance to tree64 march for early-exit | `_maxdist` | Skips marches past the closest known hit |
+| `10_root_empty_check.md` | Fast-path: if root valid mask is zero, return miss | `_rootempty` | Saves entire march for empty chunks (2-comparison check) |
+| `11_single_child_fastpath.md` | Skip Z-order + siblings calc for single-child nodes | `_singlechild` | Saves ~10 ALU ops per descent, common in sparse trees |
+| `12_cache_and_prefetch.md` | Cache parent data in nodeStack + speculative sibling prefetch | `_cacheprefetch` | 30–50% fetch reduction, shader-only, helps dense scenes |

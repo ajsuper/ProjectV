@@ -81,12 +81,12 @@ float cascadeLen(int c)   { return CASCADE_BASE_LEN * pow4(c); }
 // its per-face temporal accumulate keeps the sparse result clean). All passes of a given renderer
 // that touch the probe layout (cascades, resolve, compose) MUST agree on these two values.
 #ifndef PROBE_SPACING0
-#define PROBE_SPACING0 8   // s0: cascade-0 probe spacing, screen px (doubles per cascade)
+#define PROBE_SPACING0 6   // s0: cascade-0 probe spacing, screen px (doubles per cascade)
 #endif
 #ifndef DIR_TILE0
-#define DIR_TILE0      4   // D0: cascade-0 direction-tile dim (D0xD0 dirs; doubles per cascade).
-                           // MUST be < PROBE_SPACING0 to shrink below full-res. 4 -> 16 dirs at
-                           // c0 and region = (4/8)^2 = 1/4 of the texture (~4x fewer gather rays).
+#define DIR_TILE0      6   // D0: cascade-0 direction-tile dim (D0xD0 dirs; doubles per cascade).
+                           // MUST be < PROBE_SPACING0 to shrink below full-res. 6 -> 36 dirs at
+                           // c0 and region = (6/6)^2 = full-res (~4x more gather rays).
                            // Knob for near-field angular resolution (raise if GI looks flat / lacks
                            // directional AO -- but keep it < PROBE_SPACING0).
 #endif

@@ -1,6 +1,6 @@
 #!/bin/bash
-# Compiles the radianceCascadeRenderer shaders (vertex + fragment) to bgfx .bin.
-echo "Compiling radianceCascadeRenderer shaders..."
+# Compiles the worldCascadeRenderer shaders (vertex + fragment) to bgfx .bin.
+echo "Compiling worldCascadeRenderer shaders..."
 PROJECTV_DIR=../../../
 
 PLATFORM=windows
@@ -15,7 +15,7 @@ if [[ $OSTYPE == *"darwin"* ]]; then
 fi
 
 SHADERC=$PROJECTV_DIR/build/tools/shadercRelease
-SHADER_DIR=./radianceCascadeRenderer/pathTracerShaders
+SHADER_DIR=./worldCascadeRenderer/pathTracerShaders
 
 # Vertex shaders (*.sc except the shared include which has no $input/$output).
 for i in $SHADER_DIR/vs_*.sc; do

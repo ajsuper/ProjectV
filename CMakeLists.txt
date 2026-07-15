@@ -68,6 +68,15 @@ add_compile_definitions(${PROJV_LOG_DEFS})
 
 message(STATUS "ProjectV logging categories: ${PROJV_LOG_DEFS}")
 
+# --- Linux GLFW native backend: X11 (default) or Wayland ---
+option(PROJV_USE_X11 "Use X11 backend for GLFW on Linux" ON)
+if(PROJV_USE_X11)
+    add_compile_definitions(PROJV_USE_X11)
+    message(STATUS "GLFW Linux backend: X11")
+else()
+    message(STATUS "GLFW Linux backend: Wayland")
+endif()
+
 # Header include paths (external)
 set(SPDLOG_INCLUDE ${CMAKE_SOURCE_DIR}/external/spdlog/include)
 set(JSON_INCLUDE ${CMAKE_SOURCE_DIR}/external/json/single_include)

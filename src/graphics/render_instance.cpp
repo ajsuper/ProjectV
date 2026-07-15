@@ -22,6 +22,13 @@ namespace projv::graphics {
     }
 
     void RenderInstance::initialize(int width, int height, std::string name) {
+#if defined(__linux__)
+    #if defined(PROJV_USE_X11)
+        glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+    #else
+        glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_WAYLAND);
+    #endif
+#endif
         glfwInit();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         GLFWwindow *window = glfwCreateWindow(width, height, name.c_str(), NULL, NULL);
@@ -31,11 +38,19 @@ namespace projv::graphics {
             platformData.nwh = glfwGetCocoaWindow(window);
             platformData.type = bgfx::NativeWindowHandleType::Default;
 #elif defined(__linux__)
-            platformData.nwh = glfwGetWaylandWindow(window);
-            platformData.type = bgfx::NativeWindowHandleType::Wayland;
+    #if defined(PROJV_USE_X11)
+            platformData.ndt = glfwGetX11Display();
+            platformData.nwh = (void*)(uintptr_t)glfwGetX11Window(window);
+            platformData.context = NULL;
+            platformData.type = bgfx::NativeWindowHandleType::Default;
+    #else
             platformData.ndt = glfwGetWaylandDisplay();
-            if (platformData.nwh == NULL) {  
-                core::error("ERROR: glfwGetWaylandWindow() returned NULL. GLFW may not be compiled with Wayland support.");  
+            platformData.nwh = glfwGetWaylandWindow(window);
+            platformData.context = NULL;
+            platformData.type = bgfx::NativeWindowHandleType::Wayland;
+    #endif
+            if (platformData.nwh == NULL) {
+                core::error("ERROR: GLFW native window handle returned NULL.");
             }
 #endif
         // platformData.ndt = glfwGetCocoaDisplay();

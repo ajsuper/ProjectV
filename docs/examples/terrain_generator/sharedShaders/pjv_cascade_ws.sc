@@ -29,7 +29,7 @@
 
 // World-space DDA gather tuning (WS-only; kept out of the shared common header). Each cascade
 // texel casts one gather ray (+ a sun shadow ray on hit), so these are the main perf knobs.
-#define WS_STEPS       48u   // Max DDA steps per gather ray (bounds cost; interval-clamped).
+#define WS_STEPS       60u   // Max DDA steps per gather ray (bounds cost; interval-clamped).
 #define WS_FINISH_LOD  1     // Coarsen distant geometry so the longer far-cascade rays stay cheap.
 #define WS_LOD_DIST    45    // Voxels from the ray start before finishLOD kicks in.
 
@@ -49,7 +49,7 @@
 // MISS (== lit), so shortening it errs toward slight over-LIGHTING of long-shadowed nooks, never the
 // over-DARKENING that a coarse LOD would cause (which is why the LOD stays finest). 48 keeps local
 // contact shadows; only shadows cast from >~48 voxels away soften.
-#define SUN_SHADOW_STEPS 48u
+#define SUN_SHADOW_STEPS 60u
 // Cascades with index <= this get a real shadowed bounce; FARTHER cascades (bigger, most gather hits)
 // use the UNSHADOWED bounce -- no shadow ray at all. Their bounce is a coarse far-field contribution
 // where a missing self-shadow is barely visible, and skipping it removes the most shadow rays. 1 =

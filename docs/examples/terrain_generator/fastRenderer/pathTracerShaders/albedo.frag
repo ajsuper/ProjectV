@@ -2,7 +2,7 @@ $input v_color0
 $input v_texcoord0
 
 #include <bgfx_shader.sh>
-#include <pjv_utils_DDA.sc>
+#include <pjv_utils_DDA_cache.sc>
 
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
@@ -21,7 +21,7 @@ void main() {
     rq.maxRaySteps = 256u;
     rq.startLOD = 0;
     rq.finishLOD = 2;
-    rq.distanceToFinishLOD = 10000;
+    rq.distanceToFinishLOD = 5000;
 
     SceneIntersectData sceneHit = raySceneIntersect(ray, rq);
     vec3 nrm = sceneHit.normal;
@@ -30,6 +30,17 @@ void main() {
         return;
     }
 
-    //Voxel voxel = fetchVoxelData(sceneHit.foundBox, sceneHit.headerIndex);
-    gl_FragColor = vec4(vec3(1.0), 1.0);
+    Voxel voxel = fetchVoxelData(sceneHit.foundBox, sceneHit.headerIndex);
+    float ambientDot = dot(nrm, normalize(vec3(1, 1, 1))) + 0.4 + 0.2;
+
+    Ray sunRay;
+    sunRay.origin = ray.origin + ray.direction * sceneHit.rayT;
+    sunRay.direction = normalize(vec3(1, 1, 1));
+    sceneHit = raySceneIntersect(sunRay, rq);
+    vec3 sunColor = vec3(1);
+    if (sceneHit.foundBox.size < 0.0 || sceneHit.rayT <= 0.0) {
+        sunColor = vec3(2);
+    }
+
+    gl_FragColor = vec4((voxel.color * ambientDot) * sunColor, 1.0);
 }
