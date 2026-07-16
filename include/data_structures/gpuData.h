@@ -42,6 +42,8 @@ namespace projv {
         bgfx::UniformHandle gridInfoSampler = BGFX_INVALID_HANDLE;
         bgfx::UniformHandle cellMapSampler = BGFX_INVALID_HANDLE;
         bgfx::UniformHandle looseListSampler = BGFX_INVALID_HANDLE;
+        bgfx::UniformHandle tree64DimsUniform = BGFX_INVALID_HANDLE;
+        bgfx::UniformHandle voxelTypeDimsUniform = BGFX_INVALID_HANDLE;
 
         // --- Persistent layout state (managed pools) ---
         // Suballocators over the two geometry data textures. Units are texels: tree64 = 1 node per RGB

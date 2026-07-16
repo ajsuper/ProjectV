@@ -1,4 +1,5 @@
 #include "graphics/perform_renderer.h"
+#include <cmath>
 
 namespace projv::graphics {
     void updateUniforms(const std::unordered_map<std::string, bgfx::UniformHandle>& uniformHandles, const std::unordered_map<std::string, std::vector<uint8_t>>& uniformValues) {
@@ -133,6 +134,23 @@ namespace projv::graphics {
             bgfx::setTexture(11, gpuData->gridInfoSampler, gpuData->gridInfoTexture);
             bgfx::setTexture(12, gpuData->cellMapSampler, gpuData->cellMapTexture);
             bgfx::setTexture(10, gpuData->looseListSampler, gpuData->looseListTexture);
+
+            {
+                float tree64Dims[4] = {
+                    static_cast<float>(gpuData->tree64Width),
+                    std::log2(static_cast<float>(gpuData->tree64Width)),
+                    0.0f, 0.0f
+                };
+                bgfx::setUniform(gpuData->tree64DimsUniform, tree64Dims);
+            }
+            {
+                float voxelTypeDims[4] = {
+                    static_cast<float>(gpuData->voxelTypeWidth),
+                    std::log2(static_cast<float>(gpuData->voxelTypeWidth)),
+                    0.0f, 0.0f
+                };
+                bgfx::setUniform(gpuData->voxelTypeDimsUniform, voxelTypeDims);
+            }
 
             bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);  
             bgfx::submit(renderPass.renderPassID, renderPass.shaderProgram);

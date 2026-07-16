@@ -25,14 +25,31 @@ namespace projv::graphics {
         // (which is 50% + 1024 of the padded used total).
         uint32_t paddedAlloc(uint32_t needed) { return needed + std::max(needed / 4u, 64u); }
 
+        static uint32_t nextPowerOfTwo(uint32_t v) {
+            if (v == 0) return 1;
+            v--;
+            v |= v >> 1;
+            v |= v >> 2;
+            v |= v >> 4;
+            v |= v >> 8;
+            v |= v >> 16;
+            v++;
+            return v;
+        }
+
         // Pick texel dimensions for a capacity: height fixed, width grows. Returns actual capacity.
         // maxSz is passed in (not read from caps) so this is callable headless with no bgfx context.
+        // Width is rounded up to power of 2 so the shader can use bit ops (&, >>) instead of
+        // expensive integer divide/modulo by a non-power-of-2 divisor.
         uint32_t chooseDataDims(uint32_t capTexels, uint32_t& w, uint32_t& h, uint32_t maxSz) {
             h = std::min<uint32_t>(kDataTexHeight, maxSz);
             if (h == 0) h = 1;
             w = (capTexels + h - 1) / h;
             if (w < 1) w = 1;
-            if (w > maxSz) w = maxSz; // best effort; overflow is warned where it matters
+            w = nextPowerOfTwo(w);
+            // Clamp to largest power of 2 <= maxSz so shader bit ops stay correct.
+            uint32_t maxPoT = (maxSz >= 0x80000000u) ? 0x80000000u : (nextPowerOfTwo(maxSz + 1u) >> 1u);
+            if (w > maxPoT) w = maxPoT;
             return w * h;
         }
 
@@ -97,6 +114,8 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 out[size_t(n) * 4 + 0] = geometry[size_t(n) * 3 + 0];
                 out[size_t(n) * 4 + 1] = geometry[size_t(n) * 3 + 1];
                 out[size_t(n) * 4 + 2] = geometry[size_t(n) * 3 + 2];
+                uint32_t childPtr = geometry[size_t(n) * 3 + 2] >> 1;
+                out[size_t(n) * 4 + 3] = childPtr;
             }
             auto t1 = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -793,6 +812,10 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         gpuData.cellMapSampler = bgfx::createUniform("cellMap", bgfx::UniformType::Sampler);
         gpuData.looseListSampler = bgfx::createUniform("looseList", bgfx::UniformType::Sampler);
 
+        // 6. Data texture dimension uniforms for shader bit-op optimization.
+        gpuData.tree64DimsUniform = bgfx::createUniform("tree64Dims", bgfx::UniformType::Vec4);
+        gpuData.voxelTypeDimsUniform = bgfx::createUniform("voxelTypeDims", bgfx::UniformType::Vec4);
+
         core::render("createTexturesForScene: done geomTex=({}x{}) typeTex=({}x{}) headers={} grids={} loose={}",
                      gpuData.tree64Width, gpuData.tree64Height,
                      gpuData.voxelTypeWidth, gpuData.voxelTypeHeight,
@@ -850,6 +873,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         killT(gpuData.gridInfoTexture); killT(gpuData.cellMapTexture); killT(gpuData.looseListTexture);
         killU(gpuData.tree64Sampler); killU(gpuData.voxelTypeDataSampler); killU(gpuData.headerSampler);
         killU(gpuData.gridInfoSampler); killU(gpuData.cellMapSampler); killU(gpuData.looseListSampler);
+        killU(gpuData.tree64DimsUniform); killU(gpuData.voxelTypeDimsUniform);
         gpuData = GPUData{};
     }
 

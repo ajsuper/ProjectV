@@ -28,6 +28,9 @@ USAMPLER2D(gridInfo, 11);   // Top-level grid descriptors + scene counts (see gp
 USAMPLER2D(cellMap, 12);    // Per-grid cell -> chunk index maps (0xFFFFFFFF = empty).
 USAMPLER2D(looseList, 10);  // Compact list of loose chunk handles (header rows) to broadphase.
 
+uniform vec4 tree64Dims;     // x = power-of-2 texture width, y = log2(width)
+uniform vec4 voxelTypeDims;  // x = power-of-2 texture width, y = log2(width)
+
 struct RayQuery {
     bool doTransparency = true;
     uint startLOD = 0;
@@ -56,6 +59,7 @@ struct Tree64NodeData {
     uint data1;
     uint data2;
     uint data3;
+    uint childPtr;
 };
 
 struct CombinedNode64 {
@@ -407,21 +411,23 @@ float getRayBoxExitDistanceForSureHit(Ray ray, BoxAABB box) {
 
 
 uint tree64s(int index) {
-    ivec2 texSize = textureSize(tree64Data, 0);
-    int pixelIndex = index / 4;
-    int x = pixelIndex % texSize.x;
-    int y = pixelIndex / texSize.x;
-    int colorIndex = index % 4;
+    uint w = uint(tree64Dims.x);
+    uint shift = uint(tree64Dims.y);
+    uint pixelIndex = uint(index) >> 2u;
+    int x = int(pixelIndex & (w - 1u));
+    int y = int(pixelIndex >> shift);
+    int colorIndex = int(uint(index) & 3u);
     uvec4 pixel = texelFetch(tree64Data, ivec2(x, y), 0);
     return pixel[colorIndex];
 }
 
 uint voxelTypeDatas(int index) {
-    ivec2 texSize = textureSize(voxelTypeData, 0);
-    int pixelIndex = index / 4;
-    int x = pixelIndex % texSize.x;
-    int y = pixelIndex / texSize.x;
-    int colorIndex = index % 4;
+    uint w = uint(voxelTypeDims.x);
+    uint shift = uint(voxelTypeDims.y);
+    uint pixelIndex = uint(index) >> 2u;
+    int x = int(pixelIndex & (w - 1u));
+    int y = int(pixelIndex >> shift);
+    int colorIndex = int(uint(index) & 3u);
     uvec4 pixel = texelFetch(voxelTypeData, ivec2(x, y), 0);
     return pixel[colorIndex];
 }
@@ -650,14 +656,16 @@ Tree64NodeData tree64(uint indexOfNode) {
     //int y = pixelIndex / texSize.x;
     //int colorIndex = index % 4;
     //uvec4 pixel = texelFetch(tree64Data, ivec2(x, y), 0);
-    ivec2 texSize = textureSize(tree64Data, 0);
-    int x = indexOfNode % texSize.x;
-    int y = indexOfNode / texSize.x;
+    uint w = uint(tree64Dims.x);
+    uint shift = uint(tree64Dims.y);
+    int x = int(indexOfNode & (w - 1u));
+    int y = int(indexOfNode >> shift);
     uvec4 pixel = texelFetch(tree64Data, ivec2(x, y), 0);
     Tree64NodeData nodeData;
     nodeData.data1 = pixel.x;
     nodeData.data2 = pixel.y;
     nodeData.data3 = pixel.z;
+    nodeData.childPtr = pixel.w;
     return nodeData; 
 }
 
@@ -969,22 +977,20 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, BoxAABB
                 candidateBox.position = vec3(traversalPosition);
                 candidateBox.size = float(stepSize);
                 ivec3 highResPosition = determineTraversalCoordinatesFromRayAndBoxAndRayDistance(ray, candidateBox, rayT);
-                uint bottomChildPointer = (data.data3 >> 1) & 0b01111111111111111111111111111111;
                 uint parentDataIndex = nodeStack[nodeStackQuantity - 2u].dataIndex;
                 uint childrenBeforeThisNode = calculateSiblingsBeforeThisZOrder(4, data.data1, data.data2, nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent);
-                nodeStack[nodeStackQuantity - 1u].dataIndex = bottomChildPointer + parentDataIndex + childrenBeforeThisNode;
-                nodeStack[nodeStackQuantity].thisNodeZOrderInParent = getZOrderInParentFromThisNodesLevel(highResPosition, candidateNodeLevel - 1); // off by 1 error?
+                uint childDataIndex = parentDataIndex + data.childPtr + childrenBeforeThisNode;
+                nodeStack[nodeStackQuantity - 1u].dataIndex = childDataIndex;
+                nodeStack[nodeStackQuantity].thisNodeZOrderInParent = getZOrderInParentFromThisNodesLevel(highResPosition, candidateNodeLevel - 1);
                 nodeStack[nodeStackQuantity].dataIndex = 0;
                 nodeStackQuantity += 1;
                 candidateNodeLevel -= 1;
                 // equates to : pow(4, candidateNodeLevel);
                 shift = 2u * candidateNodeLevel;
                 stepSize = 1u << (shift);
-                //traversalPosition = roundVoxelCoordinatesBasedOnNodeSize(highResPosition, stepSize);
                 traversalPosition = (highResPosition >> shift) << shift;
 
-
-                data = tree64(nodeStack[nodeStackQuantity - 2u].dataIndex);
+                data = tree64(childDataIndex);
             } else {
                 break;
             }
@@ -1033,14 +1039,14 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, BoxAABB
             uint boundariesCrossed = getBoundariesCrossed(previousNodeCoordinate, proposedNodeCoordinate, candidateNodeLevel);
 
             if (boundariesCrossed != 0) { // If we cross boundaires, pop.
+                uint newParentIdx = nodeStack[nodeStackQuantity - 2u - boundariesCrossed].dataIndex;
                 nodeStackQuantity -= boundariesCrossed;
                 candidateNodeLevel += boundariesCrossed;
                 shift = 2 * candidateNodeLevel;
                 stepSize = 1u << (shift);
-                //traversalPosition = roundVoxelCoordinatesBasedOnNodeSize(traversalPosition, stepSize);
                 traversalPosition = (traversalPosition >> shift) << shift;
                 previouslyPopped = true;
-                data = tree64(nodeStack[nodeStackQuantity - 2u].dataIndex);
+                data = tree64(newParentIdx);
                 break;
             }
 
