@@ -27,12 +27,6 @@ namespace projv::utils {
     VoxelGrid createVoxelGrid();
 
     /**
-     * Creates a VoxelBatch
-     * @return Returns an empty VoxelBatch
-     */
-    VoxelBatch createVoxelBatch();
-
-    /**
      * Creates a Chunk object using an existing ChunkHeader.
      * @param chunkHeader The metadata describing the chunk's location, scale, and resolution.
      * @return A new Chunk initialized with the given header.
@@ -47,63 +41,85 @@ namespace projv::utils {
      */
     float createChunkScaleFromVoxelScaleAndResolution(float voxelScale, int resolutionPowerOf2);
 
-    /**
-     * Adds a voxel to a voxel batch.
-     * @param voxel The voxel to add.
-     * @param voxelBatch The target VoxelBatch that the voxel will be added to.
-     */
-    void addVoxelToVoxelBatch(Voxel& voxel, VoxelBatch& voxelBatch);
+    // ---- Brick Map API ----
 
     /**
-     * Copies all voxels from a VoxelBatch to a Chunk.
-     * @param voxelBatch The source VoxelBatch containing voxel data.
-     * @param chunk The destination Chunk to receive the voxel data.
+     * Create an empty VoxelBrickMap for the given brick dimensions.
+     * All bricks are initially absent (brickMask all zeros).
      */
-    void moveVoxelBatchToChunk(VoxelBatch& voxelBatch, Chunk& chunk);
+    std::unique_ptr<VoxelBrickMap> createVoxelBrickMap(const core::ivec3& brickDims);
 
     /**
-     * Retrieves a VoxelBatch representing the contents of a Chunk. Pool-aware: a pooled chunk
-     * (geometryPoolIndex >= 0 -- every compose-loaded chunk) keeps its real geometry in
-     * scene.geometryPool, not chunk.voxelTypeData (which is left deliberately empty once pooled), so
-     * this decompresses from the pool blob in that case and falls back to chunk.voxelTypeData only
-     * for a legacy (unpooled) chunk.
-     * @param scene The scene owning the chunk (needed to reach the pool when the chunk is pooled).
-     * @param chunk The source chunk.
-     * @param convertCompressedData Whether to decompress chunk data before converting it to a VoxelBatch.
-     * @return A VoxelBatch containing the voxel data from the chunk.
+     * Set a voxel in the brick map at integer chunk-space position (x, y, z).
+     * Creates the brick if it doesn't exist. O(1) average.
      */
-    VoxelBatch getChunkVoxelBatch(Scene& scene, Chunk& chunk, bool convertCompressedData = true);
+    void brickMapSetVoxel(VoxelBrickMap& map, int x, int y, int z, Color color);
 
     /**
-     * Merges voxel data from voxelBatchA into voxelBatchB with an optional positional offset.
-     * @param voxelBatchA The VoxelBatch to merge from.
-     * @param voxelBatchB The VoxelBatch to merge into.
-     * @param voxelBatchAPosition Optional offset to apply to voxelBatchA's data during the merge.
+     * Remove a voxel from the brick map at integer chunk-space position (x, y, z).
+     * No-op if the voxel doesn't exist. O(1) average.
      */
-    void addVoxelBatchAToVoxelBatchB(VoxelBatch& voxelBatchA, VoxelBatch& voxelBatchB, core::ivec3 voxelBatchAPosition = {0, 0, 0});
+    void brickMapClearVoxel(VoxelBrickMap& map, int x, int y, int z);
 
     /**
-     * Updates a Chunk's internal voxel representation using its current VoxelBatch.
-     * @param chunk The Chunk to update.
-     * @param clearBatch Whether to clear the VoxelBatch after the update.
+     * Check if a voxel exists at integer chunk-space position (x, y, z). O(1).
      */
-    void updateChunkFromItsVoxelBatch(Chunk& chunk, bool clearBatch = true);
+    bool brickMapHasVoxel(const VoxelBrickMap& map, int x, int y, int z);
 
     /**
-     * Removes voxel data from voxelBatchB that overlaps with voxelBatchA, using an optional position offset.
-     * @param voxelBatchA The VoxelBatch containing voxels to remove.
-     * @param voxelBatchB The VoxelBatch from which voxels will be removed.
-     * @param positionOffset An optional positional offset to apply when comparing voxels.
+     * Get the color of a voxel at integer chunk-space position (x, y, z).
+     * Returns black if the voxel doesn't exist. O(1) average.
      */
-    void removeVoxelBatchAFromVoxelBatchB(VoxelBatch& voxelBatchA, VoxelBatch& voxelBatchB, core::ivec3 positionOffset = {0, 0, 0});
+    Color brickMapGetColor(const VoxelBrickMap& map, int x, int y, int z);
 
     /**
-     * Creates a Voxel with the specified color and position.
-     * @param color The color to assign to the voxel.
-     * @param position The 3D integer coordinates where the voxel will be placed.
-     * @return Voxel The newly created voxel with the specified attributes.
+     * Populate a brick map from an existing voxelTypeData array (3 u32s per voxel).
+     * Used on first edit of a disk-loaded blob. The brick map must already
+     * have the correct brickDims for the chunk's resolution.
      */
-    Voxel createVoxel(Color color, core::ivec3 position);
+    void brickMapFromVoxelTypeData(VoxelBrickMap& map,
+                                   const std::vector<uint32_t>& voxelTypeData);
+
+    /**
+     * Build a sorted VoxelGrid (by chunk-space Z-order) from a brick map.
+     * Used as input to createTree64 for tree64 generation.
+     * Note: updateChunkFromBrickMap no longer calls this; prefer buildTree64FromBrickMap.
+     */
+    VoxelGrid buildVoxelGridFromBrickMap(const VoxelBrickMap& map);
+
+    /**
+     * Build voxelTypeData (3 u32s per voxel) directly from a brick map,
+     * in chunk-space Z-order. Faster than going through VoxelGrid.
+     * Note: updateChunkFromBrickMap no longer calls this; prefer buildVoxelTypeDataFromBrickMapFast.
+     */
+    std::vector<uint32_t> buildVoxelTypeDataFromBrickMap(const VoxelBrickMap& map);
+
+    /**
+     * Build a tree64 directly from brick map bitmasks, skipping the intermediate VoxelGrid.
+     * The brick's per-row mask[] IS the leaf-level tree64 bitmask — no bit walking needed.
+     * Uses the existing aggregateLevelTree64 for higher levels.
+     */
+    std::vector<uint32_t> buildTree64FromBrickMap(const VoxelBrickMap& map, int resolution);
+
+    /**
+     * Build voxelTypeData directly from brick map, computing chunk-space Z-order
+     * via direct composition: chunkZOrder = (brickZOrder << 18) | localZOrder.
+     * Iterates bits MSB-first to produce ascending Z-order output without sorting.
+     */
+    std::vector<uint32_t> buildVoxelTypeDataFromBrickMapFast(const VoxelBrickMap& map);
+
+    /**
+     * Update a chunk's geometryData, voxelTypeData, and header from a brick map.
+     * Calls buildTree64FromBrickMap + buildVoxelTypeDataFromBrickMapFast.
+     * Sets LOD to 0.
+     */
+    void updateChunkFromBrickMap(Chunk& chunk, const VoxelBrickMap& map);
+
+    /**
+     * Deep-clone a VoxelBrickMap (for COW fork). Copies all bricks and
+     * their hash map contents.
+     */
+    std::unique_ptr<VoxelBrickMap> cloneBrickMap(const VoxelBrickMap& src);
 }
 
 #endif

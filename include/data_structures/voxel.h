@@ -2,14 +2,20 @@
 #define VOXEL_H
 
 #include <vector>
+#include <memory>
+#include <unordered_map>
 #include "color.h"
 #include "core/math.h"
 
 namespace projv{
-    /**
-     * @brief This structure contains the properties of a voxel. It contains filled and a Color.
-     * @struct voxel
-     */
+
+    struct VoxelBrickMap;
+
+    constexpr uint32_t BRICK_SIZE = 64;
+    constexpr uint32_t BRICK_SIZE_LOG2 = 6;
+    constexpr uint32_t BRICK_VOXEL_COUNT = BRICK_SIZE * BRICK_SIZE * BRICK_SIZE;   // 262144
+    constexpr uint32_t BRICK_MASK_ROWS  = BRICK_VOXEL_COUNT / 64;                   // 4096
+
     struct Voxel {
         uint32_t ZOrderPosition;
         Color color;
@@ -21,6 +27,54 @@ namespace projv{
     };
 
     using VoxelBatch = std::vector<Voxel>;
+
+    /**
+     * Per-brick data. Each brick is BRICK_SIZE^3 = 64^3 = 262144 voxels.
+     * mask[64] stores 4096 bits (one bit per voxel), row-major within the brick
+     * in Z-order. colors is a hash map from Z-order-within-brick (18 bits) to a
+     * packed RGBA color (R10G10B10A2, with A=3 for "filled voxel").
+     */
+    struct BrickData {
+        uint64_t mask[BRICK_MASK_ROWS] = {};  // 4096 rows x 64 bits = 262144 bits
+        std::unordered_map<uint32_t, uint32_t> colors;  // Z-order-in-brick -> packed RGBA
+    };
+
+    /**
+     * Sparse voxel brick map. The chunk's volume is divided into
+     * brickDims = (resolution/BRICK_SIZE)^3 bricks. Only bricks with a set
+     * bit in brickMask have a non-null BrickData entry in the bricks array.
+     *
+     * Editing is O(1) by writing directly to the brick map. The tree64 and
+     * voxelTypeData GPU arrays are rebuilt from the brick map when edits are
+     * finalized.
+     */
+    struct VoxelBrickMap {
+        core::ivec3 brickDims;                    // (R/64, R/64, R/64)
+        uint32_t totalBricks;                     // brickDims.x * brickDims.y * brickDims.z
+
+        std::vector<uint64_t> brickMask;           // ceil(totalBricks/64) entries, bit i = brick i exists
+        std::vector<std::unique_ptr<BrickData>> bricks;  // size = totalBricks, null = absent
+
+        // Serialized normal for new voxels. 0 = (0,0,0) normal (no surface data).
+        // Set from existing voxelTypeData when building from disk data.
+        uint32_t defaultNormal = 0;
+    };
+
+    // Pack Color (8-bit RGB) into R10G10B10A2 format (A=3 for filled).
+    inline uint32_t packColor(Color c) {
+        return (static_cast<uint32_t>(c.r * 4) << 20) |  // R10
+               (static_cast<uint32_t>(c.g * 4) << 10) |  // G10
+               (static_cast<uint32_t>(c.b * 4));          // B10
+    }
+
+    // Unpack Color from R10G10B10A2 format.
+    inline Color unpackColor(uint32_t packed) {
+        Color c;
+        c.r = static_cast<uint8_t>(((packed >> 20) & 0x3FF) / 4);
+        c.g = static_cast<uint8_t>(((packed >> 10) & 0x3FF) / 4);
+        c.b = static_cast<uint8_t>((packed & 0x3FF) / 4);
+        return c;
+    }
 }
 
 #endif

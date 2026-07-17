@@ -108,10 +108,10 @@ struct WorkerState {
 static WorkerState g_worker;
 
 struct TerrainState {
-    static constexpr int kChunkRes    = 256;
+    static constexpr int kChunkRes    = 64;
     static constexpr float kVoxelScale = 1.0f;
     static constexpr float kChunkSize  = kChunkRes * kVoxelScale;
-    static constexpr int   kViewRadius = 15;
+    static constexpr int   kViewRadius = 8;
     static constexpr int   kMaxNewPerFrame = 1;
     static constexpr int   kBootstrapBatch = 40;
 
@@ -191,8 +191,7 @@ static projv::Color biomeColor(float height, float moisture, int y, float frac) 
     return projv::Color{240, 245, 255};
 }
 
-static projv::VoxelBatch generateChunkVoxels(projv::core::ivec3 coord, TerrainState& ts) {
-    projv::VoxelBatch batch;
+static void generateChunkVoxels(projv::core::ivec3 coord, projv::VoxelBrickMap& map, TerrainState& ts) {
     float ox = float(coord.x) * TerrainState::kChunkSize;
     float oz = float(coord.z) * TerrainState::kChunkSize;
     float oy = float(coord.y) * TerrainState::kChunkSize;
@@ -209,7 +208,7 @@ static projv::VoxelBatch generateChunkVoxels(projv::core::ivec3 coord, TerrainSt
 
             if (topLocalY < 0) {
                 if (localWL >= 0 && localWL < res)
-                    batch.push_back(projv::utils::createVoxel(projv::Color{30, 60, 155}, {lx, localWL, lz}));
+                    projv::utils::brickMapSetVoxel(map, lx, localWL, lz, projv::Color{30, 60, 155});
                 continue;
             }
 
@@ -227,17 +226,16 @@ static projv::VoxelBatch generateChunkVoxels(projv::core::ivec3 coord, TerrainSt
                 } else {
                     col = projv::Color{80, 75, 70};
                 }
-                batch.push_back(projv::utils::createVoxel(col, {lx, ly, lz}));
+                projv::utils::brickMapSetVoxel(map, lx, ly, lz, col);
             }
 
             if (localWL >= 0 && localWL < res && worldH < float(wl)) {
                 for (int ly = topLocalY + 1; ly <= localWL; ++ly) {
-                    batch.push_back(projv::utils::createVoxel(projv::Color{30, 60, 155}, {lx, ly, lz}));
+                    projv::utils::brickMapSetVoxel(map, lx, ly, lz, projv::Color{30, 60, 155});
                 }
             }
         }
     }
-    return batch;
 }
 
 static void terrainWorkerFunc(TerrainState& ts) {
@@ -253,14 +251,20 @@ static void terrainWorkerFunc(TerrainState& ts) {
             }
         }
         if (gotWork) {
-            projv::VoxelBatch batch = generateChunkVoxels(item.coord, ts);
+            int res = TerrainState::kChunkRes;
+            auto brickMap = projv::utils::createVoxelBrickMap(
+                projv::utils::computeBrickDims(res));
+            generateChunkVoxels(item.coord, *brickMap, ts);
             ProcessedChunk result;
             result.coord = item.coord;
-            if (batch.empty()) {
+            bool hasVoxels = false;
+            for (auto& maskWord : brickMap->brickMask) {
+                if (maskWord != 0) { hasVoxels = true; break; }
+            }
+            if (!hasVoxels) {
                 result.empty = true;
             } else {
                 result.empty = false;
-                int res = TerrainState::kChunkRes;
                 projv::ChunkHeader hdr;
                 hdr.chunkID    = 0;
                 hdr.position   = item.worldPos;
@@ -269,9 +273,8 @@ static void terrainWorkerFunc(TerrainState& ts) {
                 hdr.resolution = res;
                 hdr.rotation   = projv::core::quat(1, 0, 0, 0);
                 result.chunk = projv::utils::createChunk(hdr);
-                projv::utils::moveVoxelBatchToChunk(batch, result.chunk);
                 result.chunk.gridIndex = ts.gridIndex;
-                projv::utils::updateChunkFromItsVoxelBatch(result.chunk);
+                projv::utils::updateChunkFromBrickMap(result.chunk, *brickMap);
             }
             {
                 std::lock_guard<std::mutex> lock(g_worker.resultMutex);

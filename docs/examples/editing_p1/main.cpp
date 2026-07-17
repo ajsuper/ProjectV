@@ -63,7 +63,7 @@ namespace {
 int main(int argc, char** argv) {
     // Allow custom scene folder, default to the bundled Sponza scene.
     std::string scenePath = (argc > 1) ? argv[1]
-                                       : "docs/examples/PathTracer/SponzaScene";
+                                       : "../PathTracer/SponzaScene/";
     if (!fs::exists(scenePath)) {
         // Try relative to the binary's CWD; sometimes test runners chdir.
         std::cerr << "Scene folder not found: " << scenePath << "\n";
@@ -240,13 +240,12 @@ int main(int argc, char** argv) {
         chunk.alive  = true;
 
         // Seed with 5 voxels so we can check growth.
-        projv::VoxelBatch seed;
+        auto brickMap = projv::utils::createVoxelBrickMap(
+            projv::utils::computeBrickDims(64));
         for (int i = 0; i < 5; ++i)
-            seed.push_back(projv::utils::createVoxel(
-                projv::Color{128, 128, 128},
-                projv::core::ivec3(i * 2, i * 2, i * 2)));
-        projv::utils::moveVoxelBatchToChunk(seed, chunk);
-        projv::utils::updateChunkFromItsVoxelBatch(chunk, /*clearBatch=*/true);
+            projv::utils::brickMapSetVoxel(*brickMap,
+                i * 2, i * 2, i * 2, projv::Color{128, 128, 128});
+        projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
 
         // Intern into a pool blob.
         int32_t blobIdx = projv::internChunkGeometry(testScene, chunk);
@@ -362,13 +361,12 @@ int main(int argc, char** argv) {
         chunk.alive  = true;
 
         // Seed with 5 voxels.
-        projv::VoxelBatch seed;
+        auto brickMap = projv::utils::createVoxelBrickMap(
+            projv::utils::computeBrickDims(64));
         for (int i = 0; i < 5; ++i)
-            seed.push_back(projv::utils::createVoxel(
-                projv::Color{128, 128, 128},
-                projv::core::ivec3(i * 2, i * 2, i * 2)));
-        projv::utils::moveVoxelBatchToChunk(seed, chunk);
-        projv::utils::updateChunkFromItsVoxelBatch(chunk, true);
+            projv::utils::brickMapSetVoxel(*brickMap,
+                i * 2, i * 2, i * 2, projv::Color{128, 128, 128});
+        projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
         chunk.header.resolution = 64;
         chunk.header.scale = 32.0f;
 
@@ -513,13 +511,13 @@ int main(int argc, char** argv) {
             chunk.cellIndex = cellIdx;
             chunk.componentHandle = compHandle;
 
-            projv::VoxelBatch seed;
+            auto brickMap = projv::utils::createVoxelBrickMap(
+                projv::utils::computeBrickDims(64));
             for (auto& p : seedPositions)
-                seed.push_back(projv::utils::createVoxel(
-                    projv::Color{128, 128, 128}, p));
-            projv::utils::moveVoxelBatchToChunk(seed, chunk);
-            projv::utils::updateChunkFromItsVoxelBatch(chunk, true);
-            // Override resolution back to 64 (updateChunkFromItsVoxelBatch shrinks
+                projv::utils::brickMapSetVoxel(*brickMap,
+                    p.x, p.y, p.z, projv::Color{128, 128, 128});
+            projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
+            // Override resolution back to 64 (updateChunkFromBrickMap computes shrinks
             // it to fit the seed span; grid cells need the full data-file resolution).
             chunk.header.resolution = 64;
             chunk.header.scale = 32.0f;

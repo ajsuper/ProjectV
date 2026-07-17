@@ -6,6 +6,7 @@
 #include <iostream>
 #include <map>
 #include "core/math.h"
+#include "data_structures/voxel.h"
 //#include "robin.h"
 
 namespace projv::utils {
@@ -57,6 +58,40 @@ namespace projv::utils {
      * @return The non-negative floor-modulo remainder.
      */
     int32_t floorMod(int32_t a, int32_t b);
+
+    // ---- Brick map coordinate helpers ----
+
+    /**
+     * Compute the brick coordinate for a voxel position.
+     * brickCoord = floorDiv(pos, BRICK_SIZE)
+     */
+    core::ivec3 computeBrickCoord(int x, int y, int z);
+
+    /**
+     * Compute the local position within a brick for a voxel position.
+     * localPos = floorMod(pos, BRICK_SIZE)
+     */
+    core::ivec3 computeBrickLocalPos(int x, int y, int z);
+
+    /**
+     * Compute the Z-order of a brick coordinate within a 4-ary grid.
+     * Since brickDims is a power-of-2 of 4 (64 = 4^3 per brick axis),
+     * this is just the standard Z-order of the brick coord.
+     */
+    uint32_t computeBrickZOrder(const core::ivec3& brickCoord,
+                                const core::ivec3& brickDims);
+
+    /**
+     * Compute the Z-order of a local position within a 64^3 brick.
+     * Uses 6 bits per axis.
+     */
+    uint32_t computeLocalZOrder(const core::ivec3& localPos);
+
+    /**
+     * Compute brickDims from a resolution (power of 4, >= 64).
+     * Returns {1,1,1} for resolution < 64.
+     */
+    core::ivec3 computeBrickDims(uint32_t resolution);
 }
 
 #endif

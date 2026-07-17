@@ -328,12 +328,8 @@ void voxelizeObjFile(std::filesystem::path modelObjDirectory, std::string modelM
         chunkHeader.position = vec3(chunkIndexPosition) * vec3(chunkScale);
         chunkHeader.voxelScale = voxelScale;
         chunkHeader.resolution = 256;
-        projv::VoxelBatch voxelBatch;
-
-        projv::Voxel cornerVoxel;
-        cornerVoxel.ZOrderPosition = 4;
-        cornerVoxel.color = {0, 0, 0};
-        voxelBatch.emplace_back(cornerVoxel);
+        auto brickMap = projv::utils::createVoxelBrickMap(
+            projv::utils::computeBrickDims(256));
 
         for (size_t triangleIndex = 0; triangleIndex < vertices.size() / 3; triangleIndex++) {
             const vec3& p0 = vertices[triangleIndex * 3].position;
@@ -437,28 +433,29 @@ void voxelizeObjFile(std::filesystem::path modelObjDirectory, std::string modelM
                             b = uint(clamp(fallbackColor.z, 0.0f, 255.0f));
                         }
 
-                        projv::Voxel voxel;
-                        voxel.ZOrderPosition = projv::utils::createZOrderIndex(ivec3(x, y, z));
-                        voxel.color = {uint8_t(r), uint8_t(g), uint8_t(b)};
-                        projv::utils::addVoxelToVoxelBatch(voxel, voxelBatch);
+                        projv::utils::brickMapSetVoxel(*brickMap, x, y, z,
+                            {uint8_t(r), uint8_t(g), uint8_t(b)});
                     }
                 }
             }
         }
 
-        // Count voxels before batch is consumed (subtract the sentinel corner voxel)
-        size_t chunkVoxels = voxelBatch.size() > 0 ? voxelBatch.size() - 1 : 0;
+        // Count voxels from the brick map
+        size_t chunkVoxels = 0;
+        for (uint32_t bz = 0; bz < brickMap->totalBricks; ++bz) {
+            if (!brickMap->bricks[bz]) continue;
+            for (uint32_t row = 0; row < projv::BRICK_MASK_ROWS; ++row)
+                chunkVoxels += __builtin_popcountll(brickMap->bricks[bz]->mask[row]);
+        }
         totalVoxels += chunkVoxels;
 
-        // Skip chunks that received no real geometry (only the sentinel corner voxel), so
-        // the grid volume's block count equals the number of occupied cells.
+        // Skip chunks that received no geometry.
         if (chunkVoxels == 0) {
             continue;
         }
 
         projv::Chunk chunk = projv::utils::createChunk(chunkHeader);
-        projv::utils::moveVoxelBatchToChunk(voxelBatch, chunk);
-        projv::utils::updateChunkFromItsVoxelBatch(chunk);
+        projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
 
         projv::DataBlock block;
         block.gridX = chunkIndexPosition.x;

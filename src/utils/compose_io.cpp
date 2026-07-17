@@ -492,9 +492,12 @@ namespace projv::utils {
                         auto poolIt = poolKeyToIndex.find(poolKey);
                         if (poolIt == poolKeyToIndex.end()) {
                             int32_t idx = static_cast<int32_t>(geometryPool.size());
-                            geometryPool.push_back(GeometryBlob{
-                                block.geometry, block.voxelTypeData, resolved,
-                                core::ivec3(block.gridX, block.gridY, block.gridZ)});
+                            GeometryBlob gb;
+                            gb.geometry         = block.geometry;
+                            gb.voxelTypeData    = block.voxelTypeData;
+                            gb.sourceDataPath   = resolved;
+                            gb.sourceBlockCoord = core::ivec3(block.gridX, block.gridY, block.gridZ);
+                            geometryPool.push_back(std::move(gb));
                             poolIt = poolKeyToIndex.emplace(poolKey, idx).first;
                         }
                         chunk.geometryPoolIndex = poolIt->second;

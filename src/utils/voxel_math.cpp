@@ -121,4 +121,44 @@ namespace projv::utils {
         return r;
     }
 
+    core::ivec3 computeBrickCoord(int x, int y, int z) {
+        return {floorDiv(x, static_cast<int32_t>(BRICK_SIZE)),
+                floorDiv(y, static_cast<int32_t>(BRICK_SIZE)),
+                floorDiv(z, static_cast<int32_t>(BRICK_SIZE))};
+    }
+
+    core::ivec3 computeBrickLocalPos(int x, int y, int z) {
+        return {floorMod(x, static_cast<int32_t>(BRICK_SIZE)),
+                floorMod(y, static_cast<int32_t>(BRICK_SIZE)),
+                floorMod(z, static_cast<int32_t>(BRICK_SIZE))};
+    }
+
+    uint32_t computeBrickZOrder(const core::ivec3& brickCoord,
+                                const core::ivec3& brickDims) {
+        (void)brickDims;
+        // brickCoord components are in [0, brickDims), and each axis
+        // needs log2(brickDims) bits. Since brickDims is a power of 4
+        // and BRICK_SIZE_LOG2=6, the Z-order of brickCoord within the
+        // parent chunk is just a standard Z-order with enough bits.
+        // Use the existing createZOrderIndex (9 bits per axis = 27 total,
+        // which covers up to 512 bricks per axis = resolution up to 32768).
+        // The returned value is a valid linear index for the bricks array.
+        return static_cast<uint32_t>(createZOrderIndex(brickCoord));
+    }
+
+    uint32_t computeLocalZOrder(const core::ivec3& localPos) {
+        // 6 bits per axis: use createZOrderIndex with bitDepth=6
+        // The LUT-based createZOrderIndex uses 9 bits per axis, which
+        // correctly produces a 18-bit Z-order for 6-bit coordinates
+        // (the extra 3 high bits are zero).
+        return static_cast<uint32_t>(createZOrderIndex(localPos));
+    }
+
+    core::ivec3 computeBrickDims(uint32_t resolution) {
+        if (resolution < BRICK_SIZE) return {1, 1, 1};
+        uint32_t bpa = resolution / BRICK_SIZE;
+        return {static_cast<int32_t>(bpa),
+                static_cast<int32_t>(bpa),
+                static_cast<int32_t>(bpa)};
+    }
 }

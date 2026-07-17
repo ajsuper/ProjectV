@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <string>
+#include <memory>
 #include <stdint.h>
 
 #include "core/math.h"
@@ -111,7 +112,6 @@ namespace projv{
         ChunkHeader header;
         std::vector<uint32_t> geometryData;
         std::vector<uint32_t> voxelTypeData;
-        VoxelBatch chunkQueue;
         uint32_t LOD;
         // Instancing: when >= 0, this chunk's geometry lives once in Scene.geometryPool[idx]
         // (shared across every instance of the same .data block) and geometryData/voxelTypeData
@@ -142,6 +142,16 @@ namespace projv{
     struct GeometryBlob {
         std::vector<uint32_t> geometry;
         std::vector<uint32_t> voxelTypeData;
+        // VoxelBrickMap for editable representation. Null for unedited blobs.
+        // Populated on first edit; used for O(1) direct voxel writes instead of
+        // the old VoxelBatch decompress-modify-recompress cycle.
+        std::unique_ptr<VoxelBrickMap> brickMap;
+
+        GeometryBlob() = default;
+        GeometryBlob(GeometryBlob&&) = default;
+        GeometryBlob& operator=(GeometryBlob&&) = default;
+        GeometryBlob(const GeometryBlob& rhs);
+        GeometryBlob& operator=(const GeometryBlob& rhs);
         // Provenance for persistence: the .data file and block this geometry came from. Deduped with
         // the blob (few per scene), so it stays off the per-chunk struct. A copy-on-write fork inherits
         // these, then repoints sourceDataPath at its new file once persisted.
@@ -249,9 +259,9 @@ namespace projv{
             scene.geometryPool[srcIndex].dirty = true;
             return srcIndex;
         }
-        GeometryBlob fork = scene.geometryPool[srcIndex]; // deep copy of vecs + string
+        GeometryBlob fork = scene.geometryPool[srcIndex]; // deep copy via copy ctor
         fork.refCount = 1;
-        fork.dirty = true; // P5: new blob, no GPU range yet
+        fork.dirty = true;
         return poolInsertBlob(scene, std::move(fork));
     }
 

@@ -89,25 +89,11 @@ static void uploadCommonUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
 // Editing state
 // =============================================================================
 
-// Global editing state, stored in a global resource so it persists across frames.
 struct EditState {
     projv::ComponentHandle component = projv::INVALID_COMPONENT_HANDLE;
     int sphereRadius = 8;    // radius of the placed/removed sphere, in voxels
     int fallbackDistance = 15; // where to place when the crosshair ray misses all geometry
     int voxelColorIndex = 0;
-
-    // P6: four Sponza instances, selected with keys 1-4.
-    // sponzas[i] = Grid handle (edit target), sponzaAssets[i] = Asset handle (rotate target).
-    projv::ComponentHandle sponzas[4] = {projv::INVALID_COMPONENT_HANDLE,
-                                          projv::INVALID_COMPONENT_HANDLE,
-                                          projv::INVALID_COMPONENT_HANDLE,
-                                          projv::INVALID_COMPONENT_HANDLE};
-    projv::ComponentHandle sponzaAssets[4] = {projv::INVALID_COMPONENT_HANDLE,
-                                               projv::INVALID_COMPONENT_HANDLE,
-                                               projv::INVALID_COMPONENT_HANDLE,
-                                               projv::INVALID_COMPONENT_HANDLE};
-    int selectedSponza = 0;          // 0-3 index into sponzas[]
-    float rotationAngle = 0.0f;      // accumulated Y-axis rotation (radians)
 };
 
 // =============================================================================
@@ -182,8 +168,8 @@ static PickResult pickCrosshairWorldPos(projv::graphics::RenderInstance& renderI
     }
 
     // gPos stores: xyz = world-space hit position, w = float(headerIndex).
-    // Sky misses encode headerIndex = 0xFFFFFFFF → 4294967296.0f, well above any
-    // real geometry headerIndex (0–4), so the same >= 1e4 threshold still works.
+    // Sky misses encode headerIndex = 0xFFFFFFFF -> 4294967296.0f, well above any
+    // real geometry headerIndex (0-4), so the same >= 1e4 threshold still works.
     const bgfx::ViewId kPickView = 250;
     bgfx::blit(kPickView, staging, 0, 0, gPos, crosshairX, crosshairY, 1, 1);
 
@@ -222,7 +208,7 @@ static std::vector<projv::PendingVoxelOp> makeSphereOps(projv::core::ivec3 cente
 
 static projv::ChunkHandle buildPreviewSphere(projv::Scene& scene, projv::GPUData& gpuData,
                                               int radius, const projv::core::vec3& position) {
-    // Fixed 256³ volume (power of 4, correct for tree64 traversal).
+    // Fixed 256^3 volume (power of 4, correct for tree64 traversal).
     constexpr int     kRes    = 256;
     constexpr float   kScale  = 256.0f;
     constexpr int     kCenter = 127;   // sphere center in local voxel coords
@@ -242,21 +228,21 @@ static projv::ChunkHandle buildPreviewSphere(projv::Scene& scene, projv::GPUData
     chunk.LOD    = 0;
     chunk.alive  = true;
 
-    // Voxelize a yellow sphere centered at (127,127,127).
-    projv::VoxelBatch batch;
+    // Voxelize a yellow sphere into a brick map centered at (127,127,127).
+    auto brickMap = projv::utils::createVoxelBrickMap(
+        projv::utils::computeBrickDims(kRes));
     int r2 = radius * radius;
     for (int dz = -radius; dz <= radius; ++dz) {
         for (int dy = -radius; dy <= radius; ++dy) {
             for (int dx = -radius; dx <= radius; ++dx) {
                 if (dx * dx + dy * dy + dz * dz > r2) continue;
-                batch.push_back(projv::utils::createVoxel(
-                    projv::Color{255, 255, 0},
-                    projv::core::ivec3(kCenter + dx, kCenter + dy, kCenter + dz)));
+                projv::utils::brickMapSetVoxel(*brickMap,
+                    kCenter + dx, kCenter + dy, kCenter + dz,
+                    projv::Color{255, 255, 0});
             }
         }
     }
-    projv::utils::moveVoxelBatchToChunk(batch, chunk);
-    projv::utils::updateChunkFromItsVoxelBatch(chunk, true);
+    projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
 
     // Pool the geometry and register as a loose chunk.
     int32_t poolIdx = projv::internChunkGeometry(scene, chunk);
@@ -279,7 +265,7 @@ static projv::ChunkHandle buildPreviewSphere(projv::Scene& scene, projv::GPUData
 // Rebuild the preview sphere geometry in-place when the radius changes.
 // The chunk's blob (refCount == 1) is replaced with new voxel data.
 // Resolution is fixed at 256, sphere centred at (127,127,127), so the chunk
-// position stays the same — no recalculation needed.
+// position stays the same -- no recalculation needed.
 static void rebuildPreviewSphere(projv::Scene& scene, projv::GPUData& gpuData,
                                   projv::ChunkHandle h, int radius) {
     projv::Chunk& preview = scene.chunks[h];
@@ -288,7 +274,7 @@ static void rebuildPreviewSphere(projv::Scene& scene, projv::GPUData& gpuData,
     constexpr float   kScale  = 256.0f;
     constexpr int     kCenter = 127;
 
-    // Build a temporary chunk with the new sphere.
+    // Build a temporary chunk with the new sphere via brick map.
     projv::Chunk temp;
     temp.header = preview.header;
     temp.header.resolution = kRes;
@@ -296,20 +282,20 @@ static void rebuildPreviewSphere(projv::Scene& scene, projv::GPUData& gpuData,
     temp.LOD   = 0;
     temp.alive = true;
 
-    projv::VoxelBatch batch;
+    auto brickMap = projv::utils::createVoxelBrickMap(
+        projv::utils::computeBrickDims(kRes));
     int r2 = radius * radius;
     for (int dz = -radius; dz <= radius; ++dz) {
         for (int dy = -radius; dy <= radius; ++dy) {
             for (int dx = -radius; dx <= radius; ++dx) {
                 if (dx * dx + dy * dy + dz * dz > r2) continue;
-                batch.push_back(projv::utils::createVoxel(
-                    projv::Color{255, 255, 0},
-                    projv::core::ivec3(kCenter + dx, kCenter + dy, kCenter + dz)));
+                projv::utils::brickMapSetVoxel(*brickMap,
+                    kCenter + dx, kCenter + dy, kCenter + dz,
+                    projv::Color{255, 255, 0});
             }
         }
     }
-    projv::utils::moveVoxelBatchToChunk(batch, temp);
-    projv::utils::updateChunkFromItsVoxelBatch(temp, true);
+    projv::utils::updateChunkFromBrickMap(temp, *brickMap);
 
     // Replace the blob content in-place (sole owner, refCount == 1).
     int32_t poolIdx = preview.geometryPoolIndex;
@@ -320,12 +306,12 @@ static void rebuildPreviewSphere(projv::Scene& scene, projv::GPUData& gpuData,
         blob.dirty = true;
     }
 
-    // Resolution/scale are fixed — no header fields to update.
+    // Resolution/scale are fixed -- no header fields to update.
     // Flush the dirty blob.
     projv::graphics::flushSceneUpdates(scene, gpuData);
 }
 
-// GLFW scroll callback — accumulates scroll offset for sphere radius changes.
+// GLFW scroll callback -- accumulates scroll offset for sphere radius changes.
 static double g_scrollAccum = 0.0;
 static void scrollCallback(GLFWwindow* window, double /*xoffset*/, double yoffset) {
     (void)window;
@@ -352,8 +338,8 @@ void startup(projv::Application& app) {
     EditState& editState    = projv::core::createGlobalResource<EditState>(app.world);
     PreviewState& preview   = projv::core::createGlobalResource<PreviewState>(app.world);
 
-    // Load the QuadSponza scene.
-    scene = projv::utils::loadComposeFromDisk("./QuadSponza/");
+    // Load the Sponza scene.
+    scene = projv::utils::loadComposeFromDisk("./SponzaScene/");
     projv::core::info("Edit demo: loaded {} components, {} chunks, {} grids",
                       scene.components.size(), scene.chunks.size(), scene.grids.size());
 
@@ -368,25 +354,16 @@ void startup(projv::Application& app) {
             projv::utils::getComponentPath(scene, h));
     }
 
-    // P6: find the four Sponza Grid components by name under each Asset.
-    const char* names[4] = {"sponza_a", "sponza_b", "sponza_c", "sponza_d"};
-    for (int i = 0; i < 4; ++i) {
-        // Find the Asset parent by path: "sponza_X"
-        editState.sponzaAssets[i] = projv::utils::findComponentByPath(scene, names[i]);
-        // Find the Grid child by path: "sponza_X/model"
-        std::string path = std::string(names[i]) + "/model";
-        editState.sponzas[i] = projv::utils::findComponentByPath(scene, path);
-        if (editState.sponzas[i] != projv::INVALID_COMPONENT_HANDLE) {
-            projv::core::info("  Sponza {}: Asset[{}] Grid[{}] path=\"{}\" voxels={}",
-                i+1, editState.sponzaAssets[i], editState.sponzas[i], path,
-                projv::utils::getComponentVoxelCount(scene, editState.sponzas[i]));
-        } else {
-            projv::core::error("  Sponza {}: NOT FOUND at path \"{}\"", i+1, path);
+    // Use the first non-Asset component as the edit target.
+    editState.component = projv::INVALID_COMPONENT_HANDLE;
+    for (projv::ComponentHandle h = 0; h < scene.components.size(); ++h) {
+        if (scene.components[h].kind != projv::ComponentKind::Asset) {
+            editState.component = h;
+            break;
         }
     }
-    editState.component = editState.sponzas[0];
-    editState.selectedSponza = 0;
-    projv::core::info("Edit demo: targeting sponza 1, component {}", editState.component);
+    projv::core::info("Edit demo: targeting component {} (path=\"{}\")", editState.component,
+                      projv::utils::getComponentPath(scene, editState.component));
 
     // Load the fast renderer (direct + AO, TAA).
     projv::RendererSpecification rendererSpec = projv::graphics::loadRendererSpecification(
@@ -479,29 +456,16 @@ void render(projv::Application& app) {
 
     projv::core::vec3 forwardDirection = { projv::core::cos(cameraPhi), 0, projv::core::sin(cameraPhi) };
 
-    // --- Editing keybindings (processed up front, before cursor capture check) ---
+    // --- Editing keybindings ---
 
-    // P6: keys 1-4 select which Sponza to edit.
-    for (int i = 0; i < 4; ++i) {
-        if (glfwGetKey(renderInstance.window, GLFW_KEY_1 + i) == GLFW_PRESS) {
-            if (editState.selectedSponza != i &&
-                editState.sponzas[i] != projv::INVALID_COMPONENT_HANDLE) {
-                editState.selectedSponza = i;
-                editState.component = editState.sponzas[i];
-                editState.rotationAngle = 0.0f; // reset rotation on switch
-                projv::core::warn("SELECTED Sponza {} (component {}) path=\"{}\"",
-                    i+1, editState.component,
-                    projv::utils::getComponentPath(scene, editState.component));
-            }
-        }
-    }
-
-    // Key 5: largest sphere radius.
+    // Key 1-5: switch sphere radius (4, 8, 12, 20, 32).
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_1) == GLFW_PRESS) editState.sphereRadius = 4;
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_2) == GLFW_PRESS) editState.sphereRadius = 8;
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_3) == GLFW_PRESS) editState.sphereRadius = 12;
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_4) == GLFW_PRESS) editState.sphereRadius = 20;
     if (glfwGetKey(renderInstance.window, GLFW_KEY_5) == GLFW_PRESS) editState.sphereRadius = 32;
 
-    // Change sphere radius (in voxels): scrollwheel or key 5.
-
-    // Scrollwheel also changes the radius (scaled so one notch ≈ ±2 voxels).
+    // Scrollwheel also changes the radius (scaled so one notch = ~2 voxels).
     {
         static constexpr int kMinRadius = 2;
         static constexpr int kMaxRadius = 64;
@@ -529,7 +493,7 @@ void render(projv::Application& app) {
         projv::core::vec3 worldPos;
         if (pick.hit) {
             // If the pick lands on the preview sphere, use the sphere's centre
-            // instead of its surface — the centre sits on the real geometry the
+            // instead of its surface -- the centre sits on the real geometry the
             // sphere was placed on.
             if (pick.headerIndex == static_cast<uint32_t>(preview.chunk)) {
                 constexpr float kCenter = 127.0f;
@@ -580,28 +544,6 @@ void render(projv::Application& app) {
                           isAdd ? "ADD" : "REMOVE",
                           editState.sphereRadius, center.x, center.y, center.z, ops.size());
         cameraMoved = true; // force TAA reset so the new voxels are immediately visible
-    }
-
-    // --- Preview sphere update (static — no per-frame updates) ---
-    // Preview chunk was created at startup at position (0,0,0). No header updates here.
-
-    // --- P6: Continuous Y-axis rotation of the selected Sponza Asset ---
-    {
-        // Rotate at ~90 degrees/second (pi/2 rad/s). At 60fps that's ~0.026 rad/frame.
-        constexpr float kRotationSpeed = 0.02618f; // pi/2 / 60
-        editState.rotationAngle += kRotationSpeed;
-        if (editState.rotationAngle > 6.28318f) editState.rotationAngle -= 6.28318f;
-
-        projv::ComponentHandle assetH = editState.sponzaAssets[editState.selectedSponza];
-        if (assetH != projv::INVALID_COMPONENT_HANDLE && assetH < scene.components.size()) {
-            projv::core::quat yRot = glm::angleAxis(editState.rotationAngle,
-                                                     projv::core::vec3(0.0f, 1.0f, 0.0f));
-            // CPU: update transforms + mark affected chunk headers dirty.
-            projv::utils::setComponentRotation(scene, assetH, yRot);
-            // GPU: detect dirty headers + sync grid tables automatically.
-            projv::graphics::flushSceneUpdates(scene, gpuData);
-            cameraMoved = true;
-        }
     }
 
     // --- Cursor capture toggle ---

@@ -49,48 +49,59 @@ namespace projv::utils {
             return comp.dataRefID;
         }
 
-        // Apply edits to a single existing chunk (COW fork + merge + rebuild).
+        // Ensure the blob has a brick map. If null, build one from the existing voxelTypeData.
+        void ensureBrickMapExists(GeometryBlob& blob, uint32_t resolution) {
+            if (blob.brickMap) return;
+            core::ivec3 brickDims = computeBrickDims(resolution);
+            blob.brickMap = createVoxelBrickMap(brickDims);
+            if (!blob.voxelTypeData.empty()) {
+                brickMapFromVoxelTypeData(*blob.brickMap, blob.voxelTypeData);
+            }
+        }
+
+        // Apply a batch of PendingVoxelOps directly to a brick map.
+        // Positions are in continuous component-space coords; the brick map stores
+        // them directly (no cell bucketing — that's for the Grid path).
+        void applyOpsToBrickMap(VoxelBrickMap& map, uint32_t resolution,
+                                const std::vector<PendingVoxelOp>& ops) {
+            for (const PendingVoxelOp& op : ops) {
+                int32_t x = static_cast<int32_t>(floorMod(op.position.x, static_cast<int32_t>(resolution)));
+                int32_t y = static_cast<int32_t>(floorMod(op.position.y, static_cast<int32_t>(resolution)));
+                int32_t z = static_cast<int32_t>(floorMod(op.position.z, static_cast<int32_t>(resolution)));
+                if (x < 0 || y < 0 || z < 0 ||
+                    x >= static_cast<int32_t>(resolution) ||
+                    y >= static_cast<int32_t>(resolution) ||
+                    z >= static_cast<int32_t>(resolution)) {
+                    continue;
+                }
+                if (op.isAdd) {
+                    brickMapSetVoxel(map, x, y, z, op.color);
+                } else {
+                    brickMapClearVoxel(map, x, y, z);
+                }
+            }
+        }
+
+        // Apply edits to a single existing chunk using the brick map.
         void applyEditsToChunk(Scene& scene, Chunk& chunk,
-                               const std::vector<Voxel>& adds,
-                               const std::vector<Voxel>& removes) {
-            if (adds.empty() && removes.empty()) return;
+                               const std::vector<PendingVoxelOp>& ops) {
+            if (ops.empty()) return;
 
             int32_t oldIdx = chunk.geometryPoolIndex;
             int32_t newIdx = forkBlob(scene, oldIdx);
             chunk.geometryPoolIndex = newIdx;
-            core::edit(" applyEditsToChunk: chunkHandle={} oldPool={} newPool={} adds={} removes={}",
-                       chunk.cellIndex, oldIdx, newIdx, adds.size(), removes.size());
+            core::edit(" applyEditsToChunk: chunkHandle={} oldPool={} newPool={} ops={}",
+                       chunk.cellIndex, oldIdx, newIdx, ops.size());
 
-            VoxelBatch current = getChunkVoxelBatch(scene, chunk, true);
-            size_t preVoxelCount = current.size();
-            core::edit(" applyEditsToChunk: pre-edit voxels={}", preVoxelCount);
+            GeometryBlob& blob = scene.geometryPool[chunk.geometryPoolIndex];
+            uint32_t res = chunk.header.resolution;
+            ensureBrickMapExists(blob, res);
+            applyOpsToBrickMap(*blob.brickMap, res, ops);
 
-            if (!removes.empty()) {
-                VoxelBatch rmBatch;
-                rmBatch.reserve(removes.size());
-                for (auto& v : removes) rmBatch.push_back(v);
-                removeVoxelBatchAFromVoxelBatchB(rmBatch, current, {0, 0, 0});
-            }
-            if (!adds.empty()) {
-                VoxelBatch addBatch;
-                addBatch.reserve(adds.size());
-                for (auto& v : adds) addBatch.push_back(v);
-                addVoxelBatchAToVoxelBatchB(addBatch, current, {0, 0, 0});
-            }
+            updateChunkFromBrickMap(chunk, *blob.brickMap);
 
-            core::edit(" applyEditsToChunk: post-edit voxels={}", current.size());
-
-            moveVoxelBatchToChunk(current, chunk);
-            updateChunkFromItsVoxelBatch(chunk, /*clearBatch=*/true);
-
-            core::edit(" applyEditsToChunk: done finalRes={} scale={} geomNodes={} voxelTypes={}",
-                       chunk.header.resolution, chunk.header.scale,
-                       chunk.geometryData.size() / 3,
-                       chunk.voxelTypeData.size());
-
-            GeometryBlob& fork = scene.geometryPool[chunk.geometryPoolIndex];
-            fork.geometry      = chunk.geometryData;
-            fork.voxelTypeData = chunk.voxelTypeData;
+            blob.geometry      = chunk.geometryData;
+            blob.voxelTypeData = chunk.voxelTypeData;
 
             core::edit(" applyEditsToChunk: done res={} geomNodes={} voxelType={}",
                        chunk.header.resolution,
@@ -140,42 +151,7 @@ namespace projv::utils {
                 } else {
                     core::edit(" Chunk path: processing {} ops on chunkHandle={} res={}",
                                comp.editQueue.ops.size(), comp.chunkHandle, res);
-                    // COW fork.
-                    int32_t oldIdx = chunk.geometryPoolIndex;
-                    int32_t newIdx = forkBlob(scene, oldIdx);
-                    chunk.geometryPoolIndex = newIdx;
-
-                    VoxelBatch current = getChunkVoxelBatch(scene, chunk, true);
-
-                    VoxelBatch adds, removes;
-                    adds.reserve(comp.editQueue.ops.size());
-                    removes.reserve(comp.editQueue.ops.size());
-                    for (const PendingVoxelOp& op : comp.editQueue.ops) {
-                        core::ivec3 local{
-                            floorMod(op.position.x, static_cast<int32_t>(res)),
-                            floorMod(op.position.y, static_cast<int32_t>(res)),
-                            floorMod(op.position.z, static_cast<int32_t>(res))
-                        };
-                        if (local.x < 0 || local.y < 0 || local.z < 0 ||
-                            local.x >= static_cast<int32_t>(res) ||
-                            local.y >= static_cast<int32_t>(res) ||
-                            local.z >= static_cast<int32_t>(res)) {
-                            continue;
-                        }
-                        Voxel v = createVoxel(op.color, local);
-                        (op.isAdd ? adds : removes).push_back(v);
-                    }
-
-                    if (!removes.empty()) removeVoxelBatchAFromVoxelBatchB(removes, current);
-                    if (!adds.empty())    addVoxelBatchAToVoxelBatchB(adds, current, {0, 0, 0});
-
-                    moveVoxelBatchToChunk(current, chunk);
-                    updateChunkFromItsVoxelBatch(chunk, /*clearBatch=*/true);
-
-                    GeometryBlob& fork = scene.geometryPool[chunk.geometryPoolIndex];
-                    fork.geometry      = chunk.geometryData;
-                    fork.voxelTypeData = chunk.voxelTypeData;
-
+                    applyEditsToChunk(scene, chunk, comp.editQueue.ops);
                     comp.editQueue.ops.clear();
                     return true;
                 }
@@ -217,49 +193,35 @@ namespace projv::utils {
             core::ivec3 originCell = grid.originCellCoord;
 
             // 4. Bucket by cell.
-            std::unordered_map<int, std::vector<Voxel>> perCellAdds;
-            std::unordered_map<int, std::vector<Voxel>> perCellRemoves;
+            std::unordered_map<int, std::vector<PendingVoxelOp>> perCellOps;
             for (const auto& op : comp.editQueue.ops) {
                 core::ivec3 cellCoord(
                     floorDiv(op.position.x, static_cast<int32_t>(res)),
                     floorDiv(op.position.y, static_cast<int32_t>(res)),
                     floorDiv(op.position.z, static_cast<int32_t>(res))
                 );
-                core::ivec3 localPos(
-                    floorMod(op.position.x, static_cast<int32_t>(res)),
-                    floorMod(op.position.y, static_cast<int32_t>(res)),
-                    floorMod(op.position.z, static_cast<int32_t>(res))
-                );
                 int lin = (cellCoord.x - originCell.x)
                           + grid.dims.x * ((cellCoord.y - originCell.y)
                                            + grid.dims.y * (cellCoord.z - originCell.z));
-                Voxel v = createVoxel(op.color, localPos);
-                (op.isAdd ? perCellAdds[lin] : perCellRemoves[lin]).push_back(v);
+                perCellOps[lin].push_back(op);
             }
 
             // 5. Collect all unique cell indices.
             std::unordered_set<int> allCells;
-            for (const auto& pair : perCellAdds)    allCells.insert(pair.first);
-            for (const auto& pair : perCellRemoves) allCells.insert(pair.first);
+            for (const auto& pair : perCellOps) allCells.insert(pair.first);
 
             // 6. Apply per cell.
             for (int lin : allCells) {
                 int32_t chunkIdx = grid.cellToChunk[lin];
-                const auto& adds    = perCellAdds[lin];
-                const auto& removes = perCellRemoves[lin];
+                const auto& ops = perCellOps[lin];
 
-                core::edit(" Grid path: cell lin={} chunkIdx={} adds={} removes={} dims=({},{},{}) originCell=({},{},{})",
-                           lin, chunkIdx, adds.size(), removes.size(),
+                core::edit(" Grid path: cell lin={} chunkIdx={} ops={} dims=({},{},{}) originCell=({},{},{})",
+                           lin, chunkIdx, ops.size(),
                            grid.dims.x, grid.dims.y, grid.dims.z,
                            originCell.x, originCell.y, originCell.z);
 
                 if (chunkIdx < 0) {
-                    // New cell: create an empty chunk.
-                    if (!removes.empty()) {
-                        core::warn("editing: remove on empty cell {} -- skipped", lin);
-                    }
-                    if (adds.empty()) continue;
-
+                    // New cell: create an empty chunk and populate from ops.
                     int iz = lin / (grid.dims.x * grid.dims.y);
                     int iy = (lin / grid.dims.x) % grid.dims.y;
                     int ix = lin % grid.dims.x;
@@ -280,40 +242,54 @@ namespace projv::utils {
                     newChunk.cellIndex       = lin;
                     newChunk.componentHandle = h;
 
-                    VoxelBatch batch;
-                    batch.reserve(adds.size());
-                    for (auto& v : adds) batch.push_back(v);
+                    // Create brick map and apply initial adds.
+                    // Wrap op positions to cell-local coordinates (ops are in
+                    // global component-space; the cell covers [cellOrigin, cellOrigin+res)).
+                    core::ivec3 brickDims = computeBrickDims(res);
+                    auto brickMap = createVoxelBrickMap(brickDims);
+                    for (const auto& op : ops) {
+                        if (op.isAdd) {
+                            int32_t lx = static_cast<int32_t>(floorMod(op.position.x, static_cast<int32_t>(res)));
+                            int32_t ly = static_cast<int32_t>(floorMod(op.position.y, static_cast<int32_t>(res)));
+                            int32_t lz = static_cast<int32_t>(floorMod(op.position.z, static_cast<int32_t>(res)));
+                            brickMapSetVoxel(*brickMap, lx, ly, lz, op.color);
+                        }
+                    }
 
-                    core::edit(" Grid path: creating new chunk lin={} pos=({},{},{}) initRes={} voxelsInBatch={}",
+                    core::edit(" Grid path: creating new chunk lin={} pos=({},{},{}) initRes={} ops={}",
                                lin, chunkPos.x, chunkPos.y, chunkPos.z,
-                               newHdr.resolution, batch.size());
+                               newHdr.resolution, ops.size());
 
-                    moveVoxelBatchToChunk(batch, newChunk);
-                    updateChunkFromItsVoxelBatch(newChunk, /*clearBatch=*/true);
+                    updateChunkFromBrickMap(newChunk, *brickMap);
 
-                    core::edit(" Grid path: after updateChunkFromItsVoxelBatch: finalRes={} scale={} geomNodes={} voxelTypes={}",
+                    core::edit(" Grid path: after updateChunkFromBrickMap: finalRes={} scale={} geomNodes={} voxelTypes={}",
                                newChunk.header.resolution, newChunk.header.scale,
                                newChunk.geometryData.size() / 3,
                                newChunk.voxelTypeData.size());
 
                     internChunkGeometry(scene, newChunk);
 
+                    // Store the brick map on the blob.
+                    if (newChunk.geometryPoolIndex >= 0) {
+                        scene.geometryPool[newChunk.geometryPoolIndex].brickMap = std::move(brickMap);
+                    }
+
                     ChunkHandle newHandle = static_cast<ChunkHandle>(scene.chunks.size());
                     scene.chunks.push_back(std::move(newChunk));
                     grid.cellToChunk[lin] = static_cast<int32_t>(newHandle);
 
-                    core::edit(" Grid path: created new chunk handle={} at cell lin={} pos=({},{},{}) res={} voxels={}",
+                    core::edit(" Grid path: created new chunk handle={} at cell lin={} pos=({},{},{}) res={}",
                                newHandle, lin, chunkPos.x, chunkPos.y, chunkPos.z,
-                               newHdr.resolution, batch.size());
+                               newHdr.resolution);
                 } else {
-                    // Existing cell: COW fork + apply edits.
+                    // Existing cell: COW fork + apply edits via brick map.
                     Chunk& existingChunk = scene.chunks[chunkIdx];
                     core::edit(" Grid path: editing existing chunk handle={} cellLin={} pool={} oldRes={} forcing to {}",
                                chunkIdx, existingChunk.cellIndex,
                                existingChunk.geometryPoolIndex,
                                existingChunk.header.resolution, res);
                     existingChunk.header.resolution = res;
-                    applyEditsToChunk(scene, existingChunk, adds, removes);
+                    applyEditsToChunk(scene, existingChunk, ops);
                 }
             }
 
