@@ -349,9 +349,11 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         while (data.size() % 4 != 0) data.push_back(0);
         if (data.empty()) data.resize(4, 0);
         int width = static_cast<int>(data.size() / 4);
+        bgfx::TextureHandle tex = bgfx::createTexture2D(width, 1, false, 1, bgfx::TextureFormat::RGBA32U,
+                                                         BGFX_SAMPLER_POINT, nullptr);
         const bgfx::Memory* mem = bgfx::copy(data.data(), data.size() * sizeof(uint32_t));
-        return bgfx::createTexture2D(width, 1, false, 1, bgfx::TextureFormat::RGBA32U,
-                                     BGFX_TEXTURE_NONE | BGFX_SAMPLER_POINT, mem);
+        bgfx::updateTexture2D(tex, 0, 0, 0, 0, uint16_t(width), 1, mem);
+        return tex;
     }
 
     // Builds the flattened cell -> chunk map as an RGBA32U texture. Same 2D layout as
@@ -366,9 +368,12 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         int dataWidth = (pixelSize + textureHeight - 1) / textureHeight;
         if (dataWidth < 1) dataWidth = 1;
         data.resize(static_cast<size_t>(dataWidth) * textureHeight * 4, 0xFFFFFFFFu);
+        bgfx::TextureHandle tex = bgfx::createTexture2D(dataWidth, textureHeight, false, 1,
+                                                         bgfx::TextureFormat::RGBA32U,
+                                                         BGFX_SAMPLER_POINT, nullptr);
         const bgfx::Memory* mem = bgfx::copy(data.data(), data.size() * sizeof(uint32_t));
-        return bgfx::createTexture2D(dataWidth, textureHeight, false, 1, bgfx::TextureFormat::RGBA32U,
-                                     BGFX_TEXTURE_NONE | BGFX_SAMPLER_POINT, mem);
+        bgfx::updateTexture2D(tex, 0, 0, 0, 0, uint16_t(dataWidth), uint16_t(textureHeight), mem);
+        return tex;
     }
 
     namespace {
@@ -416,12 +421,66 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
             gpuData.looseCapacity = static_cast<uint32_t>(looseList.size());
             if (!bgfx::isValid(gpuData.headerTexture)) { auto t1 = std::chrono::high_resolution_clock::now(); double ms = std::chrono::duration<double, std::milli>(t1 - t0).count(); core::perf("syncSceneTables (headless): {:.2f}ms", ms); return; }
-            if (bgfx::isValid(gpuData.gridInfoTexture)) bgfx::destroy(gpuData.gridInfoTexture);
-            if (bgfx::isValid(gpuData.cellMapTexture)) bgfx::destroy(gpuData.cellMapTexture);
-            if (bgfx::isValid(gpuData.looseListTexture)) bgfx::destroy(gpuData.looseListTexture);
-            gpuData.gridInfoTexture = createUintRowTexture(gridInfoData);
-            gpuData.cellMapTexture = createCellMapTexture(cellMapData);
-            gpuData.looseListTexture = createCellMapTexture(looseList);
+
+            // --- GridInfo (1-row) ---
+            {
+                while (gridInfoData.size() % 4 != 0) gridInfoData.push_back(0);
+                if (gridInfoData.empty()) gridInfoData.resize(4, 0);
+                uint32_t neededW = static_cast<uint32_t>(gridInfoData.size() / 4);
+                if (neededW != gpuData.gridInfoTexWidth || !bgfx::isValid(gpuData.gridInfoTexture)) {
+                    if (bgfx::isValid(gpuData.gridInfoTexture)) bgfx::destroy(gpuData.gridInfoTexture);
+                    gpuData.gridInfoTexture = createUintRowTexture(gridInfoData);
+                    gpuData.gridInfoTexWidth = neededW;
+                } else {
+                    const bgfx::Memory* mem = bgfx::copy(gridInfoData.data(), gridInfoData.size() * sizeof(uint32_t));
+                    bgfx::updateTexture2D(gpuData.gridInfoTexture, 0, 0, 0, 0, uint16_t(neededW), 1, mem);
+                }
+            }
+
+            // --- CellMap (2D) ---
+            {
+                if (cellMapData.empty()) cellMapData.push_back(0xFFFFFFFFu);
+                int texH = 4096;
+                int maxSz = bgfx::getCaps()->limits.maxTextureSize;
+                if (maxSz < texH) texH = maxSz;
+                int pixelSize = static_cast<int>((cellMapData.size() + 3) / 4);
+                uint32_t neededW = static_cast<uint32_t>((pixelSize + texH - 1) / texH);
+                if (neededW < 1) neededW = 1;
+                uint32_t neededH = static_cast<uint32_t>(texH);
+                if (neededW != gpuData.cellMapTexWidth || neededH != gpuData.cellMapTexHeight || !bgfx::isValid(gpuData.cellMapTexture)) {
+                    if (bgfx::isValid(gpuData.cellMapTexture)) bgfx::destroy(gpuData.cellMapTexture);
+                    gpuData.cellMapTexture = createCellMapTexture(cellMapData);
+                    gpuData.cellMapTexWidth = neededW;
+                    gpuData.cellMapTexHeight = neededH;
+                } else {
+                    cellMapData.resize(static_cast<size_t>(neededW) * neededH * 4, 0xFFFFFFFFu);
+                    const bgfx::Memory* mem = bgfx::copy(cellMapData.data(), cellMapData.size() * sizeof(uint32_t));
+                    bgfx::updateTexture2D(gpuData.cellMapTexture, 0, 0, 0, 0, uint16_t(neededW), uint16_t(neededH), mem);
+                }
+            }
+
+            // --- LooseList (2D) ---
+            {
+                if (looseList.empty()) looseList.push_back(0xFFFFFFFFu);
+                int texH = 4096;
+                int maxSz = bgfx::getCaps()->limits.maxTextureSize;
+                if (maxSz < texH) texH = maxSz;
+                int pixelSize = static_cast<int>((looseList.size() + 3) / 4);
+                uint32_t neededW = static_cast<uint32_t>((pixelSize + texH - 1) / texH);
+                if (neededW < 1) neededW = 1;
+                uint32_t neededH = static_cast<uint32_t>(texH);
+                if (neededW != gpuData.looseListTexWidth || neededH != gpuData.looseListTexHeight || !bgfx::isValid(gpuData.looseListTexture)) {
+                    if (bgfx::isValid(gpuData.looseListTexture)) bgfx::destroy(gpuData.looseListTexture);
+                    gpuData.looseListTexture = createCellMapTexture(looseList);
+                    gpuData.looseListTexWidth = neededW;
+                    gpuData.looseListTexHeight = neededH;
+                } else {
+                    looseList.resize(static_cast<size_t>(neededW) * neededH * 4, 0xFFFFFFFFu);
+                    const bgfx::Memory* mem = bgfx::copy(looseList.data(), looseList.size() * sizeof(uint32_t));
+                    bgfx::updateTexture2D(gpuData.looseListTexture, 0, 0, 0, 0, uint16_t(neededW), uint16_t(neededH), mem);
+                }
+            }
+
             auto t1 = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             core_perf_every(60, "syncSceneTables: {} grids {} loose {} chunks: {:.2f}ms",

@@ -68,8 +68,8 @@ add_compile_definitions(${PROJV_LOG_DEFS})
 
 message(STATUS "ProjectV logging categories: ${PROJV_LOG_DEFS}")
 
-# --- Linux GLFW native backend: X11 (default) or Wayland ---
-option(PROJV_USE_X11 "Use X11 backend for GLFW on Linux" ON)
+# --- Linux GLFW native backend: Wayland (default) or X11 ---
+option(PROJV_USE_X11 "Use X11 backend for GLFW on Linux (OFF = Wayland)" OFF)
 if(PROJV_USE_X11)
     add_compile_definitions(PROJV_USE_X11)
     message(STATUS "GLFW Linux backend: X11")

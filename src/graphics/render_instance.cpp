@@ -67,7 +67,6 @@ namespace projv::graphics {
         bgfxInit.resolution.reset = BGFX_RESET_NONE;
         bgfxInit.platformData = platformData;
 
-        bgfx::renderFrame();
         bgfx::init(bgfxInit);
 
         static PosTexVertex vertexQuadVertices[] = {  

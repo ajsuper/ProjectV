@@ -86,22 +86,33 @@ static void uploadCommonUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
 // =============================================================================
 // Terrain state & chunk streaming
 // =============================================================================
+struct ChunkWorkItem {
+    projv::core::ivec3 coord;
+    projv::core::vec3 worldPos;
+};
+
+struct ProcessedChunk {
+    projv::core::ivec3 coord;
+    projv::Chunk chunk;
+    bool empty = false;  // true if the batch was empty (no geometry to intern)
+};
+
 struct WorkerState {
     std::mutex workMutex;
-    std::vector<projv::core::ivec3> workQueue;
+    std::vector<ChunkWorkItem> workQueue;
     std::mutex resultMutex;
-    std::vector<std::pair<projv::core::ivec3, projv::VoxelBatch>> readyChunks;
+    std::vector<ProcessedChunk> readyChunks;
     std::atomic<bool> running{true};
 };
 
 static WorkerState g_worker;
 
 struct TerrainState {
-    static constexpr int kChunkRes    = 64;
+    static constexpr int kChunkRes    = 256;
     static constexpr float kVoxelScale = 1.0f;
     static constexpr float kChunkSize  = kChunkRes * kVoxelScale;
-    static constexpr int   kViewRadius = 10;
-    static constexpr int   kMaxNewPerFrame = 10;
+    static constexpr int   kViewRadius = 15;
+    static constexpr int   kMaxNewPerFrame = 1;
     static constexpr int   kBootstrapBatch = 40;
 
     static constexpr float kWaterLevel = 400.0f;
@@ -229,64 +240,42 @@ static projv::VoxelBatch generateChunkVoxels(projv::core::ivec3 coord, TerrainSt
     return batch;
 }
 
-static bool createChunkAt(projv::Scene& scene, projv::GPUData& /*gpuData*/, TerrainState& ts, projv::core::ivec3 coord, projv::VoxelBatch&& batch) {
-    if (batch.empty()) {
-        ts.activeChunks[coord] = static_cast<projv::ChunkHandle>(-1);
-        return false;
-    }
-    projv::SceneGrid& grid = scene.grids[ts.gridIndex];
-    float chunkSize = grid.cellSize;
-    int res = TerrainState::kChunkRes;
-    float vs = TerrainState::kVoxelScale;
-
-    projv::core::ivec3 localCell = coord - grid.originCellCoord;
-    projv::core::vec3 worldPos = grid.origin + glm::mat3_cast(grid.rotation) * (projv::core::vec3(localCell) * grid.cellSize);
-
-    projv::ChunkHeader hdr;
-    hdr.chunkID    = int(ts.activeChunks.size());
-    hdr.position   = worldPos;
-    hdr.scale      = chunkSize;
-    hdr.voxelScale = vs;
-    hdr.resolution = res;
-    hdr.rotation   = grid.rotation;
-
-    projv::Chunk chunk = projv::utils::createChunk(hdr);
-    projv::utils::moveVoxelBatchToChunk(batch, chunk);
-
-    int lin = chunkCoordToLin(coord, grid);
-    chunk.gridIndex       = ts.gridIndex;
-    chunk.cellIndex       = lin;
-    chunk.componentHandle = ts.gridCompHandle;
-
-    projv::utils::updateChunkFromItsVoxelBatch(chunk);
-    projv::internChunkGeometry(scene, chunk);
-
-    projv::ChunkHandle h = projv::ChunkHandle(scene.chunks.size());
-    chunk.alive           = true;
-
-    scene.chunks.push_back(std::move(chunk));
-    grid.cellToChunk[lin] = static_cast<int32_t>(h);
-    ts.activeChunks[coord] = h;
-    return true;
-}
-
 static void terrainWorkerFunc(TerrainState& ts) {
     while (g_worker.running.load(std::memory_order_relaxed)) {
-        projv::core::ivec3 coord;
+        ChunkWorkItem item;
         bool gotWork = false;
         {
             std::lock_guard<std::mutex> lock(g_worker.workMutex);
             if (!g_worker.workQueue.empty()) {
-                coord = g_worker.workQueue.back();
+                item = g_worker.workQueue.back();
                 g_worker.workQueue.pop_back();
                 gotWork = true;
             }
         }
         if (gotWork) {
-            projv::VoxelBatch batch = generateChunkVoxels(coord, ts);
+            projv::VoxelBatch batch = generateChunkVoxels(item.coord, ts);
+            ProcessedChunk result;
+            result.coord = item.coord;
+            if (batch.empty()) {
+                result.empty = true;
+            } else {
+                result.empty = false;
+                int res = TerrainState::kChunkRes;
+                projv::ChunkHeader hdr;
+                hdr.chunkID    = 0;
+                hdr.position   = item.worldPos;
+                hdr.scale      = TerrainState::kChunkSize;
+                hdr.voxelScale = TerrainState::kVoxelScale;
+                hdr.resolution = res;
+                hdr.rotation   = projv::core::quat(1, 0, 0, 0);
+                result.chunk = projv::utils::createChunk(hdr);
+                projv::utils::moveVoxelBatchToChunk(batch, result.chunk);
+                result.chunk.gridIndex = ts.gridIndex;
+                projv::utils::updateChunkFromItsVoxelBatch(result.chunk);
+            }
             {
                 std::lock_guard<std::mutex> lock(g_worker.resultMutex);
-                g_worker.readyChunks.emplace_back(coord, std::move(batch));
+                g_worker.readyChunks.push_back(std::move(result));
             }
         } else {
             std::this_thread::sleep_for(std::chrono::microseconds(200));
@@ -296,50 +285,70 @@ static void terrainWorkerFunc(TerrainState& ts) {
 
 static void generatePendingChunks(projv::Scene& scene, projv::GPUData& gpuData, TerrainState& ts) {
     int generated = 0;
+    int consumed = 0;
+    static constexpr int kMaxConsumedPerFrame = 64;
 
     {
         std::lock_guard<std::mutex> lock(g_worker.resultMutex);
-        while (!g_worker.readyChunks.empty() && generated < TerrainState::kMaxNewPerFrame) {
-            auto [coord, batch] = std::move(g_worker.readyChunks.back());
+        while (!g_worker.readyChunks.empty() && generated < TerrainState::kMaxNewPerFrame && consumed < kMaxConsumedPerFrame) {
+            ProcessedChunk proc = std::move(g_worker.readyChunks.back());
             g_worker.readyChunks.pop_back();
-            if (ts.activeChunks.count(coord)) continue;
+            consumed++;
+            if (ts.activeChunks.count(proc.coord)) continue;
 
             projv::SceneGrid& grid = scene.grids[ts.gridIndex];
-            int lin = chunkCoordToLin(coord, grid);
+            int lin = chunkCoordToLin(proc.coord, grid);
             if (lin < 0 || lin >= static_cast<int>(grid.cellToChunk.size())) {
-                projv::core::ivec3 cell = coord - grid.originCellCoord;
+                projv::core::ivec3 cell = proc.coord - grid.originCellCoord;
                 projv::utils::expandGridToInclude(grid, cell, scene, ts.gridIndex);
-                lin = chunkCoordToLin(coord, grid);
+                lin = chunkCoordToLin(proc.coord, grid);
             }
             if (grid.cellToChunk[lin] >= 0) continue;
 
-            if (createChunkAt(scene, gpuData, ts, coord, std::move(batch)))
-                generated++;
+            if (proc.empty) {
+                ts.activeChunks[proc.coord] = static_cast<projv::ChunkHandle>(-1);
+                continue;
+            }
+
+            proc.chunk.header.chunkID = int(ts.activeChunks.size());
+            proc.chunk.gridIndex       = ts.gridIndex;
+            proc.chunk.cellIndex       = lin;
+            proc.chunk.componentHandle = ts.gridCompHandle;
+            proc.chunk.alive           = true;
+
+            projv::internChunkGeometry(scene, proc.chunk);
+
+            projv::ChunkHandle h = projv::ChunkHandle(scene.chunks.size());
+            scene.chunks.push_back(std::move(proc.chunk));
+            grid.cellToChunk[lin] = static_cast<int32_t>(h);
+            ts.activeChunks[proc.coord] = h;
+            generated++;
         }
     }
 
     {
         std::lock_guard<std::mutex> lock(g_worker.workMutex);
         while (ts.pendingIndex < ts.pendingCoords.size()) {
-            projv::core::ivec3 coord = ts.pendingCoords[ts.pendingIndex++];
+            projv::core::ivec3 c = ts.pendingCoords[ts.pendingIndex++];
             projv::SceneGrid& grid = scene.grids[ts.gridIndex];
-            int lin = chunkCoordToLin(coord, grid);
+            int lin = chunkCoordToLin(c, grid);
             if (lin < 0 || lin >= static_cast<int>(grid.cellToChunk.size())) {
-                projv::core::ivec3 cell = coord - grid.originCellCoord;
+                projv::core::ivec3 cell = c - grid.originCellCoord;
                 projv::utils::expandGridToInclude(grid, cell, scene, ts.gridIndex);
-                lin = chunkCoordToLin(coord, grid);
+                lin = chunkCoordToLin(c, grid);
             }
-            if (ts.activeChunks.count(coord)) continue;
+            if (ts.activeChunks.count(c)) continue;
             bool alreadyQueued = false;
-            for (auto& wc : g_worker.workQueue) { if (wc == coord) { alreadyQueued = true; break; } }
+            for (auto& wi : g_worker.workQueue) { if (wi.coord == c) { alreadyQueued = true; break; } }
             if (alreadyQueued) continue;
             {
                 std::lock_guard<std::mutex> rlock(g_worker.resultMutex);
                 bool alreadyReady = false;
-                for (auto& [rc, _] : g_worker.readyChunks) { if (rc == coord) { alreadyReady = true; break; } }
+                for (auto& pc : g_worker.readyChunks) { if (pc.coord == c) { alreadyReady = true; break; } }
                 if (alreadyReady) continue;
             }
-            g_worker.workQueue.push_back(coord);
+            projv::core::vec3 wp = grid.origin + (projv::core::vec3(c - grid.originCellCoord) * TerrainState::kChunkSize);
+            g_worker.workQueue.push_back(ChunkWorkItem{c, wp});
         }
     }
 
@@ -416,7 +425,8 @@ void startup(projv::Application& app) {
     // Start worker thread
     std::thread(terrainWorkerFunc, std::ref(ts)).detach();
 
-    // Seed initial pending chunk coords: sphere radius around camera start (0, 0, 0).
+    // Seed initial pending chunk coords: sphere radius around camera start (0, 0, 0),
+    // sorted by distance from camera so closest chunks generate first.
     ivec3 center(0, 0, 0);
     ts.lastCameraChunk = ivec3(-9999, -9999, -9999); // force first-frame rebuild
     for (int dz = -r; dz <= r; ++dz)
@@ -424,6 +434,10 @@ void startup(projv::Application& app) {
             for (int dx = -r; dx <= r; ++dx)
                 if (dx*dx + dy*dy + dz*dz <= r*r)
                     ts.pendingCoords.push_back(center + ivec3(dx, dy, dz));
+    std::sort(ts.pendingCoords.begin(), ts.pendingCoords.end(),
+        [](const ivec3& a, const ivec3& b) {
+            return a.x*a.x + a.y*a.y + a.z*a.z < b.x*b.x + b.y*b.y + b.z*b.z;
+        });
 }
 
 void update(projv::Application& app) {
@@ -480,8 +494,26 @@ void update(projv::Application& app) {
                 for (int dx = -TerrainState::kViewRadius; dx <= TerrainState::kViewRadius; ++dx)
                     if (dx*dx + dz*dz <= r2)
                         ts.pendingCoords.push_back(ivec3(camChunk.x + dx, dy, camChunk.z + dz));
+        // Sort by distance from camera chunk so closest generates first
+        std::sort(ts.pendingCoords.begin(), ts.pendingCoords.end(),
+            [camChunk](const ivec3& a, const ivec3& b) {
+                ivec3 da = a - camChunk, db = b - camChunk;
+                return da.x*da.x + da.y*da.y + da.z*da.z < db.x*db.x + db.y*db.y + db.z*db.z;
+            });
     }
     generatePendingChunks(scene, gpuData, ts);
+
+    // Diagnostic: log chunk population progress every 60 frames.
+    if (app.frameCount % 60 == 0) {
+        int filled = 0;
+        for (const auto& [coord, h] : ts.activeChunks)
+            if (h != static_cast<projv::ChunkHandle>(-1)) filled++;
+        projv::core::info("[DIAG] activeChunks={} filled={} sceneChunks={} sceneBlobs={} pending={} workQ={} readyQ={}",
+                   ts.activeChunks.size(), filled, scene.chunks.size(),
+                   scene.geometryPool.size(),
+                   ts.pendingCoords.size() - ts.pendingIndex,
+                   g_worker.workQueue.size(), g_worker.readyChunks.size());
+    }
 }
 
 void render(projv::Application& app) {

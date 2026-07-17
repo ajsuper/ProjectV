@@ -61,6 +61,12 @@ namespace projv {
         uint32_t looseCount = 0;
         uint32_t looseCapacity = 0;
 
+        // Scene-table texture dimensions (tracked for in-place update vs destroy+regrow).
+        // gridInfo is a 1-row texture; cellMap and looseList are 2D.
+        uint32_t gridInfoTexWidth = 0;
+        uint32_t cellMapTexWidth = 0, cellMapTexHeight = 0;
+        uint32_t looseListTexWidth = 0, looseListTexHeight = 0;
+
         // P5: chunk handles < uploadedChunkCount have been uploaded at least once.
         // New chunks (handle >= this watermark) need their first header row written.
         uint32_t uploadedChunkCount = 0;
