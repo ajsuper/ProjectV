@@ -151,7 +151,7 @@ namespace projv::utils {
             if (c.chunkHandle >= scene.chunks.size()) return 0;
             int32_t poolIdx = scene.chunks[c.chunkHandle].geometryPoolIndex;
             if (poolIdx < 0 || static_cast<size_t>(poolIdx) >= scene.geometryPool.size()) return 0;
-            return static_cast<uint32_t>(scene.geometryPool[poolIdx].voxelTypeData.size() / 3u);
+            return static_cast<uint32_t>(scene.geometryPool[poolIdx].materialIDs.size());
         }
         // Grid: sum voxels across all populated cells.
         uint32_t total = 0;
@@ -161,7 +161,7 @@ namespace projv::utils {
             if (ci < 0) continue;
             int32_t poolIdx = scene.chunks[ci].geometryPoolIndex;
             if (poolIdx < 0 || static_cast<size_t>(poolIdx) >= scene.geometryPool.size()) continue;
-            total += static_cast<uint32_t>(scene.geometryPool[poolIdx].voxelTypeData.size() / 3u);
+            total += static_cast<uint32_t>(scene.geometryPool[poolIdx].materialIDs.size());
         }
         return total;
     }

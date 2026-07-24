@@ -21,15 +21,17 @@
  * - Traversal functions
  */
 
-USAMPLER2D(tree64Data, 13);
-USAMPLER2D(voxelTypeData, 14);
+USAMPLER2D(tree64Data, 14);
+USAMPLER2D(materialIDs, 9);
+USAMPLER2D(materialPalette, 10);
 USAMPLER2D(headerData, 15);
-USAMPLER2D(gridInfo, 11);   // Top-level grid descriptors + scene counts (see gpu_interface.cpp).
-USAMPLER2D(cellMap, 12);    // Per-grid cell -> chunk index maps (0xFFFFFFFF = empty).
-USAMPLER2D(looseList, 10);  // Compact list of loose chunk handles (header rows) to broadphase.
+USAMPLER2D(gridInfo, 12);
+USAMPLER2D(cellMap, 13);
+USAMPLER2D(looseList, 11);
 
-uniform vec4 tree64Dims;     // x = power-of-2 texture width, y = log2(width)
-uniform vec4 voxelTypeDims;  // x = power-of-2 texture width, y = log2(width)
+uniform vec4 tree64Dims;
+uniform vec4 voxelTypeDims;
+uniform vec4 paletteDims;
 
 struct RayQuery {
     bool doTransparency = true;
@@ -101,7 +103,7 @@ struct TraversalNode {
     //uint dataIndex;
 };
 
-struct chunkHeader { // Not designed to be user interfacable on CPU. Only exists during runtime, mainly on GPU. Only the necessary information for rendering.
+struct chunkHeader {
     uint chunkID;
     float positionX;
     float positionY;
@@ -110,13 +112,13 @@ struct chunkHeader { // Not designed to be user interfacable on CPU. Only exists
     uint resolution;
     uint geometryStartIndex;
     uint geometryEndIndex;
-    uint voxelTypeDataStartIndex;
-    uint voxelTypeDataEndIndex;
+    uint materialIDStartIndex;
+    uint materialIDEndIndex;
     uint padding[2];
-    vec4 rotation; // World rotation quaternion [x, y, z, w]. Identity = (0,0,0,1).
+    vec4 rotation;
 };
 
-struct GPUChunkHeader { // Not designed to be user interfacable on CPU. Only exists during runtime, mainly on GPU. Only the necessary information for rendering.
+struct GPUChunkHeader {
     uint chunkID;
     float positionX;
     float positionY;
@@ -125,8 +127,8 @@ struct GPUChunkHeader { // Not designed to be user interfacable on CPU. Only exi
     uint resolution;
     uint geometryStartIndex;
     uint geometryEndIndex;
-    uint voxelTypeDataStartIndex;
-    uint voxelTypeDataEndIndex;
+    uint materialIDStartIndex;
+    uint materialIDEndIndex;
     uint dataRefID;
     uint padding[1];
 };
@@ -421,15 +423,25 @@ uint tree64s(int index) {
     return pixel[colorIndex];
 }
 
-uint voxelTypeDatas(int index) {
+uint materialID(uint index) {
     uint w = uint(voxelTypeDims.x);
     uint shift = uint(voxelTypeDims.y);
     uint pixelIndex = uint(index) >> 2u;
     int x = int(pixelIndex & (w - 1u));
     int y = int(pixelIndex >> shift);
     int colorIndex = int(uint(index) & 3u);
-    uvec4 pixel = texelFetch(voxelTypeData, ivec2(x, y), 0);
+    uvec4 pixel = texelFetch(materialIDs, ivec2(x, y), 0);
     return pixel[colorIndex];
+}
+
+uint materialPaletteEntry(uint index, uint comp) {
+    uint w = uint(paletteDims.x);
+    uint shift = uint(paletteDims.y);
+    uint pixelIndex = uint(index) >> 2u;
+    int x = int(pixelIndex & (w - 1u));
+    int y = int(pixelIndex >> shift);
+    uvec4 pixel = texelFetch(materialPalette, ivec2(x, y), 0);
+    return pixel[uint(index) & 3u];
 }
 
 chunkHeader headers(int headerIndex) {
@@ -449,10 +461,10 @@ chunkHeader headers(int headerIndex) {
     header.resolution = pixel1.g;
     header.geometryStartIndex = pixel1.b;
     header.geometryEndIndex = pixel1.a;
-    header.voxelTypeDataStartIndex = pixel2.r;
-    header.voxelTypeDataEndIndex = pixel2.g;
+    header.materialIDStartIndex = pixel2.r;
+    header.materialIDEndIndex = pixel2.g;
     header.padding[0] = pixel2.b;
-    header.padding[1] = pixel2.a;
+    header.padding[1] = pixel2.a; // paletteOffset (now stored in padding[1] on CPU)
     header.rotation = vec4(uintBitsToFloat(pixel3.r), uintBitsToFloat(pixel3.g),
                            uintBitsToFloat(pixel3.b), uintBitsToFloat(pixel3.a));
 
@@ -1096,9 +1108,6 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, uint headerI
     uint tree64StartIndex = header.geometryStartIndex;
     uint tree64EndIndex = header.geometryEndIndex;
 
-    uint voxelTypeDataStartIndex = header.voxelTypeDataStartIndex;
-    uint voxelTypeDataEndIndex = header.voxelTypeDataEndIndex;
-
     BoxAABB tree64BoundingBox;
     //tree64BoundingBox.position = vec3(header.positionX, header.positionY, header.positionZ);
     //tree64BoundingBox.size = header.scale;
@@ -1144,144 +1153,68 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, uint headerI
     tree64Intersect.rayT *= header.scale/tree64BoundingBox.size;
     return tree64Intersect;
 }
-//Given the integer postions inside of the voxel grid, find the type data for that voxel.
-int findVoxelTypeDataIndexExact(int x, int y, int z, uint voxelGridResolution, uint voxelTypeDataStartIndex, uint voxelTypeDataEndIndex) {
-    uint ZOrder = calculateZOrderIndex(x, y, z, voxelGridResolution);
-    int beginningIndex = 0;
-    int endIndex = int((voxelTypeDataEndIndex-voxelTypeDataStartIndex)/VOXEL_TYPEDATA_SLICES);
-    int middleIndex = (beginningIndex+endIndex)/2;
-    for(int i = 0; i < 100; i++){
-        if(voxelTypeDatas(middleIndex*VOXEL_TYPEDATA_SLICES + voxelTypeDataStartIndex) == ZOrder){
-            return middleIndex*VOXEL_TYPEDATA_SLICES;
-        } else {
-            if(voxelTypeDatas(middleIndex * VOXEL_TYPEDATA_SLICES + voxelTypeDataStartIndex) < ZOrder){
-                beginningIndex = middleIndex + 1; 
-            } else {
-                endIndex = middleIndex - 1;  
-            }
-        }
-        middleIndex = (beginningIndex+endIndex)/2;
-    }
-    return -1;       
-}
-
-int findVoxelTypeDataIndex(int x, int y, int z,
-                           uint voxelGridResolution,
-                           uint voxelTypeDataStartIndex,
-                           uint voxelTypeDataEndIndex)
-{
-    uint ZOrder = calculateZOrderIndex(x, y, z, voxelGridResolution);
-
-    int count = int((voxelTypeDataEndIndex - voxelTypeDataStartIndex) / VOXEL_TYPEDATA_SLICES);
-
-    int beginningIndex = 0;
-    int endIndex = count - 1;
-    int middleIndex = 0;
-
-    // ---------- Exact binary search ----------
-    for (int i = 0; i < 100 && beginningIndex <= endIndex; i++) {
-        middleIndex = (beginningIndex + endIndex) / 2;
-
-        uint value =
-            voxelTypeDatas(middleIndex * VOXEL_TYPEDATA_SLICES + voxelTypeDataStartIndex);
-
-        if (value == ZOrder) {
-            return middleIndex * VOXEL_TYPEDATA_SLICES;
-        } else if (value < ZOrder) {
-            beginningIndex = middleIndex + 1;
-        } else {
-            endIndex = middleIndex - 1;
-        }
-    }
-
-    // ---------- Fast approximate fallback ----------
-    // beginningIndex is now the insertion point
-    const int SEARCH_RADIUS = 8; // tweak: 4–16 is usually enough
-
-    int start = max(0, beginningIndex - SEARCH_RADIUS);
-    int end   = min(count - 1, beginningIndex + SEARCH_RADIUS);
-
-    for (int i = start; i <= end; i++) {
-        return i * VOXEL_TYPEDATA_SLICES;
-    }
-
-    return -1;
-}
-
-
-
-//Return the coordinate in the voxel grid of this voxel
-ivec3 voxelGridPosition(BoxAABB voxelBoundingBox, BoxAABB voxelGridBoundingBox, uint voxelGridResolution){
-    //Calculate zeroed position within the voxel grid
-    vec3 zeroedPosition = voxelBoundingBox.position - voxelGridBoundingBox.position;
-    
-    //Normalize to unit coordinates 0-1
-    vec3 unitPosition = zeroedPosition / voxelGridBoundingBox.size;
-    
-    //Ensure unitPosition is within 0-1
-    unitPosition = clamp(unitPosition, 0.0, 1.0 - 1e-6);
-    
-    //Map to grid positions based off of resolution and unit pos.
-    vec3 gridPos = unitPosition * float(voxelGridResolution);
-    
-    ivec3 voxelGridPos;
-    voxelGridPos.x = int(gridPos.x);
-    voxelGridPos.y = int(gridPos.y);
-    voxelGridPos.z = int(gridPos.z);
-    
-    // Clamp indices to valid range 0 to voxelGridResolution - 1
-    voxelGridPos.x = clamp(voxelGridPos.x, 0, int(voxelGridResolution) - 1);
-    voxelGridPos.y = clamp(voxelGridPos.y, 0, int(voxelGridResolution) - 1);
-    voxelGridPos.z = clamp(voxelGridPos.z, 0, int(voxelGridResolution) - 1);
-    
-    return voxelGridPos;
-}
-
-uint findVoxelIndex(BoxAABB voxelBoundingBox, uint headerIndex){
-    chunkHeader h = headers(headerIndex);
-    uint voxelGridResolution = h.resolution;
+// Given the integer positions inside the voxel grid, lookup the material color.
+// Replaces the old binary search on voxelTypeData with a popcount-based material lookup.
+vec3 fetchVoxelColor(BoxAABB voxelBoundingBox, uint headerIndex) {
+    chunkHeader h = headers(int(headerIndex));
+    uint res = h.resolution;
     vec3 P = vec3(h.positionX, h.positionY, h.positionZ);
     mat3 Rinv = transpose(rotationFromQuat(h.rotation));
 
-    // The hit box comes back in world space (rotated). Un-rotate it about P into the chunk's
-    // axis-aligned local frame so the grid-coordinate mapping below stays valid under rotation.
     BoxAABB localBox;
     localBox.position = Rinv * (voxelBoundingBox.position - P) + P;
     localBox.size = voxelBoundingBox.size;
 
-    BoxAABB voxelGridBoundingBox;
-    voxelGridBoundingBox.position = P;
-    voxelGridBoundingBox.size = h.scale;
-    ivec3 voxelGridPos = voxelGridPosition(localBox, voxelGridBoundingBox, voxelGridResolution);
-    uint voxelTypeDataIndex = findVoxelTypeDataIndex(voxelGridPos.x, voxelGridPos.y, voxelGridPos.z, voxelGridResolution, h.voxelTypeDataStartIndex, h.voxelTypeDataEndIndex);
-    return voxelTypeDataIndex;
-}
+    BoxAABB gridBB;
+    gridBB.position = P;
+    gridBB.size = h.scale;
 
-//Given the voxel index, return the voxel data.
-Voxel fetchVoxelData(BoxAABB voxelBoundingBox, uint headerIndex){
-    uint voxelIndex = findVoxelIndex(voxelBoundingBox, headerIndex);
-    //Assume 6-bit color channels ()
-    //Assume 4-bit normal vector channels ()
-    uint voxelTypeDataStartIndex = headers(headerIndex).voxelTypeDataStartIndex;
-    Voxel voxel;
-    uint SerializedColor = voxelTypeDatas(voxelIndex+1+voxelTypeDataStartIndex);
-    uint SerializedNormals = voxelTypeDatas(voxelIndex+2+voxelTypeDataStartIndex);
-    uint R10 = (SerializedColor >> 20) & 0x3FF;
-    uint G10 = (SerializedColor >> 10) & 0x3FF;
-    uint B10 = (SerializedColor >> 00) & 0x3FF;
-    vec3 color = vec3(float(R10)/1023, float(G10)/1023, float(B10)/1023);
-    uint normalX9 = (SerializedNormals >> 20) & 0x1FF;
-    uint normalY9 = (SerializedNormals >> 10) & 0x1FF;
-    uint normalZ9 = (SerializedNormals >> 00) & 0x1FF;
-    uint normalXSign = (SerializedNormals >> 29) & 0x1;
-    uint normalYSign = (SerializedNormals >> 19) & 0x1;
-    uint normalZSign = (SerializedNormals >> 9) & 0x1;
-    vec3 normal = normalize(vec3((float(normalX9)/511) * (float(normalXSign)*2-1), (float(normalY9)/511) * (float(normalYSign)*2-1), (float(normalZ9)/511) * (float(normalZSign)*2-1)));
-    voxel.index = voxelIndex;
-    voxel.color = color;
-    voxel.normal = normal;
+    vec3 zeroed = localBox.position - gridBB.position;
+    vec3 unitPos = clamp(zeroed / gridBB.size, 0.0, 1.0 - 1e-6);
+    ivec3 voxelPos = ivec3(unitPos * float(res));
+    voxelPos = clamp(voxelPos, ivec3(0), ivec3(int(res) - 1));
 
-    return voxel;
+    uint zOrder = calculateZOrderIndex(uint(voxelPos.x), uint(voxelPos.y), uint(voxelPos.z), res);
+
+    uint nodeIdx = h.geometryStartIndex;
+    uint treeLevels = uint(log2(float(res)) / 2.0);
+    int level = int(treeLevels) - 1;
+    uint stepSize = 1u << (6u * uint(level));
+
+    for (; level >= 0; --level) {
+        Tree64NodeData node = tree64(nodeIdx);
+        if ((node.data3 & 1u) != 0u) {
+            uint materialOffset = node.data3 >> 1u;
+            uint childPos = (zOrder / stepSize) & 63u;
+            uint mask1 = node.data1;
+            uint mask2 = node.data2;
+            uint above = 0u;
+            if (childPos < 32u) {
+                uint beforeMask = 0xFFFFFFFFu << (32u - childPos);
+                above = countbits(mask1 & beforeMask);
+            } else {
+                above = countbits(mask1);
+                uint z2 = childPos - 32u;
+                if (z2 > 0u) {
+                    uint beforeMask2 = 0xFFFFFFFFu << (32u - z2);
+                    above += countbits(mask2 & beforeMask2);
+                }
+            }
+            uint matID = materialID(h.materialIDStartIndex + materialOffset + above) + h.padding[1];
+            uint packedColor = materialPaletteEntry(matID, 0);
+            uint R10 = (packedColor >> 20) & 0x3FF;
+            uint G10 = (packedColor >> 10) & 0x3FF;
+            uint B10 = (packedColor >> 0) & 0x3FF;
+            return vec3(float(R10)/1023.0, float(G10)/1023.0, float(B10)/1023.0);
+        }
+        uint childZOrder = (zOrder / stepSize) & 63u;
+        uint siblingsBefore = calculateSiblingsBeforeThisZOrder(4, node.data1, node.data2, childZOrder);
+        uint childIdx = nodeIdx + node.childPtr + siblingsBefore;
+        nodeIdx = childIdx;
+        stepSize >>= 6u;
+    }
+
+    return vec3(0.0);
 }
 
 // ------------------------------------------------------------

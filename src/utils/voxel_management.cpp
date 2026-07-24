@@ -1,11 +1,13 @@
 #include "utils/voxel_management.h"
+#include "utils/material.h"
 #include "data_structures/nodeStructure.h"
 #include <numeric>
 
 namespace projv {
-    // GeometryBlob copy constructor — deep-copies the brick map via cloneBrickMap.
     GeometryBlob::GeometryBlob(const GeometryBlob& rhs)
         : geometry(rhs.geometry)
+        , materialIDs(rhs.materialIDs)
+        , materialPalette(rhs.materialPalette)
         , voxelTypeData(rhs.voxelTypeData)
         , brickMap(rhs.brickMap ? utils::cloneBrickMap(*rhs.brickMap) : nullptr)
         , sourceDataPath(rhs.sourceDataPath)
@@ -18,6 +20,8 @@ namespace projv {
     GeometryBlob& GeometryBlob::operator=(const GeometryBlob& rhs) {
         if (this == &rhs) return *this;
         geometry       = rhs.geometry;
+        materialIDs    = rhs.materialIDs;
+        materialPalette = rhs.materialPalette;
         voxelTypeData  = rhs.voxelTypeData;
         brickMap       = rhs.brickMap ? utils::cloneBrickMap(*rhs.brickMap) : nullptr;
         sourceDataPath = rhs.sourceDataPath;
@@ -259,7 +263,7 @@ namespace projv::utils {
         return map;
     }
 
-    void brickMapSetVoxel(VoxelBrickMap& map, int x, int y, int z, Color color) {
+    void brickMapSetVoxel(VoxelBrickMap& map, int x, int y, int z, uint8_t materialID) {
         core::ivec3 brickCoord = computeBrickCoord(x, y, z);
         core::ivec3 localPos = computeBrickLocalPos(x, y, z);
 
@@ -286,7 +290,7 @@ namespace projv::utils {
         uint32_t bit = 63 - (localZOrder % 64);
 
         brick.mask[row] |= (1ull << bit);
-        brick.colors[localZOrder] = packColor(color);
+        brick.materials[localZOrder] = materialID;
     }
 
     void brickMapClearVoxel(VoxelBrickMap& map, int x, int y, int z) {
@@ -310,7 +314,7 @@ namespace projv::utils {
 
         if (brick.mask[row] & (1ull << bit)) {
             brick.mask[row] &= ~(1ull << bit);
-            brick.colors.erase(localZOrder);
+            brick.materials.erase(localZOrder);
         }
     }
 
@@ -335,156 +339,23 @@ namespace projv::utils {
         return (brick.mask[row] & (1ull << bit)) != 0;
     }
 
-    Color brickMapGetColor(const VoxelBrickMap& map, int x, int y, int z) {
-        core::ivec3 brickCoord = computeBrickCoord(x, y, z);
-        if (brickCoord.x < 0 || brickCoord.y < 0 || brickCoord.z < 0 ||
-            brickCoord.x >= map.brickDims.x ||
-            brickCoord.y >= map.brickDims.y ||
-            brickCoord.z >= map.brickDims.z) {
-            return Color{0, 0, 0};
-        }
-
-        uint32_t brickZOrder = computeBrickZOrder(brickCoord, map.brickDims);
-        if (!map.bricks[brickZOrder]) return Color{0, 0, 0};
-
-        core::ivec3 localPos = computeBrickLocalPos(x, y, z);
-        uint32_t localZOrder = computeLocalZOrder(localPos);
-        const BrickData& brick = *map.bricks[brickZOrder];
-        uint32_t row = localZOrder / 64;
-        uint32_t bit = 63 - (localZOrder % 64);
-
-        if (!(brick.mask[row] & (1ull << bit))) return Color{0, 0, 0};
-
-        auto it = brick.colors.find(localZOrder);
-        if (it == brick.colors.end()) return Color{0, 0, 0};
-        return unpackColor(it->second);
-    }
-
     void brickMapFromVoxelTypeData(VoxelBrickMap& map,
-                                    const std::vector<uint32_t>& voxelTypeData) {
+                                    const std::vector<uint32_t>& voxelTypeData,
+                                    GeometryBlob& blob) {
         size_t count = voxelTypeData.size() / 3;
         for (size_t i = 0; i < count; ++i) {
             uint32_t zorder = voxelTypeData[i * 3];
             uint32_t serializedColor = voxelTypeData[i * 3 + 1];
-            // uint32_t serializedNormal = voxelTypeData[i * 3 + 2];
 
             core::ivec3 pos = reverseZOrderIndex(zorder);
             Color c = unserializeColor(serializedColor);
-            brickMapSetVoxel(map, pos.x, pos.y, pos.z, c);
+            uint32_t packed = packColor(c);
+            uint8_t matID = internMaterial(blob, "", packed);
+            brickMapSetVoxel(map, pos.x, pos.y, pos.z, matID);
         }
-        // Store the normal from the last voxel as default.
         if (count > 0) {
             map.defaultNormal = voxelTypeData[count * 3 - 1];
         }
-    }
-
-    VoxelGrid buildVoxelGridFromBrickMap(const VoxelBrickMap& map) {
-        VoxelGrid grid;
-        grid.max = 0;
-
-        // Iterate bricks in Z-order
-        for (uint32_t bz = 0; bz < map.totalBricks; ++bz) {
-            if (!map.bricks[bz]) continue;
-
-            core::ivec3 brickCoord = reverseZOrderIndex(bz);
-            const BrickData& brick = *map.bricks[bz];
-
-            // Iterate mask rows in order
-            for (uint32_t row = 0; row < BRICK_MASK_ROWS; ++row) {
-                uint64_t rowBits = brick.mask[row];
-                while (rowBits) {
-                    uint32_t bit = static_cast<uint32_t>(__builtin_ctzll(rowBits));
-                    uint32_t actualLocalZOrder = row * 64 + (63 - bit);
-
-                    auto cit = brick.colors.find(actualLocalZOrder);
-                    uint32_t packedColor = (cit != brick.colors.end()) ? cit->second : 0;
-
-                    // Reconstruct chunk-space position
-                    core::ivec3 localPos = reverseZOrderIndex(actualLocalZOrder);
-                    core::ivec3 chunkPos(
-                        brickCoord.x * static_cast<int32_t>(BRICK_SIZE) + localPos.x,
-                        brickCoord.y * static_cast<int32_t>(BRICK_SIZE) + localPos.y,
-                        brickCoord.z * static_cast<int32_t>(BRICK_SIZE) + localPos.z
-                    );
-
-                    Voxel v;
-                    v.ZOrderPosition = static_cast<uint32_t>(createZOrderIndex(chunkPos));
-                    v.color = unpackColor(packedColor);
-
-                    grid.voxels.push_back(v);
-                    grid.max++;
-
-                    rowBits &= (rowBits - 1);  // clear lowest set bit
-                }
-            }
-        }
-
-        // Sort by Z-order (though iteration should already be in order, be safe)
-        std::sort(grid.voxels.begin(), grid.voxels.end(),
-                  [](const Voxel& a, const Voxel& b) {
-                      return a.ZOrderPosition < b.ZOrderPosition;
-                  });
-
-        return grid;
-    }
-
-    std::vector<uint32_t> buildVoxelTypeDataFromBrickMap(const VoxelBrickMap& map) {
-        std::vector<uint32_t> data;
-        uint32_t normal = map.defaultNormal;
-
-        // Iterate bricks in Z-order
-        for (uint32_t bz = 0; bz < map.totalBricks; ++bz) {
-            if (!map.bricks[bz]) continue;
-
-            core::ivec3 brickCoord = reverseZOrderIndex(bz);
-            const BrickData& brick = *map.bricks[bz];
-
-            for (uint32_t row = 0; row < BRICK_MASK_ROWS; ++row) {
-                uint64_t rowBits = brick.mask[row];
-                while (rowBits) {
-                    uint32_t bit = static_cast<uint32_t>(__builtin_ctzll(rowBits));
-                    uint32_t actualLocalZOrder = row * 64 + (63 - bit);
-
-                    auto cit = brick.colors.find(actualLocalZOrder);
-                    uint32_t packedColor = (cit != brick.colors.end()) ? cit->second : 0;
-
-                    // Reconstruct chunk-space position for full Z-order
-                    core::ivec3 localPos = reverseZOrderIndex(actualLocalZOrder);
-                    core::ivec3 chunkPos(
-                        brickCoord.x * static_cast<int32_t>(BRICK_SIZE) + localPos.x,
-                        brickCoord.y * static_cast<int32_t>(BRICK_SIZE) + localPos.y,
-                        brickCoord.z * static_cast<int32_t>(BRICK_SIZE) + localPos.z
-                    );
-
-                    data.push_back(static_cast<uint32_t>(createZOrderIndex(chunkPos)));
-                    data.push_back(packedColor);
-                    data.push_back(normal);
-
-                    rowBits &= (rowBits - 1);
-                }
-            }
-        }
-
-        // Sort triplets by Z-order (first word) to match the tree64 traversal order,
-        // which is also sorted by Z-order. The iteration above walks bricks in Z-order
-        // but within each brick goes from high localZOrder to low (due to __builtin_ctzll
-        // starting from LSB), producing partially-reversed output.
-        size_t count = data.size() / 3;
-        std::vector<size_t> indices(count);
-        std::iota(indices.begin(), indices.end(), size_t(0));
-        std::sort(indices.begin(), indices.end(),
-            [&data](size_t a, size_t b) { return data[a * 3] < data[b * 3]; });
-        std::vector<uint32_t> sorted;
-        sorted.reserve(data.size());
-        for (size_t i = 0; i < count; ++i) {
-            size_t idx = indices[i];
-            sorted.push_back(data[idx * 3]);
-            sorted.push_back(data[idx * 3 + 1]);
-            sorted.push_back(data[idx * 3 + 2]);
-        }
-        data.swap(sorted);
-
-        return data;
     }
 
     std::vector<uint32_t> buildTree64FromBrickMap(const VoxelBrickMap& map, int resolution) {
@@ -492,7 +363,6 @@ namespace projv::utils {
         std::vector<nodeStructureTree64> tree64;
         std::vector<nodeStructureTree64> levelInProgress;
 
-        // Build leaf level directly from brick bitmasks, in descending Z-order
         for (uint32_t bz = map.totalBricks; bz > 0; --bz) {
             uint32_t brickIdx = bz - 1;
             if (!map.bricks[brickIdx]) continue;
@@ -536,50 +406,6 @@ namespace projv::utils {
         return tree64Simplified;
     }
 
-    std::vector<uint32_t> buildVoxelTypeDataFromBrickMapFast(const VoxelBrickMap& map) {
-        std::vector<uint32_t> data;
-        uint32_t normal = map.defaultNormal;
-
-        // Estimate capacity: sum of non-null brick voxel counts
-        size_t estimatedVoxels = 0;
-        for (uint32_t bz = 0; bz < map.totalBricks; ++bz) {
-            if (map.bricks[bz]) {
-                for (uint32_t row = 0; row < BRICK_MASK_ROWS; ++row) {
-                    estimatedVoxels += static_cast<size_t>(__builtin_popcountll(map.bricks[bz]->mask[row]));
-                }
-            }
-        }
-        data.reserve(estimatedVoxels * 3);
-
-        // Iterate bricks in Z-order, rows in ascending order, bits from MSB to LSB
-        // This produces voxels in ascending chunk-space Z-order without a sort.
-        for (uint32_t bz = 0; bz < map.totalBricks; ++bz) {
-            if (!map.bricks[bz]) continue;
-
-            const BrickData& brick = *map.bricks[bz];
-            uint32_t brickShift = bz << 18;
-
-            for (uint32_t row = 0; row < BRICK_MASK_ROWS; ++row) {
-                uint64_t rowBits = brick.mask[row];
-                while (rowBits) {
-                    int leadingZeros = __builtin_clzll(rowBits);
-                    uint32_t localZOrder = row * 64 + static_cast<uint32_t>(leadingZeros);
-
-                    auto cit = brick.colors.find(localZOrder);
-                    uint32_t packedColor = (cit != brick.colors.end()) ? cit->second : 0;
-
-                    data.push_back(brickShift | localZOrder);
-                    data.push_back(packedColor);
-                    data.push_back(normal);
-
-                    rowBits &= ~(1ull << (63 - leadingZeros));
-                }
-            }
-        }
-
-        return data;
-    }
-
     void updateChunkFromBrickMap(Chunk& chunk, const VoxelBrickMap& map) {
         auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -591,15 +417,12 @@ namespace projv::utils {
         auto t1 = std::chrono::high_resolution_clock::now();
         chunk.geometryData = buildTree64FromBrickMap(map, resolution);
         auto t2 = std::chrono::high_resolution_clock::now();
-        chunk.voxelTypeData = buildVoxelTypeDataFromBrickMapFast(map);
-        auto t3 = std::chrono::high_resolution_clock::now();
         chunk.LOD = 0;
 
         double treeMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
-        double typeMs = std::chrono::duration<double, std::milli>(t3 - t2).count();
-        double totalMs = std::chrono::duration<double, std::milli>(t3 - t0).count();
-        core::perf("updateChunkFromBrickMap: tree64={:.2f}ms voxelType={:.2f}ms total={:.2}ms",
-                   treeMs, typeMs, totalMs);
+        double totalMs = std::chrono::duration<double, std::milli>(t2 - t0).count();
+        core::perf("updateChunkFromBrickMap: tree64={:.2f}ms total={:.2}ms",
+                   treeMs, totalMs);
     }
 
     std::unique_ptr<VoxelBrickMap> cloneBrickMap(const VoxelBrickMap& src) {
@@ -616,7 +439,7 @@ namespace projv::utils {
                 std::copy(std::begin(src.bricks[i]->mask),
                           std::end(src.bricks[i]->mask),
                           std::begin(brickClone->mask));
-                brickClone->colors = src.bricks[i]->colors;
+                brickClone->materials = src.bricks[i]->materials;
                 dst->bricks[i] = std::move(brickClone);
             }
         }

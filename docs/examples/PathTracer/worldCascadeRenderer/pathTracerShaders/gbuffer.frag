@@ -89,8 +89,7 @@ void main() {
     n = normalize(n);
 
     vec3  P = ray.origin + ray.direction * hit.rayT;
-    Voxel voxel = fetchVoxelData(hit.foundBox, hit.headerIndex);
-    vec3  albedo = voxel.color;
+    vec3  albedo = fetchVoxelColor(hit.foundBox, hit.headerIndex);
 
     // Direct sun (hard shadow) -- this is the light the GI bounces.
     vec3 direct = vec3(0.0);

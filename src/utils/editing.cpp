@@ -3,6 +3,7 @@
 #include "core/log.h"
 #include "utils/voxel_math.h"
 #include "utils/voxel_management.h"
+#include "utils/material.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -55,7 +56,7 @@ namespace projv::utils {
             core::ivec3 brickDims = computeBrickDims(resolution);
             blob.brickMap = createVoxelBrickMap(brickDims);
             if (!blob.voxelTypeData.empty()) {
-                brickMapFromVoxelTypeData(*blob.brickMap, blob.voxelTypeData);
+                brickMapFromVoxelTypeData(*blob.brickMap, blob.voxelTypeData, blob);
             }
         }
 
@@ -75,7 +76,7 @@ namespace projv::utils {
                     continue;
                 }
                 if (op.isAdd) {
-                    brickMapSetVoxel(map, x, y, z, op.color);
+                    brickMapSetVoxel(map, x, y, z, op.materialID);
                 } else {
                     brickMapClearVoxel(map, x, y, z);
                 }
@@ -100,13 +101,14 @@ namespace projv::utils {
 
             updateChunkFromBrickMap(chunk, *blob.brickMap);
 
-            blob.geometry      = chunk.geometryData;
-            blob.voxelTypeData = chunk.voxelTypeData;
+            bakeMaterialsFromBrickMap(chunk.geometryData, blob, *blob.brickMap);
 
-            core::edit(" applyEditsToChunk: done res={} geomNodes={} voxelType={}",
+            blob.geometry = std::move(chunk.geometryData);
+
+            core::edit(" applyEditsToChunk: done res={} geomNodes={} materialIDs={}",
                        chunk.header.resolution,
                        chunk.geometryData.size() / 3,
-                       chunk.voxelTypeData.size());
+                       blob.materialIDs.size());
         }
 
         // Drain one component's queue. Handles both Chunk (loose) and Grid components.
@@ -252,7 +254,7 @@ namespace projv::utils {
                             int32_t lx = static_cast<int32_t>(floorMod(op.position.x, static_cast<int32_t>(res)));
                             int32_t ly = static_cast<int32_t>(floorMod(op.position.y, static_cast<int32_t>(res)));
                             int32_t lz = static_cast<int32_t>(floorMod(op.position.z, static_cast<int32_t>(res)));
-                            brickMapSetVoxel(*brickMap, lx, ly, lz, op.color);
+                            brickMapSetVoxel(*brickMap, lx, ly, lz, op.materialID);
                         }
                     }
 
@@ -262,16 +264,23 @@ namespace projv::utils {
 
                     updateChunkFromBrickMap(newChunk, *brickMap);
 
-                    core::edit(" Grid path: after updateChunkFromBrickMap: finalRes={} scale={} geomNodes={} voxelTypes={}",
+                    // Bake materials: create a temporary blob, bake, then move data into intern.
+                    GeometryBlob tempBlob;
+                    bakeMaterialsFromBrickMap(newChunk.geometryData, tempBlob, *brickMap);
+
+                    core::edit(" Grid path: after updateChunkFromBrickMap: finalRes={} scale={} geomNodes={} materialIDs={}",
                                newChunk.header.resolution, newChunk.header.scale,
                                newChunk.geometryData.size() / 3,
-                               newChunk.voxelTypeData.size());
+                               tempBlob.materialIDs.size());
 
                     internChunkGeometry(scene, newChunk);
 
-                    // Store the brick map on the blob.
+                    // Transfer baked materials to the new blob.
                     if (newChunk.geometryPoolIndex >= 0) {
-                        scene.geometryPool[newChunk.geometryPoolIndex].brickMap = std::move(brickMap);
+                        GeometryBlob& newBlob = scene.geometryPool[newChunk.geometryPoolIndex];
+                        newBlob.materialIDs = std::move(tempBlob.materialIDs);
+                        newBlob.materialPalette = std::move(tempBlob.materialPalette);
+                        newBlob.brickMap = std::move(brickMap);
                     }
 
                     ChunkHandle newHandle = static_cast<ChunkHandle>(scene.chunks.size());

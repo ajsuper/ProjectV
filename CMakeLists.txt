@@ -168,7 +168,7 @@ target_link_libraries(projectV-disk_io PRIVATE bgfx glfw ${MACOS_FRAMEWORKS} pro
 link_common_includes(projectV-disk_io)
 
 add_library(projectV-gpu_interface STATIC ${GRAPHICS_SRC_DIR}/gpu_interface.cpp)
-target_link_libraries(projectV-gpu_interface PRIVATE bgfx glfw ${MACOS_FRAMEWORKS})
+target_link_libraries(projectV-gpu_interface PRIVATE bgfx glfw ${MACOS_FRAMEWORKS} projectV-material)
 link_common_includes(projectV-gpu_interface)
 
 add_library(projectV-manage_resources STATIC ${GRAPHICS_SRC_DIR}/manage_resources.cpp)
@@ -185,17 +185,21 @@ link_common_includes(projectV-type_mapping)
 
 # Utils Libraries
 add_library(projectV-compose_io STATIC ${UTILS_SRC_DIR}/compose_io.cpp)
-target_link_libraries(projectV-compose_io PRIVATE projectV-voxel_management)
+target_link_libraries(projectV-compose_io PRIVATE projectV-voxel_management projectV-material)
 link_common_includes(projectV-compose_io)
 
 add_library(projectV-voxel_management STATIC ${UTILS_SRC_DIR}/voxel_management.cpp)
 link_common_includes(projectV-voxel_management)
 
+add_library(projectV-material STATIC ${UTILS_SRC_DIR}/material.cpp)
+target_link_libraries(projectV-material PRIVATE projectV-voxel_management)
+link_common_includes(projectV-material)
+
 add_library(projectV-voxel_math STATIC ${UTILS_SRC_DIR}/voxel_math.cpp)
 link_common_includes(projectV-voxel_math)
 
 add_library(projectV-editing STATIC ${UTILS_SRC_DIR}/editing.cpp)
-target_link_libraries(projectV-editing PRIVATE projectV-voxel_management projectV-voxel_math)
+target_link_libraries(projectV-editing PRIVATE projectV-voxel_management projectV-voxel_math projectV-material)
 link_common_includes(projectV-editing)
 
 add_library(projectV-scene_query STATIC ${UTILS_SRC_DIR}/scene_query.cpp)

@@ -26,6 +26,7 @@ USED_LIBRARIES := \
     -lprojectV-editing \
     -lprojectV-voxel_management \
     -lprojectV-voxel_math \
+    -lprojectV-material \
     -lprojectV-compose_io \
     -lprojectV-scene_query \
     -lprojectV-math

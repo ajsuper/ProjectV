@@ -133,8 +133,8 @@ vec3 gatherRadiance(vec3 P, vec3 N, vec3 dir, uint maxSteps) {
     // Occluded: one cheap bounce. The blocker reflects the ambient sky it receives
     // (no extra shadow ray -- skyAmbient is already the integrated sky irradiance for
     // the blocker's facing), tinting the crease with the blocker's colour.
-    Voxel v = fetchVoxelData(hit.foundBox, hit.headerIndex);
-    return v.color * skyAmbient(hit.normal) * GI_STRENGTH;
+    vec3 v = fetchVoxelColor(hit.foundBox, hit.headerIndex);
+    return v * skyAmbient(hit.normal) * GI_STRENGTH;
 #else
     return vec3(0.0); // Occluded, no bounce -> pure ambient occlusion.
 #endif

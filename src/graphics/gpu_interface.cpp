@@ -1,4 +1,5 @@
 #include "graphics/gpu_interface.h"
+#include "utils/material.h"
 
 #include <chrono>
 #include <cstring>
@@ -56,15 +57,25 @@ namespace projv::graphics {
         // Create an RGBA32U MUTABLE texture (no initial data → mutable, updateTexture2D works).
         // Fills the texture via updateTexture2D with `texels` (padded with zero).
         bgfx::TextureHandle createDataTexture(uint32_t w, uint32_t h, const std::vector<uint32_t>& texels) {
-            // Create with nullptr → mutable texture (updateTexture2D can be used later).
             bgfx::TextureHandle tex = bgfx::createTexture2D(uint16_t(w), uint16_t(h), false, 1,
                 bgfx::TextureFormat::RGBA32U,
                 BGFX_SAMPLER_POINT, nullptr);
 
-            // Fill initial data via updateTexture2D (one full-width rect per row to handle wrapping).
             std::vector<uint32_t> buf(static_cast<size_t>(w) * h * 4, 0u);
             std::copy(texels.begin(), texels.begin() + std::min(texels.size(), buf.size()), buf.begin());
             const bgfx::Memory* mem = bgfx::copy(buf.data(), buf.size() * sizeof(uint32_t));
+            bgfx::updateTexture2D(tex, 0, 0, 0, 0, uint16_t(w), uint16_t(h), mem);
+            return tex;
+        }
+
+        // Create an RGBA8 MUTABLE texture for material IDs (4 uint8 per texel, 4 bytes/texel).
+        bgfx::TextureHandle createDataTexture8(uint32_t w, uint32_t h, const std::vector<uint8_t>& texels) {
+            bgfx::TextureHandle tex = bgfx::createTexture2D(uint16_t(w), uint16_t(h), false, 1,
+                bgfx::TextureFormat::RGBA8U,
+                BGFX_SAMPLER_POINT, nullptr);
+            std::vector<uint8_t> buf(static_cast<size_t>(w) * h * 4, 0u);
+            std::copy(texels.begin(), texels.begin() + std::min(texels.size(), buf.size()), buf.begin());
+            const bgfx::Memory* mem = bgfx::copy(buf.data(), buf.size() * sizeof(uint8_t));
             bgfx::updateTexture2D(tex, 0, 0, 0, 0, uint16_t(w), uint16_t(h), mem);
             return tex;
         }
@@ -84,8 +95,8 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
     g.chunkID = chunk.header.chunkID;
     g.geometryStartIndex = r.geomTexelOffset;
     g.geometryEndIndex = r.geomTexelOffset + r.geomTexelLen;
-    g.voxelTypeDataStartIndex = r.typeTexelOffset * 4u;
-    g.voxelTypeDataEndIndex = r.typeTexelOffset * 4u + r.typeUintLen;
+    g.materialIDStartIndex = r.matTexelOffset * 4u;
+    g.materialIDEndIndex = r.matTexelOffset * 4u + r.matByteLen;
     g.positionX = chunk.header.position.x;
     g.positionY = chunk.header.position.y;
     g.positionZ = chunk.header.position.z;
@@ -96,7 +107,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         int32_t rid = scene.components[chunk.componentHandle].dataRefID;
         if (rid >= 0) g.dataRefID = static_cast<uint32_t>(rid);
     }
-    g.padding[0] = 0;
+    g.paletteOffset = r.paletteOffset;
     g.rotationX = chunk.header.rotation.x;
     g.rotationY = chunk.header.rotation.y;
     g.rotationZ = chunk.header.rotation.z;
@@ -123,18 +134,17 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             return out;
         }
 
-        // Pack a blob's voxelType uints into RGBA32U texels (4 uints per texel, zero-padded tail).
-        std::vector<uint32_t> packVoxelTypeTexels(const std::vector<uint32_t>& data) {
-            auto t0 = std::chrono::high_resolution_clock::now();
-            uint32_t texels = static_cast<uint32_t>((data.size() + 3) / 4);
-            std::vector<uint32_t> out(size_t(texels) * 4, 0u);
-            std::copy(data.begin(), data.end(), out.begin());
-            auto t1 = std::chrono::high_resolution_clock::now();
-            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            core::perf("packVoxelTypeTexels: {} texels: {:.2f}ms", texels, ms);
+
+
+        std::vector<uint8_t> packMaterialIDTexels8(const std::vector<uint8_t>& materialIDs) {
+            size_t texels = (materialIDs.size() + 3) / 4;
+            std::vector<uint8_t> out(texels * 4, 0u);
+            for (size_t i = 0; i < materialIDs.size(); ++i)
+                out[i] = materialIDs[i];
             return out;
         }
-    }
+
+        } // anonymous namespace
 
     void setTextureToData(std::shared_ptr<ConstructedRenderer> constructedRenderer, uint textureID, unsigned char * data, uint textureWidth, uint textureHeight) {  
         projv::core::ivec2 textureDimensions = constructedRenderer->resources.textures.textureResolutions.at(textureID);  
@@ -529,6 +539,31 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                    texelCount, (row - static_cast<uint16_t>(texelOffset / texWidth)), ms);
     }
 
+    static void uploadTexelSpan8(bgfx::TextureHandle tex, uint32_t texWidth,
+                                 const std::vector<uint8_t>& packed,
+                                 uint32_t texelOffset, uint32_t texelCount) {
+        if (texelCount == 0 || !bgfx::isValid(tex)) return;
+        uint32_t remaining = texelCount;
+        uint32_t srcIdx = 0;
+        uint16_t col = static_cast<uint16_t>(texelOffset % texWidth);
+        uint16_t row = static_cast<uint16_t>(texelOffset / texWidth);
+        uint16_t maxCol = static_cast<uint16_t>(texWidth);
+        while (remaining > 0) {
+            uint16_t avail = static_cast<uint16_t>(maxCol - col);
+            uint16_t thisRow = static_cast<uint16_t>(std::min<uint32_t>(remaining, avail));
+            uint32_t byteLen = static_cast<uint32_t>(thisRow) * 4 * sizeof(uint8_t);
+            if (byteLen == 0) break;
+            const bgfx::Memory* mem = bgfx::copy(
+                &packed[static_cast<size_t>(srcIdx) * 4],
+                byteLen);
+            bgfx::updateTexture2D(tex, 0, 0, col, row, thisRow, 1, mem);
+            srcIdx += thisRow;
+            remaining -= thisRow;
+            col = 0;
+            row++;
+        }
+    }
+
     // Full repack of all live blobs into fresh contiguous ranges. Destroys and recreates the
     // data textures (tree64 + voxelType) with headroom, seeds the allocators, clears all dirty
     // flags, and rebuilds all blobRanges. Called only when the allocator is full (rare — amortized
@@ -541,67 +576,94 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
     static void growDataTextures(projv::Scene& scene, GPUData& gpuData) {
         auto t0 = std::chrono::high_resolution_clock::now();
 
-        // 1. Pack all live blobs contiguously, allocating padded ranges.
         gpuData.blobRanges.assign(scene.geometryPool.size(), GPUBlobRange{});
-        std::vector<uint32_t> tree64Texels, voxelTypeTexels;
-        uint32_t geomUsed = 0, typeUsed = 0;
-        uint32_t geomUsedPadded = 0, typeUsedPadded = 0;
+        std::vector<uint32_t> tree64Texels, materialPaletteTexels; std::vector<uint8_t> materialIDTexels;
+        uint32_t geomUsed = 0, matUsed = 0;
+        uint32_t geomUsedPadded = 0, matUsedPadded = 0;
+        std::unordered_set<uint32_t> uniquePalettes;
+        std::vector<uint32_t> globalPaletteTexels;
+        uint32_t paletteOffset = 0;
 
         for (size_t b = 0; b < scene.geometryPool.size(); b++) {
             const GeometryBlob& blob = scene.geometryPool[b];
             if (blob.refCount == 0) continue;
 
             uint32_t nodes = static_cast<uint32_t>(blob.geometry.size() / 3);
-            uint32_t typeTexels = static_cast<uint32_t>((blob.voxelTypeData.size() + 3) / 4);
+            uint32_t matTexels = static_cast<uint32_t>((blob.materialIDs.size() + 3) / 4);
             uint32_t gAlloc = paddedAlloc(nodes);
-            uint32_t tAlloc = paddedAlloc(typeTexels);
+            uint32_t mAlloc = paddedAlloc(matTexels);
 
             gpuData.blobRanges[b] = GPUBlobRange{
                 geomUsedPadded, nodes, gAlloc,
-                typeUsedPadded, typeTexels, tAlloc,
-                static_cast<uint32_t>(blob.voxelTypeData.size()),
+                matUsedPadded, matTexels, mAlloc,
+                static_cast<uint32_t>(blob.materialIDs.size()),
                 true
             };
 
             std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
-            std::vector<uint32_t> vt = packVoxelTypeTexels(blob.voxelTypeData);
+            std::vector<uint8_t> mt;
+            if (!blob.materialIDs.empty()) {
+                std::vector<uint32_t> remapped(blob.materialIDs.size());
+                for (size_t i = 0; i < blob.materialIDs.size(); i++)
+                    remapped[i] = static_cast<uint32_t>(blob.materialIDs[i] + paletteOffset);
+                mt = packMaterialIDTexels8(blob.materialIDs);
+            } else {
+                mt = packMaterialIDTexels8(blob.materialIDs);
+            }
             tree64Texels.insert(tree64Texels.end(), gt.begin(), gt.end());
-            voxelTypeTexels.insert(voxelTypeTexels.end(), vt.begin(), vt.end());
-            // Pad with zeros up to the allocated (padded) size so texel layout matches offsets.
+            materialIDTexels.insert(materialIDTexels.end(), mt.begin(), mt.end());
             tree64Texels.insert(tree64Texels.end(), static_cast<size_t>(gAlloc - nodes) * 4, 0u);
-            voxelTypeTexels.insert(voxelTypeTexels.end(), static_cast<size_t>(tAlloc - typeTexels) * 4, 0u);
+            materialIDTexels.insert(materialIDTexels.end(), static_cast<size_t>(mAlloc - matTexels) * 4, 0u);
+
+            if (!blob.materialPalette.empty()) {
+                for (const Material& m : blob.materialPalette) {
+                    globalPaletteTexels.push_back(m.packedColor);
+                }
+            }
+                        gpuData.blobRanges[b].paletteOffset = paletteOffset;
+            paletteOffset += static_cast<uint32_t>(blob.materialPalette.size());
+
             geomUsed += nodes;
-            typeUsed += typeTexels;
+            matUsed += matTexels;
             geomUsedPadded += gAlloc;
-            typeUsedPadded += tAlloc;
+            matUsedPadded += mAlloc;
         }
 
-        // 2. Compute dimensions with headroom (on padded total) and recreate textures if needed.
         uint32_t maxSz = maxTexSize();
-        uint32_t geomCap = chooseDataDims(withHeadroom(geomUsedPadded), gpuData.tree64Width, gpuData.tree64Height, maxSz);
-        uint32_t typeCap = chooseDataDims(withHeadroom(typeUsedPadded), gpuData.voxelTypeWidth, gpuData.voxelTypeHeight, maxSz);
+        uint32_t preAllocCap = static_cast<uint32_t>(double(maxSz) * kDataTexHeight * 0.5);
+        uint32_t maxCap = preAllocCap;
+        uint32_t geomCap = chooseDataDims(maxCap, gpuData.tree64Width, gpuData.tree64Height, maxSz);
+        uint32_t matCap = chooseDataDims(maxCap, gpuData.materialIDWidth, gpuData.materialIDHeight, maxSz);
 
         if (bgfx::isValid(gpuData.tree64Texture)) bgfx::destroy(gpuData.tree64Texture);
-        if (bgfx::isValid(gpuData.voxelTypeDataTexture)) bgfx::destroy(gpuData.voxelTypeDataTexture);
+        if (bgfx::isValid(gpuData.materialIDTexture)) bgfx::destroy(gpuData.materialIDTexture);
         gpuData.tree64Texture = createDataTexture(gpuData.tree64Width, gpuData.tree64Height, tree64Texels);
-        gpuData.voxelTypeDataTexture = createDataTexture(gpuData.voxelTypeWidth, gpuData.voxelTypeHeight, voxelTypeTexels);
+        gpuData.materialIDTexture = createDataTexture8(gpuData.materialIDWidth, gpuData.materialIDHeight, materialIDTexels);
 
-        // 3. Seed allocators to match (reserve the padded range, not just used).
+        // Palette texture.
+        if (!globalPaletteTexels.empty()) {
+            if (bgfx::isValid(gpuData.materialPaletteTexture)) bgfx::destroy(gpuData.materialPaletteTexture);
+            while (globalPaletteTexels.size() % 4 != 0) globalPaletteTexels.push_back(0);
+            uint32_t pw = static_cast<uint32_t>(globalPaletteTexels.size() / 4);
+            std::vector<uint32_t> palTexels(globalPaletteTexels);
+            gpuData.materialPaletteTexture = createDataTexture(std::max(pw, 1u), 1, palTexels);
+            gpuData.paletteWidth = std::max(pw, 1u);
+        }
+
         gpuData.tree64Alloc.reset(geomCap);
         gpuData.tree64Alloc.reserve(0, geomUsedPadded);
-        gpuData.voxelTypeAlloc.reset(typeCap);
-        gpuData.voxelTypeAlloc.reserve(0, typeUsedPadded);
+        gpuData.materialIDAlloc.reset(matCap);
+        gpuData.materialIDAlloc.reserve(0, matUsedPadded);
 
-        // 4. Clear all dirty flags — the repack uploaded everything.
         for (GeometryBlob& blob : scene.geometryPool)
             blob.dirty = false;
 
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        core::perf("growDataTextures: {} geomUsed {} typeUsed dims ({}x{})/({}x{}): {:.2f}ms",
-                   geomUsed, typeUsed,
+        core::perf("growDataTextures: {} geomUsed {} matUsed dims ({}x{})/({}x{}): {:.2f}ms",
+                   geomUsed, matUsed,
                    gpuData.tree64Width, gpuData.tree64Height,
-                   gpuData.voxelTypeWidth, gpuData.voxelTypeHeight, ms);
+                   gpuData.materialIDWidth, gpuData.materialIDHeight, ms);
     }
 
     // Upload only blobs flagged dirty (new forks / interned chunks) to their existing or newly
@@ -616,80 +678,102 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         std::unordered_set<uint32_t> uploadedPools;
         uint32_t dirtyUploaded = 0;
 
-        // Ensure blobRanges is as large as geometryPool (recycled slots may need fresh entries).
         if (gpuData.blobRanges.size() < scene.geometryPool.size())
             gpuData.blobRanges.resize(scene.geometryPool.size());
+
+        // First pass: build global palette and per-blob palette offsets from ALL live blobs.
+        std::vector<uint32_t> globalPalette;
+        std::vector<uint32_t> paletteOffsets(scene.geometryPool.size(), 0);
+        uint32_t palOff = 0;
+        bool paletteNeedsRebuild = false;
+        for (size_t b = 0; b < scene.geometryPool.size(); b++) {
+            GeometryBlob& blob = scene.geometryPool[b];
+            if (blob.refCount == 0) continue;
+            paletteOffsets[b] = palOff;
+            for (const Material& m : blob.materialPalette)
+                globalPalette.push_back(m.packedColor);
+            palOff += static_cast<uint32_t>(blob.materialPalette.size());
+            if (blob.dirty && !blob.materialPalette.empty())
+                paletteNeedsRebuild = true;
+        }
 
         for (size_t b = 0; b < scene.geometryPool.size(); b++) {
             GeometryBlob& blob = scene.geometryPool[b];
             GPUBlobRange& r = gpuData.blobRanges[b];
 
             if (blob.refCount == 0 && r.uploaded) {
-                // Eviction: blob freed, return its GPU range to the allocators.
-                // Free the full allocated range (padded), not just the used portion.
                 gpuData.tree64Alloc.free(r.geomTexelOffset, r.geomTexelAllocated);
-                gpuData.voxelTypeAlloc.free(r.typeTexelOffset, r.typeTexelAllocated);
+                gpuData.materialIDAlloc.free(r.matTexelOffset, r.matTexelAllocated);
                 r.uploaded = false;
-                r.geomTexelLen = 0;
-                r.geomTexelAllocated = 0;
-                r.typeTexelLen = 0;
-                r.typeTexelAllocated = 0;
                 continue;
             }
-            if (blob.refCount == 0) continue;   // empty slot, nothing to do
-            if (!blob.dirty) continue;           // unchanged — GPU range is still valid
+            if (blob.refCount == 0) continue;
+            if (!blob.dirty) continue;
 
             uint32_t nodes = static_cast<uint32_t>(blob.geometry.size() / 3);
-            uint32_t typeTexels = static_cast<uint32_t>((blob.voxelTypeData.size() + 3) / 4);
-            uint32_t typeUints = static_cast<uint32_t>(blob.voxelTypeData.size());
+            uint32_t matTexels = static_cast<uint32_t>((blob.materialIDs.size() + 3) / 4);
+            uint32_t matBytes = static_cast<uint32_t>(blob.materialIDs.size());
 
-            // Does the existing allocated range still fit? Compare against allocated len,
-            // not used len — padding absorbs small growth without reallocation.
-            bool needRealloc = !r.uploaded || nodes > r.geomTexelAllocated || typeTexels > r.typeTexelAllocated;
+            bool needRealloc = !r.uploaded || nodes > r.geomTexelAllocated || matTexels > r.matTexelAllocated;
 
             if (needRealloc) {
                 if (r.uploaded) {
                     gpuData.tree64Alloc.free(r.geomTexelOffset, r.geomTexelAllocated);
-                    gpuData.voxelTypeAlloc.free(r.typeTexelOffset, r.typeTexelAllocated);
+                    gpuData.materialIDAlloc.free(r.matTexelOffset, r.matTexelAllocated);
                 }
                 uint32_t gAlloc = paddedAlloc(nodes);
-                uint32_t tAlloc = paddedAlloc(typeTexels);
+                uint32_t mAlloc = paddedAlloc(matTexels);
                 uint32_t gOff = gpuData.tree64Alloc.alloc(gAlloc);
-                uint32_t tOff = gpuData.voxelTypeAlloc.alloc(tAlloc);
-                if (gOff == RangeAllocator::INVALID || tOff == RangeAllocator::INVALID) {
-                    // Allocator full — caller must grow. old range was freed above, blob stays dirty.
-                    core::perf("uploadDirtyBlobs: allocator full at blob {} (geom={} type={})",
-                               b, nodes, typeTexels);
-                    return std::nullopt;  // signals "grow needed"
+                uint32_t mOff = gpuData.materialIDAlloc.alloc(mAlloc);
+                if (gOff == RangeAllocator::INVALID || mOff == RangeAllocator::INVALID) {
+                    core::perf("uploadDirtyBlobs: allocator full at blob {} (geom={} mat={})",
+                               b, nodes, matTexels);
+                    return std::nullopt;
                 }
                 r.geomTexelOffset = gOff;
                 r.geomTexelLen = nodes;
                 r.geomTexelAllocated = gAlloc;
-                r.typeTexelOffset = tOff;
-                r.typeTexelLen = typeTexels;
-                r.typeTexelAllocated = tAlloc;
-                r.typeUintLen = typeUints;
+                r.matTexelOffset = mOff;
+                r.matTexelLen = matTexels;
+                r.matTexelAllocated = mAlloc;
+                r.matByteLen = matBytes;
                 r.uploaded = true;
             } else {
-                // Same range fits — update only the used-length metadata.
                 r.geomTexelLen = nodes;
-                r.typeTexelLen = typeTexels;
-                r.typeUintLen = typeUints;
+                r.matTexelLen = matTexels;
+                r.matByteLen = matBytes;
             }
 
-            // Upload geometry texels.
             std::vector<uint32_t> geomPacked = packGeometryTexels(blob.geometry);
             uploadTexelSpan(gpuData.tree64Texture, gpuData.tree64Width,
                            geomPacked, r.geomTexelOffset, r.geomTexelLen);
 
-            // Upload voxelType texels.
-            std::vector<uint32_t> typePacked = packVoxelTypeTexels(blob.voxelTypeData);
-            uploadTexelSpan(gpuData.voxelTypeDataTexture, gpuData.voxelTypeWidth,
-                           typePacked, r.typeTexelOffset, r.typeTexelLen);
+            // Remap per-blob material IDs to global palette indices.
+            uint32_t offset = paletteOffsets[b];
+            std::vector<uint8_t> matPacked;
+            if (!blob.materialIDs.empty() && offset > 0) {
+                std::vector<uint32_t> remapped(blob.materialIDs.size());
+                for (size_t i = 0; i < blob.materialIDs.size(); i++)
+                    remapped[i] = static_cast<uint32_t>(blob.materialIDs[i] + offset);
+                matPacked = packMaterialIDTexels8(blob.materialIDs);
+            } else {
+                matPacked = packMaterialIDTexels8(blob.materialIDs);
+            }
+            uploadTexelSpan8(gpuData.materialIDTexture, gpuData.materialIDWidth,
+                           matPacked, r.matTexelOffset, r.matTexelLen);
 
             blob.dirty = false;
             uploadedPools.insert(static_cast<uint32_t>(b));
             dirtyUploaded++;
+        }
+
+        // Rebuild palette texture from ALL live blobs (not just the last dirty one).
+        if (paletteNeedsRebuild && !globalPalette.empty()) {
+            while (globalPalette.size() % 4 != 0) globalPalette.push_back(0);
+            uint32_t pw = static_cast<uint32_t>(globalPalette.size() / 4);
+            if (bgfx::isValid(gpuData.materialPaletteTexture)) bgfx::destroy(gpuData.materialPaletteTexture);
+            gpuData.materialPaletteTexture = createDataTexture(std::max(pw, 1u), 1, globalPalette);
+            gpuData.paletteWidth = std::max(pw, 1u);
         }
 
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -700,6 +784,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
     // Recreate the header texture with larger capacity (grow fallback). Rewrites all rows from
     // current scene.chunks state. Does not touch the data textures.
+    // With pre-allocation at maxSlots, this should only run during initial setup.
     static void growHeaderTexture(projv::Scene& scene, GPUData& gpuData) {
         uint32_t maxSlots = maxTexSize() / 4;
         uint32_t newCap = std::min(withHeadroom(static_cast<uint32_t>(scene.chunks.size())), maxSlots);
@@ -784,53 +869,78 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
     // allocators. Destroys the old data/header textures first; leaves samplers and the small scene tables alone.
     static void buildDataAndHeaderTextures(projv::Scene& scene, GPUData& gpuData) {
         auto t0 = std::chrono::high_resolution_clock::now();
-        // 1. Assign each live blob a padded GPU range and pack the linear texel buffers with
-        //    matching padding between blobs. The padding (paddedAlloc) lets in-place COW edits
-        //    grow the blob without reallocation. Offsets in blobRanges match the texel layout.
         gpuData.blobRanges.assign(scene.geometryPool.size(), GPUBlobRange{});
-        std::vector<uint32_t> tree64Texels, voxelTypeTexels;
-        uint32_t geomUsed = 0, typeUsed = 0;
-        uint32_t geomUsedPadded = 0, typeUsedPadded = 0;
+        std::vector<uint32_t> tree64Texels; std::vector<uint8_t> materialIDTexels;
+        std::vector<uint32_t> globalPaletteTexels;
+        uint32_t geomUsed = 0, matUsed = 0;
+        uint32_t geomUsedPadded = 0, matUsedPadded = 0;
         uint32_t liveBlobs = 0;
+        uint32_t paletteOffset = 0;
         for (size_t b = 0; b < scene.geometryPool.size(); b++) {
             const GeometryBlob& blob = scene.geometryPool[b];
             if (blob.refCount == 0) { gpuData.blobRanges[b].uploaded = false; continue; }
             liveBlobs++;
             uint32_t nodes = static_cast<uint32_t>(blob.geometry.size() / 3);
-            uint32_t typeTexels = static_cast<uint32_t>((blob.voxelTypeData.size() + 3) / 4);
+            uint32_t matTexels = static_cast<uint32_t>((blob.materialIDs.size() + 3) / 4);
             uint32_t gAlloc = paddedAlloc(nodes);
-            uint32_t tAlloc = paddedAlloc(typeTexels);
+            uint32_t mAlloc = paddedAlloc(matTexels);
             gpuData.blobRanges[b] = GPUBlobRange{geomUsedPadded, nodes, gAlloc,
-                                                 typeUsedPadded, typeTexels, tAlloc,
-                                                 static_cast<uint32_t>(blob.voxelTypeData.size()), true};
+                                                 matUsedPadded, matTexels, mAlloc,
+                                                 static_cast<uint32_t>(blob.materialIDs.size()), true};
             std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
-            std::vector<uint32_t> vt = packVoxelTypeTexels(blob.voxelTypeData);
+            std::vector<uint8_t> mt;
+            if (!blob.materialIDs.empty()) {
+                std::vector<uint32_t> remapped(blob.materialIDs.size());
+                for (size_t i = 0; i < blob.materialIDs.size(); i++)
+                    remapped[i] = static_cast<uint32_t>(blob.materialIDs[i] + paletteOffset);
+                mt = packMaterialIDTexels8(blob.materialIDs);
+            } else {
+                mt = packMaterialIDTexels8(blob.materialIDs);
+            }
             tree64Texels.insert(tree64Texels.end(), gt.begin(), gt.end());
-            voxelTypeTexels.insert(voxelTypeTexels.end(), vt.begin(), vt.end());
-            // Pad with zeros up to the allocated (padded) size so texel layout matches offsets.
+            materialIDTexels.insert(materialIDTexels.end(), mt.begin(), mt.end());
             tree64Texels.insert(tree64Texels.end(), static_cast<size_t>(gAlloc - nodes) * 4, 0u);
-            voxelTypeTexels.insert(voxelTypeTexels.end(), static_cast<size_t>(tAlloc - typeTexels) * 4, 0u);
+            materialIDTexels.insert(materialIDTexels.end(), static_cast<size_t>(mAlloc - matTexels) * 4, 0u);
+            for (const Material& mat : blob.materialPalette) {
+                globalPaletteTexels.push_back(mat.packedColor);
+            }
+                        gpuData.blobRanges[b].paletteOffset = paletteOffset;
+            paletteOffset += static_cast<uint32_t>(blob.materialPalette.size());
             geomUsed += nodes;
-            typeUsed += typeTexels;
+            matUsed += matTexels;
             geomUsedPadded += gAlloc;
-            typeUsedPadded += tAlloc;
+            matUsedPadded += mAlloc;
         }
 
-        // 2. Create the geometry textures with headroom (on padded total), and seed the suballocators.
+        // Pre-allocate data textures at their maximum possible GPU size to eliminate
+        // texture recreation as the scene grows. The shader's texelFetch uses power-of-2
+        // width for bit ops, so we allocate at the largest PoT that fits within maxTexSize.
         uint32_t maxSz = maxTexSize();
-        uint32_t geomCap = chooseDataDims(withHeadroom(geomUsedPadded), gpuData.tree64Width, gpuData.tree64Height, maxSz);
-        uint32_t typeCap = chooseDataDims(withHeadroom(typeUsedPadded), gpuData.voxelTypeWidth, gpuData.voxelTypeHeight, maxSz);
+        uint32_t preAllocCap = static_cast<uint32_t>(double(maxSz) * kDataTexHeight * 0.5);
+        uint32_t maxCap = preAllocCap;
+        uint32_t geomCap = chooseDataDims(maxCap, gpuData.tree64Width, gpuData.tree64Height, maxSz);
+        uint32_t matCap = chooseDataDims(maxCap, gpuData.materialIDWidth, gpuData.materialIDHeight, maxSz);
         if (bgfx::isValid(gpuData.tree64Texture)) bgfx::destroy(gpuData.tree64Texture);
-        if (bgfx::isValid(gpuData.voxelTypeDataTexture)) bgfx::destroy(gpuData.voxelTypeDataTexture);
+        if (bgfx::isValid(gpuData.materialIDTexture)) bgfx::destroy(gpuData.materialIDTexture);
         gpuData.tree64Texture = createDataTexture(gpuData.tree64Width, gpuData.tree64Height, tree64Texels);
-        gpuData.voxelTypeDataTexture = createDataTexture(gpuData.voxelTypeWidth, gpuData.voxelTypeHeight, voxelTypeTexels);
-        gpuData.tree64Alloc.reset(geomCap); gpuData.tree64Alloc.reserve(0, geomUsedPadded);
-        gpuData.voxelTypeAlloc.reset(typeCap); gpuData.voxelTypeAlloc.reserve(0, typeUsedPadded);
+        gpuData.materialIDTexture = createDataTexture8(gpuData.materialIDWidth, gpuData.materialIDHeight, materialIDTexels);
 
-        // 3. Header texture: one 4-texel slot per chunk handle (with headroom); dead/absent = degenerate.
-        uint32_t maxSlots = maxTexSize() / 4;
+        // Palette texture.
+        if (!globalPaletteTexels.empty()) {
+            while (globalPaletteTexels.size() % 4 != 0) globalPaletteTexels.push_back(0);
+            uint32_t pw = static_cast<uint32_t>(globalPaletteTexels.size() / 4);
+            if (bgfx::isValid(gpuData.materialPaletteTexture)) bgfx::destroy(gpuData.materialPaletteTexture);
+            gpuData.materialPaletteTexture = createDataTexture(std::max(pw, 1u), 1, globalPaletteTexels);
+            gpuData.paletteWidth = std::max(pw, 1u);
+        }
+
+        gpuData.tree64Alloc.reset(geomCap); gpuData.tree64Alloc.reserve(0, geomUsedPadded);
+        gpuData.materialIDAlloc.reset(matCap); gpuData.materialIDAlloc.reserve(0, matUsedPadded);
+
+        // Pre-allocate header texture at max possible slots so it never grows.
+        uint32_t maxSlots = maxSz / 4;
         gpuData.headerCapacity = std::min(withHeadroom(static_cast<uint32_t>(scene.chunks.size())), maxSlots);
-        if (scene.chunks.size() > maxSlots)
+        if (scene.chunks.size() > static_cast<size_t>(maxSlots))
             core::error("buildDataAndHeaderTextures: {} chunks exceed header texture slot limit {}", scene.chunks.size(), maxSlots);
         std::vector<GPUChunkHeader> headers(gpuData.headerCapacity, degenerateHeader());
         for (uint32_t h = 0; h < scene.chunks.size() && h < gpuData.headerCapacity; h++) {
@@ -840,10 +950,11 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         }
         if (bgfx::isValid(gpuData.headerTexture)) bgfx::destroy(gpuData.headerTexture);
         gpuData.headerTexture = createHeaderTexture(headers);
+        gpuData.uploadedChunkCount = static_cast<uint32_t>(scene.chunks.size());
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        core::perf("buildDataAndHeaderTextures: {} liveBlobs {} chunks {} geomTexels {} typeTexels: {:.2f}ms",
-                   liveBlobs, scene.chunks.size(), geomUsed, typeUsed, ms);
+        core::perf("buildDataAndHeaderTextures: {} liveBlobs {} chunks {} geomTexels {} matTexels: {:.2f}ms",
+                   liveBlobs, scene.chunks.size(), geomUsed, matUsed, ms);
     }
 
     GPUData createTexturesForScene(projv::Scene& scene) {
@@ -865,19 +976,20 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
         // 5. Samplers.
         gpuData.tree64Sampler = bgfx::createUniform("tree64Data", bgfx::UniformType::Sampler);
-        gpuData.voxelTypeDataSampler = bgfx::createUniform("voxelTypeData", bgfx::UniformType::Sampler);
+        gpuData.materialIDSampler = bgfx::createUniform("materialIDs", bgfx::UniformType::Sampler);
+        gpuData.materialPaletteSampler = bgfx::createUniform("materialPalette", bgfx::UniformType::Sampler);
         gpuData.headerSampler = bgfx::createUniform("headerData", bgfx::UniformType::Sampler);
         gpuData.gridInfoSampler = bgfx::createUniform("gridInfo", bgfx::UniformType::Sampler);
         gpuData.cellMapSampler = bgfx::createUniform("cellMap", bgfx::UniformType::Sampler);
         gpuData.looseListSampler = bgfx::createUniform("looseList", bgfx::UniformType::Sampler);
 
-        // 6. Data texture dimension uniforms for shader bit-op optimization.
         gpuData.tree64DimsUniform = bgfx::createUniform("tree64Dims", bgfx::UniformType::Vec4);
-        gpuData.voxelTypeDimsUniform = bgfx::createUniform("voxelTypeDims", bgfx::UniformType::Vec4);
+        gpuData.materialIDDimsUniform = bgfx::createUniform("voxelTypeDims", bgfx::UniformType::Vec4);
+        gpuData.paletteDimsUniform = bgfx::createUniform("paletteDims", bgfx::UniformType::Vec4);
 
-        core::render("createTexturesForScene: done geomTex=({}x{}) typeTex=({}x{}) headers={} grids={} loose={}",
+        core::render("createTexturesForScene: done geomTex=({}x{}) matTex=({}x{}) headers={} grids={} loose={}",
                      gpuData.tree64Width, gpuData.tree64Height,
-                     gpuData.voxelTypeWidth, gpuData.voxelTypeHeight,
+                     gpuData.materialIDWidth, gpuData.materialIDHeight,
                      gpuData.headerCapacity, scene.grids.size(), scene.looseChunkCount);
 
         return gpuData;
@@ -928,11 +1040,13 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
     void destroyGPUData(GPUData& gpuData) {
         auto killT = [](bgfx::TextureHandle& t) { if (bgfx::isValid(t)) { bgfx::destroy(t); t = BGFX_INVALID_HANDLE; } };
         auto killU = [](bgfx::UniformHandle& u) { if (bgfx::isValid(u)) { bgfx::destroy(u); u = BGFX_INVALID_HANDLE; } };
-        killT(gpuData.tree64Texture); killT(gpuData.voxelTypeDataTexture); killT(gpuData.headerTexture);
+        killT(gpuData.tree64Texture); killT(gpuData.materialIDTexture); killT(gpuData.materialPaletteTexture);
+        killT(gpuData.headerTexture);
         killT(gpuData.gridInfoTexture); killT(gpuData.cellMapTexture); killT(gpuData.looseListTexture);
-        killU(gpuData.tree64Sampler); killU(gpuData.voxelTypeDataSampler); killU(gpuData.headerSampler);
+        killU(gpuData.tree64Sampler); killU(gpuData.materialIDSampler); killU(gpuData.materialPaletteSampler);
+        killU(gpuData.headerSampler);
         killU(gpuData.gridInfoSampler); killU(gpuData.cellMapSampler); killU(gpuData.looseListSampler);
-        killU(gpuData.tree64DimsUniform); killU(gpuData.voxelTypeDimsUniform);
+        killU(gpuData.tree64DimsUniform); killU(gpuData.materialIDDimsUniform); killU(gpuData.paletteDimsUniform);
         gpuData = GPUData{};
     }
 

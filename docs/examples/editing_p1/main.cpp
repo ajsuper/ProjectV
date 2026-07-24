@@ -26,6 +26,7 @@
 #include "utils/scene_query.h"
 #include "utils/voxel_management.h"
 #include "utils/voxel_math.h"
+#include "utils/material.h"
 
 namespace fs = std::filesystem;
 
@@ -37,6 +38,7 @@ namespace {
             projv::core::info("[OK]   {}", msg);
         } else {
             projv::core::error("[FAIL] {}", msg);
+            fprintf(stderr, "CHECK FAILED: %s\n", msg);
             ++g_failures;
         }
     }
@@ -104,15 +106,15 @@ int main(int argc, char** argv) {
         uint32_t origRefCount = (origPoolIdx >= 0) ? scene.geometryPool[origPoolIdx].refCount : 0;
         size_t origBlobCount = scene.geometryPool.size();
         size_t origVoxelCount = (origPoolIdx >= 0)
-            ? scene.geometryPool[origPoolIdx].voxelTypeData.size() / 3
+            ? scene.geometryPool[origPoolIdx].materialIDs.size()
             : 0;
 
         // Queue three adds inside bounds + one out-of-bounds (must be skipped with warn).
         std::vector<projv::PendingVoxelOp> adds{
-            {false, {1, 2, 3},   projv::Color{255, 0,   0}},
-            {false, {4, 5, 6},   projv::Color{0,   255, 0}},
-            {false, {7, 8, 9},   projv::Color{0,   0,   255}},
-            {false, {9999,0, 0}, projv::Color{0,   0,   0}}, // OOB; should be skipped
+            {false, {1, 2, 3}, 0, {0,0,0}},
+            {false, {4, 5, 6}, 0, {0,0,0}},
+            {false, {7, 8, 9}, 0, {0,0,0}},
+            {false, {9999, 0, 0}, 0, {0,0,0}}, // OOB; should be skipped
         };
         bool ok = projv::utils::queueVoxelAdd(scene, loose, adds);
         check(ok, "queueVoxelAdd returned true on loose component");
@@ -159,7 +161,7 @@ int main(int argc, char** argv) {
             check(!blob.geometry.empty(), "blob has non-empty geometry");
 
             // Three adds were applied (the OOB op was skipped). Voxel count must have grown.
-            size_t newVoxelCount = blob.voxelTypeData.size() / 3;
+            size_t newVoxelCount = blob.materialIDs.size();
             check(newVoxelCount > origVoxelCount,
                   "voxel count grew after adds (orig -> new)");
         }
@@ -184,8 +186,8 @@ int main(int argc, char** argv) {
         projv::ComponentRecord& gcomp = scene.components[grid];
         size_t before = gcomp.editQueue.ops.size();
         std::vector<projv::PendingVoxelOp> gops{
-            {false, {5, 5, 5}, projv::Color{255, 0, 0}},
-            {false, {10, 10, 10}, projv::Color{0, 255, 0}},
+            {false, {5, 5, 5}, 0, {0,0,0}},
+            {false, {10, 10, 10}, 0, {0,0,0}},
         };
         bool ok = projv::utils::queueVoxelAdd(scene, grid, gops);
         check(ok, "queueVoxelAdd on Grid component returned true (P2 scope)");
@@ -244,11 +246,20 @@ int main(int argc, char** argv) {
             projv::utils::computeBrickDims(64));
         for (int i = 0; i < 5; ++i)
             projv::utils::brickMapSetVoxel(*brickMap,
-                i * 2, i * 2, i * 2, projv::Color{128, 128, 128});
+                i * 2, i * 2, i * 2, 0);
         projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
 
-        // Intern into a pool blob.
-        int32_t blobIdx = projv::internChunkGeometry(testScene, chunk);
+        // Bake materials into the chunk's geometry.
+        projv::GeometryBlob tmpBlob;
+        projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, tmpBlob, *brickMap);
+
+        // Intern into a pool blob, passing the brick map.
+        int32_t blobIdx = projv::internChunkGeometry(testScene, chunk, std::move(brickMap));
+        // Transfer baked materials to the blob.
+        if (blobIdx >= 0 && static_cast<size_t>(blobIdx) < testScene.geometryPool.size()) {
+            testScene.geometryPool[blobIdx].materialIDs = std::move(tmpBlob.materialIDs);
+            testScene.geometryPool[blobIdx].materialPalette = std::move(tmpBlob.materialPalette);
+        }
         check(blobIdx >= 0, "programmatic: internChunkGeometry succeeded");
         check(testScene.geometryPool[blobIdx].dirty,
               "programmatic: interned blob is dirty (P5)");
@@ -274,7 +285,7 @@ int main(int argc, char** argv) {
         check(testScene.chunks.size() == 1, "programmatic: one chunk");
 
         uint32_t origVoxelCount =
-            testScene.geometryPool[0].voxelTypeData.size() / 3u;
+            testScene.geometryPool[0].materialIDs.size();
         check(origVoxelCount == 5, "programmatic: seed has 5 voxels");
 
         // Simulate prior GPU flush: clear dirty flags so only the fork is dirty.
@@ -282,9 +293,9 @@ int main(int argc, char** argv) {
 
         // Queue 3 adds at positions that don't collide with the seed (seed has 0,2,4,6,8).
         std::vector<projv::PendingVoxelOp> adds{
-            {false, {10, 10, 10}, projv::Color{255, 0, 0}},
-            {false, {12, 12, 12}, projv::Color{0, 255, 0}},
-            {false, {14, 14, 14}, projv::Color{0, 0, 255}},
+            {false, {10, 10, 10}, 0, {0,0,0}},
+            {false, {12, 12, 12}, 0, {0,0,0}},
+            {false, {14, 14, 14}, 0, {0,0,0}},
         };
         bool ok = projv::utils::queueVoxelAdd(testScene, looseH, adds);
         check(ok, "programmatic: queueVoxelAdd returned true");
@@ -315,7 +326,7 @@ int main(int argc, char** argv) {
             check(!fork.geometry.empty(), "programmatic: fork has geometry");
 
             uint32_t newVoxelCount =
-                static_cast<uint32_t>(fork.voxelTypeData.size() / 3u);
+                static_cast<uint32_t>(fork.materialIDs.size());
             check(newVoxelCount == origVoxelCount + 3,
                   "programmatic: voxel count grew by 3");
         }
@@ -365,12 +376,20 @@ int main(int argc, char** argv) {
             projv::utils::computeBrickDims(64));
         for (int i = 0; i < 5; ++i)
             projv::utils::brickMapSetVoxel(*brickMap,
-                i * 2, i * 2, i * 2, projv::Color{128, 128, 128});
+                i * 2, i * 2, i * 2, 0);
         projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
+
+        projv::GeometryBlob tmpBlob;
+        projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, tmpBlob, *brickMap);
+
         chunk.header.resolution = 64;
         chunk.header.scale = 32.0f;
 
-        int32_t blobIdx = projv::internChunkGeometry(testScene, chunk);
+        int32_t blobIdx = projv::internChunkGeometry(testScene, chunk, std::move(brickMap));
+        if (blobIdx >= 0 && static_cast<size_t>(blobIdx) < testScene.geometryPool.size()) {
+            testScene.geometryPool[blobIdx].materialIDs = std::move(tmpBlob.materialIDs);
+            testScene.geometryPool[blobIdx].materialPalette = std::move(tmpBlob.materialPalette);
+        }
         check(blobIdx >= 0, "p3-convert: internChunkGeometry succeeded");
         testScene.chunks.push_back(std::move(chunk));
 
@@ -394,8 +413,8 @@ int main(int argc, char** argv) {
         // Queue two adds: one in-bounds (10,10,10), one overflowing (70,0,0).
         // 70 >= 64 triggers overflow conversion.
         std::vector<projv::PendingVoxelOp> adds{
-            {false, {10, 10, 10}, projv::Color{255, 0, 0}},
-            {false, {70, 0, 0},   projv::Color{0, 255, 0}},
+            {false, {10, 10, 10}, 0, {0,0,0}},
+            {false, {70, 0, 0}, 0, {0,0,0}},
         };
         bool ok = projv::utils::queueVoxelAdd(testScene, h, adds);
         check(ok, "p3-convert: queueVoxelAdd returned true");
@@ -457,13 +476,13 @@ int main(int argc, char** argv) {
         // Cell 0 blob: 5 seed + 1 add (in-bounds) = 6 voxels.
         int32_t newPool0 = testScene.chunks[0].geometryPoolIndex;
         if (newPool0 >= 0 && static_cast<size_t>(newPool0) < testScene.geometryPool.size()) {
-            size_t vc = testScene.geometryPool[newPool0].voxelTypeData.size() / 3;
+            size_t vc = testScene.geometryPool[newPool0].materialIDs.size();
             check(vc == 6, "p3-convert: cell 0 has 6 voxels (5 seed + 1 add)");
         }
 
         // New cell at cell 1: 1 add (the overflow at local (6,0,0)).
         if (cell1Pool >= 0 && static_cast<size_t>(cell1Pool) < testScene.geometryPool.size()) {
-            size_t vc = testScene.geometryPool[cell1Pool].voxelTypeData.size() / 3;
+            size_t vc = testScene.geometryPool[cell1Pool].materialIDs.size();
             check(vc == 1, "p3-convert: cell 1 has 1 voxel (overflow add)");
             check(testScene.geometryPool[cell1Pool].refCount == 1,
                   "p3-convert: cell 1 blob refCount == 1");
@@ -515,13 +534,19 @@ int main(int argc, char** argv) {
                 projv::utils::computeBrickDims(64));
             for (auto& p : seedPositions)
                 projv::utils::brickMapSetVoxel(*brickMap,
-                    p.x, p.y, p.z, projv::Color{128, 128, 128});
+                    p.x, p.y, p.z, 0);
             projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
+            projv::GeometryBlob tmpBlob;
+            projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, tmpBlob, *brickMap);
             // Override resolution back to 64 (updateChunkFromBrickMap computes shrinks
             // it to fit the seed span; grid cells need the full data-file resolution).
             chunk.header.resolution = 64;
             chunk.header.scale = 32.0f;
-            projv::internChunkGeometry(testScene, chunk);
+            int32_t blobIdx = projv::internChunkGeometry(testScene, chunk, std::move(brickMap));
+            if (blobIdx >= 0 && static_cast<size_t>(blobIdx) < testScene.geometryPool.size()) {
+                testScene.geometryPool[blobIdx].materialIDs = std::move(tmpBlob.materialIDs);
+                testScene.geometryPool[blobIdx].materialPalette = std::move(tmpBlob.materialPalette);
+            }
             projv::ChunkHandle h = static_cast<projv::ChunkHandle>(testScene.chunks.size());
             testScene.chunks.push_back(std::move(chunk));
             return h;
@@ -574,10 +599,10 @@ int main(int argc, char** argv) {
         // 1 requiring negative expansion (position (-5,5,5), cellCoord = (-1,0,0)).
         // With res=64: floorDiv(5,64)=0, floorDiv(10,64)=0, floorDiv(70,64)=1, floorDiv(-5,64)=-1.
         std::vector<projv::PendingVoxelOp> adds{
-            {false, {5, 5, 5},    projv::Color{255, 0, 0}},
-            {false, {10, 10, 10}, projv::Color{0, 255, 0}},
-            {false, {70, 5, 5},   projv::Color{0, 0, 255}},
-            {false, {-5, 5, 5},   projv::Color{255, 255, 0}},
+            {false, {5, 5, 5}, 0, {0,0,0}},
+            {false, {10, 10, 10}, 0, {0,0,0}},
+            {false, {70, 5, 5}, 0, {0,0,0}},
+            {false, {-5, 5, 5}, 0, {0,0,0}},
         };
         bool ok = projv::utils::queueVoxelAdd(testScene, gridH, adds);
         check(ok, "grid-test: queueVoxelAdd returned true");
@@ -637,14 +662,14 @@ int main(int argc, char** argv) {
             check(testScene.geometryPool[newPool0].refCount == 1,
                   "grid-test: fork 0 refCount == 1");
             // Chunk 0 had 3 seed + 2 adds = 5 voxels.
-            size_t voxCount0 = testScene.geometryPool[newPool0].voxelTypeData.size() / 3;
+            size_t voxCount0 = testScene.geometryPool[newPool0].materialIDs.size();
             check(voxCount0 == 5, "grid-test: chunk 0 has 5 voxels (3 seed + 2 adds)");
         }
         if (newPool1 >= 0 && static_cast<size_t>(newPool1) < testScene.geometryPool.size()) {
             check(testScene.geometryPool[newPool1].refCount == 1,
                   "grid-test: fork 1 refCount == 1");
             // Chunk 1 had 2 seed + 1 add = 3 voxels.
-            size_t voxCount1 = testScene.geometryPool[newPool1].voxelTypeData.size() / 3;
+            size_t voxCount1 = testScene.geometryPool[newPool1].materialIDs.size();
             check(voxCount1 == 3, "grid-test: chunk 1 has 3 voxels (2 seed + 1 add)");
         }
 
@@ -654,7 +679,7 @@ int main(int argc, char** argv) {
         check(newChunkIdx >= 0, "grid-test: new cell chunk exists");
         int32_t newPoolIdx = testScene.chunks[newChunkIdx].geometryPoolIndex;
         if (newPoolIdx >= 0 && static_cast<size_t>(newPoolIdx) < testScene.geometryPool.size()) {
-            size_t voxCount = testScene.geometryPool[newPoolIdx].voxelTypeData.size() / 3;
+            size_t voxCount = testScene.geometryPool[newPoolIdx].materialIDs.size();
             check(voxCount == 1, "grid-test: new cell has 1 voxel");
             check(testScene.geometryPool[newPoolIdx].refCount == 1,
                   "grid-test: new cell blob refCount == 1");
@@ -790,9 +815,11 @@ int main(int argc, char** argv) {
 
     if (g_failures == 0) {
         projv::core::info("Phase 6 editing: all checks passed.");
+        fprintf(stderr, "TESTS PASSED\n");
         return 0;
     } else {
         projv::core::error("Phase 3 editing: {} check(s) failed.", g_failures);
+        fprintf(stderr, "TESTS FAILED: %d\n", g_failures);
         return 1;
     }
 }

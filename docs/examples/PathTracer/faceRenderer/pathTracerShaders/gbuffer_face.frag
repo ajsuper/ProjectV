@@ -96,9 +96,9 @@ void main() {
 
     vec3 p = ray.origin + ray.direction * hit.rayT;
 
-    Voxel voxel = fetchVoxelData(hit.foundBox, hit.headerIndex);
+    vec3 voxelColor = fetchVoxelColor(hit.foundBox, hit.headerIndex);
 
-    gl_FragData[0] = vec4(voxel.color, 1.0);
+    gl_FragData[0] = vec4(voxelColor, 1.0);
     gl_FragData[1] = vec4(p, hit.rayT);
     gl_FragData[2] = vec4(faceCtr, vs);
     gl_FragData[3] = vec4(vidx, faceId);

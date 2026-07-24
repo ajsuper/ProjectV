@@ -29,7 +29,7 @@
 
 // World-space DDA gather tuning (WS-only; kept out of the shared common header). Each cascade
 // texel casts one gather ray (+ a sun shadow ray on hit), so these are the main perf knobs.
-#define WS_STEPS       60u   // Max DDA steps per gather ray (bounds cost; interval-clamped).
+#define WS_STEPS       48u   // Max DDA steps per gather ray (bounds cost; interval-clamped).
 #define WS_FINISH_LOD  1     // Coarsen distant geometry so the longer far-cascade rays stay cheap.
 #define WS_LOD_DIST    45    // Voxels from the ray start before finishLOD kicks in.
 
@@ -49,7 +49,7 @@
 // MISS (== lit), so shortening it errs toward slight over-LIGHTING of long-shadowed nooks, never the
 // over-DARKENING that a coarse LOD would cause (which is why the LOD stays finest). 48 keeps local
 // contact shadows; only shadows cast from >~48 voxels away soften.
-#define SUN_SHADOW_STEPS 60u
+#define SUN_SHADOW_STEPS 48u
 // Cascades with index <= this get a real shadowed bounce; FARTHER cascades (bigger, most gather hits)
 // use the UNSHADOWED bounce -- no shadow ray at all. Their bounce is a coarse far-field contribution
 // where a missing self-shadow is barely visible, and skipping it removes the most shadow rays. 1 =
@@ -137,8 +137,8 @@ vec4 gatherRayWS(vec3 P, vec3 N, vec3 dir, int c, float vs) {
         }
         vec3  hP = ray.origin + dir * h.rayT;
         vec3  hN = normalize(h.normal);
-        Voxel v  = fetchVoxelData(h.foundBox, h.headerIndex);
-        return vec4(directSunWS(hP, hN, v.color, c), 0.0);   // bounced sun (shadowed on near cascades)
+        vec3 v  = fetchVoxelColor(h.foundBox, h.headerIndex);
+        return vec4(directSunWS(hP, hN, v, c), 0.0);   // bounced sun (shadowed on near cascades)
     }
     return vec4(0.0, 0.0, 0.0, 1.0);                       // passed through -> transparent
 }

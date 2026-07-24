@@ -28,6 +28,7 @@ USED_LIBRARIES := \
     -lprojectV-compose_io \
     -lprojectV-scene_query \
     -lprojectV-voxel_management \
+    -lprojectV-material \
     -lprojectV-voxel_math \
     -lprojectV-math \
     -lprojectV-disk_io \

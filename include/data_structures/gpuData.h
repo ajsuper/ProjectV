@@ -18,60 +18,61 @@ namespace projv {
     // reallocation. The extra slack is sized relative to the blob's actual data (e.g. 25% + 64 min).
     // The allocator and texture headroom both account for this padding via `withHeadroom(paddedUsed)`.
     struct GPUBlobRange {
-        uint32_t geomTexelOffset = 0;     // start texel in the tree64 texture; == header.geometryStartIndex
-        uint32_t geomTexelLen = 0;        // node count actually used (1 node = 1 RGB texel)
-        uint32_t geomTexelAllocated = 0;  // padded allocation; >= geomTexelLen; range is [offset, offset+allocated)
-        uint32_t typeTexelOffset = 0;     // start texel in the voxelType texture; *4 == header voxelType start
-        uint32_t typeTexelLen = 0;        // used texels (ceil(typeUintLen / 4))
-        uint32_t typeTexelAllocated = 0;  // padded allocation; >= typeTexelLen
-        uint32_t typeUintLen = 0;         // actual voxelType uint count (header end = start + this)
-        bool uploaded = false;            // false for an unreferenced/free pool slot
+        uint32_t geomTexelOffset = 0;
+        uint32_t geomTexelLen = 0;
+        uint32_t geomTexelAllocated = 0;
+        uint32_t matTexelOffset = 0;
+        uint32_t matTexelLen = 0;
+        uint32_t matTexelAllocated = 0;
+        uint32_t matByteLen = 0;
+        uint32_t paletteOffset = 0; // offset of this blob's palette in the global palette texture
+        bool uploaded = false;
     };
 
     struct GPUData {
         bgfx::TextureHandle tree64Texture = BGFX_INVALID_HANDLE;
-        bgfx::TextureHandle voxelTypeDataTexture = BGFX_INVALID_HANDLE;
+        bgfx::TextureHandle materialIDTexture = BGFX_INVALID_HANDLE;
+        bgfx::TextureHandle materialPaletteTexture = BGFX_INVALID_HANDLE;
         bgfx::TextureHandle headerTexture = BGFX_INVALID_HANDLE;
-        bgfx::TextureHandle gridInfoTexture = BGFX_INVALID_HANDLE;   // Top-level grid descriptors + scene counts.
-        bgfx::TextureHandle cellMapTexture = BGFX_INVALID_HANDLE;    // Per-grid cell -> chunk index maps.
-        bgfx::TextureHandle looseListTexture = BGFX_INVALID_HANDLE;  // Explicit list of loose chunk handles the shader iterates.
+        bgfx::TextureHandle gridInfoTexture = BGFX_INVALID_HANDLE;
+        bgfx::TextureHandle cellMapTexture = BGFX_INVALID_HANDLE;
+        bgfx::TextureHandle looseListTexture = BGFX_INVALID_HANDLE;
 
         bgfx::UniformHandle tree64Sampler = BGFX_INVALID_HANDLE;
-        bgfx::UniformHandle voxelTypeDataSampler = BGFX_INVALID_HANDLE;
+        bgfx::UniformHandle materialIDSampler = BGFX_INVALID_HANDLE;
+        bgfx::UniformHandle materialPaletteSampler = BGFX_INVALID_HANDLE;
         bgfx::UniformHandle headerSampler = BGFX_INVALID_HANDLE;
         bgfx::UniformHandle gridInfoSampler = BGFX_INVALID_HANDLE;
         bgfx::UniformHandle cellMapSampler = BGFX_INVALID_HANDLE;
         bgfx::UniformHandle looseListSampler = BGFX_INVALID_HANDLE;
         bgfx::UniformHandle tree64DimsUniform = BGFX_INVALID_HANDLE;
-        bgfx::UniformHandle voxelTypeDimsUniform = BGFX_INVALID_HANDLE;
+        bgfx::UniformHandle materialIDDimsUniform = BGFX_INVALID_HANDLE;
+        bgfx::UniformHandle paletteDimsUniform = BGFX_INVALID_HANDLE;
 
-        // --- Persistent layout state (managed pools) ---
-        // Suballocators over the two geometry data textures. Units are texels: tree64 = 1 node per RGB
-        // texel; voxelType = 4 uints per RGBA texel. Freeing a blob returns its range here for reuse.
         graphics::RangeAllocator tree64Alloc;
-        graphics::RangeAllocator voxelTypeAlloc;
-        // Backing texture dimensions (texels). capacity == width*height; a grow recreates the texture.
+        graphics::RangeAllocator materialIDAlloc;
         uint32_t tree64Width = 0, tree64Height = 0;
-        uint32_t voxelTypeWidth = 0, voxelTypeHeight = 0;
+        uint32_t materialIDWidth = 0, materialIDHeight = 0;
 
-        // Header texture is a single row of (capacity*4) texels; a chunk's handle IS its 4-texel slot.
+        uint32_t paletteWidth = 0; // width of material palette texture (1D, RGBA32U, 4 colors per texel)
+
         uint32_t headerCapacity = 0;
 
-        // Loose-list texture (RGBA, 4 handles per texel), a compact list of `looseCount` live handles.
         uint32_t looseCount = 0;
         uint32_t looseCapacity = 0;
 
-        // Scene-table texture dimensions (tracked for in-place update vs destroy+regrow).
-        // gridInfo is a 1-row texture; cellMap and looseList are 2D.
         uint32_t gridInfoTexWidth = 0;
         uint32_t cellMapTexWidth = 0, cellMapTexHeight = 0;
         uint32_t looseListTexWidth = 0, looseListTexHeight = 0;
 
-        // P5: chunk handles < uploadedChunkCount have been uploaded at least once.
-        // New chunks (handle >= this watermark) need their first header row written.
         uint32_t uploadedChunkCount = 0;
 
-        // Per-pool-blob GPU location; parallel to Scene.geometryPool.
+        // Palette version counter: incremented when any blob's palette changes.
+        // The palette texture is only rebuilt when the version changes, avoiding
+        // unnecessary texture recreation every frame.
+        uint32_t paletteVersion = 0;
+        uint32_t paletteSizeOnLastBuild = 0;
+
         std::vector<GPUBlobRange> blobRanges;
     };
 }

@@ -36,7 +36,7 @@ namespace projv{
      */
     struct BrickData {
         uint64_t mask[BRICK_MASK_ROWS] = {};  // 4096 rows x 64 bits = 262144 bits
-        std::unordered_map<uint32_t, uint32_t> colors;  // Z-order-in-brick -> packed RGBA
+        std::unordered_map<uint32_t, uint8_t> materials;  // Z-order-in-brick -> materialID
     };
 
     /**

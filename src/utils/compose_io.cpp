@@ -1,4 +1,5 @@
 #include "utils/compose_io.h"
+#include "utils/material.h"
 
 #include <chrono>
 #include <fstream>
@@ -494,9 +495,22 @@ namespace projv::utils {
                             int32_t idx = static_cast<int32_t>(geometryPool.size());
                             GeometryBlob gb;
                             gb.geometry         = block.geometry;
-                            gb.voxelTypeData    = block.voxelTypeData;
                             gb.sourceDataPath   = resolved;
                             gb.sourceBlockCoord = core::ivec3(block.gridX, block.gridY, block.gridZ);
+
+                            // Convert old voxelTypeData to material format.
+                            if (!block.voxelTypeData.empty()) {
+                                core::ivec3 brickDims = computeBrickDims(dataFile.resolution);
+                                auto brickMap = createVoxelBrickMap(brickDims);
+                                brickMapFromVoxelTypeData(*brickMap, block.voxelTypeData, gb);
+                                gb.geometry = buildTree64FromBrickMap(*brickMap, static_cast<int>(dataFile.resolution));
+                                gb.brickMap = std::move(brickMap);
+                                bakeMaterialsFromBrickMap(gb.geometry, gb, *gb.brickMap);
+                            } else {
+                                gb.materialIDs.clear();
+                                gb.materialPalette.clear();
+                            }
+
                             geometryPool.push_back(std::move(gb));
                             poolIt = poolKeyToIndex.emplace(poolKey, idx).first;
                         }

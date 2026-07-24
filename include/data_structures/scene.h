@@ -10,6 +10,15 @@
 #include "data_structures/voxel.h"
 
 namespace projv{
+
+    constexpr uint32_t MAX_MATERIALS_PER_BLOB = 256u;
+    constexpr uint8_t  INVALID_MATERIAL = 255u;
+
+    struct Material {
+        uint32_t packedColor = 0;
+        uint32_t _pad = 0;
+        std::string name;
+    };
     // Stable slot handle for a chunk. A chunk keeps its handle for its whole life, and the handle IS
     // its row in the GPU header texture and its index into Scene.chunks. Grids and the loose list
     // reference chunks by handle so add/remove never has to rebase anything. See Scene below.
@@ -28,7 +37,8 @@ namespace projv{
     struct PendingVoxelOp {
         bool         isAdd;
         core::ivec3  position;
-        Color        color;
+        uint8_t      materialID;              // was: Color color
+        uint8_t      _pad[3];                 // padding
     };
 
     // Per-component edit queue. P1: drained by updateScene; cleared after drain.
@@ -87,7 +97,7 @@ namespace projv{
     };
 
     #pragma pack(push, 1)
-    struct GPUChunkHeader { // Not designed to be user interfacable on CPU. Only exists during runtime, mainly on GPU. Only the necessary information for rendering.
+    struct GPUChunkHeader {
         uint32_t chunkID;
         float positionX;
         float positionY;
@@ -96,11 +106,10 @@ namespace projv{
         uint32_t resolution;
         uint32_t geometryStartIndex;
         uint32_t geometryEndIndex;
-        uint32_t voxelTypeDataStartIndex;
-        uint32_t voxelTypeDataEndIndex;
+        uint32_t materialIDStartIndex;      // index into materialID texture (in bytes)
+        uint32_t materialIDEndIndex;        // end index (exclusive, in bytes)
         uint32_t dataRefID;
-        uint32_t padding[1];
-        // 4th texel: world rotation quaternion [x, y, z, w]. Identity = (0,0,0,1).
+        uint32_t paletteOffset; // replaced padding[1]: per-blob offset into global palette
         float rotationX;
         float rotationY;
         float rotationZ;
@@ -111,7 +120,6 @@ namespace projv{
     struct Chunk { // Only exists during runtime. Contains all of the header data and our geometry and color data, along with any extra runtime data not used in rendering.
         ChunkHeader header;
         std::vector<uint32_t> geometryData;
-        std::vector<uint32_t> voxelTypeData;
         uint32_t LOD;
         // Instancing: when >= 0, this chunk's geometry lives once in Scene.geometryPool[idx]
         // (shared across every instance of the same .data block) and geometryData/voxelTypeData
@@ -139,12 +147,13 @@ namespace projv{
     };
 
     // One unique geometry blob shared across chunk instances. See Scene.geometryPool.
-    struct GeometryBlob {
+    struct Material;
+
+struct GeometryBlob {
         std::vector<uint32_t> geometry;
-        std::vector<uint32_t> voxelTypeData;
-        // VoxelBrickMap for editable representation. Null for unedited blobs.
-        // Populated on first edit; used for O(1) direct voxel writes instead of
-        // the old VoxelBatch decompress-modify-recompress cycle.
+        std::vector<uint8_t>  materialIDs;
+        std::vector<Material> materialPalette;
+        std::vector<uint32_t> voxelTypeData; // DEPRECATED: kept for backward compat, will be removed
         std::unique_ptr<VoxelBrickMap> brickMap;
 
         GeometryBlob() = default;
@@ -168,6 +177,9 @@ namespace projv{
         // P5: true when the blob's GPU content is stale (newly forked, interned, or content changed).
         // Cleared by flushSceneUpdates after the incremental upload.
         bool dirty = false;
+        // Incremented each time materialPalette is modified. Used to avoid unnecessary
+        // palette texture rebuilds in uploadDirtyBlobs.
+        uint32_t paletteVersion = 0;
     };
     
     // A uniform grid of equal, grid-aligned chunks (one .data grid volume). Enables a
@@ -227,15 +239,15 @@ namespace projv{
     // and points the chunk at it, so every chunk flows through the single pooled path. No-op (returns
     // the existing index) if the chunk is already pooled. Used by the voxelizer and defensively by
     // the GPU builder to guarantee no chunk reaches the GPU with geometryPoolIndex < 0.
-    inline int32_t internChunkGeometry(Scene& scene, Chunk& chunk) {
+    inline int32_t internChunkGeometry(Scene& scene, Chunk& chunk,
+                                       std::unique_ptr<VoxelBrickMap> brickMap = nullptr) {
         if (chunk.geometryPoolIndex >= 0) return chunk.geometryPoolIndex;
         GeometryBlob blob;
         blob.geometry = std::move(chunk.geometryData);
-        blob.voxelTypeData = std::move(chunk.voxelTypeData);
+        if (brickMap) blob.brickMap = std::move(brickMap);
         blob.refCount = 1;
-        blob.dirty = true; // P5: new blob, needs GPU upload
+        blob.dirty = true;
         chunk.geometryData.clear();
-        chunk.voxelTypeData.clear();
         chunk.geometryPoolIndex = poolInsertBlob(scene, std::move(blob));
         return chunk.geometryPoolIndex;
     }

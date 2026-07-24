@@ -137,8 +137,8 @@ vec4 gatherRayWS(vec3 P, vec3 N, vec3 dir, int c, float vs) {
         }
         vec3  hP = ray.origin + dir * h.rayT;
         vec3  hN = normalize(h.normal);
-        Voxel v  = fetchVoxelData(h.foundBox, h.headerIndex);
-        return vec4(directSunWS(hP, hN, v.color, c), 0.0);   // bounced sun (shadowed on near cascades)
+        vec3 v  = fetchVoxelColor(h.foundBox, h.headerIndex);
+        return vec4(directSunWS(hP, hN, v, c), 0.0);   // bounced sun (shadowed on near cascades)
     }
     return vec4(0.0, 0.0, 0.0, 1.0);                       // passed through -> transparent
 }

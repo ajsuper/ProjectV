@@ -142,8 +142,7 @@ Hit traceScene(Ray ray, uint maxSteps, bool secondary) {
     h.distance = sceneHit.rayT;
     h.normal = normalize(nrm);
     h.position = ray.origin + ray.direction * sceneHit.rayT;
-    Voxel voxel = fetchVoxelData(sceneHit.foundBox, sceneHit.headerIndex);
-    h.albedo = voxel.color;
+    h.albedo = fetchVoxelColor(sceneHit.foundBox, sceneHit.headerIndex);
     return h;
 }
 

@@ -28,6 +28,7 @@ USED_LIBRARIES := \
     -lprojectV-compose_io \
     -lprojectV-scene_query \
     -lprojectV-voxel_management \
+    -lprojectV-material \
     -lprojectV-voxel_math \
     -lprojectV-math \
     -lprojectV-disk_io \
@@ -48,7 +49,7 @@ BGFX_LIBRARIES := \
 # Compiler and Flags
 # ========================
 CXX ?= g++
-CXXFLAGS := -O3 --std=c++17 -DPROJV_ENABLE_INFO -DPROJV_ENABLE_PERF $(INCLUDE_DIRS)
+CXXFLAGS := -O3 --std=c++17 -march=native -DPROJV_ENABLE_INFO -DPROJV_ENABLE_PERF $(INCLUDE_DIRS)
 LDFLAGS := $(LIB_DIR) $(USED_LIBRARIES) $(BGFX_LIBRARIES)
 
 # ========================

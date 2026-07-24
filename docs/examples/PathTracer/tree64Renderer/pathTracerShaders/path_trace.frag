@@ -145,8 +145,7 @@ returnStruct castRay(vec2 uv_coord, GBuffer gBuffer) {
 
         vec3 albedo = vec3(1);
 
-        Voxel voxel = fetchVoxelData(intersectHit.foundBox, intersectHit.headerIndex);
-        albedo = voxel.color; 
+        albedo = fetchVoxelColor(intersectHit.foundBox, intersectHit.headerIndex);
        //vec3 albedo = vec3(1.0, 0.8, 1.0);
 
         specularChance = 0.6;
@@ -342,8 +341,7 @@ GBuffer renderGBuffer(vec2 uv_coord) {
     // Calculate the world space point that our ray intersects the scene. Do a small offset by the normal to account for imprecision in ray marching algorithm.
     vec3 intersectPoint = ray.origin + ray.direction * voxelIntersection.distance + voxelIntersection.normal * 0.001f;
 
-    Voxel voxel = fetchVoxelData(intersectHit.foundBox, intersectHit.headerIndex);
-    vec3 albedo = voxel.color;
+    vec3 albedo = fetchVoxelColor(intersectHit.foundBox, intersectHit.headerIndex);
     //vec3 albedo = vec3(1);
 
     gBuffer.albedo = vec4(albedo, voxelIntersection.distance);

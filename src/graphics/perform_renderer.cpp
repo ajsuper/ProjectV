@@ -128,12 +128,13 @@ namespace projv::graphics {
                 constructedRenderer->resources.framebuffers.primaryWasLastRenderedToo[renderPass.targetFrameBufferID] = !constructedRenderer->resources.framebuffers.primaryWasLastRenderedToo[renderPass.targetFrameBufferID];
             }
 
-            bgfx::setTexture(13, gpuData->tree64Sampler, gpuData->tree64Texture);
-            bgfx::setTexture(14, gpuData->voxelTypeDataSampler, gpuData->voxelTypeDataTexture);
+            bgfx::setTexture(14, gpuData->tree64Sampler, gpuData->tree64Texture);
+            bgfx::setTexture(9, gpuData->materialIDSampler, gpuData->materialIDTexture);
+            bgfx::setTexture(10, gpuData->materialPaletteSampler, gpuData->materialPaletteTexture);
             bgfx::setTexture(15, gpuData->headerSampler, gpuData->headerTexture);
-            bgfx::setTexture(11, gpuData->gridInfoSampler, gpuData->gridInfoTexture);
-            bgfx::setTexture(12, gpuData->cellMapSampler, gpuData->cellMapTexture);
-            bgfx::setTexture(10, gpuData->looseListSampler, gpuData->looseListTexture);
+            bgfx::setTexture(12, gpuData->gridInfoSampler, gpuData->gridInfoTexture);
+            bgfx::setTexture(13, gpuData->cellMapSampler, gpuData->cellMapTexture);
+            bgfx::setTexture(11, gpuData->looseListSampler, gpuData->looseListTexture);
 
             {
                 float tree64Dims[4] = {
@@ -145,11 +146,19 @@ namespace projv::graphics {
             }
             {
                 float voxelTypeDims[4] = {
-                    static_cast<float>(gpuData->voxelTypeWidth),
-                    std::log2(static_cast<float>(gpuData->voxelTypeWidth)),
+                    static_cast<float>(gpuData->materialIDWidth),
+                    std::log2(static_cast<float>(gpuData->materialIDWidth)),
                     0.0f, 0.0f
                 };
-                bgfx::setUniform(gpuData->voxelTypeDimsUniform, voxelTypeDims);
+                bgfx::setUniform(gpuData->materialIDDimsUniform, voxelTypeDims);
+            }
+            {
+                float paletteDims[4] = {
+                    static_cast<float>(gpuData->paletteWidth),
+                    std::log2(static_cast<float>(gpuData->paletteWidth)),
+                    0.0f, 0.0f
+                };
+                bgfx::setUniform(gpuData->paletteDimsUniform, paletteDims);
             }
 
             bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);  

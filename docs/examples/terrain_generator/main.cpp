@@ -31,8 +31,9 @@
 #include "utils/compose_io.h"
 #include "utils/editing.h"
 #include "utils/voxel_management.h"
+#include "utils/material.h"
 
-#include "noise.hpp"
+#include "terrain_noise.hpp"
 
 #include <dlfcn.h>
 #include "renderdoc_app.h"
@@ -43,6 +44,7 @@
 namespace fs = std::filesystem;
 
 static inline float lerpf(float a, float b, float t) { return a + t * (b - a); }
+static inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 struct ivec3_hash { size_t operator()(const projv::core::ivec3& v) const { return size_t(v.x) * 73856093 ^ size_t(v.y) * 19349663 ^ size_t(v.z) * 83492791; } };
 
@@ -94,37 +96,36 @@ struct ChunkWorkItem {
 struct ProcessedChunk {
     projv::core::ivec3 coord;
     projv::Chunk chunk;
+    std::vector<uint8_t> materialIDs;       // baked material IDs
+    std::vector<projv::Material> materialPalette;  // baked palette
     bool empty = false;  // true if the batch was empty (no geometry to intern)
 };
 
 struct WorkerState {
     std::mutex workMutex;
+    std::condition_variable workCv;
     std::vector<ChunkWorkItem> workQueue;
     std::mutex resultMutex;
     std::vector<ProcessedChunk> readyChunks;
     std::atomic<bool> running{true};
+    std::vector<std::thread> threads;
+    int numThreads = 1;
 };
 
 static WorkerState g_worker;
 
 struct TerrainState {
-    static constexpr int kChunkRes    = 64;
-    static constexpr float kVoxelScale = 1.0f;
+    static constexpr int kChunkRes    = 256;
+    static constexpr float kVoxelScale = 3.0f;
     static constexpr float kChunkSize  = kChunkRes * kVoxelScale;
     static constexpr int   kViewRadius = 8;
-    static constexpr int   kMaxNewPerFrame = 1;
-    static constexpr int   kBootstrapBatch = 40;
+    static constexpr int   kMaxNewPerFrame = 2;
+    static constexpr int   kBootstrapBatch = 5;
 
     static constexpr float kWaterLevel = 400.0f;
-    static constexpr float kBeachLevel = 450.0f;
-    static constexpr float kPlainsLevel = 550.0f;
-    static constexpr float kHillsLevel = 700.0f;
-    static constexpr float kMountainLevel = 850.0f;
-    static constexpr float kSnowLevel = 950.0f;
 
-    siv::PerlinNoise terrainNoise;
-    siv::PerlinNoise moistureNoise;
-
+    terrain_noise::Generator noiseGen;
+    terrain_noise::BlendParams blendParams;
     int seed = 133;
 
     // Grid
@@ -148,90 +149,137 @@ static int chunkCoordToLin(projv::core::ivec3 coord, const projv::SceneGrid& gri
     return cell.x + grid.dims.x * (cell.y + grid.dims.y * cell.z);
 }
 
-static float terrainHeight(float worldX, float worldZ, TerrainState& ts) {
-    float nx = worldX * 0.004f;
-    float nz = worldZ * 0.004f;
-    float n = float(ts.terrainNoise.normalizedOctave2D(nx, nz, 4, 0.55f));
-    float ridged = 1.0f - std::abs(n);
-    return n * 300.0f + 450.0f + ridged * 120.0f;
-}
+static constexpr int kFillDepth = 100;
 
-static float terrainMoisture(float worldX, float worldZ, TerrainState& ts) {
-    float nx = worldX * 0.01f + 100.0f;
-    float nz = worldZ * 0.01f - 50.0f;
-    return float(ts.moistureNoise.octave2D(nx, nz, 2, 0.55f));
-}
+static projv::Color surfaceColor(const terrain_noise::TerrainSample& sample, int worldY) {
+    float height = sample.height;
+    float t = sample.temp;
+    float h = sample.humid;
+    int wl = int(TerrainState::kWaterLevel);
 
-static projv::Color biomeColor(float height, float moisture, int y, float frac) {
-    if (y < TerrainState::kWaterLevel - 3.0f) {
+    if (worldY < wl - 3) {
         return projv::Color{15, 25, 110};
     }
-    if (y < TerrainState::kWaterLevel) {
-        float df = float(y) / TerrainState::kWaterLevel;
+    if (worldY < wl) {
+        float df = float(worldY) / float(wl);
         return projv::Color{uint8_t(38), uint8_t(80), uint8_t(uint8_t(lerpf(140, 100, df)))};
     }
-    if (y < TerrainState::kBeachLevel) {
-        return projv::Color{210, 196, 135};
+
+    // Climate-driven material blending (simplified from TerrainTest's surfaceColor)
+    float altN = clampf((height - float(wl)) / terrain_noise::MAX_HEIGHT, 0.0f, 1.0f);
+
+    // Rock
+    float redW = clampf((1.0f - h * 2.5f) * (t * 3.0f - 0.8f), 0.0f, 1.0f);
+    float darkW = clampf(h * 2.0f - 0.3f, 0.0f, 1.0f) * (1.0f - redW);
+    float paleW = clampf((1.0f - t) * 2.5f - 0.5f, 0.0f, 1.0f) * (1.0f - redW) * (1.0f - darkW);
+    float tempW = clampf(1.0f - redW - darkW - paleW, 0.0f, 1.0f);
+    float rSum = redW + darkW + paleW + tempW;
+    projv::core::vec3 rockColor = (projv::core::vec3{0.78f, 0.42f, 0.24f} * redW
+                    + projv::core::vec3{0.26f, 0.28f, 0.31f} * darkW
+                    + projv::core::vec3{0.88f, 0.90f, 0.95f} * paleW
+                    + projv::core::vec3{0.52f, 0.48f, 0.42f} * tempW) * (1.0f / rSum);
+
+    // Simplified material affinities
+    struct Mat { projv::core::vec3 color; float tC, tW, hC, hW, aC, aW, rockBias, bias; };
+    using vec3 = projv::core::vec3;
+    const Mat mats[] = {
+        {{1.00f,0.84f,0.32f},  0.92f,0.18f, 0.05f,0.18f, 0.30f,4.0f, -0.5f,  0.08f}, // hot sand
+        {{0.92f,0.60f,0.16f},  0.74f,0.20f, 0.25f,0.20f, 0.30f,4.0f, -0.3f,  0.00f}, // savanna
+        {{0.74f,0.46f,0.18f},  0.62f,0.18f, 0.15f,0.18f, 0.30f,4.0f, -0.1f,  0.00f}, // scrub
+        {{0.30f,0.65f,0.20f},  0.50f,0.24f, 0.55f,0.24f, 0.30f,4.0f, -0.4f,  0.05f}, // grassland
+        {{0.10f,0.40f,0.08f},  0.44f,0.18f, 0.82f,0.20f, 0.30f,4.0f, -0.6f,  0.05f}, // forest
+        {{0.04f,0.28f,0.05f},  0.90f,0.16f, 0.93f,0.16f, 0.30f,4.0f, -0.6f,  0.08f}, // jungle
+        {{0.12f,0.34f,0.24f},  0.28f,0.18f, 0.75f,0.20f, 0.30f,4.0f, -0.4f,  0.05f}, // taiga
+        {{0.96f,0.98f,1.00f},  0.10f,0.22f, 0.40f,0.22f, 0.30f,4.0f, -0.1f,  0.00f}, // tundra
+        {{0.93f,0.96f,1.00f},  0.12f,0.22f, 0.07f,0.20f, 0.30f,4.0f,  0.0f,  0.00f}, // cold desert
+        {{1.00f,1.00f,1.00f},  0.50f,1.40f, 0.50f,1.40f, 0.30f,4.0f,  3.2f, -2.9f}, // rock
+        {{1.00f,1.00f,1.00f},  0.02f,0.28f, 0.72f,0.28f, 0.30f,4.0f, -0.7f,  0.50f}, // snow
+        {{0.82f,0.94f,1.00f},  0.00f,0.10f, 0.93f,0.14f, 0.30f,4.0f, -0.5f,  0.20f}, // glacial ice
+        {{0.88f,0.82f,0.60f},  0.55f,1.40f, 0.50f,1.40f, 0.004f,0.018f,-0.8f, -0.4f}, // beach
+    };
+    constexpr int kRockMat = 9;
+    constexpr float kSharpness = 2.6f;
+
+    vec3 acc{0, 0, 0};
+    float total = 0.0f;
+    for (int i = 0; i < 13; ++i) {
+        const Mat& m = mats[i];
+        float dt = (t - m.tC) / m.tW;
+        float dh = (h - m.hC) / m.hW;
+        float da = (altN - m.aC) / m.aW;
+        float aff = std::exp(m.bias - kSharpness * (dt * dt + dh * dh + da * da));
+        acc += (i == kRockMat ? rockColor : m.color) * aff;
+        total += aff;
     }
-    if (y < TerrainState::kPlainsLevel) {
-        if (moisture > 0.35f) return projv::Color{44, 128, 45};
-        if (moisture > -0.2f) return projv::Color{74, 153, 55};
-        return projv::Color{130, 150, 60};
-    }
-    if (y < TerrainState::kHillsLevel) {
-        if (moisture > 0.3f) return projv::Color{28, 92, 38};
-        return projv::Color{55, 110, 48};
-    }
-    if (y < TerrainState::kMountainLevel) {
-        return projv::Color{uint8_t(lerpf(90, 135, frac)), uint8_t(lerpf(90, 130, frac)), uint8_t(lerpf(85, 125, frac))};
-    }
-    if (y < TerrainState::kSnowLevel) {
-        return projv::Color{180, 180, 185};
-    }
-    return projv::Color{240, 245, 255};
+    vec3 col = total > 1e-6f ? acc * (1.0f / total) : vec3{0.5f, 0.5f, 0.5f};
+
+    float grey = col.x * 0.299f + col.y * 0.587f + col.z * 0.114f;
+    col = vec3{clampf(grey + (col.x - grey) * 1.0f, 0.0f, 1.0f),
+               clampf(grey + (col.y - grey) * 1.0f, 0.0f, 1.0f),
+               clampf(grey + (col.z - grey) * 1.0f, 0.0f, 1.0f)};
+
+    return projv::Color{uint8_t(col.x * 255.0f), uint8_t(col.y * 255.0f), uint8_t(col.z * 255.0f)};
 }
 
-static void generateChunkVoxels(projv::core::ivec3 coord, projv::VoxelBrickMap& map, TerrainState& ts) {
+static void generateChunkVoxels(projv::core::ivec3 coord, projv::VoxelBrickMap& map, projv::GeometryBlob& blob, TerrainState& ts) {
     float ox = float(coord.x) * TerrainState::kChunkSize;
     float oz = float(coord.z) * TerrainState::kChunkSize;
     float oy = float(coord.y) * TerrainState::kChunkSize;
     int res = TerrainState::kChunkRes;
+    float vs = TerrainState::kVoxelScale;
     int wl = int(TerrainState::kWaterLevel);
-    int localWL = wl - int(oy);
+    int localWL = int(std::floor((wl - oy) / vs));
 
     for (int lz = 0; lz < res; ++lz) {
-        float wz = oz + float(lz);
+        float wz = oz + float(lz) * vs;
         for (int lx = 0; lx < res; ++lx) {
-            float wx = ox + float(lx);
-            float worldH = terrainHeight(wx, wz, ts);
-            int topLocalY = int(worldH - oy);
+            float wx = ox + float(lx) * vs;
+            terrain_noise::TerrainSample sample = terrain_noise::sampleTerrain(ts.noiseGen, ts.blendParams, wx, wz);
+            float worldH = sample.height;
+            int topLocalY = int(std::floor((worldH - oy) / vs));
 
             if (topLocalY < 0) {
-                if (localWL >= 0 && localWL < res)
-                    projv::utils::brickMapSetVoxel(map, lx, localWL, lz, projv::Color{30, 60, 155});
+                // Surface below chunk - only water
+                if (worldH < float(wl)) {
+                    int waterSurfaceLocal = localWL;
+                    if (waterSurfaceLocal >= res) waterSurfaceLocal = res - 1;
+                    if (waterSurfaceLocal >= 0) {
+                        uint32_t wpacked = projv::packColor(projv::Color{30, 60, 155});
+                        uint8_t wmatID = projv::utils::internMaterial(blob, "water", wpacked);
+                        for (int ly = 0; ly <= waterSurfaceLocal; ++ly) {
+                            projv::utils::brickMapSetVoxel(map, lx, ly, lz, wmatID);
+                        }
+                    }
+                }
                 continue;
             }
 
             if (topLocalY >= res) continue;
 
-            int worldTopY = int(worldH);
-            float moisture = terrainMoisture(wx, wz, ts);
+            // Surface color
+            projv::Color col = surfaceColor(sample, int(worldH));
+            uint32_t packed = projv::packColor(col);
+            uint8_t matID = projv::utils::internMaterial(blob, "", packed);
+            projv::utils::brickMapSetVoxel(map, lx, topLocalY, lz, matID);
 
-            for (int ly = 0; ly <= topLocalY; ++ly) {
-                projv::Color col;
-                if (ly == topLocalY) {
-                    col = biomeColor(worldH, moisture, worldTopY, 1.0f);
-                } else if (ly >= topLocalY - 4) {
-                    col = biomeColor(worldH, moisture, worldTopY, 0.3f);
-                } else {
-                    col = projv::Color{80, 75, 70};
-                }
-                projv::utils::brickMapSetVoxel(map, lx, ly, lz, col);
+            // Fill ~30 voxels below surface with the same color (hollow terrain below that)
+            int bottomFill = std::max(topLocalY - kFillDepth, 0);
+            for (int ly = bottomFill; ly < topLocalY; ++ly) {
+                projv::utils::brickMapSetVoxel(map, lx, ly, lz, matID);
             }
 
-            if (localWL >= 0 && localWL < res && worldH < float(wl)) {
-                for (int ly = topLocalY + 1; ly <= localWL; ++ly) {
-                    projv::utils::brickMapSetVoxel(map, lx, ly, lz, projv::Color{30, 60, 155});
+            // Water: fill from above terrain up to water surface
+            if (worldH < float(wl)) {
+                int waterSurfaceLocal = localWL;
+                if (waterSurfaceLocal < 0) continue; // water surface below chunk
+                if (waterSurfaceLocal >= res) waterSurfaceLocal = res - 1; // water surface above chunk
+                int waterBottom = std::max(topLocalY + 1, 0);
+                if (waterBottom <= waterSurfaceLocal) {
+                    uint32_t wpacked = projv::packColor(projv::Color{30, 60, 155});
+                    uint8_t wmatID = projv::utils::internMaterial(blob, "water", wpacked);
+                    for (int ly = waterBottom; ly <= waterSurfaceLocal; ++ly) {
+                        projv::utils::brickMapSetVoxel(map, lx, ly, lz, wmatID);
+                    }
                 }
             }
         }
@@ -243,7 +291,10 @@ static void terrainWorkerFunc(TerrainState& ts) {
         ChunkWorkItem item;
         bool gotWork = false;
         {
-            std::lock_guard<std::mutex> lock(g_worker.workMutex);
+            std::unique_lock<std::mutex> lock(g_worker.workMutex);
+            g_worker.workCv.wait_for(lock, std::chrono::milliseconds(10),
+                [&]{ return !g_worker.workQueue.empty() || !g_worker.running.load(std::memory_order_relaxed); });
+            if (!g_worker.running.load(std::memory_order_relaxed)) return;
             if (!g_worker.workQueue.empty()) {
                 item = g_worker.workQueue.back();
                 g_worker.workQueue.pop_back();
@@ -254,7 +305,8 @@ static void terrainWorkerFunc(TerrainState& ts) {
             int res = TerrainState::kChunkRes;
             auto brickMap = projv::utils::createVoxelBrickMap(
                 projv::utils::computeBrickDims(res));
-            generateChunkVoxels(item.coord, *brickMap, ts);
+            projv::GeometryBlob tempBlob;
+            generateChunkVoxels(item.coord, *brickMap, tempBlob, ts);
             ProcessedChunk result;
             result.coord = item.coord;
             bool hasVoxels = false;
@@ -275,14 +327,16 @@ static void terrainWorkerFunc(TerrainState& ts) {
                 result.chunk = projv::utils::createChunk(hdr);
                 result.chunk.gridIndex = ts.gridIndex;
                 projv::utils::updateChunkFromBrickMap(result.chunk, *brickMap);
+                // Bake materials into the geometry's leaf nodes.
+                projv::utils::bakeMaterialsFromBrickMap(result.chunk.geometryData, tempBlob, *brickMap);
+                result.materialIDs = std::move(tempBlob.materialIDs);
+                result.materialPalette = std::move(tempBlob.materialPalette);
             }
             {
                 std::lock_guard<std::mutex> lock(g_worker.resultMutex);
                 g_worker.readyChunks.push_back(std::move(result));
             }
-        } else {
-            std::this_thread::sleep_for(std::chrono::microseconds(200));
-        }
+        } // else: no work, loop back to wait on cv
     }
 }
 
@@ -321,6 +375,15 @@ static void generatePendingChunks(projv::Scene& scene, projv::GPUData& gpuData, 
 
             projv::internChunkGeometry(scene, proc.chunk);
 
+            // Transfer baked material data to the new blob.
+            if (proc.chunk.geometryPoolIndex >= 0 &&
+                static_cast<size_t>(proc.chunk.geometryPoolIndex) < scene.geometryPool.size()) {
+                projv::GeometryBlob& blob = scene.geometryPool[proc.chunk.geometryPoolIndex];
+                blob.materialIDs = std::move(proc.materialIDs);
+                blob.materialPalette = std::move(proc.materialPalette);
+                blob.dirty = true;
+            }
+
             projv::ChunkHandle h = projv::ChunkHandle(scene.chunks.size());
             scene.chunks.push_back(std::move(proc.chunk));
             grid.cellToChunk[lin] = static_cast<int32_t>(h);
@@ -353,6 +416,7 @@ static void generatePendingChunks(projv::Scene& scene, projv::GPUData& gpuData, 
             projv::core::vec3 wp = grid.origin + (projv::core::vec3(c - grid.originCellCoord) * TerrainState::kChunkSize);
             g_worker.workQueue.push_back(ChunkWorkItem{c, wp});
         }
+        g_worker.workCv.notify_all();
     }
 
     if (generated > 0) projv::graphics::flushSceneUpdates(scene, gpuData);
@@ -376,8 +440,7 @@ void startup(projv::Application& app) {
     projv::Scene& scene    = projv::core::createGlobalResource<projv::Scene>(app.world);
     projv::GPUData& gpuData = projv::core::createGlobalResource<projv::GPUData>(app.world);
     TerrainState& ts        = projv::core::createGlobalResource<TerrainState>(app.world);
-    ts.terrainNoise.reseed(uint32_t(ts.seed));
-    ts.moistureNoise.reseed(uint32_t(ts.seed + 9999));
+    ts.noiseGen.reseed(uint32_t(ts.seed));
 
     // --- Create terrain grid (centered on world origin, expands dynamically via expandGridToInclude) ---
     int r = ts.kViewRadius;
@@ -425,8 +488,13 @@ void startup(projv::Application& app) {
         projv::graphics::setTextureToData(cr, 1, img, width, height);
     }
 
-    // Start worker thread
-    std::thread(terrainWorkerFunc, std::ref(ts)).detach();
+    // Start worker threads — use all available cores
+    int numWorkers = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+    projv::core::info("[WORKER] spawning {} terrain generation threads", numWorkers);
+    g_worker.numThreads = numWorkers;
+    for (int i = 0; i < numWorkers; ++i) {
+        g_worker.threads.emplace_back(terrainWorkerFunc, std::ref(ts));
+    }
 
     // Seed initial pending chunk coords: sphere radius around camera start (0, 0, 0),
     // sorted by distance from camera so closest chunks generate first.
@@ -604,6 +672,15 @@ void render(projv::Application& app) {
     }
 }
 
+void shutdownApp(projv::Application&) {
+    g_worker.running.store(false, std::memory_order_relaxed);
+    g_worker.workCv.notify_all();
+    for (auto& t : g_worker.threads) {
+        if (t.joinable()) t.join();
+    }
+    g_worker.threads.clear();
+}
+
 int main(int argc, char** argv) {
     projv::Application app = projv::core::createApp();
     std::string exeDir = fs::canonical(fs::path(argv[0])).parent_path().string();
@@ -612,6 +689,7 @@ int main(int argc, char** argv) {
     projv::core::assignSystemStage(app, projv::SystemStage::Startup, startup);
     projv::core::assignSystemStage(app, projv::SystemStage::Update,  update);
     projv::core::assignSystemStage(app, projv::SystemStage::Render,  render);
+    projv::core::assignSystemStage(app, projv::SystemStage::Shutdown, shutdownApp);
     projv::core::runApplication(app);
     return 0;
 }

@@ -100,8 +100,7 @@ void main() {
     n = normalize(n);
 
     vec3  P = ray.origin + ray.direction * hit.rayT;
-    Voxel voxel = fetchVoxelData(hit.foundBox, hit.headerIndex);
-    vec3  albedo = voxel.color;
+    vec3  albedo = fetchVoxelColor(hit.foundBox, hit.headerIndex);
 
     // ---- Exact voxel-face identity (from the DDA's own foundBox), like renderer 4 -------------
     float vs        = hit.foundBox.size;                 // voxel edge length (world)

@@ -172,8 +172,8 @@ void main() {
             // sun (indirect sunlight bounced into the crease) + its ambient sky term.
             vec3 hP = ray.origin + ray.direction * h.rayT;
             vec3 hN = normalize(h.normal);
-            Voxel hv = fetchVoxelData(h.foundBox, h.headerIndex);
-            Li += directSun(hP, hN, hv.color) + hv.color * skyAmbient(hN);
+            vec3 hv = fetchVoxelColor(h.foundBox, h.headerIndex);
+            Li += directSun(hP, hN, hv) + hv * skyAmbient(hN);
         }
     }
     Li /= float(GI_SAMPLES);

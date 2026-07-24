@@ -2,7 +2,7 @@ $input v_color0
 $input v_texcoord0
 
 #include <bgfx_shader.sh>
-#include <pjv_utils_DDA_cache.sc>
+#include <pjv_utils_DDA.sc>
 
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
@@ -30,7 +30,7 @@ void main() {
         return;
     }
 
-    Voxel voxel = fetchVoxelData(sceneHit.foundBox, sceneHit.headerIndex);
+    vec3 voxelColor = fetchVoxelColor(sceneHit.foundBox, sceneHit.headerIndex);
     float ambientDot = dot(nrm, normalize(vec3(1, 1, 1))) + 0.4 + 0.2;
 
     Ray sunRay;
@@ -42,5 +42,5 @@ void main() {
         sunColor = vec3(2);
     }
 
-    gl_FragColor = vec4((voxel.color * ambientDot) * sunColor, 1.0);
+    gl_FragColor = vec4((voxelColor * ambientDot) * sunColor, 1.0);
 }

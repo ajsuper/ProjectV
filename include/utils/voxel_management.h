@@ -53,7 +53,7 @@ namespace projv::utils {
      * Set a voxel in the brick map at integer chunk-space position (x, y, z).
      * Creates the brick if it doesn't exist. O(1) average.
      */
-    void brickMapSetVoxel(VoxelBrickMap& map, int x, int y, int z, Color color);
+    void brickMapSetVoxel(VoxelBrickMap& map, int x, int y, int z, uint8_t materialID);
 
     /**
      * Remove a voxel from the brick map at integer chunk-space position (x, y, z).
@@ -67,32 +67,19 @@ namespace projv::utils {
     bool brickMapHasVoxel(const VoxelBrickMap& map, int x, int y, int z);
 
     /**
-     * Get the color of a voxel at integer chunk-space position (x, y, z).
-     * Returns black if the voxel doesn't exist. O(1) average.
-     */
-    Color brickMapGetColor(const VoxelBrickMap& map, int x, int y, int z);
-
-    /**
-     * Populate a brick map from an existing voxelTypeData array (3 u32s per voxel).
+     * Populate a brick map from an existing voxelTypeData array (3 u32s per voxel),
+     * interning colors into a material palette on the blob.
      * Used on first edit of a disk-loaded blob. The brick map must already
      * have the correct brickDims for the chunk's resolution.
      */
     void brickMapFromVoxelTypeData(VoxelBrickMap& map,
-                                   const std::vector<uint32_t>& voxelTypeData);
+                                   const std::vector<uint32_t>& voxelTypeData,
+                                   GeometryBlob& blob);
 
     /**
      * Build a sorted VoxelGrid (by chunk-space Z-order) from a brick map.
-     * Used as input to createTree64 for tree64 generation.
-     * Note: updateChunkFromBrickMap no longer calls this; prefer buildTree64FromBrickMap.
      */
     VoxelGrid buildVoxelGridFromBrickMap(const VoxelBrickMap& map);
-
-    /**
-     * Build voxelTypeData (3 u32s per voxel) directly from a brick map,
-     * in chunk-space Z-order. Faster than going through VoxelGrid.
-     * Note: updateChunkFromBrickMap no longer calls this; prefer buildVoxelTypeDataFromBrickMapFast.
-     */
-    std::vector<uint32_t> buildVoxelTypeDataFromBrickMap(const VoxelBrickMap& map);
 
     /**
      * Build a tree64 directly from brick map bitmasks, skipping the intermediate VoxelGrid.
@@ -102,16 +89,10 @@ namespace projv::utils {
     std::vector<uint32_t> buildTree64FromBrickMap(const VoxelBrickMap& map, int resolution);
 
     /**
-     * Build voxelTypeData directly from brick map, computing chunk-space Z-order
-     * via direct composition: chunkZOrder = (brickZOrder << 18) | localZOrder.
-     * Iterates bits MSB-first to produce ascending Z-order output without sorting.
-     */
-    std::vector<uint32_t> buildVoxelTypeDataFromBrickMapFast(const VoxelBrickMap& map);
-
-    /**
-     * Update a chunk's geometryData, voxelTypeData, and header from a brick map.
-     * Calls buildTree64FromBrickMap + buildVoxelTypeDataFromBrickMapFast.
+     * Update a chunk's geometryData from a brick map.
+     * Calls buildTree64FromBrickMap.
      * Sets LOD to 0.
+     * Materials are baked separately via bakeMaterialsFromBrickMap.
      */
     void updateChunkFromBrickMap(Chunk& chunk, const VoxelBrickMap& map);
 
