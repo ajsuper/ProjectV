@@ -14,6 +14,7 @@ namespace projv {
         , ownsSourceFile(rhs.ownsSourceFile)
         , refCount(rhs.refCount)
         , dirty(rhs.dirty)
+        , renderLOD(rhs.renderLOD)
     {}
 
     GeometryBlob& GeometryBlob::operator=(const GeometryBlob& rhs) {
@@ -27,6 +28,7 @@ namespace projv {
         ownsSourceFile = rhs.ownsSourceFile;
         refCount       = rhs.refCount;
         dirty          = rhs.dirty;
+        renderLOD      = rhs.renderLOD;
         return *this;
     }
 } // namespace projv
@@ -232,7 +234,7 @@ namespace projv::utils {
     Chunk createChunk(ChunkHeader chunkHeader) {
         Chunk chunk;
         chunk.header = chunkHeader;
-        chunk.LOD = 0;
+        chunk.requestedLOD = 0;
         return chunk;
     }
 
@@ -337,7 +339,7 @@ namespace projv::utils {
         return (brick.mask[row] & (1ull << bit)) != 0;
     }
 
-    void brickMapFromVoxelTypeData(VoxelBrickMap& map,
+    void brickMapFromVoxelTypeData(Scene& scene, VoxelBrickMap& map,
                                     const std::vector<uint32_t>& voxelTypeData,
                                     ComponentRecord& comp) {
         size_t count = voxelTypeData.size() / 3;
@@ -348,7 +350,7 @@ namespace projv::utils {
             core::ivec3 pos = reverseZOrderIndex(zorder);
             Color c = unserializeColor(serializedColor);
             uint32_t packed = packColor(c);
-            uint8_t matID = internMaterial(comp, "", packed);
+            uint8_t matID = internMaterial(scene, comp, "", packed);
             brickMapSetVoxel(map, pos.x, pos.y, pos.z, matID);
         }
         if (count > 0) {
@@ -415,12 +417,131 @@ namespace projv::utils {
         auto t1 = std::chrono::high_resolution_clock::now();
         chunk.geometryData = buildTree64FromBrickMap(map, resolution);
         auto t2 = std::chrono::high_resolution_clock::now();
-        chunk.LOD = 0;
+        chunk.requestedLOD = 0;
 
         double treeMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
         double totalMs = std::chrono::duration<double, std::milli>(t2 - t0).count();
         core::perf("updateChunkFromBrickMap: tree64={:.2f}ms total={:.2}ms",
                    treeMs, totalMs);
+    }
+
+    uint32_t downsampleTree64(const std::vector<uint32_t>& geometry,
+                              const std::vector<uint8_t>&  materialIDs,
+                              uint32_t lodSteps,
+                              std::vector<uint32_t>& outGeometry,
+                              std::vector<uint8_t>&  outMaterialIDs) {
+        const size_t nodeCount = geometry.size() / 3;
+
+        auto passthrough = [&]() {
+            outGeometry = geometry;
+            outMaterialIDs = materialIDs;
+        };
+
+        if (lodSteps == 0 || nodeCount == 0) {
+            passthrough();
+            return 0;
+        }
+
+        // ---- (a) Level table -------------------------------------------------------------
+        // Levels are contiguous runs, root first. A level's node count is the total number of set
+        // child bits in the level above it, because every set bit is exactly one child node.
+        std::vector<uint32_t> levelStart;
+        std::vector<uint32_t> levelCount;
+        levelStart.push_back(0);
+        levelCount.push_back(1);
+        while (!tree64IsLeaf(geometry[levelStart.back() * 3 + 2])) {
+            uint32_t start = levelStart.back();
+            uint32_t count = levelCount.back();
+            uint32_t children = 0;
+            for (uint32_t n = start; n < start + count; ++n) {
+                children += static_cast<uint32_t>(__builtin_popcount(geometry[n * 3]));
+                children += static_cast<uint32_t>(__builtin_popcount(geometry[n * 3 + 1]));
+            }
+            uint32_t nextStart = start + count;
+            if (children == 0 || nextStart + children > nodeCount) {
+                // Malformed tree -- refuse to guess at a truncation point.
+                core::error("downsampleTree64: level walk ran off the end at node {} (nodes={})",
+                            nextStart, nodeCount);
+                passthrough();
+                return 0;
+            }
+            levelStart.push_back(nextStart);
+            levelCount.push_back(children);
+        }
+
+        const uint32_t levels = static_cast<uint32_t>(levelStart.size());
+        const uint32_t lod = (lodSteps < levels - 1) ? lodSteps : levels - 1;
+        if (lod == 0) {
+            passthrough();
+            return 0;
+        }
+
+        // ---- (b) Representative material per node ----------------------------------------
+        // A coarsened leaf needs one material byte per surviving child, so every node needs a
+        // stand-in colour for the subtree beneath it. Children always sit at a higher index than
+        // their parent (pointers are forward), so one reverse pass resolves the whole tree.
+        // "First set voxel of the first child" is the representative: it is a single pass, and on
+        // the uniform leaves that dominate real content it is exact.
+        std::vector<uint8_t> repr(nodeCount, 0);
+        for (size_t i = nodeCount; i > 0; --i) {
+            size_t n = i - 1;
+            uint32_t data3 = geometry[n * 3 + 2];
+            if (tree64IsLeaf(data3)) {
+                uint32_t offset = tree64LeafMatOffset(data3);
+                repr[n] = (offset < materialIDs.size()) ? materialIDs[offset] : 0;
+            } else if (geometry[n * 3] != 0 || geometry[n * 3 + 1] != 0) {
+                size_t firstChild = n + (data3 >> 1);
+                repr[n] = (firstChild < nodeCount) ? repr[firstChild] : 0;
+            }
+            // An empty internal node has childPtr 0 and would self-reference; it keeps repr 0.
+        }
+
+        // ---- (c) Truncate and re-leaf ----------------------------------------------------
+        const uint32_t keepLevel = levels - 1 - lod;
+        const uint32_t keepStart = levelStart[keepLevel];
+        const uint32_t keepNodes = keepStart + levelCount[keepLevel];
+
+        outGeometry.assign(geometry.begin(), geometry.begin() + static_cast<size_t>(keepNodes) * 3);
+        outMaterialIDs.clear();
+        outMaterialIDs.reserve(keepNodes - keepStart);
+
+        for (uint32_t n = keepStart; n < keepNodes; ++n) {
+            const uint32_t mask1 = geometry[n * 3];
+            const uint32_t mask2 = geometry[n * 3 + 1];
+            const size_t childBase = n + (geometry[n * 3 + 2] >> 1);
+
+            const uint32_t materialOffset = static_cast<uint32_t>(outMaterialIDs.size());
+            const size_t runStart = outMaterialIDs.size();
+            bool uniform = true;
+            uint8_t firstID = 0;
+            uint32_t rank = 0;
+
+            // Z-order k lives in bit (63 - k) of the combined mask, so walking the combined value
+            // from its MSB down visits children in ascending Z-order -- the same order the shader's
+            // sibling rank produces, which is what makes childBase + rank the right child.
+            uint64_t bits = (static_cast<uint64_t>(mask1) << 32) | static_cast<uint64_t>(mask2);
+            while (bits) {
+                int leadingZeros = __builtin_clzll(bits);
+                size_t child = childBase + rank;
+                uint8_t matID = (child < nodeCount) ? repr[child] : 0;
+                outMaterialIDs.push_back(matID);
+                if (rank == 0) firstID = matID;
+                else if (matID != firstID) uniform = false;
+                bits &= ~(1ull << (63 - leadingZeros));
+                ++rank;
+            }
+
+            // Same uniform-leaf collapse as bakeMaterialsFromBrickMap: one byte for the whole leaf
+            // and the shader skips the within-leaf rank. Coarsened leaves are uniform far more
+            // often than full-res ones, so this is where most of the material saving comes from.
+            if (uniform && outMaterialIDs.size() > runStart + 1) {
+                outMaterialIDs.resize(runStart + 1);
+            }
+
+            outGeometry[n * 3 + 2] = encodeLeafNode(materialOffset, uniform);
+        }
+
+        return lod;
     }
 
     std::unique_ptr<VoxelBrickMap> cloneBrickMap(const VoxelBrickMap& src) {

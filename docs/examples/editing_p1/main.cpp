@@ -238,7 +238,7 @@ int main(int argc, char** argv) {
 
         projv::Chunk chunk;
         chunk.header = hdr;
-        chunk.LOD    = 0;
+        chunk.requestedLOD    = 0;
         chunk.alive  = true;
         chunk.componentHandle = 0;
 
@@ -368,7 +368,7 @@ int main(int argc, char** argv) {
 
         projv::Chunk chunk;
         chunk.header = hdr;
-chunk.LOD    = 0;
+chunk.requestedLOD    = 0;
         chunk.alive  = true;
         chunk.componentHandle = 0;
 
@@ -524,7 +524,7 @@ chunk.LOD    = 0;
             hdr.rotation    = projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f);
             projv::Chunk chunk;
             chunk.header = hdr;
-            chunk.LOD    = 0;
+            chunk.requestedLOD    = 0;
             chunk.alive  = true;
             chunk.gridIndex = gridIdx;
             chunk.cellIndex = cellIdx;

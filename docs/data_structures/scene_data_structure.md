@@ -93,6 +93,8 @@ struct GeometryBlob {
     core::ivec3           sourceBlockCoord;      // the block within the file
     bool                  ownsSourceFile = true; // false until first Copy persist
     uint32_t              refCount = 0;          // live chunks referencing this blob
+    bool                  dirty = false;         // GPU copy is stale
+    uint32_t              renderLOD = 0;         // tree64 levels to drop on upload (storage LOD)
 };
 ```
 
@@ -100,6 +102,31 @@ Every `Chunk` in a Compose-loaded scene references one entry of `Scene.geometryP
 `Chunk.geometryPoolIndex`. Multiple chunks can share the same blob (instancing); the blob is freed
 when its `refCount` hits zero. A `Copy` instance forks its own private blob (COW) the first time it
 is made writable.
+
+#### Storage LOD (`renderLOD`)
+
+`renderLOD` is how many tree64 levels to drop when the blob is uploaded, each step being 4x coarser
+per axis (64³ → 16³ → 4³). It is purely a VRAM knob: the blob's CPU arrays are always full
+resolution, and the coarsened copy is built at upload time by `downsampleTree64` into scratch that
+is discarded immediately. Editing, persistence and the brick map therefore never see it.
+
+Set it with `setBlobRenderLOD(scene, poolIndex, lod)`, which marks the blob dirty. That is all
+that is required: the next flush re-uploads the blob at the new detail and rewrites the header row
+of every chunk referencing it.
+
+The flag lives on the blob rather than the chunk because the blob is the GPU upload unit — that
+makes it impossible for the uploaded geometry and the header's advertised `resolution` to disagree
+about how deep the tree is. `GPUBlobRange::uploadedLOD` tracks what is actually resident, and
+`makeHeader` reads that when computing the header's resolution.
+
+Note what does **not** change: `Chunk.header.resolution` stays full-res on the CPU, and
+`header.scale` is never touched. Holding `scale` fixed while the *uploaded* resolution shrinks is
+exactly what grows each voxel's world size, so the chunk keeps its world footprint, position,
+rotation and grid cell. See [tree64_data_structure.md](/docs/data_structures/tree64_data_structure.md)
+for why one LOD step must be 4x and not 2x.
+
+The unrelated `Chunk::LOD` field is a legacy leftover: it is written to 0 in a few places and read
+nowhere.
 
 ### `ComponentRecord`, `ComponentHandle`, `ComponentKind`
 

@@ -502,7 +502,7 @@ namespace projv::utils {
                             if (!block.voxelTypeData.empty()) {
                                 core::ivec3 brickDims = computeBrickDims(dataFile.resolution);
                                 auto brickMap = createVoxelBrickMap(brickDims);
-                                brickMapFromVoxelTypeData(*brickMap, block.voxelTypeData, rec);
+                                brickMapFromVoxelTypeData(scene, *brickMap, block.voxelTypeData, rec);
                                 gb.geometry = buildTree64FromBrickMap(*brickMap, static_cast<int>(dataFile.resolution));
                                 gb.brickMap = std::move(brickMap);
                                 bakeMaterialsFromBrickMap(gb.geometry, gb.materialIDs, *gb.brickMap);
@@ -515,7 +515,7 @@ namespace projv::utils {
                         }
                         chunk.geometryPoolIndex = poolIt->second;
                         geometryPool[chunk.geometryPoolIndex].refCount++;
-                        chunk.LOD = 0;
+                        chunk.requestedLOD = 0;
                         return chunk;
                     };
 

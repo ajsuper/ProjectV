@@ -114,8 +114,17 @@ struct chunkHeader {
     uint geometryEndIndex;
     uint materialIDStartIndex;
     uint materialIDEndIndex;
-    uint padding[2];
+    uint dataRefID;
+    uint paletteOffset;
     vec4 rotation;
+    // Levels dropped below `resolution` this chunk instance's traversal should cap itself at, on
+    // top of whatever the ray-distance-based cutoff (computeTargetLOD) already allows. See
+    // marchRayThroughTree64_DDA's cutoff check and makeHeader (gpu_interface.cpp) for how this is
+    // computed on the CPU side.
+    uint traversalLOD;
+    uint reserved0;
+    uint reserved1;
+    uint reserved2;
 };
 
 struct GPUChunkHeader {
@@ -445,12 +454,22 @@ uint materialPaletteEntry(uint index, uint comp) {
 }
 
 chunkHeader headers(int headerIndex) {
-    int index = headerIndex * 4;
+    // One header is 5 consecutive texels (grown from 4 to fit the added traversalLOD + reserved
+    // words -- a texel is atomic, so one new field forces a whole new texel). The texture is 2D
+    // (it used to be a single row, which capped the scene at maxTextureSize/N chunks), and its
+    // width is always a multiple of 5, so a header never straddles a row -- one divide resolves
+    // the row, and the 5 fetches share it. The CPU builds the same layout in createHeaderTexture
+    // (gpu_interface.cpp); the "width is a multiple of 5" invariant is what keeps the two in sync
+    // without a uniform.
+    int headersPerRow = textureSize(headerData, 0).x / 5;
+    int row = headerIndex / headersPerRow;
+    int index = (headerIndex % headersPerRow) * 5;
 
-    uvec4 pixel0 = texelFetch(headerData, ivec2(index + 0, 0), 0);
-    uvec4 pixel1 = texelFetch(headerData, ivec2(index + 1, 0), 0);
-    uvec4 pixel2 = texelFetch(headerData, ivec2(index + 2, 0), 0);
-    uvec4 pixel3 = texelFetch(headerData, ivec2(index + 3, 0), 0);
+    uvec4 pixel0 = texelFetch(headerData, ivec2(index + 0, row), 0);
+    uvec4 pixel1 = texelFetch(headerData, ivec2(index + 1, row), 0);
+    uvec4 pixel2 = texelFetch(headerData, ivec2(index + 2, row), 0);
+    uvec4 pixel3 = texelFetch(headerData, ivec2(index + 3, row), 0);
+    uvec4 pixel4 = texelFetch(headerData, ivec2(index + 4, row), 0);
 
     chunkHeader header;
     header.chunkID = pixel0.r;
@@ -463,17 +482,22 @@ chunkHeader headers(int headerIndex) {
     header.geometryEndIndex = pixel1.a;
     header.materialIDStartIndex = pixel2.r;
     header.materialIDEndIndex = pixel2.g;
-    header.padding[0] = pixel2.b;
-    header.padding[1] = pixel2.a; // paletteOffset (now stored in padding[1] on CPU)
+    header.dataRefID = pixel2.b;
+    header.paletteOffset = pixel2.a;
     header.rotation = vec4(uintBitsToFloat(pixel3.r), uintBitsToFloat(pixel3.g),
                            uintBitsToFloat(pixel3.b), uintBitsToFloat(pixel3.a));
+    header.traversalLOD = pixel4.r;
+    header.reserved0 = pixel4.g;
+    header.reserved1 = pixel4.b;
+    header.reserved2 = pixel4.a;
 
     return header;
 }
 
+// Total addressable header slots. The texture is 2D, so this is headers-per-row * rows.
 int headersLength() {
     ivec2 texSize = textureSize(headerData, 0);
-    return int(texSize.x / 4);
+    return int(texSize.x / 5) * int(texSize.y);
 }
 
 // Builds the rotation matrix R (R * v rotates v by q) from a quaternion [x, y, z, w].
@@ -918,7 +942,7 @@ uint computeTargetLOD(float distanceInVoxels, RayQuery rayQuery) {
     return uint(mix(float(rayQuery.startLOD), float(rayQuery.finishLOD), t));
 }
 
-SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, BoxAABB boundingBox, uint tree64StartIndex, uint tree64EndIndex, uint tree64Resolution) {
+SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, BoxAABB boundingBox, uint tree64StartIndex, uint tree64EndIndex, uint tree64Resolution, uint chunkTraversalLOD) {
     SceneIntersectData returnData;
     returnData.rayT = -1.0;
     returnData.normal = vec3(0.0);
@@ -977,7 +1001,14 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, BoxAABB
                 // the distance to this candidate in voxel units, and this is the
                 // only place the traversal descends, so capping here is sufficient
                 // to guarantee we never resolve finer than the requested LOD.
-                if (candidateNodeLevel <= computeTargetLOD(rayT, rayQuery)) {
+                //
+                // chunkTraversalLOD is a second, independent cap: this specific chunk instance's
+                // own requested detail level, which can be coarser than what's actually uploaded
+                // (e.g. one of several instances sharing a blob that another, closer instance
+                // forced finer -- see makeHeader in gpu_interface.cpp). It never makes the ray see
+                // MORE detail than computeTargetLOD already allows, only less -- hence max(), not
+                // a replacement.
+                if (candidateNodeLevel <= max(computeTargetLOD(rayT, rayQuery), chunkTraversalLOD)) {
                     returnData.foundBox.position = traversalPosition;
                     returnData.foundBox.size = stepSize;
                     returnData.steps = stepCount;
@@ -1137,7 +1168,7 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, uint headerI
     tree64Intersect.rayT = -1.0;
     tree64Intersect.normal = vec3(0.0);
     if(rootIntersect.distance >= 0){
-        tree64Intersect = marchRayThroughTree64_DDA(transformedRay, rayQuery, tree64BoundingBox, tree64StartIndex, tree64EndIndex, header.resolution);
+        tree64Intersect = marchRayThroughTree64_DDA(transformedRay, rayQuery, tree64BoundingBox, tree64StartIndex, tree64EndIndex, header.resolution, header.traversalLOD);
     }
     // size should be 1 for full res, 2 for half res, 4 for quarter res etc. So we multiply the size by what the voxel scale actually is.
     tree64Intersect.foundBox.size *= header.scale/tree64BoundingBox.size;
@@ -1207,7 +1238,7 @@ vec3 fetchVoxelColor(BoxAABB voxelBoundingBox, uint headerIndex) {
                     }
                 }
             }
-            uint matID = materialID(h.materialIDStartIndex + materialOffset + above) + h.padding[1];
+            uint matID = materialID(h.materialIDStartIndex + materialOffset + above) + h.paletteOffset;
             uint packedColor = materialPaletteEntry(matID, 0);
             uint R10 = (packedColor >> 20) & 0x3FF;
             uint G10 = (packedColor >> 10) & 0x3FF;

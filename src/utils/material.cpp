@@ -3,7 +3,8 @@
 
 namespace projv::utils {
 
-uint8_t internMaterial(ComponentRecord& comp, const std::string& name, uint32_t packedColor) {
+uint8_t internMaterial(Scene& scene, ComponentRecord& comp, const std::string& name, uint32_t packedColor) {
+    std::lock_guard<std::mutex> lock(scene.materialPaletteMutex);
     if (!name.empty()) {
         for (size_t i = 0; i < comp.materialPalette.size(); ++i) {
             if (comp.materialPalette[i].name == name) {

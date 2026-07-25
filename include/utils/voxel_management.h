@@ -72,7 +72,7 @@ namespace projv::utils {
      * Used on first edit of a disk-loaded blob. The brick map must already
      * have the correct brickDims for the chunk's resolution.
      */
-    void brickMapFromVoxelTypeData(VoxelBrickMap& map,
+    void brickMapFromVoxelTypeData(Scene& scene, VoxelBrickMap& map,
                                    const std::vector<uint32_t>& voxelTypeData,
                                    ComponentRecord& comp);
 
@@ -101,6 +101,31 @@ namespace projv::utils {
      * their hash map contents.
      */
     std::unique_ptr<VoxelBrickMap> cloneBrickMap(const VoxelBrickMap& src);
+
+    /**
+     * Coarsen a serialized tree64 by dropping `lodSteps` levels off the bottom.
+     *
+     * A tree64 stores its levels root-first and contiguously (buildTree64FromBrickMap) and its
+     * child pointers are relative (addPointersTree64), so coarsening is a tail truncation: the
+     * retained prefix is byte-identical and its pointers stay valid. The new last level's nodes
+     * are re-stamped as leaves, their 64 mask bits reinterpreted from "which children exist" to
+     * "which voxels are solid", and given a representative material per set bit.
+     *
+     * Each step is 4x coarser per axis. The caller must present the matching reduced resolution
+     * to the shader -- use resolutionAtLOD(resolution, returnValue).
+     *
+     * Do NOT re-run addPointersTree64 on the output: it ORs pointer bits in rather than assigning,
+     * so a second pass would corrupt the already-pointered prefix.
+     *
+     * The inputs are left untouched; outputs are written to caller-owned buffers so a per-upload
+     * scratch can be reused. Returns the number of levels actually dropped, clamped so the root
+     * level always survives (so it can be less than lodSteps on a shallow tree).
+     */
+    uint32_t downsampleTree64(const std::vector<uint32_t>& geometry,
+                              const std::vector<uint8_t>&  materialIDs,
+                              uint32_t lodSteps,
+                              std::vector<uint32_t>& outGeometry,
+                              std::vector<uint8_t>&  outMaterialIDs);
 }
 
 #endif

@@ -32,6 +32,30 @@ namespace projv{
     constexpr uint32_t TREE64_UNIFORM_FLAG = 2u;
     constexpr uint32_t TREE64_MATOFF_SHIFT = 2u;
 
+    // ---- storage LOD ----
+    //
+    // A tree64 stores its levels root-first and contiguously, so coarsening by one level is just
+    // truncating the tail and re-stamping the new last level as leaves. One step therefore drops
+    // exactly one level = 4x coarser per axis -- never 2x. The shader derives its descent depth
+    // from the header's resolution as `treeLevels = log2(resolution)/2.0` with an implicit
+    // truncation (pjv_utils_DDA.sc), so resolution must stay an exact power of 4: a 64^3 chunk
+    // goes 64 -> 16 -> 4. Resolution 32 would truncate to 2 levels and be traversed as if it were
+    // 16^3, reading the tree at the wrong depth.
+    //
+    // The clamp keeps the root level alive (minimum resolution 4). Both the downsampler and the
+    // GPU header builder call it, so the uploaded geometry and the header's resolution can never
+    // disagree about how deep the tree is.
+    inline uint32_t clampRenderLOD(uint32_t resolution, uint32_t lod) {
+        uint32_t maxLod = 0;
+        while ((resolution >> (2u * (maxLod + 1u))) >= 4u) maxLod++;
+        return lod < maxLod ? lod : maxLod;
+    }
+
+    // The resolution a chunk presents to the shader once `lod` levels have been dropped.
+    inline uint32_t resolutionAtLOD(uint32_t resolution, uint32_t lod) {
+        return resolution >> (2u * clampRenderLOD(resolution, lod));
+    }
+
     inline uint32_t encodeLeafNode(uint32_t materialOffset, bool uniform) {
         return (materialOffset << TREE64_MATOFF_SHIFT)
              | (uniform ? TREE64_UNIFORM_FLAG : 0u)

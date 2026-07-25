@@ -235,7 +235,7 @@ static projv::ChunkHandle buildPreviewSphere(projv::Scene& scene, projv::GPUData
 
     projv::Chunk chunk;
     chunk.header = hdr;
-    chunk.LOD    = 0;
+    chunk.requestedLOD    = 0;
     chunk.alive  = true;
     chunk.componentHandle = previewComp;
 
@@ -295,7 +295,7 @@ static void rebuildPreviewSphere(projv::Scene& scene, projv::GPUData& gpuData,
     temp.header = preview.header;
     temp.header.resolution = kRes;
     temp.header.scale = kScale;
-    temp.LOD   = 0;
+    temp.requestedLOD = 0;
     temp.alive = true;
 
     auto brickMap = projv::utils::createVoxelBrickMap(
@@ -428,7 +428,7 @@ void startup(projv::Application& app) {
             targetCenter.z - kCenter);
         uint32_t yellowPacked = projv::packColor(projv::Color{255, 255, 0});
         preview.yellowMaterialID = projv::utils::internMaterial(
-            scene.components[previewComp], "yellow", yellowPacked);
+            scene, scene.components[previewComp], "yellow", yellowPacked);
         preview.chunk = buildPreviewSphere(scene, gpuData, editState.sphereRadius, chunkPos,
                                             previewComp, preview.yellowMaterialID);
         preview.currentRadius = editState.sphereRadius;

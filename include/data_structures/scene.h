@@ -4,6 +4,8 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <mutex>
+#include <algorithm>
 #include <stdint.h>
 
 #include "core/math.h"
@@ -120,13 +122,28 @@ namespace projv{
         float rotationY;
         float rotationZ;
         float rotationW;
+        // Levels dropped below `resolution` this specific chunk instance's ray traversal should cap
+        // itself at, on top of whatever the ray-distance-based cutoff already allows (see
+        // computeTargetLOD/marchRayThroughTree64_DDA in pjv_utils_DDA.sc). Free/per-frame-safe: no
+        // GPU data movement, just a shader-side "stop descending here" clamp. Computed in makeHeader
+        // from Chunk::requestedLOD vs. the blob's actual uploadedLOD -- see the comment there.
+        uint32_t traversalLOD;
+        // Forced into existence by texel granularity (a texel is 4 uint32s and this field alone
+        // pushed the header into a 5th texel; the struct must total a multiple of 4 words, so all
+        // 3 remaining slots in that texel are claimed now rather than left implicitly wasted).
+        uint32_t reserved0;
+        uint32_t reserved1;
+        uint32_t reserved2;
     };
     #pragma pack(pop)
     
     struct Chunk { // Only exists during runtime. Contains all of the header data and our geometry and color data, along with any extra runtime data not used in rendering.
         ChunkHeader header;
         std::vector<uint32_t> geometryData;
-        uint32_t LOD;
+        // Levels dropped below this chunk's own native resolution (header.resolution), last
+        // requested via requestChunkLOD. Drives this instance's GPU traversal cap (see makeHeader's
+        // traversalLOD computation) independent of what's actually uploaded for a shared blob.
+        uint32_t requestedLOD = 0;
         // Instancing: when >= 0, this chunk's geometry lives once in Scene.geometryPool[idx]
         // (shared across every instance of the same .data block) and geometryData/voxelTypeData
         // above are left empty. -1 = unpooled (interned into the pool by internChunkGeometry before
@@ -180,6 +197,13 @@ struct GeometryBlob {
         // P5: true when the blob's GPU content is stale (newly forked, interned, or content changed).
         // Cleared by flushSceneUpdates after the incremental upload.
         bool dirty = false;
+        // Storage LOD: how many tree64 levels to drop when uploading this blob to the GPU. The CPU
+        // arrays above always stay full resolution -- only the GPU copy is coarsened, at upload
+        // time, by downsampleTree64. Each step is 4x coarser per axis (see clampRenderLOD in
+        // voxel.h). This is the VRAM knob: distant geometry can be resident at a fraction of the
+        // cost without any of it leaving CPU memory, so editing, persistence and the brick map are
+        // all untouched by it. Set via setBlobRenderLOD below.
+        uint32_t renderLOD = 0;
     };
     
     // A uniform grid of equal, grid-aligned chunks (one .data grid volume). Enables a
@@ -219,6 +243,68 @@ struct GeometryBlob {
         std::vector<ComponentRecord> components;
         // P1 addition: lazily populated by editing::updateScene on first edit per source.
         std::vector<DataReference>   dataReferences;
+        // Guards every ComponentRecord::materialPalette (+ paletteVersion) against concurrent
+        // interning. One mutex for the whole Scene rather than one per ComponentRecord: std::mutex
+        // is neither movable nor copyable, so a per-component mutex would break growth of the
+        // `components` vector. Locked by internMaterial (material.cpp) and by
+        // rebuildGlobalPaletteTexture (gpu_interface.cpp), which live-iterates materialPalette once
+        // a frame and would otherwise race with a concurrent intern from a worker thread.
+        mutable std::mutex materialPaletteMutex;
+
+        // std::mutex is neither movable nor copyable, which would otherwise make Scene itself
+        // neither -- and that breaks two real things: loadComposeFromDisk (compose_io.cpp) returns
+        // a Scene by value (needs move), and the ECS's createGlobalResource<T> (core/ecs.h) stores
+        // Scene inside a std::any, whose in-place constructor is SFINAE-constrained on
+        // is_copy_constructible_v<T> as a *static* requirement -- even though it only ever
+        // default-constructs Scene in place and nothing in the engine actually copies a live Scene
+        // value. Both special members below move/copy every field except the mutex, which is left
+        // freshly default-constructed on the destination (a mutex has no state worth moving or
+        // copying; each Scene instance just needs its own).
+        Scene() = default;
+        Scene(Scene&& other) noexcept
+            : chunks(std::move(other.chunks))
+            , grids(std::move(other.grids))
+            , looseChunks(std::move(other.looseChunks))
+            , looseChunkCount(other.looseChunkCount)
+            , geometryPool(std::move(other.geometryPool))
+            , blobFreeList(std::move(other.blobFreeList))
+            , components(std::move(other.components))
+            , dataReferences(std::move(other.dataReferences))
+        {}
+        Scene& operator=(Scene&& other) noexcept {
+            if (this == &other) return *this;
+            chunks = std::move(other.chunks);
+            grids = std::move(other.grids);
+            looseChunks = std::move(other.looseChunks);
+            looseChunkCount = other.looseChunkCount;
+            geometryPool = std::move(other.geometryPool);
+            blobFreeList = std::move(other.blobFreeList);
+            components = std::move(other.components);
+            dataReferences = std::move(other.dataReferences);
+            return *this;
+        }
+        Scene(const Scene& other)
+            : chunks(other.chunks)
+            , grids(other.grids)
+            , looseChunks(other.looseChunks)
+            , looseChunkCount(other.looseChunkCount)
+            , geometryPool(other.geometryPool)
+            , blobFreeList(other.blobFreeList)
+            , components(other.components)
+            , dataReferences(other.dataReferences)
+        {}
+        Scene& operator=(const Scene& other) {
+            if (this == &other) return *this;
+            chunks = other.chunks;
+            grids = other.grids;
+            looseChunks = other.looseChunks;
+            looseChunkCount = other.looseChunkCount;
+            geometryPool = other.geometryPool;
+            blobFreeList = other.blobFreeList;
+            components = other.components;
+            dataReferences = other.dataReferences;
+            return *this;
+        }
     };
 
     // Inserts a blob into the pool, reusing a recycled slot when one is free so live pool indices
@@ -233,6 +319,17 @@ struct GeometryBlob {
         int32_t idx = static_cast<int32_t>(scene.geometryPool.size());
         scene.geometryPool.push_back(std::move(blob));
         return idx;
+    }
+
+    // Releases one chunk's reference to a pool blob. Decrements refCount; if it hits 0, recycles
+    // the slot via blobFreeList so poolInsertBlob can reuse it. GPU-side teardown (freeing the
+    // allocator range) is handled generically by uploadDirtyBlobs on the next flush, which frees
+    // the range as soon as it sees refCount==0 on an uploaded blob -- this is the CPU-side half.
+    inline void releaseBlob(Scene& scene, int32_t poolIdx) {
+        if (poolIdx < 0 || poolIdx >= static_cast<int32_t>(scene.geometryPool.size())) return;
+        GeometryBlob& blob = scene.geometryPool[poolIdx];
+        if (blob.refCount == 0) return; // already released; avoid double-freeing the slot
+        if (--blob.refCount == 0) scene.blobFreeList.push_back(static_cast<uint32_t>(poolIdx));
     }
 
     // Moves an unpooled chunk's owned geometry (geometryPoolIndex < 0) into a fresh refcount-1 pool blob
@@ -275,6 +372,116 @@ struct GeometryBlob {
         fork.refCount = 1;
         fork.dirty = true;
         return poolInsertBlob(scene, std::move(fork));
+    }
+
+    // Sets the storage LOD a blob's GPU copy is built at, and marks it dirty. Marking dirty is all
+    // that is needed to make the change take effect: uploadDirtyBlobs re-uploads the blob at the
+    // new detail and reports it in `uploadedPools`, which makes updateDirtyHeaders rewrite the
+    // header row of every chunk referencing it -- picking up the reduced resolution. Returns true
+    // if the LOD actually changed, so callers can rate-limit transitions.
+    inline bool setBlobRenderLOD(Scene& scene, int32_t poolIdx, uint32_t lod) {
+        if (poolIdx < 0 || poolIdx >= static_cast<int32_t>(scene.geometryPool.size())) return false;
+        GeometryBlob& blob = scene.geometryPool[poolIdx];
+        if (blob.renderLOD == lod) return false;
+        blob.renderLOD = lod;
+        blob.dirty = true;
+        return true;
+    }
+
+    enum class ChunkLODResult : uint8_t { Unchanged, Coarsened, NeedsRegeneration };
+
+    // Requests that `handle`'s GPU-visible geometry represent `requestedResolution`. If the chunk's
+    // stored (native) resolution -- header.resolution, set once at generation time -- is >= the
+    // request, the engine derives the coarser view via the existing GPU-upload truncation path
+    // (setBlobRenderLOD/downsampleTree64) and returns Coarsened (or Unchanged if already there); no
+    // CPU regeneration is needed. If the request is finer than what's stored, nothing is changed --
+    // NeedsRegeneration tells the caller it must generate finer geometry itself and install it via
+    // replaceChunkGeometry, then call requestChunkLOD again. requestedResolution must be reachable
+    // from the chunk's native resolution by exact 4x steps (same constraint tree64 depth already
+    // has -- see voxel.h), matching whatever ring/step scheme the caller uses.
+    inline ChunkLODResult requestChunkLOD(Scene& scene, ChunkHandle handle, uint32_t requestedResolution) {
+        if (handle >= scene.chunks.size()) return ChunkLODResult::NeedsRegeneration;
+        Chunk& chunk = scene.chunks[handle];
+        uint32_t native = chunk.header.resolution;
+        if (requestedResolution > native) return ChunkLODResult::NeedsRegeneration;
+
+        uint32_t levels = 0;
+        uint32_t res = native;
+        while (res > requestedResolution && res > 1) { res /= 4; levels++; }
+
+        if (levels == chunk.requestedLOD) return ChunkLODResult::Unchanged;
+        chunk.requestedLOD = levels;
+
+        int32_t poolIdx = chunk.geometryPoolIndex;
+        if (poolIdx < 0 || poolIdx >= static_cast<int32_t>(scene.geometryPool.size()))
+            return ChunkLODResult::Coarsened;
+
+        GeometryBlob& blob = scene.geometryPool[poolIdx];
+        uint32_t reconciled = levels;
+        if (blob.refCount > 1) {
+            // Shared blob: its one GPU upload must satisfy the pickiest (finest) sharer's request.
+            // No reverse index from blob->chunks exists, so this scans scene.chunks -- only paid
+            // when sharing is actually happening (the common refCount==1 case skips straight past).
+            for (const Chunk& c : scene.chunks)
+                if (c.alive && c.geometryPoolIndex == poolIdx)
+                    reconciled = std::min(reconciled, c.requestedLOD);
+        }
+
+        if (!setBlobRenderLOD(scene, poolIdx, reconciled)) {
+            // The blob's actual upload didn't move (a pickier sharer already wins), but this
+            // chunk's own requested level changed -- its header row still needs rebuilding so the
+            // shader picks up the new traversalLOD (see makeHeader in gpu_interface.cpp).
+            chunk.headerDirty = true;
+        }
+        return ChunkLODResult::Coarsened;
+    }
+
+    // Installs newly generated geometry into an existing chunk in place, keeping its ChunkHandle,
+    // grid-cell binding, and identity untouched -- no eviction needed. If the chunk currently owns
+    // its blob solely (refCount == 1), overwrites it directly; if shared (refCount > 1), this chunk
+    // gets a fresh blob of its own and detaches from the old one via releaseBlob (mirrors forkBlob's
+    // sole-owner-vs-fork split). Raises header.resolution to newResolution and resets requestedLOD
+    // (it was relative to the OLD native resolution) and renderLOD (stale coarsening no longer
+    // applies to new content). This is what lets a chunk be "refined" (regenerated at higher detail
+    // as the camera approaches) with zero pop-out: the chunk stays visible at its old resolution
+    // right up until the new data lands, instead of being evicted and re-streamed from scratch.
+    inline void replaceChunkGeometry(Scene& scene, ChunkHandle handle,
+                                      std::vector<uint32_t> newGeometry,
+                                      std::vector<uint8_t> newMaterialIDs,
+                                      uint32_t newResolution,
+                                      std::unique_ptr<VoxelBrickMap> newBrickMap = nullptr) {
+        if (handle >= scene.chunks.size()) return;
+        Chunk& chunk = scene.chunks[handle];
+        int32_t oldIdx = chunk.geometryPoolIndex;
+
+        int32_t targetIdx = -1;
+        if (oldIdx >= 0 && oldIdx < static_cast<int32_t>(scene.geometryPool.size())) {
+            if (scene.geometryPool[oldIdx].refCount == 1) {
+                targetIdx = oldIdx; // sole owner: overwrite in place
+            } else {
+                GeometryBlob fresh;
+                fresh.refCount = 1;
+                targetIdx = poolInsertBlob(scene, std::move(fresh));
+                releaseBlob(scene, oldIdx); // detach from the old shared blob
+            }
+        }
+        if (targetIdx < 0) {
+            GeometryBlob fresh;
+            fresh.refCount = 1;
+            targetIdx = poolInsertBlob(scene, std::move(fresh));
+        }
+
+        GeometryBlob& blob = scene.geometryPool[targetIdx];
+        blob.geometry = std::move(newGeometry);
+        blob.materialIDs = std::move(newMaterialIDs);
+        if (newBrickMap) blob.brickMap = std::move(newBrickMap);
+        blob.renderLOD = 0;
+        blob.dirty = true;
+
+        chunk.geometryPoolIndex = targetIdx;
+        chunk.header.resolution = newResolution;
+        chunk.requestedLOD = 0;
+        chunk.headerDirty = true;
     }
 
     }

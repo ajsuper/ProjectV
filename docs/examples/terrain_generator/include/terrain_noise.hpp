@@ -334,13 +334,19 @@ static const float ARCH_CLIMATE[ARCH_COUNT][4] = {
     {0.35f, 0.38f, 0.42f, 0.48f},
 };
 
+// Plains and downs used to be the only archetypes with NO erosion pass at all (flat {} == strength
+// 0 == archEroded() false), so those regions never got the gully/drainage texture that
+// mountains/badlands/plateau/jagged already have. Plains gets a very light touch (it should still
+// read as mostly smooth), downs a bit more (rolling hills read well with soft drainage lines).
+// Dunes stays erosion-free: wind-formed ridges, not water drainage, are the whole point of its own
+// shape function.
 static const ErosionParams ARCH_EROSION[ARCH_COUNT] = {
     {0.15f, 0.52f, 0.70f, 1.4f, {0.22f,0.10f,0.10f,2.0f}, {0.58f,1.10f,2.80f,1.5f}, {0.72f,1.0f}, 0.85f, 0.42f, 2.0f, 0.52f},
-    {},
+    {0.22f, 0.16f, 0.28f, 1.1f, {0.24f,0.12f,0.10f,2.0f}, {0.48f,1.05f,2.80f,1.2f}, {0.80f,1.0f}, 0.92f, 0.42f, 2.0f, 0.52f},
     {0.09f, 0.40f, 0.45f, 2.2f, {0.10f,0.04f,0.10f,2.0f}, {0.55f,1.40f,2.80f,1.7f}, {0.78f,1.0f}, 0.75f, 0.45f, 2.0f, 0.52f},
     {},
     {0.12f, 0.55f, 0.90f, 1.2f, {0.18f,0.09f,0.10f,2.0f}, {0.38f,1.15f,2.80f,1.4f}, {0.66f,1.0f}, 0.80f, 0.40f, 2.0f, 0.52f},
-    {},
+    {0.16f, 0.28f, 0.42f, 1.3f, {0.18f,0.08f,0.10f,2.0f}, {0.42f,1.10f,2.80f,1.3f}, {0.72f,1.0f}, 0.85f, 0.42f, 2.0f, 0.52f},
     {0.15f, 0.35f, 0.35f, 1.2f, {0.18f,0.06f,0.10f,2.0f}, {0.35f,1.10f,2.80f,1.3f}, {0.70f,1.0f}, 0.85f, 0.42f, 2.0f, 0.52f},
 };
 static bool archEroded(int a) { return ARCH_EROSION[a].strength > 0.0f; }
@@ -420,9 +426,12 @@ struct Generator {
         return clampf(fbm(humid, nx, nz, 5, 2.1f, 0.5f) * 0.5f + 0.5f, 0.0f, 1.0f);
     }
 
-    float duneGate(float x, float z) const {
-        float hot = smoothstep(0.60f, 0.86f, baseTemperature(x, z));
-        float dry = 1.0f - smoothstep(0.16f, 0.40f, humidityNoise(x, z));
+    // Takes the already-sampled temp/humid (sampleTerrain computes both once per point already;
+    // this used to redundantly recompute both -- 2 extra domain-warped 5-octave fbm's per call --
+    // for a value the caller already had).
+    float duneGate(float temp, float humid, float x, float z) const {
+        float hot = smoothstep(0.60f, 0.86f, temp);
+        float dry = 1.0f - smoothstep(0.16f, 0.40f, humid);
         float field = fbm(selN[ARCH_DUNES], x * 0.00012f + 41.0f, z * 0.00012f + 17.0f,
                           2, 2.0f, 0.5f) * 0.5f + 0.5f;
         return hot * dry * smoothstep(0.50f, 0.72f, field);
@@ -442,6 +451,22 @@ struct Generator {
         float nx = x * BAD_FREQ, nz = z * BAD_FREQ;
         domainWarp(warpN[ARCH_BADLANDS], nx, nz, 0.30f);
         float n = fbm(shapeN[ARCH_BADLANDS], nx, nz, 2, 2.1f, 0.5f) * 0.5f + 0.5f;
+        return n * n * (3.0f - 2.0f * n);
+    }
+
+    // Formerly inline in shape()'s non-eroded switch; pulled out so erodedShapeAt (via baseShape)
+    // can reach them now that plains/downs get their own (gentle) erosion pass too.
+    float basePlains(float x, float z) const {
+        float nx = x * PLN_FREQ, nz = z * PLN_FREQ;
+        domainWarp(warpN[ARCH_PLAINS], nx, nz, 0.08f);
+        float n = fbm(shapeN[ARCH_PLAINS], nx, nz, 4, 2.1f, 0.45f) * 0.5f + 0.5f;
+        return n * n * (3.0f - 2.0f * n);
+    }
+
+    float baseDowns(float x, float z) const {
+        float nx = x * DOWN_FREQ, nz = z * DOWN_FREQ;
+        domainWarp(warpN[ARCH_DOWNS], nx, nz, 0.12f);
+        float n = fbm(shapeN[ARCH_DOWNS], nx, nz, 3, 2.0f, 0.5f) * 0.5f + 0.5f;
         return n * n * (3.0f - 2.0f * n);
     }
 
@@ -476,6 +501,8 @@ struct Generator {
             case ARCH_BADLANDS: return baseBadlands(x, z);
             case ARCH_PLATEAU:  return basePlateau(x, z);
             case ARCH_JAGGED:   return baseJagged(x, z, core);
+            case ARCH_PLAINS:   return basePlains(x, z);
+            case ARCH_DOWNS:    return baseDowns(x, z);
             default:            return 0.0f;
         }
     }
@@ -484,7 +511,9 @@ struct Generator {
                         float* ridgeMapOut, float eroMul = 1.0f) const {
         const float bf = (a == ARCH_MOUNTAIN) ? MTN_FREQ
                        : (a == ARCH_BADLANDS) ? BAD_FREQ
-                       : (a == ARCH_JAGGED)   ? JAG_FREQ : PLAT_FREQ;
+                       : (a == ARCH_JAGGED)   ? JAG_FREQ
+                       : (a == ARCH_PLAINS)   ? PLN_FREQ
+                       : (a == ARCH_DOWNS)    ? DOWN_FREQ : PLAT_FREQ;
         float h0 = baseShape(a, x, z, core);
         if (oct <= 0) { if (ridgeMapOut) *ridgeMapOut = 1.0f; return h0; }
 
@@ -601,8 +630,13 @@ struct TerrainSample {
     float humid = 0.5f;
 };
 
+// detailOct/erosionOct let the caller trade detail for speed per LOD ring: full octaves for
+// near/LOD0 chunks (where the player actually sees the texture), fewer for the far LOD1/LOD2 rings
+// that make up the bulk of resident chunks by count but are viewed from a distance where the extra
+// octaves are imperceptible. Defaults match the original hardcoded oct=2/eoct=4 so any other caller
+// is unaffected.
 static TerrainSample sampleTerrain(const Generator& g, const BlendParams& bp,
-                                   float x, float z) {
+                                   float x, float z, int detailOct = 2, int erosionOct = 4) {
     TerrainSample out;
     float claim[ARCH_COUNT];
     float total = 0.0f;
@@ -613,7 +647,7 @@ static TerrainSample sampleTerrain(const Generator& g, const BlendParams& bp,
         claim[a] = g.claim(a, x, z, bp.regionSize, out.temp, out.humid);
         out.w[a] = Generator::weightFromClaim(claim[a], bp.amount[a]);
         if (a == ARCH_DUNES && out.w[a] > 1e-4f)
-            out.w[a] *= g.duneGate(x, z);
+            out.w[a] *= g.duneGate(out.temp, out.humid, x, z);
         total += out.w[a];
     }
     if (total < 1e-6f) {
@@ -630,8 +664,8 @@ static TerrainSample sampleTerrain(const Generator& g, const BlendParams& bp,
     }
     for (int a = 0; a < ARCH_COUNT; ++a) out.w[a] /= sharp;
 
-    const int oct = 2;
-    const int eoct = 4;
+    const int oct = detailOct;
+    const int eoct = erosionOct;
 
     float eroMul = 1.0f;
     {

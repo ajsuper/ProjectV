@@ -32,6 +32,32 @@ Here is an image with an example drawing of how this sturcture works: [Example](
 ### Each node (3 x uint32_t)
 - Structured as such [**32**Bits:Valid Mask 1][**32**Bits:Valid Mask 2][**31**Bits:Relative Pointer][**1**Bit:Leaf Flag]
 
+### Storage LOD
+
+Levels are serialized root-first, one contiguous run per level, with the leaf level last, and
+child pointers are **relative** to the node that holds them. Together those two properties make
+coarsening a tree64 a pure tail truncation:
+
+1. Cut the array at the end of the level you want to keep. Every pointer in the retained prefix
+   stays valid, because the prefix layout is byte-identical.
+2. Set the leaf flag on the new last level. Its 64 mask bits, which meant "which children exist",
+   now mean "which voxels are solid" — which is exactly what a leaf is.
+3. Give each new leaf a material offset. There is one representative material byte per set bit,
+   collapsed to a single byte when they all agree (the same uniform-leaf trick as a normal bake).
+
+Do **not** re-run `addPointersTree64` on the result: it ORs pointer bits in rather than assigning,
+so a second pass corrupts the already-pointered prefix.
+
+One step drops one level, which is **4x coarser per axis** — never 2x. The resolution must stay an
+exact power of 4, because both the shader and the CPU builder derive tree depth as
+`log2(resolution)/2` with an implicit truncation. A 64³ tree goes 64 → 16 → 4; a resolution of 32
+would be read as 2 levels and traversed as if it were 16³.
+
+This is implemented by `downsampleTree64` (`src/utils/voxel_management.cpp`) and applied at GPU
+upload time only — see `GeometryBlob::renderLOD` in
+[scene_data_structure.md](/docs/data_structures/scene_data_structure.md). The CPU copy is always
+full resolution.
+
 ### More
 
 For more information on this project, visit our [README.md](README.md)

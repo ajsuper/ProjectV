@@ -1,5 +1,6 @@
 #include "graphics/gpu_interface.h"
 #include "utils/material.h"
+#include "utils/voxel_management.h"
 
 #include <chrono>
 #include <cstring>
@@ -284,7 +285,13 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
     g.positionX = chunk.header.position.x;
     g.positionY = chunk.header.position.y;
     g.positionZ = chunk.header.position.z;
-    g.resolution = chunk.header.resolution;
+    // Storage LOD: the chunk's CPU resolution is always full detail, but the tree actually resident
+    // in the texture may have had levels dropped. The header must describe the tree that is really
+    // there, so it reads the range's uploadedLOD rather than the blob's (possibly not-yet-flushed)
+    // requested value. `scale` is deliberately NOT adjusted -- holding it fixed while resolution
+    // shrinks is exactly what grows each voxel's world size and keeps the chunk's world footprint,
+    // position and grid cell identical.
+    g.resolution = resolutionAtLOD(chunk.header.resolution, r.uploadedLOD);
     g.scale = chunk.header.scale;
     g.dataRefID = 0;
     if (chunk.componentHandle < scene.components.size()) {
@@ -309,6 +316,16 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
     g.rotationY = chunk.header.rotation.y;
     g.rotationZ = chunk.header.rotation.z;
     g.rotationW = chunk.header.rotation.w;
+
+    // Traversal LOD: how many extra levels *this chunk instance* wants the shader to stop short of
+    // what's actually uploaded (r.uploadedLOD), on top of the ray-distance-based cutoff it already
+    // applies (see computeTargetLOD in pjv_utils_DDA.sc). Only meaningful when this instance wants
+    // *less* detail than the shared blob currently has resident -- e.g. one of several chunk
+    // instances sharing a blob that another, closer instance forced finer. The `>` guard matters: in
+    // a transient frame where reconciliation just lowered the blob's requested LOD but the upload
+    // flush hasn't happened yet, r.uploadedLOD can still exceed chunk.requestedLOD, and an unguarded
+    // unsigned subtraction here would underflow.
+    g.traversalLOD = (chunk.requestedLOD > r.uploadedLOD) ? (chunk.requestedLOD - r.uploadedLOD) : 0u;
 
     return g;
 }
@@ -350,6 +367,31 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         }
 
 
+
+        // Resolve what a blob should actually upload, applying its storage LOD.
+        //
+        // Both upload paths (uploadDirtyBlobs and the growDataTextures repack) go through here, so
+        // they cannot disagree about a blob's on-GPU size -- a disagreement would mean the allocator
+        // reserved one length and the header advertised another.
+        //
+        // At renderLOD 0 the scratch buffers are untouched and the blob's own arrays are used
+        // directly, so the common case costs nothing. Otherwise the coarsened copy is built into
+        // caller-owned scratch: the blob's CPU arrays always stay full resolution.
+        void effectiveBlobData(const GeometryBlob& blob,
+                               std::vector<uint32_t>& scratchGeom,
+                               std::vector<uint8_t>& scratchMat,
+                               const std::vector<uint32_t>*& outGeom,
+                               const std::vector<uint8_t>*& outMat) {
+            if (blob.renderLOD == 0) {
+                outGeom = &blob.geometry;
+                outMat = &blob.materialIDs;
+                return;
+            }
+            utils::downsampleTree64(blob.geometry, blob.materialIDs, blob.renderLOD,
+                                    scratchGeom, scratchMat);
+            outGeom = &scratchGeom;
+            outMat = &scratchMat;
+        }
 
         std::vector<uint8_t> packMaterialIDTexels8(const std::vector<uint8_t>& materialIDs) {
             size_t texels = (materialIDs.size() + 3) / 4;
@@ -405,13 +447,21 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         uint32_t palOff = 0;
         uint64_t totalVersion = 0;
 
-        for (size_t h = 0; h < scene.components.size(); ++h) {
-            const ComponentRecord& comp = scene.components[h];
-            gpuData.componentPaletteOffsets[h] = palOff;
-            for (const Material& m : comp.materialPalette)
-                globalPalette.push_back(m.packedColor);
-            palOff += static_cast<uint32_t>(comp.materialPalette.size());
-            totalVersion += comp.paletteVersion;
+        {
+            // Locked against the same mutex internMaterial uses: this loop live-iterates
+            // ComponentRecord::materialPalette and reads paletteVersion, both of which a worker
+            // thread can now be concurrently mutating via the thread-safe internMaterial -- without
+            // this, a concurrent push_back reallocating the vector mid-iteration here would be a
+            // genuine data race (iterator invalidation), not just a stale read.
+            std::lock_guard<std::mutex> lock(scene.materialPaletteMutex);
+            for (size_t h = 0; h < scene.components.size(); ++h) {
+                const ComponentRecord& comp = scene.components[h];
+                gpuData.componentPaletteOffsets[h] = palOff;
+                for (const Material& m : comp.materialPalette)
+                    globalPalette.push_back(m.packedColor);
+                palOff += static_cast<uint32_t>(comp.materialPalette.size());
+                totalVersion += comp.paletteVersion;
+            }
         }
 
         core::info("PAL-CPU: compOffsets[0]={} totalVer={} storedVer={} rebuilt={}",
@@ -640,24 +690,64 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         return texture;
     }
 
+    // ---- Header texture layout ----
+    //
+    // One header is 5 consecutive RGBA32U texels (grown from 4 to fit the added traversalLOD +
+    // reserved words -- a texel is atomic, so one new field forces a whole new texel). The texture
+    // used to be a single row, which capped the scene at maxTextureSize/N chunks on a 32768-wide
+    // GPU -- and past that cap chunks silently got no header row (invisible) while
+    // updateDirtyHeaders re-entered growHeaderTexture every frame, rebuilding the whole texture. It
+    // is now 2D: a fixed row width, growing in rows.
+    //
+    // The width is held to a multiple of 5 so a header never straddles a row boundary. That keeps a
+    // single-header update one updateTexture2D of 5x1, and lets the shader resolve a header with one
+    // divide instead of five. The shader derives the same layout from textureSize() -- see headers()
+    // in pjv_utils_DDA.sc -- so there is no uniform to keep in sync, but the "width is a multiple of
+    // 5" invariant is load-bearing on both sides.
+    uint32_t headerTexWidth() {
+        uint32_t w = maxTexSize();
+        return w - (w % 5u);   // maxTextureSize is a power of two in practice; be safe anyway
+    }
+    uint32_t headersPerRow() { return headerTexWidth() / 5u; }
+
+    // Largest number of chunk slots the header texture can address.
+    uint32_t maxHeaderSlots() {
+        return headersPerRow() * maxTexSize();
+    }
+
     bgfx::TextureHandle createHeaderTexture(std::vector<projv::GPUChunkHeader>& headers) {
+        const uint32_t hpr = headersPerRow();
+        const uint32_t w = headerTexWidth();
+        const uint32_t h = std::max<uint32_t>(1u, (static_cast<uint32_t>(headers.size()) + hpr - 1) / hpr);
+        checkTextureSize("header", texBytes(w, h, true));
+
+        // Pad to a whole number of rows so the fill below is one contiguous upload. Dead slots are
+        // degenerate (scale <= 0), which the shader's broadphase rejects.
+        headers.resize(static_cast<size_t>(h) * hpr, degenerateHeader());
+
         // Create MUTABLE texture (nullptr → mutable, so updateTexture2D works later).
-        uint32_t w = headers.size() * 4;
-        checkTextureSize("header", texBytes(w, 1, true));
         bgfx::TextureHandle headerTexture = bgfx::createTexture2D(
-            uint16_t(w), 1, false, 1, bgfx::TextureFormat::RGBA32U,
+            uint16_t(w), uint16_t(h), false, 1, bgfx::TextureFormat::RGBA32U,
             BGFX_SAMPLER_POINT, nullptr);
         if (!bgfx::isValid(headerTexture)) {
-            core::info("ERROR: createHeaderTexture({}x1) failed — out of VRAM?", w);
+            core::info("ERROR: createHeaderTexture({}x{}) failed — out of VRAM?", w, h);
             return BGFX_INVALID_HANDLE;
         }
 
-        // Fill initial data via updateTexture2D.
         const bgfx::Memory* headerMemory = bgfx::copy(
             headers.data(),
             headers.size() * sizeof(projv::GPUChunkHeader));
-        bgfx::updateTexture2D(headerTexture, 0, 0, 0, 0, uint16_t(w), 1, headerMemory);
+        bgfx::updateTexture2D(headerTexture, 0, 0, 0, 0, uint16_t(w), uint16_t(h), headerMemory);
         return headerTexture;
+    }
+
+    // Blit one header row in place. Single point of truth for header->(x,y) addressing.
+    void writeHeaderTexel(bgfx::TextureHandle tex, uint32_t slot, const projv::GPUChunkHeader& hdr) {
+        const uint32_t hpr = headersPerRow();
+        uint16_t x = static_cast<uint16_t>((slot % hpr) * 5u);
+        uint16_t y = static_cast<uint16_t>(slot / hpr);
+        const bgfx::Memory* mem = bgfx::copy(&hdr, sizeof(hdr));
+        bgfx::updateTexture2D(tex, 0, 0, x, y, 5, 1, mem);
     }
 
     // Builds a 1-row RGBA32U texture from a raw uint list (4 uints per texel). Used for the
@@ -894,14 +984,21 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         uint32_t geomUsed = 0, matUsed = 0;
         uint32_t geomUsedPadded = 0, matUsedPadded = 0;
         uint32_t liveBlobs = 0;
+        // Reused across blobs; see the matching scratch in uploadDirtyBlobs.
+        std::vector<uint32_t> lodGeomScratch;
+        std::vector<uint8_t> lodMatScratch;
 
         for (size_t b = 0; b < scene.geometryPool.size(); b++) {
             const GeometryBlob& blob = scene.geometryPool[b];
             if (blob.refCount == 0) continue;
             liveBlobs++;
 
-            uint32_t nodes = static_cast<uint32_t>(blob.geometry.size() / 3);
-            uint32_t matTexels = static_cast<uint32_t>((blob.materialIDs.size() + 3) / 4);
+            const std::vector<uint32_t>* geomSrc = nullptr;
+            const std::vector<uint8_t>* matSrc = nullptr;
+            effectiveBlobData(blob, lodGeomScratch, lodMatScratch, geomSrc, matSrc);
+
+            uint32_t nodes = static_cast<uint32_t>(geomSrc->size() / 3);
+            uint32_t matTexels = static_cast<uint32_t>((matSrc->size() + 3) / 4);
             uint32_t gAlloc = paddedAlloc(nodes);
             uint32_t mAlloc = paddedAlloc(matTexels);
 
@@ -912,12 +1009,13 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             rng.matTexelOffset     = matUsedPadded;
             rng.matTexelLen        = matTexels;
             rng.matTexelAllocated  = mAlloc;
-            rng.matByteLen         = static_cast<uint32_t>(blob.materialIDs.size());
+            rng.matByteLen         = static_cast<uint32_t>(matSrc->size());
+            rng.uploadedLOD        = blob.renderLOD;
             rng.uploaded           = true;
             gpuData.blobRanges[b]  = rng;
 
-std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
-            std::vector<uint8_t> mt = packMaterialIDTexels8(blob.materialIDs);
+            std::vector<uint32_t> gt = packGeometryTexels(*geomSrc);
+            std::vector<uint8_t> mt = packMaterialIDTexels8(*matSrc);
             tree64Texels.insert(tree64Texels.end(), gt.begin(), gt.end());
             materialIDTexels.insert(materialIDTexels.end(), mt.begin(), mt.end());
             tree64Texels.insert(tree64Texels.end(), static_cast<size_t>(gAlloc - nodes) * 4, 0u);
@@ -1018,6 +1116,10 @@ std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
             }
         }
 
+        // Reused across blobs so a flush that coarsens many chunks does not reallocate per blob.
+        std::vector<uint32_t> lodGeomScratch;
+        std::vector<uint8_t> lodMatScratch;
+
         for (size_t b = 0; b < scene.geometryPool.size(); b++) {
             GeometryBlob& blob = scene.geometryPool[b];
             GPUBlobRange& r = gpuData.blobRanges[b];
@@ -1031,11 +1133,22 @@ std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
             if (blob.refCount == 0) continue;
             if (!blob.dirty) continue;
 
-            uint32_t nodes = static_cast<uint32_t>(blob.geometry.size() / 3);
-            uint32_t matTexels = static_cast<uint32_t>((blob.materialIDs.size() + 3) / 4);
-            uint32_t matBytes = static_cast<uint32_t>(blob.materialIDs.size());
+            const std::vector<uint32_t>* geomSrc = nullptr;
+            const std::vector<uint8_t>* matSrc = nullptr;
+            effectiveBlobData(blob, lodGeomScratch, lodMatScratch, geomSrc, matSrc);
 
-            bool needRealloc = !r.uploaded || nodes > r.geomTexelAllocated || matTexels > r.matTexelAllocated;
+            uint32_t nodes = static_cast<uint32_t>(geomSrc->size() / 3);
+            uint32_t matTexels = static_cast<uint32_t>((matSrc->size() + 3) / 4);
+            uint32_t matBytes = static_cast<uint32_t>(matSrc->size());
+
+            // An LOD change forces a realloc even when the blob shrank. The normal test only fires
+            // on growth, so without this a demoted blob would keep its old oversized range until
+            // the next full repack -- and reclaiming that VRAM is the entire point of the LOD. The
+            // condition is deliberately scoped to LOD changes so the editing path's realloc
+            // behaviour (and its 25% growth slack) is left alone.
+            bool lodChanged = r.uploaded && r.uploadedLOD != blob.renderLOD;
+            bool needRealloc = !r.uploaded || nodes > r.geomTexelAllocated
+                               || matTexels > r.matTexelAllocated || lodChanged;
 
             if (needRealloc) {
                 if (r.uploaded) {
@@ -1047,6 +1160,11 @@ std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
                 uint32_t gOff = gpuData.tree64Alloc.alloc(gAlloc);
                 uint32_t mOff = gpuData.materialIDAlloc.alloc(mAlloc);
                 if (gOff == RangeAllocator::INVALID || mOff == RangeAllocator::INVALID) {
+                    // Hand back whichever half succeeded. The caller falls back to growDataTextures,
+                    // which resets both allocators wholesale, but bailing without this leaks the
+                    // range on any path that ever retries without a full repack.
+                    if (gOff != RangeAllocator::INVALID) gpuData.tree64Alloc.free(gOff, gAlloc);
+                    if (mOff != RangeAllocator::INVALID) gpuData.materialIDAlloc.free(mOff, mAlloc);
                     core::perf("uploadDirtyBlobs: allocator full at blob {} (geom={} mat={})",
                                b, nodes, matTexels);
                     return std::nullopt;
@@ -1064,15 +1182,17 @@ std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
                 r.matTexelLen = matTexels;
                 r.matByteLen = matBytes;
             }
+            // Record what is now resident, so makeHeader advertises the matching resolution.
+            r.uploadedLOD = blob.renderLOD;
 
-            std::vector<uint32_t> geomPacked = packGeometryTexels(blob.geometry);
+            std::vector<uint32_t> geomPacked = packGeometryTexels(*geomSrc);
             uploadTexelSpan(gpuData.tree64Texture, gpuData.tree64Width,
                            geomPacked, r.geomTexelOffset, r.geomTexelLen);
 
             // Per-blob material IDs are stored as local indices (0..N-1) in the texture.
             // The shader adds h.padding[1] (palette offset) to get a global palette index.
             // packMaterialIDTexels8 packs them as raw bytes — no remapping needed.
-            std::vector<uint8_t> matPacked = packMaterialIDTexels8(blob.materialIDs);
+            std::vector<uint8_t> matPacked = packMaterialIDTexels8(*matSrc);
             uploadTexelSpan8(gpuData.materialIDTexture, gpuData.materialIDWidth,
                            matPacked, r.matTexelOffset, r.matTexelLen);
 
@@ -1099,10 +1219,16 @@ std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
     // current scene.chunks state. Does not touch the data textures.
     // With pre-allocation at maxSlots, this should only run during initial setup.
     static void growHeaderTexture(projv::Scene& scene, GPUData& gpuData) {
-        uint32_t maxSlots = maxTexSize() / 4;
+        uint32_t maxSlots = maxHeaderSlots();
         uint32_t newCap = std::min(withHeadroom(static_cast<uint32_t>(scene.chunks.size())), maxSlots);
         if (newCap <= gpuData.headerCapacity) newCap = gpuData.headerCapacity + 1024;
         if (newCap > maxSlots) newCap = maxSlots;
+        // Past this the scene simply cannot be addressed; say so once rather than silently
+        // dropping chunks (which is what the old single-row texture did at 8192).
+        if (scene.chunks.size() > maxSlots) {
+            core::error("growHeaderTexture: {} chunks exceeds the {} addressable header slots — "
+                        "chunks past that will not render", scene.chunks.size(), maxSlots);
+        }
 
         if (bgfx::isValid(gpuData.headerTexture)) bgfx::destroy(gpuData.headerTexture);
         gpuData.headerCapacity = newCap;
@@ -1147,6 +1273,9 @@ std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
             if (!needsUpdate) continue;
 
             if (h >= gpuData.headerCapacity) {
+                // Already at the addressable ceiling: growing cannot help, and re-entering it every
+                // frame would rebuild the whole texture every frame. Skip the chunk instead.
+                if (gpuData.headerCapacity >= maxHeaderSlots()) continue;
                 growHeaderTexture(scene, gpuData);
                 // grow rewrote all headers; we're done.
                 auto t1 = std::chrono::high_resolution_clock::now();
@@ -1161,9 +1290,7 @@ std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
                 hdr = makeHeader(c, gpuData.blobRanges[c.geometryPoolIndex], scene, gpuData);
             }
 
-            uint16_t x = static_cast<uint16_t>(h * 4);
-            const bgfx::Memory* mem = bgfx::copy(&hdr, sizeof(hdr));
-            bgfx::updateTexture2D(gpuData.headerTexture, 0, 0, x, 0, 4, 1, mem);
+            writeHeaderTexel(gpuData.headerTexture, h, hdr);
 #if defined(PROJV_ENABLE_RENDER)
             if (h < 64) // sample first 64 chunks each flush
                 core::info("HEADER h={} matStart={} palOff={}",
@@ -1192,12 +1319,18 @@ std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
         uint32_t geomUsed = 0, matUsed = 0;
         uint32_t geomUsedPadded = 0, matUsedPadded = 0;
         uint32_t liveBlobs = 0;
+        // Reused across blobs; see the matching scratch in uploadDirtyBlobs.
+        std::vector<uint32_t> lodGeomScratch;
+        std::vector<uint8_t> lodMatScratch;
         for (size_t b = 0; b < scene.geometryPool.size(); b++) {
             const GeometryBlob& blob = scene.geometryPool[b];
             if (blob.refCount == 0) { gpuData.blobRanges[b].uploaded = false; continue; }
             liveBlobs++;
-            uint32_t nodes = static_cast<uint32_t>(blob.geometry.size() / 3);
-            uint32_t matTexels = static_cast<uint32_t>((blob.materialIDs.size() + 3) / 4);
+            const std::vector<uint32_t>* geomSrc = nullptr;
+            const std::vector<uint8_t>* matSrc = nullptr;
+            effectiveBlobData(blob, lodGeomScratch, lodMatScratch, geomSrc, matSrc);
+            uint32_t nodes = static_cast<uint32_t>(geomSrc->size() / 3);
+            uint32_t matTexels = static_cast<uint32_t>((matSrc->size() + 3) / 4);
             uint32_t gAlloc = paddedAlloc(nodes);
             uint32_t mAlloc = paddedAlloc(matTexels);
             GPUBlobRange rng{};
@@ -1207,11 +1340,12 @@ std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
             rng.matTexelOffset     = matUsedPadded;
             rng.matTexelLen        = matTexels;
             rng.matTexelAllocated  = mAlloc;
-            rng.matByteLen         = static_cast<uint32_t>(blob.materialIDs.size());
+            rng.matByteLen         = static_cast<uint32_t>(matSrc->size());
+            rng.uploadedLOD        = blob.renderLOD;
             rng.uploaded           = true;
             gpuData.blobRanges[b]  = rng;
-            std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
-            std::vector<uint8_t> mt = packMaterialIDTexels8(blob.materialIDs);
+            std::vector<uint32_t> gt = packGeometryTexels(*geomSrc);
+            std::vector<uint8_t> mt = packMaterialIDTexels8(*matSrc);
             tree64Texels.insert(tree64Texels.end(), gt.begin(), gt.end());
             materialIDTexels.insert(materialIDTexels.end(), mt.begin(), mt.end());
             tree64Texels.insert(tree64Texels.end(), static_cast<size_t>(gAlloc - nodes) * 4, 0u);
@@ -1245,7 +1379,7 @@ std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
         validateBlobRanges(scene, gpuData, "buildDataAndHeaderTextures");
 
         // Pre-allocate header texture at max possible slots so it never grows.
-        uint32_t maxSlots = maxSz / 4;
+        uint32_t maxSlots = maxHeaderSlots();
         gpuData.headerCapacity = std::min(withHeadroom(static_cast<uint32_t>(scene.chunks.size())), maxSlots);
         if (scene.chunks.size() > static_cast<size_t>(maxSlots))
             core::error("buildDataAndHeaderTextures: {} chunks exceed header texture slot limit {}", scene.chunks.size(), maxSlots);
@@ -1369,8 +1503,7 @@ std::vector<uint32_t> gt = packGeometryTexels(blob.geometry);
             static_cast<size_t>(c.geometryPoolIndex) < gpuData.blobRanges.size()) {
             hdr = makeHeader(c, gpuData.blobRanges[c.geometryPoolIndex], scene, gpuData);
         }
-        uint16_t x = static_cast<uint16_t>(h * 4);
-        const bgfx::Memory* mem = bgfx::copy(&hdr, sizeof(hdr));
-        bgfx::updateTexture2D(gpuData.headerTexture, 0, 0, x, 0, 4, 1, mem);
+        if (h >= gpuData.headerCapacity) return;
+        writeHeaderTexel(gpuData.headerTexture, h, hdr);
     }
 }

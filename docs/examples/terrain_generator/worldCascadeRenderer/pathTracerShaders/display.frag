@@ -40,10 +40,10 @@ $input v_texcoord0
 SAMPLER2D(accumColor, 0);
 
 // ---- Colour grading knobs (all defaults are no-ops) -------------------------
-#define EXPOSURE    0.4
+#define EXPOSURE    0.55
 #define TINT        vec3(1.0, 1.0, 1.0)
-#define CONTRAST    1.1
-#define SATURATION  1.5
+#define CONTRAST    1.12
+#define SATURATION  1.2
 
 vec3 acesToneMap(vec3 x) {
     const float a = 2.51;

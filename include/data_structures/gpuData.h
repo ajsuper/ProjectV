@@ -25,6 +25,11 @@ namespace projv {
         uint32_t matTexelLen = 0;
         uint32_t matTexelAllocated = 0;
         uint32_t matByteLen = 0;
+        // Storage LOD of the data actually resident in the textures right now. Distinct from
+        // GeometryBlob::renderLOD, which is the *requested* value and may not be flushed yet.
+        // makeHeader reads this one so the header's resolution always describes the tree that is
+        // really there; uploadDirtyBlobs compares the two to detect an LOD change.
+        uint32_t uploadedLOD = 0;
         bool uploaded = false;
     };
 

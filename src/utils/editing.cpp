@@ -51,12 +51,12 @@ namespace projv::utils {
         }
 
         // Ensure the blob has a brick map. If null, build one from the existing voxelTypeData.
-        void ensureBrickMapExists(GeometryBlob& blob, uint32_t resolution, ComponentRecord& comp) {
+        void ensureBrickMapExists(Scene& scene, GeometryBlob& blob, uint32_t resolution, ComponentRecord& comp) {
             if (blob.brickMap) return;
             core::ivec3 brickDims = computeBrickDims(resolution);
             blob.brickMap = createVoxelBrickMap(brickDims);
             if (!blob.voxelTypeData.empty()) {
-                brickMapFromVoxelTypeData(*blob.brickMap, blob.voxelTypeData, comp);
+                brickMapFromVoxelTypeData(scene, *blob.brickMap, blob.voxelTypeData, comp);
             }
         }
 
@@ -65,7 +65,7 @@ namespace projv::utils {
         // them directly (no cell bucketing — that's for the Grid path).
         // Colours from ops are interned into the component's material palette;
         // the returned local slot is stored in the brick map.
-        void applyOpsToBrickMap(VoxelBrickMap& map, uint32_t resolution,
+        void applyOpsToBrickMap(Scene& scene, VoxelBrickMap& map, uint32_t resolution,
                                 const std::vector<PendingVoxelOp>& ops,
                                 ComponentRecord& comp) {
             for (const PendingVoxelOp& op : ops) {
@@ -79,7 +79,7 @@ namespace projv::utils {
                     continue;
                 }
                 if (op.isAdd) {
-                    uint8_t slot = internMaterial(comp, "", op.packedColor);
+                    uint8_t slot = internMaterial(scene, comp, "", op.packedColor);
                     brickMapSetVoxel(map, x, y, z, slot);
                 } else {
                     brickMapClearVoxel(map, x, y, z);
@@ -95,6 +95,12 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
             int32_t oldIdx = chunk.geometryPoolIndex;
             int32_t newIdx = forkBlob(scene, oldIdx);
             chunk.geometryPoolIndex = newIdx;
+            // forkBlob does NOT decrement the source blob's refCount on its fork-away branch (by
+            // its own doc comment, that's the caller's job) -- without this, every edit to a shared
+            // blob permanently leaks one refcount and that slot's GPU range/pool entry can never be
+            // reclaimed. Only fires when a fork actually happened (newIdx != oldIdx); the sole-owner
+            // edit-in-place branch returns oldIdx unchanged and must not release anything.
+            if (newIdx != oldIdx) releaseBlob(scene, oldIdx);
             core::edit(" applyEditsToChunk: chunkHandle={} oldPool={} newPool={} ops={}",
                        chunk.cellIndex, oldIdx, newIdx, ops.size());
 
@@ -108,8 +114,8 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
 
             GeometryBlob& blob = scene.geometryPool[chunk.geometryPoolIndex];
             uint32_t res = chunk.header.resolution;
-            ensureBrickMapExists(blob, res, comp);
-            applyOpsToBrickMap(*blob.brickMap, res, ops, comp);
+            ensureBrickMapExists(scene, blob, res, comp);
+            applyOpsToBrickMap(scene, *blob.brickMap, res, ops, comp);
 
             updateChunkFromBrickMap(chunk, *blob.brickMap);
 
@@ -266,7 +272,7 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
                             int32_t lx = static_cast<int32_t>(floorMod(op.position.x, static_cast<int32_t>(res)));
                             int32_t ly = static_cast<int32_t>(floorMod(op.position.y, static_cast<int32_t>(res)));
                             int32_t lz = static_cast<int32_t>(floorMod(op.position.z, static_cast<int32_t>(res)));
-                            uint8_t slot = internMaterial(comp, "", op.packedColor);
+                            uint8_t slot = internMaterial(scene, comp, "", op.packedColor);
                             brickMapSetVoxel(*brickMap, lx, ly, lz, slot);
                         }
                     }
