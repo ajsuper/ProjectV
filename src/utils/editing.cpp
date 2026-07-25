@@ -51,20 +51,23 @@ namespace projv::utils {
         }
 
         // Ensure the blob has a brick map. If null, build one from the existing voxelTypeData.
-        void ensureBrickMapExists(GeometryBlob& blob, uint32_t resolution) {
+        void ensureBrickMapExists(GeometryBlob& blob, uint32_t resolution, ComponentRecord& comp) {
             if (blob.brickMap) return;
             core::ivec3 brickDims = computeBrickDims(resolution);
             blob.brickMap = createVoxelBrickMap(brickDims);
             if (!blob.voxelTypeData.empty()) {
-                brickMapFromVoxelTypeData(*blob.brickMap, blob.voxelTypeData, blob);
+                brickMapFromVoxelTypeData(*blob.brickMap, blob.voxelTypeData, comp);
             }
         }
 
         // Apply a batch of PendingVoxelOps directly to a brick map.
         // Positions are in continuous component-space coords; the brick map stores
         // them directly (no cell bucketing — that's for the Grid path).
+        // Colours from ops are interned into the component's material palette;
+        // the returned local slot is stored in the brick map.
         void applyOpsToBrickMap(VoxelBrickMap& map, uint32_t resolution,
-                                const std::vector<PendingVoxelOp>& ops) {
+                                const std::vector<PendingVoxelOp>& ops,
+                                ComponentRecord& comp) {
             for (const PendingVoxelOp& op : ops) {
                 int32_t x = static_cast<int32_t>(floorMod(op.position.x, static_cast<int32_t>(resolution)));
                 int32_t y = static_cast<int32_t>(floorMod(op.position.y, static_cast<int32_t>(resolution)));
@@ -76,7 +79,8 @@ namespace projv::utils {
                     continue;
                 }
                 if (op.isAdd) {
-                    brickMapSetVoxel(map, x, y, z, op.materialID);
+                    uint8_t slot = internMaterial(comp, "", op.packedColor);
+                    brickMapSetVoxel(map, x, y, z, slot);
                 } else {
                     brickMapClearVoxel(map, x, y, z);
                 }
@@ -84,8 +88,8 @@ namespace projv::utils {
         }
 
         // Apply edits to a single existing chunk using the brick map.
-        void applyEditsToChunk(Scene& scene, Chunk& chunk,
-                               const std::vector<PendingVoxelOp>& ops) {
+void applyEditsToChunk(Scene& scene, Chunk& chunk,
+                                const std::vector<PendingVoxelOp>& ops) {
             if (ops.empty()) return;
 
             int32_t oldIdx = chunk.geometryPoolIndex;
@@ -94,14 +98,22 @@ namespace projv::utils {
             core::edit(" applyEditsToChunk: chunkHandle={} oldPool={} newPool={} ops={}",
                        chunk.cellIndex, oldIdx, newIdx, ops.size());
 
+            ComponentHandle compHandle = INVALID_COMPONENT_HANDLE;
+            if (chunk.gridIndex >= 0 && static_cast<size_t>(chunk.gridIndex) < scene.grids.size())
+                compHandle = scene.grids[chunk.gridIndex].componentHandle;
+            else
+                compHandle = chunk.componentHandle;
+            assert(compHandle < scene.components.size());
+            ComponentRecord& comp = scene.components[compHandle];
+
             GeometryBlob& blob = scene.geometryPool[chunk.geometryPoolIndex];
             uint32_t res = chunk.header.resolution;
-            ensureBrickMapExists(blob, res);
-            applyOpsToBrickMap(*blob.brickMap, res, ops);
+            ensureBrickMapExists(blob, res, comp);
+            applyOpsToBrickMap(*blob.brickMap, res, ops, comp);
 
             updateChunkFromBrickMap(chunk, *blob.brickMap);
 
-            bakeMaterialsFromBrickMap(chunk.geometryData, blob, *blob.brickMap);
+            bakeMaterialsFromBrickMap(chunk.geometryData, blob.materialIDs, *blob.brickMap);
 
             blob.geometry = std::move(chunk.geometryData);
 
@@ -254,7 +266,8 @@ namespace projv::utils {
                             int32_t lx = static_cast<int32_t>(floorMod(op.position.x, static_cast<int32_t>(res)));
                             int32_t ly = static_cast<int32_t>(floorMod(op.position.y, static_cast<int32_t>(res)));
                             int32_t lz = static_cast<int32_t>(floorMod(op.position.z, static_cast<int32_t>(res)));
-                            brickMapSetVoxel(*brickMap, lx, ly, lz, op.materialID);
+                            uint8_t slot = internMaterial(comp, "", op.packedColor);
+                            brickMapSetVoxel(*brickMap, lx, ly, lz, slot);
                         }
                     }
 
@@ -264,22 +277,19 @@ namespace projv::utils {
 
                     updateChunkFromBrickMap(newChunk, *brickMap);
 
-                    // Bake materials: create a temporary blob, bake, then move data into intern.
-                    GeometryBlob tempBlob;
-                    bakeMaterialsFromBrickMap(newChunk.geometryData, tempBlob, *brickMap);
+                    std::vector<uint8_t> bakedMaterialIDs;
+                    bakeMaterialsFromBrickMap(newChunk.geometryData, bakedMaterialIDs, *brickMap);
 
                     core::edit(" Grid path: after updateChunkFromBrickMap: finalRes={} scale={} geomNodes={} materialIDs={}",
                                newChunk.header.resolution, newChunk.header.scale,
                                newChunk.geometryData.size() / 3,
-                               tempBlob.materialIDs.size());
+                               bakedMaterialIDs.size());
 
                     internChunkGeometry(scene, newChunk);
 
-                    // Transfer baked materials to the new blob.
                     if (newChunk.geometryPoolIndex >= 0) {
                         GeometryBlob& newBlob = scene.geometryPool[newChunk.geometryPoolIndex];
-                        newBlob.materialIDs = std::move(tempBlob.materialIDs);
-                        newBlob.materialPalette = std::move(tempBlob.materialPalette);
+                        newBlob.materialIDs = std::move(bakedMaterialIDs);
                         newBlob.brickMap = std::move(brickMap);
                     }
 

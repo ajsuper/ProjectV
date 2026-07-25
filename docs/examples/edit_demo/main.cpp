@@ -107,6 +107,8 @@ struct EditState {
 // is re-voxelized only when the radius changes (scrollwheel / key press).
 struct PreviewState {
     projv::ChunkHandle chunk = static_cast<projv::ChunkHandle>(-1);
+    projv::ComponentHandle comp = projv::INVALID_COMPONENT_HANDLE;
+    uint8_t yellowMaterialID = 0;
     int currentRadius = 0;   // radius the chunk was built with; 0 = not yet built
 };
 
@@ -190,7 +192,7 @@ static PickResult pickCrosshairWorldPos(projv::graphics::RenderInstance& renderI
 // centred on centerVoxel. Component-space voxel coords map 1:1 to world integer coords for
 // the Sponza grid, so the caller passes floor(worldPos) as the centre.
 static std::vector<projv::PendingVoxelOp> makeSphereOps(projv::core::ivec3 centerVoxel,
-                                                        int radius, uint8_t materialID, bool isAdd) {
+                                                        int radius, uint32_t packedColor, bool isAdd) {
     std::vector<projv::PendingVoxelOp> ops;
     int r2 = radius * radius;
     for (int dz = -radius; dz <= radius; ++dz) {
@@ -201,8 +203,7 @@ static std::vector<projv::PendingVoxelOp> makeSphereOps(projv::core::ivec3 cente
                 projv::PendingVoxelOp op;
                 op.isAdd = isAdd;
                 op.position = pos;
-                op.materialID = materialID;
-                op._pad[0] = op._pad[1] = op._pad[2] = 0;
+                op.packedColor = packedColor;
                 ops.push_back(op);
             }
         }
@@ -216,6 +217,7 @@ static std::vector<projv::PendingVoxelOp> makeSphereOps(projv::core::ivec3 cente
 
 static projv::ChunkHandle buildPreviewSphere(projv::Scene& scene, projv::GPUData& gpuData,
                                               int radius, const projv::core::vec3& position,
+                                              projv::ComponentHandle previewComp,
                                               uint8_t yellowMaterialID) {
     constexpr int     kRes    = 256;
     constexpr float   kScale  = 256.0f;
@@ -235,6 +237,7 @@ static projv::ChunkHandle buildPreviewSphere(projv::Scene& scene, projv::GPUData
     chunk.header = hdr;
     chunk.LOD    = 0;
     chunk.alive  = true;
+    chunk.componentHandle = previewComp;
 
     auto brickMap = projv::utils::createVoxelBrickMap(
         projv::utils::computeBrickDims(kRes));
@@ -251,16 +254,13 @@ static projv::ChunkHandle buildPreviewSphere(projv::Scene& scene, projv::GPUData
     }
     projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
 
-    // Bake materials into the geometry.
-    projv::GeometryBlob tempBlob;
-    projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, tempBlob, *brickMap);
+    // Bake material IDs from the brick map.
+    std::vector<uint8_t> bakedMaterialIDs;
+    projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, bakedMaterialIDs, *brickMap);
 
-    // Pool the geometry and register as a loose chunk.
     int32_t poolIdx = projv::internChunkGeometry(scene, chunk);
-    // Transfer baked data.
     if (poolIdx >= 0 && static_cast<size_t>(poolIdx) < scene.geometryPool.size()) {
-        scene.geometryPool[poolIdx].materialIDs = std::move(tempBlob.materialIDs);
-        scene.geometryPool[poolIdx].materialPalette = std::move(tempBlob.materialPalette);
+        scene.geometryPool[poolIdx].materialIDs = std::move(bakedMaterialIDs);
         scene.geometryPool[poolIdx].brickMap = std::move(brickMap);
     }
     projv::ChunkHandle h = static_cast<projv::ChunkHandle>(scene.chunks.size());
@@ -272,7 +272,6 @@ static projv::ChunkHandle buildPreviewSphere(projv::Scene& scene, projv::GPUData
         scene.looseChunks[scene.looseChunkCount] = static_cast<int32_t>(h);
     scene.looseChunkCount++;
 
-    // Flush so the GPU knows about the new chunk and its blob.
     projv::graphics::flushSceneUpdates(scene, gpuData);
 
     return h;
@@ -315,16 +314,15 @@ static void rebuildPreviewSphere(projv::Scene& scene, projv::GPUData& gpuData,
     projv::utils::updateChunkFromBrickMap(temp, *brickMap);
 
     // Bake materials.
-    projv::GeometryBlob tempBlob;
-    projv::utils::bakeMaterialsFromBrickMap(temp.geometryData, tempBlob, *brickMap);
+    std::vector<uint8_t> bakedMaterialIDs;
+    projv::utils::bakeMaterialsFromBrickMap(temp.geometryData, bakedMaterialIDs, *brickMap);
 
     // Replace the blob content in-place (sole owner, refCount == 1).
     int32_t poolIdx = preview.geometryPoolIndex;
     if (poolIdx >= 0 && static_cast<size_t>(poolIdx) < scene.geometryPool.size()) {
         projv::GeometryBlob& blob = scene.geometryPool[poolIdx];
         blob.geometry = std::move(temp.geometryData);
-        blob.materialIDs = std::move(tempBlob.materialIDs);
-        blob.materialPalette = std::move(tempBlob.materialPalette);
+        blob.materialIDs = std::move(bakedMaterialIDs);
         blob.brickMap = std::move(brickMap);
         blob.dirty = true;
     }
@@ -408,23 +406,17 @@ void startup(projv::Application& app) {
     renderInstance.setActiveRenderer(constructedRenderer);
     gpuData = projv::graphics::createTexturesForScene(scene);
 
-    // Intern cycle colors into the first blob's palette.
-    {
-        // Use the first blob's palette for material IDs.
-        projv::GeometryBlob* paletteBlob = nullptr;
-        for (auto& blob : scene.geometryPool) {
-            if (blob.refCount > 0) {
-                paletteBlob = &blob;
-                break;
-            }
-        }
-        if (paletteBlob) {
-            for (size_t i = 0; i < 4 && i < kCycleColorCount; ++i) {
-                uint32_t packed = projv::packColor(projv::Color{kCycleColors[i].r, kCycleColors[i].g, kCycleColors[i].b});
-                editState.cycleMaterialIDs[i] = projv::utils::internMaterial(*paletteBlob, "", packed);
-            }
-        }
-    }
+    // Cycle colors are interned into the target component's palette at edit-apply
+    // time by editing.cpp (internMaterial via applyOpsToBrickMap and the grid
+    // new-cell path). No pre-interning needed.
+
+    // Create a component for the preview sphere (loose chunk needs a palette owner).
+    projv::ComponentHandle previewComp =
+        static_cast<projv::ComponentHandle>(scene.components.size());
+    scene.components.push_back(projv::ComponentRecord{});
+    scene.components.back().kind = projv::ComponentKind::Chunk;
+    scene.components.back().name = "PreviewSphere";
+    preview.comp = previewComp;
 
     // Create the preview sphere (yellow ghost showing where the next edit will go).
     {
@@ -435,15 +427,10 @@ void startup(projv::Application& app) {
             targetCenter.y - kCenter,
             targetCenter.z - kCenter);
         uint32_t yellowPacked = projv::packColor(projv::Color{255, 255, 0});
-        uint8_t yellowMatID = 0;
-        // Find a blob to intern the yellow material into.
-        for (auto& blob : scene.geometryPool) {
-            if (blob.refCount > 0) {
-                yellowMatID = projv::utils::internMaterial(blob, "yellow", yellowPacked);
-                break;
-            }
-        }
-        preview.chunk = buildPreviewSphere(scene, gpuData, editState.sphereRadius, chunkPos, yellowMatID);
+        preview.yellowMaterialID = projv::utils::internMaterial(
+            scene.components[previewComp], "yellow", yellowPacked);
+        preview.chunk = buildPreviewSphere(scene, gpuData, editState.sphereRadius, chunkPos,
+                                            previewComp, preview.yellowMaterialID);
         preview.currentRadius = editState.sphereRadius;
         projv::core::warn("PREVIEW: chunk={} alive={} poolIdx={} res={} scale={} pos=({},{},{})",
                           preview.chunk,
@@ -531,15 +518,8 @@ void render(projv::Application& app) {
     if (preview.chunk != static_cast<projv::ChunkHandle>(-1) &&
         editState.sphereRadius != preview.currentRadius) {
         preview.currentRadius = editState.sphereRadius;
-        uint32_t yellowPacked = projv::packColor(projv::Color{255, 255, 0});
-        uint8_t yellowMatID = 0;
-        for (auto& blob : scene.geometryPool) {
-            if (blob.refCount > 0) {
-                yellowMatID = projv::utils::internMaterial(blob, "yellow", yellowPacked);
-                break;
-            }
-        }
-        rebuildPreviewSphere(scene, gpuData, preview.chunk, editState.sphereRadius, yellowMatID);
+        rebuildPreviewSphere(scene, gpuData, preview.chunk, editState.sphereRadius,
+                              preview.yellowMaterialID);
         projv::core::warn("PREVIEW REBUILD: radius={}", editState.sphereRadius);
     }
 
@@ -588,10 +568,13 @@ void render(projv::Application& app) {
 
         bool isAdd = wantsAdd;
         projv::core::ivec3 center = sphereCenter(isAdd);
-        uint8_t matID = isAdd ? editState.cycleMaterialIDs[editState.voxelColorIndex % 4]
-                              : 0;
+uint32_t packed = isAdd
+            ? projv::packColor(projv::Color{kCycleColors[editState.voxelColorIndex % 4].r,
+                                               kCycleColors[editState.voxelColorIndex % 4].g,
+                                               kCycleColors[editState.voxelColorIndex % 4].b})
+            : 0u;
         if (isAdd) editState.voxelColorIndex++;
-        auto ops = makeSphereOps(center, editState.sphereRadius, matID, isAdd);
+        auto ops = makeSphereOps(center, editState.sphereRadius, packed, isAdd);
         if (isAdd) {
             projv::utils::queueVoxelAdd(scene, editState.component, ops);
         } else {

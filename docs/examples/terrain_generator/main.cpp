@@ -58,6 +58,19 @@ struct FrameContext {
     projv::core::vec2 windowResolution;
 };
 
+// Sun elevation angle (radians), driven by the mouse scroll wheel: scrolling up raises the
+// sun, scrolling down lowers it (through sunset and on below the horizon into night). Azimuth
+// stays fixed -- see the sunAzX/sunAzZ constants in render(). Plain global (not ECS state)
+// because it's written from a GLFW callback on the same thread the render loop reads it from.
+static float g_sunElevation = 0.26f;
+
+void sunScrollCallback(GLFWwindow* /*window*/, double /*xoffset*/, double yoffset) {
+    const float sensitivity = 0.03f;
+    g_sunElevation += float(yoffset) * sensitivity;
+    if (g_sunElevation >  1.55f) g_sunElevation =  1.55f;
+    if (g_sunElevation < -0.60f) g_sunElevation = -0.60f;
+}
+
 struct CameraState {
     projv::core::vec3 position       = projv::core::vec3(0, 1000, 0);
     projv::core::vec3 prevPosition   = projv::core::vec3(0, 1000, 0);
@@ -96,8 +109,8 @@ struct ChunkWorkItem {
 struct ProcessedChunk {
     projv::core::ivec3 coord;
     projv::Chunk chunk;
-    std::vector<uint8_t> materialIDs;       // baked material IDs
-    std::vector<projv::Material> materialPalette;  // baked palette
+    std::vector<uint8_t> materialIDs;       // baked material IDs (local slots)
+    std::vector<projv::Material> materialPalette;  // worker-local palette (merged by main thread)
     bool empty = false;  // true if the batch was empty (no geometry to intern)
 };
 
@@ -115,10 +128,26 @@ struct WorkerState {
 static WorkerState g_worker;
 
 struct TerrainState {
-    static constexpr int kChunkRes    = 256;
-    static constexpr float kVoxelScale = 3.0f;
+    static constexpr int kChunkRes    = 64;
+    // World size of one voxel edge. Each voxel covers kVoxelScale^2 of world footprint, so this is
+    // sqrt() of the area factor: 3.0 -> 7.0 is ~5.4x the area per voxel. Chunk resolution is
+    // unchanged, so a chunk covers ~5.4x more ground for the same voxel count and the same view
+    // radius reaches ~2.3x further, at no extra memory.
+    static constexpr float kVoxelScale = 7.0f;
     static constexpr float kChunkSize  = kChunkRes * kVoxelScale;
-    static constexpr int   kViewRadius = 8;
+
+    // Vertical extent of chunk generation, in chunks. Derived from kChunkSize rather than hardcoded
+    // so changing kVoxelScale does not leave us generating (and discarding) columns of empty sky:
+    // taller chunks need proportionally fewer levels to cover the same world height. The ceiling
+    // covers terrain_noise's tallest archetype amplitude (ARCH_AMP mountain = 2000) plus headroom
+    // for blend and detail overshoot.
+    static constexpr float kTerrainCeiling = 2600.0f;
+    static constexpr int   kChunkYMin = -1;
+    static constexpr int   kChunkYMax = int((kTerrainCeiling + kChunkSize - 1.0f) / kChunkSize);
+    static constexpr int   kViewRadius = 30;
+    // Chunks are evicted past kViewRadius + this. The gap keeps a camera sitting on a chunk
+    // boundary from evicting and regenerating the same ring every time it steps back and forth.
+    static constexpr int   kEvictHysteresis = 2;
     static constexpr int   kMaxNewPerFrame = 2;
     static constexpr int   kBootstrapBatch = 5;
 
@@ -136,6 +165,13 @@ struct TerrainState {
     projv::core::ivec3 lastCameraChunk{-9999, -9999, -9999};
     std::vector<projv::core::ivec3> pendingCoords;
     size_t pendingIndex = 0;
+
+    // Chunk slots freed by eviction, reused before appending to Scene.chunks. Scene.chunks is
+    // "slot-indexed with holes" and never shrinks, and its length drives the GPU header texture
+    // (capped at maxTextureSize/4 slots), so without reuse a long flight would grow it forever.
+    std::vector<projv::ChunkHandle> freeChunkSlots;
+    // Monotonic, so an evicted chunk's ID is never handed to a later chunk.
+    uint32_t nextChunkID = 0;
 };
 
 static projv::core::ivec3 worldToChunkCoord(projv::core::vec3 p) {
@@ -150,6 +186,32 @@ static int chunkCoordToLin(projv::core::ivec3 coord, const projv::SceneGrid& gri
 }
 
 static constexpr int kFillDepth = 100;
+
+// Palette budget. Material IDs are uint8_t everywhere (GeometryBlob::materialIDs, internMaterial,
+// the remap tables), and a component palette holds at most MAX_MATERIALS_PER_COMPONENT - 1 entries
+// (indices 0..254; 255 is INVALID_MATERIAL). That cap is *global* across every chunk we ever
+// generate, not per-chunk -- the component palette accumulates every distinct color the generator
+// emits. Overrun it and internMaterial's uint8_t return wraps, so voxels silently alias whatever
+// palette slot sits at (index & 255).
+//
+// Surface colors come out of a continuous 13-way climate blend, which is unbounded, so they are
+// snapped to a uniform kSurfaceLevels^3 RGB lattice. The lattice is cubic -- the same level set on
+// every channel -- so near-grey rock/snow/ice quantize to neutral greys instead of picking up a
+// color cast, and the levels span [0,255] inclusive so pure white snow stays exactly white.
+//
+// Budget: 216 lattice + 1 deep water + <=3 shallow-water shades + 1 water fill = <=221 of 255.
+// kSurfaceLevels = 7 would need 343 lattice entries on its own and blow the cap.
+static constexpr int kSurfaceLevels = 6;
+static_assert(kSurfaceLevels * kSurfaceLevels * kSurfaceLevels + 5
+                  <= int(projv::MAX_MATERIALS_PER_COMPONENT) - 1,
+              "quantized surface lattice plus the fixed water colors must fit the palette cap");
+
+// Snap one normalized channel to the nearest lattice level.
+static inline uint8_t quantizeSurfaceChannel(float v01) {
+    constexpr float kMaxLevel = float(kSurfaceLevels - 1);
+    float level = std::round(clampf(v01, 0.0f, 1.0f) * kMaxLevel);
+    return uint8_t(level * (255.0f / kMaxLevel) + 0.5f);
+}
 
 static projv::Color surfaceColor(const terrain_noise::TerrainSample& sample, int worldY) {
     float height = sample.height;
@@ -218,10 +280,27 @@ static projv::Color surfaceColor(const terrain_noise::TerrainSample& sample, int
                clampf(grey + (col.y - grey) * 1.0f, 0.0f, 1.0f),
                clampf(grey + (col.z - grey) * 1.0f, 0.0f, 1.0f)};
 
-    return projv::Color{uint8_t(col.x * 255.0f), uint8_t(col.y * 255.0f), uint8_t(col.z * 255.0f)};
+    // Quantized to the lattice so the set of distinct surface colors stays inside the palette cap.
+    // The water returns above are left exact -- they are already only four colors in total.
+    return projv::Color{quantizeSurfaceChannel(col.x),
+                        quantizeSurfaceChannel(col.y),
+                        quantizeSurfaceChannel(col.z)};
 }
 
-static void generateChunkVoxels(projv::core::ivec3 coord, projv::VoxelBrickMap& map, projv::GeometryBlob& blob, TerrainState& ts) {
+static uint8_t internLocal(std::vector<projv::Material>& palette,
+                              const std::string& name, uint32_t packedColor) {
+    if (!name.empty()) {
+        for (size_t i = 0; i < palette.size(); ++i)
+            if (palette[i].name == name) return static_cast<uint8_t>(i);
+    }
+    for (size_t i = 0; i < palette.size(); ++i)
+        if (palette[i].packedColor == packedColor) return static_cast<uint8_t>(i);
+    palette.push_back({packedColor, 0, name});
+    return static_cast<uint8_t>(palette.size() - 1);
+}
+
+static void generateChunkVoxels(projv::core::ivec3 coord, projv::VoxelBrickMap& map,
+                                std::vector<projv::Material>& palette, TerrainState& ts) {
     float ox = float(coord.x) * TerrainState::kChunkSize;
     float oz = float(coord.z) * TerrainState::kChunkSize;
     float oy = float(coord.y) * TerrainState::kChunkSize;
@@ -245,7 +324,7 @@ static void generateChunkVoxels(projv::core::ivec3 coord, projv::VoxelBrickMap& 
                     if (waterSurfaceLocal >= res) waterSurfaceLocal = res - 1;
                     if (waterSurfaceLocal >= 0) {
                         uint32_t wpacked = projv::packColor(projv::Color{30, 60, 155});
-                        uint8_t wmatID = projv::utils::internMaterial(blob, "water", wpacked);
+                        uint8_t wmatID = internLocal(palette, "water", wpacked);
                         for (int ly = 0; ly <= waterSurfaceLocal; ++ly) {
                             projv::utils::brickMapSetVoxel(map, lx, ly, lz, wmatID);
                         }
@@ -259,7 +338,7 @@ static void generateChunkVoxels(projv::core::ivec3 coord, projv::VoxelBrickMap& 
             // Surface color
             projv::Color col = surfaceColor(sample, int(worldH));
             uint32_t packed = projv::packColor(col);
-            uint8_t matID = projv::utils::internMaterial(blob, "", packed);
+            uint8_t matID = internLocal(palette, "", packed);
             projv::utils::brickMapSetVoxel(map, lx, topLocalY, lz, matID);
 
             // Fill ~30 voxels below surface with the same color (hollow terrain below that)
@@ -276,7 +355,7 @@ static void generateChunkVoxels(projv::core::ivec3 coord, projv::VoxelBrickMap& 
                 int waterBottom = std::max(topLocalY + 1, 0);
                 if (waterBottom <= waterSurfaceLocal) {
                     uint32_t wpacked = projv::packColor(projv::Color{30, 60, 155});
-                    uint8_t wmatID = projv::utils::internMaterial(blob, "water", wpacked);
+                    uint8_t wmatID = internLocal(palette, "water", wpacked);
                     for (int ly = waterBottom; ly <= waterSurfaceLocal; ++ly) {
                         projv::utils::brickMapSetVoxel(map, lx, ly, lz, wmatID);
                     }
@@ -305,8 +384,8 @@ static void terrainWorkerFunc(TerrainState& ts) {
             int res = TerrainState::kChunkRes;
             auto brickMap = projv::utils::createVoxelBrickMap(
                 projv::utils::computeBrickDims(res));
-            projv::GeometryBlob tempBlob;
-            generateChunkVoxels(item.coord, *brickMap, tempBlob, ts);
+            std::vector<projv::Material> localPalette;
+            generateChunkVoxels(item.coord, *brickMap, localPalette, ts);
             ProcessedChunk result;
             result.coord = item.coord;
             bool hasVoxels = false;
@@ -327,16 +406,89 @@ static void terrainWorkerFunc(TerrainState& ts) {
                 result.chunk = projv::utils::createChunk(hdr);
                 result.chunk.gridIndex = ts.gridIndex;
                 projv::utils::updateChunkFromBrickMap(result.chunk, *brickMap);
-                // Bake materials into the geometry's leaf nodes.
-                projv::utils::bakeMaterialsFromBrickMap(result.chunk.geometryData, tempBlob, *brickMap);
-                result.materialIDs = std::move(tempBlob.materialIDs);
-                result.materialPalette = std::move(tempBlob.materialPalette);
+                // Bake material IDs (local slots against worker-local palette).
+                projv::utils::bakeMaterialsFromBrickMap(result.chunk.geometryData,
+                                                          result.materialIDs, *brickMap);
+                result.materialPalette = std::move(localPalette);
             }
             {
                 std::lock_guard<std::mutex> lock(g_worker.resultMutex);
                 g_worker.readyChunks.push_back(std::move(result));
             }
         } // else: no work, loop back to wait on cv
+    }
+}
+
+// Merge a worker-local palette into the component palette and remap materialIDs.
+static std::vector<uint8_t> mergePaletteIntoComponent(projv::ComponentRecord& comp,
+                                                       const std::vector<projv::Material>& localPalette) {
+    std::vector<uint8_t> remap(localPalette.size(), 0);
+    for (size_t i = 0; i < localPalette.size(); ++i)
+        remap[i] = projv::utils::internMaterial(comp, localPalette[i].name, localPalette[i].packedColor);
+    return remap;
+}
+
+static void remapMaterialIDs(std::vector<uint8_t>& ids, const std::vector<uint8_t>& remap) {
+    for (auto& id : ids) id = remap[id];
+}
+
+// Tear down one streamed chunk and hand its resources back.
+//
+// Order matters: clearing the grid cell is what actually hides the chunk, because syncSceneTables
+// rebuilds the cellMap from cellToChunk each flush and a -1 cell becomes 0xFFFFFFFF, which the
+// shader skips. The stale GPU header row for this slot is therefore unreachable, and it gets
+// rewritten anyway if the slot is later reused (headerDirty below).
+static void releaseChunk(projv::Scene& scene, TerrainState& ts, projv::ChunkHandle h) {
+    if (h == static_cast<projv::ChunkHandle>(-1) || h >= scene.chunks.size()) return;
+    projv::Chunk& c = scene.chunks[h];
+    if (!c.alive) return;
+
+    if (c.gridIndex >= 0 && static_cast<size_t>(c.gridIndex) < scene.grids.size()) {
+        projv::SceneGrid& grid = scene.grids[c.gridIndex];
+        if (c.cellIndex >= 0 && static_cast<size_t>(c.cellIndex) < grid.cellToChunk.size() &&
+            grid.cellToChunk[c.cellIndex] == static_cast<int32_t>(h)) {
+            grid.cellToChunk[c.cellIndex] = -1;
+        }
+    }
+
+    // Drop this chunk's reference to its geometry. At zero the CPU-side voxel data is released here
+    // and the pool slot is recycled; the GPU texel ranges are freed by uploadDirtyBlobs, which looks
+    // for exactly this (refCount == 0 with an uploaded range) on the next flush.
+    int32_t pool = c.geometryPoolIndex;
+    if (pool >= 0 && static_cast<size_t>(pool) < scene.geometryPool.size()) {
+        projv::GeometryBlob& blob = scene.geometryPool[pool];
+        if (blob.refCount > 0 && --blob.refCount == 0) {
+            blob.geometry.clear();      blob.geometry.shrink_to_fit();
+            blob.materialIDs.clear();   blob.materialIDs.shrink_to_fit();
+            blob.brickMap.reset();
+            blob.dirty = false;
+            scene.blobFreeList.push_back(static_cast<uint32_t>(pool));
+        }
+    }
+
+    c.alive = false;
+    c.geometryPoolIndex = -1;
+    c.gridIndex = -1;
+    c.cellIndex = -1;
+    ts.freeChunkSlots.push_back(h);
+}
+
+// Evict every streamed chunk that has left the view radius.
+static void evictDistantChunks(projv::Scene& scene, TerrainState& ts, projv::core::ivec3 camChunk) {
+    const int evictR = TerrainState::kViewRadius + TerrainState::kEvictHysteresis;
+    const int evictR2 = evictR * evictR;
+    int evicted = 0;
+    for (auto it = ts.activeChunks.begin(); it != ts.activeChunks.end(); ) {
+        int dx = it->first.x - camChunk.x;
+        int dz = it->first.z - camChunk.z;
+        if (dx * dx + dz * dz <= evictR2) { ++it; continue; }
+        releaseChunk(scene, ts, it->second);   // no-op for the -1 "known empty" sentinel
+        it = ts.activeChunks.erase(it);
+        evicted++;
+    }
+    if (evicted > 0) {
+        projv::core::info("[EVICT] {} chunks outside radius {} — freeChunkSlots={} blobFreeList={}",
+                          evicted, evictR, ts.freeChunkSlots.size(), scene.blobFreeList.size());
     }
 }
 
@@ -353,6 +505,14 @@ static void generatePendingChunks(projv::Scene& scene, projv::GPUData& gpuData, 
             consumed++;
             if (ts.activeChunks.count(proc.coord)) continue;
 
+            // The camera can have moved since this was queued. Eviction removed the coord from
+            // activeChunks, so without this it would be admitted right back and then evicted again
+            // on the next camera step.
+            int ddx = proc.coord.x - ts.lastCameraChunk.x;
+            int ddz = proc.coord.z - ts.lastCameraChunk.z;
+            const int evictR = TerrainState::kViewRadius + TerrainState::kEvictHysteresis;
+            if (ddx * ddx + ddz * ddz > evictR * evictR) continue;
+
             projv::SceneGrid& grid = scene.grids[ts.gridIndex];
             int lin = chunkCoordToLin(proc.coord, grid);
             if (lin < 0 || lin >= static_cast<int>(grid.cellToChunk.size())) {
@@ -367,7 +527,8 @@ static void generatePendingChunks(projv::Scene& scene, projv::GPUData& gpuData, 
                 continue;
             }
 
-            proc.chunk.header.chunkID = int(ts.activeChunks.size());
+            // Monotonic: activeChunks.size() repeats once eviction starts removing entries.
+            proc.chunk.header.chunkID = int(ts.nextChunkID++);
             proc.chunk.gridIndex       = ts.gridIndex;
             proc.chunk.cellIndex       = lin;
             proc.chunk.componentHandle = ts.gridCompHandle;
@@ -375,19 +536,40 @@ static void generatePendingChunks(projv::Scene& scene, projv::GPUData& gpuData, 
 
             projv::internChunkGeometry(scene, proc.chunk);
 
-            // Transfer baked material data to the new blob.
+            // Merge worker-local palette into component palette, remap materialIDs.
+            projv::ComponentRecord& comp = scene.components[ts.gridCompHandle];
+            std::vector<uint8_t> remap = mergePaletteIntoComponent(comp, proc.materialPalette);
+            remapMaterialIDs(proc.materialIDs, remap);
+
+            // Transfer remapped material IDs to the blob.
             if (proc.chunk.geometryPoolIndex >= 0 &&
                 static_cast<size_t>(proc.chunk.geometryPoolIndex) < scene.geometryPool.size()) {
                 projv::GeometryBlob& blob = scene.geometryPool[proc.chunk.geometryPoolIndex];
                 blob.materialIDs = std::move(proc.materialIDs);
-                blob.materialPalette = std::move(proc.materialPalette);
                 blob.dirty = true;
             }
 
-            projv::ChunkHandle h = projv::ChunkHandle(scene.chunks.size());
-            scene.chunks.push_back(std::move(proc.chunk));
+            // Reuse a slot freed by eviction when one is available, so Scene.chunks (and with it the
+            // GPU header texture) stays bounded over a long flight. A recycled slot sits below
+            // gpuData.uploadedChunkCount, so updateDirtyHeaders would not consider it new —
+            // headerDirty is what makes it rewrite the row.
+            proc.chunk.headerDirty = true;
+            int32_t poolIdx = proc.chunk.geometryPoolIndex;   // read before the move
+            projv::ChunkHandle h;
+            if (!ts.freeChunkSlots.empty()) {
+                h = ts.freeChunkSlots.back();
+                ts.freeChunkSlots.pop_back();
+                scene.chunks[h] = std::move(proc.chunk);
+            } else {
+                h = projv::ChunkHandle(scene.chunks.size());
+                scene.chunks.push_back(std::move(proc.chunk));
+            }
             grid.cellToChunk[lin] = static_cast<int32_t>(h);
             ts.activeChunks[proc.coord] = h;
+            projv::core::info("[GEN] coord=({},{},{}) h={} pool={} paletteSize={} localPaletteSize={}",
+                              proc.coord.x, proc.coord.y, proc.coord.z,
+                              h, poolIdx,
+                              comp.materialPalette.size(), proc.materialPalette.size());
             generated++;
         }
     }
@@ -436,6 +618,7 @@ void startup(projv::Application& app) {
         projv::core::createGlobalResource<projv::graphics::RenderInstance>(app.world);
     renderInstance.initialize(1920, 1080, "ProjectV Terrain Generator");
     glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    glfwSetScrollCallback(renderInstance.window, sunScrollCallback);
 
     projv::Scene& scene    = projv::core::createGlobalResource<projv::Scene>(app.world);
     projv::GPUData& gpuData = projv::core::createGlobalResource<projv::GPUData>(app.world);
@@ -444,7 +627,7 @@ void startup(projv::Application& app) {
 
     // --- Create terrain grid (centered on world origin, expands dynamically via expandGridToInclude) ---
     int r = ts.kViewRadius;
-    int yMin = -1, yMax = 18;
+    int yMin = TerrainState::kChunkYMin, yMax = TerrainState::kChunkYMax;
 
     projv::SceneGrid grid;
     grid.origin = vec3(float(-r) * TerrainState::kChunkSize,
@@ -557,11 +740,12 @@ void update(projv::Application& app) {
     ivec3 camChunk = worldToChunkCoord(cam.position);
     if (camChunk.x != ts.lastCameraChunk.x || camChunk.z != ts.lastCameraChunk.z) {
         ts.lastCameraChunk = camChunk;
+        evictDistantChunks(scene, ts, camChunk);
         ts.pendingCoords.clear();
         ts.pendingIndex = 0;
         int r2 = TerrainState::kViewRadius * TerrainState::kViewRadius;
         for (int dz = -TerrainState::kViewRadius; dz <= TerrainState::kViewRadius; ++dz)
-            for (int dy = -1; dy <= 18; ++dy)
+            for (int dy = TerrainState::kChunkYMin; dy <= TerrainState::kChunkYMax; ++dy)
                 for (int dx = -TerrainState::kViewRadius; dx <= TerrainState::kViewRadius; ++dx)
                     if (dx*dx + dz*dz <= r2)
                         ts.pendingCoords.push_back(ivec3(camChunk.x + dx, dy, camChunk.z + dz));
@@ -617,10 +801,10 @@ void render(projv::Application& app) {
 
     if (cameraMoved) frameCameraLastMovedOn = app.frameCount;
 
-    // Static sun direction (fixed, no scroll wheel).
-    float sunAngle = 0.86f;
+    // Sun elevation is mouse-scroll controlled (see g_sunElevation / sunScrollCallback);
+    // azimuth stays fixed.
     const float sunAzX = -0.6402f, sunAzZ = 0.7682f;
-    vec3 sunDirection = { cos(sunAngle) * sunAzX, sin(sunAngle), cos(sunAngle) * sunAzZ };
+    vec3 sunDirection = { cos(g_sunElevation) * sunAzX, sin(g_sunElevation), cos(g_sunElevation) * sunAzZ };
 
     FrameContext ctx;
     ctx.cameraPosition = cam.position;

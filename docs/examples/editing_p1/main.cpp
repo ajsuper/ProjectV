@@ -111,10 +111,10 @@ int main(int argc, char** argv) {
 
         // Queue three adds inside bounds + one out-of-bounds (must be skipped with warn).
         std::vector<projv::PendingVoxelOp> adds{
-            {false, {1, 2, 3}, 0, {0,0,0}},
-            {false, {4, 5, 6}, 0, {0,0,0}},
-            {false, {7, 8, 9}, 0, {0,0,0}},
-            {false, {9999, 0, 0}, 0, {0,0,0}}, // OOB; should be skipped
+            {false, {1, 2, 3}, 0u},
+            {false, {4, 5, 6}, 0u},
+            {false, {7, 8, 9}, 0u},
+            {false, {9999, 0, 0}, 0u}, // OOB; should be skipped
         };
         bool ok = projv::utils::queueVoxelAdd(scene, loose, adds);
         check(ok, "queueVoxelAdd returned true on loose component");
@@ -186,8 +186,8 @@ int main(int argc, char** argv) {
         projv::ComponentRecord& gcomp = scene.components[grid];
         size_t before = gcomp.editQueue.ops.size();
         std::vector<projv::PendingVoxelOp> gops{
-            {false, {5, 5, 5}, 0, {0,0,0}},
-            {false, {10, 10, 10}, 0, {0,0,0}},
+            {false, {5, 5, 5}, 0u},
+            {false, {10, 10, 10}, 0u},
         };
         bool ok = projv::utils::queueVoxelAdd(scene, grid, gops);
         check(ok, "queueVoxelAdd on Grid component returned true (P2 scope)");
@@ -240,6 +240,7 @@ int main(int argc, char** argv) {
         chunk.header = hdr;
         chunk.LOD    = 0;
         chunk.alive  = true;
+        chunk.componentHandle = 0;
 
         // Seed with 5 voxels so we can check growth.
         auto brickMap = projv::utils::createVoxelBrickMap(
@@ -250,15 +251,14 @@ int main(int argc, char** argv) {
         projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
 
         // Bake materials into the chunk's geometry.
-        projv::GeometryBlob tmpBlob;
-        projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, tmpBlob, *brickMap);
+        std::vector<uint8_t> bakedMaterialIDs;
+        projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, bakedMaterialIDs, *brickMap);
 
         // Intern into a pool blob, passing the brick map.
         int32_t blobIdx = projv::internChunkGeometry(testScene, chunk, std::move(brickMap));
         // Transfer baked materials to the blob.
         if (blobIdx >= 0 && static_cast<size_t>(blobIdx) < testScene.geometryPool.size()) {
-            testScene.geometryPool[blobIdx].materialIDs = std::move(tmpBlob.materialIDs);
-            testScene.geometryPool[blobIdx].materialPalette = std::move(tmpBlob.materialPalette);
+            testScene.geometryPool[blobIdx].materialIDs = std::move(bakedMaterialIDs);
         }
         check(blobIdx >= 0, "programmatic: internChunkGeometry succeeded");
         check(testScene.geometryPool[blobIdx].dirty,
@@ -293,9 +293,9 @@ int main(int argc, char** argv) {
 
         // Queue 3 adds at positions that don't collide with the seed (seed has 0,2,4,6,8).
         std::vector<projv::PendingVoxelOp> adds{
-            {false, {10, 10, 10}, 0, {0,0,0}},
-            {false, {12, 12, 12}, 0, {0,0,0}},
-            {false, {14, 14, 14}, 0, {0,0,0}},
+            {false, {10, 10, 10}, 0u},
+            {false, {12, 12, 12}, 0u},
+            {false, {14, 14, 14}, 0u},
         };
         bool ok = projv::utils::queueVoxelAdd(testScene, looseH, adds);
         check(ok, "programmatic: queueVoxelAdd returned true");
@@ -368,10 +368,11 @@ int main(int argc, char** argv) {
 
         projv::Chunk chunk;
         chunk.header = hdr;
-        chunk.LOD    = 0;
+chunk.LOD    = 0;
         chunk.alive  = true;
+        chunk.componentHandle = 0;
 
-        // Seed with 5 voxels.
+        // Seed with 5 voxels so we can check growth.
         auto brickMap = projv::utils::createVoxelBrickMap(
             projv::utils::computeBrickDims(64));
         for (int i = 0; i < 5; ++i)
@@ -379,16 +380,15 @@ int main(int argc, char** argv) {
                 i * 2, i * 2, i * 2, 0);
         projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
 
-        projv::GeometryBlob tmpBlob;
-        projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, tmpBlob, *brickMap);
+        std::vector<uint8_t> bakedMaterialIDs;
+        projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, bakedMaterialIDs, *brickMap);
 
         chunk.header.resolution = 64;
         chunk.header.scale = 32.0f;
 
         int32_t blobIdx = projv::internChunkGeometry(testScene, chunk, std::move(brickMap));
         if (blobIdx >= 0 && static_cast<size_t>(blobIdx) < testScene.geometryPool.size()) {
-            testScene.geometryPool[blobIdx].materialIDs = std::move(tmpBlob.materialIDs);
-            testScene.geometryPool[blobIdx].materialPalette = std::move(tmpBlob.materialPalette);
+            testScene.geometryPool[blobIdx].materialIDs = std::move(bakedMaterialIDs);
         }
         check(blobIdx >= 0, "p3-convert: internChunkGeometry succeeded");
         testScene.chunks.push_back(std::move(chunk));
@@ -413,8 +413,8 @@ int main(int argc, char** argv) {
         // Queue two adds: one in-bounds (10,10,10), one overflowing (70,0,0).
         // 70 >= 64 triggers overflow conversion.
         std::vector<projv::PendingVoxelOp> adds{
-            {false, {10, 10, 10}, 0, {0,0,0}},
-            {false, {70, 0, 0}, 0, {0,0,0}},
+            {false, {10, 10, 10}, 0u},
+            {false, {70, 0, 0}, 0u},
         };
         bool ok = projv::utils::queueVoxelAdd(testScene, h, adds);
         check(ok, "p3-convert: queueVoxelAdd returned true");
@@ -536,16 +536,15 @@ int main(int argc, char** argv) {
                 projv::utils::brickMapSetVoxel(*brickMap,
                     p.x, p.y, p.z, 0);
             projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
-            projv::GeometryBlob tmpBlob;
-            projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, tmpBlob, *brickMap);
+            std::vector<uint8_t> bakedMaterialIDs;
+            projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, bakedMaterialIDs, *brickMap);
             // Override resolution back to 64 (updateChunkFromBrickMap computes shrinks
             // it to fit the seed span; grid cells need the full data-file resolution).
             chunk.header.resolution = 64;
             chunk.header.scale = 32.0f;
             int32_t blobIdx = projv::internChunkGeometry(testScene, chunk, std::move(brickMap));
             if (blobIdx >= 0 && static_cast<size_t>(blobIdx) < testScene.geometryPool.size()) {
-                testScene.geometryPool[blobIdx].materialIDs = std::move(tmpBlob.materialIDs);
-                testScene.geometryPool[blobIdx].materialPalette = std::move(tmpBlob.materialPalette);
+                testScene.geometryPool[blobIdx].materialIDs = std::move(bakedMaterialIDs);
             }
             projv::ChunkHandle h = static_cast<projv::ChunkHandle>(testScene.chunks.size());
             testScene.chunks.push_back(std::move(chunk));
@@ -599,10 +598,10 @@ int main(int argc, char** argv) {
         // 1 requiring negative expansion (position (-5,5,5), cellCoord = (-1,0,0)).
         // With res=64: floorDiv(5,64)=0, floorDiv(10,64)=0, floorDiv(70,64)=1, floorDiv(-5,64)=-1.
         std::vector<projv::PendingVoxelOp> adds{
-            {false, {5, 5, 5}, 0, {0,0,0}},
-            {false, {10, 10, 10}, 0, {0,0,0}},
-            {false, {70, 5, 5}, 0, {0,0,0}},
-            {false, {-5, 5, 5}, 0, {0,0,0}},
+            {false, {5, 5, 5}, 0u},
+            {false, {10, 10, 10}, 0u},
+            {false, {70, 5, 5}, 0u},
+            {false, {-5, 5, 5}, 0u},
         };
         bool ok = projv::utils::queueVoxelAdd(testScene, gridH, adds);
         check(ok, "grid-test: queueVoxelAdd returned true");
@@ -715,6 +714,8 @@ int main(int argc, char** argv) {
         // Origin shifted due to negative expansion: origin(-5) = -1 * cellSize.
         check(grid.origin.x == -32.0f, "grid-test: origin shifted to x=-32");
     }
+
+    return g_failures == 0 ? 0 : 1;
 
     // --- P6 component tree tests ---
     {

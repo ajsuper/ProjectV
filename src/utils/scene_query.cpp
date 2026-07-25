@@ -143,15 +143,29 @@ namespace projv::utils {
         return result;
     }
 
+    namespace {
+        // Voxels in a blob = set child bits across its leaf nodes. materialIDs.size() is NOT a
+        // substitute: uniform leaves store a single material byte for all their voxels.
+        uint32_t blobVoxelCount(const Scene& scene, int32_t poolIdx) {
+            if (poolIdx < 0 || static_cast<size_t>(poolIdx) >= scene.geometryPool.size()) return 0;
+            const std::vector<uint32_t>& geom = scene.geometryPool[poolIdx].geometry;
+            uint32_t total = 0;
+            for (size_t n = 0, nodes = geom.size() / 3; n < nodes; ++n) {
+                if (!tree64IsLeaf(geom[n * 3 + 2])) continue;
+                total += static_cast<uint32_t>(__builtin_popcount(geom[n * 3 + 0]) +
+                                               __builtin_popcount(geom[n * 3 + 1]));
+            }
+            return total;
+        }
+    }
+
     uint32_t getComponentVoxelCount(const Scene& scene, ComponentHandle h) {
         if (h >= scene.components.size()) return 0;
         const ComponentRecord& c = scene.components[h];
         if (c.kind == ComponentKind::Asset) return 0;
         if (c.kind == ComponentKind::Chunk) {
             if (c.chunkHandle >= scene.chunks.size()) return 0;
-            int32_t poolIdx = scene.chunks[c.chunkHandle].geometryPoolIndex;
-            if (poolIdx < 0 || static_cast<size_t>(poolIdx) >= scene.geometryPool.size()) return 0;
-            return static_cast<uint32_t>(scene.geometryPool[poolIdx].materialIDs.size());
+            return blobVoxelCount(scene, scene.chunks[c.chunkHandle].geometryPoolIndex);
         }
         // Grid: sum voxels across all populated cells.
         uint32_t total = 0;
@@ -159,9 +173,7 @@ namespace projv::utils {
         if (gridIdx < 0 || static_cast<size_t>(gridIdx) >= scene.grids.size()) return 0;
         for (int32_t ci : scene.grids[gridIdx].cellToChunk) {
             if (ci < 0) continue;
-            int32_t poolIdx = scene.chunks[ci].geometryPoolIndex;
-            if (poolIdx < 0 || static_cast<size_t>(poolIdx) >= scene.geometryPool.size()) continue;
-            total += static_cast<uint32_t>(scene.geometryPool[poolIdx].materialIDs.size());
+            total += blobVoxelCount(scene, scene.chunks[ci].geometryPoolIndex);
         }
         return total;
     }

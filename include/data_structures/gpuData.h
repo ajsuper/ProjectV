@@ -25,7 +25,6 @@ namespace projv {
         uint32_t matTexelLen = 0;
         uint32_t matTexelAllocated = 0;
         uint32_t matByteLen = 0;
-        uint32_t paletteOffset = 0; // offset of this blob's palette in the global palette texture
         bool uploaded = false;
     };
 
@@ -67,11 +66,11 @@ namespace projv {
 
         uint32_t uploadedChunkCount = 0;
 
-        // Palette version counter: incremented when any blob's palette changes.
-        // The palette texture is only rebuilt when the version changes, avoiding
-        // unnecessary texture recreation every frame.
-        uint32_t paletteVersion = 0;
-        uint32_t paletteSizeOnLastBuild = 0;
+        // Offset of each component's palette in the global palette texture,
+        // indexed by ComponentHandle. Parallel to Scene.components.
+        std::vector<uint32_t> componentPaletteOffsets;
+        // Sum of all components' paletteVersion values; rebuilt when any changes.
+        uint64_t componentPaletteVersion = 0;
 
         std::vector<GPUBlobRange> blobRanges;
     };

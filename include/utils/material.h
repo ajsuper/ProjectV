@@ -12,15 +12,15 @@
 
 namespace projv::utils {
 
-uint8_t internMaterial(GeometryBlob& blob, const std::string& name, uint32_t packedColor);
-uint8_t findMaterialByName(const GeometryBlob& blob, const std::string& name);
-uint8_t findMaterialByColor(const GeometryBlob& blob, uint32_t packedColor);
+uint8_t internMaterial(ComponentRecord& comp, const std::string& name, uint32_t packedColor);
+uint8_t findMaterialByName(const ComponentRecord& comp, const std::string& name);
+uint8_t findMaterialByColor(const ComponentRecord& comp, uint32_t packedColor);
 
 void brickMapSetMaterial(BrickData& brick, uint32_t localZOrder, uint8_t materialID);
 uint8_t brickMapGetMaterial(const BrickData& brick, uint32_t localZOrder);
 
 void bakeMaterialsFromBrickMap(std::vector<uint32_t>& geometry,
-                                GeometryBlob& blob,
+                                std::vector<uint8_t>& materialIDs,
                                 const VoxelBrickMap& map);
 
 } // namespace projv::utils

@@ -502,13 +502,12 @@ namespace projv::utils {
                             if (!block.voxelTypeData.empty()) {
                                 core::ivec3 brickDims = computeBrickDims(dataFile.resolution);
                                 auto brickMap = createVoxelBrickMap(brickDims);
-                                brickMapFromVoxelTypeData(*brickMap, block.voxelTypeData, gb);
+                                brickMapFromVoxelTypeData(*brickMap, block.voxelTypeData, rec);
                                 gb.geometry = buildTree64FromBrickMap(*brickMap, static_cast<int>(dataFile.resolution));
                                 gb.brickMap = std::move(brickMap);
-                                bakeMaterialsFromBrickMap(gb.geometry, gb, *gb.brickMap);
+                                bakeMaterialsFromBrickMap(gb.geometry, gb.materialIDs, *gb.brickMap);
                             } else {
                                 gb.materialIDs.clear();
-                                gb.materialPalette.clear();
                             }
 
                             geometryPool.push_back(std::move(gb));

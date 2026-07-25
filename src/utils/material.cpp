@@ -1,44 +1,51 @@
 #include "utils/material.h"
 #include "core/log.h"
-#include <cassert>
 
 namespace projv::utils {
 
-uint8_t internMaterial(GeometryBlob& blob, const std::string& name, uint32_t packedColor) {
+uint8_t internMaterial(ComponentRecord& comp, const std::string& name, uint32_t packedColor) {
     if (!name.empty()) {
-        for (size_t i = 0; i < blob.materialPalette.size(); ++i) {
-            if (blob.materialPalette[i].name == name) {
+        for (size_t i = 0; i < comp.materialPalette.size(); ++i) {
+            if (comp.materialPalette[i].name == name) {
                 return static_cast<uint8_t>(i);
             }
         }
     }
-    for (size_t i = 0; i < blob.materialPalette.size(); ++i) {
-        if (blob.materialPalette[i].packedColor == packedColor) {
+    for (size_t i = 0; i < comp.materialPalette.size(); ++i) {
+        if (comp.materialPalette[i].packedColor == packedColor) {
             return static_cast<uint8_t>(i);
         }
     }
-    assert(blob.materialPalette.size() < MAX_MATERIALS_PER_BLOB - 1 &&
-           "Material palette full");
+    // Hard cap: material IDs are uint8_t, and 255 is INVALID_MATERIAL. Past this point the
+    // static_cast below would wrap and the new material would silently alias palette slot
+    // (index & 255), corrupting the colors of whatever already owns that slot. Fail loudly
+    // instead -- this used to be an assert, which is compiled out in release builds.
+    if (comp.materialPalette.size() >= MAX_MATERIALS_PER_COMPONENT - 1) {
+        core::error("internMaterial: palette full ({} entries) -- cannot add '{}' (0x{:06X}). "
+                    "Material IDs are uint8_t; quantize or reduce the color set.",
+                    comp.materialPalette.size(), name, packedColor);
+        return INVALID_MATERIAL;
+    }
     Material mat;
     mat.name = name;
     mat.packedColor = packedColor;
-    blob.materialPalette.push_back(mat);
-    blob.paletteVersion++;
-    return static_cast<uint8_t>(blob.materialPalette.size() - 1);
+    comp.materialPalette.push_back(mat);
+    comp.paletteVersion++;
+    return static_cast<uint8_t>(comp.materialPalette.size() - 1);
 }
 
-uint8_t findMaterialByName(const GeometryBlob& blob, const std::string& name) {
-    for (size_t i = 0; i < blob.materialPalette.size(); ++i) {
-        if (blob.materialPalette[i].name == name) {
+uint8_t findMaterialByName(const ComponentRecord& comp, const std::string& name) {
+    for (size_t i = 0; i < comp.materialPalette.size(); ++i) {
+        if (comp.materialPalette[i].name == name) {
             return static_cast<uint8_t>(i);
         }
     }
     return INVALID_MATERIAL;
 }
 
-uint8_t findMaterialByColor(const GeometryBlob& blob, uint32_t packedColor) {
-    for (size_t i = 0; i < blob.materialPalette.size(); ++i) {
-        if (blob.materialPalette[i].packedColor == packedColor) {
+uint8_t findMaterialByColor(const ComponentRecord& comp, uint32_t packedColor) {
+    for (size_t i = 0; i < comp.materialPalette.size(); ++i) {
+        if (comp.materialPalette[i].packedColor == packedColor) {
             return static_cast<uint8_t>(i);
         }
     }
@@ -55,9 +62,9 @@ uint8_t brickMapGetMaterial(const BrickData& brick, uint32_t localZOrder) {
 }
 
 void bakeMaterialsFromBrickMap(std::vector<uint32_t>& geometry,
-                                GeometryBlob& blob,
+                                std::vector<uint8_t>& materialIDs,
                                 const VoxelBrickMap& map) {
-    std::vector<uint8_t> materialIDs;
+    materialIDs.clear();
     size_t estimatedVoxels = 0;
     for (uint32_t bz = 0; bz < map.totalBricks; ++bz) {
         if (!map.bricks[bz]) continue;
@@ -105,6 +112,11 @@ void bakeMaterialsFromBrickMap(std::vector<uint32_t>& geometry,
         const BrickData& brick = *map.bricks[cursorBrick];
         uint64_t rowBits = brick.mask[cursorRow];
 
+        size_t runStart = materialIDs.size();
+        bool uniform = true;
+        uint8_t firstID = 0;
+        bool haveFirst = false;
+
         while (rowBits) {
             int leadingZeros = __builtin_clzll(rowBits);
             uint32_t localZOrder = static_cast<uint32_t>(cursorRow) * 64 + leadingZeros;
@@ -112,14 +124,21 @@ void bakeMaterialsFromBrickMap(std::vector<uint32_t>& geometry,
             auto mit = brick.materials.find(localZOrder);
             uint8_t matID = (mit != brick.materials.end()) ? mit->second : 0;
             materialIDs.push_back(matID);
+            if (!haveFirst) { firstID = matID; haveFirst = true; }
+            else if (matID != firstID) uniform = false;
 
             rowBits &= ~(1ull << (63 - leadingZeros));
         }
 
-        geometry[n * 3 + 2] = (materialOffset << 1) | 1u;
-    }
+        // Uniform-leaf compression. Terrain-like content fills whole leaves with one material
+        // (measured ~96% of leaves), so collapse those to a single byte and let the shader skip
+        // the per-voxel index. Random access is preserved -- the shader just ignores `above`.
+        if (uniform && materialIDs.size() > runStart + 1) {
+            materialIDs.resize(runStart + 1);
+        }
 
-    blob.materialIDs = std::move(materialIDs);
+        geometry[n * 3 + 2] = encodeLeafNode(materialOffset, uniform);
+    }
 }
 
 } // namespace projv::utils

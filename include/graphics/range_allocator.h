@@ -35,8 +35,13 @@ namespace projv::graphics {
         // Marks [offset, offset+length) as already in use (used to seed the allocator from an
         // existing packed layout, e.g. the bulk build in createTexturesForScene). Assumes the region
         // is currently free. length 0 is a no-op.
-        void reserve(uint32_t offset, uint32_t length) {
-            if (length == 0) return;
+        //
+        // Returns false when no free range contains the request -- normally because the caller's
+        // packed layout is larger than `capacity`. On failure NOTHING is marked used, so the region
+        // stays free and the next alloc() will hand it out on top of live data. Callers must treat
+        // false as fatal for the layout they just built, never ignore it.
+        [[nodiscard]] bool reserve(uint32_t offset, uint32_t length) {
+            if (length == 0) return true;
             for (size_t i = 0; i < freeList.size(); i++) {
                 FreeRange& fr = freeList[i];
                 if (offset >= fr.offset && offset + length <= fr.offset + fr.length) {
@@ -53,9 +58,10 @@ namespace projv::graphics {
                     } else {
                         freeList.erase(freeList.begin() + i);
                     }
-                    return;
+                    return true;
                 }
             }
+            return false;
         }
 
         // Allocates length units first-fit. Returns the offset, or INVALID if there is no free range

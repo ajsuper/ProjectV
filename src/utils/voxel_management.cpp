@@ -7,7 +7,6 @@ namespace projv {
     GeometryBlob::GeometryBlob(const GeometryBlob& rhs)
         : geometry(rhs.geometry)
         , materialIDs(rhs.materialIDs)
-        , materialPalette(rhs.materialPalette)
         , voxelTypeData(rhs.voxelTypeData)
         , brickMap(rhs.brickMap ? utils::cloneBrickMap(*rhs.brickMap) : nullptr)
         , sourceDataPath(rhs.sourceDataPath)
@@ -21,7 +20,6 @@ namespace projv {
         if (this == &rhs) return *this;
         geometry       = rhs.geometry;
         materialIDs    = rhs.materialIDs;
-        materialPalette = rhs.materialPalette;
         voxelTypeData  = rhs.voxelTypeData;
         brickMap       = rhs.brickMap ? utils::cloneBrickMap(*rhs.brickMap) : nullptr;
         sourceDataPath = rhs.sourceDataPath;
@@ -341,7 +339,7 @@ namespace projv::utils {
 
     void brickMapFromVoxelTypeData(VoxelBrickMap& map,
                                     const std::vector<uint32_t>& voxelTypeData,
-                                    GeometryBlob& blob) {
+                                    ComponentRecord& comp) {
         size_t count = voxelTypeData.size() / 3;
         for (size_t i = 0; i < count; ++i) {
             uint32_t zorder = voxelTypeData[i * 3];
@@ -350,7 +348,7 @@ namespace projv::utils {
             core::ivec3 pos = reverseZOrderIndex(zorder);
             Color c = unserializeColor(serializedColor);
             uint32_t packed = packColor(c);
-            uint8_t matID = internMaterial(blob, "", packed);
+            uint8_t matID = internMaterial(comp, "", packed);
             brickMapSetVoxel(map, pos.x, pos.y, pos.z, matID);
         }
         if (count > 0) {

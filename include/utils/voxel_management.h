@@ -68,13 +68,13 @@ namespace projv::utils {
 
     /**
      * Populate a brick map from an existing voxelTypeData array (3 u32s per voxel),
-     * interning colors into a material palette on the blob.
+     * interning colors into the component's material palette.
      * Used on first edit of a disk-loaded blob. The brick map must already
      * have the correct brickDims for the chunk's resolution.
      */
     void brickMapFromVoxelTypeData(VoxelBrickMap& map,
                                    const std::vector<uint32_t>& voxelTypeData,
-                                   GeometryBlob& blob);
+                                   ComponentRecord& comp);
 
     /**
      * Build a sorted VoxelGrid (by chunk-space Z-order) from a brick map.

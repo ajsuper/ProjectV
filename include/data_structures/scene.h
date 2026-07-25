@@ -11,7 +11,7 @@
 
 namespace projv{
 
-    constexpr uint32_t MAX_MATERIALS_PER_BLOB = 256u;
+    constexpr uint32_t MAX_MATERIALS_PER_COMPONENT = 256u;
     constexpr uint8_t  INVALID_MATERIAL = 255u;
 
     struct Material {
@@ -37,8 +37,7 @@ namespace projv{
     struct PendingVoxelOp {
         bool         isAdd;
         core::ivec3  position;
-        uint8_t      materialID;              // was: Color color
-        uint8_t      _pad[3];                 // padding
+        uint32_t     packedColor;
     };
 
     // Per-component edit queue. P1: drained by updateScene; cleared after drain.
@@ -77,6 +76,13 @@ namespace projv{
         core::vec3 localPosition = core::vec3(0.0f);
         core::quat localRotation = core::quat(1.0f, 0.0f, 0.0f, 0.0f);
         float      localScale = 1.0f;            // uniform only (v0.0)
+
+        // Per-component material palette: each component owns its own palette of
+        // up to MAX_MATERIALS_PER_COMPONENT entries. Chunks/blobs of this component
+        // reference local slots through their materialIDs texture; the GPU header's
+        // paletteOffset + the local slot = global palette index.
+        std::vector<Material> materialPalette;
+        uint32_t paletteVersion = 0;
     };
 
     // Governs what happens when a `data` component's voxel data is modified and persisted.
@@ -147,12 +153,9 @@ namespace projv{
     };
 
     // One unique geometry blob shared across chunk instances. See Scene.geometryPool.
-    struct Material;
-
 struct GeometryBlob {
         std::vector<uint32_t> geometry;
         std::vector<uint8_t>  materialIDs;
-        std::vector<Material> materialPalette;
         std::vector<uint32_t> voxelTypeData; // DEPRECATED: kept for backward compat, will be removed
         std::unique_ptr<VoxelBrickMap> brickMap;
 
@@ -177,9 +180,6 @@ struct GeometryBlob {
         // P5: true when the blob's GPU content is stale (newly forked, interned, or content changed).
         // Cleared by flushSceneUpdates after the incremental upload.
         bool dirty = false;
-        // Incremented each time materialPalette is modified. Used to avoid unnecessary
-        // palette texture rebuilds in uploadDirtyBlobs.
-        uint32_t paletteVersion = 0;
     };
     
     // A uniform grid of equal, grid-aligned chunks (one .data grid volume). Enables a

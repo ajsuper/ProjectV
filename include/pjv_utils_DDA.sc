@@ -1184,20 +1184,27 @@ vec3 fetchVoxelColor(BoxAABB voxelBoundingBox, uint headerIndex) {
     for (; level >= 0; --level) {
         Tree64NodeData node = tree64(nodeIdx);
         if ((node.data3 & 1u) != 0u) {
-            uint materialOffset = node.data3 >> 1u;
-            uint childPos = (zOrder / stepSize) & 63u;
-            uint mask1 = node.data1;
-            uint mask2 = node.data2;
+            // Leaf: bit 1 = uniform flag, bits 2.. = material byte offset. See voxel.h for the
+            // layout. A uniform leaf stores one material byte for all of its voxels, so the
+            // within-leaf rank (`above`) is not needed and the popcount is skipped entirely.
+            // NOTE: `uniform` is a reserved storage qualifier in HLSL/GLSL — do not name it that.
+            bool leafIsUniform = (node.data3 & 2u) != 0u;
+            uint materialOffset = node.data3 >> 2u;
             uint above = 0u;
-            if (childPos < 32u) {
-                uint beforeMask = 0xFFFFFFFFu << (32u - childPos);
-                above = countbits(mask1 & beforeMask);
-            } else {
-                above = countbits(mask1);
-                uint z2 = childPos - 32u;
-                if (z2 > 0u) {
-                    uint beforeMask2 = 0xFFFFFFFFu << (32u - z2);
-                    above += countbits(mask2 & beforeMask2);
+            if (!leafIsUniform) {
+                uint childPos = (zOrder / stepSize) & 63u;
+                uint mask1 = node.data1;
+                uint mask2 = node.data2;
+                if (childPos < 32u) {
+                    uint beforeMask = 0xFFFFFFFFu << (32u - childPos);
+                    above = countbits(mask1 & beforeMask);
+                } else {
+                    above = countbits(mask1);
+                    uint z2 = childPos - 32u;
+                    if (z2 > 0u) {
+                        uint beforeMask2 = 0xFFFFFFFFu << (32u - z2);
+                        above += countbits(mask2 & beforeMask2);
+                    }
                 }
             }
             uint matID = materialID(h.materialIDStartIndex + materialOffset + above) + h.padding[1];

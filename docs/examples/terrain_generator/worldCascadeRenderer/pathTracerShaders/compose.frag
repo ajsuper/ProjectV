@@ -162,6 +162,13 @@ void main() {
         vec3 specular = specRad * (fres * SPEC_STRENGTH);
 
         hdr = direct + albedo * R + specular;
+
+        // Height + distance fog: fades the shaded surface toward the real sky colour in the
+        // exact direction the camera is looking at it (see applyFog in pjv_sun_sky.sc), so
+        // distant terrain melts into the horizon instead of just getting darker.
+        vec3  toP  = P - cameraPos.xyz;
+        float dist = length(toP);
+        hdr = applyFog(hdr, cameraPos.xyz, toP / max(dist, 1e-4), dist);
     }
 
     gl_FragData[0] = vec4(hdr, 1.0);
