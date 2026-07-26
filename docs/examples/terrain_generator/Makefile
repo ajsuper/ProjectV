@@ -57,10 +57,14 @@ LDFLAGS := $(LIB_DIR) $(USED_LIBRARIES) $(BGFX_LIBRARIES)
 # ========================
 TARGET := terrain_generator
 SRC := main.cpp
+# The generator's own modules (terrain_noise, tree_placement) are header-only, so they must be
+# prerequisites too: with only main.cpp listed, editing a header leaves `make` believing the target
+# is up to date and silently keeps running the previous binary.
+HEADERS := $(wildcard include/*.hpp) $(wildcard include/*.h)
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
+$(TARGET): $(SRC) $(HEADERS)
 	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
 .PHONY: all clean

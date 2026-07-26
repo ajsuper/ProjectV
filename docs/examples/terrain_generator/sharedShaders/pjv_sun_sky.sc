@@ -33,22 +33,49 @@ uniform vec4 sunDir;   // xyz = normalized sun direction (from main.cpp); w unus
 #define SUN_ANGULAR 0.01             // Half-angle of the sun's visible disc (rad); constant.
 
 // ---- Real single-scattering atmosphere ---------------------------------------------------------
-#define ATMO_BETA_R    vec3(5.8, 13.5, 33.1)  // relative Rayleigh scattering coeffs, R<G<B
-#define ATMO_BETA_M    0.7                     // Mie (aerosol/haze) scattering, ~grey
+// Coefficients are relative, in units where multiplying by 0.001 * ATMO_THICKNESS gives the zenith
+// optical depth. The Rayleigh triple lands on ~(0.046, 0.108, 0.265), which is essentially the real
+// atmosphere's (0.049, 0.113, 0.278) at 680/550/440nm -- so the blue of the daytime sky is not a
+// tuned value, it falls out of the physics.
+#define ATMO_BETA_R    vec3(5.8, 13.5, 33.1)  // Rayleigh scattering (air molecules), R<G<B
+#define ATMO_BETA_M    2.5                     // Mie scattering (aerosol/haze), ~grey. Sized for a
+                                                // zenith optical depth near 0.02, the standard clear-
+                                                // air aerosol load. The old 0.7 was a quarter of that,
+                                                // which is why distant terrain had almost no haze.
+// Ozone. Absorbs (never scatters) in the Chappuis band, taking out green and some red while barely
+// touching blue -- the reason a real sky stays blue overhead as the sun goes down instead of
+// sliding through olive into grey. Its absence is what made the low-sun sky here come out green.
+#define ATMO_BETA_O    vec3(0.650, 1.881, 0.085)
 #define ATMO_MIE_G     0.62                    // Mie anisotropy -- forward-scattering sun glow
                                                 // (kept well under ~0.8: closer to 1 makes the
                                                 // forward peak both taller and narrower, which is
                                                 // exactly what blew the sunset glow out before)
 #define ATMO_THICKNESS 8.0                     // optical thickness of the whole sky column
-#define ATMO_SUN_INTENSITY 3.4                 // sun-disc brightness scale
-#define ATMO_SKY_INTENSITY 52.0                // sky in-scatter brightness scale
+#define ATMO_SUN_INTENSITY 3.4                 // sunlight scale used for SHADING the scene
+#define ATMO_DISC_INTENSITY 40.0               // radiance of the sun's visible disc. Far brighter
+                                                // than the shading scale on purpose: the disc has to
+                                                // outrun its own surrounding glow, or it reads as a
+                                                // dark hole punched in the brightest part of the sky.
+#define ATMO_SKY_INTENSITY 21.0                // sky in-scatter brightness scale
 
 // How much atmosphere a ray at elevation `cosZen` (dot with local up) punches through before
-// reaching space -- 1 straight up, growing sharply toward the horizon. That growth is what reddens
-// and dims a low sun and hazes/pales a low view angle. Clamped so a ray on/just past the horizon
-// doesn't divide by zero.
+// reaching space -- 1 straight up, growing toward the horizon. That growth is what reddens and dims
+// a low sun and hazes/pales a low view angle.
+//
+// The flat-slab 1/cos is right overhead but diverges at the horizon, where it claims an infinite
+// path (the old clamp capped it at 50). The real atmosphere is a shell wrapped on a curved planet,
+// so the horizon path tops out near 38 airmasses. This is the standard cheap fit to that: identical
+// to 1/cos above ~20 degrees, and rolling over to ~40 at the horizon instead of running away.
 float atmoAirmass(float cosZen) {
-    return 1.0 / max(cosZen, 0.02);
+    float c = max(cosZen, 0.0);
+    return 1.0 / (c + 0.025 * exp(-11.0 * c));
+}
+
+// Extinction = everything that removes light from a ray: both scattering species plus ozone's pure
+// absorption. This is the denominator of the closed-form in-scatter and the exponent of every
+// transmittance, so ozone has to be in here and NOT in the scattering source term below.
+vec3 atmoBetaExtinction() {
+    return ATMO_BETA_R * 0.001 + vec3(ATMO_BETA_M * 0.001) + ATMO_BETA_O * 0.001;
 }
 
 // Rayleigh phase (roughly uniform, mild forward/back symmetry) and Mie phase (Henyey-Greenstein;
@@ -68,8 +95,7 @@ float atmoPhaseMie(float mu) {
 // (fading in-scatter with distance/haze) and, evaluated at the SUN's own elevation, for how the
 // atmosphere tints the sunlight itself before it ever scatters toward the eye.
 vec3 atmoTransmittance(float cosZen) {
-    vec3 betaSum = ATMO_BETA_R * 0.001 + vec3(ATMO_BETA_M * 0.001);
-    return exp(-betaSum * atmoAirmass(cosZen) * ATMO_THICKNESS);
+    return exp(-atmoBetaExtinction() * atmoAirmass(cosZen) * ATMO_THICKNESS);
 }
 
 // Sample the real sky in world direction `dir` for the current sun direction. Valid for any dir
@@ -80,28 +106,48 @@ vec3 atmosphere(vec3 dir) {
     float cosZen = max(dir.y, 0.0);
     vec3  betaR  = ATMO_BETA_R * 0.001;
     float betaM  = ATMO_BETA_M * 0.001;
-    vec3  betaSum = betaR + vec3(betaM);
+    vec3  betaExt = atmoBetaExtinction();
 
-    vec3  Tview = exp(-betaSum * atmoAirmass(cosZen) * ATMO_THICKNESS);
-    vec3  Tsun  = atmoTransmittance(max(SUN_DIR.y, 0.0));
+    vec3  Tview = exp(-betaExt * atmoAirmass(cosZen) * ATMO_THICKNESS);
 
     float mu = dot(dir, SUN_DIR);
     float phaseR = atmoPhaseRayleigh(mu);
     float phaseM = atmoPhaseMie(mu);
 
+    // How attenuated the sunlight is by the time it reaches the air this view ray is looking at.
+    //
+    // Taking that straight from the sun's own elevation -- one number for the whole sky -- is what
+    // breaks a sunset. It says every scattering event happens at sea level, so at dusk the ONLY
+    // light available anywhere in the sky has been through ~40 airmasses and is pure red; the model
+    // then paints a red zenith, which is not what a sunset looks like. The real zenith stays deep
+    // blue because the air overhead is lit near the top of the atmosphere, where the sun's path in
+    // is short and has barely been reddened at all.
+    //
+    // So the elevation used for the sun's transmittance rises with the view direction: rays looking
+    // up sample air that is high, lit by nearly unattenuated sunlight (blue survives), while rays
+    // looking at the horizon sample air near the ground on the long reddened path (orange survives).
+    // One term, and the sunset gets its blue-overhead-to-orange-at-the-horizon gradient. The small
+    // constant on top is the same effect for the observer's own horizon: the lit volume stays in
+    // sunlight for a while after the ground below it does not, which is what makes dusk last.
+    float sunElev = clamp(SUN_DIR.y, -1.0, 1.0);
+    float scatterElev = min(sunElev + 0.045 + 0.35 * cosZen * cosZen, 1.0);
+    vec3  Tsun = atmoTransmittance(max(scatterElev, 0.0));
+
     // Closed-form single-scatter in-scattered radiance of a homogeneous slab: (1-T)/beta is the
     // standard substitute for integrating exp(-beta*s) ds along the view ray; Tsun applies the
-    // sun's own colour loss on the way in (the real source of a red/orange horizon glow).
-    vec3 inscatter = (betaR * phaseR + vec3(betaM * phaseM)) * (vec3(1.0) - Tview) / max(betaSum, vec3(1e-6));
+    // sun's own colour loss on the way in (the real source of a red/orange horizon glow). Ozone is
+    // in betaExt but not in the numerator -- it absorbs, it never scatters light toward the eye.
+    vec3 inscatter = (betaR * phaseR + vec3(betaM * phaseM)) * (vec3(1.0) - Tview) / max(betaExt, vec3(1e-6));
     inscatter *= Tsun;
 
-    float sunElev = clamp(SUN_DIR.y, -1.0, 1.0);
-    float dayIntensity = ATMO_SKY_INTENSITY * smoothstep(-0.06, 0.15, sunElev);
+    // Ramp reaching well below the horizon so dusk fades out over roughly the real twilight arc
+    // rather than switching off at sunset.
+    float dayIntensity = ATMO_SKY_INTENSITY * smoothstep(-0.22, 0.12, sunElev);
     vec3  sky = inscatter * dayIntensity;
 
-    // Faint night-sky floor so the model fades to a dim indigo rather than pure black once the
-    // sun sets, instead of clipping to zero.
-    vec3 nightFloor = vec3(0.006, 0.007, 0.016) * smoothstep(0.10, -0.20, sunElev);
+    // Night floor: a dim, slightly blue ambient (airglow/starlight/moon stand-in) so a night sky
+    // reads as deep blue rather than clipping to pure black, which no real sky ever does.
+    vec3 nightFloor = vec3(0.004, 0.006, 0.014) * smoothstep(0.12, -0.24, sunElev);
     return sky + nightFloor;
 }
 
@@ -113,6 +159,15 @@ vec3 pjvSunColor() {
     vec3  tint = atmoTransmittance(max(e, 0.0));
     float intensity = ATMO_SUN_INTENSITY * smoothstep(-0.02, 0.08, e);   // fades out at the horizon
     return tint * intensity;
+}
+
+// Radiance of the sun's visible DISC, as opposed to pjvSunColor()'s irradiance-for-shading. Same
+// tint, much larger scale: the two are different physical quantities (they differ by the sun's
+// solid angle) and conflating them is what left the disc dimmer than the glow around it.
+vec3 pjvSunDiscRadiance() {
+    float e = SUN_DIR.y;
+    vec3  tint = atmoTransmittance(max(e, 0.0));
+    return tint * ATMO_DISC_INTENSITY * smoothstep(-0.02, 0.06, e);
 }
 
 // Ground bounce colour for directions looking below the horizon (not part of the atmosphere
@@ -154,7 +209,7 @@ vec3 skyGradient(vec3 dir) {
 vec3 skyColor(vec3 dir) {
     vec3  sky  = skyGradient(dir);
     float disc = smoothstep(cos(SUN_ANGULAR * 1.2), cos(SUN_ANGULAR * 0.8), dot(dir, SUN_DIR));
-    return mix(sky, max(sky, SUN_COLOR), disc);
+    return mix(sky, max(sky, pjvSunDiscRadiance()), disc);
 }
 
 // ---- Height + distance fog -----------------------------------------------------------------
@@ -186,5 +241,9 @@ float fogOpticalDepth(vec3 camPos, vec3 rayDir, float dist) {
 
 vec3 applyFog(vec3 color, vec3 camPos, vec3 rayDir, float dist) {
     float fogFactor = clamp(1.0 - exp(-fogOpticalDepth(camPos, rayDir, dist)), 0.0, 1.0);
-    return mix(color, skyColor(rayDir), fogFactor);
+    // skyGradient, NOT skyColor: the haze in front of a surface carries the sky's in-scattered
+    // light (including the Mie glow near the sun, which is a real effect and comes along with the
+    // gradient), but it must not carry the sun's DISC. skyColor would paint a bright solar disc
+    // onto whatever mountain happened to be occluding the sun.
+    return mix(color, skyGradient(rayDir), fogFactor);
 }

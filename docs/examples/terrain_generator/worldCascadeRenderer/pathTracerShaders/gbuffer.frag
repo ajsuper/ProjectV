@@ -40,6 +40,57 @@ bool sunVisible(vec3 p, vec3 n) {
     return raySceneIntersect(shadow, rq).rayT < 0.0;
 }
 
+// ---- Water normal perturbation ---------------------------------------------
+// Uses ANALYTIC derivatives of sine-wave height fields to compute surface normals.
+// Finite differences at the scale of this scene's huge wavelengths produce near-zero
+// gradients; analytic derivatives give correct tilt regardless of wavelength.
+vec3 perturbWaterNormal(vec3 P, vec3 N, float time) {
+    vec2 uv = P.xz;
+    float speed = time * 0.4;
+
+    // Wave 1: long gentle swell, analytic gradient
+    vec2 d1 = normalize(vec2(1.0, 0.3));
+    float f1 = 0.008;
+    float phase1 = dot(uv, d1) * f1 + speed * 0.7;
+    float h1 = 1.5 * sin(phase1);
+    vec2 grad1 = 1.5 * f1 * d1 * cos(phase1);
+
+    // Wave 2: shorter chop, analytic gradient
+    vec2 d2 = normalize(vec2(-0.6, 0.8));
+    float f2 = 0.02;
+    float phase2 = dot(uv, d2) * f2 + speed * 1.3;
+    float h2 = 1.2 * sin(phase2);
+    vec2 grad2 = 1.2 * f2 * d2 * cos(phase2);
+
+    // Combined height and gradient
+    float h = h1 + h2;
+    vec2 grad = grad1 + grad2;
+
+    // Convert gradient to normal: normal = normalize(-grad.x, 1, -grad.y) in local (0,1,0) space
+    vec3 bumpN = normalize(vec3(-grad.x, 1.0, -grad.y) * 1000);
+
+    // Blend with original geometric normal (which is (0,1,0) for flat water)
+    return normalize(mix(N, bumpN * 1000, 0.8));
+}
+
+vec3 perturbTreeNormal(vec3 P, vec3 N, float time) {
+    vec2 windDir = vec2(0.8, 0.5);
+    float windStrength = 0.2 + 0.1 * sin(time * 0.4 + P.x * 0.2 + P.z * 0.3);
+    float phase = P.x * 0.2 + P.z * 0.3 + time * 1.5;
+    float wave = sin(phase) * windStrength;
+    vec3 windVec = vec3(windDir.x, 0.0, windDir.y);
+    return normalize(N + windVec * wave * 0.3);
+}
+
+bool isWaterColor(vec3 c) {
+    return c.b > c.g * 1.3 && c.b > c.r * 2.0 && c.g > c.r * 1.3;
+}
+
+bool isTreeColor(vec3 c, float wy) {
+    if (wy < 398.0) return false;
+    return c.g > c.r * 1.1 && c.g > c.b;
+}
+
 // Van der Corput / Halton for the sub-pixel jitter (base 2 and 3) that feeds the TAA pass.
 float halton(int i, int base) {
     float f = 1.0;
@@ -90,6 +141,17 @@ void main() {
 
     vec3  P = ray.origin + ray.direction * hit.rayT;
     vec3  albedo = fetchVoxelColor(hit.foundBox, hit.headerIndex);
+
+    // --- Water & vegetation normal perturbation ---
+    float time = float(frameCount.x) / 60.0;
+
+    // Water: any top-facing surface near the water level
+    if (P.y > 390.0 && P.y < 410.0 && n.y > 0.9) {
+        n = perturbWaterNormal(P, n, time);
+    } else if (isTreeColor(albedo, P.y)) {
+        n = perturbTreeNormal(P, n, time);
+    }
+    n = normalize(n);
 
     // Direct sun (hard shadow) -- this is the light the GI bounces.
     vec3 direct = vec3(0.0);
