@@ -404,7 +404,15 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         // Guardrail: two live blobs must never share GPU texels, and no range may run past the end
         // of its texture. A material overlap here is exactly the "geometry is fine but the colors
         // are wrong" failure -- the allocator handed out a range that still holds another blob's
-        // material IDs. Cheap (an O(n log n) sort per flush), and it names the offenders.
+        // material IDs. It names the offenders when it fires.
+        //
+        // OFF by default -- build with -DPROJV_VALIDATE_GPU_RANGES to enable. This was called on
+        // every flush, i.e. on essentially every frame that streams anything, and it is not the
+        // "cheap O(n log n)" its original note claimed: n is the live blob count, which a streaming
+        // scene carries in the tens of thousands (57,000 measured in the terrain example), so each
+        // call builds two ~1MB vectors and sorts them. That is milliseconds of frame time per
+        // frame, spent re-proving an invariant that only changes when the allocator changes.
+#if defined(PROJV_VALIDATE_GPU_RANGES)
         void validateBlobRanges(const projv::Scene& scene, const GPUData& gpuData, const char* where) {
             struct Span { uint32_t lo, hi; size_t blob; };
             std::vector<Span> geom, mat;
@@ -435,6 +443,9 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             check(geom, "geometry", gpuData.tree64Width * gpuData.tree64Height);
             check(mat, "materialID", gpuData.materialIDWidth * gpuData.materialIDHeight);
         }
+#else
+        inline void validateBlobRanges(const projv::Scene&, const GPUData&, const char*) {}
+#endif
 
         } // anonymous namespace
 
@@ -828,8 +839,14 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 pushU(gridInfoData, cellMapOffset);
                 pushF(gridInfoData, g.rotation.x); pushF(gridInfoData, g.rotation.y);
                 pushF(gridInfoData, g.rotation.z); pushF(gridInfoData, g.rotation.w);
-                for (int32_t c : g.cellToChunk)
-                    cellMapData.push_back(c < 0 ? 0xFFFFFFFFu : static_cast<uint32_t>(c));
+                // Sized up front and written by index: push_back over a million cells reallocates
+                // its way up from nothing on every single call.
+                size_t base = cellMapData.size();
+                cellMapData.resize(base + g.cellToChunk.size());
+                for (size_t i = 0; i < g.cellToChunk.size(); i++) {
+                    int32_t c = g.cellToChunk[i];
+                    cellMapData[base + i] = c < 0 ? 0xFFFFFFFFu : static_cast<uint32_t>(c);
+                }
             }
 
             gpuData.looseCapacity = static_cast<uint32_t>(looseList.size());
@@ -866,6 +883,20 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                     gpuData.cellMapTexWidth = neededW;
                     gpuData.cellMapTexHeight = neededH;
                 } else {
+                    // NOTE (perf): this rebuilds and re-uploads the entire cellMap on every flush,
+                    // and the cellMap is sized by the grid's CELL COUNT rather than by how many
+                    // cells are occupied -- a 221x22x221 streaming grid is 1.07M cells / 4.3MB from
+                    // the very first frame. Measured at ~1.1ms per flush in the terrain example,
+                    // constant, whether one cell changed or none did.
+                    //
+                    // Diffing the rebuilt buffer against a cached copy was tried and did not pay:
+                    // the rebuild and the comparison together cost about what the upload did, and
+                    // during streaming the changed rows span most of the texture anyway (a grid
+                    // cell's linear index is unrelated to its 3D proximity to the camera, so a
+                    // handful of nearby admissions scatter across the whole table). The fix that
+                    // would actually work is dirty-cell tracking at the SceneGrid level -- record
+                    // the touched index range where cellToChunk is written -- which is a change to
+                    // the grid's write sites, not to this function.
                     cellMapData.resize(static_cast<size_t>(neededW) * neededH * 4, 0xFFFFFFFFu);
                     const bgfx::Memory* mem = bgfx::copy(cellMapData.data(), cellMapData.size() * sizeof(uint32_t));
                     bgfx::updateTexture2D(gpuData.cellMapTexture, 0, 0, 0, 0, uint16_t(neededW), uint16_t(neededH), mem);

@@ -81,7 +81,8 @@ float cascadeLen(int c)   { return CASCADE_BASE_LEN * pow4(c); }
 // its per-face temporal accumulate keeps the sparse result clean). All passes of a given renderer
 // that touch the probe layout (cascades, resolve, compose) MUST agree on these two values.
 #ifndef PROBE_SPACING0
-#define PROBE_SPACING0 8   // s0: cascade-0 probe spacing, screen px (doubles per cascade)
+#define PROBE_SPACING0 18   // s0: cascade-0 probe spacing, screen px (doubles per cascade)
+                            // 8 => (4/8)^2 = 1/4, 12 => (4/12)^2 = 1/9, 18 => (4/18)^2 = 1/20
 #endif
 #ifndef DIR_TILE0
 #define DIR_TILE0      4   // D0: cascade-0 direction-tile dim (D0xD0 dirs; doubles per cascade).

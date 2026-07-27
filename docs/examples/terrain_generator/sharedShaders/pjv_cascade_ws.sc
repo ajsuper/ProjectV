@@ -29,9 +29,14 @@
 
 // World-space DDA gather tuning (WS-only; kept out of the shared common header). Each cascade
 // texel casts one gather ray (+ a sun shadow ray on hit), so these are the main perf knobs.
-#define WS_STEPS       48u   // Max DDA steps per gather ray (bounds cost; interval-clamped).
-#define WS_FINISH_LOD  1     // Coarsen distant geometry so the longer far-cascade rays stay cheap.
-#define WS_LOD_DIST    45    // Voxels from the ray start before finishLOD kicks in.
+// Each is #ifndef-guarded so a cascade's .frag can override its own values before the include.
+#ifndef WS_STEPS
+#define WS_STEPS       24u   // Max DDA steps per gather ray (bounds cost; interval-clamped).
+#endif
+#ifndef WS_FINISH_LOD
+#define WS_FINISH_LOD  2     // Coarsen distant geometry so the longer far-cascade rays stay cheap.
+#endif
+#define WS_LOD_DIST    30    // Voxels from the ray start before finishLOD kicks in.
 
 // Gather-origin lift (per-face renderer 6; see gatherRayWS). Instead of skipping near hits by distance
 // (which could not tell a coplanar self-relief hit from a real perpendicular wall -> either a dark
@@ -49,13 +54,17 @@
 // MISS (== lit), so shortening it errs toward slight over-LIGHTING of long-shadowed nooks, never the
 // over-DARKENING that a coarse LOD would cause (which is why the LOD stays finest). 48 keeps local
 // contact shadows; only shadows cast from >~48 voxels away soften.
-#define SUN_SHADOW_STEPS 48u
+#ifndef SUN_SHADOW_STEPS
+#define SUN_SHADOW_STEPS 24u
+#endif
 // Cascades with index <= this get a real shadowed bounce; FARTHER cascades (bigger, most gather hits)
 // use the UNSHADOWED bounce -- no shadow ray at all. Their bounce is a coarse far-field contribution
 // where a missing self-shadow is barely visible, and skipping it removes the most shadow rays. 1 =
 // c0,c1 shadowed / c2,c3 unshadowed. Raise to 3 to shadow every cascade (old behaviour); lower to -1
 // to never shadow a bounce.
+#ifndef SUN_BOUNCE_SHADOW_MAX_CASCADE
 #define SUN_BOUNCE_SHADOW_MAX_CASCADE 1
+#endif
 
 // Hard sun shadow ray from a bounce point (world space). Visibility only. FINEST LOD (finishLOD 0) on
 // purpose: a coarse-LOD shadow ray tests against big merged boxes that over-occlude -> false shadow ->

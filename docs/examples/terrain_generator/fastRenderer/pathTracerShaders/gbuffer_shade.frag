@@ -132,7 +132,7 @@ bool sunVisible(vec3 p, vec3 n) {
     shadow.origin = p + n * (0.02 * WORLD_SCALE);
     shadow.direction = SUN_DIR;
     // rayT >= 0 means the march found an occluder; only a genuine miss (-1) is unoccluded.
-    return traceOccludedDist(shadow, 128u) < 0.0;
+    return traceOccludedDist(shadow, 64u) < 0.0;
 }
 
 void main() {
@@ -154,7 +154,7 @@ void main() {
         FOV
     );
 
-    Hit primary = traceScene(ray, 256u);
+    Hit primary = traceScene(ray, 128u);
 
     if (!primary.hit) {
         // Sky background: already stable, no shading needed. Sky goes in the

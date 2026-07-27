@@ -30,12 +30,13 @@ uniform vec4 frameCount;
 #include <pjv_sun_sky.sc>
 
 // Hard sun shadow ray: is the sun disk visible from p (surface facing n)?
+// Keep finishLOD=0 (coarse-LOD shadow rays over-occlude -> dim bounced light).
 bool sunVisible(vec3 p, vec3 n) {
     Ray shadow;
     shadow.origin = p + n * 0.02;
     shadow.direction = SUN_DIR;
     RayQuery rq;
-    rq.maxRaySteps = 128u;
+    rq.maxRaySteps = 48u;
     rq.startLOD = 0u; rq.finishLOD = 0u; rq.distanceToFinishLOD = 30u;
     return raySceneIntersect(shadow, rq).rayT < 0.0;
 }
@@ -116,11 +117,10 @@ void main() {
     ray.direction = rayStartDirection(uvJit, windowRes.xy, cameraPos.xyz,
                                       normalize(cameraDir.xyz), FOV);
 
-    // Primary ray at the finest LOD everywhere -- a distance LOD ramp collapses far
-    // geometry into big coarse blocks (the "LOD too coarse" look). GI is screen-space so
-    // only this primary + the sun shadow touch the voxel tree; keep the visible surface crisp.
+    // Primary ray: keep LOD at 0 (coarse LOD on the visible surface looks bad).
+    // Reduce step count only — most rays hit within 256 steps.
     RayQuery rq;
-    rq.maxRaySteps         = 512u;
+    rq.maxRaySteps         = 256u;
     rq.startLOD            = 0u;
     rq.finishLOD           = 0u;
     rq.distanceToFinishLOD = 100000u;

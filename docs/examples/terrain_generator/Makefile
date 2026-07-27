@@ -38,10 +38,14 @@ USED_LIBRARIES := \
     -lprojectV-type_mapping \
     -lprojectV-render_instance
 
+# Release, not Debug. The debug bgfx/bx builds carry assertion and validation work on the submit
+# path, which is main-thread cost on every draw and every texture update -- and this app does a
+# texture update per dirty blob per frame while streaming. Both variants are already built in
+# $(BGFX_DIR).build/linux64_gcc/bin/; switch back to the *Debug set when debugging bgfx itself.
 BGFX_LIBRARIES := \
-    -lbgfxDebug \
-    -lbimgDebug \
-    -lbxDebug \
+    -lbgfxRelease \
+    -lbimgRelease \
+    -lbxRelease \
     -lglfw \
     -ldl
 

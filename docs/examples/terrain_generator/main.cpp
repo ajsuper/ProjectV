@@ -3,12 +3,18 @@
 // streamed around the camera. The grid allows the shader's marchGrid DDA path
 // to handle broadphase instead of brute-forcing every loose chunk per pixel.
 //
-// Controls: WASD/R/F + mouse to fly.
+// Controls: WASD/R/F + mouse to fly (mode 1). Press 2 for player mode with gravity/collision.
+//   Key 1 — fly camera (default)
+//   Key 2 — player camera with gravity and terrain collision
+//   In player mode: WASD moves on XZ plane, Space jumps, gravity pulls you to the ground.
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <functional>
@@ -74,16 +80,13 @@ struct FrameContext {
 };
 
 // Sun elevation angle (radians), driven by the mouse scroll wheel: scrolling up raises the
-// sun, scrolling down lowers it (through sunset and on below the horizon into night). Azimuth
-// stays fixed -- see the sunAzX/sunAzZ constants in render(). Plain global (not ECS state)
+// sun, scrolling down lowers it (through sunset and on below the horizon into night). Plain global (not ECS state)
 // because it's written from a GLFW callback on the same thread the render loop reads it from.
 static float g_sunElevation = 0.26f;
 
 void sunScrollCallback(GLFWwindow* /*window*/, double /*xoffset*/, double yoffset) {
     const float sensitivity = 0.03f;
     g_sunElevation += float(yoffset) * sensitivity;
-    if (g_sunElevation >  1.55f) g_sunElevation =  1.55f;
-    if (g_sunElevation < -0.60f) g_sunElevation = -0.60f;
 }
 
 struct CameraState {
@@ -93,6 +96,8 @@ struct CameraState {
     float pitch = -0.3f;
     float phi   = 1.57f;
     bool  prevInitialized = false;
+    bool  playerMode = false;
+    float playerVelocityY = 0.0f;
 };
 
 static void uploadCommonUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
@@ -163,12 +168,33 @@ struct ProcessedChunk {
 struct WorkerState {
     std::mutex workMutex;
     std::condition_variable workCv;
-    // FIFO: consumed front-to-back so nearest-first ordering (pendingCoords is sorted by
-    // distance before being pushed here) is preserved. A LIFO pop would generate the
+    // FIFO: consumed front-to-back so nearest-first ordering (the pending sweep walks coords
+    // nearest-first before pushing them here) is preserved. A LIFO pop would generate the
     // farthest-just-pushed chunks first and starve the near ones the camera actually needs.
     // Refines are pushed to the front (see applyLODRing) so they're picked up next regardless of
     // how deep the ordinary streaming backlog is.
+    //
+    // Kept SHALLOW on purpose -- see kMaxWorkQueueDepth. This used to be allowed to grow to
+    // whatever the pending sweep could feed it (measured at 534,000 items, ~20MB) which was wrong
+    // twice over: the whole depth was re-scanned every frame to build a dedup set, and the items
+    // were addressed to a camera position minutes in the past, so a queue that deep meant the
+    // workers spent minutes generating terrain for somewhere the camera had already left.
     std::deque<ChunkWorkItem> workQueue;
+    // Coords that are either sitting in workQueue or already generated but not yet consumed out of
+    // readyChunks/readyRefines -- i.e. every coord the pending sweep must NOT queue a second time.
+    //
+    // Maintained incrementally (insert at push, erase when the result is consumed) rather than
+    // rebuilt per frame. The rebuild it replaces walked the entire workQueue and readyChunks into a
+    // fresh unordered_set EVERY FRAME while holding workMutex, which is both O(queue depth) of
+    // hashing on the main thread and -- because the lock is held for all of it -- a hard stall for
+    // all N worker threads at the same time. That is what pinned one core at 100% while the other
+    // thirty sat idle.
+    //
+    // Guarded by workMutex. The erase side therefore cannot run inside a resultMutex critical
+    // section: the established lock order is workMutex -> resultMutex (see terrainWorkerFunc), so
+    // generatePendingChunks collects consumed coords while draining results and erases them after
+    // dropping resultMutex.
+    std::unordered_set<projv::core::ivec3, ivec3_hash> queuedCoords;
     std::mutex resultMutex;
     std::vector<ProcessedChunk> readyChunks;
     // Refine results, kept separate from readyChunks so they can be admitted every frame
@@ -179,6 +205,12 @@ struct WorkerState {
     std::atomic<bool> running{true};
     std::vector<std::thread> threads;
     int numThreads = 1;
+    // Chunks finished by the pool, split by the ring they were generated at. Generation cost per
+    // chunk differs by orders of magnitude across rings (a LOD0 chunk runs a 256x256 column
+    // prepass; a LOD2 chunk runs 16x16), so a single throughput number says nothing on its own --
+    // "the pool got slower" and "the pool is working on more expensive chunks" look identical
+    // until these are separated.
+    std::atomic<uint64_t> completed[3] = {};
 };
 
 static WorkerState g_worker;
@@ -196,9 +228,22 @@ struct TerrainState {
     static constexpr int resolutionForLOD(uint32_t lod) {
         return lod == 0 ? kChunkRes : (lod == 1 ? kChunkRes / 4 : kChunkRes / 16);
     }
-    // World size of one voxel edge at LOD0. kVoxelScale is scaled inversely with kChunkRes so
-    // the chunk world footprint stays the same: 7.0 * 64 / 256 = 1.75.
-    static constexpr float kVoxelScale = 1.75f;
+    // World size of one voxel edge at LOD0, and so (times kChunkRes) the world footprint of a
+    // chunk.
+    //
+    // Up from 1.75, which is the cheapest possible way to see more world: every chunk covers more
+    // ground for exactly the same voxel count, the vertical stack gets shorter rather than taller
+    // (13 levels instead of 21, since chunks are proportionally taller too), and the view radius in
+    // world units grows without a single extra chunk. The world is built at a scale -- 174k-unit
+    // continents, 105k-unit mountain belts -- that the old 22k-unit view radius could not show; you
+    // were always inside one landform, never looking at one.
+    //
+    // What it costs is near-field detail, which is why this is 2.8 rather than the 3.5 first tried:
+    // 3.5 put rock bedding at only 4 voxels per bed and was visibly coarse up close. At 2.8 a bed
+    // is about 8 voxels again, matching what 1.75 gave. Trees keep their WORLD size regardless --
+    // treeVoxelWorldSize is pinned at 1.75 rather than derived from this, or they would have grown
+    // along with the grid.
+    static constexpr float kVoxelScale = 2.8f;
     static constexpr float kChunkSize  = kChunkRes * kVoxelScale;
     // Voxel edge length for a chunk generated at the given ring's native resolution, keeping the
     // world-space chunk footprint (kChunkSize) identical across all three rings.
@@ -208,19 +253,49 @@ struct TerrainState {
 
     // Vertical extent of chunk generation, in chunks. Derived from kChunkSize rather than hardcoded
     // so changing kVoxelScale does not leave us generating (and discarding) columns of empty sky:
-    // taller chunks need proportionally fewer levels to cover the same world height. The ceiling
-    // covers terrain_noise's tallest archetype amplitude (ARCH_AMP mountain = 2000) plus headroom
-    // for blend and detail overshoot.
-    static constexpr float kTerrainCeiling = 2600.0f;
+    // taller chunks need proportionally fewer levels to cover the same world height.
+    //
+    // The ceiling is terrain_noise's, which sampleTerrain also clamps to, so the two cannot drift
+    // apart -- a peak taller than the topmost chunk level does not get a flat top, it gets no
+    // chunks and therefore a hole. It went up by a factor of nearly three when mountains gained
+    // uplift belts, which is most of why the column prepass is now cached across a chunk stack
+    // (see columnsForChunk): a vertical stack is seventeen levels deep now rather than eight, and
+    // without the cache every one of them re-ran the full terrain prepass for the same columns.
+    static constexpr float kTerrainCeiling = terrain_noise::TERRAIN_CEILING;
+    // Deep enough for the abyssal plain (about 550 units below sea level), which the continent
+    // field now actually reaches -- it previously bottomed out just under the waterline. One level
+    // suffices now that a chunk is 896 units tall.
     static constexpr int   kChunkYMin = -1;
     static constexpr int   kChunkYMax = int((kTerrainCeiling + kChunkSize - 1.0f) / kChunkSize);
-    static constexpr int   kViewRadius = 50;
+
+    // Radius of the outermost ring, in chunks. 110 x 717 puts the horizon 79,000 world units out,
+    // against 22,400 originally -- around half a continent wavelength, so a mountain belt is now
+    // something you look AT rather than something you are inside.
+    //
+    // Cost is chunk COUNT, which is what this was measured against rather than guessed: sweeping
+    // the occupancy rule (terrain shell or water shell intersecting a slab) over the noise field
+    // gives about 124k resident chunks. That is affordable because the outer ring is stored
+    // sparsely -- a 16^3 heightfield shell is a few kilobytes of tree64, and the per-chunk fixed
+    // overhead (header texel, grid cell, map entry) is under 200 bytes, so the header texture's
+    // ~53M slot ceiling is nowhere near binding.
+    //
+    // Shrinking kVoxelScale costs chunks quadratically at fixed view distance -- going 3.5 -> 2.8
+    // alone would have needed radius 120 and 148k chunks to hold 86k units. This trades a tenth of
+    // the view distance to keep that closer to 124k. It is the single knob to turn down if the
+    // outer ring proves too heavy; nothing else depends on it.
+    static constexpr int   kViewRadius = 110;
     // Storage LOD rings. Three levels:
     //   LOD 0 (256^3) — chunks within kLodRadiusFine chunks of camera
     //   LOD 1 (64^3)  — chunks within kLodRadius chunks of camera
     //   LOD 2 (16^3)  — everything inside the view radius
-    static constexpr int   kLodRadiusFine = 3;
-    static constexpr int   kLodRadius     = 12;
+    //
+    // Both radii grew, but by less than the chunk size did, so in WORLD units the fine ring roughly
+    // doubles (2,688 -> 3,584) and the middle ring more than triples (5,376 -> 17,920). The middle
+    // ring is the one that had to move: LOD2 voxels are 56 world units now rather than 28, and
+    // pushing the coarsest representation to the horizon without widening the band above it would
+    // have traded the extra view distance straight back for blockiness at mid range.
+    static constexpr int   kLodRadiusFine = 5;
+    static constexpr int   kLodRadius     = 22;
     // Cap on refines (regenerate-at-finer-resolution) triggered per frame. Unlike an ordinary LOD
     // change (a cheap flag flip -- setBlobRenderLOD), a refine re-runs the full worker generation
     // pipeline at higher resolution, so it gets a budget while ordinary transitions do not.
@@ -232,13 +307,33 @@ struct TerrainState {
     // generation and admission are LOD-appropriately cheap for the vast majority of chunks (only
     // the innermost ring is full-res), a much higher per-frame admission rate is affordable and
     // meaningfully cuts how long newly-visible/refined chunks stay popped-out during fast travel.
-    static constexpr int   kMaxNewPerFrame = 16;
+    // Raised again with kViewRadius. Admission rate sets how long the world takes to fill in, and
+    // that is a function of the chunk COUNT, which just went up 3.4x: at 16 a full 94k-chunk view
+    // would take about a hundred seconds to populate. These are cheap chunks -- the overwhelming
+    // majority are 16^3 outer-ring shells -- so the limit is GPU upload bandwidth per frame rather
+    // than anything CPU-side.
+    static constexpr int   kMaxNewPerFrame = 24;
     static constexpr int   kBootstrapBatch = 5;
     // Backpressure cap on unadmitted worker results (see terrainWorkerFunc). Bounds how far ahead
     // of kMaxNewPerFrame's admission rate the worker pool is allowed to race.
-    static constexpr size_t kMaxReadyBacklog = 256;
+    static constexpr size_t kMaxReadyBacklog = 512;
+    // Cap on WorkerState::workQueue depth. The pending sweep tops the queue up to this and then
+    // stops for the frame, leaving the rest of the ring for later frames -- pendingIndex is just a
+    // cursor, so nothing is lost by deferring.
+    //
+    // The queue only has to be deep enough that no worker ever finds it empty; past that, depth is
+    // pure harm. Terrain throughput is set by kMaxNewPerFrame (admissions/frame), not by how much
+    // work is queued, so extra depth buys no fill rate -- it only ages the queue. A deep queue is
+    // full of coords chosen for a camera position the camera has since left, and every one of them
+    // is generated, admitted, and then immediately evicted. Sized at roughly 30x the worker count
+    // so a full pool stays fed across a frame even if generation times are uneven.
+    static constexpr size_t kMaxWorkQueueDepth = 1024;
 
-    static constexpr float kWaterLevel = 400.0f;
+    // The global sea level. Rivers and lakes carry their own, higher, per-column water surface
+    // (TerrainSample::waterTop), so this is the floor of that value rather than the only water in
+    // the world. Owned by terrain_noise because that is where continental elevations are measured
+    // against it -- two copies of this number that disagree puts the coastline in the wrong place.
+    static constexpr float kWaterLevel = terrain_noise::SEA_LEVEL;
 
     // Horizontal world-space stretch applied to the terrain noise: continents, mountain ranges and
     // climate regions all come out this much wider, while heights are left alone.
@@ -259,7 +354,14 @@ struct TerrainState {
 
     terrain_noise::Generator noiseGen;
     terrain_noise::BlendParams blendParams;
-    int seed = std::mt19937(std::random_device{}())();
+    // Random per run, unless TERRAIN_SEED pins it. Pin it for any before/after measurement: the
+    // world's geometry density -- and with it both generation cost and GPU traversal cost -- varies
+    // enough between seeds to swamp the change being measured. Two runs of the same binary on
+    // different seeds differed by 3x here, which is larger than most of the wins in this file.
+    int seed = [] {
+        if (const char* e = std::getenv("TERRAIN_SEED")) return int(std::strtol(e, nullptr, 10));
+        return int(std::mt19937(std::random_device{}())());
+    }();
 
     trees::TreeLibrary treeLib;
     trees::Params treeParams;
@@ -295,8 +397,53 @@ struct TerrainState {
     std::unordered_set<projv::core::ivec3, ivec3_hash> revisitingEmpty;
 
     projv::core::ivec3 lastCameraChunk{-9999, -9999, -9999};
-    std::vector<projv::core::ivec3> pendingCoords;
+
+    // The streaming ring, as a camera-relative TEMPLATE rather than a materialized coord list.
+    //
+    // xzOffsets holds every (dx,dz) inside kViewRadius, sorted nearest-first, and is built exactly
+    // once at startup. pendingIndex is a cursor into the implied sequence
+    //
+    //     for each xzOffsets[i]:  for y in [kChunkYMin, kChunkYMax]:  camChunk + (dx, y, dz)
+    //
+    // so "restart streaming around the new camera chunk" is `pendingIndex = 0` and costs nothing.
+    // What this replaces: every time the camera crossed a chunk boundary, the old code cleared a
+    // vector, pushed ~684,000 freshly-computed ivec3 into it, and std::sorted the lot by distance.
+    // That is a six-figure allocation-and-sort on the main thread, on a frame the player is by
+    // definition moving through, and it recomputed a result that differs from the previous frame's
+    // only by a translation. Ordering is now XZ-major with the vertical column contiguous, which
+    // also streams better: you get whole columns near the camera rather than a shell of scattered
+    // slabs.
+    std::vector<projv::core::ivec2> xzOffsets;
     size_t pendingIndex = 0;
+    // Chunk coord the cursor's offsets are relative to. Tracks lastCameraChunk, but kept separate
+    // so a coord decoded from a stale cursor can never be attributed to the wrong origin.
+    projv::core::ivec3 pendingOrigin{0, 0, 0};
+
+    static constexpr int kYLevels = kChunkYMax - kChunkYMin + 1;
+    size_t pendingTotal() const { return xzOffsets.size() * size_t(kYLevels); }
+    projv::core::ivec3 pendingCoordAt(size_t i) const {
+        const projv::core::ivec2& o = xzOffsets[i / size_t(kYLevels)];
+        return projv::core::ivec3(pendingOrigin.x + o.x,
+                                  kChunkYMin + int(i % size_t(kYLevels)),
+                                  pendingOrigin.z + o.y);
+    }
+
+    // Set when the desired-LOD of resident chunks may have gone stale (the camera changed chunk, a
+    // refine landed, or the previous sweep ran out of per-frame budget). applyLODRing walks the
+    // whole activeChunks map, so it must not run on frames where nothing can have changed --
+    // desiredLODForChunk is a pure function of (coord, camChunk), so with a stationary camera every
+    // answer is identical to last frame's.
+    bool lodSweepNeeded = true;
+    // Camera chunk as of the last LOD sweep, so a sweep can widen its scan radius to cover whatever
+    // left the LOD<2 disc while it was not looking. Distinct from lastCameraChunk, which tracks
+    // streaming and is updated on a different schedule.
+    projv::core::ivec3 lastSweepChunk{-9999, -9999, -9999};
+    // Position within the LOD sweep's disc scan, so one sweep can be spread over several frames.
+    // Reset whenever the camera changes chunk (the whole disc has moved and every answer in it is
+    // potentially stale).
+    size_t lodCursor = 0;
+    // Set while evictDistantChunks still has chunks outside the radius it has not reached yet.
+    bool evictPending = false;
 
     // Chunk slots freed by eviction, reused before appending to Scene.chunks. Scene.chunks is
     // "slot-indexed with holes" and never shrinks, and its length drives the GPU header texture
@@ -360,21 +507,42 @@ static inline uint8_t quantizeSurfaceChannel(float v01) {
 // `slope` is the terrain gradient (rise/run) at this column, from the height prepass in
 // generateChunkVoxels. It is what decides bare rock versus soil: without it every hillside gets the
 // same climate colour regardless of whether it is a meadow or a cliff.
+// `waterTop` is this column's own water surface -- sea level almost everywhere, but a river reach's
+// pool level inside a valley. Submerged ground is coloured relative to it rather than to sea level,
+// so a river bed reads as a river bed and not as ordinary hillside that happens to be wet.
+//
+// `river` is 0 outside a valley and 1 on its axis, used only for the bank strip.
+//
+// `bare` and `rc` come from the caller rather than being worked out here. Both are needed by the
+// column's geometry (the joint and bedding recess) before any colour is chosen, and both are needed
+// again by the subsurface fill below the surface voxel, so computing them here would be the second
+// of three identical evaluations of the same three Perlin fields per column.
 static projv::Color surfaceColor(float height, float t, float h, int worldY,
-                                  float wx, float wz, float slope,
+                                  float wx, float wz, float slope, float waterTop, float river,
+                                  float bare, const rock::Column& rc,
                                   const TerrainState& ts) {
-    int wl = int(TerrainState::kWaterLevel);
+    int wl = int(waterTop);
 
-    if (worldY < wl - 3) {
-        return projv::Color{15, 25, 110};
-    }
+    // Submerged ground. Quantized onto the same lattice as everything else, which the palette
+    // budget above depends on: this used to return an ungated ramp keyed on absolute depth, and a
+    // ramp is an unbounded number of distinct colours. It cost nothing while the sea bed sat a few
+    // tens of units under the waterline, but the continent field now digs 950 units down and rivers
+    // put a second waterline anywhere up to the tree line, so the ramp would have spread over
+    // dozens of palette slots on top of the 216 the lattice already claims -- and overrunning the
+    // cap does not fail loudly, it wraps internMaterial's uint8_t and silently aliases voxels onto
+    // whatever colour sits at (index & 255).
     if (worldY < wl) {
-        float df = float(worldY) / float(wl);
-        return projv::Color{uint8_t(38), uint8_t(80), uint8_t(uint8_t(lerpf(140, 100, df)))};
+        float df = clampf((float(wl) - float(worldY)) * (1.0f / 260.0f), 0.0f, 1.0f);
+        return projv::Color{quantizeSurfaceChannel(lerpf(0.28f, 0.06f, df)),
+                            quantizeSurfaceChannel(lerpf(0.36f, 0.10f, df)),
+                            quantizeSurfaceChannel(lerpf(0.52f, 0.30f, df))};
     }
 
-    // Climate-driven material blending (simplified from TerrainTest's surfaceColor)
-    float altN = clampf((height - float(wl)) / terrain_noise::MAX_HEIGHT, 0.0f, 1.0f);
+    // Altitude is measured from SEA level, not from this column's water surface: a tarn near a
+    // summit is still alpine, and normalizing against its own pool would tell the snow line and the
+    // rock exposure that it is at sea level.
+    float altN = clampf((height - TerrainState::kWaterLevel) / terrain_noise::MAX_HEIGHT,
+                        0.0f, 1.0f);
 
     // The rock end members now live in rock_detail.hpp so the surface and the shell beneath it are
     // guaranteed to be reading the same stone.
@@ -426,10 +594,23 @@ static projv::Color surfaceColor(float height, float t, float h, int worldY,
     // a wide teal fringe. Dithering picks one or the other, so every voxel is a colour that was
     // actually chosen, and the boundary reads as patchy soil clinging to rock, which is what a real
     // slope looks like anyway.
-    float bare = rock::exposure(slope, altN, t);
     if (bare > 0.001f && hash2f(int(wx * 3.0f), int(wz * 3.0f) + 4096) < bare) {
-        rock::Column rc = rock::prepare(ts.noiseGen.microN, wx, wz, t, h, altN, slope);
         col = rock::color(rc, ts.noiseGen.rockNoise, wx, float(worldY), wz, /*detail=*/true);
+    }
+
+    // River banks. The strip between the water line and the top of the cut bank is washed gravel
+    // and silt: the current strips it every time the river is in spate, so whatever the climate
+    // grows on the slope above, it does not grow here.
+    //
+    // Dithered against the surrounding ground for the same reason bare rock is -- the bank colour
+    // and a green floodplain are far enough apart in hue that a blended fringe rounds to a colour
+    // that is in neither.
+    if (river > 0.20f) {
+        float aboveWater = height - waterTop;
+        float bank = rock::rsmooth(0.34f, 0.72f, river)
+                   * (1.0f - rock::rsmooth(9.0f, 30.0f, aboveWater));
+        if (bank > 0.001f && hash2f(int(wx * 3.0f) + 1531, int(wz * 3.0f) + 8623) < bank)
+            col = projv::core::vec3{0.78f, 0.74f, 0.62f};
     }
 
     float grey = col.x * 0.299f + col.y * 0.587f + col.z * 0.114f;
@@ -502,16 +683,27 @@ static void terrainOctavesForLOD(uint32_t lod, int& detailOct, int& erosionOct) 
 // the near ring, 16 in the middle, 4 in the far one -- rather than blinking into existence at a
 // ring boundary. Cost at the far rings is negligible: the coarse mip is ~60 voxels, and most
 // candidates are rejected by the patch field before they ever touch the terrain noise.
+// `maxGroundH` is the highest terrain column in this chunk's footprint, from the shared prepass.
 static void stampTreesIntoChunk(projv::core::ivec3 coord, projv::VoxelBrickMap& map,
-                                TerrainState& ts, int res, float vs, uint32_t lod) {
+                                TerrainState& ts, int res, float vs, uint32_t lod,
+                                float maxGroundH) {
     (void)lod;
     if (ts.treeLib.empty()) return;
+
+    // Open sky: no tree rooted anywhere in the footprint reaches this slab. Worth testing before
+    // collectTrees rather than relying on its per-instance vertical reject, because collecting is
+    // the expensive half -- every candidate that survives the patch field costs a full terrain
+    // sample to find its ground. A vertical chunk stack is seventeen levels deep and only two or
+    // three of them hold any ground, so without this the tree pass runs, in full, for a dozen
+    // slabs of empty air above every column in the world.
+    if (float(coord.y) * TerrainState::kChunkSize
+            > maxGroundH + trees::canopyHeight(ts.treeLib, ts.treeParams)) return;
 
     int placeDetailOct, placeErosionOct;
     terrainOctavesForLOD(0, placeDetailOct, placeErosionOct);
     auto sampleGround = [&](float x, float z) {
         terrain_noise::TerrainSample s = sampleWorld(ts, x, z, placeDetailOct, placeErosionOct);
-        return trees::GroundSample{s.height, s.temp, s.humid};
+        return trees::GroundSample{s.height, s.temp, s.humid, s.waterTop};
     };
 
     float ox = float(coord.x) * TerrainState::kChunkSize;
@@ -535,6 +727,190 @@ static void stampTreesIntoChunk(projv::core::ivec3 coord, projv::VoxelBrickMap& 
     }
 }
 
+// One terrain column: everything the voxel loop needs about a world XZ position, independent of
+// which chunk in the vertical stack is being filled.
+struct ColumnSample {
+    float height;
+    float temp;
+    float humid;
+    float waterTop;   // this column's own water surface: sea level, or a river reach's pool
+    float river;      // 0 outside a river valley .. 1 on its axis
+};
+
+// The prepass for one (chunkX, chunkZ) at one LOD ring: a (res+2)^2 grid of columns, plus the
+// bounds the marginal test needs.
+struct ColumnBlock {
+    int stride = 0;
+    float minH = 0.0f, maxH = 0.0f;
+    float minWaterTop = 0.0f, maxWaterTop = 0.0f;
+    std::vector<ColumnSample> cells;
+};
+
+// Cache of column blocks, keyed by chunk column and ring.
+//
+// A chunk stack is seventeen levels tall (kChunkYMin..kChunkYMax) and every level used to run the
+// full prepass over the same (res+2)^2 world positions -- 66k full terrain samples per chunk at
+// LOD0 -- including for the dozen levels of open sky above the ground and open water below it,
+// which then produced nothing. The columns do not depend on Y at all, so this computes them once
+// per stack. That is a 17x cut in the dominant cost of chunk generation, and it is what makes the
+// much taller world affordable: raising the ceiling for towering mountains adds levels to the
+// stack, and with the cache in place adding a level is nearly free.
+//
+// Bounded by count rather than by residency: entries are cheap to rebuild, so when the cache is
+// over budget the coldest half is simply dropped. Keyed including the LOD ring because a refine
+// regenerates the same column at a different resolution, and the two grids are not interchangeable.
+namespace {
+struct ColumnCacheKey {
+    int cx, cz; uint32_t lod;
+    bool operator==(const ColumnCacheKey& o) const { return cx == o.cx && cz == o.cz && lod == o.lod; }
+};
+struct ColumnCacheKeyHash {
+    size_t operator()(const ColumnCacheKey& k) const {
+        size_t h = size_t(uint32_t(k.cx)) * 0x9E3779B97F4A7C15ull;
+        h ^= size_t(uint32_t(k.cz)) * 0xC2B2AE3D27D4EB4Full + (h << 6) + (h >> 2);
+        h ^= size_t(k.lod) * 0x165667B19E3779F9ull + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+struct ColumnCacheEntry {
+    std::shared_ptr<const ColumnBlock> block;
+    uint64_t lastUse = 0;
+};
+
+// Budgeted in BYTES, not entries. The three rings differ in size by three orders of magnitude -- a
+// LOD0 block is 258^2 columns at 20 bytes, about 1.3 MB, while a LOD2 block is 18^2, about 6 KB --
+// so any entry count generous enough to hold the far rings is also a licence to hold thousands of
+// near ones, and a flight that leaves a trail of cold LOD0 columns behind it would reach gigabytes
+// before the count ever tripped.
+constexpr size_t kColumnCacheMaxBytes = 192u << 20;   // 192 MB
+
+std::mutex g_columnCacheMutex;
+std::unordered_map<ColumnCacheKey, ColumnCacheEntry, ColumnCacheKeyHash> g_columnCache;
+uint64_t g_columnCacheClock = 0;
+size_t g_columnCacheBytes = 0;
+
+// Columns a worker is building RIGHT NOW, and a CV to wait on one.
+//
+// Without this the cache only ever helps a chunk whose column was finished by an earlier chunk --
+// and the streaming order makes that the uncommon case, not the common one. Coords are queued XZ
+// column by XZ column, so the whole vertical stack for one column becomes queue-adjacent and is
+// picked up by the entire worker pool within microseconds of each other. Every one of them misses
+// the (still empty) cache and runs the identical 258x258 prepass, so a stack that should cost one
+// prepass costs one per level. The cache's entire 22x saving was being lost to that race exactly
+// when it mattered most: the fine ring, where a prepass is at its most expensive.
+//
+// Waiting rather than racing is right here because the duplicate work is total: the loser of the
+// race throws away a full LOD0 prepass. Only workers targeting the SAME column ever wait, so the
+// pool never serializes on distinct work.
+std::unordered_map<ColumnCacheKey, int, ColumnCacheKeyHash> g_columnBuilding;
+std::condition_variable g_columnCacheCv;
+
+size_t columnBlockBytes(const ColumnBlock& b) {
+    return b.cells.size() * sizeof(ColumnSample) + sizeof(ColumnBlock);
+}
+}  // namespace
+
+// Build (or fetch) the column block for a chunk's XZ footprint at a given ring.
+//
+// The one-voxel skirt on every side is what makes the terrain gradient continuous ACROSS chunk
+// boundaries: with one-sided differences at the edges, two neighbouring chunks would disagree about
+// the slope on their shared seam and draw a visible line of mismatched rock down it. It costs
+// (res+2)^2/res^2, about 1.6% more samples at LOD0.
+static std::shared_ptr<const ColumnBlock> columnsForChunk(const TerrainState& ts, int cx, int cz,
+                                                          uint32_t lod, int res, float vs) {
+    ColumnCacheKey key{cx, cz, lod};
+    {
+        std::unique_lock<std::mutex> lock(g_columnCacheMutex);
+        // Loop rather than test once: waking from the CV means SOME column finished, not
+        // necessarily this one, and the entry can also have been evicted between the notify and
+        // this thread reacquiring the lock.
+        for (;;) {
+            auto it = g_columnCache.find(key);
+            if (it != g_columnCache.end()) {
+                it->second.lastUse = ++g_columnCacheClock;
+                return it->second.block;
+            }
+            if (!g_columnBuilding.count(key)) break;   // nobody on it: claim it below
+            g_columnCacheCv.wait(lock);
+        }
+        g_columnBuilding[key] = 1;
+    }
+
+    // Built outside the lock: holding it across the build would serialize every worker in the pool
+    // behind whichever one is doing terrain noise. g_columnBuilding is what keeps other workers off
+    // THIS column meanwhile, without blocking them on any other.
+    auto block = std::make_shared<ColumnBlock>();
+    const int stride = res + 2;
+    block->stride = stride;
+    block->cells.resize(size_t(stride) * size_t(stride));
+
+    int detailOct, erosionOct;
+    terrainOctavesForLOD(lod, detailOct, erosionOct);
+
+    float ox = float(cx) * TerrainState::kChunkSize;
+    float oz = float(cz) * TerrainState::kChunkSize;
+
+    float minH = 1e30f, maxH = -1e30f, minWT = 1e30f, maxWT = -1e30f;
+    for (int j = 0; j < stride; ++j) {
+        float wz = oz + float(j - 1) * vs;
+        for (int i = 0; i < stride; ++i) {
+            float wx = ox + float(i - 1) * vs;
+            terrain_noise::TerrainSample s = sampleWorld(ts, wx, wz, detailOct, erosionOct);
+            block->cells[size_t(j) * stride + i] = {s.height, s.temp, s.humid, s.waterTop, s.river};
+            minH = std::min(minH, s.height);   maxH = std::max(maxH, s.height);
+            minWT = std::min(minWT, s.waterTop); maxWT = std::max(maxWT, s.waterTop);
+        }
+    }
+    block->minH = minH; block->maxH = maxH;
+    block->minWaterTop = minWT; block->maxWaterTop = maxWT;
+
+    std::shared_ptr<const ColumnBlock> result = block;
+    {
+        std::lock_guard<std::mutex> lock(g_columnCacheMutex);
+        if (g_columnCacheBytes >= kColumnCacheMaxBytes) {
+            // Evict coldest-first down to half the budget, in one pass. A single sort over the keys
+            // is cheaper than keeping an intrusive LRU list correct under contention, and it only
+            // happens once per 96 MB admitted.
+            std::vector<std::pair<uint64_t, ColumnCacheKey>> ages;
+            ages.reserve(g_columnCache.size());
+            for (const auto& kv : g_columnCache) ages.emplace_back(kv.second.lastUse, kv.first);
+            std::sort(ages.begin(), ages.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+            for (const auto& a : ages) {
+                if (g_columnCacheBytes <= kColumnCacheMaxBytes / 2) break;
+                auto it = g_columnCache.find(a.second);
+                if (it == g_columnCache.end()) continue;
+                g_columnCacheBytes -= columnBlockBytes(*it->second.block);
+                g_columnCache.erase(it);
+            }
+        }
+        auto& e = g_columnCache[key];
+        if (e.block) {
+            result = e.block;   // evicted and rebuilt by someone else meanwhile; use the live copy
+        } else {
+            e.block = result;
+            g_columnCacheBytes += columnBlockBytes(*result);
+        }
+        e.lastUse = ++g_columnCacheClock;
+        // Release the claim and wake anyone queued behind this column. Must happen under the same
+        // lock as the publish, so a waiter can never observe "not building" and "not cached" for a
+        // column that is in fact finished.
+        g_columnBuilding.erase(key);
+    }
+    g_columnCacheCv.notify_all();
+    return result;
+}
+
+// How deep below its surface water is actually filled, in voxels.
+//
+// Water is opaque here -- it is a coloured voxel, not a transparent medium -- so only the topmost
+// voxel of a body of water is ever visible, exactly as with ground (see kFillDepth, which does the
+// same job for rock). Filling to the sea bed mattered little when the sea bed sat just below the
+// waterline, but the continent field now digs abyssal plains 950 units down, and filling those
+// solid would spend the overwhelming majority of every ocean chunk's voxels on water nothing can
+// see.
+static constexpr int kWaterFillDepth = 40;
+
 // outMarginal (optional) reports whether the terrain surface came within a coarse voxel of this
 // chunk's vertical slab. It is only meaningful when the chunk comes back empty; see
 // ProcessedChunk::marginal.
@@ -545,8 +921,6 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
     float ox = float(coord.x) * TerrainState::kChunkSize;
     float oz = float(coord.z) * TerrainState::kChunkSize;
     float oy = float(coord.y) * TerrainState::kChunkSize;
-    int wl = int(TerrainState::kWaterLevel);
-    int localWL = int(std::floor((wl - oy) / vs));
 
     int detailOct, erosionOct;
     terrainOctavesForLOD(lod, detailOct, erosionOct);
@@ -565,32 +939,18 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
         return id;
     };
 
-    // Height prepass, one voxel wider than the chunk on every side.
-    //
-    // Rock exposure needs the terrain gradient, and a gradient needs neighbouring heights. Sampling
-    // them on demand would triple the noise cost; sampling the columns once into a grid costs
-    // nothing extra, because every column is needed anyway. The one-voxel skirt is what makes the
-    // slope continuous *across* chunk boundaries -- with one-sided differences at the edges, two
-    // neighbouring chunks would disagree about the slope on their shared seam and draw a visible
-    // line of mismatched rock down it. It costs (res+2)^2/res^2, about 1.6% more samples at LOD0.
-    const int stride = res + 2;
-    struct ColumnSample { float height, temp, humid; };
-    static thread_local std::vector<ColumnSample> columns;
-    columns.resize(size_t(stride) * size_t(stride));
-    for (int j = 0; j < stride; ++j) {
-        float wz = oz + float(j - 1) * vs;
-        for (int i = 0; i < stride; ++i) {
-            float wx = ox + float(i - 1) * vs;
-            terrain_noise::TerrainSample s = sampleWorld(ts, wx, wz, detailOct, erosionOct);
-            columns[size_t(j) * stride + i] = {s.height, s.temp, s.humid};
-        }
-    }
+    // Column prepass, shared with every other chunk in this vertical stack. Rock exposure needs the
+    // terrain gradient, and a gradient needs neighbouring heights; the grid supplies both.
+    std::shared_ptr<const ColumnBlock> columnBlock =
+        columnsForChunk(ts, coord.x, coord.z, lod, res, vs);
+    const ColumnBlock& cols = *columnBlock;
+    const int stride = cols.stride;
     auto columnAt = [&](int i, int j) -> const ColumnSample& {
-        return columns[size_t(j + 1) * stride + (i + 1)];
+        return cols.cells[size_t(j + 1) * stride + (i + 1)];
     };
 
-    // Does the terrain surface come near this chunk's vertical slab at all? The prepass already
-    // holds every column height, so this is just a min/max over data we have.
+    // Does the terrain surface, or any water, come near this chunk's vertical slab at all? The
+    // prepass already holds the bounds, so this is a handful of comparisons.
     //
     // The margin is one coarse voxel on each side. That is the scale at which this ring's sampling
     // can be wrong: a finer ring samples more columns AND more detail/erosion octaves
@@ -598,16 +958,22 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
     // there. Well clear of the slab on both sides, no amount of extra detail brings it back, so the
     // chunk is empty at every ring and never needs re-checking.
     if (outMarginal) {
-        float minH = columns[0].height, maxH = columns[0].height;
-        for (const ColumnSample& c : columns) {
-            if (c.height < minH) minH = c.height;
-            if (c.height > maxH) maxH = c.height;
-        }
         const float lo = oy - vs;
         const float hi = oy + TerrainState::kChunkSize + vs;
-        // Water counts too: a slab at or below the water line gains water voxels the moment any
-        // column's ground drops below it, which is just as ring-sensitive as the ground itself.
-        *outMarginal = (maxH >= lo && minH < hi) || oy <= TerrainState::kWaterLevel;
+        // Water is bounded now rather than reaching down to the sea bed (see kWaterFillDepth), so
+        // "below the water line" is no longer enough to make a slab marginal -- it also has to be
+        // within the fill depth of some column's water surface. Without that bound every chunk in
+        // the 950-unit-deep abyss would be re-checked at every ring forever.
+        // The lower bound carries the subsurface shell, not just the surface: a column whose top
+        // stands above this slab still writes kFillDepth voxels downward, and that shell can reach
+        // into the slab (see the fill band in the column loop). Testing the bare surface here would
+        // mark such a slab "not near ground", and an empty verdict for it would then never be
+        // re-checked at a finer ring.
+        bool nearGround = (cols.maxH >= lo && cols.minH - float(kFillDepth) * vs < hi);
+        bool nearWater = (cols.maxWaterTop >= lo)
+                      && (cols.minWaterTop - float(kWaterFillDepth) * vs < hi)
+                      && (cols.minH < cols.maxWaterTop);
+        *outMarginal = nearGround || nearWater;
     }
 
     for (int lz = 0; lz < res; ++lz) {
@@ -617,6 +983,42 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
             const ColumnSample& sample = columnAt(lx, lz);
             float worldH = sample.height;
 
+            // This column's own water surface. Everywhere but a river valley `waterTop` is sea
+            // level and this is exactly what it always was.
+            const float wt = sample.waterTop;
+
+            // Waterfalls.
+            //
+            // A cliff, in a heightfield, is not a surface -- it is the GAP between two columns. So a
+            // river going over one gets water on the lip and water in the plunge pool and nothing
+            // whatever on the face between them, which is precisely the "water stops and reappears
+            // lower down" artefact. No amount of work in the per-point terrain sampler can fix it,
+            // because the sampler sees one column and the fall exists only in the relationship
+            // between two.
+            //
+            // Here that relationship is available: the prepass grid holds the neighbours. A channel
+            // column whose channel neighbour stands higher carries that neighbour's surface down
+            // its own face, so the water sheet follows the drop instead of stopping at the lip. It
+            // chains -- each column down a cascade lifts from the one above it -- so a long rapid
+            // comes out as continuous falling water rather than a row of disconnected puddles.
+            //
+            // Restricted to columns that are actually in a channel on BOTH sides, so it can only
+            // ever extend water along a river, never spill it onto a bank.
+            float surfaceTop = wt;
+            if (sample.river > 0.25f) {
+                const ColumnSample* nb[4] = {&columnAt(lx + 1, lz), &columnAt(lx - 1, lz),
+                                             &columnAt(lx, lz + 1), &columnAt(lx, lz - 1)};
+                for (const ColumnSample* n : nb)
+                    if (n->river > 0.25f && n->waterTop > surfaceTop) surfaceTop = n->waterTop;
+            }
+            const bool isFall = surfaceTop > wt + 0.5f;
+
+            const int localWL = int(std::floor((surfaceTop - oy) / vs));
+            // A fall fills from the ground up, ignoring the still-water shell depth: the whole
+            // point is the vertical ribbon, and clipping it to 40 voxels would reinstate the gap
+            // this exists to close. Safe to leave uncapped because a channel is a few columns wide.
+            const int waterFloorLocal = isFall ? INT_MIN / 2 : localWL - kWaterFillDepth;
+
             // Central differences in world units: rise over run, so 1.0 is a 45-degree slope.
             float slope;
             {
@@ -625,61 +1027,106 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
                 slope = std::sqrt(dhdx * dhdx + dhdz * dhdz);
             }
 
-            float altN0 = clampf((worldH - float(wl)) / terrain_noise::MAX_HEIGHT, 0.0f, 1.0f);
-            float bare = rock::exposure(slope, altN0, sample.temp);
+            float altN0 = clampf((worldH - TerrainState::kWaterLevel) / terrain_noise::MAX_HEIGHT,
+                                 0.0f, 1.0f);
+            float bare = rock::exposure(slope, altN0, sample.temp, sample.humid);
 
-            // Joints cut real geometry, not just colour: where one surfaces on bare rock, the whole
-            // column is recessed. Applied to the HEIGHT before it is voxelized, and only above
-            // water. Chunk seams stay consistent because this is a pure function of world XZ, and
-            // because both chunks voxelize the carved height rather than the raw one.
-            if (worldH > float(wl) + 4.0f) {
-                worldH -= float(vs) * float(rock::carveDepth(ts.noiseGen.rockNoise, wx, worldH, wz,
-                                                             rock::verticality(slope), bare));
+            // Resolved once per column, here, because all three consumers below need it: the
+            // geometry recess, the surface colour, and the subsurface fill.
+            rock::Column rc = rock::prepare(ts.noiseGen.microN, wx, wz,
+                                            sample.temp, sample.humid, altN0, slope);
+
+            // Joints and bedding cut real geometry, not just colour: where a joint surfaces on bare
+            // rock, or a soft bed outcrops, the whole column is recessed. Applied to the HEIGHT
+            // before it is voxelized, and only above water. Chunk seams stay consistent because
+            // this is a pure function of world XZ, and because both chunks voxelize the carved
+            // height rather than the raw one.
+            //
+            // The recess is in world units, so every LOD ring cuts the same shape -- it used to be
+            // in voxels, which made a coarse ring gouge sixteen times deeper than a fine one at the
+            // same spot.
+            // Shelves standing PROUD of a bare face, the counterpart to the recess above (see
+            // rock::platformLift). Evaluated at the recessed height so the two agree about where the
+            // wall actually is, and kept as its own value because the shell below this column has to
+            // be deepened by the same amount: a shelf is only a shelf if it is solid all the way
+            // down to the rock it grows out of, and a lift with the standard fill depth would hang
+            // the top of a tall one in the air.
+            float platform = 0.0f;
+            if (worldH > wt + 4.0f) {
+                worldH -= rock::surfaceRecess(rc, ts.noiseGen.rockNoise, wx, worldH, wz, bare);
+                platform = rock::platformLift(rc, ts.noiseGen.microN, wx, worldH, wz, bare);
+                worldH += platform;
             }
 
             int topLocalY = int(std::floor((worldH - oy) / vs));
+            // Extra shell voxels this column needs purely to carry its shelf back down to the
+            // unlifted surface.
+            const int platformFill = int(std::ceil(platform / vs));
+
+            // Water occupies [max(ground, waterFloor) .. waterSurface], clipped to the slab.
+            auto fillWater = [&](int fromLocal) {
+                int top = std::min(localWL, res - 1);
+                int bottom = std::max(std::max(fromLocal, waterFloorLocal), 0);
+                for (int ly = bottom; ly <= top; ++ly) {
+                    float voxelWorldY = oy + float(ly) * vs;
+                    // Falling water is shallow water however tall the column is: it is a sheet in
+                    // free air, not a body with depth. Grading it by distance below the lip would
+                    // darken the bottom of every waterfall to abyssal blue.
+                    float depth = isFall ? 0.0f : (surfaceTop - voxelWorldY);
+                    // name="" (not "water"): internMaterial matches by NAME first when one is
+                    // given, so a shared name would collapse every depth shade below back onto
+                    // whichever color got interned first. "" falls through to the color-based
+                    // lookup, same as the plain surface-color path below.
+                    uint8_t wmatID = internColor("", projv::packColor(waterColorForDepth(depth)));
+                    projv::utils::brickMapSetVoxel(map, lx, ly, lz, wmatID);
+                }
+            };
 
             if (topLocalY < 0) {
-                // Surface below chunk - only water
-                if (worldH < float(wl)) {
-                    int waterSurfaceLocal = localWL;
-                    if (waterSurfaceLocal >= res) waterSurfaceLocal = res - 1;
-                    if (waterSurfaceLocal >= 0) {
-                        for (int ly = 0; ly <= waterSurfaceLocal; ++ly) {
-                            float voxelWorldY = oy + float(ly) * vs;
-                            // name="" (not "water"): internMaterial matches by NAME first when one is
-                            // given, so a shared name would collapse every depth shade below back onto
-                            // whichever color got interned first. "" falls through to the color-based
-                            // lookup, same as the plain surface-color path below.
-                            uint8_t wmatID = internColor("", projv::packColor(
-                                waterColorForDepth(float(wl) - voxelWorldY)));
-                            projv::utils::brickMapSetVoxel(map, lx, ly, lz, wmatID);
-                        }
-                    }
-                }
+                // Ground is below this chunk; the slab can still hold the water above it.
+                if (worldH < surfaceTop) fillWater(0);
                 continue;
             }
 
-            if (topLocalY >= res) continue;
+            // A column whose surface is above this slab is NOT finished with this slab: the shell
+            // below that surface is kFillDepth voxels deep, and if the surface sits near the bottom
+            // of the chunk above, the rest of that shell belongs down here.
+            //
+            // Returning early on `topLocalY >= res` is what put horizontal gaps along chunk seams.
+            // The chunk above filled its shell down to its own local 0 and stopped; this chunk
+            // decided the column was none of its business and wrote nothing; and the voxels between
+            // the two -- the remainder of a shell that is 84 world units deep against a 717-unit
+            // chunk -- existed in neither. Looking into such a seam from the side, you see straight
+            // through the terrain, which is exactly the reported artefact. It shows up worst at
+            // corners only because that is where two seams meet and the odds of the surface landing
+            // near a boundary are highest.
+            //
+            // The fill band is therefore computed in this chunk's local coordinates from the
+            // column's true (possibly out-of-slab) top, then clipped to the slab. Every chunk in
+            // the stack runs the same arithmetic against the same world-space band, so the pieces
+            // meet exactly and no chunk needs to know anything about its neighbours.
+            const bool topInSlab = (topLocalY < res);
 
-            // Surface color
             projv::Color col = surfaceColor(sample.height, sample.temp, sample.humid,
-                                            int(worldH), wx, wz, slope, ts);
-            uint32_t packed = projv::packColor(col);
-            uint8_t matID = internColor("", packed);
-            projv::utils::brickMapSetVoxel(map, lx, topLocalY, lz, matID);
+                                            int(worldH), wx, wz, slope, wt, sample.river,
+                                            bare, rc, ts);
+            if (topInSlab) {
+                uint32_t packed = projv::packColor(col);
+                uint8_t matID = internColor("", packed);
+                projv::utils::brickMapSetVoxel(map, lx, topLocalY, lz, matID);
+            }
 
             // Fill below the surface. Previously this smeared the surface colour straight down,
             // which meant a cliff face was a vertical stripe of whatever grew on top of it. Each
             // voxel is now coloured from its own altitude instead, so bedding reads across a cut
             // face -- which is the entire point of having strata at all.
-            int bottomFill = std::max(topLocalY - kFillDepth, 0);
-            if (bottomFill < topLocalY) {
-                float altN = clampf((worldH - float(wl)) / terrain_noise::MAX_HEIGHT, 0.0f, 1.0f);
-                // One evaluation of everything that is constant down this column; the per-voxel
-                // loop below then costs a hash rather than three Perlin lookups.
-                rock::Column rc = rock::prepare(ts.noiseGen.microN, wx, wz,
-                                                sample.temp, sample.humid, altN, slope);
+            int bottomFill = std::max(topLocalY - (kFillDepth + platformFill), 0);
+            // Exclusive upper bound: the surface voxel itself is written above (when it is in this
+            // slab), and everything strictly below it down to bottomFill is shell.
+            const int fillTop = std::min(topLocalY, res);
+            if (bottomFill < fillTop) {
+                // `rc` was resolved once at the top of this column -- everything constant down the
+                // column, so the per-voxel loop below costs a hash rather than three Perlin lookups.
 
                 // Only voxels that something can actually see get the joint/lichen/scree work. A
                 // column's side is exposed exactly down to the lowest of its four neighbours' tops;
@@ -692,7 +1139,7 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
                     std::min(columnAt(lx, lz + 1).height, columnAt(lx, lz - 1).height));
                 int exposedDownTo = int(std::floor((lowestNeighbour - oy) / vs)) - 1;
 
-                for (int ly = bottomFill; ly < topLocalY; ++ly) {
+                for (int ly = bottomFill; ly < fillTop; ++ly) {
                     float voxelWorldY = oy + float(ly) * vs;
                     // Soil gives way to bedrock with depth, dithered for the same reason as the
                     // surface above: an interpolated soil/rock colour is a colour neither one is.
@@ -712,25 +1159,12 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
                 }
             }
 
-            // Water: fill from above terrain up to water surface
-            if (worldH < float(wl)) {
-                int waterSurfaceLocal = localWL;
-                if (waterSurfaceLocal < 0) continue; // water surface below chunk
-                if (waterSurfaceLocal >= res) waterSurfaceLocal = res - 1; // water surface above chunk
-                int waterBottom = std::max(topLocalY + 1, 0);
-                if (waterBottom <= waterSurfaceLocal) {
-                    for (int ly = waterBottom; ly <= waterSurfaceLocal; ++ly) {
-                        float voxelWorldY = oy + float(ly) * vs;
-                        uint8_t wmatID = internColor("", projv::packColor(
-                            waterColorForDepth(float(wl) - voxelWorldY)));
-                        projv::utils::brickMapSetVoxel(map, lx, ly, lz, wmatID);
-                    }
-                }
-            }
+            // Water: fill from just above the ground up to this column's water surface.
+            if (worldH < surfaceTop && localWL >= 0) fillWater(topLocalY + 1);
         }
     }
 
-    stampTreesIntoChunk(coord, map, ts, res, vs, lod);
+    stampTreesIntoChunk(coord, map, ts, res, vs, lod, cols.maxH);
 }
 
 static void terrainWorkerFunc(projv::Scene& scene, TerrainState& ts) {
@@ -751,7 +1185,7 @@ static void terrainWorkerFunc(projv::Scene& scene, TerrainState& ts) {
             // time-sensitive -- the chunk is already visible at a coarser resolution, so making it
             // wait behind a possibly-huge ordinary backlog is exactly the "takes a long time to
             // refine on approach" symptom this exists to avoid.
-            g_worker.workCv.wait_for(lock, std::chrono::milliseconds(10), [&]{
+            g_worker.workCv.wait_for(lock, std::chrono::milliseconds(100), [&]{
                 if (!g_worker.running.load(std::memory_order_relaxed)) return true;
                 if (g_worker.workQueue.empty()) return false;
                 if (g_worker.workQueue.front().jumpQueue) return true;
@@ -813,6 +1247,7 @@ static void terrainWorkerFunc(projv::Scene& scene, TerrainState& ts) {
                 projv::utils::bakeMaterialsFromBrickMap(result.chunk.geometryData,
                                                           result.materialIDs, *brickMap);
             }
+            g_worker.completed[item.lod < 3 ? item.lod : 2].fetch_add(1, std::memory_order_relaxed);
             {
                 std::lock_guard<std::mutex> lock(g_worker.resultMutex);
                 if (result.refineHandle != kInvalidChunkHandle) g_worker.readyRefines.push_back(std::move(result));
@@ -892,12 +1327,16 @@ static uint32_t nativeLODFromResolution(uint32_t res) {
 }
 
 // Retune resident chunks toward their distance-appropriate LOD, at most kMaxRefinesPerFrame refine
-// triggers per call. The whole activeChunks map is walked every frame (a few thousand integer
-// compares -- nothing), but only the chunks whose LOD actually differs cost anything:
-// requestChunkLOD returns Unchanged and touches nothing when the value is already right. Re-walking
-// from the start each frame rather than holding a cursor keeps this safe against the map mutating
-// under generation and eviction, and still makes forward progress since applied chunks stop
-// matching.
+// triggers per call. Walks the whole activeChunks map, but only on frames where the answer can have
+// changed -- see the lodSweepNeeded gate at the top of the body. Chunks whose LOD is already right
+// cost only the map iteration itself: requestChunkLOD returns Unchanged and touches nothing.
+// Re-walking from the start each sweep rather than holding a cursor keeps this safe against the map
+// mutating under generation and eviction, and still makes forward progress since applied chunks
+// stop matching.
+//
+// (The map is NOT "a few thousand" entries as an earlier version of this comment assumed: it holds
+// one entry per resolved coord including the empty-sky sentinels, which is the full ring -- 835,582
+// at the shipped view radius. That is why the gate exists.)
 //
 // Returns true if anything was changed, i.e. if a flushSceneUpdates is needed to push it to the
 // GPU. This return value is NOT optional bookkeeping: requestChunkLOD records the new level in
@@ -917,73 +1356,152 @@ static uint32_t nativeLODFromResolution(uint32_t res) {
 // itself, so without this guard the same chunk would get queued again on every subsequent frame
 // until the first request completes).
 static bool applyLODRing(projv::Scene& scene, TerrainState& ts, projv::core::ivec3 camChunk) {
+    // Only sweep when an answer can have changed -- see TerrainState::lodSweepNeeded --
+    // and, when sweeping, look only where a change is POSSIBLE rather than at every resolved coord.
+    //
+    // Both halves are needed. Gating alone is not enough: `deferred` (more LOD candidates than the
+    // per-frame refine budget) is continuously true while the camera is moving, which is exactly
+    // when the sweep is most expensive, so the gate opens every frame during flight. Measured at
+    // 52ms per sweep over 700k activeChunks entries, running every frame -- 21.8 of a 22-second
+    // flight was spent in here, and it alone accounted for the 15fps and the 125ms spikes.
+    //
+    // What makes the narrow scan correct: desiredLODForChunk is a step function of XZ distance with
+    // its outermost step at kLodRadius, so every chunk beyond that radius wants LOD2 and cannot
+    // change while it stays there. Only coords inside the disc need examining, plus a margin wide
+    // enough to cover chunks that left the disc since the last sweep and are still owed their
+    // coarsening. xzOffsets is distance-sorted, so the disc is a prefix of it -- no search needed.
+    if (!ts.lodSweepNeeded) return false;
+    auto sweepT0 = std::chrono::high_resolution_clock::now();
+
+    // Margin: how far the camera has travelled (in chunks) since the last sweep, so anything that
+    // crossed out of the LOD<2 disc in that time is still covered. The +2 floor absorbs the normal
+    // one-chunk step; the clamp makes a teleport degrade to the old full-ring behaviour rather than
+    // silently skip chunks.
+    int moved = std::max(std::abs(camChunk.x - ts.lastSweepChunk.x),
+                         std::abs(camChunk.z - ts.lastSweepChunk.z));
+    int sweepR = std::min(TerrainState::kViewRadius, TerrainState::kLodRadius + std::max(2, moved));
+    if (moved > 2) ts.lodCursor = 0;   // only rewind on large jumps; margin handles small drift
+    ts.lastSweepChunk = camChunk;
+    const int sweepR2 = sweepR * sweepR;
+
+    // How many disc coords one frame may examine.
+    //
+    // Even narrowed to the disc this is ~40,000 lookups into a 400,000-entry map, which measured
+    // 4.45ms -- and it ran every frame, because `deferred` stays true for as long as there are more
+    // LOD candidates than the 3-per-frame refine budget, which is the entire time the camera is
+    // moving. Bounding the scan and resuming from a cursor turns "4.45ms every frame" into "0.9ms
+    // every frame, whole disc covered every five", which is well inside the refine budget's own
+    // latency anyway: at 3 refines a frame, scanning faster than this cannot dispatch more work.
+    static constexpr size_t kMaxLodScanPerFrame = 8192;
+    size_t discCoords = 0;
+    for (const projv::core::ivec2& o : ts.xzOffsets) {
+        if (o.x * o.x + o.y * o.y > sweepR2) break;
+        discCoords++;
+    }
+    discCoords *= size_t(TerrainState::kYLevels);
+    if (ts.lodCursor >= discCoords) ts.lodCursor = 0;
+
     int applied = 0;
+    // Candidates this sweep found but had no per-frame budget left for. Non-zero means the sweep
+    // did not finish the job, so it must run again next frame rather than wait for the camera to
+    // move -- otherwise a chunk that lost the budget race stays at the wrong LOD indefinitely.
+    int deferred = 0;
     std::vector<std::pair<projv::core::ivec3, projv::ChunkHandle>> toRefine;
     std::vector<projv::core::ivec3> toRecheck;
-    for (const auto& [coord, h] : ts.activeChunks) {
-        uint32_t desired = desiredLODForChunk(coord, camChunk);
+    const size_t scanEnd = std::min(discCoords, ts.lodCursor + kMaxLodScanPerFrame);
+    {
+        for (size_t idx = ts.lodCursor; idx < scanEnd; ++idx) {
+            const projv::core::ivec2& off = ts.xzOffsets[idx / size_t(TerrainState::kYLevels)];
+            const int y = TerrainState::kChunkYMin + int(idx % size_t(TerrainState::kYLevels));
+            projv::core::ivec3 coord(camChunk.x + off.x, y, camChunk.z + off.y);
+            auto itA = ts.activeChunks.find(coord);
+            if (itA == ts.activeChunks.end()) continue;   // not resolved yet; streaming will admit it
+            const projv::ChunkHandle h = itA->second;
+            uint32_t desired = desiredLODForChunk(coord, camChunk);
 
-        // "Known empty" coords are not chunks, but they are not necessarily empty either -- see
-        // TerrainState::emptyChunks. Re-check one at a finer ring than the one that decided it,
-        // but only if the surface actually grazed it (marginal); open sky and deep bedrock are
-        // decided once and stay decided, which is what keeps this from re-running a full 256³
-        // generation over the ~200 empty sky cells that sit inside the fine ring at any moment.
-        if (h == kInvalidChunkHandle) {
-            auto itE = ts.emptyChunks.find(coord);
-            if (itE == ts.emptyChunks.end()) continue;
-            if (!itE->second.marginal || desired >= itE->second.lod) continue;
-            if (ts.revisitingEmpty.count(coord)) continue;
-            if (toRecheck.size() < size_t(TerrainState::kMaxRefinesPerFrame))
-                toRecheck.push_back(coord);
-            continue;
-        }
-        if (h >= scene.chunks.size()) continue;
-        const projv::Chunk& c = scene.chunks[h];
-        if (!c.alive || c.geometryPoolIndex < 0) continue;
-        if (ts.refiningHandles.count(h)) continue; // already regenerating; don't re-trigger
+            // "Known empty" coords are not chunks, but they are not necessarily empty either -- see
+            // TerrainState::emptyChunks. Re-check one at a finer ring than the one that decided it,
+            // but only if the surface actually grazed it (marginal); open sky and deep bedrock are
+            // decided once and stay decided, which is what keeps this from re-running a full 256³
+            // generation over the ~200 empty sky cells that sit inside the fine ring at any moment.
+            if (h == kInvalidChunkHandle) {
+                auto itE = ts.emptyChunks.find(coord);
+                if (itE == ts.emptyChunks.end()) continue;
+                if (!itE->second.marginal || desired >= itE->second.lod) continue;
+                if (ts.revisitingEmpty.count(coord)) continue;
+                deferred += (toRecheck.size() >= size_t(TerrainState::kMaxRefinesPerFrame));
+                if (toRecheck.size() < size_t(TerrainState::kMaxRefinesPerFrame))
+                    toRecheck.push_back(coord);
+                continue;
+            }
+            if (h >= scene.chunks.size()) continue;
+            const projv::Chunk& c = scene.chunks[h];
+            if (!c.alive || c.geometryPoolIndex < 0) continue;
+            if (ts.refiningHandles.count(h)) continue; // already regenerating; don't re-trigger
 
-        uint32_t requestedRes = TerrainState::resolutionForLOD(desired);
-        projv::ChunkLODResult result = projv::requestChunkLOD(scene, h, requestedRes);
-        if (result == projv::ChunkLODResult::Coarsened) {
-            applied++;
-        } else if (result == projv::ChunkLODResult::NeedsRegeneration &&
-                   toRefine.size() < size_t(TerrainState::kMaxRefinesPerFrame)) {
-            toRefine.push_back({coord, h});
+            uint32_t requestedRes = TerrainState::resolutionForLOD(desired);
+            projv::ChunkLODResult result = projv::requestChunkLOD(scene, h, requestedRes);
+            if (result == projv::ChunkLODResult::Coarsened) {
+                applied++;
+            } else if (result == projv::ChunkLODResult::NeedsRegeneration) {
+                deferred += (toRefine.size() >= size_t(TerrainState::kMaxRefinesPerFrame));
+                if (toRefine.size() < size_t(TerrainState::kMaxRefinesPerFrame))
+                    toRefine.push_back({coord, h});
+            }
         }
     }
 
-    for (const auto& [coord, h] : toRefine) {
+    // Come back next frame if this pass did not reach the end of the disc, or if it did but had to
+    // drop candidates for want of refine budget. Only a pass that covered the whole disc and found
+    // nothing it could not act on is allowed to close the gate.
+    ts.lodCursor = scanEnd;
+    bool passComplete = (scanEnd >= discCoords);
+    ts.lodSweepNeeded = (deferred > 0) || !passComplete;
+    if (passComplete) ts.lodCursor = 0;
+
+    // Both queues below are pushed under ONE lock acquisition with ONE notify at the end. Taking
+    // and dropping workMutex per item, then notify_all-ing per item, woke all N workers up to six
+    // times per sweep just to have most of them find the queue's single new item already taken.
+    if (!toRefine.empty() || !toRecheck.empty()) {
         projv::SceneGrid& grid = scene.grids[ts.gridIndex];
-        projv::core::vec3 wp = grid.origin + (projv::core::vec3(coord - grid.originCellCoord) * TerrainState::kChunkSize);
-        uint32_t lod = desiredLODForChunk(coord, camChunk);
-        ts.refiningHandles.insert(h);
-        {
+        std::lock_guard<std::mutex> lock(g_worker.workMutex);
+
+        for (const auto& [coord, h] : toRefine) {
+            projv::core::vec3 wp = grid.origin + (projv::core::vec3(coord - grid.originCellCoord) * TerrainState::kChunkSize);
+            ts.refiningHandles.insert(h);
             // push_front (not push_back): the chunk is already visible at a coarser resolution, so
             // this should jump straight to the head of the line rather than wait behind whatever
-            // ordinary streaming backlog happens to be queued (which can be tens of thousands of
-            // coords deep during a big flight).
-            std::lock_guard<std::mutex> lock(g_worker.workMutex);
-            g_worker.workQueue.push_front(ChunkWorkItem{coord, wp, lod, /*refineHandle=*/h,
-                                                       /*jumpQueue=*/true});
+            // ordinary streaming backlog happens to be queued.
+            g_worker.workQueue.push_front(ChunkWorkItem{coord, wp, desiredLODForChunk(coord, camChunk),
+                                                       /*refineHandle=*/h, /*jumpQueue=*/true});
+            g_worker.queuedCoords.insert(coord);
         }
-        g_worker.workCv.notify_all();
-    }
 
-    // Empty re-checks go through the ORDINARY path (no refineHandle): there is no chunk to replace,
-    // so if this ring does find geometry the result has to be admitted as a brand-new chunk. The
-    // sentinel stays in activeChunks meanwhile, which keeps the pendingCoords sweep from queueing
-    // the same coord a second time; admit() knows to look past a sentinel.
-    for (const projv::core::ivec3& coord : toRecheck) {
-        projv::SceneGrid& grid = scene.grids[ts.gridIndex];
-        projv::core::vec3 wp = grid.origin + (projv::core::vec3(coord - grid.originCellCoord) * TerrainState::kChunkSize);
-        ts.revisitingEmpty.insert(coord);
-        {
-            std::lock_guard<std::mutex> lock(g_worker.workMutex);
+        // Empty re-checks go through the ORDINARY path (no refineHandle): there is no chunk to
+        // replace, so if this ring does find geometry the result has to be admitted as a brand-new
+        // chunk. The sentinel stays in activeChunks meanwhile, which keeps the pending sweep from
+        // queueing the same coord a second time; admit() knows to look past a sentinel.
+        for (const projv::core::ivec3& coord : toRecheck) {
+            projv::core::vec3 wp = grid.origin + (projv::core::vec3(coord - grid.originCellCoord) * TerrainState::kChunkSize);
+            ts.revisitingEmpty.insert(coord);
             g_worker.workQueue.push_front(ChunkWorkItem{coord, wp, desiredLODForChunk(coord, camChunk),
                                                        /*refineHandle=*/kInvalidChunkHandle,
                                                        /*jumpQueue=*/true});
+            g_worker.queuedCoords.insert(coord);
         }
-        g_worker.workCv.notify_all();
+    }
+    if (!toRefine.empty() || !toRecheck.empty()) g_worker.workCv.notify_all();
+
+    // How often this runs, and what it costs when it does, is the thing to watch if frame times
+    // regress: the gate above is what keeps an O(activeChunks) walk off the average frame, so a
+    // sweep rate approaching one per frame means some trigger is stuck on.
+    {
+        double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::high_resolution_clock::now() - sweepT0).count();
+        static double sweepMs = 0; static int sweepCount = 0;
+        sweepMs += ms; sweepCount++;
+        core_perf_every(60, "[LODSWEEP] {} sweeps, {:.2f}ms total, {:.2f}ms each, {} chunks",
+                        sweepCount, sweepMs, sweepMs / sweepCount, ts.activeChunks.size());
     }
 
     // Refines don't dirty anything yet (the geometry lands frames later, via readyRefines), so
@@ -991,15 +1509,28 @@ static bool applyLODRing(projv::Scene& scene, TerrainState& ts, projv::core::ive
     return applied > 0;
 }
 
-// Evict every streamed chunk that has left the view radius.
+// Evict streamed chunks that have left the view radius, up to a per-call budget.
+//
+// Budgeted because a single chunk-boundary crossing puts a whole crescent of the ring out of range
+// at once -- measured at 3,900 chunks, 20ms in one frame, against a 13ms average. That is a visible
+// hitch roughly once per crossing, and it was the largest remaining spike after the LOD sweep was
+// bounded. Both halves of the cost are budgeted by the same early exit: the ~300,000-entry map walk
+// stops at the cap alongside the releases, so a call costs a fraction of a pass rather than all of
+// it. Stopping early is safe -- kEvictHysteresis leaves two chunks of slack outside the view radius,
+// so a chunk waiting a few frames for its turn is still nowhere near visible -- and the caller
+// re-runs this while ts.evictPending is set, so the backlog drains within a few frames.
 static void evictDistantChunks(projv::Scene& scene, TerrainState& ts, projv::core::ivec3 camChunk) {
+    auto t0 = std::chrono::high_resolution_clock::now();
+    static constexpr int kMaxEvictPerCall = 512;
     const int evictR = TerrainState::kViewRadius + TerrainState::kEvictHysteresis;
     const int evictR2 = evictR * evictR;
     int evicted = 0;
+    bool hitCap = false;
     for (auto it = ts.activeChunks.begin(); it != ts.activeChunks.end(); ) {
         int dx = it->first.x - camChunk.x;
         int dz = it->first.z - camChunk.z;
         if (dx * dx + dz * dz <= evictR2) { ++it; continue; }
+        if (evicted >= kMaxEvictPerCall) { hitCap = true; break; }
         // Defensive: if a refine happened to be in flight for this handle, drop the marker so a
         // later slot-recycled chunk (freeChunkSlots reuses handles) can never inherit a stale
         // "already regenerating" state that isn't actually about it.
@@ -1010,9 +1541,14 @@ static void evictDistantChunks(projv::Scene& scene, TerrainState& ts, projv::cor
         it = ts.activeChunks.erase(it);
         evicted++;
     }
+    // More to do next frame if the budget ran out before the pass finished.
+    ts.evictPending = hitCap;
     if (evicted > 0) {
-        projv::core::info("[EVICT] {} chunks outside radius {} — freeChunkSlots={} blobFreeList={}",
-                          evicted, evictR, ts.freeChunkSlots.size(), scene.blobFreeList.size());
+        double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::high_resolution_clock::now() - t0).count();
+        core_info_every(8, "[EVICT] {} chunks outside radius {} in {:.2f}ms — more={} freeChunkSlots={} blobFreeList={}",
+                        evicted, evictR, ms, hitCap,
+                        ts.freeChunkSlots.size(), scene.blobFreeList.size());
     }
 }
 
@@ -1022,7 +1558,9 @@ static void evictDistantChunks(projv::Scene& scene, TerrainState& ts, projv::cor
 static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
     int generated = 0;
     int consumed = 0;
-    static constexpr int kMaxConsumedPerFrame = 64;
+    static constexpr int kMaxConsumedPerFrame = 192;
+    std::vector<projv::core::ivec3> admittedRefines;
+    std::vector<projv::ChunkHandle> admittedRefineHandles;
 
     // Admission logic for brand-new streaming results (refines are handled separately below,
     // since the chunk already exists and is never evicted). Returns true if the chunk was newly
@@ -1102,17 +1640,38 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
         // camera can have drifted since this chunk was enqueued, so desired may be coarser than
         // what was actually generated (native) -- requestChunkLOD truncates for that via the
         // normal GPU-upload path. It can also want something finer than native if the camera got
-        // closer during generation; that comes back as NeedsRegeneration and is left alone here,
-        // since applyLODRing's normal per-frame pass picks it up as a refine candidate on a later
-        // frame, exactly like any other chunk.
-        projv::requestChunkLOD(scene, h, TerrainState::resolutionForLOD(desiredLODForChunk(coord, ts.lastCameraChunk)));
+        // closer during generation; that comes back as NeedsRegeneration and is left for
+        // applyLODRing to pick up as a refine candidate.
+        //
+        // That hand-off is why NeedsRegeneration must arm lodSweepNeeded. applyLODRing no longer
+        // sweeps unconditionally every frame, so "a later frame will notice" is only true if
+        // something says so -- otherwise a chunk admitted coarser than the camera now wants would
+        // sit at the wrong resolution until the camera happened to cross a chunk boundary.
+        if (projv::requestChunkLOD(scene, h,
+                TerrainState::resolutionForLOD(desiredLODForChunk(coord, ts.lastCameraChunk)))
+            == projv::ChunkLODResult::NeedsRegeneration) {
+            // Queue the refine directly — the sweep's cursor may have passed this coord's
+            // position, and the sweep's own pass-complete gate could close before the cursor
+            // wraps around, leaving this chunk stuck at coarse resolution forever.
+            admittedRefines.push_back(coord);
+            admittedRefineHandles.push_back(h);
+        }
 
-        projv::core::info("[GEN] coord=({},{},{}) h={} pool={} paletteSize={}",
-                          coord.x, coord.y, coord.z, h, poolIdx,
-                          scene.components[ts.gridCompHandle].materialPalette.size());
+        // Every 256th, not every one: this fires up to kMaxNewPerFrame times per frame, and each
+        // call is a synchronous formatted write to the console sink from the render thread.
+        // Unthrottled it was ~10,000 lines a minute of terminal I/O on the critical path.
+        core_info_every(256, "[GEN] coord=({},{},{}) h={} pool={} paletteSize={}",
+                        coord.x, coord.y, coord.z, h, poolIdx,
+                        scene.components[ts.gridCompHandle].materialPalette.size());
         return true;
     };
 
+    // Coords whose result was consumed this frame, so they are no longer "in the pipeline" and the
+    // pending sweep is free to consider them again. Collected here rather than erased inline
+    // because g_worker.queuedCoords is guarded by workMutex and this block holds resultMutex --
+    // taking workMutex here would invert the workMutex -> resultMutex order terrainWorkerFunc uses
+    // and deadlock. The erase happens in the workMutex block below.
+    std::vector<projv::core::ivec3> consumedCoords;
     {
         std::lock_guard<std::mutex> lock(g_worker.resultMutex);
         // Refines: install directly onto the existing handle via replaceChunkGeometry -- the chunk
@@ -1122,6 +1681,10 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
             ProcessedChunk proc = std::move(g_worker.readyRefines.back());
             g_worker.readyRefines.pop_back();
             ts.refiningHandles.erase(proc.refineHandle);
+            consumedCoords.push_back(proc.coord);
+            // The chunk's resolution just changed under applyLODRing's feet, so its recorded
+            // requestedLOD needs re-deriving against the new native resolution.
+            ts.lodSweepNeeded = true;
 
             // Stale if the camera moved far enough away that evictDistantChunks already reclaimed
             // this coord/handle in the meantime (possibly recycling the slot for a different chunk
@@ -1134,9 +1697,9 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
                                         std::move(proc.chunk.geometryData),
                                         std::move(proc.materialIDs),
                                         proc.chunk.header.resolution);
-            projv::core::info("[REFINE] coord=({},{},{}) h={} resolution={}",
-                              proc.coord.x, proc.coord.y, proc.coord.z,
-                              proc.refineHandle, proc.chunk.header.resolution);
+            core_info_every(64, "[REFINE] coord=({},{},{}) h={} resolution={}",
+                            proc.coord.x, proc.coord.y, proc.coord.z,
+                            proc.refineHandle, proc.chunk.header.resolution);
             generated++;
         }
         while (!g_worker.readyChunks.empty() && generated < TerrainState::kMaxNewPerFrame && consumed < kMaxConsumedPerFrame) {
@@ -1147,36 +1710,78 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
             // rejected as stale) -- admit() records the new empty ring on its own, and leaving the
             // marker set would freeze this coord out of every future re-check.
             ts.revisitingEmpty.erase(proc.coord);
+            consumedCoords.push_back(proc.coord);
             if (admit(std::move(proc))) generated++;
         }
     }
 
     {
         std::lock_guard<std::mutex> lock(g_worker.workMutex);
-        while (ts.pendingIndex < ts.pendingCoords.size()) {
-            projv::core::ivec3 c = ts.pendingCoords[ts.pendingIndex++];
+
+        for (const projv::core::ivec3& c : consumedCoords) g_worker.queuedCoords.erase(c);
+
+        // Refines queued by admission (chunks generated at coarser native resolution than the
+        // camera now wants). Same path as applyLODRing's toRefine: push_front with jumpQueue,
+        // insert refiningHandles so applyLODRing doesn't re-trigger, insert queuedCoords so
+        // the pending sweep doesn't re-queue the coord as ordinary work.
+        {
+            projv::SceneGrid& grid = scene.grids[ts.gridIndex];
+            for (size_t i = 0; i < admittedRefines.size(); i++) {
+                projv::core::ivec3 coord = admittedRefines[i];
+                projv::ChunkHandle h = admittedRefineHandles[i];
+                g_worker.queuedCoords.insert(coord);
+                ts.refiningHandles.insert(h);
+                projv::core::vec3 wp = grid.origin + (projv::core::vec3(coord - grid.originCellCoord) * TerrainState::kChunkSize);
+                g_worker.workQueue.push_front(ChunkWorkItem{coord, wp, desiredLODForChunk(coord, ts.lastCameraChunk),
+                                                           /*refineHandle=*/h, /*jumpQueue=*/true});
+            }
+            admittedRefines.clear();
+            admittedRefineHandles.clear();
+        }
+
+        // Three caps, doing three different jobs:
+        //
+        //   kMaxScanPerFrame  bounds how many ring coords are EXAMINED. This is the one that
+        //                     actually bounds the frame, and the one that was missing: the vast
+        //                     majority of coords in a populated ring are skipped (already resident,
+        //                     or already queued) without ever counting against a push budget, so a
+        //                     push-only cap does not bound anything. With the cursor rewound to 0
+        //                     on every chunk-boundary crossing, one frame could walk all ~684,000
+        //                     coords looking for the handful that are new.
+        //   kMaxNewWorkPerFrame  bounds how many items one frame may enqueue.
+        //   kMaxWorkQueueDepth   bounds how far ahead of the camera the queue may run.
+        //
+        // Not finishing a pass is fine and expected while moving fast. xzOffsets is nearest-first,
+        // so a truncated pass is exactly the near terrain that matters, and the outer rings are
+        // picked up on later frames or once the camera slows.
+        static constexpr size_t kMaxScanPerFrame = 16384;
+        static constexpr size_t kMaxNewWorkPerFrame = 512;
+        size_t newCount = 0, scanned = 0;
+        while (ts.pendingIndex < ts.pendingTotal() && scanned < kMaxScanPerFrame &&
+               newCount < kMaxNewWorkPerFrame &&
+               g_worker.workQueue.size() < TerrainState::kMaxWorkQueueDepth) {
+            projv::core::ivec3 c = ts.pendingCoordAt(ts.pendingIndex++);
+            scanned++;
+            // Cheap rejects first. Both of these hit for nearly every coord in a populated ring,
+            // and neither needs the grid, so doing the grid lookup (and possibly a grid
+            // reallocation, via expandGridToInclude) ahead of them was paying the expensive part of
+            // the iteration for coords that were about to be thrown away.
+            if (ts.activeChunks.count(c)) continue;
+            if (g_worker.queuedCoords.count(c)) continue;
+
             projv::SceneGrid& grid = scene.grids[ts.gridIndex];
             int lin = chunkCoordToLin(c, grid);
             if (lin < 0 || lin >= static_cast<int>(grid.cellToChunk.size())) {
                 projv::core::ivec3 cell = c - grid.originCellCoord;
                 projv::utils::expandGridToInclude(grid, cell, scene, ts.gridIndex);
-                lin = chunkCoordToLin(c, grid);
-            }
-            if (ts.activeChunks.count(c)) continue;
-            bool alreadyQueued = false;
-            for (auto& wi : g_worker.workQueue) { if (wi.coord == c) { alreadyQueued = true; break; } }
-            if (alreadyQueued) continue;
-            {
-                std::lock_guard<std::mutex> rlock(g_worker.resultMutex);
-                bool alreadyReady = false;
-                for (auto& pc : g_worker.readyChunks) { if (pc.coord == c) { alreadyReady = true; break; } }
-                if (alreadyReady) continue;
             }
             projv::core::vec3 wp = grid.origin + (projv::core::vec3(c - grid.originCellCoord) * TerrainState::kChunkSize);
             uint32_t lod = desiredLODForChunk(c, ts.lastCameraChunk);
             g_worker.workQueue.push_back(ChunkWorkItem{c, wp, lod});
+            g_worker.queuedCoords.insert(c);
+            newCount++;
         }
-        g_worker.workCv.notify_all();
+        if (newCount > 0) g_worker.workCv.notify_all();
     }
 
     return generated > 0;
@@ -1244,7 +1849,14 @@ void startup(projv::Application& app) {
     // already resolved and no worker ever interns for a tree.
     {
         ts.treeParams.waterLevel = TerrainState::kWaterLevel;
-        ts.treeParams.treeVoxelWorldSize = TerrainState::voxelScaleForLOD(0);
+        // A tree's world size, NOT the terrain grid's voxel size. These were the same number while
+        // kVoxelScale was 1.75 and it was tempting to derive one from the other; doubling
+        // kVoxelScale showed why that was wrong, because it silently doubled every tree in the
+        // world along with it. stampTree already handles a mismatch properly -- it divides the two
+        // to pick a mip, so a coarser terrain grid just draws the same tree at lower resolution
+        // (see the decim/residual arithmetic there) -- which is exactly the intended behaviour and
+        // the reason the parameter exists separately at all.
+        ts.treeParams.treeVoxelWorldSize = 1.75f;
         ts.treeParams.seed = uint32_t(ts.seed);
 
         // Which climate each species claims. The names are the source OBJ's material names, which
@@ -1314,27 +1926,31 @@ void startup(projv::Application& app) {
         projv::graphics::setTextureToData(cr, 1, img, width, height);
     }
 
-    // Start worker threads — use all available cores
-    int numWorkers = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+    // Start worker threads — leave 2 cores for the render thread and main thread
+    int numWorkers = std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 2);
     projv::core::info("[WORKER] spawning {} terrain generation threads", numWorkers);
     g_worker.numThreads = numWorkers;
     for (int i = 0; i < numWorkers; ++i) {
         g_worker.threads.emplace_back(terrainWorkerFunc, std::ref(scene), std::ref(ts));
     }
 
-    // Seed initial pending chunk coords: sphere radius around camera start (0, 0, 0),
-    // sorted by distance from camera so closest chunks generate first.
-    ivec3 center(0, 0, 0);
-    ts.lastCameraChunk = ivec3(-9999, -9999, -9999); // force first-frame rebuild
+    // Build the camera-relative streaming template ONCE. Every later "re-seed the ring around the
+    // new camera chunk" is just pendingIndex = 0 -- see TerrainState::xzOffsets.
+    ts.xzOffsets.reserve(size_t(3.15 * r * r) + 4 * r);
     for (int dz = -r; dz <= r; ++dz)
-        for (int dy = yMin; dy <= yMax; ++dy)
-            for (int dx = -r; dx <= r; ++dx)
-                if (dx*dx + dy*dy + dz*dz <= r*r)
-                    ts.pendingCoords.push_back(center + ivec3(dx, dy, dz));
-    std::sort(ts.pendingCoords.begin(), ts.pendingCoords.end(),
-        [](const ivec3& a, const ivec3& b) {
-            return a.x*a.x + a.y*a.y + a.z*a.z < b.x*b.x + b.y*b.y + b.z*b.z;
+        for (int dx = -r; dx <= r; ++dx)
+            if (dx * dx + dz * dz <= r * r)
+                ts.xzOffsets.push_back(ivec2(dx, dz));
+    std::sort(ts.xzOffsets.begin(), ts.xzOffsets.end(),
+        [](const ivec2& a, const ivec2& b) {
+            return a.x * a.x + a.y * a.y < b.x * b.x + b.y * b.y;
         });
+    projv::core::info("[STREAM] ring template: {} XZ offsets x {} Y levels = {} coords",
+                      ts.xzOffsets.size(), TerrainState::kYLevels, ts.pendingTotal());
+
+    ts.lastCameraChunk = ivec3(-9999, -9999, -9999); // force first-frame reseed
+    ts.pendingOrigin = ivec3(0, 0, 0);
+    ts.pendingIndex = 0;
 }
 
 void update(projv::Application& app) {
@@ -1370,37 +1986,109 @@ void update(projv::Application& app) {
         if (cam.pitch < -1.55f) cam.pitch = -1.55f;
     }
 
+    // Fly speed is per SECOND, scaled by the frame's delta time. It used to be per FRAME, which
+    // made the camera's actual world velocity a function of the framerate -- the same key held for
+    // the same wall-clock second moved you ten times further at 130fps than at 13fps. That
+    // couples "the renderer got slower" to "the world got bigger", and it is half of what makes a
+    // dropped frame feel like a lurch rather than a hitch. Clamped so a long stall (a texture
+    // resize, an alt-tab) does not teleport the camera across the world on the recovery frame.
+    static auto lastUpdateTime = std::chrono::high_resolution_clock::now();
+    auto nowUpdate = std::chrono::high_resolution_clock::now();
+    float dt = std::chrono::duration<float>(nowUpdate - lastUpdateTime).count();
+    lastUpdateTime = nowUpdate;
+    if (dt > 0.1f) dt = 0.1f;
+
+    // Benchmark mode: fly forward at boost speed with no input, so the streaming path can be
+    // measured reproducibly. A stationary camera exercises almost none of it -- eviction, the ring
+    // re-seed, LOD transitions and refines are all camera-motion driven, and those are exactly
+    // where frame-time spikes live. TERRAIN_AUTOFLY=1 to enable.
+    static const bool kAutoFly = [] {
+        const char* e = std::getenv("TERRAIN_AUTOFLY");
+        return e && e[0] != '\0' && std::strcmp(e, "0") != 0;
+    }();
+
+    // --- Camera mode toggle (press 1 = fly, 2 = player+gravity+collision) ---
+    static bool wasKey1 = false, wasKey2 = false;
+    bool key1 = glfwGetKey(ri.window, GLFW_KEY_1) == GLFW_PRESS;
+    bool key2 = glfwGetKey(ri.window, GLFW_KEY_2) == GLFW_PRESS;
+    if (key1 && !wasKey1 && cam.playerMode) { cam.playerMode = false; cam.playerVelocityY = 0.0f; }
+    if (key2 && !wasKey2 && !cam.playerMode) cam.playerMode = true;
+    wasKey1 = key1; wasKey2 = key2;
+
     vec3 forward{cos(cam.phi), 0, sin(cam.phi)};
-    const float baseSpeed = 1.0f;
-    const float boostSpeed = baseSpeed * 20.0f;
-    const float speed = glfwGetKey(ri.window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? boostSpeed : baseSpeed;
-    if (glfwGetKey(ri.window, GLFW_KEY_W)) cam.position += forward * speed;
-    if (glfwGetKey(ri.window, GLFW_KEY_S)) cam.position -= forward * speed;
-    if (glfwGetKey(ri.window, GLFW_KEY_A)) { float p = cam.phi + 1.57f; cam.position -= vec3{cos(p), 0, sin(p)} * speed; }
-    if (glfwGetKey(ri.window, GLFW_KEY_D)) { float p = cam.phi - 1.57f; cam.position -= vec3{cos(p), 0, sin(p)} * speed; }
-    if (glfwGetKey(ri.window, GLFW_KEY_R)) cam.position.y += speed;
-    if (glfwGetKey(ri.window, GLFW_KEY_F)) cam.position.y -= speed;
+
+    if (cam.playerMode) {
+        // Player mode: gravity, terrain collision, WASD on XZ plane, Space to jump
+        static constexpr float kGravity       = -980.0f;      // units/s^2
+        static constexpr float kJumpVelocity  =  260.0f;      // initial upward speed on jump
+        static constexpr float kEyeHeight     =   40.0f;      // camera height above surface
+        static constexpr float kWalkSpeed     =   80.0f;      // world units per second
+
+        float groundH = sampleWorld(ts, cam.position.x, cam.position.z, /*detailOct=*/3, /*erosionOct=*/6).height;
+        float targetY = groundH + kEyeHeight;
+
+        if (cam.position.y > targetY + 1.0f) {
+            cam.playerVelocityY += kGravity * dt;
+            cam.position.y += cam.playerVelocityY * dt;
+            if (cam.position.y <= targetY) {
+                cam.position.y = targetY;
+                cam.playerVelocityY = 0.0f;
+            }
+        } else {
+            cam.position.y = targetY;
+            cam.playerVelocityY = 0.0f;
+            if (glfwGetKey(ri.window, GLFW_KEY_SPACE) == GLFW_PRESS) {
+                cam.playerVelocityY = kJumpVelocity;
+                cam.position.y += 1.0f;
+            }
+        }
+
+        // Walk on XZ plane
+        const float walkSpeed = (glfwGetKey(ri.window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? kWalkSpeed * 3.0f : kWalkSpeed) * dt;
+        if (glfwGetKey(ri.window, GLFW_KEY_W)) { cam.position.x += forward.x * walkSpeed; cam.position.z += forward.z * walkSpeed; }
+        if (glfwGetKey(ri.window, GLFW_KEY_S)) { cam.position.x -= forward.x * walkSpeed; cam.position.z -= forward.z * walkSpeed; }
+        if (glfwGetKey(ri.window, GLFW_KEY_A)) { float p = cam.phi + 1.57f; cam.position.x -= cos(p) * walkSpeed; cam.position.z -= sin(p) * walkSpeed; }
+        if (glfwGetKey(ri.window, GLFW_KEY_D)) { float p = cam.phi - 1.57f; cam.position.x -= cos(p) * walkSpeed; cam.position.z -= sin(p) * walkSpeed; }
+    } else {
+        // Fly mode (original)
+        const float baseSpeed = 120.0f;
+        const float boostSpeed = baseSpeed * 30.0f;
+        const float speed = (glfwGetKey(ri.window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? boostSpeed : baseSpeed) * dt;
+        if (glfwGetKey(ri.window, GLFW_KEY_W)) cam.position += forward * speed;
+        if (glfwGetKey(ri.window, GLFW_KEY_S)) cam.position -= forward * speed;
+        if (glfwGetKey(ri.window, GLFW_KEY_A)) { float p = cam.phi + 1.57f; cam.position -= vec3{cos(p), 0, sin(p)} * speed; }
+        if (glfwGetKey(ri.window, GLFW_KEY_D)) { float p = cam.phi - 1.57f; cam.position -= vec3{cos(p), 0, sin(p)} * speed; }
+        if (glfwGetKey(ri.window, GLFW_KEY_R)) cam.position.y += speed;
+        if (glfwGetKey(ri.window, GLFW_KEY_F)) cam.position.y -= speed;
+
+        if (kAutoFly) {
+            static const float flySpeed = [] {
+                const char* e = std::getenv("TERRAIN_AUTOFLY");
+                float v = e ? float(atof(e)) : 0.0f;
+                return v > 1.0f ? v : 960.0f;
+            }();
+            static bool armed = false;
+            if (!armed && ts.pendingIndex >= ts.pendingTotal()) armed = true;
+            if (armed) cam.position += forward * (flySpeed * dt);
+        }
+    }
 
     // --- Chunk streaming (X/Z only; generate full vertical columns each time) ---
     ivec3 camChunk = worldToChunkCoord(cam.position);
     if (camChunk.x != ts.lastCameraChunk.x || camChunk.z != ts.lastCameraChunk.z) {
         ts.lastCameraChunk = camChunk;
-        evictDistantChunks(scene, ts, camChunk);
-        ts.pendingCoords.clear();
+        ts.evictPending = true;
+        // Re-seed the streaming ring around the new camera chunk. The whole re-seed is these two
+        // assignments: the ring is a camera-relative template (TerrainState::xzOffsets), so moving
+        // it is retargeting the origin, not rebuilding 684,000 coords and sorting them.
+        ts.pendingOrigin = camChunk;
         ts.pendingIndex = 0;
-        int r2 = TerrainState::kViewRadius * TerrainState::kViewRadius;
-        for (int dz = -TerrainState::kViewRadius; dz <= TerrainState::kViewRadius; ++dz)
-            for (int dy = TerrainState::kChunkYMin; dy <= TerrainState::kChunkYMax; ++dy)
-                for (int dx = -TerrainState::kViewRadius; dx <= TerrainState::kViewRadius; ++dx)
-                    if (dx*dx + dz*dz <= r2)
-                        ts.pendingCoords.push_back(ivec3(camChunk.x + dx, dy, camChunk.z + dz));
-        // Sort by distance from camera chunk so closest generates first
-        std::sort(ts.pendingCoords.begin(), ts.pendingCoords.end(),
-            [camChunk](const ivec3& a, const ivec3& b) {
-                ivec3 da = a - camChunk, db = b - camChunk;
-                return da.x*da.x + da.y*da.y + da.z*da.z < db.x*db.x + db.y*db.y + db.z*db.z;
-            });
+        // Every resident chunk's distance to the camera just changed, so its desired LOD may have.
+        ts.lodSweepNeeded = true;
     }
+    // Outside the camChunk-changed branch: eviction is budgeted per call, so a crossing that puts
+    // more than the budget out of range keeps draining on the frames that follow.
+    if (ts.evictPending) evictDistantChunks(scene, ts, camChunk);
     // One flush, after both stages, covering whatever either of them dirtied.
     //
     // applyLODRing MUST be inside the same flush as the streaming work. It used to run after
@@ -1417,7 +2105,17 @@ void update(projv::Application& app) {
     if (needsFlush) projv::graphics::flushSceneUpdates(scene, gpuData);
 
     // Diagnostic: log chunk population progress every 60 frames.
-    if (app.frameCount % 60 == 0) {
+    //
+    // Off unless TERRAIN_DIAG=1 is in the environment. This block makes four separate full passes
+    // over activeChunks (six figures) and geometryPool, which is a real cost even amortised over 60
+    // frames -- and it lands as one long frame every second, which is precisely the periodic hitch
+    // this pass is trying to remove. It is genuinely useful when tuning the LOD rings and VRAM
+    // budget, so it stays available rather than being deleted; it just is not on by default.
+    static const bool kDiagEnabled = [] {
+        const char* e = std::getenv("TERRAIN_DIAG");
+        return e && e[0] == '1';
+    }();
+    if (kDiagEnabled && app.frameCount % 60 == 0) {
         int filled = 0;
         for (const auto& [coord, h] : ts.activeChunks)
             if (h != kInvalidChunkHandle) filled++;
@@ -1452,7 +2150,7 @@ void update(projv::Application& app) {
         projv::core::info("[DIAG] activeChunks={} filled={} sceneChunks={} sceneBlobs={} pending={} workQ={} readyQ={} readyRefines={} lod0={} lod1={} lod2={} fullResNodes={} residentNodes={} ({:.1f}%)",
                    ts.activeChunks.size(), filled, scene.chunks.size(),
                    scene.geometryPool.size(),
-                   ts.pendingCoords.size() - ts.pendingIndex,
+                   ts.pendingTotal() - ts.pendingIndex,
                    g_worker.workQueue.size(), g_worker.readyChunks.size(), readyRefinesCount,
                    lod0, lod1, lod2, fullResNodes, residentNodes,
                    fullResNodes ? 100.0 * double(residentNodes) / double(fullResNodes) : 0.0);
@@ -1608,8 +2306,18 @@ void render(projv::Application& app) {
     static int timedFrames = 0;
     accum += dt; minDt = std::min(minDt, dt); maxDt = std::max(maxDt, dt);
     if (++timedFrames >= 60) {
-        projv::core::info("[FPS] {:5.1f}ms avg {:5.1f}ms min {:5.1f}ms max {:3d}fps",
-                  accum / 60.f, minDt, maxDt, int(60.f / accum * 1000.f));
+        // Worker throughput per ring alongside the frame time. Chunks/sec on its own is
+        // uninterpretable because ring cost varies by orders of magnitude -- see
+        // WorkerState::completed.
+        static uint64_t prevDone[3] = {};
+        uint64_t done[3];
+        for (int i = 0; i < 3; ++i) done[i] = g_worker.completed[i].load(std::memory_order_relaxed);
+        float secs = accum / 1000.f;
+        projv::core::info("[FPS] {:5.1f}ms avg {:5.1f}ms min {:5.1f}ms max {:3d}fps | gen/s lod0={:.0f} lod1={:.0f} lod2={:.0f}",
+                  accum / 60.f, minDt, maxDt, int(60.f / accum * 1000.f),
+                  (done[0] - prevDone[0]) / secs, (done[1] - prevDone[1]) / secs,
+                  (done[2] - prevDone[2]) / secs);
+        for (int i = 0; i < 3; ++i) prevDone[i] = done[i];
         accum = 0; minDt = 9999; maxDt = 0; timedFrames = 0;
     }
 }

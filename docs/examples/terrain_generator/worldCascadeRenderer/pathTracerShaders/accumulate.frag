@@ -46,8 +46,8 @@ uniform vec4 prevCameraDir;
 // Cap it so the mean stays responsive while still being very smooth.
 #define STILL_MAX_AGE 128.0
 // Radius (texels) searched around the reprojected point for a same-face history texel to
-// borrow converged colour from, so edges fill instead of flickering. 2 = 5x5.
-#define SEARCH_RADIUS 2
+// borrow converged colour from, so edges fill instead of flickering. 1 = 3x3.
+#define SEARCH_RADIUS 1
 // Max albedo difference for two texels to count as the SAME voxel colour. Coplanar voxels
 // of different colour share a normal + position, so the face gate also needs a colour match
 // or it smears colour across voxel colour boundaries when moving.

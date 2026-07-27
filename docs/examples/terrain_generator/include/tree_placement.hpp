@@ -88,6 +88,11 @@ struct GroundSample {
     float height = 0.0f;
     float temp = 0.5f;
     float humid = 0.5f;
+    // The water surface at THIS column, which is sea level almost everywhere but a river reach's
+    // pool level inside a valley. Params::waterLevel is only the global floor of it, and testing
+    // against that alone plants trees standing in rivers -- a river bed several hundred units above
+    // sea level clears the global test comfortably.
+    float waterTop = 0.0f;
 };
 
 struct TreeLibrary {
@@ -281,7 +286,13 @@ struct Params {
     float treeVoxelWorldSize = 1.75f;
     float waterLevel = 400.0f;
     float minAltitudeAboveWater = 6.0f;   // keep trunks out of the shallows
-    float treeLineAltitude = 1500.0f;     // nothing grows above this
+    // Backstop only. The real tree line is climatic and comes from climateStocking against a
+    // temperature that now falls with altitude (see the lapse rate in terrain_noise::sampleTerrain),
+    // which puts it at a different height in a cold belt than in a warm one -- as it should be.
+    // This is just a hard cap so nothing turns up on a summit. It was 1500, set when that was near
+    // the top of the world; leaving it there once peaks reached 5000+ would have cut every forest
+    // off at a flat contour line straight across the mountains.
+    float treeLineAltitude = 6000.0f;
     // Max height change (world units) across a probe of ±cellSize/4 before the ground is called too
     // steep to hold a tree. Stops trees growing out of cliff faces at right angles.
     float maxSlope = 90.0f;
@@ -421,7 +432,8 @@ inline void collectTrees(const TreeLibrary& lib, const Params& p,
             if (roll > p.maxDensity * patch) { if (stats) stats->rejectedPatch++; continue; }
 
             GroundSample g = sampleGround(wx, wz);
-            if (g.height < p.waterLevel + p.minAltitudeAboveWater) { if (stats) stats->rejectedWater++; continue; }
+            float waterHere = std::max(g.waterTop, p.waterLevel);
+            if (g.height < waterHere + p.minAltitudeAboveWater) { if (stats) stats->rejectedWater++; continue; }
             if (g.height > p.treeLineAltitude) { if (stats) stats->rejectedTreeLine++; continue; }
 
             // Re-roll against the climate on the same draw, rescaled into the range the patch test
@@ -488,6 +500,15 @@ inline float canopyReach(const TreeLibrary& lib, const Params& p) {
         widest = std::max(widest, std::max(a.hi.z - a.trunkZ, a.trunkZ - a.lo.z));
     }
     return float(widest + 1) * p.treeVoxelWorldSize;
+}
+
+// Tallest tree in the library, in world units above the ground it is rooted in. The vertical
+// counterpart of canopyReach: how far above the terrain surface a chunk slab has to be before
+// nothing rooted under it can possibly reach in.
+inline float canopyHeight(const TreeLibrary& lib, const Params& p) {
+    int tallest = 0;
+    for (const TreeAsset& a : lib.assets) tallest = std::max(tallest, a.hi.y - a.lo.y + 1);
+    return float(tallest + 1) * p.treeVoxelWorldSize;
 }
 
 // Writes one tree's voxels into a chunk's brick map. Only the voxels that land inside the chunk are

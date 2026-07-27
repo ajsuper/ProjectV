@@ -14,6 +14,7 @@ SAMPLER2D(gNormal, 1);
 
 #define CASCADE_INDEX 3
 #define IS_TOP
+#define WS_STEPS 14u   // interval ~528 world units
 #include <pjv_cascade_ws.sc>
 
 void main() {

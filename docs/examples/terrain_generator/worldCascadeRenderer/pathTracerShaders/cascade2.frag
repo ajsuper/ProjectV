@@ -13,6 +13,7 @@ SAMPLER2D(upperCascade, 4);
 #include <pjv_utils_DDA.sc>
 
 #define CASCADE_INDEX 2
+#define WS_STEPS 12u   // interval ~132 world units
 #include <pjv_cascade_ws.sc>
 
 void main() {

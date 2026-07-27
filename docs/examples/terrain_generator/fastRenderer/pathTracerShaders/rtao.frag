@@ -54,7 +54,7 @@ uniform vec4 frameCount;
 #define PI 3.14159265358979
 
 #define AO_SAMPLES  1      // Hemisphere rays per pixel per frame. The denoiser cleans the rest.
-#define AO_STEPS    40u    // DDA step budget per ray (+ dither). Long enough (with LOD) to escape.
+#define AO_STEPS    24u    // DDA step budget per ray (+ dither). Long enough (with LOD) to escape.
 #define GI_BOUNCE   1      // 1 = add a one-bounce colour-bleed term on occluded directions.
 #define GI_STRENGTH 0.3    // Scales the one-bounce sky colour-bleed.
 

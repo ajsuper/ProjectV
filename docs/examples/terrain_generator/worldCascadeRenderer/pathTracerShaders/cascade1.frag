@@ -13,6 +13,8 @@ SAMPLER2D(upperCascade, 4);
 #include <pjv_utils_DDA.sc>
 
 #define CASCADE_INDEX 1
+#define WS_STEPS          8u    // interval ~33 world units; aggressive cut
+#define SUN_SHADOW_STEPS  6u    // further reduce sun shadow ray cost
 #include <pjv_cascade_ws.sc>
 
 void main() {
