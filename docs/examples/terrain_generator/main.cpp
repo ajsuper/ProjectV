@@ -7,6 +7,8 @@
 //   Key 1 — fly camera (default)
 //   Key 2 — player camera with gravity and terrain collision
 //   In player mode: WASD moves on XZ plane, Space jumps, gravity pulls you to the ground.
+//   Key E — place a 256-voxel-wide sphere of material 500 voxels ahead of the camera
+//   Key Q — carve the same sphere out of the terrain
 
 #include <algorithm>
 #include <atomic>
@@ -146,6 +148,17 @@ struct ChunkWorkItem {
     // reached yet. Without it, one of these sitting at the head of the queue while readyChunks is
     // full stalls the worker instead of jumping the line -- blocking the very work behind it.
     bool jumpQueue = false;
+    // Sphere-edit work: goes into WorkerState::editQueue rather than workQueue, which is drained
+    // ahead of everything else by every worker and has its own dedicated threads waiting on it.
+    // An edit is the one kind of work with a human waiting on it in real time.
+    bool isEdit = false;
+    // When the edit that caused this was placed. Carried through onto the result purely so the
+    // install can report end-to-end latency; zero for non-edit work.
+    std::chrono::steady_clock::time_point requestedAt{};
+    // Which sphere placement this chunk belongs to. Every chunk of one sphere carries the same ID
+    // and none of them is installed until all of them have arrived, so the sphere appears whole
+    // rather than filling in a chunk at a time. 0 for non-edit work.
+    uint64_t editBatchID = 0;
 };
 
 struct ProcessedChunk {
@@ -162,7 +175,18 @@ struct ProcessedChunk {
     // ring's sparse sampling missed it" (worth re-checking at a finer ring) from "empty because
     // this is open sky or deep bedrock" (empty at every ring, never worth re-checking).
     bool marginal = false;
+    // Solid featureless underground -- see TerrainState::buriedCoords.
+    bool buried = false;
     projv::ChunkHandle refineHandle = kInvalidChunkHandle;
+    // Version of this coord's sphere-edit bucket that was replayed into the result (see
+    // applySphereEdits). Compared against the bucket's current version when the result is consumed;
+    // a mismatch means an edit landed mid-generation and this result predates it.
+    uint32_t editVersion = 0;
+    // Mirrors ChunkWorkItem::isEdit, plus the timestamps needed to break the observed latency down
+    // into queue wait / generation / install wait. Only meaningful when isEdit.
+    bool isEdit = false;
+    std::chrono::steady_clock::time_point requestedAt{}, startedAt{}, finishedAt{};
+    uint64_t editBatchID = 0;
 };
 
 struct WorkerState {
@@ -180,6 +204,20 @@ struct WorkerState {
     // were addressed to a camera position minutes in the past, so a queue that deep meant the
     // workers spent minutes generating terrain for somewhere the camera had already left.
     std::deque<ChunkWorkItem> workQueue;
+    // Sphere-edit work, drained ahead of workQueue by every worker and exempt from the readyChunks
+    // backpressure cap. Guarded by workMutex, same as workQueue.
+    //
+    // A separate queue rather than a priority flag on workQueue because the two need different
+    // *pickup* behaviour, not just different ordering. push_front already put edits at the head of
+    // the line, and it was not enough: the pool is saturated with 20-80ms LOD0 chunks, so being next
+    // in line still means waiting for whichever worker happens to finish first, and an 8-chunk batch
+    // is admitted at the rate workers free up rather than in parallel. Measured that way, the eight
+    // chunks of one sphere landed 100ms, 230ms and 338ms after the key press. kEditWorkers threads
+    // below wait on this queue and nothing else, so a batch starts generating immediately and in
+    // parallel however busy the ordinary pool is.
+    std::deque<ChunkWorkItem> editQueue;
+    // Woken only for editQueue, so the dedicated edit threads don't wake on ordinary streaming.
+    std::condition_variable editCv;
     // Coords that are either sitting in workQueue or already generated but not yet consumed out of
     // readyChunks/readyRefines -- i.e. every coord the pending sweep must NOT queue a second time.
     //
@@ -202,8 +240,21 @@ struct WorkerState {
     // point they're requested) and time-sensitive (the chunk is already popped out of the scene),
     // so they shouldn't have to wait behind whatever ordinary streaming happened to finish first.
     std::vector<ProcessedChunk> readyRefines;
+    // Edit results that have to be admitted as brand-new chunks (a sphere placed where nothing was
+    // resident). Kept out of readyChunks so they skip its kMaxNewPerFrame/kMaxConsumedPerFrame
+    // budgets: a result sitting behind a 512-deep ready backlog drained 24 a frame waits up to
+    // twenty frames, which is most of a third of a second added on the frame side of an edit that
+    // had already finished generating. Edits that land on a resident chunk need no equivalent --
+    // readyRefines is already drained uncapped.
+    std::vector<ProcessedChunk> readyEdits;
     std::atomic<bool> running{true};
     std::vector<std::thread> threads;
+    // Threads that serve editQueue and nothing else. Idle (blocked on editCv) whenever no edit is in
+    // flight, which is nearly always, so the only standing cost is their stacks. Sized to cover a
+    // whole sphere in one wave: a sphere kEditSphereRadiusVoxels across spans at most 2 chunks per
+    // axis, so a batch is at most 8 chunks and none of them ever queues behind another.
+    std::vector<std::thread> editThreads;
+    static constexpr int kEditWorkers = 8;
     int numThreads = 1;
     // Chunks finished by the pool, split by the ring they were generated at. Generation cost per
     // chunk differs by orders of magnitude across rings (a LOD0 chunk runs a 256x256 column
@@ -300,6 +351,25 @@ struct TerrainState {
     // change (a cheap flag flip -- setBlobRenderLOD), a refine re-runs the full worker generation
     // pipeline at higher resolution, so it gets a budget while ordinary transitions do not.
     static constexpr int   kMaxRefinesPerFrame = 3;
+
+    // Fill every column from its surface down to the floor of the world instead of stopping
+    // kFillDepth voxels under it, so the world is solid rock you can dig into rather than a shell
+    // over emptiness. Flip to false to get the old hollow world back.
+    static constexpr bool kSolidFillToWorldBottom = true;
+    // Coarsest ring a fully-buried chunk is allowed to sit at, and the ring it is promoted to once
+    // an edit cuts into it.
+    //
+    // Buried chunks are uniform stone, so at LOD2 (16^3, 44.8 world units a voxel) they cost about
+    // 900 bytes each and look identical to a finer version -- right up until you dig, at which point
+    // the hole would be made of 45-unit blocks.
+    //
+    // So an edited one goes to full resolution. That is affordable for exactly the reason the shell
+    // exists: a carved 256^3 chunk does not store its solid interior, it stores the wall of the
+    // carve (see applySphereEdits), which is a surface and costs ~100k voxels rather than the 16.7M
+    // a real solid fill would. The world reads as full-resolution stone everywhere you cut into it
+    // while only the cut is paid for.
+    static constexpr uint32_t kBuriedLOD       = 2;
+    static constexpr uint32_t kBuriedEditedLOD = 0;
     // Chunks are evicted past kViewRadius + this. The gap keeps a camera sitting on a chunk
     // boundary from evicting and regenerating the same ring every time it steps back and forth.
     static constexpr int   kEvictHysteresis = 2;
@@ -392,6 +462,11 @@ struct TerrainState {
     // that can actually change, so open sky is still decided once and never revisited.
     struct EmptyRecord { uint32_t lod; bool marginal; };
     std::unordered_map<projv::core::ivec3, EmptyRecord, ivec3_hash> emptyChunks;
+    // Coords whose chunk generated as solid featureless underground (see generateChunkVoxels's
+    // outBuried). Held at kBuriedLOD by the LOD sweep regardless of camera distance, so the newly
+    // solid underground costs a few hundred bytes a chunk rather than the tens of kilobytes a
+    // surface chunk does. Promoted to kBuriedEditedLOD once an edit touches them.
+    std::unordered_set<projv::core::ivec3, ivec3_hash> buriedCoords;
     // Coords from emptyChunks currently being re-generated at a finer ring. Same job as
     // refiningHandles, but keyed by coord because these have no chunk handle to key on.
     std::unordered_set<projv::core::ivec3, ivec3_hash> revisitingEmpty;
@@ -434,6 +509,24 @@ struct TerrainState {
     // desiredLODForChunk is a pure function of (coord, camChunk), so with a stationary camera every
     // answer is identical to last frame's.
     bool lodSweepNeeded = true;
+    // Bumped by every event that can invalidate the part of the disc a sweep has ALREADY scanned:
+    // the camera changing chunk, a refine landing, a chunk being admitted below the LOD it wants.
+    // lodPassStamp is the value the pass currently in progress started at.
+    //
+    // A plain `lodSweepNeeded = true` is not enough on its own, because applyLODRing runs after
+    // generatePendingChunks and used to *assign* this flag at the end of the frame -- so any wake-up
+    // raised earlier in the same frame was silently overwritten by a sweep that had already walked
+    // past the coord in question. Comparing stamps instead of trusting a bool makes that lost
+    // wake-up impossible: the pass that was running when the event landed cannot close the gate.
+    uint64_t lodDirtyStamp = 1;
+    uint64_t lodPassStamp = 0;
+    // Refine candidates found but dropped for want of per-frame budget, accumulated over the WHOLE
+    // pass. Counting only the frame that happens to finish the pass loses every candidate the
+    // earlier frames of that same pass had to skip.
+    int lodPassDeferred = 0;
+    // Arm the sweep. Always use this rather than setting lodSweepNeeded directly -- the stamp is
+    // what protects an in-progress pass from closing the gate over the event just raised.
+    void armLodSweep() { lodSweepNeeded = true; lodDirtyStamp++; }
     // Camera chunk as of the last LOD sweep, so a sweep can widen its scan radius to cover whatever
     // left the LOD<2 disc while it was not looking. Distinct from lastCameraChunk, which tracks
     // streaming and is updated on a different schedule.
@@ -451,6 +544,27 @@ struct TerrainState {
     std::vector<projv::ChunkHandle> freeChunkSlots;
     // Monotonic, so an evicted chunk's ID is never handed to a later chunk.
     uint32_t nextChunkID = 0;
+
+    // Sphere placements whose chunks are still arriving.
+    //
+    // An edit spans up to eight chunks generated in parallel by independent workers, and they finish
+    // at different times -- measured at 20ms for the chunk holding a sliver of the sphere against
+    // 140ms for the one holding its middle. Installing each as it lands makes the sphere assemble
+    // itself on screen over an eighth of a second, one block at a time. Holding the whole batch
+    // until its last chunk is ready and installing them in a single frame (and so a single
+    // flushSceneUpdates) costs the difference between the fastest and slowest chunk -- which is
+    // latency nobody perceives, because the edit was not finished until the slow one landed anyway --
+    // and buys an edit that appears all at once.
+    struct EditBatch {
+        uint32_t expected = 0;
+        std::vector<ProcessedChunk> staged;
+        std::chrono::steady_clock::time_point requestedAt;
+    };
+    std::unordered_map<uint64_t, EditBatch> pendingEditBatches;
+    uint64_t nextEditBatchID = 1;   // 0 means "not an edit"
+    // Backstop against a batch that can never complete (a chunk evicted between request and result,
+    // say). Whatever has arrived by then is installed rather than held forever.
+    static constexpr int kEditBatchTimeoutMs = 3000;
 };
 
 // Every terrain query goes through here, so the world-scale knobs above apply uniformly: sampling
@@ -782,7 +896,13 @@ struct ColumnCacheEntry {
 // so any entry count generous enough to hold the far rings is also a licence to hold thousands of
 // near ones, and a flight that leaves a trail of cold LOD0 columns behind it would reach gigabytes
 // before the count ever tripped.
-constexpr size_t kColumnCacheMaxBytes = 192u << 20;   // 192 MB
+// Raised from 192MB after [GENPHASE] showed the column prepass is 86% of a LOD0 chunk's generation
+// time (186ms of 218ms). At 192MB the cache held ~144 LOD0 blocks (1.33MB each) against 121 XZ
+// columns in the fine ring alone, sharing the budget with every LOD1/LOD2 block -- so ordinary
+// streaming traffic evicted fine-ring columns that were about to be needed again, and an edit that
+// regenerated a chunk paid a full 190ms prepass instead of a cache hit. 512MB holds ~385, which
+// clears the fine ring with room to spare.
+constexpr size_t kColumnCacheMaxBytes = 512u << 20;   // 512 MB
 
 std::mutex g_columnCacheMutex;
 std::unordered_map<ColumnCacheKey, ColumnCacheEntry, ColumnCacheKeyHash> g_columnCache;
@@ -911,13 +1031,333 @@ static std::shared_ptr<const ColumnBlock> columnsForChunk(const TerrainState& ts
 // see.
 static constexpr int kWaterFillDepth = 40;
 
+// =============================================================================
+// Sphere edits
+// =============================================================================
+//
+// An edit is stored as the SHAPE that produced it (a world-space sphere), not as the voxels it
+// touched, and it is replayed every time a chunk it overlaps is generated. That is what makes an
+// edit survive the things this generator routinely does to a chunk: an LOD refine, an eviction and
+// re-stream once the camera flies away and back, a coarse->fine regeneration. All three throw the
+// chunk's voxels away and rebuild them from the noise field, so an edit written only into the voxels
+// would last until the next one of those and no longer. Replaying the shape costs a clipped
+// bounding-box sweep per overlapping chunk per generation and is resolution-independent -- the same
+// sphere cuts correctly at 256^3, 64^3 and 16^3, because it is defined in world units rather than
+// in voxels.
+//
+// Written from the main thread (placeSphereEdit) and read from the worker pool (applySphereEdits),
+// so everything here is under g_editMutex.
+struct SphereEdit {
+    projv::core::vec3 center;      // world space
+    float             radius;      // world units
+    bool              isAdd;
+    uint32_t          packedColor; // ignored when !isAdd
+};
+
+// Edits bucketed by the chunk coords they overlap, so a chunk generation looks up only its own.
+// `version` bumps on every edit added to the bucket; a worker stamps the version it replayed onto
+// its result and generatePendingChunks re-queues anything that comes back stale. That closes the
+// window where an edit lands *while* a worker is midway through generating the very chunk being
+// edited -- that result would otherwise be installed without the edit and nothing would ever come
+// along to correct it.
+struct ChunkEditBucket {
+    uint32_t version = 0;
+    std::vector<SphereEdit> edits;
+};
+
+static std::mutex g_editMutex;
+static std::unordered_map<projv::core::ivec3, ChunkEditBucket, ivec3_hash> g_editsByChunk;
+// Lets every hot path below early-out without touching g_editMutex, so the whole feature costs one
+// relaxed atomic load per chunk generation until the first edit is actually placed.
+static std::atomic<uint32_t> g_editCount{0};
+
+// Per-axis Z-order bit contributions inside a brick, tabulated once.
+//
+// A Z-order index is a bit interleave, so each axis contributes an independent set of bits and
+// zorder(x,y,z) == tx[x] | ty[y] | tz[z]. The tables are derived by asking the engine's own
+// computeLocalZOrder for the one-axis-at-a-time cases rather than by reimplementing its bit layout,
+// so this cannot drift from it, and the constructor cross-checks the identity on a spread of
+// combinations before anything relies on it. What this buys: the innermost fill loop varies only y,
+// so the x and z terms hoist out of it entirely and the per-voxel cost drops to a table lookup and
+// an OR.
+namespace {
+struct BrickZOrderTables {
+    uint32_t x[projv::BRICK_SIZE], y[projv::BRICK_SIZE], z[projv::BRICK_SIZE];
+    BrickZOrderTables() {
+        for (uint32_t i = 0; i < projv::BRICK_SIZE; ++i) {
+            x[i] = projv::utils::computeLocalZOrder(projv::core::ivec3(int(i), 0, 0));
+            y[i] = projv::utils::computeLocalZOrder(projv::core::ivec3(0, int(i), 0));
+            z[i] = projv::utils::computeLocalZOrder(projv::core::ivec3(0, 0, int(i)));
+        }
+        for (uint32_t a = 0; a < projv::BRICK_SIZE; a += 7) {
+            for (uint32_t b = 1; b < projv::BRICK_SIZE; b += 11) {
+                for (uint32_t c = 2; c < projv::BRICK_SIZE; c += 13) {
+                    uint32_t expect = projv::utils::computeLocalZOrder(
+                        projv::core::ivec3(int(a), int(b), int(c)));
+                    if ((x[a] | y[b] | z[c]) != expect) {
+                        projv::core::error("BrickZOrderTables: Z-order is not a plain bit interleave "
+                                           "at ({},{},{}) -- the fast sphere fill would corrupt "
+                                           "geometry; falling back is required.", a, b, c);
+                        valid = false;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    bool valid = true;
+};
+const BrickZOrderTables g_zTables;
+}  // namespace
+
+// Bucket version currently recorded for a coord; 0 if it has never been edited.
+static uint32_t editVersionForChunk(projv::core::ivec3 coord) {
+    if (g_editCount.load(std::memory_order_relaxed) == 0) return 0u;
+    std::lock_guard<std::mutex> lock(g_editMutex);
+    auto it = g_editsByChunk.find(coord);
+    return it == g_editsByChunk.end() ? 0u : it->second.version;
+}
+
+// Replay every edit overlapping this chunk into its brick map, after the terrain itself has been
+// generated into it. Returns the bucket version applied, which the caller stamps onto the result.
+// Worker-thread side.
+static uint32_t applySphereEdits(projv::Scene& scene, projv::ComponentRecord& comp,
+                                 projv::core::ivec3 coord, projv::VoxelBrickMap& map,
+                                 int res, float vs,
+                                 const std::function<float(int, int)>& surfaceHeightAt) {
+    if (g_editCount.load(std::memory_order_relaxed) == 0) return 0u;
+
+    std::vector<SphereEdit> edits;
+    uint32_t version = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_editMutex);
+        auto it = g_editsByChunk.find(coord);
+        if (it == g_editsByChunk.end()) return 0u;
+        version = it->second.version;
+        edits = it->second.edits;
+    }
+
+    const projv::core::vec3 origin(float(coord.x) * TerrainState::kChunkSize,
+                                   float(coord.y) * TerrainState::kChunkSize,
+                                   float(coord.z) * TerrainState::kChunkSize);
+
+    // Is this voxel rock in the FINAL state of the chunk -- after every edit in the bucket, in the
+    // order they were made? Later edits win, so this walks backwards and stops at the first sphere
+    // containing the point; below all of them it falls through to the terrain itself.
+    auto solidAt = [&](int lx, int ly, int lz) {
+        const projv::core::vec3 p(origin.x + float(lx) * vs,
+                                  origin.y + float(ly) * vs,
+                                  origin.z + float(lz) * vs);
+        for (size_t i = edits.size(); i-- > 0; ) {
+            const projv::core::vec3 d = p - edits[i].center;
+            if (d.x * d.x + d.y * d.y + d.z * d.z <= edits[i].radius * edits[i].radius)
+                return edits[i].isAdd;
+        }
+        return p.y <= surfaceHeightAt(lx, lz);
+    };
+
+    // Line every carve with rock.
+    //
+    // The terrain fill only materialises kFillDepth voxels below the surface, because that is all
+    // that can ever be seen -- which stops being true the moment a sphere cuts deeper than the
+    // shell, and that is what made digging break through into emptiness. What a carve needs is not
+    // the whole volume filled (a solid 256^3 is 16.7M brick-map entries and about 690MB, measured at
+    // 4.9 SECONDS a chunk) but rock on the wall it just exposed. That is a surface, not a volume:
+    // the shell below is ~100k voxels for a chunk's share of a 128-voxel sphere against 16.7M for
+    // the fill, and it renders identically because everything it leaves out is behind it.
+    //
+    // Thickness is in voxels, so it costs the same at every ring and stays thick enough to survive
+    // the renderer coarsening the chunk by dropping tree levels.
+    constexpr int kCarveWallThickness = 4;
+    const uint8_t rockID = projv::utils::internMaterial(
+        scene, comp, "",
+        projv::packColor(projv::Color{quantizeSurfaceChannel(0.42f),
+                                      quantizeSurfaceChannel(0.40f),
+                                      quantizeSurfaceChannel(0.38f)}));
+    if (rockID != projv::INVALID_MATERIAL) {
+        for (const SphereEdit& e : edits) {
+            if (e.isAdd) continue;   // an add brings its own material; only carves expose new wall
+            const float outer = e.radius + float(kCarveWallThickness) * vs;
+            const float r2 = e.radius * e.radius, o2 = outer * outer;
+            auto loIdx = [&](float w, float o) { return std::max(0,       int(std::ceil ((w - o) / vs))); };
+            auto hiIdx = [&](float w, float o) { return std::min(res - 1, int(std::floor((w - o) / vs))); };
+            const int x0 = loIdx(e.center.x - outer, origin.x), x1 = hiIdx(e.center.x + outer, origin.x);
+            const int y0 = loIdx(e.center.y - outer, origin.y), y1 = hiIdx(e.center.y + outer, origin.y);
+            const int z0 = loIdx(e.center.z - outer, origin.z), z1 = hiIdx(e.center.z + outer, origin.z);
+            for (int lz = z0; lz <= z1; ++lz) {
+                const float dz = origin.z + float(lz) * vs - e.center.z;
+                for (int lx = x0; lx <= x1; ++lx) {
+                    const float dx = origin.x + float(lx) * vs - e.center.x;
+                    const float d2xz = dx * dx + dz * dz;
+                    if (d2xz > o2) continue;
+                    // The shell is two thin y-bands per column (above and below the sphere), or one
+                    // solid band where the column misses the sphere entirely. Solving for them beats
+                    // testing the AABB: a 4-voxel shell on a 128-voxel sphere is ~823k voxels inside
+                    // a 260^3 box, so a per-voxel distance test throws away 95% of its work.
+                    const int yOuter = int(std::sqrt(o2 - d2xz) / vs);
+                    const int yCenter = int(std::floor((e.center.y - origin.y) / vs));
+                    const int yInner = d2xz < r2 ? int(std::sqrt(r2 - d2xz) / vs) : -1;
+                    auto band = [&](int lo, int hi) {
+                        lo = std::max(lo, y0); hi = std::min(hi, y1);
+                        for (int ly = lo; ly <= hi; ++ly) {
+                            const float dy = origin.y + float(ly) * vs - e.center.y;
+                            const float d2 = d2xz + dy * dy;
+                            if (d2 <= r2 || d2 > o2) continue;   // exact edges of the two bands
+                            if (!solidAt(lx, ly, lz)) continue;
+                            projv::utils::brickMapSetVoxel(map, lx, ly, lz, rockID);
+                        }
+                    };
+                    if (yInner < 0) {
+                        band(yCenter - yOuter, yCenter + yOuter);
+                    } else {
+                        band(yCenter - yOuter - 1, yCenter - yInner + 1);
+                        band(yCenter + yInner - 1, yCenter + yOuter + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    for (const SphereEdit& e : edits) {
+        // One intern per edit, not one per voxel: internMaterial takes the shared palette lock and
+        // linear-scans the palette, and the loop below runs up to res^3 times.
+        uint8_t matID = e.isAdd ? projv::utils::internMaterial(scene, comp, "", e.packedColor)
+                                : projv::INVALID_MATERIAL;
+        if (e.isAdd && matID == projv::INVALID_MATERIAL) continue;  // palette full; nothing to write
+
+        // Voxel index bounds of the sphere's AABB, clipped to this chunk. Voxel (lx,ly,lz) sits at
+        // world `origin + (lx,ly,lz)*vs` -- the same corner convention generateChunkVoxels uses, so
+        // an edit lines up exactly with the terrain it is cutting into.
+        auto loIdx = [&](float w, float o) { return std::max(0,       int(std::ceil ((w - o) / vs))); };
+        auto hiIdx = [&](float w, float o) { return std::min(res - 1, int(std::floor((w - o) / vs))); };
+        const int x0 = loIdx(e.center.x - e.radius, origin.x), x1 = hiIdx(e.center.x + e.radius, origin.x);
+        const int y0 = loIdx(e.center.y - e.radius, origin.y), y1 = hiIdx(e.center.y + e.radius, origin.y);
+        const int z0 = loIdx(e.center.z - e.radius, origin.z), z1 = hiIdx(e.center.z + e.radius, origin.z);
+
+        const float r2 = e.radius * e.radius;
+
+        // Fallback for the case the table constructor rejected: correct, just slower. Checked once
+        // per edit rather than per voxel, so it costs nothing when the fast path is live.
+        if (!g_zTables.valid) {
+            for (int lz = z0; lz <= z1; ++lz) {
+                const float dz = origin.z + float(lz) * vs - e.center.z;
+                for (int lx = x0; lx <= x1; ++lx) {
+                    const float dx = origin.x + float(lx) * vs - e.center.x;
+                    const float d2xz = dx * dx + dz * dz;
+                    if (d2xz > r2) continue;
+                    const float dy = std::sqrt(r2 - d2xz);
+                    const int ya = std::max(y0, int(std::ceil ((e.center.y - dy - origin.y) / vs)));
+                    const int yb = std::min(y1, int(std::floor((e.center.y + dy - origin.y) / vs)));
+                    for (int ly = ya; ly <= yb; ++ly) {
+                        if (e.isAdd) projv::utils::brickMapSetVoxel(map, lx, ly, lz, matID);
+                        else         projv::utils::brickMapClearVoxel(map, lx, ly, lz);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Brick-major, so everything brickMapSetVoxel recomputes per voxel -- brick coord, brick
+        // Z-order, bounds check, unique_ptr deref -- is done once per brick instead. A radius-128
+        // sphere is ~8.5M voxels at LOD0 and that per-voxel overhead was the single largest term in
+        // an edit's latency, ahead of generating the chunk's terrain: measured across a batch, cost
+        // tracked each chunk's share of the sphere's VOLUME almost exactly, not its terrain content.
+        const int B = int(projv::BRICK_SIZE);
+        const int bx0 = x0 / B, bx1 = x1 / B;
+        const int by0 = y0 / B, by1 = y1 / B;
+        const int bz0 = z0 / B, bz1 = z1 / B;
+
+        for (int bz = bz0; bz <= bz1; ++bz) {
+            for (int by = by0; by <= by1; ++by) {
+                for (int bx = bx0; bx <= bx1; ++bx) {
+                    const projv::core::ivec3 brickCoord(bx, by, bz);
+                    if (bx < 0 || by < 0 || bz < 0 ||
+                        bx >= map.brickDims.x || by >= map.brickDims.y || bz >= map.brickDims.z)
+                        continue;
+                    const uint32_t brickIdx = projv::utils::computeBrickZOrder(brickCoord, map.brickDims);
+
+                    // A carve has nothing to do in a brick that holds no voxels; an add has to
+                    // create one. This is also what keeps a remove cheap -- it never allocates.
+                    if (!map.bricks[brickIdx]) {
+                        if (!e.isAdd) continue;
+                        map.bricks[brickIdx] = std::make_unique<projv::BrickData>();
+                        map.brickMask[brickIdx / 64] |= (1ull << (brickIdx % 64));
+                    }
+                    projv::BrickData& brick = *map.bricks[brickIdx];
+
+                    const int ox = bx * B, oy = by * B, oz = bz * B;
+                    const int vx0 = std::max(x0, ox), vx1 = std::min(x1, ox + B - 1);
+                    const int vy0 = std::max(y0, oy), vy1 = std::min(y1, oy + B - 1);
+                    const int vz0 = std::max(z0, oz), vz1 = std::min(z1, oz + B - 1);
+
+                    for (int lz = vz0; lz <= vz1; ++lz) {
+                        const float dz = origin.z + float(lz) * vs - e.center.z;
+                        const uint32_t zBits = g_zTables.z[lz - oz];
+                        for (int lx = vx0; lx <= vx1; ++lx) {
+                            const float dx = origin.x + float(lx) * vs - e.center.x;
+                            // Solve for the Y span inside the sphere rather than testing every voxel
+                            // of the AABB: the AABB of a chunk-wide sphere is the whole chunk, and
+                            // the ~47% of it outside the sphere would be pure distance-test waste.
+                            const float d2xz = dx * dx + dz * dz;
+                            if (d2xz > r2) continue;
+                            const float dy = std::sqrt(r2 - d2xz);
+                            const int ya = std::max(vy0, int(std::ceil ((e.center.y - dy - origin.y) / vs)));
+                            const int yb = std::min(vy1, int(std::floor((e.center.y + dy - origin.y) / vs)));
+                            const uint32_t xzBits = zBits | g_zTables.x[lx - ox];
+                            for (int ly = ya; ly <= yb; ++ly) {
+                                const uint32_t lzo = xzBits | g_zTables.y[ly - oy];
+                                const uint64_t bit = 1ull << (63 - (lzo % 64));
+                                uint64_t& row = brick.mask[lzo / 64];
+                                if (e.isAdd) {
+                                    row |= bit;
+                                    brick.materials[lzo] = matID;
+                                } else if (row & bit) {
+                                    row &= ~bit;
+                                    brick.materials.erase(lzo);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return version;
+}
+
+// Where a chunk generation's wall time goes, accumulated per storage ring. Only useful in
+// aggregate -- individual chunks vary by two orders of magnitude with how much surface they hold --
+// so these are summed into atomics and reported periodically rather than logged per chunk. Answers
+// "what is `gen` actually doing", which is not guessable from the code: the column prepass is
+// cached and usually free, and the tree64 build is a fixed cost that dominates the cheap chunks.
+struct GenPhases {
+    double columns = 0, voxels = 0, trees = 0, edits = 0, tree64 = 0, materials = 0;
+};
+static std::atomic<uint64_t> g_genPhaseNs[3][6] = {};   // [lod][phase], nanoseconds
+static std::atomic<uint64_t> g_genPhaseCount[3] = {};
+static void recordGenPhases(uint32_t lod, const GenPhases& p) {
+    const uint32_t l = lod < 3 ? lod : 2;
+    const double v[6] = {p.columns, p.voxels, p.trees, p.edits, p.tree64, p.materials};
+    for (int i = 0; i < 6; ++i)
+        g_genPhaseNs[l][i].fetch_add(uint64_t(v[i] * 1e6), std::memory_order_relaxed);
+    g_genPhaseCount[l].fetch_add(1, std::memory_order_relaxed);
+}
+
 // outMarginal (optional) reports whether the terrain surface came within a coarse voxel of this
 // chunk's vertical slab. It is only meaningful when the chunk comes back empty; see
 // ProcessedChunk::marginal.
 static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& comp,
                                 projv::core::ivec3 coord, projv::VoxelBrickMap& map,
                                 TerrainState& ts, int res, float vs, uint32_t lod,
-                                bool* outMarginal = nullptr) {
+                                bool* outMarginal = nullptr, GenPhases* outPhases = nullptr,
+                                bool* outBuried = nullptr, uint32_t* outEditVersion = nullptr) {
+    auto phaseClock = std::chrono::steady_clock::now();
+    auto phaseSplit = [&]() {
+        auto now = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(now - phaseClock).count();
+        phaseClock = now;
+        return ms;
+    };
     float ox = float(coord.x) * TerrainState::kChunkSize;
     float oz = float(coord.z) * TerrainState::kChunkSize;
     float oy = float(coord.y) * TerrainState::kChunkSize;
@@ -943,7 +1383,16 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
     // terrain gradient, and a gradient needs neighbouring heights; the grid supplies both.
     std::shared_ptr<const ColumnBlock> columnBlock =
         columnsForChunk(ts, coord.x, coord.z, lod, res, vs);
+    if (outPhases) outPhases->columns = phaseSplit();
     const ColumnBlock& cols = *columnBlock;
+
+    // Is this slab entirely underground -- solid rock, no surface anywhere in its footprint? Such a
+    // chunk has no detail to show at any resolution (it is one uniform block of stone until somebody
+    // digs into it), so it is held at a coarse ring no matter how close the camera gets. That clamp
+    // is what makes filling the world to its floor affordable at all; see TerrainState::buriedCoords.
+    // minH, not maxH: the test has to hold for EVERY column in the footprint before the chunk can be
+    // called featureless, and one column dipping into the slab is enough to make it a surface chunk.
+    if (outBuried) *outBuried = (cols.minH >= oy + TerrainState::kChunkSize + vs);
     const int stride = cols.stride;
     auto columnAt = [&](int i, int j) -> const ColumnSample& {
         return cols.cells[size_t(j + 1) * stride + (i + 1)];
@@ -969,7 +1418,12 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
         // into the slab (see the fill band in the column loop). Testing the bare surface here would
         // mark such a slab "not near ground", and an empty verdict for it would then never be
         // re-checked at a finer ring.
-        bool nearGround = (cols.maxH >= lo && cols.minH - float(kFillDepth) * vs < hi);
+        // With the fill running to the chunk floor there is no lower bound any more: every slab at
+        // or below the surface is solid, so "the surface reaches this slab's top" is the whole test.
+        bool nearGround = (TerrainState::kSolidFillToWorldBottom &&
+                           res <= TerrainState::resolutionForLOD(1))
+                              ? (cols.maxH >= lo)
+                              : (cols.maxH >= lo && cols.minH - float(kFillDepth) * vs < hi);
         bool nearWater = (cols.maxWaterTop >= lo)
                       && (cols.minWaterTop - float(kWaterFillDepth) * vs < hi)
                       && (cols.minH < cols.maxWaterTop);
@@ -1120,7 +1574,32 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
             // which meant a cliff face was a vertical stripe of whatever grew on top of it. Each
             // voxel is now coloured from its own altitude instead, so bedding reads across a cut
             // face -- which is the entire point of having strata at all.
-            int bottomFill = std::max(topLocalY - (kFillDepth + platformFill), 0);
+            // Solid all the way down. Previously this stopped kFillDepth voxels below the surface,
+            // which made the world a shell: dig into a hillside and you broke through into nothing,
+            // and every chunk more than ~84 units under the surface generated empty and was never
+            // resident at all. Filling to the chunk floor instead means a column's rock continues
+            // into the chunk below it, and that one into the one below that, down to kChunkYMin.
+            //
+            // This is only affordable because of the LOD clamp on buried chunks (see
+            // TerrainState::buriedCoords): a solid chunk is cheap in tree64 terms -- uniform leaves
+            // collapse to one material byte apiece -- but the brick map it is built through is not,
+            // and materialising a solid 256^3 would put 16.7M entries in the per-brick material
+            // hash maps, on the order of half a gigabyte for one chunk.
+            // Only at the coarse rings. Measured: filling a 256^3 chunk solid takes 4,349ms in this
+            // loop alone against 25ms for the shell, because it is 16.7M brickMapSetVoxel calls and
+            // 16.7M entries across the per-brick material hash maps. At 64^3 the same fill is 53ms
+            // and at 16^3 it is under a millisecond, which is the whole reason buried chunks are
+            // clamped away from LOD0 (see TerrainState::kBuriedLOD) -- the coarse rings are where
+            // the underground actually lives, and they can afford to be solid.
+            //
+            // A LOD0 chunk therefore still carries only its visible shell. That is correct for
+            // terrain, since nothing below kFillDepth is ever on screen; what it does not yet cover
+            // is a carve at LOD0 deep enough to cut through the shell, which needs rock kept around
+            // the sphere wall specifically rather than the whole volume filled.
+            const bool solidFill = TerrainState::kSolidFillToWorldBottom &&
+                                   res <= TerrainState::resolutionForLOD(1);
+            int bottomFill = solidFill ? 0
+                                       : std::max(topLocalY - (kFillDepth + platformFill), 0);
             // Exclusive upper bound: the surface voxel itself is written above (when it is in this
             // slab), and everything strictly below it down to bottomFill is shell.
             const int fillTop = std::min(topLocalY, res);
@@ -1164,7 +1643,121 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
         }
     }
 
+    if (outPhases) outPhases->voxels = phaseSplit();
     stampTreesIntoChunk(coord, map, ts, res, vs, lod, cols.maxH);
+    if (outPhases) outPhases->trees = phaseSplit();
+
+    // Edits go on last, so they override the terrain rather than the other way round, and from in
+    // here rather than from the caller because lining a carve with rock needs to know where the
+    // ground is -- see applySphereEdits. columnAt is the same skirted prepass grid the fill above
+    // used, so a wall voxel and the terrain it is cut into agree about the surface exactly.
+    uint32_t editVersion = applySphereEdits(
+        scene, comp, coord, map, res, vs,
+        [&](int lx, int lz) { return columnAt(lx, lz).height; });
+    if (outEditVersion) *outEditVersion = editVersion;
+    if (outPhases) outPhases->edits = phaseSplit();
+}
+
+// Generate one work item and publish the result. Shared by the ordinary worker pool and the
+// dedicated edit threads -- the two differ only in which queue they take from, not in what they do
+// with what they take.
+static void runChunkWorkItem(projv::Scene& scene, TerrainState& ts, const ChunkWorkItem& item) {
+    int res = TerrainState::resolutionForLOD(item.lod);
+    float vs = TerrainState::voxelScaleForLOD(item.lod);
+    auto brickMap = projv::utils::createVoxelBrickMap(
+        projv::utils::computeBrickDims(res));
+    // scene.components never resizes after startup (the terrain grid's one component is
+    // pushed once), so this reference stays valid for the worker's whole lifetime -- the
+    // only shared-mutable field on it (materialPalette/paletteVersion) is guarded by
+    // scene.materialPaletteMutex inside internMaterial itself.
+    projv::ComponentRecord& comp = scene.components[ts.gridCompHandle];
+    bool marginal = false;
+    bool buried = false;
+    ProcessedChunk result;
+    result.isEdit = item.isEdit;
+    result.requestedAt = item.requestedAt;
+    result.editBatchID = item.editBatchID;
+    if (item.isEdit) result.startedAt = std::chrono::steady_clock::now();
+
+    GenPhases phases;
+    auto phaseClock = std::chrono::steady_clock::now();
+    auto phaseSplit = [&]() {
+        auto now = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(now - phaseClock).count();
+        phaseClock = now;
+        return ms;
+    };
+    generateChunkVoxels(scene, comp, item.coord, *brickMap, ts, res, vs, item.lod,
+                        &marginal, &phases, &buried, &result.editVersion);
+    phaseClock = std::chrono::steady_clock::now();
+    result.coord = item.coord;
+    result.lod = item.lod;
+    result.marginal = marginal;
+    result.buried = buried;
+    result.refineHandle = item.refineHandle;
+    // Edits were applied inside generateChunkVoxels (it owns the column data a carve wall needs);
+    // result.editVersion came back through its out-param. The hasVoxels test below therefore still
+    // sees them, so a sphere placed in open sky makes the chunk non-empty and a sphere that carves a
+    // chunk hollow makes it empty.
+    bool hasVoxels = false;
+    for (auto& maskWord : brickMap->brickMask) {
+        if (maskWord != 0) { hasVoxels = true; break; }
+    }
+    if (!hasVoxels) {
+        result.empty = true;
+    } else {
+        result.empty = false;
+        projv::ChunkHeader hdr;
+        hdr.chunkID    = 0;
+        hdr.position   = item.worldPos;
+        hdr.scale      = TerrainState::kChunkSize;
+        hdr.voxelScale = vs;
+        hdr.resolution = res;
+        hdr.rotation   = projv::core::quat(1, 0, 0, 0);
+        result.chunk = projv::utils::createChunk(hdr);
+        result.chunk.gridIndex = ts.gridIndex;
+        projv::utils::updateChunkFromBrickMap(result.chunk, *brickMap);
+        phases.tree64 = phaseSplit();
+        // Material IDs are already in final global-palette slots (interned directly above).
+        projv::utils::bakeMaterialsFromBrickMap(result.chunk.geometryData,
+                                                  result.materialIDs, *brickMap);
+        phases.materials = phaseSplit();
+    }
+    recordGenPhases(item.lod, phases);
+    if (item.isEdit) result.finishedAt = std::chrono::steady_clock::now();
+    g_worker.completed[item.lod < 3 ? item.lod : 2].fetch_add(1, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_worker.resultMutex);
+        // Three destinations, by how the result has to be installed and how urgently: in place on an
+        // existing chunk (readyRefines), as a brand-new chunk ahead of the frame's admission budget
+        // (readyEdits), or as ordinary streaming (readyChunks).
+        if (result.refineHandle != kInvalidChunkHandle) g_worker.readyRefines.push_back(std::move(result));
+        else if (item.isEdit)                           g_worker.readyEdits.push_back(std::move(result));
+        else                                            g_worker.readyChunks.push_back(std::move(result));
+    }
+}
+
+// Dedicated edit thread: waits on editQueue and nothing else, so a sphere starts generating the
+// moment it is placed no matter how backed up the ordinary pool is. See WorkerState::editQueue.
+static void terrainEditWorkerFunc(projv::Scene& scene, TerrainState& ts) {
+    while (g_worker.running.load(std::memory_order_relaxed)) {
+        ChunkWorkItem item;
+        bool gotWork = false;
+        {
+            std::unique_lock<std::mutex> lock(g_worker.workMutex);
+            g_worker.editCv.wait_for(lock, std::chrono::milliseconds(100), [&]{
+                return !g_worker.running.load(std::memory_order_relaxed) ||
+                       !g_worker.editQueue.empty();
+            });
+            if (!g_worker.running.load(std::memory_order_relaxed)) return;
+            if (!g_worker.editQueue.empty()) {
+                item = std::move(g_worker.editQueue.front());
+                g_worker.editQueue.pop_front();
+                gotWork = true;
+            }
+        }
+        if (gotWork) runChunkWorkItem(scene, ts, item);
+    }
 }
 
 static void terrainWorkerFunc(projv::Scene& scene, TerrainState& ts) {
@@ -1187,13 +1780,23 @@ static void terrainWorkerFunc(projv::Scene& scene, TerrainState& ts) {
             // refine on approach" symptom this exists to avoid.
             g_worker.workCv.wait_for(lock, std::chrono::milliseconds(100), [&]{
                 if (!g_worker.running.load(std::memory_order_relaxed)) return true;
+                // Edits are never held back by the readyChunks backpressure cap: they publish to
+                // readyEdits/readyRefines, neither of which that cap protects, and they are the one
+                // kind of work whose latency is directly visible to whoever pressed the key.
+                if (!g_worker.editQueue.empty()) return true;
                 if (g_worker.workQueue.empty()) return false;
                 if (g_worker.workQueue.front().jumpQueue) return true;
                 std::lock_guard<std::mutex> rlock(g_worker.resultMutex);
                 return g_worker.readyChunks.size() < TerrainState::kMaxReadyBacklog;
             });
             if (!g_worker.running.load(std::memory_order_relaxed)) return;
-            if (!g_worker.workQueue.empty()) {
+            // Edit work ahead of everything, so a batch bigger than kEditWorkers spills onto the
+            // ordinary pool rather than queueing behind it.
+            if (!g_worker.editQueue.empty()) {
+                item = std::move(g_worker.editQueue.front());
+                g_worker.editQueue.pop_front();
+                gotWork = true;
+            } else if (!g_worker.workQueue.empty()) {
                 if (g_worker.workQueue.front().jumpQueue) {
                     item = g_worker.workQueue.front();
                     g_worker.workQueue.pop_front();
@@ -1208,52 +1811,8 @@ static void terrainWorkerFunc(projv::Scene& scene, TerrainState& ts) {
                 }
             }
         }
-        if (gotWork) {
-            int res = TerrainState::resolutionForLOD(item.lod);
-            float vs = TerrainState::voxelScaleForLOD(item.lod);
-            auto brickMap = projv::utils::createVoxelBrickMap(
-                projv::utils::computeBrickDims(res));
-            // scene.components never resizes after startup (the terrain grid's one component is
-            // pushed once), so this reference stays valid for the worker's whole lifetime -- the
-            // only shared-mutable field on it (materialPalette/paletteVersion) is guarded by
-            // scene.materialPaletteMutex inside internMaterial itself.
-            projv::ComponentRecord& comp = scene.components[ts.gridCompHandle];
-            bool marginal = false;
-            generateChunkVoxels(scene, comp, item.coord, *brickMap, ts, res, vs, item.lod, &marginal);
-            ProcessedChunk result;
-            result.coord = item.coord;
-            result.lod = item.lod;
-            result.marginal = marginal;
-            result.refineHandle = item.refineHandle;
-            bool hasVoxels = false;
-            for (auto& maskWord : brickMap->brickMask) {
-                if (maskWord != 0) { hasVoxels = true; break; }
-            }
-            if (!hasVoxels) {
-                result.empty = true;
-            } else {
-                result.empty = false;
-                projv::ChunkHeader hdr;
-                hdr.chunkID    = 0;
-                hdr.position   = item.worldPos;
-                hdr.scale      = TerrainState::kChunkSize;
-                hdr.voxelScale = vs;
-                hdr.resolution = res;
-                hdr.rotation   = projv::core::quat(1, 0, 0, 0);
-                result.chunk = projv::utils::createChunk(hdr);
-                result.chunk.gridIndex = ts.gridIndex;
-                projv::utils::updateChunkFromBrickMap(result.chunk, *brickMap);
-                // Material IDs are already in final global-palette slots (interned directly above).
-                projv::utils::bakeMaterialsFromBrickMap(result.chunk.geometryData,
-                                                          result.materialIDs, *brickMap);
-            }
-            g_worker.completed[item.lod < 3 ? item.lod : 2].fetch_add(1, std::memory_order_relaxed);
-            {
-                std::lock_guard<std::mutex> lock(g_worker.resultMutex);
-                if (result.refineHandle != kInvalidChunkHandle) g_worker.readyRefines.push_back(std::move(result));
-                else                                            g_worker.readyChunks.push_back(std::move(result));
-            }
-        } // else: no work, loop back to wait on cv
+        if (gotWork) runChunkWorkItem(scene, ts, item);
+        // else: no work, loop back to wait on cv
     }
 }
 
@@ -1317,6 +1876,21 @@ static uint32_t desiredLODForChunk(projv::core::ivec3 coord, projv::core::ivec3 
     return 2u;
 }
 
+// Distance-based LOD, then held back for solid underground. A buried chunk is one uniform block of
+// stone, so the fine rings have nothing to resolve in it; the only reason to spend resolution there
+// is a carve, and then only on the chunk actually carved. Applied at every point that asks what
+// resolution a chunk should be -- admission, the LOD sweep, and the edit path -- because a clamp
+// only one of them knows about would have the sweep and the worker disagreeing forever, each
+// re-requesting a regeneration the other undoes.
+static uint32_t desiredLODClamped(const TerrainState& ts, projv::core::ivec3 coord,
+                                  projv::core::ivec3 camChunk) {
+    uint32_t desired = desiredLODForChunk(coord, camChunk);
+    if (!ts.buriedCoords.count(coord)) return desired;
+    const uint32_t floorLOD = editVersionForChunk(coord) != 0 ? TerrainState::kBuriedEditedLOD
+                                                             : TerrainState::kBuriedLOD;
+    return std::max(desired, floorLOD);
+}
+
 // Chunks are now generated directly at the resolution their assigned ring needs (see
 // terrainWorkerFunc), so a chunk's actual on-CPU detail is whatever ring it happened to be
 // generated at -- recovered here from the resolution stamped on its header at generation time.
@@ -1324,6 +1898,140 @@ static uint32_t nativeLODFromResolution(uint32_t res) {
     if (res >= uint32_t(TerrainState::resolutionForLOD(0))) return 0u;
     if (res >= uint32_t(TerrainState::resolutionForLOD(1))) return 1u;
     return 2u;
+}
+
+// Size and standoff of an edit sphere, in LOD0 voxels. Converted to world units at the call site via
+// kVoxelScale, so the sphere keeps its intended size in voxels-you-can-see terms rather than
+// silently changing scale with the world grid.
+static constexpr float kEditSphereRadiusVoxels   = 128.0f;  // 256 voxels across
+static constexpr float kEditSphereDistanceVoxels = 500.0f;
+
+// Record a sphere edit and get the chunks it touches back on screen with it applied.
+//
+// Nothing is written into any resident chunk here. The edit goes into the store and the affected
+// coords are pushed back through the ordinary generation pipeline, which is what makes this one code
+// path rather than two: the same replay that services this key press also services the refine, the
+// re-stream and the LOD change that will rebuild these chunks later.
+static void placeSphereEdit(projv::Scene& scene, TerrainState& ts,
+                            projv::core::vec3 center, float radius,
+                            bool isAdd, uint32_t packedColor) {
+    // Chunk coords the sphere's AABB overlaps. Y is clipped to the generated range -- a sphere above
+    // the terrain ceiling or below the sea floor simply touches nothing.
+    auto chunkOf = [](float w) { return int(std::floor(w / TerrainState::kChunkSize)); };
+    const int x0 = chunkOf(center.x - radius), x1 = chunkOf(center.x + radius);
+    const int y0 = std::max(TerrainState::kChunkYMin, chunkOf(center.y - radius));
+    const int y1 = std::min(TerrainState::kChunkYMax, chunkOf(center.y + radius));
+    const int z0 = chunkOf(center.z - radius), z1 = chunkOf(center.z + radius);
+
+    // Exact sphere-vs-box, not just the AABB overlap the loop bounds give: the sphere is inscribed
+    // in a 2x2x2-chunk box, so the corner chunks of that box are usually only clipped by the AABB
+    // and not touched by the sphere at all. Regenerating one is a full chunk of wasted work on the
+    // critical path of a key press, and the test that avoids it is four lines.
+    auto sphereHitsChunk = [&](int cx, int cy, int cz) {
+        const projv::core::vec3 lo(float(cx) * TerrainState::kChunkSize,
+                                   float(cy) * TerrainState::kChunkSize,
+                                   float(cz) * TerrainState::kChunkSize);
+        auto axis = [](float c, float l) {
+            const float h = std::max(l, std::min(c, l + TerrainState::kChunkSize)) - c;
+            return h * h;
+        };
+        return axis(center.x, lo.x) + axis(center.y, lo.y) + axis(center.z, lo.z) <= radius * radius;
+    };
+
+    std::vector<projv::core::ivec3> touched;
+    {
+        std::lock_guard<std::mutex> lock(g_editMutex);
+        for (int cz = z0; cz <= z1; ++cz) {
+            for (int cy = y0; cy <= y1; ++cy) {
+                for (int cx = x0; cx <= x1; ++cx) {
+                    if (!sphereHitsChunk(cx, cy, cz)) continue;
+                    projv::core::ivec3 coord(cx, cy, cz);
+                    ChunkEditBucket& bucket = g_editsByChunk[coord];
+                    // Drop any earlier edit this one completely contains. Whatever that edit did is
+                    // entirely overwritten inside the new sphere, and it reached nothing outside it,
+                    // so it can never affect the result again -- keeping it would just add a full
+                    // sphere sweep to every future regeneration of this chunk. Exact, not a
+                    // heuristic. It is what stops repeated edits in one spot (digging out a room)
+                    // from making each press slower than the last.
+                    bucket.edits.erase(
+                        std::remove_if(bucket.edits.begin(), bucket.edits.end(),
+                                       [&](const SphereEdit& old) {
+                                           const projv::core::vec3 d = old.center - center;
+                                           const float dist = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+                                           return dist + old.radius <= radius;
+                                       }),
+                        bucket.edits.end());
+                    bucket.edits.push_back(SphereEdit{center, radius, isAdd, packedColor});
+                    bucket.version++;
+                    touched.push_back(coord);
+                }
+            }
+        }
+        // Published last, and only once the store is consistent: a worker that sees a non-zero count
+        // must find the buckets it implies already in place.
+        g_editCount.fetch_add(1, std::memory_order_release);
+    }
+
+    if (touched.empty()) return;
+
+    const auto requestedAt = std::chrono::steady_clock::now();
+    const uint64_t batchID = ts.nextEditBatchID++;
+    {
+        TerrainState::EditBatch& batch = ts.pendingEditBatches[batchID];
+        batch.expected = uint32_t(touched.size());
+        batch.requestedAt = requestedAt;
+    }
+    projv::SceneGrid& grid = scene.grids[ts.gridIndex];
+    {
+        std::lock_guard<std::mutex> lock(g_worker.workMutex);
+        for (const projv::core::ivec3& coord : touched) {
+            projv::core::vec3 wp = grid.origin +
+                (projv::core::vec3(coord - grid.originCellCoord) * TerrainState::kChunkSize);
+            auto it = ts.activeChunks.find(coord);
+            const bool resident = it != ts.activeChunks.end() &&
+                                  it->second != kInvalidChunkHandle &&
+                                  it->second < scene.chunks.size() &&
+                                  scene.chunks[it->second].alive;
+            if (resident) {
+                // Refine path: replaceChunkGeometry installs the result in place, so the chunk stays
+                // visible at its current detail until the edited version is ready -- no pop-out.
+                // Queued unconditionally rather than skipped when refiningHandles already holds this
+                // chunk: an in-flight refine may have started before the edit was recorded, and
+                // discarding it in favour of this one is exactly what the stamp check in
+                // generatePendingChunks does when it arrives.
+                const projv::ChunkHandle h = it->second;
+                // The finer of what the chunk holds now and what its distance wants, so an edit
+                // never costs a chunk detail it already had.
+                uint32_t lod = std::min(nativeLODFromResolution(scene.chunks[h].header.resolution),
+                                        desiredLODClamped(ts, coord, ts.lastCameraChunk));
+                ts.refiningHandles.insert(h);
+                g_worker.queuedCoords.insert(coord);
+                g_worker.editQueue.push_back(ChunkWorkItem{coord, wp, lod, h, /*jumpQueue=*/true,
+                                                          /*isEdit=*/true, requestedAt, batchID});
+            } else {
+                // No chunk here: open sky an add-sphere is being built in, or terrain that has not
+                // streamed in yet. Ordinary admission, with any "known empty" verdict cleared first
+                // -- the edit is precisely what makes the coord non-empty, and the sentinel would
+                // otherwise make admit() and the pending sweep both skip right past it.
+                ts.activeChunks.erase(coord);
+                ts.emptyChunks.erase(coord);
+                ts.revisitingEmpty.erase(coord);
+                g_worker.queuedCoords.insert(coord);
+                g_worker.editQueue.push_back(ChunkWorkItem{coord, wp,
+                                                          desiredLODClamped(ts, coord, ts.lastCameraChunk),
+                                                          kInvalidChunkHandle, /*jumpQueue=*/true,
+                                                          /*isEdit=*/true, requestedAt, batchID});
+            }
+        }
+    }
+    // Both pools: the dedicated threads take the batch immediately, and any ordinary worker that
+    // finishes its current chunk picks up the remainder ahead of its own queue.
+    g_worker.editCv.notify_all();
+    g_worker.workCv.notify_all();
+
+    projv::core::info("[EDIT] {} sphere r={:.0f} at ({:.0f}, {:.0f}, {:.0f}) -- {} chunks requeued",
+                      isAdd ? "add" : "remove", radius,
+                      center.x, center.y, center.z, touched.size());
 }
 
 // Retune resident chunks toward their distance-appropriate LOD, at most kMaxRefinesPerFrame refine
@@ -1401,6 +2109,14 @@ static bool applyLODRing(projv::Scene& scene, TerrainState& ts, projv::core::ive
     discCoords *= size_t(TerrainState::kYLevels);
     if (ts.lodCursor >= discCoords) ts.lodCursor = 0;
 
+    // Starting a fresh pass over the disc: latch the stamp it is being run against, and reset the
+    // pass-wide deferred count. Everything below judges "did this pass finish the job" against
+    // these, not against the current frame alone.
+    if (ts.lodCursor == 0) {
+        ts.lodPassStamp = ts.lodDirtyStamp;
+        ts.lodPassDeferred = 0;
+    }
+
     int applied = 0;
     // Candidates this sweep found but had no per-frame budget left for. Non-zero means the sweep
     // did not finish the job, so it must run again next frame rather than wait for the camera to
@@ -1417,7 +2133,7 @@ static bool applyLODRing(projv::Scene& scene, TerrainState& ts, projv::core::ive
             auto itA = ts.activeChunks.find(coord);
             if (itA == ts.activeChunks.end()) continue;   // not resolved yet; streaming will admit it
             const projv::ChunkHandle h = itA->second;
-            uint32_t desired = desiredLODForChunk(coord, camChunk);
+            uint32_t desired = desiredLODClamped(ts, coord, camChunk);
 
             // "Known empty" coords are not chunks, but they are not necessarily empty either -- see
             // TerrainState::emptyChunks. Re-check one at a finer ring than the one that decided it,
@@ -1451,13 +2167,26 @@ static bool applyLODRing(projv::Scene& scene, TerrainState& ts, projv::core::ive
         }
     }
 
-    // Come back next frame if this pass did not reach the end of the disc, or if it did but had to
-    // drop candidates for want of refine budget. Only a pass that covered the whole disc and found
-    // nothing it could not act on is allowed to close the gate.
+    // Come back next frame unless this pass is genuinely finished. "Finished" means all three of:
+    // it reached the end of the disc, it acted on every candidate it found rather than dropping some
+    // for want of refine budget, and nothing invalidated its already-scanned prefix while it ran.
+    //
+    // That last condition is the one a bool cannot express. The disc is scanned nearest-first in
+    // kMaxLodScanPerFrame slices spread over several frames, so when the camera changes chunk (or a
+    // refine lands) partway through, the coords the pass already walked were judged against inputs
+    // that no longer hold -- and the nearest chunks, which need the finest LOD, sit in exactly that
+    // already-walked prefix. Closing the gate there left them coarse with nothing scheduled to look
+    // at them again until the camera next crossed a chunk boundary, which is why walking onto a
+    // chunk fixed it and standing still did not.
     ts.lodCursor = scanEnd;
-    bool passComplete = (scanEnd >= discCoords);
-    ts.lodSweepNeeded = (deferred > 0) || !passComplete;
-    if (passComplete) ts.lodCursor = 0;
+    ts.lodPassDeferred += deferred;
+    const bool passComplete = (scanEnd >= discCoords);
+    if (passComplete) {
+        ts.lodSweepNeeded = (ts.lodPassDeferred > 0) || (ts.lodPassStamp != ts.lodDirtyStamp);
+        ts.lodCursor = 0;
+    } else {
+        ts.lodSweepNeeded = true;
+    }
 
     // Both queues below are pushed under ONE lock acquisition with ONE notify at the end. Taking
     // and dropping workMutex per item, then notify_all-ing per item, woke all N workers up to six
@@ -1472,7 +2201,7 @@ static bool applyLODRing(projv::Scene& scene, TerrainState& ts, projv::core::ive
             // push_front (not push_back): the chunk is already visible at a coarser resolution, so
             // this should jump straight to the head of the line rather than wait behind whatever
             // ordinary streaming backlog happens to be queued.
-            g_worker.workQueue.push_front(ChunkWorkItem{coord, wp, desiredLODForChunk(coord, camChunk),
+            g_worker.workQueue.push_front(ChunkWorkItem{coord, wp, desiredLODClamped(ts, coord, camChunk),
                                                        /*refineHandle=*/h, /*jumpQueue=*/true});
             g_worker.queuedCoords.insert(coord);
         }
@@ -1484,7 +2213,7 @@ static bool applyLODRing(projv::Scene& scene, TerrainState& ts, projv::core::ive
         for (const projv::core::ivec3& coord : toRecheck) {
             projv::core::vec3 wp = grid.origin + (projv::core::vec3(coord - grid.originCellCoord) * TerrainState::kChunkSize);
             ts.revisitingEmpty.insert(coord);
-            g_worker.workQueue.push_front(ChunkWorkItem{coord, wp, desiredLODForChunk(coord, camChunk),
+            g_worker.workQueue.push_front(ChunkWorkItem{coord, wp, desiredLODClamped(ts, coord, camChunk),
                                                        /*refineHandle=*/kInvalidChunkHandle,
                                                        /*jumpQueue=*/true});
             g_worker.queuedCoords.insert(coord);
@@ -1561,6 +2290,19 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
     static constexpr int kMaxConsumedPerFrame = 192;
     std::vector<projv::core::ivec3> admittedRefines;
     std::vector<projv::ChunkHandle> admittedRefineHandles;
+    // Edit results thrown away because a later sphere landed on the same coord mid-generation. These
+    // carry their batch with them: the batch is still waiting on this chunk, so the re-queued item
+    // has to report back under the same ID or the sphere would never complete.
+    struct EditRequeue {
+        projv::core::ivec3 coord;
+        projv::ChunkHandle handle;
+        uint64_t batchID;
+        std::chrono::steady_clock::time_point requestedAt;
+    };
+    std::vector<EditRequeue> requeueEdits;
+    // Buried chunks that came back empty from a fine ring and need re-generating at kBuriedLOD,
+    // where the fill actually runs to the world floor. See admit().
+    std::vector<projv::core::ivec3> buriedRegenCoords;
 
     // Admission logic for brand-new streaming results (refines are handled separately below,
     // since the chunk already exists and is never evicted). Returns true if the chunk was newly
@@ -1591,13 +2333,33 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
         if (grid.cellToChunk[lin] >= 0) return false;
 
         if (proc.empty) {
+            // A buried chunk that came back empty was generated at LOD0, where the fill is still
+            // only the visible shell -- so "empty" here means "solid rock too far under the surface
+            // for the shell to reach", which is the opposite of nothing. Sentinelling it would leave
+            // a hole in the underground that nothing revisits, because the empty re-check only fires
+            // for coords a FINER ring might rescue and this one needs a coarser one. Mark it buried
+            // and let the LOD sweep re-request it at kBuriedLOD, where the fill runs to the floor.
+            if (proc.buried && TerrainState::kSolidFillToWorldBottom &&
+                proc.lod < TerrainState::kBuriedLOD) {
+                ts.buriedCoords.insert(proc.coord);
+                ts.activeChunks.erase(proc.coord);
+                ts.emptyChunks.erase(proc.coord);
+                buriedRegenCoords.push_back(proc.coord);
+                return false;
+            }
             // Record WHICH ring decided this was empty, so a later, finer ring can overrule it.
             ts.activeChunks[proc.coord] = kInvalidChunkHandle;
             ts.emptyChunks[proc.coord] = TerrainState::EmptyRecord{proc.lod, proc.marginal};
+            if (proc.buried) ts.buriedCoords.insert(proc.coord);
             return false;
         }
         // Non-empty: any previous empty verdict for this coord is superseded.
         ts.emptyChunks.erase(proc.coord);
+        // Record before requestChunkLOD below, which asks desiredLODClamped what this chunk wants
+        // and would get the unclamped answer for a buried chunk it does not yet know is buried --
+        // queueing a refine to LOD0 that the next sweep would immediately undo.
+        if (proc.buried) ts.buriedCoords.insert(proc.coord);
+        else             ts.buriedCoords.erase(proc.coord);
 
         // Monotonic: activeChunks.size() repeats once eviction starts removing entries.
         proc.chunk.header.chunkID = int(ts.nextChunkID++);
@@ -1648,7 +2410,7 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
         // something says so -- otherwise a chunk admitted coarser than the camera now wants would
         // sit at the wrong resolution until the camera happened to cross a chunk boundary.
         if (projv::requestChunkLOD(scene, h,
-                TerrainState::resolutionForLOD(desiredLODForChunk(coord, ts.lastCameraChunk)))
+                TerrainState::resolutionForLOD(desiredLODClamped(ts, coord, ts.lastCameraChunk)))
             == projv::ChunkLODResult::NeedsRegeneration) {
             // Queue the refine directly — the sweep's cursor may have passed this coord's
             // position, and the sweep's own pass-complete gate could close before the cursor
@@ -1671,9 +2433,108 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
     // because g_worker.queuedCoords is guarded by workMutex and this block holds resultMutex --
     // taking workMutex here would invert the workMutex -> resultMutex order terrainWorkerFunc uses
     // and deadlock. The erase happens in the workMutex block below.
+    // What an edit's end-to-end latency actually decomposed into, logged on install. Kept because
+    // the three terms move independently and only one of them is worth optimising at a time: `wait`
+    // is worker-pool contention, `gen` is the chunk generation itself, and `frame` is how long the
+    // finished result sat waiting for this function to run.
+    auto reportEditLatency = [](const ProcessedChunk& proc, const char* how) {
+        if (!proc.isEdit) return;
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        const auto now = std::chrono::steady_clock::now();
+        projv::core::info("[EDIT-LAT] {} coord=({},{},{}) wait={:.1f}ms gen={:.1f}ms frame={:.1f}ms total={:.1f}ms",
+                          how, proc.coord.x, proc.coord.y, proc.coord.z,
+                          ms(proc.requestedAt, proc.startedAt),
+                          ms(proc.startedAt, proc.finishedAt),
+                          ms(proc.finishedAt, now),
+                          ms(proc.requestedAt, now));
+    };
+
+    // Install one refine result onto the handle it was generated for. Shared by the immediate path
+    // (ordinary LOD refines) and the batched path (edits, held until the whole sphere is ready), so
+    // the checks that have to happen at INSTALL time rather than at drain time -- the chunk can be
+    // evicted while its siblings are still generating -- live here and are applied to both.
+    // Returns true if anything reached the scene and so needs flushing.
+    auto installRefine = [&](ProcessedChunk&& proc) -> bool {
+        // Stale if the camera moved far enough away that evictDistantChunks already reclaimed this
+        // coord/handle in the meantime (possibly recycling the slot for a different chunk entirely
+        // via freeChunkSlots) -- discard rather than clobber whatever's there now.
+        auto it = ts.activeChunks.find(proc.coord);
+        if (it == ts.activeChunks.end() || it->second != proc.refineHandle) return false;
+
+        // A refine CAN legitimately come back empty, and when it does the finer ring's answer is
+        // the authoritative one -- so record it instead of dropping it on the floor.
+        //
+        // Why a solid chunk can refine to nothing: the subsurface shell is kFillDepth *voxels*
+        // deep, not a fixed world depth, so it spans 84 world units at LOD0 and 1,344 at LOD2
+        // (16x the voxel size). A chunk buried a few hundred units under the surface is
+        // therefore genuinely solid at the coarse ring and genuinely empty at the fine one.
+        // Neither ring is wrong; the fine one wins because it is the one the camera is close
+        // enough to see. This is the same "empty is a property of the coord AT A GIVEN RING"
+        // rule TerrainState::emptyChunks already encodes, just arriving from the opposite
+        // direction, so it is recorded in exactly the same place.
+        //
+        // Recording it is also what stops this from looping. Discarding the result and leaving
+        // the chunk resident at its coarse resolution (what this line used to do, on the
+        // assumption the case "shouldn't happen") left the coord in applyLODRing's candidate set
+        // unchanged, so the very next sweep queued the identical refine again -- forever.
+        // Measured on a two-minute flight: 922 distinct coords regenerated up to several hundred
+        // times each, saturating the whole kMaxRefinesPerFrame budget indefinitely and starving
+        // every chunk that genuinely could have been refined. That is the "voxels stop refining
+        // after a few minutes" symptom -- the budget was never idle, it was spent entirely on
+        // work whose result was thrown away.
+        if (proc.empty) {
+            releaseChunk(scene, ts, proc.refineHandle);
+            it->second = kInvalidChunkHandle;
+            ts.emptyChunks[proc.coord] = TerrainState::EmptyRecord{proc.lod, proc.marginal};
+            core_info_every(64, "[REFINE-EMPTY] coord=({},{},{}) h={} empty at lod={} marginal={}",
+                            proc.coord.x, proc.coord.y, proc.coord.z,
+                            proc.refineHandle, proc.lod, proc.marginal);
+            return true;   // grid cell + blob release still have to reach the GPU this frame
+        }
+
+        if (proc.buried) ts.buriedCoords.insert(proc.coord);
+        else             ts.buriedCoords.erase(proc.coord);
+        projv::replaceChunkGeometry(scene, proc.refineHandle,
+                                    std::move(proc.chunk.geometryData),
+                                    std::move(proc.materialIDs),
+                                    proc.chunk.header.resolution);
+        core_info_every(64, "[REFINE] coord=({},{},{}) h={} resolution={}",
+                        proc.coord.x, proc.coord.y, proc.coord.z,
+                        proc.refineHandle, proc.chunk.header.resolution);
+        return true;
+    };
+
+    // Park a finished edit chunk until the rest of its sphere catches up. The batch may have been
+    // retired already (a late duplicate from a stale re-queue), in which case there is nothing left
+    // waiting on it and it installs immediately.
+    auto stageEdit = [&](ProcessedChunk&& proc) -> bool {
+        auto it = ts.pendingEditBatches.find(proc.editBatchID);
+        if (it == ts.pendingEditBatches.end()) return false;
+        it->second.staged.push_back(std::move(proc));
+        return true;
+    };
+
     std::vector<projv::core::ivec3> consumedCoords;
     {
         std::lock_guard<std::mutex> lock(g_worker.resultMutex);
+        // Edit results that have to be admitted as new chunks, drained first and without the
+        // budgets the ordinary loop below is subject to. See WorkerState::readyEdits.
+        while (!g_worker.readyEdits.empty()) {
+            ProcessedChunk proc = std::move(g_worker.readyEdits.back());
+            g_worker.readyEdits.pop_back();
+            ts.revisitingEmpty.erase(proc.coord);
+            consumedCoords.push_back(proc.coord);
+            if (editVersionForChunk(proc.coord) != proc.editVersion) {
+                requeueEdits.push_back({proc.coord, kInvalidChunkHandle,
+                                        proc.editBatchID, proc.requestedAt});
+                continue;
+            }
+            if (stageEdit(std::move(proc))) continue;
+            reportEditLatency(proc, "admit");
+            if (admit(std::move(proc))) generated++;
+        }
         // Refines: install directly onto the existing handle via replaceChunkGeometry -- the chunk
         // was never evicted, so this is not "admission." Uncapped: rare (bounded by
         // kMaxRefinesPerFrame at request time in applyLODRing), so it can't flood this loop.
@@ -1683,24 +2544,28 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
             ts.refiningHandles.erase(proc.refineHandle);
             consumedCoords.push_back(proc.coord);
             // The chunk's resolution just changed under applyLODRing's feet, so its recorded
-            // requestedLOD needs re-deriving against the new native resolution.
-            ts.lodSweepNeeded = true;
+            // requestedLOD needs re-deriving against the new native resolution -- including when the
+            // sweep in progress has already scanned past this coord, hence the stamped arm.
+            ts.armLodSweep();
 
-            // Stale if the camera moved far enough away that evictDistantChunks already reclaimed
-            // this coord/handle in the meantime (possibly recycling the slot for a different chunk
-            // entirely via freeChunkSlots) -- discard rather than clobber whatever's there now.
-            auto it = ts.activeChunks.find(proc.coord);
-            if (it == ts.activeChunks.end() || it->second != proc.refineHandle) continue;
-            if (proc.empty) continue;  // shouldn't happen for a refine of previously-solid terrain
+            // An edit landed on this coord while it was being generated, so this result predates it.
+            // Installing it would put un-edited terrain back on screen with nothing scheduled to
+            // correct it -- placeSphereEdit already queued its own refine for this handle, but that
+            // one may have been the request this result answers. Re-queue rather than assume.
+            if (editVersionForChunk(proc.coord) != proc.editVersion) {
+                if (proc.isEdit) {
+                    requeueEdits.push_back({proc.coord, proc.refineHandle,
+                                            proc.editBatchID, proc.requestedAt});
+                } else {
+                    admittedRefines.push_back(proc.coord);
+                    admittedRefineHandles.push_back(proc.refineHandle);
+                }
+                continue;
+            }
 
-            projv::replaceChunkGeometry(scene, proc.refineHandle,
-                                        std::move(proc.chunk.geometryData),
-                                        std::move(proc.materialIDs),
-                                        proc.chunk.header.resolution);
-            core_info_every(64, "[REFINE] coord=({},{},{}) h={} resolution={}",
-                            proc.coord.x, proc.coord.y, proc.coord.z,
-                            proc.refineHandle, proc.chunk.header.resolution);
-            generated++;
+            if (stageEdit(std::move(proc))) continue;
+            reportEditLatency(proc, "refine");
+            if (installRefine(std::move(proc))) generated++;
         }
         while (!g_worker.readyChunks.empty() && generated < TerrainState::kMaxNewPerFrame && consumed < kMaxConsumedPerFrame) {
             ProcessedChunk proc = std::move(g_worker.readyChunks.back());
@@ -1711,6 +2576,12 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
             // marker set would freeze this coord out of every future re-check.
             ts.revisitingEmpty.erase(proc.coord);
             consumedCoords.push_back(proc.coord);
+            // Same mid-generation edit race as the refine loop above, on the admission path.
+            if (editVersionForChunk(proc.coord) != proc.editVersion) {
+                requeueEdits.push_back({proc.coord, kInvalidChunkHandle,
+                                        proc.editBatchID, proc.requestedAt});
+                continue;
+            }
             if (admit(std::move(proc))) generated++;
         }
     }
@@ -1732,12 +2603,40 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
                 g_worker.queuedCoords.insert(coord);
                 ts.refiningHandles.insert(h);
                 projv::core::vec3 wp = grid.origin + (projv::core::vec3(coord - grid.originCellCoord) * TerrainState::kChunkSize);
-                g_worker.workQueue.push_front(ChunkWorkItem{coord, wp, desiredLODForChunk(coord, ts.lastCameraChunk),
+                g_worker.workQueue.push_front(ChunkWorkItem{coord, wp, desiredLODClamped(ts, coord, ts.lastCameraChunk),
                                                            /*refineHandle=*/h, /*jumpQueue=*/true});
             }
             admittedRefines.clear();
             admittedRefineHandles.clear();
+
+            // Edit results dropped for a mid-generation edit, straight back onto the edit lane and
+            // still tagged with their batch, which is what lets the sphere they belong to complete.
+            for (const EditRequeue& r : requeueEdits) {
+                g_worker.queuedCoords.insert(r.coord);
+                if (r.handle != kInvalidChunkHandle) ts.refiningHandles.insert(r.handle);
+                projv::core::vec3 wp = grid.origin + (projv::core::vec3(r.coord - grid.originCellCoord) * TerrainState::kChunkSize);
+                uint32_t lod = desiredLODClamped(ts, r.coord, ts.lastCameraChunk);
+                if (r.handle != kInvalidChunkHandle && r.handle < scene.chunks.size())
+                    lod = std::min(lod, nativeLODFromResolution(scene.chunks[r.handle].header.resolution));
+                g_worker.editQueue.push_back(ChunkWorkItem{r.coord, wp, lod, r.handle,
+                                                          /*jumpQueue=*/true, /*isEdit=*/true,
+                                                          r.requestedAt, r.batchID});
+            }
+            if (!requeueEdits.empty()) g_worker.editCv.notify_all();
+            requeueEdits.clear();
+
+            // Buried chunks re-requested at the coarse ring that can actually fill them. Ordinary
+            // queue, not the edit lane -- this is streaming, nobody is waiting on it.
+            for (const projv::core::ivec3& coord : buriedRegenCoords) {
+                if (g_worker.queuedCoords.count(coord)) continue;
+                g_worker.queuedCoords.insert(coord);
+                projv::core::vec3 wp = grid.origin + (projv::core::vec3(coord - grid.originCellCoord) * TerrainState::kChunkSize);
+                g_worker.workQueue.push_back(ChunkWorkItem{coord, wp,
+                                                          desiredLODClamped(ts, coord, ts.lastCameraChunk)});
+            }
+            buriedRegenCoords.clear();
         }
+
 
         // Three caps, doing three different jobs:
         //
@@ -1776,12 +2675,48 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
                 projv::utils::expandGridToInclude(grid, cell, scene, ts.gridIndex);
             }
             projv::core::vec3 wp = grid.origin + (projv::core::vec3(c - grid.originCellCoord) * TerrainState::kChunkSize);
-            uint32_t lod = desiredLODForChunk(c, ts.lastCameraChunk);
+            uint32_t lod = desiredLODClamped(ts, c, ts.lastCameraChunk);
             g_worker.workQueue.push_back(ChunkWorkItem{c, wp, lod});
             g_worker.queuedCoords.insert(c);
             newCount++;
         }
         if (newCount > 0) g_worker.workCv.notify_all();
+    }
+
+    // Install completed sphere edits, whole. A batch goes in only once every chunk it spans has
+    // reported back, so all of them reach the scene in this frame and ride out on the single
+    // flushSceneUpdates the caller does -- which is what makes the sphere appear as one object
+    // instead of assembling itself chunk by chunk over the spread between its fastest and slowest
+    // chunk. The timeout is a backstop, not a normal path: every queued item produces a result, so
+    // a batch only fails to complete if something dropped one on the floor.
+    if (!ts.pendingEditBatches.empty()) {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = ts.pendingEditBatches.begin(); it != ts.pendingEditBatches.end(); ) {
+            TerrainState::EditBatch& batch = it->second;
+            const bool complete = batch.staged.size() >= batch.expected;
+            const bool timedOut =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - batch.requestedAt).count()
+                    > TerrainState::kEditBatchTimeoutMs;
+            if (!complete && !timedOut) { ++it; continue; }
+            if (timedOut && !complete) {
+                projv::core::warn("[EDIT] batch {} timed out with {}/{} chunks -- installing partial",
+                                  it->first, batch.staged.size(), batch.expected);
+            }
+            double worstMs = 0.0;
+            for (ProcessedChunk& proc : batch.staged) {
+                worstMs = std::max(worstMs, std::chrono::duration<double, std::milli>(
+                                                proc.finishedAt - proc.requestedAt).count());
+                const bool isRefine = proc.refineHandle != kInvalidChunkHandle;
+                reportEditLatency(proc, isRefine ? "refine" : "admit");
+                if (isRefine) { if (installRefine(std::move(proc))) generated++; }
+                else          { if (admit(std::move(proc)))         generated++; }
+            }
+            projv::core::info("[EDIT] batch {} installed {} chunks in one frame "
+                              "(slowest chunk {:.1f}ms, total {:.1f}ms)",
+                              it->first, batch.staged.size(), worstMs,
+                              std::chrono::duration<double, std::milli>(now - batch.requestedAt).count());
+            it = ts.pendingEditBatches.erase(it);
+        }
     }
 
     return generated > 0;
@@ -1933,6 +2868,13 @@ void startup(projv::Application& app) {
     for (int i = 0; i < numWorkers; ++i) {
         g_worker.threads.emplace_back(terrainWorkerFunc, std::ref(scene), std::ref(ts));
     }
+    // Deliberately NOT subtracted from numWorkers: these are blocked on editCv except in the
+    // fraction of a second after a key press, so counting them against the streaming pool would
+    // give up a core permanently to buy latency that is only ever needed momentarily.
+    projv::core::info("[WORKER] spawning {} dedicated edit threads", WorkerState::kEditWorkers);
+    for (int i = 0; i < WorkerState::kEditWorkers; ++i) {
+        g_worker.editThreads.emplace_back(terrainEditWorkerFunc, std::ref(scene), std::ref(ts));
+    }
 
     // Build the camera-relative streaming template ONCE. Every later "re-seed the ring around the
     // new camera chunk" is just pendingIndex = 0 -- see TerrainState::xzOffsets.
@@ -2069,7 +3011,58 @@ void update(projv::Application& app) {
             }();
             static bool armed = false;
             if (!armed && ts.pendingIndex >= ts.pendingTotal()) armed = true;
-            if (armed) cam.position += forward * (flySpeed * dt);
+            static const float kFlyStopAfter = [] {
+                const char* e = std::getenv("TERRAIN_AUTOFLY_STOP");
+                return e ? float(atof(e)) : 0.0f;
+            }();
+            static float flownFor = 0.0f;
+            if (armed) flownFor += dt;
+            if (armed && !(kFlyStopAfter > 0.0f && flownFor > kFlyStopAfter))
+                cam.position += forward * (flySpeed * dt);
+        }
+    }
+
+    // --- Editing: E places a sphere of solid material, Q carves one out, both centred
+    // kEditSphereDistanceVoxels ahead of where the camera is looking.
+    //
+    // Edge-triggered rather than repeating while held: one press re-generates up to eight full-res
+    // chunks, which is real worker-pool work, and a held key would queue another batch every frame.
+    static bool wasEditAdd = false, wasEditRemove = false;
+    const bool editAdd    = glfwGetKey(ri.window, GLFW_KEY_E) == GLFW_PRESS;
+    const bool editRemove = glfwGetKey(ri.window, GLFW_KEY_Q) == GLFW_PRESS;
+    if ((editAdd && !wasEditAdd) || (editRemove && !wasEditRemove)) {
+        const bool isAdd = editAdd && !wasEditAdd;
+        vec3 look{cos(cam.pitch) * cos(cam.phi), sin(cam.pitch), cos(cam.pitch) * sin(cam.phi)};
+        vec3 center = cam.position + look * (kEditSphereDistanceVoxels * TerrainState::kVoxelScale);
+        // Snapped to the surface-colour lattice for the same reason tree colours are (see startup):
+        // the terrain palette is a fixed kSurfaceLevels^3 lattice plus water shades, and an
+        // off-lattice colour would spend one of the handful of slots that leaves.
+        uint32_t packed = projv::packColor(projv::Color{quantizeSurfaceChannel(0.9f),
+                                                        quantizeSurfaceChannel(0.15f),
+                                                        quantizeSurfaceChannel(0.1f)});
+        placeSphereEdit(scene, ts, center,
+                        kEditSphereRadiusVoxels * TerrainState::kVoxelScale, isAdd, packed);
+    }
+    wasEditAdd = editAdd; wasEditRemove = editRemove;
+
+    // Benchmark mode: place an alternating add/remove sphere every kAutoEditPeriod frames, so
+    // [EDIT-LAT] can be read off a run with nobody at the keyboard. Same reason TERRAIN_AUTOFLY
+    // exists -- edit latency is a function of how loaded the worker pool is, and reproducing a
+    // given load by hand is not something a human can do twice. TERRAIN_AUTOEDIT=1 to enable.
+    static const bool kAutoEdit = [] {
+        const char* e = std::getenv("TERRAIN_AUTOEDIT");
+        return e && e[0] != '\0' && std::strcmp(e, "0") != 0;
+    }();
+    if (kAutoEdit) {
+        static constexpr int kAutoEditPeriod = 300;
+        if (app.frameCount > 0 && app.frameCount % kAutoEditPeriod == 0) {
+            vec3 look{cos(cam.pitch) * cos(cam.phi), sin(cam.pitch), cos(cam.pitch) * sin(cam.phi)};
+            vec3 center = cam.position + look * (kEditSphereDistanceVoxels * TerrainState::kVoxelScale);
+            uint32_t packed = projv::packColor(projv::Color{quantizeSurfaceChannel(0.9f),
+                                                            quantizeSurfaceChannel(0.15f),
+                                                            quantizeSurfaceChannel(0.1f)});
+            placeSphereEdit(scene, ts, center, kEditSphereRadiusVoxels * TerrainState::kVoxelScale,
+                            (app.frameCount / kAutoEditPeriod) % 2 == 1, packed);
         }
     }
 
@@ -2083,8 +3076,9 @@ void update(projv::Application& app) {
         // it is retargeting the origin, not rebuilding 684,000 coords and sorting them.
         ts.pendingOrigin = camChunk;
         ts.pendingIndex = 0;
-        // Every resident chunk's distance to the camera just changed, so its desired LOD may have.
-        ts.lodSweepNeeded = true;
+        // Every resident chunk's distance to the camera just changed, so its desired LOD may have --
+        // including the chunks a sweep already in progress has walked past this pass.
+        ts.armLodSweep();
     }
     // Outside the camChunk-changed branch: eviction is budgeted per call, so a crossing that puts
     // more than the budget out of range keeps draining on the frames that follow.
@@ -2103,6 +3097,26 @@ void update(projv::Application& app) {
     bool needsFlush = generatePendingChunks(scene, ts);
     needsFlush |= applyLODRing(scene, ts, camChunk);
     if (needsFlush) projv::graphics::flushSceneUpdates(scene, gpuData);
+
+    // Where chunk generation time goes, per storage ring. Reported on the same schedule as the
+    // other perf counters; see GenPhases.
+    if (app.frameCount % 300 == 0) {
+        static const char* kPhaseNames[6] = {"columns", "voxels", "trees", "edits", "tree64", "materials"};
+        for (int l = 0; l < 3; ++l) {
+            uint64_t n = g_genPhaseCount[l].load(std::memory_order_relaxed);
+            if (n == 0) continue;
+            double tot = 0, per[6];
+            for (int i = 0; i < 6; ++i) {
+                per[i] = double(g_genPhaseNs[l][i].load(std::memory_order_relaxed)) / 1e6 / double(n);
+                tot += per[i];
+            }
+            projv::core::perf("[GENPHASE] lod{} n={} avg={:.2f}ms | {}={:.2f} {}={:.2f} {}={:.2f} "
+                              "{}={:.2f} {}={:.2f} {}={:.2f}",
+                              l, n, tot,
+                              kPhaseNames[0], per[0], kPhaseNames[1], per[1], kPhaseNames[2], per[2],
+                              kPhaseNames[3], per[3], kPhaseNames[4], per[4], kPhaseNames[5], per[5]);
+        }
+    }
 
     // Diagnostic: log chunk population progress every 60 frames.
     //
@@ -2176,7 +3190,7 @@ void update(projv::Application& app) {
         size_t wantFiner = 0, wantFinerBlocked = 0, wantFinerRegen = 0;
         size_t emptyFine = 0, emptyNear = 0, emptyStale = 0;
         for (const auto& [coord, h] : ts.activeChunks) {
-            uint32_t desired = desiredLODForChunk(coord, camChunk);
+            uint32_t desired = desiredLODClamped(ts, coord, camChunk);
             if (h == kInvalidChunkHandle) {
                 if (desired == 0) emptyFine++;
                 else if (desired == 1) emptyNear++;
@@ -2325,10 +3339,15 @@ void render(projv::Application& app) {
 void shutdownApp(projv::Application&) {
     g_worker.running.store(false, std::memory_order_relaxed);
     g_worker.workCv.notify_all();
+    g_worker.editCv.notify_all();
     for (auto& t : g_worker.threads) {
         if (t.joinable()) t.join();
     }
     g_worker.threads.clear();
+    for (auto& t : g_worker.editThreads) {
+        if (t.joinable()) t.join();
+    }
+    g_worker.editThreads.clear();
 }
 
 int main(int argc, char** argv) {
