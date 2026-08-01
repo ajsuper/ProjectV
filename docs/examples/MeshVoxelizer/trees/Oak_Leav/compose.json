@@ -1,0 +1,16 @@
+{
+    "components": [
+        {
+            "mutability": "direct",
+            "position": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "source": "model.data",
+            "type": "data"
+        }
+    ],
+    "name": "Oak_Leav",
+    "version": 1
+}

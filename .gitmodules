@@ -17,3 +17,7 @@
 [submodule "external/bx"]
 	path = external/bx
 	url = https://github.com/bkaradzic/bx.git
+[submodule "docs/examples/MeshVoxelizer/external/assimp"]
+	path = docs/examples/MeshVoxelizer/external/assimp
+	url = https://github.com/assimp/assimp.git
+	shallow = true

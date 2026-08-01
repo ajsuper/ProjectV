@@ -334,7 +334,7 @@ struct TerrainState {
     // alone would have needed radius 120 and 148k chunks to hold 86k units. This trades a tenth of
     // the view distance to keep that closer to 124k. It is the single knob to turn down if the
     // outer ring proves too heavy; nothing else depends on it.
-    static constexpr int   kViewRadius = 110;
+    static constexpr int   kViewRadius = 150;
     // Storage LOD rings. Three levels:
     //   LOD 0 (256^3) — chunks within kLodRadiusFine chunks of camera
     //   LOD 1 (64^3)  — chunks within kLodRadius chunks of camera
@@ -377,12 +377,62 @@ struct TerrainState {
     // generation and admission are LOD-appropriately cheap for the vast majority of chunks (only
     // the innermost ring is full-res), a much higher per-frame admission rate is affordable and
     // meaningfully cuts how long newly-visible/refined chunks stay popped-out during fast travel.
-    // Raised again with kViewRadius. Admission rate sets how long the world takes to fill in, and
-    // that is a function of the chunk COUNT, which just went up 3.4x: at 16 a full 94k-chunk view
-    // would take about a hundred seconds to populate. These are cheap chunks -- the overwhelming
-    // majority are 16^3 outer-ring shells -- so the limit is GPU upload bandwidth per frame rather
-    // than anything CPU-side.
-    static constexpr int   kMaxNewPerFrame = 24;
+    //
+    // This is now a SAFETY CEILING rather than the operating point: the drain loop stops on
+    // kAdmitBudgetMs of main-thread time (see generatePendingChunks), so the machine sets the rate
+    // and this only bounds the worst case. It was the binding constraint on how long a view takes
+    // to fill, and by a wide margin -- the arithmetic that motivated the change:
+    //
+    //   A radius-110 view is ~124k resident chunks. At 24/frame that is 5,166 frames, i.e. 86
+    //   seconds at a sustained 60fps and worse at any lower frame rate. The worker pool that
+    //   PRODUCES those chunks finishes the whole view in about 4.4 seconds on a 30-worker machine
+    //   (measured: 7.7/5.6/4.9 us per terrain sample at LOD0/1/2, ~133s of single-threaded column
+    //   prepass). So admission was running 19x slower than generation, and every second of the wait
+    //   was this constant rather than the terrain noise. Doubling kViewRadius makes it 33x.
+    //
+    // The old note here read "the limit is GPU upload bandwidth per frame rather than anything
+    // CPU-side". That was an assumption, never a measurement. Measured ([ADMIT], 235k chunks over
+    // 21.6k frames), the main-thread cost of one more admitted chunk is:
+    //
+    //   admit() bookkeeping   0.0052 ms/chunk
+    //   flushSceneUpdates     0.0083 ms/chunk  + 2.66 ms/frame FIXED
+    //   marginal              0.0135 ms/chunk
+    //
+    // Which is to say a chunk costs almost nothing to admit, and essentially the entire per-frame
+    // cost of streaming is a FIXED 2.66ms flush that does not care whether one chunk was admitted or
+    // two hundred. That inverts the old reasoning completely: the way to stream faster is to put more
+    // chunks through each flush, not fewer. 128 leaves the budget (kAdmitBudgetMs, ~148 chunks at the
+    // measured rate) as the real governor while capping a pathological frame at about 4.4ms.
+    //
+    // The 2.66ms fixed flush is now the largest single per-frame cost here and is worth attacking on
+    // its own -- it is paid on every streaming frame regardless of throughput.
+    //
+    // Note this is NOT currently the binding constraint: [ADMIT] reports "stopped on cap 0%" over
+    // 21.6k frames, because generation cannot keep up -- 65% of the worker pool's time is blocked in
+    // columnsForChunk waiting on other workers building the same column (see [COLCACHE], 79.6%
+    // wait). Raising this only pays off once that convoy is fixed; it is raised now so it does not
+    // become the next ceiling the moment it is.
+    static constexpr int   kMaxNewPerFrame = 128;
+    // Main-thread time the admission drain may spend per frame. This, not kMaxNewPerFrame, is the
+    // real operating limit: it is what the cap was always a proxy for, and expressing it directly
+    // means the rate self-tunes to the machine instead of being a constant that has to be re-guessed
+    // every time chunk costs or the view radius change.
+    //
+    // Charges the MEASURED marginal cost of an admitted chunk, not just the admit() call: the flush
+    // is a single batched call after the drain, so its per-chunk share cannot be observed from inside
+    // the loop and has to be carried as a constant. [ADMIT] fits that constant against real frames
+    // (least squares, flush ms vs chunks admitted) so it can be checked rather than trusted -- if the
+    // reported ms/chunk drifts from kMarginalAdmitMs, update it here.
+    //
+    // Budgeting on admit() time alone would have been useless: at 0.0041ms a chunk, 2ms of admit()
+    // is ~490 chunks, which would let a frame commit to ~25ms of flush it never accounted for.
+    static constexpr double kAdmitBudgetMs   = 2.0;
+    // Measured at 0.0052ms admit + 0.0083ms flush. The first fit of this put the flush share at
+    // 0.0508ms, which was badly conditioned: the drain was only reaching ~11 chunks a frame, so the
+    // regression had almost no spread in x to separate the per-chunk slope from the 2.7ms fixed
+    // intercept. Letting the budget open up first, then re-fitting at ~25 chunks a frame, gives the
+    // figure below. Trust a re-measurement only when [ADMIT] shows a decent chunks/frame spread.
+    static constexpr double kMarginalAdmitMs = 0.014;
     static constexpr int   kBootstrapBatch = 5;
     // Backpressure cap on unadmitted worker results (see terrainWorkerFunc). Bounds how far ahead
     // of kMaxNewPerFrame's admission rate the worker pool is allowed to race.
@@ -485,9 +535,27 @@ struct TerrainState {
     // vector, pushed ~684,000 freshly-computed ivec3 into it, and std::sorted the lot by distance.
     // That is a six-figure allocation-and-sort on the main thread, on a frame the player is by
     // definition moving through, and it recomputed a result that differs from the previous frame's
-    // only by a translation. Ordering is now XZ-major with the vertical column contiguous, which
-    // also streams better: you get whole columns near the camera rather than a shell of scattered
-    // slabs.
+    // only by a translation.
+    //
+    // Ordering is XZ-major, but LEVEL-major inside a block of kColumnInterleave columns -- see
+    // pendingCoordAt. It was fully column-contiguous, on the reasoning that whole columns near the
+    // camera stream better than a shell of scattered slabs. They do, but the cost was almost the
+    // whole worker pool:
+    //
+    //   A vertical stack is kYLevels (22) chunks that share one XZ column, so 22 CONSECUTIVE queue
+    //   entries all need the same column prepass. The pool pulls consecutive entries, so ~30 workers
+    //   would land on one or two columns; the first to arrive builds the prepass and the rest block
+    //   on g_columnCacheCv until it finishes. Measured, that was 79% of all columnsForChunk calls
+    //   waiting, 2,475 worker-seconds blocked out of ~3,340 total -- the pool was effectively
+    //   processing one column at a time instead of thirty, and a full radius-110 view took 116s to
+    //   fill against a ~33s floor. The cache was doing its job (only 4.6% misses, so almost no
+    //   duplicated work); it was the queue ORDER that serialized everything.
+    //
+    // Interleaving inside a block keeps the near-first property at block granularity -- a patch of
+    // kColumnInterleave columns still completes before the sweep moves outward -- while guaranteeing
+    // that any kColumnInterleave consecutive entries are all DIFFERENT columns, so the pool spreads.
+    // It also bounds the cache working set to one block of columns rather than a whole ring, which is
+    // what previously made kColumnCacheMaxBytes scale with kViewRadius squared.
     std::vector<projv::core::ivec2> xzOffsets;
     size_t pendingIndex = 0;
     // Chunk coord the cursor's offsets are relative to. Tracks lastCameraChunk, but kept separate
@@ -495,11 +563,33 @@ struct TerrainState {
     projv::core::ivec3 pendingOrigin{0, 0, 0};
 
     static constexpr int kYLevels = kChunkYMax - kChunkYMin + 1;
+    // Columns per interleave block. Must comfortably exceed the worker count so no two workers ever
+    // contend for one column's prepass; 128 covers any plausible core count (the pool is
+    // hardware_concurrency-2) with room over. Larger costs only cache working set -- one block of
+    // fine-ring columns is 128 * 1.33MB = 170MB worst case, against a 512MB budget -- and coarsens
+    // the granularity at which streaming is near-first.
+    static constexpr size_t kColumnInterleave = 128;
+
     size_t pendingTotal() const { return xzOffsets.size() * size_t(kYLevels); }
+
+    // Index -> coord, level-major within a block of kColumnInterleave columns.
+    //
+    // A bijection over [0, pendingTotal()), including the short final block: every block before the
+    // last holds exactly kColumnInterleave columns, so block b's entries always begin at
+    // b * kColumnInterleave * kYLevels, and the last block simply contributes fewer than the slot it
+    // was allotted. That keeps pendingTotal() exactly xzOffsets.size() * kYLevels, so the cursor
+    // arithmetic and every pendingIndex comparison elsewhere are unaffected.
     projv::core::ivec3 pendingCoordAt(size_t i) const {
-        const projv::core::ivec2& o = xzOffsets[i / size_t(kYLevels)];
+        const size_t nCols = xzOffsets.size();
+        const size_t perBlock = kColumnInterleave * size_t(kYLevels);
+        const size_t block = i / perBlock;
+        const size_t r = i - block * perBlock;
+        const size_t blockStart = block * kColumnInterleave;
+        // Short final block: iterate over the columns it actually has, not the full stride.
+        const size_t blockCols = std::min(kColumnInterleave, nCols - blockStart);
+        const projv::core::ivec2& o = xzOffsets[blockStart + (r % blockCols)];
         return projv::core::ivec3(pendingOrigin.x + o.x,
-                                  kChunkYMin + int(i % size_t(kYLevels)),
+                                  kChunkYMin + int(r / blockCols),
                                   pendingOrigin.z + o.y);
     }
 
@@ -925,6 +1015,28 @@ size_t g_columnCacheBytes = 0;
 std::unordered_map<ColumnCacheKey, int, ColumnCacheKeyHash> g_columnBuilding;
 std::condition_variable g_columnCacheCv;
 
+// Is the column cache actually amortizing a prepass over its vertical stack?
+//
+// It should: a stack is ~20 chunks deep and they share one XZ column, so 19 of every 20 calls ought
+// to be `hit`. [GENPHASE] says otherwise -- LOD2 chunks average 1.74ms in `columns` against a full
+// prepass of about 1.6ms, i.e. roughly the whole cost, roughly every time. These counters say which
+// of the two possible causes it is, because the phase timer cannot tell them apart:
+//
+//   miss  the entry was gone and this thread rebuilt it. Duplicate WORK -- the cache is too small,
+//         or the stack's chunks are spread far enough apart in time that entries age out between
+//         them, and the fix is capacity or ordering.
+//   wait  the entry was mid-build by another thread and this one blocked on the CV. No duplicate
+//         work, but the pool is serialized: the streaming order queues a whole vertical stack
+//         contiguously (see the note above), so ~20 workers can pile onto one column and 19 of them
+//         block for the length of one prepass. The fix is to interleave columns in the queue so
+//         concurrent workers land on DIFFERENT ones.
+//
+// waitNs separates the two definitively: if `columns` time is mostly waitNs, it is the second.
+struct ColumnCacheStats {
+    std::atomic<uint64_t> hit{0}, miss{0}, wait{0}, waitNs{0};
+};
+ColumnCacheStats g_colStats;
+
 size_t columnBlockBytes(const ColumnBlock& b) {
     return b.cells.size() * sizeof(ColumnSample) + sizeof(ColumnBlock);
 }
@@ -941,6 +1053,8 @@ static std::shared_ptr<const ColumnBlock> columnsForChunk(const TerrainState& ts
     ColumnCacheKey key{cx, cz, lod};
     {
         std::unique_lock<std::mutex> lock(g_columnCacheMutex);
+        bool blocked = false;
+        auto waitT0 = std::chrono::steady_clock::now();
         // Loop rather than test once: waking from the CV means SOME column finished, not
         // necessarily this one, and the entry can also have been evicted between the notify and
         // this thread reacquiring the lock.
@@ -948,11 +1062,31 @@ static std::shared_ptr<const ColumnBlock> columnsForChunk(const TerrainState& ts
             auto it = g_columnCache.find(key);
             if (it != g_columnCache.end()) {
                 it->second.lastUse = ++g_columnCacheClock;
+                if (blocked) {
+                    g_colStats.wait.fetch_add(1, std::memory_order_relaxed);
+                    g_colStats.waitNs.fetch_add(
+                        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - waitT0).count()),
+                        std::memory_order_relaxed);
+                } else {
+                    g_colStats.hit.fetch_add(1, std::memory_order_relaxed);
+                }
                 return it->second.block;
             }
             if (!g_columnBuilding.count(key)) break;   // nobody on it: claim it below
+            if (!blocked) { blocked = true; waitT0 = std::chrono::steady_clock::now(); }
             g_columnCacheCv.wait(lock);
         }
+        // Falling out of the loop means this thread builds it. If it got here after blocking, the
+        // column it waited for was evicted before it could be read -- charge both.
+        if (blocked) {
+            g_colStats.wait.fetch_add(1, std::memory_order_relaxed);
+            g_colStats.waitNs.fetch_add(
+                uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - waitT0).count()),
+                std::memory_order_relaxed);
+        }
+        g_colStats.miss.fetch_add(1, std::memory_order_relaxed);
         g_columnBuilding[key] = 1;
     }
 
@@ -2284,10 +2418,68 @@ static void evictDistantChunks(projv::Scene& scene, TerrainState& ts, projv::cor
 // Returns true if anything was admitted or refined, i.e. if a flushSceneUpdates is needed. The
 // flush itself belongs to the caller so that one flush per frame can cover this and applyLODRing
 // together -- see the call site.
+// Main-thread cost of admitting a generated chunk, and of the GPU flush that follows it.
+//
+// This is the measurement kMaxNewPerFrame / kAdmitBudgetMs should be set from, and it exists because
+// the previous setting rested on an assumption rather than a number: admission was 19x slower than
+// the generation feeding it, which made it -- not the terrain noise -- the reason a full view takes
+// a minute and a half to appear.
+//
+// Three costs, separated because they scale differently and only one of them is per-chunk:
+//   admit       per chunk. Grid/map writes plus requestChunkLOD. Scales linearly with the cap.
+//   drain       per frame. The rest of generatePendingChunks: locks, queue churn, result scanning.
+//   flush       per frame. flushSceneUpdates batches every dirty blob into one call, so this is
+//               mostly bytes uploaded. Split busy/idle: `idle` is frames that flushed without
+//               admitting anything (a pure LOD flip), which gives the fixed baseline, so the
+//               difference is the part genuinely attributable to the chunks admitted.
+//
+// The number to read off is `marginal` -- admit plus the flush's per-chunk share -- because that is
+// what one more chunk per frame actually costs.
+struct AdmitCost {
+    std::atomic<uint64_t> admitNs{0};
+    std::atomic<uint64_t> drainNs{0};
+    std::atomic<uint64_t> chunks{0};
+    std::atomic<uint64_t> busyFrames{0};
+    std::atomic<uint64_t> budgetFrames{0};   // frames the drain stopped on kAdmitBudgetMs
+    std::atomic<uint64_t> capFrames{0};      // frames the drain stopped on kMaxNewPerFrame
+    // Chunks admitted by the most recent call, read at the flush site to classify that frame.
+    // Main-thread only, so it needs no synchronization.
+    int lastFrameChunks = 0;
+
+    // Least-squares fit of flush time against the number of chunks admitted that frame, over every
+    // frame that flushed. Splitting the flush into a fixed per-frame cost and a marginal per-chunk
+    // cost is the whole question -- "how many more chunks can a frame afford" is the slope, and
+    // dividing total flush time by total chunks answers it wrongly by charging the fixed cost to the
+    // chunks. Main-thread only, hence plain doubles.
+    double fn = 0, fx = 0, fy = 0, fxx = 0, fxy = 0;   // n, sum x, sum y(ms), sum x^2, sum xy
+    void addFlush(int nChunks, double ms) {
+        const double x = double(nChunks);
+        fn += 1; fx += x; fy += ms; fxx += x * x; fxy += x * ms;
+    }
+    // Returns false when the fit is degenerate (every frame admitted the same count), which is the
+    // case during a pure-LOD-flip idle period and would otherwise divide by zero.
+    bool flushFit(double& perChunkMs, double& fixedMs) const {
+        const double den = fn * fxx - fx * fx;
+        if (fn < 8.0 || std::fabs(den) < 1e-9) return false;
+        perChunkMs = (fn * fxy - fx * fy) / den;
+        fixedMs = (fy - perChunkMs * fx) / fn;
+        return true;
+    }
+};
+static AdmitCost g_admit;
+
 static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
     int generated = 0;
     int consumed = 0;
-    static constexpr int kMaxConsumedPerFrame = 192;
+    // Raised alongside kMaxNewPerFrame: this bounds how many results are EXAMINED, so leaving it at
+    // 192 would have quietly become the new binding constraint the moment the admission cap passed
+    // it -- a frame could admit at most 192 chunks however much budget it had left.
+    static constexpr int kMaxConsumedPerFrame = 512;
+    const auto drainT0 = std::chrono::steady_clock::now();
+    uint64_t admitNsAcc = 0;
+    // What this frame has committed to: measured admit() time plus the flush share the chunks it
+    // admitted will cost later. See kAdmitBudgetMs for why admit() time alone is not enough.
+    double committedMs = 0.0;
     std::vector<projv::core::ivec3> admittedRefines;
     std::vector<projv::ChunkHandle> admittedRefineHandles;
     // Edit results thrown away because a later sphere landed on the same coord mid-generation. These
@@ -2567,7 +2759,8 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
             reportEditLatency(proc, "refine");
             if (installRefine(std::move(proc))) generated++;
         }
-        while (!g_worker.readyChunks.empty() && generated < TerrainState::kMaxNewPerFrame && consumed < kMaxConsumedPerFrame) {
+        while (!g_worker.readyChunks.empty() && generated < TerrainState::kMaxNewPerFrame &&
+               consumed < kMaxConsumedPerFrame && committedMs < TerrainState::kAdmitBudgetMs) {
             ProcessedChunk proc = std::move(g_worker.readyChunks.back());
             g_worker.readyChunks.pop_back();
             consumed++;
@@ -2582,7 +2775,18 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
                                         proc.editBatchID, proc.requestedAt});
                 continue;
             }
-            if (admit(std::move(proc))) generated++;
+            // Timed individually rather than as one span around the loop: the loop also does the
+            // stale-edit and empty-sentinel work above, and only what admit() itself costs scales
+            // with the admission cap.
+            const auto admitT0 = std::chrono::steady_clock::now();
+            const bool admitted = admit(std::move(proc));
+            const uint64_t admitNs = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - admitT0).count());
+            admitNsAcc += admitNs;
+            committedMs += double(admitNs) / 1e6;
+            // Only an ADMITTED chunk dirties a blob, so only it costs flush time. Results rejected
+            // as stale or recorded as empty cost admit() time and nothing more.
+            if (admitted) { generated++; committedMs += TerrainState::kMarginalAdmitMs; }
         }
     }
 
@@ -2719,6 +2923,24 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
         }
     }
 
+    // Only frames that actually admitted something are averaged: a frame that drained nothing tells
+    // us nothing about per-chunk cost, and folding those in would divide the totals by mostly-idle
+    // frames and understate it.
+    g_admit.lastFrameChunks = generated;
+    if (generated > 0) {
+        const uint64_t drainNs = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - drainT0).count());
+        g_admit.admitNs.fetch_add(admitNsAcc, std::memory_order_relaxed);
+        g_admit.drainNs.fetch_add(drainNs, std::memory_order_relaxed);
+        g_admit.chunks.fetch_add(uint64_t(generated), std::memory_order_relaxed);
+        g_admit.busyFrames.fetch_add(1, std::memory_order_relaxed);
+        // Which limit actually stopped the drain. If neither fires the pool simply had nothing more
+        // ready, meaning admission is no longer the constraint -- which is the goal state.
+        if (committedMs >= TerrainState::kAdmitBudgetMs)
+            g_admit.budgetFrames.fetch_add(1, std::memory_order_relaxed);
+        if (generated >= TerrainState::kMaxNewPerFrame)
+            g_admit.capFrames.fetch_add(1, std::memory_order_relaxed);
+    }
     return generated > 0;
 }
 
@@ -2806,7 +3028,7 @@ void startup(projv::Application& app) {
         // species at the ends would never come up. Widths are wider than the ~0.08 spacing between
         // centres so neighbouring bands interleave at their edges: a stand picks up strays from the
         // next zone over instead of the map banding into eight hard stripes.
-        const std::string treeFolder = "../ObjVoxelizer/trees";
+        const std::string treeFolder = "../MeshVoxelizer/trees";
         const std::vector<trees::TreeSpecies> treeSpecies = {
             // name        temp c/w      humid c/w     abundance
             {"Bark___1",   0.20f, 0.13f, 0.45f, 0.18f, 1.20f},  // thin spire conifer — coldest
@@ -2837,8 +3059,8 @@ void startup(projv::Application& app) {
                               ts.treeLib.assets.size(), terrainComp.materialPalette.size());
         } else {
             projv::core::warn("[TREES] no tree assets found under '{}' - terrain will be bare. "
-                              "Generate them with: cd ../ObjVoxelizer && make && "
-                              "./obj_voxelizer -m <model> -f <obj> -o trees/<name> -r 64",
+                              "Generate them with: cd ../MeshVoxelizer && make && "
+                              "./mesh_voxelizer -f <model> -o trees/<name> -r 64",
                               treeFolder);
         }
     }
@@ -3095,8 +3317,19 @@ void update(projv::Application& app) {
     // effect -- worst for the coarse->fine direction, which is a pure renderLOD flip on already-
     // resident geometry and so has no admission of its own to ride along with.
     bool needsFlush = generatePendingChunks(scene, ts);
+    // Read before applyLODRing, which does not admit chunks and so must not change the
+    // classification of this frame's flush. See AdmitCost.
+    const int admittedThisFrame = g_admit.lastFrameChunks;
     needsFlush |= applyLODRing(scene, ts, camChunk);
-    if (needsFlush) projv::graphics::flushSceneUpdates(scene, gpuData);
+    if (needsFlush) {
+        const auto flushT0 = std::chrono::steady_clock::now();
+        projv::graphics::flushSceneUpdates(scene, gpuData);
+        const double flushMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - flushT0).count();
+        // Every flushing frame feeds the fit, including the zero-admission ones -- those are what
+        // pin down the fixed cost.
+        g_admit.addFlush(admittedThisFrame, flushMs);
+    }
 
     // Where chunk generation time goes, per storage ring. Reported on the same schedule as the
     // other perf counters; see GenPhases.
@@ -3115,6 +3348,52 @@ void update(projv::Application& app) {
                               l, n, tot,
                               kPhaseNames[0], per[0], kPhaseNames[1], per[1], kPhaseNames[2], per[2],
                               kPhaseNames[3], per[3], kPhaseNames[4], per[4], kPhaseNames[5], per[5]);
+        }
+    }
+
+    // What an admitted chunk costs the main thread, and therefore what the admission cap should be.
+    // See AdmitCost. Reported cumulatively rather than windowed: the interesting regime is the long
+    // initial fill, and a running average over it is exactly the right summary.
+    if (app.frameCount % 300 == 0) {
+        const uint64_t n = g_admit.chunks.load(std::memory_order_relaxed);
+        const uint64_t busy = g_admit.busyFrames.load(std::memory_order_relaxed);
+        if (n > 0 && busy > 0) {
+            const double admitPerChunk =
+                double(g_admit.admitNs.load(std::memory_order_relaxed)) / 1e6 / double(n);
+            const double drainPerFrame =
+                double(g_admit.drainNs.load(std::memory_order_relaxed)) / 1e6 / double(busy);
+            const double chunksPerFrame = double(n) / double(busy);
+            double flushPerChunk = 0.0, flushFixed = 0.0;
+            const bool haveFit = g_admit.flushFit(flushPerChunk, flushFixed);
+            const double marginal = admitPerChunk + std::max(0.0, flushPerChunk);
+            projv::core::perf(
+                "[ADMIT] n={} frames={} ({:.1f}/frame) | admit={:.4f}ms/chunk | "
+                "flush fit: {:.4f}ms/chunk + {:.2f}ms/frame fixed{} | marginal={:.4f}ms/chunk | "
+                "drain={:.2f}ms/frame | stopped on budget {:.0f}% cap {:.0f}% | "
+                "{:.0f} chunks/frame fits {:.1f}ms",
+                n, busy, chunksPerFrame, admitPerChunk,
+                flushPerChunk, flushFixed, haveFit ? "" : " (DEGENERATE)", marginal,
+                drainPerFrame,
+                100.0 * double(g_admit.budgetFrames.load(std::memory_order_relaxed)) / double(busy),
+                100.0 * double(g_admit.capFrames.load(std::memory_order_relaxed)) / double(busy),
+                marginal > 1e-9 ? TerrainState::kAdmitBudgetMs / marginal : 0.0,
+                TerrainState::kAdmitBudgetMs);
+        }
+
+        // Column cache effectiveness. See ColumnCacheStats: `hit` should dominate by ~20:1 if the
+        // prepass is being amortized over its vertical stack at all.
+        const uint64_t ch = g_colStats.hit.load(std::memory_order_relaxed);
+        const uint64_t cm = g_colStats.miss.load(std::memory_order_relaxed);
+        const uint64_t cw = g_colStats.wait.load(std::memory_order_relaxed);
+        if (ch + cm + cw > 0) {
+            const double tot = double(ch + cm + cw);
+            projv::core::perf(
+                "[COLCACHE] hit={} ({:.1f}%) miss={} ({:.1f}%) wait={} ({:.1f}%) | "
+                "avg wait={:.2f}ms, {:.1f}s total blocked across the pool",
+                ch, 100.0 * double(ch) / tot, cm, 100.0 * double(cm) / tot,
+                cw, 100.0 * double(cw) / tot,
+                cw > 0 ? double(g_colStats.waitNs.load(std::memory_order_relaxed)) / 1e6 / double(cw) : 0.0,
+                double(g_colStats.waitNs.load(std::memory_order_relaxed)) / 1e9);
         }
     }
 
@@ -3220,6 +3499,10 @@ void update(projv::Application& app) {
         // Per-LOD ALLOCATED footprint (what actually consumes the texture), split so the
         // marginal cost of one more coarse chunk is directly measurable.
         uint64_t gAlloc0 = 0, gAlloc1 = 0, gAlloc2 = 0, mAlloc0 = 0, mAlloc1 = 0, mAlloc2 = 0;
+        // Used, as against allocated. GPUBlobRange deliberately rounds its ranges up so an edit can
+        // grow a blob in place, and at 155k outer-ring chunks that rounding is paid 155k times --
+        // so the ratio between these two is worth watching directly rather than inferring.
+        uint64_t gLen0 = 0, gLen1 = 0, gLen2 = 0, mLen0 = 0, mLen1 = 0, mLen2 = 0;
         size_t n0 = 0, n1 = 0, n2 = 0;
         for (size_t b = 0; b < scene.geometryPool.size(); ++b) {
             const projv::GeometryBlob& blob = scene.geometryPool[b];
@@ -3228,9 +3511,12 @@ void update(projv::Application& app) {
             const projv::GPUBlobRange& r = gpuData.blobRanges[b];
             // r.uploadedLOD mirrors blob.renderLOD's "relative to native" meaning -- same fix as above.
             uint32_t effLOD = std::min(2u, nativeLODByBlob[b] + r.uploadedLOD);
-            if (effLOD == 0) { n0++; gAlloc0 += r.geomTexelAllocated; mAlloc0 += r.matTexelAllocated; }
-            else if (effLOD == 1) { n1++; gAlloc1 += r.geomTexelAllocated; mAlloc1 += r.matTexelAllocated; }
-            else { n2++; gAlloc2 += r.geomTexelAllocated; mAlloc2 += r.matTexelAllocated; }
+            if (effLOD == 0) { n0++; gAlloc0 += r.geomTexelAllocated; mAlloc0 += r.matTexelAllocated;
+                               gLen0 += r.geomTexelLen; mLen0 += r.matTexelLen; }
+            else if (effLOD == 1) { n1++; gAlloc1 += r.geomTexelAllocated; mAlloc1 += r.matTexelAllocated;
+                                    gLen1 += r.geomTexelLen; mLen1 += r.matTexelLen; }
+            else { n2++; gAlloc2 += r.geomTexelAllocated; mAlloc2 += r.matTexelAllocated;
+                   gLen2 += r.geomTexelLen; mLen2 += r.matTexelLen; }
         }
         projv::core::info("[VRAM] lod0(256³)  n={} geomAlloc={} matAlloc={} ({:.0f}+{:.0f} texels/chunk) | lod1(64³) n={} geomAlloc={} matAlloc={} ({:.0f}+{:.0f}) | lod2(16³) n={} geomAlloc={} matAlloc={} ({:.0f}+{:.0f}) | totalBytes={:.1f}MB",
                    n0, gAlloc0, mAlloc0, n0 ? double(gAlloc0)/n0 : 0.0, n0 ? double(mAlloc0)/n0 : 0.0,
@@ -3238,6 +3524,28 @@ void update(projv::Application& app) {
                    n2, gAlloc2, mAlloc2, n2 ? double(gAlloc2)/n2 : 0.0, n2 ? double(mAlloc2)/n2 : 0.0,
                    (double(gAlloc0 + gAlloc1 + gAlloc2) * 16.0 +
                     double(mAlloc0 + mAlloc1 + mAlloc2) * 4.0) / (1024.0*1024.0));
+
+        // Allocated vs actually used, in MiB, per ring. The gap is over-allocation rounding, and it
+        // is the cheapest VRAM to reclaim if it is large -- reclaiming it costs no quality at all,
+        // unlike coarsening geometry or materials.
+        auto mib = [](uint64_t g, uint64_t m) { return (double(g)*16.0 + double(m)*4.0) / (1024.0*1024.0); };
+        const double a0 = mib(gAlloc0, mAlloc0), u0 = mib(gLen0, mLen0);
+        const double a1 = mib(gAlloc1, mAlloc1), u1 = mib(gLen1, mLen1);
+        const double a2 = mib(gAlloc2, mAlloc2), u2 = mib(gLen2, mLen2);
+        projv::core::info("[VRAMFIT] lod0 {:.1f}/{:.1f}MiB used/alloc ({:.0f}%) | lod1 {:.1f}/{:.1f} ({:.0f}%) "
+                   "| lod2 {:.1f}/{:.1f} ({:.0f}%) | total {:.1f}/{:.1f}MiB -> {:.1f}MiB reclaimable",
+                   u0, a0, a0 > 0 ? 100.0*u0/a0 : 0.0, u1, a1, a1 > 0 ? 100.0*u1/a1 : 0.0,
+                   u2, a2, a2 > 0 ? 100.0*u2/a2 : 0.0, u0+u1+u2, a0+a1+a2,
+                   (a0+a1+a2) - (u0+u1+u2));
+        // Material share, since it is 70% of the total and the only part with an obvious
+        // quality-free compression left (uniform leaves already collapse; see bakeMaterialsFromBrickMap).
+        projv::core::info("[VRAMSPLIT] geom {:.1f}MiB ({:.0f}%) | mat {:.1f}MiB ({:.0f}%) | "
+                   "lod2 alone {:.1f}MiB ({:.0f}% of all)",
+                   double(gAlloc0+gAlloc1+gAlloc2)*16.0/(1024.0*1024.0),
+                   100.0*double(gAlloc0+gAlloc1+gAlloc2)*16.0/((double(gAlloc0+gAlloc1+gAlloc2)*16.0+double(mAlloc0+mAlloc1+mAlloc2)*4.0)),
+                   double(mAlloc0+mAlloc1+mAlloc2)*4.0/(1024.0*1024.0),
+                   100.0*double(mAlloc0+mAlloc1+mAlloc2)*4.0/((double(gAlloc0+gAlloc1+gAlloc2)*16.0+double(mAlloc0+mAlloc1+mAlloc2)*4.0)),
+                   a2, 100.0*a2/(a0+a1+a2));
     }
 }
 

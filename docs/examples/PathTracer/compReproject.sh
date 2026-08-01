@@ -23,7 +23,7 @@ for i in $SHADER_DIR/vs_*.sc; do
     NAME_BIN_EXTENSION="${i%.*}.bin"
     echo "Compiling vertex shader: \"$i\" -> $NAME_BIN_EXTENSION"
     $SHADERC -f "$i" -o "$NAME_BIN_EXTENSION" --type v \
-        --platform $PLATFORM --profile $PROFILE -i $PROJECTV_DIR/external/bgfx/src -i ./sharedShaders || exit 1
+        --platform $PLATFORM --profile $PROFILE -i $PROJECTV_DIR/external/bgfx/src -i ./sharedShaders -i $PROJECTV_DIR/include || exit 1
 done
 
 # Fragment shaders.
@@ -32,7 +32,7 @@ for i in $SHADER_DIR/*.frag; do
     NAME_BIN_EXTENSION="${i%.*}.bin"
     echo "Compiling fragment shader: \"$i\" -> $NAME_BIN_EXTENSION"
     $SHADERC -f "$i" -o "$NAME_BIN_EXTENSION" --type f \
-        --platform $PLATFORM --profile $PROFILE -i $PROJECTV_DIR/external/bgfx/src -i ./sharedShaders || exit 1
+        --platform $PLATFORM --profile $PROFILE -i $PROJECTV_DIR/external/bgfx/src -i ./sharedShaders -i $PROJECTV_DIR/include || exit 1
 done
 
 echo "Done."

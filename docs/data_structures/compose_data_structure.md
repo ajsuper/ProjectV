@@ -210,9 +210,9 @@ Grid volumes can be loaded **lazily**: `loadComposeFromDisk(folder, &streamingCo
 | Intrinsic data | `tree64/<id>.bin` + `voxelTypeData/<id>.bin`, `resolution`/`voxelScale` in header | Bundled in a `.data` container |
 | Reuse / hierarchy | none (flat list) | `asset` references + scene graph |
 | Chunk ID | authored in file | assigned internally on load |
-| Status | **Removed** — no loader/writer remains in the engine | Current; produced by ObjVoxelizer, loaded by `loadComposeFromDisk` |
+| Status | **Removed** — no loader/writer remains in the engine | Current; produced by MeshVoxelizer, loaded by `loadComposeFromDisk` |
 
-The legacy loader/writer (`utils/voxel_io.h` / `loadSceneFromDisk` / `writeSceneToDisk`) was removed because the per-chunk `.bin` layout offered nothing Compose doesn't, and the only existing scenes can be regenerated from their source meshes via [ObjVoxelizer](/docs/examples/ObjVoxelizer). The intrinsic fields a `.data` carries (`resolution`, `voxelScale`, geometry `uint32[]`, `voxelTypeData` `uint32[]`) are exactly the per-chunk fields the old `loadChunkFromDisk` read.
+The legacy loader/writer (`utils/voxel_io.h` / `loadSceneFromDisk` / `writeSceneToDisk`) was removed because the per-chunk `.bin` layout offered nothing Compose doesn't, and the only existing scenes can be regenerated from their source meshes via [MeshVoxelizer](/docs/examples/MeshVoxelizer). The intrinsic fields a `.data` carries (`resolution`, `voxelScale`, geometry `uint32[]`, `voxelTypeData` `uint32[]`) are exactly the per-chunk fields the old `loadChunkFromDisk` read.
 
 ---
 

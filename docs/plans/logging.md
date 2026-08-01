@@ -321,7 +321,7 @@ caller-side gate** (see Step 4 for the pattern). For now, just change `info` →
 11. `docs/examples/PathTracer/main.cpp` — remove `spdlog::set_level(...)`.
     `core::info(...)` stays. `core::warn("PROFILING: ...")` → `core::perf("...")`
     (remove the `PROFILING: ` prefix since `[PRF]` is now automatic).
-12. `docs/examples/ObjVoxelizer/main.cpp` — `core::error`/`core::warn`/`core::info`
+12. `docs/examples/MeshVoxelizer/main.cpp` — `core::error`/`core::warn`/`core::info`
     — no change needed.
 
 **After migrating each file, build and check for errors:**
@@ -529,7 +529,7 @@ Add a section under "Delivered" documenting the logging system:
 | `docs/examples/editing_p1/main.cpp` | Remove `spdlog::set_level` if present. |
 | `docs/examples/edit_demo/main.cpp` | Remove `spdlog::set_level` (line 340). Add frame-time perf summary. |
 | `docs/examples/PathTracer/main.cpp` | Remove `spdlog::set_level`. `core::warn("PROFILING: ...")` → `core::perf("...")`. Add frame-time perf summary. |
-| `docs/examples/ObjVoxelizer/main.cpp` | No change needed. |
+| `docs/examples/MeshVoxelizer/main.cpp` | No change needed. |
 | `CODING_STYLE.md` | Update logging section. |
 | `AGENTS.md` | Add logging system delivery entry. |
 

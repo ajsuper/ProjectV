@@ -151,7 +151,7 @@ inline void buildMips(TreeAsset& asset, int levels) {
     }
 }
 
-// Reads the .data containers the ObjVoxelizer example produces (one 64^3 block per tree), decodes
+// Reads the .data containers the MeshVoxelizer example produces (one 64^3 block per tree), decodes
 // their voxelTypeData into flat voxel lists, and builds the coarse mips. Colors are kept raw here;
 // resolveMaterials() below is what turns them into palette slots, because that has to happen
 // against a live Scene.

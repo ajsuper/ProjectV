@@ -2,7 +2,7 @@
 
 An interactive real-time path tracer that loads a pre-voxelized scene from disk and renders it into ProjectV's tree64 voxel structure. The camera can be freely navigated. At startup you choose between several independent renderers — the three documented in detail below, plus experimental per-face and world-space radiance-cascade variants.
 
-The included scene is the **Sponza atrium** (`SponzaScene/`), voxelized with [ObjVoxelizer](../ObjVoxelizer/).
+The included scene is the **Sponza atrium** (`SponzaScene/`), voxelized with [MeshVoxelizer](../MeshVoxelizer/).
 
 ## Renderers
 
@@ -82,7 +82,7 @@ On startup the console prompts you to pick a renderer (`1` = tree64, `2` = repro
 
 When the camera is stationary, the accumulating renderers refine the image each frame, progressively reducing noise. Any movement (or a sun change) resets accumulation.
 
-To render a different scene, replace `SponzaScene/` with any Compose scene directory produced by ObjVoxelizer and update the `loadComposeFromDisk` path in `main.cpp`.
+To render a different scene, replace `SponzaScene/` with any Compose scene directory produced by MeshVoxelizer and update the `loadComposeFromDisk` path in `main.cpp`.
 
 ## ProjectV Features Used
 

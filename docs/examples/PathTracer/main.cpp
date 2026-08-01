@@ -3,7 +3,7 @@
 // it with one of several selectable renderers. The camera can be freely navigated with keyboard
 // controls.
 //
-// Scene: SponzaScene — voxelized Sponza atrium produced by ProjectVObjVoxelizer.
+// Scene: SponzaScene — voxelized Sponza atrium produced by ProjectV MeshVoxelizer.
 //
 // ---------------------------------------------------------------------------------------------
 // RENDERER SELECTION

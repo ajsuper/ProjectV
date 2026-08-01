@@ -88,10 +88,30 @@ namespace projv::graphics {
         uint32_t withHeadroom(uint32_t used) { return used + used / 2 + 1024; }
 
         // Per-blob over-allocation padding so in-place COW edits that grow the blob slightly
-        // don't need a new GPU range. 25% + 64-texel minimum is conservative: it absorbs typical
-        // voxel additions while keeping total padding well within the allocator's headroom
-        // (which is 50% + 1024 of the padded used total).
-        uint32_t paddedAlloc(uint32_t needed) { return needed + std::max(needed / 4u, 64u); }
+        // don't need a new GPU range. The padded total feeds withHeadroom, so the allocator's own
+        // free space scales with it.
+        //
+        // Slack is PROPORTIONAL ONLY, and only on blobs big enough to be an edit target. The rule
+        // was `needed + max(needed/4, 64)`, and that flat 64-texel floor was sized for blobs of a
+        // few thousand texels. A streaming world's blobs are not all that size: on the outer LOD
+        // ring a geometry blob is about 58 texels, which the floor took to 122 -- 111% overhead --
+        // to absorb an edit those chunks never receive, because an edit only ever lands where the
+        // player can reach and that is always the full-resolution near ring.
+        //
+        // Measured over a settled radius-110 view (155k outer-ring chunks, [VRAMFIT]): the old rule
+        // spent 396 MiB of a 1522 MiB data-texture footprint on padding, and the outer ring ran at
+        // 70% efficiency. That matters because the materialID texture's capacity (32768x12747 texels,
+        // 1556 MiB) is the hard ceiling on view distance -- overflowing it drops material bytes and
+        // renders wrong colours, so every MiB of padding there is view distance not spent.
+        //
+        // A blob below the threshold gets none. If an edit ever does land on one, the growth test in
+        // uploadDirtyBlobs sees `nodes > geomTexelAllocated`, frees and reallocates -- correct, and
+        // cheap next to the re-bake that edit already triggered.
+        constexpr uint32_t kPadMinTexels = 4096;
+        uint32_t paddedAlloc(uint32_t needed) {
+            if (needed < kPadMinTexels) return needed;
+            return needed + needed / 4u;
+        }
 
         static uint32_t nextPowerOfTwo(uint32_t v) {
             if (v == 0) return 1;

@@ -13,7 +13,7 @@ if [[ $OSTYPE == *"darwin"* ]]; then
     PROFILE=metal
 fi
 
-for i in ./tree64Renderer/pathTracerShaders/*.sc; do
+for i in ./tree64Renderer/pathTracerShaders/vs_*.sc; do
     [ -f "$i" ] || break
     echo "Compiling file: \"$i\"..."
     NAME_BIN_EXTENSION="${i%.*}.bin"
@@ -25,7 +25,8 @@ for i in ./tree64Renderer/pathTracerShaders/*.sc; do
         --platform $PLATFORM \
         --profile $PROFILE \
         -i $PROJECTV_DIR/external/bgfx/src \
-        -i ./sharedShaders
+        -i ./sharedShaders \
+        -i $PROJECTV_DIR/include
 done
 
 for i in ./tree64Renderer/pathTracerShaders/*.frag; do
@@ -40,6 +41,7 @@ for i in ./tree64Renderer/pathTracerShaders/*.frag; do
         --platform $PLATFORM \
         --profile $PROFILE \
         -i $PROJECTV_DIR/external/bgfx/src \
-        -i ./sharedShaders
+        -i ./sharedShaders \
+        -i $PROJECTV_DIR/include
 done
 

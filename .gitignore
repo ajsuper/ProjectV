@@ -14,7 +14,7 @@ docs/examples/*/main.o
 
 # Allow example models
 !docs/examples/PathTracer/SponzaScene/**/*.bin
-!docs/examples/ObjVoxelizer/testScene/**/*.bin
+!docs/examples/MeshVoxelizer/testScene/**/*.bin
 
 # Ignore VS Code config files
 .vscode/
