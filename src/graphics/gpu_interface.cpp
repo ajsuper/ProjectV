@@ -529,6 +529,63 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
     // Not rebuilt: return false so callers know headers don't need rewriting.
 
+    namespace {
+        // The colour sitting at a global palette index, resolved back through the per-component
+        // offsets the last rebuild recorded. Indices past the final component's palette are the
+        // padding rebuildGlobalPaletteTexture adds to reach a whole texel, and read as zero.
+        // Caller holds scene.materialPaletteMutex.
+        uint32_t globalPaletteEntry(const Scene& scene, const GPUData& gpuData, uint32_t globalIndex) {
+            for (size_t h = 0; h < scene.components.size() && h < gpuData.componentPaletteOffsets.size(); ++h) {
+                uint32_t offset = gpuData.componentPaletteOffsets[h];
+                const std::vector<Material>& palette = scene.components[h].materialPalette;
+                if (globalIndex >= offset && globalIndex < offset + palette.size()) {
+                    return palette[globalIndex - offset].packedColor;
+                }
+            }
+            return 0;
+        }
+    }
+
+    void updatePaletteEntry(const Scene& scene, GPUData& gpuData, ComponentHandle componentHandle, uint8_t slot) {
+        if (!bgfx::isValid(gpuData.materialPaletteTexture) || gpuData.paletteWidth == 0) {
+            return;   // Nothing uploaded yet; the first build will pick the value up.
+        }
+        if (componentHandle >= gpuData.componentPaletteOffsets.size() ||
+            componentHandle >= scene.components.size()) {
+            core::warn("updatePaletteEntry: component handle {} has no palette offset yet.", componentHandle);
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(scene.materialPaletteMutex);
+        if (slot >= scene.components[componentHandle].materialPalette.size()) {
+            core::warn("updatePaletteEntry: slot {} out of range for component {}.", slot, componentHandle);
+            return;
+        }
+
+        // The palette texture is RGBA32U — four entries per texel — so the whole texel is rewritten,
+        // including the three neighbours, which may belong to the next component's palette.
+        uint32_t globalIndex = gpuData.componentPaletteOffsets[componentHandle] + slot;
+        uint32_t texelIndex = globalIndex >> 2;
+        uint32_t texel[4];
+        for (uint32_t i = 0; i < 4; ++i) {
+            texel[i] = globalPaletteEntry(scene, gpuData, (texelIndex << 2) + i);
+        }
+
+        uint32_t x = texelIndex % gpuData.paletteWidth;
+        uint32_t y = texelIndex / gpuData.paletteWidth;
+        const bgfx::Memory* mem = bgfx::copy(texel, sizeof(texel));
+        bgfx::updateTexture2D(gpuData.materialPaletteTexture, 0, 0, uint16_t(x), uint16_t(y), 1, 1, mem);
+
+        // The GPU now matches the CPU, so move the watermark rebuildGlobalPaletteTexture compares
+        // against. Without this the next flushSceneUpdates would see a version it has not seen,
+        // rebuild the entire palette texture, and dirty every chunk header to no effect.
+        uint64_t totalVersion = 0;
+        for (const ComponentRecord& component : scene.components) {
+            totalVersion += component.paletteVersion;
+        }
+        gpuData.componentPaletteVersion = totalVersion;
+    }
+
     void setTextureToData(std::shared_ptr<ConstructedRenderer> constructedRenderer, uint textureID, unsigned char * data, uint textureWidth, uint textureHeight) {  
         projv::core::ivec2 textureDimensions = constructedRenderer->resources.textures.textureResolutions.at(textureID);  
         bool textureIsResizable = false;

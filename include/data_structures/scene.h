@@ -167,6 +167,13 @@ namespace projv{
         // -- a grid-resident chunk's component is SceneGrid::componentHandle instead (one component
         // owns every cell of its grid).
         ComponentHandle componentHandle = INVALID_COMPONENT_HANDLE;
+        // World-space edge length this chunk would have if its owning component's whole ancestor
+        // chain had localScale == 1.0 everywhere (i.e. voxelScale * resolution, transform-independent).
+        // Set once at load and never touched again; scene_query's rebakeSubtree multiplies it by the
+        // scale extracted from the current world transform to get header.scale on every edit, rather
+        // than trying to recover a scale factor from header.scale after the fact (there is nothing to
+        // recover it relative to once a transform edit has already overwritten it).
+        float nativeScale = 0.0f;
     };
 
     // One unique geometry blob shared across chunk instances. See Scene.geometryPool.
@@ -220,6 +227,9 @@ struct GeometryBlob {
         // After negative expansion this shifts away from (0,0,0). Used to linearize floorDiv'd
         // cell coordinates into the cellToChunk array.
         core::ivec3 originCellCoord{0};
+        // Transform-independent cell size (see Chunk::nativeScale -- same idea, one level up).
+        // rebakeSubtree multiplies this by the transform's extracted scale to get cellSize.
+        float nativeCellSize = 0.0f;
     };
 
     struct Scene {

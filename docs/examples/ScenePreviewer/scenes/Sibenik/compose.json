@@ -9,6 +9,16 @@
             ],
             "source": "model.data",
             "type": "data"
+        },
+        {
+            "mutability": "direct",
+            "position": [
+                10.0,
+                0.0,
+                0.0
+            ],
+            "source": "model.data",
+            "type": "data"
         }
     ],
     "name": "sibenik",

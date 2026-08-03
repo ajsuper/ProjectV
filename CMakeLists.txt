@@ -198,6 +198,10 @@ link_common_includes(projectV-material)
 add_library(projectV-voxel_math STATIC ${UTILS_SRC_DIR}/voxel_math.cpp)
 link_common_includes(projectV-voxel_math)
 
+add_library(projectV-picking STATIC ${UTILS_SRC_DIR}/picking.cpp)
+target_link_libraries(projectV-picking PRIVATE projectV-voxel_math projectV-math)
+link_common_includes(projectV-picking)
+
 add_library(projectV-editing STATIC ${UTILS_SRC_DIR}/editing.cpp)
 target_link_libraries(projectV-editing PRIVATE projectV-voxel_management projectV-voxel_math projectV-material)
 link_common_includes(projectV-editing)

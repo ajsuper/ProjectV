@@ -812,6 +812,27 @@ chunk.requestedLOD    = 0;
         check(restoredWorld.x == worldPosD.x && restoredWorld.y == worldPosD.y &&
               restoredWorld.z == worldPosD.z,
               "P6: world position restored after undo");
+
+        // setComponentScale: header.scale (or the owning grid's cellSize) must track localScale via
+        // Chunk::nativeScale / SceneGrid::nativeCellSize -- the transform-independent size rebakeSubtree
+        // multiplies by the scale it extracts from the composed world matrix.
+        auto readHeaderScale = [&](projv::ComponentHandle h) -> float {
+            const projv::ComponentRecord& c = scene.components[h];
+            if (c.kind == projv::ComponentKind::Chunk) return scene.chunks[c.chunkHandle].header.scale;
+            if (c.kind == projv::ComponentKind::Grid) return scene.grids[c.gridIndex].cellSize;
+            return -1.0f;
+        };
+        float origScale = scene.components[firstData].localScale;
+        float scaleBefore = readHeaderScale(firstData);
+        projv::utils::setComponentScale(scene, firstData, origScale * 2.0f);
+        check(std::abs(readHeaderScale(firstData) - scaleBefore * 2.0f) < 1e-2f,
+              "P6: setComponentScale(2x) doubles header scale");
+        projv::utils::setComponentScale(scene, firstData, origScale * 0.5f);
+        check(std::abs(readHeaderScale(firstData) - scaleBefore * 0.5f) < 1e-2f,
+              "P6: setComponentScale(0.5x) halves header scale");
+        projv::utils::setComponentScale(scene, firstData, origScale);
+        check(std::abs(readHeaderScale(firstData) - scaleBefore) < 1e-2f,
+              "P6: setComponentScale restores original header scale");
     }
 
     if (g_failures == 0) {

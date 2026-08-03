@@ -379,6 +379,11 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
         SceneGrid g;
         g.origin    = chunk.header.position;
         g.cellSize  = chunk.header.scale;
+        // Carried over unchanged: the conversion doesn't touch the transform, so the
+        // transform-independent size stays what the chunk's was (see Chunk::nativeScale). Left at
+        // its default 0 here, a later transform edit's scale extraction would zero this grid's
+        // cellSize on the very first rebake.
+        g.nativeCellSize = chunk.nativeScale;
         g.rotation  = chunk.header.rotation;
         g.dims      = core::ivec3(1);
         g.cellToChunk = {static_cast<int32_t>(comp.chunkHandle)};

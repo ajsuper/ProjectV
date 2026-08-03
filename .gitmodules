@@ -21,3 +21,7 @@
 	path = docs/examples/MeshVoxelizer/external/assimp
 	url = https://github.com/assimp/assimp.git
 	shallow = true
+[submodule "external/imgui"]
+	path = external/imgui
+	url = https://github.com/ocornut/imgui.git
+	branch = docking

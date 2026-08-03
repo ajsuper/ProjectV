@@ -482,6 +482,7 @@ namespace projv::utils {
                         chunk.header.resolution = dataFile.resolution;
                         chunk.header.voxelScale = dataFile.voxelScale * uniformScale;
                         chunk.header.scale = localBlockScale * uniformScale;
+                        chunk.nativeScale = localBlockScale;
                         core::vec3 blockLocalCorner =
                             core::vec3(block.gridX, block.gridY, block.gridZ) * localBlockScale;
                         chunk.header.position = core::vec3(world * core::vec4(blockLocalCorner, 1.0f));
@@ -527,6 +528,7 @@ namespace projv::utils {
                         SceneGrid grid;
                         grid.origin    = core::vec3(world[3]);
                         grid.cellSize  = localBlockScale * uniformScale;
+                        grid.nativeCellSize = localBlockScale;
                         grid.rotation  = worldRotation;
                         core::ivec3 dims(0);
                         for (const DataBlock& b : dataFile.blocks) {
