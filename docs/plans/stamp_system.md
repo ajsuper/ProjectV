@@ -1,6 +1,21 @@
 # Stamp System — Shape Placement and Region Copy/Move (SceneEditor)
 
-Design only. Nothing here is implemented yet.
+**Implemented.** This is the design it was built from; the built version is documented in
+[`docs/examples/SceneEditor/README.md`](../examples/SceneEditor/README.md) under *Stamps: the Shape
+and Region tools*, and lives in that example's `main.cpp`. Where the two differ, the README is what
+the code does.
+
+Two deliberate departures from what is written below:
+
+- **`Ctrl+Y` also cost Redo its alias.** The shortcut table here does not mention that the letter was
+  already taken; Redo keeps `Ctrl+Shift+Z`, which the Edit menu had always advertised alongside it.
+- **A merge past its cell budget is refused, not truncated.** "Budget discipline" below is borrowed
+  from the fill, but a fill that stops halfway leaves a smaller fill, while a merge that stops
+  halfway leaves half an object embedded in the scene. The message names the number and the fix.
+
+One hazard below turned out to have a second half worth recording: reusing one stamp component per
+session is not enough on its own, because `resolution` is fixed for a component's whole life. The
+pool is keyed by resolution — at most five entries, since `CHUNK_RESOLUTION_CHOICES` is five long.
 
 ## Goal
 

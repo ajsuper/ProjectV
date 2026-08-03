@@ -116,10 +116,12 @@ enum class EditorTool {
     Select,   // Ctrl+Q — click a voxel to select the component that owns it.
     Move,     // Ctrl+W — the transform gizmo, plus selection.
     Sculpt,   // Ctrl+E — add and remove voxels with a brush.
-    Paint     // Ctrl+R — recolour voxels with the palette's current entry.
+    Paint,    // Ctrl+R — recolour voxels with the palette's current entry.
+    Shape,    // Ctrl+T — generate a primitive, place it, merge it in.
+    Region    // Ctrl+Y — select voxels already in the scene, copy or move them.
 };
 
-static constexpr int EDITOR_TOOL_COUNT = 4;
+static constexpr int EDITOR_TOOL_COUNT = 6;
 
 static const char* editorToolLabel(EditorTool tool) {
     switch (tool) {
@@ -127,16 +129,23 @@ static const char* editorToolLabel(EditorTool tool) {
         case EditorTool::Move:   return "Move";
         case EditorTool::Sculpt: return "Sculpt";
         case EditorTool::Paint:  return "Paint";
+        case EditorTool::Shape:  return "Shape";
+        case EditorTool::Region: return "Region";
     }
     return "?";
 }
 
+// Ctrl+Y used to be a second binding for Redo. It is the Region tool now: the keyboard-row logic
+// above wants Q/W/E/R/T/Y in order, and Redo keeps the binding every other panel in this editor
+// already advertises (Ctrl+Shift+Z) rather than holding a letter hostage for its alias.
 static const char* editorToolShortcut(EditorTool tool) {
     switch (tool) {
         case EditorTool::Select: return "Ctrl+Q";
         case EditorTool::Move:   return "Ctrl+W";
         case EditorTool::Sculpt: return "Ctrl+E";
         case EditorTool::Paint:  return "Ctrl+R";
+        case EditorTool::Shape:  return "Ctrl+T";
+        case EditorTool::Region: return "Ctrl+Y";
     }
     return "";
 }
@@ -149,6 +158,8 @@ static const char* editorToolHint(EditorTool tool) {
         case EditorTool::Move:   return "Drag a gizmo handle to transform; click a voxel to select.";
         case EditorTool::Sculpt: return "Drag to add or remove voxels. Alt+click samples a material.";
         case EditorTool::Paint:  return "Drag to recolour voxels. Alt+click samples an entry.";
+        case EditorTool::Shape:  return "Click to drop the primitive into the scene, then place it.";
+        case EditorTool::Region: return "Click to pick the selection's two corners, or a face/volume.";
     }
     return "";
 }
@@ -161,7 +172,9 @@ enum class PickPurpose {
     SelectComponent,
     SampleMaterial,
     PaintVoxel,
-    SculptVoxel   // Re-armed every frame of a drag, not once per click — see the sculpt stroke below.
+    SculptVoxel,  // Re-armed every frame of a drag, not once per click — see the sculpt stroke below.
+    SpawnStamp,   // Shape tool: drop the primitive where the ray lands.
+    RegionSeed    // Region tool: a corner of the box, or the seed of a face/volume gather.
 };
 
 // =============================================================================
@@ -474,6 +487,224 @@ static constexpr int PAINT_MAX_INTERPOLATED_STEPS = 32;
 static bool paintShapeIsFill(PaintShape shape) {
     return shape == PaintShape::FillFace || shape == PaintShape::FillVolume;
 }
+
+// =============================================================================
+// Stamps
+// =============================================================================
+//
+// A *stamp* is geometry that is not part of the scene yet: it carries its own transform, it is
+// driven by the transform gizmo, and it ends in a commit or a cancel. Two tools produce one:
+//
+//   Shape (Ctrl+T)   generates a primitive -- box, sphere, cylinder, cone, wedge, pyramid, torus.
+//   Region (Ctrl+Y)  lifts voxels that are already in the scene, by copy or by cut.
+//
+// They are one machine with two sources, which is why there is one FloatingStamp rather than a
+// placement path per tool.
+//
+// The decision everything else follows from: **a stamp is a real ComponentKind::Chunk component in
+// the scene**, not a CPU-side voxel buffer with a preview overlay. A buffer would need its own
+// render path and could not be sculpted before it committed. A component inherits, at no cost, the
+// raycaster (which already draws any component and already honours ChunkHeader::rotation, so a
+// rotated stamp is visible exactly as it will land), the transform gizmo, the yellow selection
+// outline, Sculpt and Paint working on it before it commits -- and "keep this as its own object"
+// becomes a commit path that does nothing at all.
+
+enum class ShapeKind {
+    Box,
+    Sphere,
+    Cylinder,
+    Cone,
+    Wedge,      // A ramp: a box cut by one diagonal plane.
+    Pyramid,    // Rectangular base tapering to a point.
+    Torus
+};
+
+static constexpr int SHAPE_KIND_COUNT = 7;
+
+static const char* ShapeKindLabel(ShapeKind kind) {
+    switch (kind) {
+        case ShapeKind::Box:      return "Box";
+        case ShapeKind::Sphere:   return "Sphere";
+        case ShapeKind::Cylinder: return "Cylinder";
+        case ShapeKind::Cone:     return "Cone";
+        case ShapeKind::Wedge:    return "Wedge";
+        case ShapeKind::Pyramid:  return "Pyramid";
+        case ShapeKind::Torus:    return "Torus";
+    }
+    return "?";
+}
+
+// What the three size fields mean for this shape, said out loud: "Width/Height/Depth" is the truth
+// for a box and a lie for a torus, whose third number is the tube.
+static const char* ShapeKindHint(ShapeKind kind) {
+    switch (kind) {
+        case ShapeKind::Box:      return "A rectangular block filling the whole size box.";
+        case ShapeKind::Sphere:   return "An ellipsoid inscribed in the size box.";
+        case ShapeKind::Cylinder: return "An elliptical cylinder, its axis up the height.";
+        case ShapeKind::Cone:     return "A cone on an elliptical base, tapering to a point on top.";
+        case ShapeKind::Wedge:    return "A ramp: a box cut by one diagonal, rising along the depth.";
+        case ShapeKind::Pyramid:  return "A rectangular base tapering to a point on top.";
+        case ShapeKind::Torus:    return "A ring lying flat. Height is the tube's diameter, not the ring's.";
+    }
+    return "";
+}
+
+// What a commit does to the target's geometry.
+enum class MergeMode {
+    Add,        // Write the stamp's voxels in, each in its own colour.
+    Subtract    // Take them out. A sphere subtracted is a crater; same walk, queueVoxelRemove.
+};
+
+// How the Region tool decides which voxels are selected. The first is new; the other two are the
+// two gathers the editor already has, returning their result instead of acting on it.
+enum class RegionSelector {
+    Box,        // Click voxel A, click voxel B. Unambiguous, and no modifier gymnastics.
+    Face,       // gatherFaceRegion, unchanged.
+    Volume      // The paint fill's breadth-first traversal, returning its bitset.
+};
+
+static constexpr int REGION_SELECTOR_COUNT = 3;
+
+static const char* RegionSelectorLabel(RegionSelector selector) {
+    switch (selector) {
+        case RegionSelector::Box:    return "Box";
+        case RegionSelector::Face:   return "Face";
+        case RegionSelector::Volume: return "Volume";
+    }
+    return "?";
+}
+
+static const char* RegionSelectorHint(RegionSelector selector) {
+    switch (selector) {
+        case RegionSelector::Box:    return "Click one corner voxel, then the opposite one.";
+        case RegionSelector::Face:   return "Click a face; the whole flat surface is selected.";
+        case RegionSelector::Volume: return "Click a voxel; everything connected to it is selected.";
+    }
+    return "";
+}
+
+// Ceilings, in voxels, on the three things a stamp can be asked to do at once.
+//
+// STAMP_MAX_DIMENSION is a per-axis cap on a generated primitive, so the size fields cannot ask for
+// a volume that has to be refused after the fact.
+//
+// STAMP_MAX_SOURCE_CELLS bounds the *dense snapshot* the merge takes of the stamp before it writes
+// anything: one byte of occupancy and four of colour per cell of the stamp's bounding box, so that
+// the merge's inner loop is a bit test rather than a tree64 descent. Eight million cells is a
+// 200^3 stamp and 40 MB of scratch.
+//
+// STAMP_MAX_MERGE_CELLS bounds the *target* cells the merge walks. Under free rotation that is the
+// volume of the stamp's oriented bounding box, not the stamp's voxel count -- which is exactly why
+// the box's volume is the number capped here. Nothing is allocated per cell, so this one can afford
+// to be four times the other.
+static constexpr int    STAMP_MAX_DIMENSION = 512;
+static constexpr size_t STAMP_MAX_SOURCE_CELLS = 8000000;
+static constexpr size_t STAMP_MAX_MERGE_CELLS  = 32000000;
+// A box selection's bounding box, capped for the same reason: the bitset is one bit per cell of it.
+static constexpr size_t STAMP_MAX_SELECTION_CELLS = 64000000;
+
+// A selection of voxels inside one component -- bounds plus one bit per cell of those bounds, not a
+// vector<ivec3>. The volume fill already established why: a million-voxel selection is 128 KB one
+// way and 12 MB the other, and the bitset also answers "is this coordinate in the selection?" in
+// constant time, which the lift and the delete both ask once per voxel.
+struct VoxelSelection {
+    projv::ComponentHandle component = projv::INVALID_COMPONENT_HANDLE;
+    projv::core::ivec3 boundsMin = projv::core::ivec3(0);
+    projv::core::ivec3 boundsMax = projv::core::ivec3(0);   // Inclusive.
+    std::vector<uint64_t> bits;
+    size_t count = 0;
+    bool truncated = false;   // A gather ran into its limit.
+
+    bool empty() const { return count == 0; }
+
+    projv::core::ivec3 dimensions() const {
+        return boundsMax - boundsMin + projv::core::ivec3(1);
+    }
+
+    size_t cellCount() const {
+        projv::core::ivec3 size = dimensions();
+        return size_t(size.x) * size_t(size.y) * size_t(size.z);
+    }
+
+    bool contains(projv::core::ivec3 coord) const {
+        if (coord.x < boundsMin.x || coord.y < boundsMin.y || coord.z < boundsMin.z) return false;
+        if (coord.x > boundsMax.x || coord.y > boundsMax.y || coord.z > boundsMax.z) return false;
+        size_t bit = bitIndex(coord);
+        return ((bits[bit >> 6] >> (bit & 63)) & 1ull) != 0ull;
+    }
+
+    void set(projv::core::ivec3 coord) {
+        size_t bit = bitIndex(coord);
+        uint64_t mask = 1ull << (bit & 63);
+        if ((bits[bit >> 6] & mask) != 0ull) return;
+        bits[bit >> 6] |= mask;
+        count++;
+    }
+
+    void reset(projv::ComponentHandle owner, projv::core::ivec3 minimum, projv::core::ivec3 maximum) {
+        component = owner;
+        boundsMin = minimum;
+        boundsMax = maximum;
+        count = 0;
+        truncated = false;
+        bits.assign((cellCount() + 63) / 64, 0ull);
+    }
+
+    void clear() {
+        component = projv::INVALID_COMPONENT_HANDLE;
+        boundsMin = boundsMax = projv::core::ivec3(0);
+        bits.clear();
+        count = 0;
+        truncated = false;
+    }
+
+private:
+    size_t bitIndex(projv::core::ivec3 coord) const {
+        projv::core::ivec3 local = coord - boundsMin;
+        projv::core::ivec3 size = dimensions();
+        return (size_t(local.z) * size_t(size.y) + size_t(local.y)) * size_t(size.x) + size_t(local.x);
+    }
+};
+
+// The floating stamp itself. At most one exists at a time: a stamp is a modal state, and two of them
+// would be two answers to "what does Enter mean".
+struct FloatingStamp {
+    bool active = false;
+    projv::ComponentHandle component = projv::INVALID_COMPONENT_HANDLE;   // Live, renderable, gizmo-able.
+    projv::ComponentHandle target    = projv::INVALID_COMPONENT_HANDLE;   // Where a merge writes.
+
+    enum class Source { Generated, Lifted };
+    Source source = Source::Generated;
+
+    // Cancel has to put a cut's voxels back, which is what this holds. Empty for a copy and for a
+    // generated shape -- neither took anything out of the scene.
+    bool cutFromTarget = false;
+    std::vector<projv::core::ivec3> liftedCoords;
+    std::vector<uint32_t> liftedColors;
+
+    // Generated only. Regenerating a primitive at new dimensions is exact and free, which is why a
+    // generated shape can be resized after it has been spawned and a lifted one cannot: resizing
+    // lifted voxels is a resample, and there is nothing to resample it *from*.
+    ShapeKind kind = ShapeKind::Box;
+    int dimensions[3] = {16, 16, 16};
+    bool hollow = false;
+    int wallThickness = 1;
+    uint32_t color = 0xFFFFFFFFu;
+
+    // How many voxels went into it, for the banner. Not recomputed after a sculpt -- it says what
+    // the stamp was made of, which is what the user is placing.
+    size_t voxelCount = 0;
+
+    // The box, in the stamp component's own voxel coordinates, that its contents are known to lie
+    // in. Grown by every geometry write the editor makes to the stamp component -- the shape that
+    // was rasterised into it, and any sculpt or extrude performed on it while it floats. This is
+    // what the merge scans, and it is the reason a stamp can be sculpted before it commits without
+    // the merge having to probe the whole resolution cube to find what changed.
+    //
+    // An empty stamp is max < min, not a zero box: a zero box would claim one voxel at the origin.
+    projv::core::ivec3 contentMin = projv::core::ivec3(0);
+    projv::core::ivec3 contentMax = projv::core::ivec3(-1);
+};
 
 // Everything the editor owns that is neither the Scene nor its GPU mirror. One global resource, so
 // the ECS stages can reach it without file-scope statics.
@@ -817,6 +1048,56 @@ struct EditorState {
     };
     std::unordered_map<int, ExtrudeLayerRecord> extrudeLayers;
     bool extrudeFaceTruncated = false;   // The face hit EXTRUDE_MAX_FACE_VOXELS.
+
+    // --- Stamps ---
+    FloatingStamp stamp;
+
+    // The stamp components created this session, one per resolution, kept and refilled rather than
+    // created and destroyed per placement.
+    //
+    // This is not an optimisation, it is a leak fix. The hierarchy's Delete is a soft delete: it
+    // unparents the record and renames it `__deleted__`, and nothing ever reclaims it. A component
+    // created and thrown away on every placement would grow scene.components without bound over a
+    // session of stamping. Keyed by resolution because resolution is fixed for a component's whole
+    // life (see utils::addComponent), so one reusable stamp cannot serve every size -- and there are
+    // only ever five of them, since CHUNK_RESOLUTION_CHOICES is five entries long.
+    //
+    // A component leaves the pool exactly once: when "Keep as component" hands it to the user, at
+    // which point it is theirs and the next stamp of that resolution creates a fresh one.
+    std::unordered_map<uint32_t, projv::ComponentHandle> stampPool;
+
+    // --- Shape tool ---
+    ShapeKind shapeKind = ShapeKind::Box;
+    int shapeDimensions[3] = {16, 16, 16};   // Voxels: width, height, depth.
+    bool shapeHollow = false;
+    int shapeWallThickness = 1;
+    // Where a shape lands when the click is over nothing at all -- the same fallback the Sculpt
+    // brush has, and for the same reason: there is no surface to measure from, so it goes this many
+    // world units down the ray.
+    float shapePlaceDistance = 20.0f;
+
+    // --- Stamp placement (shared by both tools) ---
+    //
+    // On by default, and the difference is not cosmetic. Snapped, the merge is a 1:1 integer remap:
+    // every source voxel lands on exactly one target cell, nothing aliases, and lifting a region and
+    // dropping it back where it came from is byte-identical. Free, the merge rasterises the rotated
+    // shape into the target lattice -- which is the whole point of the setting, not a degradation of
+    // it. A wedge meant to sit at 30 degrees, or a tree placed at its own angle so that a dozen
+    // copies do not read as a dozen copies, can only be made with this off.
+    bool stampSnap90 = true;
+    MergeMode stampMergeMode = MergeMode::Add;
+
+    // --- Region tool ---
+    RegionSelector regionSelector = RegionSelector::Box;
+    SelectionScope regionScope = SelectionScope::Material;
+    VoxelSelection regionSelection;
+    // The Box selector's first corner, held between the two clicks. The wireframe drawn while it is
+    // pending is what makes the second click aimable.
+    bool regionCornerPending = false;
+    projv::ComponentHandle regionCornerComponent = projv::INVALID_COMPONENT_HANDLE;
+    projv::core::ivec3 regionCornerA = projv::core::ivec3(0);
+    projv::core::ivec3 regionHoverCoord = projv::core::ivec3(0);
+    bool regionHoverValid = false;
 };
 
 // =============================================================================
@@ -989,6 +1270,14 @@ static bool loadScene(projv::Scene& scene, projv::GPUData& gpuData, EditorState&
     editor.extrudeFace.clear();
     editor.extrudeLayers.clear();
     editor.extrudeAppliedDepth = 0;
+    // A stamp floating over the outgoing scene has a component handle and a target handle that both
+    // mean something else in the incoming one, and the pool's handles are gone with the scene that
+    // held them. Dropped rather than merged: there is nothing left to merge into.
+    editor.stamp = FloatingStamp();
+    editor.stampPool.clear();
+    editor.regionSelection.clear();
+    editor.regionCornerPending = false;
+    editor.regionHoverValid = false;
     editor.revealSelectionInHierarchy = false;
     // Every recorded edit refers to slots and blobs of the scene being replaced.
     editor.history.clear();
@@ -1464,6 +1753,34 @@ static bool worldToViewportPixel(projv::core::vec3 worldPos, projv::core::vec3 c
     return true;
 }
 
+// Eight world-space corners as a wireframe box. The corners are indexed by axis bits, so corner i
+// flips X with bit 0, Y with bit 1 and Z with bit 2 -- which is what makes the edge table below a
+// list of single-bit differences rather than something that has to be recomputed per box.
+//
+// Shared by the yellow selection outline and by the Region tool's selection box; two different
+// things to point at, one way of pointing at them.
+static void drawWorldBoxOutline(ImDrawList* drawList, const projv::core::vec3 corners[8],
+                                projv::core::vec3 cameraPos, projv::core::vec3 cameraDirection,
+                                ImVec2 imageMin, ImVec2 imageMax, ImU32 color, float thickness) {
+    ImVec2 screen[8];
+    bool visible[8];
+    for (int i = 0; i < 8; i++) {
+        visible[i] = worldToViewportPixel(corners[i], cameraPos, cameraDirection, imageMin, imageMax, screen[i]);
+    }
+
+    // The cube's 12 edges, as pairs of corner indices sharing exactly one bit-axis flip.
+    static const int EDGES[12][2] = {
+        {0,1}, {0,2}, {0,4}, {1,3}, {1,5}, {2,3}, {2,6}, {3,7}, {4,5}, {4,6}, {5,7}, {6,7}
+    };
+    for (const int (&edge)[2] : EDGES) {
+        // An edge with an endpoint behind the camera is dropped rather than clipped to the near
+        // plane -- simple, and sufficient for a selection hint that only needs to read as "here" once
+        // any part of the box is in front of the camera.
+        if (!visible[edge[0]] || !visible[edge[1]]) continue;
+        drawList->AddLine(screen[edge[0]], screen[edge[1]], color, thickness);
+    }
+}
+
 // Draws one chunk's world-space OBB as a yellow wireframe box. header.rotation is about the chunk's
 // own minimum corner (position), matching the convention fetchVoxelColor uses on the GPU side and
 // utils::pickVoxel mirrors on the CPU side: worldCorner = position + rotation * (localOffset).
@@ -1480,25 +1797,8 @@ static void drawChunkOutline(ImDrawList* drawList, const projv::Chunk& chunk, pr
                          (i & 4) ? chunk.header.scale : 0.0f);
         corners[i] = chunk.header.position + rotation * localOffset;
     }
-
-    ImVec2 screen[8];
-    bool visible[8];
-    for (int i = 0; i < 8; i++) {
-        visible[i] = worldToViewportPixel(corners[i], cameraPos, cameraDirection, imageMin, imageMax, screen[i]);
-    }
-
-    // The cube's 12 edges, as pairs of corner indices sharing exactly one bit-axis flip.
-    static const int EDGES[12][2] = {
-        {0,1}, {0,2}, {0,4}, {1,3}, {1,5}, {2,3}, {2,6}, {3,7}, {4,5}, {4,6}, {5,7}, {6,7}
-    };
-    const ImU32 outlineColor = IM_COL32(255, 220, 40, 255);
-    for (const int (&edge)[2] : EDGES) {
-        // An edge with an endpoint behind the camera is dropped rather than clipped to the near
-        // plane -- simple, and sufficient for a selection hint that only needs to read as "here" once
-        // any part of the box is in front of the camera.
-        if (!visible[edge[0]] || !visible[edge[1]]) continue;
-        drawList->AddLine(screen[edge[0]], screen[edge[1]], outlineColor, 2.0f);
-    }
+    drawWorldBoxOutline(drawList, corners, cameraPos, cameraDirection, imageMin, imageMax,
+                        IM_COL32(255, 220, 40, 255), 2.0f);
 }
 
 // Whether `handle` is `descendant` itself or one of its ancestors — that is, whether it lies on the
@@ -3015,8 +3315,60 @@ static void drawPaintToolIcon(ImDrawList* drawList, ImVec2 center, float size, b
     drawList->AddCircleFilled(ImVec2(center.x - 6.4f * unit, center.y + 7.2f * unit), 1.8f * unit, paint, 10);
 }
 
+// A cube with a sphere beside it: the two primitives everyone pictures when told "place a shape",
+// drawn as the outline of a box and a filled ball so the pair reads as "a shape, about to be put
+// somewhere" rather than as one object.
+static void drawShapeToolIcon(ImDrawList* drawList, ImVec2 center, float size, bool active) {
+    float unit = size / 20.0f;
+    ImU32 ink = iconInk(active);
+    ImU32 dim = iconInkDim(active);
+
+    // The box, drawn as a front face plus the two visible edges of the top and the right side --
+    // the standard three-quarter cube that reads as solid without shading.
+    ImVec2 frontMin = ImVec2(center.x - 7.4f * unit, center.y - 3.2f * unit);
+    ImVec2 frontMax = ImVec2(center.x - 0.2f * unit, center.y + 6.6f * unit);
+    float lift = 3.0f * unit;
+    drawList->AddRect(frontMin, frontMax, ink, 0.0f, 0, 1.6f);
+    drawList->AddLine(frontMin, ImVec2(frontMin.x + lift, frontMin.y - lift), dim, 1.4f);
+    drawList->AddLine(ImVec2(frontMax.x, frontMin.y), ImVec2(frontMax.x + lift, frontMin.y - lift), dim, 1.4f);
+    drawList->AddLine(ImVec2(frontMax.x, frontMax.y), ImVec2(frontMax.x + lift, frontMax.y - lift), dim, 1.4f);
+    drawList->AddLine(ImVec2(frontMin.x + lift, frontMin.y - lift),
+                      ImVec2(frontMax.x + lift, frontMin.y - lift), dim, 1.4f);
+    drawList->AddLine(ImVec2(frontMax.x + lift, frontMin.y - lift),
+                      ImVec2(frontMax.x + lift, frontMax.y - lift), dim, 1.4f);
+
+    drawList->AddCircleFilled(ImVec2(center.x + 4.6f * unit, center.y - 2.6f * unit), 4.0f * unit, ink);
+}
+
+// A dashed marquee around a solid core: the selection rectangle every editor draws, with something
+// inside it to say that what is selected is geometry rather than screen area.
+static void drawRegionToolIcon(ImDrawList* drawList, ImVec2 center, float size, bool active) {
+    float unit = size / 20.0f;
+    ImU32 ink = iconInk(active);
+    ImU32 dim = iconInkDim(active);
+
+    float half = 7.4f * unit;
+    ImVec2 boxMin = ImVec2(center.x - half, center.y - half);
+    ImVec2 boxMax = ImVec2(center.x + half, center.y + half);
+
+    // Dashed by hand: ImDrawList has no dash pattern, and four runs of three dashes is the whole of
+    // what a marquee needs.
+    const float dash = 3.2f * unit;
+    for (float offset = 0.0f; offset < 2.0f * half - 0.5f * dash; offset += 2.0f * dash) {
+        float end = std::min(offset + dash, 2.0f * half);
+        drawList->AddLine(ImVec2(boxMin.x + offset, boxMin.y), ImVec2(boxMin.x + end, boxMin.y), dim, 1.6f);
+        drawList->AddLine(ImVec2(boxMin.x + offset, boxMax.y), ImVec2(boxMin.x + end, boxMax.y), dim, 1.6f);
+        drawList->AddLine(ImVec2(boxMin.x, boxMin.y + offset), ImVec2(boxMin.x, boxMin.y + end), dim, 1.6f);
+        drawList->AddLine(ImVec2(boxMax.x, boxMin.y + offset), ImVec2(boxMax.x, boxMin.y + end), dim, 1.6f);
+    }
+
+    drawList->AddRectFilled(ImVec2(center.x - 3.6f * unit, center.y - 3.6f * unit),
+                            ImVec2(center.x + 3.6f * unit, center.y + 3.6f * unit), ink, 1.0f);
+}
+
 static void (*const TOOL_ICONS[EDITOR_TOOL_COUNT])(ImDrawList*, ImVec2, float, bool) = {
-    drawSelectToolIcon, drawMoveToolIcon, drawSculptToolIcon, drawPaintToolIcon
+    drawSelectToolIcon, drawMoveToolIcon, drawSculptToolIcon, drawPaintToolIcon,
+    drawShapeToolIcon, drawRegionToolIcon
 };
 
 // =============================================================================
@@ -3033,6 +3385,19 @@ static void (*const TOOL_ICONS[EDITOR_TOOL_COUNT])(ImDrawList*, ImVec2, float, b
 // swatch and a name so the tool can be used without looking away, but owned there. Deliberately not
 // a second "current material" of its own -- three notions of which colour is active is how you end
 // up sculpting in a colour you were not looking at.
+// The stamp and region actions the Shape and Region panels put behind buttons. They are defined
+// with the rest of the stamp machinery, far below: all of them need the component voxel space, and
+// that is built on top of the scene helpers this panel section sits above.
+static void regenerateShapeStamp(projv::Scene& scene, EditorState& editor);
+static void snapStampToTargetLattice(projv::Scene& scene, EditorState& editor);
+static bool mergeStamp(projv::Scene& scene, EditorState& editor);
+static void cancelStamp(projv::Scene& scene, EditorState& editor);
+static void keepStampAsComponent(projv::Scene& scene, EditorState& editor);
+static void liftSelection(projv::Scene& scene, EditorState& editor, bool cut);
+static void deleteSelection(projv::Scene& scene, EditorState& editor);
+static void fillSelection(projv::Scene& scene, EditorState& editor);
+static void duplicateSelectionInPlace(projv::Scene& scene, EditorState& editor);
+
 static void drawToolMaterialRow(projv::Scene& scene, EditorState& editor, bool enabled) {
     ImGui::TextDisabled("Material");
 
@@ -3448,6 +3813,266 @@ static void drawPaintToolSettings(projv::Scene& scene, EditorState& editor) {
                             : "Drag to paint a stroke; the whole sweep is one undo step.");
 }
 
+// The bottom half of both stamp panels: what happens to the floating stamp. Identical in the Shape
+// panel and the Region panel because the stamp is identical -- the two tools differ only in where
+// its geometry came from, and by the time it is floating that is history.
+static void drawStampPlacement(projv::Scene& scene, EditorState& editor) {
+    ImGui::TextDisabled("Placement");
+
+    if (!editor.stamp.active) {
+        ImGui::TextWrapped("Nothing floating. Spawn a shape or lift a selection, and the controls "
+                           "for placing it appear here.");
+        return;
+    }
+
+    // Which component a merge writes into, said before the buttons that do it. The target is fixed
+    // when the stamp is created (a stamp is built at the target's voxel scale, so it cannot be
+    // repointed at a component with a different one without becoming a resample).
+    if (editor.stamp.target < scene.components.size()) {
+        ImGui::Text("Into  %s", scene.components[editor.stamp.target].name.c_str());
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", projv::utils::getComponentPath(scene, editor.stamp.target).c_str());
+        }
+    } else {
+        ImGui::TextDisabled("No target - Merge is unavailable.");
+    }
+
+    ImGui::Spacing();
+    if (ImGui::Checkbox("Snap 90", &editor.stampSnap90)) {
+        // Turning it back on has to bring the stamp with it, or the checkbox would claim a snapped
+        // placement while the stamp sat at whatever angle the gizmo last left it.
+        if (editor.stampSnap90) snapStampToTargetLattice(scene, editor);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Rotation in multiples of 90 degrees about a lattice axis, translation in\n"
+                          "whole voxels. The merge is then a 1:1 remap: every source voxel lands on\n"
+                          "exactly one target cell.");
+    }
+    // Stated plainly rather than as a warning. Free rotation is the point of the setting, not a
+    // degraded fallback, and telling a user their deliberate choice is a mistake is worse than
+    // saying nothing.
+    ImGui::TextDisabled("%s", editor.stampSnap90
+        ? "Exact: every voxel lands on one cell."
+        : "Free rotation - the merge rasterises\ninto the target lattice.");
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Merge mode");
+    if (ImGui::RadioButton("Add", editor.stampMergeMode == MergeMode::Add)) {
+        editor.stampMergeMode = MergeMode::Add;
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Subtract", editor.stampMergeMode == MergeMode::Subtract)) {
+        editor.stampMergeMode = MergeMode::Subtract;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Takes the stamp's volume out of the target instead of writing it in.\n"
+                          "A sphere subtracted is a crater.");
+    }
+
+    ImGui::Spacing();
+    ImGui::BeginDisabled(editor.stamp.target >= scene.components.size());
+    if (ImGui::Button("Merge")) {
+        mergeStamp(scene, editor);
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Write it into the target.  (Enter)");
+
+    ImGui::SameLine();
+    if (ImGui::Button("Keep as component")) {
+        keepStampAsComponent(scene, editor);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Leave it in the hierarchy as its own object rather than merging it.\n"
+                          "Often what is wanted for a placed pillar or tree.");
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+        cancelStamp(scene, editor);
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Throw it away.  (Esc)");
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Drag the gizmo, or use the arrow keys: one voxel a\n"
+                        "press, PgUp/PgDn for vertical, Ctrl+arrows to turn 90.");
+}
+
+static void drawShapeToolSettings(projv::Scene& scene, EditorState& editor) {
+    drawToolTargetRow(scene, editor);
+    ImGui::Separator();
+
+    ImGui::TextDisabled("Shape");
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::BeginCombo("##shapeKind", ShapeKindLabel(editor.shapeKind))) {
+        for (int i = 0; i < SHAPE_KIND_COUNT; i++) {
+            ShapeKind kind = static_cast<ShapeKind>(i);
+            if (ImGui::Selectable(ShapeKindLabel(kind), editor.shapeKind == kind)) {
+                editor.shapeKind = kind;
+                regenerateShapeStamp(scene, editor);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", ShapeKindHint(kind));
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::TextDisabled("%s", ShapeKindHint(editor.shapeKind));
+
+    // Voxels, not world units, for the reason the Paint panel already gives: a size in world units
+    // means a different number of voxels per component, depending on each one's voxelScale. The
+    // world size is spelled out underneath for the one number a user pictures.
+    ImGui::Spacing();
+    static const char* AXIS_LABELS[3] = { "Width", "Height", "Depth" };
+    static const char* AXIS_IDS[3] = { "##shapeW", "##shapeH", "##shapeD" };
+    bool sizeChanged = false;
+    for (int axis = 0; axis < 3; axis++) {
+        ImGui::SetNextItemWidth(fieldWidthBeside("Height (voxels)"));
+        if (ImGui::DragInt(AXIS_IDS[axis], &editor.shapeDimensions[axis], 0.3f, 1, STAMP_MAX_DIMENSION)) {
+            sizeChanged = true;
+        }
+        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+        ImGui::TextDisabled("%s (voxels)", AXIS_LABELS[axis]);
+        editor.shapeDimensions[axis] = std::clamp(editor.shapeDimensions[axis], 1, STAMP_MAX_DIMENSION);
+    }
+
+    ImGui::Spacing();
+    if (ImGui::Checkbox("Hollow", &editor.shapeHollow)) sizeChanged = true;
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Keep only a shell of the shape, so it can be walked into.");
+    }
+    if (editor.shapeHollow) {
+        ImGui::SetNextItemWidth(fieldWidthBeside("Wall (voxels)"));
+        if (ImGui::DragInt("##shapeWall", &editor.shapeWallThickness, 0.15f, 1, 32)) sizeChanged = true;
+        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+        ImGui::TextDisabled("Wall (voxels)");
+        editor.shapeWallThickness = std::clamp(editor.shapeWallThickness, 1, 32);
+    }
+
+    // Resizing a *generated* stamp is exact and free -- the primitive is simply rasterised again at
+    // the new dimensions. That is what separates a generated stamp from a lifted one, which cannot
+    // be resized because scaling voxels is a resample rather than an edit.
+    if (sizeChanged && editor.stamp.active && editor.stamp.source == FloatingStamp::Source::Generated) {
+        regenerateShapeStamp(scene, editor);
+    }
+
+    float voxelScale = componentVoxelScale(scene, editor.stamp.active ? editor.stamp.target
+                                                                      : editor.selectedComponent);
+    if (voxelScale > 0.0f) {
+        ImGui::TextDisabled("World size %.2f x %.2f x %.2f",
+                            float(editor.shapeDimensions[0]) * voxelScale,
+                            float(editor.shapeDimensions[1]) * voxelScale,
+                            float(editor.shapeDimensions[2]) * voxelScale);
+    }
+
+    ImGui::Spacing();
+    ImGui::SetNextItemWidth(fieldWidthBeside("Place distance"));
+    ImGui::DragFloat("##shapePlaceDistance", &editor.shapePlaceDistance, 0.5f, 1.0f, 1000.0f, "%.1f");
+    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::TextDisabled("Place distance");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Where a click that hits nothing puts the shape: this far down the ray.\n"
+                          "A click that lands on a surface ignores it and sits on that surface.");
+    }
+
+    ImGui::Separator();
+    drawToolMaterialRow(scene, editor, true);
+
+    ImGui::Separator();
+    drawStampPlacement(scene, editor);
+}
+
+static void drawRegionToolSettings(projv::Scene& scene, EditorState& editor) {
+    drawToolTargetRow(scene, editor);
+    ImGui::Separator();
+
+    ImGui::TextDisabled("Selector");
+    for (int i = 0; i < REGION_SELECTOR_COUNT; i++) {
+        RegionSelector selector = static_cast<RegionSelector>(i);
+        if (i > 0) ImGui::SameLine();
+        if (ImGui::RadioButton(RegionSelectorLabel(selector), editor.regionSelector == selector)) {
+            editor.regionSelector = selector;
+            editor.regionCornerPending = false;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", RegionSelectorHint(selector));
+    }
+    ImGui::TextDisabled("%s", RegionSelectorHint(editor.regionSelector));
+
+    // Inherited unchanged from the two gathers that already answer this question. On a photo-textured
+    // scene the toggle is the difference between selecting four voxels and thirty thousand.
+    if (editor.regionSelector != RegionSelector::Box) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("Spread");
+        const char* everythingLabel = editor.regionSelector == RegionSelector::Face ? "Whole face"
+                                                                                    : "Whole volume";
+        for (int i = 0; i < SELECTION_SCOPE_COUNT; i++) {
+            SelectionScope scope = static_cast<SelectionScope>(i);
+            if (i > 0) ImGui::SameLine();
+            const char* label = scope == SelectionScope::Material ? "Material" : everythingLabel;
+            if (ImGui::RadioButton(label, editor.regionScope == scope)) editor.regionScope = scope;
+        }
+    }
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Selection");
+    const VoxelSelection& selection = editor.regionSelection;
+    if (selection.empty()) {
+        ImGui::TextWrapped("%s", editor.regionCornerPending
+            ? "First corner set. Click the opposite one."
+            : "Nothing selected yet.");
+    } else {
+        projv::core::ivec3 size = selection.dimensions();
+        ImGui::Text("%s voxel(s)", formatCompactCount(uint32_t(std::min<size_t>(selection.count,
+                                                                                0xFFFFFFFFu))).c_str());
+        ImGui::TextDisabled("Bounds %d x %d x %d", size.x, size.y, size.z);
+        if (selection.component < scene.components.size()) {
+            ImGui::TextDisabled("In %s", scene.components[selection.component].name.c_str());
+        }
+        if (selection.truncated) {
+            ImGui::TextDisabled("Stopped at the gather limit.");
+        }
+    }
+
+    ImGui::Spacing();
+    ImGui::BeginDisabled(selection.empty() || editor.stamp.active);
+    if (ImGui::Button("Copy")) liftSelection(scene, editor, false);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lift a copy; the source is left where it is.");
+    ImGui::SameLine();
+    if (ImGui::Button("Cut")) liftSelection(scene, editor, true);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Lift it and remove the source, in one undo step.\n"
+                          "Cancelling the placement puts the source back.");
+    }
+    ImGui::EndDisabled();
+
+    ImGui::BeginDisabled(selection.empty());
+    if (ImGui::Button("Delete")) deleteSelection(scene, editor);
+    ImGui::SameLine();
+    if (ImGui::Button("Fill")) fillSelection(scene, editor);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Recolour every selected voxel with the palette's current entry.\n"
+                          "Never adds one -- an empty cell in the selection stays empty.");
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(editor.stamp.active);
+    if (ImGui::Button("Duplicate")) duplicateSelectionInPlace(scene, editor);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Lift a copy, offset by one bounding box, ready to place.");
+    }
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+
+    ImGui::BeginDisabled(selection.empty() && !editor.regionCornerPending);
+    if (ImGui::Button("Clear selection")) {
+        editor.regionSelection.clear();
+        editor.regionCornerPending = false;
+    }
+    ImGui::EndDisabled();
+
+    ImGui::Separator();
+    drawToolMaterialRow(scene, editor, true);
+
+    ImGui::Separator();
+    drawStampPlacement(scene, editor);
+}
+
 static void drawToolPanel(projv::Scene& scene, EditorState& editor) {
     // The visible title tracks the tool; the identity after ### does not, so the dock layout and the
     // imgui.ini entry survive a tool switch. See TOOL_PANEL_ID.
@@ -3488,6 +4113,8 @@ static void drawToolPanel(projv::Scene& scene, EditorState& editor) {
         case EditorTool::Move:   drawMoveToolSettings(scene, editor);   break;
         case EditorTool::Sculpt: drawSculptToolSettings(scene, editor); break;
         case EditorTool::Paint:  drawPaintToolSettings(scene, editor);  break;
+        case EditorTool::Shape:  drawShapeToolSettings(scene, editor);  break;
+        case EditorTool::Region: drawRegionToolSettings(scene, editor); break;
     }
 
     ImGui::End();
@@ -4455,6 +5082,24 @@ static void applyVoxelSculpt(projv::Scene* scene, EditorState* editor, projv::Co
                       : projv::utils::queueVoxelRemove(*scene, component, ops);
     if (!queued) return;
 
+    // Every geometry write in the editor funnels through here -- brush dabs, extrude layers, the
+    // stamp's own construction, and the undo and redo of all three. So this is the one place that
+    // can keep a floating stamp's content box honest, which is what lets the merge scan a box the
+    // size of the shape rather than the whole resolution cube. Additions only: a removal cannot put
+    // anything outside the box, and shrinking it here would mean re-deriving a bound that the next
+    // snapshot tightens for free anyway.
+    if (add && editor->stamp.active && component == editor->stamp.component) {
+        for (const projv::core::ivec3& coord : coords) {
+            if (editor->stamp.contentMax.x < editor->stamp.contentMin.x) {
+                editor->stamp.contentMin = coord;
+                editor->stamp.contentMax = coord;
+            } else {
+                editor->stamp.contentMin = projv::core::min(editor->stamp.contentMin, coord);
+                editor->stamp.contentMax = projv::core::max(editor->stamp.contentMax, coord);
+            }
+        }
+    }
+
     projv::utils::updateScene(*scene);
     editor->gpuFlushNeeded = true;
     editor->cameraMovedByInterface = true;   // The accumulated image is of the old geometry.
@@ -5382,6 +6027,1336 @@ static void processSculptSample(projv::Scene& scene, EditorState& editor,
     }
 }
 
+// =============================================================================
+// The stamp: generate, lift, place, merge
+// =============================================================================
+//
+// See the Stamps section at the top of the file for what a stamp is and why it is a real component.
+// This is the machinery: rasterising a primitive into one, lifting a selection into one, snapping it
+// to the target's lattice, and writing it out.
+
+// The smallest resolution addComponent will accept that holds `extent` voxels along an axis.
+// Resolutions are powers of *four*, not two -- the tree64 depth is derived from the resolution
+// exactly as the shader derives it, so anything else builds a tree the renderer misreads.
+static uint32_t smallestChunkResolutionFor(int extent) {
+    uint32_t resolution = 4;
+    while (resolution < uint32_t(std::max(extent, 1))) resolution *= 4;
+    return resolution;
+}
+
+// Whether a cell centre lies inside a primitive occupying the box [0, size) in voxel units.
+//
+// One predicate for every shape, sampled at cell centres, because that is what makes `hollow` one
+// rule rather than seven: a shell is "inside the shape, and not inside the same shape shrunk by the
+// wall thickness". Sampling at centres rather than corners is also what keeps a shape symmetric --
+// a sphere of even diameter has no centre voxel, and testing corners would give it a bias of half a
+// voxel toward the origin.
+static bool insidePrimitive(ShapeKind kind, projv::core::vec3 point, projv::core::vec3 size) {
+    using projv::core::vec3;
+    if (size.x <= 0.0f || size.y <= 0.0f || size.z <= 0.0f) return false;
+    if (point.x < 0.0f || point.y < 0.0f || point.z < 0.0f) return false;
+    if (point.x > size.x || point.y > size.y || point.z > size.z) return false;
+
+    vec3 half = size * 0.5f;
+    vec3 offset = point - half;   // From the box's centre.
+
+    switch (kind) {
+        case ShapeKind::Box:
+            return true;   // The bounds test above is the whole shape.
+
+        case ShapeKind::Sphere: {
+            vec3 normalized = offset / half;
+            return glm::dot(normalized, normalized) <= 1.0f;
+        }
+
+        case ShapeKind::Cylinder: {
+            float u = offset.x / half.x, w = offset.z / half.z;
+            return u * u + w * w <= 1.0f;
+        }
+
+        case ShapeKind::Cone: {
+            // The radius closes linearly with height, so the tip is a point rather than a facet.
+            float taper = 1.0f - point.y / size.y;
+            if (taper <= 0.0f) return false;
+            float u = offset.x / (half.x * taper), w = offset.z / (half.z * taper);
+            return u * u + w * w <= 1.0f;
+        }
+
+        case ShapeKind::Wedge:
+            // A box cut by one diagonal: solid under the plane that rises along the depth.
+            return point.y / size.y <= point.z / size.z;
+
+        case ShapeKind::Pyramid: {
+            float taper = 1.0f - point.y / size.y;
+            if (taper <= 0.0f) return false;
+            return std::abs(offset.x) <= half.x * taper && std::abs(offset.z) <= half.z * taper;
+        }
+
+        case ShapeKind::Torus: {
+            // A ring lying flat in the XZ plane, so the height *is* the tube's diameter. The ring
+            // itself may be elliptical, which is why the nearest point on it is found by normalising
+            // in the ellipse's own units and mapping back, rather than by subtracting one radius.
+            float tube = half.y;
+            tube = std::min(tube, 0.49f * std::min(size.x, size.z));
+            if (tube <= 0.0f) return false;
+            float ringX = half.x - tube;
+            float ringZ = half.z - tube;
+            if (ringX <= 0.0f || ringZ <= 0.0f) return false;
+
+            float u = offset.x / ringX, w = offset.z / ringZ;
+            float radial = std::sqrt(u * u + w * w);
+            if (radial <= 1.0e-6f) return false;   // Dead centre: the hole, always.
+            vec3 nearest(ringX * u / radial, 0.0f, ringZ * w / radial);
+            vec3 toNearest = vec3(offset.x, offset.y, offset.z) - nearest;
+            return glm::dot(toNearest, toNearest) <= tube * tube;
+        }
+    }
+    return false;
+}
+
+// Every voxel of one primitive, in coordinates running [0, dimensions).
+//
+// Hollow is one rule for all seven shapes: inside the shape, and not inside the same shape shrunk by
+// the wall thickness on every side. That is exact for the box family and correct to within half a
+// voxel for the curved ones, which is the same tolerance the surface itself is quantised to.
+static void rasterisePrimitive(ShapeKind kind, const int dimensions[3], bool hollow, int wallThickness,
+                               std::vector<projv::core::ivec3>& out) {
+    using projv::core::vec3;
+    out.clear();
+
+    // static_cast, not float(...): `float(dimensions[0])` inside a constructor argument list is the
+    // most vexing parse -- the compiler reads it as redeclaring the parameter as an array.
+    vec3 size(static_cast<float>(dimensions[0]), static_cast<float>(dimensions[1]),
+              static_cast<float>(dimensions[2]));
+    float wall = float(std::max(wallThickness, 1));
+    vec3 innerSize = size - vec3(2.0f * wall);
+    bool hasInterior = hollow && innerSize.x > 0.0f && innerSize.y > 0.0f && innerSize.z > 0.0f;
+
+    for (int z = 0; z < dimensions[2]; z++) {
+        for (int y = 0; y < dimensions[1]; y++) {
+            for (int x = 0; x < dimensions[0]; x++) {
+                vec3 centre(float(x) + 0.5f, float(y) + 0.5f, float(z) + 0.5f);
+                if (!insidePrimitive(kind, centre, size)) continue;
+                if (hasInterior && insidePrimitive(kind, centre - vec3(wall), innerSize)) continue;
+                out.push_back(projv::core::ivec3(x, y, z));
+            }
+        }
+    }
+}
+
+// The stamp's geometry, read back out of the scene into a dense box: one occupancy byte and one
+// colour per cell.
+//
+// Dense, and taken once, because the merge's inner loop runs over *target* cells and asks this the
+// same question for each of them. A tree64 descent per target cell would put the cost of the whole
+// merge inside a loop that is already the size of an oriented bounding box; a bit test does not.
+//
+// Read back from the scene rather than kept as the list that was written, so that a stamp which has
+// been sculpted or painted while it floated merges as it looks. That is the whole point of a stamp
+// being a real component, and a snapshot that trusted its own construction record would quietly
+// throw those edits away.
+struct StampSnapshot {
+    bool valid = false;
+    projv::core::ivec3 boundsMin = projv::core::ivec3(0);
+    projv::core::ivec3 boundsMax = projv::core::ivec3(0);   // Inclusive.
+    projv::core::ivec3 size = projv::core::ivec3(0);
+    std::vector<uint8_t> occupied;
+    std::vector<uint32_t> colors;
+    size_t count = 0;
+
+    size_t index(projv::core::ivec3 coord) const {
+        projv::core::ivec3 local = coord - boundsMin;
+        return (size_t(local.z) * size_t(size.y) + size_t(local.y)) * size_t(size.x) + size_t(local.x);
+    }
+    bool inBounds(projv::core::ivec3 coord) const {
+        return coord.x >= boundsMin.x && coord.y >= boundsMin.y && coord.z >= boundsMin.z &&
+               coord.x <= boundsMax.x && coord.y <= boundsMax.y && coord.z <= boundsMax.z;
+    }
+};
+
+static StampSnapshot snapshotStamp(const projv::Scene& scene, const EditorState& editor) {
+    using projv::core::ivec3;
+    StampSnapshot snapshot;
+
+    projv::ComponentHandle component = editor.stamp.component;
+    if (component >= scene.components.size()) return snapshot;
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
+    if (!space.valid) return snapshot;
+
+    // The box the stamp's contents are known to lie in. Grown by every write the editor makes to the
+    // stamp component (see applyVoxelSculpt), so a sculpt that pushed geometry past the primitive's
+    // original extent is inside it.
+    ivec3 scanMin = editor.stamp.contentMin;
+    ivec3 scanMax = editor.stamp.contentMax;
+    if (scanMax.x < scanMin.x || scanMax.y < scanMin.y || scanMax.z < scanMin.z) return snapshot;
+
+    ivec3 scanSize = scanMax - scanMin + ivec3(1);
+    size_t cells = size_t(scanSize.x) * size_t(scanSize.y) * size_t(scanSize.z);
+    if (cells == 0 || cells > STAMP_MAX_SOURCE_CELLS) return snapshot;
+
+    std::vector<uint8_t> occupied(cells, 0);
+    std::vector<uint32_t> colors(cells, 0);
+
+    // The tight box is found in the same pass that reads the contents: the scan box is an upper
+    // bound (a sculpt that carved the shape back down leaves it too large), and every later cost —
+    // the merge's oriented bounding box above all — is measured against the tight one.
+    ivec3 tightMin = scanMax;
+    ivec3 tightMax = scanMin;
+    size_t count = 0;
+    size_t cursor = 0;
+    for (int z = scanMin.z; z <= scanMax.z; z++) {
+        for (int y = scanMin.y; y <= scanMax.y; y++) {
+            for (int x = scanMin.x; x <= scanMax.x; x++, cursor++) {
+                uint8_t slot = 0;
+                if (!queryComponentVoxel(scene, space, ivec3(x, y, z), slot)) continue;
+                occupied[cursor] = 1;
+                colors[cursor] = componentVoxelColor(scene, component, slot);
+                tightMin = projv::core::min(tightMin, ivec3(x, y, z));
+                tightMax = projv::core::max(tightMax, ivec3(x, y, z));
+                count++;
+            }
+        }
+    }
+    if (count == 0) return snapshot;
+
+    // Repacked into the tight box, so the merge's oriented bounding box is the shape's, not the
+    // scan's. A generated primitive is already tight; a sculpted one need not be.
+    snapshot.valid = true;
+    snapshot.boundsMin = tightMin;
+    snapshot.boundsMax = tightMax;
+    snapshot.size = tightMax - tightMin + ivec3(1);
+    snapshot.count = count;
+    size_t tightCells = size_t(snapshot.size.x) * size_t(snapshot.size.y) * size_t(snapshot.size.z);
+    snapshot.occupied.assign(tightCells, 0);
+    snapshot.colors.assign(tightCells, 0);
+    cursor = 0;
+    for (int z = scanMin.z; z <= scanMax.z; z++) {
+        for (int y = scanMin.y; y <= scanMax.y; y++) {
+            for (int x = scanMin.x; x <= scanMax.x; x++, cursor++) {
+                if (!occupied[cursor]) continue;
+                size_t destination = snapshot.index(ivec3(x, y, z));
+                snapshot.occupied[destination] = 1;
+                snapshot.colors[destination] = colors[cursor];
+            }
+        }
+    }
+    return snapshot;
+}
+
+// Empties the stamp component so it can hold the next stamp. Not a delete: see EditorState::stampPool
+// for why the component is kept.
+static void clearStampGeometry(projv::Scene& scene, EditorState& editor) {
+    StampSnapshot snapshot = snapshotStamp(scene, editor);
+    if (!snapshot.valid) {
+        editor.stamp.contentMin = projv::core::ivec3(0);
+        editor.stamp.contentMax = projv::core::ivec3(-1);
+        return;
+    }
+
+    std::vector<projv::core::ivec3> coords;
+    coords.reserve(snapshot.count);
+    for (int z = snapshot.boundsMin.z; z <= snapshot.boundsMax.z; z++) {
+        for (int y = snapshot.boundsMin.y; y <= snapshot.boundsMax.y; y++) {
+            for (int x = snapshot.boundsMin.x; x <= snapshot.boundsMax.x; x++) {
+                projv::core::ivec3 coord(x, y, z);
+                if (snapshot.occupied[snapshot.index(coord)]) coords.push_back(coord);
+            }
+        }
+    }
+    applyVoxelSculpt(&scene, &editor, editor.stamp.component, coords, std::vector<uint32_t>(), false);
+    editor.stamp.contentMin = projv::core::ivec3(0);
+    editor.stamp.contentMax = projv::core::ivec3(-1);
+}
+
+// The component the next stamp of this resolution goes into, created once per session and refilled
+// afterwards. See EditorState::stampPool.
+static projv::ComponentHandle acquireStampComponent(projv::Scene& scene, EditorState& editor,
+                                                    uint32_t resolution, float voxelScale) {
+    auto pooled = editor.stampPool.find(resolution);
+    if (pooled != editor.stampPool.end()) {
+        projv::ComponentHandle handle = pooled->second;
+        // A stamp that was sculpted past its own bounds has been converted to a Grid, and a Grid's
+        // extent is no longer the resolution cube this pool is keyed on. Dropped rather than reused:
+        // one leaked record beats a stamp whose contents cannot be found.
+        if (handle < scene.components.size() &&
+            scene.components[handle].kind == projv::ComponentKind::Chunk &&
+            scene.components[handle].name != "__deleted__") {
+            // The voxel scale has to match too: a stamp built at a different one makes every merge a
+            // resample. It only changes when the target does, which is rare enough to pay for.
+            const projv::ComponentRecord& record = scene.components[handle];
+            if (record.chunkHandle < scene.chunks.size() &&
+                std::abs(scene.chunks[record.chunkHandle].header.voxelScale - voxelScale) <= 1.0e-6f) {
+                return handle;
+            }
+        }
+        editor.stampPool.erase(pooled);
+    }
+
+    projv::ComponentHandle handle = projv::utils::addComponent(
+        scene, projv::ComponentKind::Chunk, "Stamp", projv::INVALID_COMPONENT_HANDLE,
+        resolution, voxelScale);
+    if (handle == projv::INVALID_COMPONENT_HANDLE) return handle;
+    editor.stampPool[resolution] = handle;
+    editor.gpuFlushNeeded = true;
+    return handle;
+}
+
+// The nearest signed permutation matrix: the rotation that takes lattice axes to lattice axes and is
+// closest to `m`. This is what "Snap 90" means, expressed once.
+//
+// Greedy rather than exhaustive over the 24 rotations: take the largest remaining entry, lock that
+// axis pair to its sign, repeat. The largest entry is the axis the user most nearly aimed at, so the
+// choice is stable under a drag rather than flipping between two near-equal candidates.
+static projv::core::mat3 nearestAxisAlignedRotation(const projv::core::mat3& m) {
+    bool rowUsed[3] = { false, false, false };
+    bool columnUsed[3] = { false, false, false };
+    projv::core::mat3 result(0.0f);
+    int lastRow = 0, lastColumn = 0;
+
+    for (int pick = 0; pick < 3; pick++) {
+        int bestRow = 0, bestColumn = 0;
+        float best = -1.0f;
+        for (int column = 0; column < 3; column++) {
+            if (columnUsed[column]) continue;
+            for (int row = 0; row < 3; row++) {
+                if (rowUsed[row]) continue;
+                float magnitude = std::abs(m[column][row]);   // glm is column-major: m[column][row].
+                if (magnitude > best) { best = magnitude; bestRow = row; bestColumn = column; }
+            }
+        }
+        rowUsed[bestRow] = true;
+        columnUsed[bestColumn] = true;
+        result[bestColumn][bestRow] = m[bestColumn][bestRow] >= 0.0f ? 1.0f : -1.0f;
+        lastRow = bestRow;
+        lastColumn = bestColumn;
+    }
+
+    // A signed permutation can come out a reflection rather than a rotation. Flipping the axis that
+    // was picked last -- the one the input was least sure about -- is the smallest correction that
+    // restores a determinant of +1.
+    if (glm::determinant(result) < 0.0f) {
+        result[lastColumn][lastRow] = -result[lastColumn][lastRow];
+    }
+    return result;
+}
+
+// Pulls the stamp onto the target's lattice: rotation to the nearest multiple of 90 degrees about a
+// lattice axis, translation to a whole number of voxels. Run after every gizmo frame while Snap 90
+// is on, which is what makes the drag feel like a grid snap rather than a free slide.
+static void snapStampToTargetLattice(projv::Scene& scene, EditorState& editor) {
+    using namespace projv::core;
+    if (!editor.stamp.active || !editor.stampSnap90) return;
+    if (editor.stamp.component >= scene.components.size()) return;
+    if (editor.stamp.target >= scene.components.size()) return;
+
+    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, editor.stamp.target);
+    if (!targetSpace.valid || targetSpace.voxelSize <= 0.0f) return;
+
+    const projv::ComponentRecord& stampRecord = scene.components[editor.stamp.component];
+    vec3 position = stampRecord.localPosition;   // A stamp is a root, so local is world.
+    quat rotation = stampRecord.localRotation;
+
+    mat3 targetRotation = glm::mat3_cast(targetSpace.rotation);
+    mat3 inverseTarget = glm::transpose(targetRotation);
+
+    quat snappedRotation = glm::normalize(
+        targetSpace.rotation * glm::quat_cast(nearestAxisAlignedRotation(inverseTarget * glm::mat3_cast(rotation))));
+
+    vec3 local = (inverseTarget * (position - targetSpace.latticeOrigin)) / targetSpace.voxelSize;
+    vec3 rounded(std::round(local.x), std::round(local.y), std::round(local.z));
+    vec3 snappedPosition = targetSpace.latticeOrigin + targetRotation * (rounded * targetSpace.voxelSize);
+
+    if (snappedPosition == position && snappedRotation == rotation) return;
+    applyComponentTransform(&scene, &editor, editor.stamp.component, snappedPosition, snappedRotation, 1.0f);
+}
+
+// Puts the stamp's *content* centre at a world point, keeping a given rotation. The content box
+// rather than the component's origin, because what the user is aiming is the shape, and a chunk's
+// origin is its minimum corner rather than the middle of whatever is inside it.
+static void centreStampAt(projv::Scene& scene, EditorState& editor, projv::core::vec3 worldCentre,
+                          projv::core::quat rotation) {
+    using namespace projv::core;
+    if (editor.stamp.component >= scene.components.size()) return;
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, editor.stamp.component);
+    if (!space.valid) return;
+
+    vec3 contentCentre = (vec3(editor.stamp.contentMin) + vec3(editor.stamp.contentMax) + vec3(1.0f)) *
+                         0.5f * space.voxelSize;
+    vec3 origin = worldCentre - glm::mat3_cast(rotation) * contentCentre;
+    applyComponentTransform(&scene, &editor, editor.stamp.component, origin, rotation, 1.0f);
+    snapStampToTargetLattice(scene, editor);
+}
+
+// Points the editor at the stamp: it is the selection, so the gizmo drives it and the outline is
+// drawn around it.
+static void selectStamp(projv::Scene& scene, EditorState& editor) {
+    editor.selectedComponent = editor.stamp.component;
+    editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, editor.stamp.component);
+    editor.selectionOutlineValid = false;
+    editor.lastInspectorSelection = projv::INVALID_COMPONENT_HANDLE;   // Refresh the Euler readout.
+}
+
+// Writes a set of voxels into the stamp component and records what box they occupy. The single point
+// at which a stamp's geometry is created, so that contentMin/contentMax cannot drift from it.
+static void fillStamp(projv::Scene& scene, EditorState& editor,
+                      const std::vector<projv::core::ivec3>& coords,
+                      const std::vector<uint32_t>& colors) {
+    using projv::core::ivec3;
+    if (coords.empty()) return;
+
+    ivec3 minimum = coords[0], maximum = coords[0];
+    for (const ivec3& coord : coords) {
+        minimum = projv::core::min(minimum, coord);
+        maximum = projv::core::max(maximum, coord);
+    }
+    editor.stamp.contentMin = minimum;
+    editor.stamp.contentMax = maximum;
+    editor.stamp.voxelCount = coords.size();
+
+    applyVoxelSculpt(&scene, &editor, editor.stamp.component, coords, colors, true);
+}
+
+// The colour a generated shape is made of: the palette's current entry, which is the same answer
+// every other placing tool gives. White when nothing is selected, so the tool still works before a
+// palette has been chosen.
+static uint32_t currentToolColor(const projv::Scene& scene, const EditorState& editor) {
+    if (editor.paletteComponent < scene.components.size() && editor.selectedMaterialSlot >= 0) {
+        const projv::ComponentRecord& source = scene.components[editor.paletteComponent];
+        if (size_t(editor.selectedMaterialSlot) < source.materialPalette.size()) {
+            return source.materialPalette[editor.selectedMaterialSlot].packedColor;
+        }
+    }
+    return 0x3FFFFFFFu;   // The same white addComponent seeds a new palette with.
+}
+
+// Generates the primitive and drops it into the scene as a floating stamp.
+//
+// The voxel scale comes from the *target*, never from editor.createVoxelScale: a stamp at a
+// different voxel size makes every merge a resample, however the rotation is snapped.
+static bool spawnShapeStamp(projv::Scene& scene, EditorState& editor, projv::ComponentHandle target,
+                            projv::core::vec3 worldCentre) {
+    using namespace projv::core;
+
+    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, target);
+    if (!targetSpace.valid || targetSpace.voxelSize <= 0.0f) {
+        editor.statusMessage = "That component has no voxel grid to place a shape in.";
+        return false;
+    }
+
+    int dimensions[3] = {
+        std::clamp(editor.shapeDimensions[0], 1, STAMP_MAX_DIMENSION),
+        std::clamp(editor.shapeDimensions[1], 1, STAMP_MAX_DIMENSION),
+        std::clamp(editor.shapeDimensions[2], 1, STAMP_MAX_DIMENSION)
+    };
+
+    std::vector<ivec3> coords;
+    rasterisePrimitive(editor.shapeKind, dimensions, editor.shapeHollow, editor.shapeWallThickness,
+                       coords);
+    if (coords.empty()) {
+        editor.statusMessage = std::string(ShapeKindLabel(editor.shapeKind)) +
+                               " at that size comes out empty - try a larger size or a thinner wall.";
+        return false;
+    }
+
+    uint32_t resolution = smallestChunkResolutionFor(std::max({dimensions[0], dimensions[1], dimensions[2]}));
+    projv::ComponentHandle component = acquireStampComponent(scene, editor, resolution,
+                                                             targetSpace.voxelSize);
+    if (component == projv::INVALID_COMPONENT_HANDLE) {
+        editor.statusMessage = "Could not create the stamp component (see log).";
+        return false;
+    }
+
+    // Whatever the pooled component was last used for has to go before the new shape goes in, or the
+    // two would merge into one stamp.
+    editor.stamp.component = component;
+    clearStampGeometry(scene, editor);
+
+    uint32_t color = currentToolColor(scene, editor);
+    editor.stamp.active = true;
+    editor.stamp.source = FloatingStamp::Source::Generated;
+    editor.stamp.target = target;
+    editor.stamp.cutFromTarget = false;
+    editor.stamp.liftedCoords.clear();
+    editor.stamp.liftedColors.clear();
+    editor.stamp.kind = editor.shapeKind;
+    editor.stamp.dimensions[0] = dimensions[0];
+    editor.stamp.dimensions[1] = dimensions[1];
+    editor.stamp.dimensions[2] = dimensions[2];
+    editor.stamp.hollow = editor.shapeHollow;
+    editor.stamp.wallThickness = editor.shapeWallThickness;
+    editor.stamp.color = color;
+
+    fillStamp(scene, editor, coords, std::vector<uint32_t>(coords.size(), color));
+    centreStampAt(scene, editor, worldCentre, targetSpace.rotation);
+    selectStamp(scene, editor);
+
+    editor.statusMessage = "Placing " + std::string(ShapeKindLabel(editor.shapeKind)) + " " +
+                           std::to_string(dimensions[0]) + "x" + std::to_string(dimensions[1]) + "x" +
+                           std::to_string(dimensions[2]) + " - Enter to merge, Esc to cancel";
+    return true;
+}
+
+// Rebuilds a *generated* stamp at whatever the panel now says, about the same centre. Exact and free
+// -- the primitive is rasterised again -- which is why a generated shape resizes and a lifted one
+// does not. Also the path the Snap 90 toggle takes when it is switched back on, since a stamp left
+// at a free angle has to be pulled back onto the lattice to match what the checkbox now claims.
+static void regenerateShapeStamp(projv::Scene& scene, EditorState& editor) {
+    using namespace projv::core;
+    if (!editor.stamp.active) return;
+
+    if (editor.stamp.source != FloatingStamp::Source::Generated) {
+        snapStampToTargetLattice(scene, editor);
+        return;
+    }
+    if (editor.stamp.component >= scene.components.size()) return;
+
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, editor.stamp.component);
+    if (!space.valid) return;
+    // Kept fixed across the rebuild, so a resize grows the shape about where it is standing rather
+    // than about its minimum corner -- which is where a chunk's origin is, and would send the shape
+    // sliding off as it grew.
+    quat rotation = scene.components[editor.stamp.component].localRotation;
+    vec3 centre = scene.components[editor.stamp.component].localPosition +
+                  glm::mat3_cast(rotation) *
+                  ((vec3(editor.stamp.contentMin) + vec3(editor.stamp.contentMax) + vec3(1.0f)) * 0.5f *
+                   space.voxelSize);
+
+    int dimensions[3] = {
+        std::clamp(editor.shapeDimensions[0], 1, STAMP_MAX_DIMENSION),
+        std::clamp(editor.shapeDimensions[1], 1, STAMP_MAX_DIMENSION),
+        std::clamp(editor.shapeDimensions[2], 1, STAMP_MAX_DIMENSION)
+    };
+    std::vector<ivec3> coords;
+    rasterisePrimitive(editor.shapeKind, dimensions, editor.shapeHollow, editor.shapeWallThickness,
+                       coords);
+    if (coords.empty()) return;
+
+    // A bigger shape may not fit the pooled component's resolution, and resolution is fixed for a
+    // component's whole life -- so a resize past it moves to the component for the new one.
+    uint32_t resolution = smallestChunkResolutionFor(std::max({dimensions[0], dimensions[1], dimensions[2]}));
+    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, editor.stamp.target);
+    float voxelScale = targetSpace.valid ? targetSpace.voxelSize : space.voxelSize;
+
+    clearStampGeometry(scene, editor);
+    projv::ComponentHandle component = acquireStampComponent(scene, editor, resolution, voxelScale);
+    if (component == projv::INVALID_COMPONENT_HANDLE) return;
+    if (component != editor.stamp.component) {
+        editor.stamp.component = component;
+        clearStampGeometry(scene, editor);
+    }
+
+    editor.stamp.kind = editor.shapeKind;
+    editor.stamp.dimensions[0] = dimensions[0];
+    editor.stamp.dimensions[1] = dimensions[1];
+    editor.stamp.dimensions[2] = dimensions[2];
+    editor.stamp.hollow = editor.shapeHollow;
+    editor.stamp.wallThickness = editor.shapeWallThickness;
+
+    fillStamp(scene, editor, coords, std::vector<uint32_t>(coords.size(), editor.stamp.color));
+    centreStampAt(scene, editor, centre, rotation);
+    selectStamp(scene, editor);
+}
+
+// Hands the stamp component back to the pool and clears the floating state. `emptyIt` is false only
+// when the geometry has just been given away, which is what "Keep as component" does.
+static void releaseStamp(projv::Scene& scene, EditorState& editor, bool emptyIt) {
+    if (emptyIt && editor.stamp.component < scene.components.size()) {
+        clearStampGeometry(scene, editor);
+    }
+    projv::ComponentHandle target = editor.stamp.target;
+
+    editor.stamp.active = false;
+    editor.stamp.component = projv::INVALID_COMPONENT_HANDLE;
+    editor.stamp.target = projv::INVALID_COMPONENT_HANDLE;
+    editor.stamp.cutFromTarget = false;
+    editor.stamp.liftedCoords.clear();
+    editor.stamp.liftedColors.clear();
+    editor.stamp.liftedCoords.shrink_to_fit();
+    editor.stamp.liftedColors.shrink_to_fit();
+    editor.stamp.voxelCount = 0;
+    editor.stamp.contentMin = projv::core::ivec3(0);
+    editor.stamp.contentMax = projv::core::ivec3(-1);
+
+    // Back to what the stamp was going into, which is what the user was working on before it
+    // appeared. Leaving the selection on an emptied stamp component would leave the gizmo and the
+    // outline pointing at nothing.
+    if (target < scene.components.size()) {
+        editor.selectedComponent = target;
+        editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, target);
+    } else {
+        editor.selectedComponent = projv::INVALID_COMPONENT_HANDLE;
+        editor.selectedVoxelCount = 0;
+    }
+    editor.selectionOutlineValid = false;
+    editor.gpuFlushNeeded = true;
+}
+
+// Writes the stamp into the target. The commit, and the whole reason for everything above.
+//
+// The walk is over **target** cells, not stamp voxels. Forward-mapping each stamp voxel to a target
+// cell (a push) leaves holes: a rotation is not area-preserving on a lattice, so two source voxels
+// can land in one target cell while a neighbouring cell receives none — and on a hollow shape, whose
+// walls are one or two voxels thick, those gaps perforate the surface and the result is a rotated
+// shape you can see through. Iterating the target instead (a pull) gives every target cell exactly
+// one answer, so the surface is closed by construction.
+//
+// That is also why the cost is the volume of the stamp's oriented bounding box rather than its voxel
+// count, and why the box's volume is what STAMP_MAX_MERGE_CELLS caps.
+//
+// With Snap 90 on the pull degenerates to the exact integer remap -- the inverse transform is a
+// signed axis permutation and every target cell in the box maps to exactly one source cell -- so one
+// code path serves both modes.
+static bool mergeStamp(projv::Scene& scene, EditorState& editor) {
+    using namespace projv::core;
+
+    if (!editor.stamp.active) return false;
+    projv::ComponentHandle stampComponent = editor.stamp.component;
+    projv::ComponentHandle target = editor.stamp.target;
+    if (stampComponent >= scene.components.size() || target >= scene.components.size() ||
+        stampComponent == target) {
+        editor.statusMessage = "The stamp has no target to merge into.";
+        return false;
+    }
+
+    StampSnapshot snapshot = snapshotStamp(scene, editor);
+    if (!snapshot.valid) {
+        editor.statusMessage = "The stamp is empty - nothing to merge.";
+        return false;
+    }
+
+    // Resolved once, read from throughout, and only then written to: a ComponentVoxelSpace holds a
+    // pointer into scene.grids that does not survive an edit. See the type's own comment.
+    ComponentVoxelSpace stampSpace = resolveComponentVoxelSpace(scene, stampComponent);
+    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, target);
+    if (!stampSpace.valid || !targetSpace.valid) {
+        editor.statusMessage = "Could not resolve the voxel grids to merge between.";
+        return false;
+    }
+
+    // The stamp's box, as eight world points, then as a target-space box around them. The corners
+    // are the box's *corners* rather than cell centres, so a rotated box is fully covered.
+    mat3 stampRotation = glm::mat3_cast(stampSpace.rotation);
+    vec3 boxLow(snapshot.boundsMin);
+    vec3 boxHigh = vec3(snapshot.boundsMax) + vec3(1.0f);
+    vec3 targetLow(0.0f), targetHigh(0.0f);
+    for (int corner = 0; corner < 8; corner++) {
+        vec3 pick(corner & 1 ? boxHigh.x : boxLow.x,
+                  corner & 2 ? boxHigh.y : boxLow.y,
+                  corner & 4 ? boxHigh.z : boxLow.z);
+        vec3 world = stampSpace.latticeOrigin +
+                     stampRotation * ((pick - vec3(stampSpace.coordOrigin)) * stampSpace.voxelSize);
+        vec3 local = (glm::transpose(glm::mat3_cast(targetSpace.rotation)) *
+                      (world - targetSpace.latticeOrigin)) / targetSpace.voxelSize +
+                     vec3(targetSpace.coordOrigin);
+        targetLow = corner == 0 ? local : projv::core::min(targetLow, local);
+        targetHigh = corner == 0 ? local : projv::core::max(targetHigh, local);
+    }
+
+    // One cell of margin on each side: the corner projection is exact but the cell a corner falls in
+    // is decided by a floor, and a stamp face sitting exactly on a cell boundary is the common case
+    // under Snap 90 rather than a rare one.
+    ivec3 cellMin(int(std::floor(targetLow.x)) - 1, int(std::floor(targetLow.y)) - 1,
+                  int(std::floor(targetLow.z)) - 1);
+    ivec3 cellMax(int(std::ceil(targetHigh.x)) + 1, int(std::ceil(targetHigh.y)) + 1,
+                  int(std::ceil(targetHigh.z)) + 1);
+    ivec3 walkSize = cellMax - cellMin + ivec3(1);
+    size_t walkCells = size_t(walkSize.x) * size_t(walkSize.y) * size_t(walkSize.z);
+    if (walkCells > STAMP_MAX_MERGE_CELLS) {
+        // Refused rather than truncated. A fill that stops halfway leaves a smaller fill; a merge
+        // that stops halfway leaves half an object embedded in the scene, which is worse than not
+        // having merged at all -- and the fix (a smaller stamp, or Snap 90 on so the box is the
+        // shape's own) is one the user can act on.
+        editor.statusMessage = "That placement would cover " + formatCompactCount(uint32_t(std::min<size_t>(walkCells, 0xFFFFFFFFu))) +
+                               " target cells, past the " +
+                               formatCompactCount(uint32_t(STAMP_MAX_MERGE_CELLS)) +
+                               " limit. Turn Snap 90 on, or use a smaller stamp.";
+        return false;
+    }
+
+    bool subtract = editor.stampMergeMode == MergeMode::Subtract;
+
+    // The undo record, split exactly the way Extrude's is: cells that were empty reverse by being
+    // removed, cells that held something reverse by having their old contents written back. The naive
+    // version -- "adding fills empty space, so undo empties it again" -- is wrong the moment a stamp
+    // lands on geometry that was already there, and deletes voxels the merge never created.
+    auto addedCoords = std::make_shared<std::vector<ivec3>>();
+    auto restoreCoords = std::make_shared<std::vector<ivec3>>();
+    auto restoreColors = std::make_shared<std::vector<uint32_t>>();
+    auto writeCoords = std::make_shared<std::vector<ivec3>>();
+    auto writeColors = std::make_shared<std::vector<uint32_t>>();
+
+    for (int z = cellMin.z; z <= cellMax.z; z++) {
+        for (int y = cellMin.y; y <= cellMax.y; y++) {
+            for (int x = cellMin.x; x <= cellMax.x; x++) {
+                ivec3 cell(x, y, z);
+                // The pull: this cell's centre, back through the stamp's transform, into the stamp's
+                // own voxel space.
+                ivec3 source = worldToComponentVoxel(stampSpace, componentVoxelToWorld(targetSpace, cell));
+                if (!snapshot.inBounds(source)) continue;
+                size_t index = snapshot.index(source);
+                if (!snapshot.occupied[index]) continue;
+
+                uint8_t slot = 0;
+                bool wasSolid = queryComponentVoxel(scene, targetSpace, cell, slot);
+                if (subtract) {
+                    if (!wasSolid) continue;
+                    restoreCoords->push_back(cell);
+                    restoreColors->push_back(componentVoxelColor(scene, target, slot));
+                    writeCoords->push_back(cell);
+                    continue;
+                }
+                if (wasSolid) {
+                    restoreCoords->push_back(cell);
+                    restoreColors->push_back(componentVoxelColor(scene, target, slot));
+                } else {
+                    addedCoords->push_back(cell);
+                }
+                writeCoords->push_back(cell);
+                // The stamp voxel's own colour, not the palette's current entry -- the same principle
+                // Extrude follows in taking its source voxel's material. A lifted region keeps its
+                // pattern; a shape sculpted in two colours keeps both.
+                writeColors->push_back(snapshot.colors[index]);
+            }
+        }
+    }
+
+    size_t touched = writeCoords->size();
+    if (touched == 0) {
+        editor.statusMessage = subtract ? "Nothing of the target lies inside the stamp."
+                                        : "The stamp does not reach the target's grid.";
+        return false;
+    }
+
+    std::string targetName = scene.components[target].name;
+    if (subtract) {
+        applyVoxelSculpt(&scene, &editor, target, *writeCoords, std::vector<uint32_t>(), false);
+    } else {
+        applyVoxelSculpt(&scene, &editor, target, *writeCoords, *writeColors, true);
+    }
+
+    projv::Scene* scenePointer = &scene;
+    EditorState* editorPointer = &editor;
+    projv::editor::EditRecord record;
+    record.label = (subtract ? "Subtract " : "Merge ") + std::string(ShapeKindLabel(editor.stamp.kind)) +
+                   " into " + targetName;
+    if (editor.stamp.source == FloatingStamp::Source::Lifted) {
+        record.label = (subtract ? "Subtract region from " : "Merge region into ") + targetName;
+    }
+    record.memoryCost = touched * (sizeof(ivec3) + sizeof(uint32_t)) +
+                        restoreCoords->size() * (sizeof(ivec3) + sizeof(uint32_t));
+    if (subtract) {
+        record.undo = [=] {
+            applyVoxelSculpt(scenePointer, editorPointer, target, *restoreCoords, *restoreColors, true);
+        };
+        record.redo = [=] {
+            applyVoxelSculpt(scenePointer, editorPointer, target, *writeCoords,
+                             std::vector<uint32_t>(), false);
+        };
+    } else {
+        // Removals before additions, the ordering applyExtrudeDepth uses: a displaced cell has to be
+        // emptied of what replaced it before its own contents go back.
+        record.undo = [=] {
+            applyVoxelSculpt(scenePointer, editorPointer, target, *addedCoords,
+                             std::vector<uint32_t>(), false);
+            applyVoxelSculpt(scenePointer, editorPointer, target, *restoreCoords, *restoreColors, true);
+        };
+        record.redo = [=] {
+            applyVoxelSculpt(scenePointer, editorPointer, target, *writeCoords, *writeColors, true);
+        };
+    }
+    editor.history.record(std::move(record), ImGui::GetTime());
+
+    editor.materialUsageValid = false;
+    editor.materialChunkUsageValid = false;
+
+    size_t displaced = restoreCoords->size();
+    releaseStamp(scene, editor, true);
+    editor.statusMessage = (subtract ? "Subtracted " : "Merged ") + std::to_string(touched) +
+                           " voxel(s) in " + targetName +
+                           (displaced > 0 && !subtract
+                                ? " (" + std::to_string(displaced) + " displaced)" : "");
+    return true;
+}
+
+// Throws the stamp away. A cut has to put back what it took, or a cancel would be a delete with a
+// misleading name.
+static void cancelStamp(projv::Scene& scene, EditorState& editor) {
+    using projv::core::ivec3;
+    if (!editor.stamp.active) return;
+
+    projv::ComponentHandle target = editor.stamp.target;
+    if (editor.stamp.cutFromTarget && !editor.stamp.liftedCoords.empty() &&
+        target < scene.components.size()) {
+        auto coords = std::make_shared<std::vector<ivec3>>(editor.stamp.liftedCoords);
+        auto colors = std::make_shared<std::vector<uint32_t>>(editor.stamp.liftedColors);
+        applyVoxelSculpt(&scene, &editor, target, *coords, *colors, true);
+
+        // Its own history entry rather than an undo of the Cut. Cancelling is something the user did
+        // now, and the edits they may have made in between are not this operation's to unwind.
+        projv::Scene* scenePointer = &scene;
+        EditorState* editorPointer = &editor;
+        projv::editor::EditRecord record;
+        record.label = "Restore cut region in " + scene.components[target].name;
+        record.memoryCost = coords->size() * (sizeof(ivec3) + sizeof(uint32_t));
+        record.undo = [=] {
+            applyVoxelSculpt(scenePointer, editorPointer, target, *coords, std::vector<uint32_t>(), false);
+        };
+        record.redo = [=] {
+            applyVoxelSculpt(scenePointer, editorPointer, target, *coords, *colors, true);
+        };
+        editor.history.record(std::move(record), ImGui::GetTime());
+        editor.materialUsageValid = false;
+        editor.materialChunkUsageValid = false;
+
+        size_t restored = coords->size();
+        releaseStamp(scene, editor, true);
+        editor.statusMessage = "Cancelled - put " + std::to_string(restored) + " voxel(s) back.";
+        return;
+    }
+
+    releaseStamp(scene, editor, true);
+    editor.statusMessage = "Stamp cancelled.";
+}
+
+// The third exit: stop treating it as a stamp and leave it in the hierarchy as its own object. Often
+// what is actually wanted for a placed pillar or a tree -- and, because a stamp was a real component
+// all along, it is a rename and a flag rather than a conversion.
+static void keepStampAsComponent(projv::Scene& scene, EditorState& editor) {
+    if (!editor.stamp.active) return;
+    projv::ComponentHandle component = editor.stamp.component;
+    if (component >= scene.components.size()) {
+        releaseStamp(scene, editor, false);
+        return;
+    }
+
+    // Out of the pool: it belongs to the user now, and the next stamp of this resolution must not
+    // refill it out from under them.
+    for (auto entry = editor.stampPool.begin(); entry != editor.stampPool.end(); ++entry) {
+        if (entry->second == component) { editor.stampPool.erase(entry); break; }
+    }
+
+    std::string name = editor.stamp.source == FloatingStamp::Source::Lifted
+                     ? "Region " + std::to_string(component)
+                     : std::string(ShapeKindLabel(editor.stamp.kind)) + " " + std::to_string(component);
+    scene.components[component].name = name;
+
+    releaseStamp(scene, editor, false);
+    editor.selectedComponent = component;
+    editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, component);
+    editor.selectionOutlineValid = false;
+    editor.revealSelectionInHierarchy = true;
+    editor.statusMessage = "Kept as component: " + name;
+}
+
+// --- Keyboard placement -----------------------------------------------------
+//
+// The gizmo is the aiming tool; these are the adjusting tool. One voxel of the target lattice per
+// press, in the plane the camera is looking across, because "a bit to the left" means left *on
+// screen* and a stamp's own axes may be pointing anywhere after a rotation.
+
+// The target-lattice axis a world direction most nearly points along, as a world-space step of one
+// voxel. `ignoreVertical` keeps the ground-plane arrows out of the vertical axis, which PgUp/PgDn own.
+static projv::core::vec3 latticeStepAlong(const ComponentVoxelSpace& space, projv::core::vec3 direction,
+                                          bool ignoreVertical) {
+    using namespace projv::core;
+    mat3 rotation = glm::mat3_cast(space.rotation);
+    int best = -1;
+    float bestDot = 0.0f;
+    for (int axis = 0; axis < 3; axis++) {
+        vec3 worldAxis = rotation[axis];
+        if (ignoreVertical && std::abs(worldAxis.y) > 0.7f) continue;
+        float magnitude = std::abs(glm::dot(worldAxis, direction));
+        if (best < 0 || magnitude > bestDot) { best = axis; bestDot = magnitude; }
+    }
+    if (best < 0) return vec3(0.0f);
+    vec3 worldAxis = rotation[best];
+    float sign = glm::dot(worldAxis, direction) >= 0.0f ? 1.0f : -1.0f;
+    return worldAxis * sign * space.voxelSize;
+}
+
+static void nudgeStamp(projv::Scene& scene, EditorState& editor, projv::core::vec3 worldDelta) {
+    if (!editor.stamp.active || editor.stamp.component >= scene.components.size()) return;
+    const projv::ComponentRecord& record = scene.components[editor.stamp.component];
+    applyComponentTransform(&scene, &editor, editor.stamp.component,
+                            record.localPosition + worldDelta, record.localRotation, 1.0f);
+    snapStampToTargetLattice(scene, editor);
+}
+
+// Turns the stamp a quarter turn about a world axis, about its own content centre so it turns in
+// place rather than swinging around its minimum corner.
+static void rotateStamp90(projv::Scene& scene, EditorState& editor, projv::core::vec3 worldAxis,
+                          float sign) {
+    using namespace projv::core;
+    if (!editor.stamp.active || editor.stamp.component >= scene.components.size()) return;
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, editor.stamp.component);
+    if (!space.valid) return;
+
+    const projv::ComponentRecord& record = scene.components[editor.stamp.component];
+    vec3 contentLocal = (vec3(editor.stamp.contentMin) + vec3(editor.stamp.contentMax) + vec3(1.0f)) *
+                        0.5f * space.voxelSize;
+    vec3 centre = record.localPosition + glm::mat3_cast(record.localRotation) * contentLocal;
+
+    // The geometry inside the stamp does not move -- only the component's transform does -- so the
+    // content box is untouched and the new placement is derived from the same centre.
+    quat delta = glm::angleAxis(sign * 1.57079632679f, glm::normalize(worldAxis));
+    centreStampAt(scene, editor, centre, glm::normalize(delta * record.localRotation));
+}
+
+// Every key a floating stamp answers to. Called once per frame from the interface, not from the
+// Viewport panel, so the stamp keeps answering while the Tool panel or the Hierarchy has focus --
+// a stamp is a modal state and it has to survive looking somewhere else.
+static void handleStampKeyboard(projv::Scene& scene, EditorState& editor) {
+    using namespace projv::core;
+    if (!editor.stamp.active) return;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.WantTextInput) return;
+    // The armed eyedropper owns Escape while it is armed -- it is the more recent, more local mode,
+    // and disarming it is what the user means. Cancelling the stamp as well would throw away a
+    // placement in answer to a keypress aimed at something else.
+    if (editor.materialPickerActive) return;
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
+        mergeStamp(scene, editor);
+        return;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        cancelStamp(scene, editor);
+        return;
+    }
+
+    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, editor.stamp.target);
+    if (!targetSpace.valid) return;
+
+    vec3 forward = computeCameraDirection(editor);
+    vec3 right = glm::normalize(glm::cross(forward, vec3(0.0f, 1.0f, 0.0f)));
+
+    if (io.KeyCtrl) {
+        // A quarter turn about the lattice axis most nearly facing the camera, so Left and Right turn
+        // the stamp the way the words mean on screen.
+        vec3 axis = latticeStepAlong(targetSpace, forward, false);
+        if (glm::length(axis) <= 0.0f) return;
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  rotateStamp90(scene, editor, axis,  1.0f);
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) rotateStamp90(scene, editor, axis, -1.0f);
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    rotateStamp90(scene, editor, right,  1.0f);
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  rotateStamp90(scene, editor, right, -1.0f);
+        return;
+    }
+
+    vec3 forwardStep = latticeStepAlong(targetSpace, vec3(forward.x, 0.0f, forward.z), true);
+    vec3 rightStep = latticeStepAlong(targetSpace, right, true);
+    vec3 upStep = latticeStepAlong(targetSpace, vec3(0.0f, 1.0f, 0.0f), false);
+
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    nudgeStamp(scene, editor, forwardStep);
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  nudgeStamp(scene, editor, -forwardStep);
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) nudgeStamp(scene, editor, rightStep);
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  nudgeStamp(scene, editor, -rightStep);
+    if (ImGui::IsKeyPressed(ImGuiKey_PageUp))     nudgeStamp(scene, editor, upStep);
+    if (ImGui::IsKeyPressed(ImGuiKey_PageDown))   nudgeStamp(scene, editor, -upStep);
+}
+
+// =============================================================================
+// Region selection
+// =============================================================================
+
+// Turns a list of coordinates into a selection. Shared by the Face and Volume selectors, which both
+// gather into a vector and then need the bitset the rest of the tool works in.
+static void buildSelectionFromCoords(VoxelSelection& selection, projv::ComponentHandle component,
+                                     const std::vector<projv::core::ivec3>& coords, bool truncated) {
+    using projv::core::ivec3;
+    selection.clear();
+    if (coords.empty()) return;
+
+    ivec3 minimum = coords[0], maximum = coords[0];
+    for (const ivec3& coord : coords) {
+        minimum = projv::core::min(minimum, coord);
+        maximum = projv::core::max(maximum, coord);
+    }
+    selection.reset(component, minimum, maximum);
+    for (const ivec3& coord : coords) selection.set(coord);
+    selection.truncated = truncated;
+}
+
+// Every voxel of the selection, in coordinate form, for the paths that have to walk it.
+static void selectionCoords(const VoxelSelection& selection, std::vector<projv::core::ivec3>& out) {
+    out.clear();
+    out.reserve(selection.count);
+    for (int z = selection.boundsMin.z; z <= selection.boundsMax.z; z++) {
+        for (int y = selection.boundsMin.y; y <= selection.boundsMax.y; y++) {
+            for (int x = selection.boundsMin.x; x <= selection.boundsMax.x; x++) {
+                projv::core::ivec3 coord(x, y, z);
+                if (selection.contains(coord)) out.push_back(coord);
+            }
+        }
+    }
+}
+
+// The Volume selector: the paint fill's breadth-first traversal, returning its region instead of
+// painting it. Breadth-first over a bitset of visited voxels, with the budget counting voxels of the
+// region rather than coordinates looked at -- all three of those were bugs in the fill once, and the
+// reasoning is written out there.
+static void gatherVolumeRegion(const projv::Scene& scene, const ComponentVoxelSpace& space,
+                               projv::core::ivec3 seed, uint8_t seedSlot, SelectionScope scope,
+                               std::vector<projv::core::ivec3>& out, bool& truncated) {
+    using projv::core::ivec3;
+    truncated = false;
+    uint8_t slot = 0;
+    if (!queryComponentVoxel(scene, space, seed, slot)) return;
+    if (scope == SelectionScope::Material && slot != seedSlot) return;
+
+    VisitedVoxels visited(scene, space);
+    std::vector<ivec3> queue;
+    size_t head = 0;
+    visited.mark(seed);
+    queue.push_back(seed);
+
+    static const ivec3 NEIGHBOURS[6] = {
+        ivec3(1, 0, 0), ivec3(-1, 0, 0), ivec3(0, 1, 0),
+        ivec3(0, -1, 0), ivec3(0, 0, 1), ivec3(0, 0, -1)
+    };
+
+    while (head < queue.size()) {
+        ivec3 current = queue[head++];
+        out.push_back(current);
+        if (out.size() >= PAINT_FILL_LIMIT) {
+            truncated = true;
+            continue;   // Drain what is queued, so the region ends as a closed shell.
+        }
+        for (const ivec3& step : NEIGHBOURS) {
+            ivec3 neighbour = current + step;
+            if (visited.isMarked(neighbour)) continue;
+            visited.mark(neighbour);
+            uint8_t found = 0;
+            if (!queryComponentVoxel(scene, space, neighbour, found)) continue;
+            if (scope == SelectionScope::Material && found != seedSlot) continue;
+            queue.push_back(neighbour);
+        }
+    }
+}
+
+// One click of the Region tool, once the ray has found a voxel. The Box selector takes two of these;
+// the other two answer on the first.
+static void applyRegionPick(projv::Scene& scene, EditorState& editor, const projv::utils::VoxelPick& pick) {
+    using projv::core::ivec3;
+
+    ivec3 seed;
+    if (!pickToComponentVoxelCoord(scene, pick, seed)) {
+        editor.statusMessage = "That voxel is not somewhere a selection can be aimed.";
+        return;
+    }
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, pick.component);
+    if (!space.valid) {
+        editor.statusMessage = "That component has no voxel grid to select in.";
+        return;
+    }
+
+    switch (editor.regionSelector) {
+        case RegionSelector::Box: {
+            // A second corner only counts when it is in the same component as the first: a box
+            // spanning two components has no meaning in either one's coordinates.
+            if (!editor.regionCornerPending || editor.regionCornerComponent != pick.component) {
+                editor.regionCornerPending = true;
+                editor.regionCornerComponent = pick.component;
+                editor.regionCornerA = seed;
+                editor.regionSelection.clear();
+                editor.statusMessage = "First corner set - click the opposite one.";
+                return;
+            }
+
+            ivec3 minimum = projv::core::min(editor.regionCornerA, seed);
+            ivec3 maximum = projv::core::max(editor.regionCornerA, seed);
+            editor.regionCornerPending = false;
+
+            ivec3 size = maximum - minimum + ivec3(1);
+            size_t cells = size_t(size.x) * size_t(size.y) * size_t(size.z);
+            if (cells > STAMP_MAX_SELECTION_CELLS) {
+                editor.statusMessage = "That box is " + formatCompactCount(uint32_t(std::min<size_t>(cells, 0xFFFFFFFFu))) +
+                                       " cells, past the selection limit.";
+                return;
+            }
+
+            // Only the voxels that exist. The box is how the region is aimed, not what it contains --
+            // selecting empty space would make Copy lift a block of nothing.
+            editor.regionSelection.reset(pick.component, minimum, maximum);
+            for (int z = minimum.z; z <= maximum.z; z++) {
+                for (int y = minimum.y; y <= maximum.y; y++) {
+                    for (int x = minimum.x; x <= maximum.x; x++) {
+                        uint8_t slot = 0;
+                        if (queryComponentVoxel(scene, space, ivec3(x, y, z), slot)) {
+                            editor.regionSelection.set(ivec3(x, y, z));
+                        }
+                    }
+                }
+            }
+            break;
+        }
+
+        case RegionSelector::Face: {
+            ivec3 normal = worldDirectionToComponentAxis(
+                space, glm::mat3_cast(scene.chunks[pick.chunk].header.rotation) *
+                       projv::core::vec3(pick.faceNormal));
+            std::vector<ivec3> coords;
+            std::vector<uint32_t> colors;
+            bool truncated = false;
+            gatherFaceRegion(scene, space, pick.component, seed, normal, pick.materialSlot,
+                             editor.regionScope, EXTRUDE_MAX_FACE_VOXELS, coords, colors, truncated);
+            buildSelectionFromCoords(editor.regionSelection, pick.component, coords, truncated);
+            break;
+        }
+
+        case RegionSelector::Volume: {
+            std::vector<ivec3> coords;
+            bool truncated = false;
+            gatherVolumeRegion(scene, space, seed, pick.materialSlot, editor.regionScope, coords, truncated);
+            buildSelectionFromCoords(editor.regionSelection, pick.component, coords, truncated);
+            break;
+        }
+    }
+
+    if (editor.regionSelection.empty()) {
+        editor.statusMessage = "Nothing selected there.";
+        return;
+    }
+    // The component owning the selection becomes the selection proper, so the panels agree about
+    // what is being worked on and a lift knows what it is lifting out of.
+    editor.selectedComponent = editor.regionSelection.component;
+    editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, editor.selectedComponent);
+    editor.selectionOutlineValid = false;
+    editor.statusMessage = "Selected " + std::to_string(editor.regionSelection.count) + " voxel(s)" +
+                           (editor.regionSelection.truncated ? " (stopped at the gather limit)" : "");
+}
+
+// Lifts the selection into a floating stamp: the Region tool's whole point, and the moment it
+// becomes the same object the Shape tool produces.
+//
+// A fresh Chunk built through queueVoxelAdd, never utils::duplicateComponent -- that helper does not
+// handle Grid components, and a selection routinely lives in one. Stated here so nobody "optimises"
+// it later.
+static void liftSelection(projv::Scene& scene, EditorState& editor, bool cut) {
+    using namespace projv::core;
+
+    VoxelSelection& selection = editor.regionSelection;
+    if (selection.empty() || selection.component >= scene.components.size()) return;
+    if (editor.stamp.active) {
+        editor.statusMessage = "Finish placing the current stamp first.";
+        return;
+    }
+
+    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, selection.component);
+    if (!targetSpace.valid || targetSpace.voxelSize <= 0.0f) {
+        editor.statusMessage = "Could not resolve the selection's voxel grid.";
+        return;
+    }
+
+    ivec3 size = selection.dimensions();
+    int longest = std::max({size.x, size.y, size.z});
+    if (longest > STAMP_MAX_DIMENSION) {
+        editor.statusMessage = "That selection is " + std::to_string(longest) +
+                               " voxels across, past the " + std::to_string(STAMP_MAX_DIMENSION) +
+                               " limit for a stamp.";
+        return;
+    }
+
+    std::vector<ivec3> sourceCoords;
+    selectionCoords(selection, sourceCoords);
+
+    std::vector<ivec3> stampCoords;
+    std::vector<uint32_t> stampColors;
+    std::vector<uint32_t> sourceColors;
+    stampCoords.reserve(sourceCoords.size());
+    stampColors.reserve(sourceCoords.size());
+    sourceColors.reserve(sourceCoords.size());
+    for (const ivec3& coord : sourceCoords) {
+        uint8_t slot = 0;
+        if (!queryComponentVoxel(scene, targetSpace, coord, slot)) continue;
+        uint32_t color = componentVoxelColor(scene, selection.component, slot);
+        stampCoords.push_back(coord - selection.boundsMin);
+        stampColors.push_back(color);
+        sourceColors.push_back(color);
+    }
+    if (stampCoords.empty()) {
+        editor.statusMessage = "The selection no longer holds any voxels.";
+        return;
+    }
+
+    uint32_t resolution = smallestChunkResolutionFor(longest);
+    projv::ComponentHandle component = acquireStampComponent(scene, editor, resolution,
+                                                             targetSpace.voxelSize);
+    if (component == projv::INVALID_COMPONENT_HANDLE) {
+        editor.statusMessage = "Could not create the stamp component (see log).";
+        return;
+    }
+
+    editor.stamp.component = component;
+    clearStampGeometry(scene, editor);
+
+    editor.stamp.active = true;
+    editor.stamp.source = FloatingStamp::Source::Lifted;
+    editor.stamp.target = selection.component;
+    editor.stamp.kind = ShapeKind::Box;   // Only used for a label; a lift has no primitive.
+    editor.stamp.dimensions[0] = size.x;
+    editor.stamp.dimensions[1] = size.y;
+    editor.stamp.dimensions[2] = size.z;
+    editor.stamp.hollow = false;
+    editor.stamp.cutFromTarget = cut;
+    editor.stamp.liftedCoords.clear();
+    editor.stamp.liftedColors.clear();
+
+    fillStamp(scene, editor, stampCoords, stampColors);
+
+    // Positioned so its lattice *coincides* with the source's: the stamp appears exactly over the
+    // original, with no visual jump, and merging it straight back is a byte-identical no-op.
+    vec3 origin = targetSpace.latticeOrigin +
+                  glm::mat3_cast(targetSpace.rotation) *
+                  (vec3(selection.boundsMin - targetSpace.coordOrigin) * targetSpace.voxelSize);
+    applyComponentTransform(&scene, &editor, component, origin, targetSpace.rotation, 1.0f);
+    selectStamp(scene, editor);
+
+    if (cut) {
+        // The lift and the removal are one gesture and one history entry, which is what makes Cut
+        // different from Copy-then-Delete.
+        auto coords = std::make_shared<std::vector<ivec3>>(sourceCoords);
+        auto colors = std::make_shared<std::vector<uint32_t>>(sourceColors);
+        projv::ComponentHandle source = selection.component;
+        applyVoxelSculpt(&scene, &editor, source, *coords, std::vector<uint32_t>(), false);
+
+        // Cancel has to put these back, so the stamp carries its own copy for as long as it floats.
+        editor.stamp.liftedCoords = sourceCoords;
+        editor.stamp.liftedColors = sourceColors;
+
+        projv::Scene* scenePointer = &scene;
+        EditorState* editorPointer = &editor;
+        projv::editor::EditRecord record;
+        record.label = "Cut " + std::to_string(coords->size()) + " voxel(s) from " +
+                       scene.components[source].name;
+        record.memoryCost = coords->size() * (sizeof(ivec3) + sizeof(uint32_t));
+        record.undo = [=] {
+            applyVoxelSculpt(scenePointer, editorPointer, source, *coords, *colors, true);
+        };
+        record.redo = [=] {
+            applyVoxelSculpt(scenePointer, editorPointer, source, *coords, std::vector<uint32_t>(), false);
+        };
+        editor.history.record(std::move(record), ImGui::GetTime());
+        editor.materialUsageValid = false;
+        editor.materialChunkUsageValid = false;
+    }
+
+    editor.statusMessage = std::string(cut ? "Cut " : "Copied ") + std::to_string(stampCoords.size()) +
+                           " voxel(s) - Enter to merge, Esc to cancel";
+}
+
+// Lift a copy and step it one bounding box to the side, so it is visibly a second object rather than
+// sitting invisibly inside the first.
+static void duplicateSelectionInPlace(projv::Scene& scene, EditorState& editor) {
+    using namespace projv::core;
+    ivec3 size = editor.regionSelection.dimensions();
+    liftSelection(scene, editor, false);
+    if (!editor.stamp.active) return;
+
+    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, editor.stamp.target);
+    if (!targetSpace.valid) return;
+    vec3 offset = glm::mat3_cast(targetSpace.rotation)[0] * (float(size.x) * targetSpace.voxelSize);
+    nudgeStamp(scene, editor, offset);
+    editor.statusMessage = "Duplicated " + std::to_string(editor.stamp.voxelCount) +
+                           " voxel(s) - Enter to merge, Esc to cancel";
+}
+
+static void deleteSelection(projv::Scene& scene, EditorState& editor) {
+    using projv::core::ivec3;
+    VoxelSelection& selection = editor.regionSelection;
+    if (selection.empty() || selection.component >= scene.components.size()) return;
+
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, selection.component);
+    if (!space.valid) return;
+
+    std::vector<ivec3> all;
+    selectionCoords(selection, all);
+
+    auto coords = std::make_shared<std::vector<ivec3>>();
+    auto colors = std::make_shared<std::vector<uint32_t>>();
+    for (const ivec3& coord : all) {
+        uint8_t slot = 0;
+        if (!queryComponentVoxel(scene, space, coord, slot)) continue;
+        coords->push_back(coord);
+        colors->push_back(componentVoxelColor(scene, selection.component, slot));
+    }
+    if (coords->empty()) {
+        editor.statusMessage = "Nothing left to delete there.";
+        return;
+    }
+
+    projv::ComponentHandle component = selection.component;
+    applyVoxelSculpt(&scene, &editor, component, *coords, std::vector<uint32_t>(), false);
+
+    projv::Scene* scenePointer = &scene;
+    EditorState* editorPointer = &editor;
+    projv::editor::EditRecord record;
+    record.label = "Delete " + std::to_string(coords->size()) + " voxel(s) in " +
+                   scene.components[component].name;
+    record.memoryCost = coords->size() * (sizeof(ivec3) + sizeof(uint32_t));
+    record.undo = [=] {
+        applyVoxelSculpt(scenePointer, editorPointer, component, *coords, *colors, true);
+    };
+    record.redo = [=] {
+        applyVoxelSculpt(scenePointer, editorPointer, component, *coords, std::vector<uint32_t>(), false);
+    };
+    editor.history.record(std::move(record), ImGui::GetTime());
+
+    editor.materialUsageValid = false;
+    editor.materialChunkUsageValid = false;
+    editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, component);
+    editor.selectionOutlineValid = false;
+    editor.statusMessage = "Deleted " + std::to_string(coords->size()) + " voxel(s).";
+}
+
+// Recolours the selection with the palette's current entry. Never adds a voxel -- an empty cell in
+// the selection stays empty, which is the same boundary the Paint tool draws against Sculpt.
+static void fillSelection(projv::Scene& scene, EditorState& editor) {
+    using projv::core::ivec3;
+    VoxelSelection& selection = editor.regionSelection;
+    if (selection.empty() || selection.component >= scene.components.size()) return;
+
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, selection.component);
+    if (!space.valid) return;
+
+    uint32_t newColor = currentToolColor(scene, editor);
+    std::vector<ivec3> all;
+    selectionCoords(selection, all);
+
+    auto coords = std::make_shared<std::vector<ivec3>>();
+    auto previous = std::make_shared<std::vector<uint32_t>>();
+    auto replacement = std::make_shared<std::vector<uint32_t>>();
+    for (const ivec3& coord : all) {
+        uint8_t slot = 0;
+        if (!queryComponentVoxel(scene, space, coord, slot)) continue;
+        uint32_t existing = componentVoxelColor(scene, selection.component, slot);
+        if (existing == newColor) continue;   // Nothing to record and nothing to write.
+        coords->push_back(coord);
+        previous->push_back(existing);
+        replacement->push_back(newColor);
+    }
+    if (coords->empty()) {
+        editor.statusMessage = "Every selected voxel is already that colour.";
+        return;
+    }
+
+    projv::ComponentHandle component = selection.component;
+    applyVoxelPaint(&scene, &editor, component, *coords, *replacement);
+
+    projv::Scene* scenePointer = &scene;
+    EditorState* editorPointer = &editor;
+    projv::editor::EditRecord record;
+    record.label = "Fill " + std::to_string(coords->size()) + " voxel(s) in " +
+                   scene.components[component].name;
+    record.memoryCost = coords->size() * (sizeof(ivec3) + 2 * sizeof(uint32_t));
+    record.undo = [=] { applyVoxelPaint(scenePointer, editorPointer, component, *coords, *previous); };
+    record.redo = [=] { applyVoxelPaint(scenePointer, editorPointer, component, *coords, *replacement); };
+    editor.history.record(std::move(record), ImGui::GetTime());
+
+    editor.materialUsageValid = false;
+    editor.materialChunkUsageValid = false;
+    editor.statusMessage = "Filled " + std::to_string(coords->size()) + " voxel(s).";
+}
+
 // Casts the ray the user clicked on into the scene and does whatever the click was for. Runs after
 // the Viewport panel has been laid out (that is where the click is noticed) but before the panels
 // that show the result, so a selection or a sample appears on the same frame it was made.
@@ -5403,6 +7378,39 @@ static void processVoxelPick(projv::Scene& scene, EditorState& editor) {
     }
 
     projv::utils::VoxelPick pick = projv::utils::pickVoxel(scene, editor.cameraPosition, rayDirection);
+
+    // The Shape tool is the one purpose a miss still means something to: with nothing under the
+    // cursor there is no surface to sit the primitive on, so it goes `Place distance` down the ray
+    // instead -- the same fallback Sculpt already has, and the only way to put a shape into a
+    // component that is still empty.
+    if (purpose == PickPurpose::SpawnStamp) {
+        projv::ComponentHandle target = pick.hit ? pick.component : editor.selectedComponent;
+        if (target >= scene.components.size() ||
+            scene.components[target].kind == projv::ComponentKind::Asset) {
+            editor.statusMessage = "Select the component to place into, or click one of its voxels.";
+            return;
+        }
+
+        projv::core::vec3 centre;
+        if (pick.hit) {
+            // Sitting *on* the surface rather than half-buried in it: the shape is pushed out along
+            // the face's own normal by half of whatever the shape measures along that direction.
+            ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, target);
+            projv::core::vec3 normal = glm::mat3_cast(scene.chunks[pick.chunk].header.rotation) *
+                                       projv::core::vec3(pick.faceNormal);
+            float voxelSize = targetSpace.valid ? targetSpace.voxelSize : 1.0f;
+            projv::core::ivec3 axis = targetSpace.valid
+                                    ? worldDirectionToComponentAxis(targetSpace, normal)
+                                    : projv::core::ivec3(0, 1, 0);
+            int extent = editor.shapeDimensions[axis.x != 0 ? 0 : (axis.y != 0 ? 1 : 2)];
+            centre = pick.worldPosition + glm::normalize(normal) * (0.5f * float(extent) * voxelSize);
+        } else {
+            centre = editor.cameraPosition + rayDirection * editor.shapePlaceDistance;
+        }
+        spawnShapeStamp(scene, editor, target, centre);
+        return;
+    }
+
     if (!pick.hit) {
         // A paint drag is expected to run off the geometry -- a sweep along a wall leaves its edge
         // every time. The anchor is dropped so the dab that lands when the cursor comes back does not
@@ -5464,7 +7472,12 @@ static void processVoxelPick(projv::Scene& scene, EditorState& editor) {
             processPaintSample(scene, editor, pick);
             break;
 
+        case PickPurpose::RegionSeed:
+            applyRegionPick(scene, editor, pick);
+            break;
+
         case PickPurpose::SculptVoxel:   // Handled above, before the shared ray cast.
+        case PickPurpose::SpawnStamp:    // Likewise: a miss means something to it.
         case PickPurpose::None:
             break;
     }
@@ -5857,7 +7870,12 @@ static void drawGizmo(ImDrawList* drawList, const GizmoLayout& layout, int hover
 static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor, bool imageHovered) {
     using namespace projv::core;
 
-    if (!editor.gizmoEnabled || editor.activeTool != EditorTool::Move || editor.materialPickerActive ||
+    // The gizmo belongs to the Move tool -- and to a floating stamp, whichever tool produced it. That
+    // is the only change placement asks of the gizmo: a stamp is aimed with the same handles as
+    // everything else, and having to switch to Move to move it would be a mode inside a mode.
+    bool drivingStamp = editor.stamp.active && editor.selectedComponent == editor.stamp.component;
+    if (!editor.gizmoEnabled || (editor.activeTool != EditorTool::Move && !drivingStamp) ||
+        editor.materialPickerActive ||
         editor.selectedComponent == projv::INVALID_COMPONENT_HANDLE ||
         editor.selectedComponent >= scene.components.size()) {
         editor.gizmoActiveHandle = -1;
@@ -5964,6 +7982,16 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
 
                     applyComponentTransform(&scene, &editor, handle, newPosition,
                                             component.localRotation, component.localScale);
+                    // Aiming a stamp is not an edit to the scene -- the merge is. Recording it would
+                    // leave undo entries pointing at a component that has since been emptied and
+                    // handed back to the pool, so undoing far enough would slide an invisible stamp
+                    // around instead of putting geometry back.
+                    if (drivingStamp) {
+                        snapStampToTargetLattice(scene, editor);
+                        drawGizmo(ImGui::GetWindowDrawList(), layout, editor.gizmoHoveredHandle,
+                                  editor.gizmoActiveHandle);
+                        return true;
+                    }
                     projv::editor::EditRecord record;
                     record.label = "Move " + component.name;
                     record.coalesceKey = "transform:pos:" + std::to_string(handle);
@@ -6013,6 +8041,14 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
                         editor.inspectorEulerDegrees[0] = glm::degrees(radians.x);
                         editor.inspectorEulerDegrees[1] = glm::degrees(radians.y);
                         editor.inspectorEulerDegrees[2] = glm::degrees(radians.z);
+
+                        // See the translate branch: a stamp's placement stays out of the history.
+                        if (drivingStamp) {
+                            snapStampToTargetLattice(scene, editor);
+                            drawGizmo(ImGui::GetWindowDrawList(), layout, editor.gizmoHoveredHandle,
+                                      editor.gizmoActiveHandle);
+                            return true;
+                        }
 
                         projv::editor::EditRecord record;
                         record.label = "Rotate " + component.name;
@@ -6349,6 +8385,115 @@ static void drawViewportToast(EditorState& editor) {
                       editor.toastMessage.c_str());
 }
 
+// A box of the component's own voxel cells, outlined in world space. The Region tool's whole visual
+// vocabulary: what is selected, and what the box being dragged out covers.
+static void drawVoxelBoxOutline(ImDrawList* drawList, const EditorState& editor,
+                                const ComponentVoxelSpace& space, projv::core::ivec3 minimum,
+                                projv::core::ivec3 maximum, ImU32 color, float thickness) {
+    using namespace projv::core;
+    if (!space.valid) return;
+
+    mat3 rotation = glm::mat3_cast(space.rotation);
+    vec3 low = vec3(minimum - space.coordOrigin) * space.voxelSize;
+    vec3 high = vec3(maximum - space.coordOrigin + ivec3(1)) * space.voxelSize;
+    vec3 corners[8];
+    for (int i = 0; i < 8; i++) {
+        vec3 localOffset((i & 1) ? high.x : low.x, (i & 2) ? high.y : low.y, (i & 4) ? high.z : low.z);
+        corners[i] = space.latticeOrigin + rotation * localOffset;
+    }
+    drawWorldBoxOutline(drawList, corners, editor.cameraPosition, computeCameraDirection(editor),
+                        editor.viewportImageMin, editor.viewportImageMax, color, thickness);
+}
+
+// What the Region tool has selected, and -- while the Box selector is between its two clicks -- what
+// the box would cover if the second click landed where the cursor is now.
+//
+// The live half costs one primary ray per frame, cast here rather than parked for processVoxelPick
+// the way a click is: picking is read-only, and the whole point of the preview is that it answers
+// before the click rather than after it.
+static void drawRegionOverlay(const projv::Scene& scene, EditorState& editor, bool imageHovered,
+                              projv::core::vec2 cursorUV) {
+    using namespace projv::core;
+    if (editor.activeTool != EditorTool::Region) return;
+
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const ImU32 SELECTED = IM_COL32(90, 200, 255, 230);
+    const ImU32 PENDING  = IM_COL32(255, 160, 60, 230);
+
+    editor.regionHoverValid = false;
+    if (editor.regionCornerPending && editor.regionCornerComponent < scene.components.size()) {
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, editor.regionCornerComponent);
+        ivec3 far = editor.regionCornerA;
+
+        if (imageHovered && !editor.cameraIsFlying) {
+            vec2 resolution(float(editor.viewportWidth), float(editor.viewportHeight));
+            vec3 rayDirection = projv::utils::rayDirectionThroughImage(
+                cursorUV, resolution, computeCameraDirection(editor));
+            projv::utils::VoxelPick pick =
+                projv::utils::pickVoxel(scene, editor.cameraPosition, rayDirection);
+            ivec3 hovered;
+            if (pick.hit && pick.component == editor.regionCornerComponent &&
+                pickToComponentVoxelCoord(scene, pick, hovered)) {
+                far = hovered;
+                editor.regionHoverCoord = hovered;
+                editor.regionHoverValid = true;
+            }
+        }
+        drawVoxelBoxOutline(drawList, editor, space, projv::core::min(editor.regionCornerA, far),
+                            projv::core::max(editor.regionCornerA, far), PENDING, 2.0f);
+        return;
+    }
+
+    if (!editor.regionSelection.empty() &&
+        editor.regionSelection.component < scene.components.size()) {
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, editor.regionSelection.component);
+        drawVoxelBoxOutline(drawList, editor, space, editor.regionSelection.boundsMin,
+                            editor.regionSelection.boundsMax, SELECTED, 2.0f);
+    }
+}
+
+// The banner that says a stamp is floating.
+//
+// A floating stamp is a modal state, and a mode the user cannot see they are in is the classic
+// editor failure: Enter and Escape mean something they do not mean the rest of the time, and the
+// gizmo is driving something that is not yet part of the scene. It is drawn whatever the active tool
+// is, so jumping to Sculpt to tweak the stamp and coming back does not lose the only sign of it.
+static void drawStampBanner(const projv::Scene& scene, const EditorState& editor) {
+    if (!editor.stamp.active) return;
+
+    std::string label = "Placing: ";
+    if (editor.stamp.source == FloatingStamp::Source::Lifted) {
+        label += "region " + std::to_string(editor.stamp.dimensions[0]) + "x" +
+                 std::to_string(editor.stamp.dimensions[1]) + "x" +
+                 std::to_string(editor.stamp.dimensions[2]);
+    } else {
+        label += std::string(ShapeKindLabel(editor.stamp.kind)) + " " +
+                 std::to_string(editor.stamp.dimensions[0]) + "x" +
+                 std::to_string(editor.stamp.dimensions[1]) + "x" +
+                 std::to_string(editor.stamp.dimensions[2]) +
+                 (editor.stamp.hollow ? " hollow" : "");
+    }
+    if (editor.stamp.target < scene.components.size()) {
+        label += "  ->  " + scene.components[editor.stamp.target].name;
+    }
+    label += editor.stampMergeMode == MergeMode::Subtract ? "  (subtract)" : "";
+    label += editor.stampSnap90 ? "" : "  (free rotation)";
+    label += "\nEnter merge  -  Esc cancel  -  arrows nudge";
+
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
+    // Top-left of the image, clear of the tool strip (which is vertically centred on the left edge)
+    // and of the toast (which is top-centre).
+    ImVec2 position(editor.viewportImageMin.x + 12.0f, editor.viewportImageMin.y + 12.0f);
+    drawList->AddRectFilled(ImVec2(position.x - 8.0f, position.y - 5.0f),
+                            ImVec2(position.x + textSize.x + 8.0f, position.y + textSize.y + 5.0f),
+                            IM_COL32(26, 20, 10, 215), 5.0f);
+    drawList->AddRect(ImVec2(position.x - 8.0f, position.y - 5.0f),
+                      ImVec2(position.x + textSize.x + 8.0f, position.y + textSize.y + 5.0f),
+                      IM_COL32(255, 200, 70, 180), 5.0f, 0, 1.5f);
+    drawList->AddText(position, IM_COL32(255, 226, 150, 255), label.c_str());
+}
+
 // The scene, drawn as an image. The panel is what decides the render resolution: its size is
 // recorded here and the render targets follow it at the top of the next frame.
 static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::ConstructedRenderer>& renderer,
@@ -6438,6 +8583,8 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
             (mousePosition.y - editor.viewportImageMin.y) / imageHeight
         };
 
+        drawRegionOverlay(scene, editor, imageHovered, cursorUV);
+
         if (imageHovered && !gizmoBusy && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             editor.pickUV = cursorUV;
 
@@ -6458,6 +8605,20 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
                 } else {
                     beginSculptStroke(editor);
                     editor.pendingPick = PickPurpose::SculptVoxel;
+                }
+            } else if (editor.activeTool == EditorTool::Shape ||
+                       editor.activeTool == EditorTool::Region) {
+                if (ImGui::GetIO().KeyAlt) {
+                    editor.pendingPick = PickPurpose::SampleMaterial;
+                } else if (editor.stamp.active) {
+                    // A stamp is floating, so the viewport belongs to the gizmo. A click here would
+                    // otherwise spawn a second stamp or move the selection off the one being placed,
+                    // and either would silently break the placement in progress.
+                    editor.statusMessage = "Finish placing the current stamp - Enter merges, Esc cancels.";
+                } else if (editor.activeTool == EditorTool::Shape) {
+                    editor.pendingPick = PickPurpose::SpawnStamp;
+                } else {
+                    editor.pendingPick = PickPurpose::RegionSeed;
                 }
             } else {
                 editor.pendingPick = PickPurpose::SelectComponent;
@@ -6526,6 +8687,7 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
         }
 
         // Last, so they are on top of the outline and the gizmo as well as the scene.
+        drawStampBanner(scene, editor);
         drawViewportToolbar(editor);
         drawViewportSettingsBar(editor);
     } else {
@@ -6605,7 +8767,9 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
             if (ImGui::MenuItem(undoLabel.c_str(), "Ctrl+Z", false, editor.history.canUndo())) {
                 editor.history.undo();
             }
-            if (ImGui::MenuItem(redoLabel.c_str(), "Ctrl+Y", false, editor.history.canRedo())) {
+            // Ctrl+Shift+Z, not Ctrl+Y: the plain chord is the Region tool now. Redo keeps the
+            // binding it always had alongside the alias, so nothing the user had learned is lost.
+            if (ImGui::MenuItem(redoLabel.c_str(), "Ctrl+Shift+Z", false, editor.history.canRedo())) {
                 editor.history.redo();
             }
             ImGui::Separator();
@@ -6662,14 +8826,21 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
             if (ImGui::IsKeyPressed(ImGuiKey_W)) editor.activeTool = EditorTool::Move;
             if (ImGui::IsKeyPressed(ImGuiKey_E)) editor.activeTool = EditorTool::Sculpt;
             if (ImGui::IsKeyPressed(ImGuiKey_R)) editor.activeTool = EditorTool::Paint;
+            if (ImGui::IsKeyPressed(ImGuiKey_T)) editor.activeTool = EditorTool::Shape;
+            // Ctrl+Y was a second Redo binding until the Region tool took the letter; Ctrl+Shift+Z
+            // is the one the Edit menu has always advertised and it is unchanged.
+            if (ImGui::IsKeyPressed(ImGuiKey_Y)) editor.activeTool = EditorTool::Region;
         }
         if (ImGui::IsKeyPressed(ImGuiKey_Z)) {
             if (io.KeyShift) editor.history.redo(); else editor.history.undo();
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_Y)) {
-            editor.history.redo();
-        }
     }
+
+    // A floating stamp answers to the keyboard from anywhere in the editor, not only over the
+    // Viewport: it is a modal state that survives a tool switch, so it has to survive looking at
+    // another panel too. Ctrl is read inside, for the 90-degree rotations, so this sits outside the
+    // Ctrl-gated block above.
+    handleStampKeyboard(scene, editor);
 
     ImGui::End();
 
@@ -8104,6 +10275,287 @@ static void runPaintStrokeSelfTest(projv::Scene& scene, EditorState& editor) {
     editor.statusMessage.clear();
 }
 
+// Everything about the stamp that is invisible from the outside.
+//
+// A merge that is off by one cell produces a perfectly plausible result in the wrong place, which is
+// the same failure class the paint-coordinate test already guards -- it reads as "the tool is a bit
+// weird" rather than as a bug, and no amount of looking at the screen settles it. So the properties
+// are asserted numerically:
+//
+//   * lift a known box and merge it back at zero offset  -> identical, voxel for voxel;
+//   * merge at a +N voxel offset                          -> exactly N cells over, no strays;
+//   * four 90-degree rotations                            -> the identity transform;
+//   * cut, then cancel                                    -> the baseline, back;
+//   * undo of a merge                                     -> the baseline, back;
+//   * a hollow shape at 37 degrees                        -> no holes in its surface.
+//
+// That last one is the pull-rasterisation test, and it is the one that fails loudly if anyone ever
+// reimplements the merge as a forward map: pushing each source voxel to a target cell leaves gaps
+// that perforate a two-voxel wall, and a shell with one hole in it is a shell you can see through.
+// It is checked by flooding the empty space *around* the merged shell and asserting that the flood
+// never reaches the middle.
+//
+// Opt-in behind its own environment variable, like the sculpt tests, because it edits the scene:
+//
+//   STAMPTEST=1 ./scene_editor ../ScenePreviewer/scenes/Sibenik
+static void runStampSelfTest(projv::Scene& scene, EditorState& editor) {
+    using projv::core::ivec3;
+    using projv::core::vec3;
+
+    // Its own components rather than the loaded scene's, so the test is the same on every scene and
+    // cannot leave a mark on the user's. Soft-deleted at the end, the way the hierarchy deletes.
+    std::vector<projv::ComponentHandle> created;
+    auto makeComponent = [&](const char* name) {
+        projv::ComponentHandle handle = projv::utils::addComponent(
+            scene, projv::ComponentKind::Chunk, name, projv::INVALID_COMPONENT_HANDLE, 64, 1.0f);
+        if (handle != projv::INVALID_COMPONENT_HANDLE) created.push_back(handle);
+        return handle;
+    };
+
+    projv::ComponentHandle target = makeComponent("__stamptest_target__");
+    projv::ComponentHandle empty = makeComponent("__stamptest_empty__");
+    if (target == projv::INVALID_COMPONENT_HANDLE || empty == projv::INVALID_COMPONENT_HANDLE) {
+        projv::core::warn("STAMPTEST: could not create the test components; skipped");
+        return;
+    }
+
+    FloatingStamp savedStamp = editor.stamp;
+    VoxelSelection savedSelection = editor.regionSelection;
+    bool savedSnap = editor.stampSnap90;
+    MergeMode savedMode = editor.stampMergeMode;
+    ShapeKind savedKind = editor.shapeKind;
+    bool savedHollow = editor.shapeHollow;
+    int savedWall = editor.shapeWallThickness;
+    int savedDimensions[3] = { editor.shapeDimensions[0], editor.shapeDimensions[1],
+                               editor.shapeDimensions[2] };
+    projv::ComponentHandle savedSelected = editor.selectedComponent;
+
+    editor.stamp = FloatingStamp();
+    editor.stampSnap90 = true;
+    editor.stampMergeMode = MergeMode::Add;
+
+    // --- The baseline: a block in which every voxel is a different colour, so a merge that lands in
+    // the right place but the wrong orientation is still caught -- a uniformly coloured block would
+    // pass a transposed remap without a murmur.
+    //
+    // Six a side, not eight: a distinct colour per voxel means a distinct palette entry per voxel,
+    // and material IDs are uint8_t. 6^3 is 216 entries and fits; 8^3 is 512 and does not.
+    const ivec3 BLOCK_MIN(20, 20, 20);
+    const int BLOCK_SIDE = 6;
+    std::vector<ivec3> blockCoords;
+    std::vector<uint32_t> blockColors;
+    for (int z = 0; z < BLOCK_SIDE; z++) {
+        for (int y = 0; y < BLOCK_SIDE; y++) {
+            for (int x = 0; x < BLOCK_SIDE; x++) {
+                blockCoords.push_back(BLOCK_MIN + ivec3(x, y, z));
+                blockColors.push_back(0x3F000000u |
+                                      uint32_t((x * 40) << 16 | (y * 40) << 8 | (z * 40)));
+            }
+        }
+    }
+    applyVoxelSculpt(&scene, &editor, target, blockCoords, blockColors, true);
+
+    // Reads a component's voxels over a box, as coordinate -> colour. The comparison every assertion
+    // below is written against.
+    auto readVoxels = [&](projv::ComponentHandle component, ivec3 minimum, ivec3 maximum) {
+        std::unordered_map<uint64_t, uint32_t> voxels;
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
+        if (!space.valid) return voxels;
+        for (int z = minimum.z; z <= maximum.z; z++) {
+            for (int y = minimum.y; y <= maximum.y; y++) {
+                for (int x = minimum.x; x <= maximum.x; x++) {
+                    uint8_t slot = 0;
+                    if (!queryComponentVoxel(scene, space, ivec3(x, y, z), slot)) continue;
+                    voxels[packVoxelKey(ivec3(x, y, z))] = componentVoxelColor(scene, component, slot);
+                }
+            }
+        }
+        return voxels;
+    };
+
+    const ivec3 SCAN_MIN(0, 0, 0);
+    const ivec3 SCAN_MAX(63, 63, 63);
+    std::unordered_map<uint64_t, uint32_t> baseline = readVoxels(target, SCAN_MIN, SCAN_MAX);
+
+    // Selects the baseline block, which is what every lift below starts from.
+    auto selectBlock = [&]() {
+        editor.regionSelection.reset(target, BLOCK_MIN, BLOCK_MIN + ivec3(BLOCK_SIDE - 1));
+        for (const ivec3& coord : blockCoords) editor.regionSelection.set(coord);
+    };
+
+    // --- 1. Lift a copy and merge it straight back. Byte-identical, or the lattice the lift builds
+    // its stamp on does not coincide with the one it came from.
+    selectBlock();
+    liftSelection(scene, editor, false);
+    bool liftedIdentity = editor.stamp.active;
+    if (liftedIdentity) mergeStamp(scene, editor);
+    std::unordered_map<uint64_t, uint32_t> afterIdentity = readVoxels(target, SCAN_MIN, SCAN_MAX);
+    bool identityMatches = liftedIdentity && afterIdentity == baseline;
+
+    // --- 2. Merge the same block N voxels over. Exactly the baseline plus a translated copy.
+    const int OFFSET = 11;
+    selectBlock();
+    liftSelection(scene, editor, false);
+    bool liftedOffset = editor.stamp.active;
+    if (liftedOffset) {
+        ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, target);
+        nudgeStamp(scene, editor, glm::mat3_cast(targetSpace.rotation)[0] *
+                                  (float(OFFSET) * targetSpace.voxelSize));
+        mergeStamp(scene, editor);
+    }
+    std::unordered_map<uint64_t, uint32_t> afterOffset = readVoxels(target, SCAN_MIN, SCAN_MAX);
+    size_t offsetWrong = 0;
+    for (size_t index = 0; index < blockCoords.size(); index++) {
+        auto found = afterOffset.find(packVoxelKey(blockCoords[index] + ivec3(OFFSET, 0, 0)));
+        if (found == afterOffset.end() || found->second != blockColors[index]) offsetWrong++;
+    }
+    size_t offsetStrays = afterOffset.size() - baseline.size() - (blockCoords.size() - offsetWrong);
+    bool offsetMatches = liftedOffset && offsetWrong == 0 && offsetStrays == 0;
+
+    // --- 3. Undo the offset merge. Straight back to the baseline: the record has to reverse the
+    // cells the merge filled *and* restore the ones it displaced, which is where the naive version
+    // ("adding fills empty space, so undo empties it again") deletes voxels it never created.
+    bool undone = editor.history.canUndo() && editor.history.undo();
+    std::unordered_map<uint64_t, uint32_t> afterUndo = readVoxels(target, SCAN_MIN, SCAN_MAX);
+    bool undoMatches = undone && afterUndo == baseline;
+
+    // --- 4. Cut, then cancel. The voxels go back exactly as they were.
+    selectBlock();
+    liftSelection(scene, editor, true);
+    bool cutLifted = editor.stamp.active && editor.stamp.cutFromTarget;
+    size_t afterCutCount = readVoxels(target, SCAN_MIN, SCAN_MAX).size();
+    if (cutLifted) cancelStamp(scene, editor);
+    std::unordered_map<uint64_t, uint32_t> afterCancel = readVoxels(target, SCAN_MIN, SCAN_MAX);
+    bool cancelMatches = cutLifted && afterCutCount == baseline.size() - blockCoords.size() &&
+                         afterCancel == baseline;
+
+    // --- 5. Four quarter turns are the identity. A rotation that is nearly-but-not-quite a lattice
+    // rotation accumulates, and four of them is where it first becomes visible.
+    editor.shapeKind = ShapeKind::Box;
+    editor.shapeHollow = false;
+    editor.shapeDimensions[0] = editor.shapeDimensions[1] = editor.shapeDimensions[2] = 6;
+    editor.regionSelection.clear();
+    spawnShapeStamp(scene, editor, empty, vec3(32.0f, 32.0f, 32.0f));
+    bool spawned = editor.stamp.active;
+    bool rotationIdentity = false;
+    if (spawned) {
+        vec3 startPosition = scene.components[editor.stamp.component].localPosition;
+        projv::core::quat startRotation = scene.components[editor.stamp.component].localRotation;
+        for (int turn = 0; turn < 4; turn++) rotateStamp90(scene, editor, vec3(0.0f, 1.0f, 0.0f), 1.0f);
+        vec3 endPosition = scene.components[editor.stamp.component].localPosition;
+        projv::core::quat endRotation = scene.components[editor.stamp.component].localRotation;
+        // Quaternion sign is not part of the rotation, so the comparison is on |dot|.
+        rotationIdentity = glm::length(endPosition - startPosition) < 1.0e-3f &&
+                           std::abs(glm::dot(endRotation, startRotation)) > 0.9999f;
+        cancelStamp(scene, editor);
+    }
+
+    // --- 6. A hollow shape at 37 degrees has no holes. See this function's header comment.
+    editor.stampSnap90 = false;
+    editor.shapeKind = ShapeKind::Box;
+    editor.shapeHollow = true;
+    editor.shapeWallThickness = 2;
+    editor.shapeDimensions[0] = editor.shapeDimensions[1] = editor.shapeDimensions[2] = 20;
+    const ivec3 SHELL_CENTRE(32, 32, 32);
+    spawnShapeStamp(scene, editor, empty, vec3(SHELL_CENTRE) + vec3(0.5f));
+    bool shellSpawned = editor.stamp.active;
+    bool shellClosed = false;
+    size_t shellVoxels = 0, sealedCells = 0;
+    if (shellSpawned) {
+        const projv::ComponentRecord& record = scene.components[editor.stamp.component];
+        projv::core::quat tilt = glm::angleAxis(glm::radians(37.0f), glm::normalize(vec3(0.2f, 1.0f, 0.1f)));
+        applyComponentTransform(&scene, &editor, editor.stamp.component, record.localPosition,
+                                glm::normalize(tilt * record.localRotation), 1.0f);
+        mergeStamp(scene, editor);
+
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, empty);
+        std::unordered_map<uint64_t, uint32_t> shell = readVoxels(empty, SCAN_MIN, SCAN_MAX);
+        shellVoxels = shell.size();
+
+        // Flood the empty space from a corner well outside the shell. Six-connected, for the same
+        // reason the volume fill is: diagonal connectivity leaks through a corner contact, which
+        // would report a hole in a shell that has none.
+        ivec3 floodMin(4, 4, 4), floodMax(59, 59, 59);
+        std::vector<uint8_t> reached(size_t(56) * 56 * 56, 0);
+        auto index = [&](ivec3 c) {
+            ivec3 local = c - floodMin;
+            return (size_t(local.z) * 56 + size_t(local.y)) * 56 + size_t(local.x);
+        };
+        std::vector<ivec3> queue{ floodMin };
+        reached[index(floodMin)] = 1;
+        static const ivec3 NEIGHBOURS[6] = {
+            ivec3(1,0,0), ivec3(-1,0,0), ivec3(0,1,0), ivec3(0,-1,0), ivec3(0,0,1), ivec3(0,0,-1)
+        };
+        for (size_t head = 0; head < queue.size(); head++) {
+            ivec3 current = queue[head];
+            for (const ivec3& step : NEIGHBOURS) {
+                ivec3 next = current + step;
+                if (next.x < floodMin.x || next.y < floodMin.y || next.z < floodMin.z) continue;
+                if (next.x > floodMax.x || next.y > floodMax.y || next.z > floodMax.z) continue;
+                if (reached[index(next)]) continue;
+                uint8_t slot = 0;
+                if (queryComponentVoxel(scene, space, next, slot)) continue;   // The wall stops it.
+                reached[index(next)] = 1;
+                queue.push_back(next);
+            }
+        }
+        for (uint8_t cell : reached) sealedCells += cell ? 0u : 1u;
+        // The crisp assertion: the middle of a closed shell cannot be reached from outside it. One
+        // hole anywhere in the surface and the flood arrives here.
+        shellClosed = shellVoxels > 0 && reached[index(SHELL_CENTRE)] == 0;
+    }
+
+    projv::core::info("STAMPTEST: baseline={} voxels, offset strays={}, wrong={}, shell={} voxels, "
+                      "sealed cells={}",
+                      baseline.size(), offsetStrays, offsetWrong, shellVoxels, sealedCells);
+    projv::core::info("STAMPTEST: lift/merge identity {} | offset merge {} | undo restores {} | "
+                      "cut+cancel restores {} | four turns identity {} | hollow at 37 sealed {}",
+                      identityMatches ? "PASS" : "FAIL",
+                      offsetMatches ? "PASS" : "FAIL",
+                      undoMatches ? "PASS" : "FAIL",
+                      cancelMatches ? "PASS" : "FAIL",
+                      rotationIdentity ? "PASS" : "FAIL",
+                      shellClosed ? "PASS" : "FAIL");
+
+    // --- Clean up. The test's components go the way the hierarchy's Delete sends one, and so do the
+    // stamp components it caused to be pooled -- otherwise every run of it would leave a "Stamp"
+    // node behind in the tree.
+    if (editor.stamp.active) cancelStamp(scene, editor);
+    for (const auto& entry : editor.stampPool) created.push_back(entry.second);
+    editor.stampPool.clear();
+    for (projv::ComponentHandle handle : created) {
+        if (handle >= scene.components.size()) continue;
+        if (scene.components[handle].kind == projv::ComponentKind::Chunk) {
+            projv::ChunkHandle chunkHandle = scene.components[handle].chunkHandle;
+            if (chunkHandle < scene.chunks.size()) {
+                scene.chunks[chunkHandle].alive = false;
+                projv::releaseBlob(scene, scene.chunks[chunkHandle].geometryPoolIndex);
+            }
+            std::vector<projv::ChunkHandle>& loose = scene.looseChunks;
+            loose.erase(std::remove(loose.begin(), loose.end(), chunkHandle), loose.end());
+            scene.looseChunkCount = uint32_t(loose.size());
+        }
+        scene.components[handle].name = "__deleted__";
+        scene.components[handle].parent = projv::INVALID_COMPONENT_HANDLE;
+    }
+
+    editor.stamp = savedStamp;
+    editor.regionSelection = savedSelection;
+    editor.stampSnap90 = savedSnap;
+    editor.stampMergeMode = savedMode;
+    editor.shapeKind = savedKind;
+    editor.shapeHollow = savedHollow;
+    editor.shapeWallThickness = savedWall;
+    editor.shapeDimensions[0] = savedDimensions[0];
+    editor.shapeDimensions[1] = savedDimensions[1];
+    editor.shapeDimensions[2] = savedDimensions[2];
+    editor.selectedComponent = savedSelected;
+    editor.selectionOutlineValid = false;
+    editor.gpuFlushNeeded = true;
+    editor.history.clear();
+    editor.statusMessage.clear();
+}
+
 // =============================================================================
 // Application stages
 // =============================================================================
@@ -8193,6 +10645,11 @@ void startup(projv::Application& app) {
             runExtrudeSelfTest(scene, editor);
             runSculptOperatorSelfTest(scene, editor);
             runPaintStrokeSelfTest(scene, editor);
+        }
+        // Its own switch: it builds its own components rather than editing the loaded scene, so it
+        // is worth running on any scene at all -- including one that has nothing to sculpt.
+        if (std::getenv("STAMPTEST")) {
+            runStampSelfTest(scene, editor);
         }
     } else {
         std::error_code errorCode;

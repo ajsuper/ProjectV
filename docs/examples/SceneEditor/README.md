@@ -42,8 +42,18 @@ With no argument it opens the previewer's bundled `StonehillCastle` if it is the
 | `H` | Re-frame the camera on the scene |
 | Left-click in Viewport | Whatever the active tool says — see Tools below |
 | `Ctrl+Q` / `Ctrl+W` / `Ctrl+E` / `Ctrl+R` | Select / Move / Sculpt / Paint |
+| `Ctrl+T` / `Ctrl+Y` | Shape / Region |
 | `Ctrl+O` / `Ctrl+Shift+R` | Load Scene… / reload the current scene |
-| `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo |
+
+While a stamp is floating (see **Shape** and **Region** below), the keyboard also means:
+
+| Input | Action |
+|-------|--------|
+| Arrow keys | Nudge one voxel of the target's lattice, in the camera's ground plane |
+| `PgUp` / `PgDn` | Nudge one voxel vertically |
+| `Ctrl` + arrows | Turn 90° about the lattice axis most nearly facing the camera |
+| `Enter` / `Esc` | Merge into the target / cancel |
 
 Panels dock, tear off, and tab by dragging their title bars. The layout is saved to `imgui.ini` beside the executable and restored on the next run; **View ▸ Reset Layout** puts it back to the default.
 
@@ -94,6 +104,10 @@ The tool is what a left-click inside the viewport means. Without one, every new 
 | **Move** | `Ctrl+W` | The transform gizmo: three arrows to translate, three rings to rotate. Clicking away from a handle still selects |
 | **Sculpt** | `Ctrl+E` | Drag to add or remove voxels with a Sphere or Cube brush, to Smooth or Bump a surface, or to Extrude a whole face. `Alt`+click samples instead |
 | **Paint** | `Ctrl+R` | Drag to repaint voxels with the palette's current entry, in one of five shapes (the two fills run once per click). `Alt`+click samples instead |
+| **Shape** | `Ctrl+T` | Drops one of seven primitives into the scene as a floating stamp, on the surface under the cursor or `Place distance` down the ray when there is nothing there. `Alt`+click samples instead |
+| **Region** | `Ctrl+Y` | Selects voxels already in the scene — two corners of a box, a face, or a connected volume — to copy, cut, delete or recolour. `Alt`+click samples instead |
+
+`Ctrl+Y` used to be a second binding for Redo. The keyboard-row logic wants `Q`/`W`/`E`/`R`/`T`/`Y` in order, and Redo keeps `Ctrl+Shift+Z`, which the Edit menu has always advertised alongside the alias.
 
 A miss deselects only under Select, whose whole job is choosing: clicking past everything is how you say "nothing". Under the other tools a near miss is a slip of the hand, and losing the selection — and with it the gizmo, or the brush's target — would cost far more than it saves.
 
@@ -249,9 +263,91 @@ Sizes are in **voxels**, not world units: this is a tool that addresses the voxe
 
 Under the `Material` scope both fills compare **palette entries, not colours**, so two entries that happen to hold the same colour stay separate regions — they are separate materials, and merging them would recolour more than was pointed at. Both spread through face neighbours only; diagonal connectivity leaks a fill through the gap where two walls touch at an edge.
 
+### Stamps: the Shape and Region tools
+
+Shape placement and region copy/move look like two features. They are one machine, and building it once is what makes the second one nearly free.
+
+Both produce a **floating stamp**: geometry that is not part of the scene yet, carrying its own transform, driven by the transform gizmo, ending in a commit or a cancel. The two tools are two *sources* feeding it — Shape generates a primitive, Region lifts voxels that are already there — and from the moment it is floating, nothing downstream can tell which made it.
+
+The decision the rest follows from is that **a stamp is a real `ComponentKind::Chunk` component in the scene**, not a CPU-side voxel buffer with a preview overlay. A buffer would need its own render path and could not be edited before it committed. A component inherits, at no cost:
+
+* **rendering** — the raycaster already draws any component and already honours `ChunkHeader::rotation`, so a rotated stamp is visible exactly as it will land;
+* **the transform gizmo**, which already operates on `editor.selectedComponent`;
+* **the yellow selection outline**;
+* **Sculpt and Paint working on the stamp before it commits**, which is the whole of "edit it how you please" for free;
+* **"keep this as its own object"** as a commit path that does nothing at all.
+
+#### Shape
+
+Seven primitives — Box, Sphere, Cylinder, Cone, Wedge, Pyramid, Torus — sized in **voxels**, with the world size shown underneath, for the reason the Paint panel already gives. `Hollow` keeps only a shell of whatever wall thickness is asked for; it is one rule for all seven (inside the shape, and not inside the same shape shrunk by the wall), which is why adding a primitive is one predicate rather than two.
+
+A click drops the shape onto the surface under the cursor, pushed out along that face's normal so it sits *on* the surface rather than half-buried, or `Place distance` down the ray when the click hits nothing — the same fallback the Sculpt brush has, and the only way to put a shape into a component that is still empty.
+
+The stamp takes its **voxel scale from the target**, never from the New Data component's setting. A stamp at a different voxel size makes every merge a resample, however the rotation is snapped. Its resolution is the smallest power of four that holds the largest dimension.
+
+A *generated* shape can be resized after it has been spawned, about the point it is standing on: regenerating a primitive at new dimensions is exact and free. A *lifted* region cannot, because scaling voxels is a resample and there is nothing to resample it from. That is the only place the two sources behave differently.
+
+#### Region
+
+| Selector | Picks |
+|----------|-------|
+| **Box** | Click one corner voxel, then the opposite one. A live wireframe follows the cursor between the two clicks |
+| **Face** | `gatherFaceRegion`, unchanged — the same flat surface Extrude moves |
+| **Volume** | The volume fill's traversal, returning its bitset instead of painting it |
+
+Face and Volume take the [scope toggle](#selection-scope) below, unchanged. On a photo-textured scene that toggle is the difference between selecting four voxels and thirty thousand.
+
+A selection is **bounds plus one bit per cell**, not a `vector<ivec3>`: the volume fill already established why, and a million-voxel selection is 128 KB one way and 12 MB the other. It also answers "is this coordinate selected?" in constant time, which the lift and the delete each ask once per voxel.
+
+**Copy** lifts the selection and leaves the source alone; **Cut** lifts it and removes the source in the *same* history entry, which is what makes it different from Copy-then-Delete. **Delete**, **Fill** (recolour with the palette's current entry; never adds a voxel) and **Duplicate** (a copy stepped one bounding box aside) act on the selection without lifting.
+
+A lift builds a fresh Chunk through `queueVoxelAdd` — never `utils::duplicateComponent`, which does not handle Grid components, and a selection routinely lives in one. It is positioned so its lattice *coincides* with the source's, so the stamp appears exactly over the original with no visual jump, and merging it straight back is a byte-identical no-op.
+
+#### Rotation: one toggle, two honest modes
+
+**`Snap 90`**, on by default.
+
+**On.** Rotation is a multiple of 90° about a lattice axis, translation is a whole number of voxels, and the voxel scales match — so the merge is a **1:1 integer remap**. Every source voxel lands on exactly one target cell, nothing aliases, nothing is lost. This is the mode for everything built to the grid.
+
+**Off.** Free rotation, and the merge **rasterises the rotated shape into the target lattice**. This is not a degraded fallback; it is the point of the setting. A wedge meant to sit at 30° in the final geometry, or a tree placed at its own angle so that a dozen copies do not read as a dozen copies, can only be made this way. The panel says so plainly rather than warning about it — a warning would be telling the user their deliberate choice is a mistake.
+
+#### The merge must pull, not push
+
+This is the one part of the stamp that is easy to get wrong in a way that looks almost right.
+
+Forward-mapping each stamp voxel to a target cell (**push**) leaves holes. A rotation is not area-preserving on a lattice, so two source voxels can land in one target cell while a neighbouring cell receives none — and on a hollow shape, whose walls are one or two voxels thick, those gaps perforate the surface. The result is a rotated shape you can see through.
+
+So the merge iterates the **target** cells instead (**pull**): take the stamp's oriented bounding box, walk every target cell inside it, inverse-transform that cell's centre into the stamp's voxel space, and sample. Every target cell gets exactly one answer, so the surface is closed by construction.
+
+The cost is therefore the **volume of the oriented bounding box**, not the stamp's voxel count — which is why that box's volume is the number capped (`STAMP_MAX_MERGE_CELLS`), and why a merge that would exceed it is refused rather than truncated: a fill that stops halfway leaves a smaller fill, but a merge that stops halfway leaves half an object embedded in the scene.
+
+With `Snap 90` on the pull degenerates to the exact integer remap — the inverse transform is a signed axis permutation, and every target cell in the box maps to exactly one source cell — so **one code path serves both modes**. Sampling at cell *centres* is what makes that numerically safe: a centre maps to an integer ± 0.5 in the other lattice, half a cell away from the nearest rounding boundary.
+
+The stamp is read into a dense occupancy-and-colour box once before the walk, so the inner loop is a bit test rather than a tree64 descent. It is read back **from the scene** rather than from the list that built it, so a stamp that has been sculpted or painted while floating merges as it looks — which is the whole point of it being a real component.
+
+#### Committing
+
+| Exit | Does |
+|------|------|
+| **Merge** (`Enter`) | Writes into the target and releases the stamp |
+| **Keep as component** | Clears the floating flag and leaves it in the hierarchy as its own object — often what is actually wanted for a placed pillar or tree |
+| **Cancel** (`Esc`) | Releases the stamp, and if it was a *cut*, puts the source voxels back |
+
+`Subtract` mode takes the stamp's volume out of the target instead: spawn a sphere, subtract, and you have a crater. Same walk, `queueVoxelRemove`.
+
+Each merged voxel carries **the stamp voxel's own colour**, not the palette's current entry — the same principle Extrude follows in taking its source voxel's material. A lifted region keeps its pattern.
+
+**The undo record is exactly Extrude's**, and for exactly the same reason. Displaced cells are split two ways: cells that were empty (reverse by removing) and cells that held something (reverse by writing the old contents back). The naive version — "adding fills empty space, so undo empties it again" — is wrong the moment a stamp lands on geometry that was already there, and deletes voxels the merge never created.
+
+#### Two things worth knowing
+
+**The stamp component is reused, not recreated.** The hierarchy's Delete is a soft delete: it unparents the record and renames it `__deleted__`, and nothing reclaims it. A component created and thrown away on every placement would grow `scene.components` without bound over a session of stamping. So one stamp component is kept per resolution and refilled — resolution is fixed for a component's whole life, which is why one reusable stamp cannot serve every size, and there are only ever five of them. A component leaves the pool exactly once: when **Keep as component** hands it to the user.
+
+**A stamp's placement stays out of the undo history.** Aiming a stamp is not an edit to the scene; the merge is. Recording every gizmo frame would leave undo entries pointing at a component that has since been emptied and handed back to the pool, so undoing far enough would slide an invisible stamp around instead of putting geometry back.
+
 ### Selection scope
 
-Three things spread a selection outward from the voxel you clicked — the Extrude face gather and both fills — and they all answer the same question, so they answer it the same way (`SelectionScope`):
+Five things spread a selection outward from the voxel you clicked — the Extrude face gather, both fills, and the Region tool's Face and Volume selectors — and they all answer the same question, so they answer it the same way (`SelectionScope`):
 
 | Scope | Spreads until |
 |-------|---------------|
@@ -378,6 +474,28 @@ The three that matter most are the ones a bug would leave looking plausible. **S
 
 Only the first two of those can be seen from a single frame. **One entry per stroke** is what makes a sweep one press of `Ctrl+Z` rather than a dozen. **No repeats** is the within-frame overlap being dropped. And **gap filled** is the point of the whole stroke, asserted against the strongest control available: the same two dab centres collected on the untouched scene with nothing between them. Two dabs paint two voxels; the stroke paints the twenty-four along the path. Without interpolation those numbers are equal — which is exactly the dotted line clicking repeatedly already gave.
 
+#### The stamp
+
+`STAMPTEST=1` has its own switch because it builds **its own components** rather than editing the loaded scene, so it is the same test on every scene and leaves no mark on the user's. A merge that is off by one cell produces a perfectly plausible result in the wrong place — the same failure class the paint-coordinate test guards, and one that reads as "the tool is a bit weird" rather than as a bug.
+
+```bash
+STAMPTEST=1 ./scene_editor ../ScenePreviewer/scenes/StonehillCastle
+# STAMPTEST: baseline=216 voxels, offset strays=0, wrong=0, shell=3904 voxels, sealed cells=7999
+# STAMPTEST: lift/merge identity PASS | offset merge PASS | undo restores PASS |
+#            cut+cancel restores PASS | four turns identity PASS | hollow at 37 sealed PASS
+```
+
+The baseline is a 6³ block in which **every voxel is a different colour**, so a merge that lands in the right place but the wrong orientation is still caught — a uniformly coloured block would pass a transposed remap without a murmur. (Six a side, not eight: a distinct colour per voxel is a distinct palette entry per voxel, and material IDs are `uint8_t`. 6³ is 216 entries and fits; 8³ is 512 and does not.)
+
+* **lift/merge identity** — lift a copy and merge it straight back at zero offset. Byte-identical, or the lattice the lift builds its stamp on does not coincide with the one it came from.
+* **offset merge** — the same block eleven voxels over: exactly the baseline plus a translated copy, no strays.
+* **undo restores** — the merge's record has to reverse the cells it filled *and* restore the ones it displaced.
+* **cut+cancel restores** — a cut removes exactly the selection, and cancelling puts it back exactly.
+* **four turns identity** — four quarter-turns compose to the identity transform. A rotation that is nearly-but-not-quite a lattice rotation accumulates, and four is where it first becomes visible.
+* **hollow at 37 sealed** — the [pull-rasterisation](#the-merge-must-pull-not-push) test, and the one that fails loudly if anyone ever reimplements the merge as a forward map. A hollow 20³ box with a two-voxel wall is merged at 37° about an off-axis axis, then the empty space *around* it is flooded from a corner well outside. The assertion is crisp: the flood must not reach the middle. One hole anywhere in the surface and it does.
+
+The shell count is worth reading too — 3,904 voxels is exactly 20³ − 16³, so the rotated merge reproduced the shape's voxel count to the voxel.
+
 #### Undo
 
 Undo repaints each voxel with the colour it had — a per-voxel list, since a sphere or a cube can span several materials. Only voxels whose colour would actually change are collected, so a brush dragged over a wall it has already painted queues nothing and the undo step is the set of voxels that really moved. A whole stroke is **one** entry, so undoing puts the scene back to where the button went down.
@@ -427,7 +545,7 @@ That is deliberate. The GPU knows the answer, but reading it back stalls the pip
 
 Every edit is recorded in `edit_history.{h,cpp}` as a pair of closures — one that reverses it, one that reapplies it — rather than as a struct in a central switch. The operations coming next (voxel add, erase, transforms) reverse in completely different ways, and each knows how to reverse itself better than a central authority would.
 
-* `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`), and the Edit menu, which names the step it will undo.
+* `Ctrl+Z` / `Ctrl+Shift+Z`, and the Edit menu, which names the step it will undo. (`Ctrl+Y` was a second Redo binding until the Region tool took the letter.)
 * The History panel lists every edit; clicking one walks the scene to the state just after it.
 * A colour drag is **one** undo step: consecutive edits to the same target within a second coalesce, keeping the colour the drag started from.
 * Removing a palette entry is undone from a **snapshot** (the palette, the affected blobs' material bytes, and which blob each chunk pointed at). The operation renumbers slots and rewrites voxels, so there is no inverse to compute — only a record to restore. The log is capped at 512 MB and drops its oldest steps past that.
@@ -488,7 +606,8 @@ Scenes are not bundled: the editor points at `../ScenePreviewer/scenes/`, whose 
 * `utils::addMaterial` / `setMaterialColor` / `setMaterialName` / `removeMaterial` — palette editing
 * `utils::countMaterialUsage` / `findMaterialChunks` — voxels per slot, and which chunks they are in
 * `utils::pickVoxel` / `queryVoxelMaterial` / `rayDirectionThroughImage` — CPU picking, for click-to-select, the eyedropper, and every frame of a sculpt stroke (via `VoxelSolidityOverride`)
-* `utils::queueVoxelAdd` / `updateScene` + `graphics::flushSceneUpdates` — the Paint tool's write path
+* `utils::queueVoxelAdd` / `queueVoxelRemove` / `updateScene` + `graphics::flushSceneUpdates` — the write path every editing tool uses
+* `utils::addComponent` / `isValidChunkResolution` — creating the stamp component a Shape or Region placement floats in
 * `utils::parseComposeJson` — the Library's scene contents, read without loading any geometry
 * `graphics::loadRendererSpecification` / `constructRendererSpecification` — the JSON-described viewport renderer
 * `graphics::performRenderPasses`, `updateUniforms`, `setUniformToValue` — the render loop, driven by hand
@@ -516,5 +635,6 @@ Implementing it was mostly a matter of getting the projection math exactly right
 * **Rotating the cube brush.** The box is axis-aligned in the component's voxel space. The Tool panel used to advertise `WASDQE` rotation, which never existed and has been removed rather than left as a promise; a rotated box means rasterising an oriented box into the grid rather than scanning an axis-aligned one.
 * **Undo of an additive stroke leaves empty cells behind.** Removing the voxels does not remove a Grid cell the stroke caused to be created — an empty chunk, drawing nothing and costing a header row. Harmless, and the next save drops it, but a cell reaper would be tidier.
 * **Cross-scene import**, which is what the Library's disabled Import button is waiting on: appending another `Scene`'s geometry blobs, palette and chunk records into the open one with every handle remapped. `duplicateComponent` is the within-scene version of the same walk and does not yet handle Grid components either.
-* **The stamp system** — a Shape tool that spawns a primitive to drag, rotate and merge into the scene, and a Region tool that selects voxels already there and copies or moves them the same way. Both are the same machine: a *floating stamp*, which is a live component (so it inherits the renderer, the gizmo, the outline, and Sculpt/Paint working on it before it commits) until it is merged, kept, or cancelled. Rotation is one toggle — snapped to 90°, where the merge is a lossless 1:1 lattice remap, or free, where it rasterises into the target lattice so a wedge or a tree can sit at its own angle. Designed in [`docs/plans/stamp_system.md`](../../plans/stamp_system.md).
+* **Scaling a lifted stamp.** The gizmo has no scale handles, and scaling voxels is a resample rather than an edit. A *generated* shape resizes by regenerating, which is exact and free; a lifted region does not resize at all. A resampling lift is the missing piece, and it is a different operation from everything the merge does today.
+* **Repointing a stamp at a different target.** The target is fixed when the stamp is created, because a stamp is built at the target's voxel scale and moving it to a component with a different one would make the merge a resample — the same problem as scaling, arriving from the other direction.
 * **Saving**: Compose write-back for an edited scene.
