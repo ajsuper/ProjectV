@@ -152,9 +152,13 @@ inline void buildMips(TreeAsset& asset, int levels) {
 }
 
 // Reads the .data containers the MeshVoxelizer example produces (one 64^3 block per tree), decodes
-// their voxelTypeData into flat voxel lists, and builds the coarse mips. Colors are kept raw here;
+// their geometry into flat voxel lists, and builds the coarse mips. Colors are kept raw here;
 // resolveMaterials() below is what turns them into palette slots, because that has to happen
 // against a live Scene.
+//
+// A .data stores geometry plus one material byte per voxel, and the palette those bytes index sits
+// in the folder's compose.json -- so both files are read, and the tree64 is walked back into a brick
+// map to recover the voxel positions the container does not store explicitly.
 inline bool loadTreeLibrary(TreeLibrary& lib, const std::string& folder,
                             const std::vector<TreeSpecies>& species, int mipLevels = 3) {
     for (const TreeSpecies& spec : species) {
@@ -164,6 +168,14 @@ inline bool loadTreeLibrary(TreeLibrary& lib, const std::string& folder,
         if (data.blocks.empty() || data.resolution == 0) {
             projv::core::warn("[TREES] could not read {} - skipping", path);
             continue;
+        }
+
+        // What the material bytes name. One `data` component per tree, so the first entry's is it.
+        std::vector<projv::Material> palette;
+        projv::ComposeDoc doc = projv::utils::parseComposeJson(folder + "/" + name + "/compose.json");
+        if (!doc.components.empty()) palette = doc.components.front().palette;
+        if (palette.empty()) {
+            projv::core::warn("[TREES] {} has no palette in its compose.json - colours will be black", name);
         }
 
         TreeAsset asset;
@@ -178,19 +190,43 @@ inline bool loadTreeLibrary(TreeLibrary& lib, const std::string& folder,
         for (const projv::DataBlock& block : data.blocks) {
             projv::core::ivec3 blockOrigin(block.gridX, block.gridY, block.gridZ);
             blockOrigin *= int(data.resolution);
-            for (size_t i = 0; i + 2 < block.voxelTypeData.size(); i += 3) {
-                projv::core::ivec3 p =
-                    projv::utils::reverseZOrderIndex(block.voxelTypeData[i]) + blockOrigin;
-                if (p.x < 0 || p.y < 0 || p.z < 0 || p.x > 255 || p.y > 255 || p.z > 255) continue;
 
-                TreeVoxel v;
-                v.x = uint8_t(p.x); v.y = uint8_t(p.y); v.z = uint8_t(p.z);
-                base.voxels.push_back(v);
-                // voxelTypeData stores R10G10B10; packColor's runtime form is the same layout.
-                base.sourceColors.push_back(block.voxelTypeData[i + 1]);
+            // The tree64 encodes position structurally, in the descent path; brickMapFromTree64 is
+            // what turns that back into coordinates, and it carries the material bytes across with it.
+            std::unique_ptr<projv::VoxelBrickMap> brickMap =
+                projv::utils::brickMapFromTree64(block.geometry, block.materialIDs, data.resolution);
 
-                asset.lo = projv::core::min(asset.lo, p);
-                asset.hi = projv::core::max(asset.hi, p);
+            for (uint32_t brickIndex = 0; brickIndex < brickMap->totalBricks; brickIndex++) {
+                const projv::BrickData* brick = brickMap->bricks[brickIndex].get();
+                if (brick == nullptr) continue;
+                projv::core::ivec3 brickOrigin =
+                    projv::utils::reverseZOrderIndex(brickIndex) * int(projv::BRICK_SIZE);
+
+                for (uint32_t row = 0; row < projv::BRICK_MASK_ROWS; row++) {
+                    uint64_t rowBits = brick->mask[row];
+                    while (rowBits != 0) {
+                        // Tree64 convention: bit 63 is Z-order position 0 within the row.
+                        int leadingZeros = __builtin_clzll(rowBits);
+                        rowBits &= ~(1ull << (63 - leadingZeros));
+                        uint32_t localZOrder = row * 64 + uint32_t(leadingZeros);
+
+                        projv::core::ivec3 p = blockOrigin + brickOrigin +
+                                               projv::utils::reverseZOrderIndex(localZOrder);
+                        if (p.x < 0 || p.y < 0 || p.z < 0 || p.x > 255 || p.y > 255 || p.z > 255) continue;
+
+                        TreeVoxel v;
+                        v.x = uint8_t(p.x); v.y = uint8_t(p.y); v.z = uint8_t(p.z);
+                        base.voxels.push_back(v);
+                        // Material::packedColor is R10G10B10, which is the raw form sourceColors
+                        // wants and what resolveMaterials later interns.
+                        uint8_t slot = projv::utils::brickMapGetMaterial(*brick, localZOrder);
+                        base.sourceColors.push_back(slot < palette.size()
+                                                    ? palette[slot].packedColor : 0u);
+
+                        asset.lo = projv::core::min(asset.lo, p);
+                        asset.hi = projv::core::max(asset.hi, p);
+                    }
+                }
             }
         }
         if (base.voxels.empty()) {

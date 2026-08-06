@@ -78,9 +78,25 @@ namespace projv::utils {
             } else if (c.kind == ComponentKind::Grid) {
                 WorldDecomposition d = decomposeWorld(world);
                 SceneGrid& grid = scene.grids[c.gridIndex];
-                grid.origin = d.position;
                 grid.rotation = d.rotation;
                 grid.cellSize = grid.nativeCellSize * d.scale;
+                // **grid.origin is the corner of cell *index* zero, and the transform positions
+                // absolute cell zero -- the two are the same point only while originCellCoord is
+                // still (0,0,0).** Assigning d.position straight across dropped the offset that a
+                // downward expansion had put there (see expandGridToInclude), which teleported every
+                // cell of the grid by originCellCoord * cellSize the first time the component was
+                // moved: one cell of displacement per cell the grid had ever grown downward, so a
+                // component that had been extruded past its low edge jumped hundreds of voxels out
+                // of the frame the moment it was dragged. The gizmo and the selection outline are
+                // driven from the transform rather than from the grid, so they stayed where the user
+                // put them and only the geometry left -- which is what makes it read as the object
+                // vanishing rather than as it moving.
+                //
+                // The invariant, maintained here, by expandGridToInclude, and by the loader (which
+                // starts at originCellCoord == 0, where the correction is nothing):
+                //     grid.origin == worldPosition + rotation * (originCellCoord * cellSize)
+                grid.origin = d.position + glm::mat3_cast(grid.rotation) *
+                                           (core::vec3(grid.originCellCoord) * grid.cellSize);
                 for (int32_t ci = 0; ci < static_cast<int32_t>(grid.cellToChunk.size()); ++ci) {
                     int32_t chIdx = grid.cellToChunk[ci];
                     if (chIdx < 0) continue;
@@ -379,18 +395,13 @@ namespace projv::utils {
 
         scene.components.push_back(std::move(component));
 
-        // Re-bake the new component so its world transform is correct.
-        core::mat4 world = core::mat4(1.0f);
-        ComponentHandle p = component.parent;
-        while (p != INVALID_COMPONENT_HANDLE && p < scene.components.size()) {
-            const ComponentRecord& pc = scene.components[p];
-            core::mat4 local = glm::translate(core::mat4(1.0f), pc.localPosition)
-                             * glm::mat4_cast(pc.localRotation)
-                             * glm::scale(core::mat4(1.0f), core::vec3(pc.localScale));
-            world = local * world;
-            p = pc.parent;
-        }
-        rebakeSubtree(scene, handle, world);
+        // Re-bake the new component so its world transform is correct. getComponentWorldMatrix
+        // includes `handle`'s own local transform, which is the whole point: rebakeSubtree bakes the
+        // matrix it is given onto the node itself, so handing it the *parent's* world drops the
+        // node's own placement. That is harmless here -- a component is created at identity and
+        // setComponentTransform follows -- and it was not harmless in duplicateComponent, which
+        // copies the source's transform in.
+        rebakeSubtree(scene, handle, getComponentWorldMatrix(scene, handle));
 
         return handle;
     }
@@ -399,23 +410,52 @@ namespace projv::utils {
                                         ComponentHandle parent) {
         if (source >= scene.components.size()) return INVALID_COMPONENT_HANDLE;
 
-        const ComponentRecord& src = scene.components[source];
-
         ComponentHandle handle = static_cast<ComponentHandle>(scene.components.size());
-        std::string dupName = src.name + " (#" + std::to_string(handle) + ")";
-        ComponentRecord component;
-        component.kind = src.kind;
-        component.name = dupName;
-        component.localPosition = src.localPosition;
-        component.localRotation = src.localRotation;
-        component.localScale = src.localScale;
-        component.sourcePath = src.sourcePath;
-        component.materialPalette = src.materialPalette;
-        component.paletteVersion = src.paletteVersion;
 
-        if (src.kind == ComponentKind::Chunk) {
+        // **Everything the source is read for is read here, into values, and no reference to it
+        // outlives this block.**
+        //
+        // `scene.components` is a vector and this function appends to it below -- which can move the
+        // buffer and invalidate every reference into it. The recursion at the bottom needs the
+        // source's kind and child list *after* that append, and it used to reach them through a
+        // reference taken up here. That is a use-after-free, and a quiet one: a freed block usually
+        // still holds the old bytes, so it read correctly whenever the vector had spare capacity
+        // (most of the time) and whenever it did not (the rest of the time, mostly). Duplicating a
+        // nested asset -- a temple holding a pillar, which is what the contents list is made of once
+        // anything has been moved into anything -- is the case that walks furthest down it.
+        //
+        // Scoping the reference is what makes the mistake unavailable rather than merely absent: a
+        // later `src.` after the append does not compile.
+        ComponentKind srcKind;
+        ChunkHandle srcChunkHandle;
+        std::vector<ComponentHandle> srcChildren;
+        ComponentRecord component;
+        {
+            const ComponentRecord& src = scene.components[source];
+            srcKind = src.kind;
+            srcChunkHandle = src.chunkHandle;
+            srcChildren = src.children;
+
+            component.kind = src.kind;
+            component.name = src.name + " (#" + std::to_string(handle) + ")";
+            component.localPosition = src.localPosition;
+            component.localRotation = src.localRotation;
+            component.localScale = src.localScale;
+            component.sourcePath = src.sourcePath;
+            component.materialPalette = src.materialPalette;
+            component.paletteVersion = src.paletteVersion;
+            // Both are part of what the record *is*, and both were being dropped. Without `op` a
+            // duplicated child of a boolean stack came back as a plain placement -- the copy of a
+            // subtracted window filled the hole it was cut from. Without `externalSource` a
+            // duplicated link quietly became a copy, which is the one distinction the two modes
+            // exist to make.
+            component.op = src.op;
+            component.externalSource = src.externalSource;
+        }
+
+        if (srcKind == ComponentKind::Chunk) {
             Chunk chunk;
-            const Chunk& srcChunk = scene.chunks[src.chunkHandle];
+            const Chunk& srcChunk = scene.chunks[srcChunkHandle];
             chunk.header = srcChunk.header;
             chunk.header.chunkID = static_cast<uint32_t>(scene.chunks.size());
             chunk.nativeScale = srcChunk.nativeScale;
@@ -423,8 +463,13 @@ namespace projv::utils {
             chunk.componentHandle = handle;
 
             // Fork the geometry blob (shared until the copy is edited).
+            //
+            // The increment belongs only to the sharing branch. forkBlob has a sole-owner fast path
+            // that returns the source index without copying -- that is a genuine second owner and
+            // has to be counted -- but when it does copy, the fresh blob already carries refCount 1
+            // for this chunk, and counting it again pinned the blob for the life of the scene.
             int32_t forkedIdx = forkBlob(scene, srcChunk.geometryPoolIndex);
-            if (forkedIdx >= 0) {
+            if (forkedIdx >= 0 && forkedIdx == srcChunk.geometryPoolIndex) {
                 scene.geometryPool[forkedIdx].refCount++;
             }
             chunk.geometryPoolIndex = forkedIdx;
@@ -435,8 +480,8 @@ namespace projv::utils {
             scene.looseChunkCount = static_cast<uint32_t>(scene.looseChunks.size());
         }
 
-        if (src.kind == ComponentKind::Asset) {
-            component.children.reserve(src.children.size());
+        if (srcKind == ComponentKind::Asset) {
+            component.children.reserve(srcChildren.size());
         }
 
         scene.components.push_back(std::move(component));
@@ -451,25 +496,29 @@ namespace projv::utils {
             scene.components[handle].parent = INVALID_COMPONENT_HANDLE;
         }
 
-        // Recursively duplicate children (only for Asset kind).
-        if (src.kind == ComponentKind::Asset) {
-            for (ComponentHandle child : src.children) {
+        // Recursively duplicate children (only for Asset kind). Driven from the copy taken above --
+        // both because the reference it used to come from is invalid by now, and because each
+        // recursion appends to scene.components again, so a live view of the source's child list
+        // would be walked while the container it lives in is repeatedly moved.
+        if (srcKind == ComponentKind::Asset) {
+            for (ComponentHandle child : srcChildren) {
                 duplicateComponent(scene, child, handle);
             }
         }
 
-        // Re-bake.
-        core::mat4 world = core::mat4(1.0f);
-        ComponentHandle p = scene.components[handle].parent;
-        while (p != INVALID_COMPONENT_HANDLE && p < scene.components.size()) {
-            const ComponentRecord& pc = scene.components[p];
-            core::mat4 local = glm::translate(core::mat4(1.0f), pc.localPosition)
-                             * glm::mat4_cast(pc.localRotation)
-                             * glm::scale(core::mat4(1.0f), core::vec3(pc.localScale));
-            world = local * world;
-            p = pc.parent;
-        }
-        rebakeSubtree(scene, handle, world);
+        // Re-bake, **including the duplicate's own local transform**.
+        //
+        // This walked the parent chain and stopped there, so the matrix baked onto the copy was its
+        // parent's world rather than its own. A duplicate carries the source's localPosition, so the
+        // copy's chunk headers were written at the parent's origin instead: its transform fields
+        // agreed with the original while its geometry -- and the selection outline and gizmo pivot,
+        // which are derived from the chunk headers -- sat somewhere else entirely. Duplicate a
+        // component that was any distance from its parent and the copy was simply not where you were
+        // looking.
+        //
+        // The same mistake, at a third site, as the one setComponentParent had. getComponentWorldMatrix
+        // is the form that cannot make it: it ends at `handle` inclusive.
+        rebakeSubtree(scene, handle, getComponentWorldMatrix(scene, handle));
 
         return handle;
     }
@@ -515,7 +564,16 @@ namespace projv::utils {
             world = local * world;
             p = pc.parent;
         }
-        rebakeSubtree(scene, child, world);
+        // The loop above accumulates the *ancestors'* transforms, and rebakeSubtree takes the world
+        // matrix of the node it is handed rather than of that node's parent. So the moved
+        // component's own local transform has to be applied here -- without it, a reparent silently
+        // snaps the component to its new parent's origin and discards a placement the user set
+        // deliberately. Every descendant was already correct: rebakeSubtree multiplies in each
+        // child's local as it recurses. It was only the root of the moved subtree that lost its own.
+        core::mat4 childLocal = glm::translate(core::mat4(1.0f), comp.localPosition)
+                              * glm::mat4_cast(comp.localRotation)
+                              * glm::scale(core::mat4(1.0f), core::vec3(comp.localScale));
+        rebakeSubtree(scene, child, world * childLocal);
 
         return true;
     }

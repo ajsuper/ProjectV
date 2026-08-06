@@ -50,14 +50,17 @@ namespace projv::utils {
             return comp.dataRefID;
         }
 
-        // Ensure the blob has a brick map. If null, build one from the existing voxelTypeData.
+        // Ensure the blob has a brick map. If null, rebuild one from the baked pair the blob was
+        // loaded with -- the tree64 and its material bytes are all a .data stores, so the editable
+        // form is reconstructed from them on the first edit rather than kept resident from load.
+        //
+        // The palette is untouched: the material bytes name slots the component already carries, so
+        // nothing needs interning and slot numbering survives the round trip exactly.
         void ensureBrickMapExists(Scene& scene, GeometryBlob& blob, uint32_t resolution, ComponentRecord& comp) {
+            (void)scene;
+            (void)comp;
             if (blob.brickMap) return;
-            core::ivec3 brickDims = computeBrickDims(resolution);
-            blob.brickMap = createVoxelBrickMap(brickDims);
-            if (!blob.voxelTypeData.empty()) {
-                brickMapFromVoxelTypeData(scene, *blob.brickMap, blob.voxelTypeData, comp);
-            }
+            blob.brickMap = brickMapFromTree64(blob.geometry, blob.materialIDs, resolution);
         }
 
         // Apply a batch of PendingVoxelOps directly to a brick map.
@@ -181,8 +184,15 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
             SceneGrid& grid = scene.grids[comp.gridIndex];
 
             // 1. Compute overall cell bounds across all ops.
-            core::ivec3 overallNewMin(0);
-            core::ivec3 overallNewMax(grid.dims.x - 1, grid.dims.y - 1, grid.dims.z - 1);
+            //
+            // Seeded with the grid's *absolute* extent, not with (0, dims-1). An op's cell coordinate
+            // comes from floorDiv against the component's continuous voxel space, so it is absolute;
+            // the grid's low corner in that space is originCellCoord, which is only (0,0,0) until the
+            // first downward expansion moves it. Mixing the two frames made every later edit look
+            // like it fell below the grid, so expandGridToInclude grew the grid by another cell every
+            // time -- once per frame of a sculpt or extrude drag. See expandGridToInclude below.
+            core::ivec3 overallNewMin = grid.originCellCoord;
+            core::ivec3 overallNewMax = grid.originCellCoord + grid.dims - core::ivec3(1);
             for (const auto& op : comp.editQueue.ops) {
                 core::ivec3 cellCoord(
                     floorDiv(op.position.x, static_cast<int32_t>(res)),
@@ -328,18 +338,30 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
         (void)gridIndex;
         core::ivec3 oldDims = grid.dims;
         core::ivec3 oldOriginCell = grid.originCellCoord;
+        // **Absolute cell coordinates throughout, not grid indices.** The grid covers
+        // [originCellCoord, originCellCoord + dims - 1]; comparing against [0, dims - 1] instead is
+        // only the same thing while originCellCoord is still (0,0,0), and the whole reason this
+        // function exists is to move it off (0,0,0). Once it had moved, a cell the grid *already
+        // held* still compared as "below the origin", so every call expanded again: one more cell,
+        // one more step of originCellCoord, one more cellSize off grid.origin, and every existing
+        // cell re-indexed one slot up. A sculpt or extrude drag calls this once a frame, so a couple
+        // of seconds of dragging walked a component's geometry tens of thousands of voxels away from
+        // its own transform. Written this way the call is idempotent, which is what it always
+        // claimed to be: expanding to include a cell already covered now returns without touching
+        // anything.
+        core::ivec3 oldMaxCell = oldOriginCell + grid.dims - core::ivec3(1);
         core::ivec3 newMin(
-            std::min(0, cellCoord.x),
-            std::min(0, cellCoord.y),
-            std::min(0, cellCoord.z)
+            std::min(oldOriginCell.x, cellCoord.x),
+            std::min(oldOriginCell.y, cellCoord.y),
+            std::min(oldOriginCell.z, cellCoord.z)
         );
         core::ivec3 newMax(
-            std::max(static_cast<int32_t>(grid.dims.x) - 1, cellCoord.x),
-            std::max(static_cast<int32_t>(grid.dims.y) - 1, cellCoord.y),
-            std::max(static_cast<int32_t>(grid.dims.z) - 1, cellCoord.z)
+            std::max(oldMaxCell.x, cellCoord.x),
+            std::max(oldMaxCell.y, cellCoord.y),
+            std::max(oldMaxCell.z, cellCoord.z)
         );
         core::ivec3 newDims = newMax - newMin + core::ivec3(1);
-        if (newDims == grid.dims && newMin == core::ivec3(0)) return;
+        if (newDims == grid.dims && newMin == oldOriginCell) return;
 
         core::edit(" expandGridToInclude: cellCoord=({},{},{}) oldDims=({},{},{}) newDims=({},{},{}) newMin=({},{},{}) oldOriginCell=({},{},{})",
                    cellCoord.x, cellCoord.y, cellCoord.z,
@@ -348,12 +370,16 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
                    newMin.x, newMin.y, newMin.z,
                    oldOriginCell.x, oldOriginCell.y, oldOriginCell.z);
 
+        // How far every existing cell slides up the index axis: old index x holds absolute cell
+        // oldOriginCell.x + x, whose new index is that minus newMin.x.
+        core::ivec3 shift = oldOriginCell - newMin;
+
         std::vector<int32_t> newMap(newDims.x * newDims.y * newDims.z, -1);
         for (int z = 0; z < grid.dims.z; z++) {
             for (int y = 0; y < grid.dims.y; y++) {
                 for (int x = 0; x < grid.dims.x; x++) {
                     int oldLin = x + grid.dims.x * (y + grid.dims.y * z);
-                    int newLin = (x - newMin.x) + newDims.x * ((y - newMin.y) + newDims.y * (z - newMin.z));
+                    int newLin = (x + shift.x) + newDims.x * ((y + shift.y) + newDims.y * (z + shift.z));
                     newMap[newLin] = grid.cellToChunk[oldLin];
                     if (grid.cellToChunk[oldLin] >= 0)
                         scene.chunks[grid.cellToChunk[oldLin]].cellIndex = newLin;
@@ -361,9 +387,13 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
             }
         }
 
+        // grid.origin is the corner of cell *index* zero, so it moves with the low corner while every
+        // existing cell keeps its world position. The invariant this maintains -- the one
+        // rebakeSubtree and dataFileFromComponent both depend on -- is
+        //     grid.origin == componentWorldPosition + rotation * (originCellCoord * cellSize)
         grid.origin += glm::mat3_cast(grid.rotation) *
-                       (core::vec3(newMin) * grid.cellSize);
-        grid.originCellCoord = grid.originCellCoord + newMin;
+                       (core::vec3(newMin - oldOriginCell) * grid.cellSize);
+        grid.originCellCoord = newMin;
         grid.dims = newDims;
         grid.cellToChunk = std::move(newMap);
     }

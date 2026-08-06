@@ -2518,8 +2518,9 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
         projv::SceneGrid& grid = scene.grids[ts.gridIndex];
         int lin = chunkCoordToLin(proc.coord, grid);
         if (lin < 0 || lin >= static_cast<int>(grid.cellToChunk.size())) {
-            projv::core::ivec3 cell = proc.coord - grid.originCellCoord;
-            projv::utils::expandGridToInclude(grid, cell, scene, ts.gridIndex);
+            // The absolute chunk coordinate, not one rebased onto the grid's current indexing:
+            // expandGridToInclude takes the same absolute cell space chunkCoordToLin does.
+            projv::utils::expandGridToInclude(grid, proc.coord, scene, ts.gridIndex);
             lin = chunkCoordToLin(proc.coord, grid);
         }
         if (grid.cellToChunk[lin] >= 0) return false;
@@ -2875,8 +2876,7 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
             projv::SceneGrid& grid = scene.grids[ts.gridIndex];
             int lin = chunkCoordToLin(c, grid);
             if (lin < 0 || lin >= static_cast<int>(grid.cellToChunk.size())) {
-                projv::core::ivec3 cell = c - grid.originCellCoord;
-                projv::utils::expandGridToInclude(grid, cell, scene, ts.gridIndex);
+                projv::utils::expandGridToInclude(grid, c, scene, ts.gridIndex);
             }
             projv::core::vec3 wp = grid.origin + (projv::core::vec3(c - grid.originCellCoord) * TerrainState::kChunkSize);
             uint32_t lod = desiredLODClamped(ts, c, ts.lastCameraChunk);

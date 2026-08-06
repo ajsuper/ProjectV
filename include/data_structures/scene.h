@@ -34,6 +34,37 @@ namespace projv{
 
     enum class ComponentKind { Chunk, Grid, Asset };
 
+    // The boolean role a component plays inside its parent. `None` is the historical behaviour and
+    // the only value any compose.json written before this field existed can mean: the component is
+    // *placed* -- parented, transformed, and rendered as its own geometry, with no relationship to
+    // its siblings. The other three make it *resolved*: its cells are folded into its parent's
+    // voxels, left to right down the child list, and it stops being a thing you look at on its own.
+    //
+    // Defaulting to None is what makes the field backward compatible in both directions. A default
+    // of Union would silently reinterpret every scene already on disk as a boolean resolve, and a
+    // loader that does not know the field reads a composed asset as its placed parts -- a degraded
+    // picture, but a coherent one.
+    //
+    // Only meaningful on a child of an Asset node, and only for Chunk and Asset children: a Grid is
+    // many blocks across many cells and folding one into a single-lattice .data is a rebuild rather
+    // than a bake, so a Grid child is treated as None whatever the file says.
+    enum class BooleanOp {
+        None,       // Placed. Its own object, its own lattice, rendered as itself.
+        Union,      // Add its cells to the accumulator. Its own colours win.
+        Subtract,   // Remove its cells from the accumulator. Contributes no colour.
+        Intersect   // Keep only cells in both. The accumulator's colours survive.
+    };
+
+    inline const char* booleanOpName(BooleanOp op) {
+        switch (op) {
+            case BooleanOp::None:      return "none";
+            case BooleanOp::Union:     return "union";
+            case BooleanOp::Subtract:  return "subtract";
+            case BooleanOp::Intersect: return "intersect";
+        }
+        return "none";
+    }
+
     // One queued edit. Continuous component-space coords (not Z-order). P1: append via
     // queueVoxelAdd/queueVoxelRemove, drained by updateScene.
     struct PendingVoxelOp {
@@ -63,6 +94,18 @@ namespace projv{
         int32_t       gridIndex = -1;   // valid when kind == ComponentKind::Grid
         std::string   sourcePath;       // provenance/debugging, mirrors GeometryBlob::sourceDataPath
 
+        // True when this Asset node is a *reference* to the folder at `sourcePath` rather than
+        // geometry this document owns. It is expanded in memory either way -- the renderer has to
+        // see it -- so the flag matters at exactly one moment: saveComposeToDisk writes a linked node
+        // as a bare `type: asset` entry pointing at `sourcePath`, and does not descend into it.
+        //
+        // Without it a link survives until the first save and then quietly becomes a copy, which is
+        // the worst of the three behaviours: the user asked for propagation, still believes they have
+        // it, and no longer do.
+        //
+        // Only meaningful for kind == Asset. A Chunk's equivalent question is Chunk::mutability.
+        bool          externalSource = false;
+
         // P1 additions: per-component edit queue and lazily-assigned data reference.
         ComponentEditQueue editQueue;
         int32_t            dataRefID = -1;   // index into Scene.dataReferences; -1 = unassigned
@@ -73,6 +116,13 @@ namespace projv{
         // P6: Hierarchy (Chunk, Grid, Asset -- all three participate)
         ComponentHandle parent = INVALID_COMPONENT_HANDLE;
         std::vector<ComponentHandle> children;   // populated for Asset; empty for Chunk/Grid
+
+        // How this component combines with its siblings inside its parent. See BooleanOp: None means
+        // "placed", which is what every component loaded from a compose.json without an `op` field
+        // is, and the three boolean values make the parent Asset node an *assembly* whose voxels are
+        // the fold of its children. Travels through compose.json, so an assembly re-opens as the
+        // editable stack that produced it rather than as a finished mesh.
+        BooleanOp op = BooleanOp::None;
 
         // P6: Local transform (relative to parent; all three use this)
         core::vec3 localPosition = core::vec3(0.0f);
@@ -145,9 +195,9 @@ namespace projv{
         // traversalLOD computation) independent of what's actually uploaded for a shared blob.
         uint32_t requestedLOD = 0;
         // Instancing: when >= 0, this chunk's geometry lives once in Scene.geometryPool[idx]
-        // (shared across every instance of the same .data block) and geometryData/voxelTypeData
-        // above are left empty. -1 = unpooled (interned into the pool by internChunkGeometry before
-        // any GPU work; see internChunkGeometry in scene.h).
+        // (shared across every instance of the same .data block) and geometryData above is left
+        // empty. -1 = unpooled (interned into the pool by internChunkGeometry before any GPU work;
+        // see internChunkGeometry in scene.h).
         int32_t geometryPoolIndex = -1;
         // Persistence policy for this instance (from its compose.json component). Drives whether an
         // edit is written back (Direct), copied off (Copy), or in-memory only (Locked).
@@ -179,8 +229,12 @@ namespace projv{
     // One unique geometry blob shared across chunk instances. See Scene.geometryPool.
 struct GeometryBlob {
         std::vector<uint32_t> geometry;
+        // One byte per solid voxel, addressed through each leaf's material offset in `geometry` and
+        // naming a slot in the owning component's palette. This is what the .data stores and what the
+        // GPU reads: there is no second per-voxel colour representation to keep in step with it.
         std::vector<uint8_t>  materialIDs;
-        std::vector<uint32_t> voxelTypeData; // DEPRECATED: kept for backward compat, will be removed
+        // The editable form. Built lazily from geometry + materialIDs on the first edit
+        // (ensureBrickMapExists -> brickMapFromTree64) and rebaked back into that pair after.
         std::unique_ptr<VoxelBrickMap> brickMap;
 
         GeometryBlob() = default;

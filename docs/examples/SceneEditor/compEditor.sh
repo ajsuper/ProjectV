@@ -33,15 +33,36 @@ for SHADER_DIR in $SHADER_DIRS; do
             -i $PROJECTV_DIR/external/bgfx/src -i $PROJECTV_DIR/include || exit 1
     done
 
-    # Fragment shaders.
+    # Fragment shaders. denoise.frag is skipped here and built separately below: it is one source
+    # compiled once per a-trous level rather than once, so the generic rule cannot name its output.
     for i in $SHADER_DIR/*.frag; do
         [ -f "$i" ] || break
+        [ "$(basename "$i")" = "denoise.frag" ] && continue
         NAME_BIN_EXTENSION="${i%.*}.bin"
         echo "Compiling fragment shader: \"$i\" -> $NAME_BIN_EXTENSION"
         $SHADERC -f "$i" -o "$NAME_BIN_EXTENSION" --type f \
             --platform $PLATFORM --profile $PROFILE \
             -i $PROJECTV_DIR/external/bgfx/src -i $PROJECTV_DIR/include || exit 1
     done
+done
+
+# The a-trous denoiser: one source, one binary per level, differing only in the stride between
+# taps. The stride has to be baked in rather than passed as a uniform because the engine publishes
+# its multiPass counter under a per-pass uniform name (`multiPassPassNumber<index>`), so a single
+# shader cannot read its own iteration number -- see the note at the top of denoise.frag. Baking it
+# also lets the 5x5 loop unroll with constant texture offsets.
+#
+# The strides must stay powers of two ascending, and the binaries must stay in the same order as
+# shaderIDs 6/7/8 in resources.json and the three passes in render.json. Adding a level means a
+# stride here, a shaderID there, and a fourth pass reading and writing FBO 5.
+DENOISE_SOURCE=./editorRenderer/editorShaders/denoise.frag
+for STRIDE in 1 2 4; do
+    DENOISE_BIN="./editorRenderer/editorShaders/denoise${STRIDE}.bin"
+    echo "Compiling fragment shader: \"$DENOISE_SOURCE\" (stride $STRIDE) -> $DENOISE_BIN"
+    $SHADERC -f "$DENOISE_SOURCE" -o "$DENOISE_BIN" --type f \
+        --platform $PLATFORM --profile $PROFILE \
+        --define "ATROUS_STRIDE=$STRIDE" \
+        -i $PROJECTV_DIR/external/bgfx/src -i $PROJECTV_DIR/include || exit 1
 done
 
 echo "Done."

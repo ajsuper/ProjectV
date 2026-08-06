@@ -41,6 +41,11 @@ uniform vec4 windowRes;
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
 uniform vec4 frameCount;   // x = frame index
+// x = 1.0 for an orthographic projection (the editor's Orthographic and Isometric
+// modes) and 0.0 for perspective; y = the world height the image spans when it is;
+// z = how far back along the view direction the ray plane sits. See the editor's
+// cameraOrthoHeight / cameraOrthoBackoff, which compute all three.
+uniform vec4 cameraProjection;
 
 #define FOV 60.0
 
@@ -70,20 +75,49 @@ vec3 backgroundColor(vec3 direction) {
     return mix(BACKGROUND_BOTTOM, BACKGROUND_TOP, height);
 }
 
+// The primary ray, under whichever projection the editor has selected.
+//
+// Perspective is rayStartDirection's job and unchanged. Orthographic is the same
+// camera basis used the other way round: every ray points along the view direction,
+// and it is the *origin* that slides across a plane `orthoHeight` world units tall.
+// The plane is pushed back by cameraProjection.z rather than left at the camera
+// position, because parallel rays have no equivalent of "the camera is outside
+// everything in front of it" -- without the offset, anything the camera has flown
+// past would simply be missing from an orthographic view of the same scene.
+Ray primaryRay(vec2 uv) {
+    vec3 forward = normalize(cameraDir.xyz);
+
+    Ray ray;
+    if (cameraProjection.x < 0.5) {
+        ray.origin = cameraPos.xyz;
+        ray.direction = rayStartDirection(uv, windowRes.xy, cameraPos.xyz, forward, FOV);
+        return ray;
+    }
+
+    // Identical to rayStartDirection's basis, including the +Z fallback for a view
+    // pointing straight up or down. The two must agree exactly: the editor projects
+    // its outlines and gizmo onto this image with the same construction on the CPU.
+    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+    vec3 right   = normalize(cross(forward, worldUp));
+    vec3 up      = normalize(cross(right, forward));
+
+    vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
+    float aspectRatio = windowRes.x / windowRes.y;
+    float halfHeight = cameraProjection.y * 0.5;
+
+    ray.origin = cameraPos.xyz - forward * cameraProjection.z +
+                 right * (ndc.x * halfHeight * aspectRatio) +
+                 up * (ndc.y * halfHeight);
+    ray.direction = forward;
+    return ray;
+}
+
 void main() {
     int  frame  = int(frameCount.x);
     vec2 jitter = vec2(halton(frame + 1, 2), halton(frame + 1, 3)) - 0.5;
     vec2 uvJit  = v_texcoord0 + jitter / windowRes.xy;
 
-    Ray ray;
-    ray.origin = cameraPos.xyz;
-    ray.direction = rayStartDirection(
-        uvJit,
-        windowRes.xy,
-        cameraPos.xyz,
-        normalize(cameraDir.xyz),
-        FOV
-    );
+    Ray ray = primaryRay(uvJit);
 
     RayQuery rayQuery;
     rayQuery.maxRaySteps = 256u;
@@ -110,7 +144,10 @@ void main() {
         return;
     }
 
-    vec3 albedo = fetchVoxelColor(sceneHit.foundBox, sceneHit.headerIndex);
+    // The march's own integer cell, not its world-space box: recovering a coordinate back out of
+    // world space is a float32 round trip that shades voxels with their neighbour's colour once the
+    // chunk has been moved or rotated. See SceneIntersectData::voxelCoord.
+    vec3 albedo = fetchVoxelColorAtCoord(sceneHit.voxelCoord, sceneHit.headerIndex);
 
     // Straight from the march's own arithmetic, for the same reason the hit test above
     // trusts it: a position re-derived from a fresh slab test lands off the surface by

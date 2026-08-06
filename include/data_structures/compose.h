@@ -15,21 +15,31 @@ namespace projv {
 
     // --- .data (PVDT) container, in-memory form ---
 
-    // One tree64 + its voxelTypeData. A simple asset has a single block at (0,0,0);
-    // a grid volume has one block per occupied grid cell.
+    // One tree64 + the material byte per solid voxel the shader indexes alongside it. A simple asset
+    // has a single block at (0,0,0); a grid volume has one block per occupied grid cell.
+    //
+    // materialIDs are slots into the *component's* palette, and that palette lives in compose.json
+    // rather than here -- see ComposeComponent::palette. The split is what lets one .data be instanced
+    // by several components that colour it differently: the geometry and the slot indices are shared,
+    // and only the short list of colours those slots point at is per-instance.
+    //
+    // The array is indexed by the leaf nodes of `geometry`: each leaf's data3 carries a byte offset
+    // into it, and a leaf whose voxels all share a material stores one byte rather than one per voxel
+    // (the uniform-leaf flag). Produced by bakeMaterialsFromBrickMap, consumed as-is by the GPU -- so
+    // nothing about the material system is rebuilt at load time.
     struct DataBlock {
         int32_t gridX = 0, gridY = 0, gridZ = 0; // grid coordinate of this block
         std::vector<uint32_t> geometry;          // tree64 array
-        std::vector<uint32_t> voxelTypeData;     // voxelTypeData array (may be empty)
+        std::vector<uint8_t>  materialIDs;       // one byte per solid voxel, uniform leaves collapsed
     };
 
     // The intrinsic voxel data for one component: one tree64, or a grid of equally-sized,
-    // grid-aligned tree64s. Placement is NOT stored here (that lives in compose.json).
+    // grid-aligned tree64s. Neither placement nor the palette is stored here -- both live in
+    // compose.json, so this file is the geometry and nothing else.
     struct DataFile {
-        uint32_t version = 1;
+        uint32_t version = 2;
         uint32_t resolution = 0;      // edge resolution, shared by all blocks
         float    voxelScale = 0.0f;   // world size of one voxel at `resolution`
-        bool     hasVoxelTypeData = true;
         std::vector<DataBlock> blocks;
     };
 
@@ -40,18 +50,17 @@ namespace projv {
         int32_t  gridX = 0, gridY = 0, gridZ = 0; // grid coordinate of this block
         uint64_t geometryOffset = 0;              // byte offset of the tree64 uint32[]
         uint32_t geometryLength = 0;              // length in uint32 units
-        uint64_t voxelTypeOffset = 0;             // byte offset of voxelTypeData uint32[] (0 if absent)
-        uint32_t voxelTypeLength = 0;             // length in uint32 units (0 if absent)
+        uint64_t materialOffset = 0;              // byte offset of the materialIDs uint8[] (0 if absent)
+        uint32_t materialLength = 0;              // length in BYTES, not words (0 if absent)
     };
 
     // The header + block table of a .data container, WITHOUT the blob region. Lets a streamer learn a
     // file's shared params (resolution/voxelScale) and every block's grid coord + size/offset without
     // reading any geometry — the cheap index that drives per-block streaming.
     struct DataFileHeader {
-        uint32_t version = 1;
+        uint32_t version = 2;
         uint32_t resolution = 0;
         float    voxelScale = 0.0f;
-        bool     hasVoxelTypeData = true;
         std::vector<BlockEntry> blocks;
     };
 
@@ -72,6 +81,19 @@ namespace projv {
         core::quat    rotation = core::quat(1.0f, 0.0f, 0.0f, 0.0f); // identity (w,x,y,z)
         core::vec3    scale = core::vec3(1.0f);
         Mutability    mutability = Mutability::Locked; // only meaningful for `data`
+        // How this entry combines with the ones above it in the list -- see projv::BooleanOp. `none`
+        // is the default and the only thing a compose.json written before this field existed can
+        // mean, so adding it reinterprets nothing already on disk. Because `asset` entries recurse,
+        // this one field gives nested CSG for free: subtracting a whole sub-assembly is an `asset`
+        // entry with `op: subtract`, and loadComposeFromDisk already walks it.
+        BooleanOp     op = BooleanOp::None;
+        // The colours this component's material slots name, in slot order -- the palette that the
+        // .data's materialIDs index into, and the same list that becomes
+        // ComponentRecord::materialPalette at load. It lives here rather than in the .data so that two
+        // components can instance one geometry file and still be coloured independently, and so that
+        // a recolour is a small JSON edit instead of a geometry rewrite. Empty for `asset` entries,
+        // which own no voxels.
+        std::vector<Material> palette;
     };
 
     // A parsed compose.json.

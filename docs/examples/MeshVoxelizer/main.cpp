@@ -379,59 +379,25 @@ ColorPalette buildColorPalette(std::vector<ColorBucket> cells) {
     return palette;
 }
 
-// Flattens a finished brick map back into the .data container's `voxelTypeData` array: three
-// uint32s per voxel — (chunk-space Z-order, R10G10B10 color, packed normal). This is what
-// loadComposeFromDisk reads to rebuild the brick map and intern the material palette, so it is the
-// on-disk home of the colors the palette IDs stand for. The normal slot is left at zero; the
-// voxelizer stores no per-voxel normals and the renderer derives them from the tree64.
-//
-// Bricks are visited in ascending brick Z-order and, within a brick, in ascending local Z-order.
-// Morton codes nest, so that visits voxels in ascending chunk-space Z-order — the order the format
-// expects — without a sort.
-std::vector<uint32_t> buildVoxelTypeData(const projv::VoxelBrickMap& brickMap, const ColorPalette& palette) {
-    std::vector<uint32_t> voxelTypeData;
-
-    for (uint32_t brickIndex = 0; brickIndex < brickMap.totalBricks; brickIndex++) {
-        const projv::BrickData* brick = brickMap.bricks[brickIndex].get();
-        if (brick == nullptr) continue;
-
-        ivec3 brickCoord = projv::utils::reverseZOrderIndex(brickIndex);
-
-        for (uint32_t row = 0; row < projv::BRICK_MASK_ROWS; row++) {
-            uint64_t rowBits = brick->mask[row];
-            while (rowBits != 0) {
-                // Tree64 convention: bit 63 is Z-order position 0 within the row.
-                int leadingZeros = __builtin_clzll(rowBits);
-                rowBits &= ~(1ull << (63 - leadingZeros));
-
-                uint32_t localZOrder = row * 64 + uint32_t(leadingZeros);
-                ivec3 localPosition = projv::utils::reverseZOrderIndex(localZOrder);
-                ivec3 voxelPosition = brickCoord * int(projv::BRICK_SIZE) + localPosition;
-
-                uint8_t materialID = projv::utils::brickMapGetMaterial(*brick, localZOrder);
-                projv::Color color = palette.colors[materialID < palette.colors.size() ? materialID : 0];
-
-                uint32_t serializedColor = (uint32_t(color.r) * 4 << 20)
-                                         | (uint32_t(color.g) * 4 << 10)
-                                         | (uint32_t(color.b) * 4);
-
-                voxelTypeData.push_back(uint32_t(projv::utils::createZOrderIndex(voxelPosition)));
-                voxelTypeData.push_back(serializedColor);
-                voxelTypeData.push_back(0);
-            }
-        }
-    }
-
-    return voxelTypeData;
-}
-
 // Writes a finished grid-volume container plus the compose.json that places it — the folder
 // loadComposeFromDisk opens. Shared by every front end, because the output format does not care
 // whether the voxels came from triangles or from a Minecraft save.
 void writeComposeScene(projv::DataFile& dataFile, const std::string& outputDirectory,
-                       const std::string& sceneName) {
+                       const std::string& sceneName, const ColorPalette& palette) {
     std::filesystem::create_directories(outputDirectory);
     projv::utils::writeDataFile(outputDirectory + "/model.data", dataFile);
+
+    // The palette goes in compose.json, not in the .data: the container stores the material *byte*
+    // per voxel and this names what those bytes mean. Keeping them apart is what lets one .data be
+    // instanced by several components that colour it differently -- and it puts the colours somewhere
+    // a person can edit by hand.
+    nlohmann::json paletteJson = nlohmann::json::array();
+    for (const projv::Color& color : palette.colors) {
+        uint32_t packed = projv::packColor(color);
+        paletteJson.push_back({
+            {"color", {(packed >> 20) & 0x3FFu, (packed >> 10) & 0x3FFu, packed & 0x3FFu}}
+        });
+    }
 
     nlohmann::json compose;
     compose["version"] = 1;
@@ -441,7 +407,8 @@ void writeComposeScene(projv::DataFile& dataFile, const std::string& outputDirec
         {"type", "data"},
         {"source", "model.data"},
         {"position", {0.0f, 0.0f, 0.0f}},
-        {"mutability", "direct"}
+        {"mutability", "direct"},
+        {"palette", paletteJson}
     });
     std::ofstream composeOut(outputDirectory + "/compose.json");
     composeOut << compose.dump(4);
@@ -593,7 +560,6 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
     projv::DataFile dataFile;
     dataFile.resolution = chunkResolution;
     dataFile.voxelScale = voxelScale;
-    dataFile.hasVoxelTypeData = true;
 
     for (int chunkIndex = 0; chunkIndex < (int)totalChunks; chunkIndex++) {
         if (totalChunks == 1 || chunkIndex % logStep == 0) {
@@ -714,18 +680,17 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
         block.gridX = chunkIndexPosition.x;
         block.gridY = chunkIndexPosition.y;
         block.gridZ = chunkIndexPosition.z;
-        // The tree64 is written unbaked (leaf nodes carry no material offsets): material offsets
-        // index a materialIDs array, which the .data container does not store. loadComposeFromDisk
-        // rebuilds both the tree64 and the material offsets from voxelTypeData below.
+        // Baked here rather than at load: bakeMaterialsFromBrickMap stamps each leaf node with its
+        // offset into materialIDs, so the pair written to disk is exactly the pair the GPU reads.
         block.geometry = std::move(chunk.geometryData);
-        block.voxelTypeData = buildVoxelTypeData(*brickMap, palette);
+        projv::utils::bakeMaterialsFromBrickMap(block.geometry, block.materialIDs, *brickMap);
         dataFile.blocks.push_back(std::move(block));
     }
 
     // Write the grid-volume .data container and a compose.json that references it.
     std::string modelName = modelPath.stem().string();
     if (modelName.empty()) modelName = "model";
-    writeComposeScene(dataFile, outputDirectory, modelName);
+    writeComposeScene(dataFile, outputDirectory, modelName, palette);
 
     // Free all loaded texture data
     for (Texture& texture : textures) {
@@ -825,7 +790,6 @@ void voxelizeMinecraftWorld(std::filesystem::path worldPath, const minecraft::Im
     projv::DataFile dataFile;
     dataFile.resolution = chunkResolution;
     dataFile.voxelScale = voxelScale;
-    dataFile.hasVoxelTypeData = true;
 
     size_t totalVoxels = 0;
     size_t chunksWritten = 0;
@@ -865,14 +829,14 @@ void voxelizeMinecraftWorld(std::filesystem::path worldPath, const minecraft::Im
         block.gridY = chunkIndexPosition.y;
         block.gridZ = chunkIndexPosition.z;
         block.geometry = std::move(chunk.geometryData);
-        block.voxelTypeData = buildVoxelTypeData(*brickMap, palette);
+        projv::utils::bakeMaterialsFromBrickMap(block.geometry, block.materialIDs, *brickMap);
         dataFile.blocks.push_back(std::move(block));
         chunksWritten++;
     }
 
     std::string sceneName = worldPath.stem().string();
     if (sceneName.empty()) sceneName = "world";
-    writeComposeScene(dataFile, outputDirectory, sceneName);
+    writeComposeScene(dataFile, outputDirectory, sceneName, palette);
 
     info("--------------------------------------------");
     info("  Voxelization Summary");

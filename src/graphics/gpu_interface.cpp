@@ -495,13 +495,30 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             }
         }
 
-        core::info("PAL-CPU: compOffsets[0]={} totalVer={} storedVer={} rebuilt={}",
-                   gpuData.componentPaletteOffsets.empty() ? 0xFFFF : gpuData.componentPaletteOffsets[0],
-                   totalVersion, gpuData.componentPaletteVersion,
-                   (totalVersion != gpuData.componentPaletteVersion || totalVersion == 0));
+        // **A cache guard must not skip when there is nothing cached.** The version watermark answers
+        // "has any palette changed since the last upload"; it cannot answer "has there ever been an
+        // upload", and those come apart in exactly one case -- which is the ordinary one.
+        //
+        // A component loaded from a compose.json carries its palette straight out of the file
+        // (loadComposeFromDisk assigns materialPalette and never touches paletteVersion), so every
+        // component of a freshly loaded scene sits at version 0 and the whole scene sums to 0. A
+        // fresh GPUData also stores 0. The two matched, the palette was declared already uploaded,
+        // and the texture was never created at all -- so every voxel sampled an invalid texture and
+        // the entire scene rendered black, with a palette panel that was completely correct because
+        // nothing was wrong on the CPU side. Adding any palette entry bumped a version, broke the
+        // tie, and repaired the whole scene at once, which is a confusing thing to watch.
+        //
+        // Testing the texture is what closes it, and it is the honest test: an invalid handle means
+        // the GPU cannot be holding what the CPU has, whatever the versions say.
+        bool haveTexture = bgfx::isValid(gpuData.materialPaletteTexture);
+        bool upToDate = totalVersion == gpuData.componentPaletteVersion && !globalPalette.empty() &&
+                        haveTexture;
 
-        if (totalVersion == gpuData.componentPaletteVersion && !globalPalette.empty())
-            return false;
+        core::info("PAL-CPU: compOffsets[0]={} totalVer={} storedVer={} haveTexture={} rebuilt={}",
+                   gpuData.componentPaletteOffsets.empty() ? 0xFFFF : gpuData.componentPaletteOffsets[0],
+                   totalVersion, gpuData.componentPaletteVersion, haveTexture, !upToDate);
+
+        if (upToDate) return false;
         gpuData.componentPaletteVersion = totalVersion;
 
         if (globalPalette.empty()) return false;

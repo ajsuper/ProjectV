@@ -71,13 +71,24 @@ namespace projv::utils {
         std::function<bool(ChunkHandle chunk, core::ivec3 voxelCoord, bool solidInScene)>;
 
     /**
-     * Casts a ray through the scene on the CPU and returns the first voxel it hits.
+     * Casts a ray through the scene on the CPU and returns the **nearest** voxel it hits.
      *
      * This is deliberately not the GPU's job: a pick is one ray on a user action, and reading a
      * G-buffer back stalls the pipeline (and needs the renderer to have a G-buffer at all, which the
      * editor's viewport renderer does not). Chunks are tested against their world bounding boxes,
-     * nearest first, and the winner is walked voxel by voxel — so cost scales with the chunk's
+     * nearest first, and each survivor is walked voxel by voxel — so cost scales with the chunk's
      * resolution along the ray, not with the size of the scene.
+     *
+     * Two properties callers depend on, both of which cost nothing when chunks do not overlap:
+     *
+     * - **Only what is drawn is hit.** The set tested is the set the renderer reaches — the scene's
+     *   loose list plus every grid cell — not every chunk that happens to be alive. The two differ
+     *   whenever something is hidden by un-listing it (which is how a caller hides geometry that must
+     *   stay readable: see SceneEditor's setComponentRendered). Without this a ray stops on surfaces
+     *   that are not on screen, and a click lands on something the user cannot see.
+     * - **Nearest wins, not first.** Bounding-box entry order is not voxel hit order, so a chunk
+     *   whose box is entered early but whose content is far cannot claim a hit over a nearer voxel in
+     *   a chunk tested later. This is what makes a pick well defined when chunks overlap or nest.
      *
      * @param scene The scene to cast into.
      * @param rayOrigin World-space start of the ray (typically the camera).

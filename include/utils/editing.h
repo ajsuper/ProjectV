@@ -9,11 +9,19 @@
 
 namespace projv::utils {
     /**
-     * Expand a SceneGrid to include the given cellCoord (grid-index-space coordinate).
-     * Handles both directions: cells at negative coordinates shift the origin so existing
-     * chunks keep their world position. The grid's originCellCoord is updated accordingly.
+     * Expand a SceneGrid to cover the given cell, in the **absolute** cell space that
+     * SceneGrid::originCellCoord is measured in -- the same space floorDiv(voxelPosition, resolution)
+     * produces, and that a grid's cells are addressed by everywhere else. NOT an index into the
+     * grid's current cellToChunk: a grid covers [originCellCoord, originCellCoord + dims - 1], so
+     * handing this an already-rebased index makes it read the grid as though it still started at
+     * (0,0,0) and expand on every call.
+     *
+     * Handles both directions: a cell below the current low corner shifts originCellCoord, and
+     * grid.origin by the same number of cells, so every existing chunk keeps its world position.
+     * Idempotent -- expanding to a cell the grid already covers changes nothing.
+     *
      * @param grid     The grid to expand.
-     * @param cellCoord Cell coordinate (in the grid's current indexing space) to include.
+     * @param cellCoord Absolute cell coordinate to include.
      * @param scene    The owning scene (needed to update chunk cellIndex on remap).
      * @param gridIndex Index of this grid in scene.grids.
      */

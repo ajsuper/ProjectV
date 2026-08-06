@@ -5,24 +5,31 @@
         {"name": "cameraDir",      "type": "vec4"},
         {"name": "frameCount",     "type": "vec4"},
         {"name": "texelSize",      "type": "vec4"},
-        {"name": "renderSettings", "type": "vec4"}
+        {"name": "renderSettings", "type": "vec4"},
+        {"name": "cameraProjection", "type": "vec4"}
     ],
     "shaders": [
         {"shaderID": 1, "path": "./editorRenderer/editorShaders/albedo.bin"},
         {"shaderID": 2, "path": "./editorRenderer/editorShaders/accumulate.bin"},
         {"shaderID": 3, "path": "./editorRenderer/editorShaders/display.bin"},
-        {"shaderID": 4, "path": "./editorRenderer/editorShaders/shade.bin"}
+        {"shaderID": 4, "path": "./editorRenderer/editorShaders/shade.bin"},
+        {"shaderID": 5, "path": "./editorRenderer/editorShaders/occlusion.bin"},
+        {"shaderID": 6, "path": "./editorRenderer/editorShaders/denoise1.bin"},
+        {"shaderID": 7, "path": "./editorRenderer/editorShaders/denoise2.bin"},
+        {"shaderID": 8, "path": "./editorRenderer/editorShaders/denoise4.bin"}
     ],
     "textures": [
         {"texID": 1, "name": "previewColor",    "format": "RGBA16_FLOAT", "resX": 1280, "resY": 720, "resizable": true, "origin": "CreateNew"},
         {"texID": 4, "name": "previewNormal",   "format": "RGBA16_FLOAT", "resX": 1280, "resY": 720, "resizable": true, "origin": "CreateNew"},
         {"texID": 5, "name": "previewPosition", "format": "RGBA32_FLOAT", "resX": 1280, "resY": 720, "resizable": true, "origin": "CreateNew"},
+        {"texID": 7, "name": "occlusion",       "format": "R16_FLOAT",    "resX": 1280, "resY": 720, "resizable": true, "origin": "CreateNew"},
         {"texID": 6, "name": "shadedColor",     "format": "RGBA16_FLOAT", "resX": 1280, "resY": 720, "resizable": true, "origin": "CreateNew"},
         {"texID": 2, "name": "accumColor",      "format": "RGBA16_FLOAT", "resX": 1280, "resY": 720, "resizable": true, "origin": "CreateNew"},
         {"texID": 3, "name": "viewportColor",   "format": "RGBA8",        "resX": 1280, "resY": 720, "resizable": true, "origin": "CreateNew"}
     ],
     "framebuffers": [
         {"fboID": 1, "textureIDs": [1, 4, 5]},
+        {"fboID": 5, "textureIDs": [7]},
         {"fboID": 4, "textureIDs": [6]},
         {"fboID": 2, "textureIDs": [2]},
         {"fboID": 3, "textureIDs": [3]}

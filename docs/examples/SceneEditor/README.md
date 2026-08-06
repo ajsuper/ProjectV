@@ -38,22 +38,26 @@ With no argument it opens the previewer's bundled `StonehillCastle` if it is the
 |-------|--------|
 | Right-mouse drag in Viewport | Fly the camera (cursor is captured for the duration) |
 | `W`/`S`, `A`/`D`, `R`/`F` | Forward/back, strafe, up/down — while flying |
-| Scroll wheel | Movement speed — while flying, or hovering the Viewport |
+| Middle-mouse drag | Pan — the scene follows the cursor across the image plane |
+| Scroll wheel | Get closer: dolly under perspective, zoom under orthographic |
+| `Ctrl` + scroll wheel | Movement speed for the fly-through |
 | `H` | Re-frame the camera on the scene |
 | Left-click in Viewport | Whatever the active tool says — see Tools below |
 | `Ctrl+Q` / `Ctrl+W` / `Ctrl+E` / `Ctrl+R` | Select / Move / Sculpt / Paint |
-| `Ctrl+T` / `Ctrl+Y` | Shape / Region |
+| `Ctrl+T` / `Ctrl+Y` | Place / Region |
 | `Ctrl+O` / `Ctrl+Shift+R` | Load Scene… / reload the current scene |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo |
 
-While a stamp is floating (see **Shape** and **Region** below), the keyboard also means:
+Under **Place** and **Region**, with something in the open asset selected (see [Assets](#assets-the-place-and-region-tools) below), the keyboard also means:
 
 | Input | Action |
 |-------|--------|
-| Arrow keys | Nudge one voxel of the target's lattice, in the camera's ground plane |
+| Arrow keys | Nudge one voxel of the open asset's lattice, in the camera's ground plane |
 | `PgUp` / `PgDn` | Nudge one voxel vertically |
 | `Ctrl` + arrows | Turn 90° about the lattice axis most nearly facing the camera |
-| `Enter` / `Esc` | Merge into the target / cancel |
+| `Delete` | Remove the selected item from the contents |
+
+There is deliberately no `Enter` to commit and no `Esc` to cancel. An asset is not a modal state waiting to be resolved, it is an object that stays where you left it; baking is a press on a button that says what it will do.
 
 Panels dock, tear off, and tab by dragging their title bars. The layout is saved to `imgui.ini` beside the executable and restored on the next run; **View ▸ Reset Layout** puts it back to the default.
 
@@ -63,12 +67,12 @@ Two columns and a strip, which is the shape editors of this kind converge on for
 
 ```
 ┌─────────────┬──────────────────────────────────┬─────────────────┐
-│ HIERARCHY   │  StonehillCastle › model         │ INSPECTOR       │
+│ ASSETS      │  StonehillCastle › keep › model  │ INSPECTOR       │
 │   what is   │  ┌──┐                            │ TOOL            │
 │   in the    │  │QW│        viewport            │ PALETTE         │
-│   scene     │  │ER│                            │                 │
+│   open one  │  │ER│                            │                 │
 ├─────────────┤  └──┘                            │                 │
-│ LIBRARY     │         [AO] [normals]           │                 │
+│ LIBRARY     │      [AO] [normals] [sun]        │                 │
 │   what      ├──────────────────────────────────┴─────────────────┤
 │   could be  │ HISTORY                                            │
 └─────────────┴────────────────────────────────────────────────────┘
@@ -81,14 +85,109 @@ The right-hand three are **stacked, not tabbed**, and that is the point: they ar
 
 | Panel | Shows |
 |-------|-------|
-| **Viewport** | The scene, rendered at exactly the panel's pixel size, with the breadcrumb, the tool strip and the render toggles floating over it |
-| **Scene Hierarchy** | The component tree from `compose.json` — Asset folders with Chunk/Grid leaves |
-| **Library** | A disk browser over the folders scenes live in: navigate, see which are Compose scenes, list what is inside one without loading it, open it |
+| **Viewport** | The scene, rendered at exactly the panel's pixel size, with the breadcrumb, the tool strip, the render toggles and the navigator floating over it |
+| **Assets** | The contents of the asset you have open, one level deep, in order: its op, drag to reorder, click to select, the arrow to look inside, `open` to go in. Above it the breadcrumb you came down; below it what the contents resolve to, and Add / Save / Bake |
+| **Library** | A disk browser over the folders assets live in: navigate, see which hold a `compose.json`, list what is inside one without loading it, open it, or bring it into the asset already open as a Copy, a Bake or a Link |
 | **Inspector** | The selected component: kind, source, voxel count, local and world transform |
 | **Tool** | The active tool's settings. Title and contents follow the tool — a setting the current brush or shape cannot use is **absent**, not greyed out, since a disabled control still reads as part of the tool and still has to be ruled out |
 | **Palette** | The selected component's materials as a grid of swatches — edit colours, add and remove entries, see where each is used |
 | **History** | Every edit made, with undo/redo and click-to-jump |
 | **Statistics** | Frame time, camera, accumulated samples — a floating window under **View ▸ Statistics**, not a dock panel |
+
+### The render toggles
+
+Four buttons on the bar at the bottom of the scene image. What sits underneath them is the scene previewer's renderer, which is one primary ray per pixel and the voxel's **stored albedo written out with no lighting at all** — so a material that reads wrong there is wrong in the data, not in the lighting. That is the property the whole viewport is built to protect, and it is why every toggle is applied by a separate pass (`shade.frag`) reading the geometry the primary ray already wrote, rather than by the march itself. Each one multiplies a scalar into the albedo; turn them all off and the image is byte for byte the unmodulated albedo again.
+
+| Toggle | Default | What it does | Costs |
+|--------|---------|--------------|-------|
+| **Ambient occlusion (screen-space)** | **on** | Contact darkening from the depth of the screen-space neighbourhood: creases go dark, and the ground under an object reads as attached rather than passing behind it | 16 texture taps per pixel |
+| **Ambient occlusion (ray traced)** | off | The same question asked of the scene instead of the screen: four short rays into the hemisphere above the surface, reaching 24 voxels instead of 3 | Four scene rays per pixel |
+| **Normal shading** | **on** | A fixed brightness per face axis, plus darker undersides. The two faces meeting at a voxel edge differ, so form is legible inside a flat-coloured region | One dot product per pixel |
+| **Sun shadow** | off | One visibility ray towards a fixed, world-space sun. Occluded points fall to 55% | A full scene ray per lit pixel |
+
+**Occlusion and normal shading are on because between them they are what makes an unlit scene read as solid at all.** The axis shading separates the two faces at an edge; the occlusion puts objects *on* the ground instead of in front of it. Neither is light transport and neither is pretending to be — they are readability aids for judging shape, and the reason they are cheap enough to leave on is that neither casts a ray.
+
+The occlusion's 16 taps are grainy for the few dozen frames the accumulation pass takes to settle, and that grain is the honest reason it used to be off. It is on now anyway: meeting a scene that already looks like an object is worth more than never being surprised by a moment of noise in the creases. Any toggle also invalidates the accumulated image the same way a camera move does, so switching one resolves from scratch instead of fading in through 64 frames of history.
+
+#### The two occlusion buttons are one choice, not two
+
+They are the same effect estimated two ways, so **turning either on turns the other off**. Multiplying two occlusion terms together is not a stronger answer; it is the same darkening applied twice. The bar therefore reads as a three-state choice — off, cheap, or thorough — with the two states sitting next to each other.
+
+The screen-space one can only see what the albedo pass happened to draw. Occlusion from geometry off the side of the screen, behind the surface being darkened, or hidden behind something nearer is invisible to it — and so is anything more than a few dozen pixels away, because its tap disc is measured in *pixels* and a disc wide enough to cross a room thrashes the texture cache for a result that reads as a smear rather than a crease. Below two pixels it gives up and returns "unoccluded", which is why a scene viewed from far enough back loses its occlusion entirely.
+
+The ray-traced one has neither limit, and buys the two things the screen-space estimator is worst at:
+
+- **An object darkens as it *approaches* a wall**, not only once they touch. The hit distance is fed back linearly, so a surface pressed against another goes fully dark and one at arm's length contributes almost nothing — which is exactly the cue that says how close two things are.
+- **A large concave space is darker than an open one.** A courtyard, a room, the inside of an arch: at a 24-voxel reach these read as enclosed. At 3 voxels they are indistinguishable from a field.
+
+Four rays per pixel per frame is noisy on its own — four binary tests, against sixteen smoothly-varying taps — and it leans on the accumulate pass harder than anything else in the viewport does. A still camera averages 64 frames, so a settled image is up to 256 rays and measurably converged; while flying, you get four. Three details make that work:
+
+- **The rays are cosine-weighted over the hemisphere**, sampled by Malley's method. Ambient occlusion *is* the cosine-weighted blocked fraction, so drawing the cosine out of the pdf leaves the estimator a plain average with no per-sample weight at all.
+- **The directions come from one R2 low-discrepancy sequence, offset per pixel.** A pair of hashes costs the same and stratifies far worse, and with a running mean doing the integration a sequence that clumps converges to a blotchy mean however many frames it is given. The per-pixel offset (a Cranley–Patterson rotation) is what stops every pixel casting the same four directions and turning the noise into a fixed pattern locked to the geometry.
+- **The sequence restarts from zero on every camera move**, indexed by frames-since-move — the same count the accumulate pass divides by. That makes the 64 frames it averages a stratified set rather than 64 arbitrary points, and keeps the index small enough that float32 still resolves the `fract`.
+
+**The AO rays march at full resolution, and that is not a place to save time.** A coarser LOD cap returns interior nodes as solid, and an interior node is 4 or 16 voxels across — wider than the quarter-voxel the ray origin is lifted off the surface. Every ray would immediately hit the coarse node holding its own starting surface, and the scene would render black.
+
+**What bounds a ray is the distance test, not the step budget.** 48 steps is only enough to be sure of reaching 24 voxels; a ray that stops beyond that distance is treated as having escaped. That cutoff is the point rather than a compromise — occlusion is a local question, and a ray long enough to reach the far side of a scene answers "how big is the scene", darkening an open plain and a small room by the same amount.
+
+**The sun shadow is the one toggle that is a claim about the *scene* rather than about the surface.** Occlusion says "these two surfaces are close together"; a shadow says "this object stands here, relative to everything else in the scene". That is a different and often more valuable question, which is why it is worth reaching for deliberately rather than paying for always. It costs a second full scene march for every lit pixel, roughly doubling what a frame spends — about what the ray-traced occlusion costs, and not by accident: that pass spends four rays of 48 steps against this one's single ray of 256, so the two expensive toggles come to roughly the same bill and neither is a surprise after the other.
+
+It is a single ray and it is deliberately hard-edged. The direction carries no per-frame jitter, so unlike the occlusion it contributes nothing for the accumulate pass to resolve and looks identical in the first frame of a camera move and the hundredth. Softening it would mean jittering the direction inside a cone and letting the running mean average it out — but a *binary* test averaged one sample per frame is far noisier while flying than a 16-tap average is, so a soft shadow would undo the one thing the hard one has going for it.
+
+Three details worth knowing, because each is a bug that showed up before it was fixed:
+
+- **The sun is world-fixed, not camera-relative.** A shadow that swung with the camera cannot tell you where an object stands, because the cue moves with the eye instead of staying with the scene.
+- **Faces turned away from the sun are darkened without a ray at all.** That is not only the obvious saving — a little under half the pixels — it is also what keeps the terminator on the geometry, where a grazing `NdotL` would otherwise leave it on the shadow ray's epsilon.
+- **The ray's start offset is measured in voxels, not world units.** Editor scenes sit at coordinates in the thousands, where a float32 ULP is around a thousandth of a unit, so a fixed epsilon small enough for a 0.01-unit voxel is below the noise floor of the position it is added to — and the ray re-hits the voxel it left, which shows up as stippled darkening across every lit face. A quarter of a voxel along the normal is inside the adjoining empty cell at either end of the range of scenes the editor opens. It is the same reason the occlusion radius is expressed in voxels.
+
+### The navigator
+
+The bottom-right corner of the scene image: an orientation cube, three projection buttons, and an eyeball. They exist because the mouse buttons and the keyboard between them cannot answer three questions that come up constantly.
+
+**Which way am I facing, and can I face an axis instead?** — the cube, drawn in the camera's own orientation with its three visible faces in the same axis colours the transform gizmo uses (X red, Y green, Z blue; the negative faces the same hue at two thirds the brightness, so `+X` and `-X` are distinguishable without reading the label). Click a face to look straight down that axis. **Drag the cube to orbit** — and the cube is the only place an orbit is offered, which is not an accident: orbiting needs a point to turn *about*, and everything else here moves a free-flying camera that never commits to one.
+
+A label is dropped from any face turned close to edge-on, where the quad is a sliver barely taller than the glyph and the text would spill over its neighbours — which reads worse than no label, because it then appears to belong to whichever face it landed on. The colour still says which axis it is.
+
+**Is distance distorting what I am looking at?** — the three projection buttons. These are not projection matrices; the renderer is a ray marcher, so each is a different **ray generator**:
+
+| Mode | The rays | Why you would want it |
+|------|----------|----------------------|
+| **Perspective** | One origin, directions fanning over a 60° vertical FOV | Depth reads naturally. The default |
+| **Orthographic** | Parallel directions; the *origin* slides across a plane `orthoHeight` units tall | Distance stops changing size, so two voxels line up on screen exactly when they line up in the scene — the question voxel work asks most often |
+| **Isometric** | Orthographic, plus the camera snapped to yaw 45° / pitch −35.26° | All three axes foreshortened equally. A view as much as a projection, so selecting it moves the camera |
+
+The one thing an orthographic ray generator needs that a perspective one does not is somewhere to *start*. A perspective ray leaves the camera, and there is nothing in front of it the camera is not already outside of. Parallel rays have no such guarantee — their plane sits at the camera position, so anything the camera has flown past would simply be missing from the same view without perspective. So the plane is pushed back along the view direction until it clears the scene's bounding sphere, and by the **minimum** offset that does so, because every unit of it is empty space the DDA has to step through on the way in.
+
+Two consequences worth knowing:
+
+- **The scroll wheel changes meaning.** Moving forward along a parallel ray produces an identical image, so under orthographic the wheel scales the height the view spans instead. Same gesture, same intent, the only arithmetic that can express it.
+- **The occlusion pass needs telling.** `shade.frag` converts a world radius into screen pixels, and under perspective that divides by the distance to the camera. Under parallel rays the scale is constant across the whole image — leave the distance term in and distant geometry loses its occlusion to a radius that shrank away.
+
+Every overlay the editor draws over the scene — the yellow selection box, the transform gizmo, the symmetry planes, the part outlines — goes through one projection function that carries the same branch, because all of them lay world geometry over an image the shader produced. A basis that disagreed with the shader by so much as a handedness would put every outline in the wrong place.
+
+**What, exactly, am I looking at?** — the eyeball. Click it, then click a voxel, and the camera moves out along the normal of the face you hit and looks straight back down it: that face ends up centred **and exactly perpendicular** to the view. The distance is preserved, so it reframes without also zooming, and the voxel becomes what the cube orbits and what the wheel dollies toward.
+
+Perpendicular is the whole point, and it is what separates this from the Inspector's **Look at this component**, which keeps the current angle and only slides. A face seen square-on is the one view in which a screen distance is a true distance along it — nothing to correct for by eye — so it is the view to line something up in, or to check a wall is flat from. The face normal arrives from `pickVoxel` in the *chunk's* voxel grid and has to be rotated into world space first; a rotated chunk is exactly where the two disagree, and where squaring up matters most.
+
+This is also the one place the camera is allowed to point **straight** up or down. Free-look stops at 1.55 radians, because a *drag* through the pole flips the image over — but a snap never passes through anything, and clicking the eyeball on a floor means perpendicular, not 1.2° short of it. The basis stays well defined at the pole because `computeCameraBasis` swings its reference axis to `+Z` there, exactly as `rayStartDirection` does on the GPU. Clicking the cube's `Y` face gets the same exactness for the same reason.
+
+It shares the armed-picker treatment with the palette's eyedropper — an outline round the image and a sentence at the top — and arming either disarms the other, because two one-shots both waiting for the next click would resolve to whichever branch was tested first.
+
+The whole cluster stands down when the Viewport is too narrow to hold it, and also when it would collide with the render toggles centred on the same bottom edge. The toggles win: they are the older of the two, and widening the panel a little brings the navigator back.
+
+### The colour language
+
+Colour means **kind**, in every panel that lists components, from one table (`componentKindStyle`). There used to be two half-systems that disagreed — the component tree tinted `(folder)` amber and `(data)` blue, while the Library tinted scene folders pale blue — so the same colour meant "a data leaf" in one panel and "a whole scene" in the next.
+
+| Kind | Colour | Reads as |
+|------|--------|----------|
+| **data** | blue | one voxel volume, at one resolution and one voxel scale |
+| **grid** | teal | many blocks on one lattice — boolean ops do not apply |
+| **asset** | amber | a container you can open; a folder with its own `compose.json` |
+| **linked** | violet | a container you do **not** own; saving writes the reference |
+| **derived** | grey | scaffolding the editor rebuilds, never written to disk |
+
+The distinction worth paying an extra colour for is **asset versus linked**. Link-ness is otherwise invisible until somebody edits one and is surprised that another changed, which is exactly what a colour should be spent on: a property that changes what an edit *does* and that you cannot otherwise see.
 
 The status bar along the bottom of the window carries the summary permanently: frame time, viewport resolution, scene size, active tool, and the last message. Messages also float over the viewport for a few seconds after they change, because most of them answer something the user just did *there* — reading the answer at the far corner of the screen was the whole problem with keeping them in a docked panel.
 
@@ -104,18 +203,20 @@ The tool is what a left-click inside the viewport means. Without one, every new 
 | **Move** | `Ctrl+W` | The transform gizmo: three arrows to translate, three rings to rotate. Clicking away from a handle still selects |
 | **Sculpt** | `Ctrl+E` | Drag to add or remove voxels with a Sphere or Cube brush, to Smooth or Bump a surface, or to Extrude a whole face. `Alt`+click samples instead |
 | **Paint** | `Ctrl+R` | Drag to repaint voxels with the palette's current entry, in one of five shapes (the two fills run once per click). `Alt`+click samples instead |
-| **Shape** | `Ctrl+T` | Drops one of seven primitives into the scene as a floating stamp, on the surface under the cursor or `Place distance` down the ray when there is nothing there. `Alt`+click samples instead |
-| **Region** | `Ctrl+Y` | Selects voxels already in the scene — two corners of a box, a face, or a connected volume — to copy, cut, delete or recolour. `Alt`+click samples instead |
+| **Place** | `Ctrl+T` | Drops one of seven primitives into the **open asset**, on the surface under the cursor or `Place distance` down the ray when there is nothing there. With nothing open the first one creates an asset and opens it. Clicking an item grabs it instead, and the panel's fields then edit *that* item |
+| **Region** | `Ctrl+Y` | Selects voxels already in the scene — two corners of a box, a face, or a connected volume — to lift into the open asset, delete or recolour. `Alt`+click samples instead |
 
 `Ctrl+Y` used to be a second binding for Redo. The keyboard-row logic wants `Q`/`W`/`E`/`R`/`T`/`Y` in order, and Redo keeps `Ctrl+Shift+Z`, which the Edit menu has always advertised alongside the alias.
 
 A miss deselects only under Select, whose whole job is choosing: clicking past everything is how you say "nothing". Under the other tools a near miss is a slip of the hand, and losing the selection — and with it the gizmo, or the brush's target — would cost far more than it saves.
 
-Selecting from the viewport also **opens and scrolls the hierarchy** to the component that was picked. Selecting something the panel meant to show it cannot show is not a selection.
+Selecting from the viewport also **opens the asset the picked component sits in** and scrolls the row into view. The contents list is one level deep by construction, so showing a selection means standing where it is — and a selection the panel meant to show it cannot show is not a selection.
 
 ### The breadcrumb
 
-A strip along the top of the viewport reading `scene › folder › … › selection`, every element clickable. The thing an edit lands on is the selection, and until now the only place that said so was a highlighted row in a panel that might be scrolled away from it. A tool about to add or remove voxels needs its target stated where the voxels are — and the ancestors being clickable makes "work on the whole asset instead" one click rather than a hunt back up the tree.
+A strip along the top of the viewport reading `document › asset › … › selection`, every element clickable, and the same path the Assets panel carries over its list. The thing an edit lands on is the selection, and the only other place that says so is a highlighted row in a panel that might be scrolled away from it. A tool about to add or remove voxels needs its target stated where the voxels are.
+
+Clicking an **ancestor** opens it, which is how you step back out of an asset you went into. The open asset is drawn amber — what an asset reads as everywhere else — and the selection yellow, because they are two different facts and are usually two different components.
 
 ### Sculpting
 
@@ -263,87 +364,424 @@ Sizes are in **voxels**, not world units: this is a tool that addresses the voxe
 
 Under the `Material` scope both fills compare **palette entries, not colours**, so two entries that happen to hold the same colour stay separate regions — they are separate materials, and merging them would recolour more than was pointed at. Both spread through face neighbours only; diagonal connectivity leaks a fill through the gap where two walls touch at an edge.
 
-### Stamps: the Shape and Region tools
+### Symmetry
 
-Shape placement and region copy/move look like two features. They are one machine, and building it once is what makes the second one nearly free.
+A block at the bottom of the Sculpt and Paint panels. Switch it on and every dab is mirrored as it is laid down — one gesture, up to eight copies, all of them exact.
 
-Both produce a **floating stamp**: geometry that is not part of the scene yet, carrying its own transform, driven by the transform gizmo, ending in a commit or a cancel. The two tools are two *sources* feeding it — Shape generates a primitive, Region lifts voxels that are already there — and from the moment it is floating, nothing downstream can tell which made it.
+**A symmetry is a map from cells to cells, or it is a resample**, and that one requirement decides the whole feature. The maps that qualify are the ones whose linear part is a signed permutation of the axes: there are 48 of them, they are closed under composition, and none of them rounds anything. Every mirror offered here is one, so a mirrored dab is the same cells reflected rather than a rasterisation of a rotated shape — no aliasing, no holes, and lifting a mirrored region and folding it back is byte-identical.
 
-The decision the rest follows from is that **a stamp is a real `ComponentKind::Chunk` component in the scene**, not a CPU-side voxel buffer with a preview overlay. A buffer would need its own render path and could not be edited before it committed. A component inherits, at no cost:
+That set is bigger than the obvious design allows for, and the difference is exactly the case that motivates the feature. Three mirror planes give eight *octants*, so about a vertical axis they give **four** copies; the eighth only arrives by flipping top against bottom, which is not what a pillar wants. The four mirrors of a square — the two axis planes **and the two diagonals** — give eight copies about that axis, and the diagonals are signed permutations just like the axis planes are. So they are first-class toggles here rather than something to fake by rotating a plane 45°, and eight-fold detail on a pillar costs no accuracy at all.
 
-* **rendering** — the raycaster already draws any component and already honours `ChunkHeader::rotation`, so a rotated stamp is visible exactly as it will land;
+| Want | Turn on |
+|------|---------|
+| A mirrored face | Mirror X (or Y, or Z) |
+| Four copies about Y | Mirror X + Mirror Z |
+| **Eight copies about Y** | Mirror X + Mirror Z + Diagonal ZX |
+| Sixteen | the above + Mirror Y |
+
+Anything else — six-fold, eight-fold *rotational* — is a rasterise and is not offered yet.
+
+#### The frame belongs to the component
+
+One frame per component, in that component's own voxel lattice. Symmetry is a property of the thing being sculpted rather than of the tool, so selecting something else brings *its* mirrors back rather than dragging the last one along, and storing the origin in the component's own coordinates is what keeps every mirror an exact integer map with no conversion in the inner loop.
+
+Mirrored cells are written into the stroke's own component and nowhere else. Symmetry across sibling components — a stroke on one part landing in the next — is a later stage; see [`docs/plans/symmetry_system.md`](../../plans/symmetry_system.md).
+
+#### Half a voxel is a real choice
+
+The planes are given as positions in the voxel grid and drag in half-voxel steps, because the half is the whole question:
+
+| Plane at | Runs through | Effect |
+|----------|--------------|--------|
+| `8.0` | a column of cell centres | that column is its own mirror image — unpaired, written once, no doubled seam |
+| `8.5` | a cell boundary | nothing is fixed; every cell pairs off |
+
+**Centre on content** picks the right one for you: a body 16 voxels wide gets a boundary plane and one 17 wide gets a centred plane, because the parity follows from the extent rather than from a setting.
+
+It also decides whether a diagonal is available at all. The diagonal of a plane maps cells to cells only when its two axis planes agree in parity — otherwise it would take cell centres onto cell corners — so the toggle greys and says which two planes disagree. Nudging either by half a voxel fixes it. That is a statement about what the lattice permits, not a warning that you have done something wrong.
+
+#### The planes are drawn because the failure is invisible
+
+A frame whose origin has drifted off the geometry does not look like broken symmetry. It looks like a second object being built in empty space some distance away, often outside the view — and neither the copy count in the panel nor the result on screen can tell you, because the result is exactly what the frame asked for. So the mirrors are drawn where they stand, dashed (a solid rectangle through a model reads as geometry), each axis in its own colour and the diagonals in amber.
+
+They are checkboxes and three numbers rather than a plane gizmo on purpose: a gizmo would be a fourth thing negotiating for the left button in a viewport where the tool, the picker and the transform handles already do.
+
+#### Where it applies
+
+**Sphere and Cube** replicate cell by cell. **Smooth and Bump** replicate by *centre* — each copy runs the same filter over its own neighbourhood and reads the geometry actually there, where mirroring an operator's output would reflect one site's result onto another site's shape. Copies whose boxes overlap near a plane run in sequence and read each other's writes, so the result there is order-dependent by a cell or two; that is the same exception these two already make in reading current rather than stroke-start geometry.
+
+**Paint** replicates the dab's centre, and for the two fills its **seed** — a mirrored fill runs the traversal again from the mirrored voxel and finds whatever region is there, which stays right even where the two regions are not congruent. Under the `Material` scope the copy spreads through the *original's* material rather than through whatever sits at its own seed.
+
+**Extrude** mirrors whole faces rather than dabs, because it has no dab — it fixes a face and a direction on the press and then reads one number. So the press gathers a face at each mirror image of the seed, and the one depth the cursor supplies drives all of them, **each along its own normal**. That last part is what makes the far copy a mirror rather than a translation: on the other side of a plane, "outward" points the other way, so a symmetric shape grows at both ends instead of growing at one and being carved at the other.
+
+The mirrored faces are **gathered, not derived**. Mapping the primary face's coordinates would assume the geometry over there is the mirror of the geometry here, and where it is not, the extrusion pushes cells that are part of no surface at all. Re-running `gatherFaceRegion` from the mirrored seed asks the geometry instead of telling it — the same choice the mirrored fill makes about its seed. A mirror image with no face under it simply contributes nothing.
+
+Faces are made **disjoint** as they are gathered. They can overlap, and the case that matters is common: a face straddling a mirror plane is its own image, so the mirrored gather returns the very same region. Left alone it would be extruded twice — written twice into one layer record and counted twice in the undo.
+
+#### Why the mirroring happens where it does
+
+The copies are made in `stampSculptDab`, on the way into the stroke journal — not in `applyVoxelSculpt` on the way out.
+
+Everything downstream of `sculptStrokeOriginal` is derived from it: the undo and redo lists, and [the lie told to the ray](#why-the-ray-ignores-the-strokes-own-geometry). Mirror after the journal and the copies are written but never remembered — undo restores one copy of eight and leaves seven behind, and an additive drag starts climbing its own mirrored deposits back toward the camera at seven sites at once. Mirror before it and undo, redo, the ray override, one-history-entry-per-gesture, and the dedupe that stops a cell *on* a plane being written twice all come for free.
+
+The group always holds the identity as its first element, so symmetry off is the same loop running once. There is no second code path.
+
+**Cost scales with the group.** Eight copies is eight times the tree64 descents per dab — a radius-24 sphere is ~58k cells before mirroring — and for Smooth and Bump it is eight snapshot boxes per tick (~2.8 ms against a 100 ms budget). The panel states the multiplier.
+
+### Assets: the Place and Region tools
+
+The workflow this is built for, stated the way a user states it:
+
+> You have a list of assets. You can move the shapes around in these assets and use the existing paint/sculpt tools. You can switch assets by just clicking on the other asset in the list. You have per-asset save/load, and you can copy other assets into the asset you are working with.
+
+The decision the rest follows from:
+
+> **There is only the asset. It is a folder with a `compose.json`. Everything else is a view of one.**
+
+A scene is an asset. A stack of booleans is an asset. A component of an asset is a thing you can open and edit as an asset in its own right. There is no top and no privileged kind — which is what the format has always said, and what the editor spent a while disagreeing with by inventing a *scene*, an *assembly* and a *folder* as three different things over one file structure. Every confusion downstream was a symptom: an Assembly panel that sat on the left describing a container that may or may not have existed, an "Assemble" tool named after a noun in a list of verbs, and a `resolveActiveAssembly` that existed at all because "which container am I adding to?" had three possible kinds of answer.
+
+Concretely:
+
+> **An asset is a live `ComponentKind::Asset` component whose contents are its children, and whose voxels are the boolean fold of those children in order.**
+
+The editor's job reduces to three verbs, and the Assets panel is where all three live:
+
+| Verb | Means |
+|------|-------|
+| **Open** | Make this asset the edit root. What is listed, what the breadcrumb ends at, and where new geometry lands |
+| **Copy** | Bring another asset into the open one, where it becomes an ordinary component |
+| **Save** | Write the open asset back to a folder |
+
+A **part** gets to be a real `ComponentKind::Chunk` component so that it inherits, at no cost:
+
+* **rendering** — the raycaster already draws any component and already honours `ChunkHeader::rotation`, so a rotated part is visible exactly as it will resolve;
 * **the transform gizmo**, which already operates on `editor.selectedComponent`;
-* **the yellow selection outline**;
-* **Sculpt and Paint working on the stamp before it commits**, which is the whole of "edit it how you please" for free;
-* **"keep this as its own object"** as a commit path that does nothing at all.
+* **the selection outline** (`collectLeafChunks`);
+* **Sculpt and Paint working on a part before it is baked**, which is the whole of "edit it how you please" for free.
 
-#### Shape
+An **asset** gets to be a real Asset component so that it inherits the **hierarchy**: parent/child is already in `ComponentRecord`, `localPosition`/`localRotation`/`localScale` already compose down it, `getComponentWorldMatrix` already walks it, and moving a parent already moves its children. A CSG stack is a parent with an ordered child list and one enum per child, and almost all of that already existed and was load-bearing elsewhere.
 
-Seven primitives — Box, Sphere, Cylinder, Cone, Wedge, Pyramid, Torus — sized in **voxels**, with the world size shown underneath, for the reason the Paint panel already gives. `Hollow` keeps only a shell of whatever wall thickness is asked for; it is one rule for all seven (inside the shape, and not inside the same shape shrunk by the wall), which is why adding a primitive is one predicate rather than two.
+So there is exactly **one selection** (`editor.selectedComponent`), **one list** (the Assets panel), and **one container pointer** (`editor.openAsset`). A part is an ordinary component and the gizmo needs no idea that any of this exists.
 
-A click drops the shape onto the surface under the cursor, pushed out along that face's normal so it sits *on* the surface rather than half-buried, or `Place distance` down the ray when the click hits nothing — the same fallback the Sculpt brush has, and the only way to put a shape into a component that is still empty.
+#### Expand, Open, Select — three verbs, three hit targets
 
-The stamp takes its **voxel scale from the target**, never from the New Data component's setting. A stamp at a different voxel size makes every merge a resample, however the rotation is snapped. Its resolution is the smallest power of four that holds the largest dimension.
+The distinction the panel is built on, and the one the tree it replaced could not make. Expanding a hierarchy node and selecting it used to be the same gesture wearing two hats, so opening a folder to look inside it also retargeted everything else.
 
-A *generated* shape can be resized after it has been spawned, about the point it is standing on: regenerating a primitive at new dimensions is exact and free. A *lifted* region cannot, because scaling voxels is a resample and there is nothing to resample it from. That is the only place the two sources behave differently.
+| Gesture | Does | Changes |
+|---------|------|---------|
+| The **arrow** | Expands the row to show what is inside it | Nothing but the view |
+| The **name**, or `open` | Selects. Double-click, or the trailing `open` button on an asset row, opens it | The selection; opening also changes the edit root |
+| **Shift+click** | Adds the row to the pick, for the verbs that act on several at once | The pick; a plain click clears it |
+| **Drag onto a folder** | Puts the component inside that asset | Its parent — not its place in the world |
+| **Drag onto anything else** | Reorders, which the fold cares about | The stack order |
+| **Right-click** | Rename, Duplicate, Move to, Copy to, Remove | — |
+
+Every row carries those, including the **expanded peek rows** under a folder. They used not to: `drawNestedRow` had no context menu and no drag handles at all, so anything you could see by expanding a folder in the top-level list could be selected and opened and nothing else — while the very same component became fully editable the moment you opened its parent instead. One component, two rows, two different sets of verbs depending on which one you happened to be looking at. Both kinds of row now go through one `drawRowVerbs`, so they cannot drift apart again.
+
+A peek row is a *view* of a list rather than the list itself, so it has no stack position and does not reorder. Everything else a row can do, it can do.
+
+#### Moving a component into an asset
+
+Dragging a row means two things, and what it lands on decides which. Onto a **folder** it means *put this inside that asset*; onto anything else it means *reorder*. So a folder is not a reorder target — drop on one of its neighbours to reorder past it. Putting-inside is the more useful reading of that gesture and the one every file manager already teaches. **Move to ▸** in the row menu is the same verb for when the target is not on screen, since the list is one level deep and a drag can only reach a sibling.
+
+This is the verb the panel was missing outright, and the reason a finished pillar could not be got into a temple: `setComponentParent` composes the transforms so a moved component does not budge in world space, and the contents list *is* the child list — but nothing in the editor called it except `wrapRootStack` at load. An asset could be opened, renamed, duplicated and deleted, and could not be put anywhere.
+
+**It arrives as `Place`.** An imported asset does the same, for the same reason: it comes at its own voxel scale, and folding it into its new home's lattice would resample it before you said you wanted that. Setting the row to Union afterwards is one click, and it is the click that says "yes, resolve this into my lattice".
+
+**Copy to ▸** is the same list of destinations asked about a new object rather than this one: duplicate, then move the copy. Twelve pillars in a temple is one pillar copied eleven times, and the geometry is shared until one of them is edited — `GeometryBlob` is refcounted by source and `forkBlob` has a sole-owner fast path.
+
+The list is always **one level deep**, plus whatever has been expanded to peek at. Depth is navigated by *opening*, which is what keeps the panel readable on a scene with ten thousand components: you are never scrolling a tree, you are standing somewhere in it. **Isolate** takes it further and draws only what is inside the open asset — working on one tower of a cathedral should not mean rendering the cathedral.
+
+#### The resolve is derived, not declared
+
+There is no create-an-assembly verb and no destroy-one, because there is no assembly. `syncResolves` runs once a frame: an asset whose contents carry boolean ops has a `Resolve`, an asset whose contents do not has none, and nothing else decides. The open asset gets one regardless of its ops, because it is where the next primitive lands and it needs a lattice before there is anything on it to derive one from.
+
+That replaced four separate mechanisms that all existed to answer *which container is this?* — a create verb, a destroy verb, an active-assembly pointer, and a load-time adoption pass. The ops on disk already answered it. The one thing that is still not derivable is `wrapRootStack`, which runs at load and edits the graph rather than reading it: `saveComposeToDisk` writes a node's children as the folder's component list, so an asset saved as *its own* folder comes back as root components carrying ops with no parent to own them, and they are given one.
+
+#### The flow
+
+1. **Open.** Click an asset in the Assets panel, or start on the document and let the first placement make one. The breadcrumb over the list and over the viewport says where you are.
+2. **Place.** `Ctrl+T`, then click in the viewport. A primitive is seated against the face under the cursor, or at `Place distance` down the ray when the click went past everything — which is the only way to put the first shape of an asset into empty space. With nothing open the click creates an asset and opens it, so the tool never has to ask what you are editing before you have made anything.
+3. **Repeat.** Every later click adds an item at the current kind and size, into the same asset. Drop the pillar, drop the arch, drop the sphere you mean to carve with — no commit in between, no target question, no mode.
+4. **Look at the result.** The viewport shows the **resolved** asset: its contents folded together in its lattice, rebuilt when everything settles. **Show sources** switches to seeing the shapes themselves. The default is the result, because the result is what is being made.
+5. **Arrange.** The gizmo, the arrow keys, the Inspector's numeric fields. An item is an ordinary component, so all three are the ordinary ones.
+6. **Boolean.** The contents list *is* the stack: one row per item in evaluation order, each with its op, drag to reorder.
+7. **Copy.** Bring another asset in from the Library as a Copy, a Bake or a Link. Once it is in, it is an ordinary component of the open asset and every adjustment after that happens in final context — which is why there is no prefab-edit mode and no need for one.
+8. **Bake.** To one Data, or into another component.
+9. **Sculpt.** The baked result is an ordinary component and every tool already applies.
+
+#### Ops
+
+`projv::BooleanOp` — the same enum the `ComponentRecord` carries and `compose.json` round-trips, rather than an editor-local "merge mode", because it is a property of the part rather than of the act of committing.
+
+| Op | | Does |
+|----|---|------|
+| **Place** | `.` | Not folded. Keeps its own geometry and its own voxel scale, and survives a bake as a separate component |
+| **Union** | `+` | Adds the item's cells to the result. Its own colours win |
+| **Subtract** | `-` | Takes the item's cells out. A sphere subtracted is a crater |
+| **Intersect** | `&` | Keeps only the cells the item and the result share. The result's colours survive |
+
+#### The Place panel edits the selection, or the next shape — never both
+
+Two sets of values, and it matters that they are two. `editor.shape*` is the **template** a new shape
+is made from; a placed shape's recipe (kind, dimensions, hollow, wall) lives on **its own `Part`** and
+is what the panel edits while it is selected.
+
+They used to be one set, and that was a defect rather than an untidiness. The fields kept the last
+selection's numbers, so clicking a second shape and nudging anything resized *that* shape to the
+first one's dimensions — and changed its kind too, silently, since `regeneratePart` read the panel
+for that as well. It reads nothing but the `Part` now, so every caller gets "rebuild this shape"
+rather than "apply the tool panel to this shape".
+
+**The kind is read-only on a placed shape.** A box is a box; "make this box a sphere" is not a resize,
+it is discarding one object and making another, and offering it inline as a dropdown makes an
+irreversible substitution look like a setting. Placing a sphere is the way to have a sphere.
+
+The op radio follows the same rule and says which it is on: **Combines as** when something in the
+open asset is selected (editing that component's `op`, the same value the contents row shows — one
+value in two places, not two values), **Drops in as** when nothing is. The snap controls, `Place
+distance` and the material row are template-only either way, because none of them is a property of a
+shape that already exists — free placement, which *is* one, lives on the component and is shown in
+the Inspector instead.
+
+The glyphs are ASCII on purpose. They used to be `∪` `∖` `∩` `·`, which are outside the default ImGui font's range — so every op control in the editor rendered the same missing-glyph box, four different operations that all looked alike, in the one place where telling them apart is the entire job.
+
+That distinction is the whole difference between this and what it replaced. A merge mode said what a stamp would do *to a target*, so two floating stamps had no relationship to each other at all and "box minus sphere" could not be said until the box was already committed scene geometry. An op says what a part does *to the parts above it*, which is the thing a user is actually thinking about, and it is expressible from the first primitive onward.
+
+**The first contributing row seeds the accumulator whatever its op says.** An empty accumulator intersected with anything is empty, and an empty accumulator subtracted from is still empty, so a stack whose first row is Intersect or Subtract would silently resolve to nothing at all — an outcome with no visible cause. Seeding makes row zero mean "this is what we start from", and the panel greys that row's op control to say so.
+
+Order matters, so rows drag to reorder: which row a subtract sits on is the difference between a hole and nothing at all.
+
+**A Subtract with nothing above it promotes the row above from Place to Union.** Seeding makes row zero mean something, but it also means a stack whose only folding row is a `Subtract` folds to the subtracting body — the thing that was meant to cut the hole, drawn as the result, with the object it was meant to cut still drawn beside it as a placement. That is the state you land in the moment you compose two finished `.data`s: a merged asset holds one *placed* row, because a placement is not a composition, and the fold is right to skip it. So when a row is set to Subtract or Intersect and nothing above it folds, the nearest placed row above becomes a `Union`, the status line says which row moved and why, and one Ctrl+Z puts both ops back — the promotion and the op change are a single history entry, so the assist can never outlive the action that asked for it. With nothing above it at all the row still seeds, and the status line says that too rather than leaving it to be inferred.
+
+It is an assist and not a rule: a row above that already folds means the Subtract has something to compose against, and a placed row is a deliberate statement that it is not part of the composition. Nor is it done by having the fold read a leading `None` as `Union` — `compose.json` writes that row as `none`, so the editor's picture would disagree with the file and any other loader would read the placement rather than the fold. The promotion changes the document, so the document stays the truth.
+
+#### The resolve
+
+Two steps, and the split is what makes an asset affordable to arrange:
+
+1. **The pull.** Each item's cells, in the asset's lattice. Cached per part on the transform it was computed for, so nudging one part in a stack of ten re-walks one part.
+2. **The fold.** Those cell sets combined left to right by their ops into one accumulator.
+
+The lattice is derived from the **asset node's own world frame**, not from the result chunk. The result's origin moves whenever the fold's bounding box moves, so using it as the lattice would shift the coordinate system every time a part was nudged — and a fold whose coordinates mean something different from one frame to the next cannot be cached, compared, or reasoned about.
+
+#### Every edit to a part has to invalidate, in both directions
+
+Sculpting, carving and painting a part all change what it folds to, so all three drop the part's cached cell set and mark the result stale. Two of them used not to.
+
+`applyVoxelSculpt` did its invalidation inside its `if (add)` branch, so **carving a part never reached the fold**; and `applyVoxelPaint` did no invalidation at all, so **recolouring one never did either**. The palette poll below does not cover the second case, because painting with an entry that already exists changes no palette — which is the most ordinary paint there is.
+
+Both produced the same misleading symptom, and it pointed away from the cause: nothing happened until the part was **moved**, at which point the transform funnel invalidated through `noteComponentMoved` and every earlier edit appeared at once. It read as "the result only regenerates when I move it" — a problem with the *rebuild*, when it was a problem with what marked the rebuild necessary.
+
+`ASSEMBLYTEST` 13 asserts all three directions against the fold *and* against the staleness flag. The flag matters on its own: a check on the fold alone passes on a rebuild that only ever happens by accident, and painting with a colour not yet in the palette sneaks through the palette poll even with the invalidation gone.
+
+The result is rebuilt only once everything **holds still** for `ASSEMBLY_SETTLE_SECONDS`. While an asset is moving its result comes down and its contents come back, which is both the honest picture (a fold from two frames ago is not what the stack says now) and the responsive one: the drag moves the part itself, at frame rate, with no fold in the loop. That gate is now load-bearing rather than a nicety — with the result as the default view, without it every frame of every drag is a fold.
+
+#### The pull must not be a push
+
+This is the one part that is easy to get wrong in a way that looks almost right.
+
+Forward-mapping each part voxel to a lattice cell (**push**) leaves holes. A rotation is not area-preserving on a lattice, so two source voxels can land in one cell while a neighbouring cell receives none — and on a hollow shape, whose walls are one or two voxels thick, those gaps perforate the surface. The result is a rotated shape you can see through.
+
+So the resolve iterates the **lattice** cells instead (**pull**): take the part's oriented bounding box, walk every lattice cell inside it, inverse-transform that cell's centre into the part's voxel space, and sample. Every cell gets exactly one answer, so the surface is closed by construction.
+
+The cost is therefore the **volume of the oriented bounding box**, not the part's voxel count — which is why that box's volume is what the budgets cap, and why a bake that would exceed `ASSEMBLY_MAX_BAKE_CELLS` is refused rather than truncated: a fill that stops halfway leaves a smaller fill, but a bake that stops halfway leaves half an object.
+
+With `Square to world` on the pull degenerates to the exact integer remap — the inverse transform is a signed axis permutation and every lattice cell in the box maps to exactly one source cell — so one code path serves both modes.
+
+A part is read into a dense occupancy-and-colour box once before the walk, so the inner loop is a bit test rather than a tree64 descent. It is read back **from the scene** rather than from the list that built it, so a part that has been sculpted or painted resolves as it looks — which is the whole point of it being a real component.
+
+#### Snapping: one grid for the document, and the objects allowed off it
+
+The snap controls live in the **Place tool's** panel, under the size fields and above the material row. They used to sit on the container, in a panel on the far side of the screen from the arrow keys and the gizmo that actually turn things — a setting about *how you place* filed under *the thing being built*, with nothing on screen connecting the two. They are a property of the tool, so they are on the tool.
+
+**One grid for the whole document.** `Snap to grid` quantizes a component's **world** position onto a single lattice — world origin, world axes, `documentSnapVoxel` apart. This is not what it used to do: snapping quantized `localPosition` against the component's *own asset's* lattice, which got two things wrong at once. A component whose parent had no resolve never snapped at all — that is every component at the document root, the level at which a scene is actually composed. And each asset carried its own lattice phase, so two objects in two different assets could each be perfectly snapped in their own frame and still be half a voxel out of step with each other. Two finished `.data`s that would not line up was the reported symptom.
+
+An asset already sitting on the document grid at the same voxel scale produces exactly the numbers it produced before, so nothing that worked has changed.
+
+`Step` is how many voxels one position is — one for detailing, 16/32/64 for standing modular pieces against each other. `Grid` is the voxel size itself: derived from the finest voxel scale in the document until you set it, then pinned, so importing a finer asset later cannot re-phase the grid under what is already placed.
+
+**`Square to world`** is separate, because the two are wanted separately. On, rotation is a multiple of 90° about a **world** axis, so the fold is a **1:1 integer remap**: every source voxel lands on exactly one cell, nothing aliases, and lifting a region and dropping it back where it came from is byte-identical. Off, free rotation, and the fold rasterises the rotated part into the lattice. That is not a degraded fallback — it is the point of the setting. A wedge meant to sit at 30° in the final geometry, or a tree placed at its own angle so a dozen copies do not read as a dozen copies, can only be made this way.
+
+##### Freedom is a property of the object
+
+The controls above are the default for **new** placements. What an existing component does is recorded on the component, in `freeComponents`, and that distinction is not cosmetic.
+
+Snapping runs **inside `applyComponentTransform`**, not in the gizmo. That is the funnel every path that moves a component goes down — the gizmo, the arrow keys, the Inspector's fields, and the undo and redo of all three — so all of them pick up snapping and cache invalidation, and pick up exactly the same ones. It is idempotent, so replaying a history record is not a second nudge.
+
+But only while the setting has not changed underneath the record. With a global flag alone: turn snapping off, stand a tree at 30°, turn it back on to place the next wall, and the tree is straightened by the next arrow-key nudge or by an undo that happens to touch it — silently, by an action that had nothing to do with rotation, long after the decision that made it.
+
+So there are three ways to be off the grid, and they differ in how long they last:
+
+| Layer | Mechanism | Lasts |
+|-------|-----------|-------|
+| Gesture | Hold **Alt** while dragging the gizmo. | The drag — and it marks the object, see below |
+| Object | `freeComponents`, shown as `~free` on the contents row. | Until cleared |
+| Default | The panel's controls. | New placements |
+
+**An Alt-drag also marks the component free**, and that is deliberate rather than incidental. Alt alone would last exactly as long as the gesture — right for the gesture, wrong for the object: the drag's own undo record holds an off-grid value, so redoing it without Alt held would push it back through the funnel and straighten the pose the drag existed to create. The pre-drag flag is latched in `gizmoDragStartFree` for the same reason the anchor is: every frame after the first would otherwise read what this drag just wrote and record an undo that cannot clear it.
+
+The Inspector shows **Snap to grid** (clears the flag and rounds the component) or **Place freely** (sets it without a drag), and the Place panel's **Pull contents onto the grid** does the whole open asset at once. That last one used to fire as a side effect of ticking the snap checkbox; now that freedom is per component, a setting that silently overrode every deliberate pose in the asset was the wrong shape, so asking for it is its own button.
+
+> **Known gap:** `freeComponents` is editor-side, so it does not survive a save. The pose itself is safe on disk — it is just a transform — but the exemption is lost, and the first nudge after a reload straightens it. The fix is an optional `"snap": false` field on the component in `compose.json`; until then the per-object guarantee holds within a session only.
+
+##### The one thing the gizmo has to know first
+
+With one exception, and it was a bug for as long as snapping existed: **a rotate drag moved the object before it turned it**, so an origin did not survive a rotation.
+
+The rotate handle compensates its position so the pivot stays put — it solves for the `localPosition` that holds the pivot under the rotation being applied. It was solving that against the *free* rotation read off the cursor, while the funnel went on to snap the rotation to the nearest 90° afterwards. So the compensation held the pivot for a rotation that never landed, leaving the component displaced by `(R_snapped − R_free) * pivot` — as large as the pivot's own distance from the origin. On screen: the object slides steadily away while the ring is dragged, and jumps into orientation at each 90° step.
+
+The rotation snap is available on its own as `latticeSnappedRotation`, and the gizmo now snaps *before* it compensates. The funnel still snaps on the way through, which is a no-op on an already-snapped value — so this is the gizmo asking the funnel a question, not a second copy of the rule, and the arrow keys, the Inspector and the undo of all three are untouched.
+
+The position still rounds to the lattice *after* the compensation, so a rotation about a content centre can still move the origin by up to half a voxel. That one is not a bug: the compensated position is not generally on the lattice, and landing on the lattice is the invariant that matters more.
+
+#### One asset, one lattice
+
+Every item must share a voxel scale or the fold is a resample, so the **asset owns `voxelScale`** and an item inherits it at creation. This is a real constraint and it does not go away — but it is the invariant of the `.data` file a bake has to produce (one `resolution` and one `voxelScale` shared by every block in it) rather than something the editor imposes to keep the fold cheap, which is a good sign about it rather than a bad one.
+
+#### Baking
+
+One verb, three destinations. Committing used to force one choice across two unrelated axes: "Merge" meant *resolve to voxels* **and** *write into somebody else's grid*, while "Keep as component" meant *do not resolve* **and** *become your own object* — so the fourth combination, resolve to voxels as an object of my own, was the one thing you could not ask for, and it is the one this flow is made of.
+
+| Bake | Does |
+|------|------|
+| **Merge to one Data** | Resolves the contents to voxels as one `.data` **inside** the asset. Shift+click rows to merge only some of them |
+| **Into `<selected>`** | Writes the resolved form into another component with its own op — so carving a crater still works, and now the carving tool can be a composed form rather than one primitive |
+| **Save…** | Writes the open asset itself — every item with its op — as a compose folder. It re-opens as the same editable asset, which is what makes a bake something you can come back from |
+
+##### Merging does not dissolve the asset
+
+It used to, and that one line was what stranded a finished asset. The merge replaced the node with a bare Chunk at the node's *parent* — and a Chunk is not a folder, so `Save as asset` (gated on `kind == Asset`) went grey on it, and no verb could put a loose component into another asset. **Finishing a pillar was the act that made it unusable in a temple.**
+
+The container is the thing the asset system manages, so merging its contents must not remove it. The merged `.data` becomes the asset's *content*: the asset stays an asset, still openable, still saveable, still able to take more components later.
+
+When the whole stack is merged the result arrives as **Place** — nothing is left for it to compose with, so the asset simply holds one placed `.data` and `syncResolves` retires the resolve. When only some rows are merged the result inherits the op of the first row it consumed, and takes that row's position in the list, so a partial merge is not also a reorder.
+
+##### Merging some of the contents
+
+Shift+click rows to pick several, then **Merge N to one Data**. The rest of the contents are left alone — which is the point: an asset is allowed to hold several components, and merging is something you do to a few of them rather than the act of finishing it off. A plain click clears the pick, so there is no multi-select mode to be stuck in.
+
+A picked **Place** row *is* merged, where the whole-stack merge leaves placed rows alone. The difference is deliberate: a Place row is not composition and the format has always let it survive a bake, but a row you deliberately picked and asked to become one `.data` is a statement that it should be in there — and it is drawn on screen, so leaving it out would merge less than what is in front of you.
+
+**A bake lands in the middle of its chunk, not in a corner.** A chunk is a resolution cube and a form
+almost never is: a 24-voxel shape needs a 64 chunk, so writing it at the chunk's own origin leaves it
+jammed into one corner with 40 voxels of nothing on each far side. Everything derived from the chunk
+rather than from the voxels then describes that corner — the gizmo pivot most visibly — and the shape
+you are holding is nowhere near the handle you are dragging. `centreBakeInChunk` is the same answer
+`centrePrimitiveInChunk` has always given a placed primitive, and the offset it returns is taken back
+off the component's origin so the object does not jump by half a chunk at the instant it is baked.
+
+Each baked voxel carries **the part voxel's own colour**, not the palette's current entry — the same principle Extrude follows in taking its source voxel's material. A lifted region keeps its pattern; a shape sculpted in two colours keeps both.
+
+**The undo record is exactly Extrude's**, and for exactly the same reason. Displaced cells are split two ways: cells that were empty (reverse by removing) and cells that held something (reverse by writing the old contents back). The naive version — "adding fills empty space, so undo empties it again" — is wrong the moment a form lands on geometry that was already there, and deletes voxels the bake never created.
+
+Undo of a bake also **brings the whole list back**, item for item, at the transforms they had, through `NodeRecipe`. A bake that could not be unbaked would make every arrangement a one-way door. The recipe carries each part's *voxels* rather than only its primitive, because a part can be sculpted and painted before the bake and rebuilding from the primitive would silently discard those edits — and it carries the primitive too, so a revived part is still resizable.
+
+Unlike a stamp's placement, **moving a part is an ordinary undoable edit**. The old exception — aiming stays out of the history — existed because a stamp was destroyed by its merge, so an undo entry pointing at one would have slid an invisible object around instead of putting geometry back. A part persists, so the exception went with the thing that forced it.
+
+#### `op` on disk, and the loop closing
+
+`ComposeComponent::op` is written as `none` | `union` | `subtract` | `intersect`, and **omitted entirely when it is `none`** — so a plain placement list comes off this writer looking exactly like the ones already on disk. The default of `none` is what makes the field backward compatible in both directions: it reinterprets nothing already written, and a loader that does not know the field reads a composed asset as its placed parts, which is a degraded but coherent picture.
+
+Because assets recurse, that one field gives **nested CSG for free**: subtracting a whole sub-asset is a child of `type: asset` with `op: subtract`, and `loadComposeFromDisk` already walks it. An Asset item resolves as the union of the leaves under it, and a sub-asset resolves to its own result first — one recursive walk rather than a second evaluator.
+
+Loading brings a stack back editable rather than inert, and it costs no load-time pass to do it: `syncResolves` notices, on the frame after the load like on every other frame, that an asset's contents carry ops. The one thing that does need a load-time step is `wrapRootStack` — see above. Without it, "save as an asset" would be a one-way door with a reassuring name, and it would fail silently, because every item would still be sitting there in the list doing nothing.
+
+`utils::instantiateComposeInto` grafts a compose folder into a scene that is already open, remapping every handle it carries: component handles, chunk handles, grid indices, geometry pool indices, and the loose list. The Library panel's **Bring into open asset** is that, and it makes an asset on disk the **third source an item can come from** — identical in every way that matters to a primitive and a lifted region: a thing with geometry, a transform, and an op.
+
+```
+        ┌─────────── sources ───────────┐
+        │  primitive (procedural)       │
+        │  lifted region (from scene)   │──▶  an item in an asset  ──▶  bake  ────┐
+        │  asset (from disk)  ◀──────────────────────────────────────────────────┘
+        └───────────────────────────────┘
+```
+
+The machine's output is its own input. Bake a buttress, copy it into the cathedral, subtract a window from it. That is the thing that makes the flow feel like modelling rather than like committing edits.
+
+An imported asset arrives as **Place**, deliberately: it comes at its own voxel scale, and folding it straight away would resample it before the user has said they want that. Setting the row's op to a boolean is one click, and it is the click that says "yes, resolve this into my lattice".
 
 #### Region
 
+The Region tool selects voxels that are already in the scene and lifts them into the open asset. Once lifted it has a stack row, an op, a gizmo and a bake, exactly like anything else — which is the payoff of a part being one thing with three sources rather than three things that look alike.
+
 | Selector | Picks |
 |----------|-------|
-| **Box** | Click one corner voxel, then the opposite one. A live wireframe follows the cursor between the two clicks |
-| **Face** | `gatherFaceRegion`, unchanged — the same flat surface Extrude moves |
-| **Volume** | The volume fill's traversal, returning its bitset instead of painting it |
+| **Box** | Click one corner voxel, then the opposite one. A live wireframe between the two makes the second click aimable |
+| **Face** | `gatherFaceRegion`, unchanged — the whole coplanar, same-facing, 4-connected surface |
+| **Volume** | The paint fill's breadth-first traversal, returning its bitset instead of painting it |
 
-Face and Volume take the [scope toggle](#selection-scope) below, unchanged. On a photo-textured scene that toggle is the difference between selecting four voxels and thirty thousand.
+A selection is **bounds plus one bit per cell**, not a `vector<ivec3>`: the volume fill already established why, since a million-voxel selection is 128 KB one way and 12 MB the other, and the bitset also answers "is this coordinate in the selection?" in constant time, which the lift and the delete both ask once per voxel.
 
-A selection is **bounds plus one bit per cell**, not a `vector<ivec3>`: the volume fill already established why, and a million-voxel selection is 128 KB one way and 12 MB the other. It also answers "is this coordinate selected?" in constant time, which the lift and the delete each ask once per voxel.
+**Copy** lifts and leaves the source; **Cut** lifts and removes it in one history entry; **Duplicate** lifts a copy offset by one bounding box. **Delete** and **Fill** act on the selection in place. Removing a cut part puts the source voxels back, or a cut would be a delete with a misleading name.
 
-**Copy** lifts the selection and leaves the source alone; **Cut** lifts it and removes the source in the *same* history entry, which is what makes it different from Copy-then-Delete. **Delete**, **Fill** (recolour with the palette's current entry; never adds a voxel) and **Duplicate** (a copy stepped one bounding box aside) act on the selection without lifting.
+A lift builds a fresh Chunk through `queueVoxelAdd` — never `utils::duplicateComponent`, which does not handle Grid components, and a selection routinely lives in one. It is positioned so its lattice *coincides* with the source's, so the part appears exactly over the original with no visual jump, and folding it straight back is a byte-identical no-op.
 
-A lift builds a fresh Chunk through `queueVoxelAdd` — never `utils::duplicateComponent`, which does not handle Grid components, and a selection routinely lives in one. It is positioned so its lattice *coincides* with the source's, so the stamp appears exactly over the original with no visual jump, and merging it straight back is a byte-identical no-op.
+#### Duplicate
 
-#### Rotation: one toggle, two honest modes
+`Duplicate` on a contents row copies the component beside the original — `DUPLICATE_OFFSET_VOXELS`
+(four) along the lattice's local X, so the offset is a whole number of voxels and the grid has
+nothing to undo. A few voxels rather than one bounding box, the way a lifted region is offset: the
+point is that the copy is *findable*. Exactly on top of the original it is invisible and every later
+click hits whichever of the two the ray reaches first, so "nothing happened" is the only available
+reading.
 
-**`Snap 90`**, on by default.
+It carries the editor's own record too, which the engine helper cannot know about: a duplicated
+primitive is still a primitive, with the same kind and dimensions, and still resizes. `cutFromSource`
+is deliberately dropped — a cut's restore list belongs to the one component that made the cut, and a
+second component offering to put the same voxels back would put them back twice.
 
-**On.** Rotation is a multiple of 90° about a lattice axis, translation is a whole number of voxels, and the voxel scales match — so the merge is a **1:1 integer remap**. Every source voxel lands on exactly one target cell, nothing aliases, nothing is lost. This is the mode for everything built to the grid.
+Four engine bugs sat under this, and the first explains why a duplicate used to be *invisible*:
 
-**Off.** Free rotation, and the merge **rasterises the rotated shape into the target lattice**. This is not a degraded fallback; it is the point of the setting. A wedge meant to sit at 30° in the final geometry, or a tree placed at its own angle so that a dozen copies do not read as a dozen copies, can only be made this way. The panel says so plainly rather than warning about it — a warning would be telling the user their deliberate choice is a mistake.
+* **`duplicateComponent` re-baked the copy with its parent's world matrix, not its own.** A duplicate
+  carries the source's `localPosition`, so the copy's chunk headers were written at the parent's
+  origin instead. Its transform fields agreed with the original while its geometry — and the
+  selection outline and gizmo pivot, both derived from those headers — sat somewhere else entirely.
+  The same mistake, at a third site, as the one `setComponentParent` had; `getComponentWorldMatrix`
+  is the form that cannot make it, because it ends at the handle inclusive.
+* **`op` and `externalSource` were not copied.** Without the first, a duplicated child of a boolean
+  stack came back as a plain placement — the copy of a subtracted window filled the hole it was cut
+  from. Without the second, a duplicated link quietly became a copy, which is the one distinction the
+  two modes exist to make.
+* **A double `refCount++` on the fork path.** `forkBlob` has a sole-owner fast path that returns the
+  source index without copying — a genuine second owner, worth counting — but when it *does* copy,
+  the fresh blob already carries `refCount = 1`, and counting it again pinned the blob for the life
+  of the scene.
+* **A reference into `scene.components` held across a `push_back` onto it.** `duplicateComponent`
+  took `const ComponentRecord& src`, appended the copy — which can move the vector's buffer — and
+  then read `src.kind` and `src.children` through that now-dangling reference to drive the recursion
+  into the source's children. A use-after-free, and a quiet one: a freed block usually still holds
+  the old bytes, so it read correctly essentially always. Duplicating a **nested** asset — a temple
+  holding a pillar, which is what the contents list is made of once anything has been moved into
+  anything — is the case that walks furthest down it. The fix scopes the reference so that a later
+  `src.` does not compile, and drives the recursion from a copied child list, which is needed anyway
+  because each recursion appends to `scene.components` again.
 
-#### The merge must pull, not push
+  `ASSEMBLYTEST` 20 calls `shrink_to_fit()` on `scene.components` before duplicating, so the append
+  is guaranteed to reallocate. That is a **trap, not a proof**: the check passed with the bug present
+  and the reallocation forced, because the stale read still returned the old bytes. It is there so
+  the reallocating path is exercised on every run rather than only on unlucky ones.
 
-This is the one part of the stamp that is easy to get wrong in a way that looks almost right.
+  `setComponentParent` was checked for the same shape and does not have it — it pushes to a
+  *children* vector, not to `scene.components`, so its reference stays valid.
 
-Forward-mapping each stamp voxel to a target cell (**push**) leaves holes. A rotation is not area-preserving on a lattice, so two source voxels can land in one target cell while a neighbouring cell receives none — and on a hollow shape, whose walls are one or two voxels thick, those gaps perforate the surface. The result is a rotated shape you can see through.
-
-So the merge iterates the **target** cells instead (**pull**): take the stamp's oriented bounding box, walk every target cell inside it, inverse-transform that cell's centre into the stamp's voxel space, and sample. Every target cell gets exactly one answer, so the surface is closed by construction.
-
-The cost is therefore the **volume of the oriented bounding box**, not the stamp's voxel count — which is why that box's volume is the number capped (`STAMP_MAX_MERGE_CELLS`), and why a merge that would exceed it is refused rather than truncated: a fill that stops halfway leaves a smaller fill, but a merge that stops halfway leaves half an object embedded in the scene.
-
-With `Snap 90` on the pull degenerates to the exact integer remap — the inverse transform is a signed axis permutation, and every target cell in the box maps to exactly one source cell — so **one code path serves both modes**. Sampling at cell *centres* is what makes that numerically safe: a centre maps to an integer ± 0.5 in the other lattice, half a cell away from the nearest rounding boundary.
-
-The stamp is read into a dense occupancy-and-colour box once before the walk, so the inner loop is a bit test rather than a tree64 descent. It is read back **from the scene** rather than from the list that built it, so a stamp that has been sculpted or painted while floating merges as it looks — which is the whole point of it being a real component.
-
-#### Committing
-
-| Exit | Does |
-|------|------|
-| **Merge** (`Enter`) | Writes into the target and releases the stamp |
-| **Keep as component** | Clears the floating flag and leaves it in the hierarchy as its own object — often what is actually wanted for a placed pillar or tree |
-| **Cancel** (`Esc`) | Releases the stamp, and if it was a *cut*, puts the source voxels back |
-
-`Subtract` mode takes the stamp's volume out of the target instead: spawn a sphere, subtract, and you have a crater. Same walk, `queueVoxelRemove`.
-
-Each merged voxel carries **the stamp voxel's own colour**, not the palette's current entry — the same principle Extrude follows in taking its source voxel's material. A lifted region keeps its pattern.
-
-**The undo record is exactly Extrude's**, and for exactly the same reason. Displaced cells are split two ways: cells that were empty (reverse by removing) and cells that held something (reverse by writing the old contents back). The naive version — "adding fills empty space, so undo empties it again" — is wrong the moment a stamp lands on geometry that was already there, and deletes voxels the merge never created.
+`ASSEMBLYTEST` 18 checks the **raw engine call on its own**, before the editor's verb. It has to:
+`duplicateComponentInEditor` follows every duplicate with a transform (the nudge), and
+`setComponentTransform` re-bakes correctly, so it silently repairs the very thing the check is for. A
+test that only went through the editor verb passed with the engine bug fully intact — which it did,
+once, before this was split.
 
 #### Two things worth knowing
 
-**The stamp component is reused, not recreated.** The hierarchy's Delete is a soft delete: it unparents the record and renames it `__deleted__`, and nothing reclaims it. A component created and thrown away on every placement would grow `scene.components` without bound over a session of stamping. So one stamp component is kept per resolution and refilled — resolution is fixed for a component's whole life, which is why one reusable stamp cannot serve every size, and there are only ever five of them. A component leaves the pool exactly once: when **Keep as component** hands it to the user.
+**A component is created per placement and deleted on removal.** Deletion is soft — handles are indices, so a record can only be unparented and renamed `__deleted__`, never erased. An earlier design pooled these to avoid that cost and it was the wrong trade: a pooled component is a *live row in the contents list* that outlives what it held. A leftover node is a bug; a few hundred bytes of unreclaimed record is a known cost of the handle model.
 
-**A stamp's placement stays out of the undo history.** Aiming a stamp is not an edit to the scene; the merge is. Recording every gizmo frame would leave undo entries pointing at a component that has since been emptied and handed back to the pool, so undoing far enough would slide an invisible stamp around instead of putting geometry back.
+The one exception is a size drag on a *procedural* part, which refills the same component in place — that runs every frame the field is dragged. Only a change of resolution (fixed for a component's whole life) needs a new component, and two things have to survive that move, neither of which is visible from the result: the **selection**, or the next field edit acts on nothing and the part you are adjusting silently stops being the one you are adjusting; and the part's **position in the stack**, since a fold is ordered and a resize is not a reorder.
+
+The selection hand-over has to be asked for *before* the delete, not after. `deleteComponent` clears any editor state pointing at the handle it is killing, so by the time it returns `editor.selectedComponent` is already `INVALID` and a test against the old handle can never match. The default part is 16 voxels and 16 is exactly its resolution, so the **first** tick of a size drag crosses a boundary — this is the common path, not an edge case, and `ASSEMBLYTEST`'s last check is there because getting it wrong looks like nothing at all until you try to make a second adjustment.
+
+**`deleteComponent` renames the whole subtree, not just its root.** The rename to `__deleted__` is what marks a record dead, and every flat scan over `scene.components` — in this editor and in `saveComposeToDisk` — filters on exactly that name. A descendant left with its own name is still a live component to all of them, pointing at a chunk that has just been killed and at a parent that has disowned it. Nothing used to delete a parent that had children, which is why this never bit; an asset deletes one every time it is baked.
+
+The related engine fix is in `setComponentParent`, which rebaked the moved subtree from the *ancestors'* accumulated transform and never multiplied in the moved component's own local one — so a reparent silently snapped the component to its new parent's origin. Every descendant was already correct; it was only the root of the moved subtree that lost its placement.
 
 ### Selection scope
 
@@ -395,7 +833,7 @@ For a loose Chunk these are the identity. For a Grid they are not: the chunk is 
 
 ### The self-test
 
-`EDITOR_SELFTEST=1` runs three read-only checks after the scene loads. All three exist because the failures they catch are invisible from the outside:
+`EDITOR_SELFTEST=1` runs several read-only checks after the scene loads. All of them exist because the failures they catch are invisible from the outside:
 
 ```bash
 EDITOR_SELFTEST=1 ./scene_editor ../ScenePreviewer/scenes/StonehillCastle
@@ -403,7 +841,92 @@ EDITOR_SELFTEST=1 ./scene_editor ../ScenePreviewer/scenes/StonehillCastle
 # SELFTEST sculpt lattice: 1728 probes, 0 lattice mismatches, 0 round-trip failures
 # SELFTEST fill: comp=0 slot=0 gathered=1556106 truncated=0 leaks=0
 # SELFTEST fill face: comp=0 normal=(-1,0,0) gathered=3213 off-plane=0 outside-volume=0 -> PASS
+# GIZMOTEST: cursor asks for 17.248 along the axis; live pivot gives [17.248, -0.000, 17.248, -0.000],
+#            frozen gives [17.248, 17.248, 17.248, 17.248]
+# GIZMOTEST: live pivot oscillates PASS | frozen pivot holds PASS
+# SYMMETRYTEST: mirror X + mirror Z + diagonal ZX -> 8 element(s), 8 distinct image(s), free axis held yes
+# SYMMETRYTEST: eightfold PASS | closed PASS | order 4 PASS | centred box holds PASS
+# SYMMETRYTEST: parity - even origin fixes 1 column(s), odd fixes 0 and pairs 7 with 8 yes -> PASS
+# SYMMETRYTEST: mismatched-parity diagonal dropped -> 4 element(s), expected 4 | PASS
 ```
+
+#### Why symmetry is tested twice
+
+`SYMMETRYTEST` is pure arithmetic over the [mirror group](#symmetry) and proves the group: eight elements *and* eight distinct images (eight maps that collapse onto four positions would still count to eight), closure under composition, every element of order four, a frame centred on a mixed-parity box mapping that box onto itself corner for corner, the parity rule fixing exactly one column or none, and a diagonal across mismatched parity being dropped rather than rounded into place.
+
+`SYMSTROKETEST` drives a real dab and proves the *hook*, which fails differently: the group can be flawless while the copies are written outside the stroke journal, and then everything looks correct until the stroke is undone and seven of the eight copies stay behind. It runs under `EDITOR_SCULPTTEST` because it edits the scene.
+
+```bash
+EDITOR_SCULPTTEST=1 ./scene_editor ../ScenePreviewer/scenes/StonehillCastle
+# SYMSTROKETEST comp=0 group=8 dab=33 centre=(-8060,-1152,-8056)
+# SYMSTROKETEST   one dab writes every copy: 264 cell(s), expected 264 -> PASS
+# SYMSTROKETEST   the written set is closed under the group -> PASS
+# SYMSTROKETEST   every copy reached the journal: 264 of 264 -> PASS
+# SYMSTROKETEST   voxels 23821 -> 24085 (expected 24085), undo back to 23821 -> PASS
+```
+
+The dab is placed where all eight images are clear of existing geometry, which is what makes the counts exact — Add skips a cell that is already solid, so a dab landing on something would give a perfectly correct run a number nobody can predict. The closure check is the one a hook that mirrored only the dab's *centre* would fail, having passed the count check on a symmetric brush. The last line is the one that matters: it fails loudly if anyone ever moves the mirroring downstream of the journal.
+
+#### Why the gizmo drag measures against a frozen pivot
+
+`GIZMOTEST` guards the one property a translate drag has to have: **with the cursor held still, every frame must agree on where the component belongs.**
+
+It did not, and had not since the gizmo was written. `closestPointOnAxis` reports `t` relative to the axis line's *origin*, and the gizmo passed it the live pivot — which moves with the component the drag is moving. Shifting that origin by `d` along the axis changes `t` by exactly `−d`, so applying a delta of `d` made the next frame compute a delta of zero, which moved the component back, which restored the original delta.
+
+The result is the `[17.248, -0.000, 17.248, -0.000]` above: a perfect two-frame oscillation between the target position and the start position, for as long as the button is held. On screen that is the object jittering in place — and its colours flickering, because two positions were feeding the same temporal accumulation buffer. The fix is to capture the pivot when the drag begins and measure the whole drag against that (`EditorState::gizmoDragStartAnchor`); the gizmo itself still follows the object, only the measurement is frozen. The rotate handles use the same frozen anchor: a rotation about the pivot is meant to leave the pivot exactly where it is, but deriving the plane from the component being rotated made that an assumption rather than a guarantee.
+
+The test asserts both halves — that the live-pivot loop oscillates and the frozen one does not — because "the fixed version is stable" is only meaningful next to evidence that the broken version was not.
+
+#### `ASSEMBLYTEST`
+
+Its own switch, because it edits the scene — and it builds its own components rather than touching the loaded one, so it is worth running on any scene at all, including one with nothing to sculpt.
+
+```bash
+ASSEMBLYTEST=1 ./scene_editor ../ScenePreviewer/scenes/StonehillCastle
+# ASSEMBLYTEST: one 8^3 box unioned -> 512 cell(s), expected 512 | PASS
+# ASSEMBLYTEST: 8^3 minus 8^3 at +4 -> 256 cell(s), expected 256 | PASS
+# ASSEMBLYTEST: 8^3 intersect 8^3 at +4 -> 256 cell(s), expected 256 | PASS
+# ASSEMBLYTEST: Intersect on row 0 seeds -> 512 cell(s), expected 512 | PASS
+# ASSEMBLYTEST: stack order A-B=256 then B,A=768, expected 256 then 768 | PASS
+# ASSEMBLYTEST: four 90-degree turns compose to the identity | PASS
+# ASSEMBLYTEST: merge keeps the asset - survived yes , holds 1 child, merged is a placed child yes
+#               -> 256 voxel(s) (expected 256), undo restores 2/2 row(s) | PASS
+# ASSEMBLYTEST: merged asset moves into another - parented yes , arrives placed yes , temple holds 1 ,
+#               world drift 0.0000 , undo puts it back yes | PASS
+# ASSEMBLYTEST: hollow sphere at 37 degrees -> 2994 shell cell(s), flood never reached the interior | PASS
+# ASSEMBLYTEST: compose round trip wrote [union subtract intersect ] read [union subtract intersect ] | PASS
+# ASSEMBLYTEST: reload adopted 1 resolve/2 part(s), folds to 256 (was 256) | PASS
+# ASSEMBLYTEST: resize across a resolution boundary keeps selection yes, stack 3->3, row 1->1 | PASS
+# ASSEMBLYTEST: recolour reaches the fold 0x3FFFFFFF -> 0x0FFC00, cells held yes | PASS
+# ASSEMBLYTEST: edits reach the fold - 512 cells, add 513 , carve 512 , painted cell(s) 1
+#               | stale add yes carve yes paint yes | PASS
+# ASSEMBLYTEST: mirrored extrude - 2 face(s), 128 voxel(s), opposed normals yes
+#               | 512 -> 640 , undo 512 | PASS
+# ASSEMBLYTEST: copy modes - link writes a reference yes | copy owns its folder yes (1 entry)
+#               | bake writes one data yes (1 entry) | PASS
+# ASSEMBLYTEST: place with nothing open -> 1 new asset(s), 2 item(s), second click stayed put yes | PASS
+# ASSEMBLYTEST: resolve follows the ops - adopted yes | retired yes | kept while open yes | PASS
+# ASSEMBLYTEST: rebuild reads the shape, not the panel - 16^3 box held 16 and stayed a Box with a
+#               stale panel; its own 24 applied as 24 | PASS
+# ASSEMBLYTEST: bake centres in its chunk - 8^3 occupies [4,4,4]..[11,11,11] (expected 4..11),
+#               world drift 0.0000 | PASS
+# ASSEMBLYTEST: duplicate lands beside the original - raw copy drift 0.000, editor step 4.000
+#               (expected 4), drawn yes | op kept yes | recipe kept yes | PASS
+```
+
+The last two are the ones that guard the redesign rather than the fold. **Place with nothing open** asserts that a second click lands in the *same* asset — if `openAsset` were not being set by the first placement, every click would build a fresh container and the shapes would never combine, which looks exactly like "the boolean ops do not work". **Resolve follows the ops** asserts `syncResolves` in both directions, because a sync that only ever adds is the failure that leaks a fold per folder the user has ever touched. **Rebuild reads the shape** is the one that guards the template/recipe split: it leaves the panel holding one shape's numbers and rebuilds a different shape, which is exactly how the bug it replaced was hit.
+
+A fold that is off by one cell produces a perfectly plausible result in the wrong place — the same failure class the paint-coordinate test guards. It reads as "the tool is a bit weird" rather than as a bug, and no amount of looking at the screen settles it, so the properties are asserted numerically instead.
+
+Two of them are worth calling out.
+
+**The hollow sphere at 37°** is the pull-rasterisation test, and it is the one that fails loudly if anyone ever reimplements the fold as a forward map. It floods the empty space *around* the resolved shell and asserts the flood never reaches the middle; one perforation in a two-voxel wall and it does.
+
+**The copy-mode check** is asserted against the *files*, not the scene, because that is the only place the three modes differ. It also has a cautionary history: the first version compared the `source` strings, which pass identically for Copy and Link (the imported node is named after the folder it came from), and the second joined the link's `../../source` back onto the output folder — where it resolves to the real source directory, which exists either way. Both passed against a build with the feature switched off. The check that works asks whether saving *descended*: a link leaves no subfolder behind, a copy leaves one.
+
+**The resize check** guards the selection hand-over described [above](#two-things-worth-knowing). Without it the line reads `keeps selection NO, row 1->-1` — the part is still in the stack and still the right size, and only the fact that you cannot adjust it twice in a row says otherwise.
+
+**Two of them are the two halves of one round trip.** `compose round trip` proves the ops reach the file; `reload adopted` proves they are read back into something you can carry on working on. It was the second that caught `setComponentParent` dropping the moved component's own local transform — every part came back at the right size, in the right stack, with the right op, and stacked on top of each other at the origin, so the subtract cancelled the union exactly and the form resolved to nothing.
 
 **`runPaintCoordSelfTest`** round-trips both coordinate mappings against the tree64. A Grid's resolution is *not* reliably available from `dataReferences[dataRefID]`: `dataRefID` is `-1` until a component's first edit assigns one (`ensureDataReference`), so on a freshly loaded scene — which is every scene, before anything is painted — the reverse map reported an empty world and every brush found nothing. The resolution is read off the first populated cell instead, the same fallback `ensureDataReference` uses.
 
@@ -474,28 +997,6 @@ The three that matter most are the ones a bug would leave looking plausible. **S
 
 Only the first two of those can be seen from a single frame. **One entry per stroke** is what makes a sweep one press of `Ctrl+Z` rather than a dozen. **No repeats** is the within-frame overlap being dropped. And **gap filled** is the point of the whole stroke, asserted against the strongest control available: the same two dab centres collected on the untouched scene with nothing between them. Two dabs paint two voxels; the stroke paints the twenty-four along the path. Without interpolation those numbers are equal — which is exactly the dotted line clicking repeatedly already gave.
 
-#### The stamp
-
-`STAMPTEST=1` has its own switch because it builds **its own components** rather than editing the loaded scene, so it is the same test on every scene and leaves no mark on the user's. A merge that is off by one cell produces a perfectly plausible result in the wrong place — the same failure class the paint-coordinate test guards, and one that reads as "the tool is a bit weird" rather than as a bug.
-
-```bash
-STAMPTEST=1 ./scene_editor ../ScenePreviewer/scenes/StonehillCastle
-# STAMPTEST: baseline=216 voxels, offset strays=0, wrong=0, shell=3904 voxels, sealed cells=7999
-# STAMPTEST: lift/merge identity PASS | offset merge PASS | undo restores PASS |
-#            cut+cancel restores PASS | four turns identity PASS | hollow at 37 sealed PASS
-```
-
-The baseline is a 6³ block in which **every voxel is a different colour**, so a merge that lands in the right place but the wrong orientation is still caught — a uniformly coloured block would pass a transposed remap without a murmur. (Six a side, not eight: a distinct colour per voxel is a distinct palette entry per voxel, and material IDs are `uint8_t`. 6³ is 216 entries and fits; 8³ is 512 and does not.)
-
-* **lift/merge identity** — lift a copy and merge it straight back at zero offset. Byte-identical, or the lattice the lift builds its stamp on does not coincide with the one it came from.
-* **offset merge** — the same block eleven voxels over: exactly the baseline plus a translated copy, no strays.
-* **undo restores** — the merge's record has to reverse the cells it filled *and* restore the ones it displaced.
-* **cut+cancel restores** — a cut removes exactly the selection, and cancelling puts it back exactly.
-* **four turns identity** — four quarter-turns compose to the identity transform. A rotation that is nearly-but-not-quite a lattice rotation accumulates, and four is where it first becomes visible.
-* **hollow at 37 sealed** — the [pull-rasterisation](#the-merge-must-pull-not-push) test, and the one that fails loudly if anyone ever reimplements the merge as a forward map. A hollow 20³ box with a two-voxel wall is merged at 37° about an off-axis axis, then the empty space *around* it is flooded from a corner well outside. The assertion is crisp: the flood must not reach the middle. One hole anywhere in the surface and it does.
-
-The shell count is worth reading too — 3,904 voxels is exactly 20³ − 16³, so the rotated merge reproduced the shape's voxel count to the voxel.
-
 #### Undo
 
 Undo repaints each voxel with the colour it had — a per-voxel list, since a sphere or a cube can span several materials. Only voxels whose colour would actually change are collected, so a brush dragged over a wall it has already painted queues nothing and the undo step is the set of voxels that really moved. A whole stroke is **one** entry, so undoing puts the scene back to where the button went down.
@@ -506,9 +1007,31 @@ The coordinate list is shared between the undo and redo closures rather than cop
 
 The left column's second half: a persistent browser over the folders scenes and assets live in. Folders holding a `compose.json` are tinted and marked `[scene]`; selecting one lists its top-level components, read with `parseComposeJson` — **no geometry is read and nothing reaches the GPU**, so browsing a 3 GB scene costs a file read.
 
-It is deliberately separate from the Scene Hierarchy above it rather than being extra roots in the same tree. The hierarchy answers "what is in my world" and its rows are renamed, reparented and deleted; the library answers "what could be" and its rows are searched and opened. One tree with two sets of operations that mean different things on rows that look alike is worse than two panels.
+It is deliberately separate from the Assets panel above it rather than being extra rows in the same list. Assets answers "what is in the thing I have open" and its rows are renamed, reordered and deleted; the library answers "what could be" and its rows are browsed and brought in. One list with two sets of operations that mean different things on rows that look alike is worse than two panels.
 
-**Import is not offered yet, and the button says so.** Copying a component between scenes means appending another `Scene`'s geometry blobs, palette and chunk records into this one and remapping every handle they carry — engine work that does not exist. Loading a scene works today. This is also why multi-scene is a *browser* rather than co-resident scenes: [loading is two-phase](#loading-is-two-phase) precisely because holding two scenes' textures at once killed a Vulkan driver, and "open a second scene to borrow from" would do exactly that on purpose.
+**Bring into open asset** grafts the selected folder into the [open asset](#assets-the-place-and-region-tools), in front of the camera, via `utils::instantiateComposeInto` — the folder is loaded into a temporary `Scene` and then appended, with every handle it carries remapped: component handles, chunk handles, grid indices, geometry pool indices, and the loose list. It arrives as an ordinary component of whatever is open, which is what makes an asset on disk the third source an item can come from.
+
+#### The three modes
+
+The mode sits beside the button rather than behind a confirmation dialog, because it is not a confirmation — it is part of the verb. "Copy this in" and "link this in" are different things to have asked for, and which one you meant is worth stating before rather than regretting after.
+
+| Mode | On disk | In memory | Gives up |
+|------|---------|-----------|----------|
+| **Copy** | Its own subfolder under the target, with its own `compose.json` and `.data` files | One pooled blob shared with the source until either is edited, then forked | Propagation from the source |
+| **Bake** | One flattened `.data` entry | One blob, one chunk, one GPU header row | The internal structure — it stops being a stack |
+| **Link** | A `type: asset` entry pointing at the source folder | Same as Copy | The ability to diverge |
+
+**All three are identical in memory** — the geometry has to be loaded either way for the renderer to see it — so nothing on screen distinguishes them. They differ at exactly one moment: what a later save writes. That is the worst possible place for a bug to hide, which is why the self-test asserts against the files rather than against the scene.
+
+**Copy** is the default. "Unlinked" is an *authoring* property, not a storage cost: the geometry pool is keyed on (canonical path, block coords, mutability), so two copies of a tree that nobody has edited are one blob.
+
+**Bake** is `foldNode`'s pull run at import time — `pullPartIntoLattice` already walks an Asset's leaves and unions them. A forty-component asset placed fifty times is two thousand header rows before baking and fifty after. Offered at copy time because that is when the choice is real; afterwards you would be flattening something you may already have started editing. A bake past `ASSEMBLY_MAX_BAKE_CELLS` is refused, and the import stays as a Copy rather than being lost to the refusal.
+
+**Link** is what the format has always supported and the editor never exposed. It needs one runtime field — `ComponentRecord::externalSource` — because a link that is not marked survives until the first save and then quietly becomes a copy: the user asked for propagation, still believes they have it, and no longer do. `saveComposeToDisk` writes a marked node as a bare reference and does not descend into it. The path is written relative whenever one can be formed, *including* one that climbs out to a sibling (`../assets/buttress`), since that is the ordinary shape of a project tree and keeping it relative is what lets the whole tree be moved.
+
+Geometry is copied rather than shared with anything already loaded: the two `Scene`s have separate geometry pools and no common blob identity, so deduplication against components already in the scene is not attempted. Instancing *within* the imported folder is preserved.
+
+This is still a *browser* rather than co-resident scenes, and deliberately: [loading is two-phase](#loading-is-two-phase) precisely because holding two scenes' textures at once killed a Vulkan driver. An import reads one folder and lets the temporary `Scene` go; opening a second scene to borrow from would keep both resident on purpose.
 
 The Inspector's local Position, Rotation, and Scale are editable — drag to change, undoable, live in the viewport as you drag. Rotation is shown and edited as Euler degrees (a quaternion has no natural "drag this number" widget); World transform stays read-only, shown for reference. "Reset transform" clears all three to identity.
 
@@ -516,7 +1039,7 @@ Editing Scale required a real engine fix, not just UI: `ComponentRecord::localSc
 
 ## Selecting a component
 
-There are three ways in — clicking a voxel in the viewport (Select or Move tool), clicking a node in the Scene Hierarchy, and clicking an ancestor in the breadcrumb — and all three land on the same selection, which every other panel follows.
+There are three ways in — clicking a voxel in the viewport (Select or Move tool), clicking a row in the Assets panel, and clicking an element of the breadcrumb — and all three land on the same selection, which every other panel follows.
 
 Whichever route it came by, the selection outlines every `.data` box it covers in **yellow** in the Viewport — the node itself if it's a Chunk or Grid, every occupied cell if it's a Grid, or every leaf beneath it if it's an Asset folder (`main.cpp`'s `collectLeafChunks`). The Inspector's "Boxes" count is the same set.
 
@@ -540,6 +1063,30 @@ The dropper button in the Palette panel's header (and in the Tool panel's materi
 That is deliberate. The GPU knows the answer, but reading it back stalls the pipeline and needs the viewport renderer to keep a G-buffer it otherwise has no use for. A CPU pick costs one ray on a click, needs nothing from the renderer, and hands back the exact voxel coordinate and chunk — which is what voxel editing will need next, not just a colour.
 
 `rayDirectionThroughImage` is a line-for-line port of `rayStartDirection` in `pjv_utils_DDA.sc`. If that shader's ray generation changes, this must change with it or picks land beside what was clicked.
+
+## Why the colour lookup uses the march's integer coordinate
+
+Worth writing down, because the symptom was subtle and the cause was not where it looked.
+
+Once a component had been moved or rotated, some of its voxels rendered in a **neighbouring voxel's colour** — scattered among correct ones, stable for a given transform, absent at the origin, and not visible in the stored data at all. Clicking a wrong-looking voxel reported the *right* colour, because CPU picking (`pickVoxel`) hands its DDA's own integer coordinate straight to `queryVoxelMaterial` and never leaves voxel space.
+
+The GPU did leave voxel space. `marchRayThroughTree64` produced an exact `ivec3` and then converted it to a world-space box; `fetchVoxelColor` converted that box *back* — rotate by R⁻¹, subtract the chunk's world position, divide by scale, multiply by resolution, truncate. Algebraically an identity, but not in float32:
+
+* the local offset is added to the world translation **P** and subtracted back, losing low bits in proportion to `|P|` (twice, in fact — the old code added `P` and immediately subtracted it again);
+* the result is **truncated**, so an error of a single ULP below an exact integer drops the coordinate a whole cell.
+
+Modelling that arithmetic in float32 over a chunk's voxels gives the rate directly:
+
+| case | wrong voxels |
+|------|--------------|
+| at the origin, unrotated | 0.00% |
+| translated a little | 6.25% |
+| rotated, at the origin | 9.81% |
+| rotated and translated | 39.40% |
+
+The 0% at the origin is why it read as a gizmo bug: the shipped scenes load at the origin unrotated and are correct, so the artefact appears the moment anything is moved.
+
+The fix is to stop reconstructing what was already known. `SceneIntersectData` now carries `voxelCoord` straight from the DDA, and `fetchVoxelColorAtCoord` indexes with it. `fetchVoxelColor(BoxAABB, …)` is kept — a dozen shaders across the other examples still call it — but is now a thin wrapper over the exact path and marked as the lossy entry point. Those examples still have the bug; porting one is a matter of passing `hit.voxelCoord` instead of `hit.foundBox`.
 
 ## Undo
 
@@ -588,9 +1135,10 @@ The two ImGui shaders live in their own directory, `editorRenderer/imguiShaders/
 main.cpp                              The editor: state, panels, camera, render loop
 imgui_impl_bgfx.{h,cpp}               Dear ImGui renderer backend for bgfx
 compEditor.sh                         Compiles both shader directories
-editorRenderer/render.json            Three passes; display targets FBO 3
-editorRenderer/resources.json         previewColor, accumColor, viewportColor + their FBOs
-editorRenderer/editorShaders/         albedo, accumulate, display (+ fullscreen quad VS)
+editorRenderer/render.json            Four passes: albedo, shade, accumulate, display (targets FBO 3)
+editorRenderer/resources.json         previewColor/Normal/Position, shadedColor, accumColor,
+                                        viewportColor + their FBOs
+editorRenderer/editorShaders/         albedo, shade, accumulate, display (+ fullscreen quad VS)
 editorRenderer/imguiShaders/          vs_imgui, imgui (+ their own varying.def.sc)
 ```
 
@@ -599,7 +1147,10 @@ Scenes are not bundled: the editor points at `../ScenePreviewer/scenes/`, whose 
 ## ProjectV Features Used
 
 * `utils::loadComposeFromDisk` — Compose scene folder → `Scene`
-* `Scene::components` (name, kind, parent/children, local transform) — the hierarchy tree
+* `utils::instantiateComposeInto` — the same walk grafted onto a branch of a scene already open, so an asset on disk can become a part
+* `utils::saveComposeToDisk` / `writeComposeJson` / `writeDataFile` — the write path a bake to disk goes down
+* `ComponentRecord::op` / `ComposeComponent::op` (`projv::BooleanOp`) — the one field that makes an asset a re-openable stack rather than a folder of parts
+* `Scene::components` (name, kind, parent/children, local transform) — the component tree the Assets panel walks one level of
 * `utils::getComponentPath`, `getComponentWorldPosition`, `getComponentVoxelCount` — the inspector panel
 * `graphics::createTexturesForScene` / `destroyGPUData` — per-load GPU upload and teardown
 * `graphics::updatePaletteEntry` — single-texel palette writes for live recolouring
@@ -607,7 +1158,7 @@ Scenes are not bundled: the editor points at `../ScenePreviewer/scenes/`, whose 
 * `utils::countMaterialUsage` / `findMaterialChunks` — voxels per slot, and which chunks they are in
 * `utils::pickVoxel` / `queryVoxelMaterial` / `rayDirectionThroughImage` — CPU picking, for click-to-select, the eyedropper, and every frame of a sculpt stroke (via `VoxelSolidityOverride`)
 * `utils::queueVoxelAdd` / `queueVoxelRemove` / `updateScene` + `graphics::flushSceneUpdates` — the write path every editing tool uses
-* `utils::addComponent` / `isValidChunkResolution` — creating the stamp component a Shape or Region placement floats in
+* `utils::addComponent` / `isValidChunkResolution` — creating an asset node and the components under it
 * `utils::parseComposeJson` — the Library's scene contents, read without loading any geometry
 * `graphics::loadRendererSpecification` / `constructRendererSpecification` — the JSON-described viewport renderer
 * `graphics::performRenderPasses`, `updateUniforms`, `setUniformToValue` — the render loop, driven by hand
@@ -619,22 +1170,38 @@ Scenes are not bundled: the editor points at `../ScenePreviewer/scenes/`, whose 
 * **Dear ImGui** (docking branch) — `external/imgui`, a submodule of the *engine*, not of this example: it is intended to become part of the engine proper. Nothing in `lib/` links against it yet, so the example compiles the five ImGui translation units it needs directly.
 * **bgfx / bx / bimg**, **GLFW** — as every windowed example.
 
+## Why a saved scene used to reload black
+
+A cache guard must not skip when there is nothing cached, and `rebuildGlobalPaletteTexture`'s did.
+
+The global palette texture is rebuilt when a watermark — the sum of every component's `paletteVersion` — differs from the one the GPU was last uploaded with. That answers *"has any palette changed since the last upload"*. It cannot answer *"has there ever been an upload"*, and the two come apart in exactly one case, which happens to be the ordinary one:
+
+* `loadComposeFromDisk` assigns `materialPalette` straight out of the file and never touched `paletteVersion`, so every component of a freshly loaded scene sat at **0** and the whole scene summed to **0**;
+* a fresh `GPUData` also stores **0**.
+
+The two matched, the palette was declared already uploaded, and **the texture was never created at all**. Every voxel sampled an invalid texture and the scene rendered black — while the Palette panel was entirely correct, the usage counts were right, and painting a voxel reported it was already that colour, because nothing whatsoever was wrong on the CPU side. Adding any palette entry bumped a version, broke the tie, and repaired the entire scene at once, which is a confusing thing to watch and points at the palette rather than at the upload.
+
+Testing `bgfx::isValid(materialPaletteTexture)` alongside the watermark is what closes it, and it is the honest test: an invalid handle means the GPU cannot be holding what the CPU has, whatever the versions say. `loadComposeFromDisk` now also stamps `paletteVersion = 1`, matching what `addComponent` puts on the default palette it creates — 0 means "never set", which was the wrong thing for a component that has a palette to report regardless of what depended on it.
+
+The diagnostic line above the guard was printing a *different* expression from the one the code branched on, so it cheerfully logged `rebuilt=true` on every frame it skipped the rebuild. It prints the real condition now, plus whether a texture exists at all.
+
 ## Loading is two-phase
 
 Releasing the old scene and building the new one in the same frame keeps both resident: bgfx frees a destroyed texture only after the frames that might still reference it have been rendered. A 3.2 GB scene reloaded that way asks an 8 GB card for 6.4 GB, and the Vulkan driver dies mid-submit. So a load releases, lets eight frames pass, then builds — the viewport shows its empty state for those frames. A bad path is rejected *before* anything is torn down.
 
 ## Selecting a component: the yellow outline
 
-Clicking a node in the Scene Hierarchy outlines every `.data` box it covers in yellow in the Viewport — the node itself if it's a Chunk or Grid, every occupied cell if it's a Grid, or every leaf beneath it if it's an Asset folder (`main.cpp`'s `collectLeafChunks`). The Inspector's "Boxes" count is the same set.
+Clicking a row in the Assets panel outlines every `.data` box it covers in yellow in the Viewport — the node itself if it's a Chunk or Grid, every occupied cell if it's a Grid, or every leaf beneath it if it's an Asset folder (`main.cpp`'s `collectLeafChunks`). The Inspector's "Boxes" count is the same set.
 
-Implementing it was mostly a matter of getting the projection math exactly right rather than anything algorithmically hard: each chunk's OBB corners (`header.position + header.rotation * localOffset`, the convention `fetchVoxelColor` and `pickVoxel` already use) are projected with `worldToViewportPixel`, which is the algebraic inverse of the shader's `rayStartDirection` — build the same camera basis (right/up/forward from yaw+pitch), but instead of turning a screen UV into a ray direction, turn a world-space offset into a screen UV. No new render pass, no GPU work: it's ImGui line-drawing on top of the already-rendered frame, using the same per-frame camera state the render loop already tracks. The one bug it caught along the way was unrelated to the outline itself — a stale "last item" in the hierarchy's click handler (see git history) that meant clicking a tree node never actually selected it.
+Implementing it was mostly a matter of getting the projection math exactly right rather than anything algorithmically hard: each chunk's OBB corners (`header.position + header.rotation * localOffset`, the convention `fetchVoxelColor` and `pickVoxel` already use) are projected with `worldToViewportPixel`, which is the algebraic inverse of the shader's `rayStartDirection` — build the same camera basis (right/up/forward from yaw+pitch), but instead of turning a screen UV into a ray direction, turn a world-space offset into a screen UV. No new render pass, no GPU work: it's ImGui line-drawing on top of the already-rendered frame, using the same per-frame camera state the render loop already tracks. The one bug it caught along the way was unrelated to the outline itself — a stale "last item" in the old hierarchy's click handler (see git history) that meant clicking a tree node never actually selected it.
 
 ## What's Next
 
 * **A brush preview in the viewport**, and a highlight of the face Extrude would take. Sculpting commits on the first frame of a drag and shows the result; what it cannot show is what the *next* press would affect. Both are already computed — the brush cell by `processSculptSample`, the face by `gatherFaceRegion` — so this is an outline to draw, not a calculation to add. The face highlight matters most: how far a face spreads depends on the scene's materials, and right now the only way to find out is to drag it.
 * **Rotating the cube brush.** The box is axis-aligned in the component's voxel space. The Tool panel used to advertise `WASDQE` rotation, which never existed and has been removed rather than left as a promise; a rotated box means rasterising an oriented box into the grid rather than scanning an axis-aligned one.
+* **Deletion is soft, and assemblies exercise it hard.** `deleteComponent` releases the geometry, unlists the chunk and renames the whole subtree `__deleted__`, but cannot erase it: handles are indices into `scene.components` and `scene.chunks`, so erasing one would have to rebase every handle in the scene, in the undo history's closures, and in the editor's own state. A long session of placing and baking parts therefore grows both vectors slowly. A reaper that compacts them and remaps handles is the real fix; a session-length cap is not.
 * **Undo of an additive stroke leaves empty cells behind.** Removing the voxels does not remove a Grid cell the stroke caused to be created — an empty chunk, drawing nothing and costing a header row. Harmless, and the next save drops it, but a cell reaper would be tidier.
-* **Cross-scene import**, which is what the Library's disabled Import button is waiting on: appending another `Scene`'s geometry blobs, palette and chunk records into the open one with every handle remapped. `duplicateComponent` is the within-scene version of the same walk and does not yet handle Grid components either.
-* **Scaling a lifted stamp.** The gizmo has no scale handles, and scaling voxels is a resample rather than an edit. A *generated* shape resizes by regenerating, which is exact and free; a lifted region does not resize at all. A resampling lift is the missing piece, and it is a different operation from everything the merge does today.
-* **Repointing a stamp at a different target.** The target is fixed when the stamp is created, because a stamp is built at the target's voxel scale and moving it to a component with a different one would make the merge a resample — the same problem as scaling, arriving from the other direction.
-* **Saving**: Compose write-back for an edited scene.
+* **Scaling a lifted part.** The gizmo has no scale handles, and scaling voxels is a resample rather than an edit. A *procedural* part resizes by regenerating, which is exact and free; a lifted or imported one does not resize at all. A resampling lift is the missing piece, and it is a different operation from everything the fold does today.
+* **A procedural source in the compose schema.** An item written to disk carries its geometry, not the recipe that made it, so a reloaded asset's primitives come back as voxels and stop being resizable. Writing `"source": "proc:box?w=48&h=64&d=48"` — something the loader can satisfy without touching the disk — is the difference between an asset you can come back to and a mesh. `Part::procedural` already carries everything such a source would need to say.
+* **Moving an imported asset between voxel scales.** An import arrives at its own scale and therefore lands as **Place**; setting it to a boolean folds it into the open asset's lattice, which is a resample the fold performs without saying so. It should say so, and offer to rebuild the item at the asset's scale instead.
+* **`duplicateComponent` still does not handle Grid components.** Nothing in the fold path calls it — a lift builds a fresh Chunk through `queueVoxelAdd` — but the contents list's Duplicate menu item does. Stated here so nobody "optimises" the lift into it later.

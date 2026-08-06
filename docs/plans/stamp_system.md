@@ -1,21 +1,35 @@
 # Stamp System — Shape Placement and Region Copy/Move (SceneEditor)
 
+**Superseded** by [`assembly_system.md`](assembly_system.md), which kept every mechanism this
+document built -- the pull-not-push rasterisation, the lattice snapping, the budget discipline, the
+Extrude-shaped undo record, the region selectors -- and changed what they are arranged around. A
+stamp is a part of a persistent assembly now, and the merge is a fold. Read this for why the
+mechanisms are the way they are; read that one for what the tool does.
+
 **Implemented.** This is the design it was built from; the built version is documented in
 [`docs/examples/SceneEditor/README.md`](../examples/SceneEditor/README.md) under *Stamps: the Shape
 and Region tools*, and lives in that example's `main.cpp`. Where the two differ, the README is what
 the code does.
 
-Two deliberate departures from what is written below:
+Three deliberate departures from what is written below:
 
 - **`Ctrl+Y` also cost Redo its alias.** The shortcut table here does not mention that the letter was
   already taken; Redo keeps `Ctrl+Shift+Z`, which the Edit menu had always advertised alongside it.
+- **Stamps are a list, not a singleton.** The design's "at most one exists at a time" was built first
+  and then replaced: several stamps float at once, shift+click adds to the selection, and Merge
+  commits the selection as one history entry. Placing, lifting, cutting, cancelling and merging are
+  all undoable, and undoing a merge brings the stamps back floating.
 - **A merge past its cell budget is refused, not truncated.** "Budget discipline" below is borrowed
   from the fill, but a fill that stops halfway leaves a smaller fill, while a merge that stops
   halfway leaves half an object embedded in the scene. The message names the number and the fix.
 
-One hazard below turned out to have a second half worth recording: reusing one stamp component per
-session is not enough on its own, because `resolution` is fixed for a component's whole life. The
-pool is keyed by resolution — at most five entries, since `CHUNK_RESOLUTION_CHOICES` is five long.
+And one hazard below was answered the wrong way round. Hazard 1 proposes reusing one stamp component
+per session to dodge the soft-delete leak. That was tried and reverted: a reused component is a **live
+node in the Scene Hierarchy that outlives the stamp it held**, so every placement left an empty
+`Stamp` behind in the user's tree. A leftover node is a bug; an unreclaimed record is a known cost of
+handles being indices. The built version creates a component per placement and deletes it on release,
+and the `deleteComponent` helper the hazard also asks for is what makes that one line at three call
+sites.
 
 ## Goal
 

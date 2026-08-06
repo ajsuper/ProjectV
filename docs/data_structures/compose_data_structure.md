@@ -9,6 +9,7 @@ This format supersedes the flat `headers.json` layout described in [scene_data_s
   - [Top-level fields](#top-level-fields)
   - [Component fields](#component-fields)
   - [Transforms](#transforms)
+  - [Boolean ops](#boolean-ops)
   - [Mutability](#mutability)
 - [`.data` Container Format](#data-container-format)
 - [Loading Rules](#loading-rules)
@@ -80,6 +81,7 @@ The wire format is **strict JSON** (RFC 8259). The loader is configured with `ig
 | `rotation` | float array | no (default identity) | Length **3** = Euler degrees `[x, y, z]`; length **4** = quaternion `[x, y, z, w]`. See [Transforms](#transforms). |
 | `scale` | number \| `[x,y,z]` | no (default `1.0`) | A single number is uniform scale. A 3-array is per-axis scale. |
 | `mutability` | `"locked"` \| `"direct"` \| `"copy"` | no (default `"locked"`) | Only meaningful for `type: data`. See [Mutability](#mutability). Ignored on `asset` (each inner `data` declares its own). |
+| `op` | `"none"` \| `"union"` \| `"subtract"` \| `"intersect"` | no (default `"none"`) | How this entry combines with the ones above it in the list. See [Boolean ops](#boolean-ops). |
 
 > **Note on `source` naming:** the key is `source`, not `data`, because it points to a *file* for `type:data` but a *folder* for `type:asset`. One key, two resolutions, disambiguated by `type`.
 
@@ -98,6 +100,28 @@ For an `asset` component, `worldMatrix(component)` becomes the parent transform 
 - **4 elements** → a quaternion `[x, y, z, w]`, used directly. Preferred when authored by tools, since it avoids gimbal ambiguity.
 
 > The engine stores rotation internally as a quaternion (or matrix). Euler input is a convenience for hand-authoring. This is a change from the current renderer, which assumes axis-aligned chunks and has **no** rotation support — see [Open Questions](#open-questions).
+
+#### Boolean ops
+
+`op` turns an ordered placement list into a **constructive-solid stack**: the parent's voxels become the fold of its children, evaluated left to right from an empty accumulator.
+
+| Value | Means |
+|-------|-------|
+| `none` | **Placed.** The component is parented, transformed and rendered as its own geometry, with no relationship to its siblings. |
+| `union` | Add its cells to the accumulator. Its own colours win. |
+| `subtract` | Remove its cells from the accumulator. Contributes no colour. |
+| `intersect` | Keep only cells in both. The accumulator's colours survive. |
+
+**The default is `none`, and that matters in both directions.** Every `compose.json` written before this field existed is a pure placement list; a default of `union` would silently reinterpret all of them as boolean resolves. And a loader that does not know the field reads a composed asset as its placed parts — a degraded picture, but a coherent one, rather than a parse failure.
+
+Two rules the evaluator has to state, because neither is discoverable from the file:
+
+- **The first contributing entry seeds the accumulator whatever its `op` says.** An empty set intersected with anything is empty, and subtracting from an empty set leaves it empty, so a stack whose first boolean entry is `intersect` or `subtract` would resolve to nothing at all — an outcome with no visible cause.
+- **`op` on a `type: data` component whose `.data` is a grid volume is treated as `none`.** A grid is many blocks across many cells, and folding one into its parent's single-lattice `.data` is a rebuild rather than a bake. The writer emits `none` for these rather than recording a promise nothing keeps.
+
+Because `asset` entries recurse, this one field gives **nested CSG** with no new tree and no second evaluator: subtracting a whole sub-assembly is an `asset` entry with `"op": "subtract"`, and the ordinary load walk already reaches it.
+
+A **shared lattice** is required of everything that folds — one `resolution` and one `voxelScale` — because that is the invariant of the `.data` file the fold has to produce. Composition by *placement* never needed that; only composition by boolean does, which is exactly why stating it per entry lets both live in one list.
 
 #### Mutability
 

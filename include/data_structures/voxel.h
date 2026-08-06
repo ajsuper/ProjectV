@@ -93,9 +93,10 @@ namespace projv{
      * brickDims = (resolution/BRICK_SIZE)^3 bricks. Only bricks with a set
      * bit in brickMask have a non-null BrickData entry in the bricks array.
      *
-     * Editing is O(1) by writing directly to the brick map. The tree64 and
-     * voxelTypeData GPU arrays are rebuilt from the brick map when edits are
-     * finalized.
+     * Editing is O(1) by writing directly to the brick map. The tree64 and the
+     * materialIDs array the GPU reads are rebaked from the brick map when edits
+     * are finalized, and rebuilt back out of that pair on the next edit
+     * (brickMapFromTree64) -- the brick map is derived, never stored.
      */
     struct VoxelBrickMap {
         core::ivec3 brickDims;                    // (R/64, R/64, R/64)
@@ -105,7 +106,9 @@ namespace projv{
         std::vector<std::unique_ptr<BrickData>> bricks;  // size = totalBricks, null = absent
 
         // Serialized normal for new voxels. 0 = (0,0,0) normal (no surface data).
-        // Set from existing voxelTypeData when building from disk data.
+        // Nothing sets it any more: the .data format stores no per-voxel normals, and the renderer
+        // derives them from the tree64. Kept because cloneBrickMap carries it and a future format
+        // that does store normals would want the field back.
         uint32_t defaultNormal = 0;
     };
 

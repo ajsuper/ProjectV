@@ -67,14 +67,28 @@ namespace projv::utils {
     bool brickMapHasVoxel(const VoxelBrickMap& map, int x, int y, int z);
 
     /**
-     * Populate a brick map from an existing voxelTypeData array (3 u32s per voxel),
-     * interning colors into the component's material palette.
-     * Used on first edit of a disk-loaded blob. The brick map must already
-     * have the correct brickDims for the chunk's resolution.
+     * Rebuild the editable brick map from a baked tree64 and its material bytes — the inverse of
+     * buildTree64FromBrickMap + bakeMaterialsFromBrickMap, and the reason a .data needs to store
+     * nothing but those two arrays.
+     *
+     * Called on the first edit of a blob loaded from disk (see ensureBrickMapExists). Voxel positions
+     * are recovered from the descent path rather than stored: a child's Z-order within its parent is
+     * its bit index in the parent's 64-bit mask, so accumulating `parentZOrder * 64 + childBit` down
+     * to the leaves reproduces each voxel's chunk-space Z-order exactly. Material bytes are read
+     * through each leaf's own offset, honouring the uniform-leaf flag.
+     *
+     * Slot numbering is preserved as-is: the bytes name slots in the component's palette, and this
+     * does not touch the palette or intern anything.
+     *
+     * @param geometry The tree64 array (3 uint32s per node, root first).
+     * @param materialIDs The baked material bytes the leaves index into. May be empty, in which case
+     *                    every voxel is rebuilt with slot 0.
+     * @param resolution The chunk's edge resolution, which fixes the brick dimensions and depth.
+     * @return The rebuilt brick map, or an empty map when the geometry is malformed.
      */
-    void brickMapFromVoxelTypeData(Scene& scene, VoxelBrickMap& map,
-                                   const std::vector<uint32_t>& voxelTypeData,
-                                   ComponentRecord& comp);
+    std::unique_ptr<VoxelBrickMap> brickMapFromTree64(const std::vector<uint32_t>& geometry,
+                                                      const std::vector<uint8_t>& materialIDs,
+                                                      uint32_t resolution);
 
     /**
      * Build a sorted VoxelGrid (by chunk-space Z-order) from a brick map.

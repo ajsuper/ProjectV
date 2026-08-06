@@ -27,8 +27,14 @@
 // Controls:
 //   Right-mouse drag in Viewport — fly the camera (cursor is captured for the duration)
 //   W/S, A/D, R/F               — forward/back, strafe, up/down (while flying)
-//   Scroll wheel                — movement speed (while flying or hovering the Viewport)
+//   Middle-mouse drag           — pan: the scene follows the cursor across the image plane
+//   Scroll wheel                — get closer: dolly under perspective, zoom under orthographic
+//   Ctrl+scroll                 — movement speed for the fly-through
 //   H                           — re-frame the camera on the scene
+//
+// …and in the bottom-right corner of the Viewport, the navigator: an orientation cube (click a face to
+// look down that axis, drag to orbit), three projection buttons (perspective, orthographic, isometric),
+// and an eyeball that turns one click on geometry into "that face, square-on and centred".
 //
 // Panels dock, tear off, and tab by dragging their title bars; the layout is saved to imgui.ini next
 // to the executable and restored on the next run. View ▸ Reset Layout puts it back.
@@ -37,6 +43,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -92,12 +99,79 @@ static void scrollCallback(GLFWwindow* /*window*/, double /*xoffset*/, double yo
 
 // How a scene is framed on open, and the movement scale that goes with it. Both are derived from the
 // scene's own size so the controls feel the same whether the subject is a tree or a city.
+// Every member is initialised, because the editor holds one of these before any scene is loaded and
+// the orthographic ray generator derives its extent from `radius` -- an indeterminate value there is a
+// viewport that shows nothing and no obvious reason why.
 struct CameraFraming {
-    projv::core::vec3 position;
-    float yaw;          // Radians; matches the cameraYaw convention below.
-    float pitch;
-    float moveSpeed;    // World units per frame at the default scroll setting.
+    projv::core::vec3 position = projv::core::vec3(0.0f, 0.0f, -100.0f);
+    float yaw = 3.14159265f * 0.5f;   // Radians; matches the cameraYaw convention below.
+    float pitch = 0.0f;
+    float moveSpeed = 1.0f;           // World units per frame at the default scroll setting.
+    // The scene's bounding sphere, kept because three separate things need a scene-sized length and
+    // all of them would otherwise re-measure it: the orbit point the navigator turns about, the height
+    // an orthographic view spans, and how far behind the camera an orthographic ray has to start.
+    projv::core::vec3 center = projv::core::vec3(0.0f);
+    float radius = 100.0f;
 };
+
+// What the primary ray does across the image. The renderer is a ray marcher rather than a rasteriser,
+// so this is not a projection matrix -- it is a choice of ray generator, and the whole difference
+// between the three is where a pixel's ray starts and which way it points:
+//
+//   Perspective   one origin (the camera), directions fanning out over a 60-degree vertical FOV.
+//   Orthographic  parallel directions, origins spread across a plane `orthoHeight` world units tall.
+//                 Distance stops mattering, which is what makes it the mode for judging whether two
+//                 things line up -- the question voxel work asks most often.
+//   Isometric     orthographic, plus the camera snapped to the angle that puts all three axes at
+//                 equal foreshortening. A view, not a separate ray generator.
+//
+// Everything downstream tests `isOrthographicProjection` rather than the enum, so Isometric picks up
+// the parallel-ray path without a second branch anywhere.
+enum class CameraProjection {
+    Perspective,
+    Orthographic,
+    Isometric
+};
+static constexpr int CAMERA_PROJECTION_COUNT = 3;
+
+static bool isOrthographicProjection(CameraProjection projection) {
+    return projection != CameraProjection::Perspective;
+}
+
+static const char* cameraProjectionLabel(CameraProjection projection) {
+    switch (projection) {
+        case CameraProjection::Perspective:  return "Perspective";
+        case CameraProjection::Orthographic: return "Orthographic";
+        case CameraProjection::Isometric:    return "Isometric";
+    }
+    return "Perspective";
+}
+
+static const char* cameraProjectionHint(CameraProjection projection) {
+    switch (projection) {
+        case CameraProjection::Perspective:
+            return "60-degree vertical field of view. Depth reads naturally;\n"
+                   "parallel edges do not stay parallel.";
+        case CameraProjection::Orthographic:
+            return "Parallel rays -- distance no longer changes size, so two\n"
+                   "voxels line up on screen exactly when they line up in the\n"
+                   "scene. Scroll zooms instead of moving forward.";
+        case CameraProjection::Isometric:
+            return "Orthographic, from the angle that foreshortens all three\n"
+                   "axes equally. Selecting it snaps the camera there.";
+    }
+    return "";
+}
+
+// The vertical FOV the perspective ray generator uses, shared with albedo.frag's FOV. Every screen
+// projection in this file has to agree with the shader about it or the overlays drift off the image.
+static constexpr float CAMERA_VERTICAL_FOV_DEGREES = 60.0f;
+
+// Isometric's angle: yaw a half-turn off the X axis so the camera looks down the +X/+Z diagonal, and
+// the pitch whose tangent is 1/sqrt(2) -- the elevation at which the three world axes project 120
+// degrees apart and equally foreshortened.
+static constexpr float ISOMETRIC_YAW = 3.14159265f * 0.25f;
+static constexpr float ISOMETRIC_PITCH = -0.61547971f;
 
 // =============================================================================
 // Tools
@@ -117,7 +191,7 @@ enum class EditorTool {
     Move,     // Ctrl+W — the transform gizmo, plus selection.
     Sculpt,   // Ctrl+E — add and remove voxels with a brush.
     Paint,    // Ctrl+R — recolour voxels with the palette's current entry.
-    Shape,    // Ctrl+T — generate a primitive, place it, merge it in.
+    Place,    // Ctrl+T — drop primitives into the open asset and boolean them together.
     Region    // Ctrl+Y — select voxels already in the scene, copy or move them.
 };
 
@@ -129,7 +203,7 @@ static const char* editorToolLabel(EditorTool tool) {
         case EditorTool::Move:   return "Move";
         case EditorTool::Sculpt: return "Sculpt";
         case EditorTool::Paint:  return "Paint";
-        case EditorTool::Shape:  return "Shape";
+        case EditorTool::Place: return "Place";
         case EditorTool::Region: return "Region";
     }
     return "?";
@@ -144,7 +218,7 @@ static const char* editorToolShortcut(EditorTool tool) {
         case EditorTool::Move:   return "Ctrl+W";
         case EditorTool::Sculpt: return "Ctrl+E";
         case EditorTool::Paint:  return "Ctrl+R";
-        case EditorTool::Shape:  return "Ctrl+T";
+        case EditorTool::Place: return "Ctrl+T";
         case EditorTool::Region: return "Ctrl+Y";
     }
     return "";
@@ -158,7 +232,7 @@ static const char* editorToolHint(EditorTool tool) {
         case EditorTool::Move:   return "Drag a gizmo handle to transform; click a voxel to select.";
         case EditorTool::Sculpt: return "Drag to add or remove voxels. Alt+click samples a material.";
         case EditorTool::Paint:  return "Drag to recolour voxels. Alt+click samples an entry.";
-        case EditorTool::Shape:  return "Click to drop the primitive into the scene, then place it.";
+        case EditorTool::Place: return "Click to drop a primitive into the open asset; click one to select it.";
         case EditorTool::Region: return "Click to pick the selection's two corners, or a face/volume.";
     }
     return "";
@@ -173,8 +247,9 @@ enum class PickPurpose {
     SampleMaterial,
     PaintVoxel,
     SculptVoxel,  // Re-armed every frame of a drag, not once per click — see the sculpt stroke below.
-    SpawnStamp,   // Shape tool: drop the primitive where the ray lands.
-    RegionSeed    // Region tool: a corner of the box, or the seed of a face/volume gather.
+    PlacePart,    // Assemble tool: drop a primitive where the click lands, or select the part hit.
+    RegionSeed,   // Region tool: a corner of the box, or the seed of a face/volume gather.
+    FocusVoxel    // Navigator's eyeball: centre the camera on the voxel the click lands on.
 };
 
 // =============================================================================
@@ -489,25 +564,50 @@ static bool paintShapeIsFill(PaintShape shape) {
 }
 
 // =============================================================================
-// Stamps
+// Assets, and how their contents combine
 // =============================================================================
 //
-// A *stamp* is geometry that is not part of the scene yet: it carries its own transform, it is
-// driven by the transform gizmo, and it ends in a commit or a cancel. Two tools produce one:
+// **There is only the asset. It is a folder with a compose.json. Everything else is a view of one.**
 //
-//   Shape (Ctrl+T)   generates a primitive -- box, sphere, cylinder, cone, wedge, pyramid, torus.
+// A scene is an asset. A stack of booleans is an asset. A component of an asset is a thing you can
+// open and edit as an asset in its own right. There is no top and no privileged kind -- which is
+// what the format has always said, and what the editor spent a while disagreeing with by inventing
+// a "scene", an "assembly" and a "folder" as three different things over one file structure.
+//
+// The decision everything else follows from:
+//
+//     **An asset is a live ComponentKind::Asset component whose contents are its children, and whose
+//     voxels are the boolean fold of those children in order.**
+//
+// That is the same move the parts themselves make, one level up. A part gets to be a real
+// ComponentKind::Chunk component so that it inherits, at no cost, the raycaster (which already draws
+// any component and already honours ChunkHeader::rotation), the transform gizmo, the selection
+// outline, and Sculpt and Paint working on it before anything is committed. An asset gets to be a
+// real Asset component so that it inherits the **hierarchy**: parent/child is already in
+// ComponentRecord, localPosition/localRotation/localScale already compose down it,
+// getComponentWorldMatrix already walks it, and moving a parent already moves its children. A CSG
+// stack is a parent with an ordered child list and one enum per child, and almost all of that
+// already existed and was load-bearing elsewhere.
+//
+// So there is exactly one selection (editor.selectedComponent), one list (the Assets panel), and one
+// container pointer (editor.openAsset). A part is an ordinary component and the gizmo needs no idea
+// that any of this exists.
+//
+// The editor's job reduces to three verbs, and the Assets panel is where all three live:
+//
+//   Open    make this asset the edit root: what is listed, and where new geometry lands.
+//   Copy    bring another asset into the open one, where it becomes an ordinary component.
+//   Save    write the open asset back to a folder.
+//
+// Three sources feed the contents of an asset, and they are identical in every way that matters --
+// a thing with geometry, a transform, and an op:
+//
+//   Place  (Ctrl+T)  rasterises a primitive: box, sphere, cylinder, cone, wedge, pyramid, torus.
 //   Region (Ctrl+Y)  lifts voxels that are already in the scene, by copy or by cut.
+//   Library          instantiates a compose folder from disk, as a copy, a bake or a link.
 //
-// They are one machine with two sources, which is why there is one FloatingStamp rather than a
-// placement path per tool.
-//
-// The decision everything else follows from: **a stamp is a real ComponentKind::Chunk component in
-// the scene**, not a CPU-side voxel buffer with a preview overlay. A buffer would need its own
-// render path and could not be sculpted before it committed. A component inherits, at no cost, the
-// raycaster (which already draws any component and already honours ChunkHeader::rotation, so a
-// rotated stamp is visible exactly as it will land), the transform gizmo, the yellow selection
-// outline, Sculpt and Paint working on it before it commits -- and "keep this as its own object"
-// becomes a commit path that does nothing at all.
+// The third is what closes the loop: the machine's output is its own input. Bake a buttress, copy it
+// into the cathedral, subtract a window from it.
 
 enum class ShapeKind {
     Box,
@@ -549,11 +649,102 @@ static const char* ShapeKindHint(ShapeKind kind) {
     return "";
 }
 
-// What a commit does to the target's geometry.
-enum class MergeMode {
-    Add,        // Write the stamp's voxels in, each in its own colour.
-    Subtract    // Take them out. A sphere subtracted is a crater; same walk, queueVoxelRemove.
+// How a part combines with the parts above it in the stack. This is projv::BooleanOp -- the same
+// enum the ComponentRecord carries and compose.json round-trips -- rather than an editor-local
+// "merge mode", because it is a property of the part rather than of the act of committing.
+//
+// That distinction is the whole difference between this and what it replaces. A merge mode said what
+// a stamp would do *to a target*, so two floating stamps had no relationship to each other at all
+// and "box minus sphere" could not be said until the box was already committed scene geometry. An op
+// says what a part does *to the parts above it*, which is the thing a user is actually thinking
+// about, and it is expressible from the first primitive onward.
+using BooleanOp = projv::BooleanOp;
+
+static constexpr int BOOLEAN_OP_COUNT = 4;
+
+static const char* BooleanOpLabel(BooleanOp op) {
+    switch (op) {
+        case BooleanOp::None:      return "Place";
+        case BooleanOp::Union:     return "Union";
+        case BooleanOp::Subtract:  return "Subtract";
+        case BooleanOp::Intersect: return "Intersect";
+    }
+    return "?";
+}
+
+// The one-glyph form the stack rows are read down. Set-theory symbols rather than +/-/&: the rows
+// are a fold and these are what a fold is written with, and "Place" needs a mark that is visibly not
+// an operation at all.
+static const char* BooleanOpGlyph(BooleanOp op) {
+    switch (op) {
+        // ASCII, deliberately. The set-theory glyphs these used to be are not in the default ImGui
+        // font's range, so every op control in the editor rendered the same missing-glyph box --
+        // four different operations that all looked alike, in the one place where telling them
+        // apart is the entire job.
+        case BooleanOp::None:      return ".";   // Placed, not folded.
+        case BooleanOp::Union:     return "+";
+        case BooleanOp::Subtract:  return "-";
+        case BooleanOp::Intersect: return "&";
+    }
+    return "?";
+}
+
+static const char* BooleanOpHint(BooleanOp op) {
+    switch (op) {
+        case BooleanOp::None:
+            return "Placed, not folded. It keeps its own geometry and its own voxel scale,\n"
+                   "and survives a bake as a separate component.";
+        case BooleanOp::Union:
+            return "Add this part's cells to the result. Its own colours win.";
+        case BooleanOp::Subtract:
+            return "Take this part's cells out of the result. A sphere subtracted is a crater.";
+        case BooleanOp::Intersect:
+            return "Keep only the cells this part and the result share. The result's colours survive.";
+    }
+    return "";
+}
+
+// What bringing another asset into the open one produces. Offered at copy time because that is when
+// the choice is real -- afterwards you would be flattening or unlinking something you may already
+// have started editing.
+//
+// All three are identical in memory (the geometry has to be loaded either way for the renderer to
+// see it). They differ at exactly one moment: what saveComposeToDisk writes.
+enum class AssetCopyMode {
+    Copy,   // Its own subfolder under the target. Independent. The default.
+    Bake,   // Flattened to one .data: one blob, one chunk, one GPU header row.
+    Link    // A `type: asset` reference to the source folder. Edits there propagate here.
 };
+
+static constexpr int ASSET_COPY_MODE_COUNT = 3;
+
+static const char* AssetCopyModeLabel(AssetCopyMode mode) {
+    switch (mode) {
+        case AssetCopyMode::Copy: return "Copy";
+        case AssetCopyMode::Bake: return "Bake";
+        case AssetCopyMode::Link: return "Link";
+    }
+    return "?";
+}
+
+static const char* AssetCopyModeHint(AssetCopyMode mode) {
+    switch (mode) {
+        case AssetCopyMode::Copy:
+            return "Its own copy, independent of the original. Editing either leaves the other\n"
+                   "alone.\n\nCosts nothing extra in memory: two unedited copies of one asset share\n"
+                   "a single geometry blob until one of them is changed.";
+        case AssetCopyMode::Bake:
+            return "Flattened to a single .data on the way in: one blob, one chunk, one GPU header\n"
+                   "row, however many components it arrived with.\n\nThe optimisation worth having\n"
+                   "for something placed many times -- and it stops being a stack, so the parts\n"
+                   "cannot be rearranged afterwards.";
+        case AssetCopyMode::Link:
+            return "A reference to the folder on disk. Editing the original changes this too, and\n"
+                   "every other place it is linked.\n\nSaving writes the reference rather than the\n"
+                   "contents, so this document does not own them.";
+    }
+    return "";
+}
 
 // How the Region tool decides which voxels are selected. The first is new; the other two are the
 // two gathers the editor already has, returning their result instead of acting on it.
@@ -583,25 +774,43 @@ static const char* RegionSelectorHint(RegionSelector selector) {
     return "";
 }
 
-// Ceilings, in voxels, on the three things a stamp can be asked to do at once.
+// Ceilings, in voxels, on the things one fold can be asked to do at once.
 //
-// STAMP_MAX_DIMENSION is a per-axis cap on a generated primitive, so the size fields cannot ask for
+// PART_MAX_DIMENSION is a per-axis cap on a generated primitive, so the size fields cannot ask for
 // a volume that has to be refused after the fact.
 //
-// STAMP_MAX_SOURCE_CELLS bounds the *dense snapshot* the merge takes of the stamp before it writes
-// anything: one byte of occupancy and four of colour per cell of the stamp's bounding box, so that
-// the merge's inner loop is a bit test rather than a tree64 descent. Eight million cells is a
-// 200^3 stamp and 40 MB of scratch.
+// PART_MAX_SOURCE_CELLS bounds the *dense snapshot* the resolve takes of a part before it folds
+// anything: one byte of occupancy and four of colour per cell of the part's bounding box, so that
+// the fold's inner loop is a bit test rather than a tree64 descent. Eight million cells is a 200^3
+// part and 40 MB of scratch.
 //
-// STAMP_MAX_MERGE_CELLS bounds the *target* cells the merge walks. Under free rotation that is the
-// volume of the stamp's oriented bounding box, not the stamp's voxel count -- which is exactly why
-// the box's volume is the number capped here. Nothing is allocated per cell, so this one can afford
+// ASSEMBLY_MAX_BAKE_CELLS bounds the cells one part's pull walks at bake time. Under free rotation
+// that is the volume of the part's oriented bounding box, not its voxel count -- which is exactly
+// why the box's volume is the number capped. Nothing is allocated per cell, so this one can afford
 // to be four times the other.
-static constexpr int    STAMP_MAX_DIMENSION = 512;
-static constexpr size_t STAMP_MAX_SOURCE_CELLS = 8000000;
-static constexpr size_t STAMP_MAX_MERGE_CELLS  = 32000000;
+//
+// ASSEMBLY_MAX_RESULT_CELLS is the whole-stack budget the live resolve runs under, and it is a
+// different quantity from the two above: the per-part caps bound one pull, this bounds the
+// accumulator every pull folds into. A stack of ten parts that each pass their own budget can still
+// produce a result nobody wants to rebuild between frames.
+static constexpr int    PART_MAX_DIMENSION = 512;
+static constexpr size_t PART_MAX_SOURCE_CELLS = 8000000;
+static constexpr size_t ASSEMBLY_MAX_BAKE_CELLS = 32000000;
+// The same walk, but for the live resolve, which runs once the asset has come to rest rather than
+// once on commit. Far tighter for that reason: a result that costs a second is not something to look
+// at while arranging. Over budget, the fold steps aside and the sources are drawn instead.
+static constexpr size_t ASSEMBLY_MAX_PREVIEW_CELLS = 2000000;
+static constexpr size_t ASSEMBLY_MAX_RESULT_CELLS = 4000000;
+// How long an asset has to hold still before its result is rebuilt. The rebuild is a bake's worth
+// of work, and doing it on every frame of a drag spends that on pictures nobody looks at -- what the
+// user is reading mid-drag is where the part is going, which the part itself already shows. Long
+// enough to sit out a gesture, short enough that letting go feels like it answered.
+//
+// This gate is what makes the whole arrangement affordable, and it is now load-bearing rather than a
+// nicety: with the result as the default view, without it every frame of every drag is a fold.
+static constexpr double ASSEMBLY_SETTLE_SECONDS = 0.15;
 // A box selection's bounding box, capped for the same reason: the bitset is one bit per cell of it.
-static constexpr size_t STAMP_MAX_SELECTION_CELLS = 64000000;
+static constexpr size_t REGION_MAX_SELECTION_CELLS = 64000000;
 
 // A selection of voxels inside one component -- bounds plus one bit per cell of those bounds, not a
 // vector<ivec3>. The volume fill already established why: a million-voxel selection is 128 KB one
@@ -666,44 +875,289 @@ private:
     }
 };
 
-// The floating stamp itself. At most one exists at a time: a stamp is a modal state, and two of them
-// would be two answers to "what does Enter mean".
-struct FloatingStamp {
-    bool active = false;
-    projv::ComponentHandle component = projv::INVALID_COMPONENT_HANDLE;   // Live, renderable, gizmo-able.
-    projv::ComponentHandle target    = projv::INVALID_COMPONENT_HANDLE;   // Where a merge writes.
+// =============================================================================
+// Symmetry
+// =============================================================================
+//
+// **A symmetry is a map from cells to cells, or it is a resample.** That single requirement decides
+// the whole feature, because it says exactly which symmetries a voxel grid can have: the ones whose
+// linear part is a signed permutation of the axes. There are 48 of those, they are closed under
+// composition, and every one of them is exact -- no rounding, no rasterisation, no holes.
+//
+// Which is more than it sounds like, and more than the obvious design offers. Three mirror planes
+// give 8 *octants*, so about a vertical axis they give 4 copies and the eighth only arrives by
+// flipping top against bottom -- which is not what a pillar wants. The four mirrors of a square
+// (the two axis planes and the two diagonals) give 8 copies about that axis, and all four are
+// signed permutations. So the diagonal mirrors are offered as first-class toggles rather than as
+// something the user fakes by rotating a plane 45 degrees, and 8-fold detail on a pillar is exact.
+//
+// Anything else -- 6-fold, 8-fold *rotational* -- is a rasterise, and is deliberately not in this
+// stage. See docs/plans/symmetry_system.md.
 
-    enum class Source { Generated, Lifted };
-    Source source = Source::Generated;
+// One element of a symmetry group:
+//
+//     c'[i] = sign[i] * c[axis[i]] + offset[i]
+//
+// A signed axis permutation with an integer offset. Every mirror below is of this form and so is
+// every product of them, so the group closes without a single float ever entering the coordinates.
+struct LatticeMap {
+    int axis[3] = {0, 1, 2};
+    int sign[3] = {1, 1, 1};
+    projv::core::ivec3 offset = projv::core::ivec3(0);
 
-    // Cancel has to put a cut's voxels back, which is what this holds. Empty for a copy and for a
-    // generated shape -- neither took anything out of the scene.
-    bool cutFromTarget = false;
-    std::vector<projv::core::ivec3> liftedCoords;
-    std::vector<uint32_t> liftedColors;
+    projv::core::ivec3 apply(projv::core::ivec3 coord) const {
+        return projv::core::ivec3(sign[0] * coord[axis[0]] + offset[0],
+                                  sign[1] * coord[axis[1]] + offset[1],
+                                  sign[2] * coord[axis[2]] + offset[2]);
+    }
+    // The linear part alone -- for a face normal or any other direction, which must be permuted and
+    // flipped but never translated.
+    projv::core::ivec3 applyDirection(projv::core::ivec3 direction) const {
+        return projv::core::ivec3(sign[0] * direction[axis[0]], sign[1] * direction[axis[1]],
+                                  sign[2] * direction[axis[2]]);
+    }
+    bool isIdentity() const {
+        for (int i = 0; i < 3; i++) {
+            if (axis[i] != i || sign[i] != 1 || offset[i] != 0) return false;
+        }
+        return true;
+    }
+    bool operator==(const LatticeMap& other) const {
+        for (int i = 0; i < 3; i++) {
+            if (axis[i] != other.axis[i] || sign[i] != other.sign[i] ||
+                offset[i] != other.offset[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
 
-    // Generated only. Regenerating a primitive at new dimensions is exact and free, which is why a
-    // generated shape can be resized after it has been spawned and a lifted one cannot: resizing
-    // lifted voxels is a resample, and there is nothing to resample it *from*.
+// `outer` applied after `inner`, i.e. the map c -> outer(inner(c)). Substituting one into the other:
+//     c''[i] = outer.sign[i] * (inner.sign[j] * c[inner.axis[j]] + inner.offset[j]) + outer.offset[i]
+// with j = outer.axis[i], which is again a signed permutation with an integer offset -- the closure
+// property the group builder below relies on.
+static LatticeMap composeLatticeMaps(const LatticeMap& outer, const LatticeMap& inner) {
+    LatticeMap result;
+    for (int i = 0; i < 3; i++) {
+        int j = outer.axis[i];
+        result.axis[i] = inner.axis[j];
+        result.sign[i] = outer.sign[i] * inner.sign[j];
+        result.offset[i] = outer.sign[i] * inner.offset[j] + outer.offset[i];
+    }
+    return result;
+}
+
+// The three axis pairs a diagonal mirror can live in, named by the plane they span.
+static void symmetryPlaneAxes(int plane, int& a, int& b) {
+    a = plane;
+    b = (plane + 1) % 3;
+}
+static const char* const SYMMETRY_PLANE_LABELS[3] = { "XY", "YZ", "ZX" };
+static const char* const SYMMETRY_AXIS_LABELS[3]  = { "X", "Y", "Z" };
+
+// Where the mirrors stand and which of them are on, for one component, in that component's own voxel
+// coordinates.
+//
+// **The origin is stored doubled, and that is the interesting part.** An axis mirror is
+//
+//     c' = origin[a] - c
+//
+// so the plane it describes sits at the float lattice coordinate (origin[a] + 1) / 2 -- and the
+// *parity* of origin[a] is the whole centre-versus-boundary question that every voxel symmetry
+// system has to answer and most of them answer implicitly:
+//
+//   * **even** -- the plane runs through a column of cell centres. That column is its own mirror
+//     image: unpaired, written once, no doubled seam.
+//   * **odd** -- the plane runs along a cell boundary. Nothing is fixed and every cell pairs off.
+//
+// Storing 2x the position as an integer expresses both exactly and keeps floats away from the one
+// place rounding would be visible. It is also why the diagonals carry a parity condition: the
+// diagonal of the (a,b) plane maps cells to cells only when origin[a] and origin[b] agree in parity,
+// because otherwise it takes cell centres onto cell corners.
+struct SymmetryFrame {
+    bool enabled = false;
+    projv::core::ivec3 origin = projv::core::ivec3(0);   // Twice each mirror plane's position.
+    bool mirror[3]   = { false, false, false };          // Axis mirrors, indexed by axis.
+    bool diagonal[3] = { false, false, false };          // Diagonal mirrors, indexed by plane.
+    // False until the origin has been put somewhere deliberate -- centred on the component's content
+    // the first time the panel sees it. Without this a fresh frame mirrors about voxel 0, which for a
+    // component whose geometry sits at +200 means a second copy 400 voxels away in empty space.
+    bool originPlaced = false;
+};
+
+// At most 48 signed permutations exist, so a group of mirrors through one common point cannot exceed
+// it. The cap is a guard on the closure loop rather than a policy.
+static const size_t SYMMETRY_MAX_ELEMENTS = 48;
+
+// Every element of the group the frame's toggles generate, identity first.
+//
+// The identity is always present, even with symmetry off, so that every caller is a loop over this
+// list and there is no second code path for the unmirrored case -- which is what keeps the brush,
+// the fills and the journal from each needing to know whether symmetry is on.
+//
+// Closure is by repeated composition against the generators until nothing new appears. All the
+// generators pass through one common point by construction (they are all derived from `origin`), so
+// the group is finite; two mirrors that did *not* share a point would compose to a translation and
+// generate an infinite one, which is the reason the origin is a single vector rather than a plane
+// position per mirror.
+static void buildSymmetryGroup(const SymmetryFrame& frame, std::vector<LatticeMap>& out) {
+    out.clear();
+    out.push_back(LatticeMap());   // Identity.
+    if (!frame.enabled) return;
+
+    std::vector<LatticeMap> generators;
+    for (int axis = 0; axis < 3; axis++) {
+        if (!frame.mirror[axis]) continue;
+        LatticeMap map;
+        map.sign[axis] = -1;
+        map.offset[axis] = frame.origin[axis];
+        generators.push_back(map);
+    }
+    for (int plane = 0; plane < 3; plane++) {
+        if (!frame.diagonal[plane]) continue;
+        int a = 0, b = 0;
+        symmetryPlaneAxes(plane, a, b);
+        // The parity condition. A diagonal whose two plane positions disagree in parity would map
+        // cell centres onto cell corners, so it is dropped rather than rounded -- the panel greys the
+        // toggle and says why, and this is the backstop for a frame that arrives some other way.
+        if (((frame.origin[a] - frame.origin[b]) & 1) != 0) continue;
+        int d = (frame.origin[a] - frame.origin[b]) / 2;
+        LatticeMap map;
+        map.axis[a] = b;  map.sign[a] = 1;  map.offset[a] = d;
+        map.axis[b] = a;  map.sign[b] = 1;  map.offset[b] = -d;
+        generators.push_back(map);
+    }
+    if (generators.empty()) return;
+
+    // Only the one diagonal per plane is generated: composed with the two axis mirrors it already
+    // produces the anti-diagonal and the three rotations, which is the full 8-element group of the
+    // square. Adding the anti-diagonal as a second generator would be redundant, and enabling the
+    // diagonal on its own still correctly gives just the two elements it generates.
+    for (size_t at = 0; at < out.size() && out.size() < SYMMETRY_MAX_ELEMENTS; at++) {
+        for (const LatticeMap& generator : generators) {
+            LatticeMap candidate = composeLatticeMaps(generator, out[at]);
+            bool seen = false;
+            for (const LatticeMap& existing : out) {
+                if (existing == candidate) { seen = true; break; }
+            }
+            if (!seen) out.push_back(candidate);
+            if (out.size() >= SYMMETRY_MAX_ELEMENTS) break;
+        }
+    }
+}
+
+// One item of an asset's contents: a primitive, a lifted region, or an instantiated asset.
+//
+// The *component* is an ordinary child of the asset it sits in -- it shows in the contents list, it
+// is selected through editor.selectedComponent like anything else, and the gizmo, the Inspector,
+// Sculpt and Paint all reach it without knowing any of this exists. This record is only the editor's
+// cache of things the ComponentRecord does not carry: what the part is made of, and what it last
+// resolved to.
+//
+// Keyed by component handle in EditorState::parts, so there is no parallel ordered list that could
+// drift out of step with the child list that actually defines the stack.
+//
+// **The owning asset is not stored here.** It is `scene.components[component].parent`, and there is
+// only ever one answer -- a cached second copy is a thing a reparent can leave pointing at the
+// container the part used to be in. See ownerOf().
+struct Part {
+    projv::ComponentHandle component = projv::INVALID_COMPONENT_HANDLE;
+
+    // The box, in the part component's own voxel coordinates, that its contents are known to lie in.
+    // Grown by every geometry write the editor makes to it -- the shape that was rasterised into it,
+    // and any sculpt or extrude performed on it since. This is what the fold scans, and it is the
+    // reason a part can be sculpted before it is baked without the fold having to probe the whole
+    // resolution cube to find what changed.
+    //
+    // An empty part is max < min, not a zero box: a zero box would claim one voxel at the origin.
+    projv::core::ivec3 contentMin = projv::core::ivec3(0);
+    projv::core::ivec3 contentMax = projv::core::ivec3(-1);
+
+    // --- Procedural provenance ---
+    //
+    // True when the part was rasterised from a primitive and can therefore be rebuilt at new
+    // dimensions exactly and for free. A lifted region or an imported asset cannot: resizing voxels
+    // is a resample, and there is nothing to resample it *from*.
+    bool procedural = false;
     ShapeKind kind = ShapeKind::Box;
     int dimensions[3] = {16, 16, 16};
     bool hollow = false;
     int wallThickness = 1;
     uint32_t color = 0xFFFFFFFFu;
+    size_t voxelCount = 0;   // What it was made of, for the stack row.
 
-    // How many voxels went into it, for the banner. Not recomputed after a sculpt -- it says what
-    // the stamp was made of, which is what the user is placing.
-    size_t voxelCount = 0;
-
-    // The box, in the stamp component's own voxel coordinates, that its contents are known to lie
-    // in. Grown by every geometry write the editor makes to the stamp component -- the shape that
-    // was rasterised into it, and any sculpt or extrude performed on it while it floats. This is
-    // what the merge scans, and it is the reason a stamp can be sculpted before it commits without
-    // the merge having to probe the whole resolution cube to find what changed.
+    // --- Cut bookkeeping (Region tool) ---
     //
-    // An empty stamp is max < min, not a zero box: a zero box would claim one voxel at the origin.
-    projv::core::ivec3 contentMin = projv::core::ivec3(0);
-    projv::core::ivec3 contentMax = projv::core::ivec3(-1);
+    // A part cut out of an existing component has to be able to put those voxels back if it is
+    // deleted, or a cut would be a delete with a misleading name.
+    bool cutFromSource = false;
+    projv::ComponentHandle cutSource = projv::INVALID_COMPONENT_HANDLE;
+    std::vector<projv::core::ivec3> cutCoords;
+    std::vector<uint32_t> cutColors;
+
+    // --- Resolved cell set, cached ---
+    //
+    // The cells this part covers in the asset's lattice, and the colour each carries. Keyed on the
+    // transform they were computed for, so nudging one part in a stack of ten re-walks one part
+    // rather than ten -- which is what keeps the settle-gated rebuild affordable as a stack grows.
+    std::vector<projv::core::ivec3> cells;
+    std::vector<uint32_t> cellColors;
+    bool cacheValid = false;
+    bool cacheOverBudget = false;
+    projv::core::vec3 cachePosition = projv::core::vec3(0.0f);
+    projv::core::quat cacheRotation = projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    // The pull resolves each voxel's slot to a colour as it goes, so the cached cells depend on the
+    // part's palette as much as on where it is standing. Keyed on ComponentRecord::paletteVersion
+    // rather than on a hook at each edit site: the engine bumps it from every palette mutation
+    // (setMaterialColor, intern, remove), so undo and redo of a recolour are covered by the same
+    // one line as the recolour itself.
+    uint32_t cachePaletteVersion = 0;
+};
+
+// The resolved form of one asset: what its contents fold to, once the boolean ops on them are
+// applied in order.
+//
+// **Derived, and owned by nobody.** There is no "assembly" object here and no "which container am I
+// working in" pointer -- a Resolve exists for exactly as long as an asset's contents carry boolean
+// ops, is created and retired by syncResolves(), and holds nothing a user chose. The asset *is* the
+// container; its child list in order *is* the stack.
+struct Resolve {
+    projv::ComponentHandle node = projv::INVALID_COMPONENT_HANDLE;
+
+    // The resolved voxels: a Chunk component holding the fold, in the asset's lattice. This is
+    // what you look at by default, and it is the reason the arrangement reads as modelling rather
+    // than as a queue of pending edits.
+    //
+    // **Not a child of `node`.** It is derived, so parenting it under the asset would put it in
+    // the child list the fold iterates (folding the result back into itself) and write it to disk as
+    // a part on save. It is a root component that the Assets panel skips, the same way it skips
+    // any other piece of editor scaffolding.
+    projv::ComponentHandle result = projv::INVALID_COMPONENT_HANDLE;
+
+    // One asset, one lattice: every part must share a voxel scale or the fold is a resample. So
+    // the asset owns it and a part inherits it at creation. This is a real constraint and it does
+    // not go away -- but it is the invariant of the .data file the bake has to produce (one
+    // resolution, one voxelScale, shared by every block) rather than something the editor imposes to
+    // keep the fold cheap, which is a good sign about it rather than a bad one.
+    float voxelScale = 1.0f;
+
+    // --- Resolve state ---
+    bool resultStale = true;
+    bool resultOverBudget = false;
+    size_t resultVoxels = 0;
+    size_t resultWalkCells = 0;
+    bool resultShown = false;      // The result is built and the parts are hidden.
+    // The last frame at which any part of this asset moved. The fold waits out the gesture --
+    // see ASSEMBLY_SETTLE_SECONDS.
+    double movedAtTime = 0.0;
+    // The summed palette versions of every part, as of the last rebuild. Two jobs, both of which a
+    // transform-only cache key misses: it is what notices a recolour at all (nothing *moves* when a
+    // palette entry changes, so there is no other signal that the result is out of date), and it is
+    // what tells the rebuild to start the result's palette over rather than refill into it -- the
+    // result is derived, so its palette should be derived too rather than accumulating every colour
+    // the asset has ever briefly been.
+    uint64_t palettePeriod = 0;
 };
 
 // Everything the editor owns that is neither the Scene nor its GPU mirror. One global resource, so
@@ -718,7 +1172,7 @@ struct EditorState {
     projv::core::vec3 cameraPosition = projv::core::vec3(0.0f);
     float cameraYaw = 0.0f;
     float cameraPitch = 0.0f;
-    float speedScrollSteps = 0.0f;      // Scroll notches; applied geometrically to framing.moveSpeed.
+    float speedScrollSteps = 0.0f;      // Ctrl+scroll notches; applied geometrically to framing.moveSpeed.
     bool cameraIsFlying = false;        // Right mouse held inside the viewport: cursor captured.
     bool cameraMovedByInterface = false; // A panel or menu moved the camera; consumed by the render
                                          // loop, which has to drop the accumulated image when it did.
@@ -727,6 +1181,21 @@ struct EditorState {
     double lastCursorX = 0.0;
     double lastCursorY = 0.0;
     int frameCameraLastMovedOn = 0;     // Drives the accumulate pass's reset.
+
+    CameraProjection cameraProjection = CameraProjection::Perspective;
+    // World units the image's height spans under an orthographic projection. Zero means "not set yet"
+    // and is filled in from the framing radius, so a scene opens zoomed to itself rather than to
+    // whatever the last scene's scale happened to be.
+    float orthoHeight = 0.0f;
+
+    // What the navigator cube orbits, what a middle-drag pans at the scale of, and how far a scroll
+    // notch dollies. The camera is still free-flying -- this is not an orbit camera with the position
+    // derived from a pivot -- so it is a *hint* about what the user is looking at, reset by re-framing
+    // and re-aimed by the focus picker. Everything that reads it copes with it being stale or behind
+    // the camera; nothing depends on it being right.
+    projv::core::vec3 orbitFocus = projv::core::vec3(0.0f);
+    bool cameraIsPanning = false;       // Middle mouse held inside the viewport.
+    bool cameraIsOrbiting = false;      // Dragging the navigator cube.
 
     // --- Viewport panel ---
     // The size the panel had when it was last laid out, in framebuffer pixels. The render targets are
@@ -739,15 +1208,29 @@ struct EditorState {
 
     // --- Render settings ---
     // The viewport's readability toggles, driven by the icon bar along the bottom of the scene image
-    // and read by shade.frag. Both are aids for judging *shape*; the renderer underneath them shows
-    // stored albedo with no lighting, and with both off that is exactly what reaches the screen.
+    // and read by shade.frag. All are aids for judging *shape*; the renderer underneath them shows
+    // stored albedo with no lighting, and with all off that is exactly what reaches the screen.
     //
-    // Normal shading is on by default and ambient occlusion is not: the first is free (one dot
-    // product per pixel) and makes an otherwise flat-looking scene legible, the second costs 16
-    // texture taps per pixel and is grainy until the accumulation settles, which is a surprising
-    // thing to meet before you have asked for it.
-    bool ambientOcclusionEnabled = false;
+    // Occlusion and normal shading are both on by default. Between them they are what makes an
+    // unlit scene read as solid at all: the axis shading separates the two faces meeting at an
+    // edge, and the occlusion puts objects on the ground rather than in front of it. Occlusion's
+    // 16 taps per pixel are grainy for the few dozen frames the accumulation takes to settle, but
+    // meeting a scene that already looks like an object is worth more than never being surprised
+    // by that grain.
+    //
+    // The sun shadow is not, and it is the one toggle here with a real cost: a full scene ray per
+    // lit pixel, roughly doubling what the viewport spends on a frame. It is also the only one that
+    // is a claim about the scene rather than about the surface -- where an object stands relative to
+    // everything else -- so it is worth reaching for deliberately when that is the question.
+    bool ambientOcclusionEnabled = true;
     bool normalShadingEnabled = true;
+    bool sunShadowEnabled = false;
+    // The second occlusion estimator: rays into the hemisphere instead of taps into the depth buffer.
+    // Off by default, and mutually exclusive with the one above -- see setOcclusionMode. It reaches
+    // eight times further and sees geometry the screen does not hold, which is what makes an object
+    // darken as it *approaches* a wall rather than only once they touch; it costs four scene rays per
+    // pixel to do it, which is why the cheap one is what the editor opens with.
+    bool rayAmbientOcclusionEnabled = false;
     // A toggle invalidates the accumulated image the same way a camera move does — without this the
     // new setting fades in over the history's 64 frames instead of appearing.
     bool renderSettingsChanged = false;
@@ -764,6 +1247,26 @@ struct EditorState {
     // Frames still to wait after releasing the old scene's GPU data before building the new one.
     // Zero means "not mid-load"; see the two-phase load in render().
     int sceneTeardownFramesRemaining = 0;
+    // File ▸ New Scene, deferred the same way and for the same reason a load is: it releases the
+    // current scene's GPU data, and both scenes would otherwise be resident at once. Kept separate
+    // from pendingScenePath rather than encoded as an empty one -- an empty pendingScenePath already
+    // means "no load pending", and overloading it would make "load nothing" and "load a new document"
+    // the same value.
+    bool pendingNewScene = false;
+    // Raised by the New Scene item when there are unsaved edits, so the confirmation is asked before
+    // anything is torn down. See the modal next to the Save As one.
+    bool newSceneConfirmOpen = false;
+
+    // --- Saving ---
+    //
+    // One dialog serves both "save the scene somewhere else" and "save this folder as an asset",
+    // because on disk the two produce the same thing: a folder holding a compose.json. saveRoot is
+    // what distinguishes them -- INVALID_COMPONENT_HANDLE writes the scene's roots, an Asset handle
+    // writes that subtree. See saveDocumentTo.
+    bool saveDialogOpen = false;
+    char savePathBuffer[1024] = {};
+    projv::ComponentHandle saveRoot = projv::INVALID_COMPONENT_HANDLE;
+    std::string saveSubject;            // What the dialog says it is about to write.
     std::string statusMessage;
     bool statisticsWindowOpen = false;   // The detailed numbers; the status bar carries the summary.
 
@@ -790,8 +1293,19 @@ struct EditorState {
     std::string libraryPreviewPath;
     projv::ComposeDoc libraryPreview;
     bool libraryPreviewValid = false;
+    // Set by the Library panel's Import button, acted on between the panels -- appending chunks and
+    // blobs has no business running in the middle of laying out a window.
+    std::string pendingImportPath;
+    AssetCopyMode assetCopyMode = AssetCopyMode::Copy;
+    AssetCopyMode pendingImportMode = AssetCopyMode::Copy;
 
     // --- Selection ---
+    //
+    // One selection, for everything. A part of an asset is an ordinary component and is selected
+    // exactly the way any other component is -- there is no second selection system running beside
+    // this one, which is what lets the gizmo, the Inspector and the outline serve both without a
+    // branch. (There used to be two, and the branch that reconciled them is where the
+    // rotate-about-the-wrong-pivot bug lived.)
     projv::ComponentHandle selectedComponent = projv::INVALID_COMPONENT_HANDLE;
     projv::ComponentHandle lastHierarchySelection = projv::INVALID_COMPONENT_HANDLE;
     uint32_t selectedVoxelCount = 0;    // Cached: counting walks the component's geometry.
@@ -845,6 +1359,22 @@ struct EditorState {
     float gizmoDragStartAxisT = 0.0f;
     projv::core::vec3 gizmoDragStartSpoke = projv::core::vec3(0.0f);
     projv::core::vec3 gizmoAnchorWorld = projv::core::vec3(0.0f);   // Pivot, in world space.
+    // The pivot as it stood when the drag began, and the line every frame of that drag measures
+    // against. **This must not be the live anchor**, which moves with the component the drag is
+    // moving.
+    //
+    // closestPointOnAxis reports t relative to the axis line's origin, so shifting that origin by d
+    // along the axis changes t by exactly -d. Measure against the live anchor and the drag chases
+    // itself: frame 1 moves the object by d, frame 2 reads t smaller by d and computes a delta of
+    // zero, so it moves it back, and frame 3 repeats. The result is a component that oscillates
+    // between two positions for as long as the button is held -- visible as the object jittering in
+    // place, and, because the two positions accumulate into the same temporal buffer, as its colours
+    // flickering. Freezing the origin makes t - gizmoDragStartAxisT the cursor's true displacement.
+    projv::core::vec3 gizmoDragStartAnchor = projv::core::vec3(0.0f);
+    // Whether the component was already free-placed when the drag began. Frozen for the same reason
+    // the anchor is: an Alt-drag *sets* the flag, so reading it live would have every frame after
+    // the first see the value this drag just wrote and record an undo that cannot clear it.
+    bool gizmoDragStartFree = false;
 
     // --- Viewport interaction ---
     // Screen rectangle the scene image occupies, so a click in it can be turned back into a ray.
@@ -852,18 +1382,24 @@ struct EditorState {
     ImVec2 viewportImageMax = ImVec2(0.0f, 0.0f);
     bool materialPickerActive = false;      // Eyedropper armed from the Palette panel: the next
                                             // viewport click samples, whatever the tool is.
+    // The navigator's eyeball, armed the same way and for the same reason: one click, aimed at
+    // geometry, that means something other than what the active tool means. Both are drawn as armed
+    // states over the image rather than as modes, because neither survives the click it is waiting for.
+    bool focusPickerActive = false;
     PickPurpose pendingPick = PickPurpose::None;   // A click landed this frame; the ray is cast after
     projv::core::vec2 pickUV = {0.0f, 0.0f};       // the interface is built, where the scene is reachable.
 
-    // --- Hierarchy ---
-    // Set when something outside the hierarchy chooses the selection (a viewport click, most of the
-    // time). The tree then opens every ancestor of the selection and scrolls it into view once --
-    // selecting a component you cannot see in the panel that is meant to show it is not a selection.
-    bool revealSelectionInHierarchy = false;
+    // --- Reveal ---
+    // Set when something outside the Assets panel chooses the selection (a viewport click, most of
+    // the time). The panel then **opens the asset the selection sits in** and scrolls the row into
+    // view -- selecting a component you cannot see in the panel that is meant to show it is not a
+    // selection, and now that the list is one level deep rather than a whole tree, the only way to
+    // show it is to be standing in the right place.
+    bool revealSelection = false;
 
     // --- Palette ---
     // Palettes are per component, so the panel edits one component's palette at a time. It follows
-    // the hierarchy selection when that component has a palette, and can be pointed elsewhere.
+    // the selection when that component has a palette, and can be pointed elsewhere.
     projv::ComponentHandle paletteComponent = projv::INVALID_COMPONENT_HANDLE;
     int selectedMaterialSlot = -1;
 
@@ -933,6 +1469,27 @@ struct EditorState {
     std::shared_ptr<std::vector<uint32_t>> paintStrokePreviousColors;
     bool paintStrokeFillTruncated = false;   // A fill ran into PAINT_FILL_LIMIT.
     bool paintStrokeTruncated = false;       // A frame hit PAINT_MAX_INTERPOLATED_STEPS.
+
+    // --- Symmetry ---
+    //
+    // **One frame per component, in that component's own voxel lattice.** Symmetry is a property of
+    // the thing being sculpted rather than of the tool, so switching selection brings that
+    // component's own mirrors back rather than dragging the last one along -- and storing the origin
+    // in the component's own coordinates is what makes every mirror an exact integer map with no
+    // conversion anywhere in the inner loop.
+    //
+    // Per component is also the honest scope for this stage: a mirrored cell is written into the
+    // stroke's own component and nowhere else. Promoting the frame to the *asset*, so a stroke on one
+    // part can land in its sibling, is a later stage and needs the stroke journal re-keyed by
+    // (component, coord) before it would be correct -- see the plan.
+    std::unordered_map<projv::ComponentHandle, SymmetryFrame> symmetryFrames;
+
+    // The group, expanded once when a stroke locks onto its component and held for the stroke.
+    //
+    // Frozen for the same reason the mode and the colour are: a gesture is one edit, and a frame that
+    // changed halfway through would leave a stroke that is symmetric over part of its length. Always
+    // holds at least the identity, so every caller is a plain loop.
+    std::vector<LatticeMap> strokeSymmetry = { LatticeMap() };
 
     // --- Sculpt ---
     SculptBrush sculptBrush = SculptBrush::Sphere;
@@ -1021,15 +1578,25 @@ struct EditorState {
     // added outward, negative layers carved inward, zero is untouched. Every frame walks it toward
     // whatever the cursor now says, one layer at a time, so dragging out and back in undoes itself as
     // you go rather than piling edits up.
-    std::vector<projv::core::ivec3> extrudeFace;   // The clicked face, in component voxel space.
-    projv::core::ivec3 extrudeNormal = projv::core::ivec3(0);   // Its outward normal, same space.
-    // One colour per face voxel, carried up each column as the face moves. The voxels pulled out
-    // inherit the material of the voxel they came from rather than the palette's current selection --
-    // extruding a wall extends the wall, in the wall's own colour. Per voxel rather than one for the
-    // whole face because a WholeFace selection spans materials, and pulling a patterned surface out
-    // has to keep its pattern rather than flatten it to whichever entry happened to be clicked.
-    std::vector<uint32_t> extrudeFaceColors;
-    projv::core::vec3 extrudeAxisWorld = projv::core::vec3(0.0f);   // The normal, in world space.
+    // One face the drag moves. There is more than one of these under symmetry: the clicked face, plus
+    // the face at each mirror image of the seed, each with its own normal because a mirror turns the
+    // direction a surface faces around with everything else.
+    //
+    // Each carries its own colours, one per voxel, carried up its column as the face moves. The
+    // voxels pulled out inherit the material of the voxel they came from rather than the palette's
+    // current selection -- extruding a wall extends the wall, in the wall's own colour. Per voxel
+    // rather than one for the whole face because a WholeFace selection spans materials, and pulling a
+    // patterned surface out has to keep its pattern rather than flatten it to whichever entry
+    // happened to be clicked.
+    struct ExtrudeFace {
+        std::vector<projv::core::ivec3> coords;
+        std::vector<uint32_t> colors;
+        projv::core::ivec3 normal = projv::core::ivec3(0);
+    };
+    // Index 0 is always the clicked face, and it is the one the cursor is measured against. Every
+    // face moves by the same signed depth, along its own normal.
+    std::vector<ExtrudeFace> extrudeFaces;
+    projv::core::vec3 extrudeAxisWorld = projv::core::vec3(0.0f);   // Face 0's normal, in world space.
     projv::core::vec3 extrudeAnchorWorld = projv::core::vec3(0.0f);
     float extrudeStartAlongAxis = 0.0f;   // Where the cursor sat on that axis when the drag began.
     int extrudeAppliedDepth = 0;
@@ -1049,43 +1616,105 @@ struct EditorState {
     std::unordered_map<int, ExtrudeLayerRecord> extrudeLayers;
     bool extrudeFaceTruncated = false;   // The face hit EXTRUDE_MAX_FACE_VOXELS.
 
-    // --- Stamps ---
-    FloatingStamp stamp;
-
-    // The stamp components created this session, one per resolution, kept and refilled rather than
-    // created and destroyed per placement.
+    // --- The open asset -------------------------------------------------------------------------
     //
-    // This is not an optimisation, it is a leak fix. The hierarchy's Delete is a soft delete: it
-    // unparents the record and renames it `__deleted__`, and nothing ever reclaims it. A component
-    // created and thrown away on every placement would grow scene.components without bound over a
-    // session of stamping. Keyed by resolution because resolution is fixed for a component's whole
-    // life (see utils::addComponent), so one reusable stamp cannot serve every size -- and there are
-    // only ever five of them, since CHUNK_RESOLUTION_CHOICES is five entries long.
+    // **The one container concept.** Everything that used to ask "which assembly am I adding to?"
+    // asks this instead, and the answer is whatever the user last opened. There is no separate
+    // active-assembly pointer and no mode to be in.
     //
-    // A component leaves the pool exactly once: when "Keep as component" hands it to the user, at
-    // which point it is theirs and the next stamp of that resolution creates a fresh one.
-    std::unordered_map<uint32_t, projv::ComponentHandle> stampPool;
+    // INVALID_COMPONENT_HANDLE means the document itself is open -- its root components are the
+    // contents, exactly as an asset's children are. That is not a special case in the data model
+    // (compose.json describes a folder's components either way); it is only the one node the editor
+    // has no ComponentRecord for, so the handle is the natural way to name it.
+    projv::ComponentHandle openAsset = projv::INVALID_COMPONENT_HANDLE;
+    // Set when the open asset changes, so the contents list can scroll back to the top. Consumed by
+    // the panel.
+    bool openAssetChanged = false;
+    // Draw only what is inside the open asset. Off by default -- opening is navigation, and hiding
+    // the rest of the world without being asked is a surprise -- but it is what makes a large scene
+    // workable, so it is one checkbox.
+    bool isolateOpen = false;
+    // Set when the open asset or the isolate flag changes. Isolation is applied on the edge rather
+    // than every frame: it walks the tree and rewrites scene.looseChunks, which is a GPU flush, and
+    // doing that on a still frame would cost one per frame forever.
+    bool isolationDirty = false;
+    // Which rows of the contents list have been expanded to show what is inside them. Expanding is a
+    // *view* change and opening is not, which is the distinction the whole panel is built on -- so
+    // this is deliberately not editor.openAsset and deliberately not the selection.
+    std::unordered_set<projv::ComponentHandle> expandedRows;
+    // Rows picked with shift+click, for the verbs that act on several at once -- today, merging a
+    // few of an asset's contents into one .data while the rest stay as they are. Empty is the
+    // ordinary case and means "just the selection"; it is cleared by any plain click, so there is no
+    // multi-select mode to be stuck in.
+    std::unordered_set<projv::ComponentHandle> pickedRows;
 
-    // --- Shape tool ---
+    // --- Resolves ---
+    //
+    // Derived state, one per asset whose contents carry boolean ops, created and retired by
+    // syncResolves(). Nothing the user made and nothing that persists: the ops on disk are the whole
+    // of what a stack is.
+    std::vector<Resolve> resolves;
+    // The editor's cache for each part, keyed by its component handle. The *stack* is the owning
+    // asset's child list -- this is only what the ComponentRecord does not carry.
+    std::unordered_map<projv::ComponentHandle, Part> parts;
+    // Set while any resolve is still moving and is therefore standing aside. Read only by the panel,
+    // to say so.
+    bool resolveSettling = false;
+
+    // --- Place tool: what the next primitive is ---
+    //
+    // Snapping lives here, on the editor, rather than on the thing being built. It is a property of
+    // *how you are placing*, which is why it belongs beside the tool that places -- filing it under
+    // the container meant the setting sat in one panel while the rotation it governed happened in
+    // another, and nothing on screen connected them.
+    //
+    // Rotation in multiples of 90 degrees about a world axis, translation in whole steps of the
+    // document lattice. On, the fold is a 1:1 integer remap: every source voxel lands on exactly one
+    // result cell and nothing aliases. Off, the fold rasterises the rotated part into the lattice --
+    // which is the point of the setting rather than a degradation of it. A wedge meant to sit at 30
+    // degrees, or a tree placed at its own angle so a dozen copies do not read as a dozen copies, can
+    // only be made this way.
+    //
+    // **These are the default for new placements, not a law over what already exists.** That is the
+    // whole reason `freeComponents` below is a separate thing rather than this flag being read
+    // everywhere: snapping runs inside applyComponentTransform, the funnel every transform goes down
+    // including undo and redo, so a global flag flipped after the fact reaches back and straightens
+    // a pose that was placed deliberately. What a component does is recorded on the component.
+    bool snapEnabled = true;
+    // How many voxels one step covers. One is the lattice itself, which is right for detailing;
+    // 16/32/64 is what placing modular pieces against each other actually wants. The requirement
+    // varies per scene, so it is a number rather than a second checkbox.
+    int  snapStepVoxels = 1;
+    // Quarter turns, independent of translation. Separate because the two are wanted separately: a
+    // tree at its own angle standing on a lattice position is an ordinary thing to want.
+    bool snapRotate90 = true;
+    // The document lattice's voxel size, or zero to derive it from the finest voxel scale present.
+    // Naming one pins the grid, so importing a finer asset later cannot re-phase it under everything
+    // already placed. See documentSnapVoxel.
+    float snapVoxelOverride = 0.0f;
+    // Components the user has deliberately placed off-lattice. Set by an Alt-drag, cleared by the
+    // Inspector's "Snap to grid", and consulted by every snap decision -- see isFreePlacement for
+    // why the freedom has to live here rather than in the gesture that made it.
+    std::unordered_set<projv::ComponentHandle> freeComponents;
+    // Draw the contents themselves instead of what they resolve to. Off by default, because the
+    // result is what is being made -- but the contents are what is being *arranged*.
+    bool showSources = false;
+
     ShapeKind shapeKind = ShapeKind::Box;
     int shapeDimensions[3] = {16, 16, 16};   // Voxels: width, height, depth.
     bool shapeHollow = false;
     int shapeWallThickness = 1;
-    // Where a shape lands when the click is over nothing at all -- the same fallback the Sculpt
+    // Where a primitive lands when the click is over nothing at all -- the same fallback the Sculpt
     // brush has, and for the same reason: there is no surface to measure from, so it goes this many
     // world units down the ray.
     float shapePlaceDistance = 20.0f;
-
-    // --- Stamp placement (shared by both tools) ---
-    //
-    // On by default, and the difference is not cosmetic. Snapped, the merge is a 1:1 integer remap:
-    // every source voxel lands on exactly one target cell, nothing aliases, and lifting a region and
-    // dropping it back where it came from is byte-identical. Free, the merge rasterises the rotated
-    // shape into the target lattice -- which is the whole point of the setting, not a degradation of
-    // it. A wedge meant to sit at 30 degrees, or a tree placed at its own angle so that a dozen
-    // copies do not read as a dozen copies, can only be made with this off.
-    bool stampSnap90 = true;
-    MergeMode stampMergeMode = MergeMode::Add;
+    // The op a newly placed part is given. Union almost always, but dropping a sphere you already
+    // know is a window wants to be one action rather than two.
+    BooleanOp shapeOp = BooleanOp::Union;
+    // Which op `Bake into <selected>` uses against the component it writes to. Separate from shapeOp:
+    // carving a crater out of a cathedral with a form that was itself built by unions is the case
+    // that needs them to differ.
+    BooleanOp bakeOp = BooleanOp::Union;
 
     // --- Region tool ---
     RegionSelector regionSelector = RegionSelector::Box;
@@ -1099,6 +1728,47 @@ struct EditorState {
     projv::core::ivec3 regionHoverCoord = projv::core::ivec3(0);
     bool regionHoverValid = false;
 };
+
+// =============================================================================
+// Free placement: the object's own answer to whether it snaps
+// =============================================================================
+//
+// **Freedom is a property of the object, not of the editor.** The global snap controls say what a
+// *new* placement gets; this says what an existing component does, and the difference is not
+// cosmetic. Snapping runs inside applyComponentTransform -- the funnel the gizmo, the arrow keys,
+// the Inspector's numeric fields and the undo and redo of all three go down. So with only a global
+// flag: turn snapping off, stand a tree at 30 degrees, turn it back on to place the next wall, and
+// the tree is straightened to the nearest quarter turn by the next arrow-key nudge or by an undo
+// that touches it. The pose is destroyed silently, by an action that had nothing to do with it, long
+// after the decision that made it.
+//
+// The funnel's own comment is right that snapping is idempotent so replaying a record is not a
+// second nudge -- but only while the setting has not changed underneath the record. Recording the
+// answer on the component is what makes that true again.
+static bool isFreePlacement(const EditorState& editor, projv::ComponentHandle component) {
+    return editor.freeComponents.count(component) != 0;
+}
+
+static void setFreePlacement(EditorState& editor, projv::ComponentHandle component, bool free) {
+    if (free) {
+        editor.freeComponents.insert(component);
+    } else {
+        editor.freeComponents.erase(component);
+    }
+}
+
+// Alt held: this gesture ignores the grid, and if the grid is off it obeys it instead.
+//
+// Read live from ImGui rather than latched at drag start, so every path through the funnel gets the
+// same answer at the same instant, and so the override lasts exactly as long as the key is down.
+// That is the point of a held modifier over a mode: there is no state left behind to forget about.
+//
+// Harmless on an undo or a redo, which pass values that were already snapped when they were
+// recorded -- suppressing a no-op leaves it a no-op. The case that is *not* harmless, replaying a
+// deliberately free pose while the grid is on, is what the per-component flag above covers.
+static bool snapSuppressedByModifier() {
+    return ImGui::GetIO().KeyAlt;
+}
 
 // =============================================================================
 // Automatic framing (from the ScenePreviewer, unchanged)
@@ -1140,6 +1810,8 @@ static CameraFraming frameScene(const projv::Scene& scene) {
         framing.yaw = 3.14159f / 2.0f;
         framing.pitch = 0.0f;
         framing.moveSpeed = 1.0f;
+        framing.center = vec3(0.0f);
+        framing.radius = 100.0f;
         return framing;
     }
 
@@ -1151,9 +1823,12 @@ static CameraFraming frameScene(const projv::Scene& scene) {
     projv::core::info("Scene bounds: ({:.1f}, {:.1f}, {:.1f}) -> ({:.1f}, {:.1f}, {:.1f})",
         boundsMin.x, boundsMin.y, boundsMin.z, boundsMax.x, boundsMax.y, boundsMax.z);
 
+    framing.center = center;
+    framing.radius = radius;
+
     // Pull back far enough that the bounding sphere fits the 60-degree vertical FOV the albedo pass
     // uses, with a margin so the subject is not jammed against the frame edge.
-    const float FOV_RADIANS = 60.0f * 3.14159265f / 180.0f;
+    const float FOV_RADIANS = CAMERA_VERTICAL_FOV_DEGREES * 3.14159265f / 180.0f;
     float distance = (radius / std::tan(FOV_RADIANS * 0.5f)) * 1.25f;
 
     framing.yaw = 3.14159265f * 0.25f;  // Looking along +X/+Z, so the camera sits on the -X/-Z side.
@@ -1181,13 +1856,164 @@ static projv::core::vec3 computeCameraDirection(const EditorState& editor) {
     };
 }
 
+// The camera's screen axes: `right` points along +X of the image, `up` along -Y of it. Identical to
+// the basis rayStartDirection builds in pjv_utils_DDA.sc, and it has to stay identical -- the
+// orthographic ray generator, the overlay projection, and the navigator cube all lay world geometry
+// over an image the shader produced, and a basis that disagrees by so much as a handedness puts every
+// outline in the wrong place.
+static void computeCameraBasis(projv::core::vec3 forward, projv::core::vec3& right,
+                               projv::core::vec3& up) {
+    using namespace projv::core;
+    forward = glm::normalize(forward);
+    // Straight up or down leaves cross(forward, worldUp) degenerate, so the reference axis swings to
+    // +Z there. The pitch clamp below keeps the camera just shy of it, but the navigator cube's
+    // snap-to-axis views aim exactly at it and would otherwise produce a zero-length basis.
+    vec3 worldUp = std::abs(forward.y) > 0.999f ? vec3(0.0f, 0.0f, 1.0f) : vec3(0.0f, 1.0f, 0.0f);
+    right = glm::normalize(glm::cross(forward, worldUp));
+    up = glm::normalize(glm::cross(right, forward));
+}
+
+// How many world units the image's height spans under an orthographic projection. Zero under
+// perspective, which is the signal every projection helper below tests -- so a caller that has not
+// been taught about the modes still behaves correctly rather than differently.
+static float cameraOrthoHeight(const EditorState& editor) {
+    if (!isOrthographicProjection(editor.cameraProjection)) return 0.0f;
+    // The lazily-filled default: a scene opens framed on itself. 2.5 radii is the perspective framing's
+    // coverage at the distance frameScene picks, so switching projection does not jump the zoom.
+    if (editor.orthoHeight <= 0.0f) return std::max(editor.framing.radius * 2.5f, 1.0e-3f);
+    return editor.orthoHeight;
+}
+
+// How far back along the view direction an orthographic ray has to start.
+//
+// A perspective ray begins at the camera and there is nothing in front of it that the camera is not
+// already outside of. Parallel rays have no such guarantee: the plane they leave from is at the camera
+// position, so anything the camera has flown past -- or anything behind it after a projection switch
+// -- is simply gone. Pushing the plane back until it clears the scene's bounding sphere makes the
+// orthographic view show the whole scene from wherever the camera happens to be standing, which is
+// what "same view, no perspective" has to mean for the mode to be usable at all.
+//
+// It is the *minimum* offset that clears the sphere rather than a generous constant, because every
+// unit of it is empty space the DDA has to step through on the way in.
+static float cameraOrthoBackoff(const EditorState& editor, projv::core::vec3 forward) {
+    if (!isOrthographicProjection(editor.cameraProjection)) return 0.0f;
+    float radius = std::max(editor.framing.radius, 1.0e-3f);
+    float towardCenter = glm::dot(editor.framing.center - editor.cameraPosition,
+                                  glm::normalize(forward));
+    return std::max(0.0f, radius * 1.05f - towardCenter);
+}
+
+// A ray through one pixel of the viewport. Under perspective every ray shares the camera's position
+// and only the direction varies; under an orthographic projection it is the other way round -- the
+// directions are all parallel and the *origin* slides across the image plane. So everything that turns
+// a cursor position into a question about the scene has to carry both, which is why the ray is a value
+// here rather than a direction paired with an implied `editor.cameraPosition`.
+struct ViewportRay {
+    projv::core::vec3 origin;
+    projv::core::vec3 direction;
+};
+
+// The ray the shader used for the pixel at `uv` (0..1 across the scene image, y down). This is the one
+// place the two projections' ray generators are written out; picking, sculpting, the gizmo's drags and
+// the region overlay all come through here, so none of them has to know which mode is live.
+static ViewportRay viewportRayThroughUV(const EditorState& editor, projv::core::vec2 uv,
+                                        projv::core::vec2 resolution) {
+    using namespace projv::core;
+    vec3 forward = glm::normalize(computeCameraDirection(editor));
+
+    float orthoHeight = cameraOrthoHeight(editor);
+    if (orthoHeight <= 0.0f) {
+        return { editor.cameraPosition,
+                 projv::utils::rayDirectionThroughImage(uv, resolution, forward) };
+    }
+
+    vec3 right, up;
+    computeCameraBasis(forward, right, up);
+
+    // Same NDC convention as rayStartDirection: the V axis is flipped because the image's origin is
+    // its top-left corner and the camera's up axis points the other way.
+    float aspectRatio = std::max(resolution.x, 1.0f) / std::max(resolution.y, 1.0f);
+    float ndcX = uv.x * 2.0f - 1.0f;
+    float ndcY = (1.0f - uv.y) * 2.0f - 1.0f;
+    float halfHeight = orthoHeight * 0.5f;
+
+    vec3 planeCenter = editor.cameraPosition - forward * cameraOrthoBackoff(editor, forward);
+    return { planeCenter + right * (ndcX * halfHeight * aspectRatio) + up * (ndcY * halfHeight),
+             forward };
+}
+
+// How far ahead of the camera the thing being looked at is, along the view direction. Drives the pan
+// scale and the dolly step, both of which want to be proportional to what is on screen rather than to
+// a fixed world length -- a pan that crosses the subject in one sweep at arm's length has to crawl
+// when the subject is a city seen from outside it.
+//
+// Floored at a multiple of the movement speed for the two cases where the focus is no help: it sits
+// behind the camera (flown past), or the camera is standing on it. Both would otherwise stall the
+// controls dead, and a stalled control reads as a broken one.
+static float cameraFocusDepth(const EditorState& editor) {
+    projv::core::vec3 forward = glm::normalize(computeCameraDirection(editor));
+    float depth = glm::dot(editor.orbitFocus - editor.cameraPosition, forward);
+    return std::max(depth, editor.framing.moveSpeed * 20.0f);
+}
+
+// Aims the camera along `direction`, keeping it the distance it currently is from the orbit focus and
+// putting the focus back in the middle of the image. Used by every snap the navigator offers: the
+// cube's faces, the Isometric mode, and the eyeball squaring up on a voxel face.
+//
+// **Straight up and straight down are allowed here, unlike in the free-look drag**, which stops at
+// 1.55 radians. A snap is a request for an exact orientation -- clicking the cube's Y face, or the
+// eyeball on a floor, means perpendicular and nothing else, and stopping 1.2 degrees short of it
+// defeats the gesture. What the free-look limit is actually protecting against is a *drag* passing
+// through the pole and flipping the image over, which a snap cannot do because it never passes through
+// anything. The basis stays well defined at the pole itself: computeCameraBasis swings its reference
+// axis to +Z there, exactly as rayStartDirection does on the GPU.
+static void aimCameraAtFocus(EditorState& editor, projv::core::vec3 direction) {
+    using namespace projv::core;
+    vec3 forward = glm::normalize(direction);
+    float distance = glm::length(editor.orbitFocus - editor.cameraPosition);
+    // A camera sitting exactly on its focus has no distance to preserve, and normalising the zero
+    // vector below would land it nowhere in particular. Back it off to something scene-sized instead.
+    if (distance < 1.0e-4f) distance = std::max(editor.framing.radius, 1.0f);
+
+    const float HALF_PI = 1.57079633f;
+    editor.cameraPitch = std::clamp(std::asin(std::clamp(forward.y, -1.0f, 1.0f)), -HALF_PI, HALF_PI);
+    editor.cameraYaw = std::atan2(forward.z, forward.x);
+    // Re-derived rather than reusing `forward`: yaw is meaningless at the pole (every yaw gives the same
+    // direction), so the position has to be built from what the camera angles now say rather than from
+    // the direction that was asked for, or the focus lands slightly off centre.
+    editor.cameraPosition = editor.orbitFocus - computeCameraDirection(editor) * distance;
+    editor.cameraMovedByInterface = true;
+}
+
 // Snaps the camera back to the framing computed for the current scene.
 static void applyFraming(EditorState& editor) {
     editor.cameraPosition = editor.framing.position;
     editor.cameraYaw = editor.framing.yaw;
     editor.cameraPitch = editor.framing.pitch;
     editor.speedScrollSteps = 0.0f;
+    // Re-framing is the one gesture that means "forget where I had got to", so the navigator's orbit
+    // point and the orthographic zoom go back to the scene as well -- leaving either behind would put
+    // the camera on the subject while still turning about, or zooming to, somewhere it has left.
+    editor.orbitFocus = editor.framing.center;
+    editor.orthoHeight = 0.0f;   // Lazily re-derived from the framing radius; see cameraOrthoHeight.
     editor.cameraMovedByInterface = true;
+}
+
+// Switches projection, and does the one thing that is not just a change of ray generator: Isometric is
+// an angle as much as a projection, so choosing it moves the camera there.
+static void setCameraProjection(EditorState& editor, CameraProjection projection) {
+    if (editor.cameraProjection == projection) return;
+    editor.cameraProjection = projection;
+    editor.cameraMovedByInterface = true;
+
+    if (projection == CameraProjection::Isometric) {
+        projv::core::vec3 direction = {
+            std::cos(ISOMETRIC_PITCH) * std::cos(ISOMETRIC_YAW),
+            std::sin(ISOMETRIC_PITCH),
+            std::cos(ISOMETRIC_PITCH) * std::sin(ISOMETRIC_YAW)
+        };
+        aimCameraAtFocus(editor, direction);
+    }
 }
 
 // =============================================================================
@@ -1215,6 +2041,83 @@ static void setBrowserDirectory(EditorState& editor, const std::string& director
 // Builds the scene in folderPath into the editor and uploads it. The *previous* scene's GPU data
 // must already have been released — see the two-phase load in render(), which exists because
 // holding two scenes' textures at once is more VRAM than a large scene leaves spare.
+// Defined with the rest of the fold machinery, far below: they need the component voxel space,
+// which is built on top of scene helpers this section sits above. Declared here because loading a
+// scene is where a stack on disk has to be recognised.
+static void syncResolves(projv::Scene& scene, EditorState& editor);
+static void wrapRootStack(projv::Scene& scene, EditorState& editor);
+static void importPendingAsset(projv::Scene& scene, EditorState& editor);
+static void dropResolveResults(projv::Scene& scene, EditorState& editor);
+
+// Drops every piece of editor state that refers to the document being replaced.
+//
+// **Shared by loadScene and newScene, and that is the point.** Every field here names a handle, a
+// slot, a blob or a coordinate belonging to the outgoing scene, and means something else entirely in
+// whatever arrives next. The list is long and has only ever grown, so a second hand-maintained copy
+// of it in the New Scene path would be a standing invitation for the two to drift -- and the way that
+// drift presents is a stale handle indexing a fresh scene, which is a crash or a silent edit to the
+// wrong component rather than anything that looks like a missed reset.
+//
+// What is NOT here is what the two paths legitimately disagree about: the document's path, the disk
+// browser's directory, the stack-adoption pass, the framing and the status line.
+static void resetEditorForDocumentSwap(EditorState& editor) {
+    editor.selectedComponent = projv::INVALID_COMPONENT_HANDLE;
+    editor.lastHierarchySelection = projv::INVALID_COMPONENT_HANDLE;
+    editor.selectedVoxelCount = 0;
+    editor.selectionOutlineChunks.clear();
+    editor.selectionOutlineValid = false;
+    // Palette state belongs to the scene that is going away: handles, slots and the cached usage
+    // counts all mean something different in the incoming one.
+    selectPaletteComponent(editor, projv::INVALID_COMPONENT_HANDLE);
+    editor.materialUsage.clear();
+    editor.materialChunkUsage.clear();
+    editor.materialPickerActive = false;
+    // An armed eyeball would resolve against the incoming scene's geometry, centring the camera on
+    // something the user never pointed at.
+    editor.focusPickerActive = false;
+    // A click parked for the ray cast that has not happened yet refers to the outgoing scene's
+    // camera and geometry, and would be cast into the incoming one.
+    editor.pendingPick = PickPurpose::None;
+    // Likewise a stroke caught mid-drag: its component handle and every coordinate it has collected
+    // belong to the scene being replaced. Dropped rather than committed — there is nothing left to
+    // commit it to, and the history is cleared just below anyway.
+    editor.sculptStrokeActive = false;
+    editor.sculptStrokeComponent = projv::INVALID_COMPONENT_HANDLE;
+    editor.sculptStrokeHasAnchor = false;
+    editor.sculptStrokeOriginal.clear();
+    editor.paintStrokeActive = false;
+    editor.paintStrokeSampled = false;
+    editor.paintStrokeComponent = projv::INVALID_COMPONENT_HANDLE;
+    editor.paintStrokeHasAnchor = false;
+    editor.paintStrokeCoords.reset();
+    editor.paintStrokePreviousColors.reset();
+    editor.extrudeFaces.clear();
+    editor.extrudeLayers.clear();
+    editor.extrudeAppliedDepth = 0;
+    // Every handle a resolve holds -- its node and its result -- indexes the outgoing
+    // scene's component vector and means something else entirely in the incoming one. Dropped
+    // rather than carried: the components they named went with the scene.
+    editor.resolves.clear();
+    editor.parts.clear();
+    // Handles into the outgoing scene, like everything above -- and a stale one here would silently
+    // exempt whichever component the incoming scene happens to give that index to.
+    editor.freeComponents.clear();
+    // Derived from the outgoing document's voxel scales, so it is a statement about a document that
+    // is no longer loaded. The incoming one derives its own on first use.
+    editor.snapVoxelOverride = 0.0f;
+    editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+    editor.openAssetChanged = true;
+    editor.isolateOpen = false;
+    editor.regionSelection.clear();
+    editor.regionCornerPending = false;
+    editor.regionHoverValid = false;
+    editor.revealSelection = false;
+    // Every recorded edit refers to slots and blobs of the scene being replaced.
+    editor.history.clear();
+    editor.renamingComponent = projv::INVALID_COMPONENT_HANDLE;
+    editor.renameBuffer[0] = '\0';
+}
+
 static bool loadScene(projv::Scene& scene, projv::GPUData& gpuData, EditorState& editor,
                       const std::string& folderPath) {
     std::string normalizedPath = folderPath;
@@ -1240,55 +2143,53 @@ static bool loadScene(projv::Scene& scene, projv::GPUData& gpuData, EditorState&
     std::error_code parentErrorCode;
     std::filesystem::path absoluteScenePath = std::filesystem::absolute(normalizedPath, parentErrorCode);
     setBrowserDirectory(editor, absoluteScenePath.parent_path().parent_path().string());
-    editor.selectedComponent = projv::INVALID_COMPONENT_HANDLE;
-    editor.lastHierarchySelection = projv::INVALID_COMPONENT_HANDLE;
-    editor.selectedVoxelCount = 0;
-    editor.selectionOutlineChunks.clear();
-    editor.selectionOutlineValid = false;
-    // Palette state belongs to the scene that is going away: handles, slots and the cached usage
-    // counts all mean something different in the incoming one.
-    selectPaletteComponent(editor, projv::INVALID_COMPONENT_HANDLE);
-    editor.materialUsage.clear();
-    editor.materialChunkUsage.clear();
-    editor.materialPickerActive = false;
-    // A click parked for the ray cast that has not happened yet refers to the outgoing scene's
-    // camera and geometry, and would be cast into the incoming one.
-    editor.pendingPick = PickPurpose::None;
-    // Likewise a stroke caught mid-drag: its component handle and every coordinate it has collected
-    // belong to the scene being replaced. Dropped rather than committed — there is nothing left to
-    // commit it to, and the history is cleared just below anyway.
-    editor.sculptStrokeActive = false;
-    editor.sculptStrokeComponent = projv::INVALID_COMPONENT_HANDLE;
-    editor.sculptStrokeHasAnchor = false;
-    editor.sculptStrokeOriginal.clear();
-    editor.paintStrokeActive = false;
-    editor.paintStrokeSampled = false;
-    editor.paintStrokeComponent = projv::INVALID_COMPONENT_HANDLE;
-    editor.paintStrokeHasAnchor = false;
-    editor.paintStrokeCoords.reset();
-    editor.paintStrokePreviousColors.reset();
-    editor.extrudeFace.clear();
-    editor.extrudeLayers.clear();
-    editor.extrudeAppliedDepth = 0;
-    // A stamp floating over the outgoing scene has a component handle and a target handle that both
-    // mean something else in the incoming one, and the pool's handles are gone with the scene that
-    // held them. Dropped rather than merged: there is nothing left to merge into.
-    editor.stamp = FloatingStamp();
-    editor.stampPool.clear();
-    editor.regionSelection.clear();
-    editor.regionCornerPending = false;
-    editor.regionHoverValid = false;
-    editor.revealSelectionInHierarchy = false;
-    // Every recorded edit refers to slots and blobs of the scene being replaced.
-    editor.history.clear();
-    editor.renamingComponent = projv::INVALID_COMPONENT_HANDLE;
-    editor.renameBuffer[0] = '\0';
+
+    resetEditorForDocumentSwap(editor);
+
+    // ...and then found again in the scene that just arrived: any folder whose children carry
+    // boolean ops is a stack somebody saved, and it has to come back editable. wrapRootStack is the
+    // one case that cannot be derived, because it edits the graph -- see its comment.
+    wrapRootStack(scene, editor);
+    syncResolves(scene, editor);
+
     editor.framing = frameScene(scene);
     applyFraming(editor);
+
     editor.statusMessage = "Loaded " + normalizedPath + " - " + std::to_string(scene.chunks.size()) +
                            " chunk(s), " + std::to_string(scene.components.size()) + " component(s)";
     projv::core::info("{}", editor.statusMessage);
     return true;
+}
+
+// File ▸ New Scene: an empty, untitled document.
+//
+// Untitled means `scenePath` is empty while `sceneLoaded` is true, and the menu was already shaped
+// for exactly that -- "Save Scene" is gated on a non-empty path and greys out, "Save Scene As..." on
+// `sceneLoaded` alone and stays live. So an untitled document needs no new save mode; it needs Ctrl+S
+// to route to Save As (see the shortcut block) and Save As to adopt the path it wrote to, which is
+// what turns the document titled.
+//
+// No component is created. utils::addComponent is not called and no asset node is invented, because
+// the Place tool already builds what it needs on first use -- ensureStackNode creates and opens an
+// asset the moment a primitive is placed with nothing open. Seeding one here would put a component in
+// every new document whether or not the user wanted it, and it would be written to disk on the first
+// save as an empty folder.
+static void newScene(projv::Scene& scene, projv::GPUData& gpuData, EditorState& editor) {
+    projv::core::info("New scene");
+
+    scene = projv::Scene();
+    gpuData = projv::graphics::createTexturesForScene(scene);
+
+    editor.scenePath.clear();
+    editor.sceneLoaded = true;
+
+    resetEditorForDocumentSwap(editor);
+
+    // Nothing to frame, and frameScene says so itself: with no live chunks it warns and returns a
+    // camera pulled back from the origin, which is where the first primitive will land.
+    editor.framing = frameScene(scene);
+    applyFraming(editor);
+    editor.statusMessage = "New scene - place something, then File > Save Scene As...";
 }
 
 // =============================================================================
@@ -1374,11 +2275,115 @@ static bgfx::TextureHandle getViewportTexture(const std::shared_ptr<projv::Const
 // Camera
 // =============================================================================
 
+// World units one screen pixel of the scene image covers, at the depth of whatever is being looked at.
+// This is the conversion that makes a drag or a scroll notch mean the same *proportion of the image*
+// at every scale, which is the only way one set of gestures can serve a tree and a city.
+//
+// Under an orthographic projection it is exact and depth-independent, which is the whole character of
+// that mode. Under perspective it is exact only at the focus depth and an approximation everywhere
+// else -- the right approximation, because the subject is what the user is dragging.
+static float viewportWorldUnitsPerScreenPixel(const EditorState& editor) {
+    float imageHeight = std::max(1.0f, editor.viewportImageMax.y - editor.viewportImageMin.y);
+
+    float orthoHeight = cameraOrthoHeight(editor);
+    if (orthoHeight > 0.0f) return orthoHeight / imageHeight;
+
+    float scale = std::tan(glm::radians(CAMERA_VERTICAL_FOV_DEGREES * 0.5f));
+    return (2.0f * scale * cameraFocusDepth(editor)) / imageHeight;
+}
+
+// Middle-mouse pan: the scene follows the cursor, sideways and up/down across the image plane.
+//
+// It is the third of the three things a 3D view has to be able to do (look, pan, and get closer), and
+// the only one the fly-through cannot express -- W/A/S/D moves along the *world's* horizontal, so
+// there is no way to slide a subject across the screen while keeping the angle you chose to look at it
+// from. Middle-drag is where every tool of this kind puts it, and it is also the one mouse button
+// nothing else in this editor wants.
+//
+// Deliberately not cursor-captured, unlike the fly-through. A pan is a short, aimed gesture that ends
+// where the user meant it to, so warping the cursor back at the end would undo exactly the feedback
+// they were working from; and without capture ImGui's own hover state stays honest throughout.
+static bool updateCameraPan(EditorState& editor) {
+    using namespace projv::core;
+
+    if (!editor.cameraIsPanning) {
+        if (!editor.viewportHovered || editor.cameraIsFlying || editor.cameraIsOrbiting) return false;
+        if (!ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) return false;
+        editor.cameraIsPanning = true;
+        return false;   // The press itself moves nothing; the drag frames after it do.
+    }
+
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+        editor.cameraIsPanning = false;
+        return false;
+    }
+
+    ImVec2 movement = ImGui::GetIO().MouseDelta;
+    if (movement.x == 0.0f && movement.y == 0.0f) return false;
+
+    vec3 right, up;
+    computeCameraBasis(computeCameraDirection(editor), right, up);
+    float unitsPerPixel = viewportWorldUnitsPerScreenPixel(editor);
+
+    // Both signs are negated against the obvious ones because the *scene* is what follows the cursor,
+    // not the camera: dragging right pushes the subject right, which means the camera goes left. The Y
+    // term picks up a second negation from the screen axis pointing down against the camera's up.
+    editor.cameraPosition -= right * (movement.x * unitsPerPixel);
+    editor.cameraPosition += up * (movement.y * unitsPerPixel);
+    // Panned along with the camera, so the orbit stays about the point that is still under the middle
+    // of the image rather than snapping back to whatever was there before the pan.
+    editor.orbitFocus -= right * (movement.x * unitsPerPixel);
+    editor.orbitFocus += up * (movement.y * unitsPerPixel);
+    return true;
+}
+
+// The scroll wheel, which has two jobs and one modifier to tell them apart.
+//
+// Bare scroll is "get closer", the gesture every other 3D application spends the wheel on. Under
+// perspective that is a dolly along the view direction, sized as a fraction of the distance to the
+// focus so it decelerates as it arrives and cannot fly through the subject in one notch. Under an
+// orthographic projection moving forward does nothing at all -- parallel rays see the same image from
+// anywhere along them -- so the same gesture scales the height the view spans, which is the
+// orthographic meaning of the same intent.
+//
+// Ctrl+scroll keeps what the wheel used to do bare: scale the fly-through's movement speed. It is the
+// rarer of the two by a wide margin (a speed is set once for a scene, a distance is adjusted
+// constantly), which is the whole reason for the split.
+static bool updateCameraZoom(EditorState& editor, float notches) {
+    if (notches == 0.0f) return false;
+
+    if (ImGui::GetIO().KeyCtrl) {
+        editor.speedScrollSteps += notches;
+        return false;   // Nothing has moved; the accumulated image is still valid.
+    }
+
+    float orthoHeight = cameraOrthoHeight(editor);
+    if (orthoHeight > 0.0f) {
+        // Geometric, so a notch is the same proportional zoom at every scale. Clamped at both ends
+        // against a wheel spun far enough to reach zero (an empty image) or to overflow.
+        editor.orthoHeight = std::clamp(orthoHeight * std::pow(1.0f / 1.1f, notches),
+                                        editor.framing.radius * 1.0e-4f,
+                                        editor.framing.radius * 1.0e4f);
+        return true;
+    }
+
+    // A fraction of the remaining distance per notch rather than a fixed step: 0.9^n approaches the
+    // focus without ever reaching it, so the wheel cannot put the camera inside what it is aimed at.
+    editor.cameraPosition += glm::normalize(computeCameraDirection(editor)) *
+                             (cameraFocusDepth(editor) * (1.0f - std::pow(0.9f, notches)));
+    return true;
+}
+
 // Fly-through camera, active only while the right mouse button is held inside the Viewport panel.
 // Gating on the panel is what lets the same mouse serve both the interface and the camera: a drag
 // that starts over a dock panel belongs to ImGui, one that starts over the scene belongs to us.
 // Returns whether the camera changed this frame, which the accumulate pass needs in order to drop
 // its history.
+//
+// Three gestures share the mouse here, chosen so that none of them has to negotiate with the tools for
+// the left button: right-drag looks, middle-drag pans, and the wheel gets closer. The navigator cube in
+// the corner of the viewport handles the fourth -- orbiting -- because that one needs something to
+// orbit *about*, and the cube is where the user says so.
 static bool updateCamera(GLFWwindow* window, EditorState& editor) {
     ImGuiIO& io = ImGui::GetIO();
     bool cameraMoved = false;
@@ -1404,13 +2409,16 @@ static bool updateCamera(GLFWwindow* window, EditorState& editor) {
         io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
     }
 
-    // Scroll scales the framing-derived speed geometrically, so one notch is a consistent
-    // proportional change whether the scene is 64 or 8192 voxels across. Scroll that lands on any
-    // other panel belongs to that panel, so it is discarded rather than applied.
+    // Scroll that lands on any other panel belongs to that panel, so it is discarded rather than
+    // applied. What it means when it does land here is updateCameraZoom's business.
     if (editor.cameraIsFlying || editor.viewportHovered) {
-        editor.speedScrollSteps += float(g_scrollOffsetThisFrame);
+        cameraMoved |= updateCameraZoom(editor, float(g_scrollOffsetThisFrame));
     }
     float moveSpeed = editor.framing.moveSpeed * std::pow(1.2f, editor.speedScrollSteps);
+
+    // Runs whether or not the fly-through is live, and before the early return below: a pan is its own
+    // gesture on its own button, not a mode you have to enter first.
+    cameraMoved |= updateCameraPan(editor);
 
     if (!editor.cameraIsFlying) {
         // H re-frames on the scene, for when navigation has left the subject behind. Ignored while a
@@ -1419,7 +2427,7 @@ static bool updateCamera(GLFWwindow* window, EditorState& editor) {
             applyFraming(editor);
             return true;
         }
-        return false;
+        return cameraMoved;
     }
 
     double cursorX, cursorY;
@@ -1445,12 +2453,24 @@ static bool updateCamera(GLFWwindow* window, EditorState& editor) {
     projv::core::vec3 rightDirection = { std::cos(editor.cameraYaw + 3.14159265f / 2.0f), 0.0f,
                                          std::sin(editor.cameraYaw + 3.14159265f / 2.0f) };
 
-    if (glfwGetKey(window, GLFW_KEY_W)) { editor.cameraPosition += forwardDirection * moveSpeed; cameraMoved = true; }
-    if (glfwGetKey(window, GLFW_KEY_S)) { editor.cameraPosition -= forwardDirection * moveSpeed; cameraMoved = true; }
-    if (glfwGetKey(window, GLFW_KEY_A)) { editor.cameraPosition -= rightDirection * moveSpeed; cameraMoved = true; }
-    if (glfwGetKey(window, GLFW_KEY_D)) { editor.cameraPosition += rightDirection * moveSpeed; cameraMoved = true; }
-    if (glfwGetKey(window, GLFW_KEY_R)) { editor.cameraPosition.y += moveSpeed; cameraMoved = true; }
-    if (glfwGetKey(window, GLFW_KEY_F)) { editor.cameraPosition.y -= moveSpeed; cameraMoved = true; }
+    // Accumulated rather than applied key by key, so the orbit focus can be carried along by the same
+    // vector. Flying is how you get somewhere, and a focus left behind at the last place you stood
+    // would make the wheel's dolly step and the pan's scale answer for a point off the back of the
+    // camera. Turning deliberately does *not* move it -- the point you aimed the eyeball at stays the
+    // point you are turning about.
+    projv::core::vec3 movement(0.0f);
+    if (glfwGetKey(window, GLFW_KEY_W)) movement += forwardDirection * moveSpeed;
+    if (glfwGetKey(window, GLFW_KEY_S)) movement -= forwardDirection * moveSpeed;
+    if (glfwGetKey(window, GLFW_KEY_A)) movement -= rightDirection * moveSpeed;
+    if (glfwGetKey(window, GLFW_KEY_D)) movement += rightDirection * moveSpeed;
+    if (glfwGetKey(window, GLFW_KEY_R)) movement.y += moveSpeed;
+    if (glfwGetKey(window, GLFW_KEY_F)) movement.y -= moveSpeed;
+
+    if (movement != projv::core::vec3(0.0f)) {
+        editor.cameraPosition += movement;
+        editor.orbitFocus += movement;
+        cameraMoved = true;
+    }
     if (glfwGetKey(window, GLFW_KEY_H)) { applyFraming(editor); cameraMoved = true; }
 
     return cameraMoved;
@@ -1472,7 +2492,7 @@ static const char* TOOL_PANEL_ID = "Tool###ToolPanel";
 //
 // Two columns and a strip, which is the shape every editor of this kind converges on for a reason:
 //
-//   left    what exists — the scene's own contents on top, the library of things that could be
+//   left    what exists — the open asset's contents on top, the library of things that could be
 //           brought into it underneath. Navigation and organisation.
 //   centre  the scene itself, with the tool strip and the breadcrumb that says what is being edited.
 //   right   what is being done to the selection, stacked rather than tabbed: the Inspector's
@@ -1491,7 +2511,9 @@ static void buildDefaultDockLayout(ImGuiID dockspaceID, ImVec2 dockspaceSize) {
     ImGuiID rightNode = ImGui::DockBuilderSplitNode(centerNode, ImGuiDir_Right, 0.25f, nullptr, &centerNode);
     ImGuiID bottomNode = ImGui::DockBuilderSplitNode(centerNode, ImGuiDir_Down, 0.22f, nullptr, &centerNode);
 
-    // Left column: the scene's contents above the disk they came from.
+    // Left column: what is in the open asset, above the disk it could come from. Two panels, not
+    // three -- the Assembly panel that used to sit between them described a container that may or
+    // may not have existed, and the space it took is now the contents list's.
     ImGuiID libraryNode = ImGui::DockBuilderSplitNode(leftNode, ImGuiDir_Down, 0.40f, nullptr, &leftNode);
 
     // Right column, split twice from the bottom up so the fractions are of the whole column: palette
@@ -1500,7 +2522,7 @@ static void buildDefaultDockLayout(ImGuiID dockspaceID, ImVec2 dockspaceSize) {
     ImGuiID toolNode = ImGui::DockBuilderSplitNode(rightNode, ImGuiDir_Down, 0.50f, nullptr, &rightNode);
 
     ImGui::DockBuilderDockWindow("Viewport", centerNode);
-    ImGui::DockBuilderDockWindow("Scene Hierarchy", leftNode);
+    ImGui::DockBuilderDockWindow("Assets", leftNode);
     ImGui::DockBuilderDockWindow("Library", libraryNode);
     ImGui::DockBuilderDockWindow("Inspector", rightNode);
     ImGui::DockBuilderDockWindow(TOOL_PANEL_ID, toolNode);
@@ -1560,6 +2582,7 @@ static void drawLoadSceneDialog(EditorState& editor) {
 
     std::string directoryToOpen;
     std::string sceneToLoad;
+    std::string folderToImport;
 
     ImGui::BeginChild("##browserListing", ImVec2(0.0f, -ImGui::GetFrameHeightWithSpacing() * 2.0f), ImGuiChildFlags_Borders);
     if (currentDirectory.has_parent_path()) {
@@ -1628,13 +2651,315 @@ static void drawLoadSceneDialog(EditorState& editor) {
 }
 
 // =============================================================================
+// Saving
+// =============================================================================
+//
+// A scene and an asset are the same thing on disk -- a folder holding a compose.json, plus the .data
+// files its entries name -- so there is one write path and the only difference is where the walk
+// starts. saveComposeToDisk takes an Asset handle to write that subtree, or INVALID_COMPONENT_HANDLE
+// to write the scene's root components; both land in a folder that loadComposeFromDisk can open.
+//
+// That is the whole of "creating an asset is the same as creating a scene": nothing here knows which
+// of the two it is doing.
+
+static void saveDocumentTo(projv::Scene& scene, EditorState& editor,
+                           projv::ComponentHandle root, const std::string& folderPath) {
+    if (folderPath.empty()) {
+        editor.statusMessage = "No folder given - nothing saved.";
+        return;
+    }
+
+    // Every asset's resolved result comes down first, and this is not an optimisation.
+    //
+    // A result is a *root* component -- deliberately, so the fold that walks its asset's contents
+    // does not fold it back into itself -- and saveComposeToDisk's whole-scene mode describes exactly
+    // the root components. So a save taken with a result standing would write it into the
+    // compose.json as a real object, beside the very parts it was derived from, and the scene would
+    // reload with both. Derived geometry is not a thing to persist; the stack that produces it is,
+    // and that is written already, as the asset's contents with their ops.
+    //
+    // They are marked stale rather than left gone, so the next frame folds them again.
+    dropResolveResults(scene, editor);
+
+    // **A save that would write nothing does not overwrite something.**
+    //
+    // saveComposeToDisk's whole-scene mode describes the root components, and with none it writes a
+    // valid, empty compose.json -- straight over the one the scene came from, geometry files and all
+    // left orphaned beside it. There is no confirmation step that would catch it either, because
+    // from the writer's point of view nothing went wrong.
+    //
+    // The reachable route in is short: a load that finds a compose.json but parses no components
+    // still sets `sceneLoaded`, so Ctrl+S is armed over a scene that is not there. A folder holding
+    // a compose.json and no live components is not a state anyone means to persist, so it is refused
+    // and named rather than written.
+    size_t writable = 0;
+    if (root == projv::INVALID_COMPONENT_HANDLE) {
+        for (projv::ComponentHandle handle = 0; handle < scene.components.size(); handle++) {
+            const projv::ComponentRecord& record = scene.components[handle];
+            if (record.parent != projv::INVALID_COMPONENT_HANDLE) continue;
+            if (record.name == "__deleted__") continue;
+            writable++;
+        }
+    } else if (root < scene.components.size()) {
+        for (projv::ComponentHandle child : scene.components[root].children) {
+            if (child < scene.components.size() && scene.components[child].name != "__deleted__") writable++;
+        }
+    }
+    std::error_code existsError;
+    bool wouldOverwrite = std::filesystem::exists(std::filesystem::path(folderPath) / "compose.json",
+                                                  existsError);
+    if (writable == 0 && wouldOverwrite) {
+        editor.statusMessage = "Nothing to save - " + folderPath +
+                               " already holds a compose.json and was left alone.";
+        projv::core::warn("saveDocumentTo: refused to write an empty component list over {}", folderPath);
+        return;
+    }
+
+    std::string subject = root == projv::INVALID_COMPONENT_HANDLE
+        ? std::string("scene")
+        : ("asset " + scene.components[root].name);
+
+    if (projv::utils::saveComposeToDisk(scene, root, folderPath)) {
+        editor.statusMessage = "Saved " + subject + " to " + folderPath;
+        // Saving the *document* somewhere is what makes that somewhere the document.
+        //
+        // Without this, Save Scene As... wrote the folder and left scenePath pointing at wherever the
+        // scene had come from, so the next Ctrl+S silently went back to overwriting the old copy --
+        // and an untitled New Scene stayed untitled after being saved, with Save Scene greyed out
+        // forever. Only for a whole-scene save: saving a subtree as an asset writes a different
+        // document and must not retitle the one still open.
+        if (root == projv::INVALID_COMPONENT_HANDLE) {
+            std::string adopted = folderPath;
+            if (!adopted.empty() && adopted.back() != '/') adopted += '/';
+            if (adopted != editor.scenePath) {
+                editor.scenePath = adopted;
+                projv::core::info("Document is now {}", editor.scenePath);
+            }
+        }
+    } else {
+        // saveComposeToDisk logs the specific failure; the status bar carries the fact that the file
+        // on disk cannot be trusted, which is the part the user has to act on.
+        editor.statusMessage = "Errors while saving " + subject + " to " + folderPath +
+                               " - see the log. The folder may be incomplete.";
+    }
+}
+
+// Arms the Save As dialog for a subject. `root` is INVALID_COMPONENT_HANDLE for the whole scene, or
+// the Asset component to write. `suggestion` seeds the path field.
+static void openSaveDialog(EditorState& editor, projv::ComponentHandle root,
+                           const std::string& subject, const std::string& suggestion) {
+    editor.saveDialogOpen = true;
+    editor.saveRoot = root;
+    editor.saveSubject = subject;
+    std::snprintf(editor.savePathBuffer, sizeof(editor.savePathBuffer), "%s", suggestion.c_str());
+}
+
+// Defined with the panels further down, and needed here only to name the document in the
+// confirmation below.
+static std::string documentName(const EditorState& editor);
+
+// Where an untitled document is offered a home: beside the scenes the browser is already pointing at,
+// under a name that does not already exist there. A blank field would be technically correct and
+// leave the user to type a full path from memory.
+static std::string untitledSaveSuggestion(const EditorState& editor) {
+    std::filesystem::path directory = editor.browserDirectory.empty() ? std::filesystem::path(".")
+                                                                      : std::filesystem::path(editor.browserDirectory);
+    std::error_code errorCode;
+    for (int suffix = 0; suffix < 1000; suffix++) {
+        std::filesystem::path candidate =
+            directory / (suffix == 0 ? "Untitled" : "Untitled " + std::to_string(suffix + 1));
+        if (!std::filesystem::exists(candidate, errorCode)) return candidate.generic_string();
+    }
+    return (directory / "Untitled").generic_string();
+}
+
+// Starts a New Scene, asking first if that would throw away edits.
+//
+// The history is the test for "unsaved", and it is the honest one available: it is cleared on load and
+// on save-as-new-document, and every edit the user makes records into it. It is not a dirty *flag* --
+// undoing back to the start still counts as unsaved here -- which errs toward asking, and asking one
+// time too many costs a keystroke where not asking costs the session's work.
+static void requestNewScene(EditorState& editor) {
+    if (!editor.history.entries().empty()) {
+        editor.newSceneConfirmOpen = true;
+        return;
+    }
+    editor.pendingNewScene = true;
+    // The other half of keeping the two document swaps mutually exclusive -- see the two-phase blocks
+    // in render(). A New Scene is the more recent request, so a load that has not started yet loses.
+    editor.pendingScenePath.clear();
+    editor.sceneTeardownFramesRemaining = 0;
+}
+
+// The confirmation for the case above. Separate from the Save As modal because it can *lead* to one:
+// "Save first" opens that dialog and leaves the new scene un-started, so the user lands back here
+// deliberately rather than having the document swapped out from under an unfinished save.
+static void drawNewSceneConfirm(EditorState& editor) {
+    if (editor.newSceneConfirmOpen) {
+        ImGui::OpenPopup("New Scene");
+        editor.newSceneConfirmOpen = false;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("New Scene", nullptr,
+                                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+
+    ImGui::TextWrapped("%zu unsaved edit(s) in \"%s\". Starting a new scene discards them.",
+                       editor.history.entries().size(), documentName(editor).c_str());
+    ImGui::Spacing();
+
+    if (ImGui::Button("Discard and start new", ImVec2(180.0f, 0.0f))) {
+        editor.pendingNewScene = true;
+        editor.pendingScenePath.clear();
+        editor.sceneTeardownFramesRemaining = 0;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save first...", ImVec2(120.0f, 0.0f))) {
+        openSaveDialog(editor, projv::INVALID_COMPONENT_HANDLE, "this scene",
+                       editor.scenePath.empty() ? untitledSaveSuggestion(editor) : editor.scenePath);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+}
+
+static void drawSaveDialog(projv::Scene& scene, EditorState& editor) {
+    if (editor.saveDialogOpen) {
+        ImGui::OpenPopup("Save As");
+        editor.saveDialogOpen = false;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(640.0f, 0.0f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Save As", nullptr,
+                                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+
+    ImGui::Text("Write %s to a folder:", editor.saveSubject.c_str());
+    ImGui::Spacing();
+
+    ImGui::SetNextItemWidth(-1.0f);
+    bool committed = ImGui::InputText("##savePath", editor.savePathBuffer, sizeof(editor.savePathBuffer),
+                                      ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SetItemDefaultFocus();
+
+    std::string target = editor.savePathBuffer;
+    std::error_code errorCode;
+    bool exists = !target.empty() && std::filesystem::exists(target, errorCode);
+    bool holdsScene = exists && std::filesystem::exists(std::filesystem::path(target) / "compose.json", errorCode);
+
+    ImGui::Spacing();
+    // Said before the button rather than in a confirmation after it: overwriting a compose folder is
+    // the one outcome here that destroys something, and it is entirely predictable from the path.
+    if (holdsScene) {
+        ImGui::TextColored(ImVec4(1.00f, 0.75f, 0.35f, 1.00f),
+                           "This folder already holds a compose.json. Saving overwrites it and any\n"
+                           ".data files whose names collide.");
+    } else if (exists) {
+        ImGui::TextDisabled("The folder exists; compose.json and the .data files will be added to it.");
+    } else {
+        ImGui::TextDisabled("The folder will be created.");
+    }
+
+    ImGui::Spacing();
+    ImGui::BeginDisabled(target.empty());
+    if (ImGui::Button("Save", ImVec2(120.0f, 0.0f)) || committed) {
+        saveDocumentTo(scene, editor, editor.saveRoot, target);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+}
+
+// =============================================================================
 // Selection outline
 // =============================================================================
 //
 // Compose components form a tree, but only the leaves -- Chunk and Grid -- own geometry; an Asset
-// node is a folder. Selecting a folder in the hierarchy means "everything under here", so the
+// node is a folder. Selecting a folder means "everything under here", so the
 // outline is drawn around every .data leaf its subtree reaches, not just the folder's own (empty)
 // bounds.
+
+// Forward declarations for the fold and open-asset functions the panels reach for before the
+// section that defines them is reached.
+static projv::ComponentHandle ownerOf(const projv::Scene& scene, projv::ComponentHandle component);
+static void                openAsset(projv::Scene& scene, EditorState& editor,
+                                     projv::ComponentHandle node);
+static Part&               ensurePart(const projv::Scene& scene, EditorState& editor,
+                                      projv::ComponentHandle component);
+static void                setComponentRendered(projv::Scene& scene, EditorState& editor,
+                                                projv::ComponentHandle component, bool rendered);
+static std::string         uniqueComponentName(const projv::Scene& scene, const std::string& base);
+static const Resolve*     findResolve(const EditorState& editor, projv::ComponentHandle node);
+static Resolve*           findResolve(EditorState& editor, projv::ComponentHandle node);
+static const Part* findPart(const EditorState& editor, projv::ComponentHandle component);
+static Part*       findPart(EditorState& editor, projv::ComponentHandle component);
+static bool                isDerivedResult(const EditorState& editor, projv::ComponentHandle component);
+// The symmetry frame belonging to a component, centred on its geometry the first time it is asked
+// for. Declared here because the Tool panel edits it and is written well above the voxel-space
+// helpers the centring needs.
+static SymmetryFrame&      symmetryFrameFor(const projv::Scene& scene, EditorState& editor,
+                                            projv::ComponentHandle component);
+static bool                centreSymmetryFrame(const projv::Scene& scene, SymmetryFrame& frame,
+                                               projv::ComponentHandle component);
+static void                invalidateResolve(EditorState& editor, Resolve& resolve);
+// The document-wide snap grid's voxel size. Declared here because the Place panel shows it and is
+// written well above the voxel-space helpers deriving it needs.
+static float               documentSnapVoxel(const projv::Scene& scene, const EditorState& editor);
+static void                invalidateResolveOf(const projv::Scene& scene, EditorState& editor,
+                                               projv::ComponentHandle component, bool isOwner = false);
+static bool                placePrimitiveAt(projv::Scene& scene, EditorState& editor,
+                                            projv::core::vec3 worldCentre);
+static void                removePart(projv::Scene& scene, EditorState& editor,
+                                      projv::ComponentHandle component);
+static projv::ComponentHandle duplicateComponentInEditor(projv::Scene& scene, EditorState& editor,
+                                                         projv::ComponentHandle source);
+static void                destroyAssetNode(projv::Scene& scene, EditorState& editor,
+                                           projv::ComponentHandle node, bool restoreCuts);
+static bool                mergeContentsToData(projv::Scene& scene, EditorState& editor,
+                                               Resolve& resolve,
+                                               const std::vector<projv::ComponentHandle>& selection);
+static std::string         documentName(const EditorState& editor);
+static void                reorderChildTo(projv::Scene& scene, projv::ComponentHandle node,
+                                          projv::ComponentHandle child, size_t index);
+static bool                bakeNodeInto(projv::Scene& scene, EditorState& editor, Resolve& resolve,
+                                            projv::ComponentHandle target, BooleanOp op);
+static bool                placePrimitiveFromCamera(projv::Scene& scene, EditorState& editor);
+static void                regeneratePart(projv::Scene& scene, EditorState& editor,
+                                          projv::ComponentHandle component);
+static projv::ComponentHandle activeStackNode(const projv::Scene& scene, EditorState& editor);
+static projv::ComponentHandle createAssetNode(projv::Scene& scene, EditorState& editor,
+                                             projv::ComponentHandle parent, float voxelScale);
+static float               suggestedVoxelScale(const projv::Scene& scene, const EditorState& editor);
+static void                liftSelection(projv::Scene& scene, EditorState& editor, bool cut);
+static void                deleteSelection(projv::Scene& scene, EditorState& editor);
+static void                fillSelection(projv::Scene& scene, EditorState& editor);
+static void                duplicateSelectionInPlace(projv::Scene& scene, EditorState& editor);
+
+// Thousands to "12.3k": the counts these report run from single voxels to tens of millions, and a
+// raw integer at that range is read as a shape rather than as a number.
+static std::string formatCompactCount(uint32_t count);
+
+// The two hooks every transform runs through -- see their definitions in the open-asset section. They
+// are declared this early because applyComponentTransform, which is the funnel every path that moves
+// a component goes down, sits well above the fold code that gives them meaning.
+static void snapTransformToLattice(const projv::Scene& scene, const EditorState& editor,
+                                    projv::ComponentHandle component,
+                                    projv::core::vec3& position, projv::core::quat& rotation);
+static void noteComponentMoved(const projv::Scene& scene, EditorState& editor,
+                               projv::ComponentHandle component);
 
 // The resolutions utils::addComponent accepts, in the order they are offered. Powers of four only --
 // anything else builds a tree64 whose depth the shader derives differently, so there is no "custom"
@@ -1691,6 +3016,138 @@ static void drawNewDataComponentOptions(EditorState& editor) {
                         editor.createVoxelScale * float(CHUNK_RESOLUTION_CHOICES[editor.createResolutionIndex]));
 }
 
+// Removes a component and its whole subtree from the scene.
+//
+// A *soft* delete, which is all the scene data structures allow: handles are indices into
+// scene.components, so the record cannot be erased without rebasing every handle in the scene, in
+// the history's closures, and in the editor's own state. Instead the geometry is released, the
+// component is unparented, and it is renamed `__deleted__` -- which is what every panel filters on.
+// The record itself stays, costing a name and an empty vector or two.
+//
+// One helper rather than a copy of the body per caller: the contents list's Remove menu item, a part
+// leaving a stack, an asset being baked, and the self-test's cleanup all need exactly this, and a
+// delete that forgets to release the blob or to unlist the loose chunk leaves geometry on screen
+// with nothing owning it.
+// =============================================================================
+// The colour language
+// =============================================================================
+//
+// **Colour means kind, in every panel that lists components.** There used to be two half-systems
+// that disagreed -- the component tree tinted `(folder)` amber and `(data)` blue, while the Library tinted
+// scene folders pale blue -- so the same colour meant "a data leaf" in one panel and "a whole scene"
+// in the next.
+//
+// The distinction worth paying an extra colour for is **Asset versus Linked asset**. Link-ness is
+// otherwise invisible until somebody edits one and is surprised that another changed, which is
+// exactly the class of thing a colour should be spent on: a property that changes what an edit *does*
+// and that you cannot otherwise see.
+struct ComponentKindStyle {
+    ImVec4 color;
+    const char* label;
+    const char* hint;
+};
+
+static ComponentKindStyle componentKindStyle(const projv::Scene& scene, const EditorState& editor,
+                                             projv::ComponentHandle handle) {
+    if (handle < scene.components.size() && isDerivedResult(editor, handle)) {
+        return { ImVec4(0.55f, 0.55f, 0.58f, 0.75f), "derived",
+                 "Scaffolding the editor rebuilds. Not yours to edit, and never written to disk." };
+    }
+    if (handle >= scene.components.size()) {
+        return { ImVec4(0.55f, 0.55f, 0.58f, 0.75f), "?", "" };
+    }
+    const projv::ComponentRecord& record = scene.components[handle];
+    switch (record.kind) {
+        case projv::ComponentKind::Grid:
+            return { ImVec4(0.30f, 0.72f, 0.68f, 0.85f), "grid",
+                     "Many blocks on one lattice. Boolean ops do not apply to a grid -- folding one\n"
+                     "into a single-lattice .data is a rebuild rather than a bake." };
+        case projv::ComponentKind::Asset:
+            if (record.externalSource) {
+                return { ImVec4(0.68f, 0.50f, 0.88f, 0.90f), "linked",
+                         "A reference to a folder on disk, not geometry this document owns.\n"
+                         "Saving writes the reference; the contents are edited at their source." };
+            }
+            return { ImVec4(0.75f, 0.60f, 0.20f, 0.85f), "asset",
+                     "A container you can open. On disk it is a folder with its own compose.json." };
+        case projv::ComponentKind::Chunk:
+        default:
+            return { ImVec4(0.35f, 0.55f, 0.80f, 0.80f), "data",
+                     "One voxel volume, at one resolution and one voxel scale." };
+    }
+}
+
+static void deleteComponent(projv::Scene& scene, EditorState& editor, projv::ComponentHandle handle) {
+    if (handle >= scene.components.size()) return;
+
+    projv::ComponentHandle oldParent = scene.components[handle].parent;
+    if (oldParent < scene.components.size()) {
+        std::vector<projv::ComponentHandle>& siblings = scene.components[oldParent].children;
+        siblings.erase(std::remove(siblings.begin(), siblings.end(), handle), siblings.end());
+    }
+
+    // **Every node in the subtree is renamed, not just the root.** The rename to "__deleted__" is
+    // what marks a record dead -- there is no liveness flag, and the record itself has to survive
+    // because handles are indices into a vector that is never compacted. Every flat scan over
+    // scene.components in this editor and in saveComposeToDisk filters on exactly that name, so a
+    // descendant left with its own name is still a live component to all of them, pointing at a
+    // chunk that has just been killed and at a parent that has disowned it.
+    //
+    // Nothing used to delete a parent that had children, which is why this never bit. An asset
+    // deletes one every time it is baked or cancelled.
+    std::vector<projv::ComponentHandle> removed;
+    auto disableSubtree = [&scene, &removed](projv::ComponentHandle current, auto& self) -> void {
+        if (current >= scene.components.size()) return;
+        projv::ComponentRecord& record = scene.components[current];
+        if (record.kind == projv::ComponentKind::Chunk) {
+            projv::ChunkHandle chunkHandle = record.chunkHandle;
+            if (chunkHandle < scene.chunks.size()) {
+                scene.chunks[chunkHandle].alive = false;
+                projv::releaseBlob(scene, scene.chunks[chunkHandle].geometryPoolIndex);
+            }
+            std::vector<projv::ChunkHandle>& loose = scene.looseChunks;
+            loose.erase(std::remove(loose.begin(), loose.end(), chunkHandle), loose.end());
+            scene.looseChunkCount = static_cast<uint32_t>(loose.size());
+        }
+        // Copied rather than iterated in place: the recursion below clears the child list it is
+        // walking, and the walk has to outlive that.
+        std::vector<projv::ComponentHandle> children = record.children;
+        for (projv::ComponentHandle child : children) {
+            self(child, self);
+        }
+        projv::ComponentRecord& current_record = scene.components[current];
+        current_record.children.clear();
+        current_record.name = "__deleted__";
+        current_record.parent = projv::INVALID_COMPONENT_HANDLE;
+        current_record.op = projv::BooleanOp::None;
+        removed.push_back(current);
+    };
+    disableSubtree(handle, disableSubtree);
+
+    // Anything the editor was pointing *into* the subtree, not only at its root: deleting a folder
+    // whose child was selected has to clear the selection too, or the gizmo goes on driving a dead
+    // component and the Palette panel goes on editing a palette nothing reads.
+    for (projv::ComponentHandle gone : removed) {
+        if (editor.selectedComponent == gone) {
+            editor.selectedComponent = projv::INVALID_COMPONENT_HANDLE;
+            editor.selectedVoxelCount = 0;
+            editor.selectionOutlineValid = false;
+        }
+        if (editor.paletteComponent == gone) {
+            editor.paletteComponent = projv::INVALID_COMPONENT_HANDLE;
+            editor.selectedMaterialSlot = -1;
+            editor.materialUsageValid = false;
+            editor.materialChunkUsageValid = false;
+        }
+        // Handles are indices into a vector that is never compacted, but addComponent recycles dead
+        // slots -- so a free-placement flag left behind here would be inherited by whatever component
+        // is created into that slot next, exempting it from the grid for no reason anyone could see.
+        setFreePlacement(editor, gone, false);
+    }
+    editor.gpuFlushNeeded = true;
+    editor.cameraMovedByInterface = true;
+}
+
 // Collects the live chunk(s) a component's selection covers: itself if it is a Chunk, every occupied
 // cell if it is a Grid, or the same recursively for every child if it is an Asset folder.
 static void collectLeafChunks(const projv::Scene& scene, projv::ComponentHandle handle,
@@ -1725,26 +3182,41 @@ static void collectLeafChunks(const projv::Scene& scene, projv::ComponentHandle 
 //
 // Returns false for a point behind the camera (dot product with forward <= 0), which has no sane
 // forward projection — the caller drops any box edge touching such a corner rather than clip it.
+//
+// `orthoHeight` selects the projection, exactly as it does for the ray generator: zero is perspective
+// and anything positive is the world height the image spans under parallel rays. Every caller passes
+// cameraOrthoHeight(editor), which is zero in the perspective modes — so this stays a single code path
+// for the callers and the default keeps the perspective behaviour for anything that has none to give.
 static bool worldToViewportPixel(projv::core::vec3 worldPos, projv::core::vec3 cameraPos,
                                  projv::core::vec3 cameraDirection, ImVec2 imageMin, ImVec2 imageMax,
-                                 ImVec2& outScreenPos, float verticalFovDegrees = 60.0f) {
+                                 ImVec2& outScreenPos, float orthoHeight = 0.0f,
+                                 float verticalFovDegrees = CAMERA_VERTICAL_FOV_DEGREES) {
     using namespace projv::core;
     vec3 forward = glm::normalize(cameraDirection);
-    vec3 worldUp = std::abs(forward.y) > 0.999f ? vec3(0.0f, 0.0f, 1.0f) : vec3(0.0f, 1.0f, 0.0f);
-    vec3 right = glm::normalize(glm::cross(forward, worldUp));
-    vec3 up = glm::normalize(glm::cross(right, forward));
+    vec3 right, up;
+    computeCameraBasis(forward, right, up);
 
     vec3 toPoint = worldPos - cameraPos;
     float depth = glm::dot(toPoint, forward);
-    if (depth <= 1.0e-3f) return false;
 
     float imageWidth = std::max(1.0f, imageMax.x - imageMin.x);
     float imageHeight = std::max(1.0f, imageMax.y - imageMin.y);
     float aspectRatio = imageWidth / imageHeight;
-    float scale = std::tan(glm::radians(verticalFovDegrees * 0.5f));
 
-    float ndcX = (glm::dot(toPoint, right) / depth) / (scale * aspectRatio);
-    float ndcY = (glm::dot(toPoint, up) / depth) / scale;
+    float ndcX, ndcY;
+    if (orthoHeight > 0.0f) {
+        // No divide by depth, and no rejection behind the camera: parallel rays leave from a plane that
+        // cameraOrthoBackoff has already pushed clear of the whole scene, so a point "behind the
+        // camera position" is genuinely in front of the image plane and genuinely on screen.
+        float halfHeight = orthoHeight * 0.5f;
+        ndcX = glm::dot(toPoint, right) / (halfHeight * aspectRatio);
+        ndcY = glm::dot(toPoint, up) / halfHeight;
+    } else {
+        if (depth <= 1.0e-3f) return false;
+        float scale = std::tan(glm::radians(verticalFovDegrees * 0.5f));
+        ndcX = (glm::dot(toPoint, right) / depth) / (scale * aspectRatio);
+        ndcY = (glm::dot(toPoint, up) / depth) / scale;
+    }
 
     // Inverse of rayStartDirection's `vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;`.
     float u = (ndcX + 1.0f) * 0.5f;
@@ -1759,13 +3231,17 @@ static bool worldToViewportPixel(projv::core::vec3 worldPos, projv::core::vec3 c
 //
 // Shared by the yellow selection outline and by the Region tool's selection box; two different
 // things to point at, one way of pointing at them.
+// `dashPixels` of 0 draws solid edges; anything larger draws a dashed line of that period, which is
+// how "this one will cut rather than add" is said without a label.
 static void drawWorldBoxOutline(ImDrawList* drawList, const projv::core::vec3 corners[8],
                                 projv::core::vec3 cameraPos, projv::core::vec3 cameraDirection,
-                                ImVec2 imageMin, ImVec2 imageMax, ImU32 color, float thickness) {
+                                ImVec2 imageMin, ImVec2 imageMax, ImU32 color, float thickness,
+                                float dashPixels = 0.0f, float orthoHeight = 0.0f) {
     ImVec2 screen[8];
     bool visible[8];
     for (int i = 0; i < 8; i++) {
-        visible[i] = worldToViewportPixel(corners[i], cameraPos, cameraDirection, imageMin, imageMax, screen[i]);
+        visible[i] = worldToViewportPixel(corners[i], cameraPos, cameraDirection, imageMin, imageMax,
+                                         screen[i], orthoHeight);
     }
 
     // The cube's 12 edges, as pairs of corner indices sharing exactly one bit-axis flip.
@@ -1777,7 +3253,23 @@ static void drawWorldBoxOutline(ImDrawList* drawList, const projv::core::vec3 co
         // plane -- simple, and sufficient for a selection hint that only needs to read as "here" once
         // any part of the box is in front of the camera.
         if (!visible[edge[0]] || !visible[edge[1]]) continue;
-        drawList->AddLine(screen[edge[0]], screen[edge[1]], color, thickness);
+        ImVec2 from = screen[edge[0]];
+        ImVec2 to = screen[edge[1]];
+        if (dashPixels <= 0.0f) {
+            drawList->AddLine(from, to, color, thickness);
+            continue;
+        }
+        // Dashed by hand: ImDrawList has no dash pattern. Stepped in screen space so the dashes stay
+        // the same size however far away the box is -- a world-space period would dissolve the
+        // pattern into a solid line at distance, which is the one thing it must not do.
+        float length = std::sqrt((to.x - from.x) * (to.x - from.x) + (to.y - from.y) * (to.y - from.y));
+        if (length <= 0.0f) continue;
+        for (float at = 0.0f; at < length; at += 2.0f * dashPixels) {
+            float end = std::min(at + dashPixels, length);
+            ImVec2 a(from.x + (to.x - from.x) * (at / length), from.y + (to.y - from.y) * (at / length));
+            ImVec2 b(from.x + (to.x - from.x) * (end / length), from.y + (to.y - from.y) * (end / length));
+            drawList->AddLine(a, b, color, thickness);
+        }
     }
 }
 
@@ -1785,7 +3277,8 @@ static void drawWorldBoxOutline(ImDrawList* drawList, const projv::core::vec3 co
 // own minimum corner (position), matching the convention fetchVoxelColor uses on the GPU side and
 // utils::pickVoxel mirrors on the CPU side: worldCorner = position + rotation * (localOffset).
 static void drawChunkOutline(ImDrawList* drawList, const projv::Chunk& chunk, projv::core::vec3 cameraPos,
-                             projv::core::vec3 cameraDirection, ImVec2 imageMin, ImVec2 imageMax) {
+                             projv::core::vec3 cameraDirection, ImVec2 imageMin, ImVec2 imageMax,
+                             float orthoHeight = 0.0f) {
     using namespace projv::core;
     if (chunk.header.scale <= 0.0f) return;
 
@@ -1798,7 +3291,7 @@ static void drawChunkOutline(ImDrawList* drawList, const projv::Chunk& chunk, pr
         corners[i] = chunk.header.position + rotation * localOffset;
     }
     drawWorldBoxOutline(drawList, corners, cameraPos, cameraDirection, imageMin, imageMax,
-                        IM_COL32(255, 220, 40, 255), 2.0f);
+                        IM_COL32(255, 220, 40, 255), 2.0f, 0.0f, orthoHeight);
 }
 
 // Whether `handle` is `descendant` itself or one of its ancestors — that is, whether it lies on the
@@ -1815,362 +3308,98 @@ static bool isSelfOrAncestorOf(const projv::Scene& scene, projv::ComponentHandle
     return false;
 }
 
-// One node of the scene tree. Asset components are the folders of a Compose scene (they hold
-// children and no geometry of their own); Chunk and Grid components are its data leaves.
-static void drawHierarchyNode(projv::Scene& scene, EditorState& editor, projv::ComponentHandle handle) {
-    if (handle >= scene.components.size()) return;
-    const projv::ComponentRecord& component = scene.components[handle];
 
-    bool isFolder = component.kind == projv::ComponentKind::Asset;
+// What a dragged row carries: where it sits now, and what it is. The index answers a reorder and the
+// handle answers a move, and one drag can mean either depending on what it lands on.
+struct RowDrag {
+    int index = -1;
+    projv::ComponentHandle handle = projv::INVALID_COMPONENT_HANDLE;
+};
 
-    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
-    // Data components (Chunk, Grid) are always leaves — they can never have children.
-    if (!isFolder) {
-        flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
-    } else if (component.children.empty()) {
-        // Empty folder: looks like a leaf but MUST push an ID — drag-drop can add children.
-        flags |= ImGuiTreeNodeFlags_Leaf;
-    }
-    if (handle == editor.selectedComponent) {
-        flags |= ImGuiTreeNodeFlags_Selected;
-    }
-
-    const char* kindLabel = isFolder ? "folder" : "data";
-    ImVec4 kindColor = isFolder ? ImVec4(0.75f, 0.60f, 0.20f, 0.85f)   // amber — folder
-                                : ImVec4(0.35f, 0.55f, 0.80f, 0.70f);  // blue  — data
-
-    // --- Rename in place ---
-    if (editor.renamingComponent == handle) {
-        std::string label = component.name.empty() ? ("component " + std::to_string(handle)) : component.name;
-        bool nodeOpen = ImGui::TreeNodeEx((void*)(uintptr_t)handle, flags, "%s", "");
-        if (nodeOpen && isFolder) { ImGui::TreePop(); }
-
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(150.0f);
-        if (ImGui::InputText("##rename", editor.renameBuffer, sizeof(editor.renameBuffer),
-                              ImGuiInputTextFlags_EnterReturnsTrue)) {
-            if (std::strlen(editor.renameBuffer) > 0) {
-                scene.components[handle].name = editor.renameBuffer;
-            }
-            editor.renamingComponent = projv::INVALID_COMPONENT_HANDLE;
+// Put a component inside an asset. The verb the panel had no way to say.
+//
+// Everything it needs already existed -- `setComponentParent` composes the transforms so the
+// component does not move in world space, and the contents list is the child list -- but nothing in
+// the editor called it except `wrapRootStack` at load. So a finished asset could be opened, renamed,
+// duplicated and deleted, and could not be put anywhere.
+//
+// **It arrives as `Place`.** An imported asset does the same, for the same reason: it comes at its
+// own voxel scale, and folding it into its new home's lattice would resample it before the user has
+// said they want that. Setting the row to Union afterwards is one click, and it is the click that
+// says "yes, resolve this into my lattice".
+static bool moveComponentInto(projv::Scene& scene, EditorState& editor,
+                              projv::ComponentHandle child, projv::ComponentHandle newParent) {
+    if (child >= scene.components.size()) return false;
+    if (newParent != projv::INVALID_COMPONENT_HANDLE) {
+        if (newParent >= scene.components.size()) return false;
+        if (scene.components[newParent].kind != projv::ComponentKind::Asset) {
+            editor.statusMessage = "Only an asset can hold components.";
+            return false;
         }
-        if (ImGui::IsItemDeactivated()) {
-            editor.renamingComponent = projv::INVALID_COMPONENT_HANDLE;
-        }
-        return;
-    }
-
-    projv::Scene* scenePtr = &scene;
-    EditorState* editorPtr = &editor;
-
-    std::string label = component.name.empty() ? ("component " + std::to_string(handle)) : component.name;
-
-    // Something outside the tree chose the selection (a viewport click, the breadcrumb): open every
-    // folder on the way down to it so the row exists to be scrolled to. Only forced open, never
-    // forced shut -- a reveal should not close folders the user opened for their own reasons.
-    bool onPathToSelection = isSelfOrAncestorOf(scene, handle, editor.selectedComponent);
-    if (editor.revealSelectionInHierarchy && onPathToSelection && isFolder) {
-        ImGui::SetNextItemOpen(true);
-    }
-
-    bool nodeOpen = ImGui::TreeNodeEx((void*)(uintptr_t)handle, flags, "%s", label.c_str());
-    // ALL item queries must happen immediately after TreeNodeEx, before anything else touches the
-    // "last item" (ImGui's drag-drop and click APIs are meaningless after a SameLine or TextDisabled).
-    bool nodeClicked = ImGui::IsItemClicked();
-    bool nodeToggledOpen = ImGui::IsItemToggledOpen();
-    bool nodeRightClicked = ImGui::IsItemClicked(ImGuiMouseButton_Right);
-
-    // Centred rather than merely brought into view: a row scrolled to the very bottom edge is
-    // technically visible and still reads as "not there".
-    if (editor.revealSelectionInHierarchy && handle == editor.selectedComponent) {
-        ImGui::SetScrollHereY(0.5f);
-    }
-
-    // --- Drag source ---
-    if (ImGui::BeginDragDropSource()) {
-        ImGui::SetDragDropPayload("COMPONENT", &handle, sizeof(handle));
-        ImGui::Text("Move %s", label.c_str());
-        ImGui::EndDragDropSource();
-    }
-
-    // --- Drop target (only Asset nodes accept drops) ---
-    if (component.kind == projv::ComponentKind::Asset && ImGui::BeginDragDropTarget()) {
-        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("COMPONENT")) {
-            projv::ComponentHandle draggedHandle = *(const projv::ComponentHandle*)payload->Data;
-            if (draggedHandle != handle) {
-                projv::ComponentHandle oldParent = scenePtr->components[draggedHandle].parent;
-                if (projv::utils::setComponentParent(*scenePtr, draggedHandle, handle)) {
-                    if (editorPtr->selectedComponent == draggedHandle) {
-                        editorPtr->selectionOutlineValid = false;
-                    }
-                    editorPtr->gpuFlushNeeded = true;
-                    editorPtr->cameraMovedByInterface = true;
-
-                    projv::editor::EditRecord record;
-                    record.label = "Reparent " + scenePtr->components[draggedHandle].name;
-                    record.undo = [scenePtr, draggedHandle, oldParent] {
-                        projv::utils::setComponentParent(*scenePtr, draggedHandle, oldParent);
-                    };
-                    record.redo = [scenePtr, draggedHandle, handle] {
-                        projv::utils::setComponentParent(*scenePtr, draggedHandle, handle);
-                    };
-                    editorPtr->history.record(std::move(record), ImGui::GetTime());
-                }
-            }
-        }
-        ImGui::EndDragDropTarget();
-    }
-
-    // --- Context menu popup trigger ---
-    char popupID[32];
-    std::snprintf(popupID, sizeof(popupID), "##ctx%u", handle);
-    if (nodeRightClicked && !nodeToggledOpen) {
-        ImGui::OpenPopup(popupID);
-    }
-
-    ImGui::SameLine();
-    ImGui::TextColored(kindColor, "(%s)", kindLabel);
-
-    if (nodeClicked && !nodeToggledOpen) {
-        editor.selectedComponent = handle;
-        editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, handle);
-        editor.selectionOutlineValid = false;
-    }
-
-    // --- Context menu popup content ---
-    if (ImGui::BeginPopup(popupID)) {
-        if (ImGui::MenuItem("Duplicate")) {
-            projv::ComponentHandle parent = scenePtr->components[handle].parent;
-            projv::ComponentHandle dup = projv::utils::duplicateComponent(*scenePtr, handle, parent);
-            if (dup != projv::INVALID_COMPONENT_HANDLE) {
-                editorPtr->gpuFlushNeeded = true;
-                editorPtr->statusMessage = "Duplicated " + scenePtr->components[dup].name;
-            }
-        }
-        if (ImGui::MenuItem("Rename")) {
-            editorPtr->renamingComponent = handle;
-            std::strncpy(editorPtr->renameBuffer, scenePtr->components[handle].name.c_str(),
-                         sizeof(editorPtr->renameBuffer) - 1);
-        }
-        if (component.kind == projv::ComponentKind::Asset && ImGui::BeginMenu("Add Child")) {
-            // The grid is fixed once the component exists, so it is chosen here rather than being
-            // silently defaulted and discovered later.
-            drawNewDataComponentOptions(*editorPtr);
-            ImGui::Separator();
-            if (ImGui::MenuItem("Data")) {
-                uint32_t resolution = CHUNK_RESOLUTION_CHOICES[editorPtr->createResolutionIndex];
-                projv::ComponentHandle child = projv::utils::addComponent(
-                    *scenePtr, projv::ComponentKind::Chunk, "New Data", handle,
-                    resolution, editorPtr->createVoxelScale);
-                if (child != projv::INVALID_COMPONENT_HANDLE) {
-                    editorPtr->gpuFlushNeeded = true;
-                    editorPtr->selectedComponent = child;
-                    editorPtr->selectionOutlineValid = false;
-                    editorPtr->selectedVoxelCount = projv::utils::getComponentVoxelCount(*scenePtr, child);
-                    editorPtr->statusMessage = "Created Data component at resolution " +
-                                               std::to_string(resolution);
-                } else {
-                    editorPtr->statusMessage = "Could not create the Data component (see log).";
-                }
-            }
-            if (ImGui::MenuItem("Folder")) {
-                projv::ComponentHandle child = projv::utils::addComponent(
-                    *scenePtr, projv::ComponentKind::Asset, "New Folder", handle,
-                    CHUNK_RESOLUTION_CHOICES[0], 1.0f);   // Ignored for an Asset; it owns no voxels.
-                if (child != projv::INVALID_COMPONENT_HANDLE) {
-                    editorPtr->selectedComponent = child;
-                    editorPtr->selectionOutlineValid = false;
-                    editorPtr->statusMessage = "Created Folder";
-                }
-            }
-            ImGui::EndMenu();
-        }
-        ImGui::Separator();
-        if (ImGui::MenuItem("Delete")) {
-            projv::ComponentHandle toDelete = handle;
-            projv::ComponentHandle oldParent = scenePtr->components[toDelete].parent;
-            std::string deletedName = scenePtr->components[toDelete].name;
-
-            if (oldParent < scenePtr->components.size()) {
-                std::vector<projv::ComponentHandle>& siblings = scenePtr->components[oldParent].children;
-                siblings.erase(std::remove(siblings.begin(), siblings.end(), toDelete), siblings.end());
-            }
-
-            auto disableSubtree = [scenePtr](projv::ComponentHandle h, auto& self) -> void {
-                if (h >= scenePtr->components.size()) return;
-                if (scenePtr->components[h].kind == projv::ComponentKind::Chunk) {
-                    projv::ChunkHandle ch = scenePtr->components[h].chunkHandle;
-                    if (ch < scenePtr->chunks.size()) {
-                        scenePtr->chunks[ch].alive = false;
-                        projv::releaseBlob(*scenePtr, scenePtr->chunks[ch].geometryPoolIndex);
-                    }
-                    auto& loose = scenePtr->looseChunks;
-                    loose.erase(std::remove(loose.begin(), loose.end(), ch), loose.end());
-                    scenePtr->looseChunkCount = static_cast<uint32_t>(loose.size());
-                }
-                for (projv::ComponentHandle child : scenePtr->components[h].children) {
-                    self(child, self);
-                }
-                scenePtr->components[h].children.clear();
-            };
-            disableSubtree(toDelete, disableSubtree);
-
-            scenePtr->components[toDelete].name = "__deleted__";
-            scenePtr->components[toDelete].parent = projv::INVALID_COMPONENT_HANDLE;
-
-            if (editorPtr->selectedComponent == toDelete) {
-                editorPtr->selectedComponent = projv::INVALID_COMPONENT_HANDLE;
-                editorPtr->selectedVoxelCount = 0;
-                editorPtr->selectionOutlineValid = false;
-            }
-            editorPtr->gpuFlushNeeded = true;
-            editorPtr->cameraMovedByInterface = true;
-            editorPtr->statusMessage = "Deleted " + deletedName;
-        }
-        ImGui::EndPopup();
-    }
-
-    // Folders always push to the ID stack (never NoTreePushOnOpen), so they always need TreePop.
-    // Data components use NoTreePushOnOpen and skip TreePop entirely.
-    bool showChildren = isFolder ? nodeOpen : (nodeOpen && !component.children.empty());
-    if (showChildren) {
-        for (projv::ComponentHandle child : component.children) {
-            drawHierarchyNode(scene, editor, child);
-        }
-        ImGui::TreePop();
-    }
-}
-
-static void drawHierarchyPanel(projv::Scene& scene, EditorState& editor) {
-    ImGui::Begin("Scene Hierarchy");
-
-    if (!editor.sceneLoaded) {
-        ImGui::TextDisabled("No scene loaded.");
-        ImGui::End();
-        return;
-    }
-
-    ImGui::TextDisabled("%s", editor.scenePath.c_str());
-
-    // --- Deselect on Escape or click on empty space ---
-    if (ImGui::IsWindowFocused() && editor.selectedComponent != projv::INVALID_COMPONENT_HANDLE &&
-        ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-        editor.selectedComponent = projv::INVALID_COMPONENT_HANDLE;
-        editor.selectedVoxelCount = 0;
-        editor.selectionOutlineValid = false;
-    }
-
-    // --- Toolbar row ---
-    if (ImGui::Button("Create", ImVec2(64.0f, 0.0f))) {
-        editor.createNameBuffer[0] = '\0';
-        ImGui::OpenPopup("##createComponent");
-    }
-    if (ImGui::BeginPopup("##createComponent")) {
-        // Pick parent: selected folder → child; selected data → sibling; nothing → root.
-        projv::ComponentHandle parent = projv::INVALID_COMPONENT_HANDLE;
-        if (editor.selectedComponent < scene.components.size()) {
-            if (scene.components[editor.selectedComponent].kind == projv::ComponentKind::Asset) {
-                parent = editor.selectedComponent;
-                ImGui::TextDisabled("Child of %s", scene.components[parent].name.c_str());
-            } else {
-                parent = scene.components[editor.selectedComponent].parent;
-                ImGui::TextDisabled("Sibling of %s", scene.components[editor.selectedComponent].name.c_str());
-            }
-        } else {
-            ImGui::TextDisabled("Root component");
-        }
-
-        auto createWithName = [&](projv::ComponentKind kind) {
-            std::string name = editor.createNameBuffer[0] ? editor.createNameBuffer : "New Component";
-            // Ignored for an Asset, which owns no voxels, but still passed: addComponent takes both
-            // without a default so a data component can never be created without a considered grid.
-            uint32_t resolution = CHUNK_RESOLUTION_CHOICES[editor.createResolutionIndex];
-            projv::ComponentHandle child = projv::utils::addComponent(scene, kind, name, parent,
-                                                                      resolution, editor.createVoxelScale);
-            if (child != projv::INVALID_COMPONENT_HANDLE) {
-                editor.gpuFlushNeeded = true;
-                editor.selectedComponent = child;
-                editor.selectionOutlineValid = false;
-                if (kind == projv::ComponentKind::Chunk) {
-                    editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, child);
-                    editor.statusMessage = "Created " + name + " at resolution " + std::to_string(resolution);
-                } else {
-                    editor.statusMessage = "Created " + name;
-                }
-            } else {
-                editor.statusMessage = "Could not create " + name + " (see log).";
-            }
-        };
-
-        ImGui::SetNextItemWidth(200.0f);
-        bool enterPressed = ImGui::InputTextWithHint("##createName", "New Component",
-            editor.createNameBuffer, sizeof(editor.createNameBuffer),
-            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
-        if (enterPressed) {
-            createWithName(projv::ComponentKind::Chunk);
-            ImGui::CloseCurrentPopup();
-        }
-
-        ImGui::Separator();
-        drawNewDataComponentOptions(editor);
-        ImGui::Separator();
-
-        if (ImGui::MenuItem("Data", "Enter", false, true)) { createWithName(projv::ComponentKind::Chunk); ImGui::CloseCurrentPopup(); }
-        if (ImGui::MenuItem("Folder", nullptr, false, true))  { createWithName(projv::ComponentKind::Asset); ImGui::CloseCurrentPopup(); }
-        ImGui::EndPopup();
-    }
-
-    ImGui::Separator();
-
-    // Drop target on empty space (for reparenting to root).
-    float availableHeight = ImGui::GetContentRegionAvail().y;
-    ImGui::BeginChild("##hierarchyDropTarget", ImVec2(0.0f, availableHeight));
-
-    for (projv::ComponentHandle handle = 0; handle < scene.components.size(); handle++) {
-        if (scene.components[handle].parent == projv::INVALID_COMPONENT_HANDLE &&
-            scene.components[handle].name != "__deleted__") {
-            drawHierarchyNode(scene, editor, handle);
+        // Into itself, or into its own descendant, would detach the subtree from the graph entirely
+        // and leave it unreachable -- a cycle the hierarchy has no way back out of.
+        if (isSelfOrAncestorOf(scene, child, newParent)) {
+            editor.statusMessage = "Cannot put " + scene.components[child].name + " inside itself.";
+            return false;
         }
     }
+    projv::ComponentHandle oldParent = scene.components[child].parent;
+    if (oldParent == newParent) return false;
 
-    // Empty space drop target for reparenting to root.
-    if (ImGui::BeginDragDropTarget()) {
-        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("COMPONENT")) {
-            projv::ComponentHandle draggedHandle = *(const projv::ComponentHandle*)payload->Data;
-            projv::ComponentHandle oldParent = scene.components[draggedHandle].parent;
-            if (projv::utils::setComponentParent(scene, draggedHandle, projv::INVALID_COMPONENT_HANDLE)) {
-                if (editor.selectedComponent == draggedHandle) {
-                    editor.selectionOutlineValid = false;
-                }
-                editor.gpuFlushNeeded = true;
-                editor.cameraMovedByInterface = true;
-
-                projv::Scene* sp = &scene;
-                EditorState* ep = &editor;
-                projv::editor::EditRecord record;
-                record.label = "Reparent " + scene.components[draggedHandle].name + " to root";
-                record.undo = [sp, draggedHandle, oldParent] {
-                    projv::utils::setComponentParent(*sp, draggedHandle, oldParent);
-                };
-                record.redo = [sp, draggedHandle] {
-                    projv::utils::setComponentParent(*sp, draggedHandle, projv::INVALID_COMPONENT_HANDLE);
-                };
-                ep->history.record(std::move(record), ImGui::GetTime());
-
-                editor.statusMessage = "Moved to root";
-            }
+    // Where it was, so undo puts it back in its place rather than at the end of the list -- a fold is
+    // ordered, and coming back to the wrong row is a different stack.
+    size_t oldIndex = 0;
+    if (oldParent < scene.components.size()) {
+        const std::vector<projv::ComponentHandle>& order = scene.components[oldParent].children;
+        for (size_t index = 0; index < order.size(); index++) {
+            if (order[index] == child) { oldIndex = index; break; }
         }
-        ImGui::EndDragDropTarget();
     }
+    BooleanOp oldOp = scene.components[child].op;
 
-    ImGui::EndChild();
+    if (!projv::utils::setComponentParent(scene, child, newParent)) {
+        editor.statusMessage = "Could not move " + scene.components[child].name + ".";
+        return false;
+    }
+    scene.components[child].op = BooleanOp::None;
 
-    // The reveal is consumed whether or not a node acted on it: if the selection no longer exists
-    // there is nothing to scroll to, and leaving the flag set would fire on some unrelated node the
-    // next time the tree happened to contain the same handle.
-    editor.revealSelectionInHierarchy = false;
+    // Both ends change: the old asset lost a row and the new one gained one.
+    invalidateResolveOf(scene, editor, oldParent, true);
+    invalidateResolveOf(scene, editor, newParent, true);
+    editor.isolationDirty = true;
+    editor.gpuFlushNeeded = true;
 
-    ImGui::End();
+    projv::Scene* scenePointer = &scene;
+    EditorState* editorPointer = &editor;
+    std::string name = scene.components[child].name;
+    std::string intoName = newParent < scene.components.size()
+                         ? scene.components[newParent].name : documentName(editor);
+
+    projv::editor::EditRecord record;
+    record.label = "Move " + name + " into " + intoName;
+    record.undo = [=] {
+        if (child >= scenePointer->components.size()) return;
+        if (!projv::utils::setComponentParent(*scenePointer, child, oldParent)) return;
+        scenePointer->components[child].op = oldOp;
+        reorderChildTo(*scenePointer, oldParent, child, oldIndex);
+        invalidateResolveOf(*scenePointer, *editorPointer, oldParent, true);
+        invalidateResolveOf(*scenePointer, *editorPointer, newParent, true);
+        editorPointer->isolationDirty = true;
+        editorPointer->gpuFlushNeeded = true;
+    };
+    record.redo = [=] {
+        if (child >= scenePointer->components.size()) return;
+        if (!projv::utils::setComponentParent(*scenePointer, child, newParent)) return;
+        scenePointer->components[child].op = BooleanOp::None;
+        invalidateResolveOf(*scenePointer, *editorPointer, oldParent, true);
+        invalidateResolveOf(*scenePointer, *editorPointer, newParent, true);
+        editorPointer->isolationDirty = true;
+        editorPointer->gpuFlushNeeded = true;
+    };
+    editor.history.record(std::move(record), ImGui::GetTime());
+
+    editor.statusMessage = "Moved " + name + " into " + intoName + ".";
+    return true;
 }
 
 // =============================================================================
@@ -2179,10 +3408,11 @@ static void drawHierarchyPanel(projv::Scene& scene, EditorState& editor) {
 //
 // The left column's second half: a persistent browser over the folders scenes and assets live in.
 //
-// It is deliberately separate from the Scene Hierarchy above it rather than being extra roots in the
-// same tree. The hierarchy answers "what is in my world" and its rows are renamed, reparented and
-// deleted; the library answers "what could be" and its rows are searched and opened. Merging them
-// would give one tree two sets of operations that mean different things on rows that look alike.
+// It is deliberately separate from the Assets panel above it rather than being extra rows in the
+// same list. Assets answers "what is in the thing I have open" and its rows are renamed, reordered
+// and deleted; the library answers "what could be" and its rows are browsed and brought in. Merging
+// them would give one list two sets of operations that mean different things on rows that look
+// alike.
 //
 // Nothing here loads geometry. A folder's compose.json is parsed to list what is inside it —
 // parseComposeJson reads the JSON and stops — so browsing a 3 GB scene costs a file read, not a GPU
@@ -2241,10 +3471,26 @@ static void drawLibraryPanel(EditorState& editor) {
 
     std::string directoryToOpen;
     std::string sceneToLoad;
+    std::string folderToImport;
 
-    // The listing takes what is left after the preview pane below it, which is given a fixed share
-    // rather than being allowed to grow: the list is the part being scanned.
-    float previewHeight = ImGui::GetFrameHeightWithSpacing() * 5.0f;
+    // The listing takes what is left after the block below it. That block's height has to be counted
+    // rather than guessed: it was a flat five rows, and the copy-mode selector added four more, so
+    // the mode buttons and the Bring-in button were laid out below the bottom of the panel and
+    // clipped -- present, reachable by nothing, and invisible.
+    //
+    // Two heights because the two states are genuinely different sizes: with nothing selected the
+    // block is two lines of explanation, and reserving room for controls that are not there would
+    // waste half the panel on the case where there is most to scan.
+    bool haveSceneSelection = !editor.librarySelection.empty() &&
+                              directoryHoldsScene(editor.librarySelection);
+    float row = ImGui::GetFrameHeightWithSpacing();
+    float wanted = row * (haveSceneSelection ? 10.0f : 3.0f);
+    // Clamped against the panel it is actually in. This column holds three panels, so the Library
+    // can easily be shorter than the block wants to be -- and a reservation that exceeded the panel
+    // would starve the listing instead of the block. Never more than 60% of the height, never less
+    // than three rows.
+    float available = std::max(ImGui::GetContentRegionAvail().y, row * 6.0f);
+    float previewHeight = std::clamp(wanted, row * 3.0f, available * 0.6f);
     ImGui::BeginChild("##libraryListing", ImVec2(0.0f, -previewHeight), ImGuiChildFlags_Borders);
     if (subdirectories.empty()) {
         ImGui::TextDisabled("No folders here.");
@@ -2279,6 +3525,12 @@ static void drawLibraryPanel(EditorState& editor) {
     }
     ImGui::EndChild();
 
+    // Its own scrolling region, and that is the whole point: laid out in the panel directly, any
+    // control that did not fit was placed past the bottom edge and simply never drawn. Clipped
+    // controls are worse than absent ones -- the feature is there, the documentation says so, and
+    // nothing on screen agrees.
+    ImGui::BeginChild("##libraryActions", ImVec2(0.0f, 0.0f));
+
     // --- Preview of the selected folder ---
     bool selectionIsScene = !editor.librarySelection.empty() &&
                             directoryHoldsScene(editor.librarySelection);
@@ -2290,7 +3542,11 @@ static void drawLibraryPanel(EditorState& editor) {
     }
 
     if (!selectionIsScene) {
-        ImGui::TextDisabled("Select a [scene] to see what is in it.");
+        // Says what selecting one is *for*, not just that you can. The copy controls only exist once
+        // there is something to copy, so with nothing selected this line is the only place the
+        // feature is advertised at all.
+        ImGui::TextDisabled("Select a [scene] to see inside it, or to bring it\ninto the asset you "
+                            "have open.");
         ImGui::TextDisabled("Double-click a folder to open it.");
     } else {
         std::filesystem::path selectionPath(editor.librarySelection);
@@ -2299,31 +3555,66 @@ static void drawLibraryPanel(EditorState& editor) {
 
         ImGui::BeginChild("##libraryPreview", ImVec2(0.0f, ImGui::GetFrameHeightWithSpacing() * 2.0f));
         for (const projv::ComposeComponent& component : editor.libraryPreview.components) {
-            const char* kind = component.type == projv::ComponentType::Asset ? "folder" : "data";
+            // The same colours the Assets panel uses, from the same table -- an entry that will read as
+            // amber once it is in the scene should not read as grey while it is being looked at.
+            // These are ComposeComponents rather than live records, so the kind is all that is known;
+            // a `data` entry could still become a Grid once its .data is read.
+            bool isAsset = component.type == projv::ComponentType::Asset;
+            ImVec4 color = isAsset ? ImVec4(0.75f, 0.60f, 0.20f, 0.85f)
+                                   : ImVec4(0.35f, 0.55f, 0.80f, 0.80f);
             ImGui::BulletText("%s", component.name.empty() ? component.source.c_str()
                                                            : component.name.c_str());
             ImGui::SameLine();
-            ImGui::TextDisabled("(%s)", kind);
+            ImGui::TextColored(color, "(%s)", isAsset ? "asset" : "data");
+            if (component.op != projv::BooleanOp::None) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", BooleanOpGlyph(component.op));
+            }
         }
         ImGui::EndChild();
 
         if (ImGui::Button("Load scene")) {
             sceneToLoad = editor.librarySelection;
         }
-        ImGui::SameLine();
-        // Stated rather than hidden, because "why can I see it but not use it" is the question the
-        // panel would otherwise leave hanging. Copying a component between scenes means appending
-        // another Scene's geometry blobs, palette and chunk records into this one and remapping every
-        // handle they carry — engine work that does not exist yet, and not something to fake here.
-        ImGui::BeginDisabled(true);
-        ImGui::Button("Import into scene");
+
+        // The third source a part can come from, and the one that closes the loop: bake a buttress,
+        // drop it into the cathedral, subtract a window from it. What used to stand here was a
+        // disabled button explaining that copying a component between scenes needed a cross-scene
+        // geometry merge in the engine -- that is instantiateComposeInto now.
+        //
+        // The mode sits beside the button rather than behind a dialog because it is not a
+        // confirmation, it is part of the verb: "copy this in" and "link this in" are different
+        // things to have asked for, and which one you meant is worth stating before rather than
+        // regretting after.
+        ImGui::Spacing();
+        ImGui::TextDisabled("Bring it in as");
+        for (int index = 0; index < ASSET_COPY_MODE_COUNT; index++) {
+            AssetCopyMode mode = static_cast<AssetCopyMode>(index);
+            if (index > 0) ImGui::SameLine();
+            if (ImGui::RadioButton(AssetCopyModeLabel(mode), editor.assetCopyMode == mode)) {
+                editor.assetCopyMode = mode;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", AssetCopyModeHint(mode));
+        }
+        ImGui::TextDisabled("%s", editor.assetCopyMode == AssetCopyMode::Copy
+            ? "Independent. Shares memory until edited."
+            : editor.assetCopyMode == AssetCopyMode::Bake
+                ? "One .data, one chunk. Stops being a stack."
+                : "A reference. Edits at the source propagate.");
+
+        ImGui::BeginDisabled(!editor.sceneLoaded);
+        if (ImGui::Button("Bring into open asset")) {
+            folderToImport = editor.librarySelection;
+        }
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Not yet: copying a component between scenes needs a cross-scene\n"
-                              "geometry merge in the engine (blobs, palette, and handle remapping).\n"
-                              "Loading the scene works today.");
+            ImGui::SetTooltip("Bring this folder into the open asset, in front of the camera. It\n"
+                              "becomes an ordinary component of it, so it can be moved, unioned or\n"
+                              "subtracted like anything else in the list.");
         }
     }
+
+    ImGui::EndChild();
 
     if (!directoryToOpen.empty()) {
         setLibraryDirectory(editor, directoryToOpen);
@@ -2332,6 +3623,15 @@ static void drawLibraryPanel(EditorState& editor) {
         // Deferred exactly as the dialog defers it: the load destroys and rebuilds GPU resources,
         // which has no business running in the middle of laying out a window.
         editor.pendingScenePath = sceneToLoad;
+    }
+    if (!folderToImport.empty()) {
+        // Deferred for the same reason, but one frame rather than a whole reload: an import appends
+        // chunks and blobs, and doing that while a window is being laid out is the kind of thing
+        // that works until it does not. The mode travels with the request rather than being read
+        // again on the far side, so changing the radio button afterwards cannot retarget a request
+        // already in flight.
+        editor.pendingImportPath = folderToImport;
+        editor.pendingImportMode = editor.assetCopyMode;
     }
 
     ImGui::End();
@@ -2342,10 +3642,34 @@ static void drawLibraryPanel(EditorState& editor) {
 // took -- and matches applyMaterialColor's shape for the same reason.
 static void applyComponentTransform(projv::Scene* scene, EditorState* editor, projv::ComponentHandle component,
                                     projv::core::vec3 localPos, projv::core::quat localRot, float localScale) {
+    // Assemblies get their two hooks here rather than in the gizmo, which is what lets the gizmo stay
+    // ignorant of them. This is the funnel every path that moves a component goes down -- the gizmo,
+    // the arrow keys, the Inspector's numeric fields, and the undo and redo of all three -- so all of
+    // them pick up lattice snapping and cache invalidation, and pick up exactly the same ones.
+    //
+    // The snap runs before the write, so the value stored is the snapped one and a history record
+    // taken afterwards records where the component actually landed rather than where the cursor was.
+    // It is idempotent, so replaying that record is not a second nudge.
+    snapTransformToLattice(*scene, *editor, component, localPos, localRot);
+
     projv::utils::setComponentTransform(*scene, component, localPos, localRot, localScale);
+    noteComponentMoved(*scene, *editor, component);
     editor->gpuFlushNeeded = true;   // Only header rows change (position/rotation/scale), not geometry
                                      // -- flushSceneUpdates' updateDirtyHeaders is what's cheap here.
     editor->cameraMovedByInterface = true;   // The accumulated image is of the old geometry position.
+}
+
+// The one place the editor changes what is selected, so that everything that has to follow the
+// selection -- the outline, the voxel count, and the reveal that brings the Assets panel to it
+// primitive lands in -- follows it from a single point rather than from a dozen assignments that
+// each remember a different subset.
+static void selectComponentInEditor(projv::Scene& scene, EditorState& editor,
+                                    projv::ComponentHandle handle, bool reveal) {
+    editor.selectedComponent = handle;
+    editor.selectedVoxelCount = handle < scene.components.size()
+                              ? projv::utils::getComponentVoxelCount(scene, handle) : 0u;
+    editor.selectionOutlineValid = false;
+    if (reveal) editor.revealSelection = true;
 }
 
 // Finds the centre of the selection's bounding box in the component's own *untransformed* local
@@ -2446,14 +3770,79 @@ static void refreshSelectionCaches(const projv::Scene& scene, EditorState& edito
     }
 }
 
+// One segment of a two-option row, both of which are always on screen: the live one lit as though held
+// down, the other dimmed but still clickable.
+//
+// This is the shape a setting with exactly two named states should take, and the reason is what the
+// alternative costs. A single button that flips its own label between the two states shows you only the
+// half you are *not* in -- so the question "what are my options here?" can only be answered by pressing
+// it and seeing what happens, and the question "which state am I in?" by reading a button that names the
+// other one. Two segments answer both without a click.
+//
+// **Dimmed, deliberately not disabled.** BeginDisabled would make the unselected segment unclickable,
+// which is precisely backwards: it is the option you came here to reach. Only the styling is muted.
+//
+// Returns true only when a click lands on the segment that is *not* already selected, so pressing the
+// live one is a no-op by construction rather than by the caller remembering to guard it.
+static bool drawChoiceSegment(const char* label, bool selected, float width) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    if (selected) {
+        // The pressed-in look, and held through hover: a segment that lights up under the cursor reads
+        // as "click to change", which for the state you are already in is a lie.
+        ImVec4 lit = style.Colors[ImGuiCol_ButtonActive];
+        ImGui::PushStyleColor(ImGuiCol_Button, lit);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, lit);
+        ImGui::PushStyleColor(ImGuiCol_Text, style.Colors[ImGuiCol_Text]);
+    } else {
+        // Scaled from the theme's own Button colour rather than hard-coded, so the pair still reads
+        // correctly if the style changes. 0.7 rather than something darker because the Inspector stacks
+        // this row between two drag fields, and ImGuiCol_FrameBg is itself a dim blue -- take much more
+        // out of it and the unselected segment stops reading as a button at all and starts looking like
+        // another number field.
+        ImVec4 base = style.Colors[ImGuiCol_Button];
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(base.x * 0.7f, base.y * 0.7f, base.z * 0.7f,
+                                                      base.w));
+        // Hover and text stay at full strength, so the dimming reads as "not current" rather than as
+        // "not available".
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, style.Colors[ImGuiCol_ButtonHovered]);
+        ImGui::PushStyleColor(ImGuiCol_Text, style.Colors[ImGuiCol_TextDisabled]);
+    }
+    bool clicked = ImGui::Button(label, ImVec2(width, 0.0f));
+    ImGui::PopStyleColor(3);
+    return clicked && !selected;
+}
+
+// The two segment widths for a row that fills the panel, so the pair reads as one control split in two
+// rather than as two buttons that happen to be adjacent.
+static float choiceSegmentWidth() {
+    float spacing = ImGui::GetStyle().ItemInnerSpacing.x;
+    return std::max(1.0f, (ImGui::GetContentRegionAvail().x - spacing) * 0.5f);
+}
+
 static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
     ImGui::Begin("Inspector");
 
     if (!editor.sceneLoaded || editor.selectedComponent == projv::INVALID_COMPONENT_HANDLE ||
         editor.selectedComponent >= scene.components.size()) {
-        ImGui::TextDisabled("Select a component in the Scene Hierarchy.");
+        ImGui::TextDisabled("Select a component in the Assets panel or the viewport.");
         ImGui::End();
         return;
+    }
+
+    // A part gets the whole ordinary Inspector -- name, transform, numeric fields -- because it is
+    // an ordinary component. All that is added is the line saying which stack it is in, so the
+    // panel's answer to "what am I looking at" stays complete.
+    const Part* inspectedPart = findPart(editor, editor.selectedComponent);
+    if (inspectedPart && ownerOf(scene, editor.selectedComponent) < scene.components.size()) {
+        ImGui::TextDisabled("Part of %s  (%s)",
+                            scene.components[ownerOf(scene, editor.selectedComponent)].name.c_str(),
+                            BooleanOpLabel(scene.components[editor.selectedComponent].op));
+        if (inspectedPart->procedural) {
+            ImGui::TextDisabled("%s %d x %d x %d", ShapeKindLabel(inspectedPart->kind),
+                                inspectedPart->dimensions[0], inspectedPart->dimensions[1],
+                                inspectedPart->dimensions[2]);
+        }
+        ImGui::Separator();
     }
 
     projv::ComponentRecord& component = scene.components[editor.selectedComponent];
@@ -2557,6 +3946,73 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
     ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
     ImGui::TextDisabled("Rotation (deg)");
 
+    // --- Free placement: the way out of the grid, and the way back ------------------------------
+    //
+    // The flag is otherwise only ever set by an Alt-drag, which makes it discoverable by accident and
+    // unclearable on purpose. Stating it here is what keeps it a property you can see and change
+    // rather than a mode the object silently fell into.
+    //
+    // Both states are on screen at once (see drawChoiceSegment) rather than one button that renames
+    // itself. That matters more here than for most settings, because the flag arrives *by accident* --
+    // an Alt-drag sets it without ever being asked to. Someone who has just discovered their component
+    // is off the grid, and does not yet know why, needs to see both what it is and what the other
+    // option is; a lone button reading "Snap to grid" tells them neither. It also retires the
+    // explanatory line this used to need, since two lit-and-dimmed segments say which state is live
+    // more directly than a sentence can.
+    bool isFree = isFreePlacement(editor, handle);
+    float segmentWidth = choiceSegmentWidth();
+
+    if (drawChoiceSegment("Snap to grid", !isFree, segmentWidth)) {
+        // Reached only from the free state, so there is always a real move to make and record: clearing
+        // the flag alone changes nothing until the transform is pushed back through the snapping funnel.
+        projv::core::vec3 previousPos = component.localPosition;
+        projv::core::quat previousRot = component.localRotation;
+        setFreePlacement(editor, handle, false);
+        applyComponentTransform(&scene, &editor, handle, previousPos, previousRot,
+                                component.localScale);
+        projv::core::vec3 snappedPos = component.localPosition;
+        projv::core::quat snappedRot = component.localRotation;
+        projv::editor::EditRecord record;
+        record.label = "Snap " + component.name + " to grid";
+        record.undo = [=] { setFreePlacement(*editorPointer, handle, true);
+                            applyComponentTransform(scenePointer, editorPointer, handle,
+                                                     previousPos, previousRot,
+                                                     scenePointer->components[handle].localScale); };
+        record.redo = [=] { setFreePlacement(*editorPointer, handle, false);
+                            applyComponentTransform(scenePointer, editorPointer, handle,
+                                                     snappedPos, snappedRot,
+                                                     scenePointer->components[handle].localScale); };
+        editor.history.record(std::move(record), ImGui::GetTime());
+        editor.statusMessage = component.name + " is back on the grid.";
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(isFree
+            ? "Round this onto the document grid and let it snap again from now on.\n"
+              "Alt-dragging it is what made it free."
+            : "Current: this follows the document grid.");
+    }
+
+    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+
+    if (drawChoiceSegment("Place freely", isFree, segmentWidth)) {
+        setFreePlacement(editor, handle, true);
+        projv::editor::EditRecord record;
+        record.label = "Free " + component.name;
+        record.undo = [=] { setFreePlacement(*editorPointer, handle, false); };
+        record.redo = [=] { setFreePlacement(*editorPointer, handle, true); };
+        editor.history.record(std::move(record), ImGui::GetTime());
+        editor.statusMessage = component.name + " now ignores the grid.";
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(isFree
+            ? "Current: this sits off the grid, at its own angle."
+            : "Let this one sit off the grid and at its own angle, whatever the document\n"
+              "setting is. Alt-dragging does the same thing without coming here.");
+    }
+    // No trailing "Placement" label, unlike the transform rows above: those need one because three
+    // anonymous number fields cannot say what they are, and these two segments already do.
+
+
     ImGui::SetNextItemWidth(-1.0f);
     float scale = component.localScale;
     // Uniform scale only (v0.0) -- matches ComponentRecord::localScale and the compose.json loader,
@@ -2619,6 +4075,910 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
                                                      projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f), 1.0f); };
         editor.history.record(std::move(record), ImGui::GetTime());
     }
+
+    ImGui::End();
+}
+
+// =============================================================================
+// Assets
+// =============================================================================
+//
+// **One panel, three verbs.** It replaced a Scene Hierarchy and an Assembly panel that showed the
+// same components under two names, and the confusion that came of it was not a layout problem: the
+// hierarchy said "everything you have, arbitrarily deep" while the assembly panel said "the one
+// container you happen to be building", and neither said which of them an edit was going to land in.
+//
+//   Expand  the disclosure arrow, and nothing else. A view change: what is inside this row.
+//   Open    make this asset the edit root. What is listed, what the breadcrumb ends at, and where
+//           the next placed primitive goes.
+//   Select  what the tools act on. Ordinary, unchanged, and shared with the viewport and the gizmo.
+//
+// Expand and Open are two hit targets on one row for a reason -- in the tree this replaced they were
+// the same gesture wearing two hats, so opening a folder to look inside it also retargeted
+// everything else. Here the arrow only ever looks and the arrow never opens.
+//
+// The list is always **one level deep**, plus whatever has been expanded to peek at. Depth is
+// navigated by opening, which is what keeps the panel readable on a scene with ten thousand
+// components: you are never scrolling a tree, you are standing somewhere in it.
+
+// The op control on one contents row. `first` greys it: an empty accumulator intersected with
+// anything is empty, so the first contributing row always seeds regardless of what it says, and a
+// control that can be set to something with no effect is a control that lies.
+static bool drawStackOpControl(const char* id, BooleanOp& op, bool first) {
+    bool changed = false;
+    ImGui::PushID(id);
+    ImGui::BeginDisabled(first);
+    ImGui::SetNextItemWidth(ImGui::GetFrameHeight() * 2.6f);
+    if (ImGui::BeginCombo("##op", BooleanOpGlyph(op), ImGuiComboFlags_NoArrowButton)) {
+        for (int index = 0; index < BOOLEAN_OP_COUNT; index++) {
+            BooleanOp candidate = static_cast<BooleanOp>(index);
+            std::string label = std::string(BooleanOpGlyph(candidate)) + "  " + BooleanOpLabel(candidate);
+            if (ImGui::Selectable(label.c_str(), op == candidate)) {
+                op = candidate;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", BooleanOpHint(candidate));
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", first
+            ? "The first row seeds the stack, so it is always what the fold starts from.\nAn op here "
+              "could not mean anything: an empty result intersected with\nanything is empty."
+            : BooleanOpHint(op));
+    }
+    ImGui::PopID();
+    return changed;
+}
+
+// Whether a row takes part in the fold: it carries an op, *and* the fold will actually walk it. A
+// `Grid` is skipped by `foldChildren` whatever op it carries -- many blocks across many cells, so
+// folding one is a rebuild rather than a bake -- so it can never be the thing a Subtract composes
+// against, and treating it as one would promote a row that still contributes nothing.
+static bool rowFolds(const projv::Scene& scene, projv::ComponentHandle child) {
+    if (child >= scene.components.size()) return false;
+    const projv::ComponentRecord& record = scene.components[child];
+    if (record.name == "__deleted__") return false;
+    if (record.kind == projv::ComponentKind::Grid) return false;
+    return record.op != BooleanOp::None;
+}
+
+// **Setting a row's op, and the one authoring assist that has to go with it.**
+//
+// `mergeContentsToData` leaves a finished asset holding a single *placed* .data -- op `None`, resolve
+// retired -- and that is right: a placement is not a composition, and `saveComposeToDisk` writes the
+// row as `none`. But `foldChildren` skips `None` rows, so the *next* thing you do to that asset --
+// duplicate the .data and set the copy to Subtract -- leaves nothing above the copy that folds. The
+// copy then becomes the first contributing row, and the first contributing row seeds the accumulator
+// whatever its op says, so the fold resolves to the subtracting body itself. On screen: the placed
+// original drawn as a placement, the copy drawn as the result, and no subtraction anywhere. A
+// whole-stack `Merge to one Data` has the matching failure -- it skips `None`, so it consumes only
+// the subtract row.
+//
+// So: when a row is set to Subtract or Intersect and nothing above it folds, the nearest placed row
+// above is promoted from `Place` to `Union`, under this same undo record, and the status line says
+// which row moved and why.
+//
+// Deliberately *not* fixed by having the fold read a leading `None` as `Union`. That would make the
+// editor's picture disagree with the file -- the row on disk still says `none`, and any other loader
+// would read the placement rather than the fold. The promotion changes the document, so the document
+// stays the truth.
+//
+// The op change itself is recorded too, which it never used to be: both call sites wrote
+// `record.op` straight into the scene and told history nothing. That was survivable while an op was
+// the only thing changing, but a promotion that outlived the Ctrl+Z of the op that caused it would
+// leave the stack folding a row the user never asked to fold.
+static void setComponentOpInEditor(projv::Scene& scene, EditorState& editor,
+                                   projv::ComponentHandle component, BooleanOp op) {
+    if (component >= scene.components.size()) return;
+    BooleanOp previousOp = scene.components[component].op;
+    if (op == previousOp) return;
+    projv::ComponentHandle node = ownerOf(scene, component);
+
+    scene.components[component].op = op;
+
+    // "Above" is the earlier siblings, because the fold is ordered and reads down the list. The scan
+    // stops at the first row that folds: finding one means the stack already has something to
+    // compose against and there is nothing to assist with.
+    projv::ComponentHandle promoted = projv::INVALID_COMPONENT_HANDLE;
+    bool nothingAbove = false;
+    if ((op == BooleanOp::Subtract || op == BooleanOp::Intersect) && node < scene.components.size()) {
+        bool foldsAbove = false;
+        projv::ComponentHandle candidate = projv::INVALID_COMPONENT_HANDLE;
+        for (projv::ComponentHandle sibling : scene.components[node].children) {
+            if (sibling == component) break;
+            if (sibling >= scene.components.size()) continue;
+            const projv::ComponentRecord& record = scene.components[sibling];
+            if (record.name == "__deleted__") continue;
+            if (rowFolds(scene, sibling)) { foldsAbove = true; break; }
+            // Placed, and something the fold would walk if it carried an op. The nearest such row
+            // wins, so the promotion is the smallest change that makes the stack mean something.
+            if (record.kind != projv::ComponentKind::Grid) candidate = sibling;
+        }
+        if (!foldsAbove) {
+            if (candidate != projv::INVALID_COMPONENT_HANDLE) {
+                scene.components[candidate].op = BooleanOp::Union;
+                promoted = candidate;
+            } else {
+                nothingAbove = true;
+            }
+        }
+    }
+
+    invalidateResolveOf(scene, editor, node, true);
+
+    projv::Scene* scenePointer = &scene;
+    EditorState* editorPointer = &editor;
+    projv::editor::EditRecord record;
+    record.label = "Set " + scene.components[component].name + " to " + BooleanOpLabel(op);
+    record.undo = [=] {
+        if (component >= scenePointer->components.size()) return;
+        scenePointer->components[component].op = previousOp;
+        if (promoted < scenePointer->components.size()) {
+            scenePointer->components[promoted].op = BooleanOp::None;
+        }
+        invalidateResolveOf(*scenePointer, *editorPointer, node, true);
+    };
+    record.redo = [=] {
+        if (component >= scenePointer->components.size()) return;
+        scenePointer->components[component].op = op;
+        if (promoted < scenePointer->components.size()) {
+            scenePointer->components[promoted].op = BooleanOp::Union;
+        }
+        invalidateResolveOf(*scenePointer, *editorPointer, node, true);
+    };
+    editor.history.record(std::move(record), ImGui::GetTime());
+
+    const char* against = op == BooleanOp::Subtract ? "subtract from" : "intersect with";
+    if (promoted != projv::INVALID_COMPONENT_HANDLE) {
+        editor.statusMessage = scene.components[component].name + " is now " +
+                               BooleanOpLabel(op) + " - and " + scene.components[promoted].name +
+                               " went from Place to Union so there is something to " + against + ".";
+    } else if (nothingAbove) {
+        // Legible rather than silent. The row is the first contributor, so it seeds instead of
+        // composing -- an outcome with a cause worth stating, since the list looks the same either
+        // way and the panel greys the seeding row's op control on the very next frame.
+        editor.statusMessage = "Nothing above " + scene.components[component].name + " to " +
+                               against + " - it seeds the stack instead. It needs a row above it "
+                               "that folds.";
+    } else if (op == BooleanOp::None) {
+        editor.statusMessage = scene.components[component].name + " is placed, not folded.";
+    } else {
+        editor.statusMessage = scene.components[component].name + " combines as " +
+                               BooleanOpLabel(op) + ".";
+    }
+}
+
+// The contents of a node, in order, skipping the dead and the derived. INVALID_COMPONENT_HANDLE
+// means the document itself, whose contents are its root components -- the same list, held by the
+// scene rather than by a record, which is the only place the document is not just another asset.
+static std::vector<projv::ComponentHandle> contentsOf(const projv::Scene& scene,
+                                                      const EditorState& editor,
+                                                      projv::ComponentHandle node) {
+    std::vector<projv::ComponentHandle> out;
+    if (node < scene.components.size()) {
+        for (projv::ComponentHandle child : scene.components[node].children) {
+            if (child >= scene.components.size()) continue;
+            if (scene.components[child].name == "__deleted__") continue;
+            out.push_back(child);
+        }
+        return out;
+    }
+    for (projv::ComponentHandle handle = 0; handle < scene.components.size(); handle++) {
+        const projv::ComponentRecord& record = scene.components[handle];
+        if (record.parent != projv::INVALID_COMPONENT_HANDLE) continue;
+        if (record.name == "__deleted__") continue;
+        if (isDerivedResult(editor, handle)) continue;
+        out.push_back(handle);
+    }
+    return out;
+}
+
+// The name the document goes by: the last element of the folder it was loaded from. scenePath always
+// ends in a separator, so the last element is empty and the name is one up.
+static std::string documentName(const EditorState& editor) {
+    if (!editor.sceneLoaded) return "(no document)";
+    // A New Scene is loaded but has no folder yet, and every panel that shows the document's name was
+    // reading this as an empty string -- a blank where a title goes reads as a bug rather than as a
+    // state. Named instead, because "untitled" is exactly what it is until the first Save As.
+    if (editor.scenePath.empty()) return "(untitled)";
+    std::filesystem::path path(editor.scenePath);
+    std::string name = path.filename().string();
+    if (name.empty()) name = path.parent_path().filename().string();
+    return name.empty() ? editor.scenePath : name;
+}
+
+// Root-first chain of the assets you have opened your way down through.
+static std::vector<projv::ComponentHandle> openChain(const projv::Scene& scene,
+                                                     projv::ComponentHandle node) {
+    std::vector<projv::ComponentHandle> chain;
+    for (projv::ComponentHandle walker = node;
+         walker != projv::INVALID_COMPONENT_HANDLE && walker < scene.components.size();
+         walker = scene.components[walker].parent) {
+        chain.push_back(walker);
+    }
+    std::reverse(chain.begin(), chain.end());
+    return chain;
+}
+
+// Renders only what the open asset contains, hiding the rest of the document.
+//
+// Only ever called on a change -- see EditorState::isolationDirty. It rewrites scene.looseChunks and
+// forces a GPU flush, which is not a per-frame price for a setting that is off most of the time.
+//
+// The walk shows the open subtree, hides every sibling of every asset on the way down to it, and
+// leaves everything inside the open asset to the resolve, which owns the parts-versus-result
+// question and would fight anything else that touched it.
+static void applyIsolation(projv::Scene& scene, EditorState& editor) {
+    bool isolating = editor.isolateOpen && editor.openAsset < scene.components.size();
+
+    if (!isolating) {
+        for (projv::ComponentHandle handle = 0; handle < scene.components.size(); handle++) {
+            const projv::ComponentRecord& record = scene.components[handle];
+            if (record.parent != projv::INVALID_COMPONENT_HANDLE) continue;
+            if (record.name == "__deleted__") continue;
+            setComponentRendered(scene, editor, handle, true);
+        }
+        return;
+    }
+
+    auto walk = [&](projv::ComponentHandle node, auto& self) -> void {
+        std::vector<projv::ComponentHandle> children = contentsOf(scene, editor, node);
+        for (projv::ComponentHandle child : children) {
+            if (child == editor.openAsset) {
+                setComponentRendered(scene, editor, child, true);
+            } else if (isSelfOrAncestorOf(scene, child, editor.openAsset)) {
+                self(child, self);
+            } else {
+                setComponentRendered(scene, editor, child, false);
+            }
+        }
+    };
+    walk(projv::INVALID_COMPONENT_HANDLE, walk);
+}
+
+// A row of the read-only peek under an expanded contents row. Selecting works, because selection is
+// how a tool is aimed and refusing it here would mean "expand to find the thing, then open its
+// parent to be allowed to touch it". Nothing else does: no ops, no reorder, no delete. Those belong
+// to the asset that owns the row, and that asset is one click away.
+// What a row's verbs asked for this frame. Collected rather than acted on, because every one of them
+// rewrites the child lists the panel is in the middle of walking.
+struct RowRequests {
+    projv::ComponentHandle open      = projv::INVALID_COMPONENT_HANDLE;
+    projv::ComponentHandle duplicate = projv::INVALID_COMPONENT_HANDLE;
+    projv::ComponentHandle remove    = projv::INVALID_COMPONENT_HANDLE;
+    projv::ComponentHandle rename    = projv::INVALID_COMPONENT_HANDLE;
+    // Move: put `moveWhat` inside `moveInto`. Copy: duplicate `copyWhat` and put the copy there.
+    projv::ComponentHandle moveWhat  = projv::INVALID_COMPONENT_HANDLE;
+    projv::ComponentHandle moveInto  = projv::INVALID_COMPONENT_HANDLE;
+    projv::ComponentHandle copyWhat  = projv::INVALID_COMPONENT_HANDLE;
+    projv::ComponentHandle copyInto  = projv::INVALID_COMPONENT_HANDLE;
+    int reorderFrom = -1, reorderTo = -1;
+};
+
+// The drag handles and the context menu a row carries. **Shared by both kinds of row**, which is the
+// point: the expanded "peek" rows under a folder used to have neither, so anything you could see by
+// expanding a folder in the top-level list could be selected and opened and nothing else. The same
+// component became fully editable the moment you opened its parent instead -- one component, two
+// rows, two different sets of verbs depending on which one you happened to be looking at.
+//
+// `reorderIndex` is -1 on a row that has no stack position to permute: the document's root
+// components, and every peek row, which is a view of a list rather than the list itself.
+static void drawRowVerbs(projv::Scene& scene, EditorState& editor, projv::ComponentHandle handle,
+                         bool isFolder, int reorderIndex, RowRequests& requests) {
+    const projv::ComponentRecord& record = scene.components[handle];
+
+    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoDisableHover)) {
+        RowDrag payload{ reorderIndex, handle };
+        ImGui::SetDragDropPayload("ASSET_ROW", &payload, sizeof(payload));
+        ImGui::Text("%s %s", BooleanOpGlyph(record.op), record.name.c_str());
+        ImGui::EndDragDropSource();
+    }
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_ROW")) {
+            RowDrag dragged = *(const RowDrag*)payload->Data;
+            if (isFolder && dragged.handle != handle) {
+                requests.moveWhat = dragged.handle;
+                requests.moveInto = handle;
+            } else if (reorderIndex >= 0 && dragged.index >= 0) {
+                requests.reorderFrom = dragged.index;
+                requests.reorderTo = reorderIndex;
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    if (!ImGui::BeginPopupContextItem("##rowMenu")) return;
+
+    if (isFolder && ImGui::MenuItem("Open")) requests.open = handle;
+    if (ImGui::MenuItem("Rename")) requests.rename = handle;
+    if (ImGui::MenuItem("Duplicate")) requests.duplicate = handle;
+
+    // Move and Copy over the same list of destinations, because they are the same question asked
+    // about a different object -- this one, or a new one like it.
+    auto destinations = [&](projv::ComponentHandle& what, projv::ComponentHandle& into) {
+        if (scene.components[handle].parent != projv::INVALID_COMPONENT_HANDLE &&
+            ImGui::MenuItem(documentName(editor).c_str())) {
+            what = handle;
+            into = projv::INVALID_COMPONENT_HANDLE;
+        }
+        for (projv::ComponentHandle candidate = 0; candidate < scene.components.size(); candidate++) {
+            const projv::ComponentRecord& other = scene.components[candidate];
+            if (other.kind != projv::ComponentKind::Asset) continue;
+            if (other.name == "__deleted__") continue;
+            if (isDerivedResult(editor, candidate)) continue;
+            if (candidate == scene.components[handle].parent) continue;
+            // Into itself or into its own descendant would cut the subtree out of the graph.
+            if (isSelfOrAncestorOf(scene, handle, candidate)) continue;
+            if (ImGui::MenuItem(projv::utils::getComponentPath(scene, candidate).c_str())) {
+                what = handle;
+                into = candidate;
+            }
+        }
+    };
+    if (ImGui::BeginMenu("Move to")) {
+        destinations(requests.moveWhat, requests.moveInto);
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Copy to")) {
+        destinations(requests.copyWhat, requests.copyInto);
+        ImGui::EndMenu();
+    }
+
+    ImGui::Separator();
+    if (ImGui::MenuItem("Remove")) requests.remove = handle;
+    ImGui::EndPopup();
+}
+
+static void drawNestedRow(projv::Scene& scene, EditorState& editor, projv::ComponentHandle handle,
+                          int depth, RowRequests& requests) {
+    if (handle >= scene.components.size()) return;
+    if (isDerivedResult(editor, handle)) return;
+    const projv::ComponentRecord& record = scene.components[handle];
+    if (record.name == "__deleted__") return;
+
+    bool isFolder = record.kind == projv::ComponentKind::Asset;
+    bool expanded = editor.expandedRows.count(handle) > 0;
+
+    ImGui::PushID(int(handle));
+    ImGui::Indent(ImGui::GetFrameHeight() * float(depth) * 0.6f);
+
+    if (isFolder && !record.children.empty()) {
+        if (ImGui::ArrowButton("##expand", expanded ? ImGuiDir_Down : ImGuiDir_Right)) {
+            if (expanded) editor.expandedRows.erase(handle); else editor.expandedRows.insert(handle);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Look inside. This does not change what is open.");
+    } else {
+        ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()));
+    }
+    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+
+    ComponentKindStyle style = componentKindStyle(scene, editor, handle);
+    std::string label = record.name.empty() ? ("component " + std::to_string(handle)) : record.name;
+    if (ImGui::Selectable(label.c_str(), editor.selectedComponent == handle,
+                          ImGuiSelectableFlags_AllowDoubleClick)) {
+        selectComponentInEditor(scene, editor, handle, false);
+        if (isFolder && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) requests.open = handle;
+    }
+    // A peek row is a view of a list rather than the list itself, so it has no stack position to
+    // reorder -- but everything else a row can do, it can do.
+    drawRowVerbs(scene, editor, handle, isFolder, -1, requests);
+    ImGui::SameLine();
+    ImGui::TextColored(style.color, "(%s)", style.label);
+    if (ImGui::IsItemHovered() && style.hint[0] != '\0') ImGui::SetTooltip("%s", style.hint);
+
+    ImGui::Unindent(ImGui::GetFrameHeight() * float(depth) * 0.6f);
+    ImGui::PopID();
+
+    if (expanded && isFolder) {
+        for (projv::ComponentHandle child : contentsOf(scene, editor, handle)) {
+            drawNestedRow(scene, editor, child, depth + 1, requests);
+        }
+    }
+}
+
+static void drawAssetsPanel(projv::Scene& scene, EditorState& editor) {
+    ImGui::Begin("Assets");
+
+    if (!editor.sceneLoaded) {
+        ImGui::TextDisabled("Nothing open. File > New Scene, File > Load Scene, or\ndouble-click a [scene] folder in the Library below.");
+        ImGui::End();
+        return;
+    }
+
+    projv::ComponentHandle node = editor.openAsset;
+    if (node != projv::INVALID_COMPONENT_HANDLE &&
+        (node >= scene.components.size() || scene.components[node].name == "__deleted__")) {
+        node = editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+    }
+    // Something outside this panel chose the selection -- a viewport click, an import, a placed
+    // shape. The list is one level deep, so "show it" means standing where it is: open the asset it
+    // sits in. Consumed here whether or not it moved, so a selection that is already in view does
+    // not leave the flag armed to fire on some later, unrelated row.
+    if (editor.revealSelection && editor.selectedComponent < scene.components.size()) {
+        projv::ComponentHandle owner = ownerOf(scene, editor.selectedComponent);
+        if (owner != node && !isDerivedResult(editor, editor.selectedComponent)) {
+            // openAsset makes the asset it opens the selection, which is right when the user asked
+            // for it and wrong here: the whole point of a reveal is the component already chosen.
+            projv::ComponentHandle revealed = editor.selectedComponent;
+            openAsset(scene, editor, owner);
+            selectComponentInEditor(scene, editor, revealed, false);
+            node = editor.openAsset;
+        }
+    }
+
+    Resolve* resolve = findResolve(editor, node);
+    projv::ComponentHandle openRequest = node;
+
+    // --- Where you are --------------------------------------------------------------------------
+    // The way back out, and the only one: the list below is one level deep by construction, so
+    // without this there would be no route up from the fourth asset you opened.
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 1.0f));
+    if (ImGui::SmallButton(documentName(editor).c_str())) {
+        openRequest = projv::INVALID_COMPONENT_HANDLE;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open the document itself.");
+    for (projv::ComponentHandle step : openChain(scene, node)) {
+        ImGui::SameLine(0.0f, 2.0f);
+        ImGui::TextDisabled(">");
+        ImGui::SameLine(0.0f, 2.0f);
+        bool here = step == node;
+        if (here) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 0.86f, 0.16f, 1.00f));
+        ImGui::PushID(int(step));
+        if (ImGui::SmallButton(scene.components[step].name.c_str())) openRequest = step;
+        ImGui::PopID();
+        if (here) ImGui::PopStyleColor();
+    }
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+
+    ImGui::Separator();
+
+    // --- What is in it --------------------------------------------------------------------------
+    std::vector<projv::ComponentHandle> contents = contentsOf(scene, editor, node);
+    size_t voxels = 0;
+    size_t contributing = 0;
+    for (projv::ComponentHandle child : contents) {
+        if (const Part* part = findPart(editor, child)) voxels += part->voxelCount;
+        if (scene.components[child].op != BooleanOp::None) contributing++;
+    }
+
+    ImGui::Text("%zu item(s)", contents.size());
+    if (resolve) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("- %zu folded, %s voxel(s)", contributing,
+                            formatCompactCount(uint32_t(std::min<size_t>(voxels, 0xFFFFFFFFu))).c_str());
+    }
+    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemSpacing.x * 2.0f);
+    if (ImGui::Checkbox("Isolate", &editor.isolateOpen)) {
+        editor.isolationDirty = true;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Draw only what is inside the open asset. Working on one tower of a\n"
+                          "cathedral should not mean rendering the cathedral.");
+    }
+
+    RowRequests requests;
+    projv::ComponentHandle removeRequest = projv::INVALID_COMPONENT_HANDLE;
+    // Deferred out of the row loop for the reason every other mutation here is: it appends to
+    // scene.components and to editor.parts, and the list being drawn is the one it changes.
+    projv::ComponentHandle duplicateRequest = projv::INVALID_COMPONENT_HANDLE;
+    // Deferred for a different reason than the appends above: an op change can promote a row *earlier*
+    // in the list, and applying it mid-walk would change a row that has already been drawn this
+    // frame. The list would then show the pre-promotion glyph beside a post-promotion fold for one
+    // frame -- the one frame in which the user is looking for exactly that glyph.
+    projv::ComponentHandle opRequest = projv::INVALID_COMPONENT_HANDLE;
+    BooleanOp opRequestValue = BooleanOp::None;
+    int moveFrom = -1, moveTo = -1;
+    bool firstContributor = true;
+
+    if (editor.openAssetChanged) {
+        ImGui::SetNextWindowScroll(ImVec2(0.0f, 0.0f));
+        editor.openAssetChanged = false;
+    }
+    // Takes what is left after the action block below it, floored so a tall action block on a short
+    // panel cannot squeeze the list out of existence -- the list is the panel.
+    float row = ImGui::GetFrameHeightWithSpacing();
+    float available = std::max(ImGui::GetContentRegionAvail().y, row * 8.0f);
+    float actionsHeight = std::min(row * 7.0f, available * 0.55f);
+    ImGui::BeginChild("##contents", ImVec2(0.0f, -actionsHeight), ImGuiChildFlags_Borders);
+    if (contents.empty()) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("%s", node == projv::INVALID_COMPONENT_HANDLE
+            ? "The document is empty."
+            : "Empty. Pick the Place tool (Ctrl+T) and click in the viewport to drop a shape in.");
+        ImGui::PopTextWrapPos();
+    }
+    for (size_t index = 0; index < contents.size(); index++) {
+        projv::ComponentHandle child = contents[index];
+        projv::ComponentRecord& record = scene.components[child];
+        const Part* part = findPart(editor, child);
+        bool isFolder = record.kind == projv::ComponentKind::Asset;
+        bool expanded = editor.expandedRows.count(child) > 0;
+
+        ImGui::PushID(int(child));
+
+        // The op, but only where an op means something. A root component of the document is not
+        // inside anything, so there is nothing for it to be unioned *into* -- showing a control
+        // there would offer a choice with no effect.
+        if (resolve) {
+            BooleanOp op = record.op;
+            bool isFirst = firstContributor && op != BooleanOp::None;
+            if (op != BooleanOp::None) firstContributor = false;
+            if (drawStackOpControl("op", op, isFirst)) {
+                opRequest = child;
+                opRequestValue = op;
+            }
+            ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+        }
+
+        // Expand: the arrow, and only the arrow.
+        if (isFolder && !record.children.empty()) {
+            if (ImGui::ArrowButton("##expand", expanded ? ImGuiDir_Down : ImGuiDir_Right)) {
+                if (expanded) editor.expandedRows.erase(child); else editor.expandedRows.insert(child);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Look inside. This does not change what is open.");
+            }
+        } else {
+            ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()));
+        }
+        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+
+        // Renaming replaces the row's name field and nothing else, so the op, the arrow and the
+        // kind tag stay where they are and the row does not jump under the cursor.
+        if (editor.renamingComponent == child) {
+            ImGui::SetNextItemWidth(-1.0f);
+            if (!ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere();
+            if (ImGui::InputText("##rename", editor.renameBuffer, sizeof(editor.renameBuffer),
+                                 ImGuiInputTextFlags_EnterReturnsTrue)) {
+                if (std::strlen(editor.renameBuffer) > 0) record.name = editor.renameBuffer;
+                editor.renamingComponent = projv::INVALID_COMPONENT_HANDLE;
+            }
+            if (ImGui::IsItemDeactivated()) {
+                editor.renamingComponent = projv::INVALID_COMPONENT_HANDLE;
+            }
+            ImGui::PopID();
+            continue;
+        }
+
+        ComponentKindStyle style = componentKindStyle(scene, editor, child);
+        std::string label = record.name.empty() ? ("component " + std::to_string(child)) : record.name;
+        if (part && part->procedural) {
+            label += "   " + std::to_string(part->dimensions[0]) + "x" +
+                     std::to_string(part->dimensions[1]) + "x" + std::to_string(part->dimensions[2]);
+        }
+        // A free-placed row is legible at a glance, the way an op is. Without it the flag is a hidden
+        // per-object mode, and "why does this one not snap" is a question with no answer on screen.
+        if (isFreePlacement(editor, child)) label += "   ~free";
+
+        float trailing = isFolder ? ImGui::GetFrameHeight() * 1.6f : 0.0f;
+        float width = std::max(ImGui::GetContentRegionAvail().x - trailing -
+                               ImGui::CalcTextSize(style.label).x - ImGui::GetFrameHeight(),
+                               ImGui::GetFrameHeight());
+        // Selected, or picked as part of a multi-row selection. Both draw highlighted, because both
+        // are "this row is what the next verb acts on" -- the difference is only how many.
+        bool isPicked = editor.pickedRows.count(child) != 0;
+        bool isSelected = editor.selectedComponent == child || isPicked;
+        if (isPicked && editor.selectedComponent != child) {
+            ImGui::PushStyleColor(ImGuiCol_Header, ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered));
+        }
+        if (ImGui::Selectable(label.c_str(), isSelected,
+                              ImGuiSelectableFlags_AllowDoubleClick, ImVec2(width, 0.0f))) {
+            // Shift adds to the pick rather than replacing it -- the gesture every list uses for
+            // "and this one too", and what makes "merge these three" expressible at all. A plain
+            // click drops the pick, so there is no way to be in a multi-selection without having
+            // asked for one, and no mode to leave.
+            if (ImGui::GetIO().KeyShift) {
+                if (isPicked) editor.pickedRows.erase(child);
+                else          editor.pickedRows.insert(child);
+                // The anchor comes along, so the row the panel calls "selected" is always one of the
+                // picked ones and the Inspector never describes a row outside the set.
+                if (!editor.pickedRows.empty()) selectComponentInEditor(scene, editor, child, false);
+            } else {
+                editor.pickedRows.clear();
+                selectComponentInEditor(scene, editor, child, false);
+                if (isFolder && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) openRequest = child;
+            }
+        }
+        if (isPicked && editor.selectedComponent != child) ImGui::PopStyleColor();
+        // Centred rather than merely brought into view: a row scrolled to the very bottom edge is
+        // technically visible and still reads as "not there".
+        if (editor.revealSelection && isSelected) ImGui::SetScrollHereY(0.5f);
+
+        // Dragging a row means two things, and which one is decided by what it lands on: onto a
+        // **folder** it means put this inside that asset, and onto anything else it means reorder.
+        // A folder is therefore not a reorder target -- drop on one of its neighbours to reorder past
+        // it. Putting-inside is the more useful reading of that gesture and the one every file
+        // manager already teaches.
+        //
+        // Reordering needs a stack, so it is offered only inside an asset; moving into one is
+        // offered everywhere, because it starts most often at the document root -- which is exactly
+        // where a just-finished asset sits.
+        drawRowVerbs(scene, editor, child, isFolder, resolve ? int(index) : -1, requests);
+        if (requests.rename == child) {
+            editor.renamingComponent = child;
+            std::strncpy(editor.renameBuffer, record.name.c_str(), sizeof(editor.renameBuffer) - 1);
+            requests.rename = projv::INVALID_COMPONENT_HANDLE;
+        }
+
+        ImGui::SameLine();
+        ImGui::TextColored(style.color, "(%s)", style.label);
+        if (ImGui::IsItemHovered() && style.hint[0] != '\0') ImGui::SetTooltip("%s", style.hint);
+
+        // Open: the one row control, and only on the rows it can mean anything for.
+        if (isFolder) {
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::GetFrameHeight() * 1.4f);
+            if (ImGui::SmallButton("open")) openRequest = child;
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Edit this asset. It becomes what is listed here and where new\n"
+                                  "geometry lands. Double-clicking the name does the same.");
+            }
+        }
+
+        ImGui::PopID();
+
+        if (expanded && isFolder) {
+            for (projv::ComponentHandle grandchild : contentsOf(scene, editor, child)) {
+                drawNestedRow(scene, editor, grandchild, 1, requests);
+            }
+        }
+    }
+
+    ImGui::EndChild();
+    // Consumed whether or not a row acted on it: if the selection no longer exists there is nothing
+    // to scroll to, and leaving it armed would fire on some unrelated row the next time the list
+    // happened to contain the same handle.
+    editor.revealSelection = false;
+
+    // Everything the rows asked for, applied now that the list is no longer being walked.
+    if (requests.open != projv::INVALID_COMPONENT_HANDLE) openRequest = requests.open;
+    if (requests.duplicate != projv::INVALID_COMPONENT_HANDLE) duplicateRequest = requests.duplicate;
+    if (requests.remove != projv::INVALID_COMPONENT_HANDLE) removeRequest = requests.remove;
+    if (requests.reorderFrom >= 0) { moveFrom = requests.reorderFrom; moveTo = requests.reorderTo; }
+
+    if (opRequest != projv::INVALID_COMPONENT_HANDLE) {
+        setComponentOpInEditor(scene, editor, opRequest, opRequestValue);
+    }
+    if (requests.moveWhat != projv::INVALID_COMPONENT_HANDLE) {
+        moveComponentInto(scene, editor, requests.moveWhat, requests.moveInto);
+        editor.pickedRows.clear();
+    }
+    // Copy is duplicate-then-move: the same two verbs the menu offers separately, run together so
+    // that "put a copy of this over there" is one gesture rather than a duplicate you then have to
+    // find and drag.
+    if (requests.copyWhat != projv::INVALID_COMPONENT_HANDLE) {
+        projv::ComponentHandle copy = duplicateComponentInEditor(scene, editor, requests.copyWhat);
+        if (copy != projv::INVALID_COMPONENT_HANDLE) {
+            moveComponentInto(scene, editor, copy, requests.copyInto);
+            selectComponentInEditor(scene, editor, copy, true);
+        }
+        editor.pickedRows.clear();
+    }
+    if (moveFrom >= 0 && moveTo >= 0 && moveFrom != moveTo && resolve) {
+        std::vector<projv::ComponentHandle>& order = scene.components[node].children;
+        if (size_t(moveFrom) < order.size() && size_t(moveTo) < order.size()) {
+            projv::ComponentHandle moved = order[size_t(moveFrom)];
+            order.erase(order.begin() + moveFrom);
+            order.insert(order.begin() + moveTo, moved);
+            invalidateResolve(editor, *resolve);
+        }
+    }
+    if (duplicateRequest != projv::INVALID_COMPONENT_HANDLE) {
+        duplicateComponentInEditor(scene, editor, duplicateRequest);
+    }
+    if (removeRequest != projv::INVALID_COMPONENT_HANDLE) {
+        std::string name = scene.components[removeRequest].name;
+        if (findPart(editor, removeRequest)) {
+            removePart(scene, editor, removeRequest);
+        } else if (findResolve(editor, removeRequest)) {
+            destroyAssetNode(scene, editor, removeRequest, true);
+        } else {
+            deleteComponent(scene, editor, removeRequest);
+        }
+        editor.statusMessage = "Removed " + name;
+    }
+
+    // --- What can be done to it -----------------------------------------------------------------
+    //
+    // Re-looked-up rather than carried down from the top: removing a row can retire a resolve and
+    // erase it from the vector, which moves everything after it. A pointer taken before the list was
+    // drawn does not survive the list being edited.
+    resolve = findResolve(editor, node);
+
+    ImGui::BeginChild("##assetActions", ImVec2(0.0f, 0.0f));
+
+    // What you are looking at, stated before the buttons that change it.
+    // Wrapped rather than clipped: this column is 20% of the window and every one of these lines is
+    // longer than it. A status line cut off mid-word says less than no status line at all.
+    ImGui::PushTextWrapPos(0.0f);
+    if (!resolve) {
+        ImGui::TextDisabled("A placement folder - nothing here combines.");
+    } else if (editor.showSources) {
+        ImGui::TextDisabled("Showing the sources. Untick to see the result.");
+    } else if (editor.resolveSettling) {
+        ImGui::TextDisabled("Moving - the result rebuilds when you let go.");
+    } else if (resolve->resultOverBudget) {
+        ImGui::TextColored(ImVec4(1.00f, 0.75f, 0.35f, 1.00f),
+                           "Too large to resolve live - showing the sources.");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("The live resolve is capped at %s cells so that arranging stays\n"
+                              "responsive. Baking has a budget four times larger, so this can still\n"
+                              "bake -- you just cannot watch it.",
+                              formatCompactCount(uint32_t(ASSEMBLY_MAX_RESULT_CELLS)).c_str());
+        }
+    } else if (contributing == 0) {
+        ImGui::TextDisabled("Nothing folded yet - every row is set to Place.");
+    } else {
+        ImGui::TextDisabled("Result: %s voxel(s) at voxel scale %.3f",
+                            formatCompactCount(uint32_t(std::min<size_t>(resolve->resultVoxels,
+                                                                         0xFFFFFFFFu))).c_str(),
+                            resolve->voxelScale);
+    }
+    ImGui::PopTextWrapPos();
+
+    if (ImGui::Checkbox("Show sources", &editor.showSources)) {
+        for (Resolve& each : editor.resolves) invalidateResolve(editor, each);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Draw the shapes themselves instead of what they resolve to.\n"
+                          "The result is the default, because the result is what is being made --\n"
+                          "but the shapes are what is being arranged.");
+    }
+
+    // --- Add -----------------------------------------------------------------------------------
+    if (ImGui::Button("Add")) ImGui::OpenPopup("##addItem");
+    if (ImGui::BeginPopup("##addItem")) {
+        ImGui::TextDisabled("Shape");
+        for (int index = 0; index < SHAPE_KIND_COUNT; index++) {
+            ShapeKind kind = static_cast<ShapeKind>(index);
+            if (ImGui::Selectable(ShapeKindLabel(kind))) {
+                editor.shapeKind = kind;
+                placePrimitiveFromCamera(scene, editor);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", ShapeKindHint(kind));
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("Container");
+        if (ImGui::Selectable("Asset")) {
+            projv::ComponentHandle created = createAssetNode(scene, editor, node,
+                                                             suggestedVoxelScale(scene, editor));
+            if (created != projv::INVALID_COMPONENT_HANDLE) {
+                editor.statusMessage = "Created " + scene.components[created].name;
+                openRequest = created;
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("An empty asset inside this one. Opening it makes it the edit root.");
+        }
+        if (ImGui::Selectable("Data")) {
+            uint32_t resolution = CHUNK_RESOLUTION_CHOICES[editor.createResolutionIndex];
+            projv::ComponentHandle created = projv::utils::addComponent(
+                scene, projv::ComponentKind::Chunk, uniqueComponentName(scene, "New Data"), node,
+                resolution, editor.createVoxelScale);
+            if (created != projv::INVALID_COMPONENT_HANDLE) {
+                editor.gpuFlushNeeded = true;
+                selectComponentInEditor(scene, editor, created, false);
+                editor.statusMessage = "Created a Data component at resolution " +
+                                       std::to_string(resolution);
+            }
+        }
+        ImGui::Separator();
+        drawNewDataComponentOptions(editor);
+        ImGui::EndPopup();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Put something into the open asset. A shape lands in front of the camera;\n"
+                          "clicking in the viewport with the Place tool puts one where you point.");
+    }
+    // ...and again, for the same reason: every entry in that popup can append to editor.resolves.
+    resolve = findResolve(editor, node);
+
+    // --- Save ------------------------------------------------------------------------------------
+    // One verb, and it means the open asset. There is no separate "save the scene" here because
+    // there is no separate scene: the document is what is open when nothing else is, and it is saved
+    // by the same button standing at the top of the breadcrumb.
+    ImGui::SameLine();
+    if (ImGui::Button("Save...")) {
+        if (node == projv::INVALID_COMPONENT_HANDLE) {
+            openSaveDialog(editor, projv::INVALID_COMPONENT_HANDLE, "this document", editor.scenePath);
+        } else {
+            std::filesystem::path suggestion =
+                std::filesystem::path(editor.scenePath).parent_path() / scene.components[node].name;
+            openSaveDialog(editor, node, "asset \"" + scene.components[node].name + "\"",
+                           suggestion.string());
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Write the open asset to a folder of its own -- its contents, in order,\n"
+                          "with their ops. It re-opens as the same editable asset rather than as\n"
+                          "finished geometry, which is what makes a bake something you can come\n"
+                          "back from.");
+    }
+
+    // --- Merge ----------------------------------------------------------------------------------
+    //
+    // One button, and what it acts on is whatever is picked: every foldable row by default, or just
+    // the shift-clicked ones. That is what keeps an asset able to hold several components -- merging
+    // is something you do to some of its contents, not the act of finishing it off.
+    ImGui::Spacing();
+    std::vector<projv::ComponentHandle> picked;
+    if (node < scene.components.size()) {
+        for (projv::ComponentHandle child : scene.components[node].children) {
+            if (editor.pickedRows.count(child) != 0) picked.push_back(child);
+        }
+    }
+    bool mergingPicked = picked.size() >= 2;
+    std::string mergeLabel = mergingPicked
+                           ? "Merge " + std::to_string(picked.size()) + " to one Data"
+                           : std::string("Merge to one Data");
+
+    ImGui::BeginDisabled(!resolve || (contributing == 0 && !mergingPicked));
+    if (ImGui::Button(mergeLabel.c_str())) {
+        if (resolve) {
+            mergeContentsToData(scene, editor, *resolve, mergingPicked ? picked
+                                                                       : std::vector<projv::ComponentHandle>());
+            editor.pickedRows.clear();
+        }
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", mergingPicked
+            ? "Resolve the picked rows to voxels as one .data, in their place in this asset.\n"
+              "The rest of the contents are left alone. Undo brings the rows back."
+            : "Resolve this asset's contents to voxels as one .data *inside* the asset --\n"
+              "the asset stays an asset, so it can still be opened, saved and copied.\n"
+              "Shift+click rows to merge only some of them. Undo brings the list back.");
+    }
+    if (mergingPicked) {
+        ImGui::TextDisabled("%zu row(s) picked - shift+click to add, click to clear", picked.size());
+    }
+
+    projv::ComponentHandle target = editor.selectedComponent;
+    if (findPart(editor, target) || findResolve(editor, target) || isDerivedResult(editor, target)) {
+        target = projv::INVALID_COMPONENT_HANDLE;
+    }
+    bool canBakeInto = resolve && contributing > 0 && target < scene.components.size() &&
+                       scene.components[target].kind != projv::ComponentKind::Asset;
+
+    ImGui::BeginDisabled(!canBakeInto);
+    std::string intoLabel = target < scene.components.size()
+                          ? "Into  " + scene.components[target].name
+                          : std::string("Into...");
+    if (ImGui::Button(intoLabel.c_str())) {
+        bakeNodeInto(scene, editor, *resolve, target, editor.bakeOp);
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", canBakeInto
+            ? "Write the resolved form into that component with the op beside this button."
+            : "Select the component to write into, in this list or in the viewport.");
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!canBakeInto);
+    for (int index = 1; index < BOOLEAN_OP_COUNT; index++) {   // Skip None: a bake always resolves.
+        BooleanOp candidate = static_cast<BooleanOp>(index);
+        if (index > 1) ImGui::SameLine(0.0f, 2.0f);
+        if (ImGui::RadioButton(BooleanOpGlyph(candidate), editor.bakeOp == candidate)) {
+            editor.bakeOp = candidate;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("%s", BooleanOpHint(candidate));
+        }
+    }
+    ImGui::EndDisabled();
+
+    if (resolve && resolve->resultWalkCells > 0) {
+        ImGui::TextDisabled("Last resolve walked %s cell(s).",
+                            formatCompactCount(uint32_t(std::min<size_t>(resolve->resultWalkCells,
+                                                                         0xFFFFFFFFu))).c_str());
+    }
+
+    ImGui::EndChild();
+
+    if (openRequest != node) openAsset(scene, editor, openRequest);
 
     ImGui::End();
 }
@@ -2844,9 +5204,9 @@ static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, Edito
         return;
     }
 
-    // Selecting a component in the hierarchy points the palette panel at it, so the two panels agree
+    // Selecting a component in the Assets panel points the palette at it, so the two panels agree
     // without the user having to say so twice. An explicit choice in the combo below still holds
-    // until the hierarchy selection changes again.
+    // until the selection changes again.
     if (editor.selectedComponent != editor.lastHierarchySelection) {
         editor.lastHierarchySelection = editor.selectedComponent;
         if (editor.selectedComponent < scene.components.size() &&
@@ -2930,7 +5290,11 @@ static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, Edito
     // --- The entries, as a grid of swatches ---
     // A palette is a set of colours, and colours are what the eye scans for — so the grid shows the
     // colour at size with only its usage count under it, and leaves names to the detail pane below.
-    float editorHeight = ImGui::GetFrameHeightWithSpacing() * 3.0f + 270.0f;
+    // When no entry is selected, the bottom detail area is hidden; only the add/remove row stays.
+    float editorHeight = editor.selectedMaterialSlot >= 0 &&
+                         size_t(editor.selectedMaterialSlot) < component.materialPalette.size()
+        ? ImGui::GetFrameHeightWithSpacing() * 3.0f + 270.0f
+        : ImGui::GetFrameHeightWithSpacing() * 4.0f;
     ImGui::BeginChild("##paletteEntries", ImVec2(0.0f, -editorHeight), ImGuiChildFlags_Borders);
 
     const float SWATCH_SIZE = 34.0f;
@@ -3040,8 +5404,9 @@ static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, Edito
     ImGui::Separator();
 
     // --- The selected entry ---
+    // Nothing to say when no entry is selected: the swatch grid above is already the invitation to
+    // click one, and a line of placeholder text was costing more of the panel than it was worth.
     if (editor.selectedMaterialSlot < 0 || size_t(editor.selectedMaterialSlot) >= component.materialPalette.size()) {
-        ImGui::TextDisabled("Select an entry to edit it.");
         ImGui::End();
         return;
     }
@@ -3167,7 +5532,7 @@ static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, Edito
 // Two strips of icon buttons float over the scene image rather than living in docked panels: the
 // tool strip down the left edge, and the render toggles along the bottom. Both change what a click
 // in the viewport does or what the viewport shows, so they belong where the user is already looking,
-// and a docked panel for six buttons would cost more screen than it is worth. The strips themselves
+// and a docked panel for seven buttons would cost more screen than it is worth. The strips themselves
 // are further down, with the Viewport panel they are drawn into; this is the chrome and the icons,
 // which sit up here because the Tool panel below repeats the same four buttons.
 //
@@ -3371,6 +5736,110 @@ static void (*const TOOL_ICONS[EDITOR_TOOL_COUNT])(ImDrawList*, ImVec2, float, b
     drawShapeToolIcon, drawRegionToolIcon
 };
 
+// --- Navigator icons --------------------------------------------------------
+//
+// The three projection buttons and the focus eyeball, drawn on the same chrome as the tool strip. Each
+// projection icon is a picture of what the projection *does* to a pair of parallel world lines, which
+// is the only difference between the three that matters to the person choosing one: perspective
+// converges them, orthographic keeps them parallel, isometric keeps them parallel at a fixed angle.
+
+// Two rails running to a vanishing point. The convergence is the icon.
+static void drawPerspectiveIcon(ImDrawList* drawList, ImVec2 center, float size, bool active) {
+    float unit = size / 20.0f;
+    ImU32 ink = iconInk(active);
+    ImU32 dim = iconInkDim(active);
+
+    // The frustum, seen from the side: an apex at the left and an image plane at the right.
+    ImVec2 apex = ImVec2(center.x - 6.6f * unit, center.y);
+    ImVec2 farTop = ImVec2(center.x + 6.6f * unit, center.y - 5.6f * unit);
+    ImVec2 farBottom = ImVec2(center.x + 6.6f * unit, center.y + 5.6f * unit);
+
+    drawList->AddLine(apex, farTop, ink, 1.6f);
+    drawList->AddLine(apex, farBottom, ink, 1.6f);
+    drawList->AddLine(farTop, farBottom, ink, 1.6f);
+    // The near plane, which is what makes it read as a frustum rather than a triangle.
+    drawList->AddLine(ImVec2(center.x - 2.4f * unit, center.y - 2.1f * unit),
+                      ImVec2(center.x - 2.4f * unit, center.y + 2.1f * unit), dim, 1.4f);
+    drawList->AddCircleFilled(apex, 1.5f * unit, ink, 10);
+}
+
+// The same side view with the rays parallel: a box, not a wedge. Drawn at the same width and height as
+// the frustum above so the pair reads as one comparison.
+static void drawOrthographicIcon(ImDrawList* drawList, ImVec2 center, float size, bool active) {
+    float unit = size / 20.0f;
+    ImU32 ink = iconInk(active);
+    ImU32 dim = iconInkDim(active);
+
+    ImVec2 boxMin = ImVec2(center.x - 6.6f * unit, center.y - 5.6f * unit);
+    ImVec2 boxMax = ImVec2(center.x + 6.6f * unit, center.y + 5.6f * unit);
+    drawList->AddRect(boxMin, boxMax, ink, 1.0f, 0, 1.6f);
+    // Three parallel rays crossing it, which is the whole claim the mode makes.
+    for (int i = -1; i <= 1; i++) {
+        float y = center.y + float(i) * 3.0f * unit;
+        drawList->AddLine(ImVec2(boxMin.x + 1.6f * unit, y), ImVec2(boxMax.x - 1.6f * unit, y), dim, 1.3f);
+    }
+}
+
+// The isometric cube itself, at the angle the mode snaps to -- three faces at three brightnesses,
+// which is what the scene looks like once the mode is on. Same construction as the normal-shading
+// icon further down, and deliberately so: both are pictures of an isometric cube, and drawing them
+// differently would suggest they were about different things.
+static void drawIsometricIcon(ImDrawList* drawList, ImVec2 center, float size, bool active) {
+    float unit = size / 20.0f;
+    float halfWidth = 6.4f * unit;
+    float halfHeight = 3.6f * unit;
+    float depth = 5.4f * unit;
+
+    ImVec2 top = ImVec2(center.x, center.y - depth * 0.5f - halfHeight);
+    ImVec2 right = ImVec2(center.x + halfWidth, center.y - depth * 0.5f);
+    ImVec2 middle = ImVec2(center.x, center.y - depth * 0.5f + halfHeight);
+    ImVec2 left = ImVec2(center.x - halfWidth, center.y - depth * 0.5f);
+    ImVec2 rightLower = ImVec2(right.x, right.y + depth);
+    ImVec2 middleLower = ImVec2(middle.x, middle.y + depth);
+    ImVec2 leftLower = ImVec2(left.x, left.y + depth);
+
+    ImU32 topColor = active ? IM_COL32(238, 242, 250, 255) : IM_COL32(150, 156, 166, 190);
+    ImU32 leftColor = active ? IM_COL32(150, 158, 176, 255) : IM_COL32(126, 132, 142, 170);
+    ImU32 rightColor = active ? IM_COL32(96, 104, 122, 255) : IM_COL32(104, 110, 120, 155);
+
+    ImVec2 topFace[4] = { top, right, middle, left };
+    ImVec2 leftFace[4] = { left, middle, middleLower, leftLower };
+    ImVec2 rightFace[4] = { middle, right, rightLower, middleLower };
+    drawList->AddConvexPolyFilled(topFace, 4, topColor);
+    drawList->AddConvexPolyFilled(leftFace, 4, leftColor);
+    drawList->AddConvexPolyFilled(rightFace, 4, rightColor);
+}
+
+static void (*const CAMERA_PROJECTION_ICONS[CAMERA_PROJECTION_COUNT])(ImDrawList*, ImVec2, float, bool) = {
+    drawPerspectiveIcon, drawOrthographicIcon, drawIsometricIcon
+};
+
+// An eye: the lens outline, an iris, and a highlight. "Point at something and I will look at it" is
+// hard to say in thirty pixels any other way, and it is the symbol every application that has this
+// gesture already uses.
+static void drawFocusEyeIcon(ImDrawList* drawList, ImVec2 center, float size, bool active) {
+    float unit = size / 20.0f;
+    ImU32 ink = iconInk(active);
+
+    // The lid, as two arcs meeting at the corners. Bezier rather than an ellipse: an eye is pointed at
+    // the ends, and an ellipse is the one shape that cannot be.
+    ImVec2 leftCorner = ImVec2(center.x - 7.4f * unit, center.y);
+    ImVec2 rightCorner = ImVec2(center.x + 7.4f * unit, center.y);
+    float lift = 5.8f * unit;
+
+    drawList->PathLineTo(leftCorner);
+    drawList->PathBezierCubicCurveTo(ImVec2(center.x - 3.4f * unit, center.y - lift),
+                                     ImVec2(center.x + 3.4f * unit, center.y - lift), rightCorner);
+    drawList->PathBezierCubicCurveTo(ImVec2(center.x + 3.4f * unit, center.y + lift),
+                                     ImVec2(center.x - 3.4f * unit, center.y + lift), leftCorner);
+    drawList->PathStroke(ink, ImDrawFlags_Closed, 1.6f);
+
+    drawList->AddCircleFilled(center, 2.9f * unit, ink, 16);
+    // A darker pupil so the iris does not read as a solid blob at 30 pixels; the colour is the bar's
+    // own background rather than black, so the hole reads as a hole in either button state.
+    drawList->AddCircleFilled(center, 1.3f * unit, IM_COL32(18, 20, 26, 235), 12);
+}
+
 // =============================================================================
 // Tool panel
 // =============================================================================
@@ -3385,19 +5854,6 @@ static void (*const TOOL_ICONS[EDITOR_TOOL_COUNT])(ImDrawList*, ImVec2, float, b
 // swatch and a name so the tool can be used without looking away, but owned there. Deliberately not
 // a second "current material" of its own -- three notions of which colour is active is how you end
 // up sculpting in a colour you were not looking at.
-// The stamp and region actions the Shape and Region panels put behind buttons. They are defined
-// with the rest of the stamp machinery, far below: all of them need the component voxel space, and
-// that is built on top of the scene helpers this panel section sits above.
-static void regenerateShapeStamp(projv::Scene& scene, EditorState& editor);
-static void snapStampToTargetLattice(projv::Scene& scene, EditorState& editor);
-static bool mergeStamp(projv::Scene& scene, EditorState& editor);
-static void cancelStamp(projv::Scene& scene, EditorState& editor);
-static void keepStampAsComponent(projv::Scene& scene, EditorState& editor);
-static void liftSelection(projv::Scene& scene, EditorState& editor, bool cut);
-static void deleteSelection(projv::Scene& scene, EditorState& editor);
-static void fillSelection(projv::Scene& scene, EditorState& editor);
-static void duplicateSelectionInPlace(projv::Scene& scene, EditorState& editor);
-
 static void drawToolMaterialRow(projv::Scene& scene, EditorState& editor, bool enabled) {
     ImGui::TextDisabled("Material");
 
@@ -3447,14 +5903,120 @@ static void drawToolMaterialRow(projv::Scene& scene, EditorState& editor, bool e
     ImGui::EndDisabled();
 }
 
+// The symmetry block, shared by the Sculpt and Paint panels the way the material row is.
+//
+// It edits the frame of the *selected* component, which is the same thing every other readout in
+// these panels is about -- the world-size line and the target row both already answer against the
+// selection rather than against whatever the next ray will happen to hit.
+//
+// The mirrors are checkboxes and not a plane gizmo on purpose. A gizmo would be a fourth thing
+// negotiating for the left button in a viewport where the tool, the picker and the transform handles
+// already do; three numbers and a Centre button say the same thing and can be read without dragging
+// anything.
+static void drawSymmetryRow(const projv::Scene& scene, EditorState& editor) {
+    projv::ComponentHandle component = editor.selectedComponent;
+    if (component >= scene.components.size()) return;
+    if (scene.components[component].kind == projv::ComponentKind::Asset) return;
+
+    ImGui::Separator();
+    SymmetryFrame& frame = symmetryFrameFor(scene, editor, component);
+
+    ImGui::Checkbox("Symmetry", &frame.enabled);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Mirror every dab across the planes below, in this component's own voxel\n"
+                          "grid. Exact -- each copy is the same cells reflected, never a resample.\n"
+                          "Stored per component, so each thing you sculpt keeps its own mirrors.");
+    }
+    if (!frame.enabled) return;
+
+    char id[48];
+
+    // --- The mirrors ---
+    ImGui::TextDisabled("Mirror");
+    for (int axis = 0; axis < 3; axis++) {
+        ImGui::SameLine();
+        std::snprintf(id, sizeof(id), "%s##symMirror%d", SYMMETRY_AXIS_LABELS[axis], axis);
+        ImGui::Checkbox(id, &frame.mirror[axis]);
+    }
+
+    // Diagonals are what make eight copies about an axis reachable at all: two axis mirrors give
+    // four, and the eighth only arrives from the diagonal planes of the square -- which are signed
+    // axis permutations, so they cost exactly as much accuracy as the axis mirrors do, none.
+    ImGui::TextDisabled("Diagonal");
+    for (int plane = 0; plane < 3; plane++) {
+        int a = 0, b = 0;
+        symmetryPlaneAxes(plane, a, b);
+        bool parityOK = ((frame.origin[a] - frame.origin[b]) & 1) == 0;
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!parityOK);
+        std::snprintf(id, sizeof(id), "%s##symDiag%d", SYMMETRY_PLANE_LABELS[plane], plane);
+        ImGui::Checkbox(id, &frame.diagonal[plane]);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered()) {
+            if (parityOK) {
+                ImGui::SetTooltip("Mirror across the %s diagonal. With the %s and %s mirrors on,\n"
+                                  "this is what turns four copies into eight.",
+                                  SYMMETRY_PLANE_LABELS[plane], SYMMETRY_AXIS_LABELS[a],
+                                  SYMMETRY_AXIS_LABELS[b]);
+            } else {
+                // Not a warning about a mistake -- a statement of what the lattice allows. A
+                // diagonal whose two planes disagree in parity takes cell centres onto cell
+                // corners, so there is no exact version of it to offer.
+                ImGui::SetTooltip("Unavailable: the %s and %s planes must both sit on cell centres\n"
+                                  "or both on cell boundaries. As they stand, this diagonal would\n"
+                                  "map cell centres onto corners. Nudge one plane by half a voxel.",
+                                  SYMMETRY_AXIS_LABELS[a], SYMMETRY_AXIS_LABELS[b]);
+            }
+        }
+    }
+
+    // --- Where the planes stand ---
+    //
+    // Shown as a position in the voxel grid rather than as the doubled integer that is stored,
+    // because a half is exactly what the user needs to see: x.0 is a plane through a column of cell
+    // centres, x.5 one along a cell boundary. The step is a half voxel so both are reachable by
+    // dragging, and the parity that governs the diagonals follows from it.
+    ImGui::Spacing();
+    ImGui::TextDisabled("Planes at (voxels)");
+    for (int axis = 0; axis < 3; axis++) {
+        float plane = (float(frame.origin[axis]) + 1.0f) * 0.5f;
+        std::snprintf(id, sizeof(id), "##symOrigin%d", axis);
+        ImGui::SetNextItemWidth(fieldWidthBeside("Z"));
+        if (ImGui::DragFloat(id, &plane, 0.5f, -1.0e6f, 1.0e6f, "%.1f")) {
+            frame.origin[axis] = int(std::lround(plane * 2.0f - 1.0f));
+            frame.originPlaced = true;
+        }
+        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+        ImGui::TextDisabled("%s", SYMMETRY_AXIS_LABELS[axis]);
+    }
+    if (ImGui::Button("Centre on content")) {
+        centreSymmetryFrame(scene, frame, component);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Put all three planes through the middle of what this component holds.\n"
+                          "The half-voxel offset follows from the extent, so a body 16 voxels wide\n"
+                          "gets a boundary plane and one 17 wide gets a centred one.");
+    }
+
+    // --- What that adds up to ---
+    static std::vector<LatticeMap> preview;
+    buildSymmetryGroup(frame, preview);
+    ImGui::TextDisabled("%zu cop%s per dab, exact", preview.size(), preview.size() == 1 ? "y" : "ies");
+    if (preview.size() == 1) {
+        ImGui::TextWrapped("No mirrors selected, so this does nothing yet. For eight copies around "
+                           "the Y axis: Mirror X, Mirror Z and Diagonal ZX.");
+    }
+}
+
 // The selection, named once at the top of the panel, so every tool says what it is about to act on
 // in the same place. The breadcrumb over the viewport says the same thing; this is the version that
 // is next to the settings being changed.
 static void drawToolTargetRow(const projv::Scene& scene, const EditorState& editor) {
     if (editor.selectedComponent >= scene.components.size()) {
         ImGui::TextDisabled("Target");
-        ImGui::TextWrapped("Nothing selected. Click a voxel in the viewport, or a node in the Scene "
-                           "Hierarchy.");
+        ImGui::TextWrapped("Nothing selected. Click a voxel in the viewport, or a row in the "
+                           "Assets panel.");
         return;
     }
     const projv::ComponentRecord& component = scene.components[editor.selectedComponent];
@@ -3478,8 +6040,8 @@ static void drawSelectToolSettings(projv::Scene& scene, EditorState& editor) {
         editor.selectionOutlineValid = false;
     }
     ImGui::SameLine();
-    if (ImGui::Button("Reveal in hierarchy")) {
-        editor.revealSelectionInHierarchy = true;
+    if (ImGui::Button("Reveal in Assets")) {
+        editor.revealSelection = true;
     }
     ImGui::EndDisabled();
 }
@@ -3697,6 +6259,8 @@ static void drawSculptToolSettings(projv::Scene& scene, EditorState& editor) {
         editor.sculptPlaceDistance = std::clamp(editor.sculptPlaceDistance, 1.0f, 10000.0f);
     }
 
+    drawSymmetryRow(scene, editor);
+
     ImGui::Separator();
     const char* footer = "Drag to sculpt. Alt+click samples a material.";
     if (extruding) footer = "Drag a face out to extend, in to carve.";
@@ -3803,6 +6367,8 @@ static void drawPaintToolSettings(projv::Scene& scene, EditorState& editor) {
     ImGui::Separator();
     drawToolMaterialRow(scene, editor, true);
 
+    drawSymmetryRow(scene, editor);
+
     ImGui::Separator();
     // The boundary against the Sculpt tool, which is the one thing about this tool that is not
     // visible from its controls -- and, for the two fills, the one thing about them that is not
@@ -3813,108 +6379,83 @@ static void drawPaintToolSettings(projv::Scene& scene, EditorState& editor) {
                             : "Drag to paint a stroke; the whole sweep is one undo step.");
 }
 
-// The bottom half of both stamp panels: what happens to the floating stamp. Identical in the Shape
-// panel and the Region panel because the stamp is identical -- the two tools differ only in where
-// its geometry came from, and by the time it is floating that is history.
-static void drawStampPlacement(projv::Scene& scene, EditorState& editor) {
-    ImGui::TextDisabled("Placement");
+// What the next primitive is. Only that -- everything about the asset it lands in, and everything
+// about what eventually becomes of it, lives in the Assets panel.
+//
+// The split is deliberate. This panel answers "what am I about to place"; the other answers "what am
+// I building". Putting a Merge button here as well is what made the old pair of panels two of
+// everything, and having one of each is most of what makes the flow read as modelling.
+static void drawPlaceToolSettings(projv::Scene& scene, EditorState& editor) {
+    projv::ComponentHandle node = activeStackNode(scene, editor);
+    Resolve* resolve = findResolve(editor, node);
 
-    if (!editor.stamp.active) {
-        ImGui::TextWrapped("Nothing floating. Spawn a shape or lift a selection, and the controls "
-                           "for placing it appear here.");
-        return;
-    }
-
-    // Which component a merge writes into, said before the buttons that do it. The target is fixed
-    // when the stamp is created (a stamp is built at the target's voxel scale, so it cannot be
-    // repointed at a component with a different one without becoming a resample).
-    if (editor.stamp.target < scene.components.size()) {
-        ImGui::Text("Into  %s", scene.components[editor.stamp.target].name.c_str());
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", projv::utils::getComponentPath(scene, editor.stamp.target).c_str());
-        }
+    // Where it will land, said by the tool that will land it. The panel used to name a container
+    // the user had no way to choose from here, which made it a status line about somebody else's
+    // state; now it names the open asset, and the Assets panel is where you change it.
+    ImGui::TextDisabled("Into");
+    if (node < scene.components.size()) {
+        ImGui::TextWrapped("%s", scene.components[node].name.c_str());
+        ImGui::TextDisabled("%zu item(s)", scene.components[node].children.size());
     } else {
-        ImGui::TextDisabled("No target - Merge is unavailable.");
+        ImGui::TextWrapped("Nothing open - the first shape you place\ncreates an asset to hold it.");
     }
 
-    ImGui::Spacing();
-    if (ImGui::Checkbox("Snap 90", &editor.stampSnap90)) {
-        // Turning it back on has to bring the stamp with it, or the checkbox would claim a snapped
-        // placement while the stamp sat at whatever angle the gizmo last left it.
-        if (editor.stampSnap90) snapStampToTargetLattice(scene, editor);
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Rotation in multiples of 90 degrees about a lattice axis, translation in\n"
-                          "whole voxels. The merge is then a 1:1 remap: every source voxel lands on\n"
-                          "exactly one target cell.");
-    }
-    // Stated plainly rather than as a warning. Free rotation is the point of the setting, not a
-    // degraded fallback, and telling a user their deliberate choice is a mistake is worse than
-    // saying nothing.
-    ImGui::TextDisabled("%s", editor.stampSnap90
-        ? "Exact: every voxel lands on one cell."
-        : "Free rotation - the merge rasterises\ninto the target lattice.");
-
-    ImGui::Spacing();
-    ImGui::TextDisabled("Merge mode");
-    if (ImGui::RadioButton("Add", editor.stampMergeMode == MergeMode::Add)) {
-        editor.stampMergeMode = MergeMode::Add;
-    }
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Subtract", editor.stampMergeMode == MergeMode::Subtract)) {
-        editor.stampMergeMode = MergeMode::Subtract;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Takes the stamp's volume out of the target instead of writing it in.\n"
-                          "A sphere subtracted is a crater.");
-    }
-
-    ImGui::Spacing();
-    ImGui::BeginDisabled(editor.stamp.target >= scene.components.size());
-    if (ImGui::Button("Merge")) {
-        mergeStamp(scene, editor);
-    }
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Write it into the target.  (Enter)");
-
-    ImGui::SameLine();
-    if (ImGui::Button("Keep as component")) {
-        keepStampAsComponent(scene, editor);
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Leave it in the hierarchy as its own object rather than merging it.\n"
-                          "Often what is wanted for a placed pillar or tree.");
-    }
-
-    ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
-        cancelStamp(scene, editor);
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Throw it away.  (Esc)");
-
-    ImGui::Spacing();
-    ImGui::TextDisabled("Drag the gizmo, or use the arrow keys: one voxel a\n"
-                        "press, PgUp/PgDn for vertical, Ctrl+arrows to turn 90.");
-}
-
-static void drawShapeToolSettings(projv::Scene& scene, EditorState& editor) {
-    drawToolTargetRow(scene, editor);
     ImGui::Separator();
 
-    ImGui::TextDisabled("Shape");
-    ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::BeginCombo("##shapeKind", ShapeKindLabel(editor.shapeKind))) {
-        for (int i = 0; i < SHAPE_KIND_COUNT; i++) {
-            ShapeKind kind = static_cast<ShapeKind>(i);
-            if (ImGui::Selectable(ShapeKindLabel(kind), editor.shapeKind == kind)) {
-                editor.shapeKind = kind;
-                regenerateShapeStamp(scene, editor);
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", ShapeKindHint(kind));
-        }
-        ImGui::EndCombo();
+    // --- The shape: the selection's own, or the template for the next one -----------------------
+    //
+    // **Two sets of values, never one.** `editor.shape*` is the template a *new* shape is made from;
+    // a placed shape's recipe lives on its own Part and is what this panel edits while it is
+    // selected. Sharing one set was a real defect rather than an untidiness: the fields kept the
+    // last selection's numbers, so clicking a second shape and nudging anything resized that shape
+    // to the first one's dimensions -- which reads as the editor randomly resizing things.
+    //
+    // And **the kind is not editable on a placed shape.** A box is a box; "make this box a sphere"
+    // is not a resize, it is discarding one object and making another, and offering it inline as a
+    // dropdown makes an irreversible substitution look like a setting. Placing a sphere is the way
+    // to have a sphere.
+    Part* editedPart = findPart(editor, editor.selectedComponent);
+    bool editingPlaced = editedPart != nullptr && editedPart->procedural;
+    bool editingLifted = editedPart != nullptr && !editedPart->procedural;
+
+    if (editingPlaced) {
+        ImGui::TextDisabled("Editing");
+        ImGui::TextWrapped("%s", scene.components[editor.selectedComponent].name.c_str());
+    } else {
+        ImGui::TextDisabled("Next shape");
     }
-    ImGui::TextDisabled("%s", ShapeKindHint(editor.shapeKind));
+
+    bool sizeChanged = false;
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Shape");
+    if (editingPlaced) {
+        ImGui::Text("%s", ShapeKindLabel(editedPart->kind));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Fixed when it was placed. Changing a shape's kind is not a resize --\n"
+                              "it is a different object -- so it is done by placing a new one.");
+        }
+        ImGui::TextDisabled("%s", ShapeKindHint(editedPart->kind));
+    } else {
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::BeginCombo("##shapeKind", ShapeKindLabel(editor.shapeKind))) {
+            for (int i = 0; i < SHAPE_KIND_COUNT; i++) {
+                ShapeKind kind = static_cast<ShapeKind>(i);
+                if (ImGui::Selectable(ShapeKindLabel(kind), editor.shapeKind == kind)) {
+                    editor.shapeKind = kind;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", ShapeKindHint(kind));
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::TextDisabled("%s", ShapeKindHint(editor.shapeKind));
+    }
+
+    // One set of controls over whichever recipe is in play. Aliased rather than copied, because a
+    // copy is what has to be kept in step and what drifted.
+    int* dimensions   = editingPlaced ? editedPart->dimensions      : editor.shapeDimensions;
+    bool* hollow      = editingPlaced ? &editedPart->hollow         : &editor.shapeHollow;
+    int* wallThickness = editingPlaced ? &editedPart->wallThickness : &editor.shapeWallThickness;
 
     // Voxels, not world units, for the reason the Paint panel already gives: a size in world units
     // means a different number of voxels per component, depending on each one's voxelScale. The
@@ -3922,44 +6463,177 @@ static void drawShapeToolSettings(projv::Scene& scene, EditorState& editor) {
     ImGui::Spacing();
     static const char* AXIS_LABELS[3] = { "Width", "Height", "Depth" };
     static const char* AXIS_IDS[3] = { "##shapeW", "##shapeH", "##shapeD" };
-    bool sizeChanged = false;
+    ImGui::BeginDisabled(editingLifted);
     for (int axis = 0; axis < 3; axis++) {
         ImGui::SetNextItemWidth(fieldWidthBeside("Height (voxels)"));
-        if (ImGui::DragInt(AXIS_IDS[axis], &editor.shapeDimensions[axis], 0.3f, 1, STAMP_MAX_DIMENSION)) {
+        if (ImGui::DragInt(AXIS_IDS[axis], &dimensions[axis], 0.3f, 1, PART_MAX_DIMENSION)) {
             sizeChanged = true;
         }
         ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
         ImGui::TextDisabled("%s (voxels)", AXIS_LABELS[axis]);
-        editor.shapeDimensions[axis] = std::clamp(editor.shapeDimensions[axis], 1, STAMP_MAX_DIMENSION);
+        dimensions[axis] = std::clamp(dimensions[axis], 1, PART_MAX_DIMENSION);
     }
 
     ImGui::Spacing();
-    if (ImGui::Checkbox("Hollow", &editor.shapeHollow)) sizeChanged = true;
+    if (ImGui::Checkbox("Hollow", hollow)) sizeChanged = true;
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Keep only a shell of the shape, so it can be walked into.");
     }
-    if (editor.shapeHollow) {
+    if (*hollow) {
         ImGui::SetNextItemWidth(fieldWidthBeside("Wall (voxels)"));
-        if (ImGui::DragInt("##shapeWall", &editor.shapeWallThickness, 0.15f, 1, 32)) sizeChanged = true;
+        if (ImGui::DragInt("##shapeWall", wallThickness, 0.15f, 1, 32)) sizeChanged = true;
         ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
         ImGui::TextDisabled("Wall (voxels)");
-        editor.shapeWallThickness = std::clamp(editor.shapeWallThickness, 1, 32);
+        *wallThickness = std::clamp(*wallThickness, 1, 32);
     }
+    ImGui::EndDisabled();
 
-    // Resizing a *generated* stamp is exact and free -- the primitive is simply rasterised again at
-    // the new dimensions. That is what separates a generated stamp from a lifted one, which cannot
-    // be resized because scaling voxels is a resample rather than an edit.
-    if (sizeChanged && editor.stamp.active && editor.stamp.source == FloatingStamp::Source::Generated) {
-        regenerateShapeStamp(scene, editor);
-    }
-
-    float voxelScale = componentVoxelScale(scene, editor.stamp.active ? editor.stamp.target
-                                                                      : editor.selectedComponent);
-    if (voxelScale > 0.0f) {
+    float voxelScale = resolve ? resolve->voxelScale : suggestedVoxelScale(scene, editor);
+    if (voxelScale > 0.0f && !editingLifted) {
         ImGui::TextDisabled("World size %.2f x %.2f x %.2f",
-                            float(editor.shapeDimensions[0]) * voxelScale,
-                            float(editor.shapeDimensions[1]) * voxelScale,
-                            float(editor.shapeDimensions[2]) * voxelScale);
+                            float(dimensions[0]) * voxelScale,
+                            float(dimensions[1]) * voxelScale,
+                            float(dimensions[2]) * voxelScale);
+    }
+
+    // Last, and **after every read of `editedPart` above**: crossing a resolution boundary moves the
+    // recipe to a new component and leaves that pointer dangling. Nothing below touches it.
+    if (sizeChanged && editingPlaced) {
+        regeneratePart(scene, editor, editor.selectedComponent);
+        editedPart = nullptr;
+    }
+    if (editingLifted) {
+        ImGui::TextDisabled("Lifted or imported, not generated - there is no\nprimitive to rebuild, "
+                            "so it does not resize.");
+    }
+
+    // --- Snapping, beside the rotation it governs -----------------------------------------------
+    //
+    // This used to live on the container, in a panel on the far side of the screen from the arrow
+    // keys and the gizmo that turn things. A setting about *how you place* belongs with the tool
+    // that places, and this is that tool.
+    ImGui::Spacing();
+    if (ImGui::Checkbox("Snap to grid", &editor.snapEnabled)) {
+        for (Resolve& each : editor.resolves) invalidateResolve(editor, each);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Translation in whole steps of the document grid -- one grid for the whole\n"
+                          "document, so two objects in different assets line up with each other and\n"
+                          "not merely with their own container.\n\n"
+                          "Hold Alt while dragging to ignore it for that gesture.");
+    }
+
+    ImGui::BeginDisabled(!editor.snapEnabled);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+    if (ImGui::DragInt("##snapStep", &editor.snapStepVoxels, 0.2f, 1, 256, "%d vox")) {
+        editor.snapStepVoxels = std::max(1, std::min(256, editor.snapStepVoxels));
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("How far one step is. One voxel is right for detailing; 16, 32 or 64 is\n"
+                          "what standing modular pieces against each other actually wants.");
+    }
+    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::TextDisabled("Step");
+
+    // The grid's own size, shown as the number it currently is and editable into a pinned one. A
+    // document that will later import something finer wants it pinned -- see documentSnapVoxel.
+    float gridVoxel = documentSnapVoxel(scene, editor);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+    if (ImGui::DragFloat("##snapVoxel", &gridVoxel, 0.001f, 0.0f, 0.0f, "%.4f")) {
+        editor.snapVoxelOverride = gridVoxel > 0.0f ? gridVoxel : 0.0f;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("The grid's voxel size. Derived from the finest voxel scale in the\n"
+                          "document until you set it, after which it is pinned -- so importing a\n"
+                          "finer asset later cannot re-phase the grid under what is already placed.");
+    }
+    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::TextDisabled("Grid%s", editor.snapVoxelOverride > 0.0f ? " (pinned)" : "");
+    ImGui::EndDisabled();
+
+    // Its own control, because the two are wanted separately: a tree at its own angle on a grid
+    // position, or a wall square to the world but deliberately off it.
+    if (ImGui::Checkbox("Square to world", &editor.snapRotate90)) {
+        for (Resolve& each : editor.resolves) invalidateResolve(editor, each);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Rotation in multiples of 90 degrees about a world axis. On, the fold is a\n"
+                          "1:1 remap: every source voxel lands on exactly one result cell.");
+    }
+
+    // Stated plainly rather than as a warning. Free rotation is the point of the setting, not a
+    // degraded fallback, and telling a user their deliberate choice is a mistake is worse than
+    // saying nothing.
+    ImGui::TextDisabled("%s", editor.snapRotate90
+        ? "Exact: every voxel lands on one cell."
+        : "Free rotation - the fold rasterises into\nthe asset's lattice.");
+
+    // The mass pull onto the grid, as its own button. It used to fire as a side effect of ticking
+    // the checkbox, which made turning a setting on move things -- and, now that freedom is recorded
+    // per component, would have silently overridden every deliberate pose in the asset. Asking for it
+    // is a different act from enabling it, so it is a different control.
+    if (node < scene.components.size() && !scene.components[node].children.empty()) {
+        ImGui::BeginDisabled(!editor.snapEnabled && !editor.snapRotate90);
+        if (ImGui::Button("Pull contents onto the grid")) {
+            size_t pulled = 0;
+            for (projv::ComponentHandle child : scene.components[node].children) {
+                if (child >= scene.components.size()) continue;
+                if (scene.components[child].name == "__deleted__") continue;
+                setFreePlacement(editor, child, false);
+                const projv::ComponentRecord& record = scene.components[child];
+                applyComponentTransform(&scene, &editor, child, record.localPosition,
+                                        record.localRotation, record.localScale);
+                pulled++;
+            }
+            for (Resolve& each : editor.resolves) invalidateResolve(editor, each);
+            editor.statusMessage = "Pulled " + std::to_string(pulled) + " item(s) onto the grid.";
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Round everything in the open asset onto the grid now, and clear any\n"
+                              "free placement on it. A half-snapped list is the confusing state, so\n"
+                              "this is the one gesture that resolves it.");
+        }
+    }
+
+    // --- The op: the selection's own, or the template's, on the same rule as the shape -----------
+    //
+    // When something in the open asset is selected this edits *that component's* `op` -- the same
+    // value the Assets panel's row combo shows, so the two agree by being one value rather than by
+    // being kept in step. With nothing selected it is what the next placed shape drops in as.
+    ImGui::Separator();
+    projv::ComponentHandle opTarget = projv::INVALID_COMPONENT_HANDLE;
+    if (resolve && editor.selectedComponent < scene.components.size() &&
+        ownerOf(scene, editor.selectedComponent) == node &&
+        scene.components[editor.selectedComponent].name != "__deleted__") {
+        opTarget = editor.selectedComponent;
+    }
+    BooleanOp op = opTarget != projv::INVALID_COMPONENT_HANDLE ? scene.components[opTarget].op
+                                                              : editor.shapeOp;
+    BooleanOp chosen = op;
+
+    ImGui::TextDisabled("%s", opTarget != projv::INVALID_COMPONENT_HANDLE ? "Combines as"
+                                                                         : "Drops in as");
+    for (int index = 1; index < BOOLEAN_OP_COUNT; index++) {   // Union/Subtract/Intersect...
+        BooleanOp candidate = static_cast<BooleanOp>(index);
+        if (index > 1) ImGui::SameLine();
+        std::string label = std::string(BooleanOpGlyph(candidate)) + " " + BooleanOpLabel(candidate);
+        if (ImGui::RadioButton(label.c_str(), op == candidate)) chosen = candidate;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", BooleanOpHint(candidate));
+    }
+    // ...and Place, on its own line, because it is the one that is not an operation at all.
+    if (ImGui::RadioButton(". Place (no boolean)", op == BooleanOp::None)) chosen = BooleanOp::None;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", BooleanOpHint(BooleanOp::None));
+
+    if (chosen != op) {
+        if (opTarget != projv::INVALID_COMPONENT_HANDLE) {
+            // The route that reaches a first-contributor row: the Assets panel greys that row's op
+            // control, so setting a merged .data's duplicate to Subtract is only reachable from here.
+            // Which makes this the site the promotion matters most at.
+            setComponentOpInEditor(scene, editor, opTarget, chosen);
+        } else {
+            editor.shapeOp = chosen;   // The template for the next placement. Nothing to promote.
+        }
     }
 
     ImGui::Spacing();
@@ -3968,15 +6642,18 @@ static void drawShapeToolSettings(projv::Scene& scene, EditorState& editor) {
     ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
     ImGui::TextDisabled("Place distance");
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Where a click that hits nothing puts the shape: this far down the ray.\n"
-                          "A click that lands on a surface ignores it and sits on that surface.");
+        ImGui::SetTooltip("How far down the ray a primitive lands when you click past everything --\n"
+                          "the same fallback the Sculpt brush has, and the only way to put the first\n"
+                          "shape of an asset into empty space.");
     }
 
     ImGui::Separator();
     drawToolMaterialRow(scene, editor, true);
 
     ImGui::Separator();
-    drawStampPlacement(scene, editor);
+    ImGui::TextDisabled("Click in the viewport to drop one where you point.\n"
+                        "Arrow keys nudge a voxel at a time, PgUp/PgDn for\n"
+                        "vertical, Ctrl+arrows turn 90. Delete removes one.");
 }
 
 static void drawRegionToolSettings(projv::Scene& scene, EditorState& editor) {
@@ -4030,15 +6707,25 @@ static void drawRegionToolSettings(projv::Scene& scene, EditorState& editor) {
         }
     }
 
+    // Copy and Cut lift the selection into the active resolve as a part -- the third thing that can
+    // become one, alongside a primitive and an asset from disk. Once lifted it is an ordinary part:
+    // same gizmo, same stack row, same ops, same bake.
     ImGui::Spacing();
-    ImGui::BeginDisabled(selection.empty() || editor.stamp.active);
+    ImGui::BeginDisabled(selection.empty());
     if (ImGui::Button("Copy")) liftSelection(scene, editor, false);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lift a copy; the source is left where it is.");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Lift a copy into the open asset; the source is left where it is.");
+    }
     ImGui::SameLine();
     if (ImGui::Button("Cut")) liftSelection(scene, editor, true);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Lift it and remove the source, in one undo step.\n"
-                          "Cancelling the placement puts the source back.");
+                          "Removing the part puts the source back.");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Duplicate")) duplicateSelectionInPlace(scene, editor);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Lift a copy, offset by one bounding box.");
     }
     ImGui::EndDisabled();
 
@@ -4050,13 +6737,6 @@ static void drawRegionToolSettings(projv::Scene& scene, EditorState& editor) {
         ImGui::SetTooltip("Recolour every selected voxel with the palette's current entry.\n"
                           "Never adds one -- an empty cell in the selection stays empty.");
     }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(editor.stamp.active);
-    if (ImGui::Button("Duplicate")) duplicateSelectionInPlace(scene, editor);
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Lift a copy, offset by one bounding box, ready to place.");
-    }
-    ImGui::EndDisabled();
     ImGui::EndDisabled();
 
     ImGui::BeginDisabled(selection.empty() && !editor.regionCornerPending);
@@ -4068,9 +6748,6 @@ static void drawRegionToolSettings(projv::Scene& scene, EditorState& editor) {
 
     ImGui::Separator();
     drawToolMaterialRow(scene, editor, true);
-
-    ImGui::Separator();
-    drawStampPlacement(scene, editor);
 }
 
 static void drawToolPanel(projv::Scene& scene, EditorState& editor) {
@@ -4113,7 +6790,7 @@ static void drawToolPanel(projv::Scene& scene, EditorState& editor) {
         case EditorTool::Move:   drawMoveToolSettings(scene, editor);   break;
         case EditorTool::Sculpt: drawSculptToolSettings(scene, editor); break;
         case EditorTool::Paint:  drawPaintToolSettings(scene, editor);  break;
-        case EditorTool::Shape:  drawShapeToolSettings(scene, editor);  break;
+        case EditorTool::Place: drawPlaceToolSettings(scene, editor); break;
         case EditorTool::Region: drawRegionToolSettings(scene, editor); break;
     }
 
@@ -4707,6 +7384,25 @@ static void applyVoxelPaint(projv::Scene* scene, EditorState* editor, projv::Com
     }
 
     if (!projv::utils::queueVoxelAdd(*scene, component, ops)) return;
+
+    // Painting a part changes what it folds to just as sculpting it does -- the pull resolves each
+    // voxel's slot to a colour as it goes, so the cached cell set carries the colours and a recolour
+    // invalidates it. This is the same hook applyVoxelSculpt has, and it was missing here entirely:
+    // a painted part kept its old colours in the result until something else happened to invalidate,
+    // which in practice meant until the part was moved.
+    //
+    // The palette poll in refreshResolves does not cover it. That watches `paletteVersion`, and
+    // painting with an entry that already exists changes no palette at all -- the most ordinary case
+    // there is, and the one that never regenerated.
+    //
+    // No content box to grow: paint only ever recolours voxels that already exist, so the box that
+    // holds them is already right.
+    auto entry = editor->parts.find(component);
+    if (entry != editor->parts.end()) {
+        entry->second.cacheValid = false;
+        invalidateResolveOf(*scene, *editor, component);
+    }
+
     projv::utils::updateScene(*scene);
     editor->gpuFlushNeeded = true;
     editor->cameraMovedByInterface = true;   // The accumulated image is of the old colours.
@@ -4799,6 +7495,8 @@ static void beginPaintStroke(EditorState& editor) {
     editor.paintStrokeTruncated = false;
     editor.paintStrokeCoords = std::make_shared<std::vector<projv::core::ivec3>>();
     editor.paintStrokePreviousColors = std::make_shared<std::vector<uint32_t>>();
+    // As in beginSculptStroke: the identity until this stroke locks onto a component.
+    editor.strokeSymmetry.assign(1, LatticeMap());
 }
 
 // Closes a stroke and hands the whole sweep to the history as one entry, which is what makes undo put
@@ -4876,6 +7574,7 @@ static void processPaintSample(projv::Scene& scene, EditorState& editor,
         editor.paintStrokeColor =
             scene.components[source].materialPalette[editor.selectedMaterialSlot].packedColor;
         editor.paintStrokeComponent = pick.component;
+        buildSymmetryGroup(symmetryFrameFor(scene, editor, pick.component), editor.strokeSymmetry);
     } else if (pick.component != editor.paintStrokeComponent) {
         // The sweep crossed onto something else. It stays locked to its own component, and the anchor
         // is dropped so that coming back does not draw a line through whatever was in between.
@@ -4894,17 +7593,34 @@ static void processPaintSample(projv::Scene& scene, EditorState& editor,
     std::vector<uint32_t> framePreviousColors;
     bool interpolated = false;
 
+    // Symmetry replicates a dab's *centre*, and a fill's *seed*. Mirroring the seed is what a
+    // mirrored fill actually means -- the traversal runs again from the mirrored voxel and finds
+    // whatever region is there, which stays right even where the two regions are not congruent.
+    //
+    // The face normal goes through the map's linear part, because a face fill needs the direction
+    // the surface is open in and that reflects along with everything else. The material slot does
+    // *not* get re-read at the mirrored seed: under the Material scope the slot is what the fill
+    // spreads through, and the copy is meant to spread through the same material as the original
+    // rather than through whatever happens to sit at its own seed.
+    auto collectMirrored = [&](ivec3 seed, bool& truncatedOut) {
+        for (const LatticeMap& map : editor.strokeSymmetry) {
+            bool truncated = false;
+            collectPaintTargets(scene, component, map.apply(seed), pick.materialSlot,
+                                map.applyDirection(pick.faceNormal), editor, editor.paintStrokeColor,
+                                frameCoords, framePreviousColors, truncated);
+            truncatedOut = truncatedOut || truncated;
+        }
+    };
+
     if (paintShapeIsFill(editor.paintStrokeShape)) {
         // A fill runs on the press and the rest of the drag is ignored -- see paintShapeIsFill.
         if (!firstSample) return;
         bool truncated = false;
-        collectPaintTargets(scene, component, centre, pick.materialSlot, pick.faceNormal, editor,
-                            editor.paintStrokeColor, frameCoords, framePreviousColors, truncated);
+        collectMirrored(centre, truncated);
         editor.paintStrokeFillTruncated = editor.paintStrokeFillTruncated || truncated;
     } else if (!editor.paintStrokeHasAnchor) {
         bool truncated = false;
-        collectPaintTargets(scene, component, centre, pick.materialSlot, pick.faceNormal, editor,
-                            editor.paintStrokeColor, frameCoords, framePreviousColors, truncated);
+        collectMirrored(centre, truncated);
     } else if (centre != editor.paintStrokeLastCenter) {
         // Fill the gap the cursor crossed since the last frame, so a quick sweep is a stripe rather
         // than a row of dots. Starts at step 1: step 0 is the previous frame's dab, already painted.
@@ -4922,8 +7638,7 @@ static void processPaintSample(projv::Scene& scene, EditorState& editor,
             ivec3 dabCentre(int(std::lround(point.x)), int(std::lround(point.y)),
                             int(std::lround(point.z)));
             bool truncated = false;
-            collectPaintTargets(scene, component, dabCentre, pick.materialSlot, pick.faceNormal, editor,
-                                editor.paintStrokeColor, frameCoords, framePreviousColors, truncated);
+            collectMirrored(dabCentre, truncated);
         }
     } else {
         return;   // The cursor moved, but not off the voxel it was already on.
@@ -4932,7 +7647,12 @@ static void processPaintSample(projv::Scene& scene, EditorState& editor,
     editor.paintStrokeLastCenter = centre;
     editor.paintStrokeHasAnchor = true;
 
-    if (interpolated) dropDuplicatePaintTargets(frameCoords, framePreviousColors);
+    // Symmetry is the second way one frame can name a coordinate twice: two copies coincide wherever
+    // a dab straddles a mirror plane, exactly as consecutive interpolated dabs overlap. Both have to
+    // be dropped before the queue or the undo record gets the cell twice.
+    if (interpolated || editor.strokeSymmetry.size() > 1) {
+        dropDuplicatePaintTargets(frameCoords, framePreviousColors);
+    }
     if (frameCoords.empty()) return;
 
     // Kept for the history, which is handed the whole sweep at once when the button comes up.
@@ -5082,22 +7802,35 @@ static void applyVoxelSculpt(projv::Scene* scene, EditorState* editor, projv::Co
                       : projv::utils::queueVoxelRemove(*scene, component, ops);
     if (!queued) return;
 
-    // Every geometry write in the editor funnels through here -- brush dabs, extrude layers, the
-    // stamp's own construction, and the undo and redo of all three. So this is the one place that
-    // can keep a floating stamp's content box honest, which is what lets the merge scan a box the
-    // size of the shape rather than the whole resolution cube. Additions only: a removal cannot put
-    // anything outside the box, and shrinking it here would mean re-deriving a bound that the next
-    // snapshot tightens for free anyway.
-    if (add && editor->stamp.active && component == editor->stamp.component) {
-        for (const projv::core::ivec3& coord : coords) {
-            if (editor->stamp.contentMax.x < editor->stamp.contentMin.x) {
-                editor->stamp.contentMin = coord;
-                editor->stamp.contentMax = coord;
-            } else {
-                editor->stamp.contentMin = projv::core::min(editor->stamp.contentMin, coord);
-                editor->stamp.contentMax = projv::core::max(editor->stamp.contentMax, coord);
+    // Every geometry write in the editor funnels through here -- brush dabs, extrude layers, a
+    // part's own construction, and the undo and redo of all three. So this is the one place that can
+    // keep a part's content box honest, which is what lets the fold scan a box the size of the
+    // shape rather than the whole resolution cube.
+    auto entry = editor->parts.find(component);
+    if (entry != editor->parts.end()) {
+        Part& part = entry->second;
+        // Growing the box is additions only: a removal cannot put anything outside it, and
+        // shrinking it here would mean re-deriving a bound that the next snapshot tightens for free.
+        if (add) {
+            for (const projv::core::ivec3& coord : coords) {
+                if (part.contentMax.x < part.contentMin.x) {
+                    part.contentMin = coord;
+                    part.contentMax = coord;
+                } else {
+                    part.contentMin = projv::core::min(part.contentMin, coord);
+                    part.contentMax = projv::core::max(part.contentMax, coord);
+                }
             }
         }
+        // **Invalidation is not additions only, and used to be.** Sculpting a part changes what it
+        // folds to whichever direction the change went, so a removal has to drop the cached cell set
+        // and the result exactly as an addition does. Nested inside the `add` branch, carving a part
+        // left the fold describing geometry that was no longer there -- and the symptom pointed away
+        // from the cause, because the next thing that *did* invalidate (nudging the part, whose
+        // transform funnel calls noteComponentMoved) made the carve appear all at once. It read as
+        // "the result only regenerates when I move it".
+        part.cacheValid = false;
+        invalidateResolveOf(*scene, *editor, part.component);
     }
 
     projv::utils::updateScene(*scene);
@@ -5141,17 +7874,32 @@ static void stampSculptDab(projv::Scene& scene, EditorState& editor, const Compo
     collectSculptDab(editor, centre, candidates);
 
     bool addMode = editor.sculptStrokeMode == SculptMode::Add;
-    for (const projv::core::ivec3& coord : candidates) {
-        uint64_t key = packVoxelKey(coord);
-        if (editor.sculptStrokeOriginal.count(key) != 0) continue;   // Already changed by this stroke.
+    // Symmetry is applied *here*, on the way into the journal, and that placement is the whole of
+    // why it costs nothing else. Every mirrored cell goes through rememberOriginal exactly like a
+    // primary one, so it lands in sculptStrokeOriginal -- which means the undo record covers all the
+    // copies, the redo does, and the lie told to the ray covers them too, so an additive stroke does
+    // not climb its own mirrored deposits back toward the camera. Mirroring downstream of this, at
+    // applyVoxelSculpt, would write the copies and remember none of them.
+    //
+    // The group holds the identity as its first element, so the unmirrored case is this same loop
+    // running once and there is no second path.
+    for (const projv::core::ivec3& base : candidates) {
+        for (const LatticeMap& map : editor.strokeSymmetry) {
+            projv::core::ivec3 coord = map.apply(base);
+            uint64_t key = packVoxelKey(coord);
+            // Also what makes a cell lying *on* a mirror plane safe: it is its own image, so the
+            // second element of the group finds it already journalled and leaves it alone rather
+            // than queueing the same voxel twice.
+            if (editor.sculptStrokeOriginal.count(key) != 0) continue;   // Already changed by this stroke.
 
-        uint8_t slot = 0;
-        bool solid = queryComponentVoxel(scene, space, coord, slot);
-        if (addMode == solid) continue;   // Adding into stone, or removing from air: nothing to do.
+            uint8_t slot = 0;
+            bool solid = queryComponentVoxel(scene, space, coord, slot);
+            if (addMode == solid) continue;   // Adding into stone, or removing from air: nothing to do.
 
-        rememberOriginal(scene, editor, space, coord, key);
-        frameCoords.push_back(coord);
-        if (addMode) frameColors.push_back(editor.sculptStrokeColor);
+            rememberOriginal(scene, editor, space, coord, key);
+            frameCoords.push_back(coord);
+            if (addMode) frameColors.push_back(editor.sculptStrokeColor);
+        }
     }
 }
 
@@ -5514,7 +8262,6 @@ static void applyExtrudeDepth(projv::Scene& scene, EditorState& editor,
     if (target == editor.extrudeAppliedDepth) return;
 
     projv::ComponentHandle component = editor.sculptStrokeComponent;
-    const ivec3& normal = editor.extrudeNormal;
 
     // Accumulated across every layer this call crosses. Removals are issued before additions, which
     // matters when reversing a layer: the cells it filled have to go before the cells it displaced
@@ -5536,17 +8283,21 @@ static void applyExtrudeDepth(projv::Scene& scene, EditorState& editor,
         editor.extrudeLayers.erase(record);
     };
 
-    // Record what a layer's cells hold right now, before touching them.
+    // Record what a layer's cells hold right now, before touching them. One record per layer covering
+    // every face, because a layer is reversed as a unit -- the copies move together or the drag is
+    // not one gesture.
     auto captureLayer = [&](int layer) {
         EditorState::ExtrudeLayerRecord record;
-        for (const ivec3& faceVoxel : editor.extrudeFace) {
-            ivec3 coord = faceVoxel + normal * layer;
-            uint8_t slot = 0;
-            if (queryComponentVoxel(scene, space, coord, slot)) {
-                record.restoreCoords.push_back(coord);
-                record.restoreColors.push_back(componentVoxelColor(scene, component, slot));
-            } else {
-                record.addedCoords.push_back(coord);
+        for (const EditorState::ExtrudeFace& face : editor.extrudeFaces) {
+            for (const ivec3& faceVoxel : face.coords) {
+                ivec3 coord = faceVoxel + face.normal * layer;
+                uint8_t slot = 0;
+                if (queryComponentVoxel(scene, space, coord, slot)) {
+                    record.restoreCoords.push_back(coord);
+                    record.restoreColors.push_back(componentVoxelColor(scene, component, slot));
+                } else {
+                    record.addedCoords.push_back(coord);
+                }
             }
         }
         return record;
@@ -5559,9 +8310,11 @@ static void applyExtrudeDepth(projv::Scene& scene, EditorState& editor,
             // it is written, including any that already held something -- that is what displacing
             // means -- and captureLayer has just recorded which were which.
             EditorState::ExtrudeLayerRecord record = captureLayer(layer);
-            for (size_t index = 0; index < editor.extrudeFace.size(); index++) {
-                toAdd.push_back(editor.extrudeFace[index] + normal * layer);
-                addColors.push_back(editor.extrudeFaceColors[index]);
+            for (const EditorState::ExtrudeFace& face : editor.extrudeFaces) {
+                for (size_t index = 0; index < face.coords.size(); index++) {
+                    toAdd.push_back(face.coords[index] + face.normal * layer);
+                    addColors.push_back(face.colors[index]);
+                }
             }
             editor.extrudeLayers[layer] = std::move(record);
         } else {
@@ -5593,34 +8346,77 @@ static void applyExtrudeDepth(projv::Scene& scene, EditorState& editor,
 // The press: choose the face, and set up the axis the drag will be measured along.
 static bool beginExtrudeDrag(projv::Scene& scene, EditorState& editor, const ComponentVoxelSpace& space,
                              const projv::utils::VoxelPick& pick, projv::core::ivec3 faceCoord,
-                             projv::core::ivec3 faceNormal, projv::core::vec3 rayDirection) {
+                             projv::core::ivec3 faceNormal, const ViewportRay& cursorRay) {
     if (faceNormal == projv::core::ivec3(0)) {
         editor.statusMessage = "Point at a face to extrude it.";
         return false;
     }
 
-    editor.extrudeFace.clear();
-    editor.extrudeFaceColors.clear();
+    using projv::core::ivec3;
+
+    editor.extrudeFaces.clear();
     editor.extrudeLayers.clear();
     editor.extrudeAppliedDepth = 0;
-    editor.extrudeNormal = faceNormal;
-    gatherFaceRegion(scene, space, editor.sculptStrokeComponent, faceCoord, faceNormal,
-                     pick.materialSlot, editor.extrudeFaceScope, EXTRUDE_MAX_FACE_VOXELS,
-                     editor.extrudeFace, editor.extrudeFaceColors, editor.extrudeFaceTruncated);
 
-    if (editor.extrudeFace.empty()) {
+    // Every cell already claimed by an earlier face, so the faces come out disjoint.
+    //
+    // They can overlap, and the common case is the one that matters: a face straddling a mirror
+    // plane is its own image, so gathering from the mirrored seed returns the very same region. Left
+    // alone, that region would be extruded twice -- written twice into one layer record, and counted
+    // twice in the undo. Filtering here rather than deduplicating at the write keeps every structure
+    // downstream (the layer records, the redo walk) able to assume one cell belongs to one face.
+    std::unordered_set<uint64_t> claimed;
+
+    // The clicked face first, then one at each mirror image of the seed. The image is gathered
+    // rather than derived by mapping the primary face's coordinates: a mirror of a *coordinate set*
+    // assumes the geometry over there is the mirror of the geometry here, and if it is not, the
+    // extrusion pushes cells that are not part of any surface. Re-running the gather is the same
+    // choice the mirrored paint fill makes about its seed, and for the same reason -- it asks the
+    // geometry rather than telling it.
+    for (const LatticeMap& map : editor.strokeSymmetry) {
+        EditorState::ExtrudeFace face;
+        face.normal = map.applyDirection(faceNormal);
+        if (face.normal == ivec3(0)) continue;
+
+        bool truncated = false;
+        gatherFaceRegion(scene, space, editor.sculptStrokeComponent, map.apply(faceCoord), face.normal,
+                         pick.materialSlot, editor.extrudeFaceScope, EXTRUDE_MAX_FACE_VOXELS,
+                         face.coords, face.colors, truncated);
+        editor.extrudeFaceTruncated = editor.extrudeFaceTruncated || truncated;
+
+        size_t kept = 0;
+        for (size_t index = 0; index < face.coords.size(); index++) {
+            if (!claimed.insert(packVoxelKey(face.coords[index])).second) continue;
+            face.coords[kept] = face.coords[index];
+            face.colors[kept] = face.colors[index];
+            kept++;
+        }
+        face.coords.resize(kept);
+        face.colors.resize(kept);
+        if (face.coords.empty()) continue;   // No surface there, or wholly claimed by an earlier face.
+        editor.extrudeFaces.push_back(std::move(face));
+    }
+
+    if (editor.extrudeFaces.empty()) {
         editor.statusMessage = "No face to extrude there.";
         return false;
     }
 
+    // The axis is the *clicked* face's, and the cursor supplies one number for all of them. Each copy
+    // then moves that many layers along its own normal, which is what makes the mirrored extrusion a
+    // mirror rather than a translation: on the far side of a plane, "outward" points the other way.
     editor.extrudeAxisWorld = glm::normalize(glm::mat3_cast(space.rotation) *
                                              projv::core::vec3(faceNormal));
     editor.extrudeAnchorWorld = componentVoxelToWorld(space, faceCoord);
     editor.extrudeStartAlongAxis = 0.0f;
-    closestPointOnAxis(editor.extrudeAnchorWorld, editor.extrudeAxisWorld, editor.cameraPosition,
-                              rayDirection, editor.extrudeStartAlongAxis);
+    closestPointOnAxis(editor.extrudeAnchorWorld, editor.extrudeAxisWorld, cursorRay.origin,
+                              cursorRay.direction, editor.extrudeStartAlongAxis);
 
-    editor.statusMessage = "Extruding " + std::to_string(editor.extrudeFace.size()) + " voxel face" +
+    size_t total = 0;
+    for (const EditorState::ExtrudeFace& face : editor.extrudeFaces) total += face.coords.size();
+    editor.statusMessage = "Extruding " + std::to_string(total) + " voxel face" +
+                           (editor.extrudeFaces.size() > 1
+                                ? " across " + std::to_string(editor.extrudeFaces.size()) + " copies" : "") +
                            (editor.extrudeFaceTruncated
                                 ? " (stopped at the " + std::to_string(EXTRUDE_MAX_FACE_VOXELS) +
                                   " voxel limit)" : "");
@@ -5629,13 +8425,13 @@ static bool beginExtrudeDrag(projv::Scene& scene, EditorState& editor, const Com
 
 // Every later frame: where has the cursor slid along the face's normal, in whole voxels?
 static void updateExtrudeDrag(projv::Scene& scene, EditorState& editor,
-                              const ComponentVoxelSpace& space, projv::core::vec3 rayDirection) {
+                              const ComponentVoxelSpace& space, const ViewportRay& cursorRay) {
     float along = 0.0f;
     // False when the axis is edge-on to the view, where the projection is meaningless and would jump.
     // Holding the last depth is the right answer: the user cannot aim along an axis they cannot see,
     // and the drag stays live for when the camera or the cursor moves off it again.
     if (!closestPointOnAxis(editor.extrudeAnchorWorld, editor.extrudeAxisWorld,
-                            editor.cameraPosition, rayDirection, along)) {
+                            cursorRay.origin, cursorRay.direction, along)) {
         return;
     }
     float layers = (along - editor.extrudeStartAlongAxis) / space.voxelSize;
@@ -5651,7 +8447,7 @@ static void endExtrudeDrag(projv::Scene& scene, EditorState& editor) {
     projv::ComponentHandle component = editor.sculptStrokeComponent;
     int depth = editor.extrudeAppliedDepth;
     if (depth == 0 || component == projv::INVALID_COMPONENT_HANDLE) {
-        editor.extrudeFace.clear();
+        editor.extrudeFaces.clear();
         editor.extrudeLayers.clear();
         return;
     }
@@ -5681,9 +8477,11 @@ static void endExtrudeDrag(projv::Scene& scene, EditorState& editor) {
         undoColors->insert(undoColors->end(), record->second.restoreColors.begin(),
                            record->second.restoreColors.end());
         if (grew) {
-            for (size_t index = 0; index < editor.extrudeFace.size(); index++) {
-                redoAdd->push_back(editor.extrudeFace[index] + editor.extrudeNormal * layer);
-                redoAddColors->push_back(editor.extrudeFaceColors[index]);
+            for (const EditorState::ExtrudeFace& face : editor.extrudeFaces) {
+                for (size_t index = 0; index < face.coords.size(); index++) {
+                    redoAdd->push_back(face.coords[index] + face.normal * layer);
+                    redoAddColors->push_back(face.colors[index]);
+                }
             }
         } else {
             redoRemove->insert(redoRemove->end(), record->second.restoreCoords.begin(),
@@ -5692,8 +8490,7 @@ static void endExtrudeDrag(projv::Scene& scene, EditorState& editor) {
     }
 
     size_t count = undoRemove->size() + undoRestore->size();
-    editor.extrudeFace.clear();
-    editor.extrudeFaceColors.clear();
+    editor.extrudeFaces.clear();
     editor.extrudeLayers.clear();
     if (count == 0) return;
 
@@ -5741,11 +8538,16 @@ static void beginSculptStroke(EditorState& editor) {
     editor.sculptStrokeHasAnchor = false;
     editor.sculptStrokeTruncated = false;
     editor.sculptStrokeOriginal.clear();
+    // Back to the identity until this stroke locks onto a component and learns that component's
+    // frame. Per-stroke state belongs with the other per-stroke resets, and without this a stroke
+    // that never locks -- or one that reaches the geometry by a path of its own, as the extrude
+    // self-test does -- would inherit the last stroke's mirrors.
+    editor.strokeSymmetry.assign(1, LatticeMap());
     // Zero, not "now": the first tick of an iterative brush should land on the frame the button goes
     // down rather than one interval later, so a quick click still does something.
     editor.sculptStrokeLastIteration = 0.0;
 
-    editor.extrudeFace.clear();
+    editor.extrudeFaces.clear();
     editor.extrudeLayers.clear();
     editor.extrudeAppliedDepth = 0;
     editor.extrudeFaceTruncated = false;
@@ -5863,7 +8665,7 @@ static void endSculptStroke(projv::Scene& scene, EditorState& editor) {
 // One frame of a stroke: cast, decide which cell the brush sits on, and stamp from the last cell to
 // this one. Called from processVoxelPick, which owns the ray.
 static void processSculptSample(projv::Scene& scene, EditorState& editor,
-                                projv::core::vec3 rayDirection) {
+                                const ViewportRay& cursorRay) {
     using projv::core::ivec3;
     using projv::core::vec3;
 
@@ -5875,13 +8677,13 @@ static void processSculptSample(projv::Scene& scene, EditorState& editor,
     // which is also why extrude never needed the solidity override the brush depends on.
     if (extruding && editor.sculptStrokeHasAnchor) {
         ComponentVoxelSpace anchored = resolveComponentVoxelSpace(scene, editor.sculptStrokeComponent);
-        if (anchored.valid) updateExtrudeDrag(scene, editor, anchored, rayDirection);
+        if (anchored.valid) updateExtrudeDrag(scene, editor, anchored, cursorRay);
         return;
     }
 
     // The stroke's own edits are hidden from its own ray; see makeSculptStrokeOverride. On the first
     // sample there is no stroke component yet, so this is empty and the ray sees the scene as it is.
-    projv::utils::VoxelPick pick = projv::utils::pickVoxel(scene, editor.cameraPosition, rayDirection,
+    projv::utils::VoxelPick pick = projv::utils::pickVoxel(scene, cursorRay.origin, cursorRay.direction,
                                                           1.0e6f, makeSculptStrokeOverride(scene, editor));
 
     // --- Which component is being sculpted ---
@@ -5900,6 +8702,48 @@ static void processSculptSample(projv::Scene& scene, EditorState& editor,
             return;
         }
         projv::ComponentHandle target = pick.hit ? pick.component : editor.selectedComponent;
+        // A resolve result is scaffolding, not an object: rebuildResolveResult deletes and re-lays it
+        // whenever the stack changes, so anything sculpted into it is gone by the next rebuild. But a
+        // ray has nothing else to aim at -- the parts are un-listed while the result is up (see
+        // setComponentRendered), and picking only draws what is drawn -- so a hit on the result has to
+        // be carried back to the part that put that voxel there, exactly as the PlacePart path carries
+        // a selection back to the resolve behind it.
+        //
+        // Last contributor wins, walking the fold in order: that is the row whose colour the fold left
+        // at this cell, so it is the row the user is looking at. A Subtract owns no voxel to attribute
+        // and is skipped. A cell no part claims cannot be attributed at all -- so rather than sculpt
+        // scaffolding that is about to be rebuilt, say what happened.
+        if (pick.hit && isDerivedResult(editor, target)) {
+            projv::ComponentHandle node = projv::INVALID_COMPONENT_HANDLE;
+            for (const Resolve& resolve : editor.resolves) {
+                if (resolve.result == target) { node = resolve.node; break; }
+            }
+            projv::ComponentHandle owner = projv::INVALID_COMPONENT_HANDLE;
+            if (node < scene.components.size()) {
+                for (projv::ComponentHandle child : scene.components[node].children) {
+                    if (child >= scene.components.size()) continue;
+                    if (scene.components[child].name == "__deleted__") continue;
+                    if (scene.components[child].op == BooleanOp::Subtract) continue;
+                    ComponentVoxelSpace childSpace = resolveComponentVoxelSpace(scene, child);
+                    if (!childSpace.valid || childSpace.resolution <= 0) continue;
+                    uint8_t slot = 0;
+                    if (queryComponentVoxel(scene, childSpace,
+                                            worldToComponentVoxel(childSpace, pick.worldPosition),
+                                            slot)) {
+                        owner = child;
+                    }
+                }
+            }
+            if (owner == projv::INVALID_COMPONENT_HANDLE) {
+                std::string nodeName = node < scene.components.size() ? scene.components[node].name
+                                                                     : std::string("that asset");
+                editor.statusMessage = "Could not tell which part of " + nodeName +
+                                       " that voxel came from - open the asset and aim at a part.";
+                editor.sculptStrokeActive = false;
+                return;
+            }
+            target = owner;
+        }
         if (target == projv::INVALID_COMPONENT_HANDLE || target >= scene.components.size()) {
             editor.statusMessage = "Nothing under the cursor - select a component to sculpt into it.";
             editor.sculptStrokeActive = false;
@@ -5928,6 +8772,10 @@ static void processSculptSample(projv::Scene& scene, EditorState& editor,
                 scene.components[source].materialPalette[editor.selectedMaterialSlot].packedColor;
         }
         editor.sculptStrokeComponent = target;
+        // Frozen for the stroke, like the mode and the colour above and for the same reason: a
+        // gesture is one edit, and a frame edited halfway through would leave a stroke that is
+        // symmetric over part of its length and not the rest.
+        buildSymmetryGroup(symmetryFrameFor(scene, editor, target), editor.strokeSymmetry);
     }
 
     projv::ComponentHandle component = editor.sculptStrokeComponent;
@@ -5958,7 +8806,8 @@ static void processSculptSample(projv::Scene& scene, EditorState& editor,
         // Nothing under the cursor: the dab goes a fixed distance down the ray. This is what makes an
         // empty component sculptable at all, and it is also how a stroke keeps flowing when the drag
         // runs off the edge of the object it started on.
-        vec3 worldPoint = editor.cameraPosition + glm::normalize(rayDirection) * editor.sculptPlaceDistance;
+        vec3 worldPoint = cursorRay.origin +
+                          glm::normalize(cursorRay.direction) * editor.sculptPlaceDistance;
         centre = worldToComponentVoxel(space, worldPoint);
         faceAxis = ivec3(0);
     }
@@ -5969,7 +8818,7 @@ static void processSculptSample(projv::Scene& scene, EditorState& editor,
     // wants: it moves the face itself, so it needs the solid voxel that was hit.
     if (extruding) {
         ivec3 faceCoord = addMode ? centre - faceAxis : centre;
-        if (!beginExtrudeDrag(scene, editor, space, pick, faceCoord, faceAxis, rayDirection)) {
+        if (!beginExtrudeDrag(scene, editor, space, pick, faceCoord, faceAxis, cursorRay)) {
             editor.sculptStrokeActive = false;
             return;
         }
@@ -5990,7 +8839,17 @@ static void processSculptSample(projv::Scene& scene, EditorState& editor,
         if (now - editor.sculptStrokeLastIteration < SCULPT_ITERATION_SECONDS) return;
         editor.sculptStrokeLastIteration = now;
 
-        applySculptIteration(scene, editor, surfaceCentre);
+        // These two replicate by *centre* rather than by cell, which is the right way round for an
+        // operator: each copy runs the same filter over its own neighbourhood and reads the geometry
+        // actually there, rather than having one site's result reflected onto another site's shape.
+        // The brush sphere is symmetric, so a mirrored centre is an exactly mirrored dab.
+        //
+        // Copies whose boxes overlap near a plane run in sequence and each reads what the previous
+        // one wrote, so the result there is order-dependent by a cell or two. That is the same
+        // exception these brushes already make in reading current rather than stroke-start geometry.
+        for (const LatticeMap& map : editor.strokeSymmetry) {
+            applySculptIteration(scene, editor, map.apply(surfaceCentre));
+        }
         return;
     }
 
@@ -6028,12 +8887,17 @@ static void processSculptSample(projv::Scene& scene, EditorState& editor,
 }
 
 // =============================================================================
-// The stamp: generate, lift, place, merge
+// The fold: parts, the resolve, and the bake
 // =============================================================================
 //
-// See the Stamps section at the top of the file for what a stamp is and why it is a real component.
-// This is the machinery: rasterising a primitive into one, lifting a selection into one, snapping it
-// to the target's lattice, and writing it out.
+// See the Assets section at the top of the file for what an asset's fold is and why both it and its
+// parts are real components. This is the machinery: rasterising a primitive into a part, lifting a
+// selection into one, snapping it to the asset's lattice, folding the stack into the result you
+// look at, and writing that result out.
+//
+// The order below is the order the data flows: a part's geometry, then the pull that puts it in the
+// asset's lattice, then the fold over the contents, then the lifecycle that creates and destroys
+// them, then the bake.
 
 // The smallest resolution addComponent will accept that holds `extent` voxels along an axis.
 // Resolutions are powers of *four*, not two -- the tree64 depth is derived from the resolution
@@ -6042,6 +8906,31 @@ static uint32_t smallestChunkResolutionFor(int extent) {
     uint32_t resolution = 4;
     while (resolution < uint32_t(std::max(extent, 1))) resolution *= 4;
     return resolution;
+}
+
+// Where a baked form's voxels sit inside the chunk that will hold them.
+//
+// A chunk is a resolution cube and a form is almost never one: a 24-voxel shape needs a 64 chunk, so
+// writing it at the chunk's own origin leaves it jammed into one corner with 40 voxels of nothing on
+// each far side. Everything derived from the chunk rather than from the voxels then reads that
+// corner as the object -- the gizmo pivot, the selection outline, and the Inspector's "centre" --
+// and the shape you are holding is nowhere near the handle you are dragging.
+//
+// centrePrimitiveInChunk has done this for placed primitives since the beginning; a bake is the same
+// problem, so it is the same answer. The offset it returns has to be taken back off the component's
+// origin, or the object visibly jumps by half a chunk at the moment it is baked.
+struct BakePlacement {
+    uint32_t resolution = 4;
+    projv::core::ivec3 offset = projv::core::ivec3(0);
+};
+
+static BakePlacement centreBakeInChunk(projv::core::ivec3 extent) {
+    BakePlacement placement;
+    placement.resolution = smallestChunkResolutionFor(std::max({extent.x, extent.y, extent.z}));
+    int side = int(placement.resolution);
+    placement.offset = projv::core::ivec3((side - extent.x) / 2, (side - extent.y) / 2,
+                                          (side - extent.z) / 2);
+    return placement;
 }
 
 // Whether a cell centre lies inside a primitive occupying the box [0, size) in voxel units.
@@ -6144,18 +9033,37 @@ static void rasterisePrimitive(ShapeKind kind, const int dimensions[3], bool hol
     }
 }
 
-// The stamp's geometry, read back out of the scene into a dense box: one occupancy byte and one
-// colour per cell.
+// Moves a rasterised primitive from the corner of its chunk to the middle of it.
 //
-// Dense, and taken once, because the merge's inner loop runs over *target* cells and asks this the
-// same question for each of them. A tree64 descent per target cell would put the cost of the whole
-// merge inside a loop that is already the size of an oriented bounding box; a bit test does not.
+// The gizmo pivots on the *chunk's* bounding box (see computeLocalPivot, which measures header.scale
+// corners rather than the geometry inside them), so a shape sitting at [0, dims) in a resolution^3
+// chunk puts the handles out in empty space off one corner of it. Centring the shape makes the two
+// coincide: the gizmo appears in the middle of the thing it is moving, which is where a user reaches
+// for it.
 //
-// Read back from the scene rather than kept as the list that was written, so that a stamp which has
-// been sculpted or painted while it floated merges as it looks. That is the whole point of a stamp
-// being a real component, and a snapshot that trusted its own construction record would quietly
+// Exact when resolution and the dimension share a parity, and half a voxel out otherwise -- which is
+// the best an integer lattice allows, and invisible against a voxel.
+static void centrePrimitiveInChunk(std::vector<projv::core::ivec3>& coords, const int dimensions[3],
+                                   uint32_t resolution) {
+    projv::core::ivec3 offset((int(resolution) - dimensions[0]) / 2,
+                              (int(resolution) - dimensions[1]) / 2,
+                              (int(resolution) - dimensions[2]) / 2);
+    if (offset == projv::core::ivec3(0)) return;
+    for (projv::core::ivec3& coord : coords) coord += offset;
+}
+
+// A part's geometry, read back out of the scene into a dense box: one occupancy byte and one colour
+// per cell.
+//
+// Dense, and taken once, because the fold's inner loop runs over *lattice* cells and asks this the
+// same question for each of them. A tree64 descent per lattice cell would put the cost of the whole
+// fold inside a loop that is already the size of an oriented bounding box; a bit test does not.
+//
+// Read back from the scene rather than kept as the list that was written, so that a part which has
+// been sculpted or painted since it was placed resolves as it looks. That is the whole point of a
+// part being a real component, and a snapshot that trusted its own construction record would quietly
 // throw those edits away.
-struct StampSnapshot {
+struct PartSnapshot {
     bool valid = false;
     projv::core::ivec3 boundsMin = projv::core::ivec3(0);
     projv::core::ivec3 boundsMax = projv::core::ivec3(0);   // Inclusive.
@@ -6174,32 +9082,30 @@ struct StampSnapshot {
     }
 };
 
-static StampSnapshot snapshotStamp(const projv::Scene& scene, const EditorState& editor) {
+// The dense snapshot of one component's contents over a stated box. Takes the box rather than a part
+// record, so the bake can snapshot an ordinary component (an asset's result) with the same code
+// the fold uses on a part.
+static PartSnapshot snapshotComponentBox(const projv::Scene& scene, projv::ComponentHandle component,
+                                         projv::core::ivec3 scanMin, projv::core::ivec3 scanMax) {
     using projv::core::ivec3;
-    StampSnapshot snapshot;
+    PartSnapshot snapshot;
 
-    projv::ComponentHandle component = editor.stamp.component;
     if (component >= scene.components.size()) return snapshot;
     ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
     if (!space.valid) return snapshot;
 
-    // The box the stamp's contents are known to lie in. Grown by every write the editor makes to the
-    // stamp component (see applyVoxelSculpt), so a sculpt that pushed geometry past the primitive's
-    // original extent is inside it.
-    ivec3 scanMin = editor.stamp.contentMin;
-    ivec3 scanMax = editor.stamp.contentMax;
     if (scanMax.x < scanMin.x || scanMax.y < scanMin.y || scanMax.z < scanMin.z) return snapshot;
 
     ivec3 scanSize = scanMax - scanMin + ivec3(1);
     size_t cells = size_t(scanSize.x) * size_t(scanSize.y) * size_t(scanSize.z);
-    if (cells == 0 || cells > STAMP_MAX_SOURCE_CELLS) return snapshot;
+    if (cells == 0 || cells > PART_MAX_SOURCE_CELLS) return snapshot;
 
     std::vector<uint8_t> occupied(cells, 0);
     std::vector<uint32_t> colors(cells, 0);
 
     // The tight box is found in the same pass that reads the contents: the scan box is an upper
-    // bound (a sculpt that carved the shape back down leaves it too large), and every later cost —
-    // the merge's oriented bounding box above all — is measured against the tight one.
+    // bound (a sculpt that carved the shape back down leaves it too large), and every later cost --
+    // the fold's oriented bounding box above all -- is measured against the tight one.
     ivec3 tightMin = scanMax;
     ivec3 tightMax = scanMin;
     size_t count = 0;
@@ -6219,7 +9125,7 @@ static StampSnapshot snapshotStamp(const projv::Scene& scene, const EditorState&
     }
     if (count == 0) return snapshot;
 
-    // Repacked into the tight box, so the merge's oriented bounding box is the shape's, not the
+    // Repacked into the tight box, so the fold's oriented bounding box is the shape's, not the
     // scan's. A generated primitive is already tight; a sculpted one need not be.
     snapshot.valid = true;
     snapshot.boundsMin = tightMin;
@@ -6243,62 +9149,79 @@ static StampSnapshot snapshotStamp(const projv::Scene& scene, const EditorState&
     return snapshot;
 }
 
-// Empties the stamp component so it can hold the next stamp. Not a delete: see EditorState::stampPool
-// for why the component is kept.
-static void clearStampGeometry(projv::Scene& scene, EditorState& editor) {
-    StampSnapshot snapshot = snapshotStamp(scene, editor);
-    if (!snapshot.valid) {
-        editor.stamp.contentMin = projv::core::ivec3(0);
-        editor.stamp.contentMax = projv::core::ivec3(-1);
-        return;
-    }
+static PartSnapshot snapshotPart(const projv::Scene& scene, const Part& part) {
+    return snapshotComponentBox(scene, part.component, part.contentMin, part.contentMax);
+}
 
-    std::vector<projv::core::ivec3> coords;
+// Every solid coordinate of a snapshot, with its colour. What the undo record of a placement needs
+// to be able to build the part again.
+static void snapshotToLists(const PartSnapshot& snapshot, std::vector<projv::core::ivec3>& coords,
+                            std::vector<uint32_t>& colors) {
+    coords.clear();
+    colors.clear();
+    if (!snapshot.valid) return;
     coords.reserve(snapshot.count);
+    colors.reserve(snapshot.count);
     for (int z = snapshot.boundsMin.z; z <= snapshot.boundsMax.z; z++) {
         for (int y = snapshot.boundsMin.y; y <= snapshot.boundsMax.y; y++) {
             for (int x = snapshot.boundsMin.x; x <= snapshot.boundsMax.x; x++) {
                 projv::core::ivec3 coord(x, y, z);
-                if (snapshot.occupied[snapshot.index(coord)]) coords.push_back(coord);
+                size_t index = snapshot.index(coord);
+                if (!snapshot.occupied[index]) continue;
+                coords.push_back(coord);
+                colors.push_back(snapshot.colors[index]);
             }
         }
     }
-    applyVoxelSculpt(&scene, &editor, editor.stamp.component, coords, std::vector<uint32_t>(), false);
-    editor.stamp.contentMin = projv::core::ivec3(0);
-    editor.stamp.contentMax = projv::core::ivec3(-1);
 }
 
-// The component the next stamp of this resolution goes into, created once per session and refilled
-// afterwards. See EditorState::stampPool.
-static projv::ComponentHandle acquireStampComponent(projv::Scene& scene, EditorState& editor,
-                                                    uint32_t resolution, float voxelScale) {
-    auto pooled = editor.stampPool.find(resolution);
-    if (pooled != editor.stampPool.end()) {
-        projv::ComponentHandle handle = pooled->second;
-        // A stamp that was sculpted past its own bounds has been converted to a Grid, and a Grid's
-        // extent is no longer the resolution cube this pool is keyed on. Dropped rather than reused:
-        // one leaked record beats a stamp whose contents cannot be found.
-        if (handle < scene.components.size() &&
-            scene.components[handle].kind == projv::ComponentKind::Chunk &&
-            scene.components[handle].name != "__deleted__") {
-            // The voxel scale has to match too: a stamp built at a different one makes every merge a
-            // resample. It only changes when the target does, which is rare enough to pay for.
-            const projv::ComponentRecord& record = scene.components[handle];
-            if (record.chunkHandle < scene.chunks.size() &&
-                std::abs(scene.chunks[record.chunkHandle].header.voxelScale - voxelScale) <= 1.0e-6f) {
-                return handle;
+// Takes a component's geometry out of the render without destroying it, by removing it from the
+// loose list -- which is exactly what the renderer and the ray walk (see raySceneIntersect's
+// sceneLooseCount / looseListValue, and syncSceneTables, which builds that texture from this vector).
+//
+// The resolved result needs this: while the result is up, the *parts* must not be drawn, because two
+// overlapping copies of one form is worse than either alone -- but they must still be fully readable,
+// since they are what the gizmo transforms and what every later rebuild of the result reads back
+// through snapshotPart.
+//
+// **It must not clear `alive`.** That was the first attempt, and it is self-defeating:
+// resolveComponentVoxelSpace refuses a dead chunk, so hiding a part made the next resolve unable to
+// see the geometry it was meant to be resolving, and the result silently came out empty. Un-listing
+// is the whole of "do not draw this"; `alive` means "this chunk exists".
+//
+// Walks the subtree, because a part can be an instantiated asset -- a folder with its own children --
+// and hiding only the node the user pointed at would leave its geometry on screen.
+static void setComponentRendered(projv::Scene& scene, EditorState& editor,
+                                 projv::ComponentHandle component, bool rendered) {
+    if (component >= scene.components.size()) return;
+
+    bool anyChanged = false;
+    auto walk = [&](projv::ComponentHandle current, auto& self) -> void {
+        if (current >= scene.components.size()) return;
+        const projv::ComponentRecord& record = scene.components[current];
+        if (record.kind == projv::ComponentKind::Chunk) {
+            projv::ChunkHandle chunkHandle = record.chunkHandle;
+            if (chunkHandle < scene.chunks.size()) {
+                std::vector<projv::ChunkHandle>& loose = scene.looseChunks;
+                bool listed = std::find(loose.begin(), loose.end(), chunkHandle) != loose.end();
+                if (listed != rendered) {
+                    if (rendered) {
+                        loose.push_back(chunkHandle);
+                    } else {
+                        loose.erase(std::remove(loose.begin(), loose.end(), chunkHandle), loose.end());
+                    }
+                    scene.looseChunkCount = static_cast<uint32_t>(loose.size());
+                    anyChanged = true;
+                }
             }
         }
-        editor.stampPool.erase(pooled);
-    }
+        for (projv::ComponentHandle child : record.children) self(child, self);
+    };
+    walk(component, walk);
 
-    projv::ComponentHandle handle = projv::utils::addComponent(
-        scene, projv::ComponentKind::Chunk, "Stamp", projv::INVALID_COMPONENT_HANDLE,
-        resolution, voxelScale);
-    if (handle == projv::INVALID_COMPONENT_HANDLE) return handle;
-    editor.stampPool[resolution] = handle;
+    if (!anyChanged) return;
     editor.gpuFlushNeeded = true;
-    return handle;
+    editor.cameraMovedByInterface = true;
 }
 
 // The nearest signed permutation matrix: the rotation that takes lattice axes to lattice axes and is
@@ -6340,67 +9263,325 @@ static projv::core::mat3 nearestAxisAlignedRotation(const projv::core::mat3& m) 
     return result;
 }
 
-// Pulls the stamp onto the target's lattice: rotation to the nearest multiple of 90 degrees about a
-// lattice axis, translation to a whole number of voxels. Run after every gizmo frame while Snap 90
-// is on, which is what makes the drag feel like a grid snap rather than a free slide.
-static void snapStampToTargetLattice(projv::Scene& scene, EditorState& editor) {
+// =============================================================================
+// The open asset: lookup, lattice, and the two hooks every transform runs through
+// =============================================================================
+
+// The asset a component sits in -- its parent, and nothing else.
+//
+// This used to be cached on the Part record as well, which is the sort of second copy that is right
+// until a reparent, and then quietly wrong: the part would go on invalidating the stack it used to
+// belong to while the one it is actually in never rebuilt.
+static projv::ComponentHandle ownerOf(const projv::Scene& scene, projv::ComponentHandle component) {
+    if (component >= scene.components.size()) return projv::INVALID_COMPONENT_HANDLE;
+    return scene.components[component].parent;
+}
+
+static int resolveIndexOf(const EditorState& editor, projv::ComponentHandle node) {
+    for (size_t index = 0; index < editor.resolves.size(); index++) {
+        if (editor.resolves[index].node == node) return int(index);
+    }
+    return -1;
+}
+
+static Resolve* findResolve(EditorState& editor, projv::ComponentHandle node) {
+    int index = resolveIndexOf(editor, node);
+    return index >= 0 ? &editor.resolves[size_t(index)] : nullptr;
+}
+
+static const Resolve* findResolve(const EditorState& editor, projv::ComponentHandle node) {
+    for (const Resolve& resolve : editor.resolves) {
+        if (resolve.node == node) return &resolve;
+    }
+    return nullptr;
+}
+
+static Part* findPart(EditorState& editor, projv::ComponentHandle component) {
+    auto entry = editor.parts.find(component);
+    return entry == editor.parts.end() ? nullptr : &entry->second;
+}
+
+static const Part* findPart(const EditorState& editor, projv::ComponentHandle component) {
+    auto entry = editor.parts.find(component);
+    return entry == editor.parts.end() ? nullptr : &entry->second;
+}
+
+// True for the derived result of any asset. The Assets panel skips these, and so does
+// anything else that enumerates "the components the user has": a result is scaffolding the editor
+// rebuilds whenever it likes, not an object anyone put there.
+static bool isDerivedResult(const EditorState& editor, projv::ComponentHandle component) {
+    if (component == projv::INVALID_COMPONENT_HANDLE) return false;
+    for (const Resolve& resolve : editor.resolves) {
+        if (resolve.result == component) return true;
+    }
+    return false;
+}
+
+// The lattice every part of an asset resolves into: the asset node's own world frame, at the
+// asset's voxel scale.
+//
+// Deliberately derived from the *node* rather than from the result chunk. The result's origin moves
+// whenever the fold's bounding box moves, so using it as the lattice would shift the coordinate
+// system every time a part was nudged -- and a fold whose coordinates mean something different from
+// one frame to the next cannot be cached, compared, or reasoned about. The node does not move unless
+// the user moves the asset itself, at which point every part moves with it and the fold is
+// unchanged in lattice space, which is exactly right.
+//
+// The space returned is a **mapping only**: `resolution` is zero and `chunk` is meaningless, so it
+// answers componentVoxelToWorld/worldToComponentVoxel and nothing else. queryComponentVoxel must
+// never be handed one of these.
+static ComponentVoxelSpace latticeAtNode(const projv::Scene& scene, projv::ComponentHandle node,
+                                        float voxelScale) {
     using namespace projv::core;
-    if (!editor.stamp.active || !editor.stampSnap90) return;
-    if (editor.stamp.component >= scene.components.size()) return;
-    if (editor.stamp.target >= scene.components.size()) return;
+    ComponentVoxelSpace space;
+    if (node >= scene.components.size()) return space;
+    if (voxelScale <= 0.0f) return space;
 
-    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, editor.stamp.target);
-    if (!targetSpace.valid || targetSpace.voxelSize <= 0.0f) return;
+    mat4 world = projv::utils::getComponentWorldMatrix(scene, node);
+    mat3 basis(world);
+    // The ancestor chain's accumulated scale, taken off a column rather than tracked separately --
+    // it is uniform (ComponentRecord::localScale is a single float), so any column reports it.
+    float scale = glm::length(basis[0]);
+    if (scale <= 1.0e-6f) return space;
+    basis[0] /= scale;
+    basis[1] /= glm::length(basis[1]) > 1.0e-6f ? glm::length(basis[1]) : 1.0f;
+    basis[2] /= glm::length(basis[2]) > 1.0e-6f ? glm::length(basis[2]) : 1.0f;
 
-    const projv::ComponentRecord& stampRecord = scene.components[editor.stamp.component];
-    vec3 position = stampRecord.localPosition;   // A stamp is a root, so local is world.
-    quat rotation = stampRecord.localRotation;
-
-    mat3 targetRotation = glm::mat3_cast(targetSpace.rotation);
-    mat3 inverseTarget = glm::transpose(targetRotation);
-
-    quat snappedRotation = glm::normalize(
-        targetSpace.rotation * glm::quat_cast(nearestAxisAlignedRotation(inverseTarget * glm::mat3_cast(rotation))));
-
-    vec3 local = (inverseTarget * (position - targetSpace.latticeOrigin)) / targetSpace.voxelSize;
-    vec3 rounded(std::round(local.x), std::round(local.y), std::round(local.z));
-    vec3 snappedPosition = targetSpace.latticeOrigin + targetRotation * (rounded * targetSpace.voxelSize);
-
-    if (snappedPosition == position && snappedRotation == rotation) return;
-    applyComponentTransform(&scene, &editor, editor.stamp.component, snappedPosition, snappedRotation, 1.0f);
+    space.valid = true;
+    space.isGrid = false;
+    space.resolution = 0;                 // Mapping only. See above.
+    space.latticeOrigin = vec3(world[3]);
+    space.rotation = glm::normalize(glm::quat_cast(basis));
+    space.voxelSize = voxelScale * scale;
+    space.coordOrigin = ivec3(0);
+    return space;
 }
 
-// Puts the stamp's *content* centre at a world point, keeping a given rotation. The content box
-// rather than the component's origin, because what the user is aiming is the shape, and a chunk's
-// origin is its minimum corner rather than the middle of whatever is inside it.
-static void centreStampAt(projv::Scene& scene, EditorState& editor, projv::core::vec3 worldCentre,
-                          projv::core::quat rotation) {
+static ComponentVoxelSpace resolveLattice(const projv::Scene& scene, const Resolve& resolve) {
+    return latticeAtNode(scene, resolve.node, resolve.voxelScale);
+}
+
+// Marks an asset's resolved form stale and starts the settle clock. Everything that changes what the
+// fold would produce goes through here: a part moving, a part's op changing, a part being added,
+// removed, resized, sculpted or reordered.
+// `editor` is unused today and is taken anyway: every other resolve mutator is called as
+// (editor, thing), and an invalidate that broke that pattern would be the one people forget to
+// route through. It is also where a future per-asset dirty list would have to look.
+static void invalidateResolve(EditorState&, Resolve& resolve) {
+    resolve.resultStale = true;
+    resolve.movedAtTime = ImGui::GetTime();
+}
+
+// Invalidates the resolve of the asset `component` sits in. `isOwner` says the handle *is* the asset
+// rather than something inside it -- the two callers that already know which they have say so, and
+// everything else hands over the child and lets this walk up one level.
+static void invalidateResolveOf(const projv::Scene& scene, EditorState& editor,
+                                projv::ComponentHandle component, bool isOwner) {
+    projv::ComponentHandle node = isOwner ? component : ownerOf(scene, component);
+    if (Resolve* resolve = findResolve(editor, node)) invalidateResolve(editor, *resolve);
+}
+
+// --- The two hooks applyComponentTransform runs every transform through ------
+//
+// Putting them there rather than in the gizmo is what lets the gizmo stay ignorant of resolves.
+// Every path that moves a component -- the gizmo, the arrow keys, the Inspector's numeric fields,
+// and the undo and redo of all three -- picks up lattice snapping and cache invalidation for free,
+// and picks up exactly the same ones, so an undone drag lands where the drag did.
+
+// **One lattice for the whole document: world axes, world origin, one voxel size.**
+//
+// Snapping used to quantize a component's localPosition against *its own asset's* lattice, and that
+// was wrong in two directions at once. A component whose parent had no resolve never snapped at all
+// -- which is every component at the document root, the level at which a scene is actually composed.
+// And each asset carried its own lattice phase, so two objects in two different assets could each be
+// perfectly snapped in their own frame and still be half a voxel out of step with each other. Two
+// finished .datas that would not line up was the whole complaint, and neither of those is a thing
+// the user did.
+//
+// Quantizing in world space against one grid fixes both, and costs nothing where the old behaviour
+// was already right: an asset sitting on the document lattice at the same voxel scale produces
+// exactly the numbers it produced before.
+//
+// The size is the finest voxel scale in the document, so the grid is at least as fine as the
+// smallest thing standing on it. Derived results are skipped -- they are rebuilt from the fold every
+// time it settles, and letting one re-phase the grid under everything else would make the whole
+// document twitch. `snapVoxelOverride` pins it, which is the answer for a document that will later
+// import something finer.
+static float documentSnapVoxel(const projv::Scene& scene, const EditorState& editor) {
+    if (editor.snapVoxelOverride > 0.0f) return editor.snapVoxelOverride;
+
+    float finest = 0.0f;
+    for (projv::ComponentHandle handle = 0; handle < scene.components.size(); handle++) {
+        if (scene.components[handle].name == "__deleted__") continue;
+        if (isDerivedResult(editor, handle)) continue;
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, handle);
+        if (!space.valid || space.voxelSize <= 0.0f) continue;
+        if (finest <= 0.0f || space.voxelSize < finest) finest = space.voxelSize;
+    }
+    if (finest > 0.0f) return finest;
+    return editor.createVoxelScale > 0.0f ? editor.createVoxelScale : 1.0f;
+}
+
+// How far apart the grid's positions are in world units, or zero when this component does not snap.
+//
+// Three ways to be exempt, and they are deliberately different in how long they last: the document
+// setting is off (until turned back on), this component is free-placed (until cleared), or Alt is
+// held (until released). See isFreePlacement for why the middle one has to exist.
+static float snapStepWorld(const projv::Scene& scene, const EditorState& editor,
+                           projv::ComponentHandle component) {
+    if (!editor.snapEnabled) return 0.0f;
+    if (isFreePlacement(editor, component)) return 0.0f;
+    if (snapSuppressedByModifier()) return 0.0f;
+
+    float voxel = documentSnapVoxel(scene, editor);
+    if (voxel <= 0.0f) return 0.0f;
+    return voxel * float(editor.snapStepVoxels > 0 ? editor.snapStepVoxels : 1);
+}
+
+// Whether this component's rotation goes to quarter turns. Governed separately from translation,
+// because the two are wanted separately: a tree at its own angle standing on a lattice position is
+// an ordinary thing to want, and so is a wall square to the world but nudged off the grid.
+static bool snapsRotation(const EditorState& editor, projv::ComponentHandle component) {
+    if (!editor.snapRotate90) return false;
+    if (isFreePlacement(editor, component)) return false;
+    if (snapSuppressedByModifier()) return false;
+    return true;
+}
+
+// The frame a component's stored transform is measured in. Identity at the document root, which is
+// what makes a root component snap against the same grid as one nested three assets deep.
+static projv::core::quat parentWorldRotation(const projv::Scene& scene,
+                                             projv::ComponentHandle component) {
+    projv::ComponentHandle parent = ownerOf(scene, component);
+    if (parent >= scene.components.size()) return projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    return projv::utils::getComponentWorldRotation(scene, parent);
+}
+
+static projv::core::mat4 parentWorldMatrix(const projv::Scene& scene,
+                                           projv::ComponentHandle component) {
+    projv::ComponentHandle parent = ownerOf(scene, component);
+    if (parent >= scene.components.size()) return projv::core::mat4(1.0f);
+    return projv::utils::getComponentWorldMatrix(scene, parent);
+}
+
+// The rotation half, on its own, for the one caller that has to know the answer *before* the funnel
+// runs.
+//
+// A rotate drag compensates its position so that the pivot stays put -- it solves for the
+// localPosition that holds the pivot under the rotation being applied. Hand that solve the drag's
+// free rotation while the funnel goes on to store the snapped one and the two disagree, leaving the
+// component displaced by (R_snapped - R_free) * pivot, which is as large as the pivot's own distance
+// from the origin. On screen it reads as the object sliding steadily away while the ring is dragged
+// and then jumping into orientation at each 90-degree step -- a translation nobody asked for, and
+// the reason an origin used to not survive a rotation. So the gizmo snaps first and compensates
+// against the rotation that will actually land.
+//
+// Returns whether snapping applied at all, which is not the same as whether the rotation changed.
+//
+// Squared to the **world** axes, not to the parent's. Two walls in two assets that were each square
+// to their own container could sit at any angle to each other, and "square" is a claim about the
+// document or it is not worth making.
+static bool latticeSnappedRotation(const projv::Scene& scene, const EditorState& editor,
+                                   projv::ComponentHandle component, projv::core::quat& rotation) {
     using namespace projv::core;
-    if (editor.stamp.component >= scene.components.size()) return;
-    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, editor.stamp.component);
-    if (!space.valid) return;
+    if (!snapsRotation(editor, component)) return false;
 
-    vec3 contentCentre = (vec3(editor.stamp.contentMin) + vec3(editor.stamp.contentMax) + vec3(1.0f)) *
-                         0.5f * space.voxelSize;
-    vec3 origin = worldCentre - glm::mat3_cast(rotation) * contentCentre;
-    applyComponentTransform(&scene, &editor, editor.stamp.component, origin, rotation, 1.0f);
-    snapStampToTargetLattice(scene, editor);
+    quat parent = parentWorldRotation(scene, component);
+    quat world = glm::normalize(parent * rotation);
+    world = glm::normalize(glm::quat_cast(nearestAxisAlignedRotation(glm::mat3_cast(world))));
+    rotation = glm::normalize(glm::inverse(parent) * world);
+    return true;
 }
 
-// Points the editor at the stamp: it is the selection, so the gizmo drives it and the outline is
-// drawn around it.
-static void selectStamp(projv::Scene& scene, EditorState& editor) {
-    editor.selectedComponent = editor.stamp.component;
-    editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, editor.stamp.component);
-    editor.selectionOutlineValid = false;
-    editor.lastInspectorSelection = projv::INVALID_COMPONENT_HANDLE;   // Refresh the Euler readout.
+static void snapTransformToLattice(const projv::Scene& scene, const EditorState& editor,
+                                    projv::ComponentHandle component,
+                                    projv::core::vec3& position, projv::core::quat& rotation) {
+    using namespace projv::core;
+
+    // Independent of the translation gate below, so "square to the world but off the grid" and "on
+    // the grid at its own angle" are both sayable.
+    latticeSnappedRotation(scene, editor, component, rotation);
+
+    float step = snapStepWorld(scene, editor, component);
+    if (step <= 0.0f) return;
+
+    // Out to world, rounded there, and back. The round trip is what puts every component in the
+    // document on one grid regardless of how deeply it is nested or what its container's origin
+    // happens to be -- rounding where the value is *stored* only ever aligns siblings.
+    //
+    // Still idempotent for a fixed ancestor chain, which is the property the undo records rely on:
+    // local -> world lands on an already-rounded world position, and rounding it again changes
+    // nothing. Moving an ancestor does change what its children snap to, which is correct -- they
+    // moved -- but it means a reparent between recording a transform and replaying it is a case that
+    // did not exist while snapping was local.
+    //
+    // The position rounds *after* whatever pivot compensation the caller applied, so a rotation about
+    // a content centre can still move the origin by up to half a step: the compensated position is
+    // not generally on the grid, and landing on the grid is the invariant that matters more.
+    mat4 parentWorld = parentWorldMatrix(scene, component);
+    vec3 world = vec3(parentWorld * vec4(position, 1.0f));
+    vec3 rounded(std::round(world.x / step) * step,
+                 std::round(world.y / step) * step,
+                 std::round(world.z / step) * step);
+
+    position = vec3(glm::inverse(parentWorld) * vec4(rounded, 1.0f));
 }
 
-// Writes a set of voxels into the stamp component and records what box they occupy. The single point
-// at which a stamp's geometry is created, so that contentMin/contentMax cannot drift from it.
-static void fillStamp(projv::Scene& scene, EditorState& editor,
-                      const std::vector<projv::core::ivec3>& coords,
-                      const std::vector<uint32_t>& colors) {
+// Everything that has to happen after a component's transform lands. A part moving invalidates its
+// own cached cell set and its asset's result; the *asset* moving invalidates nothing -- its contents
+// move with it and the fold is unchanged in lattice space, so only the result component has to be
+// carried along, which rebuildResult does by placing it on the lattice.
+static void noteComponentMoved(const projv::Scene& scene, EditorState& editor,
+                               projv::ComponentHandle component) {
+    if (Part* part = findPart(editor, component)) {
+        part->cacheValid = false;
+        invalidateResolveOf(scene, editor, component);
+        return;
+    }
+    if (Resolve* resolve = findResolve(editor, component)) {
+        invalidateResolve(editor, *resolve);
+    }
+}
+
+// =============================================================================
+// Part geometry
+// =============================================================================
+
+// A fresh component for a part to live in. Parented to the asset node, so it is an ordinary child
+// in the contents list from the moment it exists -- which is the whole point.
+static projv::ComponentHandle createPartComponent(projv::Scene& scene, EditorState& editor,
+                                                  projv::ComponentHandle stackNode, const char* name,
+                                                  uint32_t resolution, float voxelScale) {
+    projv::ComponentHandle handle = projv::utils::addComponent(
+        scene, projv::ComponentKind::Chunk, name, stackNode, resolution, voxelScale);
+    if (handle == projv::INVALID_COMPONENT_HANDLE) return handle;
+    editor.gpuFlushNeeded = true;
+    return handle;
+}
+
+// Empties a part component so it can hold different geometry. Used when a procedural part is resized
+// in place, which happens on every frame of a drag on the size fields.
+static void clearPartGeometry(projv::Scene& scene, EditorState& editor, Part& part) {
+    PartSnapshot snapshot = snapshotPart(scene, part);
+    if (!snapshot.valid) {
+        part.contentMin = projv::core::ivec3(0);
+        part.contentMax = projv::core::ivec3(-1);
+        return;
+    }
+
+    std::vector<projv::core::ivec3> coords;
+    std::vector<uint32_t> colors;
+    snapshotToLists(snapshot, coords, colors);
+    applyVoxelSculpt(&scene, &editor, part.component, coords, std::vector<uint32_t>(), false);
+    part.contentMin = projv::core::ivec3(0);
+    part.contentMax = projv::core::ivec3(-1);
+}
+
+// Writes a set of voxels into a part component and records what box they occupy. The single point at
+// which a part's geometry is created, so contentMin/contentMax cannot drift from it.
+static void fillPart(projv::Scene& scene, EditorState& editor, Part& part,
+                     const std::vector<projv::core::ivec3>& coords,
+                     const std::vector<uint32_t>& colors) {
     using projv::core::ivec3;
     if (coords.empty()) return;
 
@@ -6409,11 +9590,28 @@ static void fillStamp(projv::Scene& scene, EditorState& editor,
         minimum = projv::core::min(minimum, coord);
         maximum = projv::core::max(maximum, coord);
     }
-    editor.stamp.contentMin = minimum;
-    editor.stamp.contentMax = maximum;
-    editor.stamp.voxelCount = coords.size();
+    part.contentMin = minimum;
+    part.contentMax = maximum;
+    part.voxelCount = coords.size();
+    part.cacheValid = false;
 
-    applyVoxelSculpt(&scene, &editor, editor.stamp.component, coords, colors, true);
+    applyVoxelSculpt(&scene, &editor, part.component, coords, colors, true);
+}
+
+// Puts a part's *content* centre at a point in its asset's local frame, keeping a given rotation.
+// The content box rather than the component's origin, because what the user is aiming is the shape,
+// and a chunk's origin is its minimum corner rather than the middle of whatever is inside it.
+static void centrePartAt(projv::Scene& scene, EditorState& editor, Part& part,
+                         projv::core::vec3 localCentre, projv::core::quat rotation) {
+    using namespace projv::core;
+    if (part.component >= scene.components.size()) return;
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, part.component);
+    if (!space.valid) return;
+
+    vec3 contentCentre = (vec3(part.contentMin) + vec3(part.contentMax) + vec3(1.0f)) *
+                         0.5f * space.voxelSize;
+    vec3 origin = localCentre - glm::mat3_cast(rotation) * contentCentre;
+    applyComponentTransform(&scene, &editor, part.component, origin, rotation, 1.0f);
 }
 
 // The colour a generated shape is made of: the palette's current entry, which is the same answer
@@ -6429,24 +9627,1463 @@ static uint32_t currentToolColor(const projv::Scene& scene, const EditorState& e
     return 0x3FFFFFFFu;   // The same white addComponent seeds a new palette with.
 }
 
-// Generates the primitive and drops it into the scene as a floating stamp.
+// =============================================================================
+// The fold
+// =============================================================================
 //
-// The voxel scale comes from the *target*, never from editor.createVoxelScale: a stamp at a
-// different voxel size makes every merge a resample, however the rotation is snapped.
-static bool spawnShapeStamp(projv::Scene& scene, EditorState& editor, projv::ComponentHandle target,
-                            projv::core::vec3 worldCentre) {
-    using namespace projv::core;
+// Two steps, in this order, and the split is what makes an asset affordable to arrange:
+//
+//   1. **The pull.** Each part's cells, in the asset's lattice. Cached per part on the transform
+//      it was computed for, so nudging one part in a stack of ten re-walks one part.
+//   2. **The fold.** Those cell sets combined left to right by their ops into one accumulator.
+//
+// The walk in step 1 is over **lattice** cells, not part voxels. Forward-mapping each part voxel to a
+// lattice cell (a push) leaves holes: a rotation is not area-preserving on a lattice, so two source
+// voxels can land in one cell while a neighbouring cell receives none -- and on a hollow shape, whose
+// walls are one or two voxels thick, those gaps perforate the surface and the result is a rotated
+// shape you can see through. Iterating the destination instead (a pull) gives every cell exactly one
+// answer, so the surface is closed by construction.
+//
+// That is also why the cost is the volume of the part's oriented bounding box rather than its voxel
+// count, and why the box's volume is what the budget caps.
+//
+// With Snap 90 on the pull degenerates to the exact integer remap -- the inverse transform is a
+// signed axis permutation and every lattice cell in the box maps to exactly one source cell -- so one
+// code path serves both modes.
 
-    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, target);
-    if (!targetSpace.valid || targetSpace.voxelSize <= 0.0f) {
-        editor.statusMessage = "That component has no voxel grid to place a shape in.";
-        return false;
+// Defined with the sync code below: it walks the tree64, which the fold needs for an
+// imported asset's leaves and the loader needs for the same reason.
+static bool componentContentBounds(const projv::Scene& scene, projv::ComponentHandle component,
+                                   projv::core::ivec3& minimum, projv::core::ivec3& maximum);
+
+struct PartCells {
+    bool valid = false;
+    bool overBudget = false;
+    size_t walkCells = 0;
+    std::vector<projv::core::ivec3> coords;   // In the resolve's lattice.
+    std::vector<uint32_t> colors;
+};
+
+// One leaf's contribution. Split out of pullPartIntoLattice because a part can be a whole imported
+// asset -- a folder with several chunks under it -- and each of those has its own transform and its
+// own oriented bounding box.
+static bool pullLeafIntoLattice(const projv::Scene& scene, projv::ComponentHandle leaf,
+                                projv::core::ivec3 contentMin, projv::core::ivec3 contentMax,
+                                const ComponentVoxelSpace& lattice, size_t budget, PartCells& cells);
+
+static PartCells pullPartIntoLattice(const projv::Scene& scene, const Part& part,
+                                     const ComponentVoxelSpace& lattice, size_t budget) {
+    using namespace projv::core;
+    PartCells cells;
+
+    if (part.component >= scene.components.size() || !lattice.valid) return cells;
+
+    // An Asset part -- an imported compose folder -- is the union of the leaves under it. That is
+    // the recursive answer one level at a time: a sub-resolve resolves to its own result before it
+    // is folded here, so subtracting a whole composed form is a child of type asset with
+    // op: subtract and no new evaluator.
+    if (scene.components[part.component].kind == projv::ComponentKind::Asset) {
+        std::vector<projv::ChunkHandle> leafChunks;
+        std::vector<projv::ComponentHandle> pending{ part.component };
+        cells.valid = true;
+        while (!pending.empty()) {
+            projv::ComponentHandle current = pending.back();
+            pending.pop_back();
+            if (current >= scene.components.size()) continue;
+            const projv::ComponentRecord& record = scene.components[current];
+            if (record.name == "__deleted__") continue;
+            if (record.kind == projv::ComponentKind::Chunk) {
+                ivec3 low(0), high(-1);
+                if (!componentContentBounds(scene, current, low, high)) continue;
+                if (!pullLeafIntoLattice(scene, current, low, high, lattice, budget, cells)) {
+                    cells.overBudget = true;
+                    cells.valid = false;
+                    return cells;
+                }
+                continue;
+            }
+            for (projv::ComponentHandle child : record.children) pending.push_back(child);
+        }
+        return cells;
     }
 
+    if (!pullLeafIntoLattice(scene, part.component, part.contentMin, part.contentMax, lattice,
+                             budget, cells)) {
+        cells.overBudget = true;
+        return cells;
+    }
+    cells.valid = true;
+    return cells;
+}
+
+static bool pullLeafIntoLattice(const projv::Scene& scene, projv::ComponentHandle leaf,
+                                projv::core::ivec3 contentMin, projv::core::ivec3 contentMax,
+                                const ComponentVoxelSpace& lattice, size_t budget, PartCells& cells) {
+    using namespace projv::core;
+
+    PartSnapshot snapshot = snapshotComponentBox(scene, leaf, contentMin, contentMax);
+    if (!snapshot.valid) {
+        // An empty leaf is a valid answer -- an empty cell set -- rather than a failure. A subtract
+        // by nothing must leave the accumulator alone, not abandon the fold.
+        return true;
+    }
+
+    // Resolved once and read from throughout: a ComponentVoxelSpace holds a pointer into scene.grids
+    // that does not survive an edit. See the type's own comment. Nothing here writes.
+    ComponentVoxelSpace partSpace = resolveComponentVoxelSpace(scene, leaf);
+    if (!partSpace.valid) return true;
+
+    // The part's box, as eight world points, then as a lattice box around them. The corners are the
+    // box's *corners* rather than cell centres, so a rotated box is fully covered.
+    mat3 partRotation = glm::mat3_cast(partSpace.rotation);
+    vec3 boxLow(snapshot.boundsMin);
+    vec3 boxHigh = vec3(snapshot.boundsMax) + vec3(1.0f);
+    vec3 latticeLow(0.0f), latticeHigh(0.0f);
+    for (int corner = 0; corner < 8; corner++) {
+        vec3 pick(corner & 1 ? boxHigh.x : boxLow.x,
+                  corner & 2 ? boxHigh.y : boxLow.y,
+                  corner & 4 ? boxHigh.z : boxLow.z);
+        vec3 world = partSpace.latticeOrigin +
+                     partRotation * ((pick - vec3(partSpace.coordOrigin)) * partSpace.voxelSize);
+        vec3 local = (glm::transpose(glm::mat3_cast(lattice.rotation)) *
+                      (world - lattice.latticeOrigin)) / lattice.voxelSize +
+                     vec3(lattice.coordOrigin);
+        latticeLow = corner == 0 ? local : projv::core::min(latticeLow, local);
+        latticeHigh = corner == 0 ? local : projv::core::max(latticeHigh, local);
+    }
+
+    // One cell of margin on each side: the corner projection is exact but the cell a corner falls in
+    // is decided by a floor, and a part face sitting exactly on a cell boundary is the common case
+    // under Snap 90 rather than a rare one.
+    ivec3 cellMin(int(std::floor(latticeLow.x)) - 1, int(std::floor(latticeLow.y)) - 1,
+                  int(std::floor(latticeLow.z)) - 1);
+    ivec3 cellMax(int(std::ceil(latticeHigh.x)) + 1, int(std::ceil(latticeHigh.y)) + 1,
+                  int(std::ceil(latticeHigh.z)) + 1);
+    ivec3 walkSize = cellMax - cellMin + ivec3(1);
+    size_t walk = size_t(walkSize.x) * size_t(walkSize.y) * size_t(walkSize.z);
+    cells.walkCells += walk;
+    if (cells.walkCells > budget) return false;
+
+    cells.coords.reserve(cells.coords.size() + snapshot.count);
+    cells.colors.reserve(cells.colors.size() + snapshot.count);
+    for (int z = cellMin.z; z <= cellMax.z; z++) {
+        for (int y = cellMin.y; y <= cellMax.y; y++) {
+            for (int x = cellMin.x; x <= cellMax.x; x++) {
+                ivec3 cell(x, y, z);
+                // The pull: this cell's centre, back through the part's transform, into the part's
+                // own voxel space.
+                ivec3 source = worldToComponentVoxel(partSpace, componentVoxelToWorld(lattice, cell));
+                if (!snapshot.inBounds(source)) continue;
+                size_t index = snapshot.index(source);
+                if (!snapshot.occupied[index]) continue;
+                cells.coords.push_back(cell);
+                // The part voxel's own colour, not the palette's current entry -- the same principle
+                // Extrude follows in taking its source voxel's material. A lifted region keeps its
+                // pattern; a shape sculpted in two colours keeps both.
+                cells.colors.push_back(snapshot.colors[index]);
+            }
+        }
+    }
+    return true;
+}
+
+// The cached form. Recomputed only when the part has actually moved since the last pull, which is
+// what keeps a ten-part stack from re-walking ten oriented bounding boxes every time one of them is
+// nudged a voxel.
+static bool cachedPartCells(const projv::Scene& scene, Part& part,
+                            const ComponentVoxelSpace& lattice, size_t budget) {
+    if (part.component >= scene.components.size()) return false;
+    const projv::ComponentRecord& record = scene.components[part.component];
+    if (part.cacheValid &&
+        record.localPosition == part.cachePosition &&
+        record.localRotation == part.cacheRotation &&
+        record.paletteVersion == part.cachePaletteVersion) {
+        return !part.cacheOverBudget;
+    }
+
+    PartCells pulled = pullPartIntoLattice(scene, part, lattice, budget);
+    part.cells = std::move(pulled.coords);
+    part.cellColors = std::move(pulled.colors);
+    part.cacheValid = true;
+    part.cacheOverBudget = pulled.overBudget || !pulled.valid;
+    part.cachePosition = record.localPosition;
+    part.cacheRotation = record.localRotation;
+    part.cachePaletteVersion = record.paletteVersion;
+    return !part.cacheOverBudget;
+}
+
+// What an asset's contents currently resolve to.
+struct Fold {
+    bool valid = false;
+    bool overBudget = false;
+    size_t partCount = 0;      // Parts that contributed (op != None and non-empty).
+    size_t walkCells = 0;
+    std::vector<projv::core::ivec3> coords;
+    std::vector<uint32_t> colors;
+};
+
+// The fold: the parts' cell sets combined left to right by their ops, from an empty accumulator.
+//
+// **The first contributing row seeds the accumulator whatever its op says.** An empty accumulator
+// intersected with anything is empty, and an empty accumulator subtracted from is still empty, so a
+// stack whose first row is Intersect or Subtract would silently resolve to nothing at all -- an
+// outcome with no visible cause. Seeding makes row zero mean "this is what we start from", which is
+// the only thing it can usefully mean, and the panel greys that row's op control to say so.
+// `children` is which rows take part and in what order -- the node's whole child list for the
+// ordinary resolve, and just the picked rows for a merge of a selection.
+//
+// `placeAsUnion` is the one difference between the two callers. A `Place` row is not folded by the
+// resolve, because placement is not composition -- but it *is* drawn, so when the user picks rows
+// and asks for them to become one .data, leaving the placed ones out would merge less than what is
+// on screen and in front of them. Selecting a row is the statement that it should be in there.
+static Fold foldChildren(const projv::Scene& scene, EditorState& editor, Resolve& resolve,
+                         const std::vector<projv::ComponentHandle>& children,
+                         size_t partBudget, size_t resultBudget, bool placeAsUnion) {
+    using projv::core::ivec3;
+    Fold fold;
+
+    if (resolve.node >= scene.components.size()) return fold;
+    ComponentVoxelSpace lattice = resolveLattice(scene, resolve);
+    if (!lattice.valid) return fold;
+
+    // Keyed by packed coordinate; the coordinate itself rides along in the value because
+    // packVoxelKey masks rather than encodes and is not meant to be inverted.
+    std::unordered_map<uint64_t, std::pair<ivec3, uint32_t>> accumulator;
+    bool seeded = false;
+
+    for (projv::ComponentHandle child : children) {
+        if (child >= scene.components.size()) continue;
+        const projv::ComponentRecord& record = scene.components[child];
+        if (record.name == "__deleted__") continue;
+        BooleanOp op = record.op;
+        if (op == BooleanOp::None) {
+            if (!placeAsUnion) continue;
+            op = BooleanOp::Union;
+        }
+        // A Grid is many blocks across many cells; folding one into a single-lattice result is a
+        // rebuild rather than a bake. Treated as placed whatever it carries -- and saveComposeToDisk
+        // writes it as `none` for the same reason, so the file never promises what this refuses.
+        if (record.kind == projv::ComponentKind::Grid) continue;
+
+        // **Every child of the node is a member of the stack.** `ensurePart` rather than `findPart`,
+        // because a Part record is an editor-side cache of what a component last folded to -- not a
+        // statement about whether it is allowed to fold. Looking one up and skipping the row when it
+        // was missing made membership depend on when the component happened to be created: adopt()
+        // runs once per resolve, so anything added afterwards -- a merged .data, a New Data, a
+        // duplicate of either -- never acquired one, and was skipped for the rest of the session.
+        // Silently: the row is still listed, still carries an op you can set, and contributes
+        // nothing, so subtracting one finished .data from another resolved to nothing at all with no
+        // visible cause.
+        Part& part = ensurePart(scene, editor, child);
+        if (!cachedPartCells(scene, part, lattice, partBudget)) {
+            fold.overBudget = true;
+            return fold;
+        }
+        fold.walkCells += part.cells.size();
+        if (part.cells.empty()) continue;
+        fold.partCount++;
+
+        if (!seeded) {
+            accumulator.reserve(part.cells.size() * 2);
+            for (size_t index = 0; index < part.cells.size(); index++) {
+                accumulator[packVoxelKey(part.cells[index])] =
+                    { part.cells[index], part.cellColors[index] };
+            }
+            seeded = true;
+            continue;
+        }
+
+        switch (op) {
+            case BooleanOp::Union:
+                for (size_t index = 0; index < part.cells.size(); index++) {
+                    accumulator[packVoxelKey(part.cells[index])] =
+                        { part.cells[index], part.cellColors[index] };
+                }
+                break;
+
+            case BooleanOp::Subtract:
+                for (const ivec3& cell : part.cells) accumulator.erase(packVoxelKey(cell));
+                break;
+
+            case BooleanOp::Intersect: {
+                // The accumulator's colours survive, so this filters rather than rebuilds: the part
+                // says which cells stay, and the value already stored says what colour they are.
+                std::unordered_set<uint64_t> keep;
+                keep.reserve(part.cells.size() * 2);
+                for (const ivec3& cell : part.cells) keep.insert(packVoxelKey(cell));
+                for (auto entry = accumulator.begin(); entry != accumulator.end(); ) {
+                    entry = keep.count(entry->first) ? std::next(entry) : accumulator.erase(entry);
+                }
+                break;
+            }
+
+            case BooleanOp::None:
+                break;   // Filtered out above.
+        }
+
+        if (accumulator.size() > resultBudget) {
+            fold.overBudget = true;
+            return fold;
+        }
+    }
+
+    fold.valid = true;
+    fold.coords.reserve(accumulator.size());
+    fold.colors.reserve(accumulator.size());
+    for (const auto& entry : accumulator) {
+        fold.coords.push_back(entry.second.first);
+        fold.colors.push_back(entry.second.second);
+    }
+    return fold;
+}
+
+// The whole node, which is what the per-frame resolve folds. A copy of the child list, because a
+// pull queues nothing but the list is read across calls that may touch the scene, and iterating a
+// vector owned by a record we hand out non-const is a habit worth not having.
+static Fold foldNode(const projv::Scene& scene, EditorState& editor, Resolve& resolve,
+                                 size_t partBudget, size_t resultBudget) {
+    if (resolve.node >= scene.components.size()) return Fold();
+    std::vector<projv::ComponentHandle> children = scene.components[resolve.node].children;
+    return foldChildren(scene, editor, resolve, children, partBudget, resultBudget, false);
+}
+
+// Tears down an asset's result component and puts its contents back on screen.
+static void destroyResolveResult(projv::Scene& scene, EditorState& editor, Resolve& resolve) {
+    if (resolve.result != projv::INVALID_COMPONENT_HANDLE) {
+        deleteComponent(scene, editor, resolve.result);
+        resolve.result = projv::INVALID_COMPONENT_HANDLE;
+    }
+    if (resolve.resultShown) {
+        if (resolve.node < scene.components.size()) {
+            for (projv::ComponentHandle child : scene.components[resolve.node].children) {
+                setComponentRendered(scene, editor, child, true);
+            }
+        }
+        resolve.resultShown = false;
+    }
+    resolve.resultVoxels = 0;
+}
+
+// The summed palette versions of an asset's contents. Cheap enough to take every frame (one integer
+// read per part), which is what lets a recolour be noticed without a hook at every site that can
+// perform one.
+static uint64_t resolvePalettePeriod(const projv::Scene& scene, const Resolve& resolve) {
+    if (resolve.node >= scene.components.size()) return 0;
+    uint64_t period = 0;
+    for (projv::ComponentHandle child : scene.components[resolve.node].children) {
+        if (child < scene.components.size()) period += scene.components[child].paletteVersion;
+    }
+    return period;
+}
+
+// Rebuilds the result component from the fold, and swaps which of the two -- the result or the parts
+// -- is the thing on screen.
+//
+// This is the promotion the whole design turns on: what used to be a debug preview of one stamp's
+// merge is now the object being made, and the parts are the scaffolding you switch to when you want
+// to grab one.
+static void rebuildResult(projv::Scene& scene, EditorState& editor, Resolve& resolve) {
+    using namespace projv::core;
+    if (resolve.node >= scene.components.size()) return;
+
+    ComponentVoxelSpace lattice = resolveLattice(scene, resolve);
+    if (!lattice.valid) return;
+
+    // Taken and recorded before anything can return early. Every exit below counts as "this palette
+    // has been seen": leaving it unrecorded on the over-budget and resolves-to-nothing paths would
+    // make the poll in refreshResolves invalidate again on the very next frame, and the fold would
+    // run every frame forever -- precisely the case where it is most expensive.
+    uint64_t period = resolvePalettePeriod(scene, resolve);
+    bool paletteMoved = period != resolve.palettePeriod;
+    resolve.palettePeriod = period;
+
+    Fold fold = foldNode(scene, editor, resolve, ASSEMBLY_MAX_PREVIEW_CELLS,
+                                     ASSEMBLY_MAX_RESULT_CELLS);
+    resolve.resultStale = false;
+    resolve.resultWalkCells = fold.walkCells;
+
+    if (!fold.valid || fold.coords.empty()) {
+        // Over budget, or nothing in the stack folds to anything. Either way there is nothing honest
+        // to draw, so the parts come back and the panel says why.
+        destroyResolveResult(scene, editor, resolve);
+        resolve.resultOverBudget = fold.overBudget;
+        return;
+    }
+    resolve.resultOverBudget = false;
+
+    ivec3 minimum = fold.coords[0], maximum = fold.coords[0];
+    for (const ivec3& coord : fold.coords) {
+        minimum = projv::core::min(minimum, coord);
+        maximum = projv::core::max(maximum, coord);
+    }
+    ivec3 extent = maximum - minimum + ivec3(1);
+    int longest = std::max({extent.x, extent.y, extent.z});
+    if (longest > PART_MAX_DIMENSION) {
+        destroyResolveResult(scene, editor, resolve);
+        resolve.resultOverBudget = true;
+        return;
+    }
+
+    uint32_t resolution = smallestChunkResolutionFor(longest);
+    bool needsNewComponent = resolve.result == projv::INVALID_COMPONENT_HANDLE;
+    if (!needsNewComponent) {
+        const projv::ComponentRecord& previous = scene.components[resolve.result];
+        needsNewComponent = previous.chunkHandle >= scene.chunks.size() ||
+                            scene.chunks[previous.chunkHandle].header.resolution != resolution;
+        // A recolour starts the result's palette over. internMaterial dedupes by colour, so
+        // refilling would keep every superseded colour as a live-but-unreferenced slot -- and the
+        // palette is capped at 255 entries, so a long session of tweaking one colour would
+        // eventually fill it and the interning would start failing outright.
+        needsNewComponent = needsNewComponent || paletteMoved;
+    }
+    if (needsNewComponent) {
+        if (resolve.result != projv::INVALID_COMPONENT_HANDLE) {
+            deleteComponent(scene, editor, resolve.result);
+        }
+        // A root component, not a child of the node: the fold iterates the node's children, and a
+        // result parented under it would be folded back into itself and written to disk as a part.
+        resolve.result = projv::utils::addComponent(
+            scene, projv::ComponentKind::Chunk, "Resolve result", projv::INVALID_COMPONENT_HANDLE,
+            resolution, lattice.voxelSize);
+        if (resolve.result == projv::INVALID_COMPONENT_HANDLE) return;
+        editor.gpuFlushNeeded = true;
+    } else {
+        // Emptied rather than recreated: at an unchanged resolution the same component holds the new
+        // result exactly as well as the old one, and a component per rebuild would grow
+        // scene.components without bound over a session of arranging.
+        Part scratch;
+        scratch.component = resolve.result;
+        scratch.contentMin = ivec3(0);
+        scratch.contentMax = ivec3(int(resolution) - 1);
+        clearPartGeometry(scene, editor, scratch);
+    }
+
+    std::vector<ivec3> local;
+    local.reserve(fold.coords.size());
+    for (const ivec3& coord : fold.coords) local.push_back(coord - minimum);
+    applyVoxelSculpt(&scene, &editor, resolve.result, local, fold.colors, true);
+
+    vec3 origin = lattice.latticeOrigin +
+                  glm::mat3_cast(lattice.rotation) *
+                  (vec3(minimum - lattice.coordOrigin) * lattice.voxelSize);
+    projv::utils::setComponentTransform(scene, resolve.result, origin, lattice.rotation, 1.0f);
+    editor.gpuFlushNeeded = true;
+
+    resolve.resultVoxels = fold.coords.size();
+
+    // The parts step aside while their own result stands in for them.
+    for (projv::ComponentHandle child : scene.components[resolve.node].children) {
+        if (child >= scene.components.size()) continue;
+        setComponentRendered(scene, editor, child, scene.components[child].op == BooleanOp::None);
+    }
+    setComponentRendered(scene, editor, resolve.result, true);
+    resolve.resultShown = true;
+}
+
+// =============================================================================
+// Bringing a stack in off disk
+// =============================================================================
+
+static std::string uniqueComponentName(const projv::Scene& scene, const std::string& base);
+
+// The box a component's voxels actually occupy, in its own voxel space.
+//
+// Walked over the tree64 rather than probed cell by cell. The tree has one node per *occupied*
+// region, so the walk costs the geometry rather than the volume -- which is the difference between
+// instant and unusable on a 256^3 component, where probing would be 16.7 million tree descents.
+//
+// Returns false when there is nothing in it.
+static bool componentContentBounds(const projv::Scene& scene, projv::ComponentHandle component,
+                                   projv::core::ivec3& minimum, projv::core::ivec3& maximum) {
+    using projv::core::ivec3;
+    if (component >= scene.components.size()) return false;
+    const projv::ComponentRecord& record = scene.components[component];
+    if (record.kind != projv::ComponentKind::Chunk) return false;
+    if (record.chunkHandle >= scene.chunks.size()) return false;
+
+    const projv::Chunk& chunk = scene.chunks[record.chunkHandle];
+    int32_t poolIndex = chunk.geometryPoolIndex;
+    if (poolIndex < 0 || size_t(poolIndex) >= scene.geometryPool.size()) return false;
+    const std::vector<uint32_t>& geometry = scene.geometryPool[poolIndex].geometry;
+
+    size_t nodeCount = geometry.size() / 3;
+    if (nodeCount == 0) return false;
+
+    bool any = false;
+    // An explicit stack, matching brickMapFromTree64's traversal exactly -- the Z-order accumulated
+    // down the descent path is what recovers a voxel's position, since positions are not stored.
+    struct Pending { size_t node; uint64_t cellZOrder; };
+    std::vector<Pending> stack;
+    stack.push_back({0, 0});
+
+    while (!stack.empty()) {
+        Pending current = stack.back();
+        stack.pop_back();
+        if (current.node >= nodeCount) continue;
+
+        uint32_t mask1 = geometry[current.node * 3];
+        uint32_t mask2 = geometry[current.node * 3 + 1];
+        uint32_t data3 = geometry[current.node * 3 + 2];
+        uint64_t mask = (uint64_t(mask1) << 32) | uint64_t(mask2);
+        if (mask == 0) continue;
+
+        if (projv::tree64IsLeaf(data3)) {
+            for (uint32_t child = 0; child < 64; child++) {
+                // Bit 63 is Z-order 0 -- the convention the brick map writes with.
+                if ((mask & (1ull << (63 - child))) == 0) continue;
+                ivec3 position = projv::utils::reverseZOrderIndex(current.cellZOrder * 64 + child);
+                if (!any) {
+                    minimum = maximum = position;
+                    any = true;
+                } else {
+                    minimum = projv::core::min(minimum, position);
+                    maximum = projv::core::max(maximum, position);
+                }
+            }
+            continue;
+        }
+
+        // Children are stored contiguously in ascending Z-order from the node's own address --
+        // addPointersTree64 writes the pointer relative to the parent, so the sum is absolute.
+        size_t firstChild = current.node + (data3 >> 1);
+        uint32_t rank = 0;
+        for (uint32_t child = 0; child < 64; child++) {
+            if ((mask & (1ull << (63 - child))) == 0) continue;
+            stack.push_back({firstChild + rank, current.cellZOrder * 64 + child});
+            rank++;
+        }
+    }
+    return any;
+}
+
+// Gives a component the editor-side cache every item of an asset's contents has, if it has not got
+// one already. Everything a ComponentRecord already carries -- name, transform, op, parent -- is
+// deliberately absent from it; this is only the primitive it was made from (when it was made from
+// one) and what it last folded to.
+//
+// A component that came off disk carries no primitive: the compose schema stores geometry, not the
+// recipe that made it, so it is treated as lifted -- movable, foldable, but not resizable. Writing
+// the primitive out as a procedural source is the natural next step for the format and would make
+// these resizable again after a reload.
+//
+// `const Scene&`: this reads the scene and writes only the editor's own cache, which is what lets
+// the fold call it. It used to run at one moment only -- adopt(), when a resolve was created -- and
+// that was the whole of the bug this signature is part of fixing. See foldChildren.
+static Part& ensurePart(const projv::Scene& scene, EditorState& editor,
+                        projv::ComponentHandle component) {
+    using projv::core::ivec3;
+    auto existing = editor.parts.find(component);
+    if (existing != editor.parts.end()) return existing->second;
+
+    Part part;
+    part.component = component;
+    part.procedural = false;
+    if (componentContentBounds(scene, component, part.contentMin, part.contentMax)) {
+        ivec3 size = part.contentMax - part.contentMin + ivec3(1);
+        part.dimensions[0] = size.x;
+        part.dimensions[1] = size.y;
+        part.dimensions[2] = size.z;
+    }
+    part.voxelCount = projv::utils::getComponentVoxelCount(scene, component);
+    return editor.parts.emplace(component, std::move(part)).first->second;
+}
+
+// The voxel scale an asset's lattice runs at: whatever its contents are already at. Every part of
+// one fold must share it -- see Resolve::voxelScale -- so the first leaf that has one decides, and
+// the rest inherit it at creation.
+static float latticeScaleOf(const projv::Scene& scene, projv::ComponentHandle node) {
+    if (node >= scene.components.size()) return 0.0f;
+    for (projv::ComponentHandle child : scene.components[node].children) {
+        if (child >= scene.components.size()) continue;
+        if (scene.components[child].name == "__deleted__") continue;
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, child);
+        if (space.valid && space.voxelSize > 0.0f) return space.voxelSize;
+    }
+    return 0.0f;
+}
+
+// True when an asset's contents say they combine: at least one carries a boolean op. A folder whose
+// children are all `none` is a plain placement folder -- which is what every scene written before
+// boolean ops existed looks like, and it is left alone.
+static bool nodeHasStack(const projv::Scene& scene, projv::ComponentHandle node) {
+    if (node >= scene.components.size()) return false;
+    if (scene.components[node].kind != projv::ComponentKind::Asset) return false;
+    if (scene.components[node].name == "__deleted__") return false;
+    for (projv::ComponentHandle child : scene.components[node].children) {
+        if (child < scene.components.size() && scene.components[child].op != BooleanOp::None) return true;
+    }
+    return false;
+}
+
+// **The whole of the resolve lifetime, and it is not a user-facing object.**
+//
+// There used to be a create verb, a destroy verb, an active-assembly pointer and a load-time
+// adoption pass, all to answer "which container is this?" -- four mechanisms for a question the ops
+// on disk already answer. This runs once a frame instead: an asset whose contents carry ops has a
+// resolve, an asset whose contents do not has none, and nothing else decides.
+//
+// The open asset gets one regardless of its ops. It is where the next primitive lands, so it needs
+// a lattice before there is anything on it to derive one from.
+static void syncResolves(projv::Scene& scene, EditorState& editor) {
+    // Retire first, so a node that died this frame cannot be found again by the scan below.
+    for (size_t index = editor.resolves.size(); index-- > 0; ) {
+        Resolve& resolve = editor.resolves[index];
+        projv::ComponentHandle node = resolve.node;
+        bool alive = node < scene.components.size() &&
+                     scene.components[node].name != "__deleted__" &&
+                     scene.components[node].kind == projv::ComponentKind::Asset;
+        if (alive && (nodeHasStack(scene, node) || node == editor.openAsset)) continue;
+
+        // Its result is derived geometry that nothing will rebuild once the record is gone, so it
+        // has to come down here rather than being left as an orphan root component that saves.
+        destroyResolveResult(scene, editor, resolve);
+        editor.resolves.erase(editor.resolves.begin() + long(index));
+    }
+
+    auto adopt = [&](projv::ComponentHandle node) {
+        if (node >= scene.components.size()) return;
+        if (findResolve(editor, node)) return;
+        Resolve resolve;
+        resolve.node = node;
+        resolve.resultStale = true;
+        float scale = latticeScaleOf(scene, node);
+        resolve.voxelScale = scale > 0.0f ? scale : (editor.createVoxelScale > 0.0f
+                                                     ? editor.createVoxelScale : 1.0f);
+        editor.resolves.push_back(resolve);
+        for (projv::ComponentHandle child : scene.components[node].children) {
+            if (child < scene.components.size() && scene.components[child].name != "__deleted__") {
+                ensurePart(scene, editor, child);
+            }
+        }
+    };
+
+    for (projv::ComponentHandle handle = 0; handle < scene.components.size(); handle++) {
+        if (nodeHasStack(scene, handle)) adopt(handle);
+    }
+    if (editor.openAsset < scene.components.size() &&
+        scene.components[editor.openAsset].kind == projv::ComponentKind::Asset &&
+        scene.components[editor.openAsset].name != "__deleted__") {
+        adopt(editor.openAsset);
+    }
+}
+
+// An asset saved as *its own* compose folder has no wrapping node: saveComposeToDisk writes the
+// node's children as the folder's component list, so the folder itself is the asset and its parts
+// come back as roots. Loading that folder directly -- File > Load Scene on a saved asset --
+// therefore lands ops on components with no parent to own them.
+//
+// Given a node, rather than refused: the ops are the file saying these components combine, and an
+// asset is what that means. Every root is taken in, not only the ones carrying an op, because they
+// were all written from one contents list and a `none` row is a member of it too. The node is
+// created at identity, so reparenting moves nothing.
+//
+// Load-time only. Everything else about a resolve is derived per frame by syncResolves; this is the
+// one thing that is not derivable, because it changes the scene graph rather than reading it.
+static void wrapRootStack(projv::Scene& scene, EditorState& editor) {
+    bool rootOps = false;
+    for (const projv::ComponentRecord& record : scene.components) {
+        if (record.parent == projv::INVALID_COMPONENT_HANDLE && record.name != "__deleted__" &&
+            record.op != BooleanOp::None) {
+            rootOps = true;
+            break;
+        }
+    }
+    if (!rootOps) return;
+
+    std::vector<projv::ComponentHandle> roots;
+    for (projv::ComponentHandle handle = 0; handle < scene.components.size(); handle++) {
+        const projv::ComponentRecord& record = scene.components[handle];
+        if (record.parent != projv::INVALID_COMPONENT_HANDLE) continue;
+        if (record.name == "__deleted__") continue;
+        if (record.kind == projv::ComponentKind::Asset && nodeHasStack(scene, handle)) continue;
+        roots.push_back(handle);
+    }
+    if (roots.empty()) return;
+
+    std::filesystem::path source(editor.scenePath);
+    std::string name = source.filename().string();
+    if (name.empty()) name = source.parent_path().filename().string();
+    if (name.empty()) name = "Asset";
+
+    projv::ComponentHandle node = projv::utils::addComponent(
+        scene, projv::ComponentKind::Asset, uniqueComponentName(scene, name),
+        projv::INVALID_COMPONENT_HANDLE, CHUNK_RESOLUTION_CHOICES[0], 1.0f);
+    if (node == projv::INVALID_COMPONENT_HANDLE) return;
+    for (projv::ComponentHandle root : roots) {
+        projv::utils::setComponentParent(scene, root, node);
+    }
+    syncResolves(scene, editor);
+    projv::core::info("Wrapped {} root component(s) carrying ops into \"{}\"", roots.size(),
+                      scene.components[node].name);
+}
+
+// The voxel scale of the first leaf under a node -- what an imported asset's own lattice is, when
+// there is no open resolve whose lattice it should adopt instead.
+static float subtreeVoxelScale(const projv::Scene& scene, projv::ComponentHandle root) {
+    std::vector<projv::ComponentHandle> pending{ root };
+    while (!pending.empty()) {
+        projv::ComponentHandle current = pending.back();
+        pending.pop_back();
+        if (current >= scene.components.size()) continue;
+        const projv::ComponentRecord& record = scene.components[current];
+        if (record.name == "__deleted__") continue;
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, current);
+        if (space.valid && space.voxelSize > 0.0f) return space.voxelSize;
+        for (projv::ComponentHandle child : record.children) pending.push_back(child);
+    }
+    return 0.0f;
+}
+
+// Collapses a freshly imported subtree into one Chunk component and deletes the subtree.
+//
+// This is the fold, run at import time: pullPartIntoLattice already walks an Asset's leaves and
+// unions them, so a forty-component asset arrives as one blob, one chunk and one GPU header row.
+// Placed fifty times that is fifty header rows instead of two thousand, which is the whole reason
+// the mode exists.
+//
+// Returns the baked component, or INVALID (leaving the subtree intact) when the walk is past budget
+// -- refused rather than truncated, for the reason a half-baked object is worse than an unbaked one.
+static projv::ComponentHandle bakeImportedSubtree(projv::Scene& scene, EditorState& editor,
+                                                  projv::ComponentHandle imported,
+                                                  projv::ComponentHandle parent, float voxelScale) {
+    using namespace projv::core;
+    if (imported >= scene.components.size() || voxelScale <= 0.0f) return projv::INVALID_COMPONENT_HANDLE;
+
+    ComponentVoxelSpace lattice = latticeAtNode(scene, imported, voxelScale);
+    if (!lattice.valid) return projv::INVALID_COMPONENT_HANDLE;
+
+    // A throwaway part record: pullPartIntoLattice's Asset branch derives each leaf's content bounds
+    // itself, so nothing has to be tracked for this to work.
+    Part probe;
+    probe.component = imported;
+    PartCells cells = pullPartIntoLattice(scene, probe, lattice, ASSEMBLY_MAX_BAKE_CELLS);
+    if (cells.overBudget) {
+        editor.statusMessage = "That asset is past the bake budget - import it as a Copy instead.";
+        return projv::INVALID_COMPONENT_HANDLE;
+    }
+    if (!cells.valid || cells.coords.empty()) {
+        editor.statusMessage = "That asset has no geometry to bake.";
+        return projv::INVALID_COMPONENT_HANDLE;
+    }
+
+    ivec3 minimum = cells.coords[0], maximum = cells.coords[0];
+    for (const ivec3& coord : cells.coords) {
+        minimum = projv::core::min(minimum, coord);
+        maximum = projv::core::max(maximum, coord);
+    }
+    ivec3 extent = maximum - minimum + ivec3(1);
+    int longest = std::max({extent.x, extent.y, extent.z});
+    if (longest > PART_MAX_DIMENSION) {
+        editor.statusMessage = "That asset is " + std::to_string(longest) +
+                               " voxels across, past the " + std::to_string(PART_MAX_DIMENSION) +
+                               " limit for one component - import it as a Copy instead.";
+        return projv::INVALID_COMPONENT_HANDLE;
+    }
+
+    std::string name = scene.components[imported].name;
+    BakePlacement placement = centreBakeInChunk(extent);
+    projv::ComponentHandle baked = projv::utils::addComponent(
+        scene, projv::ComponentKind::Chunk, name, parent, placement.resolution, lattice.voxelSize);
+    if (baked == projv::INVALID_COMPONENT_HANDLE) return baked;
+
+    std::vector<ivec3> local;
+    local.reserve(cells.coords.size());
+    for (const ivec3& coord : cells.coords) local.push_back(coord - minimum + placement.offset);
+    applyVoxelSculpt(&scene, &editor, baked, local, cells.colors, true);
+
+    // Centred, and the origin steps back by the same offset so the import does not move. See
+    // centreBakeInChunk.
+    vec3 origin = lattice.latticeOrigin +
+                  glm::mat3_cast(lattice.rotation) *
+                  (vec3(minimum - placement.offset - lattice.coordOrigin) * lattice.voxelSize);
+    // Into the parent's frame, which is what localPosition is measured in.
+    mat4 toParent = parent < scene.components.size()
+                  ? glm::inverse(projv::utils::getComponentWorldMatrix(scene, parent)) : mat4(1.0f);
+    projv::utils::setComponentTransform(
+        scene, baked, vec3(toParent * vec4(origin, 1.0f)),
+        glm::normalize(glm::quat_cast(mat3(toParent)) * lattice.rotation), 1.0f);
+
+    deleteComponent(scene, editor, imported);
+    editor.gpuFlushNeeded = true;
+    return baked;
+}
+
+// Grafts the folder the Library panel asked for into the open scene, in front of the camera.
+//
+// It lands in the active resolve when there is one, as an ordinary part -- which makes an asset on
+// disk the third source a part can come from, identical in every way that matters to a primitive and
+// a lifted region: a thing with geometry, a transform, and an op. That is the loop closing. The
+// machine's output is its own input.
+//
+// With no resolve open it lands as a plain root component, because "put this in my scene" is a
+// reasonable thing to want on its own and should not conjure a CSG stack to hold it.
+static void importPendingAsset(projv::Scene& scene, EditorState& editor) {
+    using namespace projv::core;
+    if (editor.pendingImportPath.empty()) return;
+    std::string folder = editor.pendingImportPath;
+    editor.pendingImportPath.clear();
+
+    vec3 worldCentre = editor.cameraPosition +
+                       computeCameraDirection(editor) * editor.shapePlaceDistance;
+
+    projv::ComponentHandle parent = activeStackNode(scene, editor);
+    Resolve* resolve = findResolve(editor, parent);
+
+    // The import's transform is local to whatever it is parented under, so the camera point has to
+    // come down through that node's world transform before it means anything.
+    vec3 localCentre = worldCentre;
+    if (parent != projv::INVALID_COMPONENT_HANDLE) {
+        localCentre = vec3(glm::inverse(projv::utils::getComponentWorldMatrix(scene, parent)) *
+                           vec4(worldCentre, 1.0f));
+    }
+
+    projv::ComponentHandle imported = projv::utils::instantiateComposeInto(
+        scene, folder, parent, localCentre, quat(1.0f, 0.0f, 0.0f, 0.0f), 1.0f);
+    if (imported == projv::INVALID_COMPONENT_HANDLE) {
+        editor.statusMessage = "Could not import " + folder + " - see the log.";
+        return;
+    }
+    editor.gpuFlushNeeded = true;
+    editor.cameraMovedByInterface = true;
+
+    AssetCopyMode mode = editor.pendingImportMode;
+
+    // All three modes are identical in memory -- the geometry has to be loaded either way for the
+    // renderer to see it -- so what happens here is only ever about what a later save will write.
+    if (mode == AssetCopyMode::Bake) {
+        float scale = resolve ? resolve->voxelScale : subtreeVoxelScale(scene, imported);
+        projv::ComponentHandle baked = bakeImportedSubtree(scene, editor, imported, parent, scale);
+        if (baked == projv::INVALID_COMPONENT_HANDLE) {
+            // bakeImportedSubtree explains why in the status bar and leaves the subtree standing,
+            // so the import is still there as a Copy rather than being lost to a refused bake.
+            mode = AssetCopyMode::Copy;
+        } else {
+            imported = baked;
+        }
+    } else if (mode == AssetCopyMode::Link) {
+        // instantiateComposeInto builds the wrapper node fresh, so nothing has marked it yet. The
+        // wrapper is what becomes the reference; whatever it expanded to underneath is never written,
+        // because saveComposeToDisk stops descending at a linked node.
+        scene.components[imported].externalSource = true;
+        scene.components[imported].sourcePath = std::filesystem::absolute(folder).string();
+    }
+
+    // A folder that was itself saved as a stack comes back as one, nested inside this one. It
+    // resolves to its own result first, and that result is what the parent stack folds -- which is
+    // the whole of nested CSG, and it costs one recursive walk rather than a second evaluator.
+    syncResolves(scene, editor);
+    // Re-looked-up rather than carried across: syncResolves appends to editor.resolves, and a vector
+    // that grows moves everything in it.
+    resolve = findResolve(editor, parent);
+
+    if (resolve) {
+        // A **baked** import already sits in the asset's own lattice -- that is what baking it
+        // did -- so it can be unioned straight away and behaves like any other part.
+        //
+        // A Copy or a Link arrives at its *own* voxel scale, so it lands as Place: folding it
+        // immediately would resample it before the user has said they want that. Setting the row's
+        // op is one click, and it is the click that says "yes, resolve this into my lattice".
+        bool baked = scene.components[imported].kind == projv::ComponentKind::Chunk;
+        scene.components[imported].op = baked ? editor.shapeOp : BooleanOp::None;
+
+        Part part;
+        part.component = imported;
+
+        part.procedural = false;
+        part.voxelCount = projv::utils::getComponentVoxelCount(scene, imported);
+        if (baked) componentContentBounds(scene, imported, part.contentMin, part.contentMax);
+        editor.parts[imported] = std::move(part);
+        invalidateResolve(editor, *resolve);
+    }
+
+    selectComponentInEditor(scene, editor, imported, true);
+    editor.statusMessage = std::string(AssetCopyModeLabel(mode)) + " of " +
+                           scene.components[imported].name +
+                           (resolve ? " into " + scene.components[resolve->node].name
+                                     : std::string(" as a root component")) +
+                           " - " + formatCompactCount(projv::utils::getComponentVoxelCount(scene, imported)) +
+                           " voxel(s)" +
+                           (mode == AssetCopyMode::Link ? " (linked - edits at the source propagate)."
+                                                        : ".");
+}
+
+
+// Takes down every resolve's resolved result and marks it stale, so the next frame rebuilds it.
+//
+// What a save needs before it walks the scene (see saveDocumentTo), and the honest way to express
+// "this geometry is derived": rather than teaching the writer a name to skip, the derived thing is
+// simply not there while the writer runs.
+static void dropResolveResults(projv::Scene& scene, EditorState& editor) {
+    for (Resolve& resolve : editor.resolves) {
+        destroyResolveResult(scene, editor, resolve);
+        resolve.resultStale = true;
+        resolve.movedAtTime = 0.0;   // No settle to wait out: nothing moved, the result was removed.
+    }
+}
+
+// Every resolve's result, brought up to date once per frame after the gizmo and the keyboard have
+// had their say -- but only for the ones that have come to rest.
+//
+// A rebuild is a bake's worth of work, so it waits out the gesture rather than running on every frame
+// of it. While an asset is moving its result is torn down and its contents come back, which is both
+// the honest picture (a result folded two frames ago is not what the stack says now) and the
+// responsive one: the drag moves the part itself, at frame rate, with no fold in the loop.
+static void refreshResolves(projv::Scene& scene, EditorState& editor) {
+    double now = ImGui::GetTime();
+    bool anySettling = false;
+
+    bool isolating = editor.isolateOpen && editor.openAsset < scene.components.size();
+
+    for (Resolve& resolve : editor.resolves) {
+        if (resolve.node >= scene.components.size()) continue;
+
+        // An asset that isolation has hidden is left exactly as it stands, stale and untouched. Its
+        // result is not on screen, so folding it would be work nobody can see -- and every branch
+        // below shows or hides components, which would undo the hiding one asset at a time.
+        if (isolating && !isSelfOrAncestorOf(scene, editor.openAsset, resolve.node) &&
+            resolve.node != editor.openAsset) {
+            continue;
+        }
+
+        // A recolour changes what the fold is made of without moving anything, so there is no other
+        // signal that the result is out of date -- and the symptom is precise and confusing: the
+        // part changes colour immediately (its palette went straight to the GPU) while the result
+        // keeps the old one until something happens to move it.
+        //
+        // Polled rather than hooked. Palette edits arrive from the picker, the eyedropper, entry
+        // add and remove, and the undo and redo closures of all of them; one integer read per part
+        // per frame catches every one of those without a call any of them could forget.
+        uint64_t period = resolvePalettePeriod(scene, resolve);
+        if (period != resolve.palettePeriod && !resolve.resultStale) {
+            invalidateResolve(editor, resolve);
+        }
+
+        bool moving = resolve.resultStale && (now - resolve.movedAtTime) < ASSEMBLY_SETTLE_SECONDS;
+        if (moving) anySettling = true;
+
+        // Showing the parts is a way of looking, so it is answered before the settle gate: there is
+        // no result to build and nothing to wait for.
+        if (editor.showSources) {
+            if (resolve.resultShown || resolve.result != projv::INVALID_COMPONENT_HANDLE) {
+                destroyResolveResult(scene, editor, resolve);
+            }
+            if (resolve.resultStale) {
+                // Only when something actually changed: this walks every part's chunk against the
+                // loose list, and running it on a still frame would be a scan per part per frame to
+                // discover that nothing moved.
+                for (projv::ComponentHandle child : scene.components[resolve.node].children) {
+                    setComponentRendered(scene, editor, child, true);
+                }
+                resolve.resultStale = false;
+                // There is no result to recolour while the parts are what is drawn, but the poll
+                // above still has to be told the palette has been seen -- otherwise it invalidates
+                // again next frame and this walk runs on every one of them.
+                resolve.palettePeriod = period;
+            }
+            continue;
+        }
+
+        if (moving) {
+            // Mid-gesture: the parts are what is drawn, and the stale result comes down rather than
+            // hanging around describing where things used to be.
+            if (resolve.resultShown) destroyResolveResult(scene, editor, resolve);
+            continue;
+        }
+        // Staleness alone, not staleness-or-nothing-shown. A stack that folds to nothing, or one
+        // past the live budget, leaves no result component behind -- and testing for its absence
+        // would re-run that fold on every frame forever, which is precisely the case where the fold
+        // is most expensive. It is rebuilt when something invalidates it, and not otherwise.
+        if (!resolve.resultStale) continue;
+        rebuildResult(scene, editor, resolve);
+    }
+
+    editor.resolveSettling = anySettling;
+}
+
+
+// =============================================================================
+// Rebuilding an asset from a record
+// =============================================================================
+//
+// Everything needed to bring a whole resolve back after it has been baked or deleted.
+//
+// A part's recipe carries its *voxels* rather than only its primitive (kind and dimensions), because
+// a part can be sculpted and painted while the resolve is open -- rebuilding it from the primitive
+// would silently discard those edits, and undo has to put back what was actually there. The
+// primitive is carried too, so a revived part is still resizable.
+
+struct PartRecipe {
+    std::string name;
+    BooleanOp op = BooleanOp::Union;
+
+    bool procedural = false;
+    ShapeKind kind = ShapeKind::Box;
+    int dimensions[3] = {16, 16, 16};
+    bool hollow = false;
+    int wallThickness = 1;
+    uint32_t color = 0xFFFFFFFFu;
+
+    bool cutFromSource = false;
+    projv::ComponentHandle cutSource = projv::INVALID_COMPONENT_HANDLE;
+    std::vector<projv::core::ivec3> cutCoords;
+    std::vector<uint32_t> cutColors;
+
+    uint32_t resolution = 4;
+    float voxelScale = 1.0f;
+    projv::core::vec3 position = projv::core::vec3(0.0f);
+    projv::core::quat rotation = projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f);
+
+    std::vector<projv::core::ivec3> coords;    // Part-local voxel coordinates.
+    std::vector<uint32_t> colors;
+};
+
+struct NodeRecipe {
+    std::string name = "Resolve";
+    projv::ComponentHandle parent = projv::INVALID_COMPONENT_HANDLE;
+    float voxelScale = 1.0f;
+    projv::core::vec3 position = projv::core::vec3(0.0f);
+    projv::core::quat rotation = projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    float scale = 1.0f;
+    std::vector<PartRecipe> parts;
+};
+
+static PartRecipe recipeFromPart(const projv::Scene& scene, const Part& part) {
+    PartRecipe recipe;
+    if (part.component >= scene.components.size()) return recipe;
+
+    const projv::ComponentRecord& record = scene.components[part.component];
+    recipe.name = record.name;
+    recipe.op = record.op;
+    recipe.position = record.localPosition;
+    recipe.rotation = record.localRotation;
+    if (record.chunkHandle < scene.chunks.size()) {
+        recipe.resolution = scene.chunks[record.chunkHandle].header.resolution;
+        recipe.voxelScale = scene.chunks[record.chunkHandle].header.voxelScale;
+    }
+
+    recipe.procedural = part.procedural;
+    recipe.kind = part.kind;
+    recipe.dimensions[0] = part.dimensions[0];
+    recipe.dimensions[1] = part.dimensions[1];
+    recipe.dimensions[2] = part.dimensions[2];
+    recipe.hollow = part.hollow;
+    recipe.wallThickness = part.wallThickness;
+    recipe.color = part.color;
+    recipe.cutFromSource = part.cutFromSource;
+    recipe.cutSource = part.cutSource;
+    recipe.cutCoords = part.cutCoords;
+    recipe.cutColors = part.cutColors;
+
+    snapshotToLists(snapshotPart(scene, part), recipe.coords, recipe.colors);
+    return recipe;
+}
+
+static NodeRecipe recipeFromNode(const projv::Scene& scene, const EditorState& editor,
+                                         const Resolve& resolve) {
+    NodeRecipe recipe;
+    if (resolve.node >= scene.components.size()) return recipe;
+
+    const projv::ComponentRecord& node = scene.components[resolve.node];
+    recipe.name = node.name;
+    recipe.parent = node.parent;
+    recipe.position = node.localPosition;
+    recipe.rotation = node.localRotation;
+    recipe.scale = node.localScale;
+    recipe.voxelScale = resolve.voxelScale;
+
+    for (projv::ComponentHandle child : node.children) {
+        const Part* part = findPart(editor, child);
+        if (!part) continue;
+        PartRecipe partRecipe = recipeFromPart(scene, *part);
+        if (partRecipe.coords.empty()) continue;
+        recipe.parts.push_back(std::move(partRecipe));
+    }
+    return recipe;
+}
+
+static void selectComponentInEditor(projv::Scene& scene, EditorState& editor,
+                                    projv::ComponentHandle handle, bool reveal);
+
+// Move an existing child to a position in its parent's list. The stack *is* the child list in order,
+// so this is what keeps a partial merge from also being a reorder -- and it is the same permutation
+// the contents panel performs when a row is dragged.
+static void reorderChildTo(projv::Scene& scene, projv::ComponentHandle node,
+                           projv::ComponentHandle child, size_t index) {
+    if (node >= scene.components.size()) return;
+    std::vector<projv::ComponentHandle>& order = scene.components[node].children;
+    auto at = std::find(order.begin(), order.end(), child);
+    if (at == order.end()) return;
+    order.erase(at);
+    if (index > order.size()) index = order.size();
+    order.insert(order.begin() + index, child);
+}
+
+// Build rows back into an asset that already exists, at a given position. Returns what it created.
+//
+// Split out of materialiseNode so that undo of a *merge* and undo of a whole-node bake go down one
+// path: the difference between them is only whether the container has to be rebuilt first, and a
+// row that came back by one route should be the same kind of object as one that came back by the
+// other.
+static std::vector<projv::ComponentHandle> materialisePartsInto(
+        projv::Scene& scene, EditorState& editor, projv::ComponentHandle node,
+        const std::vector<PartRecipe>& recipes, size_t insertAt) {
+    std::vector<projv::ComponentHandle> created;
+    if (node >= scene.components.size()) return created;
+
+    for (const PartRecipe& partRecipe : recipes) {
+        projv::ComponentHandle component = createPartComponent(
+            scene, editor, node, partRecipe.name.empty() ? "Part" : partRecipe.name.c_str(),
+            partRecipe.resolution, partRecipe.voxelScale);
+        if (component == projv::INVALID_COMPONENT_HANDLE) continue;
+        scene.components[component].op = partRecipe.op;
+
+        Part part;
+        part.component = component;
+
+        part.procedural = partRecipe.procedural;
+        part.kind = partRecipe.kind;
+        part.dimensions[0] = partRecipe.dimensions[0];
+        part.dimensions[1] = partRecipe.dimensions[1];
+        part.dimensions[2] = partRecipe.dimensions[2];
+        part.hollow = partRecipe.hollow;
+        part.wallThickness = partRecipe.wallThickness;
+        part.color = partRecipe.color;
+        part.cutFromSource = partRecipe.cutFromSource;
+        part.cutSource = partRecipe.cutSource;
+        part.cutCoords = partRecipe.cutCoords;
+        part.cutColors = partRecipe.cutColors;
+        editor.parts[component] = std::move(part);
+
+        fillPart(scene, editor, editor.parts[component], partRecipe.coords, partRecipe.colors);
+        applyComponentTransform(&scene, &editor, component, partRecipe.position, partRecipe.rotation, 1.0f);
+        created.push_back(component);
+    }
+
+    // createPartComponent appends, so the rows arrive at the end however they were ordered before.
+    // Put them back where they came from, in their own order.
+    for (size_t index = 0; index < created.size(); index++) {
+        reorderChildTo(scene, node, created[index], insertAt + index);
+    }
+    return created;
+}
+
+// Builds an asset back into the scene from a recipe. Returns the new node handle. The single path
+// by which undo and redo bring a baked asset back, so a revived one is the same kind of object as
+// one that was built by hand.
+static projv::ComponentHandle materialiseNode(projv::Scene& scene, EditorState& editor,
+                                                  const NodeRecipe& recipe) {
+    projv::ComponentHandle node = projv::utils::addComponent(
+        scene, projv::ComponentKind::Asset, recipe.name, recipe.parent,
+        CHUNK_RESOLUTION_CHOICES[0], recipe.voxelScale);   // Both ignored for an Asset.
+    if (node == projv::INVALID_COMPONENT_HANDLE) return node;
+    projv::utils::setComponentTransform(scene, node, recipe.position, recipe.rotation, recipe.scale);
+
+    Resolve resolve;
+    resolve.node = node;
+    resolve.voxelScale = recipe.voxelScale;
+    resolve.resultStale = true;
+    editor.resolves.push_back(resolve);
+
+    materialisePartsInto(scene, editor, node, recipe.parts, 0);
+
+    openAsset(scene, editor, node);
+    if (Resolve* placed = findResolve(editor, node)) invalidateResolve(editor, *placed);
+    editor.gpuFlushNeeded = true;
+    return node;
+}
+
+// =============================================================================
+// Resolve lifecycle
+// =============================================================================
+
+// A unique name in the scene, so two assets made in one session are told apart in the contents list
+// and do not collide when they are written to neighbouring folders on disk.
+static std::string uniqueComponentName(const projv::Scene& scene, const std::string& base) {
+    auto taken = [&scene](const std::string& candidate) {
+        for (const projv::ComponentRecord& record : scene.components) {
+            if (record.name == candidate) return true;
+        }
+        return false;
+    };
+    if (!taken(base)) return base;
+    for (int suffix = 2; suffix < 10000; suffix++) {
+        std::string candidate = base + " " + std::to_string(suffix);
+        if (!taken(candidate)) return candidate;
+    }
+    return base;
+}
+
+// A new, empty asset, opened.
+//
+// `voxelScale` is the lattice everything placed into it will inherit -- see Resolve::voxelScale for
+// why one asset means one lattice. The node is an ordinary ComponentKind::Asset with no properties
+// the format does not already have; the resolve that goes with it is picked up by syncResolves on
+// the next call, so nothing here has to register anything.
+static projv::ComponentHandle createAssetNode(projv::Scene& scene, EditorState& editor,
+                                              projv::ComponentHandle parent, float voxelScale) {
+    std::string name = uniqueComponentName(scene, "New Asset");
+    projv::ComponentHandle node = projv::utils::addComponent(
+        scene, projv::ComponentKind::Asset, name, parent, CHUNK_RESOLUTION_CHOICES[0], voxelScale);
+    if (node == projv::INVALID_COMPONENT_HANDLE) {
+        editor.statusMessage = "Could not create the asset (see log).";
+        return node;
+    }
+
+    Resolve resolve;
+    resolve.node = node;
+    resolve.voxelScale = voxelScale > 0.0f ? voxelScale : 1.0f;
+    editor.resolves.push_back(resolve);
+    editor.gpuFlushNeeded = true;
+    return node;
+}
+
+// The voxel scale a new asset should adopt: whatever the user is already working at, so that a form
+// built beside an existing component can be baked into it without a resample. Falls back to the New
+// Data component setting, which is the same answer every other creation path gives.
+static float suggestedVoxelScale(const projv::Scene& scene, const EditorState& editor) {
+    projv::ComponentHandle reference = editor.selectedComponent;
+    if (reference < scene.components.size()) {
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, reference);
+        if (space.valid && space.voxelSize > 0.0f) return space.voxelSize;
+    }
+    for (projv::ComponentHandle handle = 0; handle < scene.components.size(); handle++) {
+        if (scene.components[handle].name == "__deleted__") continue;
+        if (isDerivedResult(editor, handle)) continue;
+        if (findPart(editor, handle)) continue;
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, handle);
+        if (space.valid && space.voxelSize > 0.0f) return space.voxelSize;
+    }
+    return editor.createVoxelScale > 0.0f ? editor.createVoxelScale : 1.0f;
+}
+
+// Makes `node` the edit root: what the contents list shows, what the breadcrumb ends at, and where
+// the next placed primitive lands.
+//
+// INVALID_COMPONENT_HANDLE opens the document itself. Anything that is not an Asset is refused
+// rather than silently ignored -- a Chunk holds voxels, not contents, and "open" would have nothing
+// to mean. Selecting it, which is how you edit one, is a different verb and is unaffected.
+static void openAsset(projv::Scene& scene, EditorState& editor, projv::ComponentHandle node) {
+    if (node != projv::INVALID_COMPONENT_HANDLE) {
+        if (node >= scene.components.size()) return;
+        if (scene.components[node].kind != projv::ComponentKind::Asset) return;
+        if (scene.components[node].name == "__deleted__") return;
+    }
+    if (editor.openAsset == node) return;
+    editor.openAsset = node;
+    editor.openAssetChanged = true;
+    // Set here rather than at each call site: what isolation *would* hide changes with every open,
+    // and a caller that forgot this would leave the viewport showing the previous asset's neighbours
+    // with no way to notice but the picture.
+    editor.isolationDirty = true;
+    // Opening an asset says which one you mean, so it is also the selection -- otherwise the gizmo
+    // and the Inspector would still be pointed at whatever was chosen before, one level up, and
+    // moving "this" would move something else.
+    if (node != projv::INVALID_COMPONENT_HANDLE) {
+        editor.selectedComponent = node;
+        editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, node);
+        editor.selectionOutlineValid = false;
+    }
+    syncResolves(scene, editor);
+}
+
+// Where the next placed part goes: the open asset, and nothing else.
+//
+// This used to be a three-branch guess -- follow the selection into its container, or take the
+// selection if it *was* a container, or fall back to whatever was used last -- because "which
+// container am I adding to?" had no single answer. Opening one is that answer, so the guess is gone
+// and with it the case where a stray click in a panel silently retargeted the tool.
+static projv::ComponentHandle activeStackNode(const projv::Scene& scene, EditorState& editor) {
+    if (editor.openAsset < scene.components.size() &&
+        scene.components[editor.openAsset].name != "__deleted__") {
+        return editor.openAsset;
+    }
+    return projv::INVALID_COMPONENT_HANDLE;
+}
+
+// The open asset's resolve, creating and opening an asset if the document itself is open. This is
+// what makes "Ctrl+T, click" work with no setup at all: the first click builds the asset the
+// primitive needs, so the tool never has to ask what you are editing before you have made anything.
+static Resolve* ensureStackNode(projv::Scene& scene, EditorState& editor) {
+    projv::ComponentHandle node = activeStackNode(scene, editor);
+    if (node == projv::INVALID_COMPONENT_HANDLE) {
+        node = createAssetNode(scene, editor, projv::INVALID_COMPONENT_HANDLE,
+                               suggestedVoxelScale(scene, editor));
+        if (node == projv::INVALID_COMPONENT_HANDLE) return nullptr;
+        openAsset(scene, editor, node);
+    }
+    return findResolve(editor, node);
+}
+
+// How far a duplicate is stepped off the thing it was copied from, in voxels of the lattice it
+// sits in.
+//
+// A few, deliberately -- not one bounding box, the way a lifted region is offset. The point is that
+// the copy is *findable*: exactly on top of the original it is invisible and every later click hits
+// whichever of the two the ray reaches first, so "nothing happened" is the only available reading.
+// A few voxels is enough to see the seam and close enough that the copy is still where you meant to
+// put it.
+static constexpr int DUPLICATE_OFFSET_VOXELS = 4;
+
+// Duplicate, as the editor means it: the copy lands beside the original, selected, and carrying
+// everything about the original that is not geometry.
+//
+// utils::duplicateComponent does the scene-graph half. What it cannot know is the editor's own
+// record of a placed shape -- the primitive it was rasterised from -- so a duplicated box came back
+// as an unresizable lump. Copying the Part is what keeps a duplicate the same *kind of thing* as
+// what it was copied from.
+static projv::ComponentHandle duplicateComponentInEditor(projv::Scene& scene, EditorState& editor,
+                                                         projv::ComponentHandle source) {
+    using namespace projv::core;
+    if (source >= scene.components.size()) return projv::INVALID_COMPONENT_HANDLE;
+    if (scene.components[source].name == "__deleted__") return projv::INVALID_COMPONENT_HANDLE;
+
+    projv::ComponentHandle parent = ownerOf(scene, source);
+    projv::ComponentHandle copy = projv::utils::duplicateComponent(scene, source, parent);
+    if (copy == projv::INVALID_COMPONENT_HANDLE) {
+        editor.statusMessage = "Could not duplicate " + scene.components[source].name + " (see log).";
+        return copy;
+    }
+
+    // The editor's half of what the source was. Copied wholesale and then re-pointed, so a
+    // duplicated primitive is still a primitive -- same kind, same dimensions, still resizable.
+    // `cutFromSource` is deliberately dropped: a cut's restore list belongs to the one component
+    // that made the cut, and a second component offering to put the same voxels back would put them
+    // back twice.
+    if (const Part* sourcePart = findPart(editor, source)) {
+        Part duplicated = *sourcePart;
+        duplicated.component = copy;
+        duplicated.cacheValid = false;
+        duplicated.cutFromSource = false;
+        duplicated.cutSource = projv::INVALID_COMPONENT_HANDLE;
+        duplicated.cutCoords.clear();
+        duplicated.cutColors.clear();
+        editor.parts[copy] = std::move(duplicated);
+    }
+
+    // Stepped off along the lattice the copy sits in, so the offset is a whole number of voxels and
+    // Snap 90 has nothing to undo. Local X of the parent frame: it is the axis the lattice is built
+    // on, so this is exactly the nudge the arrow keys give.
+    float voxel = 0.0f;
+    if (const Resolve* owner = findResolve(editor, parent)) {
+        voxel = owner->voxelScale;
+    }
+    if (voxel <= 0.0f) {
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, copy);
+        if (space.valid && space.voxelSize > 0.0f) voxel = space.voxelSize;
+    }
+    if (voxel <= 0.0f) voxel = 1.0f;
+
+    const projv::ComponentRecord& record = scene.components[copy];
+    applyComponentTransform(&scene, &editor, copy,
+                            record.localPosition + vec3(voxel * float(DUPLICATE_OFFSET_VOXELS),
+                                                        0.0f, 0.0f),
+                            record.localRotation, record.localScale);
+
+    editor.gpuFlushNeeded = true;
+    editor.cameraMovedByInterface = true;
+    invalidateResolveOf(scene, editor, copy);
+    selectComponentInEditor(scene, editor, copy, true);
+
+    projv::Scene* scenePointer = &scene;
+    EditorState* editorPointer = &editor;
+    auto live = std::make_shared<projv::ComponentHandle>(copy);
+    projv::editor::EditRecord undoRecord;
+    undoRecord.label = "Duplicate " + scene.components[source].name;
+    undoRecord.undo = [=] {
+        if (*live < scenePointer->components.size()) {
+            editorPointer->parts.erase(*live);
+            deleteComponent(*scenePointer, *editorPointer, *live);
+        }
+    };
+    // Redo re-runs the whole verb rather than replaying a recipe: it is the same call, and a second
+    // path that had to agree with this one is a second path that can stop agreeing.
+    undoRecord.redo = [=] {
+        *live = duplicateComponentInEditor(*scenePointer, *editorPointer, source);
+    };
+    editor.history.record(std::move(undoRecord), ImGui::GetTime());
+
+    editor.statusMessage = "Duplicated " + scene.components[source].name + " as " +
+                           scene.components[copy].name;
+    return copy;
+}
+
+// Removes one part from its resolve, restoring anything it cut out of the scene on the way. The
+// single teardown path, so a part cannot be deleted through one route and leave its cut behind
+// through another.
+static void removePart(projv::Scene& scene, EditorState& editor, projv::ComponentHandle component) {
+    Part* part = findPart(editor, component);
+    if (!part) return;
+
+    projv::ComponentHandle stackNode = ownerOf(scene, component);
+    if (part->cutFromSource && !part->cutCoords.empty() &&
+        part->cutSource < scene.components.size() &&
+        scene.components[part->cutSource].name != "__deleted__") {
+        applyVoxelSculpt(&scene, &editor, part->cutSource, part->cutCoords, part->cutColors, true);
+        editor.materialUsageValid = false;
+        editor.materialChunkUsageValid = false;
+    }
+
+    editor.parts.erase(component);
+    deleteComponent(scene, editor, component);
+    invalidateResolveOf(scene, editor, stackNode, true);
+}
+
+// Takes an asset out of the scene: its resolved form, its contents, and the node itself.
+static void destroyAssetNode(projv::Scene& scene, EditorState& editor, projv::ComponentHandle node,
+                            bool restoreCuts) {
+    int index = resolveIndexOf(editor, node);
+    if (index < 0) return;
+    Resolve& resolve = editor.resolves[size_t(index)];
+
+    destroyResolveResult(scene, editor, resolve);
+
+    if (node < scene.components.size()) {
+        std::vector<projv::ComponentHandle> children = scene.components[node].children;
+        for (projv::ComponentHandle child : children) {
+            Part* part = findPart(editor, child);
+            if (part && restoreCuts && part->cutFromSource && !part->cutCoords.empty() &&
+                part->cutSource < scene.components.size() &&
+                scene.components[part->cutSource].name != "__deleted__") {
+                applyVoxelSculpt(&scene, &editor, part->cutSource, part->cutCoords, part->cutColors, true);
+            }
+            editor.parts.erase(child);
+        }
+    }
+
+    // deleteComponent kills the whole subtree, so the parts go with the node -- and, since the fix
+    // for the half-deleted subtree, they are marked dead rather than left looking live.
+    projv::ComponentHandle parent = ownerOf(scene, node);
+    deleteComponent(scene, editor, node);
+    editor.resolves.erase(editor.resolves.begin() + index);
+    // Deleting what is open leaves nothing open, so the edit root steps out to the parent rather
+    // than being left pointing at a dead handle -- which every list, breadcrumb and placement would
+    // then read as "the document" without saying so.
+    if (editor.openAsset == node) {
+        editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+        editor.openAssetChanged = true;
+        openAsset(scene, editor, parent);
+    }
+    editor.gpuFlushNeeded = true;
+}
+
+// =============================================================================
+// Placing a part
+// =============================================================================
+
+// Rasterises the current primitive into a new part of `resolve`, centred on a point given in the
+// resolve node's local frame.
+//
+// The voxel scale comes from the resolve, never from editor.createVoxelScale: parts at different
+// voxel sizes make the fold a resample, however the rotation is snapped.
+static projv::ComponentHandle addPrimitivePart(projv::Scene& scene, EditorState& editor,
+                                               Resolve& resolve, projv::core::vec3 localCentre,
+                                               BooleanOp op) {
+    using namespace projv::core;
+
     int dimensions[3] = {
-        std::clamp(editor.shapeDimensions[0], 1, STAMP_MAX_DIMENSION),
-        std::clamp(editor.shapeDimensions[1], 1, STAMP_MAX_DIMENSION),
-        std::clamp(editor.shapeDimensions[2], 1, STAMP_MAX_DIMENSION)
+        std::clamp(editor.shapeDimensions[0], 1, PART_MAX_DIMENSION),
+        std::clamp(editor.shapeDimensions[1], 1, PART_MAX_DIMENSION),
+        std::clamp(editor.shapeDimensions[2], 1, PART_MAX_DIMENSION)
     };
 
     std::vector<ivec3> coords;
@@ -6455,407 +11092,752 @@ static bool spawnShapeStamp(projv::Scene& scene, EditorState& editor, projv::Com
     if (coords.empty()) {
         editor.statusMessage = std::string(ShapeKindLabel(editor.shapeKind)) +
                                " at that size comes out empty - try a larger size or a thinner wall.";
-        return false;
+        return projv::INVALID_COMPONENT_HANDLE;
     }
 
     uint32_t resolution = smallestChunkResolutionFor(std::max({dimensions[0], dimensions[1], dimensions[2]}));
-    projv::ComponentHandle component = acquireStampComponent(scene, editor, resolution,
-                                                             targetSpace.voxelSize);
+    centrePrimitiveInChunk(coords, dimensions, resolution);
+
+    std::string name = uniqueComponentName(scene, ShapeKindLabel(editor.shapeKind));
+    projv::ComponentHandle component = createPartComponent(scene, editor, resolve.node, name.c_str(),
+                                                           resolution, resolve.voxelScale);
     if (component == projv::INVALID_COMPONENT_HANDLE) {
-        editor.statusMessage = "Could not create the stamp component (see log).";
-        return false;
+        editor.statusMessage = "Could not create the part component (see log).";
+        return component;
     }
+    scene.components[component].op = op;
 
-    // Whatever the pooled component was last used for has to go before the new shape goes in, or the
-    // two would merge into one stamp.
-    editor.stamp.component = component;
-    clearStampGeometry(scene, editor);
+    Part part;
+    part.component = component;
 
-    uint32_t color = currentToolColor(scene, editor);
-    editor.stamp.active = true;
-    editor.stamp.source = FloatingStamp::Source::Generated;
-    editor.stamp.target = target;
-    editor.stamp.cutFromTarget = false;
-    editor.stamp.liftedCoords.clear();
-    editor.stamp.liftedColors.clear();
-    editor.stamp.kind = editor.shapeKind;
-    editor.stamp.dimensions[0] = dimensions[0];
-    editor.stamp.dimensions[1] = dimensions[1];
-    editor.stamp.dimensions[2] = dimensions[2];
-    editor.stamp.hollow = editor.shapeHollow;
-    editor.stamp.wallThickness = editor.shapeWallThickness;
-    editor.stamp.color = color;
+    part.procedural = true;
+    part.kind = editor.shapeKind;
+    part.dimensions[0] = dimensions[0];
+    part.dimensions[1] = dimensions[1];
+    part.dimensions[2] = dimensions[2];
+    part.hollow = editor.shapeHollow;
+    part.wallThickness = editor.shapeWallThickness;
+    part.color = currentToolColor(scene, editor);
+    editor.parts[component] = std::move(part);
 
-    fillStamp(scene, editor, coords, std::vector<uint32_t>(coords.size(), color));
-    centreStampAt(scene, editor, worldCentre, targetSpace.rotation);
-    selectStamp(scene, editor);
-
-    editor.statusMessage = "Placing " + std::string(ShapeKindLabel(editor.shapeKind)) + " " +
-                           std::to_string(dimensions[0]) + "x" + std::to_string(dimensions[1]) + "x" +
-                           std::to_string(dimensions[2]) + " - Enter to merge, Esc to cancel";
-    return true;
+    Part& placed = editor.parts[component];
+    fillPart(scene, editor, placed, coords, std::vector<uint32_t>(coords.size(), placed.color));
+    centrePartAt(scene, editor, placed, localCentre, projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f));
+    invalidateResolve(editor, resolve);
+    return component;
 }
 
-// Rebuilds a *generated* stamp at whatever the panel now says, about the same centre. Exact and free
-// -- the primitive is rasterised again -- which is why a generated shape resizes and a lifted one
-// does not. Also the path the Snap 90 toggle takes when it is switched back on, since a stamp left
-// at a free angle has to be pulled back onto the lattice to match what the checkbox now claims.
-static void regenerateShapeStamp(projv::Scene& scene, EditorState& editor) {
-    using namespace projv::core;
-    if (!editor.stamp.active) return;
+// Records a newly added part as one undoable step.
+static void recordPartAdded(projv::Scene& scene, EditorState& editor, const std::string& label,
+                            projv::ComponentHandle component) {
+    Part* part = findPart(editor, component);
+    if (!part) return;
+    Resolve* resolve = findResolve(editor, ownerOf(scene, component));
+    if (!resolve) return;
 
-    if (editor.stamp.source != FloatingStamp::Source::Generated) {
-        snapStampToTargetLattice(scene, editor);
-        return;
-    }
-    if (editor.stamp.component >= scene.components.size()) return;
-
-    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, editor.stamp.component);
-    if (!space.valid) return;
-    // Kept fixed across the rebuild, so a resize grows the shape about where it is standing rather
-    // than about its minimum corner -- which is where a chunk's origin is, and would send the shape
-    // sliding off as it grew.
-    quat rotation = scene.components[editor.stamp.component].localRotation;
-    vec3 centre = scene.components[editor.stamp.component].localPosition +
-                  glm::mat3_cast(rotation) *
-                  ((vec3(editor.stamp.contentMin) + vec3(editor.stamp.contentMax) + vec3(1.0f)) * 0.5f *
-                   space.voxelSize);
-
-    int dimensions[3] = {
-        std::clamp(editor.shapeDimensions[0], 1, STAMP_MAX_DIMENSION),
-        std::clamp(editor.shapeDimensions[1], 1, STAMP_MAX_DIMENSION),
-        std::clamp(editor.shapeDimensions[2], 1, STAMP_MAX_DIMENSION)
-    };
-    std::vector<ivec3> coords;
-    rasterisePrimitive(editor.shapeKind, dimensions, editor.shapeHollow, editor.shapeWallThickness,
-                       coords);
-    if (coords.empty()) return;
-
-    // A bigger shape may not fit the pooled component's resolution, and resolution is fixed for a
-    // component's whole life -- so a resize past it moves to the component for the new one.
-    uint32_t resolution = smallestChunkResolutionFor(std::max({dimensions[0], dimensions[1], dimensions[2]}));
-    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, editor.stamp.target);
-    float voxelScale = targetSpace.valid ? targetSpace.voxelSize : space.voxelSize;
-
-    clearStampGeometry(scene, editor);
-    projv::ComponentHandle component = acquireStampComponent(scene, editor, resolution, voxelScale);
-    if (component == projv::INVALID_COMPONENT_HANDLE) return;
-    if (component != editor.stamp.component) {
-        editor.stamp.component = component;
-        clearStampGeometry(scene, editor);
-    }
-
-    editor.stamp.kind = editor.shapeKind;
-    editor.stamp.dimensions[0] = dimensions[0];
-    editor.stamp.dimensions[1] = dimensions[1];
-    editor.stamp.dimensions[2] = dimensions[2];
-    editor.stamp.hollow = editor.shapeHollow;
-    editor.stamp.wallThickness = editor.shapeWallThickness;
-
-    fillStamp(scene, editor, coords, std::vector<uint32_t>(coords.size(), editor.stamp.color));
-    centreStampAt(scene, editor, centre, rotation);
-    selectStamp(scene, editor);
-}
-
-// Hands the stamp component back to the pool and clears the floating state. `emptyIt` is false only
-// when the geometry has just been given away, which is what "Keep as component" does.
-static void releaseStamp(projv::Scene& scene, EditorState& editor, bool emptyIt) {
-    if (emptyIt && editor.stamp.component < scene.components.size()) {
-        clearStampGeometry(scene, editor);
-    }
-    projv::ComponentHandle target = editor.stamp.target;
-
-    editor.stamp.active = false;
-    editor.stamp.component = projv::INVALID_COMPONENT_HANDLE;
-    editor.stamp.target = projv::INVALID_COMPONENT_HANDLE;
-    editor.stamp.cutFromTarget = false;
-    editor.stamp.liftedCoords.clear();
-    editor.stamp.liftedColors.clear();
-    editor.stamp.liftedCoords.shrink_to_fit();
-    editor.stamp.liftedColors.shrink_to_fit();
-    editor.stamp.voxelCount = 0;
-    editor.stamp.contentMin = projv::core::ivec3(0);
-    editor.stamp.contentMax = projv::core::ivec3(-1);
-
-    // Back to what the stamp was going into, which is what the user was working on before it
-    // appeared. Leaving the selection on an emptied stamp component would leave the gizmo and the
-    // outline pointing at nothing.
-    if (target < scene.components.size()) {
-        editor.selectedComponent = target;
-        editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, target);
-    } else {
-        editor.selectedComponent = projv::INVALID_COMPONENT_HANDLE;
-        editor.selectedVoxelCount = 0;
-    }
-    editor.selectionOutlineValid = false;
-    editor.gpuFlushNeeded = true;
-}
-
-// Writes the stamp into the target. The commit, and the whole reason for everything above.
-//
-// The walk is over **target** cells, not stamp voxels. Forward-mapping each stamp voxel to a target
-// cell (a push) leaves holes: a rotation is not area-preserving on a lattice, so two source voxels
-// can land in one target cell while a neighbouring cell receives none — and on a hollow shape, whose
-// walls are one or two voxels thick, those gaps perforate the surface and the result is a rotated
-// shape you can see through. Iterating the target instead (a pull) gives every target cell exactly
-// one answer, so the surface is closed by construction.
-//
-// That is also why the cost is the volume of the stamp's oriented bounding box rather than its voxel
-// count, and why the box's volume is what STAMP_MAX_MERGE_CELLS caps.
-//
-// With Snap 90 on the pull degenerates to the exact integer remap -- the inverse transform is a
-// signed axis permutation and every target cell in the box maps to exactly one source cell -- so one
-// code path serves both modes.
-static bool mergeStamp(projv::Scene& scene, EditorState& editor) {
-    using namespace projv::core;
-
-    if (!editor.stamp.active) return false;
-    projv::ComponentHandle stampComponent = editor.stamp.component;
-    projv::ComponentHandle target = editor.stamp.target;
-    if (stampComponent >= scene.components.size() || target >= scene.components.size() ||
-        stampComponent == target) {
-        editor.statusMessage = "The stamp has no target to merge into.";
-        return false;
-    }
-
-    StampSnapshot snapshot = snapshotStamp(scene, editor);
-    if (!snapshot.valid) {
-        editor.statusMessage = "The stamp is empty - nothing to merge.";
-        return false;
-    }
-
-    // Resolved once, read from throughout, and only then written to: a ComponentVoxelSpace holds a
-    // pointer into scene.grids that does not survive an edit. See the type's own comment.
-    ComponentVoxelSpace stampSpace = resolveComponentVoxelSpace(scene, stampComponent);
-    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, target);
-    if (!stampSpace.valid || !targetSpace.valid) {
-        editor.statusMessage = "Could not resolve the voxel grids to merge between.";
-        return false;
-    }
-
-    // The stamp's box, as eight world points, then as a target-space box around them. The corners
-    // are the box's *corners* rather than cell centres, so a rotated box is fully covered.
-    mat3 stampRotation = glm::mat3_cast(stampSpace.rotation);
-    vec3 boxLow(snapshot.boundsMin);
-    vec3 boxHigh = vec3(snapshot.boundsMax) + vec3(1.0f);
-    vec3 targetLow(0.0f), targetHigh(0.0f);
-    for (int corner = 0; corner < 8; corner++) {
-        vec3 pick(corner & 1 ? boxHigh.x : boxLow.x,
-                  corner & 2 ? boxHigh.y : boxLow.y,
-                  corner & 4 ? boxHigh.z : boxLow.z);
-        vec3 world = stampSpace.latticeOrigin +
-                     stampRotation * ((pick - vec3(stampSpace.coordOrigin)) * stampSpace.voxelSize);
-        vec3 local = (glm::transpose(glm::mat3_cast(targetSpace.rotation)) *
-                      (world - targetSpace.latticeOrigin)) / targetSpace.voxelSize +
-                     vec3(targetSpace.coordOrigin);
-        targetLow = corner == 0 ? local : projv::core::min(targetLow, local);
-        targetHigh = corner == 0 ? local : projv::core::max(targetHigh, local);
-    }
-
-    // One cell of margin on each side: the corner projection is exact but the cell a corner falls in
-    // is decided by a floor, and a stamp face sitting exactly on a cell boundary is the common case
-    // under Snap 90 rather than a rare one.
-    ivec3 cellMin(int(std::floor(targetLow.x)) - 1, int(std::floor(targetLow.y)) - 1,
-                  int(std::floor(targetLow.z)) - 1);
-    ivec3 cellMax(int(std::ceil(targetHigh.x)) + 1, int(std::ceil(targetHigh.y)) + 1,
-                  int(std::ceil(targetHigh.z)) + 1);
-    ivec3 walkSize = cellMax - cellMin + ivec3(1);
-    size_t walkCells = size_t(walkSize.x) * size_t(walkSize.y) * size_t(walkSize.z);
-    if (walkCells > STAMP_MAX_MERGE_CELLS) {
-        // Refused rather than truncated. A fill that stops halfway leaves a smaller fill; a merge
-        // that stops halfway leaves half an object embedded in the scene, which is worse than not
-        // having merged at all -- and the fix (a smaller stamp, or Snap 90 on so the box is the
-        // shape's own) is one the user can act on.
-        editor.statusMessage = "That placement would cover " + formatCompactCount(uint32_t(std::min<size_t>(walkCells, 0xFFFFFFFFu))) +
-                               " target cells, past the " +
-                               formatCompactCount(uint32_t(STAMP_MAX_MERGE_CELLS)) +
-                               " limit. Turn Snap 90 on, or use a smaller stamp.";
-        return false;
-    }
-
-    bool subtract = editor.stampMergeMode == MergeMode::Subtract;
-
-    // The undo record, split exactly the way Extrude's is: cells that were empty reverse by being
-    // removed, cells that held something reverse by having their old contents written back. The naive
-    // version -- "adding fills empty space, so undo empties it again" -- is wrong the moment a stamp
-    // lands on geometry that was already there, and deletes voxels the merge never created.
-    auto addedCoords = std::make_shared<std::vector<ivec3>>();
-    auto restoreCoords = std::make_shared<std::vector<ivec3>>();
-    auto restoreColors = std::make_shared<std::vector<uint32_t>>();
-    auto writeCoords = std::make_shared<std::vector<ivec3>>();
-    auto writeColors = std::make_shared<std::vector<uint32_t>>();
-
-    for (int z = cellMin.z; z <= cellMax.z; z++) {
-        for (int y = cellMin.y; y <= cellMax.y; y++) {
-            for (int x = cellMin.x; x <= cellMax.x; x++) {
-                ivec3 cell(x, y, z);
-                // The pull: this cell's centre, back through the stamp's transform, into the stamp's
-                // own voxel space.
-                ivec3 source = worldToComponentVoxel(stampSpace, componentVoxelToWorld(targetSpace, cell));
-                if (!snapshot.inBounds(source)) continue;
-                size_t index = snapshot.index(source);
-                if (!snapshot.occupied[index]) continue;
-
-                uint8_t slot = 0;
-                bool wasSolid = queryComponentVoxel(scene, targetSpace, cell, slot);
-                if (subtract) {
-                    if (!wasSolid) continue;
-                    restoreCoords->push_back(cell);
-                    restoreColors->push_back(componentVoxelColor(scene, target, slot));
-                    writeCoords->push_back(cell);
-                    continue;
-                }
-                if (wasSolid) {
-                    restoreCoords->push_back(cell);
-                    restoreColors->push_back(componentVoxelColor(scene, target, slot));
-                } else {
-                    addedCoords->push_back(cell);
-                }
-                writeCoords->push_back(cell);
-                // The stamp voxel's own colour, not the palette's current entry -- the same principle
-                // Extrude follows in taking its source voxel's material. A lifted region keeps its
-                // pattern; a shape sculpted in two colours keeps both.
-                writeColors->push_back(snapshot.colors[index]);
-            }
-        }
-    }
-
-    size_t touched = writeCoords->size();
-    if (touched == 0) {
-        editor.statusMessage = subtract ? "Nothing of the target lies inside the stamp."
-                                        : "The stamp does not reach the target's grid.";
-        return false;
-    }
-
-    std::string targetName = scene.components[target].name;
-    if (subtract) {
-        applyVoxelSculpt(&scene, &editor, target, *writeCoords, std::vector<uint32_t>(), false);
-    } else {
-        applyVoxelSculpt(&scene, &editor, target, *writeCoords, *writeColors, true);
-    }
+    // The whole resolve rather than the one part, because adding the *first* part is also what
+    // created the resolve -- undoing it has to take the container away too, or the tree fills with
+    // empty folders nobody asked for.
+    bool wasFirstPart = scene.components[resolve->node].children.size() == 1;
+    auto recipe = std::make_shared<NodeRecipe>(recipeFromNode(scene, editor, *resolve));
+    auto live = std::make_shared<projv::ComponentHandle>(component);
+    auto liveNode = std::make_shared<projv::ComponentHandle>(resolve->node);
 
     projv::Scene* scenePointer = &scene;
     EditorState* editorPointer = &editor;
     projv::editor::EditRecord record;
-    record.label = (subtract ? "Subtract " : "Merge ") + std::string(ShapeKindLabel(editor.stamp.kind)) +
-                   " into " + targetName;
-    if (editor.stamp.source == FloatingStamp::Source::Lifted) {
-        record.label = (subtract ? "Subtract region from " : "Merge region into ") + targetName;
-    }
-    record.memoryCost = touched * (sizeof(ivec3) + sizeof(uint32_t)) +
-                        restoreCoords->size() * (sizeof(ivec3) + sizeof(uint32_t));
-    if (subtract) {
-        record.undo = [=] {
-            applyVoxelSculpt(scenePointer, editorPointer, target, *restoreCoords, *restoreColors, true);
-        };
-        record.redo = [=] {
-            applyVoxelSculpt(scenePointer, editorPointer, target, *writeCoords,
-                             std::vector<uint32_t>(), false);
-        };
+    record.label = label;
+    record.memoryCost = part->voxelCount * (sizeof(projv::core::ivec3) + sizeof(uint32_t));
+    record.undo = [=] {
+        if (wasFirstPart) {
+            destroyAssetNode(*scenePointer, *editorPointer, *liveNode, true);
+        } else {
+            removePart(*scenePointer, *editorPointer, *live);
+        }
+    };
+    record.redo = [=] {
+        if (wasFirstPart) {
+            *liveNode = materialiseNode(*scenePointer, *editorPointer, *recipe);
+            if (*liveNode < scenePointer->components.size() &&
+                !scenePointer->components[*liveNode].children.empty()) {
+                *live = scenePointer->components[*liveNode].children.back();
+            }
+            return;
+        }
+        // The part alone: the resolve is still there, so only the last row of the recipe is
+        // rebuilt, and it is appended to the stack it came off.
+        Resolve* resolve = findResolve(*editorPointer, *liveNode);
+        if (!resolve || recipe->parts.empty()) return;
+        const PartRecipe& partRecipe = recipe->parts.back();
+        projv::ComponentHandle component = createPartComponent(
+            *scenePointer, *editorPointer, resolve->node,
+            partRecipe.name.empty() ? "Part" : partRecipe.name.c_str(),
+            partRecipe.resolution, partRecipe.voxelScale);
+        if (component == projv::INVALID_COMPONENT_HANDLE) return;
+        scenePointer->components[component].op = partRecipe.op;
+
+        Part rebuilt;
+        rebuilt.component = component;
+
+        rebuilt.procedural = partRecipe.procedural;
+        rebuilt.kind = partRecipe.kind;
+        rebuilt.dimensions[0] = partRecipe.dimensions[0];
+        rebuilt.dimensions[1] = partRecipe.dimensions[1];
+        rebuilt.dimensions[2] = partRecipe.dimensions[2];
+        rebuilt.hollow = partRecipe.hollow;
+        rebuilt.wallThickness = partRecipe.wallThickness;
+        rebuilt.color = partRecipe.color;
+        rebuilt.cutFromSource = partRecipe.cutFromSource;
+        rebuilt.cutSource = partRecipe.cutSource;
+        rebuilt.cutCoords = partRecipe.cutCoords;
+        rebuilt.cutColors = partRecipe.cutColors;
+        editorPointer->parts[component] = std::move(rebuilt);
+        fillPart(*scenePointer, *editorPointer, editorPointer->parts[component],
+                 partRecipe.coords, partRecipe.colors);
+        applyComponentTransform(scenePointer, editorPointer, component, partRecipe.position,
+                                partRecipe.rotation, 1.0f);
+        *live = component;
+        invalidateResolve(*editorPointer, *resolve);
+    };
+    editor.history.record(std::move(record), ImGui::GetTime());
+}
+
+// The Assemble tool's whole verb: drop a primitive where the user clicked. `worldCentre` is where it
+// goes; the resolve is created if there is not one already.
+static bool placePrimitiveAt(projv::Scene& scene, EditorState& editor, projv::core::vec3 worldCentre) {
+    using namespace projv::core;
+
+    Resolve* resolve = ensureStackNode(scene, editor);
+    if (!resolve) return false;
+
+    // The click is in world space and a part's transform is local to the asset node, so the point
+    // has to come down through the node's transform before it means anything to the part.
+    mat4 world = projv::utils::getComponentWorldMatrix(scene, resolve->node);
+    vec3 localCentre = vec3(glm::inverse(world) * vec4(worldCentre, 1.0f));
+
+    size_t before = scene.components[resolve->node].children.size();
+    projv::ComponentHandle component = addPrimitivePart(scene, editor, *resolve, localCentre,
+                                                        editor.shapeOp);
+    if (component == projv::INVALID_COMPONENT_HANDLE) return false;
+
+    selectComponentInEditor(scene, editor, component, true);
+    recordPartAdded(scene, editor, "Add " + std::string(ShapeKindLabel(editor.shapeKind)), component);
+
+    editor.statusMessage = std::string(BooleanOpLabel(editor.shapeOp)) + " " +
+                           ShapeKindLabel(editor.shapeKind) + " " +
+                           std::to_string(editor.shapeDimensions[0]) + "x" +
+                           std::to_string(editor.shapeDimensions[1]) + "x" +
+                           std::to_string(editor.shapeDimensions[2]) + " into " +
+                           scene.components[resolve->node].name + " (" +
+                           std::to_string(before + 1) + " part(s))";
+    return true;
+}
+
+// The same thing without a click: used by the panel's Add button, which puts the primitive in front
+// of the camera at the place distance.
+static bool placePrimitiveFromCamera(projv::Scene& scene, EditorState& editor) {
+    projv::core::vec3 direction = computeCameraDirection(editor);
+    return placePrimitiveAt(scene, editor,
+                            editor.cameraPosition + direction * editor.shapePlaceDistance);
+}
+
+// Rebuilds a *procedural* part from **its own** recipe, about the same centre. Exact and free -- the
+// primitive is rasterised again -- which is why a procedural part resizes and a lifted or imported
+// one does not.
+//
+// **Every value comes off the Part, never off editor.shape\*.** Those are the template for the next
+// placement, and reading them here made this function "apply the tool panel to this component"
+// rather than "rebuild this component": selecting a 8^3 box while the panel still said 40 and then
+// nudging any field resized the box to 40, because the nudge was the first thing that called this
+// and the size it applied was the previous selection's. A caller that wants to change a part's
+// recipe writes the part's own fields and then calls this.
+static void regeneratePart(projv::Scene& scene, EditorState& editor, projv::ComponentHandle component) {
+    using namespace projv::core;
+
+    Part* part = findPart(editor, component);
+    if (!part || !part->procedural) return;
+    if (component >= scene.components.size()) return;
+    Resolve* resolve = findResolve(editor, ownerOf(scene, component));
+    if (!resolve) return;
+
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
+    if (!space.valid) return;
+
+    // Kept fixed across the rebuild, so a resize grows the shape about where it is standing rather
+    // than about its minimum corner -- which is where a chunk's origin is, and would send the shape
+    // sliding off as it grew.
+    quat rotation = scene.components[component].localRotation;
+    vec3 centre = scene.components[component].localPosition +
+                  glm::mat3_cast(rotation) *
+                  ((vec3(part->contentMin) + vec3(part->contentMax) + vec3(1.0f)) * 0.5f *
+                   space.voxelSize);
+
+    // Read while `part` is still the original: the resolution branch below may move the recipe to a
+    // replacement component and leave this pointer dangling.
+    ShapeKind kind = part->kind;
+    bool hollow = part->hollow;
+    int wallThickness = std::clamp(part->wallThickness, 1, 32);
+    int dimensions[3] = {
+        std::clamp(part->dimensions[0], 1, PART_MAX_DIMENSION),
+        std::clamp(part->dimensions[1], 1, PART_MAX_DIMENSION),
+        std::clamp(part->dimensions[2], 1, PART_MAX_DIMENSION)
+    };
+    std::vector<ivec3> coords;
+    rasterisePrimitive(kind, dimensions, hollow, wallThickness, coords);
+    if (coords.empty()) return;
+
+    uint32_t resolution = smallestChunkResolutionFor(std::max({dimensions[0], dimensions[1], dimensions[2]}));
+    centrePrimitiveInChunk(coords, dimensions, resolution);
+
+    if (uint32_t(space.resolution) == resolution) {
+        // Refilled in place. This runs on every frame of a size drag, so creating and deleting a
+        // component per frame is not an option -- and at an unchanged resolution there is no reason
+        // to: the same component holds the new shape exactly as well as the old one.
+        clearPartGeometry(scene, editor, *part);
     } else {
-        // Removals before additions, the ordering applyExtrudeDepth uses: a displaced cell has to be
-        // emptied of what replaced it before its own contents go back.
-        record.undo = [=] {
-            applyVoxelSculpt(scenePointer, editorPointer, target, *addedCoords,
-                             std::vector<uint32_t>(), false);
-            applyVoxelSculpt(scenePointer, editorPointer, target, *restoreCoords, *restoreColors, true);
-        };
-        record.redo = [=] {
-            applyVoxelSculpt(scenePointer, editorPointer, target, *writeCoords, *writeColors, true);
-        };
+        // Resolution is fixed for a component's whole life (see utils::addComponent), so a resize
+        // past it has to move to a new component. The old one goes rather than lingering, and the
+        // new one takes its place in the stack rather than being appended to the end of it -- a
+        // resize must not reorder the fold.
+        std::string name = scene.components[component].name;
+        BooleanOp op = scene.components[component].op;
+        std::vector<projv::ComponentHandle>& stack = scene.components[resolve->node].children;
+        auto at = std::find(stack.begin(), stack.end(), component);
+        size_t position = at == stack.end() ? stack.size() : size_t(at - stack.begin());
+
+        projv::ComponentHandle replacement = createPartComponent(scene, editor, resolve->node,
+                                                                  name.c_str(), resolution,
+                                                                  resolve->voxelScale);
+        if (replacement == projv::INVALID_COMPONENT_HANDLE) return;
+        scene.components[replacement].op = op;
+
+        std::vector<projv::ComponentHandle>& reordered = scene.components[resolve->node].children;
+        reordered.erase(std::remove(reordered.begin(), reordered.end(), replacement), reordered.end());
+        reordered.insert(reordered.begin() + std::min(position, reordered.size()), replacement);
+
+        Part moved = *part;
+        moved.component = replacement;
+        moved.contentMin = ivec3(0);
+        moved.contentMax = ivec3(-1);
+        moved.cacheValid = false;
+
+        // Asked **before** the delete, not after. deleteComponent clears any editor state pointing at
+        // the handle it is killing, so by the time it returns `editor.selectedComponent` is already
+        // INVALID and a test against `component` can never match -- which silently dropped the
+        // selection on every resize that crossed a resolution boundary. The default part is 16
+        // voxels and 16 is exactly its resolution, so the *first* tick of a size drag crossed one:
+        // one change, and the part you were adjusting was no longer selected.
+        bool wasSelected = editor.selectedComponent == component;
+        bool wasPalette = editor.paletteComponent == component;
+
+        editor.parts.erase(component);
+        deleteComponent(scene, editor, component);
+        editor.parts[replacement] = std::move(moved);
+        part = findPart(editor, replacement);
+        if (!part) return;
+
+        // Through the ordinary selection path, so the outline, the voxel count and which resolve is
+        // active all follow the hand-over rather than being left describing a component that no
+        // longer exists. Not revealed in the Assets panel: this runs on a drag, and scrolling the list
+        // under the cursor every few frames is its own kind of wrong.
+        if (wasSelected) selectComponentInEditor(scene, editor, replacement, false);
+        if (wasPalette) selectPaletteComponent(editor, replacement);
     }
+
+    // Written back, not read in: the only thing that changes here is the clamp, and a field the
+    // panel is dragging has to end the frame holding the value that was actually rasterised.
+    part->dimensions[0] = dimensions[0];
+    part->dimensions[1] = dimensions[1];
+    part->dimensions[2] = dimensions[2];
+    part->wallThickness = wallThickness;
+
+    fillPart(scene, editor, *part, coords, std::vector<uint32_t>(coords.size(), part->color));
+    centrePartAt(scene, editor, *part, centre, rotation);
+    invalidateResolve(editor, *resolve);
+}
+
+// =============================================================================
+// The bake
+// =============================================================================
+//
+// One verb, three destinations, and the split is the point. Committing used to force one choice
+// across two unrelated axes: "Merge" meant *resolve to voxels* AND *write into somebody else's
+// grid*, while "Keep as component" meant *do not resolve* AND *become your own object* -- so the
+// fourth combination, resolve to voxels as an object of my own, was the one thing you could not ask
+// for, and it is the one this whole flow is made of.
+
+// The addressable voxel box of a component: what an Intersect written into it has to walk. A Chunk
+// is its resolution cube; a Grid is its cell extent times the resolution of one cell.
+static bool componentAddressableBox(const projv::Scene& scene, projv::ComponentHandle component,
+                                    projv::core::ivec3& minimum, projv::core::ivec3& maximum) {
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
+    if (!space.valid || space.resolution <= 0) return false;
+    if (!space.isGrid) {
+        minimum = projv::core::ivec3(0);
+        maximum = projv::core::ivec3(space.resolution - 1);
+        return true;
+    }
+    if (!space.grid) return false;
+    minimum = space.coordOrigin;
+    maximum = space.coordOrigin + space.grid->dims * space.resolution - projv::core::ivec3(1);
+    return true;
+}
+
+// --- Symmetry frames -------------------------------------------------------------------------
+//
+// Where a component's mirrors stand. The only part of the feature that looks at geometry at all --
+// everything downstream of here is integer arithmetic.
+
+// Put the mirrors through the middle of what the component actually holds.
+//
+// Content bounds first and the addressable box only as a fallback, because the difference is the
+// whole usefulness of the default: a primitive occupies a corner of a resolution cube that is mostly
+// empty, so centring on the cube would stand the mirrors out in that empty space and put every copy
+// there with them.
+//
+// The doubled origin is what makes the parity come out right without anyone choosing it. The centre
+// of a box from `min` to `max` inclusive sits at the float lattice coordinate (min + max + 1) / 2,
+// and the axis mirror's plane sits at (origin + 1) / 2 -- so `origin = min + max` is exactly that
+// plane. An odd extent then lands on an even origin (a plane through the middle column of cells,
+// which is its own mirror image and stays put) and an even extent on an odd one (a plane on the
+// boundary between the two middle columns, with every cell paired). Both are what a user means by
+// "the middle", and neither is a setting anybody should have to find.
+static bool centreSymmetryFrame(const projv::Scene& scene, SymmetryFrame& frame,
+                                projv::ComponentHandle component) {
+    projv::core::ivec3 minimum(0), maximum(0);
+    if (!componentContentBounds(scene, component, minimum, maximum) &&
+        !componentAddressableBox(scene, component, minimum, maximum)) {
+        return false;
+    }
+    frame.origin = minimum + maximum;
+    frame.originPlaced = true;
+    return true;
+}
+
+// The frame belonging to a component, centred on its geometry the first time it is asked for.
+//
+// Centring lazily rather than at creation is what keeps the default honest for a component that was
+// empty when it was made and has been sculpted since -- which is every component built by the Place
+// tool, since a part is created before its primitive is rasterised into it.
+static SymmetryFrame& symmetryFrameFor(const projv::Scene& scene, EditorState& editor,
+                                       projv::ComponentHandle component) {
+    SymmetryFrame& frame = editor.symmetryFrames[component];
+    if (!frame.originPlaced) centreSymmetryFrame(scene, frame, component);
+    return frame;
+}
+
+// What writing a cell set into an existing component would do, computed without doing it. The "what
+// was there" half that the fold deliberately does not carry: an accumulator builds its own answer,
+// but a write into somebody else's grid has to be reversible.
+//
+// The undo record is split by what each cell held before. The naive version -- "adding fills empty
+// space, so undo empties it again" -- is wrong the moment a form lands on geometry that was already
+// there, and deletes voxels the bake never created. That lesson is already paid for in this
+// codebase; it is not re-learned here.
+struct CellWritePlan {
+    bool valid = false;
+    bool overBudget = false;
+    std::vector<projv::core::ivec3> writeCoords;    // Cells to add, or to remove.
+    std::vector<uint32_t> writeColors;              // Union only.
+    bool removing = false;                          // writeCoords are removals.
+    std::vector<projv::core::ivec3> addedCoords;    // Were empty. Undo by removing.
+    std::vector<projv::core::ivec3> restoreCoords;  // Held something. Undo by writing back...
+    std::vector<uint32_t> restoreColors;            // ...in the colour it held.
+};
+
+static CellWritePlan planCellWrite(const projv::Scene& scene, projv::ComponentHandle target,
+                                   const std::vector<projv::core::ivec3>& worldCells,
+                                   const std::vector<uint32_t>& worldColors,
+                                   const ComponentVoxelSpace& sourceLattice, BooleanOp op) {
+    using namespace projv::core;
+    CellWritePlan plan;
+    if (target >= scene.components.size() || !sourceLattice.valid) return plan;
+
+    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, target);
+    if (!targetSpace.valid) return plan;
+
+    // The fold is already a set of lattice cells; carrying it into the target's lattice is one
+    // transform per cell rather than another oriented-bounding-box walk. The two lattices coincide
+    // exactly when the resolve was built at the target's voxel scale, which is the normal case and
+    // the one Snap 90 keeps exact.
+    std::unordered_map<uint64_t, uint32_t> mapped;
+    mapped.reserve(worldCells.size() * 2);
+    std::vector<ivec3> targetCells;
+    targetCells.reserve(worldCells.size());
+    for (size_t index = 0; index < worldCells.size(); index++) {
+        ivec3 cell = worldToComponentVoxel(targetSpace, componentVoxelToWorld(sourceLattice, worldCells[index]));
+        uint64_t key = packVoxelKey(cell);
+        if (mapped.emplace(key, index < worldColors.size() ? worldColors[index] : 0xFFFFFFFFu).second) {
+            targetCells.push_back(cell);
+        }
+    }
+
+    if (op == BooleanOp::Intersect) {
+        // Keep only what the target and the form share, which means walking everything the target
+        // addresses -- the cells to remove are precisely the ones the form does *not* cover, and
+        // there is no smaller region that could contain them.
+        ivec3 boxMin(0), boxMax(0);
+        if (!componentAddressableBox(scene, target, boxMin, boxMax)) return plan;
+        ivec3 size = boxMax - boxMin + ivec3(1);
+        size_t cells = size_t(size.x) * size_t(size.y) * size_t(size.z);
+        if (cells > ASSEMBLY_MAX_BAKE_CELLS) {
+            plan.overBudget = true;
+            return plan;
+        }
+        plan.removing = true;
+        for (int z = boxMin.z; z <= boxMax.z; z++) {
+            for (int y = boxMin.y; y <= boxMax.y; y++) {
+                for (int x = boxMin.x; x <= boxMax.x; x++) {
+                    ivec3 cell(x, y, z);
+                    uint8_t slot = 0;
+                    if (!queryComponentVoxel(scene, targetSpace, cell, slot)) continue;
+                    if (mapped.count(packVoxelKey(cell))) continue;
+                    plan.writeCoords.push_back(cell);
+                    plan.restoreCoords.push_back(cell);
+                    plan.restoreColors.push_back(componentVoxelColor(scene, target, slot));
+                }
+            }
+        }
+        plan.valid = true;
+        return plan;
+    }
+
+    plan.removing = op == BooleanOp::Subtract;
+    for (const ivec3& cell : targetCells) {
+        uint8_t slot = 0;
+        bool wasSolid = queryComponentVoxel(scene, targetSpace, cell, slot);
+        if (plan.removing) {
+            if (!wasSolid) continue;
+            plan.restoreCoords.push_back(cell);
+            plan.restoreColors.push_back(componentVoxelColor(scene, target, slot));
+            plan.writeCoords.push_back(cell);
+            continue;
+        }
+        if (wasSolid) {
+            plan.restoreCoords.push_back(cell);
+            plan.restoreColors.push_back(componentVoxelColor(scene, target, slot));
+        } else {
+            plan.addedCoords.push_back(cell);
+        }
+        plan.writeCoords.push_back(cell);
+        plan.writeColors.push_back(mapped[packVoxelKey(cell)]);
+    }
+    plan.valid = true;
+    return plan;
+}
+
+// Bake ▸ As a new component. The missing fourth combination: resolve to voxels, as an object of my
+// own. The default, because it is what building a form out of primitives is *for*.
+// Merge some or all of an asset's contents into a single .data component **inside that asset**.
+//
+// **The asset survives.** This used to replace the node with a bare Chunk at the node's parent, and
+// that one line was what stranded a finished asset: a Chunk is not a folder, so "Save as asset" --
+// gated on `kind == Asset` -- went grey on it, and there is no verb that puts a loose component into
+// another asset. Finishing a pillar was therefore the act that made it unusable in a temple. The
+// container is the thing the asset system manages, so merging its contents must not dissolve it.
+//
+// `selection` is which rows to merge, in stack order. Empty means every foldable row, which is what
+// the Bake button asks for; a subset is what shift-clicking rows and merging asks for, and it is why
+// this is a merge rather than a bake -- an asset can keep several components if that is what it
+// wants, and merging is something you do to a few of them.
+static bool mergeContentsToData(projv::Scene& scene, EditorState& editor, Resolve& resolve,
+                                const std::vector<projv::ComponentHandle>& selection) {
+    using namespace projv::core;
+
+    if (resolve.node >= scene.components.size()) return false;
+    ComponentVoxelSpace lattice = resolveLattice(scene, resolve);
+    if (!lattice.valid) {
+        editor.statusMessage = "That resolve has no lattice to merge into.";
+        return false;
+    }
+
+    // Which rows, in the stack's own order -- the panel's selection is a set, and a fold is ordered,
+    // so the order comes from the child list rather than from the order they were clicked in.
+    const std::vector<projv::ComponentHandle>& contents = scene.components[resolve.node].children;
+    bool wholeStack = selection.empty();
+    std::vector<projv::ComponentHandle> merging;
+    for (projv::ComponentHandle child : contents) {
+        if (child >= scene.components.size()) continue;
+        if (scene.components[child].name == "__deleted__") continue;
+        if (wholeStack) {
+            // Bake-all keeps what it always kept: a Place row is not composition, and the format has
+            // always let it survive a bake as its own component.
+            if (scene.components[child].op == BooleanOp::None) continue;
+        } else if (std::find(selection.begin(), selection.end(), child) == selection.end()) {
+            continue;
+        }
+        merging.push_back(child);
+    }
+    if (merging.empty()) {
+        editor.statusMessage = "Nothing to merge - pick rows in the contents list first.";
+        return false;
+    }
+
+    Fold fold = foldChildren(scene, editor, resolve, merging, ASSEMBLY_MAX_BAKE_CELLS,
+                             ASSEMBLY_MAX_BAKE_CELLS, !wholeStack);
+    if (fold.overBudget) {
+        // Refused rather than truncated. A fill that stops halfway leaves a smaller fill; a bake that
+        // stops halfway leaves half an object, which is worse than not having baked at all -- and the
+        // fix (Snap 90 on, so the box is the shape's own, or fewer parts at once) is one the user can
+        // act on. The resolve stays open.
+        editor.statusMessage = "That stack is past the bake budget of " +
+                               formatCompactCount(uint32_t(ASSEMBLY_MAX_BAKE_CELLS)) +
+                               " cells. Turn Snap 90 on, or bake it in fewer parts.";
+        return false;
+    }
+    if (!fold.valid || fold.coords.empty()) {
+        editor.statusMessage = "That stack resolves to nothing - check the ops on the rows.";
+        return false;
+    }
+
+    ivec3 minimum = fold.coords[0], maximum = fold.coords[0];
+    for (const ivec3& coord : fold.coords) {
+        minimum = projv::core::min(minimum, coord);
+        maximum = projv::core::max(maximum, coord);
+    }
+    ivec3 extent = maximum - minimum + ivec3(1);
+    int longest = std::max({extent.x, extent.y, extent.z});
+    if (longest > PART_MAX_DIMENSION) {
+        editor.statusMessage = "That form is " + std::to_string(longest) + " voxels across, past the " +
+                               std::to_string(PART_MAX_DIMENSION) + " limit for one component.";
+        return false;
+    }
+
+    projv::ComponentHandle node = resolve.node;
+    std::string nodeName = scene.components[node].name;
+    // Named after the asset when it *is* the asset's whole content, and after the first row it
+    // consumed when it is only part of it -- so a merged pair inside a stack of five reads as what it
+    // came from rather than as a second copy of the container.
+    std::string name = wholeStack ? nodeName : scene.components[merging.front()].name;
+
+    // Where the merged row goes in the stack: exactly where the first row it consumed was, so a
+    // partial merge is not also a reorder. A fold is ordered, and which row a subtract sits on is the
+    // difference between a hole and nothing at all.
+    size_t insertAt = contents.size();
+    for (size_t index = 0; index < contents.size(); index++) {
+        if (contents[index] == merging.front()) { insertAt = index; break; }
+    }
+
+    // Recipes first, while the rows are still alive: undo has to put them back, and it has to put
+    // back what they *were*, including anything sculpted into them since they were placed.
+    auto restored = std::make_shared<std::vector<PartRecipe>>();
+    for (projv::ComponentHandle child : merging) {
+        if (const Part* part = findPart(editor, child)) {
+            PartRecipe partRecipe = recipeFromPart(scene, *part);
+            if (!partRecipe.coords.empty()) restored->push_back(std::move(partRecipe));
+        }
+    }
+
+    BakePlacement placement = centreBakeInChunk(extent);
+    uint32_t resolution = placement.resolution;
+
+    // **Parented to the asset, not to the asset's parent.** This is the line the whole change is
+    // about: the merged .data becomes the asset's content instead of its replacement.
+    projv::ComponentHandle baked = projv::utils::addComponent(
+        scene, projv::ComponentKind::Chunk, name, node, resolution, lattice.voxelSize);
+    if (baked == projv::INVALID_COMPONENT_HANDLE) {
+        editor.statusMessage = "Could not create the merged component (see log).";
+        return false;
+    }
+
+    std::vector<ivec3> local;
+    local.reserve(fold.coords.size());
+    for (const ivec3& coord : fold.coords) local.push_back(coord - minimum + placement.offset);
+    applyVoxelSculpt(&scene, &editor, baked, local, fold.colors, true);
+
+    // `- placement.offset` is what keeps the bake in place. The cells were shifted into the middle of
+    // the chunk, so the chunk's own origin moves back by exactly the same amount and the voxels do
+    // not budge in world space.
+    vec3 origin = lattice.latticeOrigin +
+                  glm::mat3_cast(lattice.rotation) *
+                  (vec3(minimum - placement.offset - lattice.coordOrigin) * lattice.voxelSize);
+    // Positioned in the asset's own frame now, which is both what localPosition is measured in and
+    // the frame the lattice is derived from -- so the two agree by construction rather than by a
+    // round trip through the asset's parent.
+    mat4 nodeWorld = projv::utils::getComponentWorldMatrix(scene, node);
+    mat4 toParent = glm::inverse(nodeWorld);
+    vec3 localOrigin = vec3(toParent * vec4(origin, 1.0f));
+    quat localRotation = glm::normalize(glm::quat_cast(mat3(toParent)) * lattice.rotation);
+    projv::utils::setComponentTransform(scene, baked, localOrigin, localRotation, 1.0f);
+
+    // The rows this consumed go, and the merged one takes the first one's place in the order.
+    for (projv::ComponentHandle child : merging) {
+        if (child < scene.components.size()) removePart(scene, editor, child);
+    }
+    reorderChildTo(scene, node, baked, insertAt);
+
+    // The op the merged row carries. Merging the whole stack leaves the asset holding one placed
+    // .data -- no ops, so syncResolves retires the resolve and the chunk is simply what the asset
+    // is. A partial merge has to keep composing with the rows around it, so it inherits the op of
+    // the first row it consumed: that row seeded the accumulator, and the merged form stands exactly
+    // where it stood.
+    bool onlyChild = scene.components[node].children.size() == 1;
+    BooleanOp mergedOp = onlyChild ? BooleanOp::None : scene.components[merging.front()].op;
+    scene.components[baked].op = mergedOp;
+
+    auto liveBaked = std::make_shared<projv::ComponentHandle>(baked);
+    // What undo put back, so redo can take away exactly those rows. Handles are indices and a
+    // revived row gets a new one, so the record cannot name them in advance -- it has to be told.
+    auto liveRows = std::make_shared<std::vector<projv::ComponentHandle>>();
+    auto coords = std::make_shared<std::vector<ivec3>>(std::move(local));
+    auto colors = std::make_shared<std::vector<uint32_t>>(fold.colors);
+    size_t voxels = coords->size();
+    size_t consumed = merging.size();
+
+    selectComponentInEditor(scene, editor, baked, true);
+    invalidateResolveOf(scene, editor, node, true);
+
+    projv::Scene* scenePointer = &scene;
+    EditorState* editorPointer = &editor;
+    projv::editor::EditRecord record;
+    record.label = "Merge " + name;
+    record.memoryCost = voxels * (sizeof(ivec3) + sizeof(uint32_t));
+    // Undo puts the rows back where they were, in order, with their ops -- and from their recipes
+    // rather than from the primitives that made them, so anything sculpted into a row before the
+    // merge comes back too. A merge that could not be undone would make every arrangement a one-way
+    // door, which is the whole reason the recipes are taken above.
+    record.undo = [=] {
+        if (*liveBaked < scenePointer->components.size()) {
+            deleteComponent(*scenePointer, *editorPointer, *liveBaked);
+        }
+        *liveRows = materialisePartsInto(*scenePointer, *editorPointer, node, *restored, insertAt);
+        invalidateResolveOf(*scenePointer, *editorPointer, node, true);
+    };
+    record.redo = [=] {
+        for (projv::ComponentHandle row : *liveRows) {
+            if (row < scenePointer->components.size()) removePart(*scenePointer, *editorPointer, row);
+        }
+        liveRows->clear();
+        projv::ComponentHandle rebuilt = projv::utils::addComponent(
+            *scenePointer, projv::ComponentKind::Chunk, name, node, resolution, lattice.voxelSize);
+        if (rebuilt == projv::INVALID_COMPONENT_HANDLE) return;
+        applyVoxelSculpt(scenePointer, editorPointer, rebuilt, *coords, *colors, true);
+        projv::utils::setComponentTransform(*scenePointer, rebuilt, localOrigin, localRotation, 1.0f);
+        reorderChildTo(*scenePointer, node, rebuilt, insertAt);
+        scenePointer->components[rebuilt].op = mergedOp;
+        invalidateResolveOf(*scenePointer, *editorPointer, node, true);
+        editorPointer->gpuFlushNeeded = true;
+        *liveBaked = rebuilt;
+    };
     editor.history.record(std::move(record), ImGui::GetTime());
 
     editor.materialUsageValid = false;
     editor.materialChunkUsageValid = false;
-
-    size_t displaced = restoreCoords->size();
-    releaseStamp(scene, editor, true);
-    editor.statusMessage = (subtract ? "Subtracted " : "Merged ") + std::to_string(touched) +
-                           " voxel(s) in " + targetName +
-                           (displaced > 0 && !subtract
-                                ? " (" + std::to_string(displaced) + " displaced)" : "");
+    editor.statusMessage = "Merged " + std::to_string(consumed) + " item(s) into " + name + " - " +
+                           formatCompactCount(uint32_t(std::min<size_t>(voxels, 0xFFFFFFFFu))) +
+                           " voxel(s), inside " + nodeName + ".";
     return true;
 }
 
-// Throws the stamp away. A cut has to put back what it took, or a cancel would be a delete with a
-// misleading name.
-static void cancelStamp(projv::Scene& scene, EditorState& editor) {
-    using projv::core::ivec3;
-    if (!editor.stamp.active) return;
+// Bake ▸ Into <selected>. Today's merge, and it carries its own op -- so carving a crater still
+// works, and now the carving tool can be a composed form rather than one primitive.
+static bool bakeNodeInto(projv::Scene& scene, EditorState& editor, Resolve& resolve,
+                             projv::ComponentHandle target, BooleanOp op) {
+    using namespace projv::core;
 
-    projv::ComponentHandle target = editor.stamp.target;
-    if (editor.stamp.cutFromTarget && !editor.stamp.liftedCoords.empty() &&
-        target < scene.components.size()) {
-        auto coords = std::make_shared<std::vector<ivec3>>(editor.stamp.liftedCoords);
-        auto colors = std::make_shared<std::vector<uint32_t>>(editor.stamp.liftedColors);
-        applyVoxelSculpt(&scene, &editor, target, *coords, *colors, true);
+    if (resolve.node >= scene.components.size() || target >= scene.components.size()) return false;
+    if (op == BooleanOp::None) return false;
 
-        // Its own history entry rather than an undo of the Cut. Cancelling is something the user did
-        // now, and the edits they may have made in between are not this operation's to unwind.
-        projv::Scene* scenePointer = &scene;
-        EditorState* editorPointer = &editor;
-        projv::editor::EditRecord record;
-        record.label = "Restore cut region in " + scene.components[target].name;
-        record.memoryCost = coords->size() * (sizeof(ivec3) + sizeof(uint32_t));
-        record.undo = [=] {
-            applyVoxelSculpt(scenePointer, editorPointer, target, *coords, std::vector<uint32_t>(), false);
-        };
-        record.redo = [=] {
-            applyVoxelSculpt(scenePointer, editorPointer, target, *coords, *colors, true);
-        };
-        editor.history.record(std::move(record), ImGui::GetTime());
-        editor.materialUsageValid = false;
-        editor.materialChunkUsageValid = false;
+    ComponentVoxelSpace lattice = resolveLattice(scene, resolve);
+    if (!lattice.valid) return false;
 
-        size_t restored = coords->size();
-        releaseStamp(scene, editor, true);
-        editor.statusMessage = "Cancelled - put " + std::to_string(restored) + " voxel(s) back.";
-        return;
+    Fold fold = foldNode(scene, editor, resolve, ASSEMBLY_MAX_BAKE_CELLS,
+                                     ASSEMBLY_MAX_BAKE_CELLS);
+    if (fold.overBudget) {
+        editor.statusMessage = "That stack is past the bake budget of " +
+                               formatCompactCount(uint32_t(ASSEMBLY_MAX_BAKE_CELLS)) +
+                               " cells. Turn Snap 90 on, or bake it in fewer parts.";
+        return false;
+    }
+    if (!fold.valid || fold.coords.empty()) {
+        editor.statusMessage = "That stack resolves to nothing - check the ops on the rows.";
+        return false;
     }
 
-    releaseStamp(scene, editor, true);
-    editor.statusMessage = "Stamp cancelled.";
+    CellWritePlan plan = planCellWrite(scene, target, fold.coords, fold.colors, lattice, op);
+    if (plan.overBudget) {
+        editor.statusMessage = "Intersecting into " + scene.components[target].name +
+                               " would have to walk its whole grid, which is past the budget.";
+        return false;
+    }
+    if (!plan.valid || plan.writeCoords.empty()) {
+        editor.statusMessage = "That form does not reach " + scene.components[target].name + "'s grid.";
+        return false;
+    }
+
+    std::string targetName = scene.components[target].name;
+    std::string assetName = scene.components[resolve.node].name;
+
+    if (plan.removing) {
+        applyVoxelSculpt(&scene, &editor, target, plan.writeCoords, std::vector<uint32_t>(), false);
+    } else {
+        applyVoxelSculpt(&scene, &editor, target, plan.writeCoords, plan.writeColors, true);
+    }
+
+    auto recipe = std::make_shared<NodeRecipe>(recipeFromNode(scene, editor, resolve));
+    auto liveNode = std::make_shared<projv::ComponentHandle>(projv::INVALID_COMPONENT_HANDLE);
+    auto step = std::make_shared<CellWritePlan>(std::move(plan));
+    size_t written = step->writeCoords.size();
+
+    projv::ComponentHandle node = resolve.node;
+    destroyAssetNode(scene, editor, node, false);
+    selectComponentInEditor(scene, editor, target, true);
+
+    projv::Scene* scenePointer = &scene;
+    EditorState* editorPointer = &editor;
+    projv::editor::EditRecord record;
+    record.label = std::string(BooleanOpLabel(op)) + " " + assetName + " into " + targetName;
+    record.memoryCost = (step->writeCoords.size() + step->restoreCoords.size()) *
+                        (sizeof(ivec3) + sizeof(uint32_t));
+    // Removals before additions -- the ordering applyExtrudeDepth uses: a displaced cell has to be
+    // emptied of what replaced it before its own contents go back. The resolve comes back last, so
+    // the scene is already the shape it was standing over when it reappears.
+    record.undo = [=] {
+        if (step->removing) {
+            applyVoxelSculpt(scenePointer, editorPointer, target, step->restoreCoords,
+                             step->restoreColors, true);
+        } else {
+            applyVoxelSculpt(scenePointer, editorPointer, target, step->addedCoords,
+                             std::vector<uint32_t>(), false);
+            applyVoxelSculpt(scenePointer, editorPointer, target, step->restoreCoords,
+                             step->restoreColors, true);
+        }
+        *liveNode = materialiseNode(*scenePointer, *editorPointer, *recipe);
+    };
+    record.redo = [=] {
+        if (*liveNode != projv::INVALID_COMPONENT_HANDLE) {
+            destroyAssetNode(*scenePointer, *editorPointer, *liveNode, false);
+            *liveNode = projv::INVALID_COMPONENT_HANDLE;
+        }
+        if (step->removing) {
+            applyVoxelSculpt(scenePointer, editorPointer, target, step->writeCoords,
+                             std::vector<uint32_t>(), false);
+        } else {
+            applyVoxelSculpt(scenePointer, editorPointer, target, step->writeCoords,
+                             step->writeColors, true);
+        }
+    };
+    editor.history.record(std::move(record), ImGui::GetTime());
+
+    editor.materialUsageValid = false;
+    editor.materialChunkUsageValid = false;
+    editor.statusMessage = std::string(BooleanOpLabel(op)) + "ed " + assetName + " into " +
+                           targetName + " - " +
+                           formatCompactCount(uint32_t(std::min<size_t>(written, 0xFFFFFFFFu))) +
+                           " cell(s).";
+    return true;
 }
 
-// The third exit: stop treating it as a stamp and leave it in the hierarchy as its own object. Often
-// what is actually wanted for a placed pillar or a tree -- and, because a stamp was a real component
-// all along, it is a rename and a flag rather than a conversion.
-static void keepStampAsComponent(projv::Scene& scene, EditorState& editor) {
-    if (!editor.stamp.active) return;
-    projv::ComponentHandle component = editor.stamp.component;
-    if (component >= scene.components.size()) {
-        releaseStamp(scene, editor, false);
-        return;
-    }
-
-    // Out of the pool: it belongs to the user now, and the next stamp of this resolution must not
-    // refill it out from under them.
-    for (auto entry = editor.stampPool.begin(); entry != editor.stampPool.end(); ++entry) {
-        if (entry->second == component) { editor.stampPool.erase(entry); break; }
-    }
-
-    std::string name = editor.stamp.source == FloatingStamp::Source::Lifted
-                     ? "Region " + std::to_string(component)
-                     : std::string(ShapeKindLabel(editor.stamp.kind)) + " " + std::to_string(component);
-    scene.components[component].name = name;
-
-    releaseStamp(scene, editor, false);
-    editor.selectedComponent = component;
-    editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, component);
-    editor.selectionOutlineValid = false;
-    editor.revealSelectionInHierarchy = true;
-    editor.statusMessage = "Kept as component: " + name;
-}
-
-// --- Keyboard placement -----------------------------------------------------
+// =============================================================================
+// Keyboard
+// =============================================================================
 //
-// The gizmo is the aiming tool; these are the adjusting tool. One voxel of the target lattice per
+// The gizmo is the aiming tool; these are the adjusting tool. One voxel of the resolve's lattice per
 // press, in the plane the camera is looking across, because "a bit to the left" means left *on
-// screen* and a stamp's own axes may be pointing anywhere after a rotation.
+// screen* and a part's own axes may be pointing anywhere after a rotation.
 
-// The target-lattice axis a world direction most nearly points along, as a world-space step of one
-// voxel. `ignoreVertical` keeps the ground-plane arrows out of the vertical axis, which PgUp/PgDn own.
+// The lattice axis a world direction most nearly points along, as a world-space step of one voxel.
+// `ignoreVertical` keeps the ground-plane arrows out of the vertical axis, which PgUp/PgDn own.
 static projv::core::vec3 latticeStepAlong(const ComponentVoxelSpace& space, projv::core::vec3 direction,
                                           bool ignoreVertical) {
     using namespace projv::core;
@@ -6874,85 +11856,114 @@ static projv::core::vec3 latticeStepAlong(const ComponentVoxelSpace& space, proj
     return worldAxis * sign * space.voxelSize;
 }
 
-static void nudgeStamp(projv::Scene& scene, EditorState& editor, projv::core::vec3 worldDelta) {
-    if (!editor.stamp.active || editor.stamp.component >= scene.components.size()) return;
-    const projv::ComponentRecord& record = scene.components[editor.stamp.component];
-    applyComponentTransform(&scene, &editor, editor.stamp.component,
-                            record.localPosition + worldDelta, record.localRotation, 1.0f);
-    snapStampToTargetLattice(scene, editor);
+// Moves the selected component by a world delta, expressed in whatever frame its transform lives in.
+static void nudgeSelected(projv::Scene& scene, EditorState& editor, projv::core::vec3 worldDelta) {
+    using namespace projv::core;
+    projv::ComponentHandle handle = editor.selectedComponent;
+    if (handle >= scene.components.size()) return;
+
+    projv::ComponentHandle parent = scene.components[handle].parent;
+    mat3 toLocal(1.0f);
+    float parentScale = 1.0f;
+    if (parent < scene.components.size()) {
+        mat4 parentWorld = projv::utils::getComponentWorldMatrix(scene, parent);
+        mat3 basis(parentWorld);
+        parentScale = glm::length(basis[0]);
+        if (parentScale <= 1.0e-6f) parentScale = 1.0f;
+        toLocal = glm::transpose(basis / parentScale);
+    }
+    const projv::ComponentRecord& record = scene.components[handle];
+    applyComponentTransform(&scene, &editor, handle,
+                            record.localPosition + (toLocal * worldDelta) / parentScale,
+                            record.localRotation, record.localScale);
 }
 
-// Turns the stamp a quarter turn about a world axis, about its own content centre so it turns in
-// place rather than swinging around its minimum corner.
-static void rotateStamp90(projv::Scene& scene, EditorState& editor, projv::core::vec3 worldAxis,
-                          float sign) {
+// Turns the selected component a quarter turn about a world axis, about its own content centre so it
+// turns in place rather than swinging around its origin.
+static void rotateSelected90(projv::Scene& scene, EditorState& editor, projv::core::vec3 worldAxis,
+                             float sign) {
     using namespace projv::core;
-    if (!editor.stamp.active || editor.stamp.component >= scene.components.size()) return;
-    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, editor.stamp.component);
-    if (!space.valid) return;
+    projv::ComponentHandle handle = editor.selectedComponent;
+    if (handle >= scene.components.size()) return;
+    if (glm::length(worldAxis) <= 0.0f) return;
 
-    const projv::ComponentRecord& record = scene.components[editor.stamp.component];
-    vec3 contentLocal = (vec3(editor.stamp.contentMin) + vec3(editor.stamp.contentMax) + vec3(1.0f)) *
-                        0.5f * space.voxelSize;
-    vec3 centre = record.localPosition + glm::mat3_cast(record.localRotation) * contentLocal;
-
-    // The geometry inside the stamp does not move -- only the component's transform does -- so the
-    // content box is untouched and the new placement is derived from the same centre.
     quat delta = glm::angleAxis(sign * 1.57079632679f, glm::normalize(worldAxis));
-    centreStampAt(scene, editor, centre, glm::normalize(delta * record.localRotation));
+    const projv::ComponentRecord& record = scene.components[handle];
+
+    Part* part = findPart(editor, handle);
+    if (part && part->contentMax.x >= part->contentMin.x) {
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, handle);
+        if (space.valid) {
+            vec3 contentLocal = (vec3(part->contentMin) + vec3(part->contentMax) + vec3(1.0f)) *
+                                0.5f * space.voxelSize;
+            vec3 centre = record.localPosition + glm::mat3_cast(record.localRotation) * contentLocal;
+            // The geometry inside the part does not move -- only the component's transform does -- so
+            // the content box is untouched and the new placement is derived from the same centre.
+            centrePartAt(scene, editor, *part, centre, glm::normalize(delta * record.localRotation));
+            return;
+        }
+    }
+    applyComponentTransform(&scene, &editor, handle, record.localPosition,
+                            glm::normalize(delta * record.localRotation), record.localScale);
 }
 
-// Every key a floating stamp answers to. Called once per frame from the interface, not from the
-// Viewport panel, so the stamp keeps answering while the Tool panel or the Hierarchy has focus --
-// a stamp is a modal state and it has to survive looking somewhere else.
-static void handleStampKeyboard(projv::Scene& scene, EditorState& editor) {
+// Every key the open asset's contents answer to. Called once per frame from the interface, not from the Viewport
+// panel, so a part keeps answering while the Tool panel or the Hierarchy has focus.
+//
+// There is no Enter-to-commit and no Escape-to-cancel here, and their absence is the point: an
+// resolve is not a modal state waiting to be resolved, it is an object. Baking is a deliberate press
+// on a button that says what it will do.
+static void handlePlacementKeyboard(projv::Scene& scene, EditorState& editor) {
     using namespace projv::core;
-    if (!editor.stamp.active) return;
     const ImGuiIO& io = ImGui::GetIO();
     if (io.WantTextInput) return;
-    // The armed eyedropper owns Escape while it is armed -- it is the more recent, more local mode,
-    // and disarming it is what the user means. Cancelling the stamp as well would throw away a
-    // placement in answer to a keypress aimed at something else.
     if (editor.materialPickerActive) return;
+    if (editor.activeTool != EditorTool::Place && editor.activeTool != EditorTool::Region) return;
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
-        mergeStamp(scene, editor);
+    projv::ComponentHandle handle = editor.selectedComponent;
+    Part* part = findPart(editor, handle);
+    Resolve* resolve = part ? findResolve(editor, ownerOf(scene, handle)) : findResolve(editor, handle);
+    if (!resolve) return;
+
+    if (part && (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace))) {
+        std::string name = scene.components[handle].name;
+        removePart(scene, editor, handle);
+        editor.selectedComponent = resolve->node;
+        editor.selectionOutlineValid = false;
+        editor.statusMessage = "Removed " + name + " from the stack.";
         return;
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-        cancelStamp(scene, editor);
-        return;
-    }
 
-    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, editor.stamp.target);
-    if (!targetSpace.valid) return;
+    ComponentVoxelSpace lattice = resolveLattice(scene, *resolve);
+    if (!lattice.valid) return;
 
     vec3 forward = computeCameraDirection(editor);
     vec3 right = glm::normalize(glm::cross(forward, vec3(0.0f, 1.0f, 0.0f)));
 
     if (io.KeyCtrl) {
         // A quarter turn about the lattice axis most nearly facing the camera, so Left and Right turn
-        // the stamp the way the words mean on screen.
-        vec3 axis = latticeStepAlong(targetSpace, forward, false);
+        // the part the way the words mean on screen.
+        vec3 axis = latticeStepAlong(lattice, forward, false);
         if (glm::length(axis) <= 0.0f) return;
-        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  rotateStamp90(scene, editor, axis,  1.0f);
-        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) rotateStamp90(scene, editor, axis, -1.0f);
-        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    rotateStamp90(scene, editor, right,  1.0f);
-        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  rotateStamp90(scene, editor, right, -1.0f);
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  rotateSelected90(scene, editor, axis,  1.0f);
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) rotateSelected90(scene, editor, axis, -1.0f);
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    rotateSelected90(scene, editor, right,  1.0f);
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  rotateSelected90(scene, editor, right, -1.0f);
         return;
     }
 
-    vec3 forwardStep = latticeStepAlong(targetSpace, vec3(forward.x, 0.0f, forward.z), true);
-    vec3 rightStep = latticeStepAlong(targetSpace, right, true);
-    vec3 upStep = latticeStepAlong(targetSpace, vec3(0.0f, 1.0f, 0.0f), false);
+    vec3 forwardStep = latticeStepAlong(lattice, vec3(forward.x, 0.0f, forward.z), true);
+    vec3 rightStep = latticeStepAlong(lattice, right, true);
+    vec3 upStep = latticeStepAlong(lattice, vec3(0.0f, 1.0f, 0.0f), false);
 
-    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    nudgeStamp(scene, editor, forwardStep);
-    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  nudgeStamp(scene, editor, -forwardStep);
-    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) nudgeStamp(scene, editor, rightStep);
-    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  nudgeStamp(scene, editor, -rightStep);
-    if (ImGui::IsKeyPressed(ImGuiKey_PageUp))     nudgeStamp(scene, editor, upStep);
-    if (ImGui::IsKeyPressed(ImGuiKey_PageDown))   nudgeStamp(scene, editor, -upStep);
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    nudgeSelected(scene, editor, forwardStep);
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  nudgeSelected(scene, editor, -forwardStep);
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) nudgeSelected(scene, editor, rightStep);
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))  nudgeSelected(scene, editor, -rightStep);
+    if (ImGui::IsKeyPressed(ImGuiKey_PageUp))     nudgeSelected(scene, editor, upStep);
+    if (ImGui::IsKeyPressed(ImGuiKey_PageDown))   nudgeSelected(scene, editor, -upStep);
 }
+
 
 // =============================================================================
 // Region selection
@@ -7068,7 +12079,7 @@ static void applyRegionPick(projv::Scene& scene, EditorState& editor, const proj
 
             ivec3 size = maximum - minimum + ivec3(1);
             size_t cells = size_t(size.x) * size_t(size.y) * size_t(size.z);
-            if (cells > STAMP_MAX_SELECTION_CELLS) {
+            if (cells > REGION_MAX_SELECTION_CELLS) {
                 editor.statusMessage = "That box is " + formatCompactCount(uint32_t(std::min<size_t>(cells, 0xFFFFFFFFu))) +
                                        " cells, past the selection limit.";
                 return;
@@ -7125,8 +12136,10 @@ static void applyRegionPick(projv::Scene& scene, EditorState& editor, const proj
                            (editor.regionSelection.truncated ? " (stopped at the gather limit)" : "");
 }
 
-// Lifts the selection into a floating stamp: the Region tool's whole point, and the moment it
-// becomes the same object the Shape tool produces.
+// Lifts the selection into the active resolve as a part: the Region tool's whole point, and the
+// moment a region becomes the same kind of object a primitive is. Once lifted it has a stack row, an
+// op, a gizmo and a bake, exactly like anything else in the resolve -- which is the payoff of a part
+// being one thing with three sources rather than three things that look alike.
 //
 // A fresh Chunk built through queueVoxelAdd, never utils::duplicateComponent -- that helper does not
 // handle Grid components, and a selection routinely lives in one. Stated here so nobody "optimises"
@@ -7136,112 +12149,126 @@ static void liftSelection(projv::Scene& scene, EditorState& editor, bool cut) {
 
     VoxelSelection& selection = editor.regionSelection;
     if (selection.empty() || selection.component >= scene.components.size()) return;
-    if (editor.stamp.active) {
-        editor.statusMessage = "Finish placing the current stamp first.";
-        return;
-    }
 
-    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, selection.component);
-    if (!targetSpace.valid || targetSpace.voxelSize <= 0.0f) {
+    ComponentVoxelSpace sourceSpace = resolveComponentVoxelSpace(scene, selection.component);
+    if (!sourceSpace.valid || sourceSpace.voxelSize <= 0.0f) {
         editor.statusMessage = "Could not resolve the selection's voxel grid.";
         return;
     }
 
     ivec3 size = selection.dimensions();
     int longest = std::max({size.x, size.y, size.z});
-    if (longest > STAMP_MAX_DIMENSION) {
+    if (longest > PART_MAX_DIMENSION) {
         editor.statusMessage = "That selection is " + std::to_string(longest) +
-                               " voxels across, past the " + std::to_string(STAMP_MAX_DIMENSION) +
-                               " limit for a stamp.";
+                               " voxels across, past the " + std::to_string(PART_MAX_DIMENSION) +
+                               " limit for one part.";
         return;
     }
 
     std::vector<ivec3> sourceCoords;
     selectionCoords(selection, sourceCoords);
 
-    std::vector<ivec3> stampCoords;
-    std::vector<uint32_t> stampColors;
+    std::vector<ivec3> partCoords;
+    std::vector<uint32_t> partColors;
     std::vector<uint32_t> sourceColors;
-    stampCoords.reserve(sourceCoords.size());
-    stampColors.reserve(sourceCoords.size());
+    partCoords.reserve(sourceCoords.size());
+    partColors.reserve(sourceCoords.size());
     sourceColors.reserve(sourceCoords.size());
     for (const ivec3& coord : sourceCoords) {
         uint8_t slot = 0;
-        if (!queryComponentVoxel(scene, targetSpace, coord, slot)) continue;
+        if (!queryComponentVoxel(scene, sourceSpace, coord, slot)) continue;
         uint32_t color = componentVoxelColor(scene, selection.component, slot);
-        stampCoords.push_back(coord - selection.boundsMin);
-        stampColors.push_back(color);
+        partCoords.push_back(coord - selection.boundsMin);
+        partColors.push_back(color);
         sourceColors.push_back(color);
     }
-    if (stampCoords.empty()) {
+    if (partCoords.empty()) {
         editor.statusMessage = "The selection no longer holds any voxels.";
         return;
     }
 
-    uint32_t resolution = smallestChunkResolutionFor(longest);
-    projv::ComponentHandle component = acquireStampComponent(scene, editor, resolution,
-                                                             targetSpace.voxelSize);
-    if (component == projv::INVALID_COMPONENT_HANDLE) {
-        editor.statusMessage = "Could not create the stamp component (see log).";
-        return;
+    // The resolve is created at the *source's* voxel scale when there is not one already, so a
+    // region lifted out of a component and dropped back into it is a 1:1 remap rather than a
+    // resample. An asset that is already open keeps its own scale -- it owns the lattice, and
+    // silently changing it under the parts already in it would resample all of them.
+    Resolve* resolve = findResolve(editor, activeStackNode(scene, editor));
+    if (!resolve) {
+        projv::ComponentHandle node = createAssetNode(scene, editor, projv::INVALID_COMPONENT_HANDLE,
+                                                      sourceSpace.voxelSize);
+        resolve = findResolve(editor, node);
+        if (!resolve) return;
+    }
+    if (std::abs(resolve->voxelScale - sourceSpace.voxelSize) > 1.0e-6f) {
+        editor.statusMessage = "Note: " + scene.components[resolve->node].name +
+                               " is at a different voxel scale, so this lift is a resample.";
     }
 
-    editor.stamp.component = component;
-    clearStampGeometry(scene, editor);
+    uint32_t resolution = smallestChunkResolutionFor(longest);
+    std::string name = uniqueComponentName(scene, "Region");
+    projv::ComponentHandle component = createPartComponent(scene, editor, resolve->node, name.c_str(),
+                                                           resolution, resolve->voxelScale);
+    if (component == projv::INVALID_COMPONENT_HANDLE) {
+        editor.statusMessage = "Could not create the part component (see log).";
+        return;
+    }
+    scene.components[component].op = editor.shapeOp == BooleanOp::None ? BooleanOp::Union
+                                                                       : editor.shapeOp;
 
-    editor.stamp.active = true;
-    editor.stamp.source = FloatingStamp::Source::Lifted;
-    editor.stamp.target = selection.component;
-    editor.stamp.kind = ShapeKind::Box;   // Only used for a label; a lift has no primitive.
-    editor.stamp.dimensions[0] = size.x;
-    editor.stamp.dimensions[1] = size.y;
-    editor.stamp.dimensions[2] = size.z;
-    editor.stamp.hollow = false;
-    editor.stamp.cutFromTarget = cut;
-    editor.stamp.liftedCoords.clear();
-    editor.stamp.liftedColors.clear();
+    Part part;
+    part.component = component;
 
-    fillStamp(scene, editor, stampCoords, stampColors);
+    part.procedural = false;   // A lift has no primitive to rasterise again, so it does not resize.
+    part.kind = ShapeKind::Box;
+    part.dimensions[0] = size.x;
+    part.dimensions[1] = size.y;
+    part.dimensions[2] = size.z;
+    part.color = partColors.empty() ? 0xFFFFFFFFu : partColors[0];
+    part.cutFromSource = cut;
+    part.cutSource = selection.component;
+    editor.parts[component] = std::move(part);
 
-    // Positioned so its lattice *coincides* with the source's: the stamp appears exactly over the
-    // original, with no visual jump, and merging it straight back is a byte-identical no-op.
-    vec3 origin = targetSpace.latticeOrigin +
-                  glm::mat3_cast(targetSpace.rotation) *
-                  (vec3(selection.boundsMin - targetSpace.coordOrigin) * targetSpace.voxelSize);
-    applyComponentTransform(&scene, &editor, component, origin, targetSpace.rotation, 1.0f);
-    selectStamp(scene, editor);
+    fillPart(scene, editor, editor.parts[component], partCoords, partColors);
+
+    // Positioned so its lattice *coincides* with the source's: the part appears exactly over the
+    // original, with no visual jump, and folding it straight back is a byte-identical no-op.
+    vec3 worldOrigin = sourceSpace.latticeOrigin +
+                       glm::mat3_cast(sourceSpace.rotation) *
+                       (vec3(selection.boundsMin - sourceSpace.coordOrigin) * sourceSpace.voxelSize);
+    mat4 toAsset = glm::inverse(projv::utils::getComponentWorldMatrix(scene, resolve->node));
+    vec3 localOrigin = vec3(toAsset * vec4(worldOrigin, 1.0f));
+    quat localRotation = glm::normalize(glm::quat_cast(mat3(toAsset)) * sourceSpace.rotation);
+    applyComponentTransform(&scene, &editor, component, localOrigin, localRotation, 1.0f);
 
     if (cut) {
-        // The lift and the removal are one gesture and one history entry, which is what makes Cut
-        // different from Copy-then-Delete.
+        // Removing the part has to put these back, so it carries its own copy for as long as it is
+        // in the stack.
+        editor.parts[component].cutCoords = sourceCoords;
+        editor.parts[component].cutColors = sourceColors;
+    }
+    selectComponentInEditor(scene, editor, component, true);
+    invalidateResolve(editor, *resolve);
+
+    if (cut) {
+        // The lift and the removal are one gesture, so they share one history entry -- which is what
+        // makes Cut different from Copy-then-Delete.
         auto coords = std::make_shared<std::vector<ivec3>>(sourceCoords);
         auto colors = std::make_shared<std::vector<uint32_t>>(sourceColors);
         projv::ComponentHandle source = selection.component;
+
         applyVoxelSculpt(&scene, &editor, source, *coords, std::vector<uint32_t>(), false);
-
-        // Cancel has to put these back, so the stamp carries its own copy for as long as it floats.
-        editor.stamp.liftedCoords = sourceCoords;
-        editor.stamp.liftedColors = sourceColors;
-
-        projv::Scene* scenePointer = &scene;
-        EditorState* editorPointer = &editor;
-        projv::editor::EditRecord record;
-        record.label = "Cut " + std::to_string(coords->size()) + " voxel(s) from " +
-                       scene.components[source].name;
-        record.memoryCost = coords->size() * (sizeof(ivec3) + sizeof(uint32_t));
-        record.undo = [=] {
-            applyVoxelSculpt(scenePointer, editorPointer, source, *coords, *colors, true);
-        };
-        record.redo = [=] {
-            applyVoxelSculpt(scenePointer, editorPointer, source, *coords, std::vector<uint32_t>(), false);
-        };
-        editor.history.record(std::move(record), ImGui::GetTime());
         editor.materialUsageValid = false;
         editor.materialChunkUsageValid = false;
+        // The part's own arrival is recorded by recordPartAdded, whose undo calls removePart -- and
+        // removePart is what puts a cut back. So the cut needs no restore of its own here: recording
+        // one would put the voxels back twice.
+        recordPartAdded(scene, editor, "Cut " + std::to_string(coords->size()) + " voxel(s) from " +
+                                       scene.components[source].name, component);
+    } else {
+        recordPartAdded(scene, editor, "Copy region", component);
     }
 
-    editor.statusMessage = std::string(cut ? "Cut " : "Copied ") + std::to_string(stampCoords.size()) +
-                           " voxel(s) - Enter to merge, Esc to cancel";
+    editor.statusMessage = std::string(cut ? "Cut " : "Copied ") + std::to_string(partCoords.size()) +
+                           " voxel(s) into " + scene.components[resolve->node].name + ".";
 }
 
 // Lift a copy and step it one bounding box to the side, so it is visibly a second object rather than
@@ -7250,14 +12277,17 @@ static void duplicateSelectionInPlace(projv::Scene& scene, EditorState& editor) 
     using namespace projv::core;
     ivec3 size = editor.regionSelection.dimensions();
     liftSelection(scene, editor, false);
-    if (!editor.stamp.active) return;
 
-    ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, editor.stamp.target);
-    if (!targetSpace.valid) return;
-    vec3 offset = glm::mat3_cast(targetSpace.rotation)[0] * (float(size.x) * targetSpace.voxelSize);
-    nudgeStamp(scene, editor, offset);
-    editor.statusMessage = "Duplicated " + std::to_string(editor.stamp.voxelCount) +
-                           " voxel(s) - Enter to merge, Esc to cancel";
+    Part* part = findPart(editor, editor.selectedComponent);
+    if (!part) return;
+    Resolve* resolve = findResolve(editor, ownerOf(scene, editor.selectedComponent));
+    if (!resolve) return;
+    ComponentVoxelSpace lattice = resolveLattice(scene, *resolve);
+    if (!lattice.valid) return;
+
+    vec3 offset = glm::mat3_cast(lattice.rotation)[0] * (float(size.x) * lattice.voxelSize);
+    nudgeSelected(scene, editor, offset);
+    editor.statusMessage = "Duplicated " + std::to_string(part->voxelCount) + " voxel(s).";
 }
 
 static void deleteSelection(projv::Scene& scene, EditorState& editor) {
@@ -7365,49 +12395,47 @@ static void processVoxelPick(projv::Scene& scene, EditorState& editor) {
     if (purpose == PickPurpose::None) return;
     editor.pendingPick = PickPurpose::None;
 
-    projv::core::vec3 cameraDirection = computeCameraDirection(editor);
     projv::core::vec2 viewportResolution = { float(editor.viewportWidth), float(editor.viewportHeight) };
-    projv::core::vec3 rayDirection =
-        projv::utils::rayDirectionThroughImage(editor.pickUV, viewportResolution, cameraDirection);
+    ViewportRay cursorRay = viewportRayThroughUV(editor, editor.pickUV, viewportResolution);
 
     // Sculpting casts its own ray: it needs the stroke's solidity override, and a miss means
     // something to it (place down the ray) rather than nothing.
     if (purpose == PickPurpose::SculptVoxel) {
-        processSculptSample(scene, editor, rayDirection);
+        processSculptSample(scene, editor, cursorRay);
         return;
     }
 
-    projv::utils::VoxelPick pick = projv::utils::pickVoxel(scene, editor.cameraPosition, rayDirection);
+    projv::utils::VoxelPick pick = projv::utils::pickVoxel(scene, cursorRay.origin, cursorRay.direction);
 
-    // The Shape tool is the one purpose a miss still means something to: with nothing under the
-    // cursor there is no surface to sit the primitive on, so it goes `Place distance` down the ray
-    // instead -- the same fallback Sculpt already has, and the only way to put a shape into a
-    // component that is still empty.
-    if (purpose == PickPurpose::SpawnStamp) {
-        projv::ComponentHandle target = pick.hit ? pick.component : editor.selectedComponent;
-        if (target >= scene.components.size() ||
-            scene.components[target].kind == projv::ComponentKind::Asset) {
-            editor.statusMessage = "Select the component to place into, or click one of its voxels.";
-            return;
-        }
-
-        projv::core::vec3 centre;
+    // The Assemble tool's whole verb. A click on an existing part selects it -- grabbing what is
+    // already there has to beat stacking another primitive on top of it -- and a click on anything
+    // else drops a new primitive where you pointed.
+    //
+    // This is what PickPurpose::PlacePart was named for. Before resolves the click only ever
+    // selected, and the tool's own hint had to say "create primitives from the dropdown in the Tool
+    // panel", which is a tool explaining that its main verb is somewhere else.
+    if (purpose == PickPurpose::PlacePart) {
         if (pick.hit) {
-            // Sitting *on* the surface rather than half-buried in it: the shape is pushed out along
-            // the face's own normal by half of whatever the shape measures along that direction.
-            ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, target);
-            projv::core::vec3 normal = glm::mat3_cast(scene.chunks[pick.chunk].header.rotation) *
-                                       projv::core::vec3(pick.faceNormal);
-            float voxelSize = targetSpace.valid ? targetSpace.voxelSize : 1.0f;
-            projv::core::ivec3 axis = targetSpace.valid
-                                    ? worldDirectionToComponentAxis(targetSpace, normal)
-                                    : projv::core::ivec3(0, 1, 0);
-            int extent = editor.shapeDimensions[axis.x != 0 ? 0 : (axis.y != 0 ? 1 : 2)];
-            centre = pick.worldPosition + glm::normalize(normal) * (0.5f * float(extent) * voxelSize);
-        } else {
-            centre = editor.cameraPosition + rayDirection * editor.shapePlaceDistance;
+            projv::ComponentHandle hitComponent = pick.component;
+            // With the result shown the parts are hidden, so a click lands on the result and still
+            // has to resolve to the resolve behind it.
+            for (const Resolve& resolve : editor.resolves) {
+                if (resolve.result == hitComponent) { hitComponent = resolve.node; break; }
+            }
+            if (findPart(editor, hitComponent) || findResolve(editor, hitComponent)) {
+                selectComponentInEditor(scene, editor, hitComponent, true);
+                editor.statusMessage = "Selected " + scene.components[hitComponent].name;
+                return;
+            }
         }
-        spawnShapeStamp(scene, editor, target, centre);
+
+        // Against the face under the cursor the way the sculpt brush seats its brush, or at the
+        // place distance when the click went past everything -- which is the only way to put the
+        // first shape of an asset into empty space.
+        projv::core::vec3 centre = pick.hit
+            ? pick.worldPosition
+            : cursorRay.origin + glm::normalize(cursorRay.direction) * editor.shapePlaceDistance;
+        placePrimitiveAt(scene, editor, centre);
         return;
     }
 
@@ -7434,18 +12462,61 @@ static void processVoxelPick(projv::Scene& scene, EditorState& editor) {
             editor.selectionOutlineValid = false;
         }
         editor.statusMessage = "Nothing under the cursor.";
+        // Both armed pickers stay armed through a miss only in the sense that they do not: each is a
+        // one-shot the user is waiting on, and leaving one live after a click that answered nothing
+        // means the *next* click -- aimed at whatever they moved on to -- gets taken instead.
         editor.materialPickerActive = false;
+        editor.focusPickerActive = false;
         return;
     }
 
     switch (purpose) {
+        // Square up on the voxel that was clicked: the camera moves out along the normal of the face
+        // that was hit and looks straight back down it, so the face ends up centred *and* exactly
+        // perpendicular to the view.
+        //
+        // Perpendicular is the whole point of the gesture, and it is what distinguishes this from the
+        // Inspector's "Look at this component" (which keeps the current angle and only slides). A face
+        // seen square-on is the one view in which a screen distance is a true distance along it -- no
+        // foreshortening to correct for by eye -- which is what makes it the view to line something up
+        // or check a wall is flat from. Keeping the old angle, as this first did, centres the voxel but
+        // leaves every one of those judgements as hard as it was before.
+        //
+        // Distance is preserved, so the gesture reframes without also zooming.
+        case PickPurpose::FocusVoxel: {
+            editor.focusPickerActive = false;
+            editor.orbitFocus = pick.worldPosition;
+
+            // pick.faceNormal is in the *chunk's* voxel grid, so it has to be rotated into world space
+            // before it can be a view direction -- a rotated chunk is exactly the case where the two
+            // disagree, and the one where squaring up matters most.
+            projv::core::vec3 viewDirection = computeCameraDirection(editor);
+            if (pick.chunk < scene.chunks.size()) {
+                projv::core::vec3 worldNormal = glm::mat3_cast(scene.chunks[pick.chunk].header.rotation) *
+                                                projv::core::vec3(pick.faceNormal);
+                // A hit always carries a face, but a degenerate normal would leave normalize() with a
+                // NaN direction and put the camera nowhere -- so the current view direction stands in.
+                if (glm::dot(worldNormal, worldNormal) > 1.0e-6f) {
+                    viewDirection = -glm::normalize(worldNormal);
+                }
+            }
+            aimCameraAtFocus(editor, viewDirection);
+
+            editor.statusMessage = "Squared up on voxel (" + std::to_string(pick.voxelCoord.x) + ", " +
+                                   std::to_string(pick.voxelCoord.y) + ", " +
+                                   std::to_string(pick.voxelCoord.z) + ") in " +
+                                   projv::utils::getComponentPath(scene, pick.component);
+            break;
+        }
+
         case PickPurpose::SelectComponent: {
             editor.selectedComponent = pick.component;
             editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, pick.component);
             editor.selectionOutlineValid = false;
-            // The hierarchy is the panel that is meant to show what is selected, and the component
-            // just picked may be inside a collapsed folder well off the top of it.
-            editor.revealSelectionInHierarchy = true;
+            // The Assets panel is meant to show what is selected, and the contents list is one
+            // level deep -- the component just picked is very often inside something else, so
+            // showing it means opening that.
+            editor.revealSelection = true;
             editor.statusMessage = "Selected " + projv::utils::getComponentPath(scene, pick.component);
             break;
         }
@@ -7472,12 +12543,21 @@ static void processVoxelPick(projv::Scene& scene, EditorState& editor) {
             processPaintSample(scene, editor, pick);
             break;
 
-        case PickPurpose::RegionSeed:
+        case PickPurpose::RegionSeed: {
+            // Clicking a part while the Region tool is active means "grab that one", not "start a
+            // selection inside it": a part is a thing being arranged, and a box selection seeded in
+            // one is almost never what was meant.
+            if (findPart(editor, pick.component) || findResolve(editor, pick.component)) {
+                selectComponentInEditor(scene, editor, pick.component, true);
+                editor.statusMessage = "Selected " + scene.components[pick.component].name;
+                break;
+            }
             applyRegionPick(scene, editor, pick);
             break;
+        }
 
         case PickPurpose::SculptVoxel:   // Handled above, before the shared ray cast.
-        case PickPurpose::SpawnStamp:    // Likewise: a miss means something to it.
+        case PickPurpose::PlacePart:     // Handled above, before the switch.
         case PickPurpose::None:
             break;
     }
@@ -7673,11 +12753,17 @@ static ParentFrame getParentFrame(const projv::Scene& scene, projv::ComponentHan
 }
 
 // World-space size of one screen pixel at `point`'s depth, so the gizmo can be drawn at a constant
-// on-screen size however far away the component is. Mirrors worldToViewportPixel's camera model.
+// on-screen size however far away the component is. Mirrors worldToViewportPixel's camera model,
+// including its two projections: under parallel rays the answer does not depend on `point` at all,
+// which is exactly why an orthographic view is the one to check alignment in.
 static float worldUnitsPerPixel(const EditorState& editor, projv::core::vec3 point,
                                 projv::core::vec3 cameraDirection, ImVec2 imageMin, ImVec2 imageMax,
-                                float verticalFovDegrees = 60.0f) {
+                                float verticalFovDegrees = CAMERA_VERTICAL_FOV_DEGREES) {
     float imageHeight = std::max(1.0f, imageMax.y - imageMin.y);
+
+    float orthoHeight = cameraOrthoHeight(editor);
+    if (orthoHeight > 0.0f) return orthoHeight / imageHeight;
+
     float depth = glm::dot(point - editor.cameraPosition, glm::normalize(cameraDirection));
     depth = std::max(depth, 1.0e-3f);
     return (2.0f * std::tan(glm::radians(verticalFovDegrees * 0.5f)) * depth) / imageHeight;
@@ -7744,9 +12830,10 @@ static GizmoLayout buildGizmoLayout(const EditorState& editor, projv::core::vec3
     GizmoLayout layout;
     ImVec2 imageMin = editor.viewportImageMin;
     ImVec2 imageMax = editor.viewportImageMax;
+    float orthoHeight = cameraOrthoHeight(editor);
 
     if (!worldToViewportPixel(anchor, editor.cameraPosition, cameraDirection, imageMin, imageMax,
-                              layout.centerScreen)) {
+                              layout.centerScreen, orthoHeight)) {
         return layout;   // Pivot is behind the camera; there is no sane place to draw.
     }
 
@@ -7762,7 +12849,8 @@ static GizmoLayout buildGizmoLayout(const EditorState& editor, projv::core::vec3
     for (int axis = 0; axis < 3; axis++) {
         layout.arrowVisible[axis] = worldToViewportPixel(anchor + layout.axes[axis] * layout.arrowWorldLength,
                                                          editor.cameraPosition, cameraDirection,
-                                                         imageMin, imageMax, layout.arrowTipScreen[axis]);
+                                                         imageMin, imageMax, layout.arrowTipScreen[axis],
+                                                         orthoHeight);
 
         layout.ringFacingOK[axis] = std::abs(glm::dot(viewDirection, layout.axes[axis])) >= gizmo::MIN_RING_FACING;
 
@@ -7775,7 +12863,8 @@ static GizmoLayout buildGizmoLayout(const EditorState& editor, projv::core::vec3
             float angle = (float(i) / float(gizmo::RING_SEGMENTS)) * 2.0f * 3.14159265f;
             vec3 point = anchor + (spokeA * std::cos(angle) + spokeB * std::sin(angle)) * layout.worldRadius;
             ImVec2 screen;
-            if (worldToViewportPixel(point, editor.cameraPosition, cameraDirection, imageMin, imageMax, screen)) {
+            if (worldToViewportPixel(point, editor.cameraPosition, cameraDirection, imageMin, imageMax,
+                                     screen, orthoHeight)) {
                 layout.ringScreen[axis].push_back(screen);
             } else if (!layout.ringScreen[axis].empty()) {
                 break;   // Ring crosses behind the camera; keep the front arc and stop.
@@ -7870,14 +12959,27 @@ static void drawGizmo(ImDrawList* drawList, const GizmoLayout& layout, int hover
 static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor, bool imageHovered) {
     using namespace projv::core;
 
-    // The gizmo belongs to the Move tool -- and to a floating stamp, whichever tool produced it. That
-    // is the only change placement asks of the gizmo: a stamp is aimed with the same handles as
-    // everything else, and having to switch to Move to move it would be a mode inside a mode.
-    bool drivingStamp = editor.stamp.active && editor.selectedComponent == editor.stamp.component;
-    if (!editor.gizmoEnabled || (editor.activeTool != EditorTool::Move && !drivingStamp) ||
+    // The gizmo belongs to the Move tool and to the two tools that arrange parts. It drives
+    // editor.selectedComponent and nothing else -- there is no second selection to reconcile and no
+    // branch here that has to know what kind of thing it is holding, which is the whole benefit of a
+    // part being an ordinary component. (The branch this replaced is where the
+    // rotate-about-the-wrong-pivot bug lived.)
+    bool arranging = editor.activeTool == EditorTool::Place || editor.activeTool == EditorTool::Region;
+    projv::ComponentHandle gizmoTarget = editor.selectedComponent;
+    if (!editor.gizmoEnabled || (editor.activeTool != EditorTool::Move && !arranging) ||
         editor.materialPickerActive ||
-        editor.selectedComponent == projv::INVALID_COMPONENT_HANDLE ||
-        editor.selectedComponent >= scene.components.size()) {
+        gizmoTarget == projv::INVALID_COMPONENT_HANDLE ||
+        gizmoTarget >= scene.components.size() ||
+        isDerivedResult(editor, gizmoTarget)) {
+        editor.gizmoActiveHandle = -1;
+        editor.gizmoHoveredHandle = -1;
+        return false;
+    }
+    // While arranging, the handles are only worth drawing on something that is actually part of an
+    // arrangement -- otherwise the Region tool would put a gizmo on whatever the last Select click
+    // happened to leave behind.
+    if (arranging && editor.activeTool != EditorTool::Move &&
+        !findPart(editor, gizmoTarget) && !findResolve(editor, gizmoTarget)) {
         editor.gizmoActiveHandle = -1;
         editor.gizmoHoveredHandle = -1;
         return false;
@@ -7890,12 +12992,30 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
         return false;
     }
 
-    projv::ComponentHandle handle = editor.selectedComponent;
+    projv::ComponentHandle handle = gizmoTarget;
     projv::ComponentRecord& component = scene.components[handle];
 
     // The gizmo sits on whatever point the transform edits actually turn about, so the two agree.
-    vec3 pivotLocal = (editor.pivotAtCenter && editor.inspectorPivotValid)
-                    ? editor.inspectorPivotLocal : vec3(0.0f);
+    // usePivot is what the rotate drag below tests, not inspectorPivotValid directly -- the two have
+    // to agree or the gizmo is drawn about the content centre while the rotation turns about the
+    // local origin.
+    bool usePivot = editor.pivotAtCenter && editor.inspectorPivotValid;
+    vec3 pivotLocal = usePivot ? editor.inspectorPivotLocal : vec3(0.0f);
+    // A part's content box is tracked as it is written, and it is tighter than the chunk bounds
+    // refreshSelectionCaches measures: a primitive occupies a corner of a resolution cube that is
+    // mostly empty, and pivoting on the cube would put the handles out in that empty space.
+    if (editor.pivotAtCenter) {
+        if (const Part* part = findPart(editor, handle)) {
+            if (part->contentMax.x >= part->contentMin.x) {
+                ComponentVoxelSpace partSpace = resolveComponentVoxelSpace(scene, handle);
+                if (partSpace.valid) {
+                    pivotLocal = ((vec3(part->contentMin) + vec3(part->contentMax) + vec3(1.0f)) *
+                                  0.5f - vec3(partSpace.coordOrigin)) * partSpace.voxelSize;
+                    usePivot = true;
+                }
+            }
+        }
+    }
     mat4 world = projv::utils::getComponentWorldMatrix(scene, handle);
     vec3 anchor = vec3(world * vec4(pivotLocal, 1.0f));
     editor.gizmoAnchorWorld = anchor;
@@ -7920,9 +13040,9 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
     float imageHeight = std::max(1.0f, editor.viewportImageMax.y - editor.viewportImageMin.y);
     vec2 uv((mouse.x - editor.viewportImageMin.x) / imageWidth,
             (mouse.y - editor.viewportImageMin.y) / imageHeight);
-    vec3 rayDirection = projv::utils::rayDirectionThroughImage(uv, vec2(imageWidth, imageHeight),
-                                                               cameraDirection);
-    vec3 rayOrigin = editor.cameraPosition;
+    ViewportRay cursorRay = viewportRayThroughUV(editor, uv, vec2(imageWidth, imageHeight));
+    vec3 rayDirection = cursorRay.direction;
+    vec3 rayOrigin = cursorRay.origin;
 
     ParentFrame parentFrame = getParentFrame(scene, handle);
 
@@ -7956,6 +13076,8 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
             editor.gizmoDragStartPosition = component.localPosition;
             editor.gizmoDragStartRotation = component.localRotation;
             editor.gizmoDragStartScale = component.localScale;
+            editor.gizmoDragStartAnchor = anchor;   // Frozen for the drag; see the field's comment.
+            editor.gizmoDragStartFree = isFreePlacement(editor, handle);
         }
     }
 
@@ -7970,10 +13092,24 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
             vec3 previousPosition = editor.gizmoDragStartPosition;
             quat previousRotation = editor.gizmoDragStartRotation;
             float dragScale = editor.gizmoDragStartScale;
+            // The whole drag is measured against where the pivot was when it began, never against
+            // where the drag has since moved it. See EditorState::gizmoDragStartAnchor -- reading
+            // the live anchor here is a feedback loop, not a rounding error.
+            vec3 dragAnchor = editor.gizmoDragStartAnchor;
+
+            // **An Alt-drag does not merely suppress the grid, it records that it did.** Alt alone
+            // would last exactly as long as the gesture -- which is right for the gesture and wrong
+            // for the object: the drag's own undo record holds an off-grid value, so redoing it
+            // without Alt held would push it through the funnel again and straighten the pose the
+            // drag existed to create. Marking the component free is what makes the result survive
+            // its own history. "Snap to grid" in the Inspector is the way back.
+            bool wasFree = editor.gizmoDragStartFree;
+            bool nowFree = wasFree || snapSuppressedByModifier();
+            setFreePlacement(editor, handle, nowFree);
 
             if (active < 3) {
                 float t = 0.0f;
-                if (closestPointOnAxis(anchor, layout.axes[active], rayOrigin, rayDirection, t)) {
+                if (closestPointOnAxis(dragAnchor, layout.axes[active], rayOrigin, rayDirection, t)) {
                     // World-space slide along the axis, expressed in the parent's frame because that
                     // is what localPosition is measured in.
                     vec3 worldDelta = layout.axes[active] * (t - editor.gizmoDragStartAxisT);
@@ -7982,23 +13118,25 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
 
                     applyComponentTransform(&scene, &editor, handle, newPosition,
                                             component.localRotation, component.localScale);
-                    // Aiming a stamp is not an edit to the scene -- the merge is. Recording it would
-                    // leave undo entries pointing at a component that has since been emptied and
-                    // handed back to the pool, so undoing far enough would slide an invisible stamp
-                    // around instead of putting geometry back.
-                    if (drivingStamp) {
-                        snapStampToTargetLattice(scene, editor);
-                        drawGizmo(ImGui::GetWindowDrawList(), layout, editor.gizmoHoveredHandle,
-                                  editor.gizmoActiveHandle);
-                        return true;
-                    }
+                    // A part's transform is an ordinary undoable edit now, because a part is an
+                    // ordinary component that persists. Under the old flow a stamp's placement had
+                    // to stay out of the history -- the stamp was destroyed by the merge, so an undo
+                    // entry pointing at it would have slid an invisible object around instead of
+                    // putting geometry back -- and that exception is gone with the thing that forced
+                    // it. Snapping and cache invalidation already happened inside
+                    // applyComponentTransform, so there is nothing resolve-shaped left to do here.
                     projv::editor::EditRecord record;
                     record.label = "Move " + component.name;
                     record.coalesceKey = "transform:pos:" + std::to_string(handle);
-                    record.undo = [=] { applyComponentTransform(scenePointer, editorPointer, handle, previousPosition,
+                    // Freedom is restored before the transform, not after: the funnel reads the flag
+                    // on the way through, so setting it afterwards would snap the value first and
+                    // exempt it second.
+                    record.undo = [=] { setFreePlacement(*editorPointer, handle, wasFree);
+                                        applyComponentTransform(scenePointer, editorPointer, handle, previousPosition,
                                                                  scenePointer->components[handle].localRotation,
                                                                  scenePointer->components[handle].localScale); };
-                    record.redo = [=] { applyComponentTransform(scenePointer, editorPointer, handle, newPosition,
+                    record.redo = [=] { setFreePlacement(*editorPointer, handle, nowFree);
+                                        applyComponentTransform(scenePointer, editorPointer, handle, newPosition,
                                                                  scenePointer->components[handle].localRotation,
                                                                  scenePointer->components[handle].localScale); };
                     editor.history.record(std::move(record), ImGui::GetTime());
@@ -8006,8 +13144,11 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
             } else {
                 int axis = active - 3;
                 vec3 hit;
-                if (intersectRayPlane(anchor, layout.axes[axis], rayOrigin, rayDirection, hit)) {
-                    vec3 spoke = hit - anchor;
+                // Same frozen anchor. A rotation about the pivot is meant to leave the pivot exactly
+                // where it is, so this plane should not move -- but deriving it from the component
+                // being rotated makes that an assumption rather than a guarantee.
+                if (intersectRayPlane(dragAnchor, layout.axes[axis], rayOrigin, rayDirection, hit)) {
+                    vec3 spoke = hit - dragAnchor;
                     if (glm::length(spoke) > 1.0e-6f) {
                         spoke = glm::normalize(spoke);
                         // Signed angle from the spoke the drag grabbed to the current one, measured
@@ -8027,8 +13168,16 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
                                            parentFrame.rotation * editor.gizmoDragStartRotation;
                         newRotation = glm::normalize(newRotation);
 
+                        // Snapped *before* the pivot is compensated, never after. The compensation
+                        // below solves for the position that holds the pivot under a given rotation,
+                        // so it has to be given the rotation that will actually be stored -- see
+                        // latticeSnappedRotation for what compensating against the free one does.
+                        // applyComponentTransform snaps again on the way through, which is a no-op
+                        // on an already-snapped value.
+                        latticeSnappedRotation(scene, editor, handle, newRotation);
+
                         // Turn about the gizmo's own anchor, which is what the user is pointing at.
-                        vec3 newPosition = (editor.pivotAtCenter && editor.inspectorPivotValid)
+                        vec3 newPosition = usePivot
                             ? pivotCompensatedPosition(editor.gizmoDragStartPosition, editor.gizmoDragStartRotation,
                                                        dragScale, pivotLocal, newRotation, dragScale)
                             : editor.gizmoDragStartPosition;
@@ -8042,20 +13191,16 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
                         editor.inspectorEulerDegrees[1] = glm::degrees(radians.y);
                         editor.inspectorEulerDegrees[2] = glm::degrees(radians.z);
 
-                        // See the translate branch: a stamp's placement stays out of the history.
-                        if (drivingStamp) {
-                            snapStampToTargetLattice(scene, editor);
-                            drawGizmo(ImGui::GetWindowDrawList(), layout, editor.gizmoHoveredHandle,
-                                      editor.gizmoActiveHandle);
-                            return true;
-                        }
-
                         projv::editor::EditRecord record;
                         record.label = "Rotate " + component.name;
                         record.coalesceKey = "transform:rot:" + std::to_string(handle);
-                        record.undo = [=] { applyComponentTransform(scenePointer, editorPointer, handle,
+                        // See the translate branch: the flag goes back first, or the funnel snaps the
+                        // value on the way past and the exemption arrives too late to matter.
+                        record.undo = [=] { setFreePlacement(*editorPointer, handle, wasFree);
+                                            applyComponentTransform(scenePointer, editorPointer, handle,
                                                                      previousPosition, previousRotation, dragScale); };
-                        record.redo = [=] { applyComponentTransform(scenePointer, editorPointer, handle,
+                        record.redo = [=] { setFreePlacement(*editorPointer, handle, nowFree);
+                                            applyComponentTransform(scenePointer, editorPointer, handle,
                                                                      newPosition, newRotation, dragScale); };
                         editor.history.record(std::move(record), ImGui::GetTime());
                     }
@@ -8158,6 +13303,52 @@ static void drawAmbientOcclusionIcon(ImDrawList* drawList, ImVec2 center, float 
                               enabled ? IM_COL32(120, 128, 145, 190) : IM_COL32(120, 126, 136, 110), 20);
 }
 
+// The same sphere on the same ground as the icon above — because it is the same effect — with the
+// method drawn in instead of the result: a fan of rays leaving a point on the ground, the ones aimed
+// at the sphere stopping short of it and the ones aimed away running clear. That is the estimator,
+// literally, and it is the only honest way to tell two icons apart when both settings darken the same
+// crease. The contact shadow is deliberately absent here: this icon says *how*, the other says *what*.
+static void drawRayAmbientOcclusionIcon(ImDrawList* drawList, ImVec2 center, float size, bool enabled) {
+    ImU32 groundColor = enabled ? IM_COL32(150, 160, 175, 210) : IM_COL32(120, 126, 136, 150);
+    ImU32 sphereColor = enabled ? IM_COL32(236, 240, 248, 255) : IM_COL32(150, 156, 166, 190);
+    // Every ray is drawn in the same colour: at this size a dimmed line against the button's own fill
+    // is simply invisible, so what distinguishes a blocked ray is that it is *short and ends in a
+    // dot* — it stopped somewhere — rather than that it is a different shade.
+    ImU32 rayColor = enabled ? IM_COL32(150, 202, 255, 240) : IM_COL32(112, 120, 132, 145);
+    ImU32 hitColor = enabled ? IM_COL32(24, 30, 42, 255) : IM_COL32(74, 78, 86, 170);
+
+    float groundY = center.y + size * 0.30f;
+    drawList->AddLine(ImVec2(center.x - size * 0.42f, groundY), ImVec2(center.x + size * 0.42f, groundY),
+                      groundColor, 1.5f);
+
+    // The two positions are set against each other rather than chosen independently: the sphere has to
+    // sit inside the cone the fan sweeps, or the "blocked" rays below point at empty space and the
+    // drawing says nothing. From the origin the sphere's centre lies about 41 degrees up and its edges
+    // about 25 degrees either side of that, so it covers the fan's two rightmost rays and no others.
+    float sphereRadius = size * 0.19f;
+    ImVec2 origin = ImVec2(center.x - size * 0.20f, groundY - 1.0f);
+    ImVec2 sphereCenter = ImVec2(center.x + size * 0.14f, groundY - size * 0.30f);
+    drawList->AddCircleFilled(sphereCenter, sphereRadius, sphereColor, 20);
+
+    const int rayCount = 5;
+    for (int i = 0; i < rayCount; i++) {
+        // An even sweep of the upward hemisphere, 144 degrees round to 36. ImGui's y grows downward,
+        // so the angles are negated to leave the surface rather than sink through it.
+        float angle = -3.14159265f * (0.80f - float(i) * 0.15f);
+        ImVec2 direction = ImVec2(ImCos(angle), ImSin(angle));
+        // Which rays the sphere covers is worked out above and hardcoded here: the geometry is fixed,
+        // and a 26-pixel icon does not repay a ray/circle test at draw time.
+        bool blocked = i >= rayCount - 2;
+        float length = size * (blocked ? 0.27f : 0.37f);
+        ImVec2 tip = ImVec2(origin.x + direction.x * length, origin.y + direction.y * length);
+        drawList->AddLine(origin, tip, rayColor, 1.4f);
+        if (blocked) {
+            drawList->AddCircleFilled(tip, size * 0.055f, hitColor, 8);
+        }
+    }
+    drawList->AddCircleFilled(origin, size * 0.05f, rayColor, 8);
+}
+
 // An isometric cube with its three visible faces at three brightnesses -- which is precisely what the
 // setting does to the scene, so the icon is a sample of its own effect.
 static void drawNormalShadingIcon(ImDrawList* drawList, ImVec2 center, float size, bool enabled) {
@@ -8189,6 +13380,55 @@ static void drawNormalShadingIcon(ImDrawList* drawList, ImVec2 center, float siz
     drawList->AddConvexPolyFilled(rightFace, 4, rightColor);
 }
 
+// A sun up in one corner and a box throwing a shadow away from it. The thing that distinguishes this
+// from the ambient occlusion icon — which is also a shape and a darkening — is that the darkening
+// here is *offset*, and offset along the line from the sun, which is the whole difference between the
+// two settings: one darkens where surfaces are close, the other darkens what the sun cannot see.
+static void drawSunShadowIcon(ImDrawList* drawList, ImVec2 center, float size, bool enabled) {
+    ImU32 sunColor = enabled ? IM_COL32(252, 226, 150, 255) : IM_COL32(150, 146, 128, 175);
+    ImU32 boxColor = enabled ? IM_COL32(236, 240, 248, 255) : IM_COL32(150, 156, 166, 190);
+    ImU32 boxSideColor = enabled ? IM_COL32(150, 158, 176, 255) : IM_COL32(126, 132, 142, 165);
+    ImU32 groundColor = enabled ? IM_COL32(150, 160, 175, 210) : IM_COL32(120, 126, 136, 150);
+    ImU32 shadowColor = enabled ? IM_COL32(20, 24, 32, 235) : IM_COL32(70, 74, 82, 120);
+
+    float groundY = center.y + size * 0.26f;
+    drawList->AddLine(ImVec2(center.x - size * 0.42f, groundY), ImVec2(center.x + size * 0.42f, groundY),
+                      groundColor, 1.5f);
+
+    // Upper left, matching the shader's sun being up and off to one side. The rays are what says
+    // "a direction" rather than "a bright spot", which is what the setting actually depends on.
+    ImVec2 sun = ImVec2(center.x - size * 0.30f, center.y - size * 0.30f);
+    float sunRadius = size * 0.10f;
+    drawList->AddCircleFilled(sun, sunRadius, sunColor, 16);
+    for (int i = 0; i < 3; i++) {
+        // A quarter turn's worth, aimed down and to the right — the side the box and its shadow are
+        // on. Rays drawn away from the scene would point at nothing.
+        float angle = 0.30f + float(i) * 0.55f;
+        ImVec2 direction = ImVec2(ImCos(angle), ImSin(angle));
+        drawList->AddLine(ImVec2(sun.x + direction.x * sunRadius * 1.5f, sun.y + direction.y * sunRadius * 1.5f),
+                          ImVec2(sun.x + direction.x * sunRadius * 2.4f, sun.y + direction.y * sunRadius * 2.4f),
+                          sunColor, 1.3f);
+    }
+
+    // Cast down and to the right, away from the sun, and drawn before the box so the box stands on
+    // the near end of it.
+    ImVec2 boxMin = ImVec2(center.x - size * 0.04f, center.y - size * 0.06f);
+    ImVec2 boxMax = ImVec2(center.x + size * 0.20f, groundY);
+    ImVec2 shadow[4] = {
+        ImVec2(boxMin.x, groundY),
+        ImVec2(boxMax.x, groundY),
+        ImVec2(boxMax.x + size * 0.20f, groundY + size * 0.10f),
+        ImVec2(boxMin.x + size * 0.20f, groundY + size * 0.10f)
+    };
+    drawList->AddConvexPolyFilled(shadow, 4, shadowColor);
+
+    drawList->AddRectFilled(boxMin, boxMax, boxColor);
+    // The box's own away-from-the-sun side, so the icon carries the terminator the shader gets for
+    // free from the NdotL test before it spends a ray.
+    drawList->AddRectFilled(ImVec2(boxMin.x + (boxMax.x - boxMin.x) * 0.58f, boxMin.y), boxMax,
+                            boxSideColor);
+}
+
 // One toggle button, on the shared chrome the tool strip uses. The only thing that differs is what
 // it has to say about itself: a toggle reports on/off, a tool reports its shortcut.
 static bool drawSettingsBarButton(const char* id, bool enabled, const char* tooltip,
@@ -8210,7 +13450,7 @@ static bool drawSettingsBarButton(const char* id, bool enabled, const char* tool
 // to know the mouse is over the bar rather than over the scene, and the bar is drawn last so the
 // gizmo's lines cannot be laid across it.
 static bool viewportSettingsBarRect(const EditorState& editor, ImVec2& barMin, ImVec2& barMax) {
-    const int buttonCount = 2;
+    const int buttonCount = 4;
     float barWidth = buttonCount * SETTINGS_BAR_ICON_SIZE + (buttonCount - 1) * SETTINGS_BAR_SPACING +
                      2.0f * SETTINGS_BAR_PADDING;
     float barHeight = SETTINGS_BAR_ICON_SIZE + 2.0f * SETTINGS_BAR_PADDING;
@@ -8239,21 +13479,387 @@ static void drawViewportSettingsBar(EditorState& editor) {
     drawList->AddRectFilled(barMin, barMax, IM_COL32(18, 20, 26, 205), 8.0f);
     drawList->AddRect(barMin, barMax, IM_COL32(255, 255, 255, 28), 8.0f, 0, 1.0f);
 
-    ImGui::SetCursorScreenPos(ImVec2(barMin.x + SETTINGS_BAR_PADDING, barMin.y + SETTINGS_BAR_PADDING));
     ImGui::PushID("ViewportSettings");
     // No ImGui::SameLine between the buttons: it works off the layout cursor, and each button below
     // places its own screen position explicitly, which SameLine would then override.
+    int slot = 0;
+    auto placeButton = [&]() {
+        ImGui::SetCursorScreenPos(ImVec2(barMin.x + SETTINGS_BAR_PADDING +
+                                             float(slot) * (SETTINGS_BAR_ICON_SIZE + SETTINGS_BAR_SPACING),
+                                         barMin.y + SETTINGS_BAR_PADDING));
+        slot++;
+    };
+
+    // The two occlusion estimators sit side by side and behave as one three-state choice: off, cheap,
+    // or thorough. Turning either on turns the other off rather than layering them, because they
+    // answer the same question — two occlusion terms multiplied together is not a stronger answer, it
+    // is the same darkening applied twice.
+    placeButton();
     if (drawSettingsBarButton("ao", editor.ambientOcclusionEnabled,
-                              "Ambient occlusion", drawAmbientOcclusionIcon)) {
+                              "Ambient occlusion (screen-space)", drawAmbientOcclusionIcon)) {
         editor.ambientOcclusionEnabled = !editor.ambientOcclusionEnabled;
+        if (editor.ambientOcclusionEnabled) editor.rayAmbientOcclusionEnabled = false;
         editor.renderSettingsChanged = true;
     }
-    ImGui::SetCursorScreenPos(ImVec2(barMin.x + SETTINGS_BAR_PADDING + SETTINGS_BAR_ICON_SIZE + SETTINGS_BAR_SPACING,
-                                     barMin.y + SETTINGS_BAR_PADDING));
+    placeButton();
+    if (drawSettingsBarButton("rayao", editor.rayAmbientOcclusionEnabled,
+                              "Ambient occlusion (ray traced)", drawRayAmbientOcclusionIcon)) {
+        editor.rayAmbientOcclusionEnabled = !editor.rayAmbientOcclusionEnabled;
+        if (editor.rayAmbientOcclusionEnabled) editor.ambientOcclusionEnabled = false;
+        editor.renderSettingsChanged = true;
+    }
+    placeButton();
     if (drawSettingsBarButton("normal", editor.normalShadingEnabled,
                               "Normal shading", drawNormalShadingIcon)) {
         editor.normalShadingEnabled = !editor.normalShadingEnabled;
         editor.renderSettingsChanged = true;
+    }
+    placeButton();
+    if (drawSettingsBarButton("shadow", editor.sunShadowEnabled,
+                              "Sun shadow", drawSunShadowIcon)) {
+        editor.sunShadowEnabled = !editor.sunShadowEnabled;
+        editor.renderSettingsChanged = true;
+    }
+    ImGui::PopID();
+}
+
+// =============================================================================
+// Viewport navigator
+// =============================================================================
+//
+// The bottom-right corner of the scene image: an orientation cube, the three projection buttons, and
+// the focus eyeball. Together they answer the three questions the keyboard and the mouse buttons
+// cannot:
+//
+//   which way am I facing, and can I face an axis instead?   -- the cube, drawn in the camera's own
+//       orientation, its visible faces clickable. It is also the only place an *orbit* is available,
+//       and that is not an accident: orbiting needs a point to turn about, and everything else in the
+//       editor moves the camera without ever committing to one.
+//   is distance distorting what I am looking at?             -- the projection buttons.
+//   what, exactly, am I looking at?                          -- the eyeball, which turns one click on
+//       geometry into "that voxel, centred", and leaves the orbit turning about it afterwards.
+//
+// The cube is a wireframe-and-quads drawing rather than a rendered mesh for the same reason the icons
+// are drawn from primitives: it is a hundred ImDrawList calls against a second render target, a second
+// camera and a cube model.
+namespace navigator {
+    constexpr float CUBE_BOX = 76.0f;          // The square the cube is drawn and hit-tested in.
+    // Half-width of the cube as a fraction of that box, and it has to be set against the *corner-on*
+    // orientation rather than the face-on one: a cube seen down its diagonal spans sqrt(3) times its
+    // half-width, so a value chosen to look right face-on clips its own corners a quarter-turn later.
+    // 0.21 puts the widest orientation at 0.21 * sqrt(3) = 0.36 of the box's half-width, which also
+    // leaves the face labels inside it.
+    constexpr float CUBE_SCALE = 0.21f;
+    constexpr float ORBIT_SENSITIVITY = 0.011f;   // Radians per pixel of drag.
+    // How far the cursor may travel between press and release and still count as a click on a face
+    // rather than an orbit. Below a few pixels every click is an orbit of one degree; above ten, a
+    // deliberate small orbit snaps the view instead.
+    constexpr float CLICK_SLOP_PIXELS = 5.0f;
+    constexpr int FACE_COUNT = 6;
+}
+
+// Face f covers axis f/2, positive when f is even. Ordering the faces this way means the axis, the
+// sign, the label and the colour all fall out of the index with no table to keep in step.
+static projv::core::vec3 navigatorFaceNormal(int face) {
+    projv::core::vec3 normal(0.0f);
+    normal[face >> 1] = (face & 1) ? -1.0f : 1.0f;
+    return normal;
+}
+
+static const char* NAVIGATOR_FACE_LABELS[navigator::FACE_COUNT] = { "X", "-X", "Y", "-Y", "Z", "-Z" };
+
+// Where the cube and its button strip sit, and whether there is room for them at all.
+//
+// Same contract as the other two overlay strips: false when the panel is too small, and the rectangles
+// are needed *before* anything is drawn so a click on the navigator is not also a click on the scene
+// behind it. The extra condition here is the one the others do not have -- the settings bar is centred
+// along this same bottom edge, so the navigator also stands down when the two would collide, rather
+// than stacking a cube on top of three toggles.
+struct NavigatorLayout {
+    ImVec2 cubeMin, cubeMax;
+    ImVec2 barMin, barMax;
+};
+
+static bool viewportNavigatorLayout(const EditorState& editor, NavigatorLayout& layout) {
+    // The eyeball, then the three projections. The wider gap after the eyeball is what says they are
+    // two groups rather than four peers -- one arms a click, the others choose a mode.
+    const int buttonCount = 1 + CAMERA_PROJECTION_COUNT;
+    float groupGap = SETTINGS_BAR_SPACING * 2.5f;
+    float barWidth = buttonCount * SETTINGS_BAR_ICON_SIZE + (buttonCount - 1) * SETTINGS_BAR_SPACING +
+                     groupGap + 2.0f * SETTINGS_BAR_PADDING;
+    float barHeight = SETTINGS_BAR_ICON_SIZE + 2.0f * SETTINGS_BAR_PADDING;
+
+    float clusterWidth = barWidth + SETTINGS_BAR_SPACING + navigator::CUBE_BOX;
+    float clusterHeight = std::max(barHeight, navigator::CUBE_BOX);
+
+    float imageWidth = editor.viewportImageMax.x - editor.viewportImageMin.x;
+    float imageHeight = editor.viewportImageMax.y - editor.viewportImageMin.y;
+    if (imageWidth < clusterWidth + 2.0f * SETTINGS_BAR_MARGIN ||
+        imageHeight < clusterHeight + 2.0f * SETTINGS_BAR_MARGIN) {
+        return false;
+    }
+
+    // Bottom-right, both pieces sharing the cluster's vertical centre so the strip reads as attached to
+    // the cube rather than as a separate bar that happens to be nearby.
+    float clusterRight = editor.viewportImageMax.x - SETTINGS_BAR_MARGIN;
+    float clusterBottom = editor.viewportImageMax.y - SETTINGS_BAR_MARGIN;
+    float centerY = clusterBottom - clusterHeight * 0.5f;
+
+    layout.cubeMax = ImVec2(clusterRight, centerY + navigator::CUBE_BOX * 0.5f);
+    layout.cubeMin = ImVec2(clusterRight - navigator::CUBE_BOX, centerY - navigator::CUBE_BOX * 0.5f);
+    layout.barMax = ImVec2(layout.cubeMin.x - SETTINGS_BAR_SPACING, centerY + barHeight * 0.5f);
+    layout.barMin = ImVec2(layout.barMax.x - barWidth, centerY - barHeight * 0.5f);
+
+    // The centred settings bar owns the middle of this edge. Overlapping it would bury three toggles
+    // under the cube, so the navigator is what gives way -- it is the newer of the two, and the panel
+    // only has to be widened a little to get it back.
+    ImVec2 settingsMin, settingsMax;
+    if (viewportSettingsBarRect(editor, settingsMin, settingsMax) &&
+        layout.barMin.x < settingsMax.x + SETTINGS_BAR_SPACING &&
+        layout.barMin.y < settingsMax.y && layout.cubeMax.y > settingsMin.y) {
+        return false;
+    }
+    return true;
+}
+
+// The cube's eight corners projected into the box, and which faces are turned toward the viewer.
+//
+// The projection is deliberately orthographic whatever the scene's own projection is: the cube is a
+// statement about *orientation* and nothing else, and a perspective one would foreshorten the near
+// corner and make the same rotation look different depending on where the cube happened to sit.
+struct NavigatorCubeProjection {
+    ImVec2 corner[8];                       // Indexed by axis bits, as elsewhere: bit 0 is X, and so on.
+    bool faceVisible[navigator::FACE_COUNT];
+    ImVec2 faceCenter[navigator::FACE_COUNT];
+    ImVec2 faceCorner[navigator::FACE_COUNT][4];
+    float halfExtentPixels = 0.0f;          // Screen half-width of a face seen face-on.
+};
+
+static NavigatorCubeProjection projectNavigatorCube(const EditorState& editor,
+                                                    ImVec2 boxMin, ImVec2 boxMax) {
+    using namespace projv::core;
+    NavigatorCubeProjection projection;
+
+    vec3 forward = glm::normalize(computeCameraDirection(editor));
+    vec3 right, up;
+    computeCameraBasis(forward, right, up);
+
+    ImVec2 center((boxMin.x + boxMax.x) * 0.5f, (boxMin.y + boxMax.y) * 0.5f);
+    float scale = (boxMax.x - boxMin.x) * navigator::CUBE_SCALE;
+    projection.halfExtentPixels = scale;
+
+    // World offset -> screen offset. The Y term is negated because the camera's up axis and the screen's
+    // Y axis point opposite ways, the same flip the ray generator and worldToViewportPixel both carry.
+    auto project = [&](vec3 offset) {
+        return ImVec2(center.x + glm::dot(offset, right) * scale,
+                      center.y - glm::dot(offset, up) * scale);
+    };
+
+    for (int i = 0; i < 8; i++) {
+        projection.corner[i] = project(vec3((i & 1) ? 1.0f : -1.0f,
+                                            (i & 2) ? 1.0f : -1.0f,
+                                            (i & 4) ? 1.0f : -1.0f));
+    }
+
+    for (int face = 0; face < navigator::FACE_COUNT; face++) {
+        int axis = face >> 1;
+        float sign = (face & 1) ? -1.0f : 1.0f;
+        // A face is turned toward the viewer when its outward normal points back along the view.
+        projection.faceVisible[face] = glm::dot(navigatorFaceNormal(face), forward) < 0.0f;
+
+        // The two axes spanning the face, walked in a ring so the four corners come out as a convex
+        // quad rather than a bowtie -- the hit test below depends on that.
+        int axisB = (axis + 1) % 3;
+        int axisC = (axis + 2) % 3;
+        const float RING[4][2] = { {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f} };
+        for (int i = 0; i < 4; i++) {
+            vec3 offset(0.0f);
+            offset[axis] = sign;
+            offset[axisB] = RING[i][0];
+            offset[axisC] = RING[i][1];
+            projection.faceCorner[face][i] = project(offset);
+        }
+        vec3 centreOffset(0.0f);
+        centreOffset[axis] = sign;
+        projection.faceCenter[face] = project(centreOffset);
+    }
+    return projection;
+}
+
+// Which visible face the cursor is over, or -1. Convex-quad test by consistent cross-product sign,
+// which works whichever way the projection wound the corners -- and it winds them both ways, because a
+// face seen from behind is the same four points in the opposite order.
+static int hitTestNavigatorCube(const NavigatorCubeProjection& projection, ImVec2 point) {
+    for (int face = 0; face < navigator::FACE_COUNT; face++) {
+        if (!projection.faceVisible[face]) continue;
+
+        bool anyPositive = false;
+        bool anyNegative = false;
+        for (int i = 0; i < 4; i++) {
+            ImVec2 from = projection.faceCorner[face][i];
+            ImVec2 to = projection.faceCorner[face][(i + 1) % 4];
+            float cross = (to.x - from.x) * (point.y - from.y) - (to.y - from.y) * (point.x - from.x);
+            if (cross > 0.0f) anyPositive = true;
+            if (cross < 0.0f) anyNegative = true;
+        }
+        if (!(anyPositive && anyNegative)) return face;
+    }
+    return -1;
+}
+
+// The cube: three visible faces in the gizmo's own axis colours, the silhouette picked out, and each
+// face labelled with the axis it faces. Clicking one snaps the view down that axis; dragging anywhere
+// on it orbits.
+static void drawNavigatorCube(EditorState& editor, const NavigatorLayout& layout) {
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddRectFilled(layout.cubeMin, layout.cubeMax, IM_COL32(18, 20, 26, 205), 8.0f);
+    drawList->AddRect(layout.cubeMin, layout.cubeMax, IM_COL32(255, 255, 255, 28), 8.0f, 0, 1.0f);
+
+    NavigatorCubeProjection projection = projectNavigatorCube(editor, layout.cubeMin, layout.cubeMax);
+
+    ImGui::SetCursorScreenPos(layout.cubeMin);
+    ImGui::InvisibleButton("##navigatorCube", ImVec2(layout.cubeMax.x - layout.cubeMin.x,
+                                                     layout.cubeMax.y - layout.cubeMin.y));
+    bool hovered = ImGui::IsItemHovered();
+    bool held = ImGui::IsItemActive();
+    ImVec2 mouse = ImGui::GetIO().MousePos;
+    int hoveredFace = (hovered || held) ? hitTestNavigatorCube(projection, mouse) : -1;
+
+    // --- Orbit ---
+    //
+    // Same sign convention as the fly-through's look, which is what makes the cube feel like an object
+    // being turned rather than a second, contradictory camera control: drag right and the cube's front
+    // face travels right, so more of its left side comes into view.
+    if (held && ImGui::IsMouseDragging(ImGuiMouseButton_Left, navigator::CLICK_SLOP_PIXELS)) {
+        ImVec2 movement = ImGui::GetIO().MouseDelta;
+        if (movement.x != 0.0f || movement.y != 0.0f) {
+            editor.cameraYaw += movement.x * navigator::ORBIT_SENSITIVITY;
+            editor.cameraPitch = std::clamp(editor.cameraPitch - movement.y * navigator::ORBIT_SENSITIVITY,
+                                            -1.55f, 1.55f);
+            // Re-seated on the far side of the focus at the same distance, which is the whole difference
+            // between an orbit and the fly-through's turn in place.
+            aimCameraAtFocus(editor, computeCameraDirection(editor));
+        }
+        editor.cameraIsOrbiting = true;
+    }
+
+    // --- Snap ---
+    //
+    // Resolved on release rather than on press, because until the button comes up there is no telling
+    // whether the gesture was a click or the start of an orbit. cameraIsOrbiting is the record of which
+    // it turned out to be.
+    if (ImGui::IsItemDeactivated()) {
+        if (!editor.cameraIsOrbiting && hoveredFace >= 0) {
+            // Looking *at* the face means standing on its outward side, so the view direction is the
+            // normal reversed.
+            aimCameraAtFocus(editor, -navigatorFaceNormal(hoveredFace));
+            editor.statusMessage = std::string("Looking down ") + NAVIGATOR_FACE_LABELS[hoveredFace];
+        }
+        editor.cameraIsOrbiting = false;
+    }
+
+    // --- Draw ---
+    //
+    // Only the three faces turned toward the viewer, which for a convex cube is exactly the three that
+    // are not hidden. No depth sort is needed: visible faces of a cube never overlap each other.
+    const ImU32 AXIS_FILL[3] = { IM_COL32(196, 74, 84, 255),      // X, matching the gizmo's arrows
+                                 IM_COL32( 96, 176, 104, 255),    // Y
+                                 IM_COL32( 78, 130, 200, 255) };  // Z
+    for (int face = 0; face < navigator::FACE_COUNT; face++) {
+        if (!projection.faceVisible[face]) continue;
+
+        ImU32 base = AXIS_FILL[face >> 1];
+        // The negative faces are the same hue at two thirds the brightness. That is the whole of how
+        // "+X or -X" is said without relying on the label, which is three pixels tall at this size.
+        float shade = (face & 1) ? 0.60f : 1.0f;
+        if (hoveredFace == face) shade = std::min(shade + 0.35f, 1.35f);
+
+        ImU32 fill = IM_COL32(int(std::min(((base >> IM_COL32_R_SHIFT) & 0xFF) * shade, 255.0f)),
+                              int(std::min(((base >> IM_COL32_G_SHIFT) & 0xFF) * shade, 255.0f)),
+                              int(std::min(((base >> IM_COL32_B_SHIFT) & 0xFF) * shade, 255.0f)),
+                              hoveredFace == face ? 255 : 225);
+
+        // Copied out because AddConvexPolyFilled takes a pointer and the corners live in a 2D array.
+        ImVec2 quad[4] = { projection.faceCorner[face][0], projection.faceCorner[face][1],
+                           projection.faceCorner[face][2], projection.faceCorner[face][3] };
+        drawList->AddConvexPolyFilled(quad, 4, fill);
+        drawList->AddPolyline(quad, 4, IM_COL32(12, 14, 18, 200), ImDrawFlags_Closed, 1.2f);
+
+        // The label is dropped on a face turned close to edge-on, where the quad is a sliver barely
+        // taller than the text and the glyph spills out over its neighbours -- which is worse than no
+        // label at all, because it then reads as belonging to whichever face it landed on. Shoelace
+        // area against the face-on area, so the test is "how much of this face can I actually see";
+        // under an orthographic projection that ratio is exactly |dot(faceNormal, forward)|, so 0.45 is
+        // the same as "hide it below about 27 degrees off edge-on". The face's colour still says which
+        // axis it is, which is why losing the glyph costs so little.
+        float area = 0.0f;
+        for (int i = 0; i < 4; i++) {
+            ImVec2 a = projection.faceCorner[face][i];
+            ImVec2 b = projection.faceCorner[face][(i + 1) % 4];
+            area += a.x * b.y - b.x * a.y;
+        }
+        float faceOnArea = 4.0f * projection.halfExtentPixels * projection.halfExtentPixels;
+        if (std::abs(area) * 0.5f < faceOnArea * 0.45f) continue;
+
+        ImVec2 textSize = ImGui::CalcTextSize(NAVIGATOR_FACE_LABELS[face]);
+        drawList->AddText(ImVec2(projection.faceCenter[face].x - textSize.x * 0.5f,
+                                 projection.faceCenter[face].y - textSize.y * 0.5f),
+                          IM_COL32(255, 255, 255, 240), NAVIGATOR_FACE_LABELS[face]);
+    }
+
+    if (hovered && hoveredFace >= 0) {
+        ImGui::SetTooltip("Look down %s\nDrag the cube to orbit about the focus point",
+                          NAVIGATOR_FACE_LABELS[hoveredFace]);
+    } else if (hovered) {
+        ImGui::SetTooltip("Drag to orbit about the focus point.\nClick a face to look down that axis.");
+    }
+}
+
+// The strip beside the cube: the focus eyeball, then one button per projection.
+static void drawNavigatorBar(EditorState& editor, const NavigatorLayout& layout) {
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddRectFilled(layout.barMin, layout.barMax, IM_COL32(18, 20, 26, 205), 8.0f);
+    drawList->AddRect(layout.barMin, layout.barMax, IM_COL32(255, 255, 255, 28), 8.0f, 0, 1.0f);
+
+    ImGui::PushID("ViewportNavigator");
+    float x = layout.barMin.x + SETTINGS_BAR_PADDING;
+    float y = layout.barMin.y + SETTINGS_BAR_PADDING;
+
+    ImGui::SetCursorScreenPos(ImVec2(x, y));
+    bool hovered = false;
+    if (drawViewportIconButton("focus", SETTINGS_BAR_ICON_SIZE, editor.focusPickerActive,
+                               drawFocusEyeIcon, hovered)) {
+        // A toggle, not a fire-and-forget: an armed picker that cannot be disarmed by the same button
+        // that armed it is a trap, and Escape is not discoverable from a viewport.
+        editor.focusPickerActive = !editor.focusPickerActive;
+        // The eyedropper and the eyeball both claim the next click, so arming either has to disarm the
+        // other -- two armed one-shots and the first click resolves to whichever branch is tested first.
+        if (editor.focusPickerActive) editor.materialPickerActive = false;
+    }
+    if (hovered) {
+        ImGui::SetTooltip("Square up on a voxel  (%s)\nClick a voxel and the camera moves to look at the\n"
+                          "face you clicked head-on, centred and perpendicular.\n"
+                          "It orbits about that voxel afterwards.",
+                          editor.focusPickerActive ? "armed" : "off");
+    }
+
+    // The wider gap: arming a click and choosing a projection are different kinds of thing.
+    x += SETTINGS_BAR_ICON_SIZE + SETTINGS_BAR_SPACING * 3.5f;
+    for (int i = 0; i < CAMERA_PROJECTION_COUNT; i++) {
+        CameraProjection projection = static_cast<CameraProjection>(i);
+        ImGui::SetCursorScreenPos(ImVec2(x + float(i) * (SETTINGS_BAR_ICON_SIZE + SETTINGS_BAR_SPACING), y));
+
+        char id[16];
+        std::snprintf(id, sizeof(id), "projection%d", i);
+        bool projectionHovered = false;
+        if (drawViewportIconButton(id, SETTINGS_BAR_ICON_SIZE, editor.cameraProjection == projection,
+                                   CAMERA_PROJECTION_ICONS[i], projectionHovered)) {
+            setCameraProjection(editor, projection);
+        }
+        if (projectionHovered) {
+            ImGui::SetTooltip("%s\n%s", cameraProjectionLabel(projection),
+                              cameraProjectionHint(projection));
+        }
     }
     ImGui::PopID();
 }
@@ -8261,16 +13867,6 @@ static void drawViewportSettingsBar(EditorState& editor) {
 // =============================================================================
 // Viewport breadcrumb
 // =============================================================================
-
-// The last element of the loaded scene's path, which is the name anyone would call the scene by.
-// scenePath always ends in a separator, so the last element is empty and the name is one up.
-static std::string sceneDisplayName(const EditorState& editor) {
-    if (!editor.sceneLoaded) return "(no scene)";
-    std::filesystem::path path(editor.scenePath);
-    std::string name = path.filename().string();
-    if (name.empty()) name = path.parent_path().filename().string();
-    return name.empty() ? editor.scenePath : name;
-}
 
 // A strip along the top of the Viewport reading scene ▸ folder ▸ … ▸ selection, every element of it
 // clickable.
@@ -8280,7 +13876,7 @@ static std::string sceneDisplayName(const EditorState& editor) {
 // to add or remove voxels needs its target stated where the voxels are, not somewhere else on
 // screen — and the ancestors being clickable makes "work on the whole asset instead" one click
 // rather than a hunt back up the tree.
-static void drawViewportBreadcrumb(const projv::Scene& scene, EditorState& editor) {
+static void drawViewportBreadcrumb(projv::Scene& scene, EditorState& editor) {
     // Nudged in from the content region's own start, not placed absolutely: SetCursorPos is relative
     // to the *window*, not to its content, so an absolute y of a few pixels puts the strip up behind
     // the dock tab bar -- where it is drawn, and invisible.
@@ -8295,11 +13891,13 @@ static void drawViewportBreadcrumb(const projv::Scene& scene, EditorState& edito
 
     // The scene itself is the root of the path, and selects nothing — clicking it is how you get
     // back to "the whole scene, no component chosen".
-    if (ImGui::SmallButton(sceneDisplayName(editor).c_str())) {
+    if (ImGui::SmallButton(documentName(editor).c_str())) {
+        openAsset(scene, editor, projv::INVALID_COMPONENT_HANDLE);
         editor.selectedComponent = projv::INVALID_COMPONENT_HANDLE;
         editor.selectedVoxelCount = 0;
         editor.selectionOutlineValid = false;
     }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open the document itself.");
 
     if (editor.selectedComponent < scene.components.size()) {
         // Walked up and reversed rather than recursed, so the buttons come out root-first.
@@ -8322,18 +13920,29 @@ static void drawViewportBreadcrumb(const projv::Scene& scene, EditorState& edito
             // The selection itself is the end of the path and is drawn lit; its ancestors are
             // context. Both are clickable — selecting the one you are already on is harmless.
             bool isSelection = handle == editor.selectedComponent;
+            bool isOpen = handle == editor.openAsset;
             if (isSelection) {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 0.86f, 0.16f, 1.00f));
+            } else if (isOpen) {
+                // The open asset is a different fact from the selection and gets a different
+                // colour: amber is what an asset reads as everywhere else in the editor.
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.60f, 0.20f, 1.00f));
             }
             ImGui::PushID(int(handle));
             if (ImGui::SmallButton(label.c_str())) {
+                // Clicking an *ancestor* is how you step back out, which is the same verb the
+                // Assets panel's breadcrumb offers -- one path, two places to click it.
+                if (scene.components[handle].kind == projv::ComponentKind::Asset &&
+                    handle != editor.selectedComponent) {
+                    openAsset(scene, editor, handle);
+                }
                 editor.selectedComponent = handle;
                 editor.selectedVoxelCount = projv::utils::getComponentVoxelCount(scene, handle);
                 editor.selectionOutlineValid = false;
-                editor.revealSelectionInHierarchy = true;
+                editor.revealSelection = true;
             }
             ImGui::PopID();
-            if (isSelection) {
+            if (isSelection || isOpen) {
                 ImGui::PopStyleColor();
             }
         }
@@ -8402,7 +14011,107 @@ static void drawVoxelBoxOutline(ImDrawList* drawList, const EditorState& editor,
         corners[i] = space.latticeOrigin + rotation * localOffset;
     }
     drawWorldBoxOutline(drawList, corners, editor.cameraPosition, computeCameraDirection(editor),
-                        editor.viewportImageMin, editor.viewportImageMax, color, thickness);
+                        editor.viewportImageMin, editor.viewportImageMax, color, thickness, 0.0f,
+                        cameraOrthoHeight(editor));
+}
+
+// The mirror planes, drawn where they actually stand.
+//
+// Load-bearing rather than decoration, and the reason is the failure mode: a frame whose origin has
+// drifted off the geometry does not look like a broken symmetry, it looks like a second object being
+// built in empty space some distance away -- often outside the view. The number in the panel cannot
+// say that and the result cannot either, because the result is exactly what the frame asked for.
+//
+// Dashed, because a solid rectangle floating through a model reads as geometry.
+static void drawSymmetryOverlay(const projv::Scene& scene, EditorState& editor) {
+    using namespace projv::core;
+    if (editor.activeTool != EditorTool::Sculpt && editor.activeTool != EditorTool::Paint) return;
+
+    projv::ComponentHandle component = editor.selectedComponent;
+    if (component >= scene.components.size()) return;
+    auto entry = editor.symmetryFrames.find(component);
+    if (entry == editor.symmetryFrames.end() || !entry->second.enabled) return;
+    const SymmetryFrame& frame = entry->second;
+
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
+    if (!space.valid || space.voxelSize <= 0.0f) return;
+
+    ivec3 minimum(0), maximum(0);
+    if (!componentContentBounds(scene, component, minimum, maximum) &&
+        !componentAddressableBox(scene, component, minimum, maximum)) {
+        return;
+    }
+
+    // One radius for all of them rather than a per-plane extent. A mirror plane is unbounded; any
+    // rectangle drawn for it is a hint about where it sits, so the honest thing is a size that says
+    // "about as big as the thing you are working on" and reaches a little past it.
+    ivec3 extent = maximum - minimum + ivec3(1);
+    float radius = 0.6f * float(std::max({ extent.x, extent.y, extent.z })) * space.voxelSize;
+    if (radius <= 0.0f) return;
+
+    mat3 rotation = glm::mat3_cast(space.rotation);
+    vec3 centreLocal;
+    for (int axis = 0; axis < 3; axis++) {
+        centreLocal[axis] = ((float(frame.origin[axis]) + 1.0f) * 0.5f -
+                             float(space.coordOrigin[axis])) * space.voxelSize;
+    }
+    vec3 centreWorld = space.latticeOrigin + rotation * centreLocal;
+
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    vec3 cameraDirection = computeCameraDirection(editor);
+    const ImU32 AXIS_COLORS[3] = { IM_COL32(255, 105, 115, 190), IM_COL32(120, 230, 140, 190),
+                                   IM_COL32(110, 170, 255, 190) };
+    const ImU32 DIAGONAL_COLOR = IM_COL32(255, 195, 90, 175);
+
+    // Four corners of one plane's rectangle, from two in-plane directions.
+    auto drawPlane = [&](vec3 u, vec3 v, ImU32 color) {
+        ImVec2 screen[4];
+        bool visible = true;
+        const float signs[4][2] = { {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f} };
+        for (int i = 0; i < 4 && visible; i++) {
+            vec3 corner = centreWorld + rotation * ((u * signs[i][0] + v * signs[i][1]) * radius);
+            visible = worldToViewportPixel(corner, editor.cameraPosition, cameraDirection,
+                                           editor.viewportImageMin, editor.viewportImageMax, screen[i],
+                                           cameraOrthoHeight(editor));
+        }
+        if (!visible) return;   // Same rule the box outline uses: drop it rather than clip it.
+        for (int i = 0; i < 4; i++) {
+            ImVec2 from = screen[i];
+            ImVec2 to = screen[(i + 1) % 4];
+            float length = std::sqrt((to.x - from.x) * (to.x - from.x) +
+                                     (to.y - from.y) * (to.y - from.y));
+            if (length <= 0.0f) continue;
+            for (float at = 0.0f; at < length; at += 12.0f) {
+                float end = std::min(at + 6.0f, length);
+                ImVec2 a(from.x + (to.x - from.x) * (at / length),
+                         from.y + (to.y - from.y) * (at / length));
+                ImVec2 b(from.x + (to.x - from.x) * (end / length),
+                         from.y + (to.y - from.y) * (end / length));
+                drawList->AddLine(a, b, color, 1.5f);
+            }
+        }
+    };
+
+    for (int axis = 0; axis < 3; axis++) {
+        if (!frame.mirror[axis]) continue;
+        vec3 u(0.0f), v(0.0f);
+        u[(axis + 1) % 3] = 1.0f;
+        v[(axis + 2) % 3] = 1.0f;
+        drawPlane(u, v, AXIS_COLORS[axis]);
+    }
+    for (int plane = 0; plane < 3; plane++) {
+        if (!frame.diagonal[plane]) continue;
+        int a = 0, b = 0;
+        symmetryPlaneAxes(plane, a, b);
+        if (((frame.origin[a] - frame.origin[b]) & 1) != 0) continue;   // Dropped by the group too.
+        // The plane whose normal is (1,-1) in (a,b): it contains the (1,1) diagonal of that pair and
+        // the whole of the third axis.
+        vec3 u(0.0f), v(0.0f);
+        u[a] = 0.70710678f;
+        u[b] = 0.70710678f;
+        v[3 - a - b] = 1.0f;
+        drawPlane(u, v, DIAGONAL_COLOR);
+    }
 }
 
 // What the Region tool has selected, and -- while the Box selector is between its two clicks -- what
@@ -8427,10 +14136,9 @@ static void drawRegionOverlay(const projv::Scene& scene, EditorState& editor, bo
 
         if (imageHovered && !editor.cameraIsFlying) {
             vec2 resolution(float(editor.viewportWidth), float(editor.viewportHeight));
-            vec3 rayDirection = projv::utils::rayDirectionThroughImage(
-                cursorUV, resolution, computeCameraDirection(editor));
+            ViewportRay cursorRay = viewportRayThroughUV(editor, cursorUV, resolution);
             projv::utils::VoxelPick pick =
-                projv::utils::pickVoxel(scene, editor.cameraPosition, rayDirection);
+                projv::utils::pickVoxel(scene, cursorRay.origin, cursorRay.direction);
             ivec3 hovered;
             if (pick.hit && pick.component == editor.regionCornerComponent &&
                 pickToComponentVoxelCoord(scene, pick, hovered)) {
@@ -8452,33 +14160,96 @@ static void drawRegionOverlay(const projv::Scene& scene, EditorState& editor, bo
     }
 }
 
-// The banner that says a stamp is floating.
+// The active resolve's parts, outlined round the *shape* rather than round the chunk: a chunk is a
+// resolution cube with the shape centred in it, and outlining that would draw a box far larger than
+// the part inside it.
 //
-// A floating stamp is a modal state, and a mode the user cannot see they are in is the classic
-// editor failure: Enter and Escape mean something they do not mean the rest of the time, and the
-// gizmo is driving something that is not yet part of the scene. It is drawn whatever the active tool
-// is, so jumping to Sculpt to tweak the stamp and coming back does not lose the only sign of it.
-static void drawStampBanner(const projv::Scene& scene, const EditorState& editor) {
-    if (!editor.stamp.active) return;
+// Colour carries the op, so what each part does is readable without looking at a panel: **yellow for
+// union, red and dotted for subtract, blue for intersect, grey for a part that is merely placed.**
+// The selected part is drawn brighter and thicker, so which one the gizmo has is obvious at a glance.
+//
+// Only the active resolve's, and only while a tool that arranges them is up. Outlining every part of
+// every open resolve all the time would turn a scene with three resolves into a cage.
+static void drawContentsOutlines(const projv::Scene& scene, const EditorState& editor) {
+    using namespace projv::core;
+    if (editor.activeTool != EditorTool::Place && editor.activeTool != EditorTool::Region) return;
 
-    std::string label = "Placing: ";
-    if (editor.stamp.source == FloatingStamp::Source::Lifted) {
-        label += "region " + std::to_string(editor.stamp.dimensions[0]) + "x" +
-                 std::to_string(editor.stamp.dimensions[1]) + "x" +
-                 std::to_string(editor.stamp.dimensions[2]);
-    } else {
-        label += std::string(ShapeKindLabel(editor.stamp.kind)) + " " +
-                 std::to_string(editor.stamp.dimensions[0]) + "x" +
-                 std::to_string(editor.stamp.dimensions[1]) + "x" +
-                 std::to_string(editor.stamp.dimensions[2]) +
-                 (editor.stamp.hollow ? " hollow" : "");
+    const Resolve* resolve = findResolve(editor, editor.openAsset);
+    if (!resolve || resolve->node >= scene.components.size()) return;
+
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    vec3 cameraDirection = computeCameraDirection(editor);
+
+    for (projv::ComponentHandle child : scene.components[resolve->node].children) {
+        if (child >= scene.components.size()) continue;
+        const Part* part = findPart(editor, child);
+        if (!part) continue;
+        if (part->contentMax.x < part->contentMin.x) continue;   // Empty: nothing to outline.
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, child);
+        if (!space.valid) continue;
+
+        mat3 rotation = glm::mat3_cast(space.rotation);
+        vec3 low = vec3(part->contentMin - space.coordOrigin) * space.voxelSize;
+        vec3 high = vec3(part->contentMax - space.coordOrigin + ivec3(1)) * space.voxelSize;
+        vec3 corners[8];
+        for (int i = 0; i < 8; i++) {
+            vec3 offset((i & 1) ? high.x : low.x, (i & 2) ? high.y : low.y, (i & 4) ? high.z : low.z);
+            corners[i] = space.latticeOrigin + rotation * offset;
+        }
+
+        bool selected = editor.selectedComponent == child;
+        int alpha = selected ? 255 : 110;
+        ImU32 color;
+        float dash = 0.0f;
+        switch (scene.components[child].op) {
+            case BooleanOp::Subtract:  color = IM_COL32(255,  70,  60, alpha); dash = 6.0f; break;
+            case BooleanOp::Intersect: color = IM_COL32( 90, 170, 255, alpha); dash = 3.0f; break;
+            case BooleanOp::None:      color = IM_COL32(170, 170, 170, alpha); break;
+            case BooleanOp::Union:
+            default:                   color = IM_COL32(255, 220,  40, alpha); break;
+        }
+        float thickness = selected ? 2.0f : 1.2f;
+
+        drawWorldBoxOutline(drawList, corners, editor.cameraPosition, cameraDirection,
+                            editor.viewportImageMin, editor.viewportImageMax, color, thickness, dash,
+                            cameraOrthoHeight(editor));
     }
-    if (editor.stamp.target < scene.components.size()) {
-        label += "  ->  " + scene.components[editor.stamp.target].name;
+}
+
+// The line that says which resolve is being built and what it currently resolves to.
+//
+// Quieter than the banner it replaces, and deliberately so. That one announced a modal state -- Enter
+// and Escape meant something they did not mean the rest of the time, and a mode the user cannot see
+// they are in is the classic editor failure. An asset is not a mode: it is an object that stays
+// where you left it, so this is a label rather than a warning, and it is only drawn while a tool that
+// arranges parts is up.
+static void drawOpenAssetBanner(const projv::Scene& scene, const EditorState& editor) {
+    if (editor.activeTool != EditorTool::Place && editor.activeTool != EditorTool::Region) return;
+
+    const Resolve* resolve = findResolve(editor, editor.openAsset);
+    if (!resolve || resolve->node >= scene.components.size()) return;
+
+    const projv::ComponentRecord& node = scene.components[resolve->node];
+    size_t folded = 0;
+    for (projv::ComponentHandle child : node.children) {
+        if (child < scene.components.size() && scene.components[child].op != BooleanOp::None) folded++;
     }
-    label += editor.stampMergeMode == MergeMode::Subtract ? "  (subtract)" : "";
-    label += editor.stampSnap90 ? "" : "  (free rotation)";
-    label += "\nEnter merge  -  Esc cancel  -  arrows nudge";
+
+    std::string label = node.name + "   " + std::to_string(node.children.size()) + " item(s)";
+    if (folded != node.children.size()) label += ", " + std::to_string(folded) + " folded";
+    if (editor.showSources) {
+        label += "   showing sources";
+    } else if (resolve->resultOverBudget) {
+        label += "   too large to resolve live";
+    } else if (editor.resolveSettling) {
+        label += "   resolving...";
+    } else if (resolve->resultVoxels > 0) {
+        label += "   " + formatCompactCount(uint32_t(std::min<size_t>(resolve->resultVoxels,
+                                                                      0xFFFFFFFFu))) + " voxel(s)";
+    }
+    if (!editor.snapRotate90) label += "   free rotation";
+    if (!editor.snapEnabled) label += "   grid off";
+    else if (editor.snapStepVoxels > 1) label += "   step " + std::to_string(editor.snapStepVoxels);
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
@@ -8487,11 +14258,11 @@ static void drawStampBanner(const projv::Scene& scene, const EditorState& editor
     ImVec2 position(editor.viewportImageMin.x + 12.0f, editor.viewportImageMin.y + 12.0f);
     drawList->AddRectFilled(ImVec2(position.x - 8.0f, position.y - 5.0f),
                             ImVec2(position.x + textSize.x + 8.0f, position.y + textSize.y + 5.0f),
-                            IM_COL32(26, 20, 10, 215), 5.0f);
+                            IM_COL32(20, 24, 30, 200), 5.0f);
     drawList->AddRect(ImVec2(position.x - 8.0f, position.y - 5.0f),
                       ImVec2(position.x + textSize.x + 8.0f, position.y + textSize.y + 5.0f),
-                      IM_COL32(255, 200, 70, 180), 5.0f, 0, 1.5f);
-    drawList->AddText(position, IM_COL32(255, 226, 150, 255), label.c_str());
+                      IM_COL32(120, 170, 220, 150), 5.0f, 0, 1.0f);
+    drawList->AddText(position, IM_COL32(200, 220, 245, 255), label.c_str());
 }
 
 // The scene, drawn as an image. The panel is what decides the render resolution: its size is
@@ -8510,9 +14281,11 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
     editor.requestedViewportWidth = std::max(1, int(panelSize.x * framebufferScale));
     editor.requestedViewportHeight = std::max(1, int(panelSize.y * framebufferScale));
 
-    // Escape disarms the eyedropper, matching every other modal tool.
-    if (editor.materialPickerActive && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+    // Escape disarms whichever picker is armed, matching every other modal tool.
+    if ((editor.materialPickerActive || editor.focusPickerActive) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         editor.materialPickerActive = false;
+        editor.focusPickerActive = false;
     }
 
     bgfx::TextureHandle viewportTexture = getViewportTexture(renderer);
@@ -8530,9 +14303,10 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
         editor.viewportImageMax = ImGui::GetItemRectMax();
         bool imageHovered = ImGui::IsItemHovered();
 
-        // Both overlay bars float on top of the image, so a click that lands on an icon must not also
-        // be a click on the scene behind it. Their rectangles are known here even though they are
-        // drawn at the end of the panel — see viewportToolbarRect / viewportSettingsBarRect.
+        // Every overlay strip floats on top of the image, so a click that lands on one must not also be
+        // a click on the scene behind it. Their rectangles are known here even though they are drawn at
+        // the end of the panel — see viewportToolbarRect / viewportSettingsBarRect /
+        // viewportNavigatorLayout.
         ImVec2 barMin;
         ImVec2 barMax;
         if (viewportToolbarRect(editor, barMin, barMax) &&
@@ -8543,29 +14317,57 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
             ImGui::IsMouseHoveringRect(barMin, barMax, false)) {
             imageHovered = false;
         }
+        NavigatorLayout navigator;
+        bool navigatorVisible = viewportNavigatorLayout(editor, navigator);
+        if (navigatorVisible &&
+            (ImGui::IsMouseHoveringRect(navigator.cubeMin, navigator.cubeMax, false) ||
+             ImGui::IsMouseHoveringRect(navigator.barMin, navigator.barMax, false))) {
+            imageHovered = false;
+        }
+        // An orbit cannot outlive the button driving it. The flag is normally cleared by the cube's own
+        // deactivation, but the cube is not drawn at all when the panel is too narrow for it -- so a
+        // drag that shrinks the panel out from under the navigator would otherwise leave the flag set
+        // for good, and with it the suppression below, which is every viewport click gone.
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) editor.cameraIsOrbiting = false;
+        // A cube drag routinely leaves the cube's own rectangle -- an orbit is a long gesture on a
+        // 76-pixel target -- and every frame after it does would otherwise be a frame in which the
+        // cursor is "over the scene" with the left button held. That is a selection, or the start of a
+        // sculpt stroke, on top of the orbit.
+        if (editor.cameraIsOrbiting) imageHovered = false;
 
         // The selected component's .data box(es), outlined in yellow. Cache is invalidated by the
-        // hierarchy click handler and by loading a new scene; recomputing it is a tree walk, not
+        // Assets panel and by loading a new scene; recomputing it is a tree walk, not
         // something to redo every frame.
         //
         // The gizmo runs before the click is interpreted below, and it is drawn over the outline so
         // its handles are never buried by a box edge.
         bool gizmoBusy = false;
-        if (editor.selectedComponent != projv::INVALID_COMPONENT_HANDLE) {
+        // Stamps draw their own outline, round the shape and in the colour their merge mode calls
+        // for. Drawn before the gizmo so its handles sit on top.
+        drawContentsOutlines(scene, editor);
+        // A part's own outline is drawn above, coloured by its op. The yellow selection box is for
+        // everything else.
+        if (editor.selectedComponent != projv::INVALID_COMPONENT_HANDLE &&
+            !findPart(editor, editor.selectedComponent) &&
+            !isDerivedResult(editor, editor.selectedComponent)) {
             refreshSelectionCaches(scene, editor);
             ImDrawList* outlineDrawList = ImGui::GetWindowDrawList();
             projv::core::vec3 cameraDirection = computeCameraDirection(editor);
             for (projv::ChunkHandle chunkHandle : editor.selectionOutlineChunks) {
                 if (chunkHandle >= scene.chunks.size()) continue;
                 drawChunkOutline(outlineDrawList, scene.chunks[chunkHandle], editor.cameraPosition,
-                                 cameraDirection, editor.viewportImageMin, editor.viewportImageMax);
+                                 cameraDirection, editor.viewportImageMin, editor.viewportImageMax,
+                                 cameraOrthoHeight(editor));
             }
-            // A hovered handle counts as busy, not just a live drag: the click that is about to
-            // start the drag arrives on the frame the handle is merely hovered, and letting it also
-            // select would change the selection out from under the drag it just began.
-            gizmoBusy = updateAndDrawTransformGizmo(scene, editor, imageHovered) ||
-                        editor.gizmoHoveredHandle >= 0;
         }
+        // Under the gizmo, like every other outline: the mirrors are a guide, and a handle buried
+        // behind one is a handle that cannot be grabbed.
+        drawSymmetryOverlay(scene, editor);
+        // A hovered handle counts as busy, not just a live drag: the click that is about to
+        // start the drag arrives on the frame the handle is merely hovered, and letting it also
+        // select would change the selection out from under the drag it just began.
+        gizmoBusy = updateAndDrawTransformGizmo(scene, editor, imageHovered) ||
+                    editor.gizmoHoveredHandle >= 0;
 
         // --- What a left click in the scene means ---
         //
@@ -8588,7 +14390,13 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
         if (imageHovered && !gizmoBusy && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             editor.pickUV = cursorUV;
 
-            if (editor.materialPickerActive) {
+            // Both armed pickers come before the tools, for the same reason: the user asked for exactly
+            // one click to mean something else and is waiting to give it. Only one can be armed at a
+            // time -- arming either disarms the other -- so their order between themselves never
+            // decides anything.
+            if (editor.focusPickerActive) {
+                editor.pendingPick = PickPurpose::FocusVoxel;
+            } else if (editor.materialPickerActive) {
                 editor.pendingPick = PickPurpose::SampleMaterial;
             } else if (editor.activeTool == EditorTool::Paint) {
                 if (ImGui::GetIO().KeyAlt) {
@@ -8606,17 +14414,13 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
                     beginSculptStroke(editor);
                     editor.pendingPick = PickPurpose::SculptVoxel;
                 }
-            } else if (editor.activeTool == EditorTool::Shape ||
+            } else if (editor.activeTool == EditorTool::Place ||
                        editor.activeTool == EditorTool::Region) {
                 if (ImGui::GetIO().KeyAlt) {
                     editor.pendingPick = PickPurpose::SampleMaterial;
-                } else if (editor.stamp.active) {
-                    // A stamp is floating, so the viewport belongs to the gizmo. A click here would
-                    // otherwise spawn a second stamp or move the selection off the one being placed,
-                    // and either would silently break the placement in progress.
-                    editor.statusMessage = "Finish placing the current stamp - Enter merges, Esc cancels.";
-                } else if (editor.activeTool == EditorTool::Shape) {
-                    editor.pendingPick = PickPurpose::SpawnStamp;
+                } else if (editor.activeTool == EditorTool::Place) {
+                    // SpawnStamp now only selects existing stamps; create shapes via the dropdown.
+                    editor.pendingPick = PickPurpose::PlacePart;
                 } else {
                     editor.pendingPick = PickPurpose::RegionSeed;
                 }
@@ -8665,14 +14469,18 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
             }
         }
 
-        if (editor.materialPickerActive) {
+        // The two armed pickers share one hint, because they are the same state to the user: a click is
+        // owed, aimed at geometry, and the tool is not what will receive it. Only the sentence differs.
+        if (editor.materialPickerActive || editor.focusPickerActive) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
             // A hint, because an armed tool with no visible state is a trap.
             ImDrawList* drawList = ImGui::GetWindowDrawList();
             drawList->AddRect(editor.viewportImageMin, editor.viewportImageMax,
                               IM_COL32(120, 200, 255, 200), 0.0f, 0, 2.0f);
-            const char* hint = "Click a voxel to pick its material  (Esc to cancel)";
+            const char* hint = editor.focusPickerActive
+                ? "Click a voxel to centre the camera on it  (Esc to cancel)"
+                : "Click a voxel to pick its material  (Esc to cancel)";
             ImVec2 hintSize = ImGui::CalcTextSize(hint);
             ImVec2 hintPos = ImVec2((editor.viewportImageMin.x + editor.viewportImageMax.x - hintSize.x) * 0.5f,
                                     editor.viewportImageMin.y + 12.0f);
@@ -8687,11 +14495,18 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
         }
 
         // Last, so they are on top of the outline and the gizmo as well as the scene.
-        drawStampBanner(scene, editor);
+        drawOpenAssetBanner(scene, editor);
         drawViewportToolbar(editor);
         drawViewportSettingsBar(editor);
+        if (navigatorVisible) {
+            drawNavigatorBar(editor, navigator);
+            // The cube last of all: it is the only overlay whose own drag has to win against everything
+            // else in the panel, and ImGui resolves a within-window hover contest in favour of whatever
+            // was submitted latest.
+            drawNavigatorCube(editor, navigator);
+        }
     } else {
-        const char* message = "No scene loaded - File > Load Scene...";
+        const char* message = "No scene loaded - File > New Scene, or File > Load Scene...";
         ImVec2 textSize = ImGui::CalcTextSize(message);
         ImGui::SetCursorPos(ImVec2((panelSize.x - textSize.x) * 0.5f, (panelSize.y - textSize.y) * 0.5f));
         ImGui::TextDisabled("%s", message);
@@ -8724,12 +14539,12 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
     ImGui::Begin("##EditorDockHost", nullptr, hostFlags);
     ImGui::PopStyleVar(3);
 
-    // Versioned: the panels and their arrangement changed (Inspector/Tool/Palette stacked rather than
-    // tabbed, Library added, Statistics gone), and an imgui.ini written by the previous layout has
-    // saved positions for some of those windows but not others. Restoring it would half-migrate the
+    // Versioned: the panels and their arrangement changed (Scene Hierarchy and Assembly merged into
+    // one Assets panel), and an imgui.ini written by the previous layout has saved positions for
+    // some of those windows but not others. Restoring it would half-migrate the
     // layout — old panels where they were, new ones floating. A new dockspace ID has no saved node,
     // which is exactly the "first run" condition below, so the default layout is rebuilt once.
-    ImGuiID dockspaceID = ImGui::GetID("EditorDockSpaceV2");
+    ImGuiID dockspaceID = ImGui::GetID("EditorDockSpaceV5");
     // A dockspace with no node behind it is a first run (or a reset): there is no imgui.ini layout to
     // restore, so the default one is built.
     if (!editor.dockLayoutBuilt || editor.resetDockLayoutRequested) {
@@ -8743,6 +14558,13 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
 
     if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("New Scene", "Ctrl+N")) {
+                requestNewScene(editor);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("An empty, untitled document. Place something in it and give it a\n"
+                                  "folder with Save Scene As...");
+            }
             if (ImGui::MenuItem("Load Scene...", "Ctrl+O")) {
                 editor.loadSceneDialogOpen = true;
             }
@@ -8751,6 +14573,40 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
             // switch can.
             if (ImGui::MenuItem("Reload Scene", "Ctrl+Shift+R", false, editor.sceneLoaded)) {
                 editor.pendingScenePath = editor.scenePath;
+            }
+            ImGui::Separator();
+            // Save writes over the folder the scene came from; Save As asks. Both go through the same
+            // walk, and so does the asset item below them -- see the Saving section.
+            // Enabled whenever a document is open, including an untitled one -- where it means Save
+            // As, because that is the only thing it can mean and greying it out just left the user to
+            // work out for themselves which of the two items applied to them.
+            if (ImGui::MenuItem("Save Scene", "Ctrl+S", false, editor.sceneLoaded)) {
+                if (editor.scenePath.empty()) {
+                    openSaveDialog(editor, projv::INVALID_COMPONENT_HANDLE, "this scene",
+                                   untitledSaveSuggestion(editor));
+                } else {
+                    saveDocumentTo(scene, editor, projv::INVALID_COMPONENT_HANDLE, editor.scenePath);
+                }
+            }
+            if (ImGui::MenuItem("Save Scene As...", nullptr, false, editor.sceneLoaded)) {
+                openSaveDialog(editor, projv::INVALID_COMPONENT_HANDLE, "this scene",
+                               editor.scenePath.empty() ? untitledSaveSuggestion(editor)
+                                                        : editor.scenePath);
+            }
+            // An Asset component is a folder in the contents list and a folder on disk. Saving one is the
+            // same operation as saving the scene, started one node further down.
+            bool folderSelected = editor.selectedComponent < scene.components.size() &&
+                                  scene.components[editor.selectedComponent].kind == projv::ComponentKind::Asset;
+            if (ImGui::MenuItem("Save Selected Folder as Asset...", nullptr, false, folderSelected)) {
+                const projv::ComponentRecord& folder = scene.components[editor.selectedComponent];
+                std::filesystem::path suggestion =
+                    std::filesystem::path(editor.scenePath).parent_path() / folder.name;
+                openSaveDialog(editor, editor.selectedComponent,
+                               "folder \"" + folder.name + "\" as an asset", suggestion.string());
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Select a folder in the Assets panel. It is written as its own\n"
+                                  "compose folder, which can then be loaded into another scene.");
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4")) {
@@ -8816,6 +14672,23 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
         if (ImGui::IsKeyPressed(ImGuiKey_O)) {
             editor.loadSceneDialogOpen = true;
         }
+        if (ImGui::IsKeyPressed(ImGuiKey_N)) {
+            requestNewScene(editor);
+        }
+        // Save over the folder the scene came from. Save As lives in the menu only -- Ctrl+Shift+S
+        // would collide with nothing today, but the plain chord is the one worth having reflexive.
+        //
+        // On an untitled document this opens Save As rather than doing nothing, matching the menu
+        // item: Ctrl+S that silently no-ops is indistinguishable from a save that worked, which is the
+        // worst way for this particular key to behave.
+        if (!io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_S) && editor.sceneLoaded) {
+            if (editor.scenePath.empty()) {
+                openSaveDialog(editor, projv::INVALID_COMPONENT_HANDLE, "this scene",
+                               untitledSaveSuggestion(editor));
+            } else {
+                saveDocumentTo(scene, editor, projv::INVALID_COMPONENT_HANDLE, editor.scenePath);
+            }
+        }
         // Shift is what separates a reload from selecting the Paint tool, so each has to exclude the
         // other explicitly — IsKeyPressed says nothing about the modifiers held alongside it.
         if (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_R) && editor.sceneLoaded) {
@@ -8826,7 +14699,7 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
             if (ImGui::IsKeyPressed(ImGuiKey_W)) editor.activeTool = EditorTool::Move;
             if (ImGui::IsKeyPressed(ImGuiKey_E)) editor.activeTool = EditorTool::Sculpt;
             if (ImGui::IsKeyPressed(ImGuiKey_R)) editor.activeTool = EditorTool::Paint;
-            if (ImGui::IsKeyPressed(ImGuiKey_T)) editor.activeTool = EditorTool::Shape;
+            if (ImGui::IsKeyPressed(ImGuiKey_T)) editor.activeTool = EditorTool::Place;
             // Ctrl+Y was a second Redo binding until the Region tool took the letter; Ctrl+Shift+Z
             // is the one the Edit menu has always advertised and it is unchanged.
             if (ImGui::IsKeyPressed(ImGuiKey_Y)) editor.activeTool = EditorTool::Region;
@@ -8840,14 +14713,28 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
     // Viewport: it is a modal state that survives a tool switch, so it has to survive looking at
     // another panel too. Ctrl is read inside, for the 90-degree rotations, so this sits outside the
     // Ctrl-gated block above.
-    handleStampKeyboard(scene, editor);
+    handlePlacementKeyboard(scene, editor);
 
     ImGui::End();
 
     drawViewportPanel(scene, renderer, editor, framebufferScale);
     processVoxelPick(scene, editor);   // Between the panels: the click is seen above, the result is
                                        // shown below, both in this frame.
-    drawHierarchyPanel(scene, editor);
+    // After everything that can move a stamp -- the gizmo in the viewport, the keyboard above, a
+    // click just now -- and before the panels that report on them. Each preview rebuilds only when
+    // its stamp has actually moved, so a still frame costs nothing.
+    importPendingAsset(scene, editor);   // Between the panels, for the reason the pick is.
+    syncResolves(scene, editor);
+    if (editor.isolationDirty) {
+        // Both are edges rather than per-frame work, and they have to happen in this order: the
+        // results come down first so that turning isolation off does not leave a result standing
+        // beside the sources it was derived from, both drawn.
+        dropResolveResults(scene, editor);
+        applyIsolation(scene, editor);
+        editor.isolationDirty = false;
+    }
+    refreshResolves(scene, editor);
+    drawAssetsPanel(scene, editor);
     drawLibraryPanel(editor);
     drawInspectorPanel(scene, editor);
     drawToolPanel(scene, editor);
@@ -8855,6 +14742,8 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
     drawHistoryPanel(editor);
     drawStatisticsWindow(scene, editor, app.frameCount);
     drawLoadSceneDialog(editor);
+    drawSaveDialog(scene, editor);
+    drawNewSceneConfirm(editor);
     // Outside the dock host, and last: the side bar takes its strip out of the viewport's work area,
     // which is what the host window is sized from on the next frame.
     drawStatusBar(scene, editor, mainViewport);
@@ -9155,7 +15044,9 @@ static void runSculptStrokeSelfTest(projv::Scene& scene, EditorState& editor) {
         editor.sculptMode = mode;
         beginSculptStroke(editor);
         for (int frame = 0; frame < FRAMES; frame++) {
-            processSculptSample(scene, editor, direction);
+            // The synthetic camera above is a perspective one, so the probe ray leaves from its
+            // position -- the same thing viewportRayThroughUV would build for it.
+            processSculptSample(scene, editor, ViewportRay{ origin, direction });
             if (!editor.sculptStrokeActive) break;
             if (keepOverride) continue;
 
@@ -9265,6 +15156,168 @@ static void runSculptStrokeSelfTest(projv::Scene& scene, EditorState& editor) {
     editor.statusMessage.clear();
 }
 
+// The symmetry hook, driven without a mouse.
+//
+// The arithmetic test proves the *group*; this proves the *hook*, and the two fail differently. The
+// group can be flawless while the copies are written outside the stroke journal -- in which case
+// everything looks right until the stroke is undone and seven of the eight copies stay behind. That
+// is precisely what mirroring at applyVoxelSculpt rather than at stampSculptDab would produce, it is
+// invisible in a screenshot, and it is the reason the hook sits where it does.
+//
+// The dab is placed into empty space with all eight images clear, which is what makes the counts
+// exact: Add skips a cell that is already solid, so a dab landing on existing geometry would give a
+// perfectly correct run a number nobody can predict.
+//
+// Edits the scene and undoes itself, so it runs under EDITOR_SCULPTTEST.
+static void runSymmetryStrokeSelfTest(projv::Scene& scene, EditorState& editor) {
+    using projv::core::ivec3;
+
+    projv::ComponentHandle component = projv::INVALID_COMPONENT_HANDLE;
+    ComponentVoxelSpace space;
+    ivec3 boxMin(0), boxMax(0);
+    for (projv::ComponentHandle candidate = 0; candidate < scene.components.size(); candidate++) {
+        if (scene.components[candidate].kind == projv::ComponentKind::Asset) continue;
+        if (scene.components[candidate].materialPalette.empty()) continue;
+        ComponentVoxelSpace candidateSpace = resolveComponentVoxelSpace(scene, candidate);
+        if (!candidateSpace.valid) continue;
+        if (!componentAddressableBox(scene, candidate, boxMin, boxMax)) continue;
+        component = candidate;
+        space = candidateSpace;
+        break;
+    }
+    if (component == projv::INVALID_COMPONENT_HANDLE) {
+        projv::core::warn("SYMSTROKETEST: no component with a voxel space and a palette; skipped");
+        return;
+    }
+
+    SculptBrush savedBrush = editor.sculptBrush;
+    SculptMode savedMode = editor.sculptMode;
+    float savedRadius = editor.sculptRadius;
+    projv::ComponentHandle savedPalette = editor.paletteComponent;
+    int savedSlot = editor.selectedMaterialSlot;
+    bool hadFrame = editor.symmetryFrames.count(component) != 0;
+    SymmetryFrame savedFrame = hadFrame ? editor.symmetryFrames[component] : SymmetryFrame();
+
+    editor.sculptBrush = SculptBrush::Sphere;
+    editor.sculptRadius = 2.0f;
+    editor.paletteComponent = component;
+    editor.selectedMaterialSlot = 0;
+
+    SymmetryFrame& frame = editor.symmetryFrames[component];
+    frame = SymmetryFrame();
+    frame.enabled = true;
+    frame.originPlaced = true;
+    frame.origin = boxMin + boxMax;   // Centred, so both planes share a parity and the diagonal holds.
+    frame.mirror[0] = true;
+    frame.mirror[2] = true;
+    frame.diagonal[2] = true;
+
+    std::vector<LatticeMap> group;
+    buildSymmetryGroup(frame, group);
+
+    std::vector<ivec3> dab;
+    collectSculptDab(editor, ivec3(0), dab);
+
+    // Somewhere all eight copies are clear of each other and of anything already built. The two
+    // offsets differ so that no image coincides with another, and both exceed the brush diameter so
+    // the eight dabs stay disjoint and the arithmetic below is exact.
+    ivec3 centreCell(frame.origin.x / 2, frame.origin.y / 2, frame.origin.z / 2);
+    ivec3 dabCentre(0);
+    bool placed = false;
+    for (int step = 4; step <= 40 && !placed; step += 2) {
+        ivec3 candidate = centreCell + ivec3(step, 0, 2 * step);
+        bool clear = true;
+        for (size_t at = 0; at < dab.size() && clear; at++) {
+            for (const LatticeMap& map : group) {
+                ivec3 cell = map.apply(candidate + dab[at]);
+                if (cell.x < boxMin.x || cell.y < boxMin.y || cell.z < boxMin.z ||
+                    cell.x > boxMax.x || cell.y > boxMax.y || cell.z > boxMax.z) {
+                    clear = false;
+                    break;
+                }
+                uint8_t slot = 0;
+                if (queryComponentVoxel(scene, space, cell, slot)) { clear = false; break; }
+            }
+        }
+        if (clear) { dabCentre = candidate; placed = true; }
+    }
+    if (!placed) {
+        projv::core::warn("SYMSTROKETEST: found no clear spot for eight disjoint dabs; skipped");
+        if (hadFrame) editor.symmetryFrames[component] = savedFrame;
+        else editor.symmetryFrames.erase(component);
+        editor.sculptBrush = savedBrush;
+        editor.sculptRadius = savedRadius;
+        editor.paletteComponent = savedPalette;
+        editor.selectedMaterialSlot = savedSlot;
+        return;
+    }
+
+    uint32_t baseline = projv::utils::getComponentVoxelCount(scene, component);
+
+    beginSculptStroke(editor);
+    editor.sculptStrokeActive = true;
+    editor.sculptStrokeComponent = component;
+    editor.sculptStrokeMode = SculptMode::Add;
+    editor.sculptStrokeBrush = SculptBrush::Sphere;
+    editor.sculptStrokeColor = scene.components[component].materialPalette[0].packedColor;
+    buildSymmetryGroup(frame, editor.strokeSymmetry);
+
+    std::vector<ivec3> frameCoords;
+    std::vector<uint32_t> frameColors;
+    ComponentVoxelSpace live = resolveComponentVoxelSpace(scene, component);
+    stampSculptDab(scene, editor, live, dabCentre, frameCoords, frameColors);
+
+    size_t expected = dab.size() * group.size();
+    bool countExact = frameCoords.size() == expected;
+
+    // The written set must be closed under the group: every copy of every cell is also written. A
+    // hook that mirrored only the dab's centre, or dropped the last element, passes the count check
+    // on a symmetric brush and fails this one.
+    std::unordered_set<uint64_t> written;
+    for (const ivec3& coord : frameCoords) written.insert(packVoxelKey(coord));
+    bool closedSet = written.size() == frameCoords.size();
+    for (const ivec3& coord : frameCoords) {
+        for (const LatticeMap& map : group) {
+            if (written.count(packVoxelKey(map.apply(coord))) == 0) closedSet = false;
+        }
+    }
+
+    applyVoxelSculpt(&scene, &editor, component, frameCoords, frameColors, true);
+    uint32_t afterVoxels = projv::utils::getComponentVoxelCount(scene, component);
+    size_t journalled = editor.sculptStrokeOriginal.size();
+
+    endSculptStroke(scene, editor);
+    bool undone = editor.history.undo();
+    uint32_t restored = projv::utils::getComponentVoxelCount(scene, component);
+
+    bool grew = afterVoxels == baseline + uint32_t(expected);
+    bool journalExact = journalled == expected;
+    bool undoExact = undone && restored == baseline;
+
+    projv::core::info("SYMSTROKETEST comp={} group={} dab={} centre=({},{},{})",
+                      component, group.size(), dab.size(), dabCentre.x, dabCentre.y, dabCentre.z);
+    projv::core::info("SYMSTROKETEST   one dab writes every copy: {} cell(s), expected {} -> {}",
+                      frameCoords.size(), expected, countExact ? "PASS" : "FAIL");
+    projv::core::info("SYMSTROKETEST   the written set is closed under the group -> {}",
+                      closedSet ? "PASS" : "FAIL");
+    projv::core::info("SYMSTROKETEST   every copy reached the journal: {} of {} -> {}",
+                      journalled, expected, journalExact ? "PASS" : "FAIL");
+    projv::core::info("SYMSTROKETEST   voxels {} -> {} (expected {}), undo back to {} -> {}",
+                      baseline, afterVoxels, baseline + uint32_t(expected), restored,
+                      (grew && undoExact) ? "PASS" : "FAIL");
+
+    if (hadFrame) editor.symmetryFrames[component] = savedFrame;
+    else editor.symmetryFrames.erase(component);
+    editor.strokeSymmetry.assign(1, LatticeMap());
+    editor.sculptBrush = savedBrush;
+    editor.sculptMode = savedMode;
+    editor.sculptRadius = savedRadius;
+    editor.paletteComponent = savedPalette;
+    editor.selectedMaterialSlot = savedSlot;
+    editor.history.clear();
+    editor.statusMessage.clear();
+}
+
 // Extrude, driven end to end without a mouse. Three properties, each of which fails silently:
 //
 //   1. **The face is a face.** Every voxel gathered must be in the clicked voxel's plane, use its
@@ -9355,7 +15408,8 @@ static void runExtrudeSelfTest(projv::Scene& scene, EditorState& editor) {
 
     beginSculptStroke(editor);
     editor.sculptStrokeComponent = component;
-    if (!beginExtrudeDrag(scene, editor, space, pick, faceCoord, pick.faceNormal, direction)) {
+    if (!beginExtrudeDrag(scene, editor, space, pick, faceCoord, pick.faceNormal,
+                          ViewportRay{ origin, direction })) {
         projv::core::warn("EXTRUDETEST: the face gather found nothing; skipped");
         editor.sculptStrokeActive = false;
         editor.sculptBrush = savedBrush;
@@ -9368,8 +15422,10 @@ static void runExtrudeSelfTest(projv::Scene& scene, EditorState& editor) {
     // Snapshotted, because every check below has to survive the drag that follows: endExtrudeDrag
     // clears the editor's copy, and the first version of this test asserted against the cleared one
     // and reported a clean face as a failure.
-    std::vector<ivec3> face = editor.extrudeFace;
-    std::vector<uint32_t> faceColors = editor.extrudeFaceColors;
+    // Face 0 is the clicked one, and with symmetry off (which beginSculptStroke guarantees) it is the
+    // only one.
+    std::vector<ivec3> face = editor.extrudeFaces[0].coords;
+    std::vector<uint32_t> faceColors = editor.extrudeFaces[0].colors;
     size_t faceSize = face.size();
     int normalAxis = pick.faceNormal.x != 0 ? 0 : (pick.faceNormal.y != 0 ? 1 : 2);
     size_t offPlane = 0, wrongMaterial = 0, buried = 0;
@@ -10275,285 +16331,1743 @@ static void runPaintStrokeSelfTest(projv::Scene& scene, EditorState& editor) {
     editor.statusMessage.clear();
 }
 
-// Everything about the stamp that is invisible from the outside.
+// The one property a translate drag has to have: with the cursor held still, every frame must agree
+// on where the component belongs.
 //
-// A merge that is off by one cell produces a perfectly plausible result in the wrong place, which is
+// It did not. `closestPointOnAxis` reports t relative to the axis line's origin, and the gizmo passed
+// it the *live* pivot — which moves with the component the drag is moving. Shifting that origin by d
+// along the axis changes t by exactly -d, so applying a delta of d made the next frame compute a
+// delta of zero, which moved the component back, which restored the original delta. A perfect
+// two-frame oscillation for as long as the button was held: the object visibly jittering in place,
+// and its colours flickering as two positions fed the same temporal accumulation buffer.
+//
+// Read-only arithmetic — no scene, no window — so it runs under EDITOR_SELFTEST with the other cheap
+// checks. It asserts both halves, because "the fixed version is stable" is only meaningful next to
+// evidence that the broken version was not.
+static void runGizmoDragSelfTest() {
+    using namespace projv::core;
+
+    const vec3 anchor(120.0f, 40.0f, -75.0f);
+    const vec3 axis(1.0f, 0.0f, 0.0f);
+    const vec3 cameraPosition(90.0f, 70.0f, -160.0f);
+    // Neither parallel to the axis nor edge-on to it, which are the two cases closestPointOnAxis
+    // refuses outright.
+    const vec3 grabRay = glm::normalize(vec3(0.35f, -0.30f, 1.0f));
+    const vec3 heldRay = glm::normalize(vec3(0.55f, -0.30f, 1.0f));   // The cursor's one movement.
+
+    float startT = 0.0f;
+    if (!closestPointOnAxis(anchor, axis, cameraPosition, grabRay, startT)) {
+        projv::core::warn("GIZMOTEST: the probe ray is degenerate against the axis; skipped");
+        return;
+    }
+
+    // What the drag should settle on, and what every frame below is measured against.
+    float settledT = 0.0f;
+    closestPointOnAxis(anchor, axis, cameraPosition, heldRay, settledT);
+    float expected = settledT - startT;
+
+    // --- The bug: t measured against a pivot that follows the component.
+    float live[4] = {};
+    vec3 liveAnchor = anchor;
+    for (int frame = 0; frame < 4; frame++) {
+        float t = 0.0f;
+        closestPointOnAxis(liveAnchor, axis, cameraPosition, heldRay, t);
+        live[frame] = t - startT;
+        liveAnchor = anchor + axis * live[frame];   // The pivot follows what the drag just did.
+    }
+
+    // --- The fix: t measured against the pivot as it stood when the drag began.
+    float frozen[4] = {};
+    for (int frame = 0; frame < 4; frame++) {
+        float t = 0.0f;
+        closestPointOnAxis(anchor, axis, cameraPosition, heldRay, t);
+        frozen[frame] = t - startT;
+    }
+
+    float liveSwing = 0.0f, frozenSwing = 0.0f;
+    for (int frame = 1; frame < 4; frame++) {
+        liveSwing = std::max(liveSwing, std::abs(live[frame] - live[0]));
+        frozenSwing = std::max(frozenSwing, std::abs(frozen[frame] - frozen[0]));
+    }
+
+    bool oscillated = liveSwing > 0.5f * std::abs(expected);
+    bool stable = frozenSwing < 1.0e-4f && std::abs(frozen[0] - expected) < 1.0e-4f;
+
+    projv::core::info("GIZMOTEST: cursor asks for {:.3f} along the axis; live pivot gives "
+                      "[{:.3f}, {:.3f}, {:.3f}, {:.3f}], frozen gives [{:.3f}, {:.3f}, {:.3f}, {:.3f}]",
+                      expected, live[0], live[1], live[2], live[3],
+                      frozen[0], frozen[1], frozen[2], frozen[3]);
+    projv::core::info("GIZMOTEST: live pivot oscillates {} | frozen pivot holds {}",
+                      oscillated ? "PASS" : "FAIL", stable ? "PASS" : "FAIL");
+}
+
+// Everything about the symmetry group that is invisible from the outside.
+//
+// The failure class is the one every coordinate mapping in this file has had at least once: an
+// off-by-one produces a perfectly plausible second copy slightly in the wrong place, which reads as
+// "the tool is a bit odd" rather than as a bug, and no amount of looking at the screen settles it.
+// The half-voxel parity makes it worse, because the wrong answer is off by exactly one voxel -- the
+// size of the thing you are looking at. So the properties are asserted numerically:
+//
+//   * the pillar case                     -> eight elements and eight distinct images, not four twice;
+//   * closure                             -> every product of two members is a member;
+//   * mirrors are involutions             -> applying one twice is the identity;
+//   * a frame centred on a box            -> maps that box exactly onto itself, corner for corner;
+//   * parity                              -> an even origin fixes one column, an odd one fixes none;
+//   * a diagonal across mismatched parity -> dropped, rather than rounded into place.
+//
+// Read-only arithmetic -- no scene, no window -- so it runs under EDITOR_SELFTEST with the other
+// cheap checks.
+static void runSymmetrySelfTest() {
+    using projv::core::ivec3;
+
+    // --- The pillar: eight exact copies about the Y axis ---
+    SymmetryFrame frame;
+    frame.enabled = true;
+    frame.origin = ivec3(31, 31, 31);   // A body occupying 0..31: an even extent, so boundary planes.
+    frame.mirror[0] = true;             // X
+    frame.mirror[2] = true;             // Z
+    frame.diagonal[2] = true;           // The ZX pair -- the diagonal that spans X and Z.
+
+    std::vector<LatticeMap> group;
+    buildSymmetryGroup(frame, group);
+
+    // Eight elements *and* eight distinct images. The second half is the check that matters: eight
+    // maps that happen to collapse onto four positions would still count to eight.
+    ivec3 probe(3, 7, 11);
+    std::vector<ivec3> images;
+    for (const LatticeMap& map : group) {
+        ivec3 image = map.apply(probe);
+        bool seen = false;
+        for (const ivec3& existing : images) {
+            if (existing == image) { seen = true; break; }
+        }
+        if (!seen) images.push_back(image);
+    }
+    // The axis with no mirror on it must come through every element untouched, or the group is
+    // turning the pillar over as well as around it.
+    bool axisHeld = true;
+    for (const ivec3& image : images) axisHeld = axisHeld && image.y == probe.y;
+    bool eightfold = group.size() == 8 && images.size() == 8 && axisHeld;
+
+    // --- Closure: the property the builder's fixed-point loop is supposed to guarantee ---
+    bool closed = true;
+    for (const LatticeMap& outer : group) {
+        for (const LatticeMap& inner : group) {
+            LatticeMap product = composeLatticeMaps(outer, inner);
+            bool found = false;
+            for (const LatticeMap& existing : group) {
+                if (existing == product) { found = true; break; }
+            }
+            closed = closed && found;
+        }
+    }
+
+    // --- Every mirror undoes itself ---
+    bool involutions = true;
+    for (const LatticeMap& map : group) {
+        if (map.isIdentity()) continue;
+        LatticeMap twice = composeLatticeMaps(map, map);
+        // Not every element of D4 is an involution -- the two 90-degree rotations are not -- but
+        // every element applied four times must be the identity.
+        LatticeMap fourTimes = composeLatticeMaps(twice, twice);
+        involutions = involutions && fourTimes.isIdentity();
+    }
+
+    // --- A frame centred on a box maps that box onto itself ---
+    //
+    // Mixed parities on purpose, and one axis of a single voxel: an even extent, an odd extent and
+    // the degenerate case in one probe, which is where the doubling either works or is off by one.
+    const ivec3 boxMin(-5, 0, 12), boxMax(20, 33, 12);
+    SymmetryFrame centred;
+    centred.enabled = true;
+    centred.origin = boxMin + boxMax;
+    centred.mirror[0] = centred.mirror[1] = centred.mirror[2] = true;
+    std::vector<LatticeMap> centredGroup;
+    buildSymmetryGroup(centred, centredGroup);
+
+    bool boxHeld = false;
+    for (const LatticeMap& map : centredGroup) {
+        if (map.sign[0] != -1 || map.sign[1] != -1 || map.sign[2] != -1) continue;
+        if (map.axis[0] != 0 || map.axis[1] != 1 || map.axis[2] != 2) continue;
+        boxHeld = map.apply(boxMin) == boxMax && map.apply(boxMax) == boxMin;
+    }
+
+    // --- Parity decides whether a column sits on the plane or beside it ---
+    SymmetryFrame evenFrame;
+    evenFrame.enabled = true;
+    evenFrame.mirror[0] = true;
+    evenFrame.origin = ivec3(16, 0, 0);
+    std::vector<LatticeMap> evenGroup;
+    buildSymmetryGroup(evenFrame, evenGroup);
+
+    SymmetryFrame oddFrame = evenFrame;
+    oddFrame.origin = ivec3(15, 0, 0);
+    std::vector<LatticeMap> oddGroup;
+    buildSymmetryGroup(oddFrame, oddGroup);
+
+    int evenFixed = 0, oddFixed = 0;
+    for (int x = 0; x <= 32; x++) {
+        ivec3 cell(x, 0, 0);
+        if (evenGroup.size() > 1 && evenGroup[1].apply(cell) == cell) evenFixed++;
+        if (oddGroup.size() > 1 && oddGroup[1].apply(cell) == cell) oddFixed++;
+    }
+    // And the odd frame must pair its two middle columns rather than leaving a gap between them.
+    bool oddPairs = oddGroup.size() > 1 && oddGroup[1].apply(ivec3(7, 0, 0)) == ivec3(8, 0, 0);
+    bool parityRight = evenFixed == 1 && oddFixed == 0 && oddPairs;
+
+    // --- A diagonal whose two planes disagree in parity is dropped, not rounded ---
+    SymmetryFrame mismatched;
+    mismatched.enabled = true;
+    mismatched.mirror[0] = true;
+    mismatched.mirror[2] = true;
+    mismatched.diagonal[2] = true;
+    mismatched.origin = ivec3(0, 0, 1);   // X even, Z odd: no exact diagonal exists between them.
+    std::vector<LatticeMap> mismatchedGroup;
+    buildSymmetryGroup(mismatched, mismatchedGroup);
+    bool diagonalRefused = mismatchedGroup.size() == 4;
+
+    projv::core::info("SYMMETRYTEST: mirror X + mirror Z + diagonal ZX -> {} element(s), {} distinct "
+                      "image(s), free axis held {}", group.size(), images.size(),
+                      axisHeld ? "yes" : "no");
+    projv::core::info("SYMMETRYTEST: eightfold {} | closed {} | order 4 {} | centred box holds {}",
+                      eightfold ? "PASS" : "FAIL", closed ? "PASS" : "FAIL",
+                      involutions ? "PASS" : "FAIL", boxHeld ? "PASS" : "FAIL");
+    projv::core::info("SYMMETRYTEST: parity - even origin fixes {} column(s), odd fixes {} and pairs "
+                      "7 with 8 {} -> {}", evenFixed, oddFixed, oddPairs ? "yes" : "no",
+                      parityRight ? "PASS" : "FAIL");
+    projv::core::info("SYMMETRYTEST: mismatched-parity diagonal dropped -> {} element(s), expected 4 "
+                      "| {}", mismatchedGroup.size(), diagonalRefused ? "PASS" : "FAIL");
+}
+
+// Everything about the resolve that is invisible from the outside.
+//
+// A fold that is off by one cell produces a perfectly plausible result in the wrong place, which is
 // the same failure class the paint-coordinate test already guards -- it reads as "the tool is a bit
 // weird" rather than as a bug, and no amount of looking at the screen settles it. So the properties
 // are asserted numerically:
 //
-//   * lift a known box and merge it back at zero offset  -> identical, voxel for voxel;
-//   * merge at a +N voxel offset                          -> exactly N cells over, no strays;
-//   * four 90-degree rotations                            -> the identity transform;
-//   * cut, then cancel                                    -> the baseline, back;
-//   * undo of a merge                                     -> the baseline, back;
-//   * a hollow shape at 37 degrees                        -> no holes in its surface.
+//   * one part, unioned                       -> the primitive's own voxel count, cell for cell;
+//   * a second part subtracted                -> exactly the overlap removed, nothing else;
+//   * the same two intersected                -> exactly the overlap kept;
+//   * an Intersect on the first row           -> seeds, rather than resolving to nothing;
+//   * reordering the stack                    -> a different result, and the ops still apply in order;
+//   * four 90-degree rotations of a part      -> the identity transform;
+//   * bake, then undo                         -> the stack back, part for part;
+//   * a hollow shape at 37 degrees            -> no holes in its surface;
+//   * a compose round trip                    -> every op preserved.
 //
-// That last one is the pull-rasterisation test, and it is the one that fails loudly if anyone ever
-// reimplements the merge as a forward map: pushing each source voxel to a target cell leaves gaps
+// The hollow one is the pull-rasterisation test, and it is the one that fails loudly if anyone ever
+// reimplements the fold as a forward map: pushing each source voxel to a lattice cell leaves gaps
 // that perforate a two-voxel wall, and a shell with one hole in it is a shell you can see through.
-// It is checked by flooding the empty space *around* the merged shell and asserting that the flood
+// It is checked by flooding the empty space *around* the resolved shell and asserting that the flood
 // never reaches the middle.
 //
 // Opt-in behind its own environment variable, like the sculpt tests, because it edits the scene:
 //
-//   STAMPTEST=1 ./scene_editor ../ScenePreviewer/scenes/Sibenik
-static void runStampSelfTest(projv::Scene& scene, EditorState& editor) {
+//   ASSEMBLYTEST=1 ./scene_editor ../ScenePreviewer/scenes/Sibenik
+static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
     using projv::core::ivec3;
     using projv::core::vec3;
 
-    // Its own components rather than the loaded scene's, so the test is the same on every scene and
-    // cannot leave a mark on the user's. Soft-deleted at the end, the way the hierarchy deletes.
-    std::vector<projv::ComponentHandle> created;
-    auto makeComponent = [&](const char* name) {
-        projv::ComponentHandle handle = projv::utils::addComponent(
-            scene, projv::ComponentKind::Chunk, name, projv::INVALID_COMPONENT_HANDLE, 64, 1.0f);
-        if (handle != projv::INVALID_COMPONENT_HANDLE) created.push_back(handle);
-        return handle;
-    };
-
-    projv::ComponentHandle target = makeComponent("__stamptest_target__");
-    projv::ComponentHandle empty = makeComponent("__stamptest_empty__");
-    if (target == projv::INVALID_COMPONENT_HANDLE || empty == projv::INVALID_COMPONENT_HANDLE) {
-        projv::core::warn("STAMPTEST: could not create the test components; skipped");
-        return;
-    }
-
-    FloatingStamp savedStamp = editor.stamp;
-    VoxelSelection savedSelection = editor.regionSelection;
-    bool savedSnap = editor.stampSnap90;
-    MergeMode savedMode = editor.stampMergeMode;
     ShapeKind savedKind = editor.shapeKind;
     bool savedHollow = editor.shapeHollow;
     int savedWall = editor.shapeWallThickness;
     int savedDimensions[3] = { editor.shapeDimensions[0], editor.shapeDimensions[1],
                                editor.shapeDimensions[2] };
+    BooleanOp savedOp = editor.shapeOp;
+    // Test 8 turns snapping off and cannot turn it back on without changing what it asserts, so the
+    // restore belongs here with the rest of the harness. It was leaking into every test after it.
+    bool savedSnapEnabled = editor.snapEnabled;
+    bool savedSnapRotate = editor.snapRotate90;
+    int savedSnapStep = editor.snapStepVoxels;
+    float savedSnapVoxel = editor.snapVoxelOverride;
+    std::unordered_set<projv::ComponentHandle> savedFree = std::move(editor.freeComponents);
+    editor.freeComponents.clear();
     projv::ComponentHandle savedSelected = editor.selectedComponent;
+    std::vector<Resolve> savedResolves = std::move(editor.resolves);
+    std::unordered_map<projv::ComponentHandle, Part> savedParts = std::move(editor.parts);
+    projv::ComponentHandle savedOpen = editor.openAsset;
+    editor.resolves.clear();
+    editor.parts.clear();
+    editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+    editor.selectedComponent = projv::INVALID_COMPONENT_HANDLE;
 
-    editor.stamp = FloatingStamp();
-    editor.stampSnap90 = true;
-    editor.stampMergeMode = MergeMode::Add;
+    std::vector<projv::ComponentHandle> created;
 
-    // --- The baseline: a block in which every voxel is a different colour, so a merge that lands in
-    // the right place but the wrong orientation is still caught -- a uniformly coloured block would
-    // pass a transposed remap without a murmur.
-    //
-    // Six a side, not eight: a distinct colour per voxel means a distinct palette entry per voxel,
-    // and material IDs are uint8_t. 6^3 is 216 entries and fits; 8^3 is 512 and does not.
-    const ivec3 BLOCK_MIN(20, 20, 20);
-    const int BLOCK_SIDE = 6;
-    std::vector<ivec3> blockCoords;
-    std::vector<uint32_t> blockColors;
-    for (int z = 0; z < BLOCK_SIDE; z++) {
-        for (int y = 0; y < BLOCK_SIDE; y++) {
-            for (int x = 0; x < BLOCK_SIDE; x++) {
-                blockCoords.push_back(BLOCK_MIN + ivec3(x, y, z));
-                blockColors.push_back(0x3F000000u |
-                                      uint32_t((x * 40) << 16 | (y * 40) << 8 | (z * 40)));
+    // Builds an asset with one box part at the origin of its own frame, and returns both.
+    // Everything below starts from this, so a failure in the first test is a failure of the setup
+    // rather than of the property the later ones are asserting.
+    auto makeStack = [&](float voxelScale) -> Resolve* {
+        projv::ComponentHandle node = createAssetNode(scene, editor, projv::INVALID_COMPONENT_HANDLE,
+                                                      voxelScale);
+        if (node != projv::INVALID_COMPONENT_HANDLE) created.push_back(node);
+        return findResolve(editor, node);
+    };
+    auto addBox = [&](Resolve& resolve, int side, vec3 centre, BooleanOp op) {
+        editor.shapeKind = ShapeKind::Box;
+        editor.shapeHollow = false;
+        editor.shapeDimensions[0] = editor.shapeDimensions[1] = editor.shapeDimensions[2] = side;
+        return addPrimitivePart(scene, editor, resolve, centre, op);
+    };
+    auto foldOf = [&](Resolve& resolve) {
+        return foldNode(scene, editor, resolve, ASSEMBLY_MAX_BAKE_CELLS, ASSEMBLY_MAX_BAKE_CELLS);
+    };
+
+    // --- 1. One part, unioned: the primitive's own voxel count, in the lattice ---------------
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        size_t folded = 0;
+        if (resolve) {
+            addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            Fold fold = foldOf(*resolve);
+            folded = fold.coords.size();
+            ok = fold.valid && folded == 8u * 8u * 8u;
+        }
+        projv::core::info("ASSEMBLYTEST: one 8^3 box unioned -> {} cell(s), expected 512 | {}",
+                          folded, ok ? "PASS" : "FAIL");
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+    }
+
+    // --- 2. Subtract: exactly the overlap removed ---------------------------------------------
+    // Two 8^3 boxes offset by 4 on one axis overlap in a 4x8x8 slab: 256 cells. Subtracting the
+    // second must leave 512 - 256, and nothing outside the first box may survive.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        size_t folded = 0;
+        if (resolve) {
+            addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            addBox(*resolve, 8, vec3(4.0f, 0.0f, 0.0f), BooleanOp::Subtract);
+            Fold fold = foldOf(*resolve);
+            folded = fold.coords.size();
+            ok = fold.valid && folded == 512u - 256u;
+        }
+        projv::core::info("ASSEMBLYTEST: 8^3 minus 8^3 at +4 -> {} cell(s), expected 256 | {}",
+                          folded, ok ? "PASS" : "FAIL");
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+    }
+
+    // --- 3. Intersect: exactly the overlap kept -----------------------------------------------
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        size_t folded = 0;
+        if (resolve) {
+            addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            addBox(*resolve, 8, vec3(4.0f, 0.0f, 0.0f), BooleanOp::Intersect);
+            Fold fold = foldOf(*resolve);
+            folded = fold.coords.size();
+            ok = fold.valid && folded == 256u;
+        }
+        projv::core::info("ASSEMBLYTEST: 8^3 intersect 8^3 at +4 -> {} cell(s), expected 256 | {}",
+                          folded, ok ? "PASS" : "FAIL");
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+    }
+
+    // --- 4. Hazard 3: an Intersect on the first row seeds rather than annihilating -------------
+    // An empty accumulator intersected with anything is empty, so without the seeding rule this
+    // whole stack resolves to nothing at all -- an outcome with no visible cause.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        size_t folded = 0;
+        if (resolve) {
+            addBox(*resolve, 8, vec3(0.0f), BooleanOp::Intersect);   // Row 0, deliberately.
+            Fold fold = foldOf(*resolve);
+            folded = fold.coords.size();
+            ok = fold.valid && folded == 512u;
+        }
+        projv::core::info("ASSEMBLYTEST: Intersect on row 0 seeds -> {} cell(s), expected 512 | {}",
+                          folded, ok ? "PASS" : "FAIL");
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+    }
+
+    // --- 5. Order matters, and the fold respects it -------------------------------------------
+    // Union A, subtract B gives A minus B. Reordered to subtract B first -- which then seeds, by
+    // rule 4 -- and union A after gives A union B. Different numbers, and both predictable.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        size_t before = 0, after = 0;
+        if (resolve) {
+            addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            addBox(*resolve, 8, vec3(4.0f, 0.0f, 0.0f), BooleanOp::Subtract);
+            before = foldOf(*resolve).coords.size();
+
+            std::vector<projv::ComponentHandle>& stack = scene.components[resolve->node].children;
+            std::swap(stack[0], stack[1]);
+            for (auto& entry : editor.parts) entry.second.cacheValid = false;
+            after = foldOf(*resolve).coords.size();
+            // Seeded by the (now first) subtract box, then unioned with the first: 512 + 256 new.
+            ok = before == 256u && after == 768u;
+        }
+        projv::core::info("ASSEMBLYTEST: stack order A-B={} then B,A={}, expected 256 then 768 | {}",
+                          before, after, ok ? "PASS" : "FAIL");
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+    }
+
+    // --- 6. Four quarter turns compose to the identity -----------------------------------------
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        if (resolve) {
+            projv::ComponentHandle part = addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            if (part != projv::INVALID_COMPONENT_HANDLE) {
+                selectComponentInEditor(scene, editor, part, false);
+                vec3 startPosition = scene.components[part].localPosition;
+                projv::core::quat startRotation = scene.components[part].localRotation;
+                for (int turn = 0; turn < 4; turn++) {
+                    rotateSelected90(scene, editor, vec3(0.0f, 1.0f, 0.0f), 1.0f);
+                }
+                vec3 endPosition = scene.components[part].localPosition;
+                projv::core::quat endRotation = scene.components[part].localRotation;
+                // A quaternion and its negation are the same rotation, so the dot product's
+                // magnitude is what has to be one -- comparing components would fail on a sign.
+                ok = glm::length(endPosition - startPosition) < 1.0e-3f &&
+                     std::abs(glm::dot(endRotation, startRotation)) > 0.9999f;
             }
         }
+        projv::core::info("ASSEMBLYTEST: four 90-degree turns compose to the identity | {}",
+                          ok ? "PASS" : "FAIL");
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
     }
-    applyVoxelSculpt(&scene, &editor, target, blockCoords, blockColors, true);
 
-    // Reads a component's voxels over a box, as coordinate -> colour. The comparison every assertion
-    // below is written against.
-    auto readVoxels = [&](projv::ComponentHandle component, ivec3 minimum, ivec3 maximum) {
-        std::unordered_map<uint64_t, uint32_t> voxels;
-        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
-        if (!space.valid) return voxels;
-        for (int z = minimum.z; z <= maximum.z; z++) {
-            for (int y = minimum.y; y <= maximum.y; y++) {
-                for (int x = minimum.x; x <= maximum.x; x++) {
-                    uint8_t slot = 0;
-                    if (!queryComponentVoxel(scene, space, ivec3(x, y, z), slot)) continue;
-                    voxels[packVoxelKey(ivec3(x, y, z))] = componentVoxelColor(scene, component, slot);
+    // --- 7. Merge, then undo: the asset survives and the stack comes back row for row -----------
+    // The asset surviving is the property, not a detail of it. Merging used to replace the node with
+    // a bare Chunk at the node's parent, and that is what stranded a finished asset: a Chunk is not a
+    // folder, so "Save as asset" went grey on it and no verb could put it into another asset.
+    // Finishing a pillar was the act that made it unusable in a temple.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        size_t partsBefore = 0, partsAfter = 0, childrenAfterMerge = 0;
+        size_t bakedVoxels = 0;
+        bool nodeSurvived = false, mergedIsChild = false, mergedIsPlaced = false;
+        if (resolve) {
+            addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            addBox(*resolve, 8, vec3(4.0f, 0.0f, 0.0f), BooleanOp::Subtract);
+            partsBefore = scene.components[resolve->node].children.size();
+            projv::ComponentHandle node = resolve->node;
+            created.push_back(node);
+
+            size_t historyBefore = editor.history.entries().size();
+            bool merged = mergeContentsToData(scene, editor, *resolve, {});
+            nodeSurvived = node < scene.components.size() &&
+                           scene.components[node].name != "__deleted__" &&
+                           scene.components[node].kind == projv::ComponentKind::Asset;
+            childrenAfterMerge = nodeSurvived ? scene.components[node].children.size() : 0;
+            if (merged && editor.selectedComponent < scene.components.size()) {
+                projv::ComponentHandle result = editor.selectedComponent;
+                bakedVoxels = projv::utils::getComponentVoxelCount(scene, result);
+                mergedIsChild = scene.components[result].parent == node;
+                // The whole stack merged, so nothing is left to compose with: it is a placed .data.
+                mergedIsPlaced = scene.components[result].op == BooleanOp::None;
+            }
+
+            if (merged && editor.history.entries().size() > historyBefore) editor.history.undo();
+            partsAfter = nodeSurvived ? scene.components[node].children.size() : 0;
+            ok = merged && nodeSurvived && mergedIsChild && mergedIsPlaced &&
+                 childrenAfterMerge == 1 && bakedVoxels == 256u && partsAfter == partsBefore;
+        }
+        projv::core::info("ASSEMBLYTEST: merge keeps the asset - survived {} , holds {} child, merged "
+                          "is a placed child {} -> {} voxel(s) (expected 256), undo restores {}/{} "
+                          "row(s) | {}", nodeSurvived ? "yes" : "NO", childrenAfterMerge,
+                          (mergedIsChild && mergedIsPlaced) ? "yes" : "NO", bakedVoxels,
+                          partsAfter, partsBefore, ok ? "PASS" : "FAIL");
+        for (const Resolve& revived : editor.resolves) created.push_back(revived.node);
+        while (!editor.resolves.empty()) {
+            destroyAssetNode(scene, editor, editor.resolves.back().node, false);
+        }
+    }
+
+    // --- 7b. A merged asset goes into another asset, and comes back out --------------------------
+    // The reported failure, end to end: build a pillar out of primitives, merge it to one .data,
+    // then put it in a temple. Every step of that existed except the last, and the last was
+    // unreachable because merging used to leave a bare Chunk that no verb could move.
+    {
+        Resolve* pillar = makeStack(1.0f);
+        projv::ComponentHandle pillarNode = pillar ? pillar->node : projv::INVALID_COMPONENT_HANDLE;
+        bool ok = false, movedIn = false, placed = false, cameBack = false;
+        float drift = -1.0f;
+        size_t templeContents = 0;
+
+        if (pillar) {
+            addBox(*pillar, 8, vec3(0.0f), BooleanOp::Union);
+            addBox(*pillar, 8, vec3(4.0f, 0.0f, 0.0f), BooleanOp::Subtract);
+            mergeContentsToData(scene, editor, *pillar, {});
+        }
+        // A second asset invalidates the first pointer -- editor.resolves is a vector and makeStack
+        // pushes to it -- so everything past here works from handles.
+        Resolve* temple = makeStack(1.0f);
+        projv::ComponentHandle templeNode = temple ? temple->node : projv::INVALID_COMPONENT_HANDLE;
+        created.push_back(pillarNode);
+        created.push_back(templeNode);
+
+        if (pillarNode < scene.components.size() && templeNode < scene.components.size() &&
+            !scene.components[pillarNode].children.empty()) {
+            projv::ComponentHandle data = scene.components[pillarNode].children.front();
+            vec3 before = vec3(projv::utils::getComponentWorldMatrix(scene, data)[3]);
+
+            moveComponentInto(scene, editor, pillarNode, templeNode);
+            movedIn = scene.components[pillarNode].parent == templeNode;
+            placed = scene.components[pillarNode].op == BooleanOp::None;
+            templeContents = scene.components[templeNode].children.size();
+            // setComponentParent composes the transforms, so the geometry must not budge in world
+            // space -- a move is a change of ownership, not a change of place.
+            drift = glm::length(vec3(projv::utils::getComponentWorldMatrix(scene, data)[3]) - before);
+
+            editor.history.undo();
+            cameBack = scene.components[pillarNode].parent == projv::INVALID_COMPONENT_HANDLE &&
+                       scene.components[templeNode].children.empty();
+            ok = movedIn && placed && templeContents == 1 && drift < 1.0e-3f && cameBack;
+        }
+        projv::core::info("ASSEMBLYTEST: merged asset moves into another - parented {} , arrives placed "
+                          "{} , temple holds {} , world drift {:.4f} , undo puts it back {} | {}",
+                          movedIn ? "yes" : "NO", placed ? "yes" : "NO", templeContents, drift,
+                          cameBack ? "yes" : "NO", ok ? "PASS" : "FAIL");
+        while (!editor.resolves.empty()) {
+            destroyAssetNode(scene, editor, editor.resolves.back().node, false);
+        }
+    }
+
+    // --- 7c. A merged .data composes with a copy of itself ---------------------------------------
+    // The reported failure, and the reason it hid from every test above: those all fold components
+    // that the Place tool created, and the Place tool registers a Part. Nothing here does. A merged
+    // .data, its duplicate, and a New Data all arrive *after* adopt() has run over the node, so
+    // looking a Part up and skipping the row when it was missing left them out of the fold and off
+    // the lattice -- while still listing them as rows you could set an op on.
+    //
+    // Merge one box to a .data, duplicate it, offset the copy by 4 and subtract: the same 8^3 minus
+    // 8^3-at-+4 that test 2 asserts on primitives, so the expected 256 is a number already
+    // established rather than one derived here. Snapping is checked in the same breath because it
+    // failed through the identical gate.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false, mergedAgain = false, snaps = false;
+        size_t roofVoxels = 0, resultVoxels = 0;
+        if (resolve) {
+            created.push_back(resolve->node);
+            addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            mergeContentsToData(scene, editor, *resolve, {});
+
+            projv::ComponentHandle roof = editor.selectedComponent;
+            if (roof < scene.components.size() && scene.components[roof].parent == resolve->node) {
+                roofVoxels = projv::utils::getComponentVoxelCount(scene, roof);
+                // The snap half. A merged .data sits squarely on the lattice it was folded into, so
+                // a non-zero voxel here is the whole assertion -- it used to return zero and the
+                // component free-floated.
+                snaps = snapStepWorld(scene, editor, roof) > 0.0f;
+
+                // duplicateComponentInEditor steps the copy DUPLICATE_OFFSET_VOXELS along local X,
+                // which at voxelScale 1 is exactly the +4 test 2 uses.
+                projv::ComponentHandle copy = duplicateComponentInEditor(scene, editor, roof);
+                if (copy < scene.components.size()) {
+                    scene.components[copy].op = BooleanOp::Subtract;
+                    invalidateResolveOf(scene, editor, resolve->node, true);
+                    // Both rows picked, which is the gesture the panel offers: placeAsUnion promotes
+                    // the placed roof to Union so the copy has something to subtract from.
+                    mergedAgain = mergeContentsToData(scene, editor, *resolve, { roof, copy });
+                    if (mergedAgain && editor.selectedComponent < scene.components.size()) {
+                        resultVoxels =
+                            projv::utils::getComponentVoxelCount(scene, editor.selectedComponent);
+                    }
+                }
+            }
+            ok = snaps && mergedAgain && roofVoxels == 512u && resultVoxels == 256u;
+        }
+        projv::core::info("ASSEMBLYTEST: a merged .data subtracts a copy of itself - roof {} voxel(s) "
+                          "(expected 512), snaps {} , merged {} -> {} voxel(s) (expected 256) | {}",
+                          roofVoxels, snaps ? "yes" : "NO", mergedAgain ? "yes" : "NO", resultVoxels,
+                          ok ? "PASS" : "FAIL");
+        while (!editor.resolves.empty()) {
+            destroyAssetNode(scene, editor, editor.resolves.back().node, false);
+        }
+    }
+
+    // --- 7d. One grid for the document, and the objects allowed off it ---------------------------
+    // Four properties of the document lattice, each of which the per-asset lattice got wrong:
+    //
+    //   * a component inside an asset that is itself off the grid still lands *on* the grid, rather
+    //     than on one shifted by its container's offset that nothing else in the document shares;
+    //   * a component at the document root snaps at all -- it has no resolve, so under the old rule
+    //     it free-floated, which is the level at which a scene is actually composed;
+    //   * snapping is still idempotent, which is what the undo records rely on;
+    //   * a free-placed component keeps its pose through the funnel, which is the whole reason the
+    //     flag is on the component rather than on the editor.
+    //
+    // The grid is pinned to 1.0 rather than derived: the loaded scene's own voxel scales would
+    // otherwise decide the number this asserts against, and the test would say something different
+    // on every scene it is run on.
+    {
+        editor.snapVoxelOverride = 1.0f;
+        editor.snapEnabled = true;
+        editor.snapRotate90 = true;
+        editor.snapStepVoxels = 1;
+
+        // Distance from the nearest grid position, in world units.
+        auto gridResidue = [](vec3 world, float step) {
+            vec3 offset(world.x / step - std::round(world.x / step),
+                        world.y / step - std::round(world.y / step),
+                        world.z / step - std::round(world.z / step));
+            return glm::length(offset) * step;
+        };
+
+        bool ok = false, nestedSnapped = false, rootSnapped = false;
+        bool idempotent = false, freeHeld = false;
+        float nestedResidue = -1.0f, rootResidue = -1.0f;
+
+        Resolve* resolve = makeStack(1.0f);
+        if (resolve) {
+            created.push_back(resolve->node);
+            // The container stands deliberately off the grid, set directly rather than through the
+            // funnel so that nothing snaps it back before the child is measured.
+            projv::utils::setComponentTransform(scene, resolve->node, vec3(0.5f, 0.25f, -0.125f),
+                                                projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f), 1.0f);
+            projv::ComponentHandle box = addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            if (box != projv::INVALID_COMPONENT_HANDLE) {
+                applyComponentTransform(&scene, &editor, box, vec3(3.3f, -1.7f, 2.9f),
+                                        scene.components[box].localRotation, 1.0f);
+                nestedResidue = gridResidue(projv::utils::getComponentWorldPosition(scene, box), 1.0f);
+                nestedSnapped = nestedResidue < 1.0e-3f;
+
+                // Replaying the stored value is what an undo does, and it must not be a second nudge.
+                vec3 held = scene.components[box].localPosition;
+                applyComponentTransform(&scene, &editor, box, held,
+                                        scene.components[box].localRotation, 1.0f);
+                idempotent = glm::length(scene.components[box].localPosition - held) < 1.0e-4f;
+
+                // Free-placed: the funnel leaves the value exactly as handed to it, which is what
+                // makes an Alt-dragged pose survive its own undo record.
+                vec3 wanted(3.3f, -1.7f, 2.9f);
+                setFreePlacement(editor, box, true);
+                applyComponentTransform(&scene, &editor, box, wanted,
+                                        scene.components[box].localRotation, 1.0f);
+                freeHeld = glm::length(scene.components[box].localPosition - wanted) < 1.0e-4f;
+                setFreePlacement(editor, box, false);
+            }
+        }
+
+        // A component at the document root: no asset above it, and so no resolve and no lattice at
+        // all under the old rule.
+        projv::ComponentHandle loose = projv::utils::addComponent(
+            scene, projv::ComponentKind::Chunk, uniqueComponentName(scene, "Loose"),
+            projv::INVALID_COMPONENT_HANDLE, 64, 1.0f);
+        if (loose != projv::INVALID_COMPONENT_HANDLE) {
+            applyComponentTransform(&scene, &editor, loose, vec3(5.4f, 0.6f, -3.2f),
+                                    scene.components[loose].localRotation, 1.0f);
+            rootResidue = gridResidue(projv::utils::getComponentWorldPosition(scene, loose), 1.0f);
+            rootSnapped = rootResidue < 1.0e-3f;
+            deleteComponent(scene, editor, loose);
+        }
+
+        ok = nestedSnapped && rootSnapped && idempotent && freeHeld;
+        projv::core::info("ASSEMBLYTEST: one grid for the document - inside an off-grid asset {:.4f} "
+                          "off ({}), at the root {:.4f} off ({}), idempotent {} , free pose held {} | {}",
+                          nestedResidue, nestedSnapped ? "yes" : "NO", rootResidue,
+                          rootSnapped ? "yes" : "NO", idempotent ? "yes" : "NO",
+                          freeHeld ? "yes" : "NO", ok ? "PASS" : "FAIL");
+
+        editor.snapVoxelOverride = 0.0f;
+        while (!editor.resolves.empty()) {
+            destroyAssetNode(scene, editor, editor.resolves.back().node, false);
+        }
+    }
+
+    // --- 7c. Duplicating an *asset* copies the whole asset ---------------------------------------
+    // Duplicate has always worked on the rows inside an asset, because those are Chunks. On the
+    // asset itself -- a folder with children, which is what the top-level list is made of -- it is a
+    // different code path, and that path was never exercised by a test.
+    {
+        Resolve* pillar = makeStack(1.0f);
+        projv::ComponentHandle pillarNode = pillar ? pillar->node : projv::INVALID_COMPONENT_HANDLE;
+        bool ok = false;
+        size_t sourceChildren = 0, copyChildren = 0;
+        size_t sourceVoxels = 0, copyVoxels = 0;
+        bool isAsset = false;
+        float step = -1.0f;
+
+        if (pillar) {
+            addBox(*pillar, 8, vec3(0.0f), BooleanOp::Union);
+            addBox(*pillar, 8, vec3(4.0f, 0.0f, 0.0f), BooleanOp::Subtract);
+            mergeContentsToData(scene, editor, *pillar, {});
+        }
+        created.push_back(pillarNode);
+
+        if (pillarNode < scene.components.size()) {
+            sourceChildren = scene.components[pillarNode].children.size();
+            if (sourceChildren == 1) {
+                sourceVoxels = projv::utils::getComponentVoxelCount(
+                    scene, scene.components[pillarNode].children.front());
+            }
+            vec3 sourceAt = scene.components[pillarNode].localPosition;
+
+            projv::ComponentHandle copy = duplicateComponentInEditor(scene, editor, pillarNode);
+            created.push_back(copy);
+            if (copy < scene.components.size()) {
+                isAsset = scene.components[copy].kind == projv::ComponentKind::Asset;
+                copyChildren = scene.components[copy].children.size();
+                if (copyChildren == 1) {
+                    copyVoxels = projv::utils::getComponentVoxelCount(
+                        scene, scene.components[copy].children.front());
+                }
+                step = glm::length(scene.components[copy].localPosition - sourceAt);
+            }
+            // The copy has to be a whole asset: same kind, its contents copied too, holding the same
+            // geometry, and standing beside the original rather than on top of it.
+            ok = isAsset && copyChildren == sourceChildren && sourceChildren == 1 &&
+                 copyVoxels == sourceVoxels && sourceVoxels > 0 && step > 0.5f;
+        }
+        projv::core::info("ASSEMBLYTEST: duplicate an asset - copy is an asset {} , children {}/{} , "
+                          "voxels {}/{} , offset {:.3f} | {}", isAsset ? "yes" : "NO",
+                          copyChildren, sourceChildren, copyVoxels, sourceVoxels, step,
+                          ok ? "PASS" : "FAIL");
+        while (!editor.resolves.empty()) {
+            destroyAssetNode(scene, editor, editor.resolves.back().node, false);
+        }
+    }
+
+    // --- 7d. Duplicating an asset that contains another asset ------------------------------------
+    // The shape the top-level list is actually made of once anything has been moved into anything:
+    // a temple holding a pillar. One more level of recursion than 7c, and the level at which
+    // duplicateComponent's own re-entrancy is exercised.
+    {
+        Resolve* pillar = makeStack(1.0f);
+        projv::ComponentHandle pillarNode = pillar ? pillar->node : projv::INVALID_COMPONENT_HANDLE;
+        if (pillar) {
+            addBox(*pillar, 8, vec3(0.0f), BooleanOp::Union);
+            mergeContentsToData(scene, editor, *pillar, {});
+        }
+        Resolve* temple = makeStack(1.0f);
+        projv::ComponentHandle templeNode = temple ? temple->node : projv::INVALID_COMPONENT_HANDLE;
+        created.push_back(pillarNode);
+        created.push_back(templeNode);
+
+        bool ok = false, nestedIsAsset = false;
+        size_t templeChildren = 0, copyChildren = 0, nestedVoxels = 0, sourceVoxels = 0;
+        if (pillarNode < scene.components.size() && templeNode < scene.components.size()) {
+            moveComponentInto(scene, editor, pillarNode, templeNode);
+            templeChildren = scene.components[templeNode].children.size();
+            if (!scene.components[pillarNode].children.empty()) {
+                sourceVoxels = projv::utils::getComponentVoxelCount(
+                    scene, scene.components[pillarNode].children.front());
+            }
+
+            // **Forces the reallocation the old bug depended on.** duplicateComponent used to hold a
+            // reference into scene.components across a push_back onto that same vector, then read the
+            // source's kind and child list through it to drive the recursion -- a use-after-free.
+            // shrink_to_fit makes size == capacity, so the append is guaranteed to move the buffer.
+            //
+            // This is a trap, not a proof: a stale read usually still returns the old bytes, so the
+            // check passed even with the bug present and the reallocation forced. It is here so the
+            // reallocating path is exercised on every run rather than on the runs that happen to be
+            // unlucky -- the value is in what it might catch later, not in what it caught.
+            scene.components.shrink_to_fit();
+
+            projv::ComponentHandle copy = duplicateComponentInEditor(scene, editor, templeNode);
+            created.push_back(copy);
+            if (copy < scene.components.size()) {
+                copyChildren = scene.components[copy].children.size();
+                if (copyChildren == 1) {
+                    projv::ComponentHandle nested = scene.components[copy].children.front();
+                    nestedIsAsset = scene.components[nested].kind == projv::ComponentKind::Asset;
+                    // The pillar's own .data has to have come along, two levels down.
+                    if (nestedIsAsset && !scene.components[nested].children.empty()) {
+                        nestedVoxels = projv::utils::getComponentVoxelCount(
+                            scene, scene.components[nested].children.front());
+                    }
+                }
+            }
+            ok = templeChildren == 1 && copyChildren == 1 && nestedIsAsset &&
+                 nestedVoxels == sourceVoxels && sourceVoxels > 0;
+        }
+        projv::core::info("ASSEMBLYTEST: duplicate a nested asset - temple holds {} , copy holds {} , "
+                          "nested is an asset {} , its voxels {}/{} | {}", templeChildren, copyChildren,
+                          nestedIsAsset ? "yes" : "NO", nestedVoxels, sourceVoxels,
+                          ok ? "PASS" : "FAIL");
+        while (!editor.resolves.empty()) {
+            destroyAssetNode(scene, editor, editor.resolves.back().node, false);
+        }
+    }
+
+    // --- 7e. A Subtract with nothing above it promotes the row above ------------------------------
+    // The other half of 7c's repro, and belongs beside it. 7c fixed the `Part` gate, which is what
+    // made the fold *skip* those rows; this is what makes the fold mean something once it walks them.
+    // A merged .data is a placed row -- op `None`, which is exactly what a finished asset is -- and
+    // `foldChildren` skips placed rows, so a Subtract added underneath had nothing above it, became
+    // the first contributing row, and seeded the accumulator with its own body: 512 cells of the copy
+    // where the user asked for 256 cells of difference, with the original still drawn beside it as a
+    // placement. "Live preview shows both objects instead of the subtraction", reported exactly.
+    //
+    // Same geometry as tests 2 and 7c -- 8^3 minus 8^3 at +4 -- so the expected 256 is a number
+    // established elsewhere rather than derived here. Three properties: the placed row comes out
+    // `Union`, the fold comes out 256, and one undo puts *both* ops back, because a promotion that
+    // outlived the op change that caused it would leave the stack folding a row nobody asked to fold.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false, promoted = false, restored = false;
+        size_t folded = 0;
+        if (resolve) {
+            projv::ComponentHandle node = resolve->node;
+            created.push_back(node);
+            addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            mergeContentsToData(scene, editor, *resolve, {});
+
+            projv::ComponentHandle roof = editor.selectedComponent;
+            if (roof < scene.components.size() && scene.components[roof].parent == node &&
+                scene.components[roof].op == BooleanOp::None) {
+                projv::ComponentHandle copy = duplicateComponentInEditor(scene, editor, roof);
+                // Re-looked-up: the duplicate appends to scene.components and can append to
+                // editor.resolves, which moves the vector the pointer above points into.
+                resolve = findResolve(editor, node);
+                if (copy < scene.components.size() && resolve) {
+                    // Through the funnel both op controls now use, which is the point of the test:
+                    // the Place panel's radio row is the only route to this row, because the Assets
+                    // panel greys the op control on whichever row seeds.
+                    setComponentOpInEditor(scene, editor, copy, BooleanOp::Subtract);
+                    promoted = scene.components[roof].op == BooleanOp::Union;
+
+                    folded = foldOf(*resolve).coords.size();
+
+                    restored = editor.history.undo() &&
+                               scene.components[roof].op == BooleanOp::None &&
+                               scene.components[copy].op == BooleanOp::None;
+                    ok = promoted && folded == 256u && restored;
                 }
             }
         }
-        return voxels;
-    };
-
-    const ivec3 SCAN_MIN(0, 0, 0);
-    const ivec3 SCAN_MAX(63, 63, 63);
-    std::unordered_map<uint64_t, uint32_t> baseline = readVoxels(target, SCAN_MIN, SCAN_MAX);
-
-    // Selects the baseline block, which is what every lift below starts from.
-    auto selectBlock = [&]() {
-        editor.regionSelection.reset(target, BLOCK_MIN, BLOCK_MIN + ivec3(BLOCK_SIDE - 1));
-        for (const ivec3& coord : blockCoords) editor.regionSelection.set(coord);
-    };
-
-    // --- 1. Lift a copy and merge it straight back. Byte-identical, or the lattice the lift builds
-    // its stamp on does not coincide with the one it came from.
-    selectBlock();
-    liftSelection(scene, editor, false);
-    bool liftedIdentity = editor.stamp.active;
-    if (liftedIdentity) mergeStamp(scene, editor);
-    std::unordered_map<uint64_t, uint32_t> afterIdentity = readVoxels(target, SCAN_MIN, SCAN_MAX);
-    bool identityMatches = liftedIdentity && afterIdentity == baseline;
-
-    // --- 2. Merge the same block N voxels over. Exactly the baseline plus a translated copy.
-    const int OFFSET = 11;
-    selectBlock();
-    liftSelection(scene, editor, false);
-    bool liftedOffset = editor.stamp.active;
-    if (liftedOffset) {
-        ComponentVoxelSpace targetSpace = resolveComponentVoxelSpace(scene, target);
-        nudgeStamp(scene, editor, glm::mat3_cast(targetSpace.rotation)[0] *
-                                  (float(OFFSET) * targetSpace.voxelSize));
-        mergeStamp(scene, editor);
-    }
-    std::unordered_map<uint64_t, uint32_t> afterOffset = readVoxels(target, SCAN_MIN, SCAN_MAX);
-    size_t offsetWrong = 0;
-    for (size_t index = 0; index < blockCoords.size(); index++) {
-        auto found = afterOffset.find(packVoxelKey(blockCoords[index] + ivec3(OFFSET, 0, 0)));
-        if (found == afterOffset.end() || found->second != blockColors[index]) offsetWrong++;
-    }
-    size_t offsetStrays = afterOffset.size() - baseline.size() - (blockCoords.size() - offsetWrong);
-    bool offsetMatches = liftedOffset && offsetWrong == 0 && offsetStrays == 0;
-
-    // --- 3. Undo the offset merge. Straight back to the baseline: the record has to reverse the
-    // cells the merge filled *and* restore the ones it displaced, which is where the naive version
-    // ("adding fills empty space, so undo empties it again") deletes voxels it never created.
-    bool undone = editor.history.canUndo() && editor.history.undo();
-    std::unordered_map<uint64_t, uint32_t> afterUndo = readVoxels(target, SCAN_MIN, SCAN_MAX);
-    bool undoMatches = undone && afterUndo == baseline;
-
-    // --- 4. Cut, then cancel. The voxels go back exactly as they were.
-    selectBlock();
-    liftSelection(scene, editor, true);
-    bool cutLifted = editor.stamp.active && editor.stamp.cutFromTarget;
-    size_t afterCutCount = readVoxels(target, SCAN_MIN, SCAN_MAX).size();
-    if (cutLifted) cancelStamp(scene, editor);
-    std::unordered_map<uint64_t, uint32_t> afterCancel = readVoxels(target, SCAN_MIN, SCAN_MAX);
-    bool cancelMatches = cutLifted && afterCutCount == baseline.size() - blockCoords.size() &&
-                         afterCancel == baseline;
-
-    // --- 5. Four quarter turns are the identity. A rotation that is nearly-but-not-quite a lattice
-    // rotation accumulates, and four of them is where it first becomes visible.
-    editor.shapeKind = ShapeKind::Box;
-    editor.shapeHollow = false;
-    editor.shapeDimensions[0] = editor.shapeDimensions[1] = editor.shapeDimensions[2] = 6;
-    editor.regionSelection.clear();
-    spawnShapeStamp(scene, editor, empty, vec3(32.0f, 32.0f, 32.0f));
-    bool spawned = editor.stamp.active;
-    bool rotationIdentity = false;
-    if (spawned) {
-        vec3 startPosition = scene.components[editor.stamp.component].localPosition;
-        projv::core::quat startRotation = scene.components[editor.stamp.component].localRotation;
-        for (int turn = 0; turn < 4; turn++) rotateStamp90(scene, editor, vec3(0.0f, 1.0f, 0.0f), 1.0f);
-        vec3 endPosition = scene.components[editor.stamp.component].localPosition;
-        projv::core::quat endRotation = scene.components[editor.stamp.component].localRotation;
-        // Quaternion sign is not part of the rotation, so the comparison is on |dot|.
-        rotationIdentity = glm::length(endPosition - startPosition) < 1.0e-3f &&
-                           std::abs(glm::dot(endRotation, startRotation)) > 0.9999f;
-        cancelStamp(scene, editor);
+        projv::core::info("ASSEMBLYTEST: a Subtract with nothing above it promotes - placed row became "
+                          "Union {} , folds to {} cell(s) (expected 256), one undo restores both ops {} "
+                          "| {}", promoted ? "yes" : "NO", folded, restored ? "yes" : "NO",
+                          ok ? "PASS" : "FAIL");
+        while (!editor.resolves.empty()) {
+            destroyAssetNode(scene, editor, editor.resolves.back().node, false);
+        }
     }
 
-    // --- 6. A hollow shape at 37 degrees has no holes. See this function's header comment.
-    editor.stampSnap90 = false;
-    editor.shapeKind = ShapeKind::Box;
-    editor.shapeHollow = true;
-    editor.shapeWallThickness = 2;
-    editor.shapeDimensions[0] = editor.shapeDimensions[1] = editor.shapeDimensions[2] = 20;
-    const ivec3 SHELL_CENTRE(32, 32, 32);
-    spawnShapeStamp(scene, editor, empty, vec3(SHELL_CENTRE) + vec3(0.5f));
-    bool shellSpawned = editor.stamp.active;
-    bool shellClosed = false;
-    size_t shellVoxels = 0, sealedCells = 0;
-    if (shellSpawned) {
-        const projv::ComponentRecord& record = scene.components[editor.stamp.component];
-        projv::core::quat tilt = glm::angleAxis(glm::radians(37.0f), glm::normalize(vec3(0.2f, 1.0f, 0.1f)));
-        applyComponentTransform(&scene, &editor, editor.stamp.component, record.localPosition,
-                                glm::normalize(tilt * record.localRotation), 1.0f);
-        mergeStamp(scene, editor);
-
-        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, empty);
-        std::unordered_map<uint64_t, uint32_t> shell = readVoxels(empty, SCAN_MIN, SCAN_MAX);
-        shellVoxels = shell.size();
-
-        // Flood the empty space from a corner well outside the shell. Six-connected, for the same
-        // reason the volume fill is: diagonal connectivity leaks through a corner contact, which
-        // would report a hole in a shell that has none.
-        ivec3 floodMin(4, 4, 4), floodMax(59, 59, 59);
-        std::vector<uint8_t> reached(size_t(56) * 56 * 56, 0);
-        auto index = [&](ivec3 c) {
-            ivec3 local = c - floodMin;
-            return (size_t(local.z) * 56 + size_t(local.y)) * 56 + size_t(local.x);
-        };
-        std::vector<ivec3> queue{ floodMin };
-        reached[index(floodMin)] = 1;
-        static const ivec3 NEIGHBOURS[6] = {
-            ivec3(1,0,0), ivec3(-1,0,0), ivec3(0,1,0), ivec3(0,-1,0), ivec3(0,0,1), ivec3(0,0,-1)
-        };
-        for (size_t head = 0; head < queue.size(); head++) {
-            ivec3 current = queue[head];
-            for (const ivec3& step : NEIGHBOURS) {
-                ivec3 next = current + step;
-                if (next.x < floodMin.x || next.y < floodMin.y || next.z < floodMin.z) continue;
-                if (next.x > floodMax.x || next.y > floodMax.y || next.z > floodMax.z) continue;
-                if (reached[index(next)]) continue;
-                uint8_t slot = 0;
-                if (queryComponentVoxel(scene, space, next, slot)) continue;   // The wall stops it.
-                reached[index(next)] = 1;
-                queue.push_back(next);
+    // --- 7f. ...and it leaves a stack that already folds alone -----------------------------------
+    // The promotion is an assist, not a rule. A row above that already folds means the Subtract has
+    // something to compose against, and promoting anything then would be the editor overruling an
+    // arrangement the author made -- a placed row is a deliberate statement that it is not part of
+    // the composition. Row 0 unions, row 1 is placed clear of it, row 2 subtracts: the fold is row 0
+    // minus row 2, row 1 stays out of it, and nothing moves.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false, firstHeld = false, placedHeld = false;
+        size_t folded = 0;
+        if (resolve) {
+            projv::ComponentHandle node = resolve->node;
+            created.push_back(node);
+            projv::ComponentHandle first = addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            projv::ComponentHandle placed = addBox(*resolve, 8, vec3(0.0f, 8.0f, 0.0f), BooleanOp::None);
+            projv::ComponentHandle third = addBox(*resolve, 8, vec3(4.0f, 0.0f, 0.0f), BooleanOp::None);
+            if (first < scene.components.size() && placed < scene.components.size() &&
+                third < scene.components.size()) {
+                setComponentOpInEditor(scene, editor, third, BooleanOp::Subtract);
+                firstHeld = scene.components[first].op == BooleanOp::Union;
+                placedHeld = scene.components[placed].op == BooleanOp::None;
+                folded = foldOf(*resolve).coords.size();
+                ok = firstHeld && placedHeld && folded == 256u;
             }
         }
-        for (uint8_t cell : reached) sealedCells += cell ? 0u : 1u;
-        // The crisp assertion: the middle of a closed shell cannot be reached from outside it. One
-        // hole anywhere in the surface and the flood arrives here.
-        shellClosed = shellVoxels > 0 && reached[index(SHELL_CENTRE)] == 0;
+        projv::core::info("ASSEMBLYTEST: a stack that already folds is left alone - row 0 still Union {} "
+                          ", placed row still Place {} , folds to {} cell(s) (expected 256) | {}",
+                          firstHeld ? "yes" : "NO", placedHeld ? "yes" : "NO", folded,
+                          ok ? "PASS" : "FAIL");
+        while (!editor.resolves.empty()) {
+            destroyAssetNode(scene, editor, editor.resolves.back().node, false);
+        }
     }
 
-    projv::core::info("STAMPTEST: baseline={} voxels, offset strays={}, wrong={}, shell={} voxels, "
-                      "sealed cells={}",
-                      baseline.size(), offsetStrays, offsetWrong, shellVoxels, sealedCells);
-    projv::core::info("STAMPTEST: lift/merge identity {} | offset merge {} | undo restores {} | "
-                      "cut+cancel restores {} | four turns identity {} | hollow at 37 sealed {}",
-                      identityMatches ? "PASS" : "FAIL",
-                      offsetMatches ? "PASS" : "FAIL",
-                      undoMatches ? "PASS" : "FAIL",
-                      cancelMatches ? "PASS" : "FAIL",
-                      rotationIdentity ? "PASS" : "FAIL",
-                      shellClosed ? "PASS" : "FAIL");
+    // --- 8. The pull, not a push: a hollow shape at 37 degrees has a closed surface -------------
+    // Forward-mapping each source voxel to a lattice cell leaves gaps a two-voxel wall cannot
+    // absorb. Checked by flooding the empty space around the resolved shell and asserting the flood
+    // never reaches the middle -- one perforation and it does.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        bool leaked = true;
+        size_t shellCells = 0;
+        if (resolve) {
+            // Free rotation is the whole point of this test. Both gates, because the old single
+            // `snap90` governed translation and rotation together and this test was written against
+            // that -- turning off only the rotation half would quietly change what it exercises.
+            editor.snapEnabled = false;
+            editor.snapRotate90 = false;
+            editor.shapeKind = ShapeKind::Sphere;
+            editor.shapeHollow = true;
+            editor.shapeWallThickness = 2;
+            editor.shapeDimensions[0] = editor.shapeDimensions[1] = editor.shapeDimensions[2] = 24;
+            projv::ComponentHandle part = addPrimitivePart(scene, editor, *resolve, vec3(0.0f),
+                                                            BooleanOp::Union);
+            if (part != projv::INVALID_COMPONENT_HANDLE) {
+                const projv::ComponentRecord& record = scene.components[part];
+                applyComponentTransform(&scene, &editor, part, record.localPosition,
+                                        glm::angleAxis(glm::radians(37.0f),
+                                                       glm::normalize(vec3(0.3f, 1.0f, 0.2f))),
+                                        1.0f);
+                for (auto& entry : editor.parts) entry.second.cacheValid = false;
 
-    // --- Clean up. The test's components go the way the hierarchy's Delete sends one, and so do the
-    // stamp components it caused to be pooled -- otherwise every run of it would leave a "Stamp"
-    // node behind in the tree.
-    if (editor.stamp.active) cancelStamp(scene, editor);
-    for (const auto& entry : editor.stampPool) created.push_back(entry.second);
-    editor.stampPool.clear();
+                Fold fold = foldOf(*resolve);
+                shellCells = fold.coords.size();
+                if (fold.valid && shellCells > 0) {
+                    std::unordered_set<uint64_t> solid;
+                    solid.reserve(shellCells * 2);
+                    ivec3 low = fold.coords[0], high = fold.coords[0];
+                    for (const ivec3& cell : fold.coords) {
+                        solid.insert(packVoxelKey(cell));
+                        low = projv::core::min(low, cell);
+                        high = projv::core::max(high, cell);
+                    }
+                    ivec3 centre = (low + high) / 2;
+                    // Flood the empty space from one cell outside the shell's box. Reaching the
+                    // centre means the surface has a hole in it.
+                    ivec3 start = low - ivec3(1);
+                    std::unordered_set<uint64_t> seen;
+                    std::vector<ivec3> queue{ start };
+                    seen.insert(packVoxelKey(start));
+                    bool reachedCentre = false;
+                    const ivec3 STEPS[6] = { {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1} };
+                    while (!queue.empty() && !reachedCentre && seen.size() < 400000) {
+                        ivec3 at = queue.back();
+                        queue.pop_back();
+                        for (const ivec3& step : STEPS) {
+                            ivec3 next = at + step;
+                            if (next.x < low.x - 1 || next.y < low.y - 1 || next.z < low.z - 1) continue;
+                            if (next.x > high.x + 1 || next.y > high.y + 1 || next.z > high.z + 1) continue;
+                            uint64_t key = packVoxelKey(next);
+                            if (solid.count(key)) continue;
+                            if (!seen.insert(key).second) continue;
+                            if (next == centre) { reachedCentre = true; break; }
+                            queue.push_back(next);
+                        }
+                    }
+                    leaked = reachedCentre;
+                    ok = !leaked;
+                }
+            }
+        }
+        projv::core::info("ASSEMBLYTEST: hollow sphere at 37 degrees -> {} shell cell(s), flood "
+                          "{} the interior | {}", shellCells, leaked ? "REACHED" : "never reached",
+                          ok ? "PASS" : "FAIL");
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+    }
+
+    // --- 9. compose.json round trip: every op survives -----------------------------------------
+    // The field is what makes a stack re-openable, so a bake to disk that lost the ops would be
+    // a bake that could not be unbaked -- and it would fail silently, since the parts themselves
+    // would all still be there.
+    {
+        std::filesystem::path folder = std::filesystem::temp_directory_path() /
+                                       "projv_assemblytest_compose";
+        std::error_code errorCode;
+        std::filesystem::remove_all(folder, errorCode);
+
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        std::string wrote, read;
+        if (resolve) {
+            addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            addBox(*resolve, 8, vec3(4.0f, 0.0f, 0.0f), BooleanOp::Subtract);
+            addBox(*resolve, 8, vec3(0.0f, 4.0f, 0.0f), BooleanOp::Intersect);
+            for (projv::ComponentHandle child : scene.components[resolve->node].children) {
+                wrote += projv::booleanOpName(scene.components[child].op);
+                wrote += " ";
+            }
+
+            if (projv::utils::saveComposeToDisk(scene, resolve->node, folder.string())) {
+                projv::ComposeDoc doc = projv::utils::parseComposeJson((folder / "compose.json").string());
+                for (const projv::ComposeComponent& entry : doc.components) {
+                    read += projv::booleanOpName(entry.op);
+                    read += " ";
+                }
+                ok = doc.version != 0 && read == wrote;
+            }
+        }
+        projv::core::info("ASSEMBLYTEST: compose round trip wrote [{}] read [{}] | {}",
+                          wrote, read, ok ? "PASS" : "FAIL");
+        std::filesystem::remove_all(folder, errorCode);
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+    }
+
+    // --- 10. ...and comes back off disk as an editable stack ------------------------------------
+    // The other half of the round trip. Test 9 proves the ops reach the file; this proves they are
+    // read back into something you can carry on working on. Without it "bake to disk" would be a
+    // one-way door with a reassuring name -- and it would fail silently, because every part would
+    // still be sitting there in the list doing nothing.
+    {
+        std::filesystem::path folder = std::filesystem::temp_directory_path() /
+                                       "projv_assemblytest_adopt";
+        std::error_code errorCode;
+        std::filesystem::remove_all(folder, errorCode);
+
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        size_t adoptedParts = 0, adoptedAssemblies = 0;
+        size_t foldedBefore = 0, foldedAfter = 0;
+        if (resolve) {
+            addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            addBox(*resolve, 8, vec3(4.0f, 0.0f, 0.0f), BooleanOp::Subtract);
+            foldedBefore = foldOf(*resolve).coords.size();
+
+            if (projv::utils::saveComposeToDisk(scene, resolve->node, folder.string())) {
+                // Into a scene and an editor of its own, so the reload cannot be confused with what
+                // is already open -- which is exactly the situation a load meets.
+                projv::Scene reloaded = projv::utils::loadComposeFromDisk(folder.string());
+                EditorState scratch;
+                // The two halves of what a load does, in the order loadScene does them: wrap the
+                // root components the writer left carrying ops, then let the per-frame sync notice
+                // that the wrapper's contents combine.
+                wrapRootStack(reloaded, scratch);
+                syncResolves(reloaded, scratch);
+                adoptedAssemblies = scratch.resolves.size();
+                if (adoptedAssemblies == 1) {
+                    Resolve& revived = scratch.resolves.front();
+                    adoptedParts = reloaded.components[revived.node].children.size();
+                    foldedAfter = foldNode(reloaded, scratch, revived, ASSEMBLY_MAX_BAKE_CELLS,
+                                               ASSEMBLY_MAX_BAKE_CELLS).coords.size();
+                }
+                ok = adoptedAssemblies == 1 && adoptedParts == 2 && foldedAfter == foldedBefore;
+            }
+        }
+        projv::core::info("ASSEMBLYTEST: reload adopted {} resolve/{} part(s), folds to {} "
+                          "(was {}) | {}", adoptedAssemblies, adoptedParts, foldedAfter, foldedBefore,
+                          ok ? "PASS" : "FAIL");
+        std::filesystem::remove_all(folder, errorCode);
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+    }
+
+    // --- 11. A resize across a resolution boundary keeps the part selected, in place -------------
+    // A component's resolution is fixed for its whole life, so a part that outgrows its own has to
+    // move to a new one. Two things have to survive that move and neither is visible from the
+    // result: the selection, or the next field edit acts on nothing and the part you were adjusting
+    // silently stops being the one you are adjusting; and the part's *position in the stack*, since
+    // a fold is ordered and a resize is not a reorder.
+    //
+    // The default part is 16 voxels and 16 is exactly its resolution, so the first tick of a size
+    // drag crosses a boundary. This is the common path, not an edge case.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        size_t stackBefore = 0, stackAfter = 0;
+        int positionBefore = -1, positionAfter = -1;
+        bool keptSelection = false;
+        if (resolve) {
+            addBox(*resolve, 8, vec3(-20.0f, 0.0f, 0.0f), BooleanOp::Union);
+            projv::ComponentHandle part = addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            addBox(*resolve, 8, vec3(20.0f, 0.0f, 0.0f), BooleanOp::Union);
+            selectComponentInEditor(scene, editor, part, false);
+
+            const std::vector<projv::ComponentHandle>& before = scene.components[resolve->node].children;
+            stackBefore = before.size();
+            auto found = std::find(before.begin(), before.end(), part);
+            positionBefore = found == before.end() ? -1 : int(found - before.begin());
+
+            // 8 voxels resolves to a 16 chunk; 40 resolves to a 64. Crossing that is what moves the
+            // part to a new component. Written on the part's own recipe, which is where a resize
+            // lives -- see check 16 for why the tool panel's numbers must not reach in here.
+            if (Part* recipe = findPart(editor, part)) {
+                recipe->dimensions[0] = recipe->dimensions[1] = recipe->dimensions[2] = 40;
+            }
+            regeneratePart(scene, editor, part);
+
+            const std::vector<projv::ComponentHandle>& after = scene.components[resolve->node].children;
+            stackAfter = after.size();
+            projv::ComponentHandle now = editor.selectedComponent;
+            auto landed = std::find(after.begin(), after.end(), now);
+            positionAfter = landed == after.end() ? -1 : int(landed - after.begin());
+            keptSelection = now != projv::INVALID_COMPONENT_HANDLE && now != part &&
+                            findPart(editor, now) != nullptr;
+            ok = keptSelection && stackAfter == stackBefore && positionAfter == positionBefore &&
+                 positionAfter >= 0;
+        }
+        projv::core::info("ASSEMBLYTEST: resize across a resolution boundary keeps selection {}, "
+                          "stack {}->{}, row {}->{} | {}", keptSelection ? "yes" : "NO",
+                          stackBefore, stackAfter, positionBefore, positionAfter,
+                          ok ? "PASS" : "FAIL");
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+    }
+
+    // --- 12. A recolour reaches the result without anything moving ------------------------------
+    // The pull resolves each voxel's slot to a colour as it goes, so the cached cells depend on the
+    // part's palette as much as on where it is standing. Keying the cache on the transform alone
+    // left a precise and confusing symptom: the *part* changed colour immediately, because its
+    // palette went straight to the GPU, while the result kept the old one until something happened
+    // to move it.
+    //
+    // Asserted on the fold rather than on the screen: what has to be true is that re-folding an
+    // unmoved part yields the new colour, and that the cache actually re-pulls to find it.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        uint32_t before = 0, after = 0;
+        bool countHeld = false;
+        if (resolve) {
+            projv::ComponentHandle part = addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            Fold first = foldOf(*resolve);
+            before = first.colors.empty() ? 0u : first.colors[0];
+            size_t cells = first.coords.size();
+
+            // Straight at the palette, the way the picker's undo closure does it -- not through the
+            // panel, so the test is of the invalidation and not of a widget.
+            const uint32_t REPAINTED = 0x000FFC00u;   // Pure green in R10G10B10.
+            projv::utils::setMaterialColor(scene, part, 0, REPAINTED);
+
+            Fold second = foldOf(*resolve);
+            after = second.colors.empty() ? 0u : second.colors[0];
+            countHeld = second.coords.size() == cells;
+            ok = before != after && after == REPAINTED && countHeld && cells > 0;
+        }
+        projv::core::info("ASSEMBLYTEST: recolour reaches the fold 0x{:06X} -> 0x{:06X}, cells held "
+                          "{} | {}", before, after, countHeld ? "yes" : "NO", ok ? "PASS" : "FAIL");
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+    }
+
+    // --- 12b. Sculpting and painting a part reach the result, in every direction -----------------
+    // The sibling of 12, and it had two holes of exactly the same shape. `applyVoxelSculpt`
+    // invalidated inside its `if (add)` branch, so carving a part never reached the fold; and
+    // `applyVoxelPaint` did not invalidate at all, so recolouring one never did either -- and the
+    // palette poll in refreshResolves does not cover that, because painting with an entry that
+    // already exists changes no palette.
+    //
+    // Both produced the same misleading symptom: nothing happened until the part was *moved*, at
+    // which point the transform funnel invalidated and every earlier edit appeared at once. So the
+    // check is on the resolve's staleness flag as well as on the fold, because the fold alone would
+    // pass on a rebuild that only ever happens by accident.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        size_t base = 0, afterAdd = 0, afterRemove = 0;
+        size_t paintedCells = 0;
+        bool staleOnAdd = false, staleOnRemove = false, staleOnPaint = false;
+        const uint32_t PAINTED = 0x3FF00000u;   // Pure red in R10G10B10.
+        if (resolve) {
+            projv::ComponentHandle part = addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            Fold first = foldOf(*resolve);
+            base = first.coords.size();
+
+            const Part* record = findPart(editor, part);
+            ivec3 low = record ? record->contentMin : ivec3(0);
+            ivec3 high = record ? record->contentMax : ivec3(0);
+
+            // Add one cell just off a face, and check the fold grew by exactly it.
+            resolve->resultStale = false;
+            applyVoxelSculpt(&scene, &editor, part, std::vector<ivec3>{ ivec3(high.x + 1, low.y, low.z) },
+                             std::vector<uint32_t>{ 0x000FFC00u }, true);
+            staleOnAdd = resolve->resultStale;
+            afterAdd = foldOf(*resolve).coords.size();
+
+            // Carve one cell that is certainly there. This is the half that never worked.
+            resolve->resultStale = false;
+            applyVoxelSculpt(&scene, &editor, part, std::vector<ivec3>{ low },
+                             std::vector<uint32_t>(), false);
+            staleOnRemove = resolve->resultStale;
+            afterRemove = foldOf(*resolve).coords.size();
+
+            // Recolour one surviving cell, and count how many cells of the fold carry that colour.
+            resolve->resultStale = false;
+            applyVoxelPaint(&scene, &editor, part, std::vector<ivec3>{ high },
+                            std::vector<uint32_t>{ PAINTED });
+            staleOnPaint = resolve->resultStale;
+            Fold painted = foldOf(*resolve);
+            for (uint32_t color : painted.colors) {
+                if (color == PAINTED) paintedCells++;
+            }
+
+            ok = base > 0 && afterAdd == base + 1 && afterRemove == base &&
+                 paintedCells == 1 && staleOnAdd && staleOnRemove && staleOnPaint;
+        }
+        projv::core::info("ASSEMBLYTEST: edits reach the fold - {} cells, add {} , carve {} , "
+                          "painted cell(s) {} | stale add {} carve {} paint {} | {}",
+                          base, afterAdd, afterRemove, paintedCells,
+                          staleOnAdd ? "yes" : "NO", staleOnRemove ? "yes" : "NO",
+                          staleOnPaint ? "yes" : "NO", ok ? "PASS" : "FAIL");
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+    }
+
+    // --- 12c. Extrude moves every mirrored face, each along its own normal -----------------------
+    // Extrude is the one tool that cannot mirror a dab, because it has no dab: it fixes a face and a
+    // direction on the press and then reads one number. So the copies are whole faces, gathered at
+    // the mirrored seeds, and the single depth drives all of them -- each along *its own* normal,
+    // which is what makes the far copy a mirror rather than a translation. Get that wrong and both
+    // faces travel the same way: one extrudes and the other carves into the shape.
+    //
+    // A box is used rather than the loaded scene precisely because it *is* symmetric, so the second
+    // face is guaranteed to exist and the counts are exact.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        size_t faces = 0, faceVoxels = 0;
+        uint32_t before = 0, after = 0, restored = 0;
+        bool normalsOpposed = false;
+        SelectionScope savedScope = editor.extrudeFaceScope;
+        editor.extrudeFaceScope = SelectionScope::Everything;
+        if (resolve) {
+            projv::ComponentHandle part = addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            const Part* record = findPart(editor, part);
+            ivec3 low = record ? record->contentMin : ivec3(0);
+            ivec3 high = record ? record->contentMax : ivec3(0);
+            ComponentVoxelSpace partSpace = resolveComponentVoxelSpace(scene, part);
+
+            SymmetryFrame& frame = editor.symmetryFrames[part];
+            frame = SymmetryFrame();
+            frame.enabled = true;
+            frame.originPlaced = true;
+            frame.origin = low + high;   // Centred on the box, so the X mirror swaps its two X faces.
+            frame.mirror[0] = true;
+
+            // The group is built after beginSculptStroke, which resets it to the identity.
+            beginSculptStroke(editor);
+            editor.sculptStrokeComponent = part;
+            editor.sculptStrokeBrush = SculptBrush::Extrude;
+            buildSymmetryGroup(frame, editor.strokeSymmetry);
+
+            projv::utils::VoxelPick pick;
+            pick.materialSlot = 0;
+            ivec3 seed(high.x, (low.y + high.y) / 2, (low.z + high.z) / 2);
+            before = projv::utils::getComponentVoxelCount(scene, part);
+            // The ray only sets the drag's starting depth, which this check never reads -- it applies a
+            // depth of one layer directly. The live camera's position is as good an origin as any.
+            if (beginExtrudeDrag(scene, editor, partSpace, pick, seed, ivec3(1, 0, 0),
+                                 ViewportRay{ editor.cameraPosition, vec3(0.0f, 0.0f, 1.0f) })) {
+                faces = editor.extrudeFaces.size();
+                for (const EditorState::ExtrudeFace& face : editor.extrudeFaces) {
+                    faceVoxels += face.coords.size();
+                }
+                normalsOpposed = faces == 2 &&
+                                 editor.extrudeFaces[0].normal == -editor.extrudeFaces[1].normal;
+                applyExtrudeDepth(scene, editor, partSpace, 1);
+                after = projv::utils::getComponentVoxelCount(scene, part);
+                endExtrudeDrag(scene, editor);
+                editor.history.undo();
+                restored = projv::utils::getComponentVoxelCount(scene, part);
+            }
+            editor.sculptStrokeActive = false;
+            editor.symmetryFrames.erase(part);
+            editor.strokeSymmetry.assign(1, LatticeMap());
+
+            // Two 8x8 faces, each pulled one layer outward: 128 new voxels, and undo takes them back.
+            ok = faces == 2 && faceVoxels == 128 && normalsOpposed &&
+                 after == before + 128 && restored == before;
+        }
+        editor.extrudeFaceScope = savedScope;
+        projv::core::info("ASSEMBLYTEST: mirrored extrude - {} face(s), {} voxel(s), opposed normals "
+                          "{} | {} -> {} , undo {} | {}", faces, faceVoxels,
+                          normalsOpposed ? "yes" : "NO", before, after, restored, ok ? "PASS" : "FAIL");
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+    }
+
+    // --- 13. The three copy modes differ in exactly one place: what a save writes ---------------
+    // All three are identical in memory, so nothing you can see on screen distinguishes them. The
+    // difference is entirely in the file, which is the worst possible place for a bug to hide: a
+    // Link that saves as a Copy still renders correctly, still edits correctly, and has silently
+    // stopped propagating -- the one thing the user chose it for.
+    {
+        std::filesystem::path root = std::filesystem::temp_directory_path() / "projv_copymodes";
+        std::error_code errorCode;
+        std::filesystem::remove_all(root, errorCode);
+        std::filesystem::path sourceFolder = root / "source";
+        std::filesystem::path outFolder = root / "out";
+
+        // A source asset on disk: two boxes, so a bake has something to flatten.
+        std::string linkSource, copySource;
+        bool linkIsReference = false, copyIsOwned = false, bakeIsSingle = false;
+        size_t bakeComponents = 0, copyComponents = 0;
+        {
+            Resolve* seed = makeStack(1.0f);
+            if (seed) {
+                addBox(*seed, 8, vec3(0.0f), BooleanOp::None);
+                addBox(*seed, 8, vec3(16.0f, 0.0f, 0.0f), BooleanOp::None);
+                projv::utils::saveComposeToDisk(scene, seed->node, sourceFolder.string());
+                destroyAssetNode(scene, editor, seed->node, false);
+            }
+        }
+
+        // Each mode is imported into its own throwaway holder, saved, and the compose.json read back.
+        auto importAndSave = [&](AssetCopyMode mode, const std::string& holderName) -> projv::ComposeDoc {
+            projv::ComponentHandle holder = projv::utils::addComponent(
+                scene, projv::ComponentKind::Asset, holderName, projv::INVALID_COMPONENT_HANDLE, 4, 1.0f);
+            if (holder == projv::INVALID_COMPONENT_HANDLE) return {};
+            created.push_back(holder);
+
+            projv::ComponentHandle brought = projv::utils::instantiateComposeInto(
+                scene, sourceFolder.string(), holder, vec3(0.0f), projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f), 1.0f);
+            if (brought == projv::INVALID_COMPONENT_HANDLE) return {};
+
+            if (mode == AssetCopyMode::Link) {
+                scene.components[brought].externalSource = true;
+                scene.components[brought].sourcePath = std::filesystem::absolute(sourceFolder).string();
+            } else if (mode == AssetCopyMode::Bake) {
+                bakeImportedSubtree(scene, editor, brought, holder,
+                                    subtreeVoxelScale(scene, brought));
+            }
+
+            std::filesystem::path where = outFolder / holderName;
+            projv::utils::saveComposeToDisk(scene, holder, where.string());
+            return projv::utils::parseComposeJson((where / "compose.json").string());
+        };
+
+        projv::ComposeDoc linked = importAndSave(AssetCopyMode::Link, "linked");
+        if (!linked.components.empty()) {
+            linkSource = linked.components[0].source;
+            // The discriminator is **whether a subfolder was written**, not what the entry is called.
+            // Both modes emit `type: asset`, and the imported node is named after the folder it came
+            // from, so a copy's `source` string and a link's can read identically -- an earlier
+            // version of this check compared the strings and passed with the feature switched off.
+            //
+            // Asked as "did the save descend into it", by counting the subfolders it left behind.
+            // Testing a *path* does not work: a link's source climbs out (`../../source`), so
+            // joining it back onto the output folder resolves to the real source directory, which
+            // exists in both cases and made this check pass against a build with the feature
+            // switched off.
+            size_t subfolders = 0;
+            for (const std::filesystem::directory_entry& wrote :
+                 std::filesystem::directory_iterator(outFolder / "linked", errorCode)) {
+                if (wrote.is_directory(errorCode)) subfolders++;
+            }
+            bool pointsAway = linkSource.rfind("..", 0) == 0 ||
+                              std::filesystem::path(linkSource).is_absolute();
+            linkIsReference = linked.components[0].type == projv::ComponentType::Asset &&
+                              subfolders == 0 && pointsAway;
+        }
+
+        projv::ComposeDoc copied = importAndSave(AssetCopyMode::Copy, "copied");
+        copyComponents = copied.components.size();
+        if (!copied.components.empty()) {
+            copySource = copied.components[0].source;
+            // Owned: an `asset` entry naming a subfolder that really was written beneath it.
+            copyIsOwned = copied.components[0].type == projv::ComponentType::Asset &&
+                          std::filesystem::exists(outFolder / "copied" / copySource / "compose.json",
+                                                  errorCode);
+        }
+
+        projv::ComposeDoc baked = importAndSave(AssetCopyMode::Bake, "baked");
+        bakeComponents = baked.components.size();
+        // Flattened: one `data` entry, not an asset folder -- one blob and one header row where the
+        // other two modes keep the structure they arrived with.
+        bakeIsSingle = bakeComponents == 1 &&
+                       baked.components[0].type == projv::ComponentType::Data;
+
+        bool ok = linkIsReference && copyIsOwned && bakeIsSingle;
+        projv::core::info("ASSEMBLYTEST: copy modes - link writes a reference {} | copy owns its "
+                          "folder {} ({} entry) | bake writes one data {} ({} entry) | {}",
+                          linkIsReference ? "yes" : "NO", copyIsOwned ? "yes" : "NO", copyComponents,
+                          bakeIsSingle ? "yes" : "NO", bakeComponents, ok ? "PASS" : "FAIL");
+        std::filesystem::remove_all(root, errorCode);
+    }
+
+    // --- 14. Placing with nothing open creates one asset, opens it, and keeps using it ----------
+    // The path that replaced ensureActiveAssembly's three-branch guess, and the first thing anybody
+    // does after launching the editor. Two properties, and the second is the one a regression would
+    // break silently: a second click must land in the *same* asset. If openAsset were not being set
+    // by the first place, every click would build a fresh container and the shapes would never
+    // combine -- which looks exactly like "the boolean ops do not work".
+    {
+        editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+        editor.shapeKind = ShapeKind::Box;
+        editor.shapeHollow = false;
+        editor.shapeDimensions[0] = editor.shapeDimensions[1] = editor.shapeDimensions[2] = 8;
+        editor.shapeOp = BooleanOp::Union;
+        size_t resolvesBefore = editor.resolves.size();
+
+        bool placedFirst = placePrimitiveFromCamera(scene, editor);
+        projv::ComponentHandle opened = editor.openAsset;
+        bool openedSomething = opened < scene.components.size() &&
+                               scene.components[opened].kind == projv::ComponentKind::Asset;
+        bool placedSecond = placePrimitiveFromCamera(scene, editor);
+        bool sameAsset = openedSomething && editor.openAsset == opened;
+        size_t items = openedSomething ? scene.components[opened].children.size() : 0;
+        size_t created_ = editor.resolves.size() - resolvesBefore;
+
+        bool ok = placedFirst && placedSecond && openedSomething && sameAsset && items == 2 &&
+                  created_ == 1;
+        projv::core::info("ASSEMBLYTEST: place with nothing open -> {} new asset(s), {} item(s), "
+                          "second click stayed put {} | {}", created_, items,
+                          sameAsset ? "yes" : "NO", ok ? "PASS" : "FAIL");
+        if (openedSomething) {
+            editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+            destroyAssetNode(scene, editor, opened, false);
+        }
+        editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+    }
+
+    // --- 15. A resolve is derived from the ops, and retires when they go ------------------------
+    // What replaced createAssembly/destroyAssembly/adoptLoadedAssemblies: nothing registers a
+    // container and nothing unregisters one, so the only way this can be wrong is for syncResolves
+    // to disagree with the file. Asserted in both directions, because a sync that only ever adds is
+    // the failure that leaks a fold per folder the user ever touched.
+    {
+        Resolve* seed = makeStack(1.0f);
+        bool ok = false;
+        bool adopted = false, retired = false, keptWhileOpen = false;
+        if (seed) {
+            projv::ComponentHandle node = seed->node;
+            addBox(*seed, 8, vec3(0.0f), BooleanOp::Union);
+            addBox(*seed, 8, vec3(4.0f, 0.0f, 0.0f), BooleanOp::Subtract);
+
+            // Forget everything the editor knows and rediscover it from the scene alone.
+            editor.resolves.clear();
+            editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+            syncResolves(scene, editor);
+            adopted = findResolve(editor, node) != nullptr;
+
+            // Ops gone, nothing open: no reason for a fold to exist.
+            for (projv::ComponentHandle child : scene.components[node].children) {
+                scene.components[child].op = BooleanOp::None;
+            }
+            syncResolves(scene, editor);
+            retired = findResolve(editor, node) == nullptr;
+
+            // ...but the asset you are standing in always has one, because it is where the next
+            // shape lands and it needs a lattice before there is anything on it to derive one from.
+            editor.openAsset = node;
+            syncResolves(scene, editor);
+            keptWhileOpen = findResolve(editor, node) != nullptr;
+
+            ok = adopted && retired && keptWhileOpen;
+            editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+            destroyAssetNode(scene, editor, node, false);
+        }
+        projv::core::info("ASSEMBLYTEST: resolve follows the ops - adopted {} | retired {} | kept "
+                          "while open {} | {}", adopted ? "yes" : "NO", retired ? "yes" : "NO",
+                          keptWhileOpen ? "yes" : "NO", ok ? "PASS" : "FAIL");
+    }
+
+    // --- 16. A rebuild reads the shape's own recipe, not the tool panel's -----------------------
+    // The reported defect, asserted directly. `editor.shape*` is the template for the *next* shape;
+    // a placed one carries its own. When the rebuild read the template instead, selecting a second
+    // shape and nudging any field resized it to the first one's dimensions -- and changed its kind
+    // too, silently, since that came off the panel as well.
+    //
+    // Set up exactly as the user hits it: the panel is left holding one shape's numbers, and a
+    // different shape is rebuilt.
+    {
+        Resolve* seed = makeStack(1.0f);
+        bool ok = false;
+        int keptWidth = 0, appliedWidth = 0;
+        const char* keptKind = "?";
+        if (seed) {
+            projv::ComponentHandle assetNode = seed->node;
+            projv::ComponentHandle box = addBox(*seed, 16, vec3(0.0f), BooleanOp::Union);
+            if (box != projv::INVALID_COMPONENT_HANDLE) {
+                // The panel, left on some other shape's settings.
+                editor.shapeDimensions[0] = editor.shapeDimensions[1] = editor.shapeDimensions[2] = 40;
+                editor.shapeKind = ShapeKind::Cylinder;
+                editor.shapeHollow = true;
+
+                regeneratePart(scene, editor, box);
+                const Part* after = findPart(editor, box);
+                keptWidth = after ? after->dimensions[0] : -1;
+                keptKind = after ? ShapeKindLabel(after->kind) : "?";
+                bool untouched = after && after->dimensions[0] == 16 &&
+                                 after->kind == ShapeKind::Box && !after->hollow;
+
+                // ...and the shape's own recipe is what does move it.
+                bool resized = false;
+                if (Part* own = findPart(editor, box)) {
+                    own->dimensions[0] = own->dimensions[1] = own->dimensions[2] = 24;
+                    regeneratePart(scene, editor, box);
+                    // 16 is exactly resolution 16, so growing to 24 crosses a boundary and moves the
+                    // recipe to a replacement component -- which is the common path, not an edge
+                    // case. Found through the asset's contents rather than the old handle.
+                    const Part* moved = nullptr;
+                    for (projv::ComponentHandle child : scene.components[assetNode].children) {
+                        if (const Part* candidate = findPart(editor, child)) moved = candidate;
+                    }
+                    appliedWidth = moved ? moved->dimensions[0] : -1;
+                    resized = moved && moved->dimensions[0] == 24;
+                }
+                ok = untouched && resized;
+            }
+            editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+            destroyAssetNode(scene, editor, assetNode, false);
+        }
+        projv::core::info("ASSEMBLYTEST: rebuild reads the shape, not the panel - 16^3 box held {} "
+                          "and stayed a {} with a stale panel; its own 24 applied as {} | {}",
+                          keptWidth, keptKind, appliedWidth, ok ? "PASS" : "FAIL");
+        editor.shapeHollow = false;
+        editor.shapeKind = ShapeKind::Box;
+    }
+
+    // --- 17. A bake lands in the middle of its chunk, and does not move -------------------------
+    // A chunk is a resolution cube and a form almost never is, so a bake written at the chunk's own
+    // origin sits jammed into one corner of it. Everything derived from the chunk rather than from
+    // the voxels then describes that corner -- the gizmo pivot most visibly -- and the shape is
+    // nowhere near the handle you are dragging.
+    //
+    // Both halves are asserted, because centring alone is easy and wrong: shifting the cells without
+    // taking the same offset back off the component's origin teleports the object by half a chunk at
+    // the instant it is baked.
+    {
+        Resolve* seed = makeStack(1.0f);
+        bool ok = false;
+        ivec3 low(0), high(0);
+        float drift = -1.0f;
+        if (seed) {
+            projv::ComponentHandle node = seed->node;
+            addBox(*seed, 8, vec3(0.0f), BooleanOp::Union);
+
+            ComponentVoxelSpace lattice = resolveLattice(scene, *seed);
+            Fold fold = foldOf(*seed);
+            vec3 beforeCentre(0.0f);
+            if (fold.valid && !fold.coords.empty()) {
+                ivec3 minimum = fold.coords[0], maximum = fold.coords[0];
+                for (const ivec3& coord : fold.coords) {
+                    minimum = projv::core::min(minimum, coord);
+                    maximum = projv::core::max(maximum, coord);
+                }
+                beforeCentre = componentVoxelToWorld(lattice, minimum) +
+                               componentVoxelToWorld(lattice, maximum + ivec3(1));
+                beforeCentre *= 0.5f;
+            }
+
+            if (mergeContentsToData(scene, editor, *seed, {})) {
+                projv::ComponentHandle baked = editor.selectedComponent;
+                if (baked < scene.components.size() &&
+                    componentContentBounds(scene, baked, low, high)) {
+                    // 8 voxels wants a 16 chunk, so a centred form starts at (16-8)/2 = 4.
+                    bool centred = low == ivec3(4) && high == ivec3(11);
+
+                    ComponentVoxelSpace after = resolveComponentVoxelSpace(scene, baked);
+                    vec3 afterCentre = (componentVoxelToWorld(after, low) +
+                                        componentVoxelToWorld(after, high + ivec3(1))) * 0.5f;
+                    drift = glm::length(afterCentre - beforeCentre);
+                    ok = centred && drift < 1.0e-3f;
+                }
+                if (baked < scene.components.size()) deleteComponent(scene, editor, baked);
+            }
+            if (node < scene.components.size() && scene.components[node].name != "__deleted__") {
+                destroyAssetNode(scene, editor, node, false);
+            }
+            editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+        }
+        projv::core::info("ASSEMBLYTEST: bake centres in its chunk - 8^3 occupies [{},{},{}]..[{},{},{}] "
+                          "(expected 4..11), world drift {:.4f} | {}", low.x, low.y, low.z,
+                          high.x, high.y, high.z, drift, ok ? "PASS" : "FAIL");
+    }
+
+    // --- 18. A duplicate is where the original is, plus a nudge, and is drawn --------------------
+    // Three things went wrong at once here and they had one cause: duplicateComponent re-baked the
+    // copy with its *parent's* world matrix rather than its own, so the copy's chunk headers were
+    // written at the parent's origin. The transform fields agreed with the original while the
+    // geometry, the outline and the gizmo pivot -- all derived from those headers -- were somewhere
+    // else, which reads as "the duplicate is invisible and its gizmo has moved".
+    //
+    // The box is placed well off its asset's origin on purpose: at the origin the bug is invisible,
+    // because the wrong answer and the right one coincide.
+    //
+    // The **raw engine call is checked first, on its own**. duplicateComponentInEditor follows every
+    // duplicate with a transform -- the nudge -- and setComponentTransform re-bakes correctly, so it
+    // silently repairs the very thing this is meant to catch. A test that only went through the
+    // editor verb would pass with the engine bug fully intact.
+    {
+        Resolve* seed = makeStack(1.0f);
+        bool ok = false;
+        float step = -1.0f, rawDrift = -1.0f;
+        bool drawn = false, keptOp = false, keptRecipe = false;
+        if (seed) {
+            projv::ComponentHandle node = seed->node;
+            projv::ComponentHandle box = addBox(*seed, 8, vec3(30.0f, 0.0f, 0.0f),
+                                                BooleanOp::Subtract);
+            if (box != projv::INVALID_COMPONENT_HANDLE) {
+                vec3 sourceHeader = scene.chunks[scene.components[box].chunkHandle].header.position;
+
+                projv::ComponentHandle raw = projv::utils::duplicateComponent(scene, box, node);
+                if (raw < scene.components.size()) {
+                    rawDrift = glm::length(
+                        scene.chunks[scene.components[raw].chunkHandle].header.position -
+                        sourceHeader);
+                    deleteComponent(scene, editor, raw);
+                }
+
+                projv::ComponentHandle copy = duplicateComponentInEditor(scene, editor, box);
+                if (copy < scene.components.size()) {
+                    const projv::ComponentRecord& record = scene.components[copy];
+                    vec3 copyHeader = scene.chunks[record.chunkHandle].header.position;
+                    // Beside the original, by the offset and nothing else.
+                    step = glm::length(copyHeader - sourceHeader);
+                    const std::vector<projv::ChunkHandle>& loose = scene.looseChunks;
+                    drawn = std::find(loose.begin(), loose.end(), record.chunkHandle) != loose.end();
+                    keptOp = record.op == BooleanOp::Subtract;
+                    const Part* copiedPart = findPart(editor, copy);
+                    keptRecipe = copiedPart && copiedPart->procedural &&
+                                 copiedPart->dimensions[0] == 8;
+                    ok = drawn && keptOp && keptRecipe && rawDrift >= 0.0f &&
+                         rawDrift < 1.0e-3f &&
+                         std::abs(step - float(DUPLICATE_OFFSET_VOXELS)) < 1.0e-3f;
+                }
+            }
+            if (node < scene.components.size() && scene.components[node].name != "__deleted__") {
+                destroyAssetNode(scene, editor, node, false);
+            }
+            editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+        }
+        projv::core::info("ASSEMBLYTEST: duplicate lands beside the original - raw copy drift "
+                          "{:.3f}, editor step {:.3f} (expected {}), drawn {} | op kept {} | recipe "
+                          "kept {} | {}", rawDrift, step, DUPLICATE_OFFSET_VOXELS,
+                          drawn ? "yes" : "NO", keptOp ? "yes" : "NO", keptRecipe ? "yes" : "NO",
+                          ok ? "PASS" : "FAIL");
+    }
+
+    // --- Clean up ------------------------------------------------------------------------------
+    while (!editor.resolves.empty()) {
+        destroyAssetNode(scene, editor, editor.resolves.back().node, false);
+    }
     for (projv::ComponentHandle handle : created) {
-        if (handle >= scene.components.size()) continue;
-        if (scene.components[handle].kind == projv::ComponentKind::Chunk) {
-            projv::ChunkHandle chunkHandle = scene.components[handle].chunkHandle;
-            if (chunkHandle < scene.chunks.size()) {
-                scene.chunks[chunkHandle].alive = false;
-                projv::releaseBlob(scene, scene.chunks[chunkHandle].geometryPoolIndex);
-            }
-            std::vector<projv::ChunkHandle>& loose = scene.looseChunks;
-            loose.erase(std::remove(loose.begin(), loose.end(), chunkHandle), loose.end());
-            scene.looseChunkCount = uint32_t(loose.size());
+        if (handle < scene.components.size() && scene.components[handle].name != "__deleted__") {
+            deleteComponent(scene, editor, handle);
         }
-        scene.components[handle].name = "__deleted__";
-        scene.components[handle].parent = projv::INVALID_COMPONENT_HANDLE;
     }
 
-    editor.stamp = savedStamp;
-    editor.regionSelection = savedSelection;
-    editor.stampSnap90 = savedSnap;
-    editor.stampMergeMode = savedMode;
     editor.shapeKind = savedKind;
     editor.shapeHollow = savedHollow;
     editor.shapeWallThickness = savedWall;
     editor.shapeDimensions[0] = savedDimensions[0];
     editor.shapeDimensions[1] = savedDimensions[1];
     editor.shapeDimensions[2] = savedDimensions[2];
+    editor.shapeOp = savedOp;
+    editor.snapEnabled = savedSnapEnabled;
+    editor.snapRotate90 = savedSnapRotate;
+    editor.snapStepVoxels = savedSnapStep;
+    editor.snapVoxelOverride = savedSnapVoxel;
+    editor.freeComponents = std::move(savedFree);
+    editor.resolves = std::move(savedResolves);
+    editor.parts = std::move(savedParts);
+    editor.openAsset = savedOpen;
     editor.selectedComponent = savedSelected;
     editor.selectionOutlineValid = false;
     editor.gpuFlushNeeded = true;
     editor.history.clear();
     editor.statusMessage.clear();
+}
+
+// File ▸ New Scene, end to end, minus the two frames of GPU teardown.
+//
+// The deferral itself cannot be tested from here -- it is spread across frames of render() -- but
+// everything the deferral is wrapped around can be, and that is where the behaviour lives: what
+// requestNewScene decides, what newScene resets, what the document is called before it has a folder,
+// and whether saving one gives it that folder. The last of those is the property the whole feature
+// rests on: an untitled document that cannot be titled is a document that cannot be saved.
+//
+// Destructive by nature -- it replaces the open scene -- so it reloads the startup scene afterwards
+// rather than leaving the editor holding the test's leftovers.
+//
+// Opt-in via NEWSCENETEST=1, its own switch because it needs a live bgfx (it builds and destroys GPU
+// textures) and because it throws the loaded scene away:
+//   NEWSCENETEST=1 ./scene_editor ../ScenePreviewer/scenes/Sibenik
+static void runNewSceneSelfTest(projv::Scene& scene, projv::GPUData& gpuData, EditorState& editor) {
+    int failures = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (ok) {
+            projv::core::info("SELFTEST new scene: {} -- ok", what);
+        } else {
+            projv::core::error("SELFTEST new scene: {} -- FAIL", what);
+            failures++;
+        }
+    };
+
+    std::string originalPath = editor.scenePath;
+
+    // --- requestNewScene guards unsaved work -------------------------------------------------
+    editor.history.clear();
+    editor.pendingNewScene = false;
+    editor.newSceneConfirmOpen = false;
+    editor.pendingScenePath = "some/pending/load";
+    requestNewScene(editor);
+    check(editor.pendingNewScene && !editor.newSceneConfirmOpen,
+          "a clean history starts the new scene immediately");
+    check(editor.pendingScenePath.empty(),
+          "starting a new scene cancels a load that had not begun");
+
+    editor.pendingNewScene = false;
+    editor.newSceneConfirmOpen = false;
+    projv::editor::EditRecord dummy;
+    dummy.label = "selftest";
+    dummy.undo = [] {};
+    dummy.redo = [] {};
+    editor.history.record(std::move(dummy), 0.0);
+    requestNewScene(editor);
+    check(!editor.pendingNewScene && editor.newSceneConfirmOpen,
+          "unsaved edits ask before discarding");
+    editor.history.clear();
+
+    // --- newScene produces an empty, untitled, reset document ---------------------------------
+    editor.selectedComponent = 12345;              // Nonsense from the outgoing scene, which the
+    editor.openAsset = 999;                        // reset has to drop.
+    editor.sculptStrokeActive = true;
+    // The outgoing scene's textures are deliberately NOT destroyed here, and that is not an
+    // oversight. destroyGPUData followed by a build in the same breath is the one thing render()'s
+    // two-phase load exists to prevent -- bgfx frees a destroyed texture only once the frames that
+    // might still reference it have been rendered, and no frame has been submitted yet at setup()
+    // time, so the render loop went on to sample handles that had already been freed and took the
+    // process down. createTexturesForScene overwrites the GPUData wholesale, so what actually happens
+    // is a one-off leak of the startup scene's textures for the remainder of this diagnostic run,
+    // which is the right trade against crashing the app it is meant to be checking.
+    newScene(scene, gpuData, editor);
+
+    check(scene.components.empty() && scene.chunks.empty(), "the new scene holds nothing");
+    check(editor.sceneLoaded, "the new scene counts as a loaded document");
+    check(editor.scenePath.empty(), "the new document has no folder yet");
+    check(documentName(editor) == "(untitled)", "an untitled document is named, not blank");
+    check(editor.selectedComponent == projv::INVALID_COMPONENT_HANDLE &&
+          editor.openAsset == projv::INVALID_COMPONENT_HANDLE &&
+          !editor.sculptStrokeActive,
+          "state naming the old scene was dropped");
+    check(editor.history.entries().empty(), "the new document starts with no history");
+
+    // --- the Place tool can build in it with no setup -----------------------------------------
+    Resolve* resolve = ensureStackNode(scene, editor);
+    check(resolve != nullptr, "a primitive can be placed into an empty document");
+    if (resolve) {
+        check(scene.components[resolve->node].kind == projv::ComponentKind::Asset,
+              "placing creates the asset it needs");
+    }
+
+    // --- saving an untitled document titles it -------------------------------------------------
+    std::error_code errorCode;
+    std::filesystem::path target =
+        std::filesystem::temp_directory_path() / "pjv_new_scene_selftest";
+    std::filesystem::remove_all(target, errorCode);
+    saveDocumentTo(scene, editor, projv::INVALID_COMPONENT_HANDLE, target.string());
+
+    check(!editor.scenePath.empty(), "saving an untitled document gives it a folder");
+    check(documentName(editor) == "pjv_new_scene_selftest", "the document takes the folder's name");
+    check(std::filesystem::exists(target / "compose.json", errorCode),
+          "a compose.json was written where asked");
+
+    // Saving a *subtree* must not retitle the open document.
+    std::string titled = editor.scenePath;
+    if (resolve) {
+        std::filesystem::path assetTarget =
+            std::filesystem::temp_directory_path() / "pjv_new_scene_selftest_asset";
+        std::filesystem::remove_all(assetTarget, errorCode);
+        saveDocumentTo(scene, editor, resolve->node, assetTarget.string());
+        check(editor.scenePath == titled, "saving a folder as an asset leaves the document titled");
+        std::filesystem::remove_all(assetTarget, errorCode);
+    }
+    std::filesystem::remove_all(target, errorCode);
+
+    // --- the untitled suggestion does not collide ----------------------------------------------
+    std::string suggestion = untitledSaveSuggestion(editor);
+    check(!suggestion.empty() && !std::filesystem::exists(suggestion, errorCode),
+          "the suggested folder for an untitled document is free");
+
+    if (failures == 0) {
+        projv::core::info("SELFTEST new scene: all checks passed");
+    } else {
+        projv::core::error("SELFTEST new scene: {} check(s) FAILED", failures);
+    }
+
+    // Put back whatever was open, so the flag is a diagnostic rather than a way to lose the scene --
+    // and put it back through the *deferred* path rather than by calling loadScene here, for exactly
+    // the reason given above. render() then performs the swap with the frame delay it was built to
+    // take, which is also one more thing this test ends up exercising for real.
+    if (!originalPath.empty() && directoryHoldsScene(originalPath)) {
+        editor.pendingScenePath = originalPath;
+        editor.pendingNewScene = false;
+        editor.sceneTeardownFramesRemaining = 0;
+    }
 }
 
 // =============================================================================
@@ -10638,6 +18152,8 @@ void startup(projv::Application& app) {
             runPaintCoordSelfTest(scene);
             runSculptLatticeSelfTest(scene);
             runFillSelfTest(scene, editor);
+            runGizmoDragSelfTest();
+            runSymmetrySelfTest();
         }
         // Separate switch: unlike the three above, these edit the scene (and undo themselves).
         if (std::getenv("EDITOR_SCULPTTEST")) {
@@ -10645,17 +18161,23 @@ void startup(projv::Application& app) {
             runExtrudeSelfTest(scene, editor);
             runSculptOperatorSelfTest(scene, editor);
             runPaintStrokeSelfTest(scene, editor);
+            runSymmetryStrokeSelfTest(scene, editor);
         }
         // Its own switch: it builds its own components rather than editing the loaded scene, so it
         // is worth running on any scene at all -- including one that has nothing to sculpt.
-        if (std::getenv("STAMPTEST")) {
-            runStampSelfTest(scene, editor);
+        if (std::getenv("ASSEMBLYTEST")) {
+            runAssemblySelfTest(scene, editor);
+        }
+        // Its own switch as well, and last: it replaces the open scene and reloads it afterwards, so
+        // running it alongside the tests above would hand them a document they did not set up.
+        if (std::getenv("NEWSCENETEST")) {
+            runNewSceneSelfTest(scene, gpuData, editor);
         }
     } else {
         std::error_code errorCode;
         setBrowserDirectory(editor, std::filesystem::is_directory(DEFAULT_SCENE_DIRECTORY, errorCode)
                                         ? DEFAULT_SCENE_DIRECTORY : ".");
-        editor.statusMessage = "No scene loaded. Use File > Load Scene...";
+        editor.statusMessage = "No scene loaded. Use File > New Scene, or File > Load Scene...";
         projv::core::info("{}", editor.statusMessage);
     }
 }
@@ -10747,6 +18269,32 @@ void render(projv::Application& app) {
         } else {
             loadScene(scene, gpuData, editor, editor.pendingScenePath);
             editor.pendingScenePath.clear();
+            // A load that has just landed supersedes any New Scene still outstanding -- otherwise the
+            // block below would fire straight afterwards and throw away the scene that was asked for
+            // second. The two requests share sceneTeardownFramesRemaining, so exactly one of them may
+            // ever be live; this is one half of keeping that true, and the New Scene item clearing
+            // pendingScenePath is the other.
+            editor.pendingNewScene = false;
+            cameraMoved = true;
+        }
+    }
+
+    // New Scene, in the same two phases and for the same VRAM reason. Nothing is read from disk, so
+    // there is no path to validate -- but the outgoing scene's textures still have to be released and
+    // given their frames to retire before the (empty) replacement is built.
+    //
+    // Skipped outright while a load is in flight: they share the teardown counter, and a load is
+    // always the more recent request when both are set (the New Scene item clears pendingScenePath).
+    if (editor.pendingNewScene && editor.pendingScenePath.empty()) {
+        if (editor.sceneTeardownFramesRemaining > 0) {
+            editor.sceneTeardownFramesRemaining--;
+        } else if (editor.sceneLoaded) {
+            projv::graphics::destroyGPUData(gpuData);
+            editor.sceneLoaded = false;
+            editor.sceneTeardownFramesRemaining = 8;
+        } else {
+            newScene(scene, gpuData, editor);
+            editor.pendingNewScene = false;
             cameraMoved = true;
         }
     }
@@ -10776,13 +18324,26 @@ void render(projv::Application& app) {
         };
         projv::core::vec2 texelSize = { 1.0f / viewportResolution.x, 1.0f / viewportResolution.y };
         projv::core::vec3 cameraPosition = editor.cameraPosition;
-        // The viewport's icon-bar toggles, read by shade.frag. z and w are spare — the obvious next
-        // things to put there are the occlusion radius and strength, which are compile-time constants
-        // in the shader until something in the interface wants to drive them.
+        // The viewport's icon-bar toggles, read by shade.frag. All four components are in use now; the
+        // obvious next things to want here are the occlusion radius and strength, or the sun
+        // direction, and those need a second vec4 rather than a spare lane — they are compile-time
+        // constants in the shader until something in the interface wants to drive them.
         projv::core::vec4 renderSettings = {
             editor.ambientOcclusionEnabled ? 1.0f : 0.0f,
             editor.normalShadingEnabled ? 1.0f : 0.0f,
-            0.0f, 0.0f
+            editor.sunShadowEnabled ? 1.0f : 0.0f,
+            editor.rayAmbientOcclusionEnabled ? 1.0f : 0.0f
+        };
+
+        // Which ray generator albedo.frag uses, and the two numbers the orthographic one needs. Isometric
+        // is not a third case here -- it is orthographic from a particular angle, and the angle is
+        // already in cameraDir. w is spare.
+        float orthoHeight = cameraOrthoHeight(editor);
+        projv::core::vec4 cameraProjection = {
+            orthoHeight > 0.0f ? 1.0f : 0.0f,
+            orthoHeight,
+            cameraOrthoBackoff(editor, cameraDirection),
+            0.0f
         };
 
         projv::graphics::setUniformToValue(renderer, "cameraPos", cameraPosition);
@@ -10791,6 +18352,7 @@ void render(projv::Application& app) {
         projv::graphics::setUniformToValue(renderer, "frameCount", frameCount);
         projv::graphics::setUniformToValue(renderer, "texelSize", texelSize);
         projv::graphics::setUniformToValue(renderer, "renderSettings", renderSettings);
+        projv::graphics::setUniformToValue(renderer, "cameraProjection", cameraProjection);
         projv::graphics::updateUniforms(renderer->resources.uniformHandles, renderer->resources.uniformValues);
 
         // Views 0..2, all rendering offscreen at the panel's resolution. The identity matrices match

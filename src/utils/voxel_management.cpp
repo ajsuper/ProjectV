@@ -7,7 +7,6 @@ namespace projv {
     GeometryBlob::GeometryBlob(const GeometryBlob& rhs)
         : geometry(rhs.geometry)
         , materialIDs(rhs.materialIDs)
-        , voxelTypeData(rhs.voxelTypeData)
         , brickMap(rhs.brickMap ? utils::cloneBrickMap(*rhs.brickMap) : nullptr)
         , sourceDataPath(rhs.sourceDataPath)
         , sourceBlockCoord(rhs.sourceBlockCoord)
@@ -21,7 +20,6 @@ namespace projv {
         if (this == &rhs) return *this;
         geometry       = rhs.geometry;
         materialIDs    = rhs.materialIDs;
-        voxelTypeData  = rhs.voxelTypeData;
         brickMap       = rhs.brickMap ? utils::cloneBrickMap(*rhs.brickMap) : nullptr;
         sourceDataPath = rhs.sourceDataPath;
         sourceBlockCoord = rhs.sourceBlockCoord;
@@ -198,35 +196,6 @@ namespace projv::utils {
         return tree64Simplified;
     }
 
-    std::vector<uint32_t> createVoxelTypeData(VoxelGrid& voxels) {
-        std::vector<uint32_t> voxelTypeData;
-        for(size_t i = 0; i < voxels.voxels.size(); i++){
-            Voxel voxel = voxels.voxels[i];
-            //core::debug("{} ZOrderIndex", i);
-            voxelTypeData.emplace_back(voxel.ZOrderPosition);
-            int R10 = (voxel.color.r)*4;
-            int G10 = (voxel.color.g)*4;
-            int B10 = (voxel.color.b)*4;
-            float normalX = 0;
-            float normalY = 0;
-            float normalZ = 0;
-            uint8_t normalXSign = 1;
-            uint8_t normalYSign = 1;
-            uint8_t normalZSign = 1;
-            if(normalX < 0) normalXSign = 0;
-            if(normalY < 0) normalYSign = 0;
-            if(normalZ < 0) normalZSign = 0;
-            int normalX9 = int(abs(normalX)*511) & 0x1FF;
-            int normalY9 = int(abs(normalY)*511) & 0x1FF;
-            int normalZ9 = int(abs(normalZ)*511) & 0x1FF;
-            uint32_t SerializedColor = uint32_t(R10 << 20 | G10 << 10 | B10);
-            uint32_t SerializedNormal = uint32_t((normalXSign << 29) | (normalX9 << 20) | (normalYSign << 19) | (normalY9 << 10) | (normalZSign << 9) | normalZ9);
-            voxelTypeData.emplace_back(SerializedColor);
-            voxelTypeData.emplace_back(SerializedNormal);
-        }
-        return voxelTypeData;
-    }
-
     float createChunkScaleFromVoxelScaleAndResolution(float voxelScale, int resolutionPowerOf2) {
         return resolutionPowerOf2 * (voxelScale);    
     }
@@ -236,19 +205,6 @@ namespace projv::utils {
         chunk.header = chunkHeader;
         chunk.requestedLOD = 0;
         return chunk;
-    }
-
-    Color unserializeColor(uint32_t serializedColor) {
-        uint32_t R10 = (serializedColor >> 20) & 0x3FF; // 10 bits
-        uint32_t G10 = (serializedColor >> 10) & 0x3FF; // 10 bits
-        uint32_t B10 = serializedColor & 0x3FF;         // 10 bits
-    
-        projv::Color color;
-        color.r = static_cast<uint8_t>(R10 / 4); // Convert back from 10-bit to 8-bit
-        color.g = static_cast<uint8_t>(G10 / 4);
-        color.b = static_cast<uint8_t>(B10 / 4);
-    
-        return color;
     }
 
     // ---- Brick Map Implementation ----
@@ -339,23 +295,67 @@ namespace projv::utils {
         return (brick.mask[row] & (1ull << bit)) != 0;
     }
 
-    void brickMapFromVoxelTypeData(Scene& scene, VoxelBrickMap& map,
-                                    const std::vector<uint32_t>& voxelTypeData,
-                                    ComponentRecord& comp) {
-        size_t count = voxelTypeData.size() / 3;
-        for (size_t i = 0; i < count; ++i) {
-            uint32_t zorder = voxelTypeData[i * 3];
-            uint32_t serializedColor = voxelTypeData[i * 3 + 1];
+    std::unique_ptr<VoxelBrickMap> brickMapFromTree64(const std::vector<uint32_t>& geometry,
+                                                      const std::vector<uint8_t>& materialIDs,
+                                                      uint32_t resolution) {
+        std::unique_ptr<VoxelBrickMap> map = createVoxelBrickMap(computeBrickDims(resolution));
+        size_t nodeCount = geometry.size() / 3;
+        if (nodeCount == 0) return map;
 
-            core::ivec3 pos = reverseZOrderIndex(zorder);
-            Color c = unserializeColor(serializedColor);
-            uint32_t packed = packColor(c);
-            uint8_t matID = internMaterial(scene, comp, "", packed);
-            brickMapSetVoxel(map, pos.x, pos.y, pos.z, matID);
+        // An explicit stack rather than recursion: a 32768^3 chunk is eight levels deep, which is
+        // fine, but the traversal is also the load path for every edited chunk and a stack frame per
+        // node is a cost with nothing to buy it.
+        struct Pending { size_t node; uint64_t cellZOrder; };
+        std::vector<Pending> stack;
+        stack.push_back({0, 0});
+
+        while (!stack.empty()) {
+            Pending current = stack.back();
+            stack.pop_back();
+            if (current.node >= nodeCount) {
+                core::error("brickMapFromTree64: child pointer past the end of the tree - truncated");
+                continue;
+            }
+
+            uint32_t mask1 = geometry[current.node * 3];
+            uint32_t mask2 = geometry[current.node * 3 + 1];
+            uint32_t data3 = geometry[current.node * 3 + 2];
+            uint64_t mask = (static_cast<uint64_t>(mask1) << 32) | static_cast<uint64_t>(mask2);
+            if (mask == 0) continue;
+
+            if (tree64IsLeaf(data3)) {
+                // The 64 bits are voxels, not children. bakeMaterialsFromBrickMap wrote one byte per
+                // set bit in ascending Z-order (or exactly one for the whole leaf when uniform), from
+                // this offset.
+                bool uniform = tree64LeafIsUniform(data3);
+                size_t materialCursor = tree64LeafMatOffset(data3);
+
+                for (uint32_t child = 0; child < 64; child++) {
+                    // Bit 63 is Z-order 0 -- the convention brickMapSetVoxel writes with.
+                    if ((mask & (1ull << (63 - child))) == 0) continue;
+
+                    uint8_t slot = 0;
+                    if (materialCursor < materialIDs.size()) slot = materialIDs[materialCursor];
+                    if (!uniform) materialCursor++;
+
+                    core::ivec3 position = reverseZOrderIndex(current.cellZOrder * 64 + child);
+                    brickMapSetVoxel(*map, position.x, position.y, position.z, slot);
+                }
+                continue;
+            }
+
+            // Children are stored contiguously in ascending Z-order from the node's own address --
+            // addPointersTree64 writes the pointer relative to the parent, so the sum is absolute.
+            size_t firstChild = current.node + (data3 >> 1);
+            uint32_t rank = 0;
+            for (uint32_t child = 0; child < 64; child++) {
+                if ((mask & (1ull << (63 - child))) == 0) continue;
+                stack.push_back({firstChild + rank, current.cellZOrder * 64 + child});
+                rank++;
+            }
         }
-        if (count > 0) {
-            map.defaultNormal = voxelTypeData[count * 3 - 1];
-        }
+
+        return map;
     }
 
     std::vector<uint32_t> buildTree64FromBrickMap(const VoxelBrickMap& map, int resolution) {

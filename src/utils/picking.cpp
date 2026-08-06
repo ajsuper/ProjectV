@@ -50,6 +50,40 @@ namespace projv::utils {
             ChunkHandle handle;
             float entryDistance;
         };
+
+        // Which chunks are actually on screen, which is NOT the same question as which chunks are
+        // alive. The renderer reaches a chunk through exactly two routes -- the loose list it
+        // iterates, and a grid's cell map -- so anything in neither is invisible however alive it is.
+        // This mirrors computeLooseList in gpu_interface.cpp, legacy fallback included, so the set a
+        // ray tests and the set the viewport draws are the same set by construction.
+        //
+        // The distinction is load-bearing, not defensive. An editor hides geometry by un-listing it
+        // (see setComponentRendered in the SceneEditor example: a boolean part must stop being drawn
+        // while the resolved result stands in for it, yet stay fully readable, so clearing `alive`
+        // is not an option). A pick that walked every live chunk would stop on that hidden part --
+        // reporting a hit on a surface the user cannot see, in front of the one they aimed at.
+        std::vector<bool> visibleChunks(const Scene& scene) {
+            std::vector<bool> visible(scene.chunks.size(), false);
+
+            // A scene with neither route populated is a legacy one that predates both; the renderer
+            // treats every live chunk as loose, so a ray must too.
+            if (scene.grids.empty() && scene.looseChunks.empty()) {
+                for (size_t handle = 0; handle < scene.chunks.size(); handle++) {
+                    visible[handle] = scene.chunks[handle].alive;
+                }
+                return visible;
+            }
+
+            for (ChunkHandle handle : scene.looseChunks) {
+                if (handle < visible.size()) visible[handle] = true;
+            }
+            for (const SceneGrid& grid : scene.grids) {
+                for (int32_t handle : grid.cellToChunk) {
+                    if (handle >= 0 && size_t(handle) < visible.size()) visible[handle] = true;
+                }
+            }
+            return visible;
+        }
     }
 
     bool queryVoxelMaterial(const GeometryBlob& blob, uint32_t resolution,
@@ -121,15 +155,16 @@ namespace projv::utils {
 
     VoxelPick pickVoxel(const Scene& scene, core::vec3 rayOrigin, core::vec3 rayDirection,
                         float maxDistance, const VoxelSolidityOverride& solidityOverride) {
-        VoxelPick pick;
-        if (glm::length(rayDirection) <= 0.0f) return pick;
+        if (glm::length(rayDirection) <= 0.0f) return VoxelPick();
         core::vec3 direction = glm::normalize(rayDirection);
 
         // Chunks whose world box the ray crosses at all, nearest first. Everything else cannot
-        // contain the first hit, and sorting means the search usually ends in the first chunk.
+        // contain the first hit, and sorting is what lets the search stop early below.
+        std::vector<bool> visible = visibleChunks(scene);
         std::vector<ChunkCandidate> candidates;
         for (ChunkHandle handle = 0; handle < scene.chunks.size(); handle++) {
             const Chunk& chunk = scene.chunks[handle];
+            if (!visible[handle]) continue;
             if (!chunk.alive || chunk.header.scale <= 0.0f || chunk.geometryPoolIndex < 0) continue;
 
             // Into the chunk's frame: the header's rotation is about the chunk's own minimum
@@ -150,7 +185,22 @@ namespace projv::utils {
         std::sort(candidates.begin(), candidates.end(),
                   [](const ChunkCandidate& a, const ChunkCandidate& b) { return a.entryDistance < b.entryDistance; });
 
+        // The nearest voxel found so far, and how far along the ray it sits. `bestDistance` doubles
+        // as the search cutoff: a candidate whose box the ray only enters *after* the best hit
+        // cannot improve on it, and neither can anything sorted behind that candidate.
+        //
+        // Overlapping chunks are why this is a running minimum rather than a first-hit return. Box
+        // entry order is not voxel hit order: a large, mostly-empty chunk whose box starts near the
+        // camera loses to a small solid one sitting inside it, and returning on the first chunk that
+        // yielded anything would report the far surface and let the ray pass straight through the
+        // near one. The editor stacks exactly that shape -- a resolved result spanning a whole
+        // assembly's bounding box, with its parts nested inside it.
+        VoxelPick best;
+        float bestDistance = maxDistance;
+
         for (const ChunkCandidate& candidate : candidates) {
+            if (best.hit && candidate.entryDistance >= bestDistance) break;
+
             const Chunk& chunk = scene.chunks[candidate.handle];
             const GeometryBlob& blob = scene.geometryPool[chunk.geometryPoolIndex];
             uint32_t resolution = chunk.header.resolution;
@@ -202,7 +252,10 @@ namespace projv::utils {
                     uint32_t(voxel.z) >= resolution) {
                     break;   // Left the chunk; the next candidate (if any) takes over.
                 }
-                if (travelled > maxDistance) return pick;
+                // Past the cutoff: either the caller's reach, or a nearer hit already found in an
+                // earlier candidate. Nothing further along this ray can win, so give up on this
+                // chunk -- but keep the winner, rather than returning an empty pick over it.
+                if (travelled > bestDistance) break;
 
                 uint8_t materialSlot = 0;
                 bool solid = queryVoxelMaterial(blob, resolution, voxel, materialSlot);
@@ -212,6 +265,7 @@ namespace projv::utils {
                     solid = solidityOverride(candidate.handle, voxel, solid);
                 }
                 if (solid) {
+                    VoxelPick pick;
                     pick.hit = true;
                     pick.chunk = candidate.handle;
                     pick.component = (chunk.gridIndex >= 0 && size_t(chunk.gridIndex) < scene.grids.size())
@@ -256,7 +310,14 @@ namespace projv::utils {
                         (core::vec3(voxel) + core::vec3(0.5f)) * voxelSize;
                     core::mat3 rotation = glm::mat3_cast(chunk.header.rotation);
                     pick.worldPosition = rotation * (localCentre - chunk.header.position) + chunk.header.position;
-                    return pick;
+
+                    // The nearest hit in this chunk, which is not necessarily the nearest in the
+                    // scene -- so it is kept and compared, and the cutoff tightens onto it.
+                    if (!best.hit || travelled < bestDistance) {
+                        best = pick;
+                        bestDistance = travelled;
+                    }
+                    break;   // This chunk is done; a nearer voxel can only be in another one.
                 }
 
                 // Advance across the nearest voxel boundary.
@@ -279,6 +340,6 @@ namespace projv::utils {
             }
         }
 
-        return pick;
+        return best;
     }
 }

@@ -273,6 +273,7 @@ int main(int argc, char** argv) {
             0,                              // chunkHandle (first chunk)
             -1,                             // gridIndex
             "internal/test.data",           // sourcePath
+            false,                          // externalSource
             {},                             // editQueue (default)
             -1                              // dataRefID (unassigned)
         });
@@ -401,6 +402,7 @@ chunk.requestedLOD    = 0;
             0,                              // chunkHandle
             -1,                             // gridIndex
             "internal/p3-convert.data",
+            false,                          // externalSource
             {},
             -1
         });
@@ -579,6 +581,7 @@ chunk.requestedLOD    = 0;
             0,                          // chunkHandle (not used for Grid)
             gridIdx,                    // gridIndex
             "grid/test.data",           // sourcePath
+            false,                      // externalSource
             {},                         // editQueue
             -1                          // dataRefID
         });
