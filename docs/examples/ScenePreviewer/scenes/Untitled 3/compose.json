@@ -1,0 +1,15 @@
+{
+  "components": [
+    {
+      "mutability": "locked",
+      "name": "New Asset",
+      "position": [-125.00001525878906, 0.0, -7.000000953674316],
+      "rotation": [0.0, -0.7071068286895752, 0.0, 0.7071068286895752],
+      "scale": 1.0,
+      "source": "New_Asset",
+      "type": "asset"
+    }
+  ],
+  "name": "",
+  "version": 1
+}

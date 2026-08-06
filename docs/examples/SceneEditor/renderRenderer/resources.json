@@ -1,0 +1,34 @@
+{
+    "uniforms": [
+        {"name": "windowRes",        "type": "vec4"},
+        {"name": "cameraPos",        "type": "vec4"},
+        {"name": "cameraDir",        "type": "vec4"},
+        {"name": "prevCameraPos",    "type": "vec4"},
+        {"name": "prevCameraDir",    "type": "vec4"},
+        {"name": "frameCount",       "type": "vec4"},
+        {"name": "texelSize",        "type": "vec4"},
+        {"name": "cameraProjection", "type": "vec4"},
+        {"name": "sunDir",           "type": "vec4"},
+        {"name": "renderParams",     "type": "vec4"},
+        {"name": "lensParams",       "type": "vec4"},
+        {"name": "volumeParams",     "type": "vec4"},
+        {"name": "displayParams",    "type": "vec4"}
+    ],
+    "shaders": [
+        {"shaderID": 1, "path": "./renderRenderer/renderShaders/path_trace.bin"},
+        {"shaderID": 2, "path": "./renderRenderer/renderShaders/taa.bin"},
+        {"shaderID": 3, "path": "./renderRenderer/renderShaders/display.bin"}
+    ],
+    "textures": [
+        {"texID": 1, "name": "traceColor",    "format": "RGBA16_FLOAT", "resX": 1280, "resY": 720, "resizable": true, "origin": "CreateNew"},
+        {"texID": 4, "name": "traceNormal",   "format": "RGBA16_FLOAT", "resX": 1280, "resY": 720, "resizable": true, "origin": "CreateNew"},
+        {"texID": 5, "name": "tracePosition", "format": "RGBA32_FLOAT", "resX": 1280, "resY": 720, "resizable": true, "origin": "CreateNew"},
+        {"texID": 2, "name": "taaColor",      "format": "RGBA32_FLOAT", "resX": 1280, "resY": 720, "resizable": true, "origin": "CreateNew"},
+        {"texID": 3, "name": "viewportColor", "format": "RGBA8",        "resX": 1280, "resY": 720, "resizable": true, "origin": "CreateNew"}
+    ],
+    "framebuffers": [
+        {"fboID": 1, "textureIDs": [1, 4, 5]},
+        {"fboID": 2, "textureIDs": [2]},
+        {"fboID": 3, "textureIDs": [3]}
+    ]
+}

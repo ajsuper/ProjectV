@@ -20,7 +20,12 @@ SHADERC=$PROJECTV_DIR/build/tools/shadercRelease
 
 # Each directory carries its own varying.def.sc, which shaderc picks up from beside the shader:
 # ImGui's vertex is 2D with a packed colour, the viewport renderer's is a 3D fullscreen quad.
-SHADER_DIRS="./editorRenderer/editorShaders ./editorRenderer/imguiShaders"
+#
+# renderShaders is Render mode's path tracer. It has no vertex shader of its own -- its three
+# passes are the same fullscreen quad the viewport renderer draws, so it loads
+# editorShaders/vs_quad.bin at startup rather than carrying a second copy. The varying.def.sc
+# beside it still has to exist: shaderc reads it to resolve the fragment shaders' $input.
+SHADER_DIRS="./editorRenderer/editorShaders ./editorRenderer/imguiShaders ./renderRenderer/renderShaders"
 
 for SHADER_DIR in $SHADER_DIRS; do
     # Vertex shaders (vs_*.sc).

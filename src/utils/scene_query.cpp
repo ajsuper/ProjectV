@@ -337,6 +337,15 @@ namespace projv::utils {
                 core::error("addComponent: voxelScale must be positive, got {}.", voxelScale);
                 return INVALID_COMPONENT_HANDLE;
             }
+            // Capped at 256: a single chunk cannot exceed 256 on any axis. Callers whose
+            // voxel data would spill outside 256^3 should use a Grid component instead;
+            // the editing pipeline's overflow mechanism (applyComponentQueue →
+            // convertChunkToGrid) handles this automatically.
+            if (resolution > 256) {
+                core::warn("addComponent: clamping resolution from {} to 256 (max per-chunk). "
+                           "Use a Grid component for larger volumes.", resolution);
+                resolution = 256;
+            }
         }
 
         ComponentHandle handle = static_cast<ComponentHandle>(scene.components.size());

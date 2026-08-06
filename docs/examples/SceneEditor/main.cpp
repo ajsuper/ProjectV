@@ -97,6 +97,25 @@ static void scrollCallback(GLFWwindow* /*window*/, double /*xoffset*/, double yo
 // Editor state
 // =============================================================================
 
+// Which of the editor's two top-level tabs is on screen. They are not panels and they do not dock:
+// each one owns the whole window and has its own renderer behind it.
+//
+//   Edit    everything below -- the dockspace, the six panels, the tools. Its renderer shows stored
+//           albedo with readability aids on top and no light transport at all, which is what you
+//           want while authoring: the colour on screen is the colour in the file.
+//   Render  one image and a strip of controls. Its renderer is a path tracer (renderRenderer/),
+//           which answers the one question the Viewport cannot -- what does this scene look like
+//           *lit*. Nothing in it can modify the scene.
+//
+// Kept as a mode rather than a seventh dock panel deliberately. The two renderers each hold a full
+// set of screen-sized render targets, so having both live at the panel's resolution at once is real
+// VRAM for an image the user is not looking at; and Render mode's whole value is an uninterrupted
+// view of the image, which a panel sharing the window with five others cannot give.
+enum class EditorMode {
+    Edit,
+    Render
+};
+
 // How a scene is framed on open, and the movement scale that goes with it. Both are derived from the
 // scene's own size so the controls feel the same whether the subject is a tree or a city.
 // Every member is initialised, because the editor holds one of these before any scene is loaded and
@@ -249,7 +268,11 @@ enum class PickPurpose {
     SculptVoxel,  // Re-armed every frame of a drag, not once per click — see the sculpt stroke below.
     PlacePart,    // Assemble tool: drop a primitive where the click lands, or select the part hit.
     RegionSeed,   // Region tool: a corner of the box, or the seed of a face/volume gather.
-    FocusVoxel    // Navigator's eyeball: centre the camera on the voxel the click lands on.
+    FocusVoxel,   // Navigator's eyeball: centre the camera on the voxel the click lands on.
+    // Render mode's lens: put the focal plane at the distance of whatever the click lands on. The
+    // only purpose that belongs to the Render tab, and the only one that moves no geometry, changes
+    // no selection and leaves the camera exactly where it was -- it sets one float.
+    FocusDistance
 };
 
 // =============================================================================
@@ -1235,6 +1258,110 @@ struct EditorState {
     // new setting fades in over the history's 64 frames instead of appearing.
     bool renderSettingsChanged = false;
 
+    // --- Render mode ---
+    //
+    // The path traced tab. Everything here drives renderRenderer/ and nothing here touches the
+    // Viewport, which is why none of it sits alongside the four toggles above.
+    //
+    // `mode` is what this frame is drawing; `requestedMode` is what the tab strip last asked for.
+    // The render loop copies the second into the first at the top of a frame and nothing else may
+    // write `mode` -- see setEditorMode for why the switch cannot happen where it is clicked.
+    EditorMode mode = EditorMode::Edit;
+    EditorMode requestedMode = EditorMode::Edit;
+
+    // The Render tab's image size, tracked separately from the Viewport panel's for the same reason
+    // the two renderers are separate: each one's render targets follow the surface it is drawn on,
+    // and the two surfaces are different sizes. Resizing one must not disturb the other's converged
+    // image.
+    int renderViewWidth = 1280;
+    int renderViewHeight = 720;
+    int requestedRenderViewWidth = 1280;
+    int requestedRenderViewHeight = 720;
+
+    // Diffuse bounces after the primary hit. One is direct light plus a single bounce of colour
+    // bleed, which already reads as "lit" rather than "shaded"; three is where indirect light in an
+    // interior stops looking flat. Past about five the difference is below the noise floor and the
+    // cost is not, so the slider stops at the shader's own limit.
+    int renderBounces = 3;
+
+    // The sun, in the two angles a person actually thinks in. Elevation is measured from the
+    // horizon, so 0 is sunrise and 90 is noon; azimuth is a compass bearing about the Y axis. Both
+    // are converted to the direction vector the shader wants at upload -- storing the vector instead
+    // would make the two sliders fight each other near the poles.
+    float renderSunElevation = 49.0f;   // Degrees. Matches the PathTracer example's default sun.
+    float renderSunAzimuth = 130.0f;    // Degrees.
+    // The angular RADIUS of the sun disk, in degrees. This is the softness of every shadow in the
+    // image and the single control with the most say over how the render reads: 0.27 is the real
+    // sun (shadows with a crisp edge), a few degrees is a hazy day, seventeen is overcast.
+    float renderSunSize = 3.0f;
+    float renderSunIntensity = 8.0f;
+    float renderSkyIntensity = 1.0f;
+
+    // Exposure in stops, applied before the tone curve. See display.frag.
+    float renderExposure = 0.0f;
+
+    // --- Render mode: lens ---
+    //
+    // Depth of field, as a thin lens in the trace pass rather than a blur afterwards. Perspective
+    // only: there is no such thing as an out-of-focus orthographic view, because there is no lens.
+    bool renderDepthOfFieldEnabled = false;
+    // Where the focal plane sits, in world units along the view axis. Zero means "not chosen yet"
+    // and is filled in from the distance to the orbit focus the first time the tab needs it -- so
+    // turning depth of field on focuses on whatever the camera is looking at rather than on the
+    // near clip of a scene whose scale it knows nothing about.
+    float renderFocusDistance = 0.0f;
+    // Aperture, as a fraction of the focus distance rather than a radius in world units. That is
+    // what makes one slider serve every scene: a lens radius of half a unit is a pinhole in a city
+    // and a portrait lens in a model of a tree, whereas "the aperture is a fiftieth of the focus
+    // distance" is roughly an f/25 look wherever it is used. See the conversion at upload.
+    float renderApertureFraction = 0.15f;
+
+    // Red/blue separation at the corners of the image, in pixels. A display-pass effect, so it is
+    // free to change on a converged render. Zero is a perfect lens.
+    float renderChromaticAberration = 0.0f;
+
+    // --- Render mode: atmosphere ---
+    //
+    // A participating medium along the camera ray, single-scattered from the sun. This is what
+    // produces god rays, and it produces them the honest way: the shafts are the parts of the haze
+    // the sun can actually see. Off by default -- it costs a shadow ray per pixel per frame, and a
+    // scene that does not want haze should not pay for it.
+    bool renderVolumetricsEnabled = false;
+    // Optical depth across one scene radius, which is the scene-independent way to say "how thick".
+    // At 0.15 a distant wall is noticeably hazed and the shafts are clear; past about 1 the scene
+    // disappears into the fog. Converted to an extinction coefficient at upload.
+    float renderFogDensity = 0.15f;
+    // Henyey-Greenstein anisotropy. Positive is forward scattering, which is what concentrates the
+    // haze's glow around the sun and makes a shaft read as a shaft rather than as even fog.
+    float renderFogAnisotropy = 0.6f;
+    // How far the medium extends from the camera, in scene radii. Beyond it there is no haze at
+    // all, which is both the cheap way to keep the sky from being fogged to a flat grey and a
+    // useful control in its own right.
+    float renderFogRange = 2.0f;
+
+    // The maximum radiance one path may return, which is the firefly clamp. Low enough to kill the
+    // bright dots a lucky path through a one-voxel gap leaves behind, high enough to leave the sun
+    // and specular-ish highlights alone.
+    float renderFireflyClamp = 12.0f;
+
+    // Raised by any Render-mode control that changes what the trace pass produces. Consumed by the
+    // render loop exactly like renderSettingsChanged: the frames already accumulated were rendered
+    // under the old setting, so the mean has to start again rather than fade across.
+    bool renderParamsChanged = false;
+
+    // Last frame's camera, for taa.frag's reprojection. Only Render mode needs it -- the Viewport's
+    // accumulate pass resets rather than reprojects.
+    projv::core::vec3 prevCameraPosition = projv::core::vec3(0.0f);
+    projv::core::vec3 prevCameraDirection = projv::core::vec3(0.0f, 0.0f, 1.0f);
+    float prevOrthoHeight = 0.0f;
+    float prevOrthoBackoff = 0.0f;
+    bool prevCameraValid = false;
+
+    // How many frames the current image has averaged, for the sample counter in the Render tab's
+    // bar. Derived from frameCameraLastMovedOn, but the tab needs the number and the render loop is
+    // where it is known.
+    int renderSampleCount = 0;
+
     // --- Interface ---
     bool dockLayoutBuilt = false;
     bool resetDockLayoutRequested = false;
@@ -2196,6 +2323,26 @@ static void newScene(projv::Scene& scene, projv::GPUData& gpuData, EditorState& 
 // Viewport render targets
 // =============================================================================
 
+// The editor's two renderers, one per tab. Both are built at startup and both stay resident, because
+// the alternative -- constructing Render mode's on first use -- would stall the frame the user
+// switches on, loading three shaders and allocating five screen-sized targets, and would have to
+// handle a construction failure at a point where there is nothing sensible to fall back to.
+//
+// One global resource holding two, rather than two globals: the ECS keys global resources by type,
+// and both of these are the same type.
+struct EditorRenderers {
+    // editorRenderer/ -- albedo, occlusion, shading toggles. Behind the Viewport panel.
+    std::shared_ptr<projv::ConstructedRenderer> viewport;
+    // renderRenderer/ -- the path tracer. Behind the Render tab.
+    std::shared_ptr<projv::ConstructedRenderer> pathTrace;
+};
+
+// Whichever renderer the tab on screen is drawn by.
+static const std::shared_ptr<projv::ConstructedRenderer>& activeRendererFor(const EditorRenderers& renderers,
+                                                                           const EditorState& editor) {
+    return editor.mode == EditorMode::Render ? renderers.pathTrace : renderers.viewport;
+}
+
 // Resizes the scene renderer's offscreen textures (and the framebuffers pointing at them) to the
 // Viewport panel's size, so the scene is rendered at exactly the resolution it is displayed at.
 //
@@ -2263,8 +2410,9 @@ static void resizeViewportTargets(const std::shared_ptr<projv::ConstructedRender
     }
 }
 
-// The texture the display pass writes, which is what the Viewport panel shows. Texture 3 in the
-// editor renderer's resources.json.
+// The texture the display pass writes, which is what the tab on screen shows. Texture 3 in both
+// renderers' resources.json -- Render mode's numbering follows the editor renderer's for exactly
+// this reason, so one accessor serves both tabs.
 static bgfx::TextureHandle getViewportTexture(const std::shared_ptr<projv::ConstructedRenderer>& renderer) {
     const std::unordered_map<uint, bgfx::TextureHandle>& handles = renderer->resources.textures.textureHandles;
     auto it = handles.find(3);
@@ -2963,11 +3111,13 @@ static void noteComponentMoved(const projv::Scene& scene, EditorState& editor,
 
 // The resolutions utils::addComponent accepts, in the order they are offered. Powers of four only --
 // anything else builds a tree64 whose depth the shader derives differently, so there is no "custom"
-// entry here by design. 1024 and up are offered but cost 1024^3 addressable cells, so the default
-// sits at 256, which is what every scene shipped so far uses.
-static constexpr uint32_t CHUNK_RESOLUTION_CHOICES[] = { 4, 16, 64, 256, 1024 };
+// entry here by design. Capped at 256: a chunk larger than 256 on any axis would need 1024 or more
+// and is instead stored as a Grid of 256^3 cells (the editing pipeline handles overflow via
+// convertChunkToGrid automatically).
+static constexpr uint32_t CHUNK_RESOLUTION_CHOICES[] = { 4, 16, 64, 256 };
 static constexpr int CHUNK_RESOLUTION_CHOICE_COUNT =
     int(sizeof(CHUNK_RESOLUTION_CHOICES) / sizeof(CHUNK_RESOLUTION_CHOICES[0]));
+static_assert(CHUNK_RESOLUTION_CHOICE_COUNT == 4, "Capped at 256; 1024 removed");
 
 // The width a field should ask for when a text label follows it on the same row.
 //
@@ -8902,9 +9052,13 @@ static void processSculptSample(projv::Scene& scene, EditorState& editor,
 // The smallest resolution addComponent will accept that holds `extent` voxels along an axis.
 // Resolutions are powers of *four*, not two -- the tree64 depth is derived from the resolution
 // exactly as the shader derives it, so anything else builds a tree the renderer misreads.
+// Capped at 256: a chunk larger than 256 on any axis is stored as a Grid of 256^3 cells
+// instead of one oversize chunk. The editing pipeline (applyComponentQueue) handles this
+// automatically via convertChunkToGrid, so callers just use 256 and let overflow trigger
+// the grid expansion.
 static uint32_t smallestChunkResolutionFor(int extent) {
     uint32_t resolution = 4;
-    while (resolution < uint32_t(std::max(extent, 1))) resolution *= 4;
+    while (resolution < uint32_t(std::max(extent, 1)) && resolution < 256) resolution *= 4;
     return resolution;
 }
 
@@ -14516,12 +14670,449 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
     ImGui::PopStyleVar();
 }
 
+// =============================================================================
+// Render mode
+// =============================================================================
+//
+// The second tab: a path traced image of the scene and the controls that drive it, and nothing
+// else. No dockspace, no panels, no File/Edit/Tools/View -- every one of those verbs edits a
+// document, and this tab cannot. What it has instead is the tab strip (the way back), three
+// settings menus, and a sample counter, all in one menu bar above a full-window image.
+//
+// The camera is the *same* camera. Switching tabs does not move it, and flying in one tab leaves
+// you in the same place in the other, which is the whole point: you frame a shot in the Viewport
+// where editing is cheap, switch, and look at what it actually looks like.
+
+// Asks for a tab change. It is a *request* rather than the change itself because the render loop
+// picks its renderer once, at the top of the frame, and then resizes that renderer's targets, hands
+// its output texture to ImGui, and dispatches its passes -- three steps that have to agree about
+// which tab is up. The strip that calls this is drawn in the middle of the second of them. Applying
+// the switch here would mean the frame resized one renderer, displayed a second, and rendered a
+// third combination; applying it at the top of the next frame means every frame is consistent, at
+// the cost of the tab lighting up one frame late, which is 8 milliseconds and invisible.
+static void setEditorMode(EditorState& editor, EditorMode mode) {
+    editor.requestedMode = mode;
+}
+
+// The tab strip. Drawn in both tabs' menu bars, in the same place, so it does not move under the
+// cursor when it is used -- which for the one control that switches between two whole interfaces is
+// worth more than it sounds.
+static void drawModeTabs(EditorState& editor) {
+    // Sized off the longer of the two labels so the pair is symmetric, plus room for the padding a
+    // button puts either side of its text.
+    float segmentWidth = ImGui::CalcTextSize("Render").x + ImGui::GetStyle().FramePadding.x * 4.0f;
+
+    if (drawChoiceSegment("Edit", editor.mode == EditorMode::Edit, segmentWidth)) {
+        setEditorMode(editor, EditorMode::Edit);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("The scene editor: panels, tools, and a viewport showing stored colour.");
+    }
+    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+    if (drawChoiceSegment("Render", editor.mode == EditorMode::Render, segmentWidth)) {
+        setEditorMode(editor, EditorMode::Render);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Path traced preview of the same camera.  F11");
+    }
+}
+
+// A slider that invalidates the accumulated image when it is moved. Every control in the Lighting
+// and Quality menus is one of these: the frames already averaged were traced under the old value,
+// so the mean has to start again rather than have the new setting fade in across it.
+static bool drawRenderSlider(EditorState& editor, const char* label, float* value, float minimum,
+                             float maximum, const char* format, const char* tooltip) {
+    ImGui::SetNextItemWidth(180.0f);
+    bool changed = ImGui::SliderFloat(label, value, minimum, maximum, format);
+    if (changed) editor.renderParamsChanged = true;
+    if (tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
+    return changed;
+}
+
+static void drawRenderLightingMenu(EditorState& editor) {
+    drawRenderSlider(editor, "Sun elevation", &editor.renderSunElevation, -20.0f, 90.0f, "%.0f deg",
+                     "Height above the horizon. Below zero is night: the sun stops lighting the\n"
+                     "scene and the sky darkens with it.");
+    drawRenderSlider(editor, "Sun bearing", &editor.renderSunAzimuth, 0.0f, 360.0f, "%.0f deg",
+                     "Which way the light comes from, around the vertical axis.");
+    drawRenderSlider(editor, "Sun size", &editor.renderSunSize, 0.05f, 20.0f, "%.2f deg",
+                     "Angular radius of the sun disk, and so the softness of every shadow in the\n"
+                     "image. 0.27 is the real sun and gives hard edges; a few degrees reads as\n"
+                     "hazy; past ten it is an overcast sky.");
+    drawRenderSlider(editor, "Sun strength", &editor.renderSunIntensity, 0.0f, 30.0f, "%.1f",
+                     "Turn it to zero for a sky-only render -- soft, shadowless, and the fastest\n"
+                     "thing here to converge.");
+    drawRenderSlider(editor, "Sky strength", &editor.renderSkyIntensity, 0.0f, 5.0f, "%.2f",
+                     "The atmosphere is the scene's other light source, and the only one filling\n"
+                     "everything the sun cannot see.");
+}
+
+static void drawRenderQualityMenu(EditorState& editor) {
+    ImGui::SetNextItemWidth(180.0f);
+    if (ImGui::SliderInt("Bounces", &editor.renderBounces, 0, 8)) {
+        editor.renderParamsChanged = true;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Diffuse bounces after the primary hit. 0 is direct sunlight and sky only;\n"
+                          "1 adds colour bleeding between surfaces; 3 is where an interior stops\n"
+                          "looking flat. Each one costs roughly another ray per pixel per frame.");
+    }
+
+    drawRenderSlider(editor, "Firefly clamp", &editor.renderFireflyClamp, 1.0f, 200.0f, "%.0f",
+                     "The most light one path may return. Lower kills the bright specks a lucky\n"
+                     "path leaves behind, at the cost of slightly dimming genuine highlights.");
+
+    ImGui::Separator();
+
+    // Deliberately NOT a drawRenderSlider. Exposure lives in display.frag, downstream of everything
+    // the mean has averaged, so changing it does not invalidate a single accumulated sample -- it
+    // can be dragged on a render that has been converging for a minute without costing that minute.
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::SliderFloat("Exposure", &editor.renderExposure, -6.0f, 6.0f, "%.2f stops");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Applied before the tone curve, in stops. The one control here that is\n"
+                          "free: it does not restart the accumulation.");
+    }
+}
+
+// The distance from the camera to the point the navigator orbits, which is the editor's standing
+// answer to "what is the user looking at". Used as the default focal plane and by the auto-focus
+// button, so turning depth of field on focuses on the subject rather than on nothing.
+static float distanceToOrbitFocus(const EditorState& editor) {
+    projv::core::vec3 toFocus = editor.orbitFocus - editor.cameraPosition;
+    return std::max(0.01f, projv::core::length(toFocus));
+}
+
+// Click-to-focus. Resolves the click the Render tab noticed into a distance and puts the focal plane
+// there -- the gesture every camera has, and the only one that answers "focus on THAT" without the
+// user having to know what a world unit is or hunt for the number on a slider.
+//
+// Runs after the tab has been laid out (that is where the click is seen) and before the frame's
+// uniforms are uploaded, so the new focal plane is what this frame traces rather than the next one.
+//
+// Deliberately does NOT move the orbit focus, though it is tempting: the orbit point sets the scale
+// of a pan and the size of a dolly step, and a click that was about the lens should not quietly
+// change how the camera handles. The Effects menu's "Focus on orbit point" is the same relationship
+// run the other way, for when you do want the two tied together.
+static void processRenderFocusPick(projv::Scene& scene, EditorState& editor) {
+    if (editor.pendingPick != PickPurpose::FocusDistance) return;
+    editor.pendingPick = PickPurpose::None;
+
+    projv::core::vec2 renderResolution = { float(editor.renderViewWidth), float(editor.renderViewHeight) };
+    ViewportRay cursorRay = viewportRayThroughUV(editor, editor.pickUV, renderResolution);
+    projv::utils::VoxelPick pick = projv::utils::pickVoxel(scene, cursorRay.origin, cursorRay.direction);
+
+    if (!pick.hit) {
+        // The sky has no distance. Leaving the plane where it was beats moving it to some arbitrary
+        // far value -- a click that missed should cost nothing.
+        editor.statusMessage = "Nothing under the cursor to focus on.";
+        return;
+    }
+
+    // Projected onto the VIEW AXIS rather than taken as the length of the clicked ray. The shader's
+    // focal plane is a plane perpendicular to the view direction (see primaryRay), so a click near
+    // the edge of the image is further along its own ray than it is deep into the scene -- using
+    // the ray length would focus slightly behind whatever was clicked, and more so the further from
+    // the centre the click was.
+    projv::core::vec3 viewDirection = computeCameraDirection(editor);
+    float axialDistance = glm::dot(pick.worldPosition - editor.cameraPosition, viewDirection);
+
+    editor.renderFocusDistance = std::max(0.01f, axialDistance);
+    editor.renderParamsChanged = true;   // The accumulated image was traced at the old focus.
+
+    char message[160];
+    snprintf(message, sizeof(message), "Focused at %.1f units on %s", editor.renderFocusDistance,
+             projv::utils::getComponentPath(scene, pick.component).c_str());
+    editor.statusMessage = message;
+}
+
+static void drawRenderEffectsMenu(EditorState& editor) {
+    // --- Depth of field ---
+    bool orthographic = isOrthographicProjection(editor.cameraProjection);
+
+    // Filled in the first time the menu is opened, before the slider that shows it is built, rather
+    // than when the checkbox is ticked. Zero is the "never chosen" marker, and a focus distance of
+    // zero is not a value the user can be shown: it reads as a broken control, and a slider they
+    // then drag off zero starts from the near end of a scene rather than from the subject. The
+    // shader has the same fallback for the same reason -- see the upload in render().
+    if (editor.renderFocusDistance <= 0.0f) {
+        editor.renderFocusDistance = distanceToOrbitFocus(editor);
+    }
+
+    ImGui::BeginDisabled(orthographic);
+    if (ImGui::Checkbox("Depth of field", &editor.renderDepthOfFieldEnabled)) {
+        editor.renderParamsChanged = true;
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(orthographic
+            ? "Perspective only. An orthographic view has no lens, so there is nothing to defocus.\n"
+              "Switch the projection under Camera."
+            : "A real thin lens in the path tracer, not a blur pass: bokeh, foreground blur and\n"
+              "the shape of an out-of-focus highlight all come out on their own.\n\n"
+              "While it is on, click anywhere in the image to focus on what you clicked.");
+    }
+
+    ImGui::BeginDisabled(orthographic || !editor.renderDepthOfFieldEnabled);
+    ImGui::Indent();
+
+    // Logarithmic, and ranged off the scene's own size: a focus slider that is linear from zero to
+    // a city's diameter spends its whole travel in the last two pixels for anything close up.
+    float focusMaximum = std::max(1.0f, editor.framing.radius * 6.0f);
+    ImGui::SetNextItemWidth(180.0f);
+    if (ImGui::SliderFloat("Focus distance", &editor.renderFocusDistance, 0.01f, focusMaximum,
+                           "%.1f", ImGuiSliderFlags_Logarithmic)) {
+        editor.renderParamsChanged = true;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Where the focal plane sits, in world units along the view axis.\n"
+                          "Usually easier to set by clicking the subject in the image.");
+    }
+
+    if (ImGui::Button("Focus on orbit point")) {
+        editor.renderFocusDistance = distanceToOrbitFocus(editor);
+        editor.renderParamsChanged = true;
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Snap the focal plane to whatever the camera is turning about -- the point\n"
+                          "the navigator orbits, which the focus picker and Frame Scene both set.");
+    }
+
+    drawRenderSlider(editor, "Aperture", &editor.renderApertureFraction, 0.0f, 1.0f, "%.3f",
+                     "As a fraction of the focus distance, so one setting means the same thing in\n"
+                     "a scene the size of a room and one the size of a city. Wider is blurrier and\n"
+                     "noisier -- the lens samples converge like everything else here.");
+
+    ImGui::Unindent();
+    ImGui::EndDisabled();
+
+    ImGui::Separator();
+
+    // --- Atmosphere ---
+    if (ImGui::Checkbox("Atmosphere (god rays)", &editor.renderVolumetricsEnabled)) {
+        editor.renderParamsChanged = true;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Haze between the camera and the scene, single-scattered from the sun.\n"
+                          "The shafts are the parts of it the sun can actually see, so they bend\n"
+                          "round geometry and come through windows without being told there is one.\n"
+                          "Costs one more shadow ray per pixel per frame.");
+    }
+
+    ImGui::BeginDisabled(!editor.renderVolumetricsEnabled);
+    ImGui::Indent();
+    drawRenderSlider(editor, "Density", &editor.renderFogDensity, 0.0f, 2.0f, "%.3f",
+                     "Optical depth across one scene radius -- thickness, in a unit that means the\n"
+                     "same thing whatever the scene's scale. Past about 1 the scene disappears.");
+    drawRenderSlider(editor, "Forward scatter", &editor.renderFogAnisotropy, -0.9f, 0.9f, "%.2f",
+                     "How much the haze throws light onward rather than in all directions. High is\n"
+                     "what concentrates the glow around the sun and makes a shaft read as a shaft;\n"
+                     "zero is flat, directionless fog.");
+    drawRenderSlider(editor, "Range", &editor.renderFogRange, 0.1f, 10.0f, "%.2f",
+                     "How far the haze extends from the camera, in scene radii. Short keeps the sky\n"
+                     "clear while still hazing what is in front of it.");
+    ImGui::Unindent();
+    ImGui::EndDisabled();
+
+    ImGui::Separator();
+
+    // --- Lens dispersion ---
+    //
+    // Deliberately not a drawRenderSlider, for the reason exposure is not: it lives in display.frag,
+    // downstream of the accumulation, so it costs nothing to drag on a converged image.
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::SliderFloat("Chromatic aberration", &editor.renderChromaticAberration, 0.0f, 12.0f,
+                       "%.2f px");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Red/blue separation at the corners of the image, in pixels. Zero at the\n"
+                          "centre and growing outward, the way a real lens misses. Applied after the\n"
+                          "accumulation, so it does not restart the render.");
+    }
+}
+
+static void drawRenderCameraMenu(EditorState& editor) {
+    if (ImGui::MenuItem("Frame Scene", "H", false, editor.sceneLoaded)) {
+        applyFraming(editor);
+    }
+    ImGui::Separator();
+    for (int i = 0; i < CAMERA_PROJECTION_COUNT; i++) {
+        CameraProjection projection = static_cast<CameraProjection>(i);
+        if (ImGui::MenuItem(cameraProjectionLabel(projection), nullptr,
+                            editor.cameraProjection == projection)) {
+            setCameraProjection(editor, projection);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", cameraProjectionHint(projection));
+    }
+}
+
+// Builds one frame of the Render tab. Mirrors drawEditorInterface's shape -- one borderless window
+// filling the OS window, a menu bar, then the content -- and shares nothing else with it.
+static void drawRenderModeInterface(projv::Scene& scene, EditorState& editor,
+                                    const std::shared_ptr<projv::ConstructedRenderer>& renderer,
+                                    float framebufferScale) {
+    (void)scene;
+
+    const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(mainViewport->WorkPos);
+    ImGui::SetNextWindowSize(mainViewport->WorkSize);
+    ImGui::SetNextWindowViewport(mainViewport->ID);
+
+    ImGuiWindowFlags hostFlags = ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking |
+                                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+                                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::Begin("##RenderModeHost", nullptr, hostFlags);
+    ImGui::PopStyleVar(3);
+
+    if (ImGui::BeginMenuBar()) {
+        drawModeTabs(editor);
+        ImGui::Spacing();
+
+        if (ImGui::BeginMenu("Lighting")) {
+            drawRenderLightingMenu(editor);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Effects")) {
+            drawRenderEffectsMenu(editor);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Quality")) {
+            drawRenderQualityMenu(editor);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Camera")) {
+            drawRenderCameraMenu(editor);
+            ImGui::EndMenu();
+        }
+        if (ImGui::MenuItem("Restart")) {
+            // The mean starts again from this frame. Worth having as a verb of its own: after an
+            // edit made in the other tab, or a load, the accumulated image is of the old scene and
+            // there is otherwise nothing to say so but nudging the camera.
+            editor.cameraMovedByInterface = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Throw away the accumulated samples and converge again from this frame.");
+        }
+
+        // The sample counter, right-aligned. This is the number that says whether the image is
+        // finished: it climbs while the camera is still and resets to zero the moment anything
+        // moves, so "leave it until this stops changing quickly" is the whole workflow.
+        char counter[192];
+        if (!editor.sceneLoaded) {
+            snprintf(counter, sizeof(counter), "no scene");
+        } else if (editor.renderDepthOfFieldEnabled &&
+                   !isOrthographicProjection(editor.cameraProjection)) {
+            // The focal plane joins the counter while it is live, because click-to-focus has no
+            // other feedback: the status bar is an Edit-mode panel, the Effects menu is shut when
+            // you are clicking, and a shallow aperture's answer takes a second of accumulation to
+            // read off the image itself.
+            snprintf(counter, sizeof(counter), "focus %.1f   %d spp   %d x %d",
+                     editor.renderFocusDistance, editor.renderSampleCount,
+                     editor.renderViewWidth, editor.renderViewHeight);
+        } else {
+            snprintf(counter, sizeof(counter), "%d spp   %d x %d", editor.renderSampleCount,
+                     editor.renderViewWidth, editor.renderViewHeight);
+        }
+        float counterWidth = ImGui::CalcTextSize(counter).x;
+        float rightEdge = ImGui::GetWindowWidth() - counterWidth - ImGui::GetStyle().WindowPadding.x * 2.0f;
+        if (rightEdge > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(rightEdge);
+        ImGui::TextDisabled("%s", counter);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Samples per pixel averaged into the image so far, and its resolution.\n"
+                              "Resets whenever the camera or a lighting setting changes.");
+        }
+
+        ImGui::EndMenuBar();
+    }
+
+    // The image takes everything the bar left. Its size is picked up here and applied to the render
+    // targets at the top of the *next* frame, for the reason the Viewport's is -- see the note in
+    // render(): the handle handed to ImGui below must be the one this frame's passes wrote.
+    ImVec2 panelSize = ImGui::GetContentRegionAvail();
+    editor.requestedRenderViewWidth = std::max(1, int(panelSize.x * framebufferScale));
+    editor.requestedRenderViewHeight = std::max(1, int(panelSize.y * framebufferScale));
+
+    bgfx::TextureHandle renderTexture = getViewportTexture(renderer);
+    if (editor.sceneLoaded && bgfx::isValid(renderTexture)) {
+        // OpenGL's texture origin is the bottom-left corner and everyone else's is the top-left, so
+        // on a GL backend the render target arrives upside down and the V axis is flipped back here.
+        bool originBottomLeft = bgfx::getCaps()->originBottomLeft;
+        ImVec2 uv0 = originBottomLeft ? ImVec2(0.0f, 1.0f) : ImVec2(0.0f, 0.0f);
+        ImVec2 uv1 = originBottomLeft ? ImVec2(1.0f, 0.0f) : ImVec2(1.0f, 1.0f);
+        ImGui::Image(ImTextureRef(projv::editor::imGuiTextureID(renderTexture)), panelSize, uv0, uv1);
+
+        // The same gestures as the Viewport, driven by the same updateCamera: right-drag to fly with
+        // WASD/R/F, middle-drag to pan, wheel to dolly, H to re-frame. Nothing had to be written for
+        // it -- updateCamera reads this flag and nothing else about where the image is.
+        editor.viewportHovered = ImGui::IsItemHovered();
+
+        // Left-click focuses the lens on whatever was clicked, while depth of field is on. The left
+        // button is free in this tab -- there is nothing here to select, paint or sculpt -- so the
+        // one gesture a camera has that this tab could use gets it, and it gets it unmodified.
+        //
+        // Gated on the effect being on rather than always armed: with no lens there is no focal
+        // plane, and a click that silently sets a number nothing reads is worse than a click that
+        // does nothing.
+        bool focusClickArmed = editor.renderDepthOfFieldEnabled &&
+                               !isOrthographicProjection(editor.cameraProjection);
+        if (focusClickArmed && editor.viewportHovered &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            // UV within the image, which is what the ray generator wants -- independent of where the
+            // window sits and of the panel-to-pixel scale.
+            ImVec2 imageMin = ImGui::GetItemRectMin();
+            ImVec2 imageMax = ImGui::GetItemRectMax();
+            ImVec2 mousePosition = ImGui::GetIO().MousePos;
+            editor.pickUV = {
+                (mousePosition.x - imageMin.x) / std::max(1.0f, imageMax.x - imageMin.x),
+                (mousePosition.y - imageMin.y) / std::max(1.0f, imageMax.y - imageMin.y)
+            };
+            editor.pendingPick = PickPurpose::FocusDistance;
+        }
+    } else {
+        editor.viewportHovered = false;
+        const char* message = editor.sceneLoaded
+                            ? "Render target is not ready."
+                            : "No scene loaded. Switch to Edit and open one.";
+        ImVec2 textSize = ImGui::CalcTextSize(message);
+        ImGui::SetCursorPos(ImVec2((panelSize.x - textSize.x) * 0.5f,
+                                   ImGui::GetCursorPosY() + (panelSize.y - textSize.y) * 0.5f));
+        ImGui::TextDisabled("%s", message);
+    }
+
+    ImGui::End();
+}
+
 // Builds one frame of the whole interface: the host window that owns the dockspace and the menu bar,
 // then each panel docked into it.
 static void drawEditorInterface(projv::Application& app, projv::Scene& scene, projv::GPUData& gpuData,
                                 EditorState& editor,
                                 const std::shared_ptr<projv::ConstructedRenderer>& renderer,
                                 float framebufferScale) {
+    // The tab shortcut, before the split below so it answers from either tab. Not in the Ctrl-gated
+    // block further down: F11 collides with nothing, and a modifier on the one key that leaves an
+    // interface you might be stuck in is a modifier too many. Still gated on the keyboard not
+    // belonging to a text field, like every other shortcut here.
+    if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F11)) {
+        setEditorMode(editor, editor.mode == EditorMode::Render ? EditorMode::Edit : EditorMode::Render);
+    }
+
+    // Render mode is a tab, not a panel: it owns the whole window, and none of the dockspace, the
+    // menu bar or the six panels below are built at all while it is up. That is what "a new tab"
+    // has to mean here -- an editor whose panels are still on screen is still an editor, and the
+    // thing being asked for is a look at the scene with the editor out of the way.
+    if (editor.mode == EditorMode::Render) {
+        drawRenderModeInterface(scene, editor, renderer, framebufferScale);
+        // After the tab, mirroring where the Edit path resolves its own clicks: the click is seen
+        // above and answered here, both before this frame's uniforms go up, so the focal plane the
+        // user just picked is what this frame traces.
+        processRenderFocusPick(scene, editor);
+        return;
+    }
+
     const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(mainViewport->WorkPos);
     ImGui::SetNextWindowSize(mainViewport->WorkSize);
@@ -14659,8 +15250,33 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
             // a permanent panel's worth of screen is more than that is worth. The summary is always
             // on screen in the status bar regardless.
             ImGui::MenuItem("Statistics", nullptr, &editor.statisticsWindowOpen);
+            ImGui::Separator();
+            // The other half of the tab strip on the right of this bar. Both are here because the
+            // two answer different questions: the strip says "there is a second tab" to someone who
+            // has not found it, and this item is where someone who already knows looks for the
+            // shortcut.
+            if (ImGui::MenuItem("Render Mode", "F11", editor.mode == EditorMode::Render)) {
+                setEditorMode(editor, EditorMode::Render);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("A path traced image of this same camera, in its own tab: full\n"
+                                  "light transport, sun and sky, converging for as long as you\n"
+                                  "leave the camera still.");
+            }
             ImGui::EndMenu();
         }
+
+        // The tab strip, right-aligned, in the same vertical place it sits in Render mode's bar so
+        // switching back and forth does not move it under the cursor.
+        {
+            float stripWidth = (ImGui::CalcTextSize("Render").x +
+                                ImGui::GetStyle().FramePadding.x * 4.0f) * 2.0f +
+                               ImGui::GetStyle().ItemInnerSpacing.x;
+            float rightEdge = ImGui::GetWindowWidth() - stripWidth - ImGui::GetStyle().WindowPadding.x * 2.0f;
+            if (rightEdge > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(rightEdge);
+            drawModeTabs(editor);
+        }
+
         ImGui::EndMenuBar();
     }
 
@@ -16401,6 +17017,70 @@ static void runGizmoDragSelfTest() {
                       oscillated ? "PASS" : "FAIL", stable ? "PASS" : "FAIL");
 }
 
+// Render mode's click-to-focus, on the one thing about it that cannot be judged by looking at the
+// screen.
+//
+// The failure it is here for is subtle in exactly the way this file's coordinate bugs always are.
+// The shader's focal plane is a PLANE perpendicular to the view direction, so a click has to be
+// converted to a distance ALONG THE VIEW AXIS -- but the obvious implementation, taking the length
+// of the clicked ray, is correct at the centre of the image and wrong everywhere else, by more and
+// more towards the corners. On screen that reads as "focusing on things near the edge is a bit
+// soft", which is indistinguishable from the aperture being slightly wide, and no amount of
+// clicking settles it.
+//
+// So the two properties are asserted numerically instead:
+//
+//   * a click at the centre        -> the axial distance IS the ray length (the centre ray is the axis);
+//   * a click away from the centre -> the axial distance is strictly SHORTER than the ray length,
+//                                     and shorter by exactly the cosine between the two.
+//
+// Read-only arithmetic against the ray generator the picker actually calls -- no scene, no click --
+// so it runs under EDITOR_SELFTEST with the other cheap checks.
+static void runRenderFocusSelfTest(const EditorState& editor) {
+    using namespace projv::core;
+
+    const vec2 resolution(1600.0f, 900.0f);
+    const vec3 viewDirection = glm::normalize(computeCameraDirection(editor));
+
+    // A point in front of the camera, and the two clicks that could have landed on it.
+    struct Probe { const char* where; vec2 uv; };
+    const Probe probes[] = {
+        { "centre",       vec2(0.5f,  0.5f)  },
+        { "near corner",  vec2(0.05f, 0.08f) },
+    };
+
+    bool centreExact = false;
+    bool cornerShorter = false;
+    bool cosineExact = false;
+
+    for (int i = 0; i < 2; i++) {
+        ViewportRay ray = viewportRayThroughUV(editor, probes[i].uv, resolution);
+        vec3 direction = glm::normalize(ray.direction);
+
+        // A hit 250 units along that ray, standing in for whatever pickVoxel would have returned.
+        const float rayLength = 250.0f;
+        vec3 hitPosition = ray.origin + direction * rayLength;
+
+        // The conversion processRenderFocusPick performs.
+        float axial = glm::dot(hitPosition - editor.cameraPosition, viewDirection);
+        float cosine = glm::dot(direction, viewDirection);
+
+        projv::core::info("FOCUSTEST: {} click -- ray length {:.3f}, axial {:.3f}, cos {:.4f}",
+                          probes[i].where, rayLength, axial, cosine);
+
+        if (i == 0) {
+            centreExact = std::abs(axial - rayLength) < 1.0e-2f;
+        } else {
+            cornerShorter = axial < rayLength - 1.0e-2f;
+            cosineExact = std::abs(axial - rayLength * cosine) < 1.0e-2f;
+        }
+    }
+
+    projv::core::info("FOCUSTEST: centre is exact {} | corner is shorter {} | shorter by the cosine {}",
+                      centreExact ? "PASS" : "FAIL", cornerShorter ? "PASS" : "FAIL",
+                      cosineExact ? "PASS" : "FAIL");
+}
+
 // Everything about the symmetry group that is invisible from the outside.
 //
 // The failure class is the one every coordinate mapping in this file has had at least once: an
@@ -18092,9 +18772,24 @@ void startup(projv::Application& app) {
 
     bgfx::ShaderHandle vertexShader =
         projv::graphics::loadShader("./editorRenderer/editorShaders/vs_quad.bin");
-    std::shared_ptr<projv::ConstructedRenderer> constructedRenderer =
+    EditorRenderers& renderers = projv::core::createGlobalResource<EditorRenderers>(app.world);
+    renderers.viewport =
         projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader);
-    renderInstance.setActiveRenderer(constructedRenderer);
+    renderInstance.setActiveRenderer(renderers.viewport);
+
+    // Render mode's path tracer, built up front alongside the viewport's renderer. Its three passes
+    // draw the same fullscreen quad, so it takes a second handle on the same compiled vertex shader
+    // rather than a second copy of the source -- separate handles because constructShaders creates
+    // its programs with bgfx's destroyShaders flag set, and one handle owned by two renderers is one
+    // renderer's teardown away from the other holding a dangling one.
+    projv::RendererSpecification renderModeSpecification =
+        projv::graphics::loadRendererSpecification("./renderRenderer/");
+    renderInstance.addRendererSpecification(2, renderModeSpecification);
+    bgfx::ShaderHandle renderModeVertexShader =
+        projv::graphics::loadShader("./editorRenderer/editorShaders/vs_quad.bin");
+    renderers.pathTrace =
+        projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(2),
+                                                        renderModeVertexShader);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -18133,6 +18828,16 @@ void startup(projv::Application& app) {
         return;
     }
 
+    // Which tab the editor opens on. Edit unless asked otherwise -- Render mode is a place you go to
+    // look at a shot you have already framed, not a place to start. The switch exists because
+    // Render mode is reached by clicking, and a screenshot or a smoke test has no way to click.
+    if (const char* startMode = std::getenv("EDITOR_START_MODE")) {
+        if (std::string(startMode) == "render") {
+            editor.mode = EditorMode::Render;
+            editor.requestedMode = EditorMode::Render;
+        }
+    }
+
     // The library browses from an absolute path: it is navigated with an Up button, and walking a
     // relative path upward runs out of parents long before the filesystem does.
     {
@@ -18154,6 +18859,7 @@ void startup(projv::Application& app) {
             runFillSelfTest(scene, editor);
             runGizmoDragSelfTest();
             runSymmetrySelfTest();
+            runRenderFocusSelfTest(editor);
         }
         // Separate switch: unlike the three above, these edit the scene (and undo themselves).
         if (std::getenv("EDITOR_SCULPTTEST")) {
@@ -18192,7 +18898,29 @@ void render(projv::Application& app) {
     projv::Scene& scene = projv::core::getGlobalResource<projv::Scene>(app.world);
     projv::GPUData& gpuData = projv::core::getGlobalResource<projv::GPUData>(app.world);
     EditorState& editor = projv::core::getGlobalResource<EditorState>(app.world);
-    std::shared_ptr<projv::ConstructedRenderer> renderer = renderInstance.getActiveRenderer();
+    EditorRenderers& renderers = projv::core::getGlobalResource<EditorRenderers>(app.world);
+
+    // The one place editor.mode is written. Everything downstream -- which renderer is resized,
+    // whose texture reaches ImGui, whose passes are dispatched -- keys off it, so it has to settle
+    // before any of them and stay settled for the frame. See setEditorMode.
+    bool modeJustChanged = editor.requestedMode != editor.mode;
+    if (modeJustChanged) {
+        editor.mode = editor.requestedMode;
+        // The incoming renderer's accumulation buffer still holds the image it had when this tab was
+        // last left: a different camera, possibly a different scene, and at whatever size the tab
+        // was then. Treated as a camera move, which is the existing machinery for "the history is
+        // not of what is in front of you". Reprojection loses its previous frame for the same reason.
+        editor.cameraMovedByInterface = true;
+        editor.prevCameraValid = false;
+        // Hover belongs to the surface being left. Left set, one frame of scroll or a stray H would
+        // land on a viewport that is no longer on screen.
+        editor.viewportHovered = false;
+    }
+
+    // The tab on screen decides which renderer runs this frame. Both are resident, but only one is
+    // dispatched: the other's render targets keep whatever they last held, which is exactly what
+    // makes switching back instant rather than a reload.
+    std::shared_ptr<projv::ConstructedRenderer> renderer = activeRendererFor(renderers, editor);
 
     glfwPollEvents();
     if (glfwWindowShouldClose(renderInstance.window)) {
@@ -18223,12 +18951,29 @@ void render(projv::Application& app) {
     // hands ImGui the viewport texture's handle, so the handle must not change afterwards. Resizing
     // here — before anything reads it — means the texture ImGui is given is the one this frame's
     // scene passes render into.
-    if (editor.requestedViewportWidth != editor.viewportWidth ||
-        editor.requestedViewportHeight != editor.viewportHeight) {
+    //
+    // Only the tab on screen is resized. The other renderer's targets stay at whatever size that tab
+    // last had, which is right: resizing an offscreen renderer would throw away its converged image
+    // for a size nobody is looking at, and it is resized on its own terms the frame it comes back.
+    if (editor.mode == EditorMode::Render) {
+        if (editor.requestedRenderViewWidth != editor.renderViewWidth ||
+            editor.requestedRenderViewHeight != editor.renderViewHeight) {
+            editor.renderViewWidth = editor.requestedRenderViewWidth;
+            editor.renderViewHeight = editor.requestedRenderViewHeight;
+            resizeViewportTargets(renderer, editor.renderViewWidth, editor.renderViewHeight);
+            cameraMoved = true;   // The accumulated history is the wrong size now; start it again.
+            // Stronger than "start it again": the accumulation targets have just been reallocated
+            // and hold whatever the driver left in them. taa.frag must not read them at all this
+            // frame, which is what clearing this flag tells it -- an uninitialised RGBA32F can be
+            // NaN, and one NaN in a running mean never leaves it.
+            editor.prevCameraValid = false;
+        }
+    } else if (editor.requestedViewportWidth != editor.viewportWidth ||
+               editor.requestedViewportHeight != editor.viewportHeight) {
         editor.viewportWidth = editor.requestedViewportWidth;
         editor.viewportHeight = editor.requestedViewportHeight;
         resizeViewportTargets(renderer, editor.viewportWidth, editor.viewportHeight);
-        cameraMoved = true;   // The accumulated history is the wrong size now; start it again.
+        cameraMoved = true;
     }
 
     ImGui_ImplGlfw_NewFrame();
@@ -18243,6 +18988,11 @@ void render(projv::Application& app) {
     // accumulation buffer were produced under the old setting. Same treatment as a camera move.
     cameraMoved |= editor.renderSettingsChanged;
     editor.renderSettingsChanged = false;
+    // The same rule on the Render tab's side: a lighting or bounce-count change means the samples
+    // already averaged were traced under different conditions, so the mean starts again rather than
+    // letting the new setting creep in over the next few hundred frames.
+    cameraMoved |= editor.renderParamsChanged;
+    editor.renderParamsChanged = false;
     ImGui::Render();
     g_scrollOffsetThisFrame = 0.0;
 
@@ -18269,6 +19019,10 @@ void render(projv::Application& app) {
         } else {
             loadScene(scene, gpuData, editor, editor.pendingScenePath);
             editor.pendingScenePath.clear();
+            // Render mode's history is of the scene that was just unloaded. Dropped outright rather
+            // than blended away: reprojecting the old scene's image into the new one's is exactly
+            // the ghost the flag exists to prevent.
+            editor.prevCameraValid = false;
             // A load that has just landed supersedes any New Scene still outstanding -- otherwise the
             // block below would fire straight afterwards and throw away the scene that was asked for
             // second. The two requests share sceneTeardownFramesRemaining, so exactly one of them may
@@ -18295,6 +19049,7 @@ void render(projv::Application& app) {
         } else {
             newScene(scene, gpuData, editor);
             editor.pendingNewScene = false;
+            editor.prevCameraValid = false;   // As above: the history is of the document just closed.
             cameraMoved = true;
         }
     }
@@ -18312,12 +19067,138 @@ void render(projv::Application& app) {
         editor.frameCameraLastMovedOn = app.frameCount;
     }
 
-    if (editor.sceneLoaded) {
-        projv::core::vec3 cameraDirection;
-        cameraDirection.x = projv::core::cos(editor.cameraPitch) * projv::core::cos(editor.cameraYaw);
-        cameraDirection.y = projv::core::sin(editor.cameraPitch);
-        cameraDirection.z = projv::core::cos(editor.cameraPitch) * projv::core::sin(editor.cameraYaw);
+    // Both tabs' cameras are the same camera, so the direction is built once, above the split.
+    projv::core::vec3 cameraDirection;
+    cameraDirection.x = projv::core::cos(editor.cameraPitch) * projv::core::cos(editor.cameraYaw);
+    cameraDirection.y = projv::core::sin(editor.cameraPitch);
+    cameraDirection.z = projv::core::cos(editor.cameraPitch) * projv::core::sin(editor.cameraYaw);
 
+    // Which ray generator the trace/albedo pass uses, and the two numbers the orthographic one
+    // needs. Isometric is not a third case -- it is orthographic from a particular angle, and the
+    // angle is already in cameraDir. Shared by both renderers, which is why the two tabs frame the
+    // scene identically and switching does not move the camera by a pixel.
+    float orthoHeight = cameraOrthoHeight(editor);
+    float orthoBackoff = cameraOrthoBackoff(editor, cameraDirection);
+
+    if (editor.sceneLoaded && editor.mode == EditorMode::Render) {
+        // --- Render mode: the path tracer -----------------------------------------------
+        projv::core::vec2 renderResolution = { float(editor.renderViewWidth), float(editor.renderViewHeight) };
+        projv::core::vec2 texelSize = { 1.0f / renderResolution.x, 1.0f / renderResolution.y };
+        projv::core::vec3 cameraPosition = editor.cameraPosition;
+
+        // w is the flag taa.frag checks before anything else: there is no usable history this
+        // frame, so take the trace whole. Raised on the first frame, on a tab switch, and after a
+        // resize -- all cases where the accumulation buffer holds something that is not this image,
+        // or in the resize case is freshly allocated and not yet written at all.
+        projv::core::vec4 frameCount = {
+            float(app.frameCount), float(cameraMoved), float(editor.frameCameraLastMovedOn),
+            editor.prevCameraValid ? 0.0f : 1.0f
+        };
+
+        // The sun, from the two angles the interface offers. Elevation from the horizon and azimuth
+        // about Y, which is what a person means by "where is the sun" -- converted here rather than
+        // stored as a vector so the two sliders cannot fight each other near the poles.
+        const float DEGREES_TO_RADIANS = 3.14159265f / 180.0f;
+        float sunElevation = editor.renderSunElevation * DEGREES_TO_RADIANS;
+        float sunAzimuth = editor.renderSunAzimuth * DEGREES_TO_RADIANS;
+        projv::core::vec4 sunDirection = {
+            std::cos(sunElevation) * std::cos(sunAzimuth),
+            std::sin(sunElevation),
+            std::cos(sunElevation) * std::sin(sunAzimuth),
+            // w is the disk's angular radius, in radians. Floored well above zero: a zero-radius
+            // sun has zero solid angle, and next-event estimation divides by it.
+            std::max(editor.renderSunSize, 0.01f) * DEGREES_TO_RADIANS
+        };
+
+        projv::core::vec4 renderParams = {
+            float(editor.renderBounces),
+            editor.renderSunIntensity,
+            editor.renderSkyIntensity,
+            editor.renderFireflyClamp
+        };
+        projv::core::vec4 displayParams = {
+            editor.renderExposure, editor.renderChromaticAberration, 0.0f, 0.0f
+        };
+
+        // Thin-lens depth of field. The aperture is stored as a fraction of the focus distance --
+        // see renderApertureFraction -- and turned into the world-unit radius the shader wants
+        // here. The 0.05 is the constant that makes the slider's useful travel land inside 0..1:
+        // at the top of it the lens radius is a twentieth of the focus distance, which is about as
+        // shallow as a photographic lens ever gets.
+        //
+        // Zeroed outright rather than left to a disabled flag under two conditions the shader
+        // would otherwise have to test for itself: the toggle being off, and an orthographic
+        // projection, which has no lens to sample.
+        bool lensActive = editor.renderDepthOfFieldEnabled && orthoHeight <= 0.0f;
+        float focusDistance = editor.renderFocusDistance > 0.0f ? editor.renderFocusDistance
+                                                                : distanceToOrbitFocus(editor);
+        projv::core::vec4 lensParams = {
+            lensActive ? focusDistance * editor.renderApertureFraction * 0.05f : 0.0f,
+            focusDistance,
+            0.0f,
+            0.0f
+        };
+
+        // The atmosphere, converted out of the two scene-relative units the interface offers.
+        // Density is an optical depth across one scene radius, so the extinction coefficient is
+        // that divided by the radius; range is in scene radii, so it is that multiplied by it.
+        // Both go through the framing radius, which is the editor's one measure of "how big is
+        // this scene" and is already what the movement speed and the orthographic extent are
+        // derived from.
+        float sceneRadius = std::max(editor.framing.radius, 0.001f);
+        projv::core::vec4 volumeParams = {
+            editor.renderVolumetricsEnabled ? editor.renderFogDensity / sceneRadius : 0.0f,
+            editor.renderFogAnisotropy,
+            editor.renderFogRange * sceneRadius,
+            0.0f
+        };
+
+        projv::core::vec4 cameraProjection = {
+            orthoHeight > 0.0f ? 1.0f : 0.0f, orthoHeight, orthoBackoff, 0.0f
+        };
+        // Last frame's camera for the reprojection, with last frame's orthographic parameters in the
+        // spare lanes -- an orthographic view has to reproject against the extent it was actually
+        // drawn with, not this frame's.
+        projv::core::vec4 previousCameraPosition = {
+            editor.prevCameraPosition.x, editor.prevCameraPosition.y, editor.prevCameraPosition.z,
+            editor.prevOrthoHeight
+        };
+        projv::core::vec4 previousCameraDirection = {
+            editor.prevCameraDirection.x, editor.prevCameraDirection.y, editor.prevCameraDirection.z,
+            editor.prevOrthoBackoff
+        };
+
+        projv::graphics::setUniformToValue(renderer, "cameraPos", cameraPosition);
+        projv::graphics::setUniformToValue(renderer, "cameraDir", cameraDirection);
+        projv::graphics::setUniformToValue(renderer, "prevCameraPos", previousCameraPosition);
+        projv::graphics::setUniformToValue(renderer, "prevCameraDir", previousCameraDirection);
+        projv::graphics::setUniformToValue(renderer, "windowRes", renderResolution);
+        projv::graphics::setUniformToValue(renderer, "frameCount", frameCount);
+        projv::graphics::setUniformToValue(renderer, "texelSize", texelSize);
+        projv::graphics::setUniformToValue(renderer, "cameraProjection", cameraProjection);
+        projv::graphics::setUniformToValue(renderer, "sunDir", sunDirection);
+        projv::graphics::setUniformToValue(renderer, "renderParams", renderParams);
+        projv::graphics::setUniformToValue(renderer, "lensParams", lensParams);
+        projv::graphics::setUniformToValue(renderer, "volumeParams", volumeParams);
+        projv::graphics::setUniformToValue(renderer, "displayParams", displayParams);
+        projv::graphics::updateUniforms(renderer->resources.uniformHandles, renderer->resources.uniformValues);
+
+        projv::core::mat4 identityMatrix = projv::core::mat4(1.0f);
+        projv::graphics::performRenderPasses(false, renderer, renderInstance,
+                                             editor.renderViewWidth, editor.renderViewHeight,
+                                             identityMatrix, identityMatrix, &gpuData);
+
+        // What the tab's counter reports. Frames since the camera last moved, which after this
+        // frame's trace is also the number of samples averaged into what is on screen.
+        editor.renderSampleCount = std::max(0, app.frameCount - editor.frameCameraLastMovedOn);
+
+        // This frame's camera becomes next frame's history.
+        editor.prevCameraPosition = editor.cameraPosition;
+        editor.prevCameraDirection = cameraDirection;
+        editor.prevOrthoHeight = orthoHeight;
+        editor.prevOrthoBackoff = orthoBackoff;
+        editor.prevCameraValid = true;
+    } else if (editor.sceneLoaded) {
         projv::core::vec2 viewportResolution = { float(editor.viewportWidth), float(editor.viewportHeight) };
         projv::core::vec4 frameCount = {
             float(app.frameCount), float(cameraMoved), float(editor.frameCameraLastMovedOn), 0.0f
@@ -18335,14 +19216,13 @@ void render(projv::Application& app) {
             editor.rayAmbientOcclusionEnabled ? 1.0f : 0.0f
         };
 
-        // Which ray generator albedo.frag uses, and the two numbers the orthographic one needs. Isometric
-        // is not a third case here -- it is orthographic from a particular angle, and the angle is
-        // already in cameraDir. w is spare.
-        float orthoHeight = cameraOrthoHeight(editor);
+        // Which ray generator albedo.frag uses, and the two numbers the orthographic one needs.
+        // Both computed above the tab split -- Render mode's trace pass reads the same three values,
+        // and they have to agree exactly or the two tabs would not frame the same shot.
         projv::core::vec4 cameraProjection = {
             orthoHeight > 0.0f ? 1.0f : 0.0f,
             orthoHeight,
-            cameraOrthoBackoff(editor, cameraDirection),
+            orthoBackoff,
             0.0f
         };
 
