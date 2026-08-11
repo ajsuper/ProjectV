@@ -47,6 +47,17 @@ $input v_texcoord0
 
 #include <bgfx_shader.sh>
 
+// Raised well above the shared default, and defined BEFORE the include so it overrides the
+// #ifndef in pjv_utils_DDA.sc for this shader only -- the other examples keep the cheap bound.
+//
+// The old budget of 4 was sized by thinking about thickness, which is the wrong variable: what
+// decides how many transparent voxels a ray crosses is ANGLE. A ray entering a two-voxel slab at 45
+// degrees already crosses three or four, at grazing incidence it crosses dozens, and a bounce ray
+// that starts INSIDE the volume crosses more still. So a budget of 4 ran out constantly on ordinary
+// geometry, and every ray that ran out produced an artifact rather than a slightly wrong colour.
+// One more iteration than layers, so the final opaque surface behind the last layer still resolves.
+#define MAX_PEEL_ITERATIONS 65
+
 #include <pjv_utils_DDA.sc>
 
 uniform vec4 windowRes;
@@ -89,6 +100,31 @@ uniform vec4 volumeParams;
 #define PRIMARY_MAX_STEPS   256u
 #define SECONDARY_MAX_STEPS 160u
 #define SHADOW_MAX_STEPS    160u
+
+// How many transparent voxels a ray may see through before it gives up on what is behind them.
+//
+// Still a cost ceiling -- every layer is a full scene re-traversal -- but set high enough that the
+// ceiling is not what you are looking at. Running out is no longer catastrophic (the peel reports a
+// miss carrying its accumulated transmittance rather than shading an internal face as opaque), but
+// it is still an approximation, and at 4 it was being hit constantly.
+//
+// In practice tinted glass terminates long before this: transmittance multiplies down each layer and
+// the peel quits once it drops below 0.002. Only near-perfectly-clear material runs the full budget.
+#define TRANSPARENT_LAYERS  64u
+
+// Set to 1 to replace the image with a false-colour map of WHY the peel stopped on the primary ray.
+// Transparency has two failure modes that look completely different on screen and are one line apart
+// in the code -- giving up with transmittance near 1 reads as "the voxels are not there", giving up
+// with it near 0 reads as "black" -- and guessing which one you are looking at from the shaded image
+// does not work. This tells you directly, per pixel:
+//
+//   grey    reached an opaque surface (correct)   green    tMin failed to advance
+//   blue    nothing behind (sky)                  yellow   fully absorbed  -> the BLACK artifact
+//   red     layer budget spent                    magenta  iteration budget spent
+//
+//   red/magenta -> raise TRANSPARENT_LAYERS; yellow -> the material absorbs faster than intended;
+//   green -> a tMin advance bug (should never appear).
+#define PEEL_DEBUG 0
 
 // Where a bounce or shadow ray starts, in edge lengths of the voxel it is leaving. A
 // fixed world epsilon does not work across the range of scenes the editor opens --
@@ -265,6 +301,112 @@ float powerHeuristic(float pdfA, float pdfB) {
 }
 
 // =============================================================================
+// Surface
+// =============================================================================
+//
+// A voxel's material is a diffuse lobe plus, when it is glossy or metallic, a GGX
+// microfacet specular lobe. Two rules govern the whole of this section:
+//
+//   1. A DEFAULT MATERIAL MUST COST NOTHING AND CHANGE NOTHING. glossiness 0 and
+//      metallic 0 -- which is every palette entry written before materials had
+//      properties -- drives specularProbability to exactly zero, which switches the
+//      specular term and its pdf off entirely and leaves `bsdf * cos / pdf` reducing
+//      to `albedo`, the single multiply this renderer has always done. Not
+//      approximately: the same expression.
+//
+//      That is why the dielectric F0 below is scaled by glossiness rather than being
+//      the usual fixed 0.04. A constant 0.04 would be more physical, and it would also
+//      quietly put a sheen on every scene already on disk.
+//
+//   2. NEE AND BSDF SAMPLING MUST AGREE. Both estimators are weighted against each
+//      other's pdf, so both go through evaluateSurface -- the value for the estimator,
+//      the pdf for the weight. Two code paths that disagreed by a factor would not
+//      look wrong so much as slightly, unfixably wrong in the parts of the image where
+//      one estimator dominates.
+
+float luminance(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+// GGX / Trowbridge-Reitz normal distribution.
+float ggxDistribution(float cosHalf, float alpha) {
+    float a2 = alpha * alpha;
+    float d = cosHalf * cosHalf * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * d * d, 1e-9);
+}
+
+// One direction's term of the separable Smith masking-shadowing function for GGX.
+float smithG1(float cosTheta, float alpha) {
+    float a2 = alpha * alpha;
+    return 2.0 * cosTheta /
+           max(cosTheta + sqrt(a2 + (1.0 - a2) * cosTheta * cosTheta), 1e-9);
+}
+
+vec3 fresnelSchlick(float cosTheta, vec3 f0) {
+    float m = clamp(1.0 - cosTheta, 0.0, 1.0);
+    float m2 = m * m;
+    return f0 + (vec3(1.0) - f0) * (m2 * m2 * m);
+}
+
+// GGX roughness from the stored glossiness. The perceptual roughness is floored rather
+// than allowed to reach zero: a true mirror is a delta lobe, which this estimator cannot
+// sample, and an alpha of zero makes the distribution divide by zero. At the floor the
+// lobe is tight enough to read as a mirror and still has finite density.
+float alphaFromGlossiness(float glossiness) {
+    float perceptual = clamp(1.0 - glossiness, 0.03, 1.0);
+    return perceptual * perceptual;
+}
+
+// The surface's response for one light direction, and the density the BSDF sampler below
+// would have had for that same direction.
+void evaluateSurface(vec3 normal, vec3 viewDirection, vec3 lightDirection,
+                     vec3 diffuseAlbedo, vec3 f0, float alpha, float specularProbability,
+                     out vec3 bsdf, out float pdf) {
+    bsdf = vec3(0.0);
+    pdf = 0.0;
+
+    float cosLight = dot(normal, lightDirection);
+    float cosView = dot(normal, viewDirection);
+    if (cosLight <= 0.0 || cosView <= 0.0) return;
+
+    vec3 diffuse = diffuseAlbedo / PI;
+    float diffusePdf = cosLight / PI;
+
+    if (specularProbability <= 0.0) {
+        // Rule 1: the untouched-material path, byte for byte the old Lambertian.
+        bsdf = diffuse;
+        pdf = diffusePdf;
+        return;
+    }
+
+    // NOTE: `half` is a reserved type name in HLSL -- do not name this that.
+    vec3 halfVector = normalize(viewDirection + lightDirection);
+    float cosHalf = max(dot(normal, halfVector), 0.0);
+    float viewDotHalf = max(dot(viewDirection, halfVector), 1e-4);
+
+    float d = ggxDistribution(cosHalf, alpha);
+    float g = smithG1(cosView, alpha) * smithG1(cosLight, alpha);
+    vec3  f = fresnelSchlick(viewDotHalf, f0);
+
+    vec3 specular = f * (d * g / max(4.0 * cosView * cosLight, 1e-6));
+    // What the specular lobe reflects, the diffuse lobe underneath it does not get to
+    // scatter. Without this a glossy surface is brighter than the light falling on it.
+    bsdf = diffuse * (vec3(1.0) - f) + specular;
+
+    float specularPdf = d * cosHalf / (4.0 * viewDotHalf);
+    pdf = mix(diffusePdf, specularPdf, specularProbability);
+}
+
+// A half vector from the GGX distribution, for the specular lobe's bounce direction.
+vec3 sampleGGXHalfVector(vec3 n, float alpha, inout uint seed) {
+    float u1 = randomUnit(seed);
+    float u2 = randomUnit(seed);
+    float phi = 2.0 * PI * u1;
+    float a2 = alpha * alpha;
+    float cosTheta = sqrt(clamp((1.0 - u2) / (1.0 + (a2 - 1.0) * u2), 0.0, 1.0));
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+    return basisAround(n) * vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+}
+
+// =============================================================================
 // Rays
 // =============================================================================
 
@@ -393,7 +535,35 @@ void main() {
         if (bounce > bounces) break;
 
         RayQuery query = walkQuery(bounce == 0 ? PRIMARY_MAX_STEPS : SECONDARY_MAX_STEPS);
-        SceneIntersectData hit = raySceneIntersect(ray, query);
+        // Sees through transparent voxels to the nearest opaque surface, reporting what the layers
+        // in front of it did to the light. A scene with no transparent materials takes exactly the
+        // old path: the peel stops at the first hit, and the material it fetched to decide that is
+        // handed back rather than fetched again below.
+        PeeledHit peeled = raySceneIntersectPeeled(ray, query, TRANSPARENT_LAYERS, seed);
+        SceneIntersectData hit = peeled.hit;
+
+        // Glow from the transparent layers themselves, already attenuated by whatever sat in front
+        // of each. Added before the throughput below picks up their filtering, since these are in
+        // front of the surface, not behind it.
+#if PEEL_DEBUG
+
+        if (bounce == 0) {
+            vec3 dbg = vec3(0.15);
+            if (peeled.stopReason == 1u) dbg = vec3(0.0, 0.0, 1.0);
+            else if (peeled.stopReason == 2u) dbg = vec3(1.0, 0.0, 0.0);
+            else if (peeled.stopReason == 3u) dbg = vec3(0.0, 1.0, 0.0);
+            else if (peeled.stopReason == 4u) dbg = vec3(1.0, 1.0, 0.0);
+            else if (peeled.stopReason == 5u) dbg = vec3(1.0, 0.0, 1.0);
+            gl_FragData[0] = vec4(dbg, 1.0);
+            gl_FragData[1] = vec4(normalize(hit.normal + vec3(1e-6)), hit.foundBox.size);
+            gl_FragData[2] = vec4(ray.origin + ray.direction * max(hit.rayT, 0.0), 1.0);
+            return;
+        }
+#endif
+        radiance += throughput * peeled.emission;
+        // Everything reached through those layers is filtered by them -- including the sky on a miss,
+        // which is why this is applied before the miss test rather than after it.
+        throughput *= peeled.transmittance;
 
         // Trust the march's own hit data rather than re-intersecting foundBox: a fresh
         // slab test disagrees with the march by ULPs on boundary-exact hits and reports
@@ -416,10 +586,29 @@ void main() {
         // back out of world space is a float32 round trip that shades voxels with their
         // neighbour's colour once a chunk has been moved or rotated. See
         // SceneIntersectData::voxelCoord.
-        vec3 albedo = fetchVoxelColorAtCoord(hit.voxelCoord, hit.headerIndex);
+        // Already fetched by the peel to decide this voxel was the opaque one; refetching it would
+        // be a second palette read per bounce for no new information.
+        VoxelMaterial material = peeled.material;
+        vec3 albedo = material.albedo;
         vec3 normal = normalize(hit.normal);
+        vec3 viewDirection = -ray.direction;
         vec3 position = ray.origin + ray.direction * hit.rayT;
         float originBias = RAY_ORIGIN_BIAS_VOXELS * hit.foundBox.size;
+
+        // --- Emission ------------------------------------------------------------
+        // An emissive voxel adds its radiance to whatever the path has collected so far.
+        // On the primary ray throughput is 1, so an emitter is simply seen; deeper in the
+        // walk it is scaled by everything the path has bounced off, which is what makes a
+        // glowing surface light the wall beside it.
+        //
+        // There is no next-event estimation towards emissive voxels -- only the sun gets a
+        // shadow ray. Nothing double-counts (a path reaching an emitter has exactly one
+        // estimator for it, so no MIS weight belongs here), but a small, bright emitter is
+        // found only by chance and so converges slowly. Sampling them directly needs a list
+        // of emissive voxels the renderer does not build.
+        if (material.emission.r + material.emission.g + material.emission.b > 0.0) {
+            radiance += throughput * material.emission;
+        }
 
         if (bounce == 0) {
             primaryNormal = normal;
@@ -427,6 +616,29 @@ void main() {
             primaryVoxelSize = hit.foundBox.size;
             primaryHit = 1.0;
             primaryDistance = hit.rayT;
+        }
+
+        // --- Lobe setup ----------------------------------------------------------
+        // A metal has no diffuse lobe and tints its reflection with its own colour; a
+        // dielectric keeps its diffuse colour and reflects white. The dielectric's F0 is
+        // scaled by glossiness so that a fully rough entry has no specular lobe at all --
+        // see rule 1 above, which is what keeps existing scenes looking like themselves.
+        float dielectricF0 = 0.04 * material.glossiness;
+        vec3  diffuseAlbedo = albedo * (1.0 - material.metallic);
+        vec3  f0 = mix(vec3(dielectricF0), albedo, material.metallic);
+        float alpha = alphaFromGlossiness(material.glossiness);
+
+        float specularProbability = 0.0;
+        if (max(dielectricF0, material.metallic) > 0.0) {
+            // Pick the lobe in proportion to how much light each carries, so a mirror
+            // rarely wastes a sample on its diffuse lobe and a chalky surface rarely
+            // wastes one on its specular. Clamped away from 0 and 1 because a lobe that
+            // is never sampled but still evaluated in the pdf biases the estimator.
+            float specularLuminance = luminance(f0);
+            float diffuseLuminance = luminance(diffuseAlbedo);
+            specularProbability = clamp(specularLuminance /
+                                        max(specularLuminance + diffuseLuminance, 1e-4),
+                                        0.05, 0.95);
         }
 
         // --- Next event estimation: one shadow ray at the sun -------------------
@@ -437,29 +649,53 @@ void main() {
             shadowRay.origin = position + normal * originBias;
             shadowRay.direction = lightDirection;
 
-            SceneIntersectData shadowHit = raySceneIntersect(shadowRay, walkQuery(SHADOW_MAX_STEPS));
-            if (shadowHit.rayT < 0.0 || shadowHit.foundBox.size < 0.0) {
-                // Lambertian: f = albedo / PI. The estimator is f * cos * L / pdf, and
-                // it is weighted against the chance the bounce sample below would have
-                // found the same disk on its own.
-                float bsdfPdf = cosAtSurface / PI;
+            // Transmittance, not a visibility bit. A visibility test can only say lit or unlit, so
+            // glass cast a fully black shadow however transparent its material was; this carries the
+            // tint through, which is what puts coloured light on the floor under a stained window.
+            // Opaque geometry returns exactly zero, so an opaque scene behaves as it always did.
+            vec3 shadowTransmittance = raySceneTransmittance(shadowRay, walkQuery(SHADOW_MAX_STEPS), 1e30, TRANSPARENT_LAYERS);
+            if (dot(shadowTransmittance, shadowTransmittance) > 0.0) {
+                // The estimator is f * cos * L / pdf, weighted against the chance the
+                // bounce sample below would have found the same disk on its own. For an
+                // untouched material this is the Lambertian arithmetic it always was.
+                vec3 bsdf;
+                float bsdfPdf;
+                evaluateSurface(normal, viewDirection, lightDirection,
+                                diffuseAlbedo, f0, alpha, specularProbability, bsdf, bsdfPdf);
                 float weight = powerHeuristic(sunPdf, bsdfPdf);
-                radiance += weight * throughput * (albedo / PI) * cosAtSurface *
+                radiance += weight * throughput * shadowTransmittance * bsdf * cosAtSurface *
                             sunRadiance / sunPdf;
             }
         }
 
-        // --- BSDF sample: the diffuse random walk -------------------------------
-        vec3 nextDirection = sampleCosineHemisphere(normal, seed);
-        float cosNext = dot(normal, nextDirection);
-        if (cosNext <= 0.0) break;
+        // --- BSDF sample: the random walk ---------------------------------------
+        // One lobe is chosen stochastically and sampled; the throughput update then uses
+        // the COMBINED value and pdf, so the estimator stays correct however the choice
+        // fell. Sampling one lobe and dividing by only that lobe's density is the classic
+        // way to get a glossy surface that is subtly too bright.
+        vec3 nextDirection;
+        if (specularProbability > 0.0 && randomUnit(seed) < specularProbability) {
+            vec3 halfVector = sampleGGXHalfVector(normal, alpha, seed);
+            nextDirection = reflect(-viewDirection, halfVector);
+        } else {
+            nextDirection = sampleCosineHemisphere(normal, seed);
+        }
 
-        // f * cos / pdf = (albedo / PI) * cos / (cos / PI) = albedo. Cosine-weighted
-        // sampling is chosen precisely so this reduces to the one multiply.
-        throughput *= albedo;
+        float cosNext = dot(normal, nextDirection);
+        if (cosNext <= 0.0) break;   // A GGX sample can reflect below the horizon.
+
+        vec3 nextBsdf;
+        float nextPdf;
+        evaluateSurface(normal, viewDirection, nextDirection,
+                        diffuseAlbedo, f0, alpha, specularProbability, nextBsdf, nextPdf);
+        if (nextPdf <= 0.0) break;
+
+        // For an untouched material this reduces to `throughput *= albedo` exactly:
+        // (albedo / PI) * cos / (cos / PI).
+        throughput *= nextBsdf * cosNext / nextPdf;
 
         // What this ray's weight would be if it escapes onto the sun disk.
-        bsdfSunWeight = powerHeuristic(cosNext / PI, sunPdf);
+        bsdfSunWeight = powerHeuristic(nextPdf, sunPdf);
 
         ray.origin = position + normal * originBias;
         ray.direction = nextDirection;
@@ -532,12 +768,16 @@ void main() {
                 shaftRay.origin = scatterPoint;
                 shaftRay.direction = lightDirection;
 
-                SceneIntersectData shaftHit = raySceneIntersect(shaftRay, walkQuery(SHADOW_MAX_STEPS));
-                if (shaftHit.rayT < 0.0 || shaftHit.foundBox.size < 0.0) {
+                // Same swap as the surface shadow ray above, and it earns its keep here: a shaft
+                // passing through coloured glass now carries that colour into the haze, instead of
+                // the window reading as a solid occluder that casts no shaft at all.
+                vec3 shaftTransmittance = raySceneTransmittance(shaftRay, walkQuery(SHADOW_MAX_STEPS), 1e30, TRANSPARENT_LAYERS);
+                if (dot(shaftTransmittance, shaftTransmittance) > 0.0) {
                     // The sun's cone was sampled uniformly, and integrating the disk's radiance
                     // over its own solid angle gives exactly the irradiance sunRadianceColor()
                     // returns -- so the solid angle and its pdf cancel and neither appears here.
-                    radiance += scattering * transmittance * phase * sunIrradiance / distancePdf;
+                    radiance += scattering * transmittance * shaftTransmittance * phase *
+                                sunIrradiance / distancePdf;
                 }
             }
 

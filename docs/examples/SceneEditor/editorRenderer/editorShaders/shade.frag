@@ -33,6 +33,17 @@ $input v_texcoord0
 // it darkens what the sun cannot see and leaves everything else exactly as it was,
 // so a colour judged in the lit part of the scene is still the stored colour.
 //
+// There is a fifth toggle, and it is not one of these. The advanced preview lives
+// entirely in albedo.frag, which writes what it produces -- emission and the
+// specular reflection -- to a target of its own rather than into the colour. All
+// this pass does with it is ADD it, once, after the four multiplies above. That
+// ordering is the whole reason for the separate target: every term here darkens
+// DIFFUSE REFLECTANCE, and multiplying a glow by one of them dims a light source
+// because it happens to sit in a crease, face away from a sun this mode does not
+// have, or point down. An emitter is not shaded by the aids that exist to make
+// unlit geometry legible. With the toggle off the target is zero and every line
+// below behaves exactly as it did before it existed.
+//
 // This runs *before* the accumulate pass, which is what makes the sampled
 // occlusion viable at 16 taps. The estimator's tap pattern is rotated per pixel
 // and per frame, so a still camera averages a different rotation every frame into
@@ -41,8 +52,12 @@ $input v_texcoord0
 // moving you get one frame's 16 taps, which is visibly grainy in the creases and
 // converges the moment you stop.
 //
-// Inputs (FBO 1): 0 = previewColor, 1 = previewNormal, 2 = previewPosition.
-//                 (FBO 5): 3 = occlusion, denoise.frag's filtered ray occlusion.
+// Inputs (FBO 1): 0 = previewColor, 1 = previewNormal, 2 = previewPosition,
+//                 3 = previewGlow.
+//                 (FBO 5): 4 = occlusion, denoise.frag's filtered ray occlusion.
+//                 The slots are the engine's, not this file's: it binds every
+//                 texture of every input framebuffer in order, so FBO 1's fourth
+//                 attachment is what pushed the occlusion buffer from 3 to 4.
 //                 The shadow ray additionally reads the scene itself, through the
 //                 samplers pjv_utils_DDA.sc declares at slots 9-15; the engine binds
 //                 those for every pass, so nothing in render.json changes for it.
@@ -56,7 +71,8 @@ $input v_texcoord0
 SAMPLER2D(previewColor,    0);
 SAMPLER2D(previewNormal,   1);
 SAMPLER2D(previewPosition, 2);
-SAMPLER2D(occlusion,       3);
+SAMPLER2D(previewGlow,     3);
+SAMPLER2D(occlusion,       4);
 
 uniform vec4 windowRes;
 uniform vec4 cameraPos;
@@ -290,12 +306,19 @@ void main() {
     vec4 color    = texture2D(previewColor,    v_texcoord0);
     vec4 geometry = texture2D(previewNormal,   v_texcoord0);
     vec4 surface  = texture2D(previewPosition, v_texcoord0);
+    // Zero unless the advanced preview is on. Nothing below branches on the toggle: adding zero is
+    // the same image, and a uniform branch around one texture fetch is not worth the two code paths.
+    vec3 glow     = texture2D(previewGlow,     v_texcoord0).rgb;
 
     // The background passes through untouched. Shading it would move the backdrop
     // every stored colour is being judged against, which the toggles have no
     // business doing.
+    //
+    // The glow is added even here, because a transparent pane in front of the sky is a background
+    // pixel by this target's reckoning -- the peel found no opaque surface -- and a glowing one
+    // still glows. See albedo.frag's miss path, which is what writes it.
     if (surface.w < 0.5) {
-        gl_FragColor = color;
+        gl_FragColor = vec4(color.rgb + glow, color.a);
         return;
     }
 
@@ -325,5 +348,8 @@ void main() {
         shaded *= sunShadow(surface.xyz, normal, geometry.w);
     }
 
-    gl_FragColor = vec4(shaded, color.a);
+    // Added, not multiplied, and added last -- after every darkening above has had its say about the
+    // diffuse reflectance and none of them has had any say about this. Zero with the advanced
+    // preview off, which makes this line a no-op and the pass byte for byte what it always was.
+    gl_FragColor = vec4(shaded + glow, color.a);
 }

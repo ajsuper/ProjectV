@@ -799,31 +799,66 @@ static const char* RegionSelectorHint(RegionSelector selector) {
 
 // Ceilings, in voxels, on the things one fold can be asked to do at once.
 //
-// PART_MAX_DIMENSION is a per-axis cap on a generated primitive, so the size fields cannot ask for
-// a volume that has to be refused after the fact.
+// **Every number here is derived from a measurement, and they were raised once the measurement
+// stopped being embarrassing.** On this machine, after FoldAccumulator stopped being a node-per-voxel
+// `unordered_map` and pullLeafIntoLattice stopped rebuilding three rotation matrices per cell:
 //
-// PART_MAX_SOURCE_CELLS bounds the *dense snapshot* the resolve takes of a part before it folds
-// anything: one byte of occupancy and four of colour per cell of the part's bounding box, so that
-// the fold's inner loop is a bit test rather than a tree64 descent. Eight million cells is a 200^3
-// part and 40 MB of scratch.
+//   * a walked cell (the snapshot read plus the pull) costs about 22 ns and allocates nothing;
+//   * a cell of the *result* costs about 60 ns, and 79 to 101 bytes across the four structures a
+//     commit puts it through -- the accumulator, the fold's coordinate and colour vectors, the edit
+//     queue applyVoxelSculpt builds, and the undo record's copy. The spread is the accumulator's:
+//     its capacity is a power of two, so the same voxel costs 23 bytes just under a doubling and 45
+//     just over it, and a budget has to be set against the unlucky side.
 //
-// ASSEMBLY_MAX_BAKE_CELLS bounds the cells one part's pull walks at bake time. Under free rotation
-// that is the volume of the part's oriented bounding box, not its voxel count -- which is exactly
-// why the box's volume is the number capped. Nothing is allocated per cell, so this one can afford
-// to be four times the other.
+// So a walk budget buys time and a result budget buys memory, and they are set against different
+// things. The old values were 32 M for both, which read as one decision but was two, and the second
+// of them was the binding one: at the old map's 114-to-136 bytes a voxel, 32 M was already a spike
+// of more than 4 GB, which is not a limit anyone had chosen.
 //
-// ASSEMBLY_MAX_RESULT_CELLS is the whole-stack budget the live resolve runs under, and it is a
-// different quantity from the two above: the per-part caps bound one pull, this bounds the
-// accumulator every pull folds into. A stack of ten parts that each pass their own budget can still
-// produce a result nobody wants to rebuild between frames.
+// PART_MAX_DIMENSION is a per-axis cap on a *generated primitive*, so the size fields cannot ask for
+// a volume that has to be refused after the fact. It is not a cap on what a fold may produce -- it
+// used to be used as both, and that conflation is what refused a scene-sized merge with a message
+// about a limit for one component. See BAKE_MAX_DIMENSION.
 static constexpr int    PART_MAX_DIMENSION = 512;
-static constexpr size_t PART_MAX_SOURCE_CELLS = 8000000;
-static constexpr size_t ASSEMBLY_MAX_BAKE_CELLS = 32000000;
-// The same walk, but for the live resolve, which runs once the asset has come to rest rather than
-// once on commit. Far tighter for that reason: a result that costs a second is not something to look
-// at while arranging. Over budget, the fold steps aside and the sources are drawn instead.
-static constexpr size_t ASSEMBLY_MAX_PREVIEW_CELLS = 2000000;
-static constexpr size_t ASSEMBLY_MAX_RESULT_CELLS = 4000000;
+
+// How far a *baked or folded* form may span, per axis. Far larger than the primitive cap because
+// nothing about it is expensive: a result wider than a chunk's resolution overflows into a Grid on
+// its way in (applyComponentQueue -> convertChunkToGrid), which is a shape the editor now folds like
+// any other, so the extent costs cells to store and nothing to permit. What a big merge actually
+// spends is bounded by the two budgets below, which are the ones that mean something.
+static constexpr int    BAKE_MAX_DIMENSION = 4096;
+
+// PART_MAX_SOURCE_CELLS bounds the *dense snapshot* taken of one leaf before it folds: one byte of
+// occupancy and four of colour per cell of that leaf's bounding box, so the pull's inner loop is a
+// bit test rather than a tree64 descent.
+//
+// Exactly one chunk's worth, which is the point: a leaf is a Chunk, or one block of a Grid, or one
+// chunk under an imported Asset, and a chunk is capped at 256 on an axis. So no leaf the editor can
+// build can exceed this, and it can no longer refuse anything -- it is a guard on a bad number
+// reaching an allocation, not a budget anyone should meet. 84 MB of scratch, one leaf at a time.
+static constexpr size_t PART_MAX_SOURCE_CELLS = 256 * 256 * 256;
+
+// ASSEMBLY_MAX_BAKE_CELLS bounds the cells one part's pull walks on a commit. Under free rotation
+// that is the volume of the part's oriented bounding box, not its voxel count -- which is exactly
+// why the box's volume is the number capped. Nothing is allocated per cell, so this one is bounded
+// by patience rather than memory: at 22 ns a cell it is about five seconds for the largest part in
+// a stack, spent because somebody pressed Merge.
+static constexpr size_t ASSEMBLY_MAX_BAKE_CELLS = 256000000;
+// ...and what that commit may *produce*, which is the memory half: about a 3.8 GB peak typically and
+// 4.9 GB on the wrong side of the accumulator's next doubling, transient, on an action the user
+// asked for. That is the real reason this is not simply enormous, and it is why raising it is not a
+// free edit -- the way to make it bigger is to make a result voxel cheaper (the edit queue's 24
+// bytes and the undo copy's 16 are both avoidable in principle), not to move this number alone.
+static constexpr size_t ASSEMBLY_MAX_BAKE_RESULT_CELLS = 48000000;
+
+// The same two, for the live resolve, which runs on its own once the asset has come to rest rather
+// than once on commit. Tighter for that reason: a result that costs a second is not something to
+// look at while arranging. The walk is ~0.5 s at the figure above, which is what the settle delay is
+// there to hide; the result is ~1.3 GB, rebuilt whenever the stack changes. Over budget, the fold
+// steps aside and the sources are drawn instead -- so these two are a comfort setting, and the merge
+// still goes through at the larger pair above when the preview has given up.
+static constexpr size_t ASSEMBLY_MAX_PREVIEW_CELLS = 24000000;
+static constexpr size_t ASSEMBLY_MAX_RESULT_CELLS = 16000000;
 // How long an asset has to hold still before its result is rebuilt. The rebuild is a bake's worth
 // of work, and doing it on every frame of a drag spends that on pictures nobody looks at -- what the
 // user is reading mid-drag is where the part is going, which the part itself already shows. Long
@@ -1254,6 +1289,18 @@ struct EditorState {
     // darken as it *approaches* a wall rather than only once they touch; it costs four scene rays per
     // pixel to do it, which is why the cheap one is what the editor opens with.
     bool rayAmbientOcclusionEnabled = false;
+    // The fifth button, and the only one that is not a readability aid. The other four darken stored
+    // albedo to make shape legible; this one draws the three material properties the viewport
+    // otherwise ignores — emission, the specular lobe, and transparency — so that authoring them does
+    // not mean switching to Render mode, re-framing under a sun and a sky, and waiting for a path
+    // trace to converge just to see whether a slider did anything.
+    //
+    // Off by default, and it is the most expensive thing on the bar: the primary march becomes a
+    // transparency peel and a glossy voxel spends a second scene ray on its reflection. It is also
+    // the one toggle that changes what the *materials* look like rather than what the geometry looks
+    // like, so it stays something you reach for deliberately — an editor that opened with it on would
+    // be showing a lit-ish image to someone who came to judge stored colours.
+    bool advancedPreviewEnabled = false;
     // A toggle invalidates the accumulated image the same way a camera move does — without this the
     // new setting fades in over the history's 64 frames instead of appearing.
     bool renderSettingsChanged = false;
@@ -1820,7 +1867,7 @@ struct EditorState {
     // already placed. See documentSnapVoxel.
     float snapVoxelOverride = 0.0f;
     // Components the user has deliberately placed off-lattice. Set by an Alt-drag, cleared by the
-    // Inspector's "Snap to grid", and consulted by every snap decision -- see isFreePlacement for
+    // Inspector's "Follows grid", and consulted by every snap decision -- see isFreePlacement for
     // why the freedom has to live here rather than in the gesture that made it.
     std::unordered_set<projv::ComponentHandle> freeComponents;
     // Draw the contents themselves instead of what they resolve to. Off by default, because the
@@ -3118,6 +3165,14 @@ static constexpr uint32_t CHUNK_RESOLUTION_CHOICES[] = { 4, 16, 64, 256 };
 static constexpr int CHUNK_RESOLUTION_CHOICE_COUNT =
     int(sizeof(CHUNK_RESOLUTION_CHOICES) / sizeof(CHUNK_RESOLUTION_CHOICES[0]));
 static_assert(CHUNK_RESOLUTION_CHOICE_COUNT == 4, "Capped at 256; 1024 removed");
+// PART_MAX_SOURCE_CELLS is sized to hold exactly one chunk at the largest resolution offered here,
+// which is what makes it unreachable rather than a budget (see its own comment). Raising the cap
+// above without raising it too would silently turn it back into one, and the symptom -- a row that
+// contributes nothing to a fold -- points nowhere near this line.
+static_assert(PART_MAX_SOURCE_CELLS >= size_t(CHUNK_RESOLUTION_CHOICES[CHUNK_RESOLUTION_CHOICE_COUNT - 1]) *
+                                       size_t(CHUNK_RESOLUTION_CHOICES[CHUNK_RESOLUTION_CHOICE_COUNT - 1]) *
+                                       size_t(CHUNK_RESOLUTION_CHOICES[CHUNK_RESOLUTION_CHOICE_COUNT - 1]),
+              "The dense snapshot must be able to hold one whole chunk at the largest resolution.");
 
 // The width a field should ask for when a text label follows it on the same row.
 //
@@ -3210,8 +3265,9 @@ static ComponentKindStyle componentKindStyle(const projv::Scene& scene, const Ed
     switch (record.kind) {
         case projv::ComponentKind::Grid:
             return { ImVec4(0.30f, 0.72f, 0.68f, 0.85f), "grid",
-                     "Many blocks on one lattice. Boolean ops do not apply to a grid -- folding one\n"
-                     "into a single-lattice .data is a rebuild rather than a bake." };
+                     "Many blocks on one lattice -- what a .data becomes once a sculpt reaches past\n"
+                     "its resolution. Composes like any other row; the fold walks it block by block,\n"
+                     "so a large one is likelier to meet the budget than a single .data would." };
         case projv::ComponentKind::Asset:
             if (record.externalSource) {
                 return { ImVec4(0.68f, 0.50f, 0.88f, 0.90f), "linked",
@@ -3258,6 +3314,26 @@ static void deleteComponent(projv::Scene& scene, EditorState& editor, projv::Com
             std::vector<projv::ChunkHandle>& loose = scene.looseChunks;
             loose.erase(std::remove(loose.begin(), loose.end(), chunkHandle), loose.end());
             scene.looseChunkCount = static_cast<uint32_t>(loose.size());
+        } else if (record.kind == projv::ComponentKind::Grid) {
+            // A grid owns one chunk per populated cell and none of them are in looseChunks, so the
+            // Chunk branch above reaches exactly none of them. Left undone, deleting a grid killed
+            // the component and left its blocks on screen -- which is what a merge that consumes a
+            // grid row does, so the merged .data appeared *on top of* the rows it replaced.
+            //
+            // The SceneGrid record itself stays in scene.grids, emptied. Grid indices are positions
+            // in that vector and every chunk carries one, so removing an entry would renumber every
+            // grid after it -- the same reason a deleted component keeps its slot.
+            if (record.gridIndex >= 0 && size_t(record.gridIndex) < scene.grids.size()) {
+                projv::SceneGrid& grid = scene.grids[size_t(record.gridIndex)];
+                for (int32_t& cell : grid.cellToChunk) {
+                    if (cell >= 0 && size_t(cell) < scene.chunks.size()) {
+                        scene.chunks[cell].alive = false;
+                        projv::releaseBlob(scene, scene.chunks[cell].geometryPoolIndex);
+                    }
+                    cell = -1;
+                }
+                grid.componentHandle = projv::INVALID_COMPONENT_HANDLE;
+            }
         }
         // Copied rather than iterated in place: the recursion below clears the child list it is
         // walking, and the walk has to outlive that.
@@ -4068,6 +4144,38 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
     ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
     ImGui::TextDisabled("Position");
 
+    // --- What these numbers get rounded to, said where the rounding happens -----------------------
+    //
+    // Typing 3.7 into the field above and reading back 4 is this editor's most confusing moment, and
+    // until now the only explanation for it was a checkbox in a different tool's panel. There are two
+    // scopes in the answer and the line carries both: what the document's grid is doing, and what this
+    // one component has to say about it. The component wins, which is why it is stated second.
+    bool isFree = isFreePlacement(editor, handle);
+    {
+        std::string constraint;
+        if (isFree) {
+            constraint = "Free of the grid - these are exact.";
+        } else if (!editor.snapEnabled && !editor.snapRotate90) {
+            constraint = "Grid off - these are exact.";
+        } else {
+            if (editor.snapEnabled) {
+                constraint = "Rounds to the " + std::to_string(editor.snapStepVoxels) + "-voxel grid";
+            }
+            if (editor.snapRotate90) {
+                constraint += constraint.empty() ? "Rotation squares to world" : ", square to world";
+            }
+            constraint += ".";
+        }
+        ImGui::TextDisabled("%s", constraint.c_str());
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("The grid, its step and its size are on the viewport's grid bar, top\n"
+                              "right -- one setting for the gizmo, the arrow keys and these fields\n"
+                              "alike, because all three go down the same transform path.\n\n"
+                              "Hold Alt while dragging to ignore it for one gesture; the two segments\n"
+                              "below are how this component answers it for good.");
+        }
+    }
+
     ImGui::SetNextItemWidth(-1.0f);
     if (ImGui::DragFloat3("##localRot", editor.inspectorEulerDegrees, 0.5f, 0.0f, 0.0f, "%.1f")) {
         projv::core::quat previousRot = component.localRotation;
@@ -4106,13 +4214,17 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
     // itself. That matters more here than for most settings, because the flag arrives *by accident* --
     // an Alt-drag sets it without ever being asked to. Someone who has just discovered their component
     // is off the grid, and does not yet know why, needs to see both what it is and what the other
-    // option is; a lone button reading "Snap to grid" tells them neither. It also retires the
-    // explanatory line this used to need, since two lit-and-dimmed segments say which state is live
-    // more directly than a sentence can.
-    bool isFree = isFreePlacement(editor, handle);
+    // option is; a lone button tells them neither. It also retires the explanatory line this used to
+    // need, since two lit-and-dimmed segments say which state is live more directly than a sentence.
+    //
+    // **"Follows grid", not "Snap to grid".** The old label was word for word the one on the document's
+    // own checkbox, so the editor had two controls with one name at two scopes -- and the two even
+    // disagreed, since a component can be free while the document grid is on. This pair says what the
+    // *component* does; the viewport's grid bar says what the *document* does. Different words for
+    // different scopes is the whole fix.
     float segmentWidth = choiceSegmentWidth();
 
-    if (drawChoiceSegment("Snap to grid", !isFree, segmentWidth)) {
+    if (drawChoiceSegment("Follows grid", !isFree, segmentWidth)) {
         // Reached only from the free state, so there is always a real move to make and record: clearing
         // the flag alone changes nothing until the transform is pushed back through the snapping funnel.
         projv::core::vec3 previousPos = component.localPosition;
@@ -4139,12 +4251,12 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
         ImGui::SetTooltip(isFree
             ? "Round this onto the document grid and let it snap again from now on.\n"
               "Alt-dragging it is what made it free."
-            : "Current: this follows the document grid.");
+            : "Current: this follows the document grid, whatever the grid bar is set to.");
     }
 
     ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
 
-    if (drawChoiceSegment("Place freely", isFree, segmentWidth)) {
+    if (drawChoiceSegment("Free", isFree, segmentWidth)) {
         setFreePlacement(editor, handle, true);
         projv::editor::EditRecord record;
         record.label = "Free " + component.name;
@@ -4187,11 +4299,17 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
     ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
     ImGui::TextDisabled("Scale");
 
-    ImGui::Checkbox("Pivot at center", &editor.pivotAtCenter);
+    // Reported, not offered. The checkbox that was here was the second of two over one bool -- the Move
+    // panel had the other -- and it belongs with the grid on the viewport bar, where it is one control
+    // that every tool can see. What the Inspector still owes the user is the *consequence*, because it
+    // is these two fields whose meaning changes: it is why a rotation moves the Position numbers.
+    ImGui::TextDisabled("Turns about the %s.",
+                        editor.pivotAtCenter ? "bounding-box center" : "local origin");
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Rotate and scale about the selection's bounding-box center.\n"
-                          "Off: about the component's local origin, which for a chunk is its\n"
-                          "minimum corner -- the raw transform.");
+        ImGui::SetTooltip("Set on the viewport's grid bar, top right.\n\n"
+                          "About the center, a rotation or a scale moves Position too, so the\n"
+                          "component turns in place. About the local origin -- for a chunk, its\n"
+                          "minimum corner -- it is the raw transform and Position stays put.");
     }
 
     ImGui::Separator();
@@ -4282,15 +4400,15 @@ static bool drawStackOpControl(const char* id, BooleanOp& op, bool first) {
     return changed;
 }
 
-// Whether a row takes part in the fold: it carries an op, *and* the fold will actually walk it. A
-// `Grid` is skipped by `foldChildren` whatever op it carries -- many blocks across many cells, so
-// folding one is a rebuild rather than a bake -- so it can never be the thing a Subtract composes
-// against, and treating it as one would promote a row that still contributes nothing.
+// Whether a row takes part in the fold: it carries an op. Every kind does now, Grid included --
+// see foldChildren, which walks a grid one populated block at a time. The exclusion that used to
+// live here was the quiet half of a real bug: a Grid answered "no" to this *and* was skipped by the
+// fold, so a stack of two grids -- which is what a pair of .datas becomes the moment either is
+// sculpted past its resolution -- had no contributing row at all and resolved to nothing.
 static bool rowFolds(const projv::Scene& scene, projv::ComponentHandle child) {
     if (child >= scene.components.size()) return false;
     const projv::ComponentRecord& record = scene.components[child];
     if (record.name == "__deleted__") return false;
-    if (record.kind == projv::ComponentKind::Grid) return false;
     return record.op != BooleanOp::None;
 }
 
@@ -4342,9 +4460,10 @@ static void setComponentOpInEditor(projv::Scene& scene, EditorState& editor,
             const projv::ComponentRecord& record = scene.components[sibling];
             if (record.name == "__deleted__") continue;
             if (rowFolds(scene, sibling)) { foldsAbove = true; break; }
-            // Placed, and something the fold would walk if it carried an op. The nearest such row
-            // wins, so the promotion is the smallest change that makes the stack mean something.
-            if (record.kind != projv::ComponentKind::Grid) candidate = sibling;
+            // Placed, and something the fold would walk if it carried an op -- which is every kind
+            // that holds voxels. The nearest such row wins, so the promotion is the smallest change
+            // that makes the stack mean something.
+            candidate = sibling;
         }
         if (!foldsAbove) {
             if (candidate != projv::INVALID_COMPONENT_HANDLE) {
@@ -4954,10 +5073,13 @@ static void drawAssetsPanel(projv::Scene& scene, EditorState& editor) {
         ImGui::TextColored(ImVec4(1.00f, 0.75f, 0.35f, 1.00f),
                            "Too large to resolve live - showing the sources.");
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("The live resolve is capped at %s cells so that arranging stays\n"
-                              "responsive. Baking has a budget four times larger, so this can still\n"
-                              "bake -- you just cannot watch it.",
-                              formatCompactCount(uint32_t(ASSEMBLY_MAX_RESULT_CELLS)).c_str());
+            ImGui::SetTooltip("The live resolve is capped at %s voxels of result and %s cells of\n"
+                              "walk, so that arranging stays responsive. Merging is allowed %s and\n"
+                              "%s, so this can still merge -- you just cannot watch it happen.",
+                              formatCompactCount(uint32_t(ASSEMBLY_MAX_RESULT_CELLS)).c_str(),
+                              formatCompactCount(uint32_t(ASSEMBLY_MAX_PREVIEW_CELLS)).c_str(),
+                              formatCompactCount(uint32_t(ASSEMBLY_MAX_BAKE_RESULT_CELLS)).c_str(),
+                              formatCompactCount(uint32_t(ASSEMBLY_MAX_BAKE_CELLS)).c_str());
         }
     } else if (contributing == 0) {
         ImGui::TextDisabled("Nothing folded yet - every row is set to Place.");
@@ -5202,6 +5324,20 @@ static void invalidatePaletteCaches(EditorState* editor) {
 static void applyMaterialColor(projv::Scene* scene, projv::GPUData* gpuData, EditorState* editor,
                                projv::ComponentHandle component, uint8_t slot, uint32_t packedColor) {
     if (projv::utils::setMaterialColor(*scene, component, slot, packedColor)) {
+        projv::graphics::updatePaletteEntry(*scene, *gpuData, component, slot);
+        editor->cameraMovedByInterface = true;
+    }
+}
+
+// The property words, by the same cheap route and for the same reason: a slider drag emits one of
+// these per frame, and none of them can move a palette offset. `cameraMovedByInterface` is what
+// throws away the accumulated Render-mode image — the material it was averaging just changed, so
+// that history describes a scene that no longer exists.
+static void applyMaterialProperties(projv::Scene* scene, projv::GPUData* gpuData, EditorState* editor,
+                                    projv::ComponentHandle component, uint8_t slot,
+                                    uint32_t packedEmission, uint32_t packedSurface, uint32_t packedExtra) {
+    if (projv::utils::setMaterialProperties(*scene, component, slot,
+                                            packedEmission, packedSurface, packedExtra)) {
         projv::graphics::updatePaletteEntry(*scene, *gpuData, component, slot);
         editor->cameraMovedByInterface = true;
     }
@@ -5622,6 +5758,160 @@ static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, Edito
             ImGui::EndTabItem();
         }
 
+        // --- Surface properties ---
+        // Everything in Material's three property words other than the colour. They are all stored
+        // and all saved; only some of them are drawn, and the panel says which rather than letting
+        // a slider silently do nothing. Refraction is the one still in that category -- a bent ray is
+        // a new ray, not a march that carries on straight through, which no traversal here does.
+        //
+        // Everything else on this tab is now visible without leaving the Viewport: the advanced
+        // preview toggle on the viewport's bar draws emission, the specular lobe and transparency,
+        // which is what these sliders are for. It is off by default, so the notes below say where to
+        // find it rather than assuming the reader has it on.
+        if (ImGui::BeginTabItem("Surface")) {
+            // Its own scrolling child: the detail area below the swatch grid is sized for the
+            // colour picker, and this tab has more in it than that. Without the child the whole
+            // Palette window scrolls, which drags the swatch grid off the top.
+            ImGui::BeginChild("##surfaceProperties", ImVec2(0.0f, 0.0f));
+            // Leave room for the labels ImGui draws to the right of each slider; the panel is a
+            // narrow column and the default full-width item pushes them out of sight.
+            ImGui::PushItemWidth(-90.0f);
+
+            // Read the stored words once, before anything below can change them: the undo record
+            // needs the value the drag started from, not the one it is passing through.
+            const uint32_t previousEmission = material.packedEmission;
+            const uint32_t previousSurface  = material.packedSurface;
+            const uint32_t previousExtra    = material.packedExtra;
+
+            float glossiness      = projv::materialGlossiness(material);
+            float metallic        = projv::materialMetallic(material);
+            float transparency    = projv::materialTransparency(material);
+            float ior             = projv::materialIOR(material);
+            float emissiveStrength = projv::materialEmissiveStrength(material);
+            float transmission    = projv::materialTransmission(material);
+            float emission[3];
+            projv::unpackRGB10(material.packedEmission, emission[0], emission[1], emission[2]);
+
+            bool changed = false;
+
+            ImGui::SeparatorText("Reflection");
+            changed |= ImGui::SliderFloat("Glossiness", &glossiness, 0.0f, 1.0f, "%.3f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("0 is fully rough and shades exactly as this renderer always has.\n"
+                                  "Raising it grows a sharpening specular highlight.");
+            }
+            changed |= ImGui::SliderFloat("Metallic", &metallic, 0.0f, 1.0f, "%.3f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("A metal has no diffuse colour and tints its reflection with its\n"
+                                  "own albedo. Pair it with glossiness to get a polished metal.");
+            }
+
+            ImGui::SeparatorText("Emission");
+            // Left black, an emitter takes the albedo's colour, which is what a glowing version of a
+            // surface usually wants — and it is what keeps Strength from being a control that does
+            // nothing on a material nobody has picked an emission colour for. The swatch shows the
+            // colour that will actually be emitted rather than the stored zero, so the fallback is
+            // visible instead of being a thing you have to know.
+            ImGui::ColorButton("##effectiveEmission",
+                               materialSwatchColor(projv::materialEffectiveEmissionColor(material)),
+                               ImGuiColorEditFlags_NoTooltip,
+                               ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()));
+            ImGui::SameLine();
+            ImGui::TextDisabled(material.packedEmission != 0u ? "own colour" : "follows albedo");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("A black emission colour emits in the albedo's colour.\n"
+                                  "Pick one to emit something else — a dark surface that\n"
+                                  "glows brightly needs its own, since albedo times\n"
+                                  "strength would be zero.");
+            }
+            changed |= ImGui::ColorEdit3("Emission colour", emission,
+                                         ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+            // Logarithmic because the byte behind this is: the useful range runs from a faint glow
+            // to something that lights a room, and a linear slider spends most of its travel above
+            // anything anyone sets.
+            changed |= ImGui::SliderFloat("Strength", &emissiveStrength, 0.0f, 245.0f, "%.3f",
+                                          ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Radiance multiplier for the emission colour. Zero is not an\n"
+                                  "emitter at all.\n\n"
+                                  "The Viewport's advanced preview draws the glow itself straight\n"
+                                  "away, which is the quick way to judge this slider. What it does\n"
+                                  "not draw is the emitter LIGHTING anything -- that needs a path,\n"
+                                  "and Render mode is where paths are.\n\n"
+                                  "Render mode finds emitters only by chance -- there is no direct\n"
+                                  "light sampling for them -- so a small bright emitter takes many\n"
+                                  "more frames to settle than the sun does.");
+            }
+
+            ImGui::SeparatorText("Transmission");
+            changed |= ImGui::SliderFloat("Transparency", &transparency, 0.0f, 1.0f, "%.3f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("How much light passes through the SURFACE rather than\n"
+                                  "interacting with it. 0 is opaque, 1 is invisible.\n\n"
+                                  "Charged once on entering the material, not per voxel, so a\n"
+                                  "thick body does not darken with depth. The light that does\n"
+                                  "NOT pass through is shaded normally, which is how you get a\n"
+                                  "smooth reflection and transparency at once: pair a high\n"
+                                  "transparency with a high glossiness for water.\n\n"
+                                  "Inside the material the albedo tints by distance travelled,\n"
+                                  "shifting the colour without darkening it, so deep tinted\n"
+                                  "glass gets more saturated rather than black.");
+            }
+            ImGui::TextDisabled("Refraction is stored, not yet rendered:");
+            ImGui::TextDisabled("a bent ray is a new ray, not a march");
+            ImGui::TextDisabled("that carries on straight through.");
+            changed |= ImGui::SliderFloat("Transmission", &transmission, 0.0f, 1.0f, "%.3f");
+            changed |= ImGui::SliderFloat("IOR", &ior, 1.0f, 2.99f, "%.3f");
+
+            if (changed) {
+                uint32_t newEmission = projv::packRGB10(emission[0], emission[1], emission[2]);
+                uint32_t newSurface  = projv::packSurfaceWord(glossiness, metallic, transparency, ior);
+                uint32_t newExtra    = projv::packExtraWord(emissiveStrength, transmission,
+                                                            projv::materialFlags(material));
+
+                if (newEmission != previousEmission || newSurface != previousSurface ||
+                    newExtra != previousExtra) {
+                    projv::ComponentHandle component = editor.paletteComponent;
+                    applyMaterialProperties(&scene, &gpuData, &editor, component, slot,
+                                            newEmission, newSurface, newExtra);
+
+                    // One drag is one undo step, exactly as the colour picker's is: every frame of
+                    // it coalesces into the entry the drag opened, which still holds the values the
+                    // user started from. One key for all of these controls, so dragging glossiness
+                    // and then metallic without pausing is one step -- they are one stored word.
+                    projv::Scene* scenePointer = &scene;
+                    projv::GPUData* gpuPointer = &gpuData;
+                    EditorState* editorPointer = &editor;
+                    projv::editor::EditRecord record;
+                    record.label = "Edit surface of slot " + std::to_string(slot);
+                    record.coalesceKey = "surface:" + std::to_string(component) + ":" + std::to_string(slot);
+                    record.undo = [=] { applyMaterialProperties(scenePointer, gpuPointer, editorPointer,
+                                                                component, slot, previousEmission,
+                                                                previousSurface, previousExtra); };
+                    record.redo = [=] { applyMaterialProperties(scenePointer, gpuPointer, editorPointer,
+                                                                component, slot, newEmission,
+                                                                newSurface, newExtra); };
+                    editor.history.record(std::move(record), ImGui::GetTime());
+                }
+            }
+
+            ImGui::Spacing();
+            // Where to look to see any of this. The Viewport draws stored albedo and nothing else
+            // until the advanced preview is switched on, so a slider on this tab appears to do
+            // nothing at all by default -- which is the confusion this note exists to end.
+            ImGui::TextDisabled("Glossiness, metallic, emission and");
+            ImGui::TextDisabled("transparency are drawn by Render mode,");
+            ImGui::TextDisabled("and in the Viewport by the advanced");
+            ImGui::TextDisabled("preview (last button on the bar at the");
+            ImGui::TextDisabled("bottom of the scene). Without it the");
+            ImGui::TextDisabled("Viewport shows stored albedo only, so");
+            ImGui::TextDisabled("these sliders will not change it.");
+
+            ImGui::PopItemWidth();
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+
         if (ImGui::BeginTabItem("Voxels")) {
             // The breakdown walks every blob of the component, so it is computed when the selection
             // changes rather than every frame this tab is open.
@@ -5695,18 +5985,29 @@ static constexpr float SETTINGS_BAR_SPACING = 6.0f;
 static constexpr float SETTINGS_BAR_PADDING = 6.0f;      // Backing panel, around the buttons.
 static constexpr float SETTINGS_BAR_MARGIN = 10.0f;      // Gap from the edge of the image.
 
-// The chrome shared by both strips: an invisible button of the given size at the current cursor
-// position, a rounded background that fills in when the button is on and lights up under the cursor
-// when it is not, and the caller's icon centred in it. Tooltips are the caller's job — the two
-// strips have different things to say.
-static bool drawViewportIconButton(const char* id, float size, bool active,
-                                   void (*drawIcon)(ImDrawList*, ImVec2, float, bool),
-                                   bool& outHovered) {
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
-    ImVec2 buttonMin = ImGui::GetCursorScreenPos();
-    ImVec2 buttonMax = ImVec2(buttonMin.x + size, buttonMin.y + size);
+// The two shades every icon below is drawn in. Selected icons sit on a filled blue background and
+// are drawn bright; unselected ones are dimmed, so a strip reads as one row of the same objects
+// with exactly one of them lit rather than as five unrelated pictures. Declared ahead of the button
+// chrome because the value button draws its text in the same ink its neighbours' icons use.
+static ImU32 iconInk(bool active) {
+    return active ? IM_COL32(238, 242, 250, 255) : IM_COL32(152, 158, 170, 205);
+}
+static ImU32 iconInkDim(bool active) {
+    return active ? IM_COL32(190, 205, 230, 235) : IM_COL32(120, 126, 138, 175);
+}
 
-    ImGui::InvisibleButton(id, ImVec2(size, size));
+// The chrome shared by every overlay strip button: an invisible button of the given size at the
+// current cursor position, and a rounded background that fills in when the button is on and lights up
+// under the cursor when it is not. What goes *inside* it is the caller's — an icon for most, a number
+// for the grid strip's step — so the hit test and the fill are split out here rather than duplicated
+// once per button shape. Tooltips are the caller's job too: the strips have different things to say.
+static bool drawViewportButtonChrome(const char* id, float width, float height, bool active,
+                                     bool& outHovered, ImVec2& outMin, ImVec2& outMax) {
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    outMin = ImGui::GetCursorScreenPos();
+    outMax = ImVec2(outMin.x + width, outMin.y + height);
+
+    ImGui::InvisibleButton(id, ImVec2(width, height));
     outHovered = ImGui::IsItemHovered();
     bool clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
 
@@ -5719,22 +6020,39 @@ static bool drawViewportIconButton(const char* id, float size, bool active,
         background = ImGui::IsItemActive() ? IM_COL32(90, 96, 110, 235) : IM_COL32(72, 78, 92, 200);
     }
     if (background != IM_COL32(0, 0, 0, 0)) {
-        drawList->AddRectFilled(buttonMin, buttonMax, background, 5.0f);
+        drawList->AddRectFilled(outMin, outMax, background, 5.0f);
     }
+    return clicked;
+}
 
-    drawIcon(drawList, ImVec2((buttonMin.x + buttonMax.x) * 0.5f, (buttonMin.y + buttonMax.y) * 0.5f),
+// A square button with the caller's icon centred in it.
+static bool drawViewportIconButton(const char* id, float size, bool active,
+                                   void (*drawIcon)(ImDrawList*, ImVec2, float, bool),
+                                   bool& outHovered) {
+    ImVec2 buttonMin;
+    ImVec2 buttonMax;
+    bool clicked = drawViewportButtonChrome(id, size, size, active, outHovered, buttonMin, buttonMax);
+    drawIcon(ImGui::GetWindowDrawList(),
+             ImVec2((buttonMin.x + buttonMax.x) * 0.5f, (buttonMin.y + buttonMax.y) * 0.5f),
              size, active);
     return clicked;
 }
 
-// The two shades every icon below is drawn in. Selected icons sit on a filled blue background and
-// are drawn bright; unselected ones are dimmed, so the strip reads as one row of the same objects
-// with exactly one of them lit rather than as five unrelated pictures.
-static ImU32 iconInk(bool active) {
-    return active ? IM_COL32(238, 242, 250, 255) : IM_COL32(152, 158, 170, 205);
-}
-static ImU32 iconInkDim(bool active) {
-    return active ? IM_COL32(190, 205, 230, 235) : IM_COL32(120, 126, 138, 175);
+// The same chrome with a short string instead of a drawing, and wider than it is tall to hold one.
+// The grid strip's step is a *value* — "1 vx", "32 vx" — and there is no icon for a number that is
+// better than the number. Everything else in these strips is a picture because everything else in
+// them is a state rather than a quantity.
+static bool drawViewportValueButton(const char* id, float width, float height, bool active,
+                                    const char* text, bool& outHovered) {
+    ImVec2 buttonMin;
+    ImVec2 buttonMax;
+    bool clicked = drawViewportButtonChrome(id, width, height, active, outHovered, buttonMin, buttonMax);
+    ImVec2 textSize = ImGui::CalcTextSize(text);
+    ImGui::GetWindowDrawList()->AddText(
+        ImVec2((buttonMin.x + buttonMax.x - textSize.x) * 0.5f,
+               (buttonMin.y + buttonMax.y - textSize.y) * 0.5f),
+        iconInk(active), text);
+    return clicked;
 }
 
 // --- Tool icons -------------------------------------------------------------
@@ -6205,16 +6523,15 @@ static void drawMoveToolSettings(projv::Scene& scene, EditorState& editor) {
         ImGui::SetTooltip("Three arrows to translate along the world axes and three rings to rotate\n"
                           "about them, drawn at the selection's pivot.");
     }
-    ImGui::Checkbox("Pivot at center", &editor.pivotAtCenter);
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Rotate and scale about the selection's bounding-box center.\n"
-                          "Off: about the component's local origin, which for a chunk is its\n"
-                          "minimum corner -- the raw transform.");
-    }
+
+    // "Pivot at center" used to be here *and* in the Inspector, two checkboxes over one bool. It is on
+    // the viewport's grid bar now, beside the snapping it shares a scope with -- both are properties of
+    // how a transform is applied rather than of any one tool or any one object.
 
     ImGui::Spacing();
     ImGui::TextWrapped("Drag a handle to transform, or type exact values into the Inspector's "
-                       "Position, Rotation and Scale fields - the two drive the same transform.");
+                       "Position, Rotation and Scale fields - the two drive the same transform, "
+                       "and the viewport's grid bar constrains both the same way.");
 }
 
 // World units per voxel for a component, or 0 when it has no voxel space to ask about. What both
@@ -6657,94 +6974,9 @@ static void drawPlaceToolSettings(projv::Scene& scene, EditorState& editor) {
                             "so it does not resize.");
     }
 
-    // --- Snapping, beside the rotation it governs -----------------------------------------------
-    //
-    // This used to live on the container, in a panel on the far side of the screen from the arrow
-    // keys and the gizmo that turn things. A setting about *how you place* belongs with the tool
-    // that places, and this is that tool.
-    ImGui::Spacing();
-    if (ImGui::Checkbox("Snap to grid", &editor.snapEnabled)) {
-        for (Resolve& each : editor.resolves) invalidateResolve(editor, each);
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Translation in whole steps of the document grid -- one grid for the whole\n"
-                          "document, so two objects in different assets line up with each other and\n"
-                          "not merely with their own container.\n\n"
-                          "Hold Alt while dragging to ignore it for that gesture.");
-    }
-
-    ImGui::BeginDisabled(!editor.snapEnabled);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
-    if (ImGui::DragInt("##snapStep", &editor.snapStepVoxels, 0.2f, 1, 256, "%d vox")) {
-        editor.snapStepVoxels = std::max(1, std::min(256, editor.snapStepVoxels));
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("How far one step is. One voxel is right for detailing; 16, 32 or 64 is\n"
-                          "what standing modular pieces against each other actually wants.");
-    }
-    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-    ImGui::TextDisabled("Step");
-
-    // The grid's own size, shown as the number it currently is and editable into a pinned one. A
-    // document that will later import something finer wants it pinned -- see documentSnapVoxel.
-    float gridVoxel = documentSnapVoxel(scene, editor);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
-    if (ImGui::DragFloat("##snapVoxel", &gridVoxel, 0.001f, 0.0f, 0.0f, "%.4f")) {
-        editor.snapVoxelOverride = gridVoxel > 0.0f ? gridVoxel : 0.0f;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("The grid's voxel size. Derived from the finest voxel scale in the\n"
-                          "document until you set it, after which it is pinned -- so importing a\n"
-                          "finer asset later cannot re-phase the grid under what is already placed.");
-    }
-    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-    ImGui::TextDisabled("Grid%s", editor.snapVoxelOverride > 0.0f ? " (pinned)" : "");
-    ImGui::EndDisabled();
-
-    // Its own control, because the two are wanted separately: a tree at its own angle on a grid
-    // position, or a wall square to the world but deliberately off it.
-    if (ImGui::Checkbox("Square to world", &editor.snapRotate90)) {
-        for (Resolve& each : editor.resolves) invalidateResolve(editor, each);
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Rotation in multiples of 90 degrees about a world axis. On, the fold is a\n"
-                          "1:1 remap: every source voxel lands on exactly one result cell.");
-    }
-
-    // Stated plainly rather than as a warning. Free rotation is the point of the setting, not a
-    // degraded fallback, and telling a user their deliberate choice is a mistake is worse than
-    // saying nothing.
-    ImGui::TextDisabled("%s", editor.snapRotate90
-        ? "Exact: every voxel lands on one cell."
-        : "Free rotation - the fold rasterises into\nthe asset's lattice.");
-
-    // The mass pull onto the grid, as its own button. It used to fire as a side effect of ticking
-    // the checkbox, which made turning a setting on move things -- and, now that freedom is recorded
-    // per component, would have silently overridden every deliberate pose in the asset. Asking for it
-    // is a different act from enabling it, so it is a different control.
-    if (node < scene.components.size() && !scene.components[node].children.empty()) {
-        ImGui::BeginDisabled(!editor.snapEnabled && !editor.snapRotate90);
-        if (ImGui::Button("Pull contents onto the grid")) {
-            size_t pulled = 0;
-            for (projv::ComponentHandle child : scene.components[node].children) {
-                if (child >= scene.components.size()) continue;
-                if (scene.components[child].name == "__deleted__") continue;
-                setFreePlacement(editor, child, false);
-                const projv::ComponentRecord& record = scene.components[child];
-                applyComponentTransform(&scene, &editor, child, record.localPosition,
-                                        record.localRotation, record.localScale);
-                pulled++;
-            }
-            for (Resolve& each : editor.resolves) invalidateResolve(editor, each);
-            editor.statusMessage = "Pulled " + std::to_string(pulled) + " item(s) onto the grid.";
-        }
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Round everything in the open asset onto the grid now, and clear any\n"
-                              "free placement on it. A half-snapped list is the confusing state, so\n"
-                              "this is the one gesture that resolves it.");
-        }
-    }
+    // Snapping used to live here -- the checkbox, the step, the grid size, "Square to world" and the
+    // mass pull. It governs every transform in the editor, not just the ones this tool makes, so it
+    // is on the viewport's grid bar now. See drawViewportGridBar for why.
 
     // --- The op: the selection's own, or the template's, on the same rule as the shape -----------
     //
@@ -7026,6 +7258,22 @@ static uint64_t packVoxelKey(projv::core::ivec3 coord) {
     return (uint64_t(uint32_t(coord.x) & 0x1FFFFFu) << 42) |
            (uint64_t(uint32_t(coord.y) & 0x1FFFFFu) << 21) |
            (uint64_t(uint32_t(coord.z) & 0x1FFFFFu));
+}
+
+// ...and back, exactly, over the same range the packing is exact on. The masking above is a truncation
+// rather than a hash, so each field is the coordinate's low 21 bits and sign-extending from bit 20
+// recovers it -- inside +/-1,048,575 this is a true inverse, and outside it the packing had already
+// aliased and there was nothing to recover.
+//
+// Worth having because it takes the coordinate *out* of the fold's accumulator: a key that can be
+// unpacked is a key that does not need its own ivec3 stored beside it, which is twelve bytes per
+// voxel of a structure that holds one entry per voxel of the result.
+static projv::core::ivec3 unpackVoxelKey(uint64_t key) {
+    auto field = [](uint64_t bits) {
+        int32_t value = int32_t(uint32_t(bits) & 0x1FFFFFu);
+        return value >= 0x100000 ? value - 0x200000 : value;
+    };
+    return projv::core::ivec3(field(key >> 42), field(key >> 21), field(key));
 }
 
 // Everything needed to turn a component-space voxel coordinate back into the chunk that holds it,
@@ -9206,6 +9454,53 @@ static void centrePrimitiveInChunk(std::vector<projv::core::ivec3>& coords, cons
     for (projv::core::ivec3& coord : coords) coord += offset;
 }
 
+// One populated block of a Grid: the chunk holding it, and where its (0,0,0) sits in the *component's*
+// continuous voxel space.
+//
+// That space is the one every other voxel helper here speaks -- resolveComponentVoxelSpace defines it
+// for a Grid exactly as for a Chunk, anchored on the component's world position -- so a block's own
+// coordinates need only this offset added to join it. It is chunkVoxelToComponentCoord's mapping with
+// the local coordinate left out, which is where the arithmetic below comes from.
+struct GridBlock {
+    projv::ChunkHandle chunk = 0;
+    projv::core::ivec3 origin = projv::core::ivec3(0);
+};
+
+// The populated blocks of a Grid, in cell order. Empty for every other kind, which is what lets the
+// callers below write "grid path, else single-leaf path" without asking the kind twice.
+//
+// Iterating the populated cells rather than the grid's box is the whole reason a grid can be folded
+// at all: a voxelised world is mostly empty cells, and its bounding box is orders of magnitude larger
+// than its geometry. Cost here is the geometry.
+static std::vector<GridBlock> gridBlocksOf(const projv::Scene& scene,
+                                           projv::ComponentHandle component) {
+    using projv::core::ivec3;
+    std::vector<GridBlock> blocks;
+    if (component >= scene.components.size()) return blocks;
+    const projv::ComponentRecord& record = scene.components[component];
+    if (record.kind != projv::ComponentKind::Grid) return blocks;
+    if (record.gridIndex < 0 || size_t(record.gridIndex) >= scene.grids.size()) return blocks;
+
+    const projv::SceneGrid& grid = scene.grids[size_t(record.gridIndex)];
+    if (grid.dims.x <= 0 || grid.dims.y <= 0 || grid.dims.z <= 0) return blocks;
+    size_t stride = size_t(grid.dims.x), slice = stride * size_t(grid.dims.y);
+
+    for (size_t linear = 0; linear < grid.cellToChunk.size(); linear++) {
+        int32_t chunkIndex = grid.cellToChunk[linear];
+        if (chunkIndex < 0 || size_t(chunkIndex) >= scene.chunks.size()) continue;
+        const projv::Chunk& chunk = scene.chunks[size_t(chunkIndex)];
+        if (!chunk.alive) continue;
+        int32_t resolution = int32_t(chunk.header.resolution);
+        if (resolution <= 0) continue;
+
+        ivec3 cell(int(linear % stride), int((linear / stride) % size_t(grid.dims.y)),
+                   int(linear / slice));
+        blocks.push_back({ projv::ChunkHandle(chunkIndex),
+                           (grid.originCellCoord + cell) * resolution });
+    }
+    return blocks;
+}
+
 // A part's geometry, read back out of the scene into a dense box: one occupancy byte and one colour
 // per cell.
 //
@@ -9219,6 +9514,12 @@ static void centrePrimitiveInChunk(std::vector<projv::core::ivec3>& coords, cons
 // throw those edits away.
 struct PartSnapshot {
     bool valid = false;
+    // The box asked for was past PART_MAX_SOURCE_CELLS, so nothing was read. Distinct from a plain
+    // `!valid`, which also means "there is nothing in there" -- and the difference is the difference
+    // between a stack that folds to nothing because that is what its ops say and one that folds to
+    // nothing because a row was too large to look at. Only the second has a fix the user can act on,
+    // and reporting them alike is how a too-large row came to contribute silently.
+    bool overBudget = false;
     projv::core::ivec3 boundsMin = projv::core::ivec3(0);
     projv::core::ivec3 boundsMax = projv::core::ivec3(0);   // Inclusive.
     projv::core::ivec3 size = projv::core::ivec3(0);
@@ -9252,7 +9553,11 @@ static PartSnapshot snapshotComponentBox(const projv::Scene& scene, projv::Compo
 
     ivec3 scanSize = scanMax - scanMin + ivec3(1);
     size_t cells = size_t(scanSize.x) * size_t(scanSize.y) * size_t(scanSize.z);
-    if (cells == 0 || cells > PART_MAX_SOURCE_CELLS) return snapshot;
+    if (cells == 0) return snapshot;
+    if (cells > PART_MAX_SOURCE_CELLS) {
+        snapshot.overBudget = true;
+        return snapshot;
+    }
 
     std::vector<uint8_t> occupied(cells, 0);
     std::vector<uint32_t> colors(cells, 0);
@@ -9365,6 +9670,19 @@ static void setComponentRendered(projv::Scene& scene, EditorState& editor,
                         loose.erase(std::remove(loose.begin(), loose.end(), chunkHandle), loose.end());
                     }
                     scene.looseChunkCount = static_cast<uint32_t>(loose.size());
+                    anyChanged = true;
+                }
+            }
+        } else if (record.kind == projv::ComponentKind::Grid) {
+            // A grid's blocks are not in the loose list -- the renderer reaches them through
+            // cellToChunk -- so un-listing has no grid equivalent and the flag is the whole of it.
+            // Blanking cellToChunk instead would be the same mistake as clearing `alive`, one level
+            // up: every geometry read for a grid goes through that map, so a hidden grid would fold
+            // to nothing and the result it was hidden behind would lose it. See SceneGrid::rendered.
+            if (record.gridIndex >= 0 && size_t(record.gridIndex) < scene.grids.size()) {
+                projv::SceneGrid& grid = scene.grids[size_t(record.gridIndex)];
+                if (grid.rendered != rendered) {
+                    grid.rendered = rendered;
                     anyChanged = true;
                 }
             }
@@ -9805,10 +10123,12 @@ static uint32_t currentToolColor(const projv::Scene& scene, const EditorState& e
 // signed axis permutation and every lattice cell in the box maps to exactly one source cell -- so one
 // code path serves both modes.
 
-// Defined with the sync code below: it walks the tree64, which the fold needs for an
-// imported asset's leaves and the loader needs for the same reason.
+// Defined with the sync code below: they walk the tree64, which the fold needs for an imported
+// asset's leaves and for a grid's blocks, and the loader needs for the same reason.
 static bool componentContentBounds(const projv::Scene& scene, projv::ComponentHandle component,
                                    projv::core::ivec3& minimum, projv::core::ivec3& maximum);
+static bool chunkContentBounds(const projv::Scene& scene, projv::ChunkHandle chunkHandle,
+                               projv::core::ivec3& minimum, projv::core::ivec3& maximum);
 
 struct PartCells {
     bool valid = false;
@@ -9861,6 +10181,29 @@ static PartCells pullPartIntoLattice(const projv::Scene& scene, const Part& part
         return cells;
     }
 
+    // A Grid part is the union of its populated blocks, and it is walked one block at a time for the
+    // same reason an Asset is walked one leaf at a time: the alternative is a single dense snapshot
+    // over the grid's whole bounding box, and a grid's box is mostly empty cells -- a two-block grid
+    // standing at opposite corners of a world would ask for the world. Per block, the box is one
+    // chunk's worth, which is a size the fold already deals in.
+    //
+    // The blocks share one voxel space (the component's), so every block's cells land in the same
+    // lattice with no seam between them, and disjoint content boxes mean no cell is pulled twice.
+    if (scene.components[part.component].kind == projv::ComponentKind::Grid) {
+        cells.valid = true;
+        for (const GridBlock& block : gridBlocksOf(scene, part.component)) {
+            ivec3 low(0), high(-1);
+            if (!chunkContentBounds(scene, block.chunk, low, high)) continue;
+            if (!pullLeafIntoLattice(scene, part.component, low + block.origin, high + block.origin,
+                                     lattice, budget, cells)) {
+                cells.overBudget = true;
+                cells.valid = false;
+                return cells;
+            }
+        }
+        return cells;
+    }
+
     if (!pullLeafIntoLattice(scene, part.component, part.contentMin, part.contentMax, lattice,
                              budget, cells)) {
         cells.overBudget = true;
@@ -9876,6 +10219,11 @@ static bool pullLeafIntoLattice(const projv::Scene& scene, projv::ComponentHandl
     using namespace projv::core;
 
     PartSnapshot snapshot = snapshotComponentBox(scene, leaf, contentMin, contentMax);
+    // A box too large to snapshot is a refusal, not an empty answer. Read as empty -- which is what
+    // this did, because `!valid` covers both -- the row contributed nothing and the stack folded to
+    // nothing with no stated cause, which is exactly the failure this whole path is here to end.
+    // Returning false makes it "past the bake budget", which names a limit and a way around it.
+    if (snapshot.overBudget) return false;
     if (!snapshot.valid) {
         // An empty leaf is a valid answer -- an empty cell set -- rather than a failure. A subtract
         // by nothing must leave the accumulator alone, not abandon the fold.
@@ -9918,15 +10266,45 @@ static bool pullLeafIntoLattice(const projv::Scene& scene, projv::ComponentHandl
     cells.walkCells += walk;
     if (cells.walkCells > budget) return false;
 
+    // **The pull's transform, built once instead of per cell.**
+    //
+    // The loop below used to read
+    //     worldToComponentVoxel(partSpace, componentVoxelToWorld(lattice, cell))
+    // which is exactly right and was costing about 135 ns a cell -- because each of those two helpers
+    // builds a rotation matrix from a quaternion on entry, and one of them transposes it. Three
+    // matrix constructions per cell, all of them rebuilding the same constants, dwarfed the work they
+    // were set up for. That number is what every budget in this file was really measuring, and it is
+    // why they had to be as low as they were.
+    //
+    // Composed here instead: lattice cell -> part voxel is one affine map, so it is one 3x3 and one
+    // offset for the whole walk. Reassociating the arithmetic moves the result by an ulp or so, and
+    // the half-cell offset below is what makes that harmless -- a cell centre sits half a voxel from
+    // the floor boundary that decides its answer, which is a margin no rounding here comes near.
+    mat3 latticeRotation = glm::mat3_cast(lattice.rotation);
+    mat3 inversePartRotation = glm::transpose(partRotation);
+    float scale = lattice.voxelSize / partSpace.voxelSize;
+    mat3 latticeToPart = inversePartRotation * latticeRotation * scale;
+    vec3 latticeToPartOffset = inversePartRotation *
+                               (lattice.latticeOrigin - partSpace.latticeOrigin) / partSpace.voxelSize;
+
     cells.coords.reserve(cells.coords.size() + snapshot.count);
     cells.colors.reserve(cells.colors.size() + snapshot.count);
     for (int z = cellMin.z; z <= cellMax.z; z++) {
         for (int y = cellMin.y; y <= cellMax.y; y++) {
-            for (int x = cellMin.x; x <= cellMax.x; x++) {
+            // Everything that does not vary along the row, lifted out of it. The x term is the
+            // matrix's first column, so stepping x is three adds -- but it is added to a row base
+            // recomputed exactly here rather than accumulated across the row, so a long row cannot
+            // drift away from the answer the per-cell form would have given.
+            vec3 rowBase = latticeToPartOffset +
+                           latticeToPart * (vec3(float(cellMin.x), float(y), float(z)) -
+                                            vec3(lattice.coordOrigin) + vec3(0.5f));
+            for (int x = cellMin.x; x <= cellMax.x; x++, rowBase += latticeToPart[0]) {
                 ivec3 cell(x, y, z);
                 // The pull: this cell's centre, back through the part's transform, into the part's
                 // own voxel space.
-                ivec3 source = worldToComponentVoxel(partSpace, componentVoxelToWorld(lattice, cell));
+                ivec3 source(int(std::floor(rowBase.x)), int(std::floor(rowBase.y)),
+                             int(std::floor(rowBase.z)));
+                source += partSpace.coordOrigin;
                 if (!snapshot.inBounds(source)) continue;
                 size_t index = snapshot.index(source);
                 if (!snapshot.occupied[index]) continue;
@@ -9966,10 +10344,141 @@ static bool cachedPartCells(const projv::Scene& scene, Part& part,
     return !part.cacheOverBudget;
 }
 
+// The fold's accumulator: one entry per voxel of the result so far, keyed by packed coordinate.
+//
+// **Open addressing in one flat array, and this is what the budgets in this file are really made
+// of.** It used to be an `unordered_map<uint64_t, pair<ivec3, uint32_t>>`, which costs a separate
+// heap node per voxel: measured at about 80 ns and 58 bytes for every cell of the result, against
+// roughly 22 ns for the walk that produces one. A ceiling on "how big a form may the editor fold"
+// was therefore mostly a ceiling on how many mallocs it was willing to make, and every number in the
+// budget block near the top of this file had been set low enough to keep that hidden.
+//
+// One allocation for the whole table, the coordinate recovered from the key rather than stored
+// (unpackVoxelKey), and the colour a bare uint32: sixteen bytes a slot against fifty-eight a node,
+// and no allocator traffic in the inner loop at all.
+//
+// Key, colour and state live in **one** struct rather than three parallel arrays, and that is worth
+// as much as dropping the allocator was. A probe is a random index into a table far larger than any
+// cache; parallel arrays make it three misses instead of one, and the first attempt at this class
+// paid exactly that. Sixteen bytes also means four slots to a cache line, so a probe chain that does
+// step usually stays inside the line it started in.
+//
+// Deletion is by tombstone, and revivable -- a Subtract clears a slot's live flag and leaves the key,
+// so a Union later in the same stack re-uses it in place. Probing therefore stops only at a slot that
+// has never held anything, which is what keeps a tombstoned key findable.
+class FoldAccumulator {
+public:
+    void reserveFor(size_t elements) { growTo(capacityFor(elements)); }
+
+    size_t size() const { return liveCount; }
+
+    void set(uint64_t key, uint32_t color) {
+        if ((occupiedCount + 1) * 10 >= slots.size() * 7) growTo(capacityFor(liveCount + 1));
+        Slot& slot = slots[probe(key)];
+        if (slot.state == Live) { slot.color = color; return; }
+        if (slot.state == Empty) occupiedCount++;   // A tombstone was already counted.
+        slot.key = key;
+        slot.color = color;
+        slot.state = Live;
+        liveCount++;
+    }
+
+    void erase(uint64_t key) {
+        if (slots.empty()) return;
+        Slot& slot = slots[probe(key)];
+        if (slot.state != Live) return;
+        slot.state = Tombstone;
+        liveCount--;
+    }
+
+    // The colour stored at `key`, or null when nothing live is there. A pointer rather than a
+    // contains/lookup pair so that "is it in there, and what colour" is one probe.
+    const uint32_t* find(uint64_t key) const {
+        if (slots.empty()) return nullptr;
+        const Slot& slot = slots[probe(key)];
+        return slot.state == Live ? &slot.color : nullptr;
+    }
+
+    // Every live entry, as the coordinate its key encodes and the colour beside it. Walks the table
+    // in place -- there is no iterator to invalidate and no order to promise.
+    void drainInto(std::vector<projv::core::ivec3>& coords, std::vector<uint32_t>& out) const {
+        coords.reserve(coords.size() + liveCount);
+        out.reserve(out.size() + liveCount);
+        for (const Slot& slot : slots) {
+            if (slot.state != Live) continue;
+            coords.push_back(unpackVoxelKey(slot.key));
+            out.push_back(slot.color);
+        }
+    }
+
+private:
+    enum State : uint8_t { Empty = 0, Live = 1, Tombstone = 2 };
+
+    struct Slot {
+        uint64_t key = 0;       // A packed voxel key, which can be 0 -- hence a state byte.
+        uint32_t color = 0;
+        uint8_t state = Empty;
+    };
+
+    // splitmix64's finalizer. The keys are packed coordinates, so their low bits are one axis and
+    // neighbouring voxels differ in exactly one field -- masking such a key straight into a slot
+    // index would pile a whole row of the result into one probe chain.
+    static uint64_t mix(uint64_t key) {
+        key ^= key >> 30; key *= 0xBF58476D1CE4E5B9ull;
+        key ^= key >> 27; key *= 0x94D049BB133111EBull;
+        return key ^ (key >> 31);
+    }
+
+    static size_t capacityFor(size_t elements) {
+        size_t wanted = 16;
+        while (wanted * 7 < (elements + 1) * 10) wanted *= 2;   // Load factor stays under 0.7.
+        return wanted;
+    }
+
+    // The slot `key` lives in, or the one an insert of it should take. Linear probing: at this load
+    // factor the chains are short, and a step is the next slot rather than a pointer chase.
+    size_t probe(uint64_t key) const {
+        size_t mask = slots.size() - 1;
+        size_t index = size_t(mix(key)) & mask;
+        size_t firstDead = slots.size();
+        while (slots[index].state != Empty) {
+            if (slots[index].state == Live && slots[index].key == key) return index;
+            if (slots[index].state == Tombstone && firstDead == slots.size()) firstDead = index;
+            index = (index + 1) & mask;
+        }
+        // Not present. A tombstone passed on the way is where an insert belongs, so a chain does not
+        // grow past the dead entries a Subtract left in it.
+        return firstDead == slots.size() ? index : firstDead;
+    }
+
+    void growTo(size_t capacity) {
+        if (capacity <= slots.size()) return;
+        std::vector<Slot> previous = std::move(slots);
+        slots.assign(capacity, Slot());
+        liveCount = 0;
+        occupiedCount = 0;
+        // Tombstones are dropped rather than carried, which is the other half of why a stack that
+        // subtracts heavily does not degrade: the rehash is where its dead slots go.
+        for (const Slot& slot : previous) {
+            if (slot.state == Live) set(slot.key, slot.color);
+        }
+    }
+
+    std::vector<Slot> slots;    // Always a power of two, or empty.
+    size_t liveCount = 0;
+    size_t occupiedCount = 0;   // Live plus tombstones: what the load factor is measured against.
+};
+
 // What an asset's contents currently resolve to.
 struct Fold {
     bool valid = false;
     bool overBudget = false;
+    // Which ceiling stopped it, and whose fault it was. There are two budgets and they mean
+    // different things -- one is time spent walking, the other is memory the result would take --
+    // so a message that named neither left the user to guess which of the two knobs to turn, and
+    // whether the stack or one row in it was the problem.
+    bool overBudgetWasResult = false;
+    std::string overBudgetRow;   // The row that could not be walked. Empty when the result is at fault.
     size_t partCount = 0;      // Parts that contributed (op != None and non-empty).
     size_t walkCells = 0;
     std::vector<projv::core::ivec3> coords;
@@ -9990,6 +10499,15 @@ struct Fold {
 // resolve, because placement is not composition -- but it *is* drawn, so when the user picks rows
 // and asks for them to become one .data, leaving the placed ones out would merge less than what is
 // on screen and in front of them. Selecting a row is the statement that it should be in there.
+//
+// **Every kind of row folds, Grid included.** A Grid was skipped outright here, on the argument that
+// many blocks across many cells is a rebuild rather than a bake. The argument was about cost, and the
+// exclusion was not: it dropped the row whatever its size, and a .data turns into a Grid on its own
+// the first time a sculpt reaches past its resolution (convertChunkToGrid). So an ordinary component
+// could stop composing without changing in any way the user could see, and a stack of two of them
+// resolved to nothing while the panel still offered ops on both rows. Cost is a budget question, and
+// pullPartIntoLattice answers it by walking a grid one populated block at a time -- so the price is
+// the geometry, and a grid that really is too large is refused by name.
 static Fold foldChildren(const projv::Scene& scene, EditorState& editor, Resolve& resolve,
                          const std::vector<projv::ComponentHandle>& children,
                          size_t partBudget, size_t resultBudget, bool placeAsUnion) {
@@ -10000,9 +10518,7 @@ static Fold foldChildren(const projv::Scene& scene, EditorState& editor, Resolve
     ComponentVoxelSpace lattice = resolveLattice(scene, resolve);
     if (!lattice.valid) return fold;
 
-    // Keyed by packed coordinate; the coordinate itself rides along in the value because
-    // packVoxelKey masks rather than encodes and is not meant to be inverted.
-    std::unordered_map<uint64_t, std::pair<ivec3, uint32_t>> accumulator;
+    FoldAccumulator accumulator;
     bool seeded = false;
 
     for (projv::ComponentHandle child : children) {
@@ -10014,11 +10530,6 @@ static Fold foldChildren(const projv::Scene& scene, EditorState& editor, Resolve
             if (!placeAsUnion) continue;
             op = BooleanOp::Union;
         }
-        // A Grid is many blocks across many cells; folding one into a single-lattice result is a
-        // rebuild rather than a bake. Treated as placed whatever it carries -- and saveComposeToDisk
-        // writes it as `none` for the same reason, so the file never promises what this refuses.
-        if (record.kind == projv::ComponentKind::Grid) continue;
-
         // **Every child of the node is a member of the stack.** `ensurePart` rather than `findPart`,
         // because a Part record is an editor-side cache of what a component last folded to -- not a
         // statement about whether it is allowed to fold. Looking one up and skipping the row when it
@@ -10031,6 +10542,7 @@ static Fold foldChildren(const projv::Scene& scene, EditorState& editor, Resolve
         Part& part = ensurePart(scene, editor, child);
         if (!cachedPartCells(scene, part, lattice, partBudget)) {
             fold.overBudget = true;
+            fold.overBudgetRow = record.name;
             return fold;
         }
         fold.walkCells += part.cells.size();
@@ -10038,10 +10550,9 @@ static Fold foldChildren(const projv::Scene& scene, EditorState& editor, Resolve
         fold.partCount++;
 
         if (!seeded) {
-            accumulator.reserve(part.cells.size() * 2);
+            accumulator.reserveFor(part.cells.size());
             for (size_t index = 0; index < part.cells.size(); index++) {
-                accumulator[packVoxelKey(part.cells[index])] =
-                    { part.cells[index], part.cellColors[index] };
+                accumulator.set(packVoxelKey(part.cells[index]), part.cellColors[index]);
             }
             seeded = true;
             continue;
@@ -10049,9 +10560,9 @@ static Fold foldChildren(const projv::Scene& scene, EditorState& editor, Resolve
 
         switch (op) {
             case BooleanOp::Union:
+                accumulator.reserveFor(accumulator.size() + part.cells.size());
                 for (size_t index = 0; index < part.cells.size(); index++) {
-                    accumulator[packVoxelKey(part.cells[index])] =
-                        { part.cells[index], part.cellColors[index] };
+                    accumulator.set(packVoxelKey(part.cells[index]), part.cellColors[index]);
                 }
                 break;
 
@@ -10061,13 +10572,18 @@ static Fold foldChildren(const projv::Scene& scene, EditorState& editor, Resolve
 
             case BooleanOp::Intersect: {
                 // The accumulator's colours survive, so this filters rather than rebuilds: the part
-                // says which cells stay, and the value already stored says what colour they are.
-                std::unordered_set<uint64_t> keep;
-                keep.reserve(part.cells.size() * 2);
-                for (const ivec3& cell : part.cells) keep.insert(packVoxelKey(cell));
-                for (auto entry = accumulator.begin(); entry != accumulator.end(); ) {
-                    entry = keep.count(entry->first) ? std::next(entry) : accumulator.erase(entry);
+                // says which cells stay, and what is already stored says what colour they are.
+                //
+                // Rebuilt into a second table rather than filtered in place, because "keep only the
+                // keys this part names" is a scan of the *part* against the accumulator, and the part
+                // is the side whose size is known. Every survivor moves once.
+                FoldAccumulator kept;
+                kept.reserveFor(std::min(part.cells.size(), accumulator.size()));
+                for (const ivec3& cell : part.cells) {
+                    uint64_t key = packVoxelKey(cell);
+                    if (const uint32_t* color = accumulator.find(key)) kept.set(key, *color);
                 }
+                accumulator = std::move(kept);
                 break;
             }
 
@@ -10077,17 +10593,13 @@ static Fold foldChildren(const projv::Scene& scene, EditorState& editor, Resolve
 
         if (accumulator.size() > resultBudget) {
             fold.overBudget = true;
+            fold.overBudgetWasResult = true;
             return fold;
         }
     }
 
     fold.valid = true;
-    fold.coords.reserve(accumulator.size());
-    fold.colors.reserve(accumulator.size());
-    for (const auto& entry : accumulator) {
-        fold.coords.push_back(entry.second.first);
-        fold.colors.push_back(entry.second.second);
-    }
+    accumulator.drainInto(fold.coords, fold.colors);
     return fold;
 }
 
@@ -10172,7 +10684,7 @@ static void rebuildResult(projv::Scene& scene, EditorState& editor, Resolve& res
     }
     ivec3 extent = maximum - minimum + ivec3(1);
     int longest = std::max({extent.x, extent.y, extent.z});
-    if (longest > PART_MAX_DIMENSION) {
+    if (longest > BAKE_MAX_DIMENSION) {
         destroyResolveResult(scene, editor, resolve);
         resolve.resultOverBudget = true;
         return;
@@ -10240,22 +10752,19 @@ static void rebuildResult(projv::Scene& scene, EditorState& editor, Resolve& res
 
 static std::string uniqueComponentName(const projv::Scene& scene, const std::string& base);
 
-// The box a component's voxels actually occupy, in its own voxel space.
+// The box one chunk's voxels actually occupy, in that chunk's own coordinates.
 //
 // Walked over the tree64 rather than probed cell by cell. The tree has one node per *occupied*
 // region, so the walk costs the geometry rather than the volume -- which is the difference between
-// instant and unusable on a 256^3 component, where probing would be 16.7 million tree descents.
+// instant and unusable on a 256^3 chunk, where probing would be 16.7 million tree descents.
 //
 // Returns false when there is nothing in it.
-static bool componentContentBounds(const projv::Scene& scene, projv::ComponentHandle component,
-                                   projv::core::ivec3& minimum, projv::core::ivec3& maximum) {
+static bool chunkContentBounds(const projv::Scene& scene, projv::ChunkHandle chunkHandle,
+                               projv::core::ivec3& minimum, projv::core::ivec3& maximum) {
     using projv::core::ivec3;
-    if (component >= scene.components.size()) return false;
-    const projv::ComponentRecord& record = scene.components[component];
-    if (record.kind != projv::ComponentKind::Chunk) return false;
-    if (record.chunkHandle >= scene.chunks.size()) return false;
+    if (chunkHandle >= scene.chunks.size()) return false;
 
-    const projv::Chunk& chunk = scene.chunks[record.chunkHandle];
+    const projv::Chunk& chunk = scene.chunks[chunkHandle];
     int32_t poolIndex = chunk.geometryPoolIndex;
     if (poolIndex < 0 || size_t(poolIndex) >= scene.geometryPool.size()) return false;
     const std::vector<uint32_t>& geometry = scene.geometryPool[poolIndex].geometry;
@@ -10305,6 +10814,44 @@ static bool componentContentBounds(const projv::Scene& scene, projv::ComponentHa
             if ((mask & (1ull << (63 - child))) == 0) continue;
             stack.push_back({firstChild + rank, current.cellZOrder * 64 + child});
             rank++;
+        }
+    }
+    return any;
+}
+
+// The box a component's voxels actually occupy, in the component's own continuous voxel space.
+//
+// For a Chunk that is one tree walk. For a Grid it is one per populated block, unioned -- and the
+// blocks' own coordinates are lifted into the component's space on the way, which is the only reason
+// a Grid can stand where a Chunk stands anywhere downstream of here. Returning false for a Grid, as
+// this used to, is what left ensurePart giving every grid an empty content box: the fold then read a
+// single cell at the origin, found nothing, and dropped the row without a word.
+//
+// Returns false when there is nothing in it.
+static bool componentContentBounds(const projv::Scene& scene, projv::ComponentHandle component,
+                                   projv::core::ivec3& minimum, projv::core::ivec3& maximum) {
+    using projv::core::ivec3;
+    if (component >= scene.components.size()) return false;
+    const projv::ComponentRecord& record = scene.components[component];
+
+    if (record.kind == projv::ComponentKind::Chunk) {
+        return chunkContentBounds(scene, record.chunkHandle, minimum, maximum);
+    }
+    if (record.kind != projv::ComponentKind::Grid) return false;
+
+    bool any = false;
+    for (const GridBlock& block : gridBlocksOf(scene, component)) {
+        ivec3 low(0), high(0);
+        if (!chunkContentBounds(scene, block.chunk, low, high)) continue;
+        low += block.origin;
+        high += block.origin;
+        if (!any) {
+            minimum = low;
+            maximum = high;
+            any = true;
+        } else {
+            minimum = projv::core::min(minimum, low);
+            maximum = projv::core::max(maximum, high);
         }
     }
     return any;
@@ -10527,9 +11074,9 @@ static projv::ComponentHandle bakeImportedSubtree(projv::Scene& scene, EditorSta
     }
     ivec3 extent = maximum - minimum + ivec3(1);
     int longest = std::max({extent.x, extent.y, extent.z});
-    if (longest > PART_MAX_DIMENSION) {
+    if (longest > BAKE_MAX_DIMENSION) {
         editor.statusMessage = "That asset is " + std::to_string(longest) +
-                               " voxels across, past the " + std::to_string(PART_MAX_DIMENSION) +
+                               " voxels across, past the " + std::to_string(BAKE_MAX_DIMENSION) +
                                " limit for one component - import it as a Copy instead.";
         return projv::INVALID_COMPONENT_HANDLE;
     }
@@ -10801,6 +11348,43 @@ struct NodeRecipe {
     std::vector<PartRecipe> parts;
 };
 
+// Every solid voxel of a component, with its colour, in the component's own continuous voxel space.
+//
+// A Grid is read one populated block at a time -- the same reason the pull does, one level down: a
+// single dense snapshot over a grid's bounding box asks for the empty cells too, and there is no
+// bound on how many of those there are. A Chunk is the single-box case of the same thing.
+//
+// This is what makes a merged Grid row undoable. Reading it as one box, which is what snapshotPart
+// does, quietly returned nothing for any grid past PART_MAX_SOURCE_CELLS -- and a recipe with no
+// coordinates is dropped, so the row would simply not have come back.
+static void componentVoxelLists(const projv::Scene& scene, projv::ComponentHandle component,
+                                projv::core::ivec3 contentMin, projv::core::ivec3 contentMax,
+                                std::vector<projv::core::ivec3>& coords,
+                                std::vector<uint32_t>& colors) {
+    using projv::core::ivec3;
+    coords.clear();
+    colors.clear();
+    if (component >= scene.components.size()) return;
+
+    if (scene.components[component].kind != projv::ComponentKind::Grid) {
+        snapshotToLists(snapshotComponentBox(scene, component, contentMin, contentMax),
+                        coords, colors);
+        return;
+    }
+
+    std::vector<ivec3> blockCoords;
+    std::vector<uint32_t> blockColors;
+    for (const GridBlock& block : gridBlocksOf(scene, component)) {
+        ivec3 low(0), high(-1);
+        if (!chunkContentBounds(scene, block.chunk, low, high)) continue;
+        snapshotToLists(snapshotComponentBox(scene, component, low + block.origin,
+                                             high + block.origin),
+                        blockCoords, blockColors);
+        coords.insert(coords.end(), blockCoords.begin(), blockCoords.end());
+        colors.insert(colors.end(), blockColors.begin(), blockColors.end());
+    }
+}
+
 static PartRecipe recipeFromPart(const projv::Scene& scene, const Part& part) {
     PartRecipe recipe;
     if (part.component >= scene.components.size()) return recipe;
@@ -10813,6 +11397,22 @@ static PartRecipe recipeFromPart(const projv::Scene& scene, const Part& part) {
     if (record.chunkHandle < scene.chunks.size()) {
         recipe.resolution = scene.chunks[record.chunkHandle].header.resolution;
         recipe.voxelScale = scene.chunks[record.chunkHandle].header.voxelScale;
+    }
+    if (record.kind == projv::ComponentKind::Grid) {
+        // A grid's chunkHandle points at whichever block happens to sit in cell zero, and for a grid
+        // that came off disk it points at nothing at all -- so the resolution and voxel size come
+        // from the component's voxel space, which is defined for both kinds and is the space the
+        // coordinates below are written in.
+        //
+        // The row comes back as a Chunk, and grows into a Grid again by the same route it did the
+        // first time: coordinates outside the resolution overflow it (applyComponentQueue), and a
+        // converted grid keeps every voxel's world position. Same geometry in the same place, which
+        // is what undo owes; the block layout is an implementation detail underneath it.
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, part.component);
+        if (space.valid && space.resolution > 0) {
+            recipe.resolution = uint32_t(space.resolution);
+            recipe.voxelScale = space.voxelSize;
+        }
     }
 
     recipe.procedural = part.procedural;
@@ -10828,7 +11428,8 @@ static PartRecipe recipeFromPart(const projv::Scene& scene, const Part& part) {
     recipe.cutCoords = part.cutCoords;
     recipe.cutColors = part.cutColors;
 
-    snapshotToLists(snapshotPart(scene, part), recipe.coords, recipe.colors);
+    componentVoxelLists(scene, part.component, part.contentMin, part.contentMax,
+                        recipe.coords, recipe.colors);
     return recipe;
 }
 
@@ -11680,6 +12281,23 @@ static CellWritePlan planCellWrite(const projv::Scene& scene, projv::ComponentHa
     return plan;
 }
 
+// The message an over-budget fold deserves: which of the two ceilings it met, and which row met it.
+// "Past the bake budget" named neither, and the two have opposite remedies -- a walk that is too
+// large is usually one badly-oriented row (Snap 90 makes its box the shape's own instead of the box
+// that contains it turned 37 degrees), while a result that is too large is the whole stack being
+// genuinely bigger than one component can hold, and the answer is to merge it in pieces.
+static std::string overBudgetMessage(const Fold& fold) {
+    if (fold.overBudgetWasResult) {
+        return "That stack folds to more than " +
+               formatCompactCount(uint32_t(ASSEMBLY_MAX_BAKE_RESULT_CELLS)) +
+               " voxels, which is past what one merge can hold. Merge it in pieces.";
+    }
+    std::string row = fold.overBudgetRow.empty() ? std::string("A row") : "\"" + fold.overBudgetRow + "\"";
+    return row + " is past the fold's walk budget of " +
+           formatCompactCount(uint32_t(ASSEMBLY_MAX_BAKE_CELLS)) +
+           " cells. Turn Snap 90 on so its box is the shape's own, or merge fewer rows at once.";
+}
+
 // Bake ▸ As a new component. The missing fourth combination: resolve to voxels, as an object of my
 // own. The default, because it is what building a form out of primitives is *for*.
 // Merge some or all of an asset's contents into a single .data component **inside that asset**.
@@ -11728,15 +12346,13 @@ static bool mergeContentsToData(projv::Scene& scene, EditorState& editor, Resolv
     }
 
     Fold fold = foldChildren(scene, editor, resolve, merging, ASSEMBLY_MAX_BAKE_CELLS,
-                             ASSEMBLY_MAX_BAKE_CELLS, !wholeStack);
+                             ASSEMBLY_MAX_BAKE_RESULT_CELLS, !wholeStack);
     if (fold.overBudget) {
         // Refused rather than truncated. A fill that stops halfway leaves a smaller fill; a bake that
         // stops halfway leaves half an object, which is worse than not having baked at all -- and the
         // fix (Snap 90 on, so the box is the shape's own, or fewer parts at once) is one the user can
         // act on. The resolve stays open.
-        editor.statusMessage = "That stack is past the bake budget of " +
-                               formatCompactCount(uint32_t(ASSEMBLY_MAX_BAKE_CELLS)) +
-                               " cells. Turn Snap 90 on, or bake it in fewer parts.";
+        editor.statusMessage = overBudgetMessage(fold);
         return false;
     }
     if (!fold.valid || fold.coords.empty()) {
@@ -11751,9 +12367,9 @@ static bool mergeContentsToData(projv::Scene& scene, EditorState& editor, Resolv
     }
     ivec3 extent = maximum - minimum + ivec3(1);
     int longest = std::max({extent.x, extent.y, extent.z});
-    if (longest > PART_MAX_DIMENSION) {
+    if (longest > BAKE_MAX_DIMENSION) {
         editor.statusMessage = "That form is " + std::to_string(longest) + " voxels across, past the " +
-                               std::to_string(PART_MAX_DIMENSION) + " limit for one component.";
+                               std::to_string(BAKE_MAX_DIMENSION) + " limit for one component.";
         return false;
     }
 
@@ -11896,11 +12512,9 @@ static bool bakeNodeInto(projv::Scene& scene, EditorState& editor, Resolve& reso
     if (!lattice.valid) return false;
 
     Fold fold = foldNode(scene, editor, resolve, ASSEMBLY_MAX_BAKE_CELLS,
-                                     ASSEMBLY_MAX_BAKE_CELLS);
+                                     ASSEMBLY_MAX_BAKE_RESULT_CELLS);
     if (fold.overBudget) {
-        editor.statusMessage = "That stack is past the bake budget of " +
-                               formatCompactCount(uint32_t(ASSEMBLY_MAX_BAKE_CELLS)) +
-                               " cells. Turn Snap 90 on, or bake it in fewer parts.";
+        editor.statusMessage = overBudgetMessage(fold);
         return false;
     }
     if (!fold.valid || fold.coords.empty()) {
@@ -12312,9 +12926,9 @@ static void liftSelection(projv::Scene& scene, EditorState& editor, bool cut) {
 
     ivec3 size = selection.dimensions();
     int longest = std::max({size.x, size.y, size.z});
-    if (longest > PART_MAX_DIMENSION) {
+    if (longest > BAKE_MAX_DIMENSION) {
         editor.statusMessage = "That selection is " + std::to_string(longest) +
-                               " voxels across, past the " + std::to_string(PART_MAX_DIMENSION) +
+                               " voxels across, past the " + std::to_string(BAKE_MAX_DIMENSION) +
                                " limit for one part.";
         return;
     }
@@ -13256,7 +13870,7 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
             // for the object: the drag's own undo record holds an off-grid value, so redoing it
             // without Alt held would push it through the funnel again and straighten the pose the
             // drag existed to create. Marking the component free is what makes the result survive
-            // its own history. "Snap to grid" in the Inspector is the way back.
+            // its own history. "Follows grid" in the Inspector is the way back.
             bool wasFree = editor.gizmoDragStartFree;
             bool nowFree = wasFree || snapSuppressedByModifier();
             setFreePlacement(editor, handle, nowFree);
@@ -13583,6 +14197,145 @@ static void drawSunShadowIcon(ImDrawList* drawList, ImVec2 center, float size, b
                             boxSideColor);
 }
 
+// The three things the advanced preview draws, in one object: a glowing, glossy, see-through sphere
+// standing on a reflective floor. Each property is carried by a different part of the drawing rather
+// than by the whole shape's brightness, because a single "shinier sphere" would be indistinguishable
+// from the normal-shading and occlusion icons, which are also spheres and cubes at various
+// brightnesses.
+//
+//   TRANSPARENCY  the ground line is drawn FIRST and the sphere's fill is translucent, so the line
+//                 runs visibly through the sphere. Nothing else on this bar draws anything you can
+//                 see through, so it is the one unmistakable mark here.
+//   REFLECTION    a squashed mirror image of the sphere below the floor line. A reflection is the one
+//                 optical effect everyone recognises from its geometry alone.
+//   EMISSION      a halo. Drawn as concentric rings fading outwards, which reads as light leaving the
+//                 object rather than as an outline around it.
+static void drawAdvancedPreviewIcon(ImDrawList* drawList, ImVec2 center, float size, bool enabled) {
+    ImU32 groundColor = enabled ? IM_COL32(150, 160, 175, 210) : IM_COL32(120, 126, 136, 150);
+    ImU32 glassFill   = enabled ? IM_COL32(150, 202, 255,  70) : IM_COL32(130, 136, 148,  45);
+    ImU32 glassEdge   = enabled ? IM_COL32(206, 232, 255, 235) : IM_COL32(146, 152, 162, 175);
+    ImU32 mirrorColor = enabled ? IM_COL32(160, 208, 255, 120) : IM_COL32(120, 126, 136,  70);
+    ImU32 glowInner   = enabled ? IM_COL32(255, 226, 150, 170) : IM_COL32(140, 136, 122,  80);
+    ImU32 glowOuter   = enabled ? IM_COL32(255, 226, 150,  75) : IM_COL32(140, 136, 122,  38);
+    ImU32 highlight   = enabled ? IM_COL32(255, 252, 238, 255) : IM_COL32(158, 162, 170, 190);
+
+    // The sphere sits above centre so its mirror image has room below the floor without either half
+    // leaving the button. Small for a 30-pixel icon — it has to share the frame with both.
+    float radius = size * 0.20f;
+    ImVec2 sphereCenter = ImVec2(center.x, center.y - size * 0.10f);
+    float groundY = sphereCenter.y + radius + size * 0.04f;
+
+    // --- Emission: the halo ---
+    // Two rings, not a stack of them. Three read as a target rather than as a glow at this size, and
+    // the innermost of them sat close enough to the sphere's own outline to look like a doubled edge.
+    // Outer first, so the brighter one lands on top where they nearly touch.
+    drawList->AddCircle(sphereCenter, radius * 1.62f, glowOuter, 20, 1.0f);
+    drawList->AddCircle(sphereCenter, radius * 1.32f, glowInner, 20, 1.0f);
+
+    // --- Reflection: the mirror image, under a floor the line below stands for ---
+    // Squashed vertically and dimmer than the sphere — the two things that make a shape below a line
+    // read as a reflection of the shape above it rather than as a second object.
+    drawList->AddEllipseFilled(ImVec2(sphereCenter.x, groundY + radius * 0.62f),
+                               ImVec2(radius * 0.92f, radius * 0.56f), mirrorColor);
+
+    // --- The floor, before the sphere, so the sphere's translucency has something to reveal ---
+    drawList->AddLine(ImVec2(center.x - size * 0.42f, groundY), ImVec2(center.x + size * 0.42f, groundY),
+                      groundColor, 1.5f);
+
+    // --- Transparency: a filled circle you can see the floor line through ---
+    drawList->AddCircleFilled(sphereCenter, radius, glassFill, 24);
+    drawList->AddCircle(sphereCenter, radius, glassEdge, 24, 1.4f);
+
+    // --- Gloss: the specular highlight, upper left, matching where every other icon on this bar puts
+    // its light. Small and hard-edged, which is what says "glossy" rather than "bright".
+    drawList->AddCircleFilled(ImVec2(sphereCenter.x - radius * 0.36f, sphereCenter.y - radius * 0.38f),
+                              radius * 0.20f, highlight, 10);
+}
+
+// --- Grid bar icons ---------------------------------------------------------
+//
+// All three are two-state *drawings* rather than one drawing at two brightnesses, the same way the two
+// occlusion icons above are. A dimmed picture says "not available"; a picture of the other state says
+// what the other state is, which for a setting that silently rewrites the numbers a user typed is the
+// only honest thing for a 30-pixel button to say.
+
+// The document lattice, drawn as a lattice, with one cell filled to stand for what is being placed on
+// it. On, the cell sits square inside one square of the grid; off, it straddles two -- the same object,
+// no longer held to anything.
+static void drawGridSnapIcon(ImDrawList* drawList, ImVec2 center, float size, bool enabled) {
+    float step = size * 0.22f;
+    float half = step * 1.5f;
+    ImU32 line = iconInkDim(enabled);
+    ImU32 mark = iconInk(enabled);
+
+    for (int i = -1; i <= 1; i += 2) {
+        float offset = float(i) * step * 0.5f;
+        drawList->AddLine(ImVec2(center.x - half, center.y + offset),
+                          ImVec2(center.x + half, center.y + offset), line, 1.0f);
+        drawList->AddLine(ImVec2(center.x + offset, center.y - half),
+                          ImVec2(center.x + offset, center.y + half), line, 1.0f);
+    }
+    drawList->AddRect(ImVec2(center.x - half, center.y - half), ImVec2(center.x + half, center.y + half),
+                      line, 1.0f, 0, 1.0f);
+
+    float cell = step * 0.86f;
+    // On: flush into the top-left cell. Off: pushed a third of a cell out of it, on both axes, which is
+    // enough to read as "between cells" without looking like a drawing mistake.
+    ImVec2 cellMin = enabled ? ImVec2(center.x - half + step * 0.07f, center.y - half + step * 0.07f)
+                             : ImVec2(center.x - half + step * 0.40f, center.y - half + step * 0.44f);
+    drawList->AddRectFilled(cellMin, ImVec2(cellMin.x + cell, cellMin.y + cell), mark, 1.0f);
+}
+
+// A box against the world's axes, or standing at its own angle beside them. The faint L is the world
+// it is being squared to, and it stays put in both states so the box is visibly the thing that moved.
+static void drawSquareToWorldIcon(ImDrawList* drawList, ImVec2 center, float size, bool enabled) {
+    ImU32 ink = iconInk(enabled);
+    ImU32 axis = iconInkDim(enabled);
+
+    float reach = size * 0.34f;
+    drawList->AddLine(ImVec2(center.x - reach, center.y + reach),
+                      ImVec2(center.x + reach, center.y + reach), axis, 1.0f);
+    drawList->AddLine(ImVec2(center.x - reach, center.y + reach),
+                      ImVec2(center.x - reach, center.y - reach), axis, 1.0f);
+
+    // The box rests *in* the corner of the axes rather than sitting concentric with them: nested
+    // squares read as one shape at 30 pixels, and it is the box's relationship to the axes that the
+    // icon is about. Flush in the corner when on, visibly broken away from both when off.
+    float halfBox = size * 0.16f;
+    float gap = size * 0.03f;
+    float boxX = center.x - reach + halfBox + gap;
+    float boxY = center.y + reach - halfBox - gap;
+    float angle = enabled ? 0.0f : 0.52f;   // ~30 degrees: unmistakably off-axis at this size.
+    float cosine = std::cos(angle);
+    float sine = std::sin(angle);
+    ImVec2 corners[4];
+    for (int i = 0; i < 4; i++) {
+        float x = (i == 0 || i == 3) ? -halfBox : halfBox;
+        float y = (i < 2) ? -halfBox : halfBox;
+        corners[i] = ImVec2(boxX + x * cosine - y * sine, boxY + x * sine + y * cosine);
+    }
+    drawList->AddQuad(corners[0], corners[1], corners[2], corners[3], ink, 1.6f);
+}
+
+// What a rotation turns about, drawn as the point it turns about. Off puts the mark on the box's
+// minimum corner rather than anywhere arbitrary, because that is what a chunk's local origin actually
+// is -- the icon is the definition.
+static void drawPivotIcon(ImDrawList* drawList, ImVec2 center, float size, bool atCenter) {
+    ImU32 ink = iconInk(atCenter);
+    ImU32 box = iconInkDim(atCenter);
+
+    float half = size * 0.29f;
+    ImVec2 boxMin(center.x - half, center.y - half);
+    ImVec2 boxMax(center.x + half, center.y + half);
+    drawList->AddRect(boxMin, boxMax, box, 1.0f, 0, 1.4f);
+
+    // Small against the box it marks. A ring near the box's own size reads as an aperture rather than
+    // as a point, and the whole content of this icon is *which point*.
+    ImVec2 mark = atCenter ? center : ImVec2(boxMin.x, boxMax.y);
+    drawList->AddCircle(mark, size * 0.115f, ink, 16, 1.4f);
+    drawList->AddCircleFilled(mark, size * 0.05f, ink, 12);
+}
+
 // One toggle button, on the shared chrome the tool strip uses. The only thing that differs is what
 // it has to say about itself: a toggle reports on/off, a tool reports its shortcut.
 static bool drawSettingsBarButton(const char* id, bool enabled, const char* tooltip,
@@ -13604,7 +14357,7 @@ static bool drawSettingsBarButton(const char* id, bool enabled, const char* tool
 // to know the mouse is over the bar rather than over the scene, and the bar is drawn last so the
 // gizmo's lines cannot be laid across it.
 static bool viewportSettingsBarRect(const EditorState& editor, ImVec2& barMin, ImVec2& barMax) {
-    const int buttonCount = 4;
+    const int buttonCount = 5;
     float barWidth = buttonCount * SETTINGS_BAR_ICON_SIZE + (buttonCount - 1) * SETTINGS_BAR_SPACING +
                      2.0f * SETTINGS_BAR_PADDING;
     float barHeight = SETTINGS_BAR_ICON_SIZE + 2.0f * SETTINGS_BAR_PADDING;
@@ -13673,6 +14426,290 @@ static void drawViewportSettingsBar(EditorState& editor) {
                               "Sun shadow", drawSunShadowIcon)) {
         editor.sunShadowEnabled = !editor.sunShadowEnabled;
         editor.renderSettingsChanged = true;
+    }
+
+    // Last on the bar, and set apart from the four before it by what it is rather than by where it
+    // sits: those darken albedo to make shape legible, this draws material properties the rest of the
+    // viewport does not draw at all. It gets the long tooltip because it is the only control here
+    // whose effect a user cannot predict from the icon -- what it shows depends entirely on what
+    // materials the open scene happens to have, and on a scene with no emission, no gloss and no
+    // transparency it correctly does nothing whatsoever.
+    placeButton();
+    bool advancedHovered = false;
+    if (drawViewportIconButton("advanced", SETTINGS_BAR_ICON_SIZE, editor.advancedPreviewEnabled,
+                               drawAdvancedPreviewIcon, advancedHovered)) {
+        editor.advancedPreviewEnabled = !editor.advancedPreviewEnabled;
+        editor.renderSettingsChanged = true;
+    }
+    if (advancedHovered) {
+        ImGui::SetTooltip("Advanced preview  (%s)\n\n"
+                          "Draws the three material properties the Viewport otherwise ignores,\n"
+                          "without leaving it for Render mode:\n\n"
+                          "  Emission      an emitter is drawn glowing, at its own colour and\n"
+                          "                strength. It does not light anything around it --\n"
+                          "                that is light transport, and Render mode is where\n"
+                          "                that lives.\n"
+                          "  Reflections   one glossy sample per pixel per frame. What it\n"
+                          "                reflects is the STORED colour of whatever it lands\n"
+                          "                on, since this mode has no sun to shade it with.\n"
+                          "  Transparency  the primary ray sees through transparent voxels to\n"
+                          "                the surface behind, tinted by what it crossed. Same\n"
+                          "                traversal Render mode uses, so glass that reads\n"
+                          "                right here reads right there.\n\n"
+                          "Both the transparency and the reflection are one random sample per\n"
+                          "frame, so they are grainy while the camera moves and resolve within\n"
+                          "a second of it stopping -- the same accumulation the occlusion uses.\n\n"
+                          "Costs a peeled march for every pixel and a second scene ray for every\n"
+                          "glossy or metallic one. A scene whose materials have none of these set\n"
+                          "looks identical with this on, and pays almost nothing for it.\n\n"
+                          "The other four toggles do not touch what this adds: an emitter is not\n"
+                          "darkened for sitting in a crease or facing away from the sun.",
+                          editor.advancedPreviewEnabled ? "on" : "off");
+    }
+    ImGui::PopID();
+}
+
+// =============================================================================
+// Viewport grid bar
+// =============================================================================
+//
+// **Snapping and the pivot are not settings of any one tool.** Both are enforced inside
+// applyComponentTransform -- the funnel the gizmo, the arrow keys, the Inspector's number fields and
+// the undo and redo of all three go down. Filing them under the Place panel put them one tool away
+// from most of what they govern, which is how "why does the Move tool still snap" became a question
+// with no answer anywhere on screen; and having the pivot checkbox in two panels at once meant the
+// user had to find out by experiment that they were one setting. They live here instead, at the same
+// altitude as the funnel, in one copy, visible from every tool that moves anything.
+//
+// Top-right of the image, because every other edge is spoken for: the open-asset banner is top-left,
+// the toast top-centre, the tool strip down the left, the render settings bottom-centre and the
+// navigator bottom-right. It is also the corner nearest the Inspector, whose Position and Rotation
+// fields are the numbers these round.
+//
+// What is *not* here: the per-component "Follows grid / Free" flag. That is a property of one object
+// and belongs beside that object's numbers -- see the Inspector. This bar is the document's answer;
+// the Inspector's is the object's.
+
+// Which tools move geometry, and so have anything for this bar to constrain. Sculpt and Paint address
+// voxels inside one component and never touch a transform, so the bar would be four dead controls.
+static bool toolUsesGrid(EditorTool tool) {
+    return tool == EditorTool::Move || tool == EditorTool::Place || tool == EditorTool::Region;
+}
+
+static constexpr int   GRID_BAR_BUTTON_COUNT = 4;
+static constexpr float GRID_BAR_STEP_WIDTH = SETTINGS_BAR_ICON_SIZE * 1.6f;   // Wide enough for "256 vx".
+
+// Width of the bar at a given button count. Only two counts are ever asked for -- see the rect below --
+// and the step button is the one that is not square, so this is not a multiplication.
+static float gridBarWidth(int buttonCount) {
+    float width = 2.0f * SETTINGS_BAR_PADDING + SETTINGS_BAR_ICON_SIZE;   // The grid toggle, always.
+    if (buttonCount > 1) {
+        width += SETTINGS_BAR_SPACING + GRID_BAR_STEP_WIDTH;
+        width += 2.0f * (SETTINGS_BAR_SPACING + SETTINGS_BAR_ICON_SIZE);   // Square, pivot.
+    }
+    return width;
+}
+
+// Same rect-before-draw contract as the other strips, with one addition: when there is not room for
+// the whole bar it falls back to the grid toggle alone rather than disappearing. Whatever else a
+// narrow panel costs, *whether the grid is on* stays on screen -- it is the setting that silently
+// rewrites what the user typed, and a hidden control for it is precisely the confusion this bar
+// exists to end. The popover carries the rest either way, so nothing becomes unreachable.
+static bool viewportGridBarRect(const EditorState& editor, ImVec2& barMin, ImVec2& barMax,
+                                int& outButtonCount) {
+    if (!editor.sceneLoaded || !toolUsesGrid(editor.activeTool)) return false;
+
+    float height = SETTINGS_BAR_ICON_SIZE + 2.0f * SETTINGS_BAR_PADDING;
+    if (editor.viewportImageMax.y - editor.viewportImageMin.y < height + 2.0f * SETTINGS_BAR_MARGIN) {
+        return false;
+    }
+    float available = editor.viewportImageMax.x - editor.viewportImageMin.x - 2.0f * SETTINGS_BAR_MARGIN;
+
+    const int candidates[2] = { GRID_BAR_BUTTON_COUNT, 1 };
+    for (int candidate : candidates) {
+        float width = gridBarWidth(candidate);
+        if (width > available) continue;
+        barMin = ImVec2(editor.viewportImageMax.x - SETTINGS_BAR_MARGIN - width,
+                        editor.viewportImageMin.y + SETTINGS_BAR_MARGIN);
+        barMax = ImVec2(barMin.x + width, barMin.y + height);
+        outButtonCount = candidate;
+        return true;
+    }
+    return false;
+}
+
+// Draws the bar and runs its controls. Takes the scene because the popover reaches two things the
+// buttons do not: the document's own voxel size, and the open asset the mass pull acts on.
+static void drawViewportGridBar(projv::Scene& scene, EditorState& editor) {
+    ImVec2 barMin;
+    ImVec2 barMax;
+    int buttonCount = 0;
+    if (!viewportGridBarRect(editor, barMin, barMax, buttonCount)) return;
+
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddRectFilled(barMin, barMax, IM_COL32(18, 20, 26, 205), 8.0f);
+    drawList->AddRect(barMin, barMax, IM_COL32(255, 255, 255, 28), 8.0f, 0, 1.0f);
+
+    ImGui::PushID("ViewportGrid");
+    float cursorX = barMin.x + SETTINGS_BAR_PADDING;
+    float cursorY = barMin.y + SETTINGS_BAR_PADDING;
+    bool hovered = false;
+    // Set from three places -- the step button, either toggle's right-click -- and acted on once, after
+    // every button has been submitted. Opening a popup mid-strip would put it in the middle of the
+    // layout the remaining buttons are positioning themselves against.
+    bool openSettings = false;
+
+    // --- The grid itself --------------------------------------------------------------------------
+    ImGui::SetCursorScreenPos(ImVec2(cursorX, cursorY));
+    if (drawViewportIconButton("grid", SETTINGS_BAR_ICON_SIZE, editor.snapEnabled,
+                               drawGridSnapIcon, hovered)) {
+        editor.snapEnabled = !editor.snapEnabled;
+        for (Resolve& each : editor.resolves) invalidateResolve(editor, each);
+    }
+    if (hovered) {
+        ImGui::SetTooltip("Grid  (%s)\n\n"
+                          "Translation in whole steps of the document grid -- one grid for the whole\n"
+                          "document, so two objects in different assets line up with each other and\n"
+                          "not merely with their own container.\n\n"
+                          "Applies to the gizmo, the arrow keys and the Inspector's number fields\n"
+                          "alike: they are one transform path, not three.\n\n"
+                          "Hold Alt while dragging to ignore it for that one gesture.\n"
+                          "Right-click for the step and the grid size.",
+                          editor.snapEnabled ? "on" : "off");
+    }
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) openSettings = true;
+    cursorX += SETTINGS_BAR_ICON_SIZE + SETTINGS_BAR_SPACING;
+
+    if (buttonCount > 1) {
+        // --- The step, as the number it is ---------------------------------------------------------
+        char stepText[16];
+        std::snprintf(stepText, sizeof(stepText), "%d vx", editor.snapStepVoxels);
+        ImGui::SetCursorScreenPos(ImVec2(cursorX, cursorY));
+        // Lit only when the step is doing something a user might not expect. At one voxel it is the
+        // lattice itself, which is what "on the grid" already means, and lighting it there would make
+        // the default look like a mode.
+        bool stepNotable = editor.snapEnabled && editor.snapStepVoxels > 1;
+        if (drawViewportValueButton("step", GRID_BAR_STEP_WIDTH, SETTINGS_BAR_ICON_SIZE, stepNotable,
+                                    stepText, hovered)) {
+            openSettings = true;
+        }
+        if (hovered) {
+            ImGui::SetTooltip("Step: %d voxel(s) per move.%s\n\n"
+                              "One voxel is right for detailing; 16, 32 or 64 is what standing modular\n"
+                              "pieces against each other actually wants.\n\n"
+                              "Click for this and the grid's own size.",
+                              editor.snapStepVoxels,
+                              editor.snapEnabled ? "" : "  Grid is off, so nothing uses it.");
+        }
+        cursorX += GRID_BAR_STEP_WIDTH + SETTINGS_BAR_SPACING;
+
+        // --- Rotation, which is a separate wish from translation ------------------------------------
+        ImGui::SetCursorScreenPos(ImVec2(cursorX, cursorY));
+        if (drawViewportIconButton("square", SETTINGS_BAR_ICON_SIZE, editor.snapRotate90,
+                                   drawSquareToWorldIcon, hovered)) {
+            editor.snapRotate90 = !editor.snapRotate90;
+            for (Resolve& each : editor.resolves) invalidateResolve(editor, each);
+        }
+        if (hovered) {
+            ImGui::SetTooltip("Square to world  (%s)\n\n"
+                              "Rotation in multiples of 90 degrees about a world axis. Its own control\n"
+                              "because the two are wanted separately: a tree at its own angle standing\n"
+                              "on a grid position is an ordinary thing to want.\n\n"
+                              "%s",
+                              editor.snapRotate90 ? "on" : "off",
+                              editor.snapRotate90
+                                  ? "Exact: every source voxel lands on one result cell."
+                                  : "Free rotation -- the fold rasterises into the asset's lattice.");
+        }
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) openSettings = true;
+        cursorX += SETTINGS_BAR_ICON_SIZE + SETTINGS_BAR_SPACING;
+
+        // --- What a rotation turns about -------------------------------------------------------------
+        ImGui::SetCursorScreenPos(ImVec2(cursorX, cursorY));
+        if (drawViewportIconButton("pivot", SETTINGS_BAR_ICON_SIZE, editor.pivotAtCenter,
+                                   drawPivotIcon, hovered)) {
+            editor.pivotAtCenter = !editor.pivotAtCenter;
+        }
+        if (hovered) {
+            ImGui::SetTooltip("Pivot: %s\n\n"
+                              "Where a rotation or a scale turns about -- the gizmo is drawn on the\n"
+                              "same point, so what you see is what the Inspector's fields do.\n\n"
+                              "Off: the component's local origin, which for a chunk is its minimum\n"
+                              "corner -- the raw transform.",
+                              editor.pivotAtCenter ? "bounding-box center" : "local origin");
+        }
+    }
+
+    // --- The numbers, and the one bulk action over them --------------------------------------------
+    //
+    // A popover rather than four more strip buttons: a step and a voxel size are values to be typed,
+    // not states to be toggled, and neither is touched once a document is set up. The bar carries what
+    // has to be *visible*; this carries what has to be *reachable*.
+    if (openSettings) ImGui::OpenPopup("##gridSettings");
+    if (ImGui::BeginPopup("##gridSettings")) {
+        ImGui::TextDisabled("Document grid");
+        ImGui::Spacing();
+
+        ImGui::BeginDisabled(!editor.snapEnabled);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+        if (ImGui::DragInt("##snapStep", &editor.snapStepVoxels, 0.2f, 1, 256, "%d vox")) {
+            editor.snapStepVoxels = std::max(1, std::min(256, editor.snapStepVoxels));
+        }
+        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+        ImGui::TextDisabled("Step");
+
+        // The grid's own size, shown as the number it currently is and editable into a pinned one. A
+        // document that will later import something finer wants it pinned -- see documentSnapVoxel.
+        float gridVoxel = documentSnapVoxel(scene, editor);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+        if (ImGui::DragFloat("##snapVoxel", &gridVoxel, 0.001f, 0.0f, 0.0f, "%.4f")) {
+            editor.snapVoxelOverride = gridVoxel > 0.0f ? gridVoxel : 0.0f;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("The grid's voxel size. Derived from the finest voxel scale in the\n"
+                              "document until you set it, after which it is pinned -- so importing a\n"
+                              "finer asset later cannot re-phase the grid under what is already placed.");
+        }
+        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+        ImGui::TextDisabled("Size%s", editor.snapVoxelOverride > 0.0f ? " (pinned)" : "");
+        ImGui::EndDisabled();
+
+        // The mass pull onto the grid, kept a button of its own. It used to fire as a side effect of
+        // ticking the checkbox, which made turning a setting on move things -- and, now that freedom is
+        // recorded per component, would silently override every deliberate pose in the asset. Asking
+        // for it is a different act from enabling it, so it is a different control.
+        //
+        // (It is an operation on the open asset rather than a property of the grid, so the Assets panel
+        // is arguably its real home. It sits here because this is where the grid it pulls onto lives,
+        // and because stranding it was the alternative.)
+        projv::ComponentHandle node = activeStackNode(scene, editor);
+        if (node < scene.components.size() && !scene.components[node].children.empty()) {
+            ImGui::Separator();
+            ImGui::BeginDisabled(!editor.snapEnabled && !editor.snapRotate90);
+            if (ImGui::Button("Pull the open asset onto the grid")) {
+                size_t pulled = 0;
+                for (projv::ComponentHandle child : scene.components[node].children) {
+                    if (child >= scene.components.size()) continue;
+                    if (scene.components[child].name == "__deleted__") continue;
+                    setFreePlacement(editor, child, false);
+                    const projv::ComponentRecord& record = scene.components[child];
+                    applyComponentTransform(&scene, &editor, child, record.localPosition,
+                                            record.localRotation, record.localScale);
+                    pulled++;
+                }
+                for (Resolve& each : editor.resolves) invalidateResolve(editor, each);
+                editor.statusMessage = "Pulled " + std::to_string(pulled) + " item(s) onto the grid.";
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Round everything in %s onto the grid now, and clear any free\n"
+                                  "placement on it. A half-snapped list is the confusing state, so this\n"
+                                  "is the one gesture that resolves it.",
+                                  scene.components[node].name.c_str());
+            }
+        }
+        ImGui::EndPopup();
     }
     ImGui::PopID();
 }
@@ -14401,9 +15438,9 @@ static void drawOpenAssetBanner(const projv::Scene& scene, const EditorState& ed
         label += "   " + formatCompactCount(uint32_t(std::min<size_t>(resolve->resultVoxels,
                                                                       0xFFFFFFFFu))) + " voxel(s)";
     }
-    if (!editor.snapRotate90) label += "   free rotation";
-    if (!editor.snapEnabled) label += "   grid off";
-    else if (editor.snapStepVoxels > 1) label += "   step " + std::to_string(editor.snapStepVoxels);
+    // The grid, its step and the rotation setting used to be appended here as text. They are buttons on
+    // the grid bar in the opposite corner now, which says the same three things and can also change
+    // them -- and a read-only echo of a control three inches away is one more place to have to notice.
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
@@ -14468,6 +15505,11 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
             imageHovered = false;
         }
         if (viewportSettingsBarRect(editor, barMin, barMax) &&
+            ImGui::IsMouseHoveringRect(barMin, barMax, false)) {
+            imageHovered = false;
+        }
+        int gridBarButtons = 0;
+        if (viewportGridBarRect(editor, barMin, barMax, gridBarButtons) &&
             ImGui::IsMouseHoveringRect(barMin, barMax, false)) {
             imageHovered = false;
         }
@@ -14652,6 +15694,7 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
         drawOpenAssetBanner(scene, editor);
         drawViewportToolbar(editor);
         drawViewportSettingsBar(editor);
+        drawViewportGridBar(scene, editor);
         if (navigatorVisible) {
             drawNavigatorBar(editor, navigator);
             // The cube last of all: it is the only overlay whose own drag has to win against everything
@@ -17291,7 +18334,8 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
         return addPrimitivePart(scene, editor, resolve, centre, op);
     };
     auto foldOf = [&](Resolve& resolve) {
-        return foldNode(scene, editor, resolve, ASSEMBLY_MAX_BAKE_CELLS, ASSEMBLY_MAX_BAKE_CELLS);
+        return foldNode(scene, editor, resolve, ASSEMBLY_MAX_BAKE_CELLS,
+                        ASSEMBLY_MAX_BAKE_RESULT_CELLS);
     };
 
     // --- 1. One part, unioned: the primitive's own voxel count, in the lattice ---------------
@@ -17860,6 +18904,161 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
         }
     }
 
+    // --- 7g. Two grids compose, and merge to one .data -------------------------------------------
+    // The reported failure: "merging two grids says the stack resolves to nothing". A Grid was
+    // skipped by the fold outright, and `rowFolds` agreed, so a stack of two of them had no
+    // contributing row and folded to an empty accumulator -- while the panel went on offering an op
+    // on each row. It hid because nothing here made a grid: a Grid is not something the New menu
+    // offers, it is what a .data *becomes* the first time a sculpt reaches past its resolution
+    // (convertChunkToGrid), so it arrives in a document that never asked for one.
+    //
+    // Built that way here, one voxel outside the chunk and then taken away again, so the geometry is
+    // the same 8^3 box the tests above use. The expected numbers are therefore test 2's exactly --
+    // 512 unioned, 256 after subtracting a copy at +4 -- which is the point: a grid must compose
+    // like the chunk it was a moment ago, not merely compose somehow.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false, bothGrids = false, merged = false;
+        bool hiddenByResult = false, shownAgain = false;
+        size_t unionCells = 0, subtractCells = 0, mergedVoxels = 0, rowsAfterUndo = 0;
+        if (resolve) {
+            created.push_back(resolve->node);
+            projv::ComponentHandle base = addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            projv::ComponentHandle cut = addBox(*resolve, 8, vec3(4.0f, 0.0f, 0.0f),
+                                                BooleanOp::Subtract);
+
+            // Past the far corner of the chunk on every axis, which is what applyComponentQueue
+            // tests for -- then removed, leaving a grid holding exactly what the chunk held.
+            auto growIntoGrid = [&](projv::ComponentHandle part) {
+                if (part >= scene.components.size()) return;
+                ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, part);
+                if (!space.valid) return;
+                std::vector<ivec3> outside{ ivec3(space.resolution) };
+                applyVoxelSculpt(&scene, &editor, part, outside, { 0xFFFFFFFFu }, true);
+                applyVoxelSculpt(&scene, &editor, part, outside, std::vector<uint32_t>(), false);
+            };
+            growIntoGrid(base);
+            growIntoGrid(cut);
+            bothGrids = base < scene.components.size() && cut < scene.components.size() &&
+                        scene.components[base].kind == projv::ComponentKind::Grid &&
+                        scene.components[cut].kind == projv::ComponentKind::Grid;
+
+            // The subtracting row set aside first, so the union is measured on its own -- a fold that
+            // came out at 256 with both rows live would not say which of the two was being walked.
+            scene.components[cut].op = BooleanOp::None;
+            unionCells = foldOf(*resolve).coords.size();
+            scene.components[cut].op = BooleanOp::Subtract;
+            subtractCells = foldOf(*resolve).coords.size();
+
+            // A row that folds must stop being drawn while its result stands in for it. A grid's
+            // blocks are not in the loose list, so un-listing -- the whole of setComponentRendered
+            // until now -- reaches none of them, and the grid would have gone on being drawn *through*
+            // the result built out of it. Read back off the SceneGrid, which is where the renderer and
+            // the ray both look.
+            auto gridDrawn = [&](projv::ComponentHandle part) {
+                if (part >= scene.components.size()) return true;
+                int32_t index = scene.components[part].gridIndex;
+                if (index < 0 || size_t(index) >= scene.grids.size()) return true;
+                return scene.grids[size_t(index)].rendered;
+            };
+            rebuildResult(scene, editor, *resolve);
+            hiddenByResult = resolve->resultShown && !gridDrawn(base) && !gridDrawn(cut);
+            destroyResolveResult(scene, editor, *resolve);
+            shownAgain = gridDrawn(base) && gridDrawn(cut);
+
+            size_t rowsBefore = scene.components[resolve->node].children.size();
+            size_t historyBefore = editor.history.entries().size();
+            merged = mergeContentsToData(scene, editor, *resolve, {});
+            if (merged && editor.selectedComponent < scene.components.size()) {
+                mergedVoxels = projv::utils::getComponentVoxelCount(scene, editor.selectedComponent);
+            }
+            // Undo has to put grid rows back from their recipes, which is the half of this that reads
+            // a grid rather than writing one.
+            if (merged && editor.history.entries().size() > historyBefore) editor.history.undo();
+            rowsAfterUndo = resolve->node < scene.components.size()
+                          ? scene.components[resolve->node].children.size() : 0;
+
+            ok = bothGrids && unionCells == 512u && subtractCells == 256u &&
+                 hiddenByResult && shownAgain && merged &&
+                 mergedVoxels == 256u && rowsAfterUndo == rowsBefore;
+        }
+        projv::core::info("ASSEMBLYTEST: two grids compose - both are grids {} , union {} cell(s) "
+                          "(expected 512), minus a copy at +4 {} (expected 256), hidden behind the "
+                          "result {} and drawn again after {} , merged {} -> {} voxel(s) "
+                          "(expected 256), undo restores {} row(s) | {}",
+                          bothGrids ? "yes" : "NO", unionCells, subtractCells,
+                          hiddenByResult ? "yes" : "NO", shownAgain ? "yes" : "NO",
+                          merged ? "yes" : "NO", mergedVoxels, rowsAfterUndo, ok ? "PASS" : "FAIL");
+        while (!editor.resolves.empty()) {
+            destroyAssetNode(scene, editor, editor.resolves.back().node, false);
+        }
+    }
+
+    // --- 7h. A merge wider than one chunk ---------------------------------------------------------
+    // What raising BAKE_MAX_DIMENSION actually opened up, and the case the old cap refused with a
+    // message about "the limit for one component". Two 8^3 boxes 1000 voxels apart span 1008: past
+    // the old ceiling of 512, so this is the assertion that the ceiling moved, and far past any
+    // resolution one chunk can be -- so writing it overflows the chunk it was created in and
+    // applyComponentQueue converts it to a Grid on the way, which is only a sensible answer now that
+    // a Grid folds like anything else.
+    //
+    // The placement is asserted alongside the count, because "it merged" is the easy half. The bake's
+    // centring offset goes negative for a form this wide, and that offset has to come back off the
+    // component's origin or the geometry lands hundreds of voxels from where it was.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false, merged = false, becameGrid = false;
+        size_t mergedVoxels = 0;
+        float drift = -1.0f;
+        int span = 0;
+        if (resolve) {
+            addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            addBox(*resolve, 8, vec3(1000.0f, 0.0f, 0.0f), BooleanOp::Union);
+            projv::ComponentHandle node = resolve->node;
+
+            ComponentVoxelSpace lattice = resolveLattice(scene, *resolve);
+            Fold fold = foldOf(*resolve);
+            vec3 beforeCentre(0.0f);
+            if (fold.valid && !fold.coords.empty()) {
+                ivec3 minimum = fold.coords[0], maximum = fold.coords[0];
+                for (const ivec3& coord : fold.coords) {
+                    minimum = projv::core::min(minimum, coord);
+                    maximum = projv::core::max(maximum, coord);
+                }
+                span = (maximum - minimum + ivec3(1)).x;
+                beforeCentre = (componentVoxelToWorld(lattice, minimum) +
+                                componentVoxelToWorld(lattice, maximum + ivec3(1))) * 0.5f;
+            }
+
+            merged = mergeContentsToData(scene, editor, *resolve, {});
+            projv::ComponentHandle baked = editor.selectedComponent;
+            if (merged && baked < scene.components.size()) {
+                mergedVoxels = projv::utils::getComponentVoxelCount(scene, baked);
+                becameGrid = scene.components[baked].kind == projv::ComponentKind::Grid;
+                ivec3 low(0), high(0);
+                if (componentContentBounds(scene, baked, low, high)) {
+                    ComponentVoxelSpace after = resolveComponentVoxelSpace(scene, baked);
+                    vec3 afterCentre = (componentVoxelToWorld(after, low) +
+                                        componentVoxelToWorld(after, high + ivec3(1))) * 0.5f;
+                    drift = glm::length(afterCentre - beforeCentre);
+                }
+            }
+            ok = merged && becameGrid && span == 1008 && mergedVoxels == 1024u &&
+                 drift >= 0.0f && drift < 1.0e-3f;
+            if (node < scene.components.size() && scene.components[node].name != "__deleted__") {
+                destroyAssetNode(scene, editor, node, false);
+            }
+            editor.openAsset = projv::INVALID_COMPONENT_HANDLE;
+        }
+        projv::core::info("ASSEMBLYTEST: a merge wider than one chunk - spans {} (expected 1008), "
+                          "merged {} -> {} voxel(s) (expected 1024), overflowed to a grid {} , world "
+                          "drift {:.4f} | {}", span, merged ? "yes" : "NO", mergedVoxels,
+                          becameGrid ? "yes" : "NO", drift, ok ? "PASS" : "FAIL");
+        while (!editor.resolves.empty()) {
+            destroyAssetNode(scene, editor, editor.resolves.back().node, false);
+        }
+    }
+
     // --- 8. The pull, not a push: a hollow shape at 37 degrees has a closed surface -------------
     // Forward-mapping each source voxel to a lattice cell leaves gaps a two-voxel wall cannot
     // absorb. Checked by flooding the empty space around the resolved shell and asserting the flood
@@ -18006,7 +19205,7 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
                     Resolve& revived = scratch.resolves.front();
                     adoptedParts = reloaded.components[revived.node].children.size();
                     foldedAfter = foldNode(reloaded, scratch, revived, ASSEMBLY_MAX_BAKE_CELLS,
-                                               ASSEMBLY_MAX_BAKE_CELLS).coords.size();
+                                               ASSEMBLY_MAX_BAKE_RESULT_CELLS).coords.size();
                 }
                 ok = adoptedAssemblies == 1 && adoptedParts == 2 && foldedAfter == foldedBefore;
             }
@@ -18838,6 +20037,20 @@ void startup(projv::Application& app) {
         }
     }
 
+    // Which tool the editor opens on, for the same reason and to the same audience as the mode switch
+    // above: the tool decides which viewport overlays exist at all -- the grid bar is only up for the
+    // tools that move geometry -- so a screenshot of one is otherwise unreachable without a click.
+    if (const char* startTool = std::getenv("EDITOR_START_TOOL")) {
+        std::string requested(startTool);
+        for (int i = 0; i < EDITOR_TOOL_COUNT; i++) {
+            EditorTool tool = static_cast<EditorTool>(i);
+            if (requested == editorToolLabel(tool)) {
+                editor.activeTool = tool;
+                break;
+            }
+        }
+    }
+
     // The library browses from an absolute path: it is navigated with an Up button, and walking a
     // relative path upward runs out of parents long before the filesystem does.
     {
@@ -18853,6 +20066,33 @@ void startup(projv::Application& app) {
     std::string startupScenePath = editor.scenePath.empty() ? DEFAULT_SCENE_PATH : editor.scenePath;
     if (directoryHoldsScene(startupScenePath)) {
         loadScene(scene, gpuData, editor, startupScenePath);
+
+        // An explicit camera, as "x,y,z,yaw,pitch" (world units and radians). Applied after the load
+        // so it overrides frameScene's automatic framing.
+        //
+        // Same audience as the mode and tool switches above -- a screenshot or a smoke test cannot
+        // click -- but it earns its place for a sharper reason: frameScene's result depends on the
+        // viewport's aspect ratio, so the window manager's choice of window size silently changes
+        // what the camera looks at. That makes two renders of the same scene not comparable, and a
+        // pixel diff between them meaningless. Anything being verified by comparing images needs to
+        // pin the camera, or it is measuring the window manager.
+        if (const char* startCamera = std::getenv("EDITOR_CAMERA")) {
+            float values[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+            int parsed = std::sscanf(startCamera, "%f,%f,%f,%f,%f",
+                                     &values[0], &values[1], &values[2], &values[3], &values[4]);
+            if (parsed == 5) {
+                editor.cameraPosition = projv::core::vec3(values[0], values[1], values[2]);
+                editor.cameraYaw = values[3];
+                editor.cameraPitch = values[4];
+                editor.cameraMovedByInterface = true;   // Drop any accumulated Render-mode image.
+                projv::core::info("EDITOR_CAMERA: position ({}, {}, {}) yaw {} pitch {}",
+                                  values[0], values[1], values[2], values[3], values[4]);
+            } else {
+                projv::core::warn("EDITOR_CAMERA: expected \"x,y,z,yaw,pitch\", got \"{}\" "
+                                  "({} of 5 values parsed) - ignoring.", startCamera, parsed);
+            }
+        }
+
         if (std::getenv("EDITOR_SELFTEST")) {
             runPaintCoordSelfTest(scene);
             runSculptLatticeSelfTest(scene);
@@ -19205,15 +20445,24 @@ void render(projv::Application& app) {
         };
         projv::core::vec2 texelSize = { 1.0f / viewportResolution.x, 1.0f / viewportResolution.y };
         projv::core::vec3 cameraPosition = editor.cameraPosition;
-        // The viewport's icon-bar toggles, read by shade.frag. All four components are in use now; the
-        // obvious next things to want here are the occlusion radius and strength, or the sun
-        // direction, and those need a second vec4 rather than a spare lane — they are compile-time
+        // The viewport's four readability toggles, read by shade.frag. All four components are in use;
+        // the obvious next things to want here are the occlusion radius and strength, or the sun
+        // direction, and those need another vec4 rather than a spare lane — they are compile-time
         // constants in the shader until something in the interface wants to drive them.
         projv::core::vec4 renderSettings = {
             editor.ambientOcclusionEnabled ? 1.0f : 0.0f,
             editor.normalShadingEnabled ? 1.0f : 0.0f,
             editor.sunShadowEnabled ? 1.0f : 0.0f,
             editor.rayAmbientOcclusionEnabled ? 1.0f : 0.0f
+        };
+
+        // The fifth toggle, and the vec4 renderSettings had no room left for. Read by three passes
+        // rather than one: albedo.frag switches to the transparency peel and adds emission and the
+        // specular sample, and display.frag rolls off the overshoot that produces instead of clipping
+        // it. shade.frag needs no flag at all — the glow target it adds is simply zero when this is
+        // off, which is what keeps that pass one code path.
+        projv::core::vec4 previewSettings = {
+            editor.advancedPreviewEnabled ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f
         };
 
         // Which ray generator albedo.frag uses, and the two numbers the orthographic one needs.
@@ -19232,6 +20481,7 @@ void render(projv::Application& app) {
         projv::graphics::setUniformToValue(renderer, "frameCount", frameCount);
         projv::graphics::setUniformToValue(renderer, "texelSize", texelSize);
         projv::graphics::setUniformToValue(renderer, "renderSettings", renderSettings);
+        projv::graphics::setUniformToValue(renderer, "previewSettings", previewSettings);
         projv::graphics::setUniformToValue(renderer, "cameraProjection", cameraProjection);
         projv::graphics::updateUniforms(renderer->resources.uniformHandles, renderer->resources.uniformValues);
 

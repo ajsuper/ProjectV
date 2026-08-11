@@ -125,15 +125,6 @@ namespace projv::graphics {
             return v;
         }
 
-        inline bool isPowerOfTwo(uint32_t v) { return v != 0 && (v & (v - 1)) == 0; }
-        inline bool isPowerOfFour(uint32_t v) { return isPowerOfTwo(v) && (v & 0x55555555u) != 0u; }
-
-        static uint32_t nextPowerOfFour(uint32_t v) {
-            uint32_t p = 1;
-            while (p < v) p <<= 2;
-            return p;
-        }
-
         // Total bytes the two data textures may use, together.
         //
         // bgfx reports gpuMemoryMax as the device-local heap BUDGET, i.e. memory currently free --
@@ -488,8 +479,13 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             for (size_t h = 0; h < scene.components.size(); ++h) {
                 const ComponentRecord& comp = scene.components[h];
                 gpuData.componentPaletteOffsets[h] = palOff;
-                for (const Material& m : comp.materialPalette)
+                // Four words per entry, in the order the shader's decodeMaterial reads them.
+                for (const Material& m : comp.materialPalette) {
                     globalPalette.push_back(m.packedColor);
+                    globalPalette.push_back(m.packedEmission);
+                    globalPalette.push_back(m.packedSurface);
+                    globalPalette.push_back(m.packedExtra);
+                }
                 palOff += static_cast<uint32_t>(comp.materialPalette.size());
                 totalVersion += comp.paletteVersion;
             }
@@ -523,45 +519,48 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
         if (globalPalette.empty()) return false;
 
-        while (globalPalette.size() % 4 != 0) globalPalette.push_back(0);
-        uint32_t pw = static_cast<uint32_t>(globalPalette.size() / 4);
-        uint32_t pwPot = nextPowerOfFour(pw);
-        while (globalPalette.size() < pwPot * 4) globalPalette.push_back(0);
+        // One RGBA32U texel per entry, so the texel count IS the entry count -- the palette used to
+        // pack four entries into a texel and the shader picked one of the four components out of the
+        // fetch. It no longer has to: a single texelFetch returns a whole material.
+        //
+        // The width must stay a power of two because the shader addresses texels with `& (w - 1)`
+        // and `>> log2(w)`. It is also capped and allowed to wrap onto further rows: at four times
+        // the texels per entry, a palette that once fit in one row of a 16384-wide texture would
+        // reach the width limit at a quarter of the entries, and silently creating a texture
+        // narrower than the data is the failure that renders a scene black.
+        const uint32_t entries = palOff;
+        uint32_t maxSz = maxTexSize();
+        uint32_t maxPot = (maxSz >= 0x80000000u) ? 0x80000000u : (nextPowerOfTwo(maxSz + 1u) >> 1u);
+        uint32_t width = nextPowerOfTwo(entries);
+        uint32_t widthCap = std::min(4096u, maxPot);
+        if (width > widthCap) width = widthCap;
+        if (width == 0) width = 1;
+        uint32_t height = (entries + width - 1u) / width;
+        if (height > maxSz) {
+            core::error("rebuildGlobalPaletteTexture: {} palette entries need {} rows of {}, past the "
+                        "{} texture limit -- entries past the cut render black.",
+                        entries, height, width, maxSz);
+            height = maxSz;
+        }
+        globalPalette.resize(static_cast<size_t>(width) * height * 4u, 0u);
 
-        if (pwPot != gpuData.paletteWidth || !bgfx::isValid(gpuData.materialPaletteTexture)) {
+        if (width != gpuData.paletteWidth || height != gpuData.paletteHeight ||
+            !bgfx::isValid(gpuData.materialPaletteTexture)) {
             if (bgfx::isValid(gpuData.materialPaletteTexture)) bgfx::destroy(gpuData.materialPaletteTexture);
-            gpuData.materialPaletteTexture = createDataTexture(pwPot, 1, globalPalette);
+            gpuData.materialPaletteTexture = createDataTexture(width, height, globalPalette);
         } else {
             const bgfx::Memory* mem = bgfx::copy(globalPalette.data(), globalPalette.size() * sizeof(uint32_t));
-            bgfx::updateTexture2D(gpuData.materialPaletteTexture, 0, 0, 0, 0, uint16_t(pwPot), 1, mem);
+            bgfx::updateTexture2D(gpuData.materialPaletteTexture, 0, 0, 0, 0,
+                                  uint16_t(width), uint16_t(height), mem);
         }
-        core::info("rebuildGlobalPaletteTexture: {} components, {} palette entries, width={}",
-                   scene.components.size(), palOff, pwPot);
-        core::info("PALETTE-REBUILT: {} components, {} entries, width={} totalVersion={}",
-                   scene.components.size(), palOff, pwPot, totalVersion);
-        gpuData.paletteWidth = pwPot;
-        if (!isPowerOfFour(pwPot)) core::info("PALETTE NOT Po4: width={}", pwPot);
+        core::info("rebuildGlobalPaletteTexture: {} components, {} palette entries, {}x{} texels",
+                   scene.components.size(), palOff, width, height);
+        gpuData.paletteWidth = width;
+        gpuData.paletteHeight = height;
         return true;
     }
 
     // Not rebuilt: return false so callers know headers don't need rewriting.
-
-    namespace {
-        // The colour sitting at a global palette index, resolved back through the per-component
-        // offsets the last rebuild recorded. Indices past the final component's palette are the
-        // padding rebuildGlobalPaletteTexture adds to reach a whole texel, and read as zero.
-        // Caller holds scene.materialPaletteMutex.
-        uint32_t globalPaletteEntry(const Scene& scene, const GPUData& gpuData, uint32_t globalIndex) {
-            for (size_t h = 0; h < scene.components.size() && h < gpuData.componentPaletteOffsets.size(); ++h) {
-                uint32_t offset = gpuData.componentPaletteOffsets[h];
-                const std::vector<Material>& palette = scene.components[h].materialPalette;
-                if (globalIndex >= offset && globalIndex < offset + palette.size()) {
-                    return palette[globalIndex - offset].packedColor;
-                }
-            }
-            return 0;
-        }
-    }
 
     void updatePaletteEntry(const Scene& scene, GPUData& gpuData, ComponentHandle componentHandle, uint8_t slot) {
         if (!bgfx::isValid(gpuData.materialPaletteTexture) || gpuData.paletteWidth == 0) {
@@ -579,14 +578,13 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             return;
         }
 
-        // The palette texture is RGBA32U — four entries per texel — so the whole texel is rewritten,
-        // including the three neighbours, which may belong to the next component's palette.
-        uint32_t globalIndex = gpuData.componentPaletteOffsets[componentHandle] + slot;
-        uint32_t texelIndex = globalIndex >> 2;
-        uint32_t texel[4];
-        for (uint32_t i = 0; i < 4; ++i) {
-            texel[i] = globalPaletteEntry(scene, gpuData, (texelIndex << 2) + i);
-        }
+        // One entry per texel, so this writes exactly the entry that changed. It used to have to
+        // reconstruct the three neighbouring entries sharing the texel -- which could belong to the
+        // next component's palette -- just to rewrite one colour.
+        uint32_t texelIndex = gpuData.componentPaletteOffsets[componentHandle] + slot;
+        const Material& material = scene.components[componentHandle].materialPalette[slot];
+        uint32_t texel[4] = { material.packedColor, material.packedEmission,
+                              material.packedSurface, material.packedExtra };
 
         uint32_t x = texelIndex % gpuData.paletteWidth;
         uint32_t y = texelIndex / gpuData.paletteWidth;
@@ -937,8 +935,12 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 // its way up from nothing on every single call.
                 size_t base = cellMapData.size();
                 cellMapData.resize(base + g.cellToChunk.size());
+                // A hidden grid is uploaded as a grid of empty cells rather than dropped from the
+                // descriptor list: descriptors are indexed by position, so removing one would
+                // renumber every grid after it. The CPU-side map is left exactly as it is -- see
+                // SceneGrid::rendered, and note that everything reading geometry reads through it.
                 for (size_t i = 0; i < g.cellToChunk.size(); i++) {
-                    int32_t c = g.cellToChunk[i];
+                    int32_t c = g.rendered ? g.cellToChunk[i] : -1;
                     cellMapData[base + i] = c < 0 ? 0xFFFFFFFFu : static_cast<uint32_t>(c);
                 }
             }

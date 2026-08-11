@@ -78,6 +78,10 @@ namespace projv::utils {
                 if (handle < visible.size()) visible[handle] = true;
             }
             for (const SceneGrid& grid : scene.grids) {
+                // The grid-level form of the same rule: a grid hidden behind a resolved result is
+                // still fully readable geometry, and a ray must no more stop on it than on a hidden
+                // loose chunk. See SceneGrid::rendered.
+                if (!grid.rendered) continue;
                 for (int32_t handle : grid.cellToChunk) {
                     if (handle >= 0 && size_t(handle) < visible.size()) visible[handle] = true;
                 }

@@ -96,7 +96,7 @@ The right-hand three are **stacked, not tabbed**, and that is the point: they ar
 
 ### The render toggles
 
-Four buttons on the bar at the bottom of the scene image. What sits underneath them is the scene previewer's renderer, which is one primary ray per pixel and the voxel's **stored albedo written out with no lighting at all** — so a material that reads wrong there is wrong in the data, not in the lighting. That is the property the whole viewport is built to protect, and it is why every toggle is applied by a separate pass (`shade.frag`) reading the geometry the primary ray already wrote, rather than by the march itself. Each one multiplies a scalar into the albedo; turn them all off and the image is byte for byte the unmodulated albedo again.
+Five buttons on the bar at the bottom of the scene image. What sits underneath them is the scene previewer's renderer, which is one primary ray per pixel and the voxel's **stored albedo written out with no lighting at all** — so a material that reads wrong there is wrong in the data, not in the lighting. That is the property the whole viewport is built to protect, and it is why the first four toggles are applied by a separate pass (`shade.frag`) reading the geometry the primary ray already wrote, rather than by the march itself. Each of the four multiplies a scalar into the albedo; turn them all off and the image is byte for byte the unmodulated albedo again.
 
 | Toggle | Default | What it does | Costs |
 |--------|---------|--------------|-------|
@@ -104,6 +104,9 @@ Four buttons on the bar at the bottom of the scene image. What sits underneath t
 | **Ambient occlusion (ray traced)** | off | The same question asked of the scene instead of the screen: four short rays into the hemisphere above the surface, reaching 24 voxels instead of 3 | Four scene rays per pixel |
 | **Normal shading** | **on** | A fixed brightness per face axis, plus darker undersides. The two faces meeting at a voxel edge differ, so form is legible inside a flat-coloured region | One dot product per pixel |
 | **Sun shadow** | off | One visibility ray towards a fixed, world-space sun. Occluded points fall to 55% | A full scene ray per lit pixel |
+| **Advanced preview** | off | The three material properties the other four ignore: **emission, reflections and transparency**. Not a readability aid — the only toggle here that changes what the *materials* look like rather than what the geometry looks like | A peeled primary march, plus a scene ray per glossy or metallic pixel |
+
+**The advanced preview is the odd one out and is documented on its own below.** The other four darken stored albedo; it *adds* to it, and what it adds is not a readability aid but the three material properties the Viewport has no other way of showing you.
 
 **Occlusion and normal shading are on because between them they are what makes an unlit scene read as solid at all.** The axis shading separates the two faces at an edge; the occlusion puts objects *on* the ground instead of in front of it. Neither is light transport and neither is pretending to be — they are readability aids for judging shape, and the reason they are cheap enough to leave on is that neither casts a ray.
 
@@ -139,6 +142,57 @@ Three details worth knowing, because each is a bug that showed up before it was 
 - **The sun is world-fixed, not camera-relative.** A shadow that swung with the camera cannot tell you where an object stands, because the cue moves with the eye instead of staying with the scene.
 - **Faces turned away from the sun are darkened without a ray at all.** That is not only the obvious saving — a little under half the pixels — it is also what keeps the terminator on the geometry, where a grazing `NdotL` would otherwise leave it on the shadow ray's epsilon.
 - **The ray's start offset is measured in voxels, not world units.** Editor scenes sit at coordinates in the thousands, where a float32 ULP is around a thousandth of a unit, so a fixed epsilon small enough for a 0.01-unit voxel is below the noise floor of the position it is added to — and the ray re-hits the voxel it left, which shows up as stippled darkening across every lit face. A quarter of a voxel along the normal is inside the adjoining empty cell at either end of the range of scenes the editor opens. It is the same reason the occlusion radius is expressed in voxels.
+
+#### The advanced preview
+
+The fifth button, and the only one on the bar that is not a readability aid. A material carries three properties the Viewport draws nothing of — **emission, the specular lobe, and transparency** — and the Palette panel used to say so in as many words, because until this existed the only way to find out what a slider had done was to switch to Render mode. That is a real cost: Render mode re-frames the shot under a sun and a sky and then takes hundreds of frames to converge, so "did raising glossiness do anything" became a question you answered by leaving the thing you were doing.
+
+This answers it in place. It stays inside the viewport's own flat, sunless, background-only world and adds nothing but what the materials themselves contribute:
+
+| What | How |
+|------|-----|
+| **Transparency** | The primary march becomes `raySceneIntersectPeeled` — it sees *through* transparent voxels to the nearest opaque surface and tints what it finds by the layers it crossed. Identical traversal, identical depth budget and identical stochastic alpha to Render mode's, so glass that reads right here reads right there |
+| **Emission** | The emissive radiance of the hit, plus the glow of every transparent layer in front of it, each already dimmed by what sat in front of *it* |
+| **Reflections** | One GGX sample per pixel per frame, marched into the scene. Same lobe, same Fresnel, same masking term the path tracer uses — the estimator is written out in closed form because there is one lobe here and nothing to weigh it against |
+
+**A scene whose materials have none of the three set looks identical with this on.** Not approximately: `metallic 0` leaves the albedo whole, an opaque scene's transmittance is exactly one, and `glossiness 0` with `metallic 0` drives the dielectric F0 to zero, which returns from the reflection before it spends a ray. That is the same zero rule the material word itself is built on, and it is what makes the toggle safe to leave on while working.
+
+**What it does *not* do is light the scene.** An emitter glows; it does not brighten the wall beside it. That is light transport, it needs a path, and Render mode is where paths live. The distinction is worth keeping straight, because "my emitter is not lighting anything" is a correct observation about this mode rather than a bug in it.
+
+##### Emission and reflection are added, not multiplied — and that needs its own render target
+
+The four readability toggles all darken. Adding a glow to the albedo *before* them means the occlusion dims an emitter for sitting in a crease, the axis shading dims it for facing sideways, and the sun shadow dims it for facing away from a sun this mode does not otherwise have. All three are nonsense: every one of those terms is a statement about **diffuse reflectance**, and a light source is not shaded by the aids that exist to make unlit geometry legible.
+
+So `albedo.frag` writes what it produces to a **fourth attachment of its own** — `previewGlow` — and `shade.frag` adds it once, last, after every multiply has had its say. With the toggle off the target is zero, the add is a no-op, and the pass is byte for byte what it was before any of this existed.
+
+The one thing that attachment costs is a slot shuffle: the engine binds every texture of every input framebuffer in order, so a fourth attachment on FBO 1 pushed the occlusion buffer from sampler 3 to sampler 4 in `shade.frag` and `denoise.frag`. `occlusion.frag` gets the glow bound at slot 3 and simply never declares it.
+
+##### Both new samples are stochastic, which is why they cost one ray
+
+The peel's alpha decision and the reflection direction are each one random sample per pixel per frame, seeded per pixel and per frame — the same arrangement the ray-traced occlusion uses, leaning on the same accumulate pass. So both are grainy while the camera moves and resolve within a second of it stopping, and neither needs a second ray to look smooth once you are still. A deterministic alternative exists for neither: alpha compositing N layers analytically means N shading evaluations rather than one, and a deterministic reflection is a mirror, which is the one roughness a real material almost never has.
+
+##### The display pass had to learn about overshoot
+
+`display.frag` is a deliberate straight copy, and it says so at length: the viewport's output is stored reflectance, already in [0, 1], and tone mapping it would mean the editor is no longer showing you the colour in the file.
+
+The advanced preview is the first thing upstream that produces values above 1 — emission is radiance and its strength control reaches 245. Left alone those clip, and clipping is the worst available answer, because every channel that overshoots saturates to the same 1.0: a bright red emitter and a bright blue one both arrive on screen as a white blob, and *what colour is this emitter* is the question the toggle was added to answer.
+
+Borrowing Render mode's ACES-plus-gamma pipeline would fix that and break something worse — that curve lifts and desaturates the whole image, including the pixels that are plain reflectance and were already correct, so toggling the preview would appear to change every material in the scene. Instead there is a rolloff built outwards from the straight-through rule:
+
+- **Identity below the knee.** A pixel whose brightest channel is under 0.75 passes through untouched. Stored reflectance lives down there, so the guarantee survives the toggle intact.
+- **Hue preserved above it.** The curve is applied to the brightest channel and the others scaled by the same ratio. Per-channel compression pulls an overshooting colour towards white as it brightens; scaling by the peak keeps a red emitter red however far past 1 it goes.
+- **Asymptotic, not clamped.** The remaining quarter of the range is spent on an exponential approach to 1.0, whose slope at the knee matches the identity below it, so there is no crease at the join and no second brightness at which things start clipping after all.
+
+##### The peel depth was measured, not guessed
+
+The transparency budget is a **compile-time** loop bound the SPIR-V path unrolls, so every pixel of every frame carries the code whether it peels or not — including the plain view, which is what the viewport spends almost all its time drawing. The obvious conclusion is to keep the viewport's budget below Render mode's 65 layers, and it is wrong: with the preview off, the shader runs the same speed at 65 as at 2 (1172 against 1201 fps, same scene and framing). The branch is uniform across the draw, so the unrolled peel costs the plain path nothing — and a shallower budget here would have made the preview disagree with the render it is a preview *of*, which is the one thing it cannot afford to do.
+
+With the preview on it is not free, and what it costs depends on the scene rather than on the number: the loop leaves at the first opaque voxel and again once the transmittance is spent, so opaque geometry runs one iteration and clear glass runs the budget. On a test scene with a lot of shallow water, 65 measured about twice 33. That is the price of agreeing with the render, and only the person who asked to see it pays it.
+
+##### Two honest limits
+
+- **A metal goes dark.** `metallic 1` has no diffuse lobe, so what it shows is its reflection — and in a mode with no sun and no sky, the thing it mostly reflects is a deliberately dark background. Chrome in an empty scene is nearly black here and looks like metal in Render mode. That is the truthful preview of the material rather than a flattering one, and the reflection does pick up nearby geometry, which is what makes it read as a mirror rather than as a hole.
+- **The occlusion rays do not peel.** Glass occludes exactly as an opaque voxel does. Deliberately: occlusion is a readability aid measuring how enclosed a point is, glass in a window frame does enclose it, and teaching four rays per pixel to peel would cost that pass the thing that makes it affordable.
 
 ### The navigator
 

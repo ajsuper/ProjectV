@@ -33,8 +33,17 @@ uniform vec4 tree64Dims;
 uniform vec4 voxelTypeDims;
 uniform vec4 paletteDims;
 
+// NOTE ON DEFAULTS: these initializers are NOT dependable. Every renderer builds a RayQuery by
+// declaring one and assigning only the fields it cares about, and the compiled result does not carry
+// the values written here -- an unassigned field is garbage. `doTransparency` has been in this struct
+// unset and unread by anything for as long as it has existed, which is why that was never noticed.
+//
+// So nothing that GATES A HIT may live in here. The distance floor the peeling traversals need is an
+// explicit function parameter (see raySceneIntersectFrom) for exactly that reason: putting it here
+// first, and letting it default to 0, produced a garbage floor in all ~20 existing shaders and
+// rejected every hit in the scene -- a completely empty render.
 struct RayQuery {
-    bool doTransparency = true;
+    bool doTransparency = true;   // Vestigial: nothing sets it and nothing reads it.
     uint startLOD = 0;
     uint finishLOD = 0;
     uint distanceToFinishLOD = 0; // Measured in voxels.
@@ -177,6 +186,16 @@ struct SceneIntersectData {
     //
     // The DDA has the exact integer the whole way through. Carry it rather than rebuild it.
     ivec3 voxelCoord;
+    // Distance at which the ray LEAVES the cell it hit, in the same units and from the same origin as
+    // rayT, so `exitT - rayT` is exactly how far the ray travelled inside that cell.
+    //
+    // Carried for the same reason voxelCoord is. Rebuilding it outside -- turning foundBox back into a
+    // world AABB and slab-testing it -- looks equivalent and is not: on a near-axis-aligned ray the
+    // near-zero direction components make 1/direction enormous, and a slab test takes the MINIMUM
+    // across all three axes, so an axis the ray barely traverses contributes a spurious bound. Which
+    // way it is spurious flips with the sign of that component, so the error shows up as a hard split
+    // down the middle of the screen where the sign changes. The march knows the answer exactly.
+    float exitT;
 };
 
 static CombinedNode64 nodeStack[5];
@@ -462,14 +481,84 @@ uint materialID(uint index) {
     return pixel[colorIndex];
 }
 
-uint materialPaletteEntry(uint index, uint comp) {
+// One palette entry is one RGBA32U texel: the four words of projv::Material. The palette used to
+// pack four entries into a texel and select one component out of the fetch, so every material
+// property added since then has been free -- the fetch was always returning four words and throwing
+// three of them away. See the Material comment in data_structures/scene.h for the word layout and,
+// more importantly, for why all-zero words 1-3 mean "shade this exactly as the colour-only pipeline
+// did", which is what lets every compose.json already on disk render unchanged.
+uvec4 materialPaletteTexel(uint index) {
     uint w = uint(paletteDims.x);
     uint shift = uint(paletteDims.y);
-    uint pixelIndex = uint(index) >> 2u;
-    int x = int(pixelIndex & (w - 1u));
-    int y = int(pixelIndex >> shift);
-    uvec4 pixel = texelFetch(materialPalette, ivec2(x, y), 0);
-    return pixel[uint(index) & 3u];
+    int x = int(index & (w - 1u));
+    int y = int(index >> shift);
+    return texelFetch(materialPalette, ivec2(x, y), 0);
+}
+
+// Everything a shader can know about a voxel's surface. Decoded from that one texel; nothing in
+// here costs a second fetch.
+struct VoxelMaterial {
+    vec3  albedo;
+    vec3  emission;       // Already scaled by strength, so this is radiance rather than a colour.
+    float glossiness;     // 0 = fully rough (Lambertian), 1 = mirror.
+    float metallic;       // 0 = dielectric, 1 = conductor (the specular lobe takes the albedo tint).
+    float transparency;   // Stored and carried. Nothing reads it yet -- see the note below.
+    float ior;            // 1.0 = no refraction.
+    float transmission;
+    uint  flags;
+};
+
+vec3 unpackPaletteRGB10(uint packed) {
+    return vec3(float((packed >> 20u) & 0x3FFu),
+                float((packed >> 10u) & 0x3FFu),
+                float( packed         & 0x3FFu)) / 1023.0;
+}
+
+// NOTE ON TRANSPARENCY: `transparency`, `ior` and `transmission` are decoded and carried here, but
+// no renderer acts on them, because acting on them is not a shading change -- it is a traversal
+// change. Every march in this file stops at the first solid voxel, so a see-through voxel would
+// need the marcher to read the material mid-traversal and keep going, which is a material fetch per
+// step instead of per hit. The storage is free; that is not. Kept decoded so the shading side is
+// ready when the traversal side is.
+// The material of nothing: black, non-emissive, fully rough, opaque. By the zero rule this is what a
+// palette entry of all zeroes decodes to, so "empty" and "never had properties set" agree.
+VoxelMaterial emptyVoxelMaterial() {
+    VoxelMaterial m;
+    m.albedo = vec3(0.0);
+    m.emission = vec3(0.0);
+    m.glossiness = 0.0;
+    m.metallic = 0.0;
+    m.transparency = 0.0;
+    m.ior = 1.0;
+    m.transmission = 0.0;
+    m.flags = 0u;
+    return m;
+}
+
+VoxelMaterial decodeMaterial(uvec4 texel) {
+    VoxelMaterial m;
+    m.albedo = unpackPaletteRGB10(texel.x);
+
+    // Exponential, matching projv::unpackEmissiveStrength on the CPU: raw 0 is exactly zero, so a
+    // legacy entry is not an emitter, and 1..255 spans roughly 0.004 to 245 with raw 128 sitting at
+    // 1.0. A linear byte would put every usable dim emitter inside its first step.
+    uint strengthRaw = (texel.w >> 24u) & 0xFFu;
+    float strength = strengthRaw == 0u ? 0.0 : exp2(float(strengthRaw) / 16.0 - 8.0);
+    // A zero emission word means "emit in the albedo's colour" -- emitting black is meaningless, so
+    // zero is free to carry that. Keeps the strength control alive on a material that has never had
+    // an emission colour picked, without giving up independent emission for the surfaces that need
+    // it (a black voxel cannot glow if emission is albedo * strength). See
+    // projv::materialEffectiveEmissionColor.
+    vec3 emissionColour = texel.y == 0u ? m.albedo : unpackPaletteRGB10(texel.y);
+    m.emission = emissionColour * strength;
+
+    m.glossiness   = float((texel.z >> 24u) & 0xFFu) / 255.0;
+    m.metallic     = float((texel.z >> 16u) & 0xFFu) / 255.0;
+    m.transparency = float((texel.z >>  8u) & 0xFFu) / 255.0;
+    m.ior          = 1.0 + float(texel.z & 0xFFu) / 128.0;
+    m.transmission = float((texel.w >> 16u) & 0xFFu) / 255.0;
+    m.flags        = (texel.w >> 8u) & 0xFFu;
+    return m;
 }
 
 chunkHeader headers(int headerIndex) {
@@ -961,9 +1050,19 @@ uint computeTargetLOD(float distanceInVoxels, RayQuery rayQuery) {
     return uint(mix(float(rayQuery.startLOD), float(rayQuery.finishLOD), t));
 }
 
-SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, BoxAABB boundingBox, uint tree64StartIndex, uint tree64EndIndex, uint tree64Resolution, uint chunkTraversalLOD) {
+
+// Exit distance of the cell at `cellMin` with edge `cellSize`, for a ray already inside it. The same
+// expression the DDA stepper builds its own tMax from, so the two cannot disagree.
+float cellExitDistance(Ray ray, vec3 invRayDir, ivec3 cellMin, uint cellSize) {
+    vec3 farPlanes = mix(vec3(cellMin), vec3(cellMin) + vec3(float(cellSize)), step(vec3(0.0), ray.direction));
+    vec3 t = (farPlanes - ray.origin) * invRayDir;
+    return min(min(t.x, t.y), t.z);
+}
+
+SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float tMin, BoxAABB boundingBox, uint tree64StartIndex, uint tree64EndIndex, uint tree64Resolution, uint chunkTraversalLOD) {
     SceneIntersectData returnData;
     returnData.rayT = -1.0;
+    returnData.exitT = -1.0;
     returnData.normal = vec3(0.0);
     vec3 invRayDir = 1.0/ray.direction;
     // Normal of the face the ray most recently crossed. Starts as the volume entry face
@@ -1004,14 +1103,24 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, BoxAABB
             if (previouslyPopped) break;
             if (checkZOrderInValidMasks(data.data1, data.data2, nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent)) {
                 if((data.data3 & 0b1) == 1u) {
-                    returnData.foundBox.position = traversalPosition;
-                    returnData.voxelCoord = traversalPosition;
-                    returnData.foundBox.size = stepSize;
-                    returnData.steps = stepCount;
-                    returnData.rayT = rayT;
-                    returnData.normal = hitNormal;
-                    return returnData;
-                    // Leaf found! Handle accordingly.
+                    // Leaf found! Handle accordingly -- unless it sits at or before tMin, which is
+                    // the case a peeling caller has already consumed. This is the branch that
+                    // matters for a ray whose origin is INSIDE a solid voxel: the descent reaches
+                    // that voxel immediately at rayT == 0, and returning it would hand back the
+                    // surface the caller is trying to get past. Breaking out of the descent instead
+                    // drops into the DDA stepping section below, which walks out of the voxel one
+                    // step at a time and reports the next one properly, with a real normal.
+                    if (tMin <= 0.0 || rayT >= tMin) {
+                        returnData.foundBox.position = traversalPosition;
+                        returnData.voxelCoord = traversalPosition;
+                        returnData.foundBox.size = stepSize;
+                        returnData.steps = stepCount;
+                        returnData.rayT = rayT;
+                        returnData.exitT = cellExitDistance(ray, invRayDir, traversalPosition, stepSize);
+                        returnData.normal = hitNormal;
+                        return returnData;
+                    }
+                    break;
                 }
                 // LOD cutoff. This candidate is occupied (valid in its parent's
                 // mask) but is an interior node we would normally descend into.
@@ -1029,13 +1138,20 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, BoxAABB
                 // MORE detail than computeTargetLOD already allows, only less -- hence max(), not
                 // a replacement.
                 if (candidateNodeLevel <= max(computeTargetLOD(rayT, rayQuery), chunkTraversalLOD)) {
-                    returnData.foundBox.position = traversalPosition;
-                    returnData.voxelCoord = traversalPosition;
-                    returnData.foundBox.size = stepSize;
-                    returnData.steps = stepCount;
-                    returnData.rayT = rayT;
-                    returnData.normal = hitNormal;
-                    return returnData;
+                    // Same tMin gate as the leaf above. A coarsened node is treated as wholly solid,
+                    // so there is no finer geometry inside it for a peel to find -- stepping past it
+                    // is the right way to get beyond a layer the caller already consumed.
+                    if (tMin <= 0.0 || rayT >= tMin) {
+                        returnData.foundBox.position = traversalPosition;
+                        returnData.voxelCoord = traversalPosition;
+                        returnData.foundBox.size = stepSize;
+                        returnData.steps = stepCount;
+                        returnData.rayT = rayT;
+                        returnData.exitT = cellExitDistance(ray, invRayDir, traversalPosition, stepSize);
+                        returnData.normal = hitNormal;
+                        return returnData;
+                    }
+                    break;
                 }
                 BoxAABB candidateBox;
                 candidateBox.position = vec3(traversalPosition);
@@ -1136,16 +1252,23 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, BoxAABB
             if (cellExitT > rayT &&
                 checkZOrderInValidMasks(data.data1, data.data2, nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent)) { // New valid z order found!!
                 if ((data.data3 & 0b1) == 1) {
-                    returnData.foundBox.position = traversalPosition;
-                    returnData.voxelCoord = traversalPosition;
-                    returnData.foundBox.size = stepSize;
-                    returnData.steps = stepCount;
-                    returnData.rayT = rayT;
-                    returnData.normal = hitNormal;
-                    return returnData;
                     // Leaf found, handle accordingly.
+                    if (tMin <= 0.0 || rayT >= tMin) {
+                        returnData.foundBox.position = traversalPosition;
+                        returnData.voxelCoord = traversalPosition;
+                        returnData.foundBox.size = stepSize;
+                        returnData.steps = stepCount;
+                        returnData.rayT = rayT;
+                        returnData.exitT = cellExitT;
+                        returnData.normal = hitNormal;
+                        return returnData;
+                    }
+                    // At or before tMin: a surface the caller has already consumed. Keep stepping
+                    // through this leaf rather than returning it. Deliberately does NOT break --
+                    // breaking would leave the stepping loop and re-descend onto the same voxel.
+                } else {
+                    break;   // Interior node: leave the stepping loop and descend into it.
                 }
-                break;
             }
         }
     }
@@ -1157,7 +1280,7 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, BoxAABB
 }
 
 //Cast the ray through the tree64 bounding box.
-SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, uint headerIndex) {
+SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, uint headerIndex) {
     chunkHeader header = headers(headerIndex);
 
     uint tree64StartIndex = header.geometryStartIndex;
@@ -1180,10 +1303,30 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, uint headerI
     transformedRay.origin = (Rinv * (ray.origin - P)) * (tree64BoundingBox.size / header.scale);
     transformedRay.direction = Rinv * ray.direction;
 
+    // Nudge near-zero components away from zero so 1/direction stays finite. SIGN-PRESERVING: the
+    // test is on the magnitude, so assigning a bare +epsilon silently reversed a small NEGATIVE
+    // component (-3e-7 became +1e-6), which reverses the DDA's step direction and the entry/exit slab
+    // ordering on that axis -- a direction-dependent wrong walk for any near-axis-aligned ray.
+    //
+    // Barely visible while only the FIRST hit mattered, because a flipped near-zero axis rarely
+    // changes which voxel is met first. It matters once a ray has to be walked correctly through a
+    // sequence of voxels, as the transparency peel does: the march then follows a slightly different
+    // ray than the caller's, so the voxels it visits and the segment lengths measured against the
+    // caller's ray stop agreeing.
     float epsilon = 1e-6;
-    if (abs(transformedRay.direction.x) < epsilon) transformedRay.direction.x = epsilon;
-    if (abs(transformedRay.direction.y) < epsilon) transformedRay.direction.y = epsilon;
-    if (abs(transformedRay.direction.z) < epsilon) transformedRay.direction.z = epsilon;
+    if (abs(transformedRay.direction.x) < epsilon)
+        transformedRay.direction.x = transformedRay.direction.x < 0.0 ? -epsilon : epsilon;
+    if (abs(transformedRay.direction.y) < epsilon)
+        transformedRay.direction.y = transformedRay.direction.y < 0.0 ? -epsilon : epsilon;
+    if (abs(transformedRay.direction.z) < epsilon)
+        transformedRay.direction.z = transformedRay.direction.z < 0.0 ? -epsilon : epsilon;
+
+    // tMin arrives in world units and the march runs in voxel units. The origin above was scaled by
+    // resolution/scale while the direction was left unscaled, so a world distance t maps to
+    // t * (resolution/scale) locally -- exactly the factor the returned rayT is divided by further
+    // down. Converting here rather than at the three comparison sites keeps the march working in one
+    // set of units throughout.
+    float localTMin = tMin * (tree64BoundingBox.size / header.scale);
 
     IntersectionResult rootIntersect = getRayBoxEntry(transformedRay, tree64BoundingBox);
 
@@ -1193,7 +1336,7 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, uint headerI
     tree64Intersect.rayT = -1.0;
     tree64Intersect.normal = vec3(0.0);
     if(rootIntersect.distance >= 0){
-        tree64Intersect = marchRayThroughTree64_DDA(transformedRay, rayQuery, tree64BoundingBox, tree64StartIndex, tree64EndIndex, header.resolution, header.traversalLOD);
+        tree64Intersect = marchRayThroughTree64_DDA(transformedRay, rayQuery, localTMin, tree64BoundingBox, tree64StartIndex, tree64EndIndex, header.resolution, header.traversalLOD);
     }
     // size should be 1 for full res, 2 for half res, 4 for quarter res etc. So we multiply the size by what the voxel scale actually is.
     tree64Intersect.foundBox.size *= header.scale/tree64BoundingBox.size;
@@ -1207,6 +1350,7 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, uint headerI
     // length-preserving), so t values convert back to world with the inverse uniform scale.
     // A miss's -1 stays negative. Rotation preserves distance, so it does not affect rayT.
     tree64Intersect.rayT *= header.scale/tree64BoundingBox.size;
+    tree64Intersect.exitT *= header.scale/tree64BoundingBox.size;
     return tree64Intersect;
 }
 // The colour of one voxel, given the cell the march landed on **in the chunk's own voxel space**.
@@ -1226,7 +1370,13 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, uint headerI
 //
 // The coordinate is clamped rather than trusted: a caller handing over a miss's zeroed struct should
 // read a defined voxel rather than index the tree out of bounds.
-vec3 fetchVoxelColorAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
+//
+// This returns the WHOLE material. fetchVoxelColorAtCoord below is the albedo-only wrapper, and it
+// stays because a renderer that only wants a colour should not have to know what a VoxelMaterial is
+// -- and because every existing call site across the examples asks for exactly that. Splitting the
+// two costs nothing: the descent, the fetch and the decode are identical either way, and the unused
+// fields fold away in the compiler.
+VoxelMaterial fetchVoxelMaterialAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
     chunkHeader h = headers(int(headerIndex));
     uint res = h.resolution;
 
@@ -1266,11 +1416,7 @@ vec3 fetchVoxelColorAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
                 }
             }
             uint matID = materialID(h.materialIDStartIndex + materialOffset + above) + h.paletteOffset;
-            uint packedColor = materialPaletteEntry(matID, 0);
-            uint R10 = (packedColor >> 20) & 0x3FF;
-            uint G10 = (packedColor >> 10) & 0x3FF;
-            uint B10 = (packedColor >> 0) & 0x3FF;
-            return vec3(float(R10)/1023.0, float(G10)/1023.0, float(B10)/1023.0);
+            return decodeMaterial(materialPaletteTexel(matID));
         }
         uint childZOrder = (zOrder / stepSize) & 63u;
         uint siblingsBefore = calculateSiblingsBeforeThisZOrder(4, node.data1, node.data2, childZOrder);
@@ -1279,7 +1425,13 @@ vec3 fetchVoxelColorAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
         stepSize >>= 6u;
     }
 
-    return vec3(0.0);
+    // Fell out of the descent without finding a leaf: an empty voxel.
+    return emptyVoxelMaterial();
+}
+
+// Albedo only, for the renderers that shade from a colour and nothing else.
+vec3 fetchVoxelColorAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
+    return fetchVoxelMaterialAtCoord(hitVoxelCoord, headerIndex).albedo;
 }
 
 // The lossy path, kept only because a dozen shaders across the other examples still call it.
@@ -1364,7 +1516,7 @@ uint looseListValue(uint index) {
 // but each occupied cell is marched with the original WORLD ray via castRayThroughTree64 —
 // the chunk header already carries world placement + rotation. R^-1 is orthonormal, so the
 // grid-local ray parameter t matches world rayT and is directly comparable to maxDistance.
-SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float maxDistance) {
+SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float maxDistance, float tMin) {
     SceneIntersectData miss;
     miss.foundBox.size = -1;
     miss.voxelCoord = ivec3(0);
@@ -1377,10 +1529,12 @@ SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float ma
     mat3 Rinv = transpose(rotationFromQuat(g.rotation));
     vec3 lo = Rinv * (ray.origin - g.origin);
     vec3 ld = Rinv * ray.direction;
+    // Sign-preserving, for the same reason as castRayThroughTree64's clamp above: a bare +eps flips a
+    // small negative component and walks the cell DDA the wrong way along that axis.
     float eps = 1e-6;
-    if (abs(ld.x) < eps) ld.x = eps;
-    if (abs(ld.y) < eps) ld.y = eps;
-    if (abs(ld.z) < eps) ld.z = eps;
+    if (abs(ld.x) < eps) ld.x = ld.x < 0.0 ? -eps : eps;
+    if (abs(ld.y) < eps) ld.y = ld.y < 0.0 ? -eps : eps;
+    if (abs(ld.z) < eps) ld.z = ld.z < 0.0 ? -eps : eps;
     vec3 invD = 1.0 / ld;
 
     // Slab test against the (possibly non-cubic) grid box [0, dims*cellSize].
@@ -1392,7 +1546,11 @@ SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float ma
     float tEnter = max(max(tsmall.x, tsmall.y), tsmall.z);
     float tExit = min(min(tbig.x, tbig.y), tbig.z);
     if (tEnter > tExit || tExit < 0.0) return miss;
-    float tStart = max(tEnter, 0.0);
+    // Start the cell walk at tMin when the caller has already consumed everything nearer, so a peel
+    // does not re-walk the same cells on every pass. The grid's frame is rotation-only (no scale),
+    // so its t and the caller's are the same units.
+    float tStart = max(max(tEnter, 0.0), tMin);
+    if (tStart > tExit) return miss;
 
     // Entry cell + DDA setup.
     vec3 p = lo + ld * tStart;
@@ -1414,7 +1572,7 @@ SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float ma
             uint lin = uint(cell.x + g.dims.x * (cell.y + g.dims.y * cell.z));
             uint chunkIdx = cellMapValue(g.cellMapOffset + lin);
             if (chunkIdx != 0xFFFFFFFFu) {
-                SceneIntersectData hit = castRayThroughTree64(ray, rayQuery, int(chunkIdx));
+                SceneIntersectData hit = castRayThroughTree64(ray, rayQuery, tMin, int(chunkIdx));
                 if (hit.foundBox.size > 0 && hit.rayT >= 0.0 && hit.rayT < maxDistance) {
                     hit.headerIndex = chunkIdx;
                     // Front-to-back: the first occupied cell with a hit holds this grid's nearest hit.
@@ -1434,7 +1592,7 @@ SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float ma
     return miss;
 }
 
-SceneIntersectData raySceneIntersect(Ray ray, RayQuery rayQuery) {
+SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin) {
     float closestDistance = 100000000;
     SceneIntersectData sceneIntersect;
     sceneIntersect.foundBox.size = -1;
@@ -1463,7 +1621,7 @@ SceneIntersectData raySceneIntersect(Ray ray, RayQuery rayQuery) {
         float tBB = getRayBoxEntryDistance(localRay, tree64BoundingBox);
         if(tBB < 0 || tBB >= closestDistance) continue;
 
-        SceneIntersectData tree64Intersect = castRayThroughTree64(ray, rayQuery, int(headerIndex));
+        SceneIntersectData tree64Intersect = castRayThroughTree64(ray, rayQuery, tMin, int(headerIndex));
         // Rank by the march's own rayT (re-intersecting foundBox analytically flips
         // boundary-exact hits into misses by ULPs). rayT == 0 is a real hit.
         if(tree64Intersect.foundBox.size > 0 && tree64Intersect.rayT >= 0 && tree64Intersect.rayT < closestDistance){
@@ -1476,12 +1634,351 @@ SceneIntersectData raySceneIntersect(Ray ray, RayQuery rayQuery) {
     // Grid volumes: top-level uniform-grid DDA, pruned by the closest loose hit so far.
     int gridCount = int(sceneGridCount());
     for(int gi = 0; gi < gridCount; gi++){
-        SceneIntersectData gh = marchGrid(ray, rayQuery, gi, closestDistance);
+        SceneIntersectData gh = marchGrid(ray, rayQuery, gi, closestDistance, tMin);
         if(gh.foundBox.size > 0 && gh.rayT >= 0 && gh.rayT < closestDistance){
             sceneIntersect = gh;
             closestDistance = gh.rayT;
         }
     }
     return sceneIntersect;
+}
+
+// The nearest hit along the whole ray -- what every renderer calls. A floor of 0 is the value the
+// march's comparisons are written to pass unconditionally, so this is bit for bit the traversal it
+// has always been, and no caller has to know the floor exists.
+SceneIntersectData raySceneIntersect(Ray ray, RayQuery rayQuery) {
+    return raySceneIntersectFrom(ray, rayQuery, 0.0);
+}
+
+// =============================================================================
+// Transparency
+// =============================================================================
+//
+// Seeing through a voxel is a TRAVERSAL change, not a shading one: every march above stops at the
+// first solid voxel it meets. These two functions add the "and keep going" case by repeatedly calling
+// raySceneIntersect with the ray restarted just past each non-opaque voxel.
+//
+// ---- Why the loop is out here and not in the DDA ----
+//
+// The tempting version is to teach marchRayThroughTree64_DDA to skip transparent leaves and carry on
+// stepping. That is cheaper and it is WRONG, because of where nearest-hit is decided. raySceneIntersect
+// brute-forces every loose chunk tracking `closestDistance` and only then marches the grids pruned by
+// it, so which surface is actually in front is known at THIS level and nowhere below it. A march that
+// skipped transparent leaves inside one chunk would return that chunk's nearest opaque hit while a
+// transparent voxel belonging to a different loose chunk sat in front of it -- two overlapping glass
+// panes in different components would composite in the wrong order. Restarting the whole query is
+// correct by construction: each pass re-answers "what is nearest now".
+//
+// The price is a full scene re-traversal per transparent layer -- loose broadphase over every loose
+// chunk, grid slab tests, grid DDA, tree descent from the root. Thin geometry (a pane, a window) is
+// cheap. A deep volume of glass or water is not, which is what RayQuery::maxTransparentLayers is for.
+// If a scene ever needs many layers cheaply, THAT is the point to move the loop inward and accept the
+// ordering work, not before.
+//
+// ---- Resuming without moving the ray ----
+//
+// Each pass asks for the nearest hit BEYOND a distance (RayQuery::tMin) rather than restarting the
+// ray past the last one. That distinction is not stylistic; moving the origin is broken here.
+//
+// An origin nudged past a hit lands either inside the next voxel or exactly on a boundary, and this
+// marcher is degenerate at both. Inside a voxel, the descent reaches it immediately and returns a
+// real hit carrying rayT == 0 and a zero normal (SceneIntersectData::normal says so outright), which
+// every renderer's miss test reads as a miss -- so a transparent surface showed the SKY behind it,
+// not the geometry. Exactly on a boundary, the zero-measure guard in the DDA step skips the cell's
+// validity check by design. Scaling the nudge by the voxel does not help: both failures are about
+// where the origin lands, not how far it moved.
+//
+// Keeping the origin fixed sidesteps all of it. Every entry computation stays in the regime it was
+// written for, rayT and the normal stay meaningful, and there is no epsilon to tune.
+//
+// ---- What is NOT here ----
+//
+// Refraction. `ior` and `transmission` are decoded but unused: a refracted ray CHANGES DIRECTION, so
+// it cannot be a continuation of the same march -- it is a new ray, which belongs in a renderer's
+// bounce loop rather than in a traversal. The peel reports the entry normal a refraction pass would
+// need, so adding it later is additive. A transparent voxel here is a pure filter: it tints and
+// attenuates what is behind it, and it does not reflect.
+
+// Compile-time bound the peel loops unroll against on the HLSL/SPIR-V path.
+// RayQuery::maxTransparentLayers is the runtime limit and must not exceed this.
+#ifndef MAX_PEEL_ITERATIONS
+#define MAX_PEEL_ITERATIONS 16
+#endif
+
+struct PeeledHit {
+    // The nearest OPAQUE hit, with rayT measured from the caller's own ray origin (not from whatever
+    // advanced origin found it). A miss carries rayT < 0 exactly as raySceneIntersect's does.
+    SceneIntersectData hit;
+    // The material at `hit`, already fetched. Callers must use this rather than calling
+    // fetchVoxelMaterialAtCoord again -- the peel had to fetch it to decide whether to stop, so
+    // reusing it is what keeps this free on opaque geometry: the work moves rather than doubling.
+    VoxelMaterial material;
+    // Product of the transparent layers crossed on the way. Multiply the radiance arriving from
+    // `hit` (or from the sky, on a miss) by this.
+    vec3 transmittance;
+    // Radiance emitted BY those transparent layers, each already attenuated by the layers in front of
+    // it. Add it; do not scale it by `transmittance` again.
+    vec3 emission;
+    // Layers actually crossed.
+    uint layers;
+    // Why the peel stopped. Free to compute, and the only way to tell the failure modes apart from
+    // the outside: giving up with transmittance near 1 reads on screen as "the voxels are not there",
+    // giving up with it near 0 reads as "black", and the two are one line apart in here. Rendered as
+    // false colour by PEEL_DEBUG in the scene editor's path tracer.
+    //
+    //   0 reached an opaque surface (the good case)   3 tMin failed to advance
+    //   1 ran out of geometry (nothing behind)        4 fully absorbed
+    //   2 layer budget spent                         5 iteration budget spent
+    uint stopReason;
+};
+
+// Absorption through `segmentLength` world units of a material's INTERIOR. Chromatic only.
+//
+// The albedo is normalised so its brightest channel passes unattenuated, which is the whole point:
+// depth then changes the transmitted COLOUR without changing how much light gets through. Thick red
+// glass becomes more saturated red rather than dark red, and a neutral material is perfectly clear at
+// any thickness.
+//
+// This deliberately carries no notion of "how transparent" the material is. That belongs to the
+// INTERFACE, not the medium -- see the entering/interior split in raySceneIntersectPeeled. Folding the
+// two together is what made a partially transparent surface unusable: `transparency` was applied once
+// per voxel, so N voxels of depth attenuated by transparency^N and anything below 1.0 went black
+// within a few voxels, faster still at grazing angles where a ray crosses more of them.
+//
+// An overall (achromatic) absorption coefficient would be a genuine medium property and belongs here
+// eventually; `transmission` in Material's word3 is the field reserved for it.
+vec3 mediumAbsorption(VoxelMaterial m, float segmentLength, float voxelSize) {
+    float peak = max(max(m.albedo.r, max(m.albedo.g, m.albedo.b)), 1e-4);
+    vec3 tint = clamp(m.albedo / peak, vec3(1e-6), vec3(1.0));
+    return pow(tint, vec3(max(segmentLength / max(voxelSize, 1e-9), 0.0)));
+}
+
+// One round of PCG, so the peel can make the stochastic interface decision below. Named apart from any
+// renderer's own generator on purpose; a caller passes its own seed in and gets it advanced.
+float peelRandom(inout uint seed) {
+    seed = seed * 747796405u + 2891336453u;
+    uint word = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
+    return float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
+}
+
+// Whether two hits are the same material, continuing through one body rather than meeting a new
+// surface. Compared on the decoded values because two hits on one palette entry decode identically.
+bool sameMedium(VoxelMaterial a, VoxelMaterial b) {
+    return a.transparency == b.transparency && all(equal(a.albedo, b.albedo));
+}
+
+// How much of the voxel just hit the ray actually crossed, for the Beer-Lambert exponent above.
+//
+// foundBox is axis-aligned in WORLD space, which is exact for an unrotated chunk and an approximation
+// for a rotated one, where the voxel is an oriented box. Clamped to the longest a ray can cross a
+// cube of this size (sqrt(3) * edge) so a rotated chunk cannot produce an absurd thickness.
+float peelSegmentLength(Ray ray, SceneIntersectData hit) {
+    // Straight from the march's own arithmetic. The previous version rebuilt the voxel as a world AABB
+    // and slab-tested it, which collapsed the segment to zero for near-axis-aligned rays, and did so on
+    // only one side of the sign flip -- see SceneIntersectData::exitT.
+    return clamp(hit.exitT - hit.rayT, 0.0, 1.7320508 * max(hit.foundBox.size, 1e-9));
+}
+
+// Where the next pass should start looking: just inside the voxel just consumed, so that voxel's own
+// entry (exactly hit.rayT) is excluded while the next voxel's entry is not.
+//
+// A small fraction of the voxel rather than its exit plane, for two reasons. The comparison is
+// strict, so setting tMin to the exit plane would also exclude the next voxel, whose entry sits at
+// the same t. And the exit plane is only approximate on a rotated chunk, where overshooting would
+// skip a layer outright -- undershooting merely costs an iteration.
+float peelNextTMin(SceneIntersectData hit, float segmentLength) {
+    float voxelSize = max(hit.foundBox.size, 1e-9);
+    // Prefer a step that stays INSIDE the voxel being left: capped at half of what the ray actually
+    // crossed, so a grazing ray that clips a sliver off a corner cannot have its step land beyond the
+    // next voxel's entry and skip it.
+    float step = min(voxelSize * 0.01, max(segmentLength, 0.0) * 0.5);
+
+    // ...but the step must also be REPRESENTABLE. tMin is `hit.rayT + step`, and a float32 mantissa at
+    // a ray distance of a few hundred resolves about 1e-4; a sliver crossing can ask for a step orders
+    // of magnitude below that, so the addition returns hit.rayT unchanged and the very same voxel is
+    // returned on the next pass. That is not a near miss -- it attenuates one voxel for every
+    // remaining layer (black) or, when the sliver makes the exponent ~0 so each pass multiplies by 1,
+    // for none of them (the voxel vanishes). Both show up as direction-dependent, because which faces
+    // a ray grazes depends on where it is pointing.
+    //
+    // So the step is floored at a few ULP for the magnitude of rayT in play. Where that floor beats
+    // the cap above, the sliver is skipped -- a corner graze carrying essentially no material, which
+    // is the right thing to lose.
+    float resolvable = max(abs(hit.rayT), 1.0) * 1e-6;
+    return hit.rayT + max(step, resolvable);
+}
+
+// Nearest opaque hit, seeing through everything transparent in front of it.
+PeeledHit raySceneIntersectPeeled(Ray ray, RayQuery rayQuery, uint maxLayers, inout uint seed) {
+    PeeledHit result;
+    result.transmittance = vec3(1.0);
+    result.emission = vec3(0.0);
+    result.layers = 0u;
+    result.stopReason = 5u;
+    result.material = emptyVoxelMaterial();
+
+    // The ray never moves; only the floor on acceptable distances does. So every rayT below is
+    // already in the caller's own parametrisation, with no bookkeeping to undo.
+    float tMin = 0.0;
+    // Identity of the voxel the previous pass consumed, so a pass that fails to move on is caught
+    // exactly rather than being absorbed into the result. See the guard below.
+    uint  lastHeader = 0xFFFFFFFFu;
+    ivec3 lastVoxel = ivec3(0x7FFFFFFF);
+    // Tracking for the interface-vs-interior split: a hit continues the previous body only if it is
+    // the same material AND begins where the previous one ended.
+    VoxelMaterial previous = emptyVoxelMaterial();
+    bool  inMedium = false;
+    float previousExit = 0.0;
+
+    for (int iteration = 0; iteration < MAX_PEEL_ITERATIONS; iteration++) {
+        SceneIntersectData hit = raySceneIntersectFrom(ray, rayQuery, tMin);
+
+        // The same voxel again: tMin failed to advance past it (see peelNextTMin). Stop rather than
+        // attenuate it a second time. Belt and braces behind the ULP floor -- cheap, and it turns any
+        // residual non-advance into one lost layer instead of a black or invisible voxel.
+        if (hit.headerIndex == lastHeader && all(equal(hit.voxelCoord, lastVoxel))) { result.stopReason = 3u; break; }
+
+        if (hit.foundBox.size < 0.0 || hit.rayT < 0.0) {
+            // Nothing solid left along the ray. Whatever the caller does on a miss (sky, usually) is
+            // still filtered by the layers already crossed.
+            result.stopReason = 1u;
+            result.hit = hit;
+            result.hit.rayT = -1.0;
+            return result;
+        }
+
+        VoxelMaterial material = fetchVoxelMaterialAtCoord(hit.voxelCoord, hit.headerIndex);
+
+        // Genuinely opaque: this is the surface the caller asked for.
+        if (material.transparency <= 0.0) {
+            result.stopReason = 0u;
+            result.hit = hit;
+            result.material = material;
+            return result;
+        }
+
+        // Out of layer budget. Give up as a MISS carrying what was accumulated -- never report this
+        // voxel as the opaque hit. It is not opaque, and the face the caller would shade is INTERNAL
+        // to a transparent volume: a face buried in glass, facing into more glass, which shades
+        // almost black. Because the depth at which the budget runs out varies per ray, those dark
+        // faces land on different voxel boundaries per pixel, which is what makes the inside of a
+        // thick transparent object read as a lattice of dark squares.
+        if (result.layers >= maxLayers) { result.stopReason = 2u; break; }
+
+        // Interface or interior? Only an INTERFACE gets the transparency decision. Interior voxels of
+        // one body are not separate panes of glass, and charging them each an alpha is what made depth
+        // read as darkness.
+        bool entering = !inMedium || !sameMedium(previous, material) ||
+                        hit.rayT > previousExit + max(hit.foundBox.size, 1e-9) * 0.5;
+        if (entering) {
+            // Stochastic alpha. With probability (1 - transparency) the surface interacts and is
+            // returned as an ordinary hit, so it is shaded by the full BSDF -- which is what gives a
+            // water surface its specular reflection while still being see-through. Choosing the
+            // interaction with exactly that probability makes both branches carry weight 1, so the
+            // estimator needs no compensating factor and converges to the alpha-composited answer.
+            if (peelRandom(seed) >= material.transparency) {
+                result.stopReason = 0u;
+                result.hit = hit;
+                result.material = material;
+                return result;
+            }
+        }
+
+        // How much of this voxel the ray actually crossed. Drives both the Beer-Lambert exponent
+        // and how far the next pass steps, so the two cannot disagree about the voxel's extent.
+        float segmentLength = peelSegmentLength(ray, hit);
+
+        // Emission first: a layer's own glow is dimmed by what is in FRONT of it, not by itself.
+        result.emission += result.transmittance * material.emission;
+        result.transmittance *= mediumAbsorption(material, segmentLength, hit.foundBox.size);
+        result.layers++;
+        lastHeader = hit.headerIndex;
+        lastVoxel = hit.voxelCoord;
+        previous = material;
+        previousExit = hit.exitT;
+        inMedium = true;
+
+        // Fully absorbed: nothing behind this can contribute, so stop rather than spending the
+        // remaining layers resolving a surface that will be multiplied by zero. A miss again, not
+        // this voxel as opaque -- the near-zero transmittance already makes the result black without
+        // shading an internal face to get there.
+        if (max(result.transmittance.r, max(result.transmittance.g, result.transmittance.b)) < 0.002) break;
+
+        tMin = peelNextTMin(hit, segmentLength);
+    }
+
+    // Ran out of iterations with transparent voxels still ahead. Reported as a miss carrying the
+    // transmittance accumulated so far, which is the honest answer: we do not know what is behind.
+    result.hit.foundBox.size = -1.0;
+    result.hit.rayT = -1.0;
+    result.hit.normal = vec3(0.0);
+    result.hit.voxelCoord = ivec3(0);
+    return result;
+}
+
+// How much light survives the trip from `ray.origin` to `maxDistance` along `ray`.
+//
+// The shadow-ray form, and the reason transparency is visible at all rather than merely stored: a
+// visibility test can only answer "lit" or "not", so a glass pane casts a fully black shadow no
+// matter what its material says. This returns the tint instead, which is what puts coloured light on
+// the floor under stained glass.
+//
+// Cheaper than the peel above per layer -- it never resolves the occluder's material beyond its
+// transparency, needs no ordering (multiplication commutes), and quits as soon as it is dark.
+//
+// Running out of budget returns the transmittance accumulated so far, NOT black. Black is the
+// conservative answer when a ray might still be blocked, and it was the original choice here on the
+// grounds that an over-dark shadow is less noticeable than light leaking through solid geometry.
+// That reasoning does not survive a transparent VOLUME: every shading point inside one needs more
+// layers to reach the light than the budget allows, so black turned the whole interior into a
+// lattice of unlit faces. Between the two errors, slightly-too-much light through deep glass is far
+// less visible than a black interior, and it degrades smoothly instead of per-voxel.
+vec3 raySceneTransmittance(Ray ray, RayQuery rayQuery, float maxDistance, uint maxLayers) {
+    vec3 transmittance = vec3(1.0);
+    float tMin = 0.0;
+    uint layers = 0u;
+    uint  lastHeader = 0xFFFFFFFFu;
+    ivec3 lastVoxel = ivec3(0x7FFFFFFF);
+    VoxelMaterial previous = emptyVoxelMaterial();
+    bool  inMedium = false;
+    float previousExit = 0.0;
+
+    for (int iteration = 0; iteration < MAX_PEEL_ITERATIONS; iteration++) {
+        SceneIntersectData hit = raySceneIntersectFrom(ray, rayQuery, tMin);
+        // Same non-advance guard as the peel above; without it a sliver crossing darkens one voxel
+        // once per remaining layer and the shadow goes black.
+        if (hit.headerIndex == lastHeader && all(equal(hit.voxelCoord, lastVoxel))) return transmittance;
+        if (hit.foundBox.size < 0.0 || hit.rayT < 0.0) return transmittance;  // reached the light
+        if (hit.rayT >= maxDistance) return transmittance;                    // occluder is past it
+
+        VoxelMaterial material = fetchVoxelMaterialAtCoord(hit.voxelCoord, hit.headerIndex);
+        if (material.transparency <= 0.0) return vec3(0.0);   // genuinely opaque: blocked
+        // Out of budget. Return what survived so far rather than black. Black is the conservative
+        // answer for a ray that might still be blocked, and it is badly wrong here: a shading point
+        // inside or behind a transparent volume needs more layers than the budget allows, so every
+        // one of them would lose its direct sunlight and the volume's interior goes dark.
+        if (layers >= maxLayers) return transmittance;
+
+        float segmentLength = peelSegmentLength(ray, hit);
+        // Interface alpha applied ANALYTICALLY here rather than stochastically: a shadow ray wants the
+        // expected attenuation, and multiplying by `transparency` once per interface is exactly that,
+        // with none of the variance a random choice would add to every shadow in the image.
+        bool entering = !inMedium || !sameMedium(previous, material) ||
+                        hit.rayT > previousExit + max(hit.foundBox.size, 1e-9) * 0.5;
+        if (entering) transmittance *= material.transparency;
+        transmittance *= mediumAbsorption(material, segmentLength, hit.foundBox.size);
+        if (max(transmittance.r, max(transmittance.g, transmittance.b)) < 0.002) return vec3(0.0);
+        layers++;
+        lastHeader = hit.headerIndex;
+        lastVoxel = hit.voxelCoord;
+        previous = material;
+        previousExit = hit.exitT;
+        inMedium = true;
+
+        tMin = peelNextTMin(hit, segmentLength);
+    }
+
+    // Iterations exhausted with transparent voxels still ahead: same call as the layer budget above.
+    return transmittance;
 }
 

@@ -22,10 +22,20 @@ $input v_texcoord0
 // 64 frames of it. See denoise.frag for the spatial half and the README's
 // occlusion section for the whole chain.
 //
-// Inputs (FBO 1): 0 = previewColor, 1 = previewNormal, 2 = previewPosition.
+// Inputs (FBO 1): 0 = previewColor, 1 = previewNormal, 2 = previewPosition. FBO 1's
+//                 fourth attachment (previewGlow) is bound at slot 3 and left
+//                 undeclared here, which is nothing to do: an emitter's glow is not
+//                 a geometry guide, and a sampler this shader never reads is not in
+//                 its program for the engine's bind to land on.
 //                 The rays additionally read the scene itself, through the samplers
 //                 pjv_utils_DDA.sc declares at slots 9-15; the engine binds those
 //                 for every pass, so nothing in render.json changes for it.
+//
+// The rays are ordinary marches and stop at the first solid voxel, so under the
+// advanced preview a transparent voxel occludes exactly as an opaque one does.
+// Deliberately: this is a readability aid measuring how enclosed a point is, glass
+// in a window frame does enclose it, and teaching four rays per pixel to peel would
+// cost the pass its whole reason for being affordable.
 // Output (FBO 5): occlusion.r -- 1.0 unoccluded, 0.0 fully enclosed.
 // =============================================================================
 

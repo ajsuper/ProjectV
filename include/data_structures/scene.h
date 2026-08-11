@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <algorithm>
+#include <cmath>
 #include <stdint.h>
 
 #include "core/math.h"
@@ -16,11 +17,122 @@ namespace projv{
     constexpr uint32_t MAX_MATERIALS_PER_COMPONENT = 256u;
     constexpr uint8_t  INVALID_MATERIAL = 255u;
 
+    // One palette entry: four words of properties plus an editor-facing name.
+    //
+    // The four words are exactly one RGBA32U texel, which is why the entry is this size and not some
+    // other size. The palette texture used to pack four entries per texel and the shader fetched a
+    // texel and selected one of its four components; at one entry per texel the SAME single
+    // texelFetch returns all four words, so three extra properties cost no bandwidth and no extra
+    // fetch. Going wider would cost a second fetch, which is the real budget here -- not memory. A
+    // full 254-entry palette is 4 KB, against data textures measured in gigabytes.
+    //
+    // ---- The zero rule ----
+    //
+    // Words 1-3 are defined so that ALL ZEROES IS TODAY'S BEHAVIOUR: an opaque, non-emissive,
+    // fully-rough dielectric shaded exactly as the colour-only pipeline shaded it. That is what
+    // makes this change additive rather than a migration -- every compose.json already on disk
+    // parses into palettes whose new words are zero, and renders identically.
+    //
+    // It is also why two of the fields are stored inverted from how you would name them out loud.
+    // `glossiness` rather than roughness, because 0 has to mean "fully rough"; `transparency`
+    // rather than opacity, because 0 has to mean "opaque". Storing roughness/opacity would make a
+    // zero-filled legacy palette read as a scene of mirrors seen through glass.
     struct Material {
+        // word0: albedo, R10G10B10 in bits 20-29 / 10-19 / 0-9. Bit-identical to the field this
+        // struct has always had, so nothing that reads or writes a colour changes.
         uint32_t packedColor = 0;
-        uint32_t _pad = 0;
+        // word1: emission colour, same R10G10B10 layout. The intensity is separate (see below)
+        // because a 10-bit channel cannot hold an emitter brighter than the sky.
+        uint32_t packedEmission = 0;
+        // word2: glossiness | metallic | transparency | ior, one byte each, high byte first.
+        uint32_t packedSurface = 0;
+        // word3: emissiveStrength | transmission | flags | reserved, one byte each, high byte first.
+        uint32_t packedExtra = 0;
         std::string name;
     };
+
+    // ---- Field accessors -------------------------------------------------------------------
+    //
+    // Free functions rather than members so Material stays a trivially-copyable POD-plus-string:
+    // it is snapshotted wholesale by the editor's undo history and memcpy'd into the palette
+    // texture, and both want it to stay dumb.
+
+    inline uint32_t packRGB10(float r, float g, float b) {
+        uint32_t red   = uint32_t(std::lround(std::clamp(r, 0.0f, 1.0f) * 1023.0f));
+        uint32_t green = uint32_t(std::lround(std::clamp(g, 0.0f, 1.0f) * 1023.0f));
+        uint32_t blue  = uint32_t(std::lround(std::clamp(b, 0.0f, 1.0f) * 1023.0f));
+        return (red << 20) | (green << 10) | blue;
+    }
+    inline void unpackRGB10(uint32_t packed, float& r, float& g, float& b) {
+        r = float((packed >> 20) & 0x3FFu) / 1023.0f;
+        g = float((packed >> 10) & 0x3FFu) / 1023.0f;
+        b = float((packed >>  0) & 0x3FFu) / 1023.0f;
+    }
+
+    inline uint32_t packByteField(float unitValue) {
+        return uint32_t(std::lround(std::clamp(unitValue, 0.0f, 1.0f) * 255.0f));
+    }
+
+    // IOR occupies one byte as `1 + raw/128`, so raw 0 is 1.0 -- no refraction, which is what a
+    // legacy palette must mean -- and the byte spans 1.0 to 2.99 in steps of 1/128. That covers
+    // water (1.33), glass (1.5) and diamond (2.42) with room to spare, at a precision far finer
+    // than anyone can see.
+    inline uint32_t packIOR(float ior)   { return uint32_t(std::clamp(std::lround((ior - 1.0f) * 128.0f), 0L, 255L)); }
+    inline float    unpackIOR(uint32_t raw) { return 1.0f + float(raw) / 128.0f; }
+
+    // Emissive strength is exponential, not linear: an emitter is useful anywhere from "barely
+    // glowing" to "brighter than the sun", and 256 linear steps across that range would put every
+    // usable dim value in the first step. raw 0 is exactly zero (not emissive -- the zero rule
+    // again), and 1..255 covers 2^-7.9 to 2^7.9, roughly 0.004 to 245, with raw 128 sitting at 1.0.
+    inline float unpackEmissiveStrength(uint32_t raw) {
+        return raw == 0u ? 0.0f : std::exp2(float(raw) / 16.0f - 8.0f);
+    }
+    inline uint32_t packEmissiveStrength(float strength) {
+        if (strength <= 0.0f) return 0u;
+        long raw = std::lround((std::log2(strength) + 8.0f) * 16.0f);
+        return uint32_t(std::clamp(raw, 1L, 255L));
+    }
+
+    // word2 / word3 are byte lanes; these name them so no call site open-codes a shift.
+    inline uint32_t packSurfaceWord(float glossiness, float metallic, float transparency, float ior) {
+        return (packByteField(glossiness)  << 24) | (packByteField(metallic) << 16) |
+               (packByteField(transparency) << 8) |  packIOR(ior);
+    }
+    inline uint32_t packExtraWord(float emissiveStrength, float transmission, uint32_t flags) {
+        return (packEmissiveStrength(emissiveStrength) << 24) |
+               (packByteField(transmission) << 16) | ((flags & 0xFFu) << 8);
+    }
+    inline float materialGlossiness(const Material& m)   { return float((m.packedSurface >> 24) & 0xFFu) / 255.0f; }
+    inline float materialMetallic(const Material& m)     { return float((m.packedSurface >> 16) & 0xFFu) / 255.0f; }
+    inline float materialTransparency(const Material& m) { return float((m.packedSurface >>  8) & 0xFFu) / 255.0f; }
+    inline float materialIOR(const Material& m)          { return unpackIOR(m.packedSurface & 0xFFu); }
+    inline float materialEmissiveStrength(const Material& m) { return unpackEmissiveStrength((m.packedExtra >> 24) & 0xFFu); }
+
+    // The colour an emitter actually emits.
+    //
+    // Emission has to be storable INDEPENDENTLY of albedo -- the whole point is surfaces whose lit
+    // appearance is unrelated to their unlit one, and `albedo * strength` cannot express the one that
+    // matters most: a black voxel that glows. Multiplying by a zero albedo gives zero, so lava on
+    // dark rock, an LED panel or a screen would have to be painted white to emit at all.
+    //
+    // But independent storage makes black the default emission colour, and black times any strength
+    // is still nothing -- so raising Strength on a fresh material would do visibly nothing until a
+    // colour was picked separately. Emitting black is meaningless (strength 0 is how you mean that),
+    // which makes zero a free sentinel: it means "emit in the albedo's colour", which is what a
+    // glowing version of a surface almost always wants. No flag bit and no extra state -- an entry
+    // that has never had an emission colour set behaves the intuitive way, and one that has is
+    // independent.
+    inline uint32_t materialEffectiveEmissionColor(const Material& m) {
+        return m.packedEmission != 0u ? m.packedEmission : m.packedColor;
+    }
+    inline float materialTransmission(const Material& m) { return float((m.packedExtra >> 16) & 0xFFu) / 255.0f; }
+    inline uint32_t materialFlags(const Material& m)     { return (m.packedExtra >> 8) & 0xFFu; }
+
+    // Whether an entry carries anything beyond its colour. Used by the serializer to keep
+    // colour-only palettes writing exactly the JSON they used to.
+    inline bool materialHasExtendedProperties(const Material& m) {
+        return m.packedEmission != 0u || m.packedSurface != 0u || m.packedExtra != 0u;
+    }
     // Stable slot handle for a chunk. A chunk keeps its handle for its whole life, and the handle IS
     // its row in the GPU header texture and its index into Scene.chunks. Grids and the loose list
     // reference chunks by handle so add/remove never has to rebase anything. See Scene below.
@@ -45,9 +157,13 @@ namespace projv{
     // loader that does not know the field reads a composed asset as its placed parts -- a degraded
     // picture, but a coherent one.
     //
-    // Only meaningful on a child of an Asset node, and only for Chunk and Asset children: a Grid is
-    // many blocks across many cells and folding one into a single-lattice .data is a rebuild rather
-    // than a bake, so a Grid child is treated as None whatever the file says.
+    // Only meaningful on a child of an Asset node, and it means the same thing for all three kinds.
+    // A Grid used to be excluded -- treated as None whatever the file said, on the grounds that
+    // folding many blocks on many cells into a single-lattice .data is a rebuild rather than a bake.
+    // That exclusion was invisible where it mattered: a Chunk becomes a Grid on its own the first
+    // time a sculpt writes outside its resolution (convertChunkToGrid), so an ordinary .data could
+    // quietly stop composing, and a stack of two of them resolved to nothing with no stated cause.
+    // The cost argument was real but it is a budget question, and the fold already has budgets.
     enum class BooleanOp {
         None,       // Placed. Its own object, its own lattice, rendered as itself.
         Union,      // Add its cells to the accumulator. Its own colours win.
@@ -284,6 +400,13 @@ struct GeometryBlob {
         // Transform-independent cell size (see Chunk::nativeScale -- same idea, one level up).
         // rebakeSubtree multiplies this by the transform's extracted scale to get cellSize.
         float nativeCellSize = 0.0f;
+        // Whether the renderer draws this grid's cells. The grid equivalent of Scene::looseChunks
+        // membership, which is how an editor hides a loose chunk without disturbing it: a component
+        // that has been folded into a resolved result must stop being drawn while staying fully
+        // readable, so clearing Chunk::alive or blanking cellToChunk is not an option -- the fold
+        // itself reads through both. Consumed by syncSceneTables (which emits every cell as empty
+        // while this is false) and by picking's visibility mask, and by nothing else.
+        bool rendered = true;
     };
 
     struct Scene {

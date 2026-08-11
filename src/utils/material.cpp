@@ -166,6 +166,25 @@ bool setMaterialColor(Scene& scene, ComponentHandle componentHandle, uint8_t slo
     return true;
 }
 
+bool setMaterialProperties(Scene& scene, ComponentHandle componentHandle, uint8_t slot,
+                           uint32_t packedEmission, uint32_t packedSurface, uint32_t packedExtra) {
+    if (componentHandle >= scene.components.size()) return false;
+    std::lock_guard<std::mutex> lock(scene.materialPaletteMutex);
+    ComponentRecord& comp = scene.components[componentHandle];
+    if (slot >= comp.materialPalette.size()) return false;
+
+    Material& material = comp.materialPalette[slot];
+    if (material.packedEmission == packedEmission && material.packedSurface == packedSurface &&
+        material.packedExtra == packedExtra) {
+        return true;
+    }
+    material.packedEmission = packedEmission;
+    material.packedSurface = packedSurface;
+    material.packedExtra = packedExtra;
+    comp.paletteVersion++;
+    return true;
+}
+
 bool setMaterialName(Scene& scene, ComponentHandle componentHandle, uint8_t slot, const std::string& name) {
     if (componentHandle >= scene.components.size()) return false;
     std::lock_guard<std::mutex> lock(scene.materialPaletteMutex);

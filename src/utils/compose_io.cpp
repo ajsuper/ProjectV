@@ -393,6 +393,33 @@ namespace projv::utils {
                         uint32_t blue  = jm["color"][2].get<uint32_t>() & 0x3FFu;
                         material.packedColor = (red << 20) | (green << 10) | blue;
                     }
+
+                    // The non-colour properties. Every one of them is optional and every one
+                    // defaults to the value that makes the entry behave exactly as a colour-only
+                    // entry always has (see the zero rule on Material in scene.h), so a palette
+                    // written before these existed parses to the same bits it used to.
+                    //
+                    // They go out as floats in their natural units rather than as the packed bytes
+                    // the GPU reads, for the same reason the colour goes out as three numbers: the
+                    // file is meant to survive a hand-edit. The quantization back to bytes here is
+                    // the same one the editor's sliders go through, so a load/save round trip is a
+                    // fixed point rather than a slow drift.
+                    if (jm.contains("emission") && jm["emission"].is_array() && jm["emission"].size() == 3) {
+                        uint32_t red   = jm["emission"][0].get<uint32_t>() & 0x3FFu;
+                        uint32_t green = jm["emission"][1].get<uint32_t>() & 0x3FFu;
+                        uint32_t blue  = jm["emission"][2].get<uint32_t>() & 0x3FFu;
+                        material.packedEmission = (red << 20) | (green << 10) | blue;
+                    }
+                    float glossiness   = jm.value("glossiness", 0.0f);
+                    float metallic     = jm.value("metallic", 0.0f);
+                    float transparency = jm.value("transparency", 0.0f);
+                    float ior          = jm.value("ior", 1.0f);
+                    material.packedSurface = packSurfaceWord(glossiness, metallic, transparency, ior);
+
+                    float emissiveStrength = jm.value("emissiveStrength", 0.0f);
+                    float transmission     = jm.value("transmission", 0.0f);
+                    uint32_t flags         = jm.value("flags", 0u);
+                    material.packedExtra = packExtraWord(emissiveStrength, transmission, flags);
                     if (c.palette.size() >= MAX_MATERIALS_PER_COMPONENT) {
                         core::warn("parseComposeJson: '{}' has more than {} materials in {} - "
                                    "the rest are dropped", c.source, MAX_MATERIALS_PER_COMPONENT,
@@ -892,6 +919,23 @@ namespace projv::utils {
                     materialJson["color"] = { (material.packedColor >> 20) & 0x3FFu,
                                               (material.packedColor >> 10) & 0x3FFu,
                                               material.packedColor & 0x3FFu };
+                    // Each property is written only when it is not its default, so a palette that
+                    // is only colours writes byte-identical JSON to what this writer produced
+                    // before the properties existed. Emitting `"glossiness": 0` on all 254 slots of
+                    // every component would bury the fields that were actually set.
+                    if (material.packedEmission != 0u) {
+                        materialJson["emission"] = { (material.packedEmission >> 20) & 0x3FFu,
+                                                     (material.packedEmission >> 10) & 0x3FFu,
+                                                     material.packedEmission & 0x3FFu };
+                    }
+                    if (materialGlossiness(material) != 0.0f)   materialJson["glossiness"] = materialGlossiness(material);
+                    if (materialMetallic(material) != 0.0f)     materialJson["metallic"] = materialMetallic(material);
+                    if (materialTransparency(material) != 0.0f) materialJson["transparency"] = materialTransparency(material);
+                    // IOR's default is 1.0 (no refraction), not 0 -- the packed byte is what is zero.
+                    if ((material.packedSurface & 0xFFu) != 0u) materialJson["ior"] = materialIOR(material);
+                    if (materialEmissiveStrength(material) != 0.0f) materialJson["emissiveStrength"] = materialEmissiveStrength(material);
+                    if (materialTransmission(material) != 0.0f) materialJson["transmission"] = materialTransmission(material);
+                    if (materialFlags(material) != 0u)          materialJson["flags"] = materialFlags(material);
                     palette.push_back(std::move(materialJson));
                 }
                 entry["palette"] = std::move(palette);
@@ -1083,11 +1127,12 @@ namespace projv::utils {
             // Per component, even where the geometry is shared: two instances of one .data each write
             // their own palette, which is what lets them be coloured apart.
             entry.palette = comp.materialPalette;
-            // A Grid child is written as `none` whatever it carries: a grid is many blocks across
-            // many cells, and folding one into its parent's single-lattice .data is a rebuild rather
-            // than a bake. Writing an op we would refuse to honour on the way back in would put a
-            // promise in the file that nothing keeps.
-            entry.op = comp.kind == ComponentKind::Grid ? BooleanOp::None : comp.op;
+            // Every kind writes the op it carries, Grid included. This used to force `none` on a
+            // Grid child on the grounds that the fold would refuse to honour it, and that made the
+            // file a lossy record of a document the editor could express: a Grid row set to Subtract
+            // reloaded as a placement, so the hole it cut was gone. The fold now walks a grid cell by
+            // cell, so the promise is one that is kept.
+            entry.op = comp.op;
 
             std::string base = sanitizeForFilename(comp.name.empty() ? "component" : comp.name);
             std::string unique = base;

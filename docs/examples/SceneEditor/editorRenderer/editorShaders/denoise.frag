@@ -29,7 +29,10 @@ $input v_texcoord0
 // previous level wrote. Nothing here has to know which of the two it is looking at.
 //
 // Inputs (FBO 1): 0 = previewColor, 1 = previewNormal, 2 = previewPosition -- the
-//                 guides. (FBO 5): 3 = occlusion, the level's input.
+//                 guides. Slot 3 is FBO 1's fourth attachment, previewGlow, which
+//                 this pass has no use for; the engine binds every texture of every
+//                 input framebuffer in order, so it is what pushed the occlusion
+//                 buffer to 4. (FBO 5): 4 = occlusion, the level's input.
 // Output (FBO 5): occlusion.r, filtered.
 // =============================================================================
 
@@ -38,7 +41,7 @@ $input v_texcoord0
 SAMPLER2D(previewColor,    0);
 SAMPLER2D(previewNormal,   1);
 SAMPLER2D(previewPosition, 2);
-SAMPLER2D(occlusion,       3);
+SAMPLER2D(occlusion,       4);
 
 uniform vec4 windowRes;
 // x = ambient occlusion (screen-space), y = normal shading, z = sun shadow, w = ray occlusion.

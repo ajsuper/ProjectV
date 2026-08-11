@@ -58,7 +58,13 @@ namespace projv {
         uint32_t tree64Width = 0, tree64Height = 0;
         uint32_t materialIDWidth = 0, materialIDHeight = 0;
 
-        uint32_t paletteWidth = 0; // width of material palette texture (1D, RGBA32U, 4 colors per texel)
+        // Material palette texture dimensions, in texels. RGBA32U with ONE ENTRY PER TEXEL: the four
+        // words of a Material (see scene.h) are the texel's four components, so a global palette
+        // index is a texel index directly. Width is a power of two because the shader addresses it
+        // with `& (width - 1)` and `>> log2(width)`; height exists because a palette can outgrow one
+        // row now that an entry costs a whole texel.
+        uint32_t paletteWidth = 0;
+        uint32_t paletteHeight = 0;
 
         uint32_t headerCapacity = 0;
 

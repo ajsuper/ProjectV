@@ -123,14 +123,17 @@ namespace projv::graphics {
     void updateChunkHeader(projv::Scene& scene, GPUData& gpuData, ChunkHandle chunkHandle);
 
     /**
-     * Pushes one recoloured palette slot to the GPU: a single texel write, with no header rewrite
+     * Pushes one changed palette slot to the GPU: a single texel write, with no header rewrite
      * and no blob traffic. flushSceneUpdates would carry the change too, but it rebuilds the whole
      * palette texture and marks every chunk header dirty — the wrong price for something an editor
      * does on every frame of a colour drag.
      *
-     * Size-preserving edits only (utils::setMaterialColor / setMaterialName). Adding or removing an
-     * entry shifts every later component's palette offset, so it has to go through
-     * flushSceneUpdates instead.
+     * Writes the slot's whole four-word entry (colour and every material property), because at one
+     * entry per texel that is the same single write either way.
+     *
+     * Size-preserving edits only (utils::setMaterialColor / setMaterialProperties /
+     * setMaterialName). Adding or removing an entry shifts every later component's palette offset,
+     * so it has to go through flushSceneUpdates instead.
      *
      * @param scene The scene holding the authoritative palette.
      * @param gpuData The GPU mirror to patch.

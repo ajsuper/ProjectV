@@ -52,6 +52,26 @@ uint8_t addMaterial(Scene& scene, ComponentHandle componentHandle, const std::st
 bool setMaterialColor(Scene& scene, ComponentHandle componentHandle, uint8_t slot, uint32_t packedColor);
 
 /**
+ * Rewrites a slot's non-colour property words — emission, glossiness, metallic, transparency, IOR
+ * and the rest of Material's four-word payload (see the Material comment in scene.h).
+ *
+ * Size-preserving in exactly the sense setMaterialColor is: it changes what a slot means, never how
+ * many slots exist, so it takes the same cheap single-texel GPU route via updatePaletteEntry rather
+ * than a full flush. Split from setMaterialColor rather than folded into it because an editor drags
+ * one or the other, and a caller that only moved a slider should not have to restate the colour.
+ *
+ * @param scene The scene owning the component.
+ * @param componentHandle The component whose palette is edited.
+ * @param slot The slot to rewrite.
+ * @param packedEmission Emission colour word (word1).
+ * @param packedSurface Glossiness/metallic/transparency/IOR word (word2).
+ * @param packedExtra Emissive-strength/transmission/flags word (word3).
+ * @return False if the handle or slot is out of range.
+ */
+bool setMaterialProperties(Scene& scene, ComponentHandle componentHandle, uint8_t slot,
+                           uint32_t packedEmission, uint32_t packedSurface, uint32_t packedExtra);
+
+/**
  * Renames an existing slot. Names are how compose data and internMaterial identify materials, so
  * this is not purely cosmetic — two entries sharing a name will collide in internMaterial.
  * @return False if the handle or slot is out of range.
