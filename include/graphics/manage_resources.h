@@ -78,16 +78,40 @@ namespace projv::graphics {
     std::shared_ptr<ConstructedRenderer> constructRendererSpecification(RendererSpecification &renderer, bgfx::ShaderHandle vertexShader);
 
     /**
-    * Resizes framebuffers and their associated textures if the window dimensions have changed.
-    * This ensures that all render targets are correctly sized for the new resolution.
+    * Brings every relative render target to its share of the given render resolution -- scale 1.0 is
+    * full, 0.5 is half on each axis -- and rebuilds the framebuffers pointing at the ones that
+    * actually changed. Fixed-size textures are never touched. Rounding is ceil.
+    *
+    * Cheap to call every frame: a target already at its requested size is skipped, and if nothing
+    * moved no framebuffer is rebuilt. Drivers should call it every frame rather than trying to detect
+    * a resize themselves -- it is also what brings relative targets up from their 1x1 initial size.
+    *
+    * Does NOT resize the back buffer. bgfx::reset belongs to the driver, which is the only thing
+    * that knows whether this renderer draws into the window or into a panel inside it.
+    *
     * @param textures A reference to a ConstructedTextures object containing all texture handles.
     * @param frameBuffers A reference to a ConstructedFramebuffers object containing all framebuffer handles.
-    * @param windowWidth The new width of the rendering window.
-    * @param windowHeight The new height of the rendering window.
-    * @param prevWindowWidth The previous width of the rendering window (for comparison).
-    * @param prevWindowHeight The previous height of the rendering window (for comparison).
+    * @param renderWidth The width this renderer should render at.
+    * @param renderHeight The height this renderer should render at.
+    * @return True if any target was resized. A caller averaging frames (accumulation, temporal
+    *         reprojection) must drop its history when this is true -- the history is at the old size.
     */
-    void resizeFramebuffersAndTheirTexturesIfNeeded(ConstructedTextures& textures, ConstructedFramebuffers& frameBuffers, int windowWidth, int windowHeight, int prevWindowWidth, int prevWindowHeight);
+    bool resizeRenderTargets(ConstructedTextures& textures, ConstructedFramebuffers& frameBuffers, int renderWidth, int renderHeight);
+
+    /**
+    * The pixel size a render pass writing to `frameBufferID` must rasterize at: the size of that
+    * framebuffer's attachments, or the back buffer's size for the default framebuffer (ID -1).
+    *
+    * This is what makes a target's size authoritative rather than advisory. A pass whose view rect
+    * does not match its target either clips (rect too large) or leaves it partly unwritten (too
+    * small), and neither reports an error.
+    *
+    * @param textures The renderer's constructed textures, whose textureResolutions map holds the sizes.
+    * @param frameBuffers The renderer's constructed framebuffers, for the attachment lookup.
+    * @param frameBufferID The render pass's output framebuffer ID; -1 is the back buffer.
+    * @param backBufferSize The current back buffer size, returned for framebuffer -1.
+    */
+    core::ivec2 resolveTargetSize(const ConstructedTextures& textures, const ConstructedFramebuffers& frameBuffers, int frameBufferID, core::ivec2 backBufferSize);
 }
 
 #endif

@@ -1,0 +1,230 @@
+{
+  "components": [
+    {
+      "mutability": "locked",
+      "name": "New Asset",
+      "palette": [
+        {
+          "color": [77, 526, 94]
+        },
+        {
+          "color": [634, 625, 589]
+        },
+        {
+          "color": [272, 620, 62]
+        },
+        {
+          "color": [307, 573, 184]
+        },
+        {
+          "color": [378, 367, 337]
+        },
+        {
+          "color": [190, 374, 120]
+        },
+        {
+          "color": [219, 424, 136]
+        },
+        {
+          "color": [563, 542, 512]
+        },
+        {
+          "color": [512, 493, 464]
+        },
+        {
+          "color": [248, 474, 152]
+        },
+        {
+          "color": [599, 583, 556]
+        },
+        {
+          "color": [460, 444, 417]
+        },
+        {
+          "color": [161, 324, 104]
+        },
+        {
+          "color": [409, 395, 370]
+        },
+        {
+          "color": [529, 514, 476]
+        },
+        {
+          "color": [358, 346, 323]
+        },
+        {
+          "color": [278, 523, 168]
+        },
+        {
+          "color": [307, 297, 276]
+        },
+        {
+          "color": [544, 504, 243]
+        },
+        {
+          "color": [444, 408, 196]
+        },
+        {
+          "color": [395, 360, 172]
+        },
+        {
+          "color": [593, 552, 266]
+        },
+        {
+          "color": [494, 456, 219]
+        },
+        {
+          "color": [345, 311, 149]
+        },
+        {
+          "color": [132, 275, 88],
+          "name": "grass.lush.7"
+        },
+        {
+          "color": [102, 225, 72],
+          "name": "grass.lush.8"
+        },
+        {
+          "color": [295, 263, 126],
+          "name": "grass.dry.7"
+        },
+        {
+          "color": [246, 215, 102],
+          "name": "grass.dry.8"
+        },
+        {
+          "color": [164, 348, 102],
+          "name": "grass.blade.1"
+        },
+        {
+          "color": [273, 471, 157],
+          "name": "grass.blade.2"
+        },
+        {
+          "color": [382, 593, 211],
+          "name": "grass.blade.3"
+        },
+        {
+          "color": [491, 716, 266],
+          "name": "grass.blade.4"
+        },
+        {
+          "color": [246, 450, 164],
+          "name": "grass.stem"
+        },
+        {
+          "color": [286, 563, 225],
+          "name": "clover.leaf"
+        },
+        {
+          "color": [972, 972, 941],
+          "name": "daisy.petal"
+        },
+        {
+          "color": [982, 839, 256],
+          "name": "daisy.eye"
+        },
+        {
+          "color": [798, 133, 113],
+          "name": "poppy.petal"
+        },
+        {
+          "color": [102, 92, 92],
+          "name": "poppy.eye"
+        },
+        {
+          "color": [1003, 870, 205],
+          "name": "buttercup"
+        },
+        {
+          "color": [389, 348, 818],
+          "name": "bluebell"
+        },
+        {
+          "color": [931, 931, 890],
+          "name": "dandelion.puff"
+        },
+        {
+          "color": [1003, 818, 153],
+          "name": "dandelion.head"
+        },
+        {
+          "color": [266, 184, 123],
+          "name": "tree.bark.1"
+        },
+        {
+          "color": [358, 261, 174],
+          "name": "tree.bark.2"
+        },
+        {
+          "color": [450, 338, 225],
+          "name": "tree.bark.3"
+        },
+        {
+          "color": [102, 266, 92],
+          "name": "tree.leaf.1"
+        },
+        {
+          "color": [198, 389, 136],
+          "name": "tree.leaf.2"
+        },
+        {
+          "color": [293, 512, 181],
+          "name": "tree.leaf.3"
+        },
+        {
+          "color": [389, 634, 225],
+          "name": "tree.leaf.4"
+        },
+        {
+          "color": [72, 205, 133],
+          "name": "tree.needle.1"
+        },
+        {
+          "color": [138, 307, 179],
+          "name": "tree.needle.2"
+        },
+        {
+          "color": [205, 409, 225],
+          "name": "tree.needle.3"
+        },
+        {
+          "color": [962, 777, 839],
+          "name": "tree.blossom"
+        },
+        {
+          "color": [307, 266, 225],
+          "name": "tree.dead.1"
+        },
+        {
+          "color": [471, 430, 379],
+          "name": "tree.dead.2"
+        },
+        {
+          "color": [1023, 1017, 575],
+          "emissiveStrength": 245.1464385986328,
+          "name": "Light"
+        },
+        {
+          "color": [676, 750, 963],
+          "emissiveStrength": 0.1486508846282959,
+          "name": "Fire2",
+          "transparency": 1.0
+        },
+        {
+          "color": [956, 859, 704],
+          "emissiveStrength": 8.724061965942383,
+          "name": "Fire2",
+          "transparency": 1.0
+        }
+      ],
+      "position": [-667.0, -226.0, -626.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "New_Asset.data",
+      "type": "data"
+    }
+  ],
+  "name": "New Asset",
+  "version": 1
+}

@@ -38,14 +38,28 @@ $input v_texcoord0
 
 #include <bgfx_shader.sh>
 
-SAMPLER2D(previewColor,    0);
-SAMPLER2D(previewNormal,   1);
-SAMPLER2D(previewPosition, 2);
-SAMPLER2D(occlusion,       4);
+SAMPLER2D(previewColor,     0);
+SAMPLER2D(previewNormal,    1);
+SAMPLER2D(previewPosition,  2);
+SAMPLER2D(giLight,          4);
 
-uniform vec4 windowRes;
-// x = ambient occlusion (screen-space), y = normal shading, z = sun shadow, w = ray occlusion.
-uniform vec4 renderSettings;
+uniform vec4 passTargetRes;                        // (w, h, 1/w, 1/h) of THIS pass's target.
+// 8 must equal PROJV_MAX_PASS_INPUTS in constructedRenderer.h -- the engine sets that many.
+uniform vec4 passInputRes[8];  // Per input slot; [1] and [2] are the G-buffer.
+// x = advanced preview. This pass filters the path traced light, so it is gated on the toggle that
+// produces it rather than on one of shade.frag's four readability aids.
+uniform vec4 previewSettings;
+
+// The G-buffer is larger than this pass -- the light is traced at a fraction of the viewport while
+// geometry stays sharp -- so a guide has to be POINT-sampled. An ordinary fetch would return a
+// bilinear blend of several full-resolution texels, and a normal or a position averaged across a
+// silhouette belongs to neither surface, which is exactly the discontinuity these weights exist to
+// find. Snapping the UV to one source texel's centre asks about a real sample instead.
+vec2 guideUV(vec2 uv, int slot) {
+    vec2 sourceRes = passInputRes[slot].xy;
+    if (sourceRes.x < 0.5) return uv;   // Size unknown (slot above PROJV_MAX_PASS_INPUTS).
+    return (floor(uv * sourceRes) + 0.5) * passInputRes[slot].zw;
+}
 
 // Set per level on the shaderc command line. Guarded so the file still compiles alone.
 #ifndef ATROUS_STRIDE
@@ -90,29 +104,34 @@ float atrousKernel(int offset) {
 }
 
 void main() {
-    float centerOcclusion = texture2D(occlusion, v_texcoord0).r;
+    vec4 centerSample = texture2D(giLight, v_texcoord0);
+    vec3 centerLight = centerSample.rgb;
+    // Carried through unfiltered. Alpha is gi_temporal.frag's depth key, not part of the signal:
+    // filtering it would average the depths of every surface in the kernel and produce a number
+    // belonging to none of them, which the next frame's reprojection would then validate against.
+    float depthKey = centerSample.a;
 
-    vec4 centerGeometry = texture2D(previewNormal,   v_texcoord0);
-    vec4 centerSurface  = texture2D(previewPosition, v_texcoord0);
+    vec4 centerGeometry = texture2D(previewNormal,   guideUV(v_texcoord0, 1));
+    vec4 centerSurface  = texture2D(previewPosition, guideUV(v_texcoord0, 2));
 
     // Nothing to filter, and nothing that may be filtered *into*: the background carries no
-    // surface for the edge-stopping weights to compare against, and occlusion.frag has already
-    // written the identity there. Passing it straight through also keeps the toggled-off case free
-    // -- with the whole buffer at 1.0 this pass is a copy.
-    if (renderSettings.w < 0.5 || centerSurface.w < 0.5) {
-        gl_FragColor = vec4(centerOcclusion, 0.0, 0.0, 0.0);
+    // surface for the edge-stopping weights to compare against, and gi.frag has already written
+    // black there. Passing it straight through also keeps the toggled-off case free -- with the
+    // whole buffer at zero this pass is a copy.
+    if (previewSettings.x < 0.5 || centerSurface.w < 0.5) {
+        gl_FragColor = vec4(centerLight, depthKey);
         return;
     }
 
     vec3 centerNormal = normalize(centerGeometry.xyz);
     float planeTolerance = max(ATROUS_PLANE_VOXELS * centerGeometry.w, 1e-6);
 
-    vec2 texelSize = 1.0 / windowRes.xy;
+    vec2 texelSize = passTargetRes.zw;
 
     // The centre tap seeds both sums at its full kernel weight, so a pixel every one of whose
     // neighbours is rejected keeps its own value rather than dividing by zero.
     float weightSum = atrousKernel(0) * atrousKernel(0);
-    float occlusionSum = centerOcclusion * weightSum;
+    vec3 lightSum = centerLight * weightSum;
 
     for (int y = -2; y <= 2; y++) {
         for (int x = -2; x <= 2; x++) {
@@ -127,12 +146,12 @@ void main() {
                 continue;
             }
 
-            vec4 tapSurface = texture2D(previewPosition, tapUV);
+            vec4 tapSurface = texture2D(previewPosition, guideUV(tapUV, 2));
             if (tapSurface.w < 0.5) {
                 continue;   // Background: no surface, so no comparison and no contribution.
             }
 
-            vec4 tapGeometry = texture2D(previewNormal, tapUV);
+            vec4 tapGeometry = texture2D(previewNormal, guideUV(tapUV, 1));
             vec3 tapNormal = normalize(tapGeometry.xyz);
 
             // Distance from the tap to the centre pixel's tangent plane. See ATROUS_PLANE_VOXELS.
@@ -144,10 +163,10 @@ void main() {
 
             float weight = atrousKernel(x) * atrousKernel(y) * planeWeight * normalWeight;
 
-            occlusionSum += texture2D(occlusion, tapUV).r * weight;
+            lightSum += texture2D(giLight, tapUV).rgb * weight;
             weightSum += weight;
         }
     }
 
-    gl_FragColor = vec4(occlusionSum / weightSum, 0.0, 0.0, 0.0);
+    gl_FragColor = vec4(lightSum / weightSum, depthKey);
 }

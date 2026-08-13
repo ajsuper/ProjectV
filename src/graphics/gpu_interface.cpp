@@ -602,32 +602,30 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
     }
 
     void setTextureToData(std::shared_ptr<ConstructedRenderer> constructedRenderer, uint textureID, unsigned char * data, uint textureWidth, uint textureHeight) {  
-        projv::core::ivec2 textureDimensions = constructedRenderer->resources.textures.textureResolutions.at(textureID);  
-        bool textureIsResizable = false;
-        for(size_t i = 0; i < constructedRenderer->resources.textures.texturesResizedWithResourceTextures.size(); i++) {
-            if(constructedRenderer->resources.textures.texturesResizedWithResourceTextures[i] == textureID) {
-                textureIsResizable = true;
-            }
-        }
+        projv::core::ivec2 textureDimensions = constructedRenderer->resources.textures.textureResolutions.at(textureID);
+        // A keyed lookup, not a scan. This used to walk an unordered_map by integer index -- which
+        // INSERTS key `i` on every iteration, because operator[] on a map does -- and then compared
+        // the resulting bool against a texture ID, so the answer was meaningless for every ID above 1.
+        //
+        // "Resizable" here means the JSON does not pin this texture's size, so data of a different
+        // size is a new size rather than a contradiction.
+        bool textureIsResizable =
+            constructedRenderer->resources.textures.relativeTextureScales.count(textureID) > 0;
 
         if(textureDimensions.x != int(textureWidth) || textureDimensions.y != int(textureHeight)) {
+            const std::string mismatch =
+                "Texture " + std::to_string(textureID) + ": passed dimensions don't match. Expected: (" +
+                std::to_string(textureDimensions.x) + ", " + std::to_string(textureDimensions.y) +
+                "), got: (" + std::to_string(textureWidth) + ", " + std::to_string(textureHeight) + "). ";
             if(textureIsResizable) {
-                std::invalid_argument(
-                    "Passed texture dimensions don't match. Expected: (" + 
-                    std::to_string(textureDimensions.x) + ", " + std::to_string(textureDimensions.y) + 
-                    "), got: (" + std::to_string(textureWidth) + 
-                    ", " + 
-                    std::to_string(textureHeight) + 
-                    "). Since texture is resizable, it will automatically change it's size to match."
-                );
+                // Not fatal: this texture follows the data uploaded into it, so the new size is the
+                // answer rather than the problem. Previously this branch constructed a
+                // std::invalid_argument and dropped it on the floor -- no throw, no log, nothing.
+                core::warn("{}Texture follows its resource data, so it will take the new size.", mismatch);
             } else {
                 throw std::invalid_argument(
-                    "Passed texture dimensions don't match. Expected: (" + 
-                    std::to_string(textureDimensions.x) + ", " + std::to_string(textureDimensions.y) + 
-                    "), got: (" + std::to_string(textureWidth) + 
-                    ", " + 
-                    std::to_string(textureHeight) + 
-                    "). Ensure the resolutions in resources.json and the loaded texture match."
+                    mismatch + "Ensure the resolution in resources.json matches the loaded image, or "
+                    "declare the texture with \"sizeMode\": \"fixed\" at the image's size."
                 );
             }
         }

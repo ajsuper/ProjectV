@@ -25,3 +25,6 @@
 	path = external/imgui
 	url = https://github.com/ocornut/imgui.git
 	branch = docking
+[submodule "docs/examples/SceneEditor/external/lua"]
+	path = docs/examples/SceneEditor/external/lua
+	url = https://github.com/lua/lua.git

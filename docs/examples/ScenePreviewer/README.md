@@ -44,8 +44,12 @@ The scene directory is any folder holding a `compose.json` — whatever `loadCom
 |-------|--------|--------|-----------|------|
 | `StonehillCastle` | Minecraft world (Java, 1.21) | 1,727,740 | 65 | 21 MB |
 | `Sibenik` | `sibenik.obj` — 75 k tris, 3 textures | 1,301,862 | 241 | 16 MB |
-| `Bistro` | Amazon Lumberyard Bistro exterior — 2.8 M tris, 114 textures | 983,852 | 222 | 12 MB |
+| `Bistro` | Amazon Lumberyard Bistro exterior — 2.8 M tris, 114 textures | 983,852 | 255 | 1.6 MB |
 | `LostEmpire` | `lost_empire.obj` — a Minecraft map exported as a mesh | 975,087 | 224 | 12 MB |
+
+`Bistro` is the one mesh scene regenerated since the `.data` container went to version 2, which is why it is the only row measured in single-digit megabytes: v2 stores one material byte per voxel and moves the colors into `compose.json`, where v1 carried a full color per voxel.
+
+`Sibenik` and `LostEmpire` are still version 1. They **load as zero chunks** — `readDataFile` rejects the container outright and says so — until they are re-run with the commands below, and the sizes quoted for them are v1 sizes that will drop by roughly the same factor when they are. `StonehillCastle` loads (10 chunks) because its `compose.json` references only v2 components; the 21 MB v1 `model.data` still sitting in that folder is an unreferenced leftover, and the figures in its row above describe that stale file rather than what currently loads.
 
 To regenerate any of them:
 

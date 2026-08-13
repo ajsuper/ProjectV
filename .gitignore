@@ -12,6 +12,11 @@ SceneTest/
 # Ignore example build outputs
 docs/examples/*/main.o
 
+# A brush's tuned parameter values, written beside the brush by the SceneEditor's Brush Lab. The .lua
+# is the brush and belongs in version control; the sidecar is one user's dial settings and is rewritten
+# every time a slider moves.
+docs/examples/SceneEditor/brushes/*.params.json
+
 # Allow example models
 !docs/examples/PathTracer/SponzaScene/**/*.bin
 !docs/examples/MeshVoxelizer/testScene/**/*.bin

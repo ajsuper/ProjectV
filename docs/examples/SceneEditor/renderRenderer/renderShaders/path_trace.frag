@@ -60,7 +60,7 @@ $input v_texcoord0
 
 #include <pjv_utils_DDA.sc>
 
-uniform vec4 windowRes;
+uniform vec4 passTargetRes;   // Engine-set: (w, h, 1/w, 1/h) of THIS pass's target.
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
 // x = frame index, y = 1.0 on a frame the camera moved, z = the frame it last moved on.
@@ -441,7 +441,7 @@ Ray primaryRay(vec2 uv, inout uint seed) {
     Ray ray;
     if (cameraProjection.x < 0.5) {
         ray.origin = cameraPos.xyz;
-        ray.direction = rayStartDirection(uv, windowRes.xy, cameraPos.xyz, forward, 60.0);
+        ray.direction = rayStartDirection(uv, passTargetRes.xy, cameraPos.xyz, forward, 60.0);
 
         if (lensParams.x > 0.0) {
             // The focus distance is measured along the VIEW AXIS, not along this pixel's ray, so
@@ -459,7 +459,7 @@ Ray primaryRay(vec2 uv, inout uint seed) {
     }
 
     vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float aspectRatio = windowRes.x / windowRes.y;
+    float aspectRatio = passTargetRes.x / passTargetRes.y;
     float halfHeight = cameraProjection.y * 0.5;
 
     ray.origin = cameraPos.xyz - forward * cameraProjection.z +
@@ -490,14 +490,14 @@ void main() {
 
     // Per-pixel, per-frame. The pixel term decorrelates neighbours (so noise is noise
     // rather than a pattern) and the frame term is what the accumulation averages away.
-    ivec2 pixel = ivec2(v_texcoord0 * windowRes.xy);
+    ivec2 pixel = ivec2(v_texcoord0 * passTargetRes.xy);
     uint seed = hashSeed(uvec3(uint(pixel.x), uint(pixel.y), uint(frame)));
 
     // Halton for the frame's shared offset, plus a per-pixel Cranley-Patterson rotation
     // so the shared sequence does not print itself onto the image as a moving grid.
     vec2 jitter = fract(vec2(halton(frame + 1, 2), halton(frame + 1, 3)) +
                         vec2(randomUnit(seed), randomUnit(seed))) - 0.5;
-    vec2 uv = v_texcoord0 + jitter / windowRes.xy;
+    vec2 uv = v_texcoord0 + jitter / passTargetRes.xy;
 
     Ray ray = primaryRay(uv, seed);
 
@@ -798,7 +798,30 @@ void main() {
     // fades over minutes. Clamping is a bias, and it is the one bias this renderer
     // accepts: the alternative is an image that is converged everywhere except the
     // handful of pixels the eye goes to first.
-    radiance = min(max(radiance, vec3(0.0)), vec3(renderParams.w));
+    //
+    // The clamp is on the path's PEAK CHANNEL, and the whole vector is scaled by one factor. A
+    // per-component min() -- which is what this was -- is not a dimmer, it is a hue eraser: it
+    // drops every channel that is over the ceiling to exactly the ceiling and leaves the ones
+    // under it alone, so a strongly tinted radiance loses its ratios entirely. (100, 20, 20)
+    // left as (12, 12, 12): pure white. That is what washed out a bright emitter and everything
+    // the first bounce off it lit -- raising the light's strength did not brighten the colour,
+    // it deleted it, and no exposure or tone curve downstream could get it back because the
+    // ratios were gone before the pixel was written. Nothing lit by the sun or the sky showed it
+    // simply because those never reach the ceiling. Scaling instead bounds the intensity, which
+    // is the only thing a firefly clamp has any business bounding, and leaves the chromaticity
+    // exactly as the path found it.
+    //
+    // The NaN scrub comes first and is written as a comparison rather than a max(): NaN compares
+    // false against every bound, so max(x, 0.0) may pass it straight through, and one NaN
+    // entering taa.frag's running mean never leaves it.
+    radiance.r = radiance.r > 0.0 ? radiance.r : 0.0;
+    radiance.g = radiance.g > 0.0 ? radiance.g : 0.0;
+    radiance.b = radiance.b > 0.0 ? radiance.b : 0.0;
+
+    float peakChannel = max(radiance.r, max(radiance.g, radiance.b));
+    if (peakChannel > renderParams.w) {
+        radiance *= renderParams.w / peakChannel;
+    }
 
     gl_FragData[0] = vec4(radiance, primaryHit);
     gl_FragData[1] = vec4(primaryNormal, primaryVoxelSize);

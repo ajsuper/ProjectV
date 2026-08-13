@@ -159,12 +159,16 @@ Minecraft worlds take the same path from step 2 onward, fed the blocks that were
 
 ## Output Format
 
-`model.data` is a PVDT container (see [compose_data_structure.md](/docs/data_structures/compose_data_structure.md)). Each block carries:
+`model.data` is a PVDT container, currently version 2 (see [compose_data_structure.md](/docs/data_structures/compose_data_structure.md)). It holds geometry and nothing else — neither the placement nor the palette is in there. Each block carries:
 
-- **`geometry`** — the tree64, built from the brick map. It is written *unbaked*: leaf nodes carry no material offsets, because those index a `materialIDs` array the container does not store.
-- **`voxelTypeData`** — three `uint32`s per voxel: chunk-space Z-order, `R10G10B10` color, and a packed normal (left at zero; the renderer derives normals from the tree64). This is the on-disk home of the colors the palette IDs stand for.
+- **`geometry`** — the tree64, built from the brick map by `updateChunkFromBrickMap`.
+- **`materialIDs`** — one byte per solid voxel, with uniform leaves collapsed to a single entry.
 
-`loadComposeFromDisk` reads `voxelTypeData` back, interns each distinct color into the component's material palette, and rebuilds both the brick map and the tree64 (with material offsets) from it.
+The two are written already **baked** against each other: `bakeMaterialsFromBrickMap` stamps each leaf node with its offset into `materialIDs`, so the pair on disk is exactly the pair the GPU reads and `loadComposeFromDisk` does not have to rebuild the tree.
+
+The colors those bytes stand for live in `compose.json`, as a `palette` array on the component — one `"color"` entry per material ID, in the same order, as `R10G10B10` components (so each channel runs 0–1023, not 0–255). Keeping them out of the `.data` is what lets one container be instanced by several components that color it differently, and it puts the colors somewhere a person can edit by hand.
+
+Splitting the colors out this way also keeps the container small — a byte per voxel rather than a color per voxel. The Lumberyard Bistro exterior at `-r 512` is 2.8 M triangles and 983,852 voxels in a 1.6 MB `.data`.
 
 ## ProjectV Features Used
 
@@ -174,7 +178,7 @@ Minecraft worlds take the same path from step 2 onward, fed the blocks that were
 | **Logging** | `info`/`warn`/`error` via the spdlog wrapper for structured, leveled output |
 | **Compose I/O** | `writeDataFile` — serializes the `DataFile`/`DataBlock` set into a `.data` container |
 | **Voxel Management** | `ChunkHeader`, `createChunk`, `createVoxelBrickMap`, `brickMapSetVoxel`, `updateChunkFromBrickMap`, `createChunkScaleFromVoxelScaleAndResolution` |
-| **Materials** | `brickMapGetMaterial` — reads back the palette ID a voxel was written with |
+| **Materials** | `bakeMaterialsFromBrickMap` — emits the per-voxel `materialIDs` array and stamps each tree64 leaf with its offset into it |
 | **Z-Order Indexing** | `createZOrderIndex` / `reverseZOrderIndex` — Morton-coded spatial layout, both for chunks within the grid and voxels within a chunk |
 
 ## `trees/` — prebuilt assets

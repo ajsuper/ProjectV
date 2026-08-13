@@ -114,7 +114,7 @@ $input v_texcoord0
 // figure, for the reason above.
 #define TRANSPARENT_LAYERS 64u
 
-uniform vec4 windowRes;
+uniform vec4 passTargetRes;   // Engine-set: (w, h, 1/w, 1/h) of THIS pass's target.
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
 uniform vec4 frameCount;   // x = frame index
@@ -305,7 +305,7 @@ vec3 specularPreview(vec3 position, vec3 normal, vec3 viewDirection, VoxelMateri
         return weight * backgroundColor(lightDirection);
     }
 
-    VoxelMaterial reflected = fetchVoxelMaterialAtCoord(reflectHit.voxelCoord, reflectHit.headerIndex);
+    VoxelMaterial reflected = fetchVoxelMaterialFromHit(reflectHit);
     return weight * (reflected.albedo + reflected.emission);
 }
 
@@ -324,7 +324,7 @@ Ray primaryRay(vec2 uv) {
     Ray ray;
     if (cameraProjection.x < 0.5) {
         ray.origin = cameraPos.xyz;
-        ray.direction = rayStartDirection(uv, windowRes.xy, cameraPos.xyz, forward, FOV);
+        ray.direction = rayStartDirection(uv, passTargetRes.xy, cameraPos.xyz, forward, FOV);
         return ray;
     }
 
@@ -336,7 +336,7 @@ Ray primaryRay(vec2 uv) {
     vec3 up      = normalize(cross(right, forward));
 
     vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float aspectRatio = windowRes.x / windowRes.y;
+    float aspectRatio = passTargetRes.x / passTargetRes.y;
     float halfHeight = cameraProjection.y * 0.5;
 
     ray.origin = cameraPos.xyz - forward * cameraProjection.z +
@@ -349,7 +349,7 @@ Ray primaryRay(vec2 uv) {
 void main() {
     int  frame  = int(frameCount.x);
     vec2 jitter = vec2(halton(frame + 1, 2), halton(frame + 1, 3)) - 0.5;
-    vec2 uvJit  = v_texcoord0 + jitter / windowRes.xy;
+    vec2 uvJit  = v_texcoord0 + jitter / passTargetRes.xy;
 
     Ray ray = primaryRay(uvJit);
 
@@ -369,7 +369,7 @@ void main() {
     // accumulate pass averages away over the 64 frames since the camera last moved. The pixel
     // coordinate is rebuilt from the UNJITTERED uv rather than from gl_FragCoord, which bgfx does
     // not expose to a fragment shader on the HLSL/SPIR-V path.
-    ivec2 pixel = ivec2(v_texcoord0 * windowRes.xy);
+    ivec2 pixel = ivec2(v_texcoord0 * passTargetRes.xy);
     uint  seed = hashSeed(uvec3(uint(pixel.x), uint(pixel.y), uint(frame)));
 
     SceneIntersectData sceneHit;
@@ -435,10 +435,12 @@ void main() {
                                  specularPreview(hitPosition, normalize(normal), -ray.direction,
                                                  material, sceneHit.foundBox.size, seed));
     } else {
-        // The march's own integer cell, not its world-space box: recovering a coordinate back out of
-        // world space is a float32 round trip that shades voxels with their neighbour's colour once
-        // the chunk has been moved or rotated. See SceneIntersectData::voxelCoord.
-        albedo = fetchVoxelColorAtCoord(sceneHit.voxelCoord, sceneHit.headerIndex);
+        // Straight off the march's own hit: two texelFetches, no chunk header and no second descent
+        // through the tree to rediscover the leaf it was standing in. Nothing is recovered from the
+        // hit's world-space box, which is the float32 round trip that shades voxels with their
+        // neighbour's colour once a chunk has been moved or rotated. See
+        // SceneIntersectData::materialListIndex.
+        albedo = fetchVoxelColorFromHit(sceneHit);
     }
 
     gl_FragData[0] = vec4(albedo, 1.0);

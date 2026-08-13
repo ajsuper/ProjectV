@@ -63,6 +63,15 @@ namespace projv::graphics {
     std::vector<FrameBuffer> loadFrameBuffers(nlohmann::json& resourceData);
 
     /**
+     * Throws if any framebuffer attaches textures whose sizing rules disagree, or lists a textureID
+     * that no texture declares. A framebuffer has no size of its own -- it is its attachments' size --
+     * so an inconsistent set cannot be created correctly at any render resolution.
+     * @param frameBuffers The loaded framebuffer declarations.
+     * @param textures The loaded texture declarations those framebuffers refer to.
+     */
+    void validateFrameBufferAttachmentSizes(const std::vector<FrameBuffer>& frameBuffers, const std::vector<Texture>& textures);
+
+    /**
      * Loads the render passes based on the json dependency graph description of a renderer.
      * @param dependencyGraphData The json dependency graph description containing all of the information of a renderer.
      * @return Returns an std::vector<projv::RenderPass> containing all of the render passes described in the json dependency graph description.

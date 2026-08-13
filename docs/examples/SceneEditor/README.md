@@ -4,6 +4,8 @@ ProjectV's scene editor / modelling tool: a window whose interface is made of **
 
 Editing is organised around **tools** — Select, Move, Sculpt, Paint — chosen from a strip of icons down the left edge of the scene, or with `Ctrl+Q`/`W`/`E`/`R`. The tool is what a left-click in the viewport means, and the right-hand column shows the tool's settings. Select and Move are complete; Paint recolours voxels along a click-and-drag, and Sculpt adds and removes geometry along one. Palette editing — recolour, rename, add and remove entries — is complete, and everything is undoable.
 
+There are three top-level tabs, each of which owns the whole window: **Edit** (everything above), **Render** (`F11`, a path traced image of the same camera), and **Brushes** (`F10`, [the Brush Lab](#the-brush-lab) — where programmable brushes are written in Lua and tried on the scene without keeping the result).
+
 ## The shell it is built on
 
 **One frame carries both the scene and the interface.** The scene's render passes draw into an offscreen texture instead of the back buffer, and ImGui draws that texture as an image inside the Viewport panel. That is what lets the scene live in a dock node the user can move, resize, and tab like any other panel — rather than being the window, with the interface floating on top of it. Every editor tool that will want a panel beside the scene depends on this.
@@ -20,11 +22,14 @@ make               # builds ./scene_editor
 ./compEditor.sh    # (re)compiles the viewport and ImGui shaders to .bin
 ```
 
-Requires ProjectV built at `../../../` with its libraries in `../../../lib/`, bgfx built, and the ImGui submodule checked out:
+Requires ProjectV built at `../../../` with its libraries in `../../../lib/`, bgfx built, and two submodules checked out — ImGui from the engine's `external/`, and **Lua** from this example's:
 
 ```bash
-git submodule update --init external/imgui
+git submodule update --init ../../../external/imgui
+git submodule update --init external/lua        # Lua 5.4.7, for the Brush Lab
 ```
+
+Lua lives in *this example's* `external/` rather than the engine's: nothing in the engine embeds a scripting language, and programmable brushes are the editor's feature rather than the renderer's. It is compiled straight into the binary like ImGui, so there is nothing to install and no shared library to find at runtime. `make` says which command to run if the folder is empty, rather than failing with forty errors from a header nobody in this repo wrote.
 
 ## How to Use
 
@@ -259,6 +264,9 @@ The tool is what a left-click inside the viewport means. Without one, every new 
 | **Paint** | `Ctrl+R` | Drag to repaint voxels with the palette's current entry, in one of five shapes (the two fills run once per click). `Alt`+click samples instead |
 | **Place** | `Ctrl+T` | Drops one of seven primitives into the **open asset**, on the surface under the cursor or `Place distance` down the ray when there is nothing there. With nothing open the first one creates an asset and opens it. Clicking an item grabs it instead, and the panel's fields then edit *that* item |
 | **Region** | `Ctrl+Y` | Selects voxels already in the scene — two corners of a box, a face, or a connected volume — to lift into the open asset, delete or recolour. `Alt`+click samples instead |
+| **Custom** | `Ctrl+U` | Drag to run whichever [programmable brush](#the-brush-lab) is selected — the one tool whose verb is not fixed by the editor but by a Lua file. `Alt`+click samples instead |
+
+The Custom tool is the odd one out and deliberately so: the other six do one thing each, and what a drag does under this one comes out of a file in the brushes folder. Its panel is a brush picker and that brush's settings; everything about *writing* a brush stays in the Brush Lab.
 
 `Ctrl+Y` used to be a second binding for Redo. The keyboard-row logic wants `Q`/`W`/`E`/`R`/`T`/`Y` in order, and Redo keeps `Ctrl+Shift+Z`, which the Edit menu has always advertised alongside the alias.
 
@@ -1239,6 +1247,256 @@ Testing `bgfx::isValid(materialPaletteTexture)` alongside the watermark is what 
 
 The diagnostic line above the guard was printing a *different* expression from the one the code branched on, so it cheerfully logged `rebuilt=true` on every frame it skipped the rebuild. It prints the real condition now, plus whether a texture exists at all.
 
+## The Brush Lab
+
+A third top-level tab, beside **Edit** and **Render** (`F10`, or the strip in any tab's menu bar). It is where **programmable brushes** are written and tried: a brush is a Lua file in `brushes/` next to the executable, and the Lab is a library list, the declaration read back, the settings it asks for, its source, its output, and a preview that runs it on the open scene and throws the result away.
+
+A brush is a tab rather than a panel because it is not part of any document. It is a file in the user's own folder, shared by every scene they open, and designing one is a four-surface loop that has nothing to say while a scene is being arranged. It costs nothing on the renderer: it borrows Edit's, so switching allocates no targets and the preview is the same stored-albedo view the Viewport shows — the only honest view of what a brush actually wrote.
+
+The design, and the reasoning behind every decision below, is in [`docs/plans/brush_system.md`](../../plans/brush_system.md).
+
+### What a brush is
+
+One file that declares what it is, what settings it wants, what materials it can write — and then answers **one question per voxel**:
+
+```lua
+return {
+    name = "Cracked Rock",
+    kind = "material",                              -- material | geometry | scatter
+    needs = { "position", "skinDepth", "material" }, -- only these are computed
+    maxSkinDepth = 6,
+
+    params = {
+        { name = "frequency", label = "Crack frequency", type = "float",
+          default = 0.09, min = 0.01, max = 0.5 },
+        { name = "onlyMaterial", label = "Only this material", type = "text", default = "" },
+        { name = "seed", type = "seed", default = 8891 },
+    },
+
+    -- Twelve greys as one ramp. The colours are what the entries are given *if they have to be
+    -- created*; once they exist they belong to the palette, and any role can be pointed at an entry
+    -- that is already there.
+    materials = {
+        { name = "rock", steps = 12, color = { 0.60, 0.58, 0.54 }, colorTo = { 0.10, 0.10, 0.09 } },
+    },
+
+    apply = function(ctx, p)
+        if p.onlyMaterial ~= "" and not string.find(ctx.material or "", p.onlyMaterial, 1, true) then
+            return nil                              -- leave this voxel alone
+        end
+        local f1, f2 = pv.worley(ctx.x * p.frequency, ctx.y * p.frequency, ctx.z * p.frequency, p.seed)
+        local crack = 1.0 - pv.smoothstep(0.0, 0.18, f2 - f1)
+        crack = crack * pv.clamp(1.0 - ctx.depth / 7, 0.0, 1.0)   -- a crack is a surface feature
+        return 1 + math.floor(pv.clamp(crack, 0.0, 0.999) * 12)   -- an index into `materials`
+    end,
+}
+```
+
+Seven brushes ship in `brushes/`: `cracked_rock`, `crevice_shade`, `grass_tint` and `palette_paint` (material), `pitted_stone` — *Cracked Stone*, which opens cracks rather than painting them (geometry) — and `grass_tufts` and `trees` (scatter). **New Brush** writes a working template of the chosen kind, because the first thing anyone does with a new brush is preview it.
+
+### Three kinds, decided by what they write
+
+| Kind | Asked about | Returns |
+|------|-------------|---------|
+| **Material** | solid voxels only | a material index, or `nil`. Cannot add or remove geometry |
+| **Geometry** | every cell of the dab, empty ones included | an index (fill), `false` (empty it), or `nil` |
+| **Scatter** | **sites** on the surface, not cells | a list of voxels to grow there, or `nil` |
+
+A rock texture and a grass tint are the *same kind*: both recolour what exists. That is the distinction the machinery cares about, because it is exactly what decides whether an empty cell is a question the brush gets asked. A grass brush is two brushes composed — `grass_tint` paints the ground, `grass_tufts` plants what stands up out of it.
+
+### Scatter: sites, not cells
+
+A scatter brush plants objects. It is not asked about cells at all — it is asked about **sites**, and it answers with a shape:
+
+```lua
+apply = function(ctx, p)
+    if ctx.ny < 1.0 - p.maxSlope then return nil end          -- too steep; nothing grows
+    local height = 1 + math.floor(pv.hash(ctx.x, ctx.y, ctx.z, p.seed) * p.height)
+    if not pv.fits(ctx.x, ctx.y + 1, ctx.z, ctx.x, ctx.y + height, ctx.z) then return nil end
+    local voxels = {}
+    for i = 1, height do voxels[#voxels + 1] = { 0, i, 0, 1 } end   -- dx, dy, dz, material
+    return voxels
+end
+```
+
+Offsets are from the site; `{x=,y=,z=,material=}` works as well as the positional form. `nil` is the ordinary answer — a scatter brush is asked about every eligible site and plants on a fraction of them.
+
+**Where the sites are is the editor's job, and it is the part that decides whether the tool feels right.** Three things are wanted at once: plants that do not clump; a second pass over planted ground that plants nothing new; and the same ground giving the same plants every time. All three fall out of choosing sites from a **lattice fixed to the model** rather than from the dab. The component's voxel space is divided into cells `spacing` across, each cell hashes to one offset inside itself, and a surface voxel is a site exactly when it sits at its own cell's offset. The dab only decides which cells are *visited* — never which voxel within them wins — so a cell answers the same whether it was reached from the middle of a stroke or clipped by its edge.
+
+The lattice is 2D, in the two axes across the surface, with the third being whichever axis that bit of surface most faces. On ground that is one plant per `spacing × spacing` column; on a wall it is the same rule turned on its side.
+
+Two settings are read by the **editor** rather than by the script, by name — so a scatter brush's spacing is tuned in the same panel as everything else, with no second mechanism and no declaration naming which parameter means what:
+
+| | |
+|---|---|
+| `spacing` | how far apart sites are, in voxels. One placement per cell at most |
+| `density` | what fraction of those cells are taken, 0–1 |
+
+`spacing` is the lattice's cell size, which is an *average* spacing rather than a hard minimum: two sites in neighbouring cells can land against each other if one jitters to its high edge and the other to its low one. What cannot happen is two in one cell.
+
+**The fit test is all-or-nothing.** A placement whose every cell is free is planted; one that would grow through anything is refused whole. Planting the half that fits is what makes a scatter of trees look like a scatter of half trees, and "check that it fits" is the whole of the request. The brush can look further than its own voxels with `pv.solid(x, y, z)` and `pv.fits(x0,y0,z0, x1,y1,z1)`, in the component's own coordinates — a tree asking about its headroom before it commits. Both count what the dab has planted so far, so two plants cannot grow through each other.
+
+One rule the host enforces that the lattice cannot: **nothing is ever planted on what this stroke has already planted.** A blade of grass is itself a solid voxel with air above it, so without that, a second dab finds every blade tip and grows another blade out of it — a tower per site, taller every pass. The stroke journal is the record of what the stroke made, which makes it exactly the right question to ask.
+
+#### `trees`, and why a tree is the real test of all this
+
+A blade of grass is three voxels and fits almost anywhere; the fit machinery barely matters to it. A tree is a trunk and a canopy that may be a thousand voxels across, and the interesting question stops being what it looks like and becomes *is there room for it here*. `brushes/trees.lua` asks three times, cheapest first, because most sites are rejected and the cheap tests are what keep a dab affordable:
+
+1. **the ground** — slope, enclosure, and whether the base is standing on anything (`footing` counts how many of the nine cells under it are solid, so a tree will not root on a one-voxel spur off a cliff);
+2. **a thin column straight up**, which catches a low ceiling for the cost of a dozen cells — derived from the tree's real height (trunk + twice the canopy radius), because a headroom check that stops short of the crown passes sites the editor then refuses anyway, having paid to generate a whole tree first;
+3. **the whole canopy box plus `clearance`**, and only when clearance is asked for — with clearance 0 it asks exactly the question the editor already answers exactly, and asking twice is the most expensive thing in the brush.
+
+`clearance` is the one check the editor cannot do on the brush's behalf: the editor knows what a placement *occupies*, not what it wants left alone around it.
+
+Broadleaf, conifer and bare are checkboxes like the grass brush's flowers, and blossom is a fourth that speckles a broadleaf canopy. Trunks lean on the same quadratic arc the grass blades use, with the elbow filled in so a leaning trunk cannot come apart into floating segments.
+
+### Why a brush returns an index and not a colour
+
+This is the one part that is forced rather than chosen. A component's palette holds 255 entries (material IDs are one byte), the edit queue carries *colours*, and `internMaterial` adds an entry for every colour it has not seen — so a brush returning free-form RGB exhausts the palette within one stroke and then fails loudly having painted nothing.
+
+So a brush declares its output set, the editor resolves it against the palette once per stroke, and the brush picks by index. Three things follow, all wanted: the palette cost is known before it runs (the Brush tab states it, next to how much room the target has left); a brush can set glossiness and emission per voxel, which a colour could not; and entries are matched **by name**, so re-running a brush lands on the same entries instead of adding a second set beside them. A `steps` ramp generates its entries, so a crack that darkens with depth does not have to write out sixteen greys.
+
+### The palette is the single source of truth
+
+**A brush does not own colours. It owns roles, and a role points at a palette entry.**
+
+Materials are created, recoloured, renamed and removed in one place — the Palette panel — and the Brush Lab shows *that* panel at the foot of its right-hand column, not a copy of it. Same function, same state, and the same width and corner of the window it occupies in the Edit tab, so it is not a panel to re-find on switching. The entry selected in the Lab is the entry selected in the Edit tab, and a colour changed in either is changed for good.
+
+Everything a brush can write is listed under **What it writes**, one row per role:
+
+```
+6 palette entries  | Box has 7 of 255
+▣ rock.1 -> granite_dark  x
+▣ rock.2
+▢ rock.3
+▣ paint (setting) -> lichen  x
+```
+
+- **Click a role's swatch, then click a palette entry.** That is the assign gesture, and it is the same gesture for a declared material and for a colour setting.
+- A **hollow** swatch means no entry of that name exists yet: the brush would create one in the colour the script suggests. A **filled** one is an entry that exists, drawn in the colour it actually is.
+- `->` names the entry a role has been pointed at; `x` puts it back to the entry named after itself.
+- Bindings are stored **by name**, in the sidecar. A slot index is a fact about one component's palette and means something else in the next one; a name is what `internMaterial` already matches on, so a binding made on the castle still means the right thing when the brush is taken to the terrain — and it survives the palette being reordered by a removal, which renumbers every slot above it.
+
+**A colour setting is a palette reference, not a colour picker.** `{ name = "paint", type = "color" }` draws a swatch that assigns an entry — there is no RGB to edit in the Settings tab, because editing a colour is something you do to an entry, in the one place entries are edited. A picker there would write a number into the brush that the palette knows nothing about, and the two would then disagree about what "the tint" is. The script gets `p.paint.r/.g/.b` as before, plus **`p.paint.index`** — a material index, which is exactly what `apply` returns. `brushes/palette_paint.lua` is the whole idea in one file.
+
+**The declared colours are creation defaults.** They are used on exactly one occasion: no entry of that name exists and one has to be made. After that the palette's copy wins — its colour, its glossiness, its emission — and the script's numbers stop being consulted. Otherwise running the brush over one more patch would quietly undo a colour that had just been set by hand. Which is also why a brush still declares colours at all: one dropped into a fresh scene has to do something visible without a setup ritual first.
+
+Recolour an entry in the strip below and the next dab paints the new colour, with nothing else to change.
+
+### The context is declared, not queried
+
+`needs` is a list, not a set of callbacks, and that is a cost decision. Skin depth and crevice occupancy are questions about a voxel's *neighbours*, and neighbouring voxels' neighbourhoods overlap almost entirely — asked of the tree64 one cell at a time that is ~28 descents per cell per field, which is what made Smooth unaffordable before `SculptScratch` existed. So the editor reads the dab's neighbourhood into a flat box once and every query becomes an array index.
+
+| Field | What the script sees |
+|-------|----------------------|
+| `position` | `ctx.x/y/z` — the component's own voxel lattice. The **default** deliberately: it is coherent across the whole `.data` and across separate strokes, where world position re-textures the object every time it is moved |
+| `world` | `ctx.wx/wy/wz` — world units, for things that belong to the world rather than the object |
+| `material` | `ctx.slot`, `ctx.r/g/b`, `ctx.material` — what is in the cell now. This is how "only the stone" is a setting rather than a second brush |
+| `solid` | `ctx.solid`. Free, and always present for a geometry brush |
+| `skinDepth` | `ctx.depth` — 0 for a voxel with an exposed face, 1 for one behind it. Costs a margin of `maxSkinDepth + 1` |
+| `crevice` | `ctx.crevice` — the solid fraction of a ball. The number that makes creases darker. **Flat open ground already reads about 0.6**, since half the ball around a surface voxel is the ground it stands on: a threshold below that rejects the field you were aiming at, which is a mistake that looks like a broken brush rather than a mis-set number |
+| `distance` | `ctx.distance` — 0 at the dab's centre, 1 at its rim. Free |
+| `normal` | `ctx.nx/ny/nz` — the gradient of the local solid mask, so it points out of the material and is near zero deep inside |
+
+The declaration buys the margin: a brush that does not ask for skin depth does not pay for it, and one that asks for 6 pays for 6 rather than the worst case. **Skin depth is breadth-first from every exposed face**, giving exact 6-connected distance — a chamfer pass would be cheaper and would answer a different question (a diagonal counted as one step reports a corner voxel as shallower than it is). Outside the box reads as *solid*, which is the safe direction: an empty answer there would invent a surface at the boundary and report every deep voxel near it as skin.
+
+### Settings, in the script or in the editor
+
+Both, and **the script cannot tell the difference** — it reads them out of the same table. The schema comes from the script's `params`; anything added with *Add a setting…* in the Lab goes in a `<brush>.params.json` sidecar beside the file, along with the values of both sets. Which is the order this actually happens in: a setting starts life as a knob you wanted while looking at the panel, and gets written into the script once it has earned its place.
+
+Two files rather than one because they have different authors. The `.lua` belongs to whoever wrote the brush and to version control beside it; the values are the local user's dial settings and change every time a slider moves. Writing them back into the script would mean an editor that rewrites the author's source on every drag.
+
+Eight types — number, whole number, checkbox, **colour** (a palette reference, see above), choice, text, asset path, and **seed**, which is separate from a whole number because it comes with a *Roll* button: "give me a different arrangement" is a different verb from "set this to 8891". Roll steps by a fixed amount rather than randomising, so a sequence of arrangements can be walked back through.
+
+### Hot reload
+
+Editing the file in your own editor works exactly as well as editing it in the Lab: the folder is polled once a frame (one `stat` per brush) and a changed file is reloaded, **keeping the values you have tuned** — matched on name and type. Without that the Lab would be unusable, since a script is saved every few seconds while a number is being tuned and a reload that reset every slider would undo the tuning being done.
+
+### Preview writes to the scene, and takes it all back
+
+Preview is a real edit, journalled and rolled back. Not a copy of the component (which would have to be built and uploaded per dab, and still would not answer what the brush does to *this* model against its actual neighbours) and not a shader trick (which cannot show a geometry brush at all, because the geometry is the output).
+
+What makes it safe is one rule on top of the journal: **preview writes never reach the undo history.** So previewing cannot change the document — the worst case is a revert that has to be asked for — and leaving the tab discards the lot. That is caught where `editor.mode` is written rather than in the Lab's own button, because the tab can also be left by the strip, by `F10`, by `F11` straight to Render, or by the View menu.
+
+The journal holds what each cell was *before* the preview first touched it, which is what makes the revert exact however many dabs overlap: a cell already journalled is skipped before the script is called, so it cannot be changed twice. A cell the brush *declined* is not journalled and is asked again — deliberately, because remembering every cell ever considered would put the whole swept volume into the structure the revert walks, and a carving brush's answer legitimately changes once material has gone.
+
+**The revert takes the palette back too.** A brush resolves its roles into the palette before it paints a single voxel, so a preview creates entries whether or not it ends up changing anything — and a preview that restored every voxel but left six new entries behind would still have edited the document, silently, with no undo entry, in the one structure whose numbering *is* data. Entries the preview created are popped again after the voxels are restored, which is the order that makes it safe: nothing references them by then, so nothing is renumbered. The unwind stops if the last entry is no longer one the preview made, or is still in use — the palette is not private to the preview, and an entry left behind is untidy where removing the wrong one rewrites the material byte of every voxel above it.
+
+The strip above the image reports three numbers, and each is one a brush author asks for: how many voxels changed, how many the script was asked about, and how long the dab took — including reading the declared neighbourhood, not just the script's own answers. If the per-voxel figure is far above what the script's arithmetic could account for, the cost is the snapshot, and the fix is a smaller `maxSkinDepth` than a simpler script.
+
+### Lua, and why per-voxel scripting is affordable
+
+Lua 5.4.7, pinned as a submodule in this example's `external/` and compiled straight into the editor like ImGui. Built with `LUA_USE_POSIX` rather than `LUA_USE_LINUX` on purpose: the Linux preset adds `LUA_USE_DLOPEN`, which would give a script `package.loadlib` and with it arbitrary native code. The one capability the sandbox cannot take back is the one not compiled in.
+
+`dofile`, `loadfile`, `load`, `require`, `package`, `io`, `debug`, `collectgarbage` and `os` are removed. `os` goes whole rather than being trimmed to `os.time`, because a brush must be a pure function of its context and the clock is exactly what would let one stop being one. This is a guard against accidents and against a brush quietly ceasing to be reproducible — not a security boundary, and a brush is a file the user put in their own folder.
+
+**The noise is native, and that is the whole performance answer.** `pv.worley`, `pv.noise`, `pv.fbm`, `pv.hash`, `pv.clamp`, `pv.lerp` and `pv.smoothstep` are C++; the script composes them, which is the part that is actually the brush's design. Measured on the shipped brushes: **85–385 ns per voxel, 2.6–11.8 M calls a second.** A radius-8 dab is ~2000 voxels.
+
+The runaway guard is **250 ms per call**, checked from a count hook — because a script is saved and reloaded every few seconds while it is being written, so `while true do end` is a normal event rather than an exotic one. It has to be time per *call*: Lua's count hook fires on a counter that runs across the whole state, so an instruction budget kills a stroke of a hundred thousand honest calls exactly as reliably as it kills one infinite loop, and at a random voxel.
+
+`print()` from a script and every error it raises go to the **Output** tab, which carries an error count on its label so a failing brush says so from whichever tab is up. An error is reported once per stroke, not once per voxel: the first one latches, and the rest of the dab is skipped.
+
+### Using a brush: the Custom tool
+
+The Lab is where a brush is *written*. The **Custom** tool (`Ctrl+U`, Edit tab) is where one is *used*, and it edits the document — one stroke, one entry in the History panel, undo and redo like anything else.
+
+Its panel is the brush picker and that brush's own two panels, and nothing else: no New, no Copy, no source editor, no rescan. Those are what the Lab is for, and having them in both places would mean two ways to write a brush and two places for that to go wrong. What is here is what you reach for while modelling — pick a brush, read what it will do, turn its knobs.
+
+The panels are literally the Lab's, drawn by the same functions against the same state. A parameter changed here is changed there and saved to the same sidecar; a material role bound here is bound there. There is one brush, not a working copy per tab.
+
+**Below the surface the tool and the preview are the same machine.** Same dab functions, same palette resolution, same fit test, same journal — the only difference is the two ends: a stroke begins by clearing the journal and ends by turning it into a history entry rather than reverting it. That sharing is the point rather than an economy. A preview whose machinery differed from the tool's would be a rehearsal of something else, and the first time the two disagreed the preview would stop being worth looking at.
+
+Two details the stroke inherits from the tools beside it: it is confined to **one component** for its whole life (the journal is keyed on component-space coordinates, so a drag wandering onto a second object would file its cells under the first one's lattice and undo them into the wrong place), and it keeps **the brush it began with**, since the library is polled for changes every frame and a hot reload landing mid-drag would otherwise give one history entry describing two different brushes.
+
+Undo restores voxels, not the palette: entries the stroke created stay behind, unused. That is the same bargain undoing an additive sculpt strikes with the empty Grid cell it leaves — the alternative is renumbering slots, which is the one palette operation that rewrites geometry. The Palette panel's *Remove entry* is how they go.
+
+### What is not built yet
+* **Scatter plants voxels, not instances.** Every placement is baked into the target component's geometry, which is right for grass (half a million components would be madness) and wrong for trees: two hundred trees should share one geometry blob, which `geometryPool`'s refcounting already makes nearly free. Placing an instance rather than voxels is the next thing scatter wants, along with `asset` parameters that name a compose folder to plant.
+* **Binding to an unnamed entry is refused.** A binding is a name, and a photo-textured voxelisation gives nearly every entry no name at all. The Lab says so and points at the name field rather than naming the entry for you — a palette edit nobody asked for, and one that would need its own undo entry.
+
+### `BRUSHTEST`
+
+Its own switch, because it edits the scene. It builds a 21³ slab in empty space inside an existing component — inside its current bounds, so a Grid is never made to expand — runs every runnable brush over it, and tears it down.
+
+```bash
+BRUSHTEST=1 ./scene_editor ../ScenePreviewer/scenes/Untitled\ 3
+# BRUSHTEST comp=1 slab=21^3 at (2,2,2)
+# BRUSHTEST   one voxel in is skin depth 1 -> PASS
+# BRUSHTEST   the centre is skin depth 10 -> PASS
+# BRUSHTEST   an empty cell reports -1 -> PASS
+# BRUSHTEST   crevice is higher inside than on a corner (0.186589 -> 1.000000) -> PASS
+# BRUSHTEST   the normal on the top face points up (1.000000) -> PASS
+# BRUSHTEST   cracked_rock: revert restores every voxel's solidity -> PASS
+# BRUSHTEST   cracked_rock: revert restores every voxel's colour -> PASS
+# BRUSHTEST   cracked_rock: a repeated dab is identical -> PASS
+# BRUSHTEST   cracked_rock: four overlapping dabs still revert exactly -> PASS
+# BRUSHTEST cracked_rock (Material): 519 voxels changed per dab
+# BRUSHTEST   pitted_stone: four overlapping dabs still revert exactly -> PASS
+# BRUSHTEST   the test leaves no geometry behind -> PASS
+# BRUSHTEST: all checks passed
+```
+
+Each check exists because its failure is invisible from the outside:
+
+* **Skin depth against known values.** A wrong depth field still produces a plausible-looking texture — just one whose cracks are in the wrong places, or that run all the way through. The slab's depths are known by construction, which is what makes it a test subject rather than just a surface.
+* **The normal on the top face points up.** Getting this wrong flips every "upward faces only" brush onto the undersides of things.
+* **A revert restores every voxel's solidity and colour**, compared cell by cell over the slab *and a margin shell around it*. This is the promise the tab makes, and a revert that missed the cells a geometry brush **removed** would leave the document modified with no undo entry — the worst failure this system can have, and one nobody would notice until they saved.
+* **Determinism**, and **four overlapping dabs still revert exactly**. The first is what makes a preview a preview of anything; the second is what makes a *drag* safe rather than just a click.
+* **A bound role paints the entry's colour, not the script's**, and costs the palette nothing where an unbound one costs an entry (measured as the difference between resolving the same brush both ways, since the brush's *other* roles still have to be created). This is the whole of "the palette is the source of truth", and it fails silently: a binding that were ignored would still paint something plausible, just in the colour the script suggested rather than the one the user chose.
+* **A custom stroke commits and comes back.** One history entry per stroke (measured by the cursor, not the entry count — recording after an undo discards the redo tail, so the list can stay the same length while an entry is genuinely added), undo restores every voxel, redo puts back exactly what the stroke did. An undo that does not restore is the worst failure this tool can have: it is silent, and by the time it is noticed the stroke it should have reversed is many edits back.
+* **Revert takes back the palette entries it created**, checked entry by entry — name and colour — before and after, and again after four overlapping dabs. This is the check that would have caught the leak that shipped in the first version of the Lab: the voxels came back and the entries stayed.
+* **Scatter plants, spaces and does not double-plant.** One site per lattice cell; a second dab in the same place plants nothing new; a dab nudged sideways plants the rim it newly reached and *roots nothing in a cell that already has a plant*. That last one is the property in its precise form — testing "a nudged dab plants nothing" would be testing that the brush does not work, and both of the looser versions of this check passed while the brush was growing towers of grass on top of itself.
+* **A low ceiling refuses placements.** A plate is laid three voxels over the slab and the same dab run underneath it: `trees` plants 3 in the open and 0 under the ceiling, `grass_tufts` 63 and 12. This is the half of the fit test that fails silently — one that never refuses looks exactly like one that works, until a tree grows through a roof. The slab the test builds reserves 26 voxels of sky above it for the same reason: with two voxels of headroom every tree is correctly refused, and the test learns nothing about trees.
+
+Two switches exist for the same reason the mode and tool ones do — a preview is reached by dragging on the image, and a screenshot or a smoke test has no way to drag:
+
+```bash
+EDITOR_START_MODE=brushes ./scene_editor <scene>              # open on the Lab
+EDITOR_BRUSH_DEMO=1 EDITOR_START_BRUSH=cracked_rock ./scene_editor <scene>
+```
+
+`EDITOR_BRUSH_DEMO` turns preview on and lands one dab a few frames in. It hunts outward from the centre of the image for geometry rather than assuming the middle is on it — the Lab's column is a different shape from the Viewport panel the camera was framed for, so the scene is routinely off to one side, and a demo dab reporting "nothing under the cursor" would look exactly like a broken preview.
+
 ## Loading is two-phase
 
 Releasing the old scene and building the new one in the same frame keeps both resident: bgfx frees a destroyed texture only after the frames that might still reference it have been rendered. A 3.2 GB scene reloaded that way asks an 8 GB card for 6.4 GB, and the Vulkan driver dies mid-submit. So a load releases, lets eight frames pass, then builds — the viewport shows its empty state for those frames. A bad path is rejected *before* anything is torn down.
@@ -1251,6 +1509,8 @@ Implementing it was mostly a matter of getting the projection math exactly right
 
 ## What's Next
 
+* **One brush registry.** Programmable brushes are a tool now (Custom, `Ctrl+U`), but the five native sculpt brushes are still `SculptBrush` — an enum with switch statements in five places, entirely separate from the scripted path. Folding them into the same registry is what would prove the interface: Sphere, Cube, Smooth, Bump and Extrude registering through it, rather than a hypothetical script.
+* **Scatter brushes.** Declared and checked, but not run. What is missing is one placement pass and three host services every scatter brush would otherwise reimplement: surface sampling, blue-noise thinning to a minimum spacing (deterministic from a coordinate hash, so re-dabbing does not double-plant), and a fit test. The output mode then splits by scale — grass blades **bake** into the target's voxels, because half a million components is madness; trees **instance**, which is nearly free since `geometryPool` refcounts blobs and two hundred trees sharing one cost a single upload.
 * **A brush preview in the viewport**, and a highlight of the face Extrude would take. Sculpting commits on the first frame of a drag and shows the result; what it cannot show is what the *next* press would affect. Both are already computed — the brush cell by `processSculptSample`, the face by `gatherFaceRegion` — so this is an outline to draw, not a calculation to add. The face highlight matters most: how far a face spreads depends on the scene's materials, and right now the only way to find out is to drag it.
 * **Rotating the cube brush.** The box is axis-aligned in the component's voxel space. The Tool panel used to advertise `WASDQE` rotation, which never existed and has been removed rather than left as a promise; a rotated box means rasterising an oriented box into the grid rather than scanning an axis-aligned one.
 * **Deletion is soft, and assemblies exercise it hard.** `deleteComponent` releases the geometry, unlists the chunk and renames the whole subtree `__deleted__`, but cannot erase it: handles are indices into `scene.components` and `scene.chunks`, so erasing one would have to rebase every handle in the scene, in the undo history's closures, and in the editor's own state. A long session of placing and baking parts therefore grows both vectors slowly. A reaper that compacts them and remaps handles is the real fix; a session-length cap is not.

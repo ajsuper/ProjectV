@@ -43,12 +43,22 @@ add_subdirectory(${ASSIMP_DIR} ${CMAKE_BINARY_DIR}/assimp EXCLUDE_FROM_ALL)
 # --- Engine libraries ---------------------------------------------------------------------------
 # The voxelizer links the prebuilt static libraries from the engine's top-level build. They are
 # looked up rather than rebuilt so this example stays independent of the engine's build tree.
+#
+# Order matters: these are static archives, each scanned once, so a library must follow everything
+# that references it. This is the same order the rendering examples use, minus the graphics libraries
+# the voxelizer has no use for -- it writes a .data container and never opens a window.
+#
+# `ecs` and `scene_query` are here for compose_io's benefit rather than the voxelizer's own: it now
+# builds its scenes through addComponent/setComponentTransform, so linking compose_io drags them in
+# even though nothing in main.cpp calls either.
 set(PROJECTV_LIBS
+    projectV-ecs
     projectV-compose_io
     projectV-voxel_management
     projectV-material
     projectV-voxel_math
     projectV-math
+    projectV-scene_query
 )
 
 foreach(lib ${PROJECTV_LIBS})

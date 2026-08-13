@@ -28,25 +28,29 @@ namespace projv::graphics {
         ConstructedTextures constructedTextures;
         for (size_t i = 0; i < textures.size(); i++) {
             Texture texture = textures[i];
-            uint resX = texture.resolutionX;
-            uint resY = texture.resolutionY;
-            if (resX <= 0 || resY <= 0) {
-                resX = 1;
-                resY = 1;
+
+            // Presence in relativeTextureScales is the sizing rule -- see ConstructedTextures.
+            if (texture.sizeMode == TextureSizeMode::Relative) {
+                constructedTextures.relativeTextureScales[texture.textureID] = texture.scale;
             }
 
-            if (texture.resizable == true && texture.origin == TextureOrigin::CreateNew) {
-                constructedTextures.texturesResizedWithWindow[texture.textureID] = true;
+            // A relative texture is created 1x1 and takes its real size from the driver's first
+            // resizeRenderTargets, which every driver calls before it renders. Deliberately not
+            // seeded from a declared resolution: the render resolution is the single source of truth
+            // for these, and a plausible-looking placeholder is how a target ends up quietly stuck at
+            // a size nobody asked for.
+            uint16_t textureWidth = 1;
+            uint16_t textureHeight = 1;
+            if (texture.sizeMode == TextureSizeMode::Fixed) {
+                textureWidth = uint16_t(std::max(1, texture.resolutionX));
+                textureHeight = uint16_t(std::max(1, texture.resolutionY));
             }
-            if (texture.resizable == true && texture.origin == TextureOrigin::CPUBuffer) {
-                constructedTextures.texturesResizedWithResourceTextures[texture.textureID] = true;
-            }
-
-            uint16_t textureWidth = uint16_t(std::max(1, texture.resolutionX));
-            uint16_t textureHeight = uint16_t(std::max(1, texture.resolutionY));
             // Opt-in (Texture::readBack): lets this texture be blitted into and read back to the CPU
             // via bgfx::readTexture. Off by default so every other texture is unaffected.
             uint64_t textureFlags = BGFX_TEXTURE_RT | (texture.readBack ? (BGFX_TEXTURE_READ_BACK | BGFX_TEXTURE_BLIT_DST) : 0);
+            // Remembered so a resize can rebuild this texture as the same kind of texture. See
+            // ConstructedTextures::textureFlags.
+            constructedTextures.textureFlags[texture.textureID] = textureFlags;
             constructedTextures.textureHandles[texture.textureID] = bgfx::createTexture2D(textureWidth, textureHeight, false, 1, texture.format, textureFlags);
             constructedTextures.textureSamplerHandles[texture.textureID] = bgfx::createUniform(texture.name.c_str(), bgfx::UniformType::Sampler);
             constructedTextures.textureHandlesAlternate[texture.textureID] = BGFX_INVALID_HANDLE;
@@ -58,7 +62,10 @@ namespace projv::graphics {
                 constructedTextures.pingPongFlags[texture.textureID] = true;
             }
             constructedTextures.textureFormats[texture.textureID] = texture.format;
-            constructedTextures.textureResolutions[texture.textureID] = projv::core::ivec2(texture.resolutionX, texture.resolutionY);
+            // The size the handle actually has, not the size that was declared. These two used to be
+            // allowed to drift; resolveTargetSize reads this to decide a pass's view rect, so it has to
+            // be what the texture is, always.
+            constructedTextures.textureResolutions[texture.textureID] = projv::core::ivec2(int(textureWidth), int(textureHeight));
         }
 
         return constructedTextures;
@@ -130,8 +137,6 @@ namespace projv::graphics {
 
             BGFXDependencyGraph dependencyGraph;
             dependencyGraph.depdendencies = getDependenciesList(frameBuffers, constructedResources.textures.textureSamplerHandles, renderPass); // Should be removed. We should only store the ID's.
-            dependencyGraph.windowWidth = 1;
-            dependencyGraph.windowHeight = 1;
             dependencyGraph.targetFrameBufferID = renderPass.frameBufferOutputID;
             dependencyGraph.shaderProgram = createShaderProgram(constructedResources.defaultVertexShader, constructedResources.shaderHandles.at(renderPass.shaderID));
             dependencyGraph.renderPassID = uint(i);
@@ -146,6 +151,10 @@ namespace projv::graphics {
     std::shared_ptr<ConstructedRenderer> constructRendererSpecification(RendererSpecification &renderer, bgfx::ShaderHandle vertexShader) {
         ConstructedRenderer constructedRenderer;
         constructedRenderer.resources.defaultVertexShader = vertexShader;
+        // Engine-owned, so it exists for every renderer whether or not its resources.json mentions it.
+        // See BGFXResources::passTargetRes.
+        constructedRenderer.resources.passTargetRes = bgfx::createUniform("passTargetRes", bgfx::UniformType::Vec4);
+        constructedRenderer.resources.passInputRes = bgfx::createUniform("passInputRes", bgfx::UniformType::Vec4, PROJV_MAX_PASS_INPUTS);
         const Resources &resources = renderer.resources;
         const std::vector<RenderPass> &renderPasses = renderer.dependencyGraph.renderPasses;
 
@@ -164,44 +173,127 @@ namespace projv::graphics {
         return std::make_shared<ConstructedRenderer>(constructedRenderer);
     }
 
-    void resizeFramebuffersAndTheirTexturesIfNeeded(ConstructedTextures& textures, ConstructedFramebuffers& frameBuffers, int windowWidth, int windowHeight, int prevWindowWidth, int prevWindowHeight) {
-        if (true && (prevWindowWidth != windowWidth || prevWindowHeight != windowHeight)) {
-            bgfx::reset(windowWidth, windowHeight, BGFX_RESET_NONE, bgfx::TextureFormat::Count);
-
-            for (auto textureID : textures.texturesResizedWithWindow) {
-                bgfx::TextureHandle handle = textures.textureHandles.at(textureID.first);
-                if (bgfx::isValid(handle)) {
-                    bgfx::destroy(handle);
-                }
-                bgfx::TextureFormat::Enum textureFormat = textures.textureFormats[textureID.first];
-                textures.textureHandles.at(textureID.first) = bgfx::createTexture2D(windowWidth, windowHeight, false, 1,textureFormat, BGFX_TEXTURE_RT);
-            }
-
-            for (auto &frameBuffer : frameBuffers.frameBufferTextureMapping) {
-                int frameBufferID = frameBuffer.first; //std::pair<int, std::vector<uint>> first = frameBufferID, second = vector of textureIDs
-                std::vector<bgfx::Attachment> attachments = getTextureAttachments(textures.textureHandles, frameBuffer.second);
-                frameBuffers.frameBufferHandles[frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.second.size()), attachments.data(), true); // Bindings in GLSL are determined by the textureID order.
-                frameBuffers.frameBufferTextureMapping[frameBufferID] = frameBuffer.second;
-            }
-
-            // Handle alternate FBO's and textures.
-            for (auto textureID : textures.texturesResizedWithWindow) {
-                if (textures.pingPongFlags.at(textureID.first) == false) continue;
-                bgfx::TextureHandle handle = textures.textureHandlesAlternate.at(textureID.first);
-                if (bgfx::isValid(handle)) {
-                    bgfx::destroy(handle);
-                }
-                bgfx::TextureFormat::Enum textureFormat = textures.textureFormats[textureID.first];
-                textures.textureHandlesAlternate.at(textureID.first) = bgfx::createTexture2D(windowWidth, windowHeight, false, 1,textureFormat, BGFX_TEXTURE_RT);
-            }
-
-            for (auto &frameBuffer : frameBuffers.frameBufferTextureMapping) {
-                if (frameBuffers.pingPongFBOs.at(frameBuffer.first) == false) continue;
-                int frameBufferID = frameBuffer.first; //std::pair<int, std::vector<uint>> first = frameBufferID, second = vector of textureIDs
-                std::vector<bgfx::Attachment> attachments = getTextureAttachments(textures.textureHandlesAlternate, frameBuffer.second);
-                frameBuffers.frameBufferHandlesAlternate[frameBufferID] = bgfx::createFrameBuffer(uint16_t(frameBuffer.second.size()), attachments.data(), true); // Bindings in GLSL are determined by the textureID order.
-                frameBuffers.frameBufferTextureMapping[frameBufferID] = frameBuffer.second;
-            }
+    // The size a pass writing to this framebuffer has to rasterize at. See the header for why this is
+    // authoritative rather than advisory.
+    //
+    // A framebuffer has no size of its own -- FrameBuffer is a list of texture IDs -- so its size is
+    // its attachments'. Reading the first attachment is sufficient because every attachment of a
+    // framebuffer is required to be the same size (an API requirement, enforced at load).
+    core::ivec2 resolveTargetSize(const ConstructedTextures& textures, const ConstructedFramebuffers& frameBuffers, int frameBufferID, core::ivec2 backBufferSize) {
+        if (frameBufferID < 0) {
+            return backBufferSize;   // The default framebuffer: whatever the driver last reset to.
         }
+        auto mapping = frameBuffers.frameBufferTextureMapping.find(frameBufferID);
+        if (mapping == frameBuffers.frameBufferTextureMapping.end() || mapping->second.empty()) {
+            return backBufferSize;
+        }
+        auto resolution = textures.textureResolutions.find(mapping->second.front());
+        if (resolution == textures.textureResolutions.end()) {
+            return backBufferSize;
+        }
+        return resolution->second;
+    }
+
+    // Brings every window-relative render target to `renderWidth` x `renderHeight`, and rebuilds the
+    // framebuffers that point at the ones which actually changed. Returns whether anything was
+    // rebuilt, which is what a caller averaging frames needs: an accumulation or a reprojection
+    // history cannot be carried across a resolution change, so the driver folds this into the same
+    // condition a camera move goes through.
+    //
+    // Deliberately does NOT touch the back buffer. bgfx::reset used to live here, which is correct
+    // only when the render target *is* the window and wrong for any renderer drawing into a panel --
+    // it shrinks the back buffer, and the interface with it. That coupling is the whole reason the
+    // scene editor grew a private copy of this function; the back buffer belongs to the driver.
+    //
+    // Ownership is uniform: textures belong to ConstructedTextures and framebuffers to
+    // ConstructedFramebuffers. Every createFrameBuffer here passes destroyTexture=false to match
+    // constructFramebuffers -- passing true made the framebuffer co-own attachments this function
+    // destroys itself.
+    bool resizeRenderTargets(ConstructedTextures& textures, ConstructedFramebuffers& frameBuffers, int renderWidth, int renderHeight) {
+        renderWidth = std::max(1, renderWidth);
+        renderHeight = std::max(1, renderHeight);
+
+        // Which textures actually moved. Only the framebuffers holding one of these need rebuilding;
+        // the old code rebuilt every framebuffer in the renderer on any window change, including
+        // fixed-size ones whose attachments had not been touched.
+        std::vector<uint> resizedTextureIDs;
+        for (const auto& relativeTexture : textures.relativeTextureScales) {
+            uint textureID = relativeTexture.first;
+            float scale = relativeTexture.second;
+
+            // Rounded UP, in one place, so a half-resolution target of an odd-width image covers it
+            // rather than falling a column short. Consumers must not re-derive a size by scaling --
+            // they read the real one from passTargetRes, because ceil(w*s) is not w*s.
+            int scaledWidth  = std::max(1, int(std::ceil(float(renderWidth)  * scale)));
+            int scaledHeight = std::max(1, int(std::ceil(float(renderHeight) * scale)));
+
+            core::ivec2 current = textures.textureResolutions.at(textureID);
+            if (current.x == scaledWidth && current.y == scaledHeight) continue;
+
+            bgfx::TextureFormat::Enum format = textures.textureFormats.at(textureID);
+            // The flags this texture was created with, not a fresh BGFX_TEXTURE_RT -- see
+            // ConstructedTextures::textureFlags for what recreating with the wrong ones silently costs.
+            uint64_t flags = textures.textureFlags.at(textureID);
+
+            if (bgfx::isValid(textures.textureHandles.at(textureID))) {
+                bgfx::destroy(textures.textureHandles.at(textureID));
+            }
+            textures.textureHandles.at(textureID) =
+                bgfx::createTexture2D(uint16_t(scaledWidth), uint16_t(scaledHeight), false, 1, format, flags);
+
+            // A ping-pong texture exists twice and both copies have to follow, or the pass reads one
+            // resolution and writes another on alternating frames.
+            if (textures.pingPongFlags.at(textureID)) {
+                if (bgfx::isValid(textures.textureHandlesAlternate.at(textureID))) {
+                    bgfx::destroy(textures.textureHandlesAlternate.at(textureID));
+                }
+                textures.textureHandlesAlternate.at(textureID) =
+                    bgfx::createTexture2D(uint16_t(scaledWidth), uint16_t(scaledHeight), false, 1, format, flags);
+            }
+
+            // Kept in step with the handles. This map is what resolveTargetSize reads to decide a
+            // pass's view rect, so leaving it at the declared size (as this function used to) makes
+            // every pass rasterize at a resolution its target no longer has.
+            textures.textureResolutions.at(textureID) = core::ivec2(scaledWidth, scaledHeight);
+            resizedTextureIDs.push_back(textureID);
+        }
+
+        if (resizedTextureIDs.empty()) {
+            return false;
+        }
+
+        for (auto& frameBuffer : frameBuffers.frameBufferTextureMapping) {
+            int frameBufferID = frameBuffer.first;
+            const std::vector<uint>& textureIDs = frameBuffer.second;
+
+            bool holdsAResizedTexture = false;
+            for (uint textureID : textureIDs) {
+                for (uint resizedID : resizedTextureIDs) {
+                    if (textureID == resizedID) { holdsAResizedTexture = true; break; }
+                }
+                if (holdsAResizedTexture) break;
+            }
+            if (!holdsAResizedTexture) continue;
+
+            // Destroyed before being overwritten. Assigning over a live handle leaks the framebuffer
+            // object, and a renderer resized on every frame of a splitter drag exhausts bgfx's
+            // framebuffer pool in seconds.
+            if (bgfx::isValid(frameBuffers.frameBufferHandles.at(frameBufferID))) {
+                bgfx::destroy(frameBuffers.frameBufferHandles.at(frameBufferID));
+            }
+            std::vector<bgfx::Attachment> attachments = getTextureAttachments(textures.textureHandles, textureIDs);
+            frameBuffers.frameBufferHandles.at(frameBufferID) =
+                bgfx::createFrameBuffer(uint16_t(textureIDs.size()), attachments.data(), false); // Bindings in GLSL are determined by the textureID order.
+
+            if (!frameBuffers.pingPongFBOs.at(frameBufferID)) continue;
+            if (bgfx::isValid(frameBuffers.frameBufferHandlesAlternate.at(frameBufferID))) {
+                bgfx::destroy(frameBuffers.frameBufferHandlesAlternate.at(frameBufferID));
+            }
+            std::vector<bgfx::Attachment> alternateAttachments = getTextureAttachments(textures.textureHandlesAlternate, textureIDs);
+            frameBuffers.frameBufferHandlesAlternate.at(frameBufferID) =
+                bgfx::createFrameBuffer(uint16_t(textureIDs.size()), alternateAttachments.data(), false);
+        }
+
+        return true;
     }
 }

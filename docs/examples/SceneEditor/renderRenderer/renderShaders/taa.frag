@@ -59,8 +59,7 @@ SAMPLER2D(traceNormal,   1);
 SAMPLER2D(tracePosition, 2);
 SAMPLER2D(taaColor,      3);
 
-uniform vec4 windowRes;
-uniform vec4 texelSize;
+uniform vec4 passTargetRes;   // Engine-set: (w, h, 1/w, 1/h) of THIS pass's target.
 // x = frame index, y = 1.0 on a frame the camera moved, z = the frame it last moved on,
 // w = 1.0 when there is no usable history at all and this frame must be taken whole. That last one
 // is not the same statement as "the camera moved": it is raised on the first frame, on a tab switch
@@ -107,7 +106,7 @@ bool projectIntoPreviousFrame(vec3 worldPosition, out vec2 previousUV) {
     vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
     vec3 right   = normalize(cross(forward, worldUp));
     vec3 up      = normalize(cross(right, forward));
-    float aspectRatio = windowRes.x / windowRes.y;
+    float aspectRatio = passTargetRes.x / passTargetRes.y;
 
     vec2 ndc;
     if (cameraProjection.x > 0.5) {
@@ -171,8 +170,8 @@ void main() {
     vec3 moment2 = vec3(0.0);
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
-            vec2 tapUV = clamp(v_texcoord0 + vec2(float(x), float(y)) * texelSize.xy,
-                               texelSize.xy * 0.5, 1.0 - texelSize.xy * 0.5);
+            vec2 tapUV = clamp(v_texcoord0 + vec2(float(x), float(y)) * passTargetRes.zw,
+                               passTargetRes.zw * 0.5, 1.0 - passTargetRes.zw * 0.5);
             vec3 tap = texture2D(traceColor, tapUV).rgb;
             moment1 += tap;
             moment2 += tap * tap;

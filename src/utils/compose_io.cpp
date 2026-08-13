@@ -46,7 +46,7 @@ namespace projv::utils {
 
         }
 
-    void writeDataFile(const std::string& path, const DataFile& data) {
+    bool writeDataFile(const std::string& path, const DataFile& data) {
         core::info("writeDataFile: Writing .data container with {} block(s) to: {}", data.blocks.size(), path);
 
         std::filesystem::path parent = std::filesystem::path(path).parent_path();
@@ -57,7 +57,7 @@ namespace projv::utils {
         std::ofstream out(path, std::ios::binary);
         if (!out) {
             core::error("writeDataFile: Failed to open file for writing: {}", path);
-            return;
+            return false;
         }
 
         const uint32_t blockCount = static_cast<uint32_t>(data.blocks.size());
@@ -119,7 +119,16 @@ namespace projv::utils {
         }
 
         out.close();
+        // Checked rather than assumed: the geometry is the part of a save that matters, and a
+        // failure here used to be invisible to the caller -- saveComposeToDisk went on to write a
+        // compose.json referencing a .data that was never written, and reported success.
+        out.flush();
+        if (!out) {
+            core::error("writeDataFile: Failed while writing {} -- the file is incomplete", path);
+            return false;
+        }
         core::info("writeDataFile: Successfully wrote {} block(s)", blockCount);
+        return true;
     }
 
     DataFile readDataFile(const std::string& path) {
@@ -451,6 +460,25 @@ namespace projv::utils {
         std::unordered_set<std::string> warnedCycles;
         uint32_t nextChunkID = 0;
 
+        // The document's own folder, hoisted above `expand` because every asset entry has to be
+        // measured against it -- see the externalSource decision below.
+        const std::string documentRoot = std::filesystem::weakly_canonical(folderPath).string();
+
+        // Is `candidate` inside the document's own folder?
+        //
+        // This is the whole of the difference between an asset this document *owns* and one it
+        // *references*. saveComposeToDisk stores a nested asset as a sub-folder named after it
+        // (`source: "New_Asset"` -> `<document>/New_Asset/compose.json`), so a path under the
+        // document root is this document's own storage, however it got written.
+        auto insideDocument = [&documentRoot](const std::string& candidate) {
+            std::filesystem::path relative =
+                std::filesystem::path(candidate).lexically_relative(documentRoot);
+            if (relative.empty()) return false;
+            const std::string text = relative.generic_string();
+            // "." is the root itself; anything starting ".." has climbed out of it.
+            return text == "." || text.rfind("..", 0) != 0;
+        };
+
         // P6: expand now creates component records for every compose.json entry, including
         // Asset folders, and links parent/children. Chunks are created directly in scene.chunks.
         std::function<void(const std::string&, const core::mat4&,
@@ -656,11 +684,24 @@ namespace projv::utils {
                     std::string resolved = std::filesystem::weakly_canonical(
                         std::filesystem::path(folder) / c.source).string();
                     rec.sourcePath = resolved;
-                    // An `asset` entry *is* a reference: the file says "the contents of that folder
-                    // go here". Marking it keeps that true across a save, so a document that
-                    // referenced a shared asset still references it afterwards instead of being
-                    // silently flattened into a private copy of it.
-                    rec.externalSource = true;
+                    // An `asset` entry pointing *outside* this document is a reference: the file says
+                    // "the contents of that folder go here", and marking it keeps that true across a
+                    // save, so a document that referenced a shared asset still references it
+                    // afterwards instead of being silently flattened into a private copy of it.
+                    //
+                    // **An entry pointing inside this document is not a reference, it is this
+                    // document's own storage**, and marking it as external was a data-loss bug rather
+                    // than a nuance. saveComposeToDisk writes a nested asset as a sub-folder named
+                    // after it and recurses into it; reloading that file used to flag the asset
+                    // external, and the next save wrote the bare reference back and *did not descend*
+                    // -- so every edit inside it was silently discarded while the save reported
+                    // success. One round trip through disk was enough to arm it, which is every
+                    // document that has ever been saved and reopened.
+                    rec.externalSource = !insideDocument(resolved);
+                    if (!rec.externalSource) {
+                        core::trace("loadComposeFromDisk: '{}' is this document's own asset at {}",
+                                    c.name, resolved);
+                    }
 
                     if (std::find(folderStack.begin(), folderStack.end(), resolved) != folderStack.end()) {
                         if (warnedCycles.insert(resolved).second) {
@@ -677,7 +718,7 @@ namespace projv::utils {
             }
         };
 
-        std::string rootCanonical = std::filesystem::weakly_canonical(folderPath).string();
+        const std::string& rootCanonical = documentRoot;
         folderStack.push_back(rootCanonical);
         expand(rootCanonical, core::mat4(1.0f), INVALID_COMPONENT_HANDLE, 0,
                std::unordered_set<std::string>{});
@@ -1188,7 +1229,9 @@ namespace projv::utils {
                         continue;
                     }
                     entry.source = unique + ".data";
-                    writeDataFile((std::filesystem::path(folderPath) / entry.source).string(), data);
+                    if (!writeDataFile((std::filesystem::path(folderPath) / entry.source).string(), data)) {
+                        allWritten = false;
+                    }
                     if (sharedBlob >= 0) blobToSource.emplace(sharedBlob, entry.source);
                 }
 

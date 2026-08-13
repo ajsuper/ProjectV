@@ -35,11 +35,27 @@ $input v_texcoord0
 
 SAMPLER2D(taaColor, 0);
 
-uniform vec4 texelSize;
 // x = exposure in stops, y = chromatic aberration -- the red/blue separation at the corners of
 // the image, in pixels. z/w spare. Kept as its own uniform rather than folded into renderParams so
 // dragging any of it does not have to invalidate anything the trace pass reads.
 uniform vec4 displayParams;
+// The grade, split by *where in the pipeline it applies* rather than by what the controls are called.
+//
+//   gradeTint.rgb   a colour cast, multiplied into linear radiance BEFORE the tone curve. Temperature
+//                   is folded into it on the CPU, since it is a fixed pair of channel gains. A white
+//                   balance belongs here because it is a property of the light: applying it after the
+//                   curve tints the clipped highlights too, which is what a filter over a photograph
+//                   looks like rather than what a filter over a lens looks like.
+//   gradeParams     x = saturation, y = contrast, z = lift, w = vignette. All applied AFTER the curve,
+//                   on the mapped image. Contrast and saturation in linear light push values out of
+//                   gamut and clip rather than shape; in display space they do what the sliders'
+//                   names promise, around a pivot that means something.
+uniform vec4 gradeParams;
+uniform vec4 gradeTint;
+// Engine-set per pass: (w, h, 1/w, 1/h) of the target THIS pass writes. The aberration offsets and
+// the edge clamp below are in this pass's own texels, which is why they take the target's size and
+// not the traced image's -- the two differ as soon as the trace runs at a fraction of the display.
+uniform vec4 passTargetRes;
 
 // ACES filmic, Narkowicz's fit. Cheap, and close enough to the reference curve that the
 // difference does not survive an 8-bit target.
@@ -72,12 +88,12 @@ vec3 sampleWithDispersion(vec2 uv, float cornerPixels) {
     // at the centre and 1 at the corners.
     vec2 radial = (uv - 0.5) * 2.0;
     float falloff = clamp(dot(radial, radial) * 0.5, 0.0, 1.0);
-    vec2 offset = radial * falloff * cornerPixels * texelSize.xy;
+    vec2 offset = radial * falloff * cornerPixels * passTargetRes.zw;
 
     // The render targets carry no clamp sampler, so an offset past the edge would wrap around and
     // fringe the top of the image with the bottom of it.
-    vec2 low = texelSize.xy * 0.5;
-    vec2 high = 1.0 - texelSize.xy * 0.5;
+    vec2 low = passTargetRes.zw * 0.5;
+    vec2 high = 1.0 - passTargetRes.zw * 0.5;
 
     // Red long, blue short, green undisplaced: the ordering of the visible spectrum, and the
     // reason the fringing reads as a lens artefact rather than as a colour bug.
@@ -86,16 +102,54 @@ vec3 sampleWithDispersion(vec2 uv, float cornerPixels) {
                 texture2D(taaColor, clamp(uv - offset, low, high)).b);
 }
 
+// Rec. 709 luminance. Saturation is measured against this rather than against the channel average so
+// that pulling the colour out of an image leaves it at the brightness the eye reads it at -- a flat
+// mean makes blues too light and greens too dark, which shows up as a desaturated render that does not
+// match the brightness of the one it came from.
+float luminance(vec3 color) {
+    return dot(color, vec3(0.2126, 0.7152, 0.0722));
+}
+
 void main() {
     vec3 hdr = max(sampleWithDispersion(v_texcoord0, displayParams.y), vec3(0.0));
 
     hdr *= exp2(displayParams.x);
 
+    // ---- Before the curve: the light ----
+    //
+    // The colour cast goes in here, while the image is still radiance. See the uniform's comment.
+    hdr *= gradeTint.rgb;
+
     vec3 mapped = acesToneMap(hdr);
+
+    // ---- After the curve: the picture ----
+    //
+    // Contrast about a mid-grey pivot rather than about black, so raising it darkens the shadows and
+    // lifts the highlights instead of just making everything brighter. 0.5 is mid grey in the encoded
+    // space this is about to be written into -- which is the space the eye judges the result in, and
+    // the reason all of this sits after the tone map rather than before it.
+    mapped = clamp((mapped - 0.5) * gradeParams.y + 0.5, 0.0, 1.0);
+
+    // Saturation, against luminance.
+    mapped = clamp(mix(vec3_splat(luminance(mapped)), mapped, gradeParams.x), 0.0, 1.0);
+
+    // Lift: raise the floor without moving white, which is the compression a print has and a render
+    // does not. Scaling the range down as the floor comes up is what keeps white at white -- adding a
+    // constant instead would push the top of the image off the end and clip it flat.
+    mapped = mapped * (1.0 - gradeParams.z) + vec3_splat(gradeParams.z);
+
+    // Vignette. Radial like the aberration above, and for the same reason: it is what a lens does at
+    // the edge of its own coverage. Squared falloff so the darkening starts gently rather than at a
+    // visible ring.
+    if (gradeParams.w > 0.0) {
+        vec2 radial = (v_texcoord0 - 0.5) * 2.0;
+        float falloff = clamp(dot(radial, radial) * 0.5, 0.0, 1.0);
+        mapped *= 1.0 - falloff * falloff * gradeParams.w;
+    }
 
     // sRGB-ish encode. The target is a plain RGBA8 texture that ImGui samples without a
     // sRGB view, so the curve has to be applied here rather than left to the hardware.
-    mapped = pow(mapped, vec3(1.0 / 2.2));
+    mapped = pow(max(mapped, vec3(0.0)), vec3(1.0 / 2.2));
 
     gl_FragColor = vec4(mapped, 1.0);
 }

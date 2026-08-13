@@ -1,0 +1,58 @@
+{
+    "uniforms": [
+        {"name": "cameraPos",     "type": "vec4"},
+        {"name": "cameraDir",     "type": "vec4"},
+        {"name": "prevCameraPos", "type": "vec4"},
+        {"name": "prevCameraDir", "type": "vec4"},
+        {"name": "frameCount",    "type": "vec4"},
+        {"name": "sunDir",        "type": "vec4"},
+        {"name": "renderParams",  "type": "vec4"}
+    ],
+    "shaders": [
+        {"shaderID": 1,  "path": "./advancedRenderer/cascadeShaders/gbuffer.bin"},
+        {"shaderID": 2,  "path": "./advancedRenderer/cascadeShaders/cascade3.bin"},
+        {"shaderID": 3,  "path": "./advancedRenderer/cascadeShaders/cascade2.bin"},
+        {"shaderID": 4,  "path": "./advancedRenderer/cascadeShaders/cascade1.bin"},
+        {"shaderID": 5,  "path": "./advancedRenderer/cascadeShaders/cascade0.bin"},
+        {"shaderID": 6,  "path": "./advancedRenderer/cascadeShaders/resolve.bin"},
+        {"shaderID": 7,  "path": "./advancedRenderer/cascadeShaders/accumulate.bin"},
+        {"shaderID": 8,  "path": "./advancedRenderer/cascadeShaders/compose.bin"},
+        {"shaderID": 9,  "path": "./advancedRenderer/cascadeShaders/taa.bin"},
+        {"shaderID": 10, "path": "./advancedRenderer/cascadeShaders/display.bin"}
+    ],
+    "textures": [
+        {"texID": 1,  "name": "gPos",       "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 2,  "name": "gNormal",    "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 3,  "name": "gAlbedo",    "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 4,  "name": "gDirect",    "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 5,  "name": "gFace",      "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 6,  "name": "gKey",       "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+
+        {"texID": 7,  "name": "cascade3",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.25, "origin": "CreateNew"},
+        {"texID": 8,  "name": "cascade2",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.25, "origin": "CreateNew"},
+        {"texID": 9,  "name": "cascade1",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.25, "origin": "CreateNew"},
+        {"texID": 10, "name": "cascade0",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.25, "origin": "CreateNew"},
+
+        {"texID": 11, "name": "indirect",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+
+        {"texID": 12, "name": "accumR",     "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 13, "name": "histKey",    "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 14, "name": "histPos",    "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+
+        {"texID": 15, "name": "composeHDR", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+
+        {"texID": 16, "name": "taaColor",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 17, "name": "taaPos",     "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"}
+    ],
+    "framebuffers": [
+        {"fboID": 1, "textureIDs": [1, 2, 3, 4, 5, 6]},
+        {"fboID": 2, "textureIDs": [7]},
+        {"fboID": 3, "textureIDs": [8]},
+        {"fboID": 4, "textureIDs": [9]},
+        {"fboID": 5, "textureIDs": [10]},
+        {"fboID": 6, "textureIDs": [11]},
+        {"fboID": 7, "textureIDs": [12, 13, 14]},
+        {"fboID": 8, "textureIDs": [15]},
+        {"fboID": 9, "textureIDs": [16, 17]}
+    ]
+}

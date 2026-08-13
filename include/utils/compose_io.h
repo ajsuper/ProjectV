@@ -13,8 +13,12 @@ namespace projv::utils {
      * Writes a DataFile to a .data (PVDT) container on disk.
      * @param path The path (including .data filename) to write to.
      * @param data The DataFile to serialize.
+     * @return False if the file could not be opened, or the write failed part way and what is on disk
+     *         is incomplete. **Check it.** This returned void until it was found that the one caller
+     *         that matters went on to write a compose.json referencing a .data that had never been
+     *         written -- a save that reported success and had quietly lost the geometry.
      */
-    void writeDataFile(const std::string& path, const DataFile& data);
+    bool writeDataFile(const std::string& path, const DataFile& data);
 
     /**
      * Reads a .data (PVDT) container from disk into a DataFile. Reads the whole file; for per-block

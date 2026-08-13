@@ -73,11 +73,20 @@ struct Tree64NodeData {
     uint childPtr;
 };
 
+// One entry of the descent stack. Both fields are live and both are needed: `dataIndex` is read at
+// arbitrary depth (a pop reads nodeStack[n - 2 - boundariesCrossed]) and the z-order is read at the
+// top of the stack.
+//
+// A third field, `cachedData` (a whole Tree64NodeData, 4 uints), used to sit here. Nothing in this
+// file ever read or wrote it -- the march keeps the current node's data in a plain local, `data` --
+// so it was 4 dead uints per entry, 20 across the stack. That is not free the way dead scalars are:
+// nodeStack is a dynamically-indexed array, which is what stops the compiler from proving the field
+// unused and eliminating it, so the array either lands in scratch memory or forces 30 dwords into
+// indexable registers. Either one is paid in the DDA's inner loop.
 struct CombinedNode64 {
     //BoxAABB boundingBox; // Every node has one.
     uint thisNodeZOrderInParent; // Root node won't have one since it has no parent.
     uint dataIndex; // Every node will have one except for the candidate node.
-    Tree64NodeData cachedData; // This line is the issue.
 };
 
 struct PushResults {
@@ -196,7 +205,32 @@ struct SceneIntersectData {
     // way it is spurious flips with the sign of that component, so the error shows up as a hard split
     // down the middle of the screen where the sign changes. The march knows the answer exactly.
     float exitT;
+    // Flat index of this voxel's entry in the materialIDs texture, and the palette base to add to
+    // what that entry holds. Together they are everything fetchVoxelMaterialFromHit needs, which is
+    // why they are here: they turn a material lookup into two texelFetches.
+    //
+    // Carried for the same reason voxelCoord and exitT are, and with more to gain than either. The
+    // alternative -- fetchVoxelMaterialAtCoord -- re-fetches the chunk header (5 texels) and then
+    // re-descends the tree from the root, one texel and one popcount per level, to reach the leaf the
+    // march was standing on when it returned. The march already had that leaf's occupancy mask and
+    // material offset in hand, and the voxel's index within it on the top of the stack; the whole
+    // descent exists to recover values that were live one function call earlier.
+    //
+    // That is paid on every hit of every ray in every renderer, and TWICE per transparent layer in
+    // the peel (once to decide whether the layer is opaque, once for the surface that stops it), so
+    // it is the redundant work that scales worst with what the peel and the bounce loop ask for.
+    //
+    // MATERIAL_INDEX_NEEDS_DESCENT means the march could not resolve it and the caller must fall back
+    // to fetchVoxelMaterialAtCoord. That is the LOD-cutoff hit: a coarsened interior node returned as
+    // wholly solid has no single material to name, and the fallback's behaviour (the material of the
+    // node's minimum-corner voxel) is what those hits have always shaded as.
+    uint materialListIndex;
+    uint paletteOffset;
 };
+
+// See SceneIntersectData::materialListIndex. Not a valid index -- the material list is nowhere near
+// this long, and a hit that carries it has no leaf to read.
+#define MATERIAL_INDEX_NEEDS_DESCENT 0xFFFFFFFFu
 
 static CombinedNode64 nodeStack[5];
 static uint nodeStackQuantity = 0;
@@ -837,16 +871,23 @@ uint calculateSiblingsBeforeThisZOrder2(uint branchingFactor, uint mask1, uint m
     return siblings;
 }
 
-// Hamming algorithm
-uint countBits(uint x) {
-    x = x - ((x >> 1) & 0x55555555u);
-    x = (x & 0x33333333u) + ((x >> 2) & 0x33333333u);
-    x = (x + (x >> 4)) & 0x0F0F0F0Fu;
-    x = x + (x >> 8);
-    x = x + (x >> 16);
-    return x & 0x3Fu;
-}
-
+// How many of the 64 children before `zOrder` are set, across the node's two mask words -- i.e. the
+// rank of this child among its present siblings, which is its offset from the node's first child.
+//
+// Serves two callers with the same arithmetic. For an INTERIOR node the children are nodes and the
+// rank offsets into the child array; for a LEAF node the children are voxels and the rank offsets
+// into the material list. fetchVoxelMaterialFromHit and fetchVoxelMaterialAtCoord both go through
+// here so the two cannot drift.
+//
+// `countbits` is bgfx's portable popcount intrinsic (one instruction on every target this builds
+// for). This used to call a hand-rolled Hamming popcount -- about a dozen ALU ops -- while the
+// material path a few hundred lines down already used the intrinsic, which had it exactly backwards:
+// the slow version was the one in the descent's inner loop.
+//
+// The zOrder == 0 early return is load-bearing, not a micro-optimisation: it is what keeps the shift
+// below out of `0xFFFFFFFFu << 32u`, which is undefined in GLSL and masks to a shift of 0 in HLSL --
+// yielding a full mask and a rank of popcount(mask1) where the answer is 0. Any caller open-coding
+// this test needs the same guard.
 uint calculateSiblingsBeforeThisZOrder(uint branchingFactor, uint mask1, uint mask2, uint zOrder) {
     uint siblings = 0u;
 
@@ -859,22 +900,39 @@ uint calculateSiblingsBeforeThisZOrder(uint branchingFactor, uint mask1, uint ma
 
         // Keep bits strictly before this zOrder
         uint beforeMask = 0xFFFFFFFFu << (32u - zOrder);
-        siblings = countBits(mask1 & beforeMask);
+        siblings = countbits(mask1 & beforeMask);
 
     } else {
 
         // All bits in mask1 are before
-        siblings = countBits(mask1);
+        siblings = countbits(mask1);
 
         uint z2 = zOrder - 32u;
 
         if (z2 > 0u) {
             uint beforeMask2 = 0xFFFFFFFFu << (32u - z2);
-            siblings += countBits(mask2 & beforeMask2);
+            siblings += countbits(mask2 & beforeMask2);
         }
     }
 
     return siblings;
+}
+
+// The material list index of one voxel of a LEAF node, given the leaf's own node data and the
+// voxel's z-order among the leaf's 64 children. Leaf-relative: the caller adds the chunk's
+// materialIDStartIndex, which is the one piece of this that lives in the header rather than the tree.
+//
+// data3's layout is the leaf flag in bit 0, the uniform flag in bit 1, and the material byte offset
+// in bits 2 and up (see voxel.h). A uniform leaf stores ONE material byte for all 64 of its voxels,
+// so the rank is not needed and the popcount is skipped -- which is also why a homogeneous body of
+// water costs no more per voxel to look up than a single painted voxel does.
+uint leafMaterialListOffset(Tree64NodeData leaf, uint voxelZOrderInLeaf) {
+    bool leafIsUniform = (leaf.data3 & 2u) != 0u;
+    uint materialOffset = leaf.data3 >> 2u;
+    if (leafIsUniform) {
+        return materialOffset;
+    }
+    return materialOffset + calculateSiblingsBeforeThisZOrder(4, leaf.data1, leaf.data2, voxelZOrderInLeaf);
 }
 
 // ------------------------------------------------------------
@@ -899,38 +957,10 @@ uint moveZOrder(uint zOrder, vec3 direction)
     return MOVE_LUT[zOrder * 7u + encodeDir(direction)];
 }
 
-// Implementations from Nvidia.
-int findMSB(int x) {
-    int i;
-    int mask;
-    int res = -1;
-    if (x < 0) {
-        x = ~x;
-    }
-    for(i = 0; i < 32; i++) {
-        mask = 0x80000000 >> i;
-        if (x & mask) {
-            res = 31 - i;
-            break;
-        }
-    }
-    return res;
-}
-
-int findLSB(int x)
-{
-  int i;
-  int mask;
-  int res = -1;
-  for(i = 0; i < 32; i++) {
-    mask = 1 << i;
-    if (x & mask) {
-      res = i;
-      break;
-    }
-  }
-  return res;
-}
+// findMSB / findLSB used to sit here -- 32-iteration scalar loops, "implementations from Nvidia",
+// called by nothing in this file or in any shader that includes it. Removed rather than left for a
+// compiler to strip, because a reader looking for the bit-scan the traversal uses would find these
+// first: the one that is actually live is open-coded inside getBoundariesCrossed below.
 
 // Will not work for high res position! Coordinate scale must ALWAYS be 1 node, not 1 voxel...
 uint getBoundariesCrossed(ivec3 previousNodeCoordinate, ivec3 proposedNodeCoordinate, uint meaningles) {
@@ -1118,6 +1148,13 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
                         returnData.rayT = rayT;
                         returnData.exitT = cellExitDistance(ray, invRayDir, traversalPosition, stepSize);
                         returnData.normal = hitNormal;
+                        // `data` IS the leaf node here -- the leaf flag is carried by the node whose
+                        // 64 children are voxels, and the candidate we just validated against its
+                        // masks is one of those voxels. So the material offset is available from the
+                        // values already in registers, with no fetch and no second descent. See
+                        // SceneIntersectData::materialListIndex.
+                        returnData.materialListIndex = leafMaterialListOffset(
+                            data, nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent);
                         return returnData;
                     }
                     break;
@@ -1149,6 +1186,13 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
                         returnData.rayT = rayT;
                         returnData.exitT = cellExitDistance(ray, invRayDir, traversalPosition, stepSize);
                         returnData.normal = hitNormal;
+                        // The one hit that cannot name a material. This candidate is an INTERIOR node
+                        // returned whole, so there is no leaf to read a material byte from and no one
+                        // voxel it would belong to -- the node spans 4, 16 or 64 of them. Hand the
+                        // caller the sentinel and let it descend on voxelCoord, which reproduces
+                        // exactly what a coarsened hit has always shaded as (the material of the
+                        // node's minimum-corner voxel, or empty if that corner is not filled).
+                        returnData.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
                         return returnData;
                     }
                     break;
@@ -1212,6 +1256,7 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
                 returnData.foundBox.size = -1;
                 returnData.voxelCoord = ivec3(0);
                 returnData.steps = stepCount;
+                returnData.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
                 return returnData;
             }
             // Get our coordinates in node space. Shift right is the same as traversalPosition / 4^stepSize
@@ -1261,6 +1306,12 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
                         returnData.rayT = rayT;
                         returnData.exitT = cellExitT;
                         returnData.normal = hitNormal;
+                        // Same as the descent's leaf hit: `data` is the leaf, and moveZOrder has just
+                        // put this voxel's index among its 64 children on the top of the stack. The
+                        // z-order stays within the node by construction (MOVE_LUT is 6 bits wide), so
+                        // it is the leaf-local index the material list is ranked by.
+                        returnData.materialListIndex = leafMaterialListOffset(
+                            data, nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent);
                         return returnData;
                     }
                     // At or before tMin: a surface the caller has already consumed. Keep stepping
@@ -1276,6 +1327,7 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
     returnData.foundBox.size = -1;
     returnData.voxelCoord = ivec3(0);
     returnData.steps = stepCount;
+    returnData.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
     return returnData;
 }
 
@@ -1334,9 +1386,24 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
     tree64Intersect.foundBox.size = -1;
     tree64Intersect.voxelCoord = ivec3(0);
     tree64Intersect.rayT = -1.0;
+    tree64Intersect.exitT = -1.0;
     tree64Intersect.normal = vec3(0.0);
+    tree64Intersect.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
+    tree64Intersect.paletteOffset = 0u;
     if(rootIntersect.distance >= 0){
         tree64Intersect = marchRayThroughTree64_DDA(transformedRay, rayQuery, localTMin, tree64BoundingBox, tree64StartIndex, tree64EndIndex, header.resolution, header.traversalLOD);
+    }
+
+    // The march works in tree space and returns a LEAF-RELATIVE material offset; the two values that
+    // turn it into an absolute lookup live in the header, which is fetched here and not down there.
+    // Same division of labour as the position and normal below, which the march also returns in local
+    // terms for this function to lift into world space.
+    //
+    // The sentinel is preserved rather than offset -- it is not an index and adding a base to it would
+    // turn "descend for this" into a wild read.
+    tree64Intersect.paletteOffset = header.paletteOffset;
+    if (tree64Intersect.materialListIndex != MATERIAL_INDEX_NEEDS_DESCENT) {
+        tree64Intersect.materialListIndex += header.materialIDStartIndex;
     }
     // size should be 1 for full res, 2 for half res, 4 for quarter res etc. So we multiply the size by what the voxel scale actually is.
     tree64Intersect.foundBox.size *= header.scale/tree64BoundingBox.size;
@@ -1393,29 +1460,17 @@ VoxelMaterial fetchVoxelMaterialAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
         Tree64NodeData node = tree64(nodeIdx);
         if ((node.data3 & 1u) != 0u) {
             // Leaf: bit 1 = uniform flag, bits 2.. = material byte offset. See voxel.h for the
-            // layout. A uniform leaf stores one material byte for all of its voxels, so the
-            // within-leaf rank (`above`) is not needed and the popcount is skipped entirely.
+            // layout, and leafMaterialListOffset for the decode -- shared with the march's own hit
+            // sites so the fast path and this fallback cannot disagree about which byte a voxel owns.
+            //
+            // The rank used to be open-coded here, and it was missing the `childPos == 0` guard that
+            // calculateSiblingsBeforeThisZOrder carries: `0xFFFFFFFFu << 32u` is undefined in GLSL and
+            // masks to a shift of zero in HLSL, which returns the whole mask's popcount where the
+            // answer is zero. That mis-shaded the first-numbered voxel of every non-uniform leaf.
             // NOTE: `uniform` is a reserved storage qualifier in HLSL/GLSL — do not name it that.
-            bool leafIsUniform = (node.data3 & 2u) != 0u;
-            uint materialOffset = node.data3 >> 2u;
-            uint above = 0u;
-            if (!leafIsUniform) {
-                uint childPos = (zOrder / stepSize) & 63u;
-                uint mask1 = node.data1;
-                uint mask2 = node.data2;
-                if (childPos < 32u) {
-                    uint beforeMask = 0xFFFFFFFFu << (32u - childPos);
-                    above = countbits(mask1 & beforeMask);
-                } else {
-                    above = countbits(mask1);
-                    uint z2 = childPos - 32u;
-                    if (z2 > 0u) {
-                        uint beforeMask2 = 0xFFFFFFFFu << (32u - z2);
-                        above += countbits(mask2 & beforeMask2);
-                    }
-                }
-            }
-            uint matID = materialID(h.materialIDStartIndex + materialOffset + above) + h.paletteOffset;
+            uint matID = materialID(h.materialIDStartIndex +
+                                    leafMaterialListOffset(node, (zOrder / stepSize) & 63u)) +
+                         h.paletteOffset;
             return decodeMaterial(materialPaletteTexel(matID));
         }
         uint childZOrder = (zOrder / stepSize) & 63u;
@@ -1432,6 +1487,36 @@ VoxelMaterial fetchVoxelMaterialAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
 // Albedo only, for the renderers that shade from a colour and nothing else.
 vec3 fetchVoxelColorAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
     return fetchVoxelMaterialAtCoord(hitVoxelCoord, headerIndex).albedo;
+}
+
+// The material of a hit the march just returned. **This is what a renderer holding a
+// SceneIntersectData should call.**
+//
+// Two texelFetches: the material byte, then the palette entry. Nothing else -- no header fetch, no
+// tree descent, no popcount. The march resolved the leaf-relative offset from values it already had in
+// registers at the moment it decided to stop, and castRayThroughTree64 added the chunk's base while it
+// still had the header open. See SceneIntersectData::materialListIndex.
+//
+// What this replaces, per call, is 5 header texels plus one texel and one popcount per tree level
+// (4 levels at resolution 256) to rediscover the leaf the march was standing in. The saving is largest
+// exactly where it hurt most: the peel pays it per transparent layer, so a body of water goes from a
+// full root descent per voxel crossed to two fetches per voxel crossed.
+//
+// The fallback is a genuine fallback, not a slow path taken by accident. Only a LOD-cutoff hit -- a
+// coarsened interior node returned whole -- carries the sentinel, and only because such a hit has no
+// single voxel whose material it could name. Every full-resolution hit takes the fast path, which is
+// every hit in the scene editor's viewport and in its path tracer.
+VoxelMaterial fetchVoxelMaterialFromHit(SceneIntersectData hit) {
+    if (hit.materialListIndex == MATERIAL_INDEX_NEEDS_DESCENT) {
+        return fetchVoxelMaterialAtCoord(hit.voxelCoord, hit.headerIndex);
+    }
+    uint matID = materialID(hit.materialListIndex) + hit.paletteOffset;
+    return decodeMaterial(materialPaletteTexel(matID));
+}
+
+// Albedo only, matching fetchVoxelColorAtCoord's relationship to the function above it.
+vec3 fetchVoxelColorFromHit(SceneIntersectData hit) {
+    return fetchVoxelMaterialFromHit(hit).albedo;
 }
 
 // The lossy path, kept only because a dozen shaders across the other examples still call it.
@@ -1521,8 +1606,11 @@ SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float ma
     miss.foundBox.size = -1;
     miss.voxelCoord = ivec3(0);
     miss.rayT = -1.0;
+    miss.exitT = -1.0;
     miss.normal = vec3(0.0);
     miss.steps = 0;
+    miss.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
+    miss.paletteOffset = 0u;
 
     Grid g = getGrid(gridIndex);
 
@@ -1599,7 +1687,10 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin)
     sceneIntersect.voxelCoord = ivec3(0);
     sceneIntersect.steps = 0;
     sceneIntersect.rayT = -1.0;
+    sceneIntersect.exitT = -1.0;
     sceneIntersect.normal = vec3(0.0);
+    sceneIntersect.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
+    sceneIntersect.paletteOffset = 0u;
 
     // Loose (transform-placed) chunks: brute-force over the explicit loose-handle list (not a
     // positional prefix), so add/remove needs no header reordering. Broadphase in each chunk's
@@ -1710,7 +1801,7 @@ struct PeeledHit {
     // advanced origin found it). A miss carries rayT < 0 exactly as raySceneIntersect's does.
     SceneIntersectData hit;
     // The material at `hit`, already fetched. Callers must use this rather than calling
-    // fetchVoxelMaterialAtCoord again -- the peel had to fetch it to decide whether to stop, so
+    // fetchVoxelMaterialFromHit again -- the peel had to fetch it to decide whether to stop, so
     // reusing it is what keeps this free on opaque geometry: the work moves rather than doubling.
     VoxelMaterial material;
     // Product of the transparent layers crossed on the way. Multiply the radiance arriving from
@@ -1847,7 +1938,7 @@ PeeledHit raySceneIntersectPeeled(Ray ray, RayQuery rayQuery, uint maxLayers, in
             return result;
         }
 
-        VoxelMaterial material = fetchVoxelMaterialAtCoord(hit.voxelCoord, hit.headerIndex);
+        VoxelMaterial material = fetchVoxelMaterialFromHit(hit);
 
         // Genuinely opaque: this is the surface the caller asked for.
         if (material.transparency <= 0.0) {
@@ -1951,7 +2042,7 @@ vec3 raySceneTransmittance(Ray ray, RayQuery rayQuery, float maxDistance, uint m
         if (hit.foundBox.size < 0.0 || hit.rayT < 0.0) return transmittance;  // reached the light
         if (hit.rayT >= maxDistance) return transmittance;                    // occluder is past it
 
-        VoxelMaterial material = fetchVoxelMaterialAtCoord(hit.voxelCoord, hit.headerIndex);
+        VoxelMaterial material = fetchVoxelMaterialFromHit(hit);
         if (material.transparency <= 0.0) return vec3(0.0);   // genuinely opaque: blocked
         // Out of budget. Return what survived so far rather than black. Black is the conservative
         // answer for a ray that might still be blocked, and it is badly wrong here: a shading point

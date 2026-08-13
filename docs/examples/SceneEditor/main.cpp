@@ -40,11 +40,14 @@
 // to the executable and restored on the next run. View ▸ Reset Layout puts it back.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -68,10 +71,15 @@
 
 #include <glm/gtc/quaternion.hpp>
 
+#include <bimg/bimg.h>
+#include <bx/error.h>
+#include <bx/file.h>
+
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder — building the default dock layout is not in the public API.
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_bgfx.h"
+#include "brush.h"
 #include "edit_history.h"
 
 // The interface is drawn into a bgfx view above every scene pass. bgfx submits views in ascending ID
@@ -83,6 +91,11 @@ static constexpr bgfx::ViewId EDITOR_IMGUI_VIEW_ID = 200;
 // previewer's scene folder is shared rather than copied — the .data files are tens of megabytes.
 static const char* DEFAULT_SCENE_DIRECTORY = "../ScenePreviewer/scenes/";
 static const char* DEFAULT_SCENE_PATH = "../ScenePreviewer/scenes/StonehillCastle/";
+
+// Where the Brush Lab looks for brushes. Relative to the working directory, like the scene paths
+// above, and beside the executable rather than inside a scene: a brush is a tool, and a tool that
+// lived in one scene's folder would have to be copied into the next one.
+static const char* DEFAULT_BRUSH_DIRECTORY = "brushes/";
 
 // Mouse wheel. GLFW scroll callbacks are plain C function pointers, so the accumulated offset lives
 // at file scope. This callback is installed *before* ImGui's, so ImGui chains into it and both see
@@ -97,8 +110,8 @@ static void scrollCallback(GLFWwindow* /*window*/, double /*xoffset*/, double yo
 // Editor state
 // =============================================================================
 
-// Which of the editor's two top-level tabs is on screen. They are not panels and they do not dock:
-// each one owns the whole window and has its own renderer behind it.
+// Which of the editor's three top-level tabs is on screen. They are not panels and they do not dock:
+// each one owns the whole window.
 //
 //   Edit    everything below -- the dockspace, the six panels, the tools. Its renderer shows stored
 //           albedo with readability aids on top and no light transport at all, which is what you
@@ -106,14 +119,25 @@ static void scrollCallback(GLFWwindow* /*window*/, double /*xoffset*/, double yo
 //   Render  one image and a strip of controls. Its renderer is a path tracer (renderRenderer/),
 //           which answers the one question the Viewport cannot -- what does this scene look like
 //           *lit*. Nothing in it can modify the scene.
+//   Brushes the Brush Lab: a library of programmable brushes, the script behind the selected one,
+//           the settings it declares, and a preview that runs it on the open scene and throws the
+//           result away. Its subject is a *file*, not the document, which is why it is a tab: a
+//           brush belongs to the user's toolbox and outlives every scene they open with it.
 //
-// Kept as a mode rather than a seventh dock panel deliberately. The two renderers each hold a full
-// set of screen-sized render targets, so having both live at the panel's resolution at once is real
-// VRAM for an image the user is not looking at; and Render mode's whole value is an uninterrupted
-// view of the image, which a panel sharing the window with five others cannot give.
+// Kept as modes rather than dock panels deliberately. Edit and Render each hold a full set of
+// screen-sized render targets, so having both live at the panel's resolution at once is real VRAM for
+// an image the user is not looking at; and Render mode's whole value is an uninterrupted view of the
+// image, which a panel sharing the window with five others cannot give.
+//
+// The Lab is a third tab for a different reason, and it costs nothing on the renderer: it borrows
+// Edit's, so switching to it allocates no targets and its preview is the same albedo view the
+// Viewport shows. What it needs its own tab for is the *interface* -- designing a brush is a
+// four-panel job (library, source, settings, output) that has nothing to say while a scene is being
+// arranged, and six existing panels have nowhere to put it.
 enum class EditorMode {
     Edit,
-    Render
+    Render,
+    Brushes
 };
 
 // How a scene is framed on open, and the movement scale that goes with it. Both are derived from the
@@ -211,10 +235,14 @@ enum class EditorTool {
     Sculpt,   // Ctrl+E — add and remove voxels with a brush.
     Paint,    // Ctrl+R — recolour voxels with the palette's current entry.
     Place,    // Ctrl+T — drop primitives into the open asset and boolean them together.
-    Region    // Ctrl+Y — select voxels already in the scene, copy or move them.
+    Region,   // Ctrl+Y — select voxels already in the scene, copy or move them.
+    // Ctrl+U — run whichever programmable brush is selected. The one tool whose *verb* is not fixed
+    // by the editor: what a drag does is decided by a Lua file in the brushes folder, so this entry is
+    // "the brushes are a tool now" rather than a seventh built-in behaviour.
+    Custom
 };
 
-static constexpr int EDITOR_TOOL_COUNT = 6;
+static constexpr int EDITOR_TOOL_COUNT = 7;
 
 static const char* editorToolLabel(EditorTool tool) {
     switch (tool) {
@@ -224,6 +252,7 @@ static const char* editorToolLabel(EditorTool tool) {
         case EditorTool::Paint:  return "Paint";
         case EditorTool::Place: return "Place";
         case EditorTool::Region: return "Region";
+        case EditorTool::Custom: return "Custom";
     }
     return "?";
 }
@@ -239,6 +268,7 @@ static const char* editorToolShortcut(EditorTool tool) {
         case EditorTool::Paint:  return "Ctrl+R";
         case EditorTool::Place: return "Ctrl+T";
         case EditorTool::Region: return "Ctrl+Y";
+        case EditorTool::Custom: return "Ctrl+U";
     }
     return "";
 }
@@ -253,6 +283,7 @@ static const char* editorToolHint(EditorTool tool) {
         case EditorTool::Paint:  return "Drag to recolour voxels. Alt+click samples an entry.";
         case EditorTool::Place: return "Click to drop a primitive into the open asset; click one to select it.";
         case EditorTool::Region: return "Click to pick the selection's two corners, or a face/volume.";
+        case EditorTool::Custom: return "Drag to run the selected brush. This one edits the document.";
     }
     return "";
 }
@@ -272,7 +303,13 @@ enum class PickPurpose {
     // Render mode's lens: put the focal plane at the distance of whatever the click lands on. The
     // only purpose that belongs to the Render tab, and the only one that moves no geometry, changes
     // no selection and leaves the camera exactly where it was -- it sets one float.
-    FocusDistance
+    FocusDistance,
+    // The Brush Lab's preview: run the selected brush over a dab centred on the voxel the click
+    // landed on, journalling everything it writes. Re-armed every frame of a drag like SculptVoxel.
+    BrushPreview,
+    // The Custom tool: the same dab, kept. Same evaluation, same journal -- the only difference is
+    // what happens when the button comes up, which is a history entry instead of a revert.
+    CustomBrush
 };
 
 // =============================================================================
@@ -380,6 +417,19 @@ static constexpr int SELECTION_SCOPE_COUNT = 2;
 // the ceiling here is tighter than Paint's: radius 24 is a 49^3 box, ~118k descents, which is about
 // as much as belongs inside a frame that also has to rebuild the chunk and re-upload it.
 static constexpr float SCULPT_MAX_RADIUS = 24.0f;
+
+// The programmable brushes' ceilings, here beside the sculpt brush's for the same reason they exist: a
+// coordinate is cheap to generate and a dab is a cube, so the cost of a careless radius is cubic.
+// Shared by the Brush Lab's preview and the Custom tool -- one dab is one dab whichever ends up kept.
+static constexpr float BRUSH_PREVIEW_MAX_RADIUS = 24.0f;
+// Cells one dab may consider. A radius-24 sphere is ~58k, which at the slowest brush measured here
+// (~400 ns a voxel, Worley plus fBm plus a string search) is about 23 ms -- one frame's worth. Past
+// this the dab is truncated and says so.
+static constexpr size_t BRUSH_MAX_DAB_CELLS = 120000;
+// Sites one scatter dab may consider. Far lower than the cell ceiling because a site costs a script
+// call *and* a fit test over the placement's whole box, where a cell costs one call -- and because a
+// dab that plants a thousand objects is not a dab, it is a landscape.
+static constexpr size_t BRUSH_MAX_SCATTER_SITES = 2000;
 static constexpr float SCULPT_MAX_CUBE_SIDE = 48.0f;
 
 // How far apart two consecutive dabs of a stroke may be, in voxels, before the gap between them is
@@ -1367,6 +1417,46 @@ struct EditorState {
     // free to change on a converged render. Zero is a perfect lens.
     float renderChromaticAberration = 0.0f;
 
+    // --- The grade ---
+    //
+    // Colour controls that live in display.frag, downstream of everything the accumulation has
+    // averaged. Every one of them is free in the sense that matters: dragging any of it does not
+    // invalidate a single traced sample, so a render that has been converging for a minute can be
+    // graded without costing that minute. That is the whole reason they are here and not in the trace.
+    //
+    // All default to the identity, so a fresh scene renders exactly as it did before these existed.
+    float renderSaturation = 1.0f;      // 0 is greyscale, 1 is untouched, above 1 pushes.
+    float renderContrast = 1.0f;        // About a mid-grey pivot.
+    float renderLift = 0.0f;            // Raises the black point -- the faded-film end of a look.
+    float renderVignette = 0.0f;        // Darkening towards the corners.
+    float renderTemperature = 0.0f;     // -1 cool, +1 warm. A white balance, applied before the curve.
+    float renderTint[3] = { 1.0f, 1.0f, 1.0f };   // An arbitrary colour cast, likewise.
+
+    // --- Saving the render ---
+    //
+    // A readback is not a thing that happens when you ask for it. bgfx::readTexture queues the copy
+    // and hands back the frame number at which the pixels will exist on this side of the bus, so the
+    // request and the write are two events with frames in between -- and holding the buffer across
+    // them is what these fields are for. Spinning on bgfx::frame() until it caught up would be
+    // shorter and would also drive the frame loop from inside the interface, which is the one thing
+    // this editor's render loop is careful never to let anything do.
+    bool renderSaveRequested = false;        // Set by the button, consumed by the render loop.
+    // The staging texture the image is blitted into before it is read.
+    //
+    // A separate texture rather than reading the render target directly, because **a texture cannot be
+    // both a render target and readable**: bgfx creates one with BGFX_TEXTURE_RT | BGFX_TEXTURE_READ_BACK
+    // as an invalid handle, and the framebuffer that then attaches it dereferences the hole -- which
+    // is a segfault during renderer construction, not an error anyone gets told about. So the render
+    // target stays exactly what it was, and the copy is made into something built to be copied into.
+    bgfx::TextureHandle renderSaveTexture = BGFX_INVALID_HANDLE;
+    int renderSaveTextureWidth = 0;
+    int renderSaveTextureHeight = 0;
+    uint32_t renderSaveReadyFrame = 0;       // 0 = nothing in flight.
+    std::vector<uint8_t> renderSavePixels;   // Held until the frame lands; RGBA8, tightly packed.
+    int renderSaveWidth = 0;
+    int renderSaveHeight = 0;
+    std::string renderSavePath;
+
     // --- Render mode: atmosphere ---
     //
     // A participating medium along the camera ray, single-scattered from the sun. This is what
@@ -1901,6 +1991,151 @@ struct EditorState {
     projv::core::ivec3 regionCornerA = projv::core::ivec3(0);
     projv::core::ivec3 regionHoverCoord = projv::core::ivec3(0);
     bool regionHoverValid = false;
+
+    // --- Brush Lab ---
+    //
+    // The third tab: where brushes are written, and the only place they can be run so far. Everything
+    // here belongs to *designing* a brush rather than to using one, which is why it is a tab and not
+    // a panel -- the Edit tab's job is a document, and a brush is not part of any document. It is a
+    // file in a folder, shared between every scene the user opens.
+    projv::editor::BrushLibrary brushLibrary;
+    // Selected by id rather than by pointer or index. A reload rebuilds nothing here, but New,
+    // Duplicate and a rescan all reorder the list, and an index would quietly select its neighbour.
+    std::string selectedBrushID;
+
+    // The source editor. A fixed buffer rather than a std::string because ImGui's multiline input
+    // wants a char* and a capacity, and 64 KB is about sixty times the longest brush here.
+    std::vector<char> brushSourceBuffer;
+    std::string brushSourceLoadedFor;   // Which brush id the buffer holds, so switching reloads it.
+    bool brushSourceEdited = false;     // The buffer differs from the file.
+
+    // Layout. Two splitters, remembered for the session; the Lab does not use the dockspace (see
+    // drawBrushLabInterface) so there is no imgui.ini entry to restore them from.
+    float brushLibraryWidth = 250.0f;
+    float brushInspectorWidth = 400.0f;
+    int brushInspectorTab = 0;
+    // Which of the Custom tool's three panels is up. Separate from brushInspectorTab: the Lab and the
+    // Tool panel are looked at for different reasons (writing a brush against using one), and making
+    // them share would mean opening the Lab silently changed what the Tool panel shows.
+    int customToolTab = 0;
+    // How much of the Lab the palette strip along the bottom takes.
+    float brushPaletteHeight = 300.0f;
+
+    // The "add a parameter here rather than in the script" form.
+    char brushNewParamName[64] = "";
+    char brushNewParamLabel[96] = "";
+    int brushNewParamType = 0;
+    char brushNewParamOptions[256] = "";
+    double brushNewParamMin = 0.0;
+    double brushNewParamMax = 1.0;
+
+    // The New Brush / Duplicate dialogs.
+    bool brushCreateDialogOpen = false;
+    bool brushCreateIsDuplicate = false;
+    char brushCreateID[64] = "";
+    char brushCreateName[96] = "";
+    int brushCreateKind = 0;
+    std::string brushCreateError;
+
+    // When a parameter last moved, so the sidecar is written once after the drag rather than once per
+    // frame of it. Same reasoning as the history's coalesce window.
+    double brushValuesTouchedAt = 0.0;
+
+    std::string brushStatus;   // The Lab's own status line; separate from the editor's.
+
+    // --- Preview ---
+    //
+    // Preview is a real edit to the real scene, journalled and rolled back. It is not a separate
+    // renderer, a copy of the component, or a shader trick, and each of those was considered:
+    //
+    //   * a copy would have to be built and uploaded per dab, and would not answer the question the
+    //     preview is for -- what the brush does to *this* model, against its actual neighbours;
+    //   * a shader preview could not show a geometry brush at all, since the geometry is the output.
+    //
+    // What makes it safe is the journal below plus one rule: preview writes never reach the undo
+    // history. So the document cannot be changed by previewing -- the worst case is a revert that has
+    // to be triggered by hand -- and switching to the Edit tab discards the lot.
+    bool brushPreviewActive = false;
+    bool brushPreviewStrokeActive = false;
+    projv::ComponentHandle brushPreviewComponent = projv::INVALID_COMPONENT_HANDLE;
+    // What every cell a brush stroke has touched held before it was touched. Exactly the shape of
+    // sculptStrokeOriginal, for exactly its reason -- remembering the original rather than the changes
+    // is what lets one stroke both add and remove, over and over, and still be reversed in one step.
+    //
+    // **Shared by the Lab's preview and the Edit tab's Custom tool**, and that sharing is the whole
+    // design of the second one: the dab functions, the palette resolution, the fit test and this
+    // journal are identical, and the only thing that differs is what happens when the button comes up.
+    // The Lab reverts it; the Custom tool turns it into a history entry. Two endings, one machine --
+    // which is why previewing a brush is a truthful preview of using it.
+    std::unordered_map<uint64_t, StrokeVoxel> brushStrokeJournal;
+    size_t brushPreviewWrites = 0;       // Cells actually changed, for the readout.
+    size_t brushPreviewCalls = 0;        // Voxels the script was asked about.
+    double brushPreviewMilliseconds = 0.0;
+    bool brushPreviewTruncated = false;  // A dab hit BRUSH_MAX_DAB_CELLS.
+    float brushPreviewRadius = 8.0f;
+    // Palette slots the brush's declared materials were interned into, for the component the preview
+    // is working on. Rebuilt when either changes.
+    std::vector<uint32_t> brushPreviewColors;
+    projv::ComponentHandle brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
+    std::string brushPreviewPaletteBrush;
+
+    // Palette entries the preview had to create because nothing of that name existed yet, oldest
+    // first, and the component they were created in.
+    //
+    // **The revert takes these back too.** A preview that puts every voxel back but leaves six new
+    // entries in the palette has still edited the document -- silently, with no undo entry, and in the
+    // one structure whose numbering is data. Journalling the voxels and not the palette was the whole
+    // gap: the marks vanished and the evidence of them stayed.
+    std::vector<std::string> brushPreviewCreatedEntries;
+    projv::ComponentHandle brushPreviewCreatedIn = projv::INVALID_COMPONENT_HANDLE;
+
+    // --- The Custom tool ---
+    //
+    // A stroke of a programmable brush that is *kept*. It runs the same dabs the Lab's preview does
+    // into the same journal; what makes it an edit rather than a rehearsal is that it ends in a
+    // history entry instead of a revert.
+    bool customStrokeActive = false;
+    projv::ComponentHandle customStrokeComponent = projv::INVALID_COMPONENT_HANDLE;
+    // The brush the stroke began with, by id. Frozen for the stroke's length: the Tool panel cannot be
+    // reached while the button is held, but a hot reload can land mid-drag, and a stroke that changed
+    // brush half way through would be one history entry describing two different things.
+    std::string customStrokeBrushID;
+    float customBrushRadius = 6.0f;
+
+    // The surface voxels the last scatter dab chose as sites -- one per lattice cell it visited,
+    // whether or not anything grew there. Kept because it is the one thing about a scatter dab that is
+    // otherwise invisible: what grew is a shape, and the sites are the decision that produced it.
+    std::vector<projv::core::ivec3> brushPreviewScatterSites;
+    // ...and the subset of those where something actually grew. The two differ by every site the
+    // brush declined and every placement refused for want of room, which on ordinary ground is most
+    // of them.
+    std::vector<projv::core::ivec3> brushPreviewScatterPlanted;
+
+    // --- Assigning a palette entry to a brush role ---
+    //
+    // The Lab's one modal gesture: click a material role, then click a palette entry. Parked here as
+    // an intent rather than resolved where the click happens, the way PickPurpose is and for the same
+    // reason -- the palette body is drawn before the code that knows what a brush is, and it has no
+    // business knowing either. It sets `brushBindingPicked` and the Lab acts on it a few lines later.
+    std::string brushBindingRole;        // declaredName of the role waiting for an entry; empty = idle.
+    std::string brushBindingRoleLabel;   // What to call it in the banner.
+    // The entry the user clicked, consumed by the Lab. The flag is separate from the string because an
+    // entry may legitimately have no name -- and that is exactly the case the Lab has to refuse and
+    // explain, since a binding *is* a name.
+    std::string brushBindingPicked;
+    bool brushBindingPickedValid = false;
+
+    // Frames until the demo dab fires, or 0 for never. Set by EDITOR_BRUSH_DEMO, and the same
+    // concession the mode, tool and preview switches above are: a preview is reached by dragging on
+    // the image, and a screenshot or a smoke test has no way to drag. It aims at the centre of the
+    // viewport, which is exactly where a click in the middle of the image would land. The countdown is
+    // because the ray needs the panel's size, and the panel is not measured until it has been drawn.
+    int brushDemoFramesRemaining = 0;
+    // Frames until an automatic Save Image, or 0 for never. Set by EDITOR_SAVE_RENDER, and the same
+    // concession the mode and brush-demo switches are: the button is reached by clicking, and a smoke
+    // test has no way to click. It is also the hook a batch render would want -- open a scene, let it
+    // converge, write the file, exit -- which is why the countdown is in frames rather than in a flag.
+    int renderSaveCountdown = 0;
 };
 
 // =============================================================================
@@ -2290,6 +2525,27 @@ static void resetEditorForDocumentSwap(EditorState& editor) {
     editor.history.clear();
     editor.renamingComponent = projv::INVALID_COMPONENT_HANDLE;
     editor.renameBuffer[0] = '\0';
+
+    // The brush *library* survives a document swap -- brushes are files, not part of any scene, which
+    // is the whole reason the Lab is a tab. What does not survive is everything the preview holds: a
+    // component handle, coordinates in that component's lattice, and palette slots interned into its
+    // palette. All three name the outgoing scene.
+    //
+    // Dropped rather than reverted, and deliberately: the geometry those coordinates described has just
+    // been thrown away with the scene, so there is nothing left to put back and a revert would write
+    // the old scene's cells into whatever the incoming one puts at those coordinates.
+    editor.brushPreviewActive = false;
+    editor.brushPreviewStrokeActive = false;
+    editor.brushStrokeJournal.clear();
+    editor.brushPreviewWrites = 0;
+    editor.brushPreviewComponent = projv::INVALID_COMPONENT_HANDLE;
+    editor.brushPreviewColors.clear();
+    editor.brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
+    editor.brushPreviewPaletteBrush.clear();
+    // Dropped rather than removed, like the journal above and for the same reason: the palette those
+    // entries were appended to went with the scene.
+    editor.brushPreviewCreatedEntries.clear();
+    editor.brushPreviewCreatedIn = projv::INVALID_COMPONENT_HANDLE;
 }
 
 static bool loadScene(projv::Scene& scene, projv::GPUData& gpuData, EditorState& editor,
@@ -2384,78 +2640,53 @@ struct EditorRenderers {
     std::shared_ptr<projv::ConstructedRenderer> pathTrace;
 };
 
-// Whichever renderer the tab on screen is drawn by.
+// Whichever renderer the tab on screen is drawn by. The Brush Lab shares Edit's, which is why a third
+// tab costs no VRAM and why its preview looks exactly like the Viewport -- stored colour, no lighting,
+// which is the only honest view of what a brush actually wrote.
 static const std::shared_ptr<projv::ConstructedRenderer>& activeRendererFor(const EditorRenderers& renderers,
                                                                            const EditorState& editor) {
     return editor.mode == EditorMode::Render ? renderers.pathTrace : renderers.viewport;
 }
 
-// Resizes the scene renderer's offscreen textures (and the framebuffers pointing at them) to the
-// Viewport panel's size, so the scene is rendered at exactly the resolution it is displayed at.
-//
-// The engine's resizeFramebuffersAndTheirTexturesIfNeeded cannot be used here: it also calls
-// bgfx::reset with the size it is given, which is right when the render target *is* the window, and
-// wrong here — it would shrink the back buffer to the panel and the interface with it. This is that
-// function's texture half, minus the reset, plus destruction of the framebuffer handles it replaces
-// (the editor resizes on every frame of a splitter drag, so leaked handles would exhaust bgfx's
-// framebuffer pool within seconds).
-static void resizeViewportTargets(const std::shared_ptr<projv::ConstructedRenderer>& renderer,
-                                  int width, int height) {
-    projv::ConstructedTextures& textures = renderer->resources.textures;
-    projv::ConstructedFramebuffers& framebuffers = renderer->resources.framebuffers;
-
-    // bgfx defers the actual release until the frame that last referenced a handle has completed, so
-    // destroying up front is safe even though this runs mid-frame-loop.
-    for (const auto& framebuffer : framebuffers.frameBufferTextureMapping) {
-        uint frameBufferID = framebuffer.first;
-        if (bgfx::isValid(framebuffers.frameBufferHandles.at(frameBufferID))) {
-            bgfx::destroy(framebuffers.frameBufferHandles.at(frameBufferID));
-        }
-        if (framebuffers.pingPongFBOs.at(frameBufferID) &&
-            bgfx::isValid(framebuffers.frameBufferHandlesAlternate.at(frameBufferID))) {
-            bgfx::destroy(framebuffers.frameBufferHandlesAlternate.at(frameBufferID));
-        }
-    }
-
-    for (const auto& resizableTexture : textures.texturesResizedWithWindow) {
-        uint textureID = resizableTexture.first;
-        bgfx::TextureFormat::Enum format = textures.textureFormats.at(textureID);
-
-        if (bgfx::isValid(textures.textureHandles.at(textureID))) {
-            bgfx::destroy(textures.textureHandles.at(textureID));
-        }
-        textures.textureHandles.at(textureID) =
-            bgfx::createTexture2D(uint16_t(width), uint16_t(height), false, 1, format, BGFX_TEXTURE_RT);
-        textures.textureResolutions[textureID] = projv::core::ivec2(width, height);
-
-        // The accumulation target is a ping-pong pair: it is read and written by the same pass, so it
-        // exists twice and both copies have to follow the panel.
-        if (!textures.pingPongFlags.at(textureID)) continue;
-        if (bgfx::isValid(textures.textureHandlesAlternate.at(textureID))) {
-            bgfx::destroy(textures.textureHandlesAlternate.at(textureID));
-        }
-        textures.textureHandlesAlternate.at(textureID) =
-            bgfx::createTexture2D(uint16_t(width), uint16_t(height), false, 1, format, BGFX_TEXTURE_RT);
-    }
-
-    for (const auto& framebuffer : framebuffers.frameBufferTextureMapping) {
-        uint frameBufferID = framebuffer.first;
-        const std::vector<uint>& textureIDs = framebuffer.second;
-
-        // false: the framebuffer does not take ownership of its attachments. The textures are
-        // destroyed by the loop above, so ownership here would mean destroying them twice.
-        std::vector<bgfx::Attachment> attachments =
-            projv::graphics::getTextureAttachments(textures.textureHandles, textureIDs);
-        framebuffers.frameBufferHandles.at(frameBufferID) =
-            bgfx::createFrameBuffer(uint16_t(textureIDs.size()), attachments.data(), false);
-
-        if (!framebuffers.pingPongFBOs.at(frameBufferID)) continue;
-        std::vector<bgfx::Attachment> alternateAttachments =
-            projv::graphics::getTextureAttachments(textures.textureHandlesAlternate, textureIDs);
-        framebuffers.frameBufferHandlesAlternate.at(frameBufferID) =
-            bgfx::createFrameBuffer(uint16_t(textureIDs.size()), alternateAttachments.data(), false);
-    }
+// Render mode's light rig, as the two uniforms that describe it. Shared because the viewport's path
+// traced preview lights with exactly this: gi.frag takes the same sun direction, disk radius, bounce
+// count, intensities and firefly clamp that renderRenderer's path tracer does, which is what makes
+// the preview predict the render rather than resemble it. One definition so the two cannot drift.
+static void editorLightRig(const EditorState& editor,
+                           projv::core::vec4& sunDirection,
+                           projv::core::vec4& renderParams) {
+    // The sun, from the two angles the interface offers. Elevation from the horizon and azimuth
+    // about Y, which is what a person means by "where is the sun" -- converted here rather than
+    // stored as a vector so the two sliders cannot fight each other near the poles.
+    const float DEGREES_TO_RADIANS = 3.14159265f / 180.0f;
+    float sunElevation = editor.renderSunElevation * DEGREES_TO_RADIANS;
+    float sunAzimuth = editor.renderSunAzimuth * DEGREES_TO_RADIANS;
+    sunDirection = {
+        std::cos(sunElevation) * std::cos(sunAzimuth),
+        std::sin(sunElevation),
+        std::cos(sunElevation) * std::sin(sunAzimuth),
+        // w is the disk's angular radius, in radians. Floored well above zero: a zero-radius sun has
+        // zero solid angle, and next-event estimation divides by it.
+        std::max(editor.renderSunSize, 0.01f) * DEGREES_TO_RADIANS
+    };
+    renderParams = {
+        float(editor.renderBounces),
+        editor.renderSunIntensity,
+        editor.renderSkyIntensity,
+        editor.renderFireflyClamp
+    };
 }
+
+// The scene renderer's offscreen targets follow the Viewport panel rather than the OS window, which
+// is the whole reason the editor drives the renderer itself: the back buffer is reset to the window
+// just above, and the render targets are sized to the panel here. Two sizes, set independently,
+// through the same two engine calls the windowed drivers use.
+//
+// A hand-written copy of the engine's resizer used to live here, because the engine's version also
+// called bgfx::reset with the size it was given -- correct when the render target *is* the window,
+// and wrong here, since it shrank the back buffer to the panel and the interface with it. The engine
+// no longer touches the back buffer, so that fork (and the three bugs it had been quietly fixing:
+// dropped texture flags, leaked framebuffer handles, a stale resolution map) is gone.
 
 // The texture the display pass writes, which is what the tab on screen shows. Texture 3 in both
 // renderers' resources.json -- Render mode's numbering follows the editor renderer's for exactly
@@ -5418,6 +5649,82 @@ static bool removeMaterialWithUndo(projv::Scene& scene, EditorState& editor, uin
     return true;
 }
 
+// Removes every entry nothing references, in one action and one history entry.
+//
+// **Highest slot first, and that is not a detail.** removeMaterial renumbers every slot above the one
+// it takes out and rewrites the material byte of every voxel that referenced them, so a list of
+// indices collected up front goes stale the moment the first one is removed. Walking down means every
+// index still names what it named when it was collected -- the slots below a removal do not move.
+//
+// One snapshot for the whole batch rather than one per entry: the undo of a palette removal is a
+// snapshot of the palette *and* the material bytes (see capturePaletteSnapshot), and taking twenty of
+// those to undo twenty removals would cost twenty copies of the component's material arrays to
+// reproduce a state each of them already contains.
+//
+// A component is never emptied. removeMaterial refuses to take the last entry, and an all-unused
+// palette is exactly what a component with no voxels has -- so the rule here is "leave one" rather
+// than "leave none", and the one left is slot 0.
+static size_t removeUnusedMaterials(projv::Scene& scene, EditorState& editor) {
+    projv::ComponentHandle component = editor.paletteComponent;
+    if (component >= scene.components.size()) return 0;
+
+    std::vector<uint32_t> usage = projv::utils::countMaterialUsage(scene, component);
+    const projv::ComponentRecord& record = scene.components[component];
+
+    std::vector<uint8_t> doomed;
+    for (size_t slot = 0; slot < record.materialPalette.size(); slot++) {
+        if (slot < usage.size() && usage[slot] == 0) doomed.push_back(uint8_t(slot));
+    }
+    // Keep one. If everything is unused the palette is a set of definitions with no voxels behind
+    // them, and a component with an empty palette is a component nothing can be painted into.
+    if (doomed.size() >= record.materialPalette.size() && !doomed.empty()) {
+        doomed.erase(doomed.begin());
+    }
+    if (doomed.empty()) return 0;
+
+    auto snapshot = std::make_shared<projv::editor::PaletteSnapshot>(
+        projv::editor::capturePaletteSnapshot(scene, component, true));
+
+    size_t removed = 0;
+    for (size_t i = doomed.size(); i-- > 0;) {
+        // The replacement is only consulted when something still references the slot, and nothing
+        // does -- so any valid different index will do. 0 unless we are removing 0 itself.
+        uint8_t replacement = doomed[i] == 0 ? 1 : 0;
+        if (projv::utils::removeMaterial(scene, component, doomed[i], replacement)) removed++;
+    }
+    if (removed == 0) return 0;
+
+    editor.selectedMaterialSlot = -1;
+    invalidatePaletteCaches(&editor);
+    editor.gpuFlushNeeded = true;
+
+    projv::Scene* scenePointer = &scene;
+    EditorState* editorPointer = &editor;
+    auto doomedList = std::make_shared<std::vector<uint8_t>>(std::move(doomed));
+
+    projv::editor::EditRecord record2;
+    record2.label = "Remove " + std::to_string(removed) + " unused entr" +
+                    (removed == 1 ? "y" : "ies");
+    record2.memoryCost = snapshot->memoryCost();
+    record2.undo = [=] {
+        projv::editor::restorePaletteSnapshot(*scenePointer, *snapshot);
+        editorPointer->gpuFlushNeeded = true;
+        editorPointer->selectedMaterialSlot = -1;
+        invalidatePaletteCaches(editorPointer);
+    };
+    record2.redo = [=] {
+        for (size_t i = doomedList->size(); i-- > 0;) {
+            uint8_t replacement = (*doomedList)[i] == 0 ? 1 : 0;
+            projv::utils::removeMaterial(*scenePointer, component, (*doomedList)[i], replacement);
+        }
+        editorPointer->gpuFlushNeeded = true;
+        editorPointer->selectedMaterialSlot = -1;
+        invalidatePaletteCaches(editorPointer);
+    };
+    editor.history.record(std::move(record2), ImGui::GetTime());
+    return removed;
+}
+
 // The removed-entry dialog. Reachable only when the slot is actually used: with nothing referencing
 // it, removal needs no decision from anyone.
 static void drawMaterialRemovalDialog(projv::Scene& scene, EditorState& editor) {
@@ -5481,12 +5788,19 @@ static void drawMaterialRemovalDialog(projv::Scene& scene, EditorState& editor) 
     ImGui::EndPopup();
 }
 
-static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, EditorState& editor) {
-    ImGui::Begin("Palette");
-
+// The palette, drawn into whatever window or child is current.
+//
+// Split from the panel below so the **Brush Lab can show the same palette rather than a copy of it**.
+// That is not a tidiness: the palette is where materials are created, recoloured, renamed and removed,
+// and a brush binds its roles to entries in it. Two implementations would mean two places for those
+// verbs to drift apart, and the whole point of the arrangement is that there is one.
+//
+// Everything it needs is in EditorState (paletteComponent, selectedMaterialSlot, the usage caches), so
+// both callers see the same selection and the same component -- clicking a swatch in the Lab selects
+// the same entry the Edit tab's panel is showing.
+static void drawPaletteBody(projv::Scene& scene, projv::GPUData& gpuData, EditorState& editor) {
     if (!editor.sceneLoaded) {
         ImGui::TextDisabled("No scene loaded.");
-        ImGui::End();
         return;
     }
 
@@ -5511,7 +5825,6 @@ static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, Edito
         }
         if (fallback == projv::INVALID_COMPONENT_HANDLE) {
             ImGui::TextDisabled("No component in this scene has a material palette.");
-            ImGui::End();
             return;
         }
         if (fallback != editor.paletteComponent) selectPaletteComponent(editor, fallback);
@@ -5544,6 +5857,22 @@ static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, Edito
     if (!editor.materialUsageValid) {
         editor.materialUsage = projv::utils::countMaterialUsage(scene, editor.paletteComponent);
         editor.materialUsageValid = true;
+    }
+
+    // The Brush Lab is waiting for an entry. This is the only thing the palette knows about brushes,
+    // and all it does is change what a click on a swatch means for one click.
+    bool assigning = !editor.brushBindingRole.empty();
+    if (assigning) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            editor.brushBindingRole.clear();
+            editor.brushBindingRoleLabel.clear();
+            assigning = false;
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+            ImGui::TextWrapped("Click an entry to give it to \"%s\"   (Esc to cancel)",
+                               editor.brushBindingRoleLabel.c_str());
+            ImGui::PopStyleColor();
+        }
     }
 
     // 255, not 256: material IDs are uint8_t and 255 is the "no material" sentinel.
@@ -5601,10 +5930,24 @@ static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, Edito
             editor.selectedMaterialSlot = int(slot);
             editor.materialChunkUsageValid = false;
             std::snprintf(editor.materialNameBuffer, sizeof(editor.materialNameBuffer), "%s", material.name.c_str());
+            // Selecting is what a click always does. Assigning is what it *also* does while a brush
+            // role is waiting -- so the entry the brush gets is visibly the entry that just became
+            // selected, and the detail pane below is already showing it if it needs editing.
+            if (assigning) {
+                editor.brushBindingPicked = material.name;
+                editor.brushBindingPickedValid = true;
+            }
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%zu  %s\n%u voxel(s)", slot,
-                              material.name.empty() ? "(unnamed)" : material.name.c_str(), usage);
+            if (assigning) {
+                ImGui::SetTooltip("%zu  %s\nGive this entry to \"%s\"", slot,
+                                  material.name.empty() ? "(unnamed -- name it first)"
+                                                        : material.name.c_str(),
+                                  editor.brushBindingRoleLabel.c_str());
+            } else {
+                ImGui::SetTooltip("%zu  %s\n%u voxel(s)", slot,
+                                  material.name.empty() ? "(unnamed)" : material.name.c_str(), usage);
+            }
         }
         // The selection ring is drawn rather than styled: ColorButton has no selected state, and a
         // ring reads at a glance across a grid of sixty swatches.
@@ -5685,6 +6028,40 @@ static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, Edito
     }
     ImGui::EndDisabled();
 
+    // Sweep out everything nothing references. A palette accumulates these on its own -- a brush
+    // declares a ramp and half of it never gets painted, a region is recoloured away from an entry, an
+    // import brings a scheme wider than the model uses -- and removing them one at a time means
+    // finding them one at a time, in a grid that says how many voxels use each entry but not which
+    // ones are the zeroes.
+    size_t unused = 0;
+    for (size_t slot = 0; slot < component.materialPalette.size(); slot++) {
+        if (slot < editor.materialUsage.size() && editor.materialUsage[slot] == 0) unused++;
+    }
+    // Never offered when it would empty the palette: one entry always stays.
+    size_t removable = unused >= component.materialPalette.size() && unused > 0 ? unused - 1 : unused;
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(removable == 0);
+    if (ImGui::Button("Remove unused")) {
+        size_t removed = removeUnusedMaterials(scene, editor);
+        editor.statusMessage = removed > 0
+            ? "Removed " + std::to_string(removed) + " unused palette entr" +
+              (removed == 1 ? "y" : "ies") + " from " + component.name
+            : "Nothing to remove: every entry is in use.";
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        if (removable == 0) {
+            ImGui::SetTooltip("Every entry is used by at least one voxel.");
+        } else {
+            ImGui::SetTooltip("Remove the %zu entr%s no voxel references, in one undoable step.\n\n"
+                              "Slots are renumbered and every voxel above them is rewritten, so this\n"
+                              "is a real edit to the geometry rather than a tidy-up of a list -- which\n"
+                              "is why it is a button you press rather than something that happens on\n"
+                              "its own.", removable, removable == 1 ? "y" : "ies");
+        }
+    }
+
     drawMaterialRemovalDialog(scene, editor);
 
     ImGui::Separator();
@@ -5693,7 +6070,6 @@ static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, Edito
     // Nothing to say when no entry is selected: the swatch grid above is already the invitation to
     // click one, and a line of placeholder text was costing more of the panel than it was worth.
     if (editor.selectedMaterialSlot < 0 || size_t(editor.selectedMaterialSlot) >= component.materialPalette.size()) {
-        ImGui::End();
         return;
     }
 
@@ -5961,7 +6337,12 @@ static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, Edito
         }
         ImGui::EndTabBar();
     }
+}
 
+// The Edit tab's docked Palette panel: the body above, in a window.
+static void drawPalettePanel(projv::Scene& scene, projv::GPUData& gpuData, EditorState& editor) {
+    ImGui::Begin("Palette");
+    drawPaletteBody(scene, gpuData, editor);
     ImGui::End();
 }
 
@@ -6199,9 +6580,36 @@ static void drawRegionToolIcon(ImDrawList* drawList, ImVec2 center, float size, 
                             ImVec2(center.x + 3.6f * unit, center.y + 3.6f * unit), ink, 1.0f);
 }
 
+// The Custom tool: a brush head over three sparks.
+//
+// Deliberately not a picture of what it does, because it does not do one thing -- the whole point of
+// the tool is that its verb comes out of a file. So the icon says "a brush, and something scripted
+// about it", which is the most honest thing a fixed picture can say about a tool whose behaviour is
+// not fixed.
+static void drawCustomToolIcon(ImDrawList* drawList, ImVec2 center, float size, bool active) {
+    float unit = size / 20.0f;
+    ImU32 ink = iconInk(active);
+    ImU32 dim = iconInkDim(active);
+
+    // The handle, running up to the right.
+    drawList->AddLine(ImVec2(center.x - 1.0f * unit, center.y + 1.0f * unit),
+                      ImVec2(center.x + 5.0f * unit, center.y - 5.0f * unit), ink, 1.8f);
+    // The ferrule and the head.
+    drawList->AddLine(ImVec2(center.x - 2.6f * unit, center.y + 2.6f * unit),
+                      ImVec2(center.x + 0.6f * unit, center.y - 0.6f * unit), ink, 3.2f);
+    drawList->AddTriangleFilled(ImVec2(center.x - 6.6f * unit, center.y + 6.6f * unit),
+                                ImVec2(center.x - 4.4f * unit, center.y + 1.4f * unit),
+                                ImVec2(center.x - 1.4f * unit, center.y + 4.4f * unit), ink);
+
+    // Three sparks off the head, the largest nearest it, for "and then something happens".
+    drawList->AddCircleFilled(ImVec2(center.x + 3.0f * unit, center.y + 3.4f * unit), 1.5f * unit, dim);
+    drawList->AddCircleFilled(ImVec2(center.x + 6.0f * unit, center.y + 5.6f * unit), 1.0f * unit, dim);
+    drawList->AddCircleFilled(ImVec2(center.x + 5.6f * unit, center.y + 1.2f * unit), 0.8f * unit, dim);
+}
+
 static void (*const TOOL_ICONS[EDITOR_TOOL_COUNT])(ImDrawList*, ImVec2, float, bool) = {
     drawSelectToolIcon, drawMoveToolIcon, drawSculptToolIcon, drawPaintToolIcon,
-    drawShapeToolIcon, drawRegionToolIcon
+    drawShapeToolIcon, drawRegionToolIcon, drawCustomToolIcon
 };
 
 // --- Navigator icons --------------------------------------------------------
@@ -7132,6 +7540,130 @@ static void drawRegionToolSettings(projv::Scene& scene, EditorState& editor) {
     drawToolMaterialRow(scene, editor, true);
 }
 
+// Defined with the brush system, far below: the Tool panel draws the *same* panels the Brush Lab does,
+// and those are built on the component voxel space and the palette resolution, neither of which exists
+// this far up the file. Declared here because this is where the Tool panel is assembled.
+namespace projv { namespace editor { struct BrushDefinition; } }
+static projv::editor::BrushDefinition* selectedBrush(EditorState& editor);
+static void drawBrushParametersTab(projv::Scene& scene, EditorState& editor,
+                                   projv::editor::BrushDefinition& brush);
+static void drawBrushDeclarationTab(projv::Scene& scene, EditorState& editor,
+                                    projv::editor::BrushDefinition& brush);
+static void drawBrushOutputTab(projv::editor::BrushDefinition& brush);
+static void beginCustomStroke(projv::Scene& scene, EditorState& editor);
+static void endCustomStroke(projv::Scene& scene, EditorState& editor);
+
+// The Custom tool's settings: which brush, how big a dab, and then the brush's own two panels.
+//
+// **Everything the Brush Lab has for *configuring* a brush and nothing it has for *authoring* one.**
+// No New, no Copy, no source editor, no rescan -- those are what the Lab is for, and putting them here
+// would mean two places to write a brush and two places for that to go wrong. What is here is the part
+// a person reaches for while modelling: pick a brush, read what it will do, turn its knobs.
+//
+// The panels themselves are the same functions the Lab draws, against the same state. A parameter
+// changed here is changed there, saved to the same sidecar; a role bound here is bound there. There is
+// one brush, and it does not have a working copy per tab.
+static void drawCustomToolSettings(projv::Scene& scene, EditorState& editor) {
+    drawToolTargetRow(scene, editor);
+    ImGui::Separator();
+
+    projv::editor::BrushLibrary& library = editor.brushLibrary;
+    projv::editor::BrushDefinition* brush = selectedBrush(editor);
+
+    ImGui::TextDisabled("Brush");
+    ImGui::SetNextItemWidth(-1.0f);
+    std::string preview = brush ? brush->name : std::string("Select a brush");
+    if (ImGui::BeginCombo("##customBrush", preview.c_str())) {
+        if (library.brushes.empty()) {
+            ImGui::TextDisabled("No brushes in %s", library.folder.c_str());
+        }
+        for (const std::shared_ptr<projv::editor::BrushDefinition>& entry : library.brushes) {
+            bool broken = !entry->loadError.empty();
+            // A broken brush is listed and refuses to be selected, rather than being hidden: a brush
+            // that vanishes from the list after an edit reads as "I deleted my brush".
+            ImGui::BeginDisabled(broken);
+            std::string label = entry->name + "   (" + projv::editor::brushKindLabel(entry->kind) + ")";
+            if (ImGui::Selectable(label.c_str(), entry->id == editor.selectedBrushID)) {
+                editor.selectedBrushID = entry->id;
+                editor.brushSourceLoadedFor.clear();
+                editor.brushPreviewColors.clear();
+                editor.brushPreviewPaletteBrush.clear();
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("%s", broken ? entry->loadError.c_str()
+                                               : (entry->description.empty() ? entry->sourcePath.c_str()
+                                                                             : entry->description.c_str()));
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    if (!brush) {
+        ImGui::TextWrapped("Brushes are Lua files in %s. Write one in the Brushes tab (F10).",
+                           library.folder.c_str());
+        return;
+    }
+    if (!brush->loadError.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
+        ImGui::TextWrapped("%s", brush->loadError.c_str());
+        ImGui::PopStyleColor();
+        ImGui::TextDisabled("Fix it in the Brushes tab (F10).");
+        return;
+    }
+
+    if (!brush->description.empty()) ImGui::TextDisabled("%s", brush->description.c_str());
+
+    ImGui::Spacing();
+    // Sizes are in voxels for the reason every other brush in this editor states: the tool addresses
+    // the voxel grid, and a radius in world units covers a different number of voxels per component.
+    ImGui::SetNextItemWidth(fieldWidthBeside("Radius (voxels)"));
+    ImGui::DragFloat("##customRadius", &editor.customBrushRadius, 0.1f, 0.5f,
+                     BRUSH_PREVIEW_MAX_RADIUS, "%.1f");
+    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::TextDisabled("Radius (voxels)");
+    editor.customBrushRadius = std::clamp(editor.customBrushRadius, 0.5f, BRUSH_PREVIEW_MAX_RADIUS);
+    editor.brushPreviewRadius = editor.customBrushRadius;
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("How big one dab is. The brush decides what it does inside that -- for a\n"
+                          "scatter brush this is how much ground one dab considers, not how far\n"
+                          "apart it plants.");
+    }
+
+    ImGui::Separator();
+
+    // The Lab's two configuring tabs, in the order they are there.
+    static const char* const TAB_NAMES[3] = { "Settings", "Brush", "Output" };
+    for (int i = 0; i < 3; i++) {
+        if (i > 0) ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+        std::string label = TAB_NAMES[i];
+        if (i == 2) {
+            size_t errors = 0;
+            for (const projv::editor::BrushMessage& message : brush->messages) {
+                if (message.isError) errors++;
+            }
+            // The count on the tab, so a brush that is failing says so from whichever tab is up. In
+            // the Edit tab this matters more than in the Lab: here the user is modelling, not
+            // debugging, and a brush that has quietly started erroring would otherwise just seem to
+            // have stopped working.
+            if (errors > 0) label += " (" + std::to_string(errors) + ")";
+        }
+        float width = ImGui::CalcTextSize(label.c_str()).x + ImGui::GetStyle().FramePadding.x * 4.0f;
+        if (drawChoiceSegment(label.c_str(), editor.customToolTab == i, width)) {
+            editor.customToolTab = i;
+        }
+    }
+    ImGui::Separator();
+
+    if (editor.customToolTab == 0) {
+        drawBrushParametersTab(scene, editor, *brush);
+    } else if (editor.customToolTab == 1) {
+        drawBrushDeclarationTab(scene, editor, *brush);
+    } else {
+        drawBrushOutputTab(*brush);
+    }
+}
+
 static void drawToolPanel(projv::Scene& scene, EditorState& editor) {
     // The visible title tracks the tool; the identity after ### does not, so the dock layout and the
     // imgui.ini entry survive a tool switch. See TOOL_PANEL_ID.
@@ -7174,6 +7706,7 @@ static void drawToolPanel(projv::Scene& scene, EditorState& editor) {
         case EditorTool::Paint:  drawPaintToolSettings(scene, editor);  break;
         case EditorTool::Place: drawPlaceToolSettings(scene, editor); break;
         case EditorTool::Region: drawRegionToolSettings(scene, editor); break;
+        case EditorTool::Custom: drawCustomToolSettings(scene, editor); break;
     }
 
     ImGui::End();
@@ -13158,6 +13691,12 @@ static void fillSelection(projv::Scene& scene, EditorState& editor) {
 // Casts the ray the user clicked on into the scene and does whatever the click was for. Runs after
 // the Viewport panel has been laid out (that is where the click is noticed) but before the panels
 // that show the result, so a selection or a sample appears on the same frame it was made.
+// Defined with the Brush Lab, far below: running a brush needs the component voxel space, the field
+// snapshot and the palette interning, none of which exist yet at this point in the file. Declared here
+// because this is where a click is turned into an action.
+static void processBrushPreviewSample(projv::Scene& scene, EditorState& editor,
+                                      const projv::utils::VoxelPick& pick);
+
 static void processVoxelPick(projv::Scene& scene, EditorState& editor) {
     PickPurpose purpose = editor.pendingPick;
     if (purpose == PickPurpose::None) return;
@@ -13174,6 +13713,13 @@ static void processVoxelPick(projv::Scene& scene, EditorState& editor) {
     }
 
     projv::utils::VoxelPick pick = projv::utils::pickVoxel(scene, cursorRay.origin, cursorRay.direction);
+
+    // A brush dab, previewed or kept. Handled before the miss check below because it has its own thing
+    // to say about a miss, and nothing at all to say about the selection -- which it must not touch.
+    if (purpose == PickPurpose::BrushPreview || purpose == PickPurpose::CustomBrush) {
+        processBrushPreviewSample(scene, editor, pick);
+        return;
+    }
 
     // The Assemble tool's whole verb. A click on an existing part selects it -- grabbing what is
     // already there has to beat stacking another primitive on top of it -- and a click on anything
@@ -13326,6 +13872,9 @@ static void processVoxelPick(projv::Scene& scene, EditorState& editor) {
 
         case PickPurpose::SculptVoxel:   // Handled above, before the shared ray cast.
         case PickPurpose::PlacePart:     // Handled above, before the switch.
+        case PickPurpose::BrushPreview:  // Handled above, before the miss check -- it has its own.
+        case PickPurpose::CustomBrush:   // Likewise: the same dab, kept rather than previewed.
+        case PickPurpose::FocusDistance: // Render mode's, resolved by processRenderFocusPick instead.
         case PickPurpose::None:
             break;
     }
@@ -14443,27 +14992,32 @@ static void drawViewportSettingsBar(EditorState& editor) {
     }
     if (advancedHovered) {
         ImGui::SetTooltip("Advanced preview  (%s)\n\n"
-                          "Draws the three material properties the Viewport otherwise ignores,\n"
-                          "without leaving it for Render mode:\n\n"
-                          "  Emission      an emitter is drawn glowing, at its own colour and\n"
-                          "                strength. It does not light anything around it --\n"
-                          "                that is light transport, and Render mode is where\n"
-                          "                that lives.\n"
-                          "  Reflections   one glossy sample per pixel per frame. What it\n"
-                          "                reflects is the STORED colour of whatever it lands\n"
-                          "                on, since this mode has no sun to shade it with.\n"
+                          "Lights the Viewport with Render mode's own rig -- the same sun, sky,\n"
+                          "bounce count and firefly clamp -- so this predicts the render rather\n"
+                          "than standing in for it. It also draws the three material properties\n"
+                          "the flat Viewport ignores:\n\n"
+                          "  Emission      an emitter glows at its own colour and strength, and\n"
+                          "                lights what is around it.\n"
+                          "  Reflections   one glossy sample per pixel per frame.\n"
                           "  Transparency  the primary ray sees through transparent voxels to\n"
                           "                the surface behind, tinted by what it crossed. Same\n"
                           "                traversal Render mode uses, so glass that reads\n"
                           "                right here reads right there.\n\n"
-                          "Both the transparency and the reflection are one random sample per\n"
-                          "frame, so they are grainy while the camera moves and resolve within\n"
-                          "a second of it stopping -- the same accumulation the occlusion uses.\n\n"
-                          "Costs a peeled march for every pixel and a second scene ray for every\n"
-                          "glossy or metallic one. A scene whose materials have none of these set\n"
-                          "looks identical with this on, and pays almost nothing for it.\n\n"
-                          "The other four toggles do not touch what this adds: an emitter is not\n"
-                          "darkened for sitting in a crease or facing away from the sun.",
+                          "The light arrives in two halves, split by how sharp it is. The sun is\n"
+                          "traced at full resolution, one shadow ray per pixel and unfiltered, so\n"
+                          "its shadows have a real edge -- as soft as its disc size says and no\n"
+                          "softer. Everything else (bounced light, the sky, emitters) is traced at\n"
+                          "a quarter resolution, reprojected and denoised, because none of it has\n"
+                          "an edge to lose. An emitter's own shadows are the compromise in that\n"
+                          "split: they come from the soft half, and are softer than the render's.\n\n"
+                          "Normal shading and the sun shadow are ignored while this is on -- they\n"
+                          "stand in for light, and there is real light now. Screen-space ambient\n"
+                          "occlusion is not: it still applies, at reduced strength and to the soft\n"
+                          "half only, because a quarter-resolution buffer cannot resolve a single\n"
+                          "voxel's contact shading and that is what you read voxel edges by.\n\n"
+                          "Everything stochastic here -- the penumbra, the reflection, the\n"
+                          "transparency, the occlusion taps -- is one sample per frame, so it is\n"
+                          "grainy while the camera moves and resolves within a second of stopping.",
                           editor.advancedPreviewEnabled ? "on" : "off");
     }
     ImGui::PopID();
@@ -15610,6 +16164,18 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
                     beginSculptStroke(editor);
                     editor.pendingPick = PickPurpose::SculptVoxel;
                 }
+            } else if (editor.activeTool == EditorTool::Custom) {
+                if (ImGui::GetIO().KeyAlt) {
+                    // Alt-sample, like every other tool that writes materials. A programmable brush
+                    // resolves its own roles, so this does not choose what it paints -- it is here
+                    // because "what material is that?" is a question asked mid-stroke whatever tool is
+                    // up, and a tool that answered it differently from its neighbours would be worse
+                    // than one that did not answer it at all.
+                    editor.pendingPick = PickPurpose::SampleMaterial;
+                } else {
+                    beginCustomStroke(scene, editor);
+                    editor.pendingPick = PickPurpose::CustomBrush;
+                }
             } else if (editor.activeTool == EditorTool::Place ||
                        editor.activeTool == EditorTool::Region) {
                 if (ImGui::GetIO().KeyAlt) {
@@ -15653,6 +16219,23 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
         //
         // A fill takes no part in the drag -- it did its work on the press -- so its frames are not
         // even sampled, which spares them a ray cast that could only be thrown away.
+        // --- The rest of a Custom-brush drag ---
+        //
+        // The same shape as the sculpt and paint drags, and for the same reasons: sampled on movement
+        // rather than on clicks, hover not required once the button is down (a sweep routinely leaves
+        // the panel), and the release watched wherever the cursor happens to be.
+        if (editor.customStrokeActive) {
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                endCustomStroke(scene, editor);
+            } else {
+                ImVec2 movement = ImGui::GetIO().MouseDelta;
+                if (movement.x != 0.0f || movement.y != 0.0f) {
+                    editor.pickUV = cursorUV;
+                    editor.pendingPick = PickPurpose::CustomBrush;
+                }
+            }
+        }
+
         if (editor.paintStrokeActive) {
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 endPaintStroke(scene, editor);
@@ -15737,13 +16320,21 @@ static void setEditorMode(EditorState& editor, EditorMode mode) {
     editor.requestedMode = mode;
 }
 
-// The tab strip. Drawn in both tabs' menu bars, in the same place, so it does not move under the
-// cursor when it is used -- which for the one control that switches between two whole interfaces is
-// worth more than it sounds.
+// The width one segment of the tab strip takes. Every tab's menu bar reserves the whole strip's width
+// on the right, so this has to be one number rather than each bar measuring its own labels -- the
+// strip must land in the same place in all three, or the one control that switches between whole
+// interfaces moves out from under the cursor as it is used.
+static float modeTabSegmentWidth() {
+    return ImGui::CalcTextSize("Brushes").x + ImGui::GetStyle().FramePadding.x * 4.0f;
+}
+
+static float modeTabStripWidth() {
+    return modeTabSegmentWidth() * 3.0f + ImGui::GetStyle().ItemInnerSpacing.x * 2.0f;
+}
+
+// The tab strip. Drawn in every tab's menu bar, in the same place.
 static void drawModeTabs(EditorState& editor) {
-    // Sized off the longer of the two labels so the pair is symmetric, plus room for the padding a
-    // button puts either side of its text.
-    float segmentWidth = ImGui::CalcTextSize("Render").x + ImGui::GetStyle().FramePadding.x * 4.0f;
+    float segmentWidth = modeTabSegmentWidth();
 
     if (drawChoiceSegment("Edit", editor.mode == EditorMode::Edit, segmentWidth)) {
         setEditorMode(editor, EditorMode::Edit);
@@ -15757,6 +16348,14 @@ static void drawModeTabs(EditorState& editor) {
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip("Path traced preview of the same camera.  F11");
+    }
+    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+    if (drawChoiceSegment("Brushes", editor.mode == EditorMode::Brushes, segmentWidth)) {
+        setEditorMode(editor, EditorMode::Brushes);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("The Brush Lab: write a brush, tune what it takes, try it on the scene\n"
+                          "without keeping the result.  F10");
     }
 }
 
@@ -15803,19 +16402,18 @@ static void drawRenderQualityMenu(EditorState& editor) {
 
     drawRenderSlider(editor, "Firefly clamp", &editor.renderFireflyClamp, 1.0f, 200.0f, "%.0f",
                      "The most light one path may return. Lower kills the bright specks a lucky\n"
-                     "path leaves behind, at the cost of slightly dimming genuine highlights.");
+                     "path leaves behind, at the cost of slightly dimming genuine highlights.\n"
+                     "The limit is on the brightest channel and the whole colour is scaled to\n"
+                     "meet it, so a clamped emitter dims and keeps its hue rather than washing\n"
+                     "out towards white -- which is what a per-channel limit does to anything\n"
+                     "strongly tinted and much brighter than this number.");
 
     ImGui::Separator();
-
-    // Deliberately NOT a drawRenderSlider. Exposure lives in display.frag, downstream of everything
-    // the mean has averaged, so changing it does not invalidate a single accumulated sample -- it
-    // can be dragged on a render that has been converging for a minute without costing that minute.
-    ImGui::SetNextItemWidth(180.0f);
-    ImGui::SliderFloat("Exposure", &editor.renderExposure, -6.0f, 6.0f, "%.2f stops");
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Applied before the tone curve, in stops. The one control here that is\n"
-                          "free: it does not restart the accumulation.");
-    }
+    // Exposure used to sit here. It moved to Grade, where the rest of the controls that are applied
+    // after the accumulation now live -- one place for "changes the light" and one for "changes the
+    // picture", rather than the one free control in this menu being the odd one out in it.
+    ImGui::TextDisabled("Exposure and the rest of the grade");
+    ImGui::TextDisabled("are under Grade.");
 }
 
 // The distance from the camera to the point the navigator orbits, which is the editor's standing
@@ -15973,6 +16571,97 @@ static void drawRenderEffectsMenu(EditorState& editor) {
     }
 }
 
+// The grade: everything that changes how the traced image *looks* rather than what is traced.
+//
+// A menu of its own rather than more of Effects, because the division is a real one and it is the
+// division that matters most while rendering: nothing in here restarts the accumulation. Depth of
+// field, the atmosphere and the bounce count change what the path tracer does and cost you the
+// converging image; saturation, contrast and a colour cast are applied to the finished mean, once,
+// after it has been averaged. Sliding one of these on a render that has been settling for a minute is
+// free, and a user has no way of knowing that unless the interface groups them by it.
+static void drawRenderGradeMenu(EditorState& editor) {
+    ImGui::TextDisabled("Applied after the accumulation:");
+    ImGui::TextDisabled("none of this restarts the render.");
+    ImGui::Separator();
+
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::SliderFloat("Exposure", &editor.renderExposure, -6.0f, 6.0f, "%.2f stops");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Applied before the tone curve, in stops -- a multiply on the light\n"
+                          "reaching the sensor rather than a lift on the developed image. After the\n"
+                          "curve it could only stretch highlights that had already clipped.");
+    }
+
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::SliderFloat("Contrast", &editor.renderContrast, 0.0f, 2.5f, "%.2f");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Pushes tones away from mid grey. 1 is untouched; 0 is a flat grey card.");
+    }
+
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::SliderFloat("Saturation", &editor.renderSaturation, 0.0f, 2.5f, "%.2f");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("0 is greyscale, 1 is untouched. Measured against luminance rather than\n"
+                          "the channel average, so desaturating leaves the image at the brightness\n"
+                          "the eye reads it at.");
+    }
+
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::SliderFloat("Lift", &editor.renderLift, 0.0f, 0.5f, "%.3f");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Raises the black point without touching white -- the faded end of a film\n"
+                          "look. A little goes a long way.");
+    }
+
+    ImGui::Separator();
+
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::SliderFloat("Temperature", &editor.renderTemperature, -1.0f, 1.0f, "%.2f");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Cool to warm. Applied in linear light before the tone curve, where a\n"
+                          "white balance belongs: it is a property of the light, not of the print.");
+    }
+
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::ColorEdit3("Tint", editor.renderTint,
+                      ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_Float);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("An arbitrary colour cast, multiplied into the linear image. White is\n"
+                          "neutral. Temperature is the one-dimensional version of this and the one\n"
+                          "to reach for first.");
+    }
+
+    ImGui::Separator();
+
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::SliderFloat("Vignette", &editor.renderVignette, 0.0f, 1.0f, "%.2f");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Darkening towards the corners. Radial, like the chromatic aberration in\n"
+                          "Effects, and for the same reason: it is a property of a lens.");
+    }
+
+    ImGui::Separator();
+    bool neutral = editor.renderExposure == 0.0f && editor.renderContrast == 1.0f &&
+                   editor.renderSaturation == 1.0f && editor.renderLift == 0.0f &&
+                   editor.renderVignette == 0.0f && editor.renderTemperature == 0.0f &&
+                   editor.renderTint[0] == 1.0f && editor.renderTint[1] == 1.0f &&
+                   editor.renderTint[2] == 1.0f;
+    ImGui::BeginDisabled(neutral);
+    if (ImGui::MenuItem("Reset the grade")) {
+        editor.renderExposure = 0.0f;
+        editor.renderContrast = 1.0f;
+        editor.renderSaturation = 1.0f;
+        editor.renderLift = 0.0f;
+        editor.renderVignette = 0.0f;
+        editor.renderTemperature = 0.0f;
+        editor.renderTint[0] = editor.renderTint[1] = editor.renderTint[2] = 1.0f;
+    }
+    ImGui::EndDisabled();
+    if (neutral && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Already neutral: this is the image the tone curve produced.");
+    }
+}
+
 static void drawRenderCameraMenu(EditorState& editor) {
     if (ImGui::MenuItem("Frame Scene", "H", false, editor.sceneLoaded)) {
         applyFraming(editor);
@@ -16023,6 +16712,10 @@ static void drawRenderModeInterface(projv::Scene& scene, EditorState& editor,
             drawRenderEffectsMenu(editor);
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Grade")) {
+            drawRenderGradeMenu(editor);
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("Quality")) {
             drawRenderQualityMenu(editor);
             ImGui::EndMenu();
@@ -16031,6 +16724,24 @@ static void drawRenderModeInterface(projv::Scene& scene, EditorState& editor,
             drawRenderCameraMenu(editor);
             ImGui::EndMenu();
         }
+        // The image, out to a file. Enabled only while there is one: a save taken before the first
+        // frame has been traced would write a black rectangle and report success.
+        ImGui::BeginDisabled(!editor.sceneLoaded || editor.renderSaveReadyFrame != 0);
+        if (ImGui::MenuItem("Save Image")) {
+            editor.renderSaveRequested = true;
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (editor.renderSaveReadyFrame != 0) {
+                ImGui::SetTooltip("A save is already in flight -- the pixels arrive a frame or two\n"
+                                  "after they are asked for.");
+            } else {
+                ImGui::SetTooltip("Write the image to a PNG in renders/, at the size it is being\n"
+                                  "traced at and with the grade applied. What is saved is the render\n"
+                                  "itself -- not the window, so no menu bar and no interface.");
+            }
+        }
+
         if (ImGui::MenuItem("Restart")) {
             // The mean starts again from this frame. Worth having as a verb of its own: after an
             // edit made in the other tab, or a load, the accumulated image is of the old scene and
@@ -16129,6 +16840,3217 @@ static void drawRenderModeInterface(projv::Scene& scene, EditorState& editor,
     ImGui::End();
 }
 
+// =============================================================================
+// The Brush Lab
+// =============================================================================
+//
+// Where a brush is written and tried. The tab is deliberately its own thing rather than a panel: a
+// brush is a file in the user's brushes folder, shared by every scene, and the work of designing one
+// (read the script, tune what it takes, run it, look at the output, change the script) is a loop that
+// wants the whole window and has nothing to say while a scene is being arranged.
+//
+// It borrows the Edit tab's renderer, so the tab costs no VRAM and its preview is the same albedo
+// view the Viewport shows -- which is the right view for judging a brush, because the colour on
+// screen is the colour the brush wrote.
+//
+// What the Lab can do that the Custom tool cannot is *author* a brush -- write one, copy one, edit its
+// source. Running one is shared: the Custom tool (Ctrl+U) drives exactly the machinery below, and the
+// only difference is that its journal ends in a history entry rather than in a revert.
+
+
+// The dense read of the neighbourhood a dab needs, and the reason a scripted brush can afford to ask
+// about skin depth at all.
+//
+// **The cost of a context-hungry brush is reading the geometry, not writing it** -- the same finding
+// the Smooth and Bump brushes are built on (see SculptScratch). Skin depth and crevice occupancy are
+// both questions about a voxel's *neighbours*, and neighbouring voxels' neighbourhoods overlap almost
+// entirely; asked of the tree64 one cell at a time that is ~28 descents per cell per field. Copying
+// the box in once makes every one of them an array index.
+//
+// The box is the dab plus a margin, and the margin is what the brush's declaration buys: a brush that
+// does not ask for skin depth does not pay for the margin skin depth needs, and one that asks for a
+// depth of 6 pays for 6 rather than for the worst case. Nothing is ever read within `margin` of the
+// boundary, so no answer inside the dab depends on what is outside the box.
+struct BrushField {
+    projv::core::ivec3 origin = projv::core::ivec3(0);   // Component coord of the low corner.
+    int side = 0;
+    int margin = 0;
+    std::vector<uint8_t> solid;
+    std::vector<uint8_t> slot;
+    // Voxels from the surface: 0 for a voxel with an exposed face, 1 for one directly behind it. -1
+    // for an empty cell, and `depthCeiling` for a solid one no surface was reached from inside the box.
+    std::vector<int16_t> depth;
+    int depthCeiling = 0;
+    int creviceRadius = 0;
+    float creviceDivisor = 1.0f;   // Cells in the crevice ball, precomputed.
+
+    int index(projv::core::ivec3 coord) const {
+        projv::core::ivec3 local = coord - origin;
+        if (local.x < 0 || local.y < 0 || local.z < 0 ||
+            local.x >= side || local.y >= side || local.z >= side) {
+            return -1;
+        }
+        return (local.z * side + local.y) * side + local.x;
+    }
+    // Outside the box reads as *solid*, which is the safe direction: an empty answer there would
+    // invent a surface at the boundary and report every deep voxel near it as skin.
+    bool solidAt(projv::core::ivec3 coord) const {
+        int at = index(coord);
+        return at < 0 ? true : solid[size_t(at)] != 0;
+    }
+    int depthAt(projv::core::ivec3 coord) const {
+        int at = index(coord);
+        return at < 0 ? -1 : int(depth[size_t(at)]);
+    }
+};
+
+// One descent per cell into the flat arrays, then the derived fields the declaration asked for.
+static void snapshotBrushField(const projv::Scene& scene, const ComponentVoxelSpace& space,
+                               projv::core::ivec3 centre, int dabRadius,
+                               const projv::editor::BrushDefinition& brush, BrushField& field) {
+    using projv::core::ivec3;
+    using projv::editor::BrushContextField;
+
+    bool wantsDepth = brush.context.has(BrushContextField::SkinDepth);
+    bool wantsCrevice = brush.context.has(BrushContextField::Crevice);
+    bool wantsNormal = brush.context.has(BrushContextField::Normal);
+
+    field.margin = 0;
+    // Depth needs one cell past the deepest it will report, so the voxel at that depth can see that
+    // its neighbour is deeper still rather than being cut off and called the surface.
+    if (wantsDepth) field.margin = std::max(field.margin, brush.maxSkinDepth + 1);
+    if (wantsCrevice) field.margin = std::max(field.margin, brush.creviceRadius);
+    if (wantsNormal) field.margin = std::max(field.margin, 1);
+
+    field.side = 2 * (dabRadius + field.margin) + 1;
+    field.origin = centre - ivec3(dabRadius + field.margin);
+    size_t cells = size_t(field.side) * size_t(field.side) * size_t(field.side);
+    field.solid.assign(cells, 0);
+    field.slot.assign(cells, 0);
+    field.creviceRadius = brush.creviceRadius;
+    int r = brush.creviceRadius;
+    field.creviceDivisor = float((2 * r + 1) * (2 * r + 1) * (2 * r + 1));
+
+    size_t at = 0;
+    for (int z = 0; z < field.side; z++) {
+        for (int y = 0; y < field.side; y++) {
+            for (int x = 0; x < field.side; x++, at++) {
+                uint8_t slot = 0;
+                if (!queryComponentVoxel(scene, space, field.origin + ivec3(x, y, z), slot)) continue;
+                field.solid[at] = 1;
+                field.slot[at] = slot;
+            }
+        }
+    }
+
+    if (!wantsDepth) {
+        field.depth.clear();
+        return;
+    }
+
+    // Breadth-first from every exposed face inward, which gives exact voxel distance-from-surface in
+    // 6-connected steps. A two-pass chamfer would be cheaper and would answer a slightly different
+    // question (Chebyshev distance, which counts a diagonal as one step and so reports a corner voxel
+    // as shallower than it is); for deciding how far a crack has bitten, steps through the material
+    // are the honest measure.
+    field.depthCeiling = std::max(1, brush.maxSkinDepth + 1);
+    field.depth.assign(cells, -1);
+    static std::vector<int32_t> queue;   // Reused: this runs once per dab, up to ~200k entries.
+    queue.clear();
+
+    static const ivec3 FACE_NEIGHBOURS[6] = {
+        ivec3(1, 0, 0), ivec3(-1, 0, 0), ivec3(0, 1, 0),
+        ivec3(0, -1, 0), ivec3(0, 0, 1), ivec3(0, 0, -1)
+    };
+
+    at = 0;
+    for (int z = 0; z < field.side; z++) {
+        for (int y = 0; y < field.side; y++) {
+            for (int x = 0; x < field.side; x++, at++) {
+                if (!field.solid[at]) continue;
+                ivec3 coord = field.origin + ivec3(x, y, z);
+                bool exposed = false;
+                for (const ivec3& step : FACE_NEIGHBOURS) {
+                    if (!field.solidAt(coord + step)) { exposed = true; break; }
+                }
+                if (!exposed) continue;
+                field.depth[at] = 0;
+                queue.push_back(int32_t(at));
+            }
+        }
+    }
+
+    for (size_t head = 0; head < queue.size(); head++) {
+        int32_t current = queue[head];
+        int16_t nextDepth = int16_t(field.depth[size_t(current)] + 1);
+        if (nextDepth > field.depthCeiling) continue;   // No brush asked to see this far in.
+        int x = current % field.side;
+        int y = (current / field.side) % field.side;
+        int z = current / (field.side * field.side);
+        for (const ivec3& step : FACE_NEIGHBOURS) {
+            int nx = x + step.x, ny = y + step.y, nz = z + step.z;
+            if (nx < 0 || ny < 0 || nz < 0 || nx >= field.side || ny >= field.side || nz >= field.side) {
+                continue;
+            }
+            size_t neighbour = size_t((nz * field.side + ny) * field.side + nx);
+            if (!field.solid[neighbour] || field.depth[neighbour] >= 0) continue;
+            field.depth[neighbour] = nextDepth;
+            queue.push_back(int32_t(neighbour));
+        }
+    }
+
+    // A solid cell the flood never reached is enclosed as far as this box can tell. Reported at the
+    // ceiling rather than left at -1, because -1 means "not solid" to the script and a buried voxel is
+    // very much solid.
+    for (size_t i = 0; i < cells; i++) {
+        if (field.solid[i] && field.depth[i] < 0) field.depth[i] = int16_t(field.depthCeiling);
+    }
+}
+
+// The fraction of the cells in a ball around `coord` that are solid. Computed on demand rather than
+// for the whole box: only the dab's own cells are ever asked, and they are a fraction of it.
+static float brushCreviceAt(const BrushField& field, projv::core::ivec3 coord) {
+    int r = field.creviceRadius;
+    if (r <= 0) return 0.0f;
+    int count = 0;
+    for (int dz = -r; dz <= r; dz++) {
+        for (int dy = -r; dy <= r; dy++) {
+            for (int dx = -r; dx <= r; dx++) {
+                if (field.solidAt(coord + projv::core::ivec3(dx, dy, dz))) count++;
+            }
+        }
+    }
+    return float(count) / field.creviceDivisor;
+}
+
+// The surface direction at `coord`, as the gradient of the local solid mask: it points out of the
+// material, is roughly unit length on a surface voxel, and is near zero deep inside (where every
+// direction is equally solid) -- which is exactly the behaviour a brush wants when it asks "is this
+// face pointing up".
+static void brushNormalAt(const BrushField& field, projv::core::ivec3 coord, float& nx, float& ny,
+                          float& nz) {
+    float gx = 0.0f, gy = 0.0f, gz = 0.0f;
+    for (int dz = -1; dz <= 1; dz++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0 && dz == 0) continue;
+                if (field.solidAt(coord + projv::core::ivec3(dx, dy, dz))) continue;
+                // Empty neighbours pull the normal toward themselves; weighted by inverse distance so
+                // a face neighbour counts for more than a corner one.
+                float length = std::sqrt(float(dx * dx + dy * dy + dz * dz));
+                gx += float(dx) / length;
+                gy += float(dy) / length;
+                gz += float(dz) / length;
+            }
+        }
+    }
+    float magnitude = std::sqrt(gx * gx + gy * gy + gz * gz);
+    if (magnitude < 1.0e-4f) { nx = ny = nz = 0.0f; return; }
+    nx = gx / magnitude;
+    ny = gy / magnitude;
+    nz = gz / magnitude;
+}
+
+// The brush currently selected in the Lab, or null.
+static projv::editor::BrushDefinition* selectedBrush(EditorState& editor) {
+    if (editor.selectedBrushID.empty()) return nullptr;
+    return editor.brushLibrary.find(editor.selectedBrushID);
+}
+
+// Resolves every material role of a brush against the target component's palette, and caches the
+// colour each one turned out to be.
+//
+// **Interning by name, once per (brush, component) pair, is what keeps a procedural texture inside the
+// palette.** The edit queue carries colours, and applyComponentQueue interns whatever colour it is
+// given -- so a brush returning free-form RGB would add a palette entry per distinct value and hit the
+// 255-entry ceiling within one stroke (internMaterial then fails loudly and paints nothing). Declaring
+// the output set up front turns that into a known, bounded cost: this many entries, added once.
+//
+// **The palette wins.** A role that resolves to an entry which already exists takes that entry as it
+// stands -- its colour, its glossiness, its emission -- and the brush's declared numbers are not
+// consulted at all. They are creation defaults, and they are used on exactly one occasion: an entry of
+// that name does not exist yet and one has to be made. Anything else would make the script a second
+// source of truth for what a material is, and would quietly undo a colour the user had just set in the
+// Palette panel every time they ran the brush over another patch.
+static bool ensureBrushPalette(projv::Scene& scene, EditorState& editor,
+                               projv::editor::BrushDefinition& brush,
+                               projv::ComponentHandle component, std::string& error) {
+    if (component >= scene.components.size()) {
+        error = "No component to paint.";
+        return false;
+    }
+    if (editor.brushPreviewPaletteComponent == component &&
+        editor.brushPreviewPaletteBrush == brush.id &&
+        !editor.brushPreviewColors.empty()) {
+        return true;
+    }
+
+    std::vector<projv::editor::BrushMaterialSlot> slots;
+    projv::editor::brushExpandMaterials(brush, slots);
+    if (slots.empty()) {
+        error = "The brush declares no materials, so there is nothing for it to write.";
+        return false;
+    }
+
+    projv::ComponentRecord& record = scene.components[component];
+    size_t existing = record.materialPalette.size();
+    // Counted before anything is added, and refused rather than truncated: a stroke that ran out of
+    // palette half way would leave a model painted in two different schemes, and the second half of
+    // the message is the only actionable part of it.
+    size_t room = projv::MAX_MATERIALS_PER_COMPONENT - 1 - existing;
+    size_t needed = 0;
+    for (const projv::editor::BrushMaterialSlot& slot : slots) {
+        if (projv::utils::findMaterialByName(record, slot.name) == projv::INVALID_MATERIAL) needed++;
+    }
+    if (needed > room) {
+        error = "This brush needs " + std::to_string(needed) + " new palette entries and " +
+                record.name + " has room for " + std::to_string(room) +
+                ". Reduce the brush's ramp steps, or remove unused entries from the palette.";
+        return false;
+    }
+
+    editor.brushPreviewColors.clear();
+    editor.brushPreviewColors.reserve(slots.size());
+    bool paletteGrew = false;
+    for (const projv::editor::BrushMaterialSlot& slot : slots) {
+        // Does the entry already exist? Asked before interning, because the answer decides whether the
+        // brush's declared colour and surface properties are used at all.
+        bool existed = projv::utils::findMaterialByName(record, slot.name) != projv::INVALID_MATERIAL;
+
+        uint32_t packed = projv::packRGB10(slot.color[0], slot.color[1], slot.color[2]);
+        uint8_t index = projv::utils::internMaterial(scene, record, slot.name, packed);
+        if (index == projv::INVALID_MATERIAL) {
+            error = "The palette is full.";
+            editor.brushPreviewColors.clear();
+            return false;
+        }
+
+        if (!existed) {
+            paletteGrew = true;
+            // Remembered so the revert can take it back. See EditorState::brushPreviewCreatedEntries.
+            editor.brushPreviewCreatedEntries.push_back(slot.name);
+            editor.brushPreviewCreatedIn = component;
+            // Only now -- the entry is this brush's to describe because this brush has just made it.
+            // An entry that was already there keeps whatever the Palette panel says it is.
+            bool hasProperties = slot.glossiness > 0.0f || slot.metallic > 0.0f ||
+                                 slot.transparency > 0.0f || slot.ior > 1.0f ||
+                                 slot.emissiveStrength > 0.0f || slot.hasEmissionColor;
+            if (hasProperties) {
+                uint32_t emission = slot.hasEmissionColor
+                    ? projv::packRGB10(slot.emission[0], slot.emission[1], slot.emission[2]) : 0u;
+                uint32_t surface = projv::packSurfaceWord(slot.glossiness, slot.metallic,
+                                                          slot.transparency, slot.ior);
+                uint32_t extra = projv::packExtraWord(slot.emissiveStrength, 0.0f, 0u);
+                projv::utils::setMaterialProperties(scene, component, index, emission, surface, extra);
+            }
+        }
+
+        // The colour the *entry* holds, not the one asked for: interning by name finds an entry that
+        // already exists under that name whatever colour it carries, and the queue resolves a written
+        // voxel back to a slot by colour. Taking the entry's own colour is what keeps those two
+        // agreeing -- writing the requested colour would land the voxel on a different slot, or add
+        // one. It is also what makes recolouring an entry in the Palette panel change what the brush
+        // paints, with no further ceremony.
+        uint32_t slotColor = record.materialPalette[index].packedColor;
+        editor.brushPreviewColors.push_back(slotColor);
+
+        // A colour parameter's resolved colour has to reach the script, which reads it as p.<name>.r/g/b.
+        // This is the one piece of palette state that is copied rather than looked up live, because the
+        // Lua table is built once per stroke and cannot consult the palette per voxel.
+        if (slot.paramIndex >= 0 && size_t(slot.paramIndex) < brush.values.size()) {
+            projv::unpackRGB10(slotColor, brush.values[size_t(slot.paramIndex)].color[0],
+                               brush.values[size_t(slot.paramIndex)].color[1],
+                               brush.values[size_t(slot.paramIndex)].color[2]);
+        }
+    }
+
+    if (paletteGrew) {
+        // New entries move every later component's palette offset, so the GPU mirror needs the full
+        // resync rather than the single-texel colour path -- and the panel's usage counts are stale.
+        editor.gpuFlushNeeded = true;
+        invalidatePaletteCaches(&editor);
+    }
+
+    editor.brushPreviewPaletteComponent = component;
+    editor.brushPreviewPaletteBrush = brush.id;
+    return true;
+}
+
+// Takes back the palette entries the preview created.
+//
+// **Called after the voxels are back, and that order is the whole of why it is safe**: the only things
+// referencing these entries were the preview's own voxels, so once those are restored the entries are
+// unused and popping them renumbers nothing.
+//
+// Popped from the end, one at a time, and only while the last entry is still one this preview made and
+// still unused. Both guards matter, because the palette is not private to the preview: the user may
+// have added an entry of their own on top of ours, or bound a role to one of ours and painted with it
+// somewhere the revert does not reach. Either stops the unwind rather than taking something that is no
+// longer ours to take -- an entry left behind is untidy, and removing the wrong one renumbers every
+// slot above it and rewrites the material byte of every voxel that referenced them.
+static void removeBrushPreviewEntries(projv::Scene& scene, EditorState& editor) {
+    if (editor.brushPreviewCreatedEntries.empty()) return;
+
+    projv::ComponentHandle component = editor.brushPreviewCreatedIn;
+    std::vector<std::string> created = std::move(editor.brushPreviewCreatedEntries);
+    editor.brushPreviewCreatedEntries.clear();
+    editor.brushPreviewCreatedIn = projv::INVALID_COMPONENT_HANDLE;
+    if (component >= scene.components.size()) return;
+
+    // Counted once, against the geometry as it now stands. Only the last slot is ever consulted, and
+    // popping does not disturb the indices below it.
+    std::vector<uint32_t> usage = projv::utils::countMaterialUsage(scene, component);
+
+    size_t removed = 0;
+    for (size_t i = created.size(); i-- > 0;) {
+        projv::ComponentRecord& record = scene.components[component];
+        if (record.materialPalette.size() <= 1) break;   // Never leave a component with no palette.
+        if (record.materialPalette.back().name != created[i]) break;
+        size_t lastIndex = record.materialPalette.size() - 1;
+        if (lastIndex < usage.size() && usage[lastIndex] != 0) break;
+        popLastMaterial(&scene, &editor, component);
+        removed++;
+    }
+
+    if (removed > 0) {
+        editor.gpuFlushNeeded = true;
+        // The brush's cached colours pointed at slots that no longer exist.
+        editor.brushPreviewColors.clear();
+        editor.brushPreviewPaletteBrush.clear();
+        editor.brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
+    }
+}
+
+// Puts everything the preview has written back, in one pair of queue drains, and forgets it.
+//
+// The journal holds what each cell was *before* the preview first touched it, so this is exact however
+// many dabs crossed the same cell and whichever direction each of them went. Two calls rather than
+// one because a removal and an addition are different queue verbs: cells that were empty are removed,
+// cells that held something are written back with the colour they held.
+static void revertBrushPreview(projv::Scene& scene, EditorState& editor) {
+    if (editor.brushStrokeJournal.empty()) {
+        editor.brushPreviewWrites = 0;
+        // Still worth doing: resolving the palette creates entries whether or not a single voxel ended
+        // up changing, so a dab that painted nothing can leave entries behind on its own.
+        removeBrushPreviewEntries(scene, editor);
+        return;
+    }
+    projv::ComponentHandle component = editor.brushPreviewComponent;
+    if (component == projv::INVALID_COMPONENT_HANDLE || component >= scene.components.size()) {
+        editor.brushStrokeJournal.clear();
+        editor.brushPreviewWrites = 0;
+        removeBrushPreviewEntries(scene, editor);
+        return;
+    }
+
+    std::vector<projv::core::ivec3> toRemove;
+    std::vector<projv::core::ivec3> toRestore;
+    std::vector<uint32_t> restoreColors;
+    for (const std::pair<const uint64_t, EditorState::StrokeVoxel>& entry : editor.brushStrokeJournal) {
+        if (entry.second.wasSolid) {
+            toRestore.push_back(entry.second.coord);
+            restoreColors.push_back(entry.second.oldColor);
+        } else {
+            toRemove.push_back(entry.second.coord);
+        }
+    }
+
+    size_t reverted = editor.brushStrokeJournal.size();
+    editor.brushStrokeJournal.clear();
+    editor.brushPreviewWrites = 0;
+    // Removals first, additions second -- the order every undo path in this editor uses, so a cell
+    // that appears in both lists (it cannot, but the ordering costs nothing) ends solid.
+    applyVoxelSculpt(&scene, &editor, component, toRemove, std::vector<uint32_t>(), false);
+    applyVoxelSculpt(&scene, &editor, component, toRestore, restoreColors, true);
+
+    // After the voxels, never before: these entries are only unused once the voxels that referenced
+    // them are gone.
+    size_t entriesBefore = editor.brushPreviewCreatedEntries.size();
+    removeBrushPreviewEntries(scene, editor);
+
+    editor.brushStatus = "Reverted " + std::to_string(reverted) + " preview voxel" +
+                         (reverted == 1 ? "" : "s") +
+                         (entriesBefore > 0 ? " and " + std::to_string(entriesBefore) +
+                                              " palette entr" + (entriesBefore == 1 ? "y" : "ies")
+                                            : std::string()) + ".";
+}
+
+// Leaves preview mode, reverting whatever it wrote. Safe to call when it is already off.
+static void endBrushPreview(projv::Scene& scene, EditorState& editor) {
+    bool wasActive = editor.brushPreviewActive || !editor.brushStrokeJournal.empty();
+    editor.brushPreviewActive = false;
+    editor.brushPreviewStrokeActive = false;
+    revertBrushPreview(scene, editor);
+    editor.brushPreviewComponent = projv::INVALID_COMPONENT_HANDLE;
+    editor.brushPreviewCalls = 0;
+    editor.brushPreviewMilliseconds = 0.0;
+    editor.brushPreviewTruncated = false;
+    if (wasActive && editor.brushStatus.empty()) editor.brushStatus = "Preview off.";
+}
+
+// One dab: run the brush over a ball of cells around `centre` and apply what it says.
+//
+// The shape of this function is the shape the real stroke will have, and every part of it is here for
+// a reason the existing tools already paid for:
+//
+//   * the journal is checked *before* the script is called, so a cell the preview has already
+//     **changed** costs nothing when a later dab crosses it -- and, more importantly, cannot be
+//     changed twice, which is what keeps the revert exact however many dabs overlap.
+//
+//     A cell the brush *declined* is not journalled and is asked again, deliberately. The alternative
+//     -- remembering every cell that was ever considered -- would put the whole volume swept by the
+//     drag into the structure the revert walks, when only the changed cells need restoring. It also
+//     happens to be the behaviour a carving brush wants: it declined that cell against the geometry as
+//     it was, and after a few dabs have taken material away the honest answer may have changed. Same
+//     reasoning as Smooth and Bump reading current geometry rather than the stroke's starting state;
+
+//   * the answers are gathered and applied in one queue per dab rather than per voxel, because
+//     updateScene forks and rebuilds every chunk a queue touches;
+//   * a Material brush is offered only solid cells and a Geometry brush every cell, which is the whole
+//     difference between the kinds.
+static void runBrushPreviewDab(projv::Scene& scene, EditorState& editor,
+                               projv::editor::BrushDefinition& brush,
+                               projv::ComponentHandle component, projv::core::ivec3 centre) {
+    using projv::core::ivec3;
+    using projv::editor::BrushContextField;
+
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
+    if (!space.valid) {
+        editor.brushStatus = "That component has no voxel lattice to paint on.";
+        return;
+    }
+
+    std::string error;
+    if (!ensureBrushPalette(scene, editor, brush, component, error)) {
+        editor.brushStatus = error;
+        return;
+    }
+    projv::editor::BrushInvocation invocation = projv::editor::brushBeginStroke(brush, error);
+    if (!invocation.valid()) {
+        editor.brushStatus = error;
+        return;
+    }
+
+    float radius = std::min(editor.brushPreviewRadius, BRUSH_PREVIEW_MAX_RADIUS);
+    int extent = int(std::floor(radius));
+    float radiusSquared = radius * radius;
+
+    BrushField field;
+    snapshotBrushField(scene, space, centre, extent, brush, field);
+
+    bool wantsMaterial = brush.context.has(BrushContextField::Material);
+    bool wantsCrevice = brush.context.has(BrushContextField::Crevice);
+    bool wantsNormal = brush.context.has(BrushContextField::Normal);
+    bool wantsWorld = brush.context.has(BrushContextField::World);
+    bool wantsDistance = brush.context.has(BrushContextField::Distance);
+    bool geometry = brush.kind == projv::editor::BrushKind::Geometry;
+
+    const projv::ComponentRecord& record = scene.components[component];
+
+    std::vector<ivec3> paintCoords;
+    std::vector<uint32_t> paintColors;
+    std::vector<ivec3> addCoords;
+    std::vector<uint32_t> addColors;
+    std::vector<ivec3> removeCoords;
+
+    size_t considered = 0;
+    bool truncated = false;
+    // steady_clock, not ImGui::GetTime(): the whole dab runs inside one frame, and ImGui's clock only
+    // advances at NewFrame -- so every measurement taken with it would be exactly zero. This number is
+    // shown to the brush author as nanoseconds per voxel, which makes it the one readout that has to be
+    // measured with something that moves.
+    std::chrono::steady_clock::time_point dabStart = std::chrono::steady_clock::now();
+
+    for (int dz = -extent; dz <= extent && !truncated; dz++) {
+        for (int dy = -extent; dy <= extent && !truncated; dy++) {
+            for (int dx = -extent; dx <= extent; dx++) {
+                float distanceSquared = float(dx * dx + dy * dy + dz * dz);
+                if (distanceSquared > radiusSquared) continue;
+                if (++considered > BRUSH_MAX_DAB_CELLS) { truncated = true; break; }
+
+                ivec3 coord = centre + ivec3(dx, dy, dz);
+                int at = field.index(coord);
+                if (at < 0) continue;
+                bool solid = field.solid[size_t(at)] != 0;
+                // A material brush cannot create geometry, so an empty cell is not a question it gets
+                // asked. This is also the cheap rejection that makes a big dab affordable on a thin
+                // surface: most of a ball around a wall is air.
+                if (!geometry && !solid) continue;
+
+                uint64_t key = packVoxelKey(coord);
+                if (editor.brushStrokeJournal.count(key) != 0) continue;
+
+                projv::editor::BrushContext context;
+                context.x = coord.x;
+                context.y = coord.y;
+                context.z = coord.z;
+                context.solid = solid;
+                if (wantsWorld) {
+                    projv::core::vec3 world = componentVoxelToWorld(space, coord);
+                    context.wx = world.x;
+                    context.wy = world.y;
+                    context.wz = world.z;
+                }
+                uint8_t slot = field.slot[size_t(at)];
+                uint32_t previousColor = solid ? componentVoxelColor(scene, component, slot) : 0u;
+                if (wantsMaterial) {
+                    context.slot = solid ? int(slot) : -1;
+                    if (solid) {
+                        float r = 0.0f, g = 0.0f, b = 0.0f;
+                        projv::unpackRGB10(previousColor, r, g, b);
+                        context.r = r;
+                        context.g = g;
+                        context.b = b;
+                        context.materialName = slot < record.materialPalette.size()
+                                             ? record.materialPalette[slot].name.c_str() : nullptr;
+                    }
+                }
+                if (!field.depth.empty()) context.depth = field.depthAt(coord);
+                if (wantsCrevice) context.crevice = brushCreviceAt(field, coord);
+                if (wantsNormal) brushNormalAt(field, coord, context.nx, context.ny, context.nz);
+                if (wantsDistance) {
+                    context.distance = radius > 0.0f ? std::sqrt(distanceSquared) / radius : 0.0f;
+                }
+
+                projv::editor::BrushVerdict verdict = projv::editor::brushEvaluate(invocation, context);
+                if (invocation.failed()) { truncated = false; break; }
+                if (verdict.action == projv::editor::BrushAction::Leave) continue;
+
+                uint32_t color = 0;
+                if (verdict.action == projv::editor::BrushAction::Write) {
+                    if (size_t(verdict.materialIndex) >= editor.brushPreviewColors.size()) continue;
+                    color = editor.brushPreviewColors[size_t(verdict.materialIndex)];
+                    // Nothing to do, and nothing to journal: recording a cell the brush "wrote" the
+                    // colour it already had would put an entry in the revert list for a cell that
+                    // never changed.
+                    if (solid && color == previousColor) continue;
+                }
+                if (verdict.action == projv::editor::BrushAction::Erase && !solid) continue;
+
+                EditorState::StrokeVoxel remembered;
+                remembered.coord = coord;
+                remembered.wasSolid = solid;
+                remembered.oldColor = previousColor;
+                editor.brushStrokeJournal.emplace(key, remembered);
+
+                if (verdict.action == projv::editor::BrushAction::Erase) {
+                    removeCoords.push_back(coord);
+                } else if (solid) {
+                    paintCoords.push_back(coord);
+                    paintColors.push_back(color);
+                } else {
+                    addCoords.push_back(coord);
+                    addColors.push_back(color);
+                }
+            }
+            if (invocation.failed()) break;
+        }
+        if (invocation.failed()) break;
+    }
+
+    editor.brushPreviewCalls += invocation.callCount();
+    editor.brushPreviewMilliseconds +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - dabStart).count();
+    editor.brushPreviewTruncated = editor.brushPreviewTruncated || truncated;
+
+    if (invocation.failed()) {
+        editor.brushStatus = "The brush raised an error -- see Output.";
+        // Whatever it managed before failing is still applied and still journalled, so the revert
+        // stays exact. Half a dab is a more useful thing to look at than none, and it is what the
+        // error is about.
+    }
+
+    size_t changed = paintCoords.size() + addCoords.size() + removeCoords.size();
+    editor.brushPreviewWrites += changed;
+    if (changed == 0) {
+        if (!invocation.failed() && considered > 0) {
+            editor.brushStatus = "Nothing changed here: the brush left every voxel of the dab alone.";
+        }
+        return;
+    }
+
+    editor.brushPreviewComponent = component;
+    // Painting first: a paint and an add are both queueVoxelAdd, but keeping them separate keeps the
+    // readout honest about which of the two a brush is doing.
+    applyVoxelPaint(&scene, &editor, component, paintCoords, paintColors);
+    applyVoxelSculpt(&scene, &editor, component, addCoords, addColors, true);
+    applyVoxelSculpt(&scene, &editor, component, removeCoords, std::vector<uint32_t>(), false);
+}
+
+// =============================================================================
+// Scatter
+// =============================================================================
+//
+// A scatter brush is not asked about cells. It is asked about **sites** -- points on the surface where
+// something might grow -- and it answers with a list of voxels rather than with one voxel's fate.
+//
+// Where the sites are is the editor's job, and it is the part that decides whether the tool feels
+// right. Three properties are wanted at once:
+//
+//   * **spread out.** Plants that clump into a mat are the failure mode of every naive scatter, so no
+//     two sites may be closer than `spacing`.
+//   * **stable under a second dab.** Sweeping back over ground you have already planted must not plant
+//     it again. That is what rules out choosing sites from the dab's own candidate list: the list
+//     depends on where the dab was centred, so the same ground gives different answers each pass.
+//   * **deterministic.** The same ground, the same settings, the same plants -- or a preview is not a
+//     preview of the stroke.
+//
+// All three fall out of choosing sites from a **global lattice** rather than from the dab. The
+// component's voxel space is divided into cells `spacing` across; each cell hashes to one offset
+// inside itself; a surface voxel is a site exactly when it sits at its own cell's offset. The dab then
+// only decides which cells are *visited* -- never which voxel within them wins -- so a cell answers the
+// same whether it was reached from the middle of a stroke or clipped by its edge.
+//
+// The lattice is 2D, in the two axes across the surface, with the third being whichever axis the
+// surface most faces. On ground that is the familiar thing: one plant per `spacing` x `spacing` column,
+// wherever the ground happens to be in that column. On a wall it is the same rule turned on its side.
+
+// A cheap, stable 2D hash. Distinct from the one the noise library uses -- this one only has to spread
+// site offsets evenly and be the same tomorrow, and keeping it here means changing the noise cannot
+// silently move every plant in the scene.
+static uint32_t scatterHash(int32_t a, int32_t b, uint32_t seed) {
+    uint32_t h = seed * 0x9E3779B9u;
+    h ^= uint32_t(a) * 0x85EBCA6Bu; h = (h << 13) | (h >> 19); h *= 0xC2B2AE35u;
+    h ^= uint32_t(b) * 0x27D4EB2Fu; h = (h << 17) | (h >> 15); h *= 0x165667B1u;
+    h ^= h >> 16;
+    return h;
+}
+
+// A parameter's value by name, or `fallback` when the brush does not declare it. This is how the
+// editor reads `spacing`, `density` and `seed` off a scatter brush -- by convention rather than by a
+// declaration naming which parameter means what, so a scatter brush's spacing is tuned in the same
+// panel as everything else with no second mechanism to learn.
+static double brushParamValueOr(const projv::editor::BrushDefinition& brush, const char* name,
+                                double fallback) {
+    for (size_t i = 0; i < brush.params.size() && i < brush.values.size(); i++) {
+        if (brush.params[i].name != name) continue;
+        switch (brush.params[i].type) {
+            case projv::editor::BrushParamType::Float:
+            case projv::editor::BrushParamType::Int:
+            case projv::editor::BrushParamType::Seed:
+                return brush.values[i].number;
+            default:
+                return fallback;
+        }
+    }
+    return fallback;
+}
+
+// One dab of a scatter brush.
+static void runBrushScatterDab(projv::Scene& scene, EditorState& editor,
+                               projv::editor::BrushDefinition& brush,
+                               projv::ComponentHandle component, projv::core::ivec3 centre) {
+    using projv::core::ivec3;
+    using projv::editor::BrushContextField;
+
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
+    if (!space.valid) {
+        editor.brushStatus = "That component has no voxel lattice to plant on.";
+        return;
+    }
+
+    std::string error;
+    if (!ensureBrushPalette(scene, editor, brush, component, error)) {
+        editor.brushStatus = error;
+        return;
+    }
+    projv::editor::BrushInvocation invocation = projv::editor::brushBeginStroke(brush, error);
+    if (!invocation.valid()) {
+        editor.brushStatus = error;
+        return;
+    }
+
+    int spacing = std::clamp(int(std::lround(brushParamValueOr(brush, projv::editor::BRUSH_SPACING_PARAM,
+                                                               3.0))), 1, 64);
+    double density = std::clamp(brushParamValueOr(brush, projv::editor::BRUSH_DENSITY_PARAM, 0.6),
+                                0.0, 1.0);
+    uint32_t seed = uint32_t(std::lround(brushParamValueOr(brush, "seed", 1.0)));
+
+    float radius = std::min(editor.brushPreviewRadius, BRUSH_PREVIEW_MAX_RADIUS);
+    int extent = int(std::floor(radius));
+    float radiusSquared = radius * radius;
+
+    BrushField field;
+    snapshotBrushField(scene, space, centre, extent, brush, field);
+
+    // The fit test the script reaches through pv.solid / pv.fits. It answers against the scene rather
+    // than the field snapshot, because a tree's headroom reaches far outside the dab's box -- and it
+    // counts what this dab has planted so far, so two plants cannot grow through each other.
+    const projv::Scene* scenePointer = &scene;
+    const ComponentVoxelSpace* spacePointer = &space;
+    std::unordered_set<uint64_t> plantedThisDab;
+    projv::editor::brushSetSolidQuery(brush, [scenePointer, spacePointer, &plantedThisDab]
+                                             (int32_t x, int32_t y, int32_t z) {
+        ivec3 coord(x, y, z);
+        if (plantedThisDab.count(packVoxelKey(coord)) != 0) return true;
+        uint8_t slot = 0;
+        return queryComponentVoxel(*scenePointer, *spacePointer, coord, slot);
+    });
+
+    bool wantsMaterial = brush.context.has(BrushContextField::Material);
+    bool wantsCrevice = brush.context.has(BrushContextField::Crevice);
+    bool wantsWorld = brush.context.has(BrushContextField::World);
+    bool wantsDistance = brush.context.has(BrushContextField::Distance);
+    const projv::ComponentRecord& record = scene.components[component];
+
+    std::vector<ivec3> addCoords;
+    std::vector<uint32_t> addColors;
+    std::vector<projv::editor::BrushPlacementVoxel> placement;
+
+    size_t sites = 0, planted = 0, rejected = 0;
+    bool truncated = false;
+    editor.brushPreviewScatterSites.clear();
+    editor.brushPreviewScatterPlanted.clear();
+    std::chrono::steady_clock::time_point dabStart = std::chrono::steady_clock::now();
+
+    static const ivec3 FACE_NEIGHBOURS[6] = {
+        ivec3(1, 0, 0), ivec3(-1, 0, 0), ivec3(0, 1, 0),
+        ivec3(0, -1, 0), ivec3(0, 0, 1), ivec3(0, 0, -1)
+    };
+
+    for (int dz = -extent; dz <= extent && !truncated; dz++) {
+        for (int dy = -extent; dy <= extent && !truncated; dy++) {
+            for (int dx = -extent; dx <= extent; dx++) {
+                float distanceSquared = float(dx * dx + dy * dy + dz * dz);
+                if (distanceSquared > radiusSquared) continue;
+
+                ivec3 coord = centre + ivec3(dx, dy, dz);
+                int at = field.index(coord);
+                if (at < 0 || !field.solid[size_t(at)]) continue;
+
+                // **Never plant on what this stroke has already planted.** A blade of grass is itself a
+                // solid voxel with air above it, so without this the second dab over the same ground
+                // finds every blade tip and grows another blade out of it -- a tower per site, taller
+                // every pass. The lattice cannot prevent it: the tip is in the same cell as the ground
+                // it stands on and satisfies the same offset test, at a different height.
+                //
+                // The journal is the record of what this stroke made, which makes it exactly the right
+                // question to ask, and it costs one hash lookup on a candidate that has already passed
+                // the far cheaper solidity test.
+                if (editor.brushStrokeJournal.count(packVoxelKey(coord)) != 0) continue;
+
+                // A surface voxel: solid, with somewhere to grow into.
+                bool exposed = false;
+                for (const ivec3& step : FACE_NEIGHBOURS) {
+                    if (!field.solidAt(coord + step)) { exposed = true; break; }
+                }
+                if (!exposed) continue;
+
+                float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+                brushNormalAt(field, coord, nx, ny, nz);
+
+                // Which way this bit of surface faces, and so which two axes the lattice runs in.
+                int axis = 1;
+                if (std::abs(nx) >= std::abs(ny) && std::abs(nx) >= std::abs(nz)) axis = 0;
+                else if (std::abs(nz) >= std::abs(ny) && std::abs(nz) >= std::abs(nx)) axis = 2;
+                int axisA = (axis + 1) % 3;
+                int axisB = (axis + 2) % 3;
+
+                int32_t cellA = projv::utils::floorDiv(coord[axisA], spacing);
+                int32_t cellB = projv::utils::floorDiv(coord[axisB], spacing);
+                uint32_t cellHash = scatterHash(cellA, cellB, seed);
+
+                // Is this cell planted at all, and is this the voxel it planted?
+                if (double(cellHash & 0xFFFFu) / 65535.0 > density) continue;
+                int32_t offsetA = int32_t((cellHash >> 16) % uint32_t(spacing));
+                int32_t offsetB = int32_t((cellHash >> 24) % uint32_t(spacing));
+                if (projv::utils::floorMod(coord[axisA], spacing) != offsetA) continue;
+                if (projv::utils::floorMod(coord[axisB], spacing) != offsetB) continue;
+
+                sites++;
+                if (sites > BRUSH_MAX_SCATTER_SITES) { truncated = true; break; }
+                // Kept for the readout and for the self-test, which checks the lattice's one real
+                // guarantee -- one site per cell -- against the sites themselves rather than trying to
+                // infer them from the shapes that grew out of them.
+                editor.brushPreviewScatterSites.push_back(coord);
+
+                projv::editor::BrushContext context;
+                context.x = coord.x;
+                context.y = coord.y;
+                context.z = coord.z;
+                context.solid = true;
+                context.nx = nx;
+                context.ny = ny;
+                context.nz = nz;
+                if (wantsWorld) {
+                    projv::core::vec3 world = componentVoxelToWorld(space, coord);
+                    context.wx = world.x;
+                    context.wy = world.y;
+                    context.wz = world.z;
+                }
+                if (wantsMaterial) {
+                    uint8_t slot = field.slot[size_t(at)];
+                    context.slot = int(slot);
+                    uint32_t packed = componentVoxelColor(scene, component, slot);
+                    projv::unpackRGB10(packed, context.r, context.g, context.b);
+                    context.materialName = slot < record.materialPalette.size()
+                                         ? record.materialPalette[slot].name.c_str() : nullptr;
+                }
+                if (!field.depth.empty()) context.depth = field.depthAt(coord);
+                if (wantsCrevice) context.crevice = brushCreviceAt(field, coord);
+                if (wantsDistance) {
+                    context.distance = radius > 0.0f ? std::sqrt(distanceSquared) / radius : 0.0f;
+                }
+
+                if (!projv::editor::brushEvaluateScatter(invocation, context, placement)) {
+                    if (invocation.failed()) break;
+                    continue;   // Nothing grows here, which is the ordinary answer.
+                }
+
+                // **The fit test, and it is all-or-nothing.** A placement whose every cell is free is
+                // planted; one that would grow through anything at all is refused whole. Planting the
+                // half that fits is what makes a scatter of trees look like a scatter of half trees,
+                // and "validate that it fits" is the entire request.
+                bool fits = true;
+                for (const projv::editor::BrushPlacementVoxel& voxel : placement) {
+                    ivec3 target = coord + ivec3(voxel.dx, voxel.dy, voxel.dz);
+                    if (target == coord) continue;   // The site itself is allowed to be solid.
+                    uint8_t slot = 0;
+                    if (queryComponentVoxel(scene, space, target, slot) ||
+                        plantedThisDab.count(packVoxelKey(target)) != 0) {
+                        fits = false;
+                        break;
+                    }
+                }
+                if (!fits) { rejected++; continue; }
+
+                for (const projv::editor::BrushPlacementVoxel& voxel : placement) {
+                    ivec3 target = coord + ivec3(voxel.dx, voxel.dy, voxel.dz);
+                    uint64_t key = packVoxelKey(target);
+                    if (editor.brushStrokeJournal.count(key) != 0) continue;
+                    if (size_t(voxel.materialIndex) >= editor.brushPreviewColors.size()) continue;
+
+                    EditorState::StrokeVoxel remembered;
+                    remembered.coord = target;
+                    uint8_t slot = 0;
+                    remembered.wasSolid = queryComponentVoxel(scene, space, target, slot);
+                    if (remembered.wasSolid) remembered.oldColor = componentVoxelColor(scene, component, slot);
+                    editor.brushStrokeJournal.emplace(key, remembered);
+
+                    plantedThisDab.insert(key);
+                    addCoords.push_back(target);
+                    addColors.push_back(editor.brushPreviewColors[size_t(voxel.materialIndex)]);
+                }
+                editor.brushPreviewScatterPlanted.push_back(coord);
+                planted++;
+            }
+            if (invocation.failed()) break;
+        }
+        if (invocation.failed()) break;
+    }
+
+    // Dropped before the lambda's captures go out of scope: the query holds references to locals of
+    // this function, and a brush that kept answering pv.solid after the dab would be reading a dead
+    // stack.
+    projv::editor::brushSetSolidQuery(brush, projv::editor::BrushSolidQuery());
+
+    editor.brushPreviewCalls += invocation.callCount();
+    editor.brushPreviewMilliseconds +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - dabStart).count();
+    editor.brushPreviewTruncated = editor.brushPreviewTruncated || truncated;
+
+    if (invocation.failed()) {
+        editor.brushStatus = "The brush raised an error -- see Output.";
+    }
+    if (addCoords.empty()) {
+        if (!invocation.failed()) {
+            editor.brushStatus = sites == 0
+                ? "No room for a site here: nothing on the surface at this spacing."
+                : ("Planted nothing: " + std::to_string(sites) + " site(s), " +
+                   std::to_string(rejected) + " refused for want of room.");
+        }
+        return;
+    }
+
+    editor.brushPreviewComponent = component;
+    editor.brushPreviewWrites += addCoords.size();
+    applyVoxelSculpt(&scene, &editor, component, addCoords, addColors, true);
+
+    editor.brushStatus = "Planted " + std::to_string(planted) + " of " + std::to_string(sites) +
+                         " site(s)" +
+                         (rejected > 0 ? ", " + std::to_string(rejected) + " with no room" : "") + ".";
+}
+
+// =============================================================================
+// The Custom tool
+// =============================================================================
+//
+// The Brush Lab's brushes, used on the document. Everything below the surface is shared with the
+// preview -- the same dab functions, the same palette resolution, the same fit test, the same journal
+// -- and only the two ends differ: a stroke begins by clearing the journal and ends by turning it into
+// a history entry rather than reverting it.
+//
+// That sharing is the point rather than an economy. A preview whose machinery differed from the tool's
+// would be a rehearsal of something else, and the first time the two disagreed the preview would stop
+// being worth looking at.
+
+static void beginCustomStroke(projv::Scene& scene, EditorState& editor) {
+    projv::editor::BrushDefinition* brush = selectedBrush(editor);
+    if (!brush) return;
+
+    // A preview left live in the Lab is reverted the moment the tab is left, so the journal should
+    // already be empty; clearing is belt and braces against a path that ever leaves it otherwise.
+    editor.brushStrokeJournal.clear();
+    editor.brushPreviewWrites = 0;
+    editor.brushPreviewCalls = 0;
+    editor.brushPreviewMilliseconds = 0.0;
+    editor.brushPreviewTruncated = false;
+    editor.brushPreviewComponent = projv::INVALID_COMPONENT_HANDLE;
+    editor.customStrokeActive = true;
+    editor.customStrokeComponent = projv::INVALID_COMPONENT_HANDLE;
+    editor.customStrokeBrushID = brush->id;
+    editor.brushPreviewRadius = editor.customBrushRadius;
+    (void)scene;
+}
+
+// Turns the journal into one history entry.
+//
+// Read out as a *difference* -- what each remembered cell held when the stroke began against what it
+// holds now -- rather than as a list of what the dabs did. A cell a stroke changed and then changed
+// back contributes nothing, which is exactly right: a scatter dab that planted a tree and a later one
+// that could not fit beside it should leave the same history entry as the first dab alone.
+//
+// Four lists, because one stroke can both add and remove: a geometry brush carves and fills within a
+// single drag, so undo has to delete what appeared *and* restore what vanished.
+static void endCustomStroke(projv::Scene& scene, EditorState& editor) {
+    if (!editor.customStrokeActive) return;
+    editor.customStrokeActive = false;
+
+    projv::ComponentHandle component = editor.brushPreviewComponent;
+    // Palette entries the stroke created stay. They are part of the edit now -- voxels reference them,
+    // and the numbering above them is data -- so the list is dropped rather than unwound. Undoing the
+    // stroke leaves them behind, unused, exactly as undoing an additive sculpt leaves an empty Grid
+    // cell behind; the Palette panel's own Remove entry is how they go.
+    editor.brushPreviewCreatedEntries.clear();
+    editor.brushPreviewCreatedIn = projv::INVALID_COMPONENT_HANDLE;
+
+    if (editor.brushStrokeJournal.empty() || component == projv::INVALID_COMPONENT_HANDLE ||
+        component >= scene.components.size()) {
+        editor.brushStrokeJournal.clear();
+        return;
+    }
+
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
+    auto undoRemove = std::make_shared<std::vector<projv::core::ivec3>>();
+    auto undoRestore = std::make_shared<std::vector<projv::core::ivec3>>();
+    auto undoColors = std::make_shared<std::vector<uint32_t>>();
+    auto redoAdd = std::make_shared<std::vector<projv::core::ivec3>>();
+    auto redoColors = std::make_shared<std::vector<uint32_t>>();
+    auto redoRemove = std::make_shared<std::vector<projv::core::ivec3>>();
+
+    for (const std::pair<const uint64_t, EditorState::StrokeVoxel>& entry : editor.brushStrokeJournal) {
+        const EditorState::StrokeVoxel& before = entry.second;
+        uint8_t slot = 0;
+        bool nowSolid = space.valid && queryComponentVoxel(scene, space, before.coord, slot);
+        uint32_t nowColor = nowSolid ? componentVoxelColor(scene, component, slot) : 0u;
+
+        if (nowSolid == before.wasSolid && (!nowSolid || nowColor == before.oldColor)) continue;
+
+        if (nowSolid) {
+            redoAdd->push_back(before.coord);
+            redoColors->push_back(nowColor);
+        } else {
+            redoRemove->push_back(before.coord);
+        }
+        if (before.wasSolid) {
+            undoRestore->push_back(before.coord);
+            undoColors->push_back(before.oldColor);
+        } else {
+            undoRemove->push_back(before.coord);
+        }
+    }
+    editor.brushStrokeJournal.clear();
+
+    size_t count = undoRemove->size() + undoRestore->size();
+    if (count == 0) return;
+
+    projv::editor::BrushDefinition* brush = editor.brushLibrary.find(editor.customStrokeBrushID);
+    std::string brushName = brush ? brush->name : editor.customStrokeBrushID;
+
+    projv::Scene* scenePointer = &scene;
+    EditorState* editorPointer = &editor;
+
+    projv::editor::EditRecord record;
+    record.label = brushName + " in " + scene.components[component].name;
+    record.memoryCost = count * (sizeof(projv::core::ivec3) + sizeof(uint32_t)) +
+                        redoAdd->size() * (sizeof(projv::core::ivec3) + sizeof(uint32_t));
+    // Removals before additions in both directions, so a cell that changed hands is emptied before it
+    // is refilled rather than the two writes racing over one coordinate.
+    record.undo = [=] {
+        applyVoxelSculpt(scenePointer, editorPointer, component, *undoRemove,
+                         std::vector<uint32_t>(), false);
+        applyVoxelSculpt(scenePointer, editorPointer, component, *undoRestore, *undoColors, true);
+    };
+    record.redo = [=] {
+        applyVoxelSculpt(scenePointer, editorPointer, component, *redoRemove,
+                         std::vector<uint32_t>(), false);
+        applyVoxelSculpt(scenePointer, editorPointer, component, *redoAdd, *redoColors, true);
+    };
+    editor.history.record(std::move(record), ImGui::GetTime());
+
+    editor.statusMessage = brushName + ": " + std::to_string(count) + " voxel" +
+                           (count == 1 ? "" : "s") + " in " + scene.components[component].name;
+}
+
+// The pick handler for both a preview dab and a Custom-tool dab, called from processVoxelPick.
+static void processBrushPreviewSample(projv::Scene& scene, EditorState& editor,
+                                     const projv::utils::VoxelPick& pick) {
+    // A stroke keeps the brush it began with. The panel cannot be reached while the button is held,
+    // but the library is polled for changes every frame the Lab is open and a reload can land mid-drag
+    // -- and one history entry describing two different brushes is not a thing a user can undo.
+    projv::editor::BrushDefinition* brush =
+        editor.customStrokeActive && !editor.customStrokeBrushID.empty()
+            ? editor.brushLibrary.find(editor.customStrokeBrushID)
+            : selectedBrush(editor);
+    if (!brush) return;
+    if (!pick.hit) {
+        editor.brushStatus = "Nothing under the cursor.";
+        return;
+    }
+    // A stroke is confined to one component for the whole of its life: the journal is keyed on
+    // component-space coordinates, and letting a drag wander onto a second object would file its cells
+    // under the first one's lattice -- and then undo them into the wrong place.
+    if (editor.brushPreviewComponent != projv::INVALID_COMPONENT_HANDLE &&
+        pick.component != editor.brushPreviewComponent) {
+        editor.brushStatus = editor.customStrokeActive
+            ? "This stroke stays on " + scene.components[editor.brushPreviewComponent].name + "."
+            : "Preview stays on " + scene.components[editor.brushPreviewComponent].name +
+              " until it is reverted.";
+        if (editor.mode == EditorMode::Edit) editor.statusMessage = editor.brushStatus;
+        return;
+    }
+    projv::core::ivec3 coord;
+    if (!pickToComponentVoxelCoord(scene, pick, coord)) {
+        editor.brushStatus = "That voxel is not somewhere a brush can be aimed.";
+        return;
+    }
+    bool scattering = brush->kind == projv::editor::BrushKind::Scatter;
+
+    // Point the palette at what is being painted. The strip along the bottom is where this brush's
+    // roles are assigned and its entries edited, so it has to be showing the palette those roles are
+    // actually resolved against -- otherwise a swatch says one colour and the voxels come out another,
+    // and the assign gesture binds against a palette the stroke never consults.
+    if (pick.component < scene.components.size() &&
+        !scene.components[pick.component].materialPalette.empty() &&
+        editor.paletteComponent != pick.component) {
+        selectPaletteComponent(editor, pick.component);
+        invalidatePaletteCaches(&editor);
+    }
+
+    if (scattering) {
+        runBrushScatterDab(scene, editor, *brush, pick.component, coord);
+    } else {
+        runBrushPreviewDab(scene, editor, *brush, pick.component, coord);
+    }
+
+    // The dab functions report through brushStatus, which is the Lab's status bar. In the Edit tab
+    // that bar is not on screen, so the same sentence goes to the one that is -- otherwise the Custom
+    // tool's only way of saying "nothing changed here" or "the palette is full" is silence.
+    if (editor.mode == EditorMode::Edit && !editor.brushStatus.empty()) {
+        editor.statusMessage = editor.brushStatus;
+    }
+}
+
+// --- The panels -------------------------------------------------------------------------------
+
+// The library list, down the left.
+static void drawBrushLibraryColumn(projv::Scene& scene, EditorState& editor) {
+    projv::editor::BrushLibrary& library = editor.brushLibrary;
+
+    ImGui::TextDisabled("Brushes");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%zu)", library.brushes.size());
+
+    float buttonWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
+    if (ImGui::Button("New", ImVec2(buttonWidth, 0.0f))) {
+        editor.brushCreateDialogOpen = true;
+        editor.brushCreateIsDuplicate = false;
+        editor.brushCreateError.clear();
+        editor.brushCreateID[0] = '\0';
+        editor.brushCreateName[0] = '\0';
+        editor.brushCreateKind = 0;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Write a new brush from a working template.");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(selectedBrush(editor) == nullptr);
+    if (ImGui::Button("Copy", ImVec2(buttonWidth, 0.0f))) {
+        projv::editor::BrushDefinition* brush = selectedBrush(editor);
+        editor.brushCreateDialogOpen = true;
+        editor.brushCreateIsDuplicate = true;
+        editor.brushCreateError.clear();
+        std::snprintf(editor.brushCreateID, sizeof(editor.brushCreateID), "%s_copy",
+                      brush ? brush->id.c_str() : "brush");
+        std::snprintf(editor.brushCreateName, sizeof(editor.brushCreateName), "%s copy",
+                      brush ? brush->name.c_str() : "Brush");
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Copy this brush, its tuned values included, under a new name.");
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Rescan", ImVec2(buttonWidth, 0.0f))) {
+        // Preview state names a brush and a component; both could be gone after a rescan.
+        endBrushPreview(scene, editor);
+        projv::editor::brushLibraryLoad(library, library.folder, true);
+        editor.brushSourceLoadedFor.clear();
+        editor.brushStatus = "Reloaded " + std::to_string(library.brushes.size()) + " brushes.";
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Read the folder again, picking up files added or removed outside the\n"
+                          "editor. Edits to a file already listed are picked up on their own.");
+    }
+
+    ImGui::Separator();
+
+    if (!library.folderError.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
+        ImGui::TextWrapped("%s", library.folderError.c_str());
+        ImGui::PopStyleColor();
+        return;
+    }
+    if (library.brushes.empty()) {
+        ImGui::TextWrapped("No brushes in this folder yet. New writes one that works, which is the\n"
+                           "shortest way to see what a brush is made of.");
+        return;
+    }
+
+    ImGui::BeginChild("##brushList", ImVec2(0.0f, -ImGui::GetFrameHeightWithSpacing()));
+    for (std::shared_ptr<projv::editor::BrushDefinition>& entry : library.brushes) {
+        projv::editor::BrushDefinition& brush = *entry;
+        bool selected = brush.id == editor.selectedBrushID;
+        bool broken = !brush.loadError.empty();
+
+        if (broken) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
+        // Two lines per entry: the brush's name, and its kind under it in grey. The kind is the one
+        // thing that decides what the brush can do, so it belongs in the list rather than only in the
+        // inspector.
+        if (ImGui::Selectable(("##sel" + brush.id).c_str(), selected,
+                              ImGuiSelectableFlags_None,
+                              ImVec2(0.0f, ImGui::GetTextLineHeight() * 2.2f))) {
+            if (brush.id != editor.selectedBrushID) {
+                // Switching brushes mid-preview would leave the first brush's marks on the model with
+                // the second brush's name against them.
+                endBrushPreview(scene, editor);
+                editor.selectedBrushID = brush.id;
+                editor.brushSourceLoadedFor.clear();
+                editor.brushPreviewColors.clear();
+                editor.brushPreviewPaletteBrush.clear();
+            }
+        }
+        ImVec2 rowMin = ImGui::GetItemRectMin();
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        drawList->AddText(ImVec2(rowMin.x + 4.0f, rowMin.y + 2.0f),
+                          ImGui::GetColorU32(broken ? ImGuiCol_Text : ImGuiCol_Text),
+                          broken ? (brush.id + "  (error)").c_str() : brush.name.c_str());
+        drawList->AddText(ImVec2(rowMin.x + 4.0f, rowMin.y + 2.0f + ImGui::GetTextLineHeight()),
+                          ImGui::GetColorU32(ImGuiCol_TextDisabled),
+                          broken ? "will not load"
+                                 : projv::editor::brushKindLabel(brush.kind));
+        if (broken) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", broken ? brush.loadError.c_str()
+                                           : (brush.description.empty() ? brush.sourcePath.c_str()
+                                                                        : brush.description.c_str()));
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::TextDisabled("%s", library.folder.c_str());
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", library.folder.c_str());
+}
+
+// Which palette entry a brush role resolves to right now, looked up live rather than cached.
+//
+// Live because the palette is the source of truth and the user may have recoloured the entry a moment
+// ago in the strip below -- a cached swatch would be showing them the colour it used to be. Returns
+// false when no entry of that name exists yet, which is not an error: it means the brush would create
+// one, and the caller draws the declared colour as the *proposal* it is.
+static bool resolveBrushRoleColor(const projv::Scene& scene, const EditorState& editor,
+                                  const std::string& entryName, ImVec4& out, int& slotOut) {
+    slotOut = -1;
+    if (editor.paletteComponent >= scene.components.size() || entryName.empty()) return false;
+    const projv::ComponentRecord& record = scene.components[editor.paletteComponent];
+    uint8_t found = projv::utils::findMaterialByName(record, entryName);
+    if (found == projv::INVALID_MATERIAL) return false;
+    slotOut = int(found);
+    out = materialSwatchColor(record.materialPalette[found].packedColor);
+    return true;
+}
+
+// Arms the assign gesture: the next click on a palette entry gives it to this role.
+static void armBrushBinding(EditorState& editor, const std::string& declaredName,
+                            const std::string& label) {
+    editor.brushBindingRole = declaredName;
+    editor.brushBindingRoleLabel = label;
+    editor.brushBindingPicked.clear();
+    editor.brushBindingPickedValid = false;
+    editor.brushStatus = "Click an entry in the palette below to give it to \"" + label + "\".";
+}
+
+// One row of the role list: a swatch that arms the gesture, the role's name, and where it points.
+//
+// The swatch is a button rather than a colour picker, and that is the whole change this section is
+// about. A picker here would be a second place to choose a colour -- one that writes a number into a
+// brush rather than into the palette, and so one that can disagree with it. Clicking here says *which
+// entry*, and the entry's colour is edited where entries are edited.
+static bool drawBrushRoleRow(projv::Scene& scene, EditorState& editor,
+                             projv::editor::BrushDefinition& brush,
+                             const projv::editor::BrushMaterialSlot& role, int index) {
+    bool changed = false;
+    ImGui::PushID(index);
+
+    ImVec4 color(role.color[0], role.color[1], role.color[2], 1.0f);
+    int paletteSlot = -1;
+    bool exists = resolveBrushRoleColor(scene, editor, role.name, color, paletteSlot);
+    bool arming = editor.brushBindingRole == role.declaredName;
+
+    float swatchSize = ImGui::GetFrameHeight();
+    if (ImGui::ColorButton("##roleSwatch", color,
+                           ImGuiColorEditFlags_NoPicker | ImGuiColorEditFlags_NoTooltip |
+                           ImGuiColorEditFlags_NoDragDrop,
+                           ImVec2(swatchSize, swatchSize))) {
+        armBrushBinding(editor, role.declaredName, role.declaredName);
+    }
+    // An entry that does not exist yet is drawn hollow, so "this is a proposal the brush will create"
+    // and "this is an entry that exists" are not the same picture.
+    ImVec2 swatchMin = ImGui::GetItemRectMin();
+    ImVec2 swatchMax = ImGui::GetItemRectMax();
+    if (!exists) {
+        ImGui::GetWindowDrawList()->AddRect(swatchMin, swatchMax, IM_COL32(210, 210, 210, 200), 2.0f,
+                                            0, 1.0f);
+    }
+    if (arming) {
+        ImGui::GetWindowDrawList()->AddRect(ImVec2(swatchMin.x - 2.0f, swatchMin.y - 2.0f),
+                                            ImVec2(swatchMax.x + 2.0f, swatchMax.y + 2.0f),
+                                            IM_COL32(255, 200, 90, 240), 3.0f, 0, 2.0f);
+    }
+    if (ImGui::IsItemHovered()) {
+        if (exists) {
+            ImGui::SetTooltip("%s\nwrites palette entry %d \"%s\"\n\nClick to point it at a different"
+                              " entry.", role.declaredName.c_str(), paletteSlot, role.name.c_str());
+        } else {
+            ImGui::SetTooltip("%s\nno entry called \"%s\" yet -- the brush will create one in this\n"
+                              "colour the first time it runs.\n\nClick to point it at an entry that\n"
+                              "already exists instead.", role.declaredName.c_str(), role.name.c_str());
+        }
+    }
+
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::TextUnformatted(role.declaredName.c_str());
+    if (role.bound) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("-> %s", role.name.c_str());
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Assigned to the entry called \"%s\". Stored beside the brush, by name,\n"
+                              "so it still means this entry after the palette is reordered -- and\n"
+                              "means the same thing on another model that has one.", role.name.c_str());
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("x")) {
+            projv::editor::brushSetMaterialBinding(brush, role.declaredName, std::string());
+            changed = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Back to the entry named after the role itself.");
+        }
+    } else if (role.paramIndex >= 0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(setting)");
+    }
+    ImGui::EndGroup();
+
+    ImGui::PopID();
+    return changed;
+}
+
+// Every palette entry the brush can write, and what each is pointed at.
+static void drawBrushMaterialRoles(projv::Scene& scene, EditorState& editor,
+                                   projv::editor::BrushDefinition& brush) {
+    std::vector<projv::editor::BrushMaterialSlot> roles;
+    projv::editor::brushExpandMaterials(brush, roles);
+
+    // The palette cost, stated. This is the number that decides whether a brush can run on a given
+    // component at all, and the reason a brush returns an index rather than a colour.
+    ImGui::Text("%zu palette %s", roles.size(), roles.size() == 1 ? "entry" : "entries");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("A component's palette holds 255 entries, and a brush's roles are resolved\n"
+                          "into it once when a stroke begins. That ceiling is why a brush returns an\n"
+                          "index into this list rather than a colour of its own.");
+    }
+    if (editor.paletteComponent < scene.components.size()) {
+        const projv::ComponentRecord& target = scene.components[editor.paletteComponent];
+        size_t used = target.materialPalette.size();
+        ImGui::SameLine();
+        ImGui::TextDisabled("| %s has %zu of %u", target.name.c_str(), used,
+                            projv::MAX_MATERIALS_PER_COMPONENT - 1);
+    }
+
+    if (roles.empty()) {
+        ImGui::TextDisabled("Nothing -- this brush writes no materials.");
+        return;
+    }
+
+    bool changed = false;
+    for (size_t i = 0; i < roles.size(); i++) {
+        changed |= drawBrushRoleRow(scene, editor, brush, roles[i], int(i));
+    }
+    if (changed) {
+        // A rebinding changes which entries a stroke resolves to, so the cached colours are of the
+        // wrong entries now.
+        editor.brushPreviewColors.clear();
+        editor.brushPreviewPaletteBrush.clear();
+        editor.brushValuesTouchedAt = ImGui::GetTime();
+    }
+}
+
+// One parameter's widget. Returns true when the value moved.
+//
+// `scene`, `editor` and `brush` are here for exactly one type: a colour setting is a reference to a
+// palette entry, so drawing it means resolving that entry and arming the assign gesture. Every other
+// type is a self-contained value and ignores all three.
+static bool drawBrushParamWidget(projv::Scene& scene, EditorState& editor,
+                                 projv::editor::BrushDefinition& brush,
+                                 const projv::editor::BrushParam& param,
+                                 projv::editor::BrushParamValue& value) {
+    using projv::editor::BrushParamType;
+    bool changed = false;
+    ImGui::PushID(param.name.c_str());
+
+    switch (param.type) {
+        case BrushParamType::Float: {
+            float scratch = float(value.number);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::DragFloat("##v", &scratch, float(param.step), float(param.minimum),
+                                 float(param.maximum), "%.4g")) {
+                value.number = std::clamp(double(scratch), param.minimum, param.maximum);
+                changed = true;
+            }
+            break;
+        }
+        case BrushParamType::Int: {
+            int scratch = int(std::lround(value.number));
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::DragInt("##v", &scratch, 1.0f, int(param.minimum), int(param.maximum))) {
+                value.number = double(std::clamp(scratch, int(param.minimum), int(param.maximum)));
+                changed = true;
+            }
+            break;
+        }
+        case BrushParamType::Seed: {
+            // The re-roll button is the point of this type: "give me a different arrangement" is a
+            // different verb from "set this number to 8891", and it is the one actually wanted.
+            int scratch = int(std::lround(value.number));
+            float buttonWidth = ImGui::CalcTextSize("Roll").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+            ImGui::SetNextItemWidth(-(buttonWidth + ImGui::GetStyle().ItemInnerSpacing.x));
+            if (ImGui::DragInt("##v", &scratch, 1.0f, int(param.minimum), int(param.maximum))) {
+                value.number = double(std::clamp(scratch, int(param.minimum), int(param.maximum)));
+                changed = true;
+            }
+            ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+            if (ImGui::Button("Roll")) {
+                // Stepped by a large odd number rather than randomised: the same click gives the same
+                // next seed, so a sequence of arrangements can be walked back through. A brush is a
+                // pure function of its seed and this keeps the whole loop reproducible.
+                double span = std::max(1.0, param.maximum - param.minimum);
+                value.number = param.minimum + std::fmod(value.number - param.minimum + 65537.0, span);
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Another arrangement. Steps by a fixed amount rather than at\n"
+                                  "random, so the sequence can be walked back through.");
+            }
+            break;
+        }
+        case BrushParamType::Bool:
+            if (ImGui::Checkbox("##v", &value.boolean)) changed = true;
+            break;
+        case BrushParamType::Color: {
+            // **Not a colour picker.** A colour setting names a palette entry: click it, then click
+            // the entry in the palette below. There is no RGB to edit here because editing the colour
+            // is something you do to the entry, in the one place entries are edited -- a picker here
+            // would write a number into the brush that the palette knows nothing about, and the two
+            // would then disagree about what "the tint" is.
+            std::string entryName = projv::editor::brushMaterialBinding(brush, param.name);
+            if (entryName.empty()) entryName = param.name;
+
+            ImVec4 color(value.color[0], value.color[1], value.color[2], 1.0f);
+            int paletteSlot = -1;
+            bool exists = resolveBrushRoleColor(scene, editor, entryName, color, paletteSlot);
+            bool arming = editor.brushBindingRole == param.name;
+
+            float swatchSize = ImGui::GetFrameHeight();
+            if (ImGui::ColorButton("##v", color,
+                                   ImGuiColorEditFlags_NoPicker | ImGuiColorEditFlags_NoTooltip |
+                                   ImGuiColorEditFlags_NoDragDrop,
+                                   ImVec2(swatchSize, swatchSize))) {
+                armBrushBinding(editor, param.name, param.label);
+            }
+            ImVec2 swatchMin = ImGui::GetItemRectMin();
+            ImVec2 swatchMax = ImGui::GetItemRectMax();
+            if (!exists) {
+                ImGui::GetWindowDrawList()->AddRect(swatchMin, swatchMax, IM_COL32(210, 210, 210, 200),
+                                                    2.0f, 0, 1.0f);
+            }
+            if (arming) {
+                ImGui::GetWindowDrawList()->AddRect(ImVec2(swatchMin.x - 2.0f, swatchMin.y - 2.0f),
+                                                    ImVec2(swatchMax.x + 2.0f, swatchMax.y + 2.0f),
+                                                    IM_COL32(255, 200, 90, 240), 3.0f, 0, 2.0f);
+            }
+            // Two calls, not one with a conditional format string: the two take different arguments,
+            // and a single call would hand the second format's %s an int.
+            if (ImGui::IsItemHovered() && exists) {
+                ImGui::SetTooltip("Palette entry %d \"%s\".\nClick to assign a different one.",
+                                  paletteSlot, entryName.c_str());
+            } else if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("No entry called \"%s\" yet -- one is created in this colour the\n"
+                                  "first time the brush runs. Click to point this setting at an entry\n"
+                                  "that already exists.", entryName.c_str());
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted(entryName.c_str());
+            if (!projv::editor::brushMaterialBinding(brush, param.name).empty()) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("x")) {
+                    projv::editor::brushSetMaterialBinding(brush, param.name, std::string());
+                    changed = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Back to the entry named after the setting itself.");
+                }
+            }
+            break;
+        }
+        case BrushParamType::Enum: {
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::BeginCombo("##v", value.text.c_str())) {
+                for (const std::string& option : param.options) {
+                    if (ImGui::Selectable(option.c_str(), option == value.text)) {
+                        value.text = option;
+                        changed = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            break;
+        }
+        case BrushParamType::Text:
+        case BrushParamType::Asset: {
+            char scratch[512];
+            std::snprintf(scratch, sizeof(scratch), "%s", value.text.c_str());
+            ImGui::SetNextItemWidth(-1.0f);
+            const char* hint = param.type == BrushParamType::Asset ? "path to a compose folder"
+                                                                   : "";
+            if (ImGui::InputTextWithHint("##v", hint, scratch, sizeof(scratch))) {
+                value.text = scratch;
+                changed = true;
+            }
+            break;
+        }
+    }
+
+    ImGui::PopID();
+    return changed;
+}
+
+// The Parameters tab: the settings the brush declared, plus the ones added here.
+//
+// **Both sets are drawn the same way and read the same way by the script**, which is the whole of what
+// "declare them in the script, or add them in the editor" has to mean. A parameter added here goes in
+// the sidecar and arrives in `p` exactly as a declared one does, so a brush can be tuned into shape
+// with the panel in front of you and the declaration written down afterwards -- which is the order
+// this actually happens in.
+static void drawBrushParametersTab(projv::Scene& scene, EditorState& editor,
+                                   projv::editor::BrushDefinition& brush) {
+    using projv::editor::BrushParamType;
+
+    if (brush.params.empty()) {
+        ImGui::TextWrapped("This brush declares no settings. Add a `params` list to its script, or "
+                           "add one below and read it as `p.<name>`.");
+    }
+
+    bool changed = false;
+    int removeIndex = -1;
+    for (size_t i = 0; i < brush.params.size() && i < brush.values.size(); i++) {
+        const projv::editor::BrushParam& param = brush.params[i];
+        ImGui::PushID(int(i));
+
+        // A checkbox is its own label, so it gets one line instead of the three every other type
+        // takes. That is worth a special case: a brush offering a choice of things to plant offers it
+        // as six or seven of these, and read as "label / widget / reset" triples they stop looking
+        // like a list of options and start looking like a wall of settings. There is no Reset either
+        // -- clicking the box is the reset -- and Reset all still covers it.
+        if (param.type == projv::editor::BrushParamType::Bool) {
+            if (ImGui::Checkbox(param.label.c_str(), &brush.values[i].boolean)) changed = true;
+            if (!param.tooltip.empty() && ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", param.tooltip.c_str());
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("p.%s%s", param.name.c_str(), param.editorDefined ? "  (added here)" : "");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("How the script reads it: `p.%s`", param.name.c_str());
+            }
+            ImGui::PopID();
+            continue;
+        }
+
+        ImGui::TextUnformatted(param.label.c_str());
+        if (param.editorDefined) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(added here)");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Defined in this editor rather than in the script, and stored in\n"
+                                  "%s. The script reads it exactly as it reads its own.",
+                                  std::filesystem::path(brush.sidecarPath).filename().string().c_str());
+            }
+        }
+        if (!param.tooltip.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", param.tooltip.c_str());
+        }
+
+        if (drawBrushParamWidget(scene, editor, brush, param, brush.values[i])) changed = true;
+
+        // Reset and, for an editor-defined one, remove. On the same line as the widget would crowd
+        // it; underneath in grey is where a secondary action belongs.
+        if (ImGui::SmallButton("Reset")) {
+            projv::editor::brushResetParam(brush, i);
+            changed = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Back to the default the %s gives it.",
+                              param.editorDefined ? "definition here" : "script");
+        }
+        if (param.editorDefined) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Remove")) removeIndex = int(i);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("p.%s", param.name.c_str());
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("How the script reads it: `p.%s`", param.name.c_str());
+        }
+
+        ImGui::Spacing();
+        ImGui::PopID();
+    }
+
+    if (removeIndex >= 0) {
+        projv::editor::brushRemoveEditorParam(brush, size_t(removeIndex));
+        changed = true;
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button("Reset all")) {
+        projv::editor::brushResetParams(brush);
+        changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Add a setting...")) ImGui::OpenPopup("##addBrushParam");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Add a setting the script has not declared. It is stored beside the brush\n"
+                          "and read as `p.<name>` -- which is how a setting usually starts life,\n"
+                          "before it is written into the script.");
+    }
+
+    if (ImGui::BeginPopup("##addBrushParam")) {
+        ImGui::SetNextItemWidth(220.0f);
+        ImGui::InputTextWithHint("##name", "name (as p.name)", editor.brushNewParamName,
+                                 sizeof(editor.brushNewParamName));
+        ImGui::SetNextItemWidth(220.0f);
+        ImGui::InputTextWithHint("##label", "label shown here", editor.brushNewParamLabel,
+                                 sizeof(editor.brushNewParamLabel));
+        ImGui::SetNextItemWidth(220.0f);
+        if (ImGui::BeginCombo("##type", projv::editor::brushParamTypeLabel(
+                static_cast<BrushParamType>(editor.brushNewParamType)))) {
+            for (int i = 0; i < projv::editor::BRUSH_PARAM_TYPE_COUNT; i++) {
+                BrushParamType type = static_cast<BrushParamType>(i);
+                if (ImGui::Selectable(projv::editor::brushParamTypeLabel(type),
+                                      editor.brushNewParamType == i)) {
+                    editor.brushNewParamType = i;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        BrushParamType type = static_cast<BrushParamType>(editor.brushNewParamType);
+        if (type == BrushParamType::Float || type == BrushParamType::Int ||
+            type == BrushParamType::Seed) {
+            ImGui::SetNextItemWidth(105.0f);
+            ImGui::InputDouble("##min", &editor.brushNewParamMin, 0.0, 0.0, "%.4g");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(105.0f);
+            ImGui::InputDouble("##max", &editor.brushNewParamMax, 0.0, 0.0, "%.4g");
+            ImGui::SameLine();
+            ImGui::TextDisabled("range");
+        }
+        if (type == BrushParamType::Enum) {
+            ImGui::SetNextItemWidth(220.0f);
+            ImGui::InputTextWithHint("##options", "choices, comma separated",
+                                     editor.brushNewParamOptions,
+                                     sizeof(editor.brushNewParamOptions));
+        }
+
+        if (ImGui::Button("Add")) {
+            projv::editor::BrushParam param;
+            param.name = editor.brushNewParamName;
+            param.label = editor.brushNewParamLabel[0] ? editor.brushNewParamLabel : param.name;
+            param.type = type;
+            param.minimum = std::min(editor.brushNewParamMin, editor.brushNewParamMax);
+            param.maximum = std::max(editor.brushNewParamMin, editor.brushNewParamMax);
+            param.step = std::max(1.0e-6, (param.maximum - param.minimum) / 200.0);
+            param.defaultNumber = param.minimum;
+            if (type == BrushParamType::Enum) {
+                std::string options = editor.brushNewParamOptions;
+                size_t start = 0;
+                while (start <= options.size()) {
+                    size_t comma = options.find(',', start);
+                    std::string option = options.substr(start, comma == std::string::npos
+                                                               ? std::string::npos : comma - start);
+                    // Trimmed, because "a, b, c" is how anyone types a list.
+                    size_t from = option.find_first_not_of(" \t");
+                    size_t to = option.find_last_not_of(" \t");
+                    if (from != std::string::npos) param.options.push_back(option.substr(from, to - from + 1));
+                    if (comma == std::string::npos) break;
+                    start = comma + 1;
+                }
+                if (!param.options.empty()) param.defaultText = param.options.front();
+            }
+            if (projv::editor::brushAddEditorParam(brush, param)) {
+                changed = true;
+                editor.brushNewParamName[0] = '\0';
+                editor.brushNewParamLabel[0] = '\0';
+                editor.brushNewParamOptions[0] = '\0';
+                ImGui::CloseCurrentPopup();
+            } else {
+                editor.brushStatus = param.name.empty()
+                    ? "A setting needs a name."
+                    : "There is already a setting called " + param.name + ".";
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    if (changed) {
+        brush.valuesDirty = true;
+        editor.brushValuesTouchedAt = ImGui::GetTime();
+        // Changing a setting invalidates what the preview has drawn with the old one, but it does NOT
+        // revert it: a preview is built up dab by dab and having it vanish because a slider moved
+        // would make comparing two settings impossible. The readout says the marks are mixed.
+    }
+}
+
+// The Brush tab: what the declaration says, read back.
+static void drawBrushDeclarationTab(projv::Scene& scene, EditorState& editor,
+                                    projv::editor::BrushDefinition& brush) {
+    using projv::editor::BrushContextField;
+
+    ImGui::TextDisabled("Name");
+    ImGui::TextWrapped("%s", brush.name.c_str());
+    if (!brush.description.empty()) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("What it does");
+        ImGui::TextWrapped("%s", brush.description.c_str());
+    }
+    if (!brush.author.empty()) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("By %s", brush.author.c_str());
+    }
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Kind");
+    ImGui::TextUnformatted(projv::editor::brushKindLabel(brush.kind));
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", projv::editor::brushKindHint(brush.kind));
+
+    // What the editor reads off a scatter brush rather than the script, said out loud where the two
+    // numbers can be seen next to each other -- the pair is what decides whether a stroke plants a
+    // meadow or three tufts, and neither is legible from the Settings list alone.
+    if (brush.kind == projv::editor::BrushKind::Scatter) {
+        int spacing = int(std::lround(brushParamValueOr(brush, projv::editor::BRUSH_SPACING_PARAM, 3.0)));
+        double density = brushParamValueOr(brush, projv::editor::BRUSH_DENSITY_PARAM, 0.6);
+        ImGui::TextDisabled("one site per %d voxels, %d%% of them taken", std::max(1, spacing),
+                            int(std::lround(std::clamp(density, 0.0, 1.0) * 100.0)));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Sites are chosen on a lattice fixed to the model, not to the dab, so\n"
+                              "sweeping back over ground you have already planted does not plant it\n"
+                              "again. Tuned by the brush's own `spacing` and `density` settings.");
+        }
+    }
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("What it reads");
+    if (!brush.context.any()) {
+        ImGui::TextDisabled("nothing -- it is the same everywhere");
+    }
+    for (int i = 0; i < projv::editor::BRUSH_CONTEXT_FIELD_COUNT; i++) {
+        BrushContextField fieldKind = static_cast<BrushContextField>(i);
+        if (!brush.context.has(fieldKind)) continue;
+        ImGui::BulletText("%s", projv::editor::brushContextFieldName(fieldKind));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", projv::editor::brushContextFieldHint(fieldKind));
+        }
+    }
+    if (brush.context.has(BrushContextField::SkinDepth)) {
+        ImGui::TextDisabled("  measured to %d voxels deep", brush.maxSkinDepth);
+    }
+    if (brush.context.has(BrushContextField::Crevice)) {
+        ImGui::TextDisabled("  averaged over a %d-voxel ball", brush.creviceRadius);
+    }
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("What it writes");
+    drawBrushMaterialRoles(scene, editor, brush);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextDisabled("%s", brush.sourcePath.c_str());
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", brush.sourcePath.c_str());
+}
+
+// The Source tab: the script, editable, with the reload it needs.
+static void drawBrushSourceTab(projv::Scene& scene, EditorState& editor,
+                               projv::editor::BrushDefinition& brush) {
+    // The buffer is filled the first time this brush is looked at, and refilled when the selection
+    // changes. Not refilled per frame -- that would fight whatever is being typed.
+    if (editor.brushSourceLoadedFor != brush.id) {
+        std::string source = projv::editor::brushReadSource(brush);
+        if (editor.brushSourceBuffer.size() < 65536) editor.brushSourceBuffer.resize(65536);
+        std::snprintf(editor.brushSourceBuffer.data(), editor.brushSourceBuffer.size(), "%s",
+                      source.c_str());
+        editor.brushSourceLoadedFor = brush.id;
+        editor.brushSourceEdited = false;
+    }
+
+    ImGui::BeginDisabled(!editor.brushSourceEdited);
+    if (ImGui::Button("Save and reload")) {
+        // Whatever the preview has drawn was drawn by the old script. Reverting first is the honest
+        // answer -- leaving it would mix two versions of the brush on one model with nothing to say
+        // which marks came from which.
+        endBrushPreview(scene, editor);
+        if (projv::editor::brushWriteSource(brush, editor.brushSourceBuffer.data())) {
+            editor.brushStatus = "Saved and reloaded " + brush.id + ".";
+        } else if (!brush.loadError.empty()) {
+            editor.brushStatus = "Saved, but it will not load -- see the error below.";
+        } else {
+            editor.brushStatus = "Could not write " + brush.sourcePath;
+        }
+        editor.brushSourceEdited = false;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Discard changes")) {
+        editor.brushSourceLoadedFor.clear();
+        editor.brushSourceEdited = false;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (editor.brushSourceEdited) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.4f, 1.0f));
+        ImGui::TextUnformatted("unsaved");
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::TextDisabled("saved");
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Editing the file in your own editor works just as well: the Lab notices\n"
+                          "the change and reloads it, keeping the settings you have tuned.");
+    }
+
+    if (!brush.loadError.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
+        ImGui::TextWrapped("%s", brush.loadError.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    if (ImGui::InputTextMultiline("##source", editor.brushSourceBuffer.data(),
+                                  editor.brushSourceBuffer.size(),
+                                  ImVec2(-1.0f, -1.0f),
+                                  ImGuiInputTextFlags_AllowTabInput)) {
+        editor.brushSourceEdited = true;
+    }
+}
+
+// The Output tab: what the brush printed, and what it complained about.
+static void drawBrushOutputTab(projv::editor::BrushDefinition& brush) {
+    if (ImGui::Button("Clear")) brush.messages.clear();
+    ImGui::SameLine();
+    ImGui::TextDisabled("print() from the script arrives here, and so do its errors.");
+
+    ImGui::BeginChild("##brushOutput", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders);
+    if (brush.messages.empty()) {
+        ImGui::TextDisabled("Nothing yet.");
+    }
+    for (const projv::editor::BrushMessage& message : brush.messages) {
+        if (message.isError) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
+            ImGui::TextWrapped("%s", message.text.c_str());
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::TextWrapped("%s", message.text.c_str());
+        }
+    }
+    // Follow the tail: a script that prints while a dab runs is being watched, not scrolled.
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - ImGui::GetTextLineHeight()) {
+        ImGui::SetScrollHereY(1.0f);
+    }
+    ImGui::EndChild();
+}
+
+// The preview strip above the image: everything about running the brush, and nothing else.
+static void drawBrushPreviewBar(projv::Scene& scene, EditorState& editor,
+                                projv::editor::BrushDefinition* brush) {
+    bool runnable = brush && brush->usable() && projv::editor::brushKindIsRunnable(brush->kind);
+    bool canPreview = runnable && editor.sceneLoaded;
+
+    ImGui::BeginDisabled(!canPreview);
+    // The one control that changes what a click in the image means, so it reads as a switch that is
+    // on or off rather than as a button that does something.
+    if (drawChoiceSegment(editor.brushPreviewActive ? "Previewing" : "Preview",
+                          editor.brushPreviewActive,
+                          ImGui::CalcTextSize("Previewing").x + ImGui::GetStyle().FramePadding.x * 4.0f)) {
+        if (editor.brushPreviewActive) {
+            endBrushPreview(scene, editor);
+        } else {
+            editor.brushPreviewActive = true;
+            editor.brushPreviewCalls = 0;
+            editor.brushPreviewMilliseconds = 0.0;
+            editor.brushPreviewTruncated = false;
+            editor.brushStatus = "Drag on the scene to try the brush. Nothing is kept.";
+        }
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        if (!editor.sceneLoaded) {
+            ImGui::SetTooltip("Open a scene in the Edit tab first -- a brush is tried on something.");
+        } else if (!brush) {
+            ImGui::SetTooltip("Select a brush on the left.");
+        } else if (!brush->usable()) {
+            ImGui::SetTooltip("This brush will not load. See the error in Source.");
+        } else {
+            ImGui::SetTooltip("Run the brush on the scene, and throw the result away. Preview edits\n"
+                              "never reach the undo history and are reverted when you leave.");
+        }
+    }
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(editor.brushStrokeJournal.empty());
+    if (ImGui::Button("Revert")) revertBrushPreview(scene, editor);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Put back every voxel the preview has touched, and keep previewing.");
+    }
+
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::DragFloat("##brushRadius", &editor.brushPreviewRadius, 0.1f, 0.5f,
+                     BRUSH_PREVIEW_MAX_RADIUS, "radius %.1f");
+    editor.brushPreviewRadius = std::clamp(editor.brushPreviewRadius, 0.5f, BRUSH_PREVIEW_MAX_RADIUS);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("How big one dab is, in voxels of the component under the cursor.\n"
+                          "The brush itself decides what it does inside that.");
+    }
+
+    // The readout. Three numbers, and each of them is one a brush author asks for: how much did it
+    // change, how much did it look at, and how long did that take.
+    ImGui::SameLine();
+    if (editor.brushStrokeJournal.empty()) {
+        ImGui::TextDisabled("nothing drawn");
+    } else {
+        ImGui::Text("%zu voxel%s changed", editor.brushPreviewWrites,
+                    editor.brushPreviewWrites == 1 ? "" : "s");
+        if (ImGui::IsItemHovered() && editor.brushPreviewComponent < scene.components.size()) {
+            ImGui::SetTooltip("On %s. Reverting puts all %zu journalled cells back.",
+                              scene.components[editor.brushPreviewComponent].name.c_str(),
+                              editor.brushStrokeJournal.size());
+        }
+    }
+    if (editor.brushPreviewCalls > 0) {
+        ImGui::SameLine();
+        double nanoseconds = editor.brushPreviewMilliseconds * 1.0e6 / double(editor.brushPreviewCalls);
+        ImGui::TextDisabled("| %zu calls, %.1f ms, %.0f ns/voxel", editor.brushPreviewCalls,
+                            editor.brushPreviewMilliseconds, nanoseconds);
+        if (ImGui::IsItemHovered()) {
+            // Said out loud because the two costs are very different and the ratio between them is the
+            // main thing a slow brush is diagnosed by: if the per-voxel figure is far above what the
+            // script's arithmetic could account for, the cost is the snapshot, and the fix is a smaller
+            // maxSkinDepth or creviceRadius rather than a simpler script.
+            ImGui::SetTooltip("Voxels the script was asked about, and how long the whole dab took --\n"
+                              "which includes reading the neighbourhood the brush declared, not just\n"
+                              "the script's own answers. Divided out per voxel for comparison.");
+        }
+    }
+    if (editor.brushPreviewTruncated) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.4f, 1.0f));
+        ImGui::TextUnformatted("| dab truncated");
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("A dab hit the %zu-cell ceiling and stopped part way. Use a smaller\n"
+                              "radius -- the cost of one is cubic in it.", BRUSH_MAX_DAB_CELLS);
+        }
+    }
+}
+
+// The New Brush / Copy Brush dialog.
+static void drawBrushCreateDialog(EditorState& editor) {
+    if (!editor.brushCreateDialogOpen) return;
+    const char* title = editor.brushCreateIsDuplicate ? "Copy Brush" : "New Brush";
+    ImGui::OpenPopup(title);
+    ImGui::SetNextWindowSize(ImVec2(430.0f, 0.0f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    ImGui::TextDisabled("File name");
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##id", "cracked_rock", editor.brushCreateID,
+                             sizeof(editor.brushCreateID));
+    ImGui::TextDisabled("Letters, digits, _ and - . The file becomes <name>.lua");
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Name shown in the list");
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##name", "Cracked Rock", editor.brushCreateName,
+                             sizeof(editor.brushCreateName));
+
+    if (!editor.brushCreateIsDuplicate) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("Kind");
+        for (int i = 0; i < projv::editor::BRUSH_KIND_COUNT; i++) {
+            projv::editor::BrushKind kind = static_cast<projv::editor::BrushKind>(i);
+            if (i > 0) ImGui::SameLine();
+            if (ImGui::RadioButton(projv::editor::brushKindLabel(kind), editor.brushCreateKind == i)) {
+                editor.brushCreateKind = i;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", projv::editor::brushKindHint(kind));
+            }
+        }
+        ImGui::TextDisabled("The template you get is a working brush of that kind. Change it to taste.");
+    }
+
+    if (!editor.brushCreateError.empty()) {
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
+        ImGui::TextWrapped("%s", editor.brushCreateError.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button(editor.brushCreateIsDuplicate ? "Copy" : "Create", ImVec2(120.0f, 0.0f))) {
+        std::string error;
+        projv::editor::BrushDefinition* created = nullptr;
+        if (editor.brushCreateIsDuplicate) {
+            projv::editor::BrushDefinition* source = selectedBrush(editor);
+            if (source) {
+                created = projv::editor::brushDuplicate(editor.brushLibrary, *source,
+                                                        editor.brushCreateID, error);
+            } else {
+                error = "The brush being copied is gone.";
+            }
+        } else {
+            created = projv::editor::brushCreate(editor.brushLibrary, editor.brushCreateID,
+                                                 static_cast<projv::editor::BrushKind>(editor.brushCreateKind),
+                                                 editor.brushCreateName, error);
+        }
+        if (created) {
+            editor.selectedBrushID = created->id;
+            editor.brushSourceLoadedFor.clear();
+            editor.brushPreviewColors.clear();
+            editor.brushPreviewPaletteBrush.clear();
+            editor.brushCreateDialogOpen = false;
+            editor.brushCreateError.clear();
+            editor.brushStatus = "Created " + created->sourcePath;
+            // Straight to the source: a new brush's whole point is the file, and one extra click to
+            // find it is one click of nothing.
+            editor.brushInspectorTab = 2;
+            ImGui::CloseCurrentPopup();
+        } else {
+            editor.brushCreateError = error;
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f))) {
+        editor.brushCreateDialogOpen = false;
+        editor.brushCreateError.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+// A draggable divider. ImGui's own splitter behaviour, which handles the hover cursor and the drag
+// for us; all this adds is the invisible bar to hang it on.
+static void drawBrushSplitter(const char* id, float* width, float minimum, float maximum,
+                              bool growLeft) {
+    ImGui::SameLine(0.0f, 0.0f);
+    float thickness = 6.0f;
+    ImVec2 position = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(id, ImVec2(thickness, ImGui::GetContentRegionAvail().y));
+    if (ImGui::IsItemActive()) {
+        float delta = ImGui::GetIO().MouseDelta.x;
+        *width = std::clamp(*width + (growLeft ? delta : -delta), minimum, maximum);
+    }
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            position, ImVec2(position.x + thickness, position.y + ImGui::GetItemRectSize().y),
+            ImGui::GetColorU32(ImGuiCol_SeparatorHovered));
+    }
+    ImGui::SameLine(0.0f, 0.0f);
+}
+
+// A draggable divider between the columns and the palette strip. The vertical twin of
+// drawBrushSplitter; separate rather than parameterised because the two differ in every line that
+// matters (which axis the drag reads, which cursor, which rectangle) and share only the idea.
+static void drawBrushHorizontalSplitter(const char* id, float* height, float minimum, float maximum) {
+    float thickness = 6.0f;
+    ImVec2 position = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(id, ImVec2(ImGui::GetContentRegionAvail().x, thickness));
+    if (ImGui::IsItemActive()) {
+        // Dragging down shrinks the strip, which is why the delta is subtracted: the strip is anchored
+        // to the bottom of the window and its height grows upward.
+        *height = std::clamp(*height - ImGui::GetIO().MouseDelta.y, minimum, maximum);
+    }
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            position, ImVec2(position.x + ImGui::GetItemRectSize().x, position.y + thickness),
+            ImGui::GetColorU32(ImGuiCol_SeparatorHovered));
+    }
+}
+
+// One frame of the Brush Lab.
+static void drawBrushLabInterface(projv::Scene& scene, projv::GPUData& gpuData, EditorState& editor,
+                                  const std::shared_ptr<projv::ConstructedRenderer>& renderer,
+                                  float framebufferScale) {
+    // Files edited outside the editor are picked up here, once a frame, at the cost of one stat per
+    // brush. This is the loop the Lab is built around -- a brush author's editor of choice is their
+    // own, and the Lab has to be a viewer of the file rather than the only way to change it.
+    if (projv::editor::brushLibraryPollForChanges(editor.brushLibrary) > 0) {
+        editor.brushSourceLoadedFor.clear();
+        // The colours may have moved with the declaration.
+        editor.brushPreviewPaletteBrush.clear();
+        editor.brushPreviewColors.clear();
+    }
+
+    const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(mainViewport->WorkPos);
+    ImGui::SetNextWindowSize(mainViewport->WorkSize);
+    ImGui::SetNextWindowViewport(mainViewport->ID);
+
+    ImGuiWindowFlags hostFlags = ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking |
+                                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::Begin("##BrushLabHost", nullptr, hostFlags);
+    ImGui::PopStyleVar(2);
+
+    projv::editor::BrushDefinition* brush = selectedBrush(editor);
+
+    if (ImGui::BeginMenuBar()) {
+        if (ImGui::BeginMenu("Brush")) {
+            if (ImGui::MenuItem("New Brush...")) {
+                editor.brushCreateDialogOpen = true;
+                editor.brushCreateIsDuplicate = false;
+                editor.brushCreateError.clear();
+                editor.brushCreateID[0] = '\0';
+                editor.brushCreateName[0] = '\0';
+            }
+            if (ImGui::MenuItem("Copy Brush...", nullptr, false, brush != nullptr)) {
+                editor.brushCreateDialogOpen = true;
+                editor.brushCreateIsDuplicate = true;
+                editor.brushCreateError.clear();
+                std::snprintf(editor.brushCreateID, sizeof(editor.brushCreateID), "%s_copy",
+                              brush->id.c_str());
+                std::snprintf(editor.brushCreateName, sizeof(editor.brushCreateName), "%s copy",
+                              brush->name.c_str());
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Reload This Brush", nullptr, false, brush != nullptr)) {
+                endBrushPreview(scene, editor);
+                projv::editor::brushReload(*brush);
+                editor.brushSourceLoadedFor.clear();
+                editor.brushStatus = brush->usable() ? "Reloaded " + brush->id
+                                                     : "Reload failed: " + brush->loadError;
+            }
+            if (ImGui::MenuItem("Rescan Folder")) {
+                endBrushPreview(scene, editor);
+                projv::editor::brushLibraryLoad(editor.brushLibrary, editor.brushLibrary.folder, true);
+                editor.brushSourceLoadedFor.clear();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Save Settings", nullptr, false, brush && brush->valuesDirty)) {
+                if (projv::editor::brushSaveSidecar(*brush)) {
+                    brush->valuesDirty = false;
+                    editor.brushStatus = "Settings written to " + brush->sidecarPath;
+                }
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Settings are written on their own a moment after they stop\n"
+                                  "changing, and when you leave the tab. This is for impatience.");
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Preview")) {
+            bool runnable = brush && brush->usable() && projv::editor::brushKindIsRunnable(brush->kind);
+            if (ImGui::MenuItem("Preview on the scene", nullptr, editor.brushPreviewActive,
+                                runnable && editor.sceneLoaded)) {
+                if (editor.brushPreviewActive) endBrushPreview(scene, editor);
+                else editor.brushPreviewActive = true;
+            }
+            if (ImGui::MenuItem("Revert what it drew", nullptr, false,
+                                !editor.brushStrokeJournal.empty())) {
+                revertBrushPreview(scene, editor);
+            }
+            ImGui::Separator();
+            ImGui::TextDisabled("Preview never touches the undo history,");
+            ImGui::TextDisabled("and is reverted when you leave this tab.");
+            ImGui::EndMenu();
+        }
+
+        {
+            float rightEdge = ImGui::GetWindowWidth() - modeTabStripWidth() -
+                              ImGui::GetStyle().WindowPadding.x * 2.0f;
+            if (rightEdge > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(rightEdge);
+            drawModeTabs(editor);
+        }
+        ImGui::EndMenuBar();
+    }
+
+    // Three columns, sized by two splitters, over a one-line status bar. Not a dockspace: the Lab's
+    // surfaces are always all wanted and always in the same relationship (pick a brush, look at it,
+    // run it, assign what it writes), so the freedom to rearrange them buys nothing and costs a second
+    // layout in imgui.ini to keep migrated.
+    //
+    // The palette lives at the foot of the **right-hand column**, which is where the Edit tab docks it.
+    // It was briefly a full-width strip along the bottom, on the reasoning that it belongs to the
+    // component rather than to the brush -- but a panel that is one width and place in one tab and a
+    // different width and place in the other is a panel the user has to re-find, and the palette is the
+    // one surface both tabs share. Matching the Edit tab is worth more than the argument for spanning.
+    float availableHeight = ImGui::GetContentRegionAvail().y;
+    // The status bar's line, reserved from the columns rather than left to overflow -- otherwise it
+    // pushes the bottom of the right-hand column off the window by exactly its own height.
+    float statusHeight = ImGui::GetTextLineHeightWithSpacing();
+    ImGui::BeginChild("##brushColumns", ImVec2(0.0f, availableHeight - statusHeight));
+    float totalWidth = ImGui::GetContentRegionAvail().x;
+    float minimumCentre = 200.0f;
+    editor.brushLibraryWidth = std::clamp(editor.brushLibraryWidth, 140.0f,
+                                          std::max(140.0f, totalWidth - minimumCentre - 200.0f));
+    editor.brushInspectorWidth = std::clamp(editor.brushInspectorWidth, 240.0f,
+                                            std::max(240.0f, totalWidth - editor.brushLibraryWidth -
+                                                             minimumCentre));
+    float centreWidth = totalWidth - editor.brushLibraryWidth - editor.brushInspectorWidth - 12.0f;
+
+    ImGui::BeginChild("##brushLibraryColumn", ImVec2(editor.brushLibraryWidth, 0.0f));
+    drawBrushLibraryColumn(scene, editor);
+    ImGui::EndChild();
+
+    drawBrushSplitter("##brushSplitterLeft", &editor.brushLibraryWidth, 140.0f,
+                      std::max(140.0f, totalWidth - minimumCentre - 200.0f), true);
+
+    // --- The centre column: the preview ---
+    ImGui::BeginChild("##brushPreviewColumn", ImVec2(centreWidth, 0.0f));
+    drawBrushPreviewBar(scene, editor, brush);
+
+    ImVec2 imageSize = ImGui::GetContentRegionAvail();
+    // The Lab's image drives the *same* render targets the Edit tab's Viewport does, so this is what
+    // the resize at the top of the frame reads while this tab is up. Publishing it here rather than
+    // leaving Edit's last size is what stops the image being letterboxed at the other tab's aspect.
+    editor.requestedViewportWidth = std::max(1, int(imageSize.x * framebufferScale));
+    editor.requestedViewportHeight = std::max(1, int(imageSize.y * framebufferScale));
+
+    bgfx::TextureHandle viewportTexture = getViewportTexture(renderer);
+    if (editor.sceneLoaded && bgfx::isValid(viewportTexture) && imageSize.x > 1.0f &&
+        imageSize.y > 1.0f) {
+        bool originBottomLeft = bgfx::getCaps()->originBottomLeft;
+        ImVec2 uv0 = originBottomLeft ? ImVec2(0.0f, 1.0f) : ImVec2(0.0f, 0.0f);
+        ImVec2 uv1 = originBottomLeft ? ImVec2(1.0f, 0.0f) : ImVec2(1.0f, 1.0f);
+        ImGui::Image(ImTextureRef(projv::editor::imGuiTextureID(viewportTexture)), imageSize, uv0, uv1);
+
+        editor.viewportImageMin = ImGui::GetItemRectMin();
+        editor.viewportImageMax = ImGui::GetItemRectMax();
+        bool imageHovered = ImGui::IsItemHovered();
+        // The camera reads this, and it is what lets the Lab's image be flown around with the same
+        // gestures the Viewport has. Nothing else about navigation needed changing: updateCamera
+        // works off these two fields and the image rectangle above.
+        editor.viewportHovered = ImGui::IsWindowHovered();
+
+        float imageWidth = std::max(1.0f, editor.viewportImageMax.x - editor.viewportImageMin.x);
+        float imageHeight = std::max(1.0f, editor.viewportImageMax.y - editor.viewportImageMin.y);
+        ImVec2 mousePosition = ImGui::GetIO().MousePos;
+        projv::core::vec2 cursorUV = {
+            (mousePosition.x - editor.viewportImageMin.x) / imageWidth,
+            (mousePosition.y - editor.viewportImageMin.y) / imageHeight
+        };
+
+        if (editor.brushPreviewActive) {
+            // A dab on the press, and another every frame the cursor moves while the button is held --
+            // the same shape as the paint drag, and for the same reason: a brush is swept, and one dab
+            // per click is not a brush.
+            if (imageHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                editor.brushPreviewStrokeActive = true;
+                editor.pickUV = cursorUV;
+                editor.pendingPick = PickPurpose::BrushPreview;
+            } else if (editor.brushPreviewStrokeActive) {
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    editor.brushPreviewStrokeActive = false;
+                } else {
+                    ImVec2 movement = ImGui::GetIO().MouseDelta;
+                    if (movement.x != 0.0f || movement.y != 0.0f) {
+                        editor.pickUV = cursorUV;
+                        editor.pendingPick = PickPurpose::BrushPreview;
+                    }
+                }
+            }
+
+            // A border, because preview is a mode and a mode the user cannot see they are in is the
+            // classic editor trap -- doubly so for one that writes to the document.
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            drawList->AddRect(editor.viewportImageMin, editor.viewportImageMax,
+                              IM_COL32(255, 190, 90, 220), 0.0f, 0, 2.0f);
+            const char* hint = editor.brushStrokeJournal.empty()
+                ? "Preview: drag on the scene. Nothing here is kept."
+                : "Preview: these marks are temporary and go when you leave this tab.";
+            ImVec2 hintSize = ImGui::CalcTextSize(hint);
+            ImVec2 hintPosition((editor.viewportImageMin.x + editor.viewportImageMax.x - hintSize.x) * 0.5f,
+                                editor.viewportImageMin.y + 10.0f);
+            drawList->AddRectFilled(ImVec2(hintPosition.x - 8.0f, hintPosition.y - 4.0f),
+                                    ImVec2(hintPosition.x + hintSize.x + 8.0f,
+                                           hintPosition.y + hintSize.y + 4.0f),
+                                    IM_COL32(0, 0, 0, 170), 4.0f);
+            drawList->AddText(hintPosition, IM_COL32(255, 210, 140, 255), hint);
+        }
+
+        // The demo dab. Fires once when the countdown runs out -- see
+        // EditorState::brushDemoFramesRemaining.
+        //
+        // It hunts for the geometry rather than assuming the centre of the image is on it. The Lab's
+        // column is a different shape from the Viewport panel the camera was framed for, so the scene
+        // is routinely off to one side of it -- and a demo dab that reported "nothing under the cursor"
+        // would look exactly like a broken preview.
+        if (editor.brushDemoFramesRemaining > 0) {
+            editor.brushDemoFramesRemaining--;
+            if (editor.brushDemoFramesRemaining == 0) {
+                editor.brushPreviewActive = true;
+                projv::core::vec2 resolution = { float(editor.viewportWidth),
+                                                 float(editor.viewportHeight) };
+                // Outward from the centre, so the dab lands as near the middle of the image as the
+                // geometry allows.
+                bool found = false;
+                for (int ring = 0; ring <= 8 && !found; ring++) {
+                    for (int step = 0; step <= ring * 8 && !found; step++) {
+                        float angle = ring == 0 ? 0.0f
+                                    : float(step) / float(ring * 8) * 6.2831853f;
+                        float distance = float(ring) * 0.055f;
+                        projv::core::vec2 uv = { 0.5f + std::cos(angle) * distance,
+                                                 0.5f + std::sin(angle) * distance };
+                        ViewportRay ray = viewportRayThroughUV(editor, uv, resolution);
+                        projv::utils::VoxelPick probe =
+                            projv::utils::pickVoxel(scene, ray.origin, ray.direction);
+                        if (!probe.hit) continue;
+                        editor.pickUV = uv;
+                        editor.pendingPick = PickPurpose::BrushPreview;
+                        found = true;
+                    }
+                }
+                if (!found) {
+                    projv::core::warn("EDITOR_BRUSH_DEMO: no geometry anywhere near the middle of the "
+                                      "image; nothing dabbed");
+                }
+            }
+        }
+    } else {
+        editor.viewportHovered = false;
+        const char* message = editor.sceneLoaded
+            ? "Render target is not ready."
+            : "No scene loaded. Switch to Edit and open one -- a brush is tried on something.";
+        ImVec2 textSize = ImGui::CalcTextSize(message);
+        ImGui::SetCursorPos(ImVec2(std::max(0.0f, (imageSize.x - textSize.x) * 0.5f),
+                                   ImGui::GetCursorPosY() + (imageSize.y - textSize.y) * 0.5f));
+        ImGui::TextDisabled("%s", message);
+    }
+    ImGui::EndChild();
+
+    drawBrushSplitter("##brushSplitterRight", &editor.brushInspectorWidth, 240.0f,
+                      std::max(240.0f, totalWidth - editor.brushLibraryWidth - minimumCentre), false);
+
+    // --- The right column: the brush itself, over the palette ---
+    ImGui::BeginChild("##brushInspectorColumn", ImVec2(0.0f, 0.0f));
+
+    float columnHeight = ImGui::GetContentRegionAvail().y;
+    float splitterHeight = 6.0f;
+    editor.brushPaletteHeight = std::clamp(editor.brushPaletteHeight, 120.0f,
+                                           std::max(120.0f, columnHeight - 140.0f));
+    float inspectorHeight = columnHeight - editor.brushPaletteHeight - splitterHeight;
+
+    ImGui::BeginChild("##brushInspectorTop", ImVec2(0.0f, inspectorHeight));
+    if (!brush) {
+        ImGui::TextWrapped("Select a brush on the left, or make one with New.");
+    } else {
+        static const char* const TAB_NAMES[4] = { "Brush", "Settings", "Source", "Output" };
+        for (int i = 0; i < 4; i++) {
+            if (i > 0) ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+            // The error count on the Output tab, so a brush that is failing says so from whichever
+            // tab is up. A script's errors are the one thing that must not need looking for.
+            std::string label = TAB_NAMES[i];
+            if (i == 3) {
+                size_t errors = 0;
+                for (const projv::editor::BrushMessage& message : brush->messages) {
+                    if (message.isError) errors++;
+                }
+                if (errors > 0) label += " (" + std::to_string(errors) + ")";
+            }
+            float width = ImGui::CalcTextSize(label.c_str()).x + ImGui::GetStyle().FramePadding.x * 4.0f;
+            if (drawChoiceSegment(label.c_str(), editor.brushInspectorTab == i, width)) {
+                editor.brushInspectorTab = i;
+            }
+        }
+        ImGui::Separator();
+
+        ImGui::BeginChild("##brushInspectorBody", ImVec2(0.0f, 0.0f));
+        switch (editor.brushInspectorTab) {
+            case 0: drawBrushDeclarationTab(scene, editor, *brush); break;
+            case 1: drawBrushParametersTab(scene, editor, *brush); break;
+            case 2: drawBrushSourceTab(scene, editor, *brush); break;
+            default: drawBrushOutputTab(*brush); break;
+        }
+        ImGui::EndChild();
+    }
+    ImGui::EndChild();   // The inspector's top half.
+
+    // --- The palette, at the foot of the right column ---
+    //
+    // The same panel the Edit tab docks, drawn from the same function against the same state -- so the
+    // entry selected here is the entry selected there, and a colour changed here is changed for good.
+    // This is what "the palette is the single source of truth" has to mean in practice: not a second
+    // palette that agrees, but the same one. Same width and same corner of the window in both tabs,
+    // for the same reason.
+    drawBrushHorizontalSplitter("##brushPaletteSplitter", &editor.brushPaletteHeight, 120.0f,
+                                std::max(120.0f, columnHeight - 140.0f));
+    ImGui::BeginChild("##brushPaletteStrip", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders);
+    drawPaletteBody(scene, gpuData, editor);
+    ImGui::EndChild();
+
+    ImGui::EndChild();   // The inspector column.
+    ImGui::EndChild();   // The three columns.
+
+    // The Lab's status bar, along the bottom of the window -- where the Edit tab's is, and carrying the
+    // same kind of thing. Every message this tab produces (what a dab did, why a preview refused, which
+    // entry a role was just given) is something the user asked for a moment ago and can see nowhere
+    // else, and the Edit tab's own bar is not on screen here to carry them.
+    //
+    // Amber while the assign gesture is armed, because that is a modal state: the next click on the
+    // palette means something other than "select this".
+    if (!editor.brushBindingRole.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+        ImGui::Text("Assigning \"%s\" -- click an entry in the palette.  (Esc to cancel)",
+                    editor.brushBindingRoleLabel.c_str());
+        ImGui::PopStyleColor();
+    } else if (!editor.brushStatus.empty()) {
+        ImGui::TextDisabled("%s", editor.brushStatus.c_str());
+    } else {
+        ImGui::TextDisabled("The palette is the scene's own: what is created and edited there is what "
+                            "the brush writes, and nothing a preview draws is kept.");
+    }
+
+    // The assign gesture's other half. The palette body parked the entry the user clicked; this is
+    // where it becomes a binding, because this is the first point that knows which brush is selected.
+    if (editor.brushBindingPickedValid) {
+        editor.brushBindingPickedValid = false;
+        std::string picked = editor.brushBindingPicked;
+        std::string role = editor.brushBindingRole;
+        editor.brushBindingPicked.clear();
+        if (picked.empty()) {
+            // A binding is a name, so an unnamed entry has nothing to bind to. Said rather than
+            // silently ignored, with the fix in the same sentence -- the name field is directly below.
+            editor.brushStatus = "That entry has no name. Give it one below: a brush points at an "
+                                 "entry by name, so the binding survives the palette being reordered.";
+        } else if (brush && !role.empty()) {
+            projv::editor::brushSetMaterialBinding(*brush, role, picked);
+            editor.brushBindingRole.clear();
+            editor.brushBindingRoleLabel.clear();
+            // The cached colours are of the old entries.
+            editor.brushPreviewColors.clear();
+            editor.brushPreviewPaletteBrush.clear();
+            editor.brushValuesTouchedAt = ImGui::GetTime();
+            editor.brushStatus = "\"" + role + "\" now writes " + picked + ".";
+        }
+    }
+
+    drawBrushCreateDialog(editor);
+
+    ImGui::End();
+
+    // Settings are written a moment after they stop changing rather than on every frame of a drag --
+    // the same coalescing the undo history does, and for the same reason: a slider being dragged is
+    // one edit, not sixty a second, and this one ends in a file write.
+    if (brush && brush->valuesDirty && editor.brushValuesTouchedAt > 0.0 &&
+        ImGui::GetTime() - editor.brushValuesTouchedAt > 0.75) {
+        if (projv::editor::brushSaveSidecar(*brush)) brush->valuesDirty = false;
+        editor.brushValuesTouchedAt = 0.0;
+    }
+}
+
+// =============================================================================
+// Brush self-test
+// =============================================================================
+//
+// What is invisible from the outside, and what the whole design rests on:
+//
+//   1. **Skin depth is right.** It is the field the flagship brush is built on, and a wrong one still
+//      produces a plausible-looking texture -- just one whose cracks are in the wrong places or go all
+//      the way through. Checked against a slab whose depths are known by construction.
+//   2. **A preview reverts exactly.** This is the promise the tab makes. A revert that is off by one
+//      cell, or that misses the cells a geometry brush *removed*, leaves the document quietly modified
+//      with no undo entry -- the worst failure this system can have, and one nobody would notice until
+//      they saved.
+//   3. **A brush is deterministic.** Run, revert, run again: byte-identical. If it is not, then a
+//      preview is not a preview of anything, and neither dabs nor mirrored strokes will agree.
+//
+//   BRUSHTEST=1 ./scene_editor ../ScenePreviewer/scenes/Untitled\ 3
+static void runBrushSelfTest(projv::Scene& scene, EditorState& editor) {
+    using projv::core::ivec3;
+
+    size_t failures = 0;
+    auto check = [&failures](bool condition, const std::string& what) {
+        if (condition) {
+            projv::core::info("BRUSHTEST   {} -> PASS", what);
+        } else {
+            projv::core::error("BRUSHTEST   {} -> FAIL", what);
+            failures++;
+        }
+    };
+
+    if (editor.brushLibrary.brushes.empty()) {
+        projv::core::warn("BRUSHTEST: no brushes in {}; skipped", editor.brushLibrary.folder);
+        return;
+    }
+    for (const std::shared_ptr<projv::editor::BrushDefinition>& brush : editor.brushLibrary.brushes) {
+        check(brush->loadError.empty(), "brush '" + brush->id + "' loads");
+    }
+
+    // Somewhere empty inside an existing component to build a test subject, found exactly the way the
+    // operator test finds its room and for the same reason: a slab parked off in space would make a
+    // Grid expand to reach it and leave a shell of empty cells behind for good.
+    const int SLAB = 21;
+    // Empty space demanded *above* the slab, on top of the room the slab itself takes.
+    //
+    // A tree is the reason. Its headroom check asks about a column a trunk plus a canopy tall, so on a
+    // slab with two voxels of sky over it every tree is correctly refused and the test learns nothing
+    // about trees -- it learns that the fit test works, which it already checks elsewhere and far more
+    // directly. This is the room to find out what a scatter brush does when there *is* room.
+    const int HEADROOM = 26;
+    projv::ComponentHandle component = projv::INVALID_COMPONENT_HANDLE;
+    ivec3 base(0);
+    for (projv::ComponentHandle candidate = 0;
+         candidate < scene.components.size() && component == projv::INVALID_COMPONENT_HANDLE; candidate++) {
+        if (scene.components[candidate].kind == projv::ComponentKind::Asset) continue;
+        if (scene.components[candidate].materialPalette.empty()) continue;
+        ComponentVoxelSpace probe = resolveComponentVoxelSpace(scene, candidate);
+        if (!probe.valid || probe.resolution < SLAB + 8) continue;
+
+        std::vector<projv::ChunkHandle> leaves;
+        collectLeafChunks(scene, candidate, leaves);
+        if (leaves.empty()) continue;
+        ivec3 cellOrigin;
+        if (!chunkVoxelToComponentCoord(scene, candidate, leaves.front(), ivec3(0), cellOrigin)) continue;
+
+        for (int z = 2; z + SLAB + 4 < probe.resolution && component == projv::INVALID_COMPONENT_HANDLE; z += 11) {
+            for (int y = 2; y + SLAB + HEADROOM < probe.resolution && component == projv::INVALID_COMPONENT_HANDLE; y += 11) {
+                for (int x = 2; x + SLAB + 4 < probe.resolution; x += 11) {
+                    ivec3 corner = cellOrigin + ivec3(x, y, z);
+                    bool clear = true;
+                    // Wider in y than in x and z: the slab needs elbow room on every side, and sky
+                    // above it.
+                    for (int dz = -2; dz <= SLAB + 2 && clear; dz++) {
+                        for (int dy = -2; dy <= SLAB + HEADROOM && clear; dy++) {
+                            for (int dx = -2; dx <= SLAB + 2 && clear; dx++) {
+                                uint8_t slot = 0;
+                                if (queryComponentVoxel(scene, probe, corner + ivec3(dx, dy, dz), slot)) {
+                                    clear = false;
+                                }
+                            }
+                        }
+                    }
+                    if (!clear) continue;
+                    component = candidate;
+                    base = corner;
+                    break;
+                }
+            }
+        }
+    }
+    if (component == projv::INVALID_COMPONENT_HANDLE) {
+        projv::core::warn("BRUSHTEST: found no empty room inside an editable component; skipped");
+        return;
+    }
+
+    // A solid cube. Its skin depths are known by construction, which is what makes it a test subject
+    // rather than just a surface: the voxel at (1,1,1) from a corner is depth 1, the centre of a
+    // 21-cube is depth 10.
+    uint32_t baseColor = scene.components[component].materialPalette.front().packedColor;
+    std::vector<ivec3> slabCoords;
+    std::vector<uint32_t> slabColors;
+    for (int z = 0; z < SLAB; z++) {
+        for (int y = 0; y < SLAB; y++) {
+            for (int x = 0; x < SLAB; x++) {
+                slabCoords.push_back(base + ivec3(x, y, z));
+                slabColors.push_back(baseColor);
+            }
+        }
+    }
+    applyVoxelSculpt(&scene, &editor, component, slabCoords, slabColors, true);
+    projv::core::info("BRUSHTEST comp={} slab={}^3 at ({},{},{})", component, SLAB, base.x, base.y, base.z);
+
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
+    if (!space.valid) {
+        projv::core::error("BRUSHTEST: the component lost its lattice; aborting");
+        return;
+    }
+
+    // --- 1. Skin depth ---
+    {
+        projv::editor::BrushDefinition probe;
+        probe.kind = projv::editor::BrushKind::Material;
+        probe.maxSkinDepth = 12;
+        probe.context.set(projv::editor::BrushContextField::SkinDepth);
+        BrushField field;
+        ivec3 centre = base + ivec3(SLAB / 2);
+        snapshotBrushField(scene, space, centre, SLAB / 2 + 1, probe, field);
+
+        check(field.depthAt(base) == 0, "a corner voxel is skin depth 0");
+        check(field.depthAt(base + ivec3(SLAB - 1)) == 0, "the far corner is skin depth 0");
+        check(field.depthAt(base + ivec3(SLAB / 2, 0, SLAB / 2)) == 0, "a face voxel is skin depth 0");
+        check(field.depthAt(base + ivec3(SLAB / 2, 1, SLAB / 2)) == 1, "one voxel in is skin depth 1");
+        check(field.depthAt(base + ivec3(SLAB / 2, 4, SLAB / 2)) == 4, "four voxels in is skin depth 4");
+        // The centre of a 21-cube is 10 from every face, which is past the 12 asked for only just --
+        // so this also pins the ceiling behaviour down at a value that is not clamped.
+        check(field.depthAt(centre) == SLAB / 2, "the centre is skin depth " + std::to_string(SLAB / 2));
+        check(field.depthAt(base - ivec3(1, 0, 0)) == -1, "an empty cell reports -1");
+
+        // Crevice: an exposed corner has to read lower than a buried centre. The absolute values depend
+        // on the radius, so the test is the ordering, which is what every brush using it depends on.
+        float cornerCrevice = brushCreviceAt(field, base);
+        float centreCrevice = brushCreviceAt(field, centre);
+        check(centreCrevice > cornerCrevice + 0.2f,
+              "crevice is higher inside than on a corner (" + std::to_string(cornerCrevice) + " -> " +
+              std::to_string(centreCrevice) + ")");
+
+        // The normal on the +Y face has to point +Y. Getting this wrong flips every "upward faces
+        // only" brush onto the undersides of things.
+        float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+        brushNormalAt(field, base + ivec3(SLAB / 2, SLAB - 1, SLAB / 2), nx, ny, nz);
+        check(ny > 0.8f, "the normal on the top face points up (" + std::to_string(ny) + ")");
+    }
+
+    // --- 2 and 3. Preview, revert, and determinism, for every runnable brush ---
+    ivec3 dabCentre = base + ivec3(SLAB / 2, SLAB - 1, SLAB / 2);
+    editor.brushPreviewRadius = 6.0f;
+
+    // The state of the whole slab and a shell around it, so a revert that puts a voxel back in the
+    // wrong place is caught rather than just one that puts back the wrong number of them.
+    auto snapshotSlab = [&](std::vector<uint8_t>& solid, std::vector<uint32_t>& color) {
+        solid.clear();
+        color.clear();
+        const int MARGIN = 8;
+        for (int z = -MARGIN; z < SLAB + MARGIN; z++) {
+            for (int y = -MARGIN; y < SLAB + MARGIN; y++) {
+                for (int x = -MARGIN; x < SLAB + MARGIN; x++) {
+                    uint8_t slot = 0;
+                    ivec3 coord = base + ivec3(x, y, z);
+                    bool isSolid = queryComponentVoxel(scene, space, coord, slot);
+                    solid.push_back(isSolid ? 1 : 0);
+                    color.push_back(isSolid ? componentVoxelColor(scene, component, slot) : 0u);
+                }
+            }
+        }
+    };
+
+    std::vector<uint8_t> beforeSolid;
+    std::vector<uint32_t> beforeColor;
+    snapshotSlab(beforeSolid, beforeColor);
+
+    // The palette as it stood before any brush ran. A preview is supposed to leave the document
+    // exactly as it found it, and the palette is part of the document -- entries are numbered, that
+    // numbering is what voxels store, and an entry left behind is a change with no undo entry.
+    auto snapshotPalette = [&](std::vector<std::pair<std::string, uint32_t>>& out) {
+        out.clear();
+        for (const projv::Material& entry : scene.components[component].materialPalette) {
+            out.push_back({ entry.name, entry.packedColor });
+        }
+    };
+    std::vector<std::pair<std::string, uint32_t>> beforePalette;
+    snapshotPalette(beforePalette);
+
+    // Every kind goes through one call here, because every check in this loop is a property all three
+    // share: a dab changes something, it is journalled, it reverts exactly, and it is deterministic.
+    auto runDab = [&](projv::editor::BrushDefinition& brush, ivec3 at) {
+        if (brush.kind == projv::editor::BrushKind::Scatter) {
+            runBrushScatterDab(scene, editor, brush, component, at);
+        } else {
+            runBrushPreviewDab(scene, editor, brush, component, at);
+        }
+    };
+
+    // A dab has to be wide enough to contain a site, and a scatter brush's sites are `spacing` apart
+    // on a lattice the dab does not control -- so a radius-6 dab of a brush that plants every fourteen
+    // voxels routinely covers no site at all, and every check below it reads as "the brush is broken".
+    // Sized off the brush's own spacing instead.
+    auto dabRadiusFor = [](const projv::editor::BrushDefinition& brush) {
+        if (brush.kind != projv::editor::BrushKind::Scatter) return 6.0f;
+        double spacing = brushParamValueOr(brush, projv::editor::BRUSH_SPACING_PARAM, 3.0);
+        return std::clamp(float(spacing) + 4.0f, 8.0f, BRUSH_PREVIEW_MAX_RADIUS);
+    };
+
+    for (const std::shared_ptr<projv::editor::BrushDefinition>& entry : editor.brushLibrary.brushes) {
+        projv::editor::BrushDefinition& brush = *entry;
+        if (!brush.usable() || !projv::editor::brushKindIsRunnable(brush.kind)) continue;
+
+        editor.brushPreviewRadius = dabRadiusFor(brush);
+        // Each brush starts from the untouched slab, so one brush's marks are never another's input.
+        editor.brushPreviewComponent = projv::INVALID_COMPONENT_HANDLE;
+        editor.brushStrokeJournal.clear();
+        editor.brushPreviewWrites = 0;
+        editor.brushPreviewColors.clear();
+        editor.brushPreviewPaletteBrush.clear();
+        editor.brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
+
+        runDab(brush, dabCentre);
+        size_t firstWrites = editor.brushPreviewWrites;
+        size_t firstJournal = editor.brushStrokeJournal.size();
+
+        std::vector<uint8_t> firstSolid;
+        std::vector<uint32_t> firstColor;
+        snapshotSlab(firstSolid, firstColor);
+
+        check(firstWrites > 0, brush.id + ": a dab changes something");
+        check(firstJournal >= firstWrites, brush.id + ": every change is journalled");
+        check(firstColor != beforeColor || firstSolid != beforeSolid,
+              brush.id + ": the change is visible in the geometry");
+
+        // Revert, and demand the slab back exactly.
+        revertBrushPreview(scene, editor);
+        std::vector<uint8_t> revertedSolid;
+        std::vector<uint32_t> revertedColor;
+        snapshotSlab(revertedSolid, revertedColor);
+        check(revertedSolid == beforeSolid, brush.id + ": revert restores every voxel's solidity");
+        check(revertedColor == beforeColor, brush.id + ": revert restores every voxel's colour");
+        check(editor.brushStrokeJournal.empty(), brush.id + ": the journal is emptied by the revert");
+
+        // ...and the palette. This is the half that was missing: a brush resolves its roles into the
+        // palette before it paints a single voxel, so a preview leaves entries behind whether or not
+        // it changed anything. Reverting the voxels and not the entries is a document that has been
+        // edited by something advertised as temporary.
+        std::vector<std::pair<std::string, uint32_t>> revertedPalette;
+        snapshotPalette(revertedPalette);
+        check(revertedPalette == beforePalette,
+              brush.id + ": revert takes back the palette entries it created (" +
+              std::to_string(beforePalette.size()) + " -> " +
+              std::to_string(revertedPalette.size()) + ")");
+
+        // Determinism: the same dab on the same geometry, twice, has to land identically.
+        editor.brushPreviewComponent = projv::INVALID_COMPONENT_HANDLE;
+        runDab(brush, dabCentre);
+        std::vector<uint8_t> secondSolid;
+        std::vector<uint32_t> secondColor;
+        snapshotSlab(secondSolid, secondColor);
+        check(secondSolid == firstSolid && secondColor == firstColor,
+              brush.id + ": a repeated dab is identical");
+        check(editor.brushPreviewWrites == firstWrites,
+              brush.id + ": a repeated dab changes the same count (" +
+              std::to_string(editor.brushPreviewWrites) + " vs " + std::to_string(firstWrites) + ")");
+
+        // Overlapping dabs. A cell already journalled can never be changed a second time, so however
+        // many dabs land on top of each other the revert still holds what was there to begin with --
+        // which is the property that makes a *drag* safe rather than just a click. (The number of
+        // changes may grow: a brush that declined a cell is asked again, and a carving brush that has
+        // since taken material away may answer differently. That is intended; see runBrushPreviewDab.)
+        for (int again = 0; again < 3; again++) {
+            runDab(brush, dabCentre + ivec3(again - 1, 0, 1));
+        }
+        revertBrushPreview(scene, editor);
+        std::vector<uint8_t> afterDragSolid;
+        std::vector<uint32_t> afterDragColor;
+        snapshotSlab(afterDragSolid, afterDragColor);
+        check(afterDragSolid == beforeSolid && afterDragColor == beforeColor,
+              brush.id + ": four overlapping dabs still revert exactly");
+        std::vector<std::pair<std::string, uint32_t>> afterDragPalette;
+        snapshotPalette(afterDragPalette);
+        check(afterDragPalette == beforePalette,
+              brush.id + ": four overlapping dabs leave the palette as they found it");
+        projv::core::info("BRUSHTEST {} ({}): {} voxels changed per dab",
+                          brush.id, projv::editor::brushKindLabel(brush.kind), firstWrites);
+    }
+
+    // --- 4. Scatter ---
+    //
+    // Three properties, and each fails in a way that looks like something else:
+    //
+    //   * **a second dab plants nothing new.** If sites came from the dab rather than from a lattice
+    //     fixed to the model, sweeping back over planted ground would plant it again -- which reads as
+    //     "the grass gets thicker the longer I hold the mouse" rather than as a bug in site selection.
+    //   * **placements respect spacing.** A scatter that clumps is the failure mode of the naive
+    //     version, and it is only visible once there is enough of it to look at.
+    //   * **it reverts.** Scatter writes voxels into empty space; if they were not journalled the
+    //     preview would leave a meadow behind.
+    for (const std::shared_ptr<projv::editor::BrushDefinition>& entry : editor.brushLibrary.brushes) {
+        projv::editor::BrushDefinition& brush = *entry;
+        if (!brush.usable() || brush.kind != projv::editor::BrushKind::Scatter) continue;
+
+        editor.brushPreviewComponent = projv::INVALID_COMPONENT_HANDLE;
+        editor.brushStrokeJournal.clear();
+        editor.brushPreviewWrites = 0;
+        editor.brushPreviewColors.clear();
+        editor.brushPreviewPaletteBrush.clear();
+        editor.brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
+
+        // The top face of the slab, which is level ground with room above it.
+        ivec3 scatterCentre = base + ivec3(SLAB / 2, SLAB - 1, SLAB / 2);
+        editor.brushPreviewRadius = dabRadiusFor(brush);
+        runBrushScatterDab(scene, editor, brush, component, scatterCentre);
+        size_t firstPlanted = editor.brushPreviewWrites;
+        size_t firstSites = editor.brushPreviewScatterSites.size();
+        // Plants, not voxels: the ceiling check below compares how many *placements* landed, and a
+        // tree and a blade of grass are wildly different numbers of voxels.
+        size_t plantedInOpen = editor.brushPreviewScatterPlanted.size();
+        check(firstPlanted > 0, brush.id + ": a scatter dab plants something");
+
+        // Every planted voxel, so spacing can be measured between the columns they stand in.
+        std::vector<ivec3> plantedSites;
+        for (const std::pair<const uint64_t, EditorState::StrokeVoxel>& journalled :
+             editor.brushStrokeJournal) {
+            if (!journalled.second.wasSolid) plantedSites.push_back(journalled.second.coord);
+        }
+        check(plantedSites.size() == firstPlanted, brush.id + ": every planted voxel is journalled");
+
+        // The same dab again: the lattice is fixed to the model, so every site it finds is already
+        // planted and every placement is refused for want of room.
+        size_t before = editor.brushPreviewWrites;
+        runBrushScatterDab(scene, editor, brush, component, scatterCentre);
+        check(editor.brushPreviewWrites == before,
+              brush.id + ": a second dab in the same place plants nothing new (" +
+              std::to_string(editor.brushPreviewWrites - before) + " added)");
+
+        // ...and a dab nudged sideways may plant the rim it has newly reached -- that is the tool
+        // working -- but must not put a second plant into ground that already has one. Which is the
+        // property in its precise form: **no lattice cell is ever planted twice.** Testing "a nudged
+        // dab plants nothing" instead would be testing that the brush does not work.
+        int cellSpacing = std::max(1, int(std::lround(brushParamValueOr(brush,
+                                             projv::editor::BRUSH_SPACING_PARAM, 3.0))));
+        auto cellOf = [cellSpacing](ivec3 coord) {
+            return (uint64_t(uint32_t(projv::utils::floorDiv(coord.x, cellSpacing))) << 32) |
+                   uint32_t(projv::utils::floorDiv(coord.z, cellSpacing));
+        };
+        // Measured against where plants are *rooted*, not where their voxels ended up. A blade that
+        // leans puts a voxel in the cell next door, and a tuft is several voxels wide -- so counting
+        // voxels per cell reports a perfectly correct scatter as a double-plant.
+        std::unordered_set<uint64_t> cellsRootedBefore;
+        for (const ivec3& site : editor.brushPreviewScatterPlanted) {
+            cellsRootedBefore.insert(cellOf(site));
+        }
+
+        runBrushScatterDab(scene, editor, brush, component, scatterCentre + ivec3(1, 0, 1));
+
+        size_t doubled = 0, freshCells = 0;
+        for (const ivec3& site : editor.brushPreviewScatterPlanted) {
+            if (cellsRootedBefore.count(cellOf(site)) != 0) doubled++;
+            else freshCells++;
+        }
+        check(doubled == 0,
+              brush.id + ": a nudged dab roots plants only in cells that had none (" +
+              std::to_string(doubled) + " into an occupied cell, " + std::to_string(freshCells) +
+              " into fresh ones)");
+
+        // **One site per lattice cell.** That is the guarantee the jittered lattice actually makes,
+        // and it is what `spacing` means -- not a hard minimum distance between two plants. Two sites
+        // in neighbouring cells can land against each other if one jitters to its high edge and the
+        // other to its low one; what cannot happen is two in the same cell.
+        //
+        // Checked against the sites rather than against the geometry, because the geometry is the
+        // wrong thing to measure: a tuft is several voxels wide, so a clover leaf sitting beside its
+        // own blade reads as two plants one voxel apart to anything counting voxels.
+        int spacing = std::max(1, int(std::lround(brushParamValueOr(brush,
+                                       projv::editor::BRUSH_SPACING_PARAM, 3.0))));
+        std::unordered_set<uint64_t> occupiedCells;
+        size_t sharedCells = 0;
+        for (const ivec3& site : editor.brushPreviewScatterSites) {
+            // The top face is what this dab lands on, so the lattice runs in x and z there.
+            int32_t cellX = projv::utils::floorDiv(site.x, spacing);
+            int32_t cellZ = projv::utils::floorDiv(site.z, spacing);
+            uint64_t key = (uint64_t(uint32_t(cellX)) << 32) | uint32_t(cellZ);
+            if (!occupiedCells.insert(key).second) sharedCells++;
+        }
+        size_t siteCount = editor.brushPreviewScatterSites.size();
+        check(siteCount > 0 && sharedCells == 0,
+              brush.id + ": one site per lattice cell (" + std::to_string(siteCount) +
+              " sites, " + std::to_string(sharedCells) + " sharing a cell, spacing " +
+              std::to_string(spacing) + ")");
+
+        revertBrushPreview(scene, editor);
+        std::vector<uint8_t> afterScatterSolid;
+        std::vector<uint32_t> afterScatterColor;
+        snapshotSlab(afterScatterSolid, afterScatterColor);
+        check(afterScatterSolid == beforeSolid && afterScatterColor == beforeColor,
+              brush.id + ": reverting a scatter leaves the slab as it was");
+        std::vector<std::pair<std::string, uint32_t>> afterScatterPalette;
+        snapshotPalette(afterScatterPalette);
+        check(afterScatterPalette == beforePalette,
+              brush.id + ": reverting a scatter takes its palette entries back");
+
+        projv::core::info("BRUSHTEST {} (Scatter): {} voxels over {} site(s)",
+                          brush.id, firstPlanted, firstSites);
+
+        revertBrushPreview(scene, editor);
+
+        // **The fit test, against a ceiling.** Everything above proves a scatter brush plants; this
+        // proves it *declines*, which is the half that matters for anything larger than a blade of
+        // grass and the half that fails silently -- a fit test that never refuses looks exactly like a
+        // fit test that works, until a tree grows through a roof.
+        //
+        // A plate is laid a few voxels over the slab and the same dab is run underneath it. Whatever
+        // the brush plants there must be less than it planted in the open, and for anything that needs
+        // real headroom it must be nothing at all.
+        {
+            const int CEILING_GAP = 3;
+            std::vector<ivec3> ceiling;
+            std::vector<uint32_t> ceilingColors;
+            for (int z = -2; z < SLAB + 2; z++) {
+                for (int x = -2; x < SLAB + 2; x++) {
+                    ceiling.push_back(base + ivec3(x, SLAB - 1 + CEILING_GAP, z));
+                    ceilingColors.push_back(baseColor);
+                }
+            }
+            applyVoxelSculpt(&scene, &editor, component, ceiling, ceilingColors, true);
+
+            editor.brushPreviewComponent = projv::INVALID_COMPONENT_HANDLE;
+            editor.brushStrokeJournal.clear();
+            editor.brushPreviewWrites = 0;
+            runBrushScatterDab(scene, editor, brush, component, scatterCentre);
+            size_t underCeiling = editor.brushPreviewScatterPlanted.size();
+
+            check(underCeiling < plantedInOpen,
+                  brush.id + ": a low ceiling refuses placements (" + std::to_string(plantedInOpen) +
+                  " in the open, " + std::to_string(underCeiling) + " under a " +
+                  std::to_string(CEILING_GAP) + "-voxel ceiling)");
+
+            revertBrushPreview(scene, editor);
+            applyVoxelSculpt(&scene, &editor, component, ceiling, std::vector<uint32_t>(), false);
+
+            std::vector<uint8_t> afterCeilingSolid;
+            std::vector<uint32_t> afterCeilingColor;
+            snapshotSlab(afterCeilingSolid, afterCeilingColor);
+            check(afterCeilingSolid == beforeSolid && afterCeilingColor == beforeColor,
+                  brush.id + ": the ceiling check leaves the slab as it found it");
+        }
+    }
+    editor.brushPreviewRadius = 6.0f;
+
+    // --- 5. Bindings ---
+    //
+    // A role pointed at an existing palette entry has to paint *that entry's* colour, and the brush's
+    // declared colour has to stop mattering. This is the whole of "the palette is the source of
+    // truth", and it fails silently: a binding that is ignored still paints something plausible, just
+    // in the colour the script suggested rather than the one the user chose.
+    {
+        projv::editor::BrushDefinition* subject = nullptr;
+        for (const std::shared_ptr<projv::editor::BrushDefinition>& entry : editor.brushLibrary.brushes) {
+            if (entry->usable() && entry->kind == projv::editor::BrushKind::Material &&
+                entry->totalMaterialSlots() > 0) {
+                subject = entry.get();
+                break;
+            }
+        }
+        projv::ComponentRecord& record = scene.components[component];
+        if (subject && record.materialPalette.size() > 1) {
+            std::vector<projv::editor::BrushMaterialSlot> roles;
+            projv::editor::brushExpandMaterials(*subject, roles);
+            std::string role = roles.front().declaredName;
+
+            // An entry that already exists, is named, and is not one of the brush's own.
+            int targetSlot = -1;
+            for (size_t i = 0; i < record.materialPalette.size(); i++) {
+                if (record.materialPalette[i].name.empty()) continue;
+                bool isBrushOwn = false;
+                for (const projv::editor::BrushMaterialSlot& r : roles) {
+                    if (r.name == record.materialPalette[i].name) { isBrushOwn = true; break; }
+                }
+                if (!isBrushOwn) { targetSlot = int(i); break; }
+            }
+            if (targetSlot < 0) {
+                projv::core::warn("BRUSHTEST: no named palette entry to bind to; binding checks skipped");
+            } else {
+                std::string entryName = record.materialPalette[size_t(targetSlot)].name;
+                uint32_t entryColor = record.materialPalette[size_t(targetSlot)].packedColor;
+                std::string previousBinding = projv::editor::brushMaterialBinding(*subject, role);
+                size_t paletteBefore = record.materialPalette.size();
+
+                // Resolve once *unbound*, to find out what this brush costs the palette normally.
+                // Measured rather than assumed, because it is the difference between the two that the
+                // claim is about -- "a bound role adds nothing" is a statement about one entry, not
+                // about the brush's other roles, which still have to be created.
+                auto resolveFresh = [&](std::string& errorOut) {
+                    editor.brushPreviewColors.clear();
+                    editor.brushPreviewPaletteBrush.clear();
+                    editor.brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
+                    return ensureBrushPalette(scene, editor, *subject, component, errorOut);
+                };
+
+                std::string paletteError;
+                bool resolvedUnbound = resolveFresh(paletteError);
+                size_t unboundCost = scene.components[component].materialPalette.size() - paletteBefore;
+                removeBrushPreviewEntries(scene, editor);
+                check(resolvedUnbound &&
+                      scene.components[component].materialPalette.size() == paletteBefore,
+                      "resolving a brush and taking its entries back is a round trip");
+
+                projv::editor::brushSetMaterialBinding(*subject, role, entryName);
+                projv::editor::brushExpandMaterials(*subject, roles);
+                check(roles.front().bound && roles.front().name == entryName,
+                      "a bound role resolves to the entry it was given");
+
+                bool resolvedBound = resolveFresh(paletteError);
+                size_t boundCost = scene.components[component].materialPalette.size() - paletteBefore;
+                check(resolvedBound, "a bound brush resolves its palette: " + paletteError);
+                check(!editor.brushPreviewColors.empty() &&
+                      editor.brushPreviewColors.front() == entryColor,
+                      "the bound role paints the entry's own colour, not the script's");
+                check(unboundCost > 0 && boundCost + 1 == unboundCost,
+                      "a role bound to an existing entry costs the palette nothing (" +
+                      std::to_string(unboundCost) + " new entries unbound, " +
+                      std::to_string(boundCost) + " bound)");
+
+                removeBrushPreviewEntries(scene, editor);
+
+                // And unbinding puts it back to its own name.
+                projv::editor::brushSetMaterialBinding(*subject, role, previousBinding);
+                projv::editor::brushExpandMaterials(*subject, roles);
+                check(roles.front().name == role || roles.front().name == previousBinding,
+                      "unbinding returns the role to its own name");
+                check(scene.components[component].materialPalette.size() == paletteBefore,
+                      "the binding checks leave the palette as they found it");
+                editor.brushPreviewColors.clear();
+                editor.brushPreviewPaletteBrush.clear();
+                editor.brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
+            }
+        }
+    }
+
+    // --- 6. The Custom tool: a stroke that is kept, and can be taken back ---
+    //
+    // The Lab's preview and this share every line of machinery except the two ends, so what is left to
+    // check is exactly those: that a stroke ends in a history entry, and that the entry restores the
+    // scene. An undo that does not restore is the worst failure this tool can have -- it is silent,
+    // and by the time it is noticed the stroke it should have reversed is many edits back.
+    {
+        std::string previousSelection = editor.selectedBrushID;
+        float previousRadius = editor.customBrushRadius;
+
+        for (const std::shared_ptr<projv::editor::BrushDefinition>& entry : editor.brushLibrary.brushes) {
+            projv::editor::BrushDefinition& brush = *entry;
+            if (!brush.usable()) continue;
+            // One of each kind is enough: the commit path does not vary with the brush, only with what
+            // the brush wrote, and a material, a geometry and a scatter brush between them cover
+            // recolouring, carving and adding.
+            static std::set<projv::editor::BrushKind> covered;
+            if (covered.count(brush.kind) != 0) continue;
+            covered.insert(brush.kind);
+
+            editor.selectedBrushID = brush.id;
+            editor.customBrushRadius = dabRadiusFor(brush);
+            size_t paletteBeforeStroke = scene.components[component].materialPalette.size();
+            // The *cursor*, not the entry count. Recording an edit after an undo discards the redo
+            // tail, so a stroke that follows one leaves the list the same length while still having
+            // added exactly one entry -- and the count is what the previous version of this check
+            // measured, which is why it failed for every brush after the first.
+            int historyBefore = editor.history.position();
+
+            beginCustomStroke(scene, editor);
+            runDab(brush, dabCentre);
+            endCustomStroke(scene, editor);
+
+            std::vector<uint8_t> committedSolid;
+            std::vector<uint32_t> committedColor;
+            snapshotSlab(committedSolid, committedColor);
+            bool changed = committedSolid != beforeSolid || committedColor != beforeColor;
+            check(changed, brush.id + ": a custom stroke changes the document");
+            check(editor.history.position() == historyBefore + 1,
+                  brush.id + ": a custom stroke records exactly one history entry");
+            check(editor.brushStrokeJournal.empty(),
+                  brush.id + ": the journal is handed to the history, not kept");
+
+            check(editor.history.canUndo() && editor.history.undo(),
+                  brush.id + ": the stroke can be undone");
+            std::vector<uint8_t> undoneSolid;
+            std::vector<uint32_t> undoneColor;
+            snapshotSlab(undoneSolid, undoneColor);
+            check(undoneSolid == beforeSolid && undoneColor == beforeColor,
+                  brush.id + ": undo restores every voxel");
+
+            check(editor.history.canRedo() && editor.history.redo(),
+                  brush.id + ": the stroke can be redone");
+            std::vector<uint8_t> redoneSolid;
+            std::vector<uint32_t> redoneColor;
+            snapshotSlab(redoneSolid, redoneColor);
+            check(redoneSolid == committedSolid && redoneColor == committedColor,
+                  brush.id + ": redo puts back exactly what the stroke did");
+
+            editor.history.undo();
+
+            // The palette entries a *kept* stroke created stay -- undo restores voxels, not the
+            // palette, which is the same bargain undoing an additive sculpt strikes with the empty
+            // Grid cell it leaves behind. Asserted rather than merely documented, because the
+            // alternative (renumbering slots on undo) would rewrite the material byte of every voxel
+            // above them and is the one palette operation that touches geometry.
+            check(scene.components[component].materialPalette.size() >= paletteBeforeStroke,
+                  brush.id + ": undo leaves the entries the stroke created");
+
+            // ...and this test tidies them up itself, since nothing else will.
+            std::vector<uint32_t> usage = projv::utils::countMaterialUsage(scene, component);
+            while (scene.components[component].materialPalette.size() > paletteBeforeStroke) {
+                size_t last = scene.components[component].materialPalette.size() - 1;
+                if (last < usage.size() && usage[last] != 0) break;
+                popLastMaterial(&scene, &editor, component);
+            }
+        }
+        editor.selectedBrushID = previousSelection;
+        editor.customBrushRadius = previousRadius;
+        editor.customStrokeActive = false;
+    }
+
+    // --- 7. Remove unused ---
+    //
+    // The palette's sweep, tested here because this is where a component with unused entries exists:
+    // a brush stroke declares a ramp and paints a fraction of it, which is exactly how a palette
+    // collects entries nothing references in the first place.
+    //
+    // What is being checked is the *renumbering*. removeMaterial shifts every slot above the one it
+    // takes out and rewrites the material byte of every voxel that referenced them, so a batch that
+    // removed its collected indices in ascending order would be removing the wrong entries after the
+    // first -- and the result of that is not an error, it is a model whose colours have quietly
+    // shifted by one.
+    {
+        projv::ComponentRecord& record = scene.components[component];
+        std::vector<std::string> namesBefore;
+        for (const projv::Material& entry : record.materialPalette) namesBefore.push_back(entry.name);
+
+        // Four entries added at the end, two of which are then painted onto the slab. That leaves the
+        // unused ones **interleaved** with used ones, which is the case that matters: removing them in
+        // the order they were found would take the wrong entries after the first, because every
+        // removal renumbers the slots above it. Relying on a brush stroke to produce the fixture was
+        // the first attempt and produced none -- a ramp painted over a 21-cube uses all of itself.
+        // Hoisted, because the teardown has to put these voxels back: they are what keeps two of the
+        // four extra entries "in use", and an entry in use is one the sweep will not take.
+        std::vector<ivec3> painted;
+        std::vector<uint32_t> paintedColors;
+        {
+            struct Extra { const char* name; uint32_t color; bool paint; };
+            const Extra EXTRAS[4] = {
+                { "zz_test_unused_a", 0x3F80001u, false },
+                { "zz_test_used_b",   0x2F40002u, true  },
+                { "zz_test_unused_c", 0x1F00003u, false },
+                { "zz_test_used_d",   0x0EC0004u, true  },
+            };
+            int offset = 0;
+            for (const Extra& extra : EXTRAS) {
+                projv::utils::addMaterial(scene, component, extra.name, extra.color);
+                if (!extra.paint) continue;
+                // A couple of voxels each, on the slab's top face where they cannot disturb anything.
+                for (int i = 0; i < 2; i++) {
+                    painted.push_back(base + ivec3(1 + offset * 2 + i, SLAB - 1, 1));
+                    paintedColors.push_back(extra.color);
+                }
+                offset++;
+            }
+            applyVoxelPaint(&scene, &editor, component, painted, paintedColors);
+            invalidatePaletteCaches(&editor);
+        }
+
+        {
+            std::vector<uint32_t> usage = projv::utils::countMaterialUsage(scene, component);
+            size_t unusedBefore = 0;
+            std::vector<std::string> usedNames;
+            for (size_t slot = 0; slot < record.materialPalette.size(); slot++) {
+                if (slot < usage.size() && usage[slot] == 0) unusedBefore++;
+                else usedNames.push_back(record.materialPalette[slot].name);
+            }
+            check(unusedBefore > 0, "a brush stroke leaves some of its ramp unused");
+
+            projv::ComponentHandle previousPalette = editor.paletteComponent;
+            editor.paletteComponent = component;
+            size_t removed = removeUnusedMaterials(scene, editor);
+            check(removed == unusedBefore,
+                  "remove unused takes every unreferenced entry (" + std::to_string(removed) +
+                  " of " + std::to_string(unusedBefore) + ")");
+
+            // The survivors have to be exactly the entries that were in use, in order, and every voxel
+            // has to have come through the renumbering still pointing at the colour it had.
+            std::vector<std::string> namesAfter;
+            for (const projv::Material& entry : scene.components[component].materialPalette) {
+                namesAfter.push_back(entry.name);
+            }
+            check(namesAfter == usedNames,
+                  "the entries left are exactly the ones in use, in order");
+            std::vector<uint32_t> usageAfter = projv::utils::countMaterialUsage(scene, component);
+            size_t stillUnused = 0;
+            for (uint32_t count : usageAfter) if (count == 0) stillUnused++;
+            check(stillUnused == 0, "nothing unreferenced is left behind");
+
+            check(editor.history.canUndo() && editor.history.undo(),
+                  "the sweep is one undoable step");
+            std::vector<std::string> namesRestored;
+            for (const projv::Material& entry : scene.components[component].materialPalette) {
+                namesRestored.push_back(entry.name);
+            }
+            check(namesRestored.size() >= namesBefore.size(),
+                  "undo puts the removed entries back (" + std::to_string(namesRestored.size()) +
+                  " entries)");
+
+            // Back to the baseline. The paint above went in through applyVoxelPaint directly rather
+            // than through a stroke, so there is no history entry to undo -- and reaching for
+            // history.undo() here took back an unrelated edit instead, which is why the palette came
+            // out two entries fat. The voxels are put back by hand, which makes the last two extras
+            // unused, and one more sweep takes all four.
+            std::vector<uint32_t> baseColors(painted.size(), baseColor);
+            applyVoxelPaint(&scene, &editor, component, painted, baseColors);
+            invalidatePaletteCaches(&editor);
+            removeUnusedMaterials(scene, editor);
+            std::vector<std::string> namesFinal;
+            for (const projv::Material& entry : scene.components[component].materialPalette) {
+                namesFinal.push_back(entry.name);
+            }
+            check(namesFinal == namesBefore,
+                  "the palette is left exactly as the test found it (" +
+                  std::to_string(namesBefore.size()) + " -> " + std::to_string(namesFinal.size()) + ")");
+            editor.paletteComponent = previousPalette;
+        }
+    }
+
+    // Whatever the loop left behind, and the slab itself.
+    endBrushPreview(scene, editor);
+    std::vector<ivec3> removeCoords = slabCoords;
+    applyVoxelSculpt(&scene, &editor, component, removeCoords, std::vector<uint32_t>(), false);
+
+    std::vector<uint8_t> finalSolid;
+    std::vector<uint32_t> finalColor;
+    snapshotSlab(finalSolid, finalColor);
+    bool clean = true;
+    for (size_t i = 0; i < finalSolid.size(); i++) {
+        // Everything the test built is gone; everything it found is untouched. The margin shell is
+        // what makes the second half of that meaningful.
+        if (finalSolid[i] != 0) { clean = false; break; }
+    }
+    check(clean, "the test leaves no geometry behind");
+
+    if (failures == 0) {
+        projv::core::info("BRUSHTEST: all checks passed");
+    } else {
+        projv::core::error("BRUSHTEST: {} check(s) failed", failures);
+    }
+}
+
 // Builds one frame of the whole interface: the host window that owns the dockspace and the menu bar,
 // then each panel docked into it.
 static void drawEditorInterface(projv::Application& app, projv::Scene& scene, projv::GPUData& gpuData,
@@ -16142,6 +20064,12 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
     if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F11)) {
         setEditorMode(editor, editor.mode == EditorMode::Render ? EditorMode::Edit : EditorMode::Render);
     }
+    // F10 for the Lab, beside F11 for the same reason F11 is not Ctrl-gated: the keys that leave an
+    // interface you might be stuck in should not need a modifier.
+    if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F10)) {
+        setEditorMode(editor, editor.mode == EditorMode::Brushes ? EditorMode::Edit
+                                                                 : EditorMode::Brushes);
+    }
 
     // Render mode is a tab, not a panel: it owns the whole window, and none of the dockspace, the
     // menu bar or the six panels below are built at all while it is up. That is what "a new tab"
@@ -16153,6 +20081,15 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
         // above and answered here, both before this frame's uniforms go up, so the focal plane the
         // user just picked is what this frame traces.
         processRenderFocusPick(scene, editor);
+        return;
+    }
+
+    // The Brush Lab, likewise. It owns the whole window and builds none of the dockspace -- and it
+    // resolves its own click in the same place and for the same reason Render mode does, except that
+    // this one's click writes voxels, so it has to land before this frame's geometry goes up.
+    if (editor.mode == EditorMode::Brushes) {
+        drawBrushLabInterface(scene, gpuData, editor, renderer, framebufferScale);
+        processVoxelPick(scene, editor);
         return;
     }
 
@@ -16306,16 +20243,22 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
                                   "light transport, sun and sky, converging for as long as you\n"
                                   "leave the camera still.");
             }
+            if (ImGui::MenuItem("Brush Lab", "F10", editor.mode == EditorMode::Brushes)) {
+                setEditorMode(editor, EditorMode::Brushes);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Write programmable brushes and try them on this scene without\n"
+                                  "keeping the result. A brush is a Lua file in the brushes folder\n"
+                                  "that answers one question per voxel.");
+            }
             ImGui::EndMenu();
         }
 
         // The tab strip, right-aligned, in the same vertical place it sits in Render mode's bar so
         // switching back and forth does not move it under the cursor.
         {
-            float stripWidth = (ImGui::CalcTextSize("Render").x +
-                                ImGui::GetStyle().FramePadding.x * 4.0f) * 2.0f +
-                               ImGui::GetStyle().ItemInnerSpacing.x;
-            float rightEdge = ImGui::GetWindowWidth() - stripWidth - ImGui::GetStyle().WindowPadding.x * 2.0f;
+            float rightEdge = ImGui::GetWindowWidth() - modeTabStripWidth() -
+                              ImGui::GetStyle().WindowPadding.x * 2.0f;
             if (rightEdge > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(rightEdge);
             drawModeTabs(editor);
         }
@@ -16362,6 +20305,7 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
             // Ctrl+Y was a second Redo binding until the Region tool took the letter; Ctrl+Shift+Z
             // is the one the Edit menu has always advertised and it is unchanged.
             if (ImGui::IsKeyPressed(ImGuiKey_Y)) editor.activeTool = EditorTool::Region;
+            if (ImGui::IsKeyPressed(ImGuiKey_U)) editor.activeTool = EditorTool::Custom;
         }
         if (ImGui::IsKeyPressed(ImGuiKey_Z)) {
             if (io.KeyShift) editor.history.redo(); else editor.history.undo();
@@ -19835,6 +23779,215 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
 // Opt-in via NEWSCENETEST=1, its own switch because it needs a live bgfx (it builds and destroys GPU
 // textures) and because it throws the loaded scene away:
 //   NEWSCENETEST=1 ./scene_editor ../ScenePreviewer/scenes/Sibenik
+// Does File ▸ Save actually write what is on screen?
+//
+// The one self-test here whose failure costs a user their afternoon: a save that reports success and
+// writes nothing is indistinguishable from one that worked until the next time the folder is opened.
+// Nothing else in this file can catch it, because the fact under test is not "did the writer return
+// true" but "is the edit in the file" -- and the only honest way to ask that is to write, load the
+// folder back, and look.
+//
+// **It works on a copy and never touches the open document.** The whole scene folder is copied to a
+// temporary directory, the copy is opened, edited, saved through the *exact* call File ▸ Save makes,
+// and reloaded. Testing against the real folder would mean a test for data loss whose failure mode is
+// data loss.
+//
+//   SAVETEST=1 ./scene_editor ../ScenePreviewer/scenes/Untitled\ 3
+static void runSaveSelfTest(projv::Scene& scene, projv::GPUData& gpuData, EditorState& editor) {
+    using projv::core::ivec3;
+
+    int failures = 0;
+    auto check = [&](bool ok, const std::string& what) {
+        if (ok) {
+            projv::core::info("SAVETEST   {} -> PASS", what);
+        } else {
+            projv::core::error("SAVETEST   {} -> FAIL", what);
+            failures++;
+        }
+    };
+
+    if (!editor.sceneLoaded || editor.scenePath.empty()) {
+        projv::core::warn("SAVETEST: no scene open; skipped");
+        return;
+    }
+
+    std::error_code code;
+    std::filesystem::path source = std::filesystem::absolute(editor.scenePath, code);
+    std::filesystem::path scratch = std::filesystem::temp_directory_path(code) / "projv_savetest";
+    std::filesystem::remove_all(scratch, code);
+    std::filesystem::create_directories(scratch, code);
+    if (code) {
+        projv::core::error("SAVETEST: could not make {}: {}", scratch.string(), code.message());
+        return;
+    }
+    // recursive, and overwrite_existing so a leftover from a previous run cannot make this a no-op.
+    std::filesystem::copy(source, scratch,
+                          std::filesystem::copy_options::recursive |
+                          std::filesystem::copy_options::overwrite_existing, code);
+    if (code) {
+        projv::core::error("SAVETEST: could not copy {} to {}: {}", source.string(), scratch.string(),
+                           code.message());
+        return;
+    }
+    projv::core::info("SAVETEST working on a copy at {}", scratch.string());
+
+    projv::graphics::destroyGPUData(gpuData);
+    if (!loadScene(scene, gpuData, editor, scratch.string())) {
+        projv::core::error("SAVETEST: the copy would not load; aborting");
+        return;
+    }
+
+    // A deterministic edit, in empty space inside an existing component so no Grid has to expand.
+    projv::ComponentHandle component = projv::INVALID_COMPONENT_HANDLE;
+    ivec3 base(0);
+    const int MARK = 6;
+    for (projv::ComponentHandle candidate = 0;
+         candidate < scene.components.size() && component == projv::INVALID_COMPONENT_HANDLE; candidate++) {
+        if (scene.components[candidate].kind == projv::ComponentKind::Asset) continue;
+        if (scene.components[candidate].materialPalette.empty()) continue;
+        ComponentVoxelSpace probe = resolveComponentVoxelSpace(scene, candidate);
+        if (!probe.valid || probe.resolution < MARK + 8) continue;
+        std::vector<projv::ChunkHandle> leaves;
+        collectLeafChunks(scene, candidate, leaves);
+        if (leaves.empty()) continue;
+        ivec3 cellOrigin;
+        if (!chunkVoxelToComponentCoord(scene, candidate, leaves.front(), ivec3(0), cellOrigin)) continue;
+
+        for (int z = 2; z + MARK + 2 < probe.resolution && component == projv::INVALID_COMPONENT_HANDLE; z += 7) {
+            for (int y = 2; y + MARK + 2 < probe.resolution && component == projv::INVALID_COMPONENT_HANDLE; y += 7) {
+                for (int x = 2; x + MARK + 2 < probe.resolution; x += 7) {
+                    ivec3 corner = cellOrigin + ivec3(x, y, z);
+                    bool clear = true;
+                    for (int dz = -1; dz <= MARK && clear; dz++) {
+                        for (int dy = -1; dy <= MARK && clear; dy++) {
+                            for (int dx = -1; dx <= MARK && clear; dx++) {
+                                uint8_t slot = 0;
+                                if (queryComponentVoxel(scene, probe, corner + ivec3(dx, dy, dz), slot)) {
+                                    clear = false;
+                                }
+                            }
+                        }
+                    }
+                    if (!clear) continue;
+                    component = candidate;
+                    base = corner;
+                    break;
+                }
+            }
+        }
+    }
+    if (component == projv::INVALID_COMPONENT_HANDLE) {
+        projv::core::warn("SAVETEST: no empty room to mark; skipped");
+        std::filesystem::remove_all(scratch, code);
+        return;
+    }
+
+    // A colour nothing else in the scene is likely to hold, so finding it again after the round trip
+    // is proof the *edit* survived rather than proof the file has voxels in it.
+    const uint32_t MARK_COLOR = projv::packRGB10(0.93f, 0.11f, 0.57f);
+    std::vector<ivec3> marks;
+    std::vector<uint32_t> markColors;
+    for (int z = 0; z < MARK; z++) {
+        for (int y = 0; y < MARK; y++) {
+            for (int x = 0; x < MARK; x++) {
+                marks.push_back(base + ivec3(x, y, z));
+                markColors.push_back(MARK_COLOR);
+            }
+        }
+    }
+    applyVoxelSculpt(&scene, &editor, component, marks, markColors, true);
+    std::string componentName = scene.components[component].name;
+    projv::core::info("SAVETEST marked {}^3 at ({},{},{}) in '{}'", MARK, base.x, base.y, base.z,
+                      componentName);
+
+    // Present before the save, or the test proves nothing about the save.
+    {
+        ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
+        uint8_t slot = 0;
+        check(space.valid && queryComponentVoxel(scene, space, base, slot),
+              "the mark is in memory before saving");
+    }
+
+    // --- The call File ▸ Save makes, character for character ---
+    std::string savedTo = editor.scenePath;
+    saveDocumentTo(scene, editor, projv::INVALID_COMPONENT_HANDLE, savedTo);
+    projv::core::info("SAVETEST save reported: {}", editor.statusMessage);
+
+    // Reload the folder and look for the mark. Nothing about the in-memory scene is trusted here --
+    // that is the whole point.
+    projv::graphics::destroyGPUData(gpuData);
+    bool reloaded = loadScene(scene, gpuData, editor, scratch.string());
+    check(reloaded, "the saved folder loads again");
+    if (reloaded) {
+        size_t found = 0;
+        for (projv::ComponentHandle handle = 0; handle < scene.components.size(); handle++) {
+            if (scene.components[handle].kind == projv::ComponentKind::Asset) continue;
+            ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, handle);
+            if (!space.valid) continue;
+            for (const ivec3& coord : marks) {
+                uint8_t slot = 0;
+                if (!queryComponentVoxel(scene, space, coord, slot)) continue;
+                if (componentVoxelColor(scene, handle, slot) == MARK_COLOR) found++;
+            }
+        }
+        check(found == marks.size(),
+              "the mark survived the round trip (" + std::to_string(found) + " of " +
+              std::to_string(marks.size()) + " voxels)");
+    }
+
+    // --- A genuine link still stays a link ---
+    //
+    // The fix above narrows what counts as an external asset, so the other half of the rule needs a
+    // guard of its own: an asset that really does live outside the document must still be written as
+    // a reference, not flattened into a private copy. Losing that would be the mirror of the bug just
+    // fixed -- edit the shared asset, and the documents referencing it would stop tracking it.
+    {
+        std::filesystem::path linkDoc = std::filesystem::temp_directory_path(code) /
+                                        "projv_savetest_link";
+        std::filesystem::remove_all(linkDoc, code);
+        std::filesystem::create_directories(linkDoc, code);
+
+        // Points at the *other* scratch document's asset folder: outside this one, which is the whole
+        // condition under test.
+        std::filesystem::path target = scratch / "New_Asset";
+        std::string relative = std::filesystem::relative(target, linkDoc, code).generic_string();
+        {
+            std::ofstream file((linkDoc / "compose.json").string(), std::ios::trunc);
+            file << "{\n  \"version\": 1,\n  \"name\": \"link\",\n  \"components\": [\n"
+                 << "    { \"type\": \"asset\", \"name\": \"Linked\", \"source\": \"" << relative
+                 << "\",\n      \"position\": [0,0,0], \"rotation\": [0,0,0,1], \"scale\": 1.0 }\n"
+                 << "  ]\n}\n";
+        }
+
+        projv::graphics::destroyGPUData(gpuData);
+        if (loadScene(scene, gpuData, editor, linkDoc.string())) {
+            bool sawLink = false;
+            for (const projv::ComponentRecord& entry : scene.components) {
+                if (entry.kind != projv::ComponentKind::Asset) continue;
+                if (entry.name != "Linked") continue;
+                sawLink = true;
+                check(entry.externalSource,
+                      "an asset outside the document is still loaded as a link");
+            }
+            check(sawLink, "the linking document loaded");
+
+            saveDocumentTo(scene, editor, projv::INVALID_COMPONENT_HANDLE, editor.scenePath);
+            bool copied = std::filesystem::exists(linkDoc / "Linked" / "compose.json", code);
+            check(!copied, "saving a link does not flatten it into a private copy");
+        }
+        std::filesystem::remove_all(linkDoc, code);
+    }
+
+    std::filesystem::remove_all(scratch, code);
+
+    if (failures == 0) {
+        projv::core::info("SAVETEST: all checks passed");
+    } else {
+        projv::core::error("SAVETEST: {} check(s) failed -- File > Save is not writing what is on "
+                           "screen", failures);
+    }
+}
+
 static void runNewSceneSelfTest(projv::Scene& scene, projv::GPUData& gpuData, EditorState& editor) {
     int failures = 0;
     auto check = [&](bool ok, const char* what) {
@@ -20031,9 +24184,53 @@ void startup(projv::Application& app) {
     // look at a shot you have already framed, not a place to start. The switch exists because
     // Render mode is reached by clicking, and a screenshot or a smoke test has no way to click.
     if (const char* startMode = std::getenv("EDITOR_START_MODE")) {
-        if (std::string(startMode) == "render") {
+        std::string requested(startMode);
+        if (requested == "render") {
             editor.mode = EditorMode::Render;
             editor.requestedMode = EditorMode::Render;
+        } else if (requested == "brushes") {
+            editor.mode = EditorMode::Brushes;
+            editor.requestedMode = EditorMode::Brushes;
+        }
+    }
+
+    // One dab of the selected brush at the centre of the Lab's image, a few frames after it opens.
+    // Same audience and reason as the switches above; also the quickest smoke test that the whole path
+    // works, since it exercises the pick, the field snapshot, the script and the GPU flush.
+    if (const char* demo = std::getenv("EDITOR_BRUSH_DEMO")) {
+        if (std::string(demo) != "0") {
+            editor.mode = EditorMode::Brushes;
+            editor.requestedMode = EditorMode::Brushes;
+            editor.brushDemoFramesRemaining = 30;
+        }
+    }
+    // The brush library. Beside the executable rather than beside the scene: a brush belongs to the
+    // person using the editor, not to any one document, and the folder has to be the same one whatever
+    // scene was opened on the command line. Created if it is not there, so New Brush works on a fresh
+    // checkout without a setup step.
+    //
+    // Loaded before EDITOR_START_BRUSH is read, so the name given there can be checked against what is
+    // actually on disk rather than silently selecting nothing.
+    {
+        projv::editor::brushLibraryLoad(editor.brushLibrary, DEFAULT_BRUSH_DIRECTORY, true);
+        if (const char* saveAfter = std::getenv("EDITOR_SAVE_RENDER")) {
+        int frames = std::atoi(saveAfter);
+        editor.renderSaveCountdown = frames > 0 ? frames : 120;
+        editor.mode = EditorMode::Render;
+        editor.requestedMode = EditorMode::Render;
+        projv::core::info("EDITOR_SAVE_RENDER: saving the render after {} frame(s)",
+                          editor.renderSaveCountdown);
+    }
+    if (const char* startBrush = std::getenv("EDITOR_START_BRUSH")) {
+            if (editor.brushLibrary.find(startBrush)) {
+                editor.selectedBrushID = startBrush;
+            } else {
+                projv::core::warn("EDITOR_START_BRUSH: no brush called '{}' in {}", startBrush,
+                                  editor.brushLibrary.folder);
+            }
+        }
+        if (editor.selectedBrushID.empty() && !editor.brushLibrary.brushes.empty()) {
+            editor.selectedBrushID = editor.brushLibrary.brushes.front()->id;
         }
     }
 
@@ -20049,6 +24246,16 @@ void startup(projv::Application& app) {
                 break;
             }
         }
+    }
+
+    // The advanced preview -- the path traced viewport -- on from startup. Same audience and same
+    // reason as the mode and tool switches above: it is reached by clicking the viewport's bar, and a
+    // screenshot or a smoke test has no way to click. It is also the toggle most worth capturing,
+    // since it is the one that changes what the renderer does rather than how a panel looks.
+    if (const char* startPreview = std::getenv("EDITOR_ADVANCED_PREVIEW")) {
+        editor.advancedPreviewEnabled = std::string(startPreview) != "0";
+        projv::core::info("EDITOR_ADVANCED_PREVIEW: advanced preview {}",
+                          editor.advancedPreviewEnabled ? "on" : "off");
     }
 
     // The library browses from an absolute path: it is navigated with an Up button, and walking a
@@ -20114,6 +24321,14 @@ void startup(projv::Application& app) {
         if (std::getenv("ASSEMBLYTEST")) {
             runAssemblySelfTest(scene, editor);
         }
+
+        if (std::getenv("BRUSHTEST")) {
+            runBrushSelfTest(scene, editor);
+        }
+
+        if (std::getenv("SAVETEST")) {
+            runSaveSelfTest(scene, gpuData, editor);
+        }
         // Its own switch as well, and last: it replaces the open scene and reloads it afterwards, so
         // running it alongside the tests above would hand them a document they did not set up.
         if (std::getenv("NEWSCENETEST")) {
@@ -20132,6 +24347,28 @@ void update(projv::Application& app) {
     (void)app;
 }
 
+// Turns a scene's folder name into something safe to put in a file name. The engine has one of these
+// for .data files, but it is private to compose_io.cpp -- and exporting it so a screenshot can be
+// named would be a change to the engine's surface for the sake of the editor's convenience.
+static std::string filenameSafe(const std::string& text) {
+    std::string safe;
+    for (char character : text) {
+        bool allowed = (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+                       (character >= '0' && character <= '9') || character == '_' || character == '-';
+        safe += allowed ? character : '_';
+    }
+    while (!safe.empty() && safe.back() == '_') safe.pop_back();
+    return safe.empty() ? std::string("render") : safe;
+}
+
+static void core_info_once_grade(const projv::core::vec4& p, const projv::core::vec4& t) {
+    static bool once = false;
+    if (once) return;
+    once = true;
+    projv::core::info("GRADE params=({}, {}, {}, {}) tint=({}, {}, {}, {})",
+                      p.x, p.y, p.z, p.w, t.x, t.y, t.z, t.w);
+}
+
 void render(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance =
         projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
@@ -20145,6 +24382,24 @@ void render(projv::Application& app) {
     // before any of them and stay settled for the frame. See setEditorMode.
     bool modeJustChanged = editor.requestedMode != editor.mode;
     if (modeJustChanged) {
+        // **Leaving the Brush Lab is what makes a preview temporary.** This is the one place that can
+        // guarantee it: the Lab's own Preview button covers the deliberate exit, but the tab can also
+        // be left by the strip, by F10, by F11 straight to Render, or by the View menu, and a preview
+        // that survived any one of those would have quietly become an edit to the document -- an edit
+        // with no undo entry, because preview writes never make one.
+        //
+        // Before editor.mode moves, so the revert's own queue drain and GPU flush happen while the
+        // tab that owns them is still the one on screen.
+        if (editor.mode == EditorMode::Brushes) {
+            endBrushPreview(scene, editor);
+            // Settings that were still coalescing when the tab was left. The Lab's timer will not fire
+            // again until it is reopened, and by then the value is only in memory.
+            for (std::shared_ptr<projv::editor::BrushDefinition>& brush : editor.brushLibrary.brushes) {
+                if (brush->valuesDirty && projv::editor::brushSaveSidecar(*brush)) {
+                    brush->valuesDirty = false;
+                }
+            }
+        }
         editor.mode = editor.requestedMode;
         // The incoming renderer's accumulation buffer still holds the image it had when this tab was
         // last left: a different camera, possibly a different scene, and at whatever size the tab
@@ -20195,12 +24450,24 @@ void render(projv::Application& app) {
     // Only the tab on screen is resized. The other renderer's targets stay at whatever size that tab
     // last had, which is right: resizing an offscreen renderer would throw away its converged image
     // for a size nobody is looking at, and it is resized on its own terms the frame it comes back.
+    // The resizer is asked every frame rather than only when the panel's size changes, and it decides
+    // for itself whether anything needs doing -- a target already at its requested size is skipped, so
+    // the steady-state cost is a walk of a small map.
+    //
+    // Asking unconditionally is not just tidier, it is required. A relative target is created 1x1 and
+    // gets its real size from this call, so gating the call on "did the panel size change" left the
+    // targets at 1x1 for any session where the panel opened at the size it closed at -- which is every
+    // session, because imgui.ini restores the layout. The old code got away with it only because
+    // targets used to be born at a declared resolution that happened to be plausible.
+    //
+    // Only the tab on screen is resized. The other renderer's targets stay at whatever size that tab
+    // last had, which is right: resizing an offscreen renderer would throw away its converged image
+    // for a size nobody is looking at, and it is resized on its own terms the frame it comes back.
     if (editor.mode == EditorMode::Render) {
-        if (editor.requestedRenderViewWidth != editor.renderViewWidth ||
-            editor.requestedRenderViewHeight != editor.renderViewHeight) {
-            editor.renderViewWidth = editor.requestedRenderViewWidth;
-            editor.renderViewHeight = editor.requestedRenderViewHeight;
-            resizeViewportTargets(renderer, editor.renderViewWidth, editor.renderViewHeight);
+        editor.renderViewWidth = editor.requestedRenderViewWidth;
+        editor.renderViewHeight = editor.requestedRenderViewHeight;
+        if (projv::graphics::resizeRenderTargets(renderer->resources.textures, renderer->resources.framebuffers,
+                                                 editor.renderViewWidth, editor.renderViewHeight)) {
             cameraMoved = true;   // The accumulated history is the wrong size now; start it again.
             // Stronger than "start it again": the accumulation targets have just been reallocated
             // and hold whatever the driver left in them. taa.frag must not read them at all this
@@ -20208,12 +24475,13 @@ void render(projv::Application& app) {
             // NaN, and one NaN in a running mean never leaves it.
             editor.prevCameraValid = false;
         }
-    } else if (editor.requestedViewportWidth != editor.viewportWidth ||
-               editor.requestedViewportHeight != editor.viewportHeight) {
+    } else {
         editor.viewportWidth = editor.requestedViewportWidth;
         editor.viewportHeight = editor.requestedViewportHeight;
-        resizeViewportTargets(renderer, editor.viewportWidth, editor.viewportHeight);
-        cameraMoved = true;
+        if (projv::graphics::resizeRenderTargets(renderer->resources.textures, renderer->resources.framebuffers,
+                                                 editor.viewportWidth, editor.viewportHeight)) {
+            cameraMoved = true;
+        }
     }
 
     ImGui_ImplGlfw_NewFrame();
@@ -20320,10 +24588,16 @@ void render(projv::Application& app) {
     float orthoHeight = cameraOrthoHeight(editor);
     float orthoBackoff = cameraOrthoBackoff(editor, cameraDirection);
 
-    if (editor.sceneLoaded && editor.mode == EditorMode::Render) {
+    // The panel's size is not known on the first frame (see the resize block above), and a render
+    // target has no meaningful size until it is. Skipping the scene passes for that one frame is the
+    // honest answer: the interface below still draws, which is what measures the panel, so the next
+    // frame renders properly. Rendering anyway would trace a placeholder-sized image and show it.
+    const bool renderViewIsSized = editor.renderViewWidth > 0 && editor.renderViewHeight > 0;
+    const bool viewportIsSized = editor.viewportWidth > 0 && editor.viewportHeight > 0;
+
+    if (editor.sceneLoaded && renderViewIsSized && editor.mode == EditorMode::Render) {
         // --- Render mode: the path tracer -----------------------------------------------
         projv::core::vec2 renderResolution = { float(editor.renderViewWidth), float(editor.renderViewHeight) };
-        projv::core::vec2 texelSize = { 1.0f / renderResolution.x, 1.0f / renderResolution.y };
         projv::core::vec3 cameraPosition = editor.cameraPosition;
 
         // w is the flag taa.frag checks before anything else: there is no usable history this
@@ -20335,29 +24609,30 @@ void render(projv::Application& app) {
             editor.prevCameraValid ? 0.0f : 1.0f
         };
 
-        // The sun, from the two angles the interface offers. Elevation from the horizon and azimuth
-        // about Y, which is what a person means by "where is the sun" -- converted here rather than
-        // stored as a vector so the two sliders cannot fight each other near the poles.
+        projv::core::vec4 sunDirection;
+        projv::core::vec4 renderParams;
+        editorLightRig(editor, sunDirection, renderParams);
         const float DEGREES_TO_RADIANS = 3.14159265f / 180.0f;
-        float sunElevation = editor.renderSunElevation * DEGREES_TO_RADIANS;
-        float sunAzimuth = editor.renderSunAzimuth * DEGREES_TO_RADIANS;
-        projv::core::vec4 sunDirection = {
-            std::cos(sunElevation) * std::cos(sunAzimuth),
-            std::sin(sunElevation),
-            std::cos(sunElevation) * std::sin(sunAzimuth),
-            // w is the disk's angular radius, in radians. Floored well above zero: a zero-radius
-            // sun has zero solid angle, and next-event estimation divides by it.
-            std::max(editor.renderSunSize, 0.01f) * DEGREES_TO_RADIANS
-        };
-
-        projv::core::vec4 renderParams = {
-            float(editor.renderBounces),
-            editor.renderSunIntensity,
-            editor.renderSkyIntensity,
-            editor.renderFireflyClamp
-        };
         projv::core::vec4 displayParams = {
             editor.renderExposure, editor.renderChromaticAberration, 0.0f, 0.0f
+        };
+        // The grade, in two words. Split by *where in the pipeline they apply* rather than by what
+        // they are called: gradeTint is multiplied into linear radiance before the tone curve, because
+        // a white balance is a property of the light; gradeParams is applied to the mapped image
+        // afterwards, because contrast and saturation are properties of the print and doing them in
+        // linear light blows highlights out of gamut instead of shaping them.
+        projv::core::vec4 gradeParams = {
+            editor.renderSaturation, editor.renderContrast, editor.renderLift, editor.renderVignette
+        };
+        // Temperature is folded into the tint here rather than in the shader: it is a fixed pair of
+        // channel gains, the arithmetic is the same every frame, and doing it on the CPU keeps the
+        // shader's version of "the cast" a single multiply.
+        float warm = std::clamp(editor.renderTemperature, -1.0f, 1.0f);
+        projv::core::vec4 gradeTint = {
+            editor.renderTint[0] * (1.0f + warm * 0.20f),
+            editor.renderTint[1] * (1.0f + warm * 0.02f),
+            editor.renderTint[2] * (1.0f - warm * 0.20f),
+            0.0f
         };
 
         // Thin-lens depth of field. The aperture is stored as a fraction of the focus distance --
@@ -20412,20 +24687,25 @@ void render(projv::Application& app) {
         projv::graphics::setUniformToValue(renderer, "cameraDir", cameraDirection);
         projv::graphics::setUniformToValue(renderer, "prevCameraPos", previousCameraPosition);
         projv::graphics::setUniformToValue(renderer, "prevCameraDir", previousCameraDirection);
-        projv::graphics::setUniformToValue(renderer, "windowRes", renderResolution);
         projv::graphics::setUniformToValue(renderer, "frameCount", frameCount);
-        projv::graphics::setUniformToValue(renderer, "texelSize", texelSize);
         projv::graphics::setUniformToValue(renderer, "cameraProjection", cameraProjection);
         projv::graphics::setUniformToValue(renderer, "sunDir", sunDirection);
         projv::graphics::setUniformToValue(renderer, "renderParams", renderParams);
         projv::graphics::setUniformToValue(renderer, "lensParams", lensParams);
         projv::graphics::setUniformToValue(renderer, "volumeParams", volumeParams);
         projv::graphics::setUniformToValue(renderer, "displayParams", displayParams);
+        core_info_once_grade(gradeParams, gradeTint);
+        projv::graphics::setUniformToValue(renderer, "gradeParams", gradeParams);
+        projv::graphics::setUniformToValue(renderer, "gradeTint", gradeTint);
         projv::graphics::updateUniforms(renderer->resources.uniformHandles, renderer->resources.uniformValues);
 
+        // The back buffer size, not the panel's. Every pass here writes an offscreen target and takes
+        // its size from that target, so this is only the fallback for a pass writing the default
+        // framebuffer -- which this renderer has none of. Passing the panel size would be a lie that
+        // happens not to be read.
         projv::core::mat4 identityMatrix = projv::core::mat4(1.0f);
         projv::graphics::performRenderPasses(false, renderer, renderInstance,
-                                             editor.renderViewWidth, editor.renderViewHeight,
+                                             framebufferWidth, framebufferHeight,
                                              identityMatrix, identityMatrix, &gpuData);
 
         // What the tab's counter reports. Frames since the camera last moved, which after this
@@ -20438,12 +24718,16 @@ void render(projv::Application& app) {
         editor.prevOrthoHeight = orthoHeight;
         editor.prevOrthoBackoff = orthoBackoff;
         editor.prevCameraValid = true;
-    } else if (editor.sceneLoaded) {
+    } else if (editor.sceneLoaded && viewportIsSized) {
         projv::core::vec2 viewportResolution = { float(editor.viewportWidth), float(editor.viewportHeight) };
         projv::core::vec4 frameCount = {
-            float(app.frameCount), float(cameraMoved), float(editor.frameCameraLastMovedOn), 0.0f
+            float(app.frameCount), float(cameraMoved), float(editor.frameCameraLastMovedOn),
+            // w marks "there is no usable history at all", which is what gi_temporal.frag tests before
+            // it reads the previous frame's light. Carried in the viewport too now that the traced
+            // light is reprojected -- it used to be hardcoded zero here, which was true only because
+            // nothing in this mode had a history to invalidate.
+            editor.prevCameraValid ? 0.0f : 1.0f
         };
-        projv::core::vec2 texelSize = { 1.0f / viewportResolution.x, 1.0f / viewportResolution.y };
         projv::core::vec3 cameraPosition = editor.cameraPosition;
         // The viewport's four readability toggles, read by shade.frag. All four components are in use;
         // the obvious next things to want here are the occlusion radius and strength, or the sun
@@ -20475,22 +24759,54 @@ void render(projv::Application& app) {
             0.0f
         };
 
+        // The same light rig Render mode uses, because gi.frag is a preview OF Render mode and lights
+        // with its sun and sky. Set whether or not the advanced toggle is on: gi.frag returns before
+        // reading either when it is off, and a uniform the shader declares must still have a value.
+        projv::core::vec4 sunDirection;
+        projv::core::vec4 renderParams;
+        editorLightRig(editor, sunDirection, renderParams);
+
+        // Last frame's camera, for gi_temporal.frag's reprojection. The spare lanes carry that
+        // frame's orthographic parameters, because an orthographic view has to be reprojected
+        // against the extent it was actually drawn with rather than this frame's.
+        projv::core::vec4 previousCameraPosition = {
+            editor.prevCameraPosition.x, editor.prevCameraPosition.y, editor.prevCameraPosition.z,
+            editor.prevOrthoHeight
+        };
+        projv::core::vec4 previousCameraDirection = {
+            editor.prevCameraDirection.x, editor.prevCameraDirection.y, editor.prevCameraDirection.z,
+            editor.prevOrthoBackoff
+        };
+
         projv::graphics::setUniformToValue(renderer, "cameraPos", cameraPosition);
         projv::graphics::setUniformToValue(renderer, "cameraDir", cameraDirection);
-        projv::graphics::setUniformToValue(renderer, "windowRes", viewportResolution);
+        projv::graphics::setUniformToValue(renderer, "prevCameraPos", previousCameraPosition);
+        projv::graphics::setUniformToValue(renderer, "prevCameraDir", previousCameraDirection);
         projv::graphics::setUniformToValue(renderer, "frameCount", frameCount);
-        projv::graphics::setUniformToValue(renderer, "texelSize", texelSize);
         projv::graphics::setUniformToValue(renderer, "renderSettings", renderSettings);
         projv::graphics::setUniformToValue(renderer, "previewSettings", previewSettings);
         projv::graphics::setUniformToValue(renderer, "cameraProjection", cameraProjection);
+        projv::graphics::setUniformToValue(renderer, "sunDir", sunDirection);
+        projv::graphics::setUniformToValue(renderer, "renderParams", renderParams);
         projv::graphics::updateUniforms(renderer->resources.uniformHandles, renderer->resources.uniformValues);
 
-        // Views 0..2, all rendering offscreen at the panel's resolution. The identity matrices match
-        // the renderer's fullscreen-quad vertex shader, which ignores them.
+        // Views 0..2, all rendering offscreen; each pass takes its resolution from the target it
+        // writes. The identity matrices match the renderer's fullscreen-quad vertex shader, which
+        // ignores them. The size passed is the back buffer's, for the same reason as in Render mode
+        // above -- no pass here writes the default framebuffer.
         projv::core::mat4 identityMatrix = projv::core::mat4(1.0f);
         projv::graphics::performRenderPasses(false, renderer, renderInstance,
-                                             editor.viewportWidth, editor.viewportHeight,
+                                             framebufferWidth, framebufferHeight,
                                              identityMatrix, identityMatrix, &gpuData);
+
+        // This frame's camera becomes next frame's history, exactly as Render mode does it. Recorded
+        // AFTER the passes, so the reprojection above read the camera from the frame the history was
+        // actually drawn with.
+        editor.prevCameraPosition = editor.cameraPosition;
+        editor.prevCameraDirection = cameraDirection;
+        editor.prevOrthoHeight = orthoHeight;
+        editor.prevOrthoBackoff = orthoBackoff;
+        editor.prevCameraValid = true;
     }
 
     // Nothing else touches the back buffer any more — the scene renders offscreen — so the interface
@@ -20499,8 +24815,110 @@ void render(projv::Application& app) {
     bgfx::touch(EDITOR_IMGUI_VIEW_ID);
     projv::editor::renderImGuiDrawData(ImGui::GetDrawData());
 
-    bgfx::frame();
+    if (editor.renderSaveCountdown > 0 && editor.mode == EditorMode::Render) {
+        if (--editor.renderSaveCountdown == 0) editor.renderSaveRequested = true;
+    }
 
+    // --- Saving the render, in two halves ---
+    //
+    // The request is made *after* the passes have been submitted, so the texture being read is the one
+    // this frame just produced rather than the previous frame's. The write happens some frames later,
+    // when bgfx says the copy has landed -- see EditorState::renderSaveReadyFrame.
+    if (editor.renderSaveRequested) {
+        editor.renderSaveRequested = false;
+        bgfx::TextureHandle image = getViewportTexture(renderer);
+        if (!bgfx::isValid(image) || editor.renderViewWidth <= 0 || editor.renderViewHeight <= 0) {
+            editor.statusMessage = "Nothing to save: the render target is not ready.";
+        } else if ((bgfx::getCaps()->supported &
+                    (BGFX_CAPS_TEXTURE_READ_BACK | BGFX_CAPS_TEXTURE_BLIT)) !=
+                   (BGFX_CAPS_TEXTURE_READ_BACK | BGFX_CAPS_TEXTURE_BLIT)) {
+            // Named rather than swallowed: on a backend without readback there is no way to get the
+            // pixels at all, and a button that quietly does nothing is worse than one that says why.
+            editor.statusMessage = "This graphics backend cannot read a texture back, so the render "
+                                   "cannot be saved.";
+            projv::core::warn("Save Image: BGFX_CAPS_TEXTURE_READ_BACK is not supported");
+        } else {
+            // The staging texture, made to match the image and remade when the image changes size.
+            if (!bgfx::isValid(editor.renderSaveTexture) ||
+                editor.renderSaveTextureWidth != editor.renderViewWidth ||
+                editor.renderSaveTextureHeight != editor.renderViewHeight) {
+                if (bgfx::isValid(editor.renderSaveTexture)) bgfx::destroy(editor.renderSaveTexture);
+                editor.renderSaveTexture = bgfx::createTexture2D(
+                    uint16_t(editor.renderViewWidth), uint16_t(editor.renderViewHeight), false, 1,
+                    bgfx::TextureFormat::RGBA8,
+                    BGFX_TEXTURE_BLIT_DST | BGFX_TEXTURE_READ_BACK | BGFX_SAMPLER_POINT |
+                    BGFX_SAMPLER_UVW_CLAMP);
+                editor.renderSaveTextureWidth = editor.renderViewWidth;
+                editor.renderSaveTextureHeight = editor.renderViewHeight;
+            }
+
+            std::error_code saveError;
+            std::filesystem::create_directories("renders", saveError);
+            // Named after the scene and numbered, so a session of saves does not overwrite itself and
+            // the files sort in the order they were taken.
+            std::string stem = "render";
+            if (!editor.scenePath.empty()) {
+                std::filesystem::path scene(editor.scenePath);
+                std::string name = scene.filename().string();
+                if (name.empty()) name = scene.parent_path().filename().string();
+                if (!name.empty()) stem = filenameSafe(name);
+            }
+            std::string path;
+            for (int index = 1; index < 10000; index++) {
+                char candidate[512];
+                std::snprintf(candidate, sizeof(candidate), "renders/%s_%04d.png", stem.c_str(), index);
+                if (!std::filesystem::exists(candidate, saveError)) { path = candidate; break; }
+            }
+            if (path.empty()) {
+                editor.statusMessage = "Could not find a free file name in renders/.";
+            } else {
+                editor.renderSaveWidth = editor.renderViewWidth;
+                editor.renderSaveHeight = editor.renderViewHeight;
+                editor.renderSavePixels.assign(size_t(editor.renderSaveWidth) *
+                                               size_t(editor.renderSaveHeight) * 4, 0);
+                editor.renderSavePath = path;
+                // On a view above every pass this frame submits, so bgfx runs the copy after the
+                // image has been drawn rather than before it -- views execute in ascending id order,
+                // and the interface itself is at EDITOR_IMGUI_VIEW_ID.
+                bgfx::blit(EDITOR_IMGUI_VIEW_ID + 1, editor.renderSaveTexture, 0, 0, image);
+                editor.renderSaveReadyFrame =
+                    bgfx::readTexture(editor.renderSaveTexture, editor.renderSavePixels.data());
+                editor.statusMessage = "Saving " + path + "...";
+            }
+        }
+    }
+
+    uint32_t completedFrame = bgfx::frame();
+
+    if (editor.renderSaveReadyFrame != 0 && completedFrame >= editor.renderSaveReadyFrame) {
+        uint32_t width = uint32_t(editor.renderSaveWidth);
+        uint32_t height = uint32_t(editor.renderSaveHeight);
+        bx::FileWriter writer;
+        bx::Error error;
+        if (bx::open(&writer, editor.renderSavePath.c_str(), false, &error)) {
+            // The target is RGBA8 and the rows are tight, so the pitch is width * 4. Not yflipped:
+            // the pass writes into an offscreen target top-down, the same orientation ImGui draws it
+            // in -- and the image on screen is the thing being saved.
+            int32_t written = bimg::imageWritePng(&writer, width, height, width * 4,
+                                                  editor.renderSavePixels.data(),
+                                                  bimg::TextureFormat::RGBA8, false, &error);
+            bx::close(&writer);
+            if (written > 0 && error.isOk()) {
+                editor.statusMessage = "Saved " + editor.renderSavePath + "  (" +
+                                       std::to_string(width) + " x " + std::to_string(height) + ")";
+                projv::core::info("Save Image: wrote {} ({} x {})", editor.renderSavePath, width, height);
+            } else {
+                editor.statusMessage = "Could not write " + editor.renderSavePath;
+                projv::core::error("Save Image: imageWritePng failed for {}", editor.renderSavePath);
+            }
+        } else {
+            editor.statusMessage = "Could not open " + editor.renderSavePath + " for writing.";
+            projv::core::error("Save Image: could not open {}", editor.renderSavePath);
+        }
+        editor.renderSaveReadyFrame = 0;
+        editor.renderSavePixels.clear();
+        editor.renderSavePixels.shrink_to_fit();
+    }
 }
 
 
@@ -20511,6 +24929,13 @@ void shutdown(projv::Application& app) {
     projv::editor::shutdownImGuiBgfx();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+
+    // The screenshot staging texture, if one was ever made. Owned by the editor rather than by the
+    // renderer -- it is not part of any pass -- so nothing else would release it.
+    if (bgfx::isValid(editor.renderSaveTexture)) {
+        bgfx::destroy(editor.renderSaveTexture);
+        editor.renderSaveTexture = BGFX_INVALID_HANDLE;
+    }
 
     if (editor.sceneLoaded && std::getenv("EDITOR_NO_DESTROY") == nullptr) {
         projv::graphics::destroyGPUData(gpuData);
