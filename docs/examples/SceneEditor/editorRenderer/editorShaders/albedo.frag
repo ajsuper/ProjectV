@@ -126,6 +126,16 @@ uniform vec4 cameraProjection;
 // x = advanced preview. y/z/w spare. Its own uniform rather than a fifth lane of renderSettings,
 // which has none left -- see the note beside renderSettings in the editor's render loop.
 uniform vec4 previewSettings;
+// .y = how many times the primary ray may be BENT by a material whose IOR is not 1. A runtime budget
+// rather than a #define, and zero by default, because the branch is not free where it is granted:
+// every layer of every ray tests for it. The Palette panel's Refraction slider sets it.
+uint refractionSegments() { return uint(max(previewSettings.y, 0.0) + 0.5); }
+// .w = which refraction diagnostic to draw, 0 = none. See drawRefractDebug below for the views.
+//
+// A NUMBER rather than a flag because "the picture is wrong" is never one question: each view isolates
+// one stage of the bend, and the one that comes back uniform is the one that is not at fault.
+int refractDebugMode() { return int(previewSettings.w + 0.5); }
+bool refractDebug() { return refractDebugMode() == 1; }
 
 #define FOV 60.0
 
@@ -287,7 +297,7 @@ vec3 specularPreview(vec3 position, vec3 normal, vec3 viewDirection, VoxelMateri
     reflectRay.origin = position + normal * (REFLECT_ORIGIN_BIAS_VOXELS * voxelSize);
     reflectRay.direction = lightDirection;
 
-    RayQuery reflectQuery;
+    RayQuery reflectQuery = pjvPrimaryQuery(100u);
     reflectQuery.maxRaySteps = REFLECT_MAX_STEPS;
     // No distance LOD, matching the primary march: a reflection of a simplified scene is a picture
     // of the wrong thing, and it is the one place a blocky distant surface would be read as a
@@ -299,7 +309,7 @@ vec3 specularPreview(vec3 position, vec3 normal, vec3 viewDirection, VoxelMateri
     // Not the peel. A reflection ray that saw through glass would double this shader's unrolled
     // traversal code for the one case of a mirror looking at a window, so a transparent voxel
     // reflects as its own surface here. The primary ray is where transparency is answered.
-    SceneIntersectData reflectHit = raySceneIntersect(reflectRay, reflectQuery);
+    SceneIntersectData reflectHit = raySceneIntersect(reflectRay, reflectQuery).hit;
     if (reflectHit.foundBox.size < 0.0 || reflectHit.rayT <= 0.0 ||
         dot(reflectHit.normal, reflectHit.normal) < 0.5) {
         return weight * backgroundColor(lightDirection);
@@ -353,7 +363,7 @@ void main() {
 
     Ray ray = primaryRay(uvJit);
 
-    RayQuery rayQuery;
+    RayQuery rayQuery = pjvPrimaryQuery(100u);
     rayQuery.maxRaySteps = 256u;
     // Full-resolution primary march, matching the fast renderer. Distance LOD was
     // measured there to buy almost nothing while making distant geometry blocky,
@@ -373,6 +383,13 @@ void main() {
     uint  seed = hashSeed(uvec3(uint(pixel.x), uint(pixel.y), uint(frame)));
 
     SceneIntersectData sceneHit;
+    // The ray the hit was found on. Identical to `ray` on every path that does not refract.
+    Ray hitRay = ray;
+    // Diagnostic only; see refractDebugMode.
+    uint segmentsTaken = 0u;
+    uint layersCrossed = 0u;
+    uint bendFlags = 0u;
+    uint stopWhy = 0u;
     // What the transparent layers in front of the hit did to the light behind them, and what they
     // emitted on their own account. Both identities under the plain path, which never peels.
     vec3 transmittance = vec3(1.0);
@@ -384,24 +401,168 @@ void main() {
         // Sees through transparency to the nearest opaque surface. A scene with no transparent
         // materials takes exactly the plain path's traversal: the peel stops at the first hit, and
         // the material it fetched to decide that is handed back rather than fetched again below.
-        PeeledHit peeled = raySceneIntersectPeeled(ray, rayQuery, TRANSPARENT_LAYERS, seed);
+        pjvQueryTransparency(rayQuery, TRANSPARENT_LAYERS, seed);
+        // ...and bends the ray at an interface whose IOR is not 1. Zero segments -- the default --
+        // reproduces the peel exactly, which is what the Refraction slider at 0 has to mean.
+        if (refractionSegments() > 0u) pjvQueryRefraction(rayQuery, refractionSegments());
+        SceneHit peeled = raySceneIntersect(ray, rayQuery);
         sceneHit = peeled.hit;
         material = peeled.material;
         transmittance = peeled.transmittance;
         glow = peeled.emission;
+        segmentsTaken = peeled.segments;
+        layersCrossed = peeled.layers;
+        bendFlags = peeled.diagBendFlags;
+        stopWhy = peeled.stopReason;
+        // The ray the hit was found ON, which is `ray` unless something bent it. Everything below
+        // reconstructs positions from this rather than from `ray`: after a bend,
+        // `ray.origin + ray.direction * rayT` names a point in empty space along the ORIGINAL
+        // direction, so the surface would be shaded correctly and positioned wrongly -- and this
+        // pass writes a G-buffer, so a wrong position is then read by the occlusion estimator, the
+        // GI's reprojection and every screen-space tap downstream.
+        hitRay = peeled.finalRay;
     } else {
-        sceneHit = raySceneIntersect(ray, rayQuery);
+        sceneHit = raySceneIntersect(ray, rayQuery).hit;
     }
 
     // Trust the march's own hit data rather than re-intersecting foundBox: a fresh
     // slab test disagrees with the march by ULPs on boundary-exact hits and
     // misclassifies them as misses.
     vec3 normal = sceneHit.normal;
+
+    // ---- WHY WAS THIS PIXEL THROWN AWAY? -----------------------------------------------------
+    //
+    // The miss test below rejects on THREE separate conditions and the pixel looks identical for all
+    // of them, which is what has made the refraction artifacts so hard to place: geometry that was
+    // found and then discarded is indistinguishable from geometry that was never there.
+    //
+    // With animDebug/previewSettings.w set (EDITOR_REFRACT_DEBUG=1) this splits them apart:
+    //
+    //   MAGENTA  geometry WAS found, and it was rejected for rayT <= 0 -- the ray started inside or
+    //            exactly on the surface it hit. If the artifact is magenta, the refracted ray's
+    //            origin is landing inside the geometry behind the glass.
+    //   CYAN     geometry WAS found, and it was rejected for a degenerate normal -- the hit came
+    //            from the initial descent with no committed DDA step, so hitNormal kept its zero
+    //            seed. If the artifact is cyan, the normal repair is not reaching this path.
+    //   unchanged  genuine miss: nothing was there.
+    //
+    // Both markers mean "the traversal found this and the renderer refused it", which is a different
+    // bug from "the traversal did not find it" and wants looking at in a different place.
+    if (refractDebug() && sceneHit.foundBox.size > 0.0) {
+        if (sceneHit.rayT <= 0.0) {
+            gl_FragData[0] = vec4(1.0, 0.0, 1.0, 1.0);
+            gl_FragData[1] = vec4(0.0, 1.0, 0.0, 1.0);
+            gl_FragData[2] = vec4(hitRay.origin, 1.0);
+            gl_FragData[3] = vec4(4.0, 0.0, 4.0, 0.0);
+            return;
+        }
+        if (dot(normal, normal) < 0.5) {
+            gl_FragData[0] = vec4(0.0, 1.0, 1.0, 1.0);
+            gl_FragData[1] = vec4(0.0, 1.0, 0.0, 1.0);
+            gl_FragData[2] = vec4(hitRay.origin + hitRay.direction * sceneHit.rayT, 1.0);
+            gl_FragData[3] = vec4(0.0, 4.0, 4.0, 0.0);
+            return;
+        }
+    }
+
+    // ---- THE OTHER DIAGNOSTIC VIEWS ----------------------------------------------------------
+    //
+    // Drawn before the miss test so they cover hits and misses alike -- an artifact that turns out to
+    // be a miss in one view and a hit in another is exactly the kind of thing these are for.
+    //
+    //   2  HOW MANY TIMES DID THIS RAY BEND?  grey 0, red 1, green 2, blue 3+.
+    //      If the artifact's boundary is a boundary between two of these colours, the bend COUNT is
+    //      what is discontinuous -- rays either side of the edge took different numbers of segments,
+    //      which points at the budget or at the interface test, not at the bend arithmetic.
+    //      If it is uniform across the artifact, every ray bent the same number of times and the
+    //      fault is in what the bend DID.
+    //
+    //   3  HOW COARSE WAS THE HIT?  green = full resolution, yellow = one LOD step, red = two or
+    //      more. This is the LOD question asked directly. `push` and the face normal both scale with
+    //      the hit's box, so a coarsened interface bends a whole node's worth of rays identically and
+    //      displaces them by a whole node's worth of nudge. If the artifact's boundaries line up with
+    //      a colour change here, LOD is the cause; if the artifact sits inside a single flat green
+    //      region, LOD is exonerated and it is something that varies per VOXEL.
+    //
+    //   4  WHY DID THE TRAVERSAL STOP?  green opaque (the good case), red out of layers, blue out of
+    //      peel iterations, yellow resume-floor stall, magenta out of refraction segments.
+    //      Distinguishes "the ray ran out of budget" from "the ray finished and the answer is wrong".
+    if (refractDebugMode() >= 2) {
+        vec3 dbg = vec3(0.0);
+        if (refractDebugMode() == 2) {
+            dbg = segmentsTaken == 0u ? vec3(0.15)
+                : (segmentsTaken == 1u ? vec3(1.0, 0.0, 0.0)
+                : (segmentsTaken == 2u ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.4, 1.0)));
+        } else if (refractDebugMode() == 3) {
+            // foundBox.size is the hit's WORLD size, so compare it against the finest voxel of the
+            // chunk it came from -- which the hit does not carry. The scene's own voxel scale is not
+            // available here either, so this reads the RATIO against the smallest box seen being 1:
+            // in practice a full-resolution hit is the modal size and anything larger is coarsened.
+            float sz = max(sceneHit.foundBox.size, 1e-6);
+            dbg = sz < 1.5 ? vec3(0.0, 1.0, 0.0)
+                : (sz < 5.0 ? vec3(1.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0));
+            if (sceneHit.foundBox.size < 0.0) dbg = vec3(0.05);
+        } else if (refractDebugMode() == 6) {
+            // ---- WHICH CLAUSE OF THE BEND GATE SAID NO? ------------------------------------
+            //
+            // The end of the line for "why is it not bending". The gate has four inputs and declines
+            // silently on any of them; this reports the one that failed, so there is nothing left to
+            // infer.
+            //
+            //   GREY     the decision was never reached -- the peel called this voxel OPAQUE and
+            //            stopped the ray at it. That is not the bend declining, it is the layer
+            //            never being offered, and the fault is in the peel or the material.
+            //   BLUE     reached, but not called an INTERFACE (crossedInterface false) -- the peel
+            //            thinks the ray is already inside this body.
+            //   YELLOW   reached, interface, but the SEGMENT BUDGET is spent.
+            //   RED      reached, interface, budget fine -- but the material's IOR came through as
+            //            1.0, so there is nothing to bend. The value itself is in diagBendIor; a red
+            //            field means the IOR is not arriving in the shader, not that the bend is broken.
+            //   GREEN    all four passed, so a bend did happen here.
+            uint f = bendFlags;
+            dbg = (f & 1u) == 0u ? vec3(0.15)
+                : ((f & 2u) == 0u ? vec3(0.0, 0.4, 1.0)
+                : ((f & 4u) == 0u ? vec3(1.0, 1.0, 0.0)
+                : ((f & 8u) == 0u ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0))));
+        } else if (refractDebugMode() == 5) {
+            // ---- DID THE RAY CROSS TRANSPARENCY, AND DID IT BEND? --------------------------
+            //
+            // The one view that separates the two halves of the refraction path, and the one to
+            // reach for when view 2 comes back uniformly grey (no bends) while view 4 shows the peel
+            // clearly running. Those two facts together mean the ray IS crossing transparent layers
+            // and is never bending at them, which narrows the fault to the bend condition itself --
+            // there is nothing else between "a layer was consumed" and "a segment was taken".
+            //
+            //   grey   no transparent layer crossed at all -- the peel is not seeing this material,
+            //          so the fault is upstream of refraction entirely (transparency, or the query).
+            //   RED    layers crossed, ZERO bends. The smoking gun: the interface was reached and
+            //          the bend declined it. Only two clauses can do that -- the interface flag, and
+            //          the material's IOR being 1 where it was expected not to be.
+            //   green  layers crossed and at least one bend taken -- this path is working, and
+            //          whatever is wrong is in what the bend DID rather than whether it happened.
+            dbg = layersCrossed == 0u ? vec3(0.15)
+                : (segmentsTaken == 0u ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0));
+        } else {
+            dbg = stopWhy == 0u ? vec3(0.0, 1.0, 0.0)
+                : (stopWhy == 2u ? vec3(1.0, 0.0, 0.0)
+                : (stopWhy == 5u ? vec3(0.0, 0.4, 1.0)
+                : (stopWhy == 3u ? vec3(1.0, 1.0, 0.0)
+                : (stopWhy == 8u ? vec3(1.0, 0.0, 1.0) : vec3(0.15)))));
+        }
+        gl_FragData[0] = vec4(dbg, 1.0);
+        gl_FragData[1] = vec4(0.0, 1.0, 0.0, 1.0);
+        gl_FragData[2] = vec4(hitRay.origin + hitRay.direction * max(sceneHit.rayT, 0.0), 1.0);
+        gl_FragData[3] = vec4(dbg * 4.0, 0.0);
+        return;
+    }
+
     if (sceneHit.foundBox.size < 0.0 || sceneHit.rayT <= 0.0 || dot(normal, normal) < 0.5) {
         // The background, filtered by any transparent layers between it and the camera -- which is
         // how a pane of glass against the sky reads as glass rather than as nothing. Under the plain
         // path the transmittance is exactly one and this is the untouched backdrop it always was.
-        gl_FragData[0] = vec4(backgroundColor(ray.direction) * transmittance, 0.0);
+        // The background the ray is looking at AFTER any bend, which is the whole visible effect of
+        // refraction against an empty backdrop.
+        gl_FragData[0] = vec4(backgroundColor(hitRay.direction) * transmittance, 0.0);
         gl_FragData[1] = vec4(0.0, 0.0, 0.0, 0.0);
         // a = 0 marks "no geometry here". shade.frag tests this rather than the colour
         // target's mask so a background pixel can never be read as a world position at
@@ -416,7 +577,7 @@ void main() {
     // Straight from the march's own arithmetic, for the same reason the hit test above
     // trusts it: a position re-derived from a fresh slab test lands off the surface by
     // ULPs, and the occlusion estimator measures exactly that kind of small offset.
-    vec3 hitPosition = ray.origin + ray.direction * sceneHit.rayT;
+    vec3 hitPosition = hitRay.origin + hitRay.direction * sceneHit.rayT;
 
     vec3 albedo;
     if (advanced) {

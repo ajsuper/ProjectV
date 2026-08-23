@@ -45,9 +45,30 @@ namespace projv::graphics {
                 textureWidth = uint16_t(std::max(1, texture.resolutionX));
                 textureHeight = uint16_t(std::max(1, texture.resolutionY));
             }
+            // ---- CLAMP AT THE EDGES, ALWAYS ---------------------------------------------------
+            // bgfx's default addressing is REPEAT, and for a render target that is never what anyone
+            // means. A render target holds a picture of the screen, so a filter tap that runs off one
+            // side does not find "more image" over there -- it finds the OPPOSITE side, and whatever
+            // was there gets blended in as if it were adjacent. Every screen-space filter in the tree
+            // has this bug by default: blurs, bloom, god rays, temporal reprojection, the lot. It
+            // shows up as a bright feature at the top of the frame reappearing along the bottom,
+            // which is exactly how it was found.
+            //
+            // Clamping is the right default rather than a workaround. It makes an off-screen tap read
+            // the nearest edge texel, which is the standard assumption every one of these filters is
+            // written against -- and it removes a whole class of bug that is invisible until some
+            // effect happens to be bright near an edge.
+            //
+            // Set at CREATION rather than per-bind: bgfx::setTexture's 4-argument form passes
+            // UINT32_MAX for its flags, which means "use the texture's own", so this reaches every
+            // pass without touching a single call site. It is also stored in
+            // ConstructedTextures::textureFlags below, so a resize rebuilds the target the same way.
+            //
             // Opt-in (Texture::readBack): lets this texture be blitted into and read back to the CPU
             // via bgfx::readTexture. Off by default so every other texture is unaffected.
-            uint64_t textureFlags = BGFX_TEXTURE_RT | (texture.readBack ? (BGFX_TEXTURE_READ_BACK | BGFX_TEXTURE_BLIT_DST) : 0);
+            uint64_t textureFlags = BGFX_TEXTURE_RT
+                                  | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP
+                                  | (texture.readBack ? (BGFX_TEXTURE_READ_BACK | BGFX_TEXTURE_BLIT_DST) : 0);
             // Remembered so a resize can rebuild this texture as the same kind of texture. See
             // ConstructedTextures::textureFlags.
             constructedTextures.textureFlags[texture.textureID] = textureFlags;
@@ -155,6 +176,8 @@ namespace projv::graphics {
         // See BGFXResources::passTargetRes.
         constructedRenderer.resources.passTargetRes = bgfx::createUniform("passTargetRes", bgfx::UniformType::Vec4);
         constructedRenderer.resources.passInputRes = bgfx::createUniform("passInputRes", bgfx::UniformType::Vec4, PROJV_MAX_PASS_INPUTS);
+        constructedRenderer.resources.pjvMotionSets = bgfx::createUniform("pjvMotionSets", bgfx::UniformType::Vec4, PROJV_MOTION_SET_VEC4S);
+        constructedRenderer.resources.pjvAnimTime = bgfx::createUniform("pjvAnimTime", bgfx::UniformType::Vec4);
         const Resources &resources = renderer.resources;
         const std::vector<RenderPass> &renderPasses = renderer.dependencyGraph.renderPasses;
 

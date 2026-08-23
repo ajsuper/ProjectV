@@ -43,10 +43,10 @@ bool sunVisible(vec3 p, vec3 n) {
     Ray shadow;
     shadow.origin = p + n * 0.02;
     shadow.direction = SUN_DIR;
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = 48u;
     rq.startLOD = 0u; rq.finishLOD = 0u; rq.distanceToFinishLOD = 30u;
-    return raySceneIntersect(shadow, rq).rayT < 0.0;
+    return raySceneIntersect(shadow, rq).hit.rayT < 0.0;
 }
 
 // Van der Corput / Halton for the sub-pixel jitter (base 2 and 3) that feeds the TAA pass.
@@ -76,13 +76,13 @@ void main() {
 
     // Primary ray at the finest LOD everywhere so every hit is a single finest voxel (a coarse LOD
     // would merge many voxels into one "face" and destroy the per-face identity + the crisp look).
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps         = 512u;
     rq.startLOD            = 0u;
     rq.finishLOD           = 0u;
     rq.distanceToFinishLOD = 100000u;
 
-    SceneIntersectData hit = raySceneIntersect(ray, rq);
+    SceneIntersectData hit = raySceneIntersect(ray, rq).hit;
     vec3 n = hit.normal;
 
     // Miss / degenerate boundary hit -> sky background. Store an impossible face key so nothing

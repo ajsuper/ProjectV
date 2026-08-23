@@ -23,6 +23,32 @@
 // which a position-derived key never could.
 // =============================================================================
 
+// ---- PER-VOXEL LIGHTING (U) -------------------------------------------------------------------
+// A mode switch, read by the two passes that decide how finely the indirect term is resolved:
+// pjv_probe.sc, which chooses what a probe integrates, and resolve.frag, which chooses which probe
+// samples belong to a pixel. Everything else -- the key format, gFace, the temporal gates, the
+// upscaler -- is left exactly as it is, which is why the mode is three small edits rather than a
+// second pipeline.
+//
+// OFF (default): the indirect term is per voxel FACE. A probe integrates the hemisphere about one
+// face's normal, from that face's centre, and only samples from the same face count. This is the
+// physically finer answer and it is what makes a voxel's lit top read differently from its shaded
+// side without any direct light being involved.
+//
+// ON: the indirect term is per VOXEL. A probe integrates the whole SPHERE around the voxel -- see
+// pjvProbeGather -- and any sample from the same voxel counts, whichever face it stood on. Every
+// face of a voxel then converges to one number, so a voxel is lit as a unit.
+//
+// Nothing about this is a fallback for the other. It is the coarser quantity, and coarser is
+// sometimes what is wanted: it is flat-shaded rather than form-shaded, it is a sixth of the distinct
+// values to converge so it settles faster and holds still through more camera motion, and it is the
+// granularity a real surface cache indexed by materialListIndex would store.
+//
+// It is DECLARED as a macro rather than a function so that only the shaders that actually use it
+// need `uniform vec4 debugParams` -- the passes that include this header for pjvSameFace alone are
+// unaffected and do not have to grow a uniform they never read.
+#define PJV_PER_VOXEL_LIGHTING (debugParams.w > 0.5)
+
 // The key a pixel with no surface carries. Deliberately NOT zero: zero is voxel (0,0,0) face -X,
 // which is a real face in any scene with a chunk at the origin, and the sky would then share that
 // face's converged lighting. 1e20 is outside any scene's coordinate range and is exactly
@@ -51,6 +77,28 @@ vec4 pjvFaceKey(ivec3 voxelCoord, uint headerIndex, vec3 n) {
 bool pjvSameFace(vec4 a, vec4 b) {
     if (a.w >= FACE_KEY_NONE || b.w >= FACE_KEY_NONE) return false;
     return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+}
+
+// True when two keys name the same VOXEL, whatever face of it. The face id is the low part of w
+// (w = headerIndex * 6 + faceId), so dividing it out leaves chunk + voxel identity.
+//
+// This is the gate a SWAYING BLADE needs, and it is exact rather than a loosened guess. The envelope
+// march deliberately reports the blade's SOURCE voxel as its identity -- "identity is the SOURCE, so
+// it holds still", see envelopeResolve -- so voxelCoord is rock steady from frame to frame even as
+// the blade moves. What is not steady is the NORMAL, because that comes from the drawn box, and the
+// ray meets a differently-oriented piece of the blade each frame. So the key churns in exactly one
+// of its four components, and pjvSameFace, which needs all four, rejects every frame.
+//
+// Matching on the voxel instead pools a blade's faces into one value. For foliage that is the right
+// quantity anyway -- a blade's indirect light is ambient, not a property of which side of it the ray
+// happened to strike -- and being an identity rather than a distance test, it cannot ghost.
+//
+// It earns its place on static geometry too, for the pixel sitting exactly on a voxel's CORNER: the
+// sub-pixel jitter flips such a pixel between two faces of one voxel, which changes the face id and
+// nothing else.
+bool pjvSameVoxel(vec4 a, vec4 b) {
+    if (a.w >= FACE_KEY_NONE || b.w >= FACE_KEY_NONE) return false;
+    return a.x == b.x && a.y == b.y && a.z == b.z && floor(a.w / 6.0) == floor(b.w / 6.0);
 }
 
 // The face's outward normal, recovered from the key alone. The temporal pass needs this to decide

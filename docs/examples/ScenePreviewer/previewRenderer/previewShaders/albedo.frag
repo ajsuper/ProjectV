@@ -83,7 +83,7 @@ void main() {
         FOV
     );
 
-    RayQuery rayQuery;
+    RayQuery rayQuery = pjvPrimaryQuery(100u);
     rayQuery.maxRaySteps = 256u;
     // Full-resolution primary march, matching the fast renderer. Distance LOD was
     // measured there to buy almost nothing while making distant geometry blocky,
@@ -92,7 +92,7 @@ void main() {
     rayQuery.finishLOD = 2;
     rayQuery.distanceToFinishLOD = 10000;
 
-    SceneIntersectData sceneHit = raySceneIntersect(ray, rayQuery);
+    SceneIntersectData sceneHit = raySceneIntersect(ray, rayQuery).hit;
 
     // Trust the march's own hit data rather than re-intersecting foundBox: a fresh
     // slab test disagrees with the march by ULPs on boundary-exact hits and

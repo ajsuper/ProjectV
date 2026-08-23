@@ -413,24 +413,39 @@ static constexpr int SELECTION_SCOPE_COUNT = 2;
 
 // Ceilings on the brush, for the same reason the paint brush has them: every candidate coordinate
 // costs a tree64 descent to learn whether a voxel is there, and the *scanned box* -- not the placed
-// count -- is what sets the cost. A dab happens every frame of a drag rather than once per click, so
-// the ceiling here is tighter than Paint's: radius 24 is a 49^3 box, ~118k descents, which is about
-// as much as belongs inside a frame that also has to rebuild the chunk and re-upload it.
-static constexpr float SCULPT_MAX_RADIUS = 24.0f;
+// count -- is what sets the cost.
+//
+// **These are sized for blocking out a large scene, not for keeping every dab inside one frame.**
+// That is a deliberate change of what the number is for. The old ceiling was 24 -- a 49^3 box, ~118k
+// descents, about as much as belongs inside a frame that also has to rebuild the chunk and re-upload
+// it -- and it made the tool unusable at the scale of a landscape, where a stroke that moves a
+// 48-voxel ball is a detail pass rather than the shape. Radius 128 is a 257^3 box, ~17 M descents,
+// which is a visible pause per dab and not a dropped frame in a stroke that would otherwise have
+// taken a hundred dabs to cover the same ground. The stroke interpolation steps at half the radius,
+// so a large brush lays down *fewer* dabs over a given distance, not more.
+//
+// What is still true, and is why these are not simply enormous: the cost is cubic in the radius, and
+// Smooth/Bump additionally hold a dense scratch box of it (see SculptScratch -- ~180 MB at this
+// ceiling, kept between ticks). Doubling this again is a memory decision as much as a time one.
+static constexpr float SCULPT_MAX_RADIUS = 128.0f;
 
 // The programmable brushes' ceilings, here beside the sculpt brush's for the same reason they exist: a
 // coordinate is cheap to generate and a dab is a cube, so the cost of a careless radius is cubic.
 // Shared by the Brush Lab's preview and the Custom tool -- one dab is one dab whichever ends up kept.
-static constexpr float BRUSH_PREVIEW_MAX_RADIUS = 24.0f;
-// Cells one dab may consider. A radius-24 sphere is ~58k, which at the slowest brush measured here
-// (~400 ns a voxel, Worley plus fBm plus a string search) is about 23 ms -- one frame's worth. Past
-// this the dab is truncated and says so.
-static constexpr size_t BRUSH_MAX_DAB_CELLS = 120000;
-// Sites one scatter dab may consider. Far lower than the cell ceiling because a site costs a script
-// call *and* a fit test over the placement's whole box, where a cell costs one call -- and because a
-// dab that plants a thousand objects is not a dab, it is a landscape.
-static constexpr size_t BRUSH_MAX_SCATTER_SITES = 2000;
-static constexpr float SCULPT_MAX_CUBE_SIDE = 48.0f;
+// Matched to the sculpt brush's so that "radius 90" means the same size of bite in either tool.
+static constexpr float BRUSH_PREVIEW_MAX_RADIUS = 128.0f;
+// Cells one dab may consider. Sized so the largest dab the radius allows is never truncated on cell
+// count alone: a radius-128 sphere is ~8.8 M cells, and the ceiling sits above it. What a big dab
+// costs is then the script's own arithmetic -- at the slowest brush measured here (~400 ns a voxel,
+// Worley plus fBm plus a string search) 8.8 M cells is several seconds, which is the author's problem
+// to solve with a cheaper script or a smaller radius rather than the editor's to refuse. This remains
+// the backstop against a runaway, and a dab past it is truncated and says so.
+static constexpr size_t BRUSH_MAX_DAB_CELLS = 12000000;
+// Sites one scatter dab may consider. Still far lower than the cell ceiling because a site costs a
+// script call *and* a fit test over the placement's whole box, where a cell costs one call -- but
+// high enough that one dab of grass can cover a hillside, which is the scale these are planted at.
+static constexpr size_t BRUSH_MAX_SCATTER_SITES = 50000;
+static constexpr float SCULPT_MAX_CUBE_SIDE = 256.0f;
 
 // How far apart two consecutive dabs of a stroke may be, in voxels, before the gap between them is
 // filled in with dabs of its own -- and how many of those one frame will pay for.
@@ -551,10 +566,16 @@ static constexpr float SCULPT_BLEND_MARGIN = 2.0f;
 
 // Extrude's two ceilings. The face is gathered by a flood fill with no bound of its own -- a terrain's
 // ground plane is one enormous face of one material -- and the voxels it moves are the face times the
-// depth, so the two multiply. A million-voxel face pulled out sixty-four layers is not an edit anyone
-// meant to make, and the depth cap is what keeps a single flick of the mouse from being one.
-static constexpr size_t EXTRUDE_MAX_FACE_VOXELS = 1000000;
-static constexpr int    EXTRUDE_MAX_DEPTH = 64;
+// depth, so the two multiply.
+//
+// Raised for large scenes, where pulling a whole ground plane up into a plateau is a thing people do
+// on purpose and the old million-voxel face refused it. The product is what to watch: these two allow
+// an edit of billions of voxels between them, which no machine will finish, so the honest reading is
+// that they now bound each factor at something a large scene plausibly wants rather than bounding
+// their product at something safe. The depth cap is still what keeps a single flick of the mouse from
+// running away -- it is just a longer flick now.
+static constexpr size_t EXTRUDE_MAX_FACE_VOXELS = 16000000;
+static constexpr int    EXTRUDE_MAX_DEPTH = 512;
 
 // =============================================================================
 // Paint shapes
@@ -605,27 +626,34 @@ static const char* PaintShapeHint(PaintShape shape) {
 
 // Ceilings on the brush settings, and on how far a flood fill will spread.
 //
-// Both are about a click staying a click. Every candidate coordinate costs a tree64 descent to find
-// out whether a voxel is there at all, so the scanned box -- not the painted count -- is what sets
-// the cost: radius 32 is a 65^3 box, a quarter of a million descents, which is a perceptible pause
-// and about as much as belongs on the end of a mouse button.
+// The first two are about the scanned box. Every candidate coordinate costs a tree64 descent to find
+// out whether a voxel is there at all, so the box -- not the painted count -- is what sets the cost:
+// radius 128 is a 257^3 box, ~17 M descents, seconds rather than the perceptible pause the old
+// radius-32 ceiling was chosen to stay under. That trade is made on purpose and for the same reason
+// the sculpt brush's is (see SCULPT_MAX_RADIUS): on a scene the size of a landscape, a click that
+// cannot recolour more than a 65-voxel box is not a tool, and the alternative to one slow click is a
+// hundred fast ones.
 //
 // The fill limit is a different worry: a fill has no bound of its own, and one started on a terrain's
 // ground material would otherwise walk the entire component. It counts voxels *of the region* -- the
 // ones a fill would paint -- and not coordinates looked at, which is roughly seven times larger and
-// is what an earlier version measured, cutting every large fill off at a seventh of its budget. Four
-// million is comfortably past a terrain's ground layer and still a fraction of a second, now that the
-// visited set is a bitset rather than a hash of packed coordinates.
-static constexpr float PAINT_MAX_RADIUS = 32.0f;
-static constexpr int   PAINT_MAX_CUBE_SIDE = 64;
-static constexpr size_t PAINT_FILL_LIMIT = 4000000;
+// is what an earlier version measured, cutting every large fill off at a seventh of its budget.
+//
+// This one is bounded by memory, not by patience, which is why it is raised by four rather than by
+// sixteen: the region is carried as a coordinate and a colour per voxel and then copied into the edit
+// queue and the undo record, so it costs tens of bytes a voxel across those structures. Sixteen
+// million is a gigabyte-ish spike on a click, which is the most that belongs on the end of a mouse
+// button; the visited set itself is a bitset over the component and is not what costs.
+static constexpr float PAINT_MAX_RADIUS = 128.0f;
+static constexpr int   PAINT_MAX_CUBE_SIDE = 256;
+static constexpr size_t PAINT_FILL_LIMIT = 16000000;
 
 // How many dabs one frame of a paint drag will pay for, filling in the gap the cursor crossed since
 // the last frame. Same reasoning as the sculpt brush's cap, and the same trade: past this the stroke
-// thins out rather than the frame stalling. Lower than sculpt's, because a paint dab is the more
-// expensive of the two at equal size -- the ceiling on the paint radius is a 65^3 box against the
-// brush's 49^3, and a stroke that is a few voxels sparse is far less noticeable on a recolour than on
-// geometry, where it leaves a visible hole.
+// thins out rather than the frame stalling. Lower than sculpt's because a stroke that is a few voxels
+// sparse is far less noticeable on a recolour than on geometry, where it leaves a visible hole. Both
+// step at half the brush's radius, so at the large radii these tools now allow the cap is reached
+// only by a flick across thousands of voxels, which is not a stroke anyone is aiming.
 static constexpr int PAINT_MAX_INTERPOLATED_STEPS = 32;
 
 // Whether a shape spreads on its own rather than covering a fixed neighbourhood. The two fills do,
@@ -918,7 +946,10 @@ static constexpr size_t ASSEMBLY_MAX_RESULT_CELLS = 16000000;
 // nicety: with the result as the default view, without it every frame of every drag is a fold.
 static constexpr double ASSEMBLY_SETTLE_SECONDS = 0.15;
 // A box selection's bounding box, capped for the same reason: the bitset is one bit per cell of it.
-static constexpr size_t REGION_MAX_SELECTION_CELLS = 64000000;
+// One bit is cheap, so this is set well past what any other edit can act on -- 512 M cells is a 64 MB
+// bitset and an 800-voxel cube, which is a district of a large scene rather than a model in it. What
+// the selection can then *do* is bounded by the operation, not by this.
+static constexpr size_t REGION_MAX_SELECTION_CELLS = 512000000;
 
 // A selection of voxels inside one component -- bounds plus one bit per cell of those bounds, not a
 // vector<ivec3>. The volume fill already established why: a million-voxel selection is 128 KB one
@@ -1351,6 +1382,20 @@ struct EditorState {
     // like, so it stays something you reach for deliberately — an editor that opened with it on would
     // be showing a lit-ish image to someone who came to judge stored colours.
     bool advancedPreviewEnabled = false;
+    // How many times one ray may be BENT by a material whose IOR is not 1. Shared by the Viewport's
+    // advanced preview and the Render tab, deliberately: the preview exists to answer "what will this
+    // material do", and it cannot answer that if the two tabs disagree about whether glass bends light.
+    //
+    // ZERO BY DEFAULT, which reproduces the previous traversal exactly. Not a conservative default so
+    // much as an honest one -- a bend is a branch every layer of every ray tests for, so a scene with
+    // no glass in it should not pay for the feature, and at 0 it does not.
+    //
+    // One is enough to see a surface refract; two is what lets you see through a glass body and out
+    // the far side. Past three nobody can tell, and each one is a scene query.
+    int refractionSegments = 0;
+    // Which refraction diagnostic the viewport draws, 0 = none. EDITOR_REFRACT_DEBUG=<1..4>.
+    // See refractDebugMode in albedo.frag for what each view shows and what it rules out.
+    int refractDebugMode = 0;
     // A toggle invalidates the accumulated image the same way a camera move does — without this the
     // new setting fades in over the history's 64 frames instead of appearing.
     bool renderSettingsChanged = false;
@@ -2076,6 +2121,11 @@ struct EditorState {
     // Palette slots the brush's declared materials were interned into, for the component the preview
     // is working on. Rebuilt when either changes.
     std::vector<uint32_t> brushPreviewColors;
+    // The palette *index* of each of those, parallel to brushPreviewColors. The colour is what gets
+    // written; the index is what says which entry a written cell belongs to, which is the question the
+    // displacement rule asks about cells this dab has just planted -- a colour would have to be
+    // resolved back to an entry to answer it, and two entries may share one.
+    std::vector<uint8_t> brushPreviewSlots;
     projv::ComponentHandle brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
     std::string brushPreviewPaletteBrush;
 
@@ -2540,6 +2590,7 @@ static void resetEditorForDocumentSwap(EditorState& editor) {
     editor.brushPreviewWrites = 0;
     editor.brushPreviewComponent = projv::INVALID_COMPONENT_HANDLE;
     editor.brushPreviewColors.clear();
+    editor.brushPreviewSlots.clear();
     editor.brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
     editor.brushPreviewPaletteBrush.clear();
     // Dropped rather than removed, like the journal above and for the same reason: the palette those
@@ -2563,6 +2614,45 @@ static bool loadScene(projv::Scene& scene, projv::GPUData& gpuData, EditorState&
     projv::Scene loadedScene = projv::utils::loadComposeFromDisk(normalizedPath);
 
     scene = std::move(loadedScene);
+
+    // Scripted material overrides, applied BEFORE the palette reaches the GPU so an overridden entry
+    // is what every pass reads rather than needing a re-upload. Same reason EDITOR_CAMERA and
+    // EDITOR_SAVE_RENDER exist: a captured frame is only comparable to another if both were set up
+    // identically, and a headless run has no mouse to drag a slider with.
+    //
+    // EDITOR_GLASS="<prefix>=<alpha>[,...]"  EDITOR_GLASS_IOR=...  EDITOR_GLASS_DENSITY=...
+    // Each writes one BYTE LANE; a whole-word pack here would clear the other properties.
+    {
+        auto applyByte = [&scene](const char* envName, bool surfaceWord, int shift, bool isIOR) {
+            const char* spec = std::getenv(envName);
+            if (!spec) return;
+            int applied = 0;
+            std::string rest(spec);
+            while (!rest.empty()) {
+                size_t comma = rest.find(',');
+                std::string one = rest.substr(0, comma);
+                rest = (comma == std::string::npos) ? std::string() : rest.substr(comma + 1);
+                size_t eq = one.find('=');
+                if (eq == std::string::npos) continue;
+                std::string prefix = one.substr(0, eq);
+                float value = std::strtof(one.c_str() + eq + 1, nullptr);
+                uint32_t byteValue = isIOR ? projv::packIOR(value) : projv::packByteField(value);
+                for (projv::ComponentRecord& component : scene.components) {
+                    for (projv::Material& material : component.materialPalette) {
+                        if (material.name.rfind(prefix, 0) != 0) continue;
+                        uint32_t& word = surfaceWord ? material.packedSurface : material.packedExtra;
+                        word = (word & ~(0xFFu << shift)) | ((byteValue & 0xFFu) << shift);
+                        applied++;
+                    }
+                }
+            }
+            projv::core::info("{}: {} palette entr(ies) updated.", envName, applied);
+        };
+        applyByte("EDITOR_GLASS",         true,   8, false);
+        applyByte("EDITOR_GLASS_IOR",     true,   0, true);
+        applyByte("EDITOR_GLASS_DENSITY", false, 16, false);
+    }
+
     gpuData = projv::graphics::createTexturesForScene(scene);
 
     editor.scenePath = normalizedPath;
@@ -6233,11 +6323,65 @@ static void drawPaletteBody(projv::Scene& scene, projv::GPUData& gpuData, Editor
                                   "shifting the colour without darkening it, so deep tinted\n"
                                   "glass gets more saturated rather than black.");
             }
-            ImGui::TextDisabled("Refraction is stored, not yet rendered:");
-            ImGui::TextDisabled("a bent ray is a new ray, not a march");
-            ImGui::TextDisabled("that carries on straight through.");
+            // ---- The renderer-side budget, beside the material-side value it enables ------------
+            //
+            // Two controls that only work together, so they sit together. IOR is a property of the
+            // MATERIAL and is saved with it; the segment budget is a property of the RENDERER and is
+            // not saved at all -- and a slider that silently does nothing because a different,
+            // unmentioned setting is zero is exactly the kind of thing this panel used to have a
+            // "not yet rendered" label for.
+            //
+            // Applies to both tabs from one field, because the preview exists to answer "what will
+            // this material do" and cannot answer it if the two tabs disagree.
+            ImGui::Separator();
+            if (ImGui::SliderInt("Refraction", &editor.refractionSegments, 0, 8,
+                                 editor.refractionSegments == 0 ? "off" : "%d bend(s)")) {
+                editor.renderSettingsChanged = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("How many times ONE ray may be bent, for the WHOLE SCENE. Not a\n"
+                                  "material property -- it is what lets the IOR below do anything,\n"
+                                  "and at 0 (the default) the traversal is exactly what it was\n"
+                                  "before refraction existed.\n\n"
+                                  "Zero by default because a bend is not free where it is granted:\n"
+                                  "every transparent layer of every ray tests for one. A scene with\n"
+                                  "no glass in it should not pay for the feature.\n\n"
+                                  "A bend is per INTERFACE, not per object: a single pane costs TWO,\n"
+                                  "one entering and one leaving. So 2 is the minimum for one pane to\n"
+                                  "look right, and a ray clipping the edge of a body meets more\n"
+                                  "surfaces than one through its middle -- which is why too small a\n"
+                                  "budget shows up as artifacts along edges specifically.\n\n"
+                                  "4 to 6 covers most scenes. A ray that runs out stops AT the\n"
+                                  "surface rather than punching through it, so the failure is a\n"
+                                  "shading difference rather than a tear.\n\n"
+                                  "In the Viewport this needs the ADVANCED preview toggle on; the\n"
+                                  "Render tab always peels.");
+            }
             changed |= ImGui::SliderFloat("Transmission", &transmission, 0.0f, 1.0f, "%.3f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("How STRONGLY this medium absorbs, as opposed to what colour it\n"
+                                  "absorbs -- which is the albedo's job. A metre of pool water and a\n"
+                                  "metre of ink are the same colour problem and completely different\n"
+                                  "absorption problems, and this is the difference between them.\n\n"
+                                  "0 is what every palette written before this existed carries, and\n"
+                                  "reproduces the previous absorption exactly. 1 is four times the\n"
+                                  "optical depth per voxel crossed.");
+            }
             changed |= ImGui::SliderFloat("IOR", &ior, 1.0f, 2.99f, "%.3f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("How far this material bends light at its SURFACE. 1.0 is no\n"
+                                  "refraction; 1.33 water, 1.5 glass, 2.42 diamond.\n\n"
+                                  "The bend happens at an INTERFACE only -- where the ray enters or\n"
+                                  "leaves a body -- not at every voxel inside one, so a flat pane\n"
+                                  "stays a flat pane rather than becoming a stack of lenses.\n\n"
+                                  "Does nothing on its own: the Refraction budget above has to be\n"
+                                  "above zero, because a bent ray is a NEW ray and costs a new scene\n"
+                                  "query. With it at 1 or more, both the Viewport's advanced preview\n"
+                                  "and the Render tab bend light here.\n\n"
+                                  "Total internal reflection falls out of this for free -- past the\n"
+                                  "critical angle the refracted ray becomes a reflected one, which is\n"
+                                  "what makes a thick glass edge go mirror-like at a grazing view.");
+            }
 
             if (changed) {
                 uint32_t newEmission = projv::packRGB10(emission[0], emission[1], emission[2]);
@@ -7587,6 +7731,7 @@ static void drawCustomToolSettings(projv::Scene& scene, EditorState& editor) {
                 editor.selectedBrushID = entry->id;
                 editor.brushSourceLoadedFor.clear();
                 editor.brushPreviewColors.clear();
+                editor.brushPreviewSlots.clear();
                 editor.brushPreviewPaletteBrush.clear();
             }
             ImGui::EndDisabled();
@@ -8872,8 +9017,11 @@ enum class SculptOperator {
 // simpler than applying each pass, and it keeps the intermediate states of a blend off the screen --
 // but it is a tidiness, not the fix.
 //
-// Buffers are kept between ticks (this runs ten times a second, and the box is up to ~830 KB at the
-// largest radius) and this is single-threaded UI code.
+// Buffers are kept between ticks (this runs ten times a second) and this is single-threaded UI code.
+// The box is ten bytes a cell across the four arrays, so it is a few hundred KB at the radius these
+// brushes are normally used at and ~180 MB at SCULPT_MAX_RADIUS -- held for the rest of the session,
+// since the vectors are static and never shrink. That is the memory half of why the radius ceiling is
+// where it is, and it is the thing to revisit first if it is ever raised again.
 struct SculptScratch {
     projv::core::ivec3 origin = projv::core::ivec3(0);   // Component coord of the box's low corner.
     int side = 0;
@@ -9734,11 +9882,30 @@ static void processSculptSample(projv::Scene& scene, EditorState& editor,
         faceAxis = worldDirectionToComponentAxis(space, worldNormal);
         centre = worldToComponentVoxel(space, pick.worldPosition) + (addMode ? faceAxis : ivec3(0));
     } else {
-        // Nothing under the cursor: the dab goes a fixed distance down the ray. This is what makes an
-        // empty component sculptable at all, and it is also how a stroke keeps flowing when the drag
-        // runs off the edge of the object it started on.
-        vec3 worldPoint = cursorRay.origin +
-                          glm::normalize(cursorRay.direction) * editor.sculptPlaceDistance;
+        // Nothing under the cursor: the dab goes down the ray -- but at the depth the stroke is
+        // *already working at*, not at a fixed distance from the eye.
+        //
+        // The fixed distance is right for the first dab of a stroke and wrong for every dab after it.
+        // Sculpting a wall 200 units out and letting the cursor cross onto the sky moved the sample
+        // from the wall to 20 units in front of the camera in one frame, and the gap fill below then
+        // joined the two: a solid column of brush laid from the geometry to the eye, in one frame,
+        // from a flick the user read as "I went past the edge". Holding the depth makes the crossing
+        // continuous, which is what the run-off-the-edge case wanted in the first place -- the stroke
+        // carries on in the plane it was carving and extends the shape past its own silhouette,
+        // rather than teleporting into the viewer's face.
+        //
+        // The fixed distance still governs the case it was written for: a stroke that has not landed
+        // a dab yet, which is the only way to put the first voxel into an empty component.
+        vec3 forward = glm::normalize(cursorRay.direction);
+        float distance = editor.sculptPlaceDistance;
+        if (editor.sculptStrokeHasAnchor) {
+            float depth = glm::dot(componentVoxelToWorld(space, editor.sculptStrokeLastCenter) -
+                                       cursorRay.origin, forward);
+            // Behind the eye: the view was orbited mid-stroke and the anchor is no longer in front of
+            // the camera, so there is no depth to hold and the fixed distance is all that is left.
+            if (depth > 0.0f) distance = depth;
+        }
+        vec3 worldPoint = cursorRay.origin + forward * distance;
         centre = worldToComponentVoxel(space, worldPoint);
         faceAxis = ivec3(0);
     }
@@ -9797,14 +9964,30 @@ static void processSculptSample(projv::Scene& scene, EditorState& editor,
         float span = glm::length(to - from);
         int steps = std::max(1, int(std::ceil(span / sculptDabSpacing(editor))));
         if (steps > SCULPT_MAX_INTERPOLATED_STEPS) {
-            steps = SCULPT_MAX_INTERPOLATED_STEPS;
+            // **Past the cap the gap is not filled at all -- the stroke breaks and picks up at the new
+            // cell.** It used to be filled anyway, at coarser spacing, which is the one thing the gap
+            // fill must never do: a gap this size is not a fast hand, it is the sample landing
+            // somewhere else. The cursor crosses a silhouette onto a wall far behind, or onto another
+            // object entirely (the world-space carry above), and the two samples are neighbours on
+            // screen and hundreds of voxels apart in the scene. Bridging them drew a line of brush
+            // through the air between the two surfaces -- a beam hanging in the scene, laid down by a
+            // gesture that never went near it.
+            //
+            // Breaking is also what the cap already meant. Its own comment says the stroke thins out
+            // rather than the frame stalling, and a dotted line across open space is the visible half
+            // of that trade; the status message ("moved faster than the brush could follow") reads the
+            // same either way. Paint reached the same conclusion by a shorter route and simply drops
+            // its anchor whenever the cursor leaves the geometry -- sculpt cannot, because its empty-
+            // space fallback is a real place to put voxels, so it tests the distance instead.
             editor.sculptStrokeTruncated = true;
-        }
-        for (int step = 1; step <= steps; step++) {
-            vec3 point = from + (to - from) * (float(step) / float(steps));
-            ivec3 dabCentre(int(std::lround(point.x)), int(std::lround(point.y)),
-                            int(std::lround(point.z)));
-            stampSculptDab(scene, editor, space, dabCentre, frameCoords, framePreviousColors);
+            stampSculptDab(scene, editor, space, centre, frameCoords, framePreviousColors);
+        } else {
+            for (int step = 1; step <= steps; step++) {
+                vec3 point = from + (to - from) * (float(step) / float(steps));
+                ivec3 dabCentre(int(std::lround(point.x)), int(std::lround(point.y)),
+                                int(std::lround(point.z)));
+                stampSculptDab(scene, editor, space, dabCentre, frameCoords, framePreviousColors);
+            }
         }
     }
 
@@ -13442,9 +13625,12 @@ static void applyRegionPick(projv::Scene& scene, EditorState& editor, const proj
 // op, a gizmo and a bake, exactly like anything else in the resolve -- which is the payoff of a part
 // being one thing with three sources rather than three things that look alike.
 //
-// A fresh Chunk built through queueVoxelAdd, never utils::duplicateComponent -- that helper does not
-// handle Grid components, and a selection routinely lives in one. Stated here so nobody "optimises"
-// it later.
+// A fresh Chunk built through queueVoxelAdd, never utils::duplicateComponent. That helper now copies
+// a Grid as well as a Chunk, so this is no longer a workaround for a hole in it -- but the two verbs
+// still mean different things and swapping one for the other would be wrong. Duplicating copies a
+// component *whole*: same lattice, same extent, every cell of it. A lift takes an arbitrary region
+// out of a component and makes it its own object, at its own origin, sized to the selection -- which
+// a copy of the source would have to be cut back down to. Stated here so nobody "optimises" it later.
 static void liftSelection(projv::Scene& scene, EditorState& editor, bool cut) {
     using namespace projv::core;
 
@@ -17111,21 +17297,32 @@ static bool ensureBrushPalette(projv::Scene& scene, EditorState& editor,
 
     editor.brushPreviewColors.clear();
     editor.brushPreviewColors.reserve(slots.size());
+    editor.brushPreviewSlots.clear();
+    editor.brushPreviewSlots.reserve(slots.size());
     bool paletteGrew = false;
     for (const projv::editor::BrushMaterialSlot& slot : slots) {
-        // Does the entry already exist? Asked before interning, because the answer decides whether the
-        // brush's declared colour and surface properties are used at all.
-        bool existed = projv::utils::findMaterialByName(record, slot.name) != projv::INVALID_MATERIAL;
-
+        // **Did interning actually append an entry?** Asked by watching the palette's size across the
+        // call, and not by looking the name up beforehand, because a name miss does not mean a new
+        // entry: internMaterial falls back to matching by *colour*, so a role whose name is new but
+        // whose colour matches an existing entry binds to that entry and creates nothing.
+        //
+        // Getting this wrong was silent and expensive. The revert list is a list of names to pop off
+        // the end of the palette, and it only pops while the last entry is the name it expects -- so
+        // one name recorded that was never appended stops the unwind dead at the first comparison and
+        // strands every entry the brush made, in that component, for the rest of the session. A brush
+        // declaring two roles with the same colour was enough to trigger it.
         uint32_t packed = projv::packRGB10(slot.color[0], slot.color[1], slot.color[2]);
+        size_t paletteBefore = record.materialPalette.size();
         uint8_t index = projv::utils::internMaterial(scene, record, slot.name, packed);
+        bool created = record.materialPalette.size() > paletteBefore;
         if (index == projv::INVALID_MATERIAL) {
             error = "The palette is full.";
             editor.brushPreviewColors.clear();
+            editor.brushPreviewSlots.clear();
             return false;
         }
 
-        if (!existed) {
+        if (created) {
             paletteGrew = true;
             // Remembered so the revert can take it back. See EditorState::brushPreviewCreatedEntries.
             editor.brushPreviewCreatedEntries.push_back(slot.name);
@@ -17153,6 +17350,7 @@ static bool ensureBrushPalette(projv::Scene& scene, EditorState& editor,
         // paints, with no further ceremony.
         uint32_t slotColor = record.materialPalette[index].packedColor;
         editor.brushPreviewColors.push_back(slotColor);
+        editor.brushPreviewSlots.push_back(index);
 
         // A colour parameter's resolved colour has to reach the script, which reads it as p.<name>.r/g/b.
         // This is the one piece of palette state that is copied rather than looked up live, because the
@@ -17216,6 +17414,7 @@ static void removeBrushPreviewEntries(projv::Scene& scene, EditorState& editor) 
         editor.gpuFlushNeeded = true;
         // The brush's cached colours pointed at slots that no longer exist.
         editor.brushPreviewColors.clear();
+        editor.brushPreviewSlots.clear();
         editor.brushPreviewPaletteBrush.clear();
         editor.brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
     }
@@ -17560,8 +17759,10 @@ static void runBrushScatterDab(projv::Scene& scene, EditorState& editor,
         return;
     }
 
+    // Spacing runs as far as the dab does: on a large scene a scatter brush plants trees as readily
+    // as grass, and a lattice coarser than the brush is wide simply plants fewer of them per dab.
     int spacing = std::clamp(int(std::lround(brushParamValueOr(brush, projv::editor::BRUSH_SPACING_PARAM,
-                                                               3.0))), 1, 64);
+                                                               3.0))), 1, 512);
     double density = std::clamp(brushParamValueOr(brush, projv::editor::BRUSH_DENSITY_PARAM, 0.6),
                                 0.0, 1.0);
     uint32_t seed = uint32_t(std::lround(brushParamValueOr(brush, "seed", 1.0)));
@@ -17578,13 +17779,57 @@ static void runBrushScatterDab(projv::Scene& scene, EditorState& editor,
     // counts what this dab has planted so far, so two plants cannot grow through each other.
     const projv::Scene* scenePointer = &scene;
     const ComponentVoxelSpace* spacePointer = &space;
-    std::unordered_set<uint64_t> plantedThisDab;
-    projv::editor::brushSetSolidQuery(brush, [scenePointer, spacePointer, &plantedThisDab]
-                                             (int32_t x, int32_t y, int32_t z) {
-        ivec3 coord(x, y, z);
-        if (plantedThisDab.count(packVoxelKey(coord)) != 0) return true;
+    // Key -> the palette entry planted there, so the displacement rule can be asked about this dab's
+    // own work in exactly the terms it asks about the scene. A bare set could only say "taken", which
+    // made the *first* plant of a dab an absolute obstruction to every later one -- so two trees could
+    // never share a cell of foliage however much their crowns were meant to interleave, and a dense
+    // planting was impossible within a single dab no matter what the brush declared.
+    std::unordered_map<uint64_t, uint8_t> plantedThisDab;
+
+    // Which of the target's palette entries this brush may grow through -- see
+    // BrushDefinition::displaces. Resolved to slots once per dab rather than compared as strings per
+    // query: the fit test asks about a few thousand cells per candidate site, and a prefix compare in
+    // that loop would be the most expensive thing in the brush by a wide margin. A palette is at most
+    // 255 entries, so the set is small and the lookup is a bit test.
+    std::vector<bool> displaceable(256, false);
+    bool anyDisplaceable = false;
+    if (!brush.displaces.empty()) {
+        const std::vector<projv::Material>& palette = scene.components[component].materialPalette;
+        for (size_t slot = 0; slot < palette.size() && slot < 256; slot++) {
+            for (const std::string& prefix : brush.displaces) {
+                if (palette[slot].name.compare(0, prefix.size(), prefix) == 0) {
+                    displaceable[slot] = true;
+                    anyDisplaceable = true;
+                    break;
+                }
+            }
+        }
+    }
+    // "Is this cell in the way?", which is the question both the script's pv.solid and the host's own
+    // fit test below are actually asking. A cell holding something the placement may displace is
+    // occupied but not in the way, and answering the narrower question in one place is what keeps the
+    // two agreeing -- a brush whose headroom check disagreed with the test that refuses it would
+    // report no reason for planting nothing.
+    auto blocked = [scenePointer, spacePointer, &displaceable, anyDisplaceable,
+                    &plantedThisDab](const ivec3& coord) {
+        // This dab's own plantings first, and judged by the same rule as anything else. A cell holding
+        // foliage the brush declares displaceable is no more of an obstruction for having been planted
+        // a moment ago than for having been there all along -- that symmetry is what lets crowns
+        // interleave, and its absence is what made a dense planting refuse itself.
+        //
+        // A trunk is not displaceable and so still blocks, which is the part worth keeping: two crowns
+        // sharing leaves is a wood, two trunks sharing a cell is a mistake.
+        auto planted = plantedThisDab.find(packVoxelKey(coord));
+        if (planted != plantedThisDab.end()) {
+            return !(anyDisplaceable && displaceable[planted->second]);
+        }
         uint8_t slot = 0;
-        return queryComponentVoxel(*scenePointer, *spacePointer, coord, slot);
+        if (!queryComponentVoxel(*scenePointer, *spacePointer, coord, slot)) return false;
+        return !(anyDisplaceable && displaceable[slot]);
+    };
+
+    projv::editor::brushSetSolidQuery(brush, [&blocked](int32_t x, int32_t y, int32_t z) {
+        return blocked(ivec3(x, y, z));
     });
 
     bool wantsMaterial = brush.context.has(BrushContextField::Material);
@@ -17698,16 +17943,16 @@ static void runBrushScatterDab(projv::Scene& scene, EditorState& editor,
                 }
 
                 // **The fit test, and it is all-or-nothing.** A placement whose every cell is free is
-                // planted; one that would grow through anything at all is refused whole. Planting the
-                // half that fits is what makes a scatter of trees look like a scatter of half trees,
-                // and "validate that it fits" is the entire request.
+                // planted; one that would grow through anything it may not displace is refused whole.
+                // Planting the half that fits is what makes a scatter of trees look like a scatter of
+                // half trees, and "validate that it fits" is the entire request.
                 bool fits = true;
                 for (const projv::editor::BrushPlacementVoxel& voxel : placement) {
                     ivec3 target = coord + ivec3(voxel.dx, voxel.dy, voxel.dz);
                     if (target == coord) continue;   // The site itself is allowed to be solid.
-                    uint8_t slot = 0;
-                    if (queryComponentVoxel(scene, space, target, slot) ||
-                        plantedThisDab.count(packVoxelKey(target)) != 0) {
+                    // Through the same predicate the script's own fit test reads, so `displaces` is
+                    // honoured by both or by neither -- including for this dab's own plantings.
+                    if (blocked(target)) {
                         fits = false;
                         break;
                     }
@@ -17718,7 +17963,10 @@ static void runBrushScatterDab(projv::Scene& scene, EditorState& editor,
                     ivec3 target = coord + ivec3(voxel.dx, voxel.dy, voxel.dz);
                     uint64_t key = packVoxelKey(target);
                     if (editor.brushStrokeJournal.count(key) != 0) continue;
-                    if (size_t(voxel.materialIndex) >= editor.brushPreviewColors.size()) continue;
+                    // Both, because both are indexed by it below and they are only parallel by
+                    // construction.
+                    if (size_t(voxel.materialIndex) >= editor.brushPreviewColors.size() ||
+                        size_t(voxel.materialIndex) >= editor.brushPreviewSlots.size()) continue;
 
                     EditorState::StrokeVoxel remembered;
                     remembered.coord = target;
@@ -17727,7 +17975,11 @@ static void runBrushScatterDab(projv::Scene& scene, EditorState& editor,
                     if (remembered.wasSolid) remembered.oldColor = componentVoxelColor(scene, component, slot);
                     editor.brushStrokeJournal.emplace(key, remembered);
 
-                    plantedThisDab.insert(key);
+                    // Recorded with what went there, not merely that something did: a later placement
+                    // in this same dab has to be able to ask whether this cell is displaceable, and
+                    // only the palette entry can answer that. `insert` leaves an earlier entry alone,
+                    // which is right -- the first thing planted in a cell is what is in it.
+                    plantedThisDab.insert({ key, editor.brushPreviewSlots[size_t(voxel.materialIndex)] });
                     addCoords.push_back(target);
                     addColors.push_back(editor.brushPreviewColors[size_t(voxel.materialIndex)]);
                 }
@@ -18034,6 +18286,7 @@ static void drawBrushLibraryColumn(projv::Scene& scene, EditorState& editor) {
                 editor.selectedBrushID = brush.id;
                 editor.brushSourceLoadedFor.clear();
                 editor.brushPreviewColors.clear();
+                editor.brushPreviewSlots.clear();
                 editor.brushPreviewPaletteBrush.clear();
             }
         }
@@ -18199,6 +18452,7 @@ static void drawBrushMaterialRoles(projv::Scene& scene, EditorState& editor,
         // A rebinding changes which entries a stroke resolves to, so the cached colours are of the
         // wrong entries now.
         editor.brushPreviewColors.clear();
+        editor.brushPreviewSlots.clear();
         editor.brushPreviewPaletteBrush.clear();
         editor.brushValuesTouchedAt = ImGui::GetTime();
     }
@@ -18858,6 +19112,7 @@ static void drawBrushCreateDialog(EditorState& editor) {
             editor.selectedBrushID = created->id;
             editor.brushSourceLoadedFor.clear();
             editor.brushPreviewColors.clear();
+            editor.brushPreviewSlots.clear();
             editor.brushPreviewPaletteBrush.clear();
             editor.brushCreateDialogOpen = false;
             editor.brushCreateError.clear();
@@ -18932,6 +19187,7 @@ static void drawBrushLabInterface(projv::Scene& scene, projv::GPUData& gpuData, 
         // The colours may have moved with the declaration.
         editor.brushPreviewPaletteBrush.clear();
         editor.brushPreviewColors.clear();
+        editor.brushPreviewSlots.clear();
     }
 
     const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
@@ -19274,6 +19530,7 @@ static void drawBrushLabInterface(projv::Scene& scene, projv::GPUData& gpuData, 
             editor.brushBindingRoleLabel.clear();
             // The cached colours are of the old entries.
             editor.brushPreviewColors.clear();
+            editor.brushPreviewSlots.clear();
             editor.brushPreviewPaletteBrush.clear();
             editor.brushValuesTouchedAt = ImGui::GetTime();
             editor.brushStatus = "\"" + role + "\" now writes " + picked + ".";
@@ -19499,10 +19756,14 @@ static void runBrushSelfTest(projv::Scene& scene, EditorState& editor) {
     // on a lattice the dab does not control -- so a radius-6 dab of a brush that plants every fourteen
     // voxels routinely covers no site at all, and every check below it reads as "the brush is broken".
     // Sized off the brush's own spacing instead.
+    //
+    // Bounded against the test slab rather than against BRUSH_PREVIEW_MAX_RADIUS: the ceiling is now
+    // large enough that a brush declaring a coarse spacing would give the self-test a multi-million
+    // cell dab on a 21-voxel slab, which is minutes of startup spent almost entirely on empty space.
     auto dabRadiusFor = [](const projv::editor::BrushDefinition& brush) {
         if (brush.kind != projv::editor::BrushKind::Scatter) return 6.0f;
         double spacing = brushParamValueOr(brush, projv::editor::BRUSH_SPACING_PARAM, 3.0);
-        return std::clamp(float(spacing) + 4.0f, 8.0f, BRUSH_PREVIEW_MAX_RADIUS);
+        return std::clamp(float(spacing) + 4.0f, 8.0f, float(SLAB) + 4.0f);
     };
 
     for (const std::shared_ptr<projv::editor::BrushDefinition>& entry : editor.brushLibrary.brushes) {
@@ -19515,6 +19776,7 @@ static void runBrushSelfTest(projv::Scene& scene, EditorState& editor) {
         editor.brushStrokeJournal.clear();
         editor.brushPreviewWrites = 0;
         editor.brushPreviewColors.clear();
+        editor.brushPreviewSlots.clear();
         editor.brushPreviewPaletteBrush.clear();
         editor.brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
 
@@ -19604,6 +19866,7 @@ static void runBrushSelfTest(projv::Scene& scene, EditorState& editor) {
         editor.brushStrokeJournal.clear();
         editor.brushPreviewWrites = 0;
         editor.brushPreviewColors.clear();
+        editor.brushPreviewSlots.clear();
         editor.brushPreviewPaletteBrush.clear();
         editor.brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
 
@@ -19793,6 +20056,7 @@ static void runBrushSelfTest(projv::Scene& scene, EditorState& editor) {
                 // about the brush's other roles, which still have to be created.
                 auto resolveFresh = [&](std::string& errorOut) {
                     editor.brushPreviewColors.clear();
+                    editor.brushPreviewSlots.clear();
                     editor.brushPreviewPaletteBrush.clear();
                     editor.brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
                     return ensureBrushPalette(scene, editor, *subject, component, errorOut);
@@ -19832,6 +20096,7 @@ static void runBrushSelfTest(projv::Scene& scene, EditorState& editor) {
                 check(scene.components[component].materialPalette.size() == paletteBefore,
                       "the binding checks leave the palette as they found it");
                 editor.brushPreviewColors.clear();
+                editor.brushPreviewSlots.clear();
                 editor.brushPreviewPaletteBrush.clear();
                 editor.brushPreviewPaletteComponent = projv::INVALID_COMPONENT_HANDLE;
             }
@@ -20755,6 +21020,155 @@ static void runSculptStrokeSelfTest(projv::Scene& scene, EditorState& editor) {
     editor.paletteComponent = savedPalette;
     editor.selectedMaterialSlot = savedSlot;
     editor.cameraPosition = savedCamera;
+    editor.history.clear();
+    editor.statusMessage.clear();
+}
+
+// Running off the edge of the object: **a stroke must never lay voxels back toward the camera.**
+//
+// The failure this exists for is the loudest one the sculpt tool had. The cursor crosses the object's
+// silhouette onto the sky, the sample stops coming from the surface, and the empty-space fallback put
+// it a fixed distance in front of the eye instead -- so one frame moved the brush from the wall to
+// arm's length and the gap fill joined the two, leaving a solid column of brush standing between the
+// object and the viewer. It is geometry, so it survives everything but an undo.
+//
+// The invariant is stated as a distance and not as a voxel count, because the two ways of getting it
+// wrong -- bridging the jump, and simply taking the jump -- differ only in how much of the column
+// gets drawn, and neither is acceptable. Nothing the stroke touches may be nearer the eye than the
+// surface it is working on, less the brush's own radius.
+//
+// Built rather than found: a slab in an empty patch of sky far above any document, aimed at from
+// below so the ray that misses it carries on into nothing. That is what makes the miss a real miss on
+// any scene the test is run against -- both rays are checked before anything is sculpted, and the
+// test says so and stops rather than quietly asserting on a ray that hit the user's terrain.
+//
+// Edits the scene and cleans up after itself, so it runs under EDITOR_SCULPTTEST.
+static void runSculptRunOffSelfTest(projv::Scene& scene, EditorState& editor) {
+    using projv::core::ivec3;
+    using projv::core::vec3;
+
+    const uint32_t RESOLUTION = 64;
+    const float    VOXEL = 1.0f;
+    const int      SLAB_LOW = 24, SLAB_HIGH = 40;   // [low, high) on every axis: a 16^3 block.
+    const int      SLAB_MID = (SLAB_LOW + SLAB_HIGH) / 2;
+    const float    CAMERA_BACK = 300.0f;            // How far below the slab the synthetic eye sits.
+    const float    RADIUS = 3.0f;
+    // Deliberately tiny next to CAMERA_BACK. This is the number the old fallback used, so the gap it
+    // used to open -- and the column that used to fill it -- is the whole 290 units between them.
+    const float    PLACE_DISTANCE = 10.0f;
+    const vec3     PROBE_AT(0.0f, 4000.0f, 0.0f);
+
+    projv::ComponentHandle component = projv::utils::addComponent(
+        scene, projv::ComponentKind::Chunk, uniqueComponentName(scene, "RunOffProbe"),
+        projv::INVALID_COMPONENT_HANDLE, RESOLUTION, VOXEL);
+    if (component == projv::INVALID_COMPONENT_HANDLE) {
+        projv::core::warn("RUNOFFTEST: could not create the probe component; skipped");
+        return;
+    }
+    applyComponentTransform(&scene, &editor, component, PROBE_AT,
+                            scene.components[component].localRotation, 1.0f);
+
+    std::vector<ivec3> slab;
+    std::vector<uint32_t> slabColors;
+    for (int z = SLAB_LOW; z < SLAB_HIGH; z++) {
+        for (int y = SLAB_LOW; y < SLAB_HIGH; y++) {
+            for (int x = SLAB_LOW; x < SLAB_HIGH; x++) {
+                slab.push_back(ivec3(x, y, z));
+                slabColors.push_back(0xFFFFFFFFu);
+            }
+        }
+    }
+    applyVoxelSculpt(&scene, &editor, component, slab, slabColors, true);
+
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, component);
+    if (!space.valid) {
+        projv::core::warn("RUNOFFTEST: the probe has no voxel space; skipped");
+        deleteComponent(scene, editor, component);
+        return;
+    }
+
+    // Straight up at the slab's underside, from far enough out that the fallback distance and the
+    // surface are nowhere near each other.
+    vec3 slabCentre = componentVoxelToWorld(space, ivec3(SLAB_MID));
+    vec3 camera = slabCentre - vec3(0.0f, CAMERA_BACK, 0.0f);
+    vec3 hitDirection(0.0f, 1.0f, 0.0f);
+    // The second frame's ray: aimed a few voxels past the slab's +X face, so it clears it by a hair
+    // and keeps going. A silhouette crossing, which is the gesture being tested -- not a wild flick.
+    vec3 missDirection = glm::normalize(
+        componentVoxelToWorld(space, ivec3(SLAB_HIGH + 8, SLAB_MID, SLAB_MID)) - camera);
+
+    projv::utils::VoxelPick opening = projv::utils::pickVoxel(scene, camera, hitDirection);
+    projv::utils::VoxelPick beyond  = projv::utils::pickVoxel(scene, camera, missDirection);
+    if (!opening.hit || opening.component != component || beyond.hit) {
+        projv::core::warn("RUNOFFTEST: the probe rays did not land as set up (hit {} on component "
+                          "{}, second ray hit {}); skipped",
+                          opening.hit ? "yes" : "no", opening.component, beyond.hit ? "yes" : "no");
+        deleteComponent(scene, editor, component);
+        editor.history.clear();
+        return;
+    }
+
+    SculptBrush savedBrush = editor.sculptBrush;
+    SculptMode savedMode = editor.sculptMode;
+    float savedRadius = editor.sculptRadius;
+    float savedPlace = editor.sculptPlaceDistance;
+    projv::ComponentHandle savedPalette = editor.paletteComponent;
+    int savedSlot = editor.selectedMaterialSlot;
+    projv::ComponentHandle savedSelected = editor.selectedComponent;
+    vec3 savedCamera = editor.cameraPosition;
+
+    editor.sculptBrush = SculptBrush::Sphere;
+    editor.sculptMode = SculptMode::Add;
+    editor.sculptRadius = RADIUS;
+    editor.sculptPlaceDistance = PLACE_DISTANCE;
+    editor.paletteComponent = component;
+    editor.selectedMaterialSlot = 0;
+    editor.selectedComponent = component;
+    editor.cameraPosition = camera;
+
+    beginSculptStroke(editor);
+    processSculptSample(scene, editor, ViewportRay{ camera, hitDirection });
+    size_t afterHit = editor.sculptStrokeOriginal.size();
+    processSculptSample(scene, editor, ViewportRay{ camera, missDirection });
+    size_t afterMiss = editor.sculptStrokeOriginal.size();
+
+    // Measured over the journal rather than over the geometry: the journal holds every cell the
+    // stroke decided to write, whether or not the write then landed inside the component's
+    // addressable box. A column aimed out of the lattice is the same bug as one aimed into it.
+    float nearest = std::numeric_limits<float>::infinity();
+    for (const auto& entry : editor.sculptStrokeOriginal) {
+        nearest = std::min(nearest,
+                           glm::dot(componentVoxelToWorld(space, entry.second.coord) - camera,
+                                    hitDirection));
+    }
+    endSculptStroke(scene, editor);
+
+    // The brush is a ball centred on the surface, so its near side is legitimately a radius closer to
+    // the eye; two voxels more for the cell-centre rounding. Past that it is heading for the camera.
+    float surfaceDistance = opening.distance;
+    float allowedApproach = (RADIUS + 2.0f) * space.voxelSize;
+    bool held = nearest >= surfaceDistance - allowedApproach;
+    // The fallback still has to *work*: the point of holding the depth is that the stroke carries on
+    // past the object's edge, not that it stops there.
+    bool carriedOn = afterMiss > afterHit;
+    bool ok = held && carriedOn && afterHit > 0;
+
+    projv::core::info("SCULPTTEST run-off: surface at {:.1f}, fallback distance {:.1f}, nearest voxel "
+                      "{:.1f} (floor {:.1f}), {} voxel(s) on the surface then {} more past the edge | {}",
+                      surfaceDistance, PLACE_DISTANCE, nearest, surfaceDistance - allowedApproach,
+                      afterHit, afterMiss - afterHit, ok ? "PASS" : "FAIL");
+
+    editor.sculptBrush = savedBrush;
+    editor.sculptMode = savedMode;
+    editor.sculptRadius = savedRadius;
+    editor.sculptPlaceDistance = savedPlace;
+    editor.paletteComponent = savedPalette;
+    editor.selectedMaterialSlot = savedSlot;
+    editor.cameraPosition = savedCamera;
+    deleteComponent(scene, editor, component);
+    editor.selectedComponent = savedSelected;
+    editor.selectionOutlineValid = false;
+    editor.gpuFlushNeeded = true;
     editor.history.clear();
     editor.statusMessage.clear();
 }
@@ -23733,6 +24147,92 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
                           ok ? "PASS" : "FAIL");
     }
 
+    // --- 12. Duplicating a component that outgrew one chunk -------------------------------------
+    // The Grid case, which is every component past 256 voxels on an axis -- and, quietly, any
+    // component at all that has ever been sculpted outside its own resolution, because that is what
+    // convertChunkToGrid does. utils::duplicateComponent handled Chunk and Asset and silently did
+    // nothing for the third kind: the copy came back with gridIndex still -1, so it had a record, a
+    // name, a transform and a gizmo, and no geometry anywhere in the scene. Reported exactly as "it
+    // says it duplicated, the gizmo is there, the model never appears".
+    //
+    // Built by sculpting rather than by loading a large .data, so the test carries its own geometry
+    // and runs on any document. Two voxels at opposite ends of a span far wider than the component's
+    // resolution is the shortest thing that forces the conversion: the second write lands outside
+    // the chunk, and the component becomes a grid of cells with one voxel in each of two of them.
+    //
+    // The assertion that matters is the voxel count, because that is the number the bug zeroed while
+    // every other property of the copy stayed right. The cell wiring is checked beside it: a cell
+    // chunk pointing at the wrong grid, or at no grid, survives this frame and fails at the next
+    // transform edit, where rebakeSubtree walks cellToChunk and moves geometry that no longer knows
+    // where it lives.
+    {
+        const int FAR = 200;   // Comfortably outside the resolution below, on one axis.
+        projv::ComponentHandle source = projv::utils::addComponent(
+            scene, projv::ComponentKind::Chunk, uniqueComponentName(scene, "GridDup"),
+            projv::INVALID_COMPONENT_HANDLE, 64, 1.0f);
+
+        bool became = false, copyIsGrid = false, cellsWired = true;
+        uint32_t sourceVoxels = 0, copyVoxels = 0;
+        size_t sourceCells = 0, copyCells = 0;
+        int32_t sourceGrid = -1, copyGrid = -1;
+
+        if (source != projv::INVALID_COMPONENT_HANDLE) {
+            created.push_back(source);
+            applyVoxelSculpt(&scene, &editor, source,
+                             { ivec3(0, 0, 0), ivec3(FAR, 0, 0) }, { 0xFFFFFFFFu, 0xFFFFFFFFu }, true);
+
+            became = scene.components[source].kind == projv::ComponentKind::Grid;
+            sourceGrid = scene.components[source].gridIndex;
+            sourceVoxels = projv::utils::getComponentVoxelCount(scene, source);
+            if (sourceGrid >= 0 && size_t(sourceGrid) < scene.grids.size()) {
+                for (int32_t cell : scene.grids[sourceGrid].cellToChunk) {
+                    if (cell >= 0) sourceCells++;
+                }
+            }
+
+            projv::ComponentHandle copy = duplicateComponentInEditor(scene, editor, source);
+            if (copy < scene.components.size()) {
+                created.push_back(copy);
+                copyIsGrid = scene.components[copy].kind == projv::ComponentKind::Grid;
+                copyGrid = scene.components[copy].gridIndex;
+                copyVoxels = projv::utils::getComponentVoxelCount(scene, copy);
+                if (copyGrid >= 0 && size_t(copyGrid) < scene.grids.size()) {
+                    // A distinct grid, and every populated cell of it holding a chunk that agrees
+                    // about which grid and which cell it is -- the copy must not be sharing the
+                    // source's SceneGrid, and its cells must not still be pointing at the source's.
+                    cellsWired = copyGrid != sourceGrid;
+                    const projv::SceneGrid& grid = scene.grids[size_t(copyGrid)];
+                    for (size_t cell = 0; cell < grid.cellToChunk.size(); cell++) {
+                        int32_t chunkIndex = grid.cellToChunk[cell];
+                        if (chunkIndex < 0) continue;
+                        copyCells++;
+                        if (size_t(chunkIndex) >= scene.chunks.size()) { cellsWired = false; continue; }
+                        const projv::Chunk& chunk = scene.chunks[size_t(chunkIndex)];
+                        if (chunk.gridIndex != copyGrid || chunk.cellIndex != int32_t(cell) ||
+                            chunk.geometryPoolIndex < 0 || !chunk.alive) {
+                            cellsWired = false;
+                        }
+                        // A grid's cells live in cellToChunk and nowhere else. Listed as loose as
+                        // well, a cell is drawn twice and freed once.
+                        if (std::find(scene.looseChunks.begin(), scene.looseChunks.end(),
+                                      projv::ChunkHandle(chunkIndex)) != scene.looseChunks.end()) {
+                            cellsWired = false;
+                        }
+                    }
+                } else {
+                    cellsWired = false;
+                }
+            }
+        }
+
+        bool ok = became && copyIsGrid && sourceVoxels > 0 && copyVoxels == sourceVoxels &&
+                  copyCells == sourceCells && sourceCells > 1 && cellsWired;
+        projv::core::info("ASSEMBLYTEST: duplicate a grid component - source became a grid {} , copy "
+                          "is a grid {} , voxels {}/{} , populated cells {}/{} , cells wired {} | {}",
+                          became ? "yes" : "NO", copyIsGrid ? "yes" : "NO", copyVoxels, sourceVoxels,
+                          copyCells, sourceCells, cellsWired ? "yes" : "NO", ok ? "PASS" : "FAIL");
+    }
+
     // --- Clean up ------------------------------------------------------------------------------
     while (!editor.resolves.empty()) {
         destroyAssetNode(scene, editor, editor.resolves.back().node, false);
@@ -24252,6 +24752,25 @@ void startup(projv::Application& app) {
     // reason as the mode and tool switches above: it is reached by clicking the viewport's bar, and a
     // screenshot or a smoke test has no way to click. It is also the toggle most worth capturing,
     // since it is the one that changes what the renderer does rather than how a panel looks.
+    if (const char* rd = std::getenv("EDITOR_REFRACT_DEBUG")) {
+        editor.refractDebugMode = std::max(0, std::min(6, std::atoi(rd)));
+        static const char* const REFRACT_VIEWS[] = {
+            "off",
+            "1 = discarded hits (magenta rayT<=0, cyan zero normal)",
+            "2 = bends taken (grey 0, red 1, green 2, blue 3+)",
+            "3 = hit coarseness (green full-res, yellow 1 LOD step, red 2+)",
+            "4 = stop reason (green opaque, red layers, blue iterations, yellow stall, magenta segments)",
+            "5 = crossed vs bent (grey none, RED crossed but never bent, green bent)",
+            "6 = which bend clause said no (grey never reached, blue not-an-interface, "
+            "yellow budget, RED ior==1, green bent)"
+        };
+        projv::core::info("EDITOR_REFRACT_DEBUG: {}", REFRACT_VIEWS[editor.refractDebugMode]);
+    }
+    if (const char* refr = std::getenv("EDITOR_REFRACTION")) {
+        editor.refractionSegments = std::max(0, std::min(8, std::atoi(refr)));
+        projv::core::info("EDITOR_REFRACTION: {} bend(s)", editor.refractionSegments);
+    }
+
     if (const char* startPreview = std::getenv("EDITOR_ADVANCED_PREVIEW")) {
         editor.advancedPreviewEnabled = std::string(startPreview) != "0";
         projv::core::info("EDITOR_ADVANCED_PREVIEW: advanced preview {}",
@@ -24311,6 +24830,7 @@ void startup(projv::Application& app) {
         // Separate switch: unlike the three above, these edit the scene (and undo themselves).
         if (std::getenv("EDITOR_SCULPTTEST")) {
             runSculptStrokeSelfTest(scene, editor);
+            runSculptRunOffSelfTest(scene, editor);
             runExtrudeSelfTest(scene, editor);
             runSculptOperatorSelfTest(scene, editor);
             runPaintStrokeSelfTest(scene, editor);
@@ -24650,7 +25170,10 @@ void render(projv::Application& app) {
         projv::core::vec4 lensParams = {
             lensActive ? focusDistance * editor.renderApertureFraction * 0.05f : 0.0f,
             focusDistance,
-            0.0f,
+            // .z = the refraction segment budget. The SAME editor field the Viewport's preview reads,
+            // so the two tabs cannot disagree about whether glass bends light. A different uniform
+            // only because the two tabs are separate renderers with separate resources.json files.
+            float(editor.refractionSegments),
             0.0f
         };
 
@@ -24746,7 +25269,10 @@ void render(projv::Application& app) {
         // it. shade.frag needs no flag at all — the glow target it adds is simply zero when this is
         // off, which is what keeps that pass one code path.
         projv::core::vec4 previewSettings = {
-            editor.advancedPreviewEnabled ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f
+            editor.advancedPreviewEnabled ? 1.0f : 0.0f,
+            float(editor.refractionSegments),
+            0.0f,
+            float(editor.refractDebugMode)
         };
 
         // Which ray generator albedo.frag uses, and the two numbers the orthographic one needs.

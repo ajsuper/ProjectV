@@ -208,7 +208,7 @@ vec3 sampleSunCone(inout uint seed) {
 }
 
 RayQuery walkQuery(uint maxSteps) {
-    RayQuery query;
+    RayQuery query = pjvPrimaryQuery(100u);
     query.maxRaySteps = maxSteps;
     // No distance LOD. A bounce that gathers light from a coarsened version of the scene reports the
     // wrong colour, and unlike a primary ray there is nothing on screen to tell you it happened.
@@ -224,7 +224,11 @@ vec3 sunVisibility(vec3 position, vec3 normal, float voxelSize, vec3 lightDirect
     Ray shadowRay;
     shadowRay.origin = position + normal * (GI_ORIGIN_BIAS_VOXELS * voxelSize);
     shadowRay.direction = lightDirection;
-    return raySceneTransmittance(shadowRay, walkQuery(GI_SHADOW_STEPS), 1e30, TRANSPARENT_LAYERS);
+    RayQuery q = pjvShadowQuery(GI_SHADOW_STEPS, 1e30);
+    // No distance LOD, for the same reason walkQuery gives.
+    q.distanceToFinishLOD = 100000u;
+    pjvQueryTransparency(q, TRANSPARENT_LAYERS, 0u);
+    return raySceneTransmittance(shadowRay, q);
 }
 
 void main() {
@@ -313,8 +317,12 @@ void main() {
         bounceRay.origin = position + normal * (GI_ORIGIN_BIAS_VOXELS * voxelSize);
         bounceRay.direction = cosineHemisphere(normal, seed);
 
-        PeeledHit peeled = raySceneIntersectPeeled(bounceRay, walkQuery(GI_PRIMARY_STEPS),
-                                                   TRANSPARENT_LAYERS, seed);
+        RayQuery bounceQ = walkQuery(GI_PRIMARY_STEPS);
+        pjvQueryTransparency(bounceQ, TRANSPARENT_LAYERS, seed);
+        SceneHit peeled = raySceneIntersect(bounceRay, bounceQ);
+        // The query advanced its own copy of the seed; carry that back so this bounce and the next
+        // do not make the same stochastic interface decision.
+        seed = bounceQ.seed + peeled.layers * 2654435761u;
         // Whatever the transparent layers on the way emitted, and their filtering of what is behind.
         light += throughput * peeled.emission;
         throughput *= peeled.transmittance;

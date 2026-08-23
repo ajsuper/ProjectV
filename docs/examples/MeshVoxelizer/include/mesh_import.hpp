@@ -59,6 +59,7 @@ struct ImportedTexture {
 struct ImportedMaterial {
     std::string name;
     int textureIndex = -1;                                  // Into ImportedModel::textures; -1 = untextured.
+    int heightTextureIndex = -1;                            // Grayscale height/bump map; -1 = none.
     projv::core::vec3 diffuseColor{200.0f, 200.0f, 200.0f}; // 0-255, the untextured fallback.
 };
 
@@ -301,6 +302,82 @@ inline ImportedMaterial importMaterial(const aiScene& scene, const aiMaterial& m
     return imported;
 }
 
+/**
+ * Registers a material's height/bump map, for displacement. Returns the texture index or -1.
+ *
+ * Which slot holds it is format-dependent and inconsistent: OBJ's `map_Bump`/`bump` lands in
+ * aiTextureType_HEIGHT, `disp` in DISPLACEMENT, and glTF-style assets use NORMALS. All three are
+ * tried in that order.
+ *
+ * The subtlety is that a "bump" reference frequently names a *normal* map rather than a height map —
+ * a tangent-space RGB field, which is a gradient and not a displacement, and cannot be used as one
+ * without integrating it. Asset packs that were converted to normal maps commonly keep the artist's
+ * original grayscale height map right beside it under the same name minus a prefix (San Miguel ships
+ * `N_moldura2piso_bump.png` next to `moldura2piso_bump.png`, for all 57 of its bump materials). So a
+ * leading `N_` is stripped and the sibling preferred when it exists.
+ *
+ * Whether what we end up with is *actually* grayscale is verified later from its pixels, where the
+ * image is decoded — a filename is a hint, not proof.
+ */
+inline int importHeightTexture(const aiScene& scene, const aiMaterial& material,
+                              const std::filesystem::path& modelDirectory,
+                              const std::filesystem::path& assetRoot,
+                              FileIndex& index, ImportedModel& model,
+                              std::unordered_map<std::string, int>& texturesByReference) {
+    aiString texturePath;
+    bool hasBump = material.GetTexture(aiTextureType_HEIGHT, 0, &texturePath) == AI_SUCCESS ||
+                   material.GetTexture(aiTextureType_DISPLACEMENT, 0, &texturePath) == AI_SUCCESS ||
+                   material.GetTexture(aiTextureType_NORMALS, 0, &texturePath) == AI_SUCCESS;
+    if (!hasBump || texturePath.length == 0) return -1;
+
+    std::string reference = texturePath.C_Str();
+
+    // Prefer the grayscale sibling: same reference with a leading `N_` dropped from the filename.
+    //
+    // Split on either separator by hand rather than through std::filesystem. A reference written on
+    // Windows arrives as `textures\N_foo.png`, and on POSIX std::filesystem treats the backslash as
+    // an ordinary character — so filename() hands back the whole string and a prefix test against it
+    // silently never matches.
+    size_t separator = reference.find_last_of("/\\");
+    std::string directoryPart = (separator == std::string::npos) ? std::string() : reference.substr(0, separator + 1);
+    std::string filename = (separator == std::string::npos) ? reference : reference.substr(separator + 1);
+
+    std::vector<std::string> candidates;
+    if (filename.rfind("N_", 0) == 0 || filename.rfind("n_", 0) == 0) {
+        candidates.push_back(directoryPart + filename.substr(2));
+    }
+    candidates.push_back(reference);
+
+    for (const std::string& candidate : candidates) {
+        auto existing = texturesByReference.find(candidate);
+        if (existing != texturesByReference.end()) {
+            if (existing->second >= 0) return existing->second;
+            continue; // Remembered miss.
+        }
+        if (const aiTexture* embedded = scene.GetEmbeddedTexture(candidate.c_str())) {
+            model.textures.push_back(copyEmbeddedTexture(*embedded, candidate));
+            model.embeddedTextureCount++;
+        } else {
+            std::filesystem::path resolved =
+                resolveTexturePath(candidate, modelDirectory, assetRoot, index);
+            if (resolved.empty()) {
+                // Not warned about: a missing sibling is the normal case, and a missing bump map only
+                // costs displacement rather than color.
+                texturesByReference[candidate] = -1;
+                continue;
+            }
+            ImportedTexture texture;
+            texture.name = candidate;
+            texture.path = resolved;
+            model.textures.push_back(std::move(texture));
+        }
+        int textureIndex = int(model.textures.size()) - 1;
+        texturesByReference[candidate] = textureIndex;
+        return textureIndex;
+    }
+    return -1;
+}
+
 } // namespace detail
 
 /**
@@ -371,9 +448,15 @@ inline bool importModel(const std::filesystem::path& modelPath,
     if (scene->mNumMaterials > 0) info("Resolving materials and textures...");
     model.materials.reserve(scene->mNumMaterials);
     for (unsigned int materialIndex = 0; materialIndex < scene->mNumMaterials; materialIndex++) {
-        model.materials.push_back(detail::importMaterial(
+        ImportedMaterial imported = detail::importMaterial(
             *scene, *scene->mMaterials[materialIndex], modelDirectory, assetRoot, fileIndex, model,
-            texturesByReference, missingTextures));
+            texturesByReference, missingTextures);
+        // Registered after the diffuse map so a bump reference that happens to name the same file as
+        // some material's diffuse map reuses that entry rather than decoding the image twice.
+        imported.heightTextureIndex = detail::importHeightTexture(
+            *scene, *scene->mMaterials[materialIndex], modelDirectory, assetRoot, fileIndex, model,
+            texturesByReference);
+        model.materials.push_back(std::move(imported));
     }
 
     // A triangle always needs a material to read its fallback color from, even when the format

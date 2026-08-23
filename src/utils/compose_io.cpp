@@ -19,7 +19,11 @@
 namespace projv::utils {
     namespace {
         constexpr char PVDT_MAGIC[4] = {'P', 'V', 'D', 'T'};
-        constexpr uint32_t PVDT_VERSION = 2;
+        // v3 adds the animation envelope: a second, quarter-resolution tree64 per block plus a
+        // motion byte per set cell. Both are optional, and a v3 file with neither is byte-comparable
+        // to a v2 one apart from the wider block table -- see readDataFile's version branch.
+        constexpr uint32_t PVDT_VERSION = 3;
+        constexpr uint32_t PVDT_VERSION_MIN = 2;   // oldest version still readable
         constexpr uint32_t COMPOSE_VERSION = 1;
         // With geometry instancing, a repeated .data block costs only one shared pool entry plus a
         // cheap per-instance header at each level (not a full geometry copy), so geometry no longer
@@ -30,7 +34,20 @@ namespace projv::utils {
         constexpr int MAX_RECURSION_DEPTH = 6;
 
         constexpr uint32_t HEADER_SIZE = 24;   // magic + version + flags + blockCount + resolution + voxelScale
-        constexpr uint32_t BLOCK_ENTRY_SIZE = 40;
+        // The block table entry grew with v3. The size is therefore version-dependent, and a reader
+        // must use the one matching the file it opened rather than a single constant -- getting this
+        // wrong walks the table at the wrong stride and produces offsets that point into the middle
+        // of the blob region, which reads as corrupt geometry rather than as a version error.
+        constexpr uint32_t BLOCK_ENTRY_SIZE_V2 = 40;
+        constexpr uint32_t BLOCK_ENTRY_SIZE_V3 = 64;
+        constexpr uint32_t blockEntrySize(uint32_t version) {
+            return version >= 3 ? BLOCK_ENTRY_SIZE_V3 : BLOCK_ENTRY_SIZE_V2;
+        }
+
+        // Header `flags` bit 0. Purely an index: it lets a streamer know whether a file carries any
+        // animation at all without walking the block table. The per-block lengths remain the
+        // authority -- a set bit with every length zero is odd but not wrong.
+        constexpr uint32_t PVDT_FLAG_HAS_ENVELOPE = 1u << 0;
 
         template<typename T>
         void writePod(std::ofstream& out, const T& value) {
@@ -45,6 +62,55 @@ namespace projv::utils {
         }
 
         }
+
+    namespace {
+        // One block-table entry, at whatever stride this file's version uses. The v3 fields are left
+        // zero for a v2 file, which is what "this block has no animation" already means everywhere
+        // else -- so nothing downstream needs a version test of its own.
+        BlockEntry readBlockEntry(std::ifstream& in, uint32_t version) {
+            BlockEntry e;
+            e.gridX = readPod<int32_t>(in);
+            e.gridY = readPod<int32_t>(in);
+            e.gridZ = readPod<int32_t>(in);
+            (void)readPod<uint32_t>(in); // padding
+            e.geometryOffset = readPod<uint64_t>(in);
+            e.geometryLength = readPod<uint32_t>(in);
+            e.materialOffset = readPod<uint64_t>(in);
+            e.materialLength = readPod<uint32_t>(in);
+            if (version >= 3) {
+                e.envelopeOffset = readPod<uint64_t>(in);
+                e.envelopeLength = readPod<uint32_t>(in);
+                e.envelopeMotionOffset = readPod<uint64_t>(in);
+                e.envelopeMotionLength = readPod<uint32_t>(in);
+            }
+            return e;
+        }
+
+        // The blob halves of one block. Shared by readDataFile and both readDataBlock overloads so
+        // there is one place that knows a block is four optional arrays rather than two.
+        void readBlockBlobs(std::ifstream& in, const BlockEntry& e, DataBlock& b) {
+            if (e.geometryLength > 0) {
+                b.geometry.resize(e.geometryLength);
+                in.seekg(static_cast<std::streamoff>(e.geometryOffset), std::ios::beg);
+                in.read(reinterpret_cast<char*>(b.geometry.data()), e.geometryLength * sizeof(uint32_t));
+            }
+            if (e.materialLength > 0) {
+                b.materialIDs.resize(e.materialLength);
+                in.seekg(static_cast<std::streamoff>(e.materialOffset), std::ios::beg);
+                in.read(reinterpret_cast<char*>(b.materialIDs.data()), e.materialLength);
+            }
+            if (e.envelopeLength > 0) {
+                b.envelope.resize(e.envelopeLength);
+                in.seekg(static_cast<std::streamoff>(e.envelopeOffset), std::ios::beg);
+                in.read(reinterpret_cast<char*>(b.envelope.data()), e.envelopeLength * sizeof(uint32_t));
+            }
+            if (e.envelopeMotionLength > 0) {
+                b.envelopeMotion.resize(e.envelopeMotionLength);
+                in.seekg(static_cast<std::streamoff>(e.envelopeMotionOffset), std::ios::beg);
+                in.read(reinterpret_cast<char*>(b.envelopeMotion.data()), e.envelopeMotionLength);
+            }
+        }
+    }
 
     bool writeDataFile(const std::string& path, const DataFile& data) {
         core::info("writeDataFile: Writing .data container with {} block(s) to: {}", data.blocks.size(), path);
@@ -61,11 +127,19 @@ namespace projv::utils {
         }
 
         const uint32_t blockCount = static_cast<uint32_t>(data.blocks.size());
-        const uint32_t flags = 0u;   // Reserved. v1's only flag said whether voxelTypeData was present.
+        uint32_t flags = 0u;   // v1's only flag said whether voxelTypeData was present.
+        for (const DataBlock& b : data.blocks) {
+            if (!b.envelope.empty()) { flags |= PVDT_FLAG_HAS_ENVELOPE; break; }
+        }
 
         // Compute blob-region offsets. The blob starts right after the block table.
-        uint64_t cursor = HEADER_SIZE + static_cast<uint64_t>(blockCount) * BLOCK_ENTRY_SIZE;
-        struct BlobLoc { uint64_t geomOff; uint32_t geomLen; uint64_t matOff; uint32_t matLen; };
+        uint64_t cursor = HEADER_SIZE + static_cast<uint64_t>(blockCount) * BLOCK_ENTRY_SIZE_V3;
+        struct BlobLoc {
+            uint64_t geomOff; uint32_t geomLen;
+            uint64_t matOff;  uint32_t matLen;
+            uint64_t envOff;  uint32_t envLen;
+            uint64_t motOff;  uint32_t motLen;
+        };
         std::vector<BlobLoc> locs(blockCount);
         for (uint32_t i = 0; i < blockCount; i++) {
             const DataBlock& b = data.blocks[i];
@@ -82,6 +156,25 @@ namespace projv::utils {
                 locs[i].matLen = 0;
                 locs[i].matOff = 0;
             }
+
+            // Absent stays absent. A zero length and a zero offset is what a reader tests, so a block
+            // with no animation costs nothing beyond the two table fields.
+            if (!b.envelope.empty()) {
+                locs[i].envLen = static_cast<uint32_t>(b.envelope.size());
+                locs[i].envOff = cursor;
+                cursor += static_cast<uint64_t>(locs[i].envLen) * sizeof(uint32_t);
+            } else {
+                locs[i].envLen = 0;
+                locs[i].envOff = 0;
+            }
+            if (!b.envelopeMotion.empty()) {
+                locs[i].motLen = static_cast<uint32_t>(b.envelopeMotion.size());
+                locs[i].motOff = cursor;
+                cursor += locs[i].motLen;
+            } else {
+                locs[i].motLen = 0;
+                locs[i].motOff = 0;
+            }
         }
 
         // Header.
@@ -92,7 +185,8 @@ namespace projv::utils {
         writePod(out, data.resolution);
         writePod(out, data.voxelScale);
 
-        // Block table (40 bytes each: 3xint32 grid, 4 pad, u64 geomOff, u32 geomLen, u64 matOff, u32 matLen).
+        // Block table, BLOCK_ENTRY_SIZE_V3 bytes each: 3xint32 grid, 4 pad, then four
+        // (u64 offset, u32 length) pairs -- geometry, materialIDs, envelope, envelopeMotion.
         for (uint32_t i = 0; i < blockCount; i++) {
             const DataBlock& b = data.blocks[i];
             writePod(out, b.gridX);
@@ -104,6 +198,10 @@ namespace projv::utils {
             writePod(out, locs[i].geomLen);
             writePod(out, locs[i].matOff);
             writePod(out, locs[i].matLen);
+            writePod(out, locs[i].envOff);
+            writePod(out, locs[i].envLen);
+            writePod(out, locs[i].motOff);
+            writePod(out, locs[i].motLen);
         }
 
         // Blob region, in the same order the offsets were computed.
@@ -115,6 +213,13 @@ namespace projv::utils {
             }
             if (!b.materialIDs.empty()) {
                 out.write(reinterpret_cast<const char*>(b.materialIDs.data()), b.materialIDs.size());
+            }
+            if (!b.envelope.empty()) {
+                out.write(reinterpret_cast<const char*>(b.envelope.data()),
+                          b.envelope.size() * sizeof(uint32_t));
+            }
+            if (!b.envelopeMotion.empty()) {
+                out.write(reinterpret_cast<const char*>(b.envelopeMotion.data()), b.envelopeMotion.size());
             }
         }
 
@@ -149,12 +254,18 @@ namespace projv::utils {
         }
 
         data.version = readPod<uint32_t>(in);
-        // Refused, not warned through. v1 stored per-voxel voxelTypeData and no material bytes, so
-        // there is nothing to hand the GPU without rebuilding the whole material system at load --
-        // which is exactly what v2 exists to stop doing. Re-voxelize v1 content to upgrade it.
-        if (data.version != PVDT_VERSION) {
-            core::error("readDataFile: {} is .data version {}, and only version {} is supported. "
-                        "Re-voxelize this asset.", path, data.version, PVDT_VERSION);
+        // v1 is still refused, not warned through: it stored per-voxel voxelTypeData and no material
+        // bytes, so there is nothing to hand the GPU without rebuilding the whole material system at
+        // load -- which is exactly what v2 exists to stop doing. Re-voxelize v1 content to upgrade it.
+        //
+        // v2 IS read, and this is the difference that makes the envelope an adjacent structure rather
+        // than a migration. Everything v3 added is optional, so a v2 file is simply a v3 file in which
+        // no block animates -- readBlockEntry leaves those fields zero and every reader downstream
+        // already treats zero as absent. Refusing v2 would have meant re-voxelizing every asset in the
+        // tree to gain a feature almost none of them use.
+        if (data.version < PVDT_VERSION_MIN || data.version > PVDT_VERSION) {
+            core::error("readDataFile: {} is .data version {}, and only versions {}..{} are supported. "
+                        "Re-voxelize this asset.", path, data.version, PVDT_VERSION_MIN, PVDT_VERSION);
             return {};
         }
         (void)readPod<uint32_t>(in);   // flags, reserved
@@ -165,39 +276,24 @@ namespace projv::utils {
         // Read the block table first, then seek to each blob.
         std::vector<BlockEntry> entries(blockCount);
         for (uint32_t i = 0; i < blockCount; i++) {
-            entries[i].gridX = readPod<int32_t>(in);
-            entries[i].gridY = readPod<int32_t>(in);
-            entries[i].gridZ = readPod<int32_t>(in);
-            (void)readPod<uint32_t>(in); // padding
-            entries[i].geometryOffset = readPod<uint64_t>(in);
-            entries[i].geometryLength = readPod<uint32_t>(in);
-            entries[i].materialOffset = readPod<uint64_t>(in);
-            entries[i].materialLength = readPod<uint32_t>(in);
+            entries[i] = readBlockEntry(in, data.version);
         }
 
         data.blocks.resize(blockCount);
+        uint32_t envelopeBlocks = 0;
         for (uint32_t i = 0; i < blockCount; i++) {
             DataBlock& b = data.blocks[i];
             b.gridX = entries[i].gridX;
             b.gridY = entries[i].gridY;
             b.gridZ = entries[i].gridZ;
-
-            if (entries[i].geometryLength > 0) {
-                b.geometry.resize(entries[i].geometryLength);
-                in.seekg(static_cast<std::streamoff>(entries[i].geometryOffset), std::ios::beg);
-                in.read(reinterpret_cast<char*>(b.geometry.data()),
-                        entries[i].geometryLength * sizeof(uint32_t));
-            }
-            if (entries[i].materialLength > 0) {
-                b.materialIDs.resize(entries[i].materialLength);
-                in.seekg(static_cast<std::streamoff>(entries[i].materialOffset), std::ios::beg);
-                in.read(reinterpret_cast<char*>(b.materialIDs.data()), entries[i].materialLength);
-            }
+            readBlockBlobs(in, entries[i], b);
+            if (!b.envelope.empty()) envelopeBlocks++;
         }
 
         in.close();
-        core::info("readDataFile: Successfully read {} block(s) (resolution {}, voxelScale {})",
-                   blockCount, data.resolution, data.voxelScale);
+        core::info("readDataFile: Successfully read {} block(s) (v{}, resolution {}, voxelScale {}, "
+                   "{} with an animation envelope)",
+                   blockCount, data.version, data.resolution, data.voxelScale, envelopeBlocks);
         return data;
     }
 
@@ -215,9 +311,9 @@ namespace projv::utils {
             return {};
         }
         hdr.version = readPod<uint32_t>(in);
-        if (hdr.version != PVDT_VERSION) {
-            core::error("readDataFileHeader: {} is .data version {}, and only version {} is supported. "
-                        "Re-voxelize this asset.", path, hdr.version, PVDT_VERSION);
+        if (hdr.version < PVDT_VERSION_MIN || hdr.version > PVDT_VERSION) {
+            core::error("readDataFileHeader: {} is .data version {}, and only versions {}..{} are "
+                        "supported. Re-voxelize this asset.", path, hdr.version, PVDT_VERSION_MIN, PVDT_VERSION);
             return {};
         }
         (void)readPod<uint32_t>(in);   // flags, reserved
@@ -227,15 +323,7 @@ namespace projv::utils {
 
         hdr.blocks.resize(blockCount);
         for (uint32_t i = 0; i < blockCount; i++) {
-            BlockEntry& e = hdr.blocks[i];
-            e.gridX = readPod<int32_t>(in);
-            e.gridY = readPod<int32_t>(in);
-            e.gridZ = readPod<int32_t>(in);
-            (void)readPod<uint32_t>(in); // padding
-            e.geometryOffset = readPod<uint64_t>(in);
-            e.geometryLength = readPod<uint32_t>(in);
-            e.materialOffset = readPod<uint64_t>(in);
-            e.materialLength = readPod<uint32_t>(in);
+            hdr.blocks[i] = readBlockEntry(in, hdr.version);
         }
         return hdr;
     }
@@ -250,16 +338,7 @@ namespace projv::utils {
             core::error("readDataBlock: Failed to open file for reading: {}", path);
             return b;
         }
-        if (entry.geometryLength > 0) {
-            b.geometry.resize(entry.geometryLength);
-            in.seekg(static_cast<std::streamoff>(entry.geometryOffset), std::ios::beg);
-            in.read(reinterpret_cast<char*>(b.geometry.data()), entry.geometryLength * sizeof(uint32_t));
-        }
-        if (entry.materialLength > 0) {
-            b.materialIDs.resize(entry.materialLength);
-            in.seekg(static_cast<std::streamoff>(entry.materialOffset), std::ios::beg);
-            in.read(reinterpret_cast<char*>(b.materialIDs.data()), entry.materialLength);
-        }
+        readBlockBlobs(in, entry, b);
         return b;
     }
 
@@ -622,6 +701,11 @@ namespace projv::utils {
                             // first edit asks for one (ensureBrickMapExists).
                             gb.geometry         = block.geometry;
                             gb.materialIDs      = block.materialIDs;
+                            // Empty for every v2 file and for every v3 file with no animation, which
+                            // is the overwhelming majority. Carried straight through for the same
+                            // reason the pair above is: the file already holds what the GPU reads.
+                            gb.envelope         = block.envelope;
+                            gb.envelopeMotion   = block.envelopeMotion;
                             gb.sourceDataPath   = resolved;
                             gb.sourceBlockCoord = core::ivec3(block.gridX, block.gridY, block.gridZ);
 
@@ -1026,6 +1110,8 @@ namespace projv::utils {
             // rendering, and writing anything else would be writing something nobody has seen.
             block.geometry = blob.geometry;
             block.materialIDs = blob.materialIDs;
+            block.envelope = blob.envelope;
+            block.envelopeMotion = blob.envelopeMotion;
 
             if (block.geometry.empty()) return;
 

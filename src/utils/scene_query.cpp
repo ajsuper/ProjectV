@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <sstream>
+#include <unordered_map>
 
 #include "core/log.h"
 #include "utils/voxel_management.h"
@@ -437,12 +438,14 @@ namespace projv::utils {
         // later `src.` after the append does not compile.
         ComponentKind srcKind;
         ChunkHandle srcChunkHandle;
+        int32_t srcGridIndex;
         std::vector<ComponentHandle> srcChildren;
         ComponentRecord component;
         {
             const ComponentRecord& src = scene.components[source];
             srcKind = src.kind;
             srcChunkHandle = src.chunkHandle;
+            srcGridIndex = src.gridIndex;
             srcChildren = src.children;
 
             component.kind = src.kind;
@@ -487,6 +490,104 @@ namespace projv::utils {
             component.chunkHandle = static_cast<ChunkHandle>(scene.chunks.size() - 1);
             scene.looseChunks.push_back(component.chunkHandle);
             scene.looseChunkCount = static_cast<uint32_t>(scene.looseChunks.size());
+        }
+
+        // **A Grid is geometry too, and this function used to duplicate only two of the three kinds.**
+        //
+        // The copy came out with `kind == Grid` and `gridIndex` still at its default -1: a full record
+        // with a name, a transform, an outliner row and a gizmo, and no geometry anywhere in the scene.
+        // Every symptom follows from that -- it reports as duplicated, the gizmo appears where the copy
+        // is, and the model never does -- and it only showed up on large components because that is the
+        // only place Grids come from: a chunk is capped at 256 on an axis, and anything past it is
+        // stored as a grid of cells (the loader's multi-block path, and convertChunkToGrid the first
+        // time a sculpt writes outside a chunk's resolution).
+        //
+        // The copy is cell-for-cell: a fresh SceneGrid carrying the source's lattice, and one duplicated
+        // chunk per populated cell. Cells are reached only through cellToChunk and are deliberately NOT
+        // pushed onto looseChunks -- that list is loose leaves, and a cell in both would be drawn twice.
+        if (srcKind == ComponentKind::Grid &&
+            srcGridIndex >= 0 && static_cast<size_t>(srcGridIndex) < scene.grids.size()) {
+            const int32_t gridIndex = static_cast<int32_t>(scene.grids.size());
+
+            // Everything read off the source grid is read into values here, for the reason the block
+            // above exists: the loop below appends to scene.chunks and the push_back at the end appends
+            // to scene.grids, and either can move the buffer a reference points into.
+            SceneGrid grid;
+            std::vector<int32_t> srcCells;
+            {
+                const SceneGrid& srcGrid = scene.grids[srcGridIndex];
+                grid.origin          = srcGrid.origin;
+                grid.cellSize        = srcGrid.cellSize;
+                grid.dims            = srcGrid.dims;
+                grid.rotation        = srcGrid.rotation;
+                grid.originCellCoord = srcGrid.originCellCoord;
+                grid.nativeCellSize  = srcGrid.nativeCellSize;
+                grid.rendered        = srcGrid.rendered;
+                grid.componentHandle = handle;
+                srcCells = srcGrid.cellToChunk;
+            }
+            grid.cellToChunk.assign(srcCells.size(), -1);
+
+            // Two cells of one grid routinely share a blob (a repeated block appears once in the pool),
+            // and forking per-cell would give the copy a private deep copy of each -- on the very
+            // components that are large enough to be grids in the first place. Forking once per distinct
+            // source blob keeps the copy's sharing exactly as dense as the original's.
+            std::unordered_map<int32_t, int32_t> forkedBlobs;
+
+            for (size_t cell = 0; cell < srcCells.size(); ++cell) {
+                const int32_t srcChunkIndex = srcCells[cell];
+                if (srcChunkIndex < 0 || static_cast<size_t>(srcChunkIndex) >= scene.chunks.size()) {
+                    continue;
+                }
+
+                Chunk chunk;
+                int32_t srcBlobIndex = -1;
+                {
+                    const Chunk& srcChunk = scene.chunks[srcChunkIndex];
+                    chunk.header       = srcChunk.header;
+                    chunk.nativeScale  = srcChunk.nativeScale;
+                    chunk.requestedLOD = srcChunk.requestedLOD;
+                    // Mutability is deliberately *not* carried over, which is the Chunk branch's
+                    // choice above and for a sharper reason here: Direct means "write edits back to
+                    // the .data this came from", and a copy that inherited it would write its own
+                    // edits into the original's file. The copy starts Locked, like any component the
+                    // document did not load from disk, and persisting it is the save path's decision.
+                    // Empty for any chunk that has been interned (which is every chunk the renderer has
+                    // ever seen), and the whole geometry for one that has not.
+                    chunk.geometryData = srcChunk.geometryData;
+                    srcBlobIndex       = srcChunk.geometryPoolIndex;
+                }
+                chunk.header.chunkID  = static_cast<uint32_t>(scene.chunks.size());
+                chunk.alive           = true;
+                chunk.gridIndex       = gridIndex;
+                chunk.cellIndex       = static_cast<int32_t>(cell);
+                chunk.componentHandle = handle;
+
+                // The refcount rule the Chunk branch above states: a fresh blob out of forkBlob already
+                // carries the 1 for whichever chunk asked for it, and every other chunk that ends up
+                // bound to that same blob -- including the source's own, when forkBlob took its
+                // sole-owner fast path and handed the source index straight back -- is a further owner
+                // and has to be counted.
+                int32_t blobIndex = -1;
+                auto forked = forkedBlobs.find(srcBlobIndex);
+                if (forked != forkedBlobs.end()) {
+                    blobIndex = forked->second;
+                    if (blobIndex >= 0) scene.geometryPool[blobIndex].refCount++;
+                } else {
+                    blobIndex = forkBlob(scene, srcBlobIndex);
+                    forkedBlobs.emplace(srcBlobIndex, blobIndex);
+                    if (blobIndex >= 0 && blobIndex == srcBlobIndex) {
+                        scene.geometryPool[blobIndex].refCount++;
+                    }
+                }
+                chunk.geometryPoolIndex = blobIndex;
+
+                grid.cellToChunk[cell] = static_cast<int32_t>(scene.chunks.size());
+                scene.chunks.push_back(std::move(chunk));
+            }
+
+            scene.grids.push_back(std::move(grid));
+            component.gridIndex = gridIndex;
         }
 
         if (srcKind == ComponentKind::Asset) {

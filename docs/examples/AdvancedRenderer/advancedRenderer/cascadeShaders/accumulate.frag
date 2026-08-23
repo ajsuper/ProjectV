@@ -68,6 +68,29 @@ $input v_texcoord0
 // a face owns no probe. That is handled explicitly rather than by leaking interpolated samples back
 // in -- a lighting change knocks the age down (LIGHT_CHANGE_AGE) so the next samples rebuild fast.
 //
+// -----------------------------------------------------------------------------
+// THE GATE ABOVE HAD NEVER ACTUALLY RUN
+// -----------------------------------------------------------------------------
+// Worth recording, because everything below was written for a test that was being silently skipped.
+//
+// This pass binds ten input textures. bgfx addresses a texture binding by STAGE and the later call
+// on a stage replaces the earlier, and the engine parks the scene's own textures on stages 9..15 --
+// so gKey, as the tenth input, landed on stage 9 underneath materialIDs. SAMPLER2D(gKey, 9) was
+// reading a uint scene texture through a float sampler. curKey was garbage, histKey was last frame's
+// copy of the same garbage, and the identity half of the gate collapsed into a comparison of two
+// meaningless numbers that happened to agree.
+//
+// What was left running was the geometric fallback alone -- which is precisely the weaker test this
+// file's header explains it is not safe to rely on, and it is why an earlier edit concluded the exact
+// key was "fragile" and deleted the exact-match pass from the moving branch. It was not fragile; it
+// was disconnected. performRenderPasses now binds the scene FIRST so a pass's own inputs win the
+// collision (see the note there), and the exact-match pass is restored below.
+//
+// This pass still overruns the nine-input budget, deliberately. It is safe here because it never
+// traces a ray, so the materialIDs binding it costs is one it would not have used -- but the engine
+// warns about it at startup, and that warning is correct: a pass that DID trace a ray must stay
+// inside nine inputs.
+//
 // Inputs (FBO 6 [0], FBO 7 [1..3], FBO 1 [4..9]):
 //   0 indirect  1 accumR(hist) 2 histKey 3 histPos  4 gPos 5 gNormal 6 gAlbedo 7 gDirect
 //   8 gFace 9 gKey
@@ -84,6 +107,8 @@ SAMPLER2D(accumR,   1);
 SAMPLER2D(histKey,  2);
 SAMPLER2D(histPos,  3);
 SAMPLER2D(gPos,     4);
+SAMPLER2D(gNormal,  5);   // FBO1[1]: a = the hit voxel's edge length, the unit the sway tolerance uses
+SAMPLER2D(gAlbedo,  6);   // FBO1[2]: a = 1 on an ANIMATED surface (see gbuffer.frag)
 SAMPLER2D(gKey,     9);
 
 uniform vec4 prevCameraPos;
@@ -116,6 +141,164 @@ uniform vec4 prevCameraDir;
 // full window -- and it is the only thing that refreshes a face which currently owns no probe.
 #define LIGHT_CHANGE_AGE 4.0
 
+// ---- ANIMATED SURFACES ------------------------------------------------------------------------
+// A swaying blade of grass defeats BOTH halves of the gate above, and it is worth being precise
+// about why, because it looks like a bug in the accumulator and is not one.
+//
+// The blade is not geometry that moves; it is geometry that is CARVED OUT OF A STATIC ENVELOPE at
+// shade time (the envelope resolve in pjv_utils_DDA.sc). So from one frame to the next the
+// primary ray lands on a
+// different envelope voxel and a differently-oriented piece of blade. gKey changes -- so the exact
+// match fails -- and the face id packed in it changes too, so sameSurface's same-facing test fails
+// as well. Every frame, for every blade pixel, history is discarded and the raw gather is re-exposed.
+//
+// Rendering the temporal age as a ramp shows this exactly: static rock reaches STILL_MAX_AGE and sits
+// there, while every grass and tree pixel is pinned at 1. It was survivable under the cascades, whose
+// per-frame output was deterministic; against a stochastic gather it is the whole of the flicker.
+//
+// The fix is to gate animated pixels on POSITION ALONE, within a few voxels. What that averages is
+// no longer "the light on this face" but "the light in this small patch of air", which is the right
+// quantity for foliage anyway -- a blade's indirect light is ambient, it is not a property of which
+// particular voxel the blade happens to occupy this frame.
+//
+// Fallback radius for an animated pixel whose VOXEL identity did not match -- in practice fire,
+// whose parcels advect through space and have no fixed source voxel to key on. Kept tight and paired
+// with the neighbourhood clamp: this was 6 and unclamped, which reached across whole blades and
+// borrowed light from foliage that was genuinely differently lit, visible as the moving grass
+// SMEARING its old brightness along behind it. A loose radius and no clamp is what ghosting is made
+// of. Grass no longer reaches this path at all -- see pjvSameVoxel.
+#define ANIM_POS_TOL_VOXELS 2.5
+// Fire's own radius. Wider because a parcel ADVECTS -- it is somewhere else next frame, by design,
+// where a blade merely leans -- so the tolerance has to cover a frame's travel or the gate rejects
+// every time and fire accumulates nothing at all. Paired with the neighbourhood clamp, which is what
+// stops a radius this loose from smearing the flame upward behind itself.
+#define FIRE_POS_TOL_VOXELS 6.0
+// And a shorter mean than the sway gets: a flame's light genuinely changes fast, so a long average
+// is not denoising it, it is lagging it into a smear.
+#define FIRE_MAX_AGE 12.0
+// Animated surfaces cap lower than static ones: their light really does change as they move, so a
+// long mean lags the sway instead of denoising it. Long enough to kill the noise, short enough to
+// follow.
+#define ANIM_MAX_AGE 32.0
+
+// ---- SILHOUETTE EDGES -------------------------------------------------------------------------
+// A pixel on a voxel's silhouette straddles two faces of DIFFERENT orientation, and the sub-pixel
+// jitter lands it on one or the other from frame to frame. Neither gate above can hold: the exact
+// key changes, and sameSurface's same-facing test fails precisely because the two faces face
+// different ways. So the pixel reset to age 1 every frame and re-exposed the raw gather -- a bright
+// crawling fringe along every voxel edge, which is the "flicker along voxel edges, as if it had to
+// do with the jitter" exactly.
+//
+// The value such a pixel WANTS is the coverage-weighted mix of the two faces, and a running mean
+// over jittered frames is precisely how to compute that -- but only if the history is allowed to
+// survive the flip. So there is a third tier: same point in space, any facing. It is deliberately
+// the tightest radius of the three, because "different face at the same point" is only innocent
+// when the point really is the same one.
+#define EDGE_POS_TOL_VOXELS 1.5
+// Capped well below a static face: this mean is averaging two different faces together on purpose,
+// and how much of each depends on where the geometry sits under the pixel, so it must re-settle
+// quickly when that changes.
+#define EDGE_MAX_AGE 24.0
+// ...but that reasoning has a range, and past the crossover it inverts.
+//
+// It assumes the coverage mix is volatile: with a voxel a few pixels across, a small shift in the
+// geometry under the pixel changes how much of each face it sees by a lot, so a long mean would lag.
+// Once the voxel is SMALLER than the pixel, the pixel contains many faces rather than two, the jitter
+// samples them in proportion to their coverage, and that proportion is statistically stationary under
+// a still camera -- there is nothing left for a short mean to stay responsive to, and averaging more
+// of it is strictly closer to the right answer.
+//
+// This matters far more than it used to. The edge tier was a rare fallback when it was written; once
+// the tolerance below is measured in pixel footprints, it is the ONLY tier that can match past the
+// crossover, so its cap is the far field's entire history length. 24 frames of an 8-ray gather is
+// visibly noisy; 128 is what the resolved case already gets and there is no reason the far field
+// should get less.
+#define EDGE_SUBPIXEL_MAX_AGE 128.0
+
+// World size of one output pixel at a given depth -- the scale that decides which of the two regimes
+// above a pixel is in, and the same quantity taa.frag and upscale.frag measure themselves against.
+float pixelFootprint(float curDepth) {
+    return curDepth * (2.0 * tan(radians(FOV * 0.5))) / passTargetRes.y;
+}
+
+// How completely the source grid resolves a voxel of this size at this depth: 0 sub-pixel, 1 several
+// pixels across. Same 0.75..2.0 crossover the other passes fade over, so the whole renderer changes
+// regime at one distance rather than three.
+float geometryResolved(float voxelSize, float curDepth) {
+    return smoothstep(0.75, 2.0, voxelSize / max(pixelFootprint(curDepth), 1e-6));
+}
+
+// How many PIXEL FOOTPRINTS of separation still count as the same spot, once the voxel grid is finer
+// than the pixel grid. A jittered ray stays inside its own pixel by construction, so one footprint is
+// the whole range the hit point can move without anything having changed; the margin above that
+// covers an oblique surface, where the same angular offset slides further along the plane.
+#define SPOT_TOL_PIXELS 3.0
+
+// Near enough to be the same point on the surface, whatever face the jitter happened to land on.
+//
+// The tolerance is the LARGER of a voxel count and the pixel's own world footprint, and carrying both
+// is what makes this tier work at every distance rather than only up close.
+//
+// A voxel count is the right unit while a voxel is bigger than a pixel: the jitter then moves the hit
+// point by a fraction of a voxel, and a voxel and a half is a generous bound on "the same spot".
+//
+// It is the wrong unit as soon as the projection inverts. Far away one pixel covers MANY voxels, so a
+// +-0.5px jitter lands on a genuinely different voxel every frame and displaces the hit point by
+// several voxels of world distance -- routinely past 1.5 of them. This tier, the one written for
+// "different face, same point", then rejected every distant pixel, and the indirect term fell back to
+// a raw gather every frame. That is the far-field flicker: not a different failure from the close-up
+// one that the identity search fixed, but the same failure measured in a unit that stops applying.
+// Keying on the face cannot rescue it either -- at that scale the face genuinely IS different each
+// frame, so there is no identity left to match on and position is all that remains.
+//
+// Scaling by the footprint says the physically true thing: everything within one pixel footprint is
+// inside this pixel, and therefore part of what this pixel sees. Its correct value is the
+// coverage-weighted mix of all of it, and a running mean over jittered frames is exactly how that
+// mix is computed -- provided the history is allowed to survive. Meanwhile a real disocclusion moves
+// the hit point by a depth discontinuity, which is orders of magnitude beyond a footprint, so this
+// stays as good a rejector of those as it ever was. The tier is still clamped to the current
+// neighbourhood by its caller, which bounds whatever it does let through.
+bool sameSpot(vec4 hPos, vec3 curP, float voxelSize, float curDepth, float tolVoxels) {
+    if (hPos.a < 0.0) return false;                       // that texel was sky
+    float footprint = curDepth * (2.0 * tan(radians(FOV * 0.5))) / passTargetRes.y;
+    float tol = max(tolVoxels * max(voxelSize, 1e-4), SPOT_TOL_PIXELS * footprint);
+    return distance(hPos.xyz, curP) < tol;
+}
+
+// ---- NEIGHBOURHOOD CLAMP ----------------------------------------------------------------------
+// Bound a history value to the range the CURRENT frame actually shows nearby, the standard cure for
+// a temporal filter that reuses across a loose gate. Where the gate matched on position rather than
+// identity, "the same patch" is a guess, and a wrong guess drags a stale brightness along behind
+// moving geometry for as many frames as the mean is long.
+//
+// Applied ONLY on the loose tiers. Clamping an exact-face match would be actively harmful: the box
+// is built from the raw per-frame gather, which at 8 rays is noisy, so clamping a converged
+// 128-frame mean into it would inject that noise straight back and undo the accumulation this whole
+// design rests on. Identity matches need no such guess and get no clamp.
+vec3 clampToNeighbourhood(vec3 history, vec2 uv) {
+    vec3 lo = vec3(1e9), hi = vec3(-1e9);
+    float n = 0.0;
+    for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++) {
+        vec2 sUV = uv + vec2(float(dx), float(dy)) * passTargetRes.zw;
+        // SKY IS NOT A NEIGHBOUR VALUE. resolve.frag writes exactly zero indirect on a background
+        // texel -- correctly, since the sky has no bounce to gather -- but that zero is not a plausible
+        // reading of the surface this pixel is on, and letting it into the box drops `lo` to black.
+        // A converged history beside a silhouette was then clamped toward zero, darkening the indirect
+        // term along every voxel-to-sky edge in the frame. Same mistake as the one in compose.frag's
+        // filteredIndirect, in the other direction: there sky taps were admitted by an interpolated
+        // depth, here by not being asked about at all.
+        if (texture2D(gPos, sUV).a < 0.0) continue;
+        vec3 s = texture2D(indirect, sUV).rgb;
+        lo = min(lo, s);
+        hi = max(hi, s);
+        n += 1.0;
+    }
+    // Every neighbour was sky: nothing to bound against, so leave the history as it is rather than
+    // clamping it into an empty box (lo > hi, which would pin it to a corner of nonsense).
+    return n > 0.0 ? clamp(history, lo, hi) : history;
+}
+
 // The geometric fallback: is a history texel on a surface this pixel could legitimately inherit
 // from? Same facing (from the key's face id, so no normal has to be stored), close to this pixel's
 // tangent plane, and not a gross positional jump.
@@ -137,8 +320,9 @@ void main() {
     vec2 uv  = v_texcoord0;
     vec4 curSample = texture2D(indirect, uv);
     vec3 cur = curSample.rgb;
-    // Set by resolve: did this sample come from a probe on this pixel's own face?
-    bool exactSample = curSample.a > 0.5;
+    // resolve still tags each sample with whether it came from a probe on this pixel's own face. That
+    // distinction drove the per-face store and is deliberately ignored here; the tag is left in place
+    // because resolve is unchanged and it costs nothing to carry.
     vec4 gp  = texture2D(gPos, uv);
     vec4 curKey = texture2D(gKey, pjvSnapToTexel(uv, passTargetRes.xy));
 
@@ -156,47 +340,133 @@ void main() {
     // taking it from the key guarantees the orientation test and the identity test cannot disagree.
     vec3 curN = pjvFaceNormal(curKey.w);
 
+    // Is this a swaying blade rather than a fixed voxel face? gbuffer.frag states it outright in
+    // gAlbedo's alpha, because it cannot be inferred here -- a face centre moves when a blade sways
+    // AND when the sub-pixel jitter simply samples the neighbouring voxel, by about the same
+    // distance. See ANIM_POS_TOL_VOXELS for what this changes and why it has to.
+    // 0 stationary, 0.5 displaced (sway), 1 advected (fire). See gbuffer.frag for why fire is its
+    // own class: it is the one moving thing with no stable voxel to key on.
+    float motionClass = texture2D(gAlbedo, uv).a;
+    bool  animated  = motionClass > 0.25;
+    bool  advected  = motionClass > 0.75;
+    float voxelSize = texture2D(gNormal, uv).a;
+
     vec3  accum = cur;
-    // Negative until a probe has landed on this face -- see the note above. A first sample that is
-    // already exact starts positive.
-    float age   = exactSample ? 1.0 : -1.0;
+    // Plain frame count now. It used to be signed, the sign carrying "a probe has landed on this face
+    // before" -- a per-face notion with nothing left to mean.
+    float age   = 1.0;
 
     // Branch on whether the CAMERA moved, not on frameCount.y -- that flag also rises when only the
     // sun moved, and a lighting change under a still camera should keep the identity-reprojected
     // still path rather than fall into the reprojecting one.
     bool camMoved = any(notEqual(prevCameraPos.xyz, cameraPos.xyz)) ||
                     any(notEqual(prevCameraDir.xyz, cameraDir.xyz));
-    // The scene-changed signal is up but the camera did not move, so it was a light. Reuses the
-    // existing frameCount.y fold rather than adding a per-light flag, and being event-driven it is
-    // immune to the per-frame gather jitter that would otherwise trip it every frame.
-    bool lightMoved = (frameCount.y != 0.0) && !camMoved;
+    // The SUN moved, from its own flag rather than inferred from the scene-changed fold.
+    //
+    // It used to be (frameCount.y != 0 && !camMoved), and frameCount.y is raised by the grass sway on
+    // every single frame -- so this read "the light changed" forever, LIGHT_CHANGE_AGE knocked the
+    // history back to 4 every frame, and STILL_MAX_AGE 128 was unreachable. That is why the GI had no
+    // temporal accumulation at all: not because the mean was wrong, but because it was reset before it
+    // could ever build.
+    bool lightMoved = frameCount.w != 0.0;
 
     if (frameCount.x > 0.0) {
-        if (!camMoved) {
+        // An animated pixel takes the SEARCHING branch even when the camera is still, because the
+        // thing that moved was the geometry. Its own texel almost never holds last frame's blade --
+        // the blade swayed off it -- but a texel a pixel or two away usually does. With a still
+        // camera the reprojection below is the identity, so this costs nothing but the search.
+        if (!camMoved && !animated) {
             // STILL: this pixel's own texel, no resampling at all. The key still has to match --
             // the sun can move under a still camera, but the geometry cannot, so a mismatch here
             // means the previous frame wrote something else and is not ours to average.
             vec2 ownUV = (floor(uv * passTargetRes.xy) + 0.5) * passTargetRes.zw;
             vec4 hKey = texture2D(histKey, ownUV);
             vec4 h    = texture2D(accumR,  ownUV);
-            if (pjvSameFace(hKey, curKey) && !any(isnan(h))) {
-                bool  hadExact = h.a > 0.0;   // sign carries "a probe has landed here before"
-                float hAge = min(max(abs(h.a), 1.0), STILL_MAX_AGE);
-                if (lightMoved) hAge = min(hAge, LIGHT_CHANGE_AGE);
-                if (exactSample) {
-                    age   = min(hAge + 1.0, STILL_MAX_AGE);
-                    accum = mix(h.rgb, cur, 1.0 / age);
-                } else if (!hadExact) {
-                    // Still bootstrapping: no probe has ever landed on this face, so the
-                    // interpolation is the best estimate available and keeps averaging.
-                    age   = -min(hAge + 1.0, STILL_MAX_AGE);
-                    accum = mix(h.rgb, cur, 1.0 / min(hAge + 1.0, STILL_MAX_AGE));
-                } else {
-                    // Hold. This face owns no probe right now, and the interpolated stand-in is
-                    // whatever the neighbouring faces happen to look like from here.
-                    age   = hAge;
-                    accum = h.rgb;
+            vec4 hPos = texture2D(histPos, ownUV);
+            // EXACT FACE IDENTITY FIRST, geometry only if that fails. R is a per-face quantity again
+            // (probe.frag seeds its directions from the key, so every pixel on a face computes the
+            // same number from the same origin) and an identical key is therefore proof that last
+            // frame's value answers this frame's question -- the strongest gate available, and one
+            // that cannot pool two neighbouring faces' light the way the geometric test can.
+            //
+            // The fallback still matters and is not a weaker version of the same thing: it covers the
+            // sub-pixel regime, where many voxels project into one pixel and the exact key genuinely
+            // does change every frame for reasons that have nothing to do with the lighting. Which
+            // regime a pixel is in needs no decision -- an exact match existing IS the distinction.
+            bool tight = pjvSameFace(hKey, curKey) ||
+                         pjvSameVoxel(hKey, curKey) ||
+                         sameSurface(hKey, hPos, curKey, curP, curN, curDepth);
+
+            // ---- THE OWN TEXEL IS NOT THE ONLY PLACE THIS FACE'S HISTORY CAN BE -------------------
+            // This is what makes the indirect term converge with the jitter on, and its absence is the
+            // whole of the edge flicker.
+            //
+            // R is a per-FACE quantity, but it is stored per PIXEL. That is exact while a pixel keeps
+            // landing on the same face, and the sub-pixel jitter is precisely what stops it: at any
+            // face boundary the +-0.5px offset puts the primary ray on face A one frame and face B the
+            // next. Neither is a disocclusion -- both faces are permanently visible at that pixel, and
+            // the jitter alternating between them IS the sub-pixel signal. But the own texel holds
+            // whichever face last frame landed on, so every tier here fails on the flip, age resets to
+            // 1, and the pixel emits a raw 8-ray gather. Every frame, forever, on every edge in the
+            // frame. With the jitter off nothing ever flips and the same code converges perfectly,
+            // which is exactly the difference observed.
+            //
+            // The face this pixel wants has not been lost, though -- it is one texel away, in a pixel
+            // that landed on it this frame and has been converging it all along. The MOVING branch
+            // below already searches for exactly this, for exactly this reason: "voxel silhouettes are
+            // a staircase of micro-faces, so the exact reprojected texel routinely lands on the wrong
+            // one while the face this pixel wants sits a texel or two away holding its fully converged
+            // value". Camera motion and jitter produce the same situation; only the moving branch was
+            // given the means to handle it.
+            //
+            // Radius 1 because the jitter is bounded by half a pixel, so the alternate face is always
+            // an immediate neighbour -- a wider window would only admit faces the ray could not have
+            // reached. IDENTITY ONLY: this feeds a 128-frame mean, and an exact key is proof, whereas
+            // the positional tiers are guesses that would be far more expensive to get wrong here than
+            // in the short moving history. Those stay on the own texel, below, exactly as before.
+            //
+            // Runs only when the own texel already failed, so a pixel sitting still on its face -- the
+            // overwhelming majority of the frame -- pays nothing for it.
+            if (!tight) {
+                float bestD = 1e9;
+                for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) {
+                    if (dx == 0 && dy == 0) continue;      // already tested, and it failed
+                    float d = float(dx * dx + dy * dy);
+                    if (d >= bestD) continue;
+                    vec2 sUV  = ownUV + vec2(float(dx), float(dy)) * passTargetRes.zw;
+                    vec4 sKey = texture2D(histKey, sUV);
+                    if (pjvSameFace(sKey, curKey) || pjvSameVoxel(sKey, curKey)) {
+                        bestD = d;
+                        h     = texture2D(accumR,  sUV);
+                        hPos  = texture2D(histPos, sUV);
+                        tight = true;
+                    }
                 }
+            }
+            // Last tier: a silhouette between two DIFFERENT voxels, where nothing identifies the
+            // pair and only proximity is left. See EDGE_POS_TOL_VOXELS.
+            bool edge = !tight && sameSpot(hPos, curP, voxelSize, curDepth, EDGE_POS_TOL_VOXELS);
+
+            if ((tight || edge) && !any(isnan(h))) {
+                // Every frame contributes. The three-way branch this replaces -- take it, bootstrap
+                // it, or HOLD the old value -- existed to protect a per-face store: a face that owned
+                // no probe this frame had to keep its last real value rather than accept a neighbour's
+                // interpolated stand-in. With the value no longer per face there is no such thing as
+                // "this face's own probe", every pixel has a usable estimate every frame, and holding
+                // would only freeze noise in place.
+                // The edge tier's cap fades with the geometry: short while a voxel is resolved and the
+                // coverage mix is volatile, long once it is sub-pixel and the mix is stationary. See
+                // EDGE_SUBPIXEL_MAX_AGE.
+                float maxAge = tight ? STILL_MAX_AGE
+                                     : mix(EDGE_SUBPIXEL_MAX_AGE, EDGE_MAX_AGE,
+                                           geometryResolved(voxelSize, curDepth));
+                // Only the guessed match is clamped -- see clampToNeighbourhood.
+                vec3  hRGB   = tight ? h.rgb : clampToNeighbourhood(h.rgb, uv);
+                float hAge = min(max(abs(h.a), 1.0), maxAge);
+                if (lightMoved) hAge = min(hAge, LIGHT_CHANGE_AGE);
+                age   = min(hAge + 1.0, maxAge);
+                accum = mix(hRGB, cur, 1.0 / age);
             }
         } else {
             // MOVING: reproject this pixel's world position into last frame's camera, then search a
@@ -213,43 +483,96 @@ void main() {
             if (valid) {
                 vec2 baseUV = (floor(pUV * passTargetRes.xy) + 0.5) * passTargetRes.zw;
 
+                // Two searches over one window: the nearest EXACT face match wins outright if there is
+                // one, and the nearest geometric match is kept as the fallback. Both are tracked in a
+                // single pass over the taps -- the window is 5x5 and reading it twice would cost more
+                // than carrying the second candidate.
+                //
+                // The exact pass is what makes the neighbourhood search worth having. Voxel silhouettes
+                // are a staircase of micro-faces, so the exact reprojected texel routinely lands on the
+                // wrong one while the face this pixel wants sits a texel or two away holding its fully
+                // converged value. Finding it by identity is exact; finding it by geometry is a guess
+                // that can just as easily land on the neighbouring face.
                 vec4  bestExact = vec4(0.0); float bestExactDist = 1e9;
                 vec4  bestGeom  = vec4(0.0); float bestGeomDist  = 1e9;
+                vec4  bestEdge  = vec4(0.0); float bestEdgeDist  = 1e9;
 
                 for (int dy = -SEARCH_RADIUS; dy <= SEARCH_RADIUS; dy++)
                 for (int dx = -SEARCH_RADIUS; dx <= SEARCH_RADIUS; dx++) {
                     vec2 sUV = baseUV + vec2(float(dx), float(dy)) * passTargetRes.zw;
-                    vec4 hKey = texture2D(histKey, sUV);
                     float d = float(dx * dx + dy * dy);
+                    if (d >= bestExactDist && d >= bestGeomDist && d >= bestEdgeDist) continue;
 
-                    if (pjvSameFace(hKey, curKey)) {
-                        if (d < bestExactDist) { bestExactDist = d; bestExact = texture2D(accumR, sUV); }
-                    } else if (bestExactDist > 1e8) {
-                        // Only worth evaluating while no exact match has been found -- an exact
-                        // match always wins, so the geometric candidate would be discarded anyway.
-                        vec4 hPos = texture2D(histPos, sUV);
-                        if (sameSurface(hKey, hPos, curKey, curP, curN, curDepth) && d < bestGeomDist) {
-                            bestGeomDist = d; bestGeom = texture2D(accumR, sUV);
+                    vec4 hKey = texture2D(histKey, sUV);
+
+                    // An animated pixel gates on the VOXEL, not the face: the envelope march holds a
+                    // blade's source voxel still on purpose and only its normal churns, so this is an
+                    // exact identity rather than the positional guess it used to be -- which is why
+                    // it neither ghosts nor needs the clamp. Position is kept only as the fallback,
+                    // for fire, whose parcels genuinely advect through space and have no fixed voxel.
+                    if (animated) {
+                        if (d < bestExactDist && pjvSameVoxel(hKey, curKey)) {
+                            bestExactDist = d; bestExact = texture2D(accumR, sUV);
+                            continue;
                         }
+                        if (d >= bestEdgeDist) continue;
+                        vec4 hPosA = texture2D(histPos, sUV);
+                        // Fire gets the wider radius: a parcel advects a real distance every frame,
+                        // so the tolerance has to cover how far it travelled, not merely how far a
+                        // blade leaned. Grass only reaches this line when its voxel match failed.
+                        float tol = advected ? FIRE_POS_TOL_VOXELS : ANIM_POS_TOL_VOXELS;
+                        if (sameSpot(hPosA, curP, voxelSize, curDepth, tol)) {
+                            bestEdgeDist = d; bestEdge = texture2D(accumR, sUV);
+                        }
+                        continue;
+                    }
+
+                    if (d < bestExactDist &&
+                        (pjvSameFace(hKey, curKey) || pjvSameVoxel(hKey, curKey))) {
+                        bestExactDist = d; bestExact = texture2D(accumR, sUV);
+                        continue;   // an identity match is never also wanted as a weaker candidate
+                    }
+                    if (d >= bestGeomDist && d >= bestEdgeDist) continue;
+                    vec4 hPos = texture2D(histPos, sUV);
+                    if (d < bestGeomDist && sameSurface(hKey, hPos, curKey, curP, curN, curDepth)) {
+                        bestGeomDist = d; bestGeom = texture2D(accumR, sUV);
+                        continue;
+                    }
+                    // Silhouette tier, as in the still branch: same point, any facing.
+                    if (d < bestEdgeDist && sameSpot(hPos, curP, voxelSize, curDepth, EDGE_POS_TOL_VOXELS)) {
+                        bestEdgeDist = d; bestEdge = texture2D(accumR, sUV);
                     }
                 }
 
-                bool found = bestExactDist < 1e8 || bestGeomDist < 1e8;
-                vec4 h = bestExactDist < 1e8 ? bestExact : bestGeom;
+                // Strongest available match wins, and the cap and the clamp follow from which one it
+                // was: an identity match is proof and is trusted whole, the two positional matches are
+                // guesses and are both capped short and bounded to what this frame shows nearby.
+                bool  isExact = bestExactDist < 1e8;
+                bool  isGeom  = !isExact && bestGeomDist < 1e8;
+                bool  isEdge  = !isExact && !isGeom && bestEdgeDist < 1e8;
+                bool  found   = isExact || isGeom || isEdge;
+                vec4  h       = isExact ? bestExact : (isGeom ? bestGeom : bestEdge);
+
+                // Moving surfaces cap short whichever tier matched, because their light genuinely
+                // changes as they move -- that is a property of the surface, not of the match. Fire
+                // caps shortest of all; see FIRE_MAX_AGE.
+                float maxAge = advected ? FIRE_MAX_AGE
+                             : (animated ? ANIM_MAX_AGE
+                             : (isEdge   ? mix(EDGE_SUBPIXEL_MAX_AGE, EDGE_MAX_AGE,
+                                               geometryResolved(voxelSize, curDepth))
+                                         : MOVING_MAX_AGE));
+                // Only a POSITIONAL match is a guess and needs bounding. An animated pixel that
+                // matched on its voxel identity is as trustworthy as a static one that matched on its
+                // face, and clamping it would feed the raw gather's noise back into a mean that was
+                // busy removing it -- the opposite of what is wanted on the noisiest surfaces here.
+                bool  guessed = isEdge;
+
                 if (found && !any(isnan(h))) {
-                    bool  hadExact = h.a > 0.0;
-                    float hAge = min(max(abs(h.a), 1.0), MOVING_MAX_AGE);
+                    vec3  hRGB = guessed ? clampToNeighbourhood(h.rgb, uv) : h.rgb;
+                    float hAge = min(max(abs(h.a), 1.0), maxAge);
                     if (lightMoved) hAge = min(hAge, LIGHT_CHANGE_AGE);
-                    if (exactSample) {
-                        age   = min(hAge + 1.0, MOVING_MAX_AGE);
-                        accum = mix(h.rgb, cur, 1.0 / age);
-                    } else if (!hadExact) {
-                        age   = -min(hAge + 1.0, MOVING_MAX_AGE);
-                        accum = mix(h.rgb, cur, 1.0 / min(hAge + 1.0, MOVING_MAX_AGE));
-                    } else {
-                        age   = hAge;
-                        accum = h.rgb;
-                    }
+                    age   = min(hAge + 1.0, maxAge);
+                    accum = mix(hRGB, cur, 1.0 / age);
                 }
             }
         }

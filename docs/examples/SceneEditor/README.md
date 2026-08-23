@@ -156,7 +156,23 @@ This answers it in place. It stays inside the viewport's own flat, sunless, back
 
 | What | How |
 |------|-----|
-| **Transparency** | The primary march becomes `raySceneIntersectPeeled` — it sees *through* transparent voxels to the nearest opaque surface and tints what it finds by the layers it crossed. Identical traversal, identical depth budget and identical stochastic alpha to Render mode's, so glass that reads right here reads right there |
+| **Transparency** | The primary march peels — it sees *through* transparent voxels to the nearest opaque surface and tints what it finds by the layers it crossed. Identical traversal, identical stochastic alpha to Render mode's, so glass that reads right here reads right there. `Transmission` deepens the tint with distance travelled *through* the body, as opposed to `Transparency`, which is charged once at the surface |
+| **Refraction** | With the Palette panel's **Refraction** budget above zero, the ray also *bends* at an interface whose `IOR` is not 1, and total internal reflection falls out of it — past the critical angle a thick glass edge goes mirror-like. The budget is a **renderer** setting, not a material one, and is shared with Render mode from one field so the preview and the render cannot disagree. Zero by default: a bend is a branch every transparent layer of every ray tests for, so a scene with no glass does not pay for it |
+
+**Diagnosing refraction.** `EDITOR_REFRACT_DEBUG=<1..4>` replaces the viewport with one of four
+diagnostic views, and `EDITOR_GLASS="<prefix>=<alpha>"`, `EDITOR_GLASS_IOR`, `EDITOR_GLASS_DENSITY`
+and `EDITOR_REFRACTION=<0..3>` set a material up from the command line so two runs are comparable.
+The views exist because "the picture is wrong" is never one question — each isolates one stage, and
+the one that comes back uniform is the one that is not at fault:
+
+| Mode | Shows | Rules out |
+|---|---|---|
+| 1 | Discarded hits — magenta `rayT <= 0`, cyan degenerate normal | The renderer refusing a hit the traversal actually found |
+| 2 | Bends taken — grey 0, red 1, green 2, blue 3+ | A discontinuous bend *count* versus a wrong bend |
+| 3 | Hit coarseness — green full-res, yellow one LOD step, red two or more | LOD, asked directly |
+| 4 | Stop reason — green opaque, red layers, blue iterations, yellow stall, magenta segments | "Ran out of budget" versus "finished, and the answer is wrong" |
+| 5 | Crossed versus bent — grey nothing crossed, **red** crossed but never bent, green bent | Whether the fault is before or after the bend condition |
+
 | **Emission** | The emissive radiance of the hit, plus the glow of every transparent layer in front of it, each already dimmed by what sat in front of *it* |
 | **Reflections** | One GGX sample per pixel per frame, marched into the scene. Same lobe, same Fresnel, same masking term the path tracer uses — the estimator is written out in closed form because there is one lobe here and nothing to weigh it against |
 

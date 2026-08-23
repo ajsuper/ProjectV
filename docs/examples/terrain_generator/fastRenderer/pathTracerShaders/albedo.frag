@@ -17,13 +17,13 @@ void main() {
     ray.origin = cameraPos.xyz;
     ray.direction = rayStartDirection(uv, windowRes.xy, cameraPos.xyz, normalize(cameraDir.xyz), FOV);
 
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = 256u;
     rq.startLOD = 0;
     rq.finishLOD = 2;
     rq.distanceToFinishLOD = 5000;
 
-    SceneIntersectData sceneHit = raySceneIntersect(ray, rq);
+    SceneIntersectData sceneHit = raySceneIntersect(ray, rq).hit;
     vec3 nrm = sceneHit.normal;
     if (sceneHit.foundBox.size < 0.0 || sceneHit.rayT <= 0.0 || dot(nrm, nrm) < 0.5) {
         gl_FragColor = vec4(0.68, 0.85, 0.90, 1.0);
@@ -36,7 +36,7 @@ void main() {
     Ray sunRay;
     sunRay.origin = ray.origin + ray.direction * sceneHit.rayT;
     sunRay.direction = normalize(vec3(1, 1, 1));
-    sceneHit = raySceneIntersect(sunRay, rq);
+    sceneHit = raySceneIntersect(sunRay, rq).hit;
     vec3 sunColor = vec3(1);
     if (sceneHit.foundBox.size < 0.0 || sceneHit.rayT <= 0.0) {
         sunColor = vec3(2);

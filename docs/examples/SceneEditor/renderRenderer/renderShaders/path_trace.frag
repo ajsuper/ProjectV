@@ -79,7 +79,7 @@ uniform vec4 sunDir;
 // w = the firefly clamp (maximum radiance any one path may return).
 uniform vec4 renderParams;
 // Thin-lens depth of field. x = the lens radius in world units (zero disables it entirely),
-// y = the focus distance measured along the view axis, z/w spare.
+// y = the focus distance measured along the view axis, z = the refraction segment budget, w spare.
 uniform vec4 lensParams;
 // Single-scattering atmosphere, which is where the god rays come from. x = the extinction
 // coefficient in inverse world units (zero disables it), y = the Henyey-Greenstein anisotropy in
@@ -111,6 +111,12 @@ uniform vec4 volumeParams;
 // In practice tinted glass terminates long before this: transmittance multiplies down each layer and
 // the peel quits once it drops below 0.002. Only near-perfectly-clear material runs the full budget.
 #define TRANSPARENT_LAYERS  64u
+
+// How many times ONE ray may be bent by a material whose IOR is not 1. Runtime, off by default, and
+// set from the same editor field the viewport's albedo.frag reads, so the preview and the render
+// cannot disagree about whether glass bends light. A different uniform only because the two tabs are
+// separate renderers with separate resources.json files.
+uint refractionSegments() { return uint(max(lensParams.z, 0.0) + 0.5); }
 
 // Set to 1 to replace the image with a false-colour map of WHY the peel stopped on the primary ray.
 // Transparency has two failure modes that look completely different on screen and are one line apart
@@ -470,7 +476,7 @@ Ray primaryRay(vec2 uv, inout uint seed) {
 }
 
 RayQuery walkQuery(uint maxSteps) {
-    RayQuery query;
+    RayQuery query = pjvPrimaryQuery(100u);
     query.maxRaySteps = maxSteps;
     // No distance LOD anywhere in this renderer. LOD trades geometric detail for march
     // steps, and this mode exists to show the scene as it is -- a converged image of a
@@ -539,8 +545,26 @@ void main() {
         // in front of it did to the light. A scene with no transparent materials takes exactly the
         // old path: the peel stops at the first hit, and the material it fetched to decide that is
         // handed back rather than fetched again below.
-        PeeledHit peeled = raySceneIntersectPeeled(ray, query, TRANSPARENT_LAYERS, seed);
+        pjvQueryTransparency(query, TRANSPARENT_LAYERS, seed);
+        // ...and bends it at an interface whose IOR is not 1. Zero segments -- the default --
+        // reproduces the peel exactly, which is what the Refraction slider at 0 has to mean.
+        if (refractionSegments() > 0u) pjvQueryRefraction(query, refractionSegments());
+        SceneHit peeled = raySceneIntersect(ray, query);
+        seed = query.seed + peeled.layers * 2654435761u;
         SceneIntersectData hit = peeled.hit;
+
+        // ---- THE RAY BECOMES THE ONE THE HIT WAS FOUND ON ------------------------------------
+        //
+        // Identical to what went in unless refraction bent it, so nothing about a non-refracting
+        // scene changes. When it did bend, this one line carries the new ray through the whole rest
+        // of the iteration -- the miss test's direction, the hit position, the view vector, the next
+        // bounce's origin -- because `ray` is already this loop's "where am I now".
+        //
+        // Not optional, and the failure is not subtle once you look for it: every one of those reads
+        // `ray.origin + ray.direction * hit.rayT` or `-ray.direction`, and after a bend the original
+        // direction names a point in empty space. The surface would be shaded correctly, placed
+        // wrongly, and then used as the origin of the next bounce.
+        ray = peeled.finalRay;
 
         // Glow from the transparent layers themselves, already attenuated by whatever sat in front
         // of each. Added before the throughput below picks up their filtering, since these are in
@@ -653,7 +677,10 @@ void main() {
             // glass cast a fully black shadow however transparent its material was; this carries the
             // tint through, which is what puts coloured light on the floor under a stained window.
             // Opaque geometry returns exactly zero, so an opaque scene behaves as it always did.
-            vec3 shadowTransmittance = raySceneTransmittance(shadowRay, walkQuery(SHADOW_MAX_STEPS), 1e30, TRANSPARENT_LAYERS);
+            RayQuery shadowQ = walkQuery(SHADOW_MAX_STEPS);
+            shadowQ.flags |= PJV_Q_OCCLUSION_ONLY;
+            pjvQueryTransparency(shadowQ, TRANSPARENT_LAYERS, 0u);
+            vec3 shadowTransmittance = raySceneTransmittance(shadowRay, shadowQ);
             if (dot(shadowTransmittance, shadowTransmittance) > 0.0) {
                 // The estimator is f * cos * L / pdf, weighted against the chance the
                 // bounce sample below would have found the same disk on its own. For an
@@ -771,7 +798,10 @@ void main() {
                 // Same swap as the surface shadow ray above, and it earns its keep here: a shaft
                 // passing through coloured glass now carries that colour into the haze, instead of
                 // the window reading as a solid occluder that casts no shaft at all.
-                vec3 shaftTransmittance = raySceneTransmittance(shaftRay, walkQuery(SHADOW_MAX_STEPS), 1e30, TRANSPARENT_LAYERS);
+                RayQuery shaftQ = walkQuery(SHADOW_MAX_STEPS);
+                shaftQ.flags |= PJV_Q_OCCLUSION_ONLY;
+                pjvQueryTransparency(shaftQ, TRANSPARENT_LAYERS, 0u);
+                vec3 shaftTransmittance = raySceneTransmittance(shaftRay, shaftQ);
                 if (dot(shaftTransmittance, shaftTransmittance) > 0.0) {
                     // The sun's cone was sampled uniformly, and integrating the disk's radiance
                     // over its own solid angle gives exactly the irradiance sunRadianceColor()

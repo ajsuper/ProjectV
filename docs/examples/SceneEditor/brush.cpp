@@ -225,7 +225,12 @@ void instructionHook(lua_State* state, lua_Debug* /*debug*/) {
         // specifiers and no precision modifiers at all -- a "%.0f" here does not print a number, it
         // replaces the whole message with "invalid option '%.' to 'lua_pushfstring'", so the one
         // error the user is most likely to hit would arrive unreadable.
-        luaL_error(state, "brush call exceeded %d ms -- it looks like an endless loop",
+        // Names the other cause as well as the likely one. At a quarter of a second an overrun was
+        // an endless loop and nothing else; at two, a scatter brush building a genuinely large object
+        // can reach it honestly, and a reader told only about loops will go looking for a bug that is
+        // not there instead of turning the size down.
+        luaL_error(state, "brush call exceeded %d ms -- an endless loop, or one placement asking for "
+                          "more than can be built in that time",
                    int(BRUSH_CALL_TIMEOUT_SECONDS * 1000.0));
     }
 }
@@ -455,8 +460,10 @@ int luaFits(lua_State* state) {
     if (y1 < y0) std::swap(y0, y1);
     if (z1 < z0) std::swap(z0, z1);
 
-    // Bounded so a typo cannot ask about a billion cells inside the per-call deadline.
-    const int64_t MAX_CELLS = 2000000;
+    // Bounded so a typo cannot ask about a billion cells inside the per-call deadline. Generous
+    // enough that an honest question about a large placement -- a tree's headroom on a scene-sized
+    // component -- is answered rather than refused; the deadline is the real guard on a slow one.
+    const int64_t MAX_CELLS = 16000000;
     int64_t cells = int64_t(x1 - x0 + 1) * int64_t(y1 - y0 + 1) * int64_t(z1 - z0 + 1);
     if (cells > MAX_CELLS) {
         return luaL_error(state, "pv.fits was asked about %d cells; the ceiling is %d",
@@ -1188,6 +1195,33 @@ void loadInto(BrushDefinition& brush) {
         brush.creviceRadius = std::clamp(int(number), 1, 8);
     }
 
+    // `displaces`, the material name prefixes a placement may grow through. See BrushDefinition.
+    brush.displaces.clear();
+    lua_getfield(state, declaration, "displaces");
+    if (lua_istable(state, -1)) {
+        lua_Integer count = luaL_len(state, -1);
+        for (lua_Integer i = 1; i <= count; i++) {
+            lua_rawgeti(state, -1, i);
+            if (lua_type(state, -1) == LUA_TSTRING) {
+                std::string prefix = lua_tostring(state, -1);
+                // An empty prefix matches every name, which would let a placement overwrite the whole
+                // scene -- the one value that turns a convenience into a wrecking ball, and easy to
+                // arrive at from a stray `""` in a list.
+                if (prefix.empty()) {
+                    appendMessage(&brush, true,
+                                  "an empty prefix in `displaces` would match every material; ignored");
+                } else if (brush.kind != BrushKind::Scatter) {
+                    appendMessage(&brush, true,
+                                  "`displaces` only means anything for a scatter brush; ignored");
+                } else {
+                    brush.displaces.push_back(std::move(prefix));
+                }
+            }
+            lua_pop(state, 1);
+        }
+    }
+    lua_pop(state, 1);
+
     lua_getfield(state, declaration, "params");
     if (lua_istable(state, -1)) {
         lua_Integer count = luaL_len(state, -1);
@@ -1874,7 +1908,20 @@ bool brushEvaluateScatter(BrushInvocation& invocation, const BrushContext& conte
     lua_Integer count = luaL_len(state, -1);
     // A placement is an object, not a landscape. The cap is what stops one runaway loop in a script
     // from queueing a million voxels per site across a dab of hundreds of sites.
-    const lua_Integer MAX_PLACEMENT_VOXELS = 20000;
+    //
+    // **Sized for the largest honest object, not for the smallest.** At 20000 this was a limit on what
+    // could be modelled rather than a guard against a bug: a tree 200 voxels tall needs a trunk with a
+    // radius near 20, and the *shell* of that trunk alone is past 20000 before a leaf is placed. So a
+    // brush working at a high voxel resolution could not describe its subject at all, and the failure
+    // arrived as a refused placement rather than as anything a reader would connect to a ceiling.
+    //
+    // What the cap actually has to catch is the runaway -- the `while true do` that queues until
+    // memory runs out -- and a million is the number that comment has always named. This stays an
+    // order of magnitude below it while leaving room for a large object, and nothing else is spending
+    // its own budget on the strength of this one: a placement is refused whole, so the cost of the
+    // ceiling being generous is a slower dab, never a corrupted one. The scatter lattice bounds how
+    // many placements a dab can hold, and the fit test bounds how many can overlap (none).
+    const lua_Integer MAX_PLACEMENT_VOXELS = 120000;
     if (count > MAX_PLACEMENT_VOXELS) {
         invocation.failedFlag = true;
         invocation.errorText = "one placement returned " + std::to_string(count) +

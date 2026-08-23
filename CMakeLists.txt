@@ -184,6 +184,10 @@ target_link_libraries(projectV-type_mapping PRIVATE bgfx glfw ${MACOS_FRAMEWORKS
 link_common_includes(projectV-type_mapping)
 
 # Utils Libraries
+add_library(projectV-animation STATIC ${UTILS_SRC_DIR}/animation.cpp)
+target_link_libraries(projectV-animation PRIVATE projectV-voxel_management projectV-material projectV-voxel_math)
+link_common_includes(projectV-animation)
+
 add_library(projectV-compose_io STATIC ${UTILS_SRC_DIR}/compose_io.cpp)
 target_link_libraries(projectV-compose_io PRIVATE projectV-voxel_management projectV-material)
 link_common_includes(projectV-compose_io)

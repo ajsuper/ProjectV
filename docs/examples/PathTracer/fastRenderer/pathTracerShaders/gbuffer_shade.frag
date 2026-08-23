@@ -70,7 +70,7 @@ struct Hit {
 };
 
 Hit traceScene(Ray ray, uint maxSteps) {
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = maxSteps;
     // Full-resolution primary ray. Distance-LOD was tried here (distanceToFinishLOD 64)
     // but gave almost no speed-up while making distant geometry unrecognisably blocky --
@@ -80,7 +80,7 @@ Hit traceScene(Ray ray, uint maxSteps) {
     rq.distanceToFinishLOD = 10000;
 
     Hit h;
-    SceneIntersectData sceneHit = raySceneIntersect(ray, rq);
+    SceneIntersectData sceneHit = raySceneIntersect(ray, rq).hit;
     // Trust the march's own hit data. Re-intersecting foundBox with getRayBoxEntry
     // returned <= 0 for boundary-exact hits (ULP disagreement between the voxel-space
     // march and the world-space slab test), which misclassified real hits as sky ->
@@ -112,13 +112,13 @@ Hit traceScene(Ray ray, uint maxSteps) {
 // visibility query. Only the primary ray, which needs the surface colour, still
 // pays for the full traceScene().
 float traceOccludedDist(Ray ray, uint maxSteps) {
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = maxSteps;
     rq.startLOD = 0;
     rq.finishLOD = 0;
     rq.distanceToFinishLOD = 30;
 
-    SceneIntersectData sceneHit = raySceneIntersect(ray, rq);
+    SceneIntersectData sceneHit = raySceneIntersect(ray, rq).hit;
     // Occlusion distance straight from the march (-1 on a genuine miss). Re-intersecting
     // foundBox with getRayBoxEntry returned <= 0 for boundary-exact hits, so a shadow
     // ray grazing a voxel edge reported "unoccluded" and leaked full sun into shadow ->

@@ -237,6 +237,28 @@ struct BrushDefinition {
     // Radius of the ball Crevice is averaged over, in voxels. Same story.
     int creviceRadius = 3;
 
+    // Material name prefixes a Scatter brush's placement is allowed to grow through, matched against
+    // the *target component's* palette entry names. Empty -- the default -- means the placement must
+    // land in cells that are entirely empty, which is what every scatter brush used to require.
+    //
+    // **This exists because "occupied" and "in the way" are not the same question, and the fit test
+    // could only ask the first one.** Plant a field of grass and then try to plant trees in it and
+    // every site is refused: the trunk's first voxel is inside a blade, the headroom column starts
+    // inside a blade, and the brush cannot tell that from a wall. The user's report was "it isn't
+    // placing anywhere", and there is nothing a script can do about it -- the refusal happens in the
+    // host, after the placement comes back.
+    //
+    // A prefix rather than an exact name, and matched against the palette rather than against the
+    // brush's own materials, because the thing being displaced belongs to whatever put it there: a
+    // grass brush writes `grass.blade`, `grass.tip` and any ramp step in between, and a tree wants to
+    // grow through all of them without knowing how that brush names its ramp. Bound by name for the
+    // same reason material roles are (see BrushMaterialSlot): a slot index is a fact about one
+    // component's palette, and a name survives being planted in a different one.
+    //
+    // Displacement is a real edit and is journalled like any other -- the cell's old solidity and
+    // colour are remembered, so a revert or an undo puts the grass back.
+    std::vector<std::string> displaces;
+
     std::vector<BrushParam> params;
     std::vector<BrushMaterial> materials;
 
@@ -548,8 +570,27 @@ extern const char* const BRUSH_DENSITY_PARAM;   // "density", 0..1 of eligible s
 // per call, so a stroke of a hundred thousand honest thirty-instruction calls trips a two-million
 // instruction budget exactly as reliably as one infinite loop does -- and kills the stroke at a
 // random voxel. Elapsed time since the call began has no such accumulation.
+//
+// **Raised from 0.25s, which was measured against the wrong unit of work.** A material brush's call
+// decides one voxel and is over in microseconds, and against that a quarter second is enormous. A
+// scatter brush's call builds a whole object: one call to the tree brush generates a trunk, a
+// branching skeleton and every leaf on it, tens of thousands of voxels at a large trunk height, and
+// that is a legitimate call that simply takes longer than a tenth of a second. At 0.25 the guard
+// stopped catching runaways and started setting a ceiling on how big a scatter brush's subject could
+// be -- and it enforced that ceiling by killing the stroke with "it looks like an endless loop",
+// which sends the reader hunting for a bug in a script that does not have one.
+//
+// The number to size this against is how long a person will sit through before deciding the editor
+// has hung, not how long the smallest call takes. Two seconds is comfortably inside that and is still
+// three orders of magnitude away from any honest per-voxel call, so `while true do end` is caught
+// just as surely -- only after two seconds rather than a quarter of one, which nobody will notice
+// against the reload that follows it.
+//
+// Note what this does and does not bound: it is per *call*, and a scatter dab makes one call per
+// site, so it has never bounded the length of a dab. What bounds that is the site ceiling
+// (BRUSH_MAX_SCATTER_SITES) and the dab's cell ceiling, and raising this does not touch either.
 constexpr int BRUSH_HOOK_INTERVAL = 100000;     // Lua instructions between deadline checks.
-constexpr double BRUSH_CALL_TIMEOUT_SECONDS = 0.25;
+constexpr double BRUSH_CALL_TIMEOUT_SECONDS = 2.0;
 
 } // namespace projv::editor
 

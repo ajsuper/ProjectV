@@ -1,5 +1,5 @@
 #!/bin/bash
-# Compiles the AdvancedRenderer's shaders (one vertex, ten fragment) to bgfx .bin.
+# Compiles the AdvancedRenderer's shaders (one vertex, fourteen fragment) to bgfx .bin.
 echo "Compiling AdvancedRenderer shaders..."
 PROJECTV_DIR=../../../
 

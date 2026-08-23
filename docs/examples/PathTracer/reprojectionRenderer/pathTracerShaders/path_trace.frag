@@ -111,7 +111,7 @@ struct Hit {
 };
 
 Hit traceScene(Ray ray, uint maxSteps, bool secondary) {
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = maxSteps;
     rq.startLOD = 0;
     rq.finishLOD = 0;
@@ -123,7 +123,7 @@ Hit traceScene(Ray ray, uint maxSteps, bool secondary) {
     }
 
     Hit h;
-    SceneIntersectData sceneHit = raySceneIntersect(ray, rq);
+    SceneIntersectData sceneHit = raySceneIntersect(ray, rq).hit;
     // Trust the march's own hit data. Re-intersecting foundBox with getRayBoxEntry
     // returned <= 0 for boundary-exact hits (ULP disagreement between the voxel-space
     // march and the world-space slab test), misclassifying real hits as sky and, on

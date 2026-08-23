@@ -64,10 +64,10 @@ bool sunVisibleWS(vec3 p, vec3 n) {
     Ray shadow;
     shadow.origin    = p + n * (0.02 * WORLD_SCALE);
     shadow.direction = SUN_DIR;
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = SUN_SHADOW_STEPS;
     rq.startLOD = 0u; rq.finishLOD = 0u; rq.distanceToFinishLOD = 100000u;
-    return raySceneIntersect(shadow, rq).rayT < 0.0;   // rayT < 0 == genuine miss == lit
+    return raySceneIntersect(shadow, rq).hit.rayT < 0.0;   // rayT < 0 == genuine miss == lit
 }
 
 // Unshadowed bounced sunlight (no shadow ray) -- used on the far cascades.
@@ -106,13 +106,13 @@ vec4 gatherRayWS(vec3 P, vec3 N, vec3 dir, int c, float vs) {
     ray.origin    = P + N * lift + dir * t0;          // start at this interval's near end, lifted off N
     ray.direction = dir;
 
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps         = WS_STEPS;
     rq.startLOD            = 0u;
     rq.finishLOD           = uint(WS_FINISH_LOD);     // coarse far -> long rays stay cheap
     rq.distanceToFinishLOD = uint(WS_LOD_DIST);
 
-    SceneIntersectData h = raySceneIntersect(ray, rq);
+    SceneIntersectData h = raySceneIntersect(ray, rq).hit;
 
     // Note: the old distance-based grazing self-relief skip is gone -- the ORIGIN_LIFT above clears the
     // coplanar self-relief geometrically (a lifted near-tangent ray skims over it), so near hits are now

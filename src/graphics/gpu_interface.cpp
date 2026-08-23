@@ -293,6 +293,12 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
     g.geometryEndIndex = r.geomTexelOffset + r.geomTexelLen;
     g.materialIDStartIndex = r.matTexelOffset * 4u;
     g.materialIDEndIndex = r.matTexelOffset * 4u + r.matByteLen;
+    // Zero node count is how a chunk says it has no animation envelope, and it is the common case.
+    // Nothing else in the header changes for such a chunk, which is what makes the structure
+    // adjacent: a renderer that never looks at these words cannot tell they exist.
+    g.envelopeStartIndex = r.envTexelOffset;
+    g.envelopeNodeCount = r.envTexelLen;
+    g.envelopeMotionStartIndex = r.envMotionTexelOffset * 4u;
     g.positionX = chunk.header.position.x;
     g.positionY = chunk.header.position.y;
     g.positionZ = chunk.header.position.z;
@@ -388,6 +394,16 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         // At renderLOD 0 the scratch buffers are untouched and the blob's own arrays are used
         // directly, so the common case costs nothing. Otherwise the coarsened copy is built into
         // caller-owned scratch: the blob's CPU arrays always stay full resolution.
+        // The envelope is deliberately NOT run through downsampleTree64 alongside the geometry.
+        //
+        // Storage LOD exists to trade geometric detail for VRAM at distance, and it is applied to a
+        // tree whose cells are voxels. The envelope's cells are already 4x4x4 voxels, so one LOD step
+        // would make them 16 voxels across -- far past the one-to-two voxels of displacement the
+        // envelope exists to bound, which would turn a blade's swept volume into a region the size of
+        // a bush and cost a 16^3 block resolve for it. And it buys nothing: a chunk coarse enough to
+        // want LOD is a chunk whose animation is well below a pixel, which is what the query's
+        // animResolveDistance already turns off. So a coarsened blob keeps its envelope at full
+        // envelope resolution, and the resolve simply stops running at that distance.
         void effectiveBlobData(const GeometryBlob& blob,
                                std::vector<uint32_t>& scratchGeom,
                                std::vector<uint8_t>& scratchMat,
@@ -434,6 +450,13 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 if (!r.uploaded) continue;
                 if (r.geomTexelLen) geom.push_back({r.geomTexelOffset, r.geomTexelOffset + r.geomTexelLen, b});
                 if (r.matTexelLen)  mat.push_back({r.matTexelOffset,   r.matTexelOffset + r.matTexelLen,   b});
+                // The envelope shares both textures with the geometry, so it has to share the
+                // overlap check too -- a guardrail that skips the newest ranges is the one that
+                // will not fire when it matters. Pushed into the same lists deliberately: an
+                // envelope overlapping ANOTHER blob's geometry is exactly as broken as two
+                // geometries overlapping, and would read as one chunk's tree corrupting another's.
+                if (r.envTexelLen) geom.push_back({r.envTexelOffset, r.envTexelOffset + r.envTexelLen, b});
+                if (r.envMotionTexelLen) mat.push_back({r.envMotionTexelOffset, r.envMotionTexelOffset + r.envMotionTexelLen, b});
             }
             auto check = [&](std::vector<Span>& v, const char* kind, uint32_t cap) {
                 std::sort(v.begin(), v.end(), [](const Span& a, const Span& b) { return a.lo < b.lo; });
@@ -1126,6 +1149,12 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             uint32_t matTexels = static_cast<uint32_t>((matSrc->size() + 3) / 4);
             uint32_t gAlloc = paddedAlloc(nodes);
             uint32_t mAlloc = paddedAlloc(matTexels);
+            // Never coarsened; see effectiveBlobData. Zero for a blob with no animation, and zero
+            // must short-circuit paddedAlloc's floor so a static blob reserves nothing at all.
+            uint32_t envNodes = static_cast<uint32_t>(blob.envelope.size() / 3);
+            uint32_t envMotTexels = static_cast<uint32_t>((blob.envelopeMotion.size() + 3) / 4);
+            uint32_t eAlloc = envNodes ? paddedAlloc(envNodes) : 0u;
+            uint32_t emAlloc = envMotTexels ? paddedAlloc(envMotTexels) : 0u;
 
             GPUBlobRange rng{};
             rng.geomTexelOffset    = geomUsedPadded;
@@ -1135,6 +1164,15 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             rng.matTexelLen        = matTexels;
             rng.matTexelAllocated  = mAlloc;
             rng.matByteLen         = static_cast<uint32_t>(matSrc->size());
+            // The envelope sits immediately after its own blob's geometry in the flat array, so a
+            // repack keeps the two together and the pack order below matches these offsets exactly.
+            rng.envTexelOffset       = geomUsedPadded + gAlloc;
+            rng.envTexelLen          = envNodes;
+            rng.envTexelAllocated    = eAlloc;
+            rng.envMotionTexelOffset = matUsedPadded + mAlloc;
+            rng.envMotionTexelLen    = envMotTexels;
+            rng.envMotionTexelAllocated = emAlloc;
+            rng.envMotionByteLen     = static_cast<uint32_t>(blob.envelopeMotion.size());
             rng.uploadedLOD        = blob.renderLOD;
             rng.uploaded           = true;
             gpuData.blobRanges[b]  = rng;
@@ -1145,11 +1183,21 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             materialIDTexels.insert(materialIDTexels.end(), mt.begin(), mt.end());
             tree64Texels.insert(tree64Texels.end(), static_cast<size_t>(gAlloc - nodes) * 4, 0u);
             materialIDTexels.insert(materialIDTexels.end(), static_cast<size_t>(mAlloc - matTexels) * 4, 0u);
+            if (eAlloc) {
+                std::vector<uint32_t> et = packGeometryTexels(blob.envelope);
+                tree64Texels.insert(tree64Texels.end(), et.begin(), et.end());
+                tree64Texels.insert(tree64Texels.end(), static_cast<size_t>(eAlloc - envNodes) * 4, 0u);
+            }
+            if (emAlloc) {
+                std::vector<uint8_t> emt = packMaterialIDTexels8(blob.envelopeMotion);
+                materialIDTexels.insert(materialIDTexels.end(), emt.begin(), emt.end());
+                materialIDTexels.insert(materialIDTexels.end(), static_cast<size_t>(emAlloc - envMotTexels) * 4, 0u);
+            }
 
-            geomUsed += nodes;
-            matUsed += matTexels;
-            geomUsedPadded += gAlloc;
-            matUsedPadded += mAlloc;
+            geomUsed += nodes + envNodes;
+            matUsed += matTexels + envMotTexels;
+            geomUsedPadded += gAlloc + eAlloc;
+            matUsedPadded += mAlloc + emAlloc;
         }
 
         uint32_t maxSz = maxTexSize();
@@ -1252,6 +1300,10 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             if (blob.refCount == 0 && r.uploaded) {
                 gpuData.tree64Alloc.free(r.geomTexelOffset, r.geomTexelAllocated);
                 gpuData.materialIDAlloc.free(r.matTexelOffset, r.matTexelAllocated);
+                if (r.envTexelAllocated) gpuData.tree64Alloc.free(r.envTexelOffset, r.envTexelAllocated);
+                if (r.envMotionTexelAllocated) gpuData.materialIDAlloc.free(r.envMotionTexelOffset, r.envMotionTexelAllocated);
+                r.envTexelAllocated = 0; r.envTexelLen = 0;
+                r.envMotionTexelAllocated = 0; r.envMotionTexelLen = 0;
                 r.uploaded = false;
                 continue;
             }
@@ -1265,6 +1317,11 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             uint32_t nodes = static_cast<uint32_t>(geomSrc->size() / 3);
             uint32_t matTexels = static_cast<uint32_t>((matSrc->size() + 3) / 4);
             uint32_t matBytes = static_cast<uint32_t>(matSrc->size());
+            // The envelope is never coarsened -- see effectiveBlobData -- so it comes straight off
+            // the blob whatever the LOD is.
+            uint32_t envNodes = static_cast<uint32_t>(blob.envelope.size() / 3);
+            uint32_t envMotTexels = static_cast<uint32_t>((blob.envelopeMotion.size() + 3) / 4);
+            uint32_t envMotBytes = static_cast<uint32_t>(blob.envelopeMotion.size());
 
             // An LOD change forces a realloc even when the blob shrank. The normal test only fires
             // on growth, so without this a demoted blob would keep its old oversized range until
@@ -1273,25 +1330,40 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             // behaviour (and its 25% growth slack) is left alone.
             bool lodChanged = r.uploaded && r.uploadedLOD != blob.renderLOD;
             bool needRealloc = !r.uploaded || nodes > r.geomTexelAllocated
-                               || matTexels > r.matTexelAllocated || lodChanged;
+                               || matTexels > r.matTexelAllocated || lodChanged
+                               || envNodes > r.envTexelAllocated
+                               || envMotTexels > r.envMotionTexelAllocated;
 
             if (needRealloc) {
                 if (r.uploaded) {
                     gpuData.tree64Alloc.free(r.geomTexelOffset, r.geomTexelAllocated);
                     gpuData.materialIDAlloc.free(r.matTexelOffset, r.matTexelAllocated);
+                    if (r.envTexelAllocated) gpuData.tree64Alloc.free(r.envTexelOffset, r.envTexelAllocated);
+                    if (r.envMotionTexelAllocated) gpuData.materialIDAlloc.free(r.envMotionTexelOffset, r.envMotionTexelAllocated);
                 }
                 uint32_t gAlloc = paddedAlloc(nodes);
                 uint32_t mAlloc = paddedAlloc(matTexels);
+                // A blob with no envelope allocates none. Zero has to short-circuit rather than go
+                // through paddedAlloc, which has a floor and would hand every static blob in the
+                // scene a range it never writes to.
+                uint32_t eAlloc = envNodes ? paddedAlloc(envNodes) : 0u;
+                uint32_t emAlloc = envMotTexels ? paddedAlloc(envMotTexels) : 0u;
                 uint32_t gOff = gpuData.tree64Alloc.alloc(gAlloc);
                 uint32_t mOff = gpuData.materialIDAlloc.alloc(mAlloc);
-                if (gOff == RangeAllocator::INVALID || mOff == RangeAllocator::INVALID) {
-                    // Hand back whichever half succeeded. The caller falls back to growDataTextures,
+                uint32_t eOff = eAlloc ? gpuData.tree64Alloc.alloc(eAlloc) : 0u;
+                uint32_t emOff = emAlloc ? gpuData.materialIDAlloc.alloc(emAlloc) : 0u;
+                if (gOff == RangeAllocator::INVALID || mOff == RangeAllocator::INVALID ||
+                    (eAlloc && eOff == RangeAllocator::INVALID) ||
+                    (emAlloc && emOff == RangeAllocator::INVALID)) {
+                    // Hand back whichever parts succeeded. The caller falls back to growDataTextures,
                     // which resets both allocators wholesale, but bailing without this leaks the
                     // range on any path that ever retries without a full repack.
                     if (gOff != RangeAllocator::INVALID) gpuData.tree64Alloc.free(gOff, gAlloc);
                     if (mOff != RangeAllocator::INVALID) gpuData.materialIDAlloc.free(mOff, mAlloc);
-                    core::perf("uploadDirtyBlobs: allocator full at blob {} (geom={} mat={})",
-                               b, nodes, matTexels);
+                    if (eAlloc && eOff != RangeAllocator::INVALID) gpuData.tree64Alloc.free(eOff, eAlloc);
+                    if (emAlloc && emOff != RangeAllocator::INVALID) gpuData.materialIDAlloc.free(emOff, emAlloc);
+                    core::perf("uploadDirtyBlobs: allocator full at blob {} (geom={} mat={} env={} envMot={})",
+                               b, nodes, matTexels, envNodes, envMotTexels);
                     return std::nullopt;
                 }
                 r.geomTexelOffset = gOff;
@@ -1301,11 +1373,21 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 r.matTexelLen = matTexels;
                 r.matTexelAllocated = mAlloc;
                 r.matByteLen = matBytes;
+                r.envTexelOffset = eOff;
+                r.envTexelLen = envNodes;
+                r.envTexelAllocated = eAlloc;
+                r.envMotionTexelOffset = emOff;
+                r.envMotionTexelLen = envMotTexels;
+                r.envMotionTexelAllocated = emAlloc;
+                r.envMotionByteLen = envMotBytes;
                 r.uploaded = true;
             } else {
                 r.geomTexelLen = nodes;
                 r.matTexelLen = matTexels;
                 r.matByteLen = matBytes;
+                r.envTexelLen = envNodes;
+                r.envMotionTexelLen = envMotTexels;
+                r.envMotionByteLen = envMotBytes;
             }
             // Record what is now resident, so makeHeader advertises the matching resolution.
             r.uploadedLOD = blob.renderLOD;
@@ -1320,6 +1402,18 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             std::vector<uint8_t> matPacked = packMaterialIDTexels8(*matSrc);
             uploadTexelSpan8(gpuData.materialIDTexture, gpuData.materialIDWidth,
                            matPacked, r.matTexelOffset, r.matTexelLen);
+
+            // The envelope, into the same two textures through its own ranges.
+            if (envNodes) {
+                std::vector<uint32_t> envPacked = packGeometryTexels(blob.envelope);
+                uploadTexelSpan(gpuData.tree64Texture, gpuData.tree64Width,
+                                envPacked, r.envTexelOffset, r.envTexelLen);
+            }
+            if (envMotTexels) {
+                std::vector<uint8_t> envMotPacked = packMaterialIDTexels8(blob.envelopeMotion);
+                uploadTexelSpan8(gpuData.materialIDTexture, gpuData.materialIDWidth,
+                                 envMotPacked, r.envMotionTexelOffset, r.envMotionTexelLen);
+            }
 
             blob.dirty = false;
             uploadedPools.insert(static_cast<uint32_t>(b));
@@ -1458,6 +1552,12 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             uint32_t matTexels = static_cast<uint32_t>((matSrc->size() + 3) / 4);
             uint32_t gAlloc = paddedAlloc(nodes);
             uint32_t mAlloc = paddedAlloc(matTexels);
+            // See the matching block in growDataTextures. Same layout rule: a blob's envelope
+            // immediately follows its geometry, and zero allocates nothing.
+            uint32_t envNodes = static_cast<uint32_t>(blob.envelope.size() / 3);
+            uint32_t envMotTexels = static_cast<uint32_t>((blob.envelopeMotion.size() + 3) / 4);
+            uint32_t eAlloc = envNodes ? paddedAlloc(envNodes) : 0u;
+            uint32_t emAlloc = envMotTexels ? paddedAlloc(envMotTexels) : 0u;
             GPUBlobRange rng{};
             rng.geomTexelOffset    = geomUsedPadded;
             rng.geomTexelLen       = nodes;
@@ -1466,6 +1566,13 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             rng.matTexelLen        = matTexels;
             rng.matTexelAllocated  = mAlloc;
             rng.matByteLen         = static_cast<uint32_t>(matSrc->size());
+            rng.envTexelOffset       = geomUsedPadded + gAlloc;
+            rng.envTexelLen          = envNodes;
+            rng.envTexelAllocated    = eAlloc;
+            rng.envMotionTexelOffset = matUsedPadded + mAlloc;
+            rng.envMotionTexelLen    = envMotTexels;
+            rng.envMotionTexelAllocated = emAlloc;
+            rng.envMotionByteLen     = static_cast<uint32_t>(blob.envelopeMotion.size());
             rng.uploadedLOD        = blob.renderLOD;
             rng.uploaded           = true;
             gpuData.blobRanges[b]  = rng;
@@ -1475,10 +1582,20 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             materialIDTexels.insert(materialIDTexels.end(), mt.begin(), mt.end());
             tree64Texels.insert(tree64Texels.end(), static_cast<size_t>(gAlloc - nodes) * 4, 0u);
             materialIDTexels.insert(materialIDTexels.end(), static_cast<size_t>(mAlloc - matTexels) * 4, 0u);
-            geomUsed += nodes;
-            matUsed += matTexels;
-            geomUsedPadded += gAlloc;
-            matUsedPadded += mAlloc;
+            if (eAlloc) {
+                std::vector<uint32_t> et = packGeometryTexels(blob.envelope);
+                tree64Texels.insert(tree64Texels.end(), et.begin(), et.end());
+                tree64Texels.insert(tree64Texels.end(), static_cast<size_t>(eAlloc - envNodes) * 4, 0u);
+            }
+            if (emAlloc) {
+                std::vector<uint8_t> emt = packMaterialIDTexels8(blob.envelopeMotion);
+                materialIDTexels.insert(materialIDTexels.end(), emt.begin(), emt.end());
+                materialIDTexels.insert(materialIDTexels.end(), static_cast<size_t>(emAlloc - envMotTexels) * 4, 0u);
+            }
+            geomUsed += nodes + envNodes;
+            matUsed += matTexels + envMotTexels;
+            geomUsedPadded += gAlloc + eAlloc;
+            matUsedPadded += mAlloc + emAlloc;
         }
 
         // Size the data textures from the VRAM budget so they do not need recreating as the scene

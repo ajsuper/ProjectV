@@ -60,13 +60,13 @@ void main() {
 
     // Primary ray at LOD 0 so every hit is a single finest-resolution voxel -- coarse
     // LOD boxes would merge many voxels into one "face" and destroy the per-face look.
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps         = 256u;
     rq.startLOD            = 0u;
     rq.finishLOD           = 0u;
     rq.distanceToFinishLOD = 100000u;
 
-    SceneIntersectData hit = raySceneIntersect(ray, rq);
+    SceneIntersectData hit = raySceneIntersect(ray, rq).hit;
 
     vec3 n = hit.normal;
     // Miss (or a degenerate boundary hit with no valid face normal) -> sky background.

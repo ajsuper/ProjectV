@@ -28,6 +28,7 @@ LIB_DIR := -L$(PROJECTV_DIR)/lib \
 USED_LIBRARIES := \
     -Wl,--start-group \
     -lprojectV-ecs \
+    -lprojectV-animation \
     -lprojectV-compose_io \
     -lprojectV-voxel_management \
     -lprojectV-material \

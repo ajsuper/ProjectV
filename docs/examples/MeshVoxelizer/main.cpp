@@ -37,8 +37,12 @@
 #include "include/minecraft_import.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <iostream>
+#include <mutex>
+#include <numeric>
 #include <string>
+#include <thread>
 using namespace projv::core;
 
 struct Triangle {
@@ -177,11 +181,16 @@ Texture decodeTexture(const meshimport::ImportedTexture& source) {
 // default from the file extension. It stays overridable because plenty of individual models
 // (particularly ones converted out of 3ds Max) disagree with their own format, and sampling those
 // with the wrong setting lands on whatever occupies the mirrored half of the atlas.
+// `outAlpha`, when given, receives the texel's alpha — 255 for anything untextured, since a flat
+// material color is fully opaque. Callers use it to drop cutout texels: alpha-tested foliage stores
+// its leaf silhouette in the alpha channel and leaves the rest of the quad transparent, so a
+// voxelizer that ignores alpha turns every leaf card into a solid slab. See ALPHA_CUTOFF_DEFAULT.
 projv::Color sampleFaceColor(const Texture* texture, bool flipV,
                              const vec2& texCoord0, const vec2& texCoord1, const vec2& texCoord2,
                              float bary0, float bary1, float bary2,
-                             const vec3& fallbackColor) {
+                             const vec3& fallbackColor, uint8_t* outAlpha = nullptr) {
     if (texture == nullptr) {
+        if (outAlpha != nullptr) *outAlpha = 255;
         return {uint8_t(clamp(fallbackColor.x, 0.0f, 255.0f)),
                 uint8_t(clamp(fallbackColor.y, 0.0f, 255.0f)),
                 uint8_t(clamp(fallbackColor.z, 0.0f, 255.0f))};
@@ -198,7 +207,127 @@ projv::Color sampleFaceColor(const Texture* texture, bool flipV,
     int ty = clamp(int(uv.y * texture->size.y), 0, texture->size.y - 1);
     int index = (ty * texture->size.x + tx) * int(texture->channels);
 
+    // decodeTexture always requests 4 components from stb, so the alpha byte is present even for a
+    // source image that had none — stb fills it with 255, which is exactly the opaque answer.
+    if (outAlpha != nullptr) *outAlpha = texture->image[index + 3];
     return {texture->image[index + 0], texture->image[index + 1], texture->image[index + 2]};
+}
+
+// ---- Displacement ----------------------------------------------------------------------------
+//
+// Height maps let voxelization recover surface relief the mesh never had: mortar between bricks,
+// carving in a moulding, the grain of a rough floor. That detail is exactly what a triangle mesh
+// pushes into a texture instead of geometry, and it is exactly what a high-resolution voxel grid has
+// the budget to represent — at -r 8192 a voxel is 8.4 mm, so a 3 cm relief is ~3.6 voxels deep.
+//
+// This is much cheaper in voxels than in meshes. A renderer displacing a mesh has to tessellate
+// until triangles are pixel-sized; a voxelizer just asks, per voxel, "is this inside the displaced
+// surface?" — no tessellation, no new topology.
+
+// Which way a height map reads. There is no reliable convention in the wild — an asset routinely
+// mixes both, because its maps came from different sources — so this is decided per map by default.
+enum class HeightPolarity {
+    Auto,           // Decide per map from its own histogram. See decideHeightPolarity.
+    BrightIsHigh,   // The nominal convention: white protrudes.
+    DarkIsHigh,     // Inverted authoring: black protrudes.
+};
+
+struct DisplaceOptions {
+    float scaleMeters = 0.0f;       // Peak-to-trough relief in model units. 0 disables displacement.
+    bool zeroAtMean = false;        // Use each map's own mean as the neutral height instead of 0.5.
+    HeightPolarity polarity = HeightPolarity::Auto;
+    float thicknessVoxels = 1.0f;   // Shell thickness of the displaced surface, in voxels.
+    bool enabled() const { return scaleMeters > 0.0f; }
+};
+
+// Statistics of a height map, enough to judge which way it reads.
+struct HeightStats {
+    float mean = 0.5f;
+    float median = 0.5f;
+};
+
+inline HeightStats measureHeight(const Texture& texture) {
+    HeightStats stats;
+    if (texture.image == nullptr || texture.size.x <= 0 || texture.size.y <= 0) return stats;
+    const int texelCount = texture.size.x * texture.size.y;
+    const int stride = std::max(1, texelCount / 8192);
+    uint64_t histogram[256] = {0};
+    double sum = 0.0;
+    size_t sampled = 0;
+    for (int texel = 0; texel < texelCount; texel += stride) {
+        unsigned char value = texture.image[size_t(texel) * texture.channels];
+        histogram[value]++;
+        sum += value;
+        sampled++;
+    }
+    if (sampled == 0) return stats;
+    stats.mean = float(sum / double(sampled)) / 255.0f;
+    uint64_t half = sampled / 2, running = 0;
+    for (int bin = 0; bin < 256; bin++) {
+        running += histogram[bin];
+        if (running >= half) { stats.median = bin / 255.0f; break; }
+    }
+    return stats;
+}
+
+// Decides whether a height map is authored dark-is-high, i.e. needs its sign flipped.
+//
+// The physical assumption is what makes this decidable: relief on an architectural surface is
+// overwhelmingly *recesses cut into an otherwise flat field* — mortar between bricks, carving in a
+// moulding, pits in stone. So the field should be the majority of the image and the detail the
+// minority, and the detail should be the darker of the two.
+//
+// A minority of thin features drags the mean away from the median in the features' own direction, so
+// mean > median means the minority is bright — a map whose "detail" protrudes, which is the inverted
+// authoring. Separately, a map whose field is itself dark (low mean) is inverted regardless of the
+// spread: a correctly-authored map's flat field sits high, because there is nothing to be lower than.
+//
+// San Miguel needs this per-map rather than globally: its brickwork map is authored conventionally
+// while the stone arch, column and pitted-stone maps are inverted, so any single global choice gets
+// one of the two groups wrong.
+inline bool decideHeightPolarity(const HeightStats& stats, HeightPolarity requested) {
+    if (requested == HeightPolarity::BrightIsHigh) return false;
+    if (requested == HeightPolarity::DarkIsHigh) return true;
+    const bool brightMinority = (stats.mean - stats.median) > 0.015f;
+    const bool darkField = stats.mean < 0.35f;
+    return brightMinority || darkField;
+}
+
+// Samples a height map as 0..1. Grayscale images decode to R=G=B, so the red channel is the height;
+// using it directly rather than a luminance weighting keeps an accidentally-tinted map behaving.
+float sampleHeight(const Texture& texture, bool flipV,
+                   const vec2& texCoord0, const vec2& texCoord1, const vec2& texCoord2,
+                   float bary0, float bary1, float bary2) {
+    vec2 uv = bary0 * texCoord0 + bary1 * texCoord1 + bary2 * texCoord2;
+    if (flipV) uv.y = 1.0f - uv.y;
+    uv.x -= std::floor(uv.x);
+    uv.y -= std::floor(uv.y);
+    int tx = clamp(int(uv.x * texture.size.x), 0, texture.size.x - 1);
+    int ty = clamp(int(uv.y * texture.size.y), 0, texture.size.y - 1);
+    return texture.image[(ty * texture.size.x + tx) * int(texture.channels)] / 255.0f;
+}
+
+// Is this image a tangent-space normal map rather than a height map? Those encode a direction as RGB
+// and average to roughly (128, 128, 255) — flat normals pointing straight out of the surface. A
+// height map is grayscale, so R, G and B track each other. Displacement needs a scalar height, and a
+// normal map is its gradient, so using one as a height field produces noise rather than relief.
+//
+// Checked from the pixels rather than the filename because the reference in the .mtl says "bump"
+// either way and is not evidence of the contents.
+bool looksLikeNormalMap(const Texture& texture) {
+    if (texture.image == nullptr || texture.size.x <= 0 || texture.size.y <= 0) return false;
+    const int stride = std::max(1, (texture.size.x * texture.size.y) / 4096); // ~4k samples is plenty.
+    double sumR = 0.0, sumG = 0.0, sumB = 0.0;
+    size_t sampled = 0;
+    for (int texel = 0; texel < texture.size.x * texture.size.y; texel += stride) {
+        const unsigned char* pixel = texture.image + size_t(texel) * texture.channels;
+        sumR += pixel[0]; sumG += pixel[1]; sumB += pixel[2];
+        sampled++;
+    }
+    if (sampled == 0) return false;
+    double meanR = sumR / double(sampled), meanG = sumG / double(sampled), meanB = sumB / double(sampled);
+    return meanB > 170.0 && meanB > meanR + 40.0 && meanB > meanG + 40.0 &&
+           std::abs(meanR - 128.0) < 45.0 && std::abs(meanG - 128.0) < 45.0;
 }
 
 // ---- Material palette ------------------------------------------------------------------------
@@ -226,6 +355,16 @@ constexpr int HISTOGRAM_SIZE = HISTOGRAM_AXIS * HISTOGRAM_AXIS * HISTOGRAM_AXIS;
 // Total surface samples spread across the mesh when building the palette. Large enough that even
 // a small material gets a fair vote, small enough to stay far cheaper than voxelization itself.
 constexpr int PALETTE_SAMPLE_BUDGET = 2000000;
+
+// Texels at or below this alpha produce no voxel. Alpha-tested foliage is the reason: a leaf card is
+// one quad whose alpha channel carries the leaf silhouette and whose remainder is fully transparent,
+// so sampling color alone fills the whole quad and turns a tree into a set of solid slabs. 128 is
+// the conventional half-way cutoff that authoring tools assume.
+//
+// The palette pre-pass has to apply the same test. A fully transparent texel still holds *some* RGB
+// underneath — usually black or white filler — and histogramming that spends scarce palette entries
+// on colors no visible voxel will ever use.
+constexpr uint8_t ALPHA_CUTOFF_DEFAULT = 128;
 
 inline int histogramIndex(uint8_t r, uint8_t g, uint8_t b) {
     return ((r >> (8 - HISTOGRAM_BITS)) << (2 * HISTOGRAM_BITS))
@@ -415,7 +554,7 @@ void writeComposeScene(projv::DataFile& dataFile, const std::string& outputDirec
     composeOut.close();
 }
 
-void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetDirectory, int voxelizationResolution, std::string outputDirectory, bool flipTextureV) {
+void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetDirectory, int voxelizationResolution, std::string outputDirectory, bool flipTextureV, uint8_t alphaCutoff, unsigned int threadCount, const DisplaceOptions& displace) {
     using namespace projv::core;
     info("--------------------------------------------");
     info("  ProjectV Voxelizer");
@@ -424,6 +563,21 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
     info("  Output:     {}", outputDirectory);
     info("  Resolution: {} (rounded up to whole chunks; chunks are 256^3, or 64^3 at r<=64)", voxelizationResolution);
     info("  Flip V:     {}", flipTextureV ? "yes (bottom-left texture origin)" : "no (top-left texture origin)");
+    if (alphaCutoff == 0) {
+        info("  Alpha:      ignored (every texel is treated as solid)");
+    } else {
+        info("  Alpha:      cutoff {} — texels below this produce no voxel", alphaCutoff);
+    }
+    info("  Threads:    {}", threadCount);
+    if (displace.enabled()) {
+        const char* polarityName = displace.polarity == HeightPolarity::Auto ? "auto (per map)"
+                                 : displace.polarity == HeightPolarity::DarkIsHigh ? "dark-is-high"
+                                                                                   : "bright-is-high";
+        info("  Displace:   {:.4f} model units peak-to-trough, zero at {}, polarity {}",
+            displace.scaleMeters, displace.zeroAtMean ? "each map's mean" : "mid-gray", polarityName);
+    } else {
+        info("  Displace:   off (--displace-scale enables it)");
+    }
     info("--------------------------------------------");
 
     info("Loading model...");
@@ -480,11 +634,87 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
         return model.materials[model.triangleMaterials[triangleIndex]].diffuseColor;
     };
 
+    // Validate the height maps the importer found, and work out each one's neutral height. A "bump"
+    // reference that turned out to name a normal map is dropped here rather than used as a height
+    // field, which would turn its gradient encoding into noise. Nothing below runs when displacement
+    // is off, so a run without --displace-scale is unaffected by any of this.
+    std::vector<float> heightZeroPoint(textures.size(), 0.5f);
+    std::vector<bool> heightUsable(textures.size(), false);
+    std::vector<bool> heightInvert(textures.size(), false);
+    int heightMapsUsed = 0, heightMapsRejected = 0, heightMapsFlipped = 0, heightMapsWereColor = 0;
+    if (displace.enabled()) {
+        info("Validating height maps...");
+        // Every texture some material uses as its *diffuse* map. A sibling lookup that lands on one
+        // of these has found a colour texture, not a height map — see below.
+        std::vector<bool> usedAsDiffuse(textures.size(), false);
+        std::vector<bool> referenced(textures.size(), false);
+        for (const meshimport::ImportedMaterial& material : model.materials) {
+            if (material.textureIndex >= 0) usedAsDiffuse[material.textureIndex] = true;
+            if (material.heightTextureIndex >= 0) referenced[material.heightTextureIndex] = true;
+        }
+        for (size_t textureIndex = 0; textureIndex < textures.size(); textureIndex++) {
+            if (!referenced[textureIndex] || textures[textureIndex].image == nullptr) continue;
+            const Texture& texture = textures[textureIndex];
+
+            // Stripping `N_` can land on the material's own colour texture rather than a height map:
+            // San Miguel's `N_muros_b1.png` sits beside `muros_b1.png`, which is the wall albedo. A
+            // desaturated albedo passes every "is this grayscale" test there is, so the reliable
+            // signal is that the file is *also* somebody's diffuse map. Displacing by albedo would
+            // turn every painted marking into geometry.
+            if (usedAsDiffuse[textureIndex]) {
+                projv::core::warn("  [IS A COLOUR MAP] '{}' — this file is used as a diffuse texture, "
+                                  "so it is not a height map. No displacement for it.",
+                    model.textures[textureIndex].name);
+                heightMapsWereColor++;
+                heightMapsRejected++;
+                continue;
+            }
+            if (looksLikeNormalMap(texture)) {
+                projv::core::warn("  [NORMAL MAP] '{}' — no grayscale height sibling found, so this "
+                                  "material gets no displacement.", model.textures[textureIndex].name);
+                heightMapsRejected++;
+                continue;
+            }
+
+            HeightStats stats = measureHeight(texture);
+            heightZeroPoint[textureIndex] = displace.zeroAtMean ? stats.mean : 0.5f;
+            heightInvert[textureIndex] = decideHeightPolarity(stats, displace.polarity);
+            heightUsable[textureIndex] = true;
+            heightMapsUsed++;
+            if (heightInvert[textureIndex]) {
+                heightMapsFlipped++;
+                info("  '{}' mean={:.2f} median={:.2f} — reads dark-is-high, flipping so its detail "
+                     "recesses.", model.textures[textureIndex].name, stats.mean, stats.median);
+            }
+            // A map averaging far from mid-gray spends most of its range on one side, so treating
+            // 0.5 as neutral shifts the whole surface instead of adding relief around it.
+            if (!displace.zeroAtMean && std::abs(stats.mean - 0.5f) > 0.25f) {
+                projv::core::warn("  '{}' averages {:.2f}, far from mid-gray — displacement will be "
+                                  "mostly a uniform {} shift. --displace-zero mean centres it.",
+                    model.textures[textureIndex].name, stats.mean, stats.mean > 0.5f ? "outward" : "inward");
+            }
+        }
+        info("  {} height map(s) usable ({} flipped to dark-is-high), {} rejected "
+             "({} were colour maps, {} normal maps).",
+            heightMapsUsed, heightMapsFlipped, heightMapsRejected, heightMapsWereColor,
+            heightMapsRejected - heightMapsWereColor);
+    }
+
+    // The height map index for a triangle, or -1 when its material has none or it was rejected.
+    // An index rather than a pointer because the caller needs the map's zero point as well.
+    auto heightMapForTriangle = [&](size_t triangleIndex) -> int {
+        if (!displace.enabled()) return -1;
+        int heightIndex = model.materials[model.triangleMaterials[triangleIndex]].heightTextureIndex;
+        if (heightIndex < 0 || !heightUsable[heightIndex]) return -1;
+        return heightIndex;
+    };
+
     // Build the material palette before voxelizing — every voxel written below needs a palette ID,
     // and the palette has to fit inside the engine's per-component cap. Triangles are sampled in
     // proportion to their surface area, which is what voxel counts follow.
     info("Building material palette...");
     ColorHistogram histogram;
+    size_t paletteSamplesCut = 0;
     std::vector<float> triangleAreas(triangleCount);
     double totalArea = 0.0;
     for (size_t triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++) {
@@ -513,15 +743,22 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
             float u = (sample + 0.5f) / float(sampleCount);
             float v = std::fmod(u * 0.61803399f, 1.0f); // golden-ratio stride
             if (u + v > 1.0f) { u = 1.0f - u; v = 1.0f - v; } // fold back into the triangle
+            uint8_t alpha = 255;
             projv::Color color = sampleFaceColor(texture, flipTextureV,
                                                  v0.texCoord, v1.texCoord, v2.texCoord,
                                                  1.0f - u - v, u, v,
-                                                 fallbackColorForTriangle(triangleIndex));
+                                                 fallbackColorForTriangle(triangleIndex), &alpha);
+            // Same cutoff the voxel loop uses. A cutout texel produces no voxel, so letting its
+            // filler color vote here would spend palette entries on colors nothing can display.
+            if (alphaCutoff != 0 && alpha < alphaCutoff) { paletteSamplesCut++; continue; }
             histogram.add(color.r, color.g, color.b);
         }
     }
     ColorPalette palette = buildColorPalette(histogram.populatedCells());
     info("  {} material(s) in palette (cap {}).", palette.colors.size(), PALETTE_CAPACITY);
+    if (paletteSamplesCut > 0) {
+        info("  {} sample(s) dropped below the alpha cutoff (cutout texels).", paletteSamplesCut);
+    }
 
     vec3 modelExtents = verticesMax - verticesMin;
     float largestDistanceTotal = max(max(modelExtents.x, modelExtents.y), modelExtents.z);
@@ -549,23 +786,139 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
         vertices[vertexIndex].position = (vertices[vertexIndex].position - verticesMin) * modelScaleFactor;
     }
 
+    // Displacement is specified in model units but applied in grid space, where 1 unit is 1 voxel, so
+    // it converts through the same factor the positions did. This is what makes the flag
+    // resolution-independent: 3 cm of relief is 3 cm whether -r is 4096 or 8192, it just resolves
+    // into more voxels at the higher setting.
+    const float displaceHalfRangeVoxels = displace.enabled()
+        ? 0.5f * displace.scaleMeters * modelScaleFactor : 0.0f;
+    // How far a displaced surface can stray from its triangle, and therefore how much every bounding
+    // box below has to grow. Getting this wrong does not produce a wrong answer in the interior — it
+    // produces missing geometry at chunk seams, which is far harder to notice.
+    const float displaceReachVoxels = displace.enabled()
+        ? displaceHalfRangeVoxels + displace.thicknessVoxels : 0.0f;
+    if (displace.enabled()) {
+        info("Displacement: +/-{:.2f} voxel(s) about the surface ({:.4f} model units peak-to-trough).",
+            displaceHalfRangeVoxels, displace.scaleMeters);
+        if (displaceHalfRangeVoxels < 0.5f) {
+            projv::core::warn("  That is under half a voxel, so displacement will barely register. "
+                              "Raise --displace-scale or -r.");
+        }
+    }
+
     uint totalChunks = numberOfChunksPerAxis * numberOfChunksPerAxis * numberOfChunksPerAxis;
 
     info("Voxelizing: {} chunk(s) ({} per axis), voxel size: {:.5f}", totalChunks, numberOfChunksPerAxis, voxelScale);
 
     size_t totalVoxels = 0;
-    uint logStep = std::max(1u, totalChunks / 10);
 
     // Accumulate every occupied chunk into a single grid-volume .data container.
     projv::DataFile dataFile;
     dataFile.resolution = chunkResolution;
     dataFile.voxelScale = voxelScale;
 
-    for (int chunkIndex = 0; chunkIndex < (int)totalChunks; chunkIndex++) {
-        if (totalChunks == 1 || chunkIndex % logStep == 0) {
-            info("  Chunk {}/{} ({:.0f}%)", chunkIndex + 1, totalChunks,
-                100.0f * chunkIndex / totalChunks);
+    // ---- Triangle binning -----------------------------------------------------------------------
+    //
+    // Without this, the chunk loop rescans the entire triangle soup once per chunk: O(chunks x
+    // triangles), which at -r 8192 is 32768 chunks x 10M triangles — 3.3e11 bounding-box tests to
+    // place geometry that, at a few centimetres per triangle against 2.16 m chunks, almost always
+    // belongs to exactly one chunk. Cost then tracks the grid rather than the model, which is the
+    // wrong thing for it to track.
+    //
+    // Binning inverts the loop: assign each triangle once to the chunks its bbox overlaps, then let
+    // each chunk visit only its own bucket. Empty chunks cost nothing instead of a full scan.
+    //
+    // The overlap test here is deliberately the same conservative bbox test the serial loop applied,
+    // so the set of (chunk, triangle) pairs considered is identical and binning cannot change the
+    // output — a triangle exactly on a chunk boundary still lands in both neighbours.
+    //
+    // Stored as CSR (offsets plus one flat index array) rather than a vector per chunk: at 32768
+    // chunks, per-vector allocation overhead and pointer chasing would cost more than the payload.
+    info("Binning triangles into chunks...");
+    const int chunksPerAxis = int(numberOfChunksPerAxis);
+    auto chunkCellOf = [&](const vec3& point) {
+        ivec3 cell = ivec3(floor(point / chunkScale));
+        return clamp(cell, ivec3(0), ivec3(chunksPerAxis - 1));
+    };
+    // Linear (x + y*N + z*N^2) cell indexing; the chunk loop converts from its Z-order chunk index.
+    auto linearCell = [&](int x, int y, int z) {
+        return size_t(x) + size_t(y) * size_t(chunksPerAxis)
+             + size_t(z) * size_t(chunksPerAxis) * size_t(chunksPerAxis);
+    };
+
+    // 64-bit offsets: a large floor triangle can span hundreds of chunks at high -r, so the
+    // incidence total is not safely bounded by a 32-bit count even though each index fits in one.
+    std::vector<uint64_t> binOffsets(size_t(totalChunks) + 1, 0);
+    for (size_t triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++) {
+        const vec3& p0 = vertices[triangleIndex * 3 + 0].position;
+        const vec3& p1 = vertices[triangleIndex * 3 + 1].position;
+        const vec3& p2 = vertices[triangleIndex * 3 + 2].position;
+        // Grown by the displacement reach: a displaced surface can leave its triangle's own box and
+        // cross into a neighbouring chunk, and a triangle absent from that chunk's bucket would leave
+        // a seam there.
+        ivec3 lo = chunkCellOf(min(min(p0, p1), p2) - vec3(displaceReachVoxels));
+        ivec3 hi = chunkCellOf(max(max(p0, p1), p2) + vec3(displaceReachVoxels));
+        for (int z = lo.z; z <= hi.z; z++)
+            for (int y = lo.y; y <= hi.y; y++)
+                for (int x = lo.x; x <= hi.x; x++)
+                    binOffsets[linearCell(x, y, z) + 1]++;
+    }
+    std::partial_sum(binOffsets.begin(), binOffsets.end(), binOffsets.begin());
+    const uint64_t totalIncidences = binOffsets.back();
+
+    std::vector<uint32_t> binTriangles(totalIncidences);
+    {
+        // `cursor` walks a copy of the bucket starts so binOffsets stays the final index.
+        std::vector<uint64_t> cursor(binOffsets.begin(), binOffsets.end() - 1);
+        for (size_t triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++) {
+            const vec3& p0 = vertices[triangleIndex * 3 + 0].position;
+            const vec3& p1 = vertices[triangleIndex * 3 + 1].position;
+            const vec3& p2 = vertices[triangleIndex * 3 + 2].position;
+            // Must match the count pass above exactly, displacement reach included.
+            ivec3 lo = chunkCellOf(min(min(p0, p1), p2) - vec3(displaceReachVoxels));
+            ivec3 hi = chunkCellOf(max(max(p0, p1), p2) + vec3(displaceReachVoxels));
+            for (int z = lo.z; z <= hi.z; z++)
+                for (int y = lo.y; y <= hi.y; y++)
+                    for (int x = lo.x; x <= hi.x; x++)
+                        binTriangles[cursor[linearCell(x, y, z)]++] = uint32_t(triangleIndex);
         }
+    }
+    info("  {} triangle-chunk incidence(s), {:.2f} per triangle ({:.1f} MB).", totalIncidences,
+        triangleCount > 0 ? double(totalIncidences) / double(triangleCount) : 0.0,
+        double(totalIncidences * sizeof(uint32_t)) / (1024.0 * 1024.0));
+
+    // Only chunks that actually received triangles can produce a voxel, so the rest are skipped
+    // outright — at -r 8192 that is ~1.3k chunks of 32768.
+    std::vector<int> chunksToProcess;
+    for (int chunkIndex = 0; chunkIndex < (int)totalChunks; chunkIndex++) {
+        projv::core::ivec3 gridPosition = projv::utils::reverseZOrderIndex(chunkIndex);
+        size_t cell = linearCell(gridPosition.x, gridPosition.y, gridPosition.z);
+        if (binOffsets[cell + 1] > binOffsets[cell]) chunksToProcess.push_back(chunkIndex);
+    }
+    info("  {} of {} chunk(s) hold geometry.", chunksToProcess.size(), totalChunks);
+
+    // Each chunk is independent: its own brick map, its own DataBlock, and everything it reads —
+    // vertices, textures, the palette LUT — is immutable by this point. So the only shared state is
+    // the work counter and the output collection. Blocks land in per-thread vectors tagged with
+    // their chunk index and are merged in that order afterwards, which keeps the .data
+    // byte-identical no matter what --threads is set to.
+    struct ThreadResult {
+        std::vector<std::pair<int, projv::DataBlock>> blocks;
+        size_t voxels = 0;
+        size_t alphaSkipped = 0;
+    };
+    std::vector<ThreadResult> threadResults(threadCount);
+    std::atomic<size_t> nextWorkItem{0};
+    std::atomic<size_t> chunksDone{0};
+    const size_t logEvery = std::max<size_t>(1, chunksToProcess.size() / 10);
+
+    auto voxelizeChunkRange = [&](unsigned int threadIndex) {
+      ThreadResult& threadOutput = threadResults[threadIndex];
+      for (;;) {
+        size_t workItem = nextWorkItem.fetch_add(1);
+        if (workItem >= chunksToProcess.size()) break;
+        int chunkIndex = chunksToProcess[workItem];
+
         projv::core::ivec3 chunkIndexPosition = projv::utils::reverseZOrderIndex(chunkIndex);
         projv::ChunkHeader chunkHeader;
         chunkHeader.chunkID = chunkIndex;
@@ -576,7 +929,9 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
         auto brickMap = projv::utils::createVoxelBrickMap(
             projv::utils::computeBrickDims(chunkResolution));
 
-        for (size_t triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++) {
+        const size_t chunkCell = linearCell(chunkIndexPosition.x, chunkIndexPosition.y, chunkIndexPosition.z);
+        for (uint64_t bucketSlot = binOffsets[chunkCell]; bucketSlot < binOffsets[chunkCell + 1]; bucketSlot++) {
+            const size_t triangleIndex = binTriangles[bucketSlot];
             const vec3& p0 = vertices[triangleIndex * 3].position;
             const vec3& p1 = vertices[triangleIndex * 3 + 1].position;
             const vec3& p2 = vertices[triangleIndex * 3 + 2].position;
@@ -598,18 +953,33 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
             float baryDenom = d00 * d11 - d01 * d01;
             bool degenerate = (std::abs(baryDenom) < 1e-10f);
 
-            AABB chunkAABB;
-            chunkAABB.min = chunkHeader.position;
-            chunkAABB.max = chunkHeader.position + vec3(chunkScale);
-
             vec3 triMin = min(min(tri.v0, tri.v1), tri.v2);
             vec3 triMax = max(max(tri.v0, tri.v1), tri.v2);
 
-            if (triMax.x < chunkAABB.min.x || triMin.x > chunkAABB.max.x ||
-                triMax.y < chunkAABB.min.y || triMin.y > chunkAABB.max.y ||
-                triMax.z < chunkAABB.min.z || triMin.z > chunkAABB.max.z) {
-                continue;
+            // No chunk-overlap rejection here: membership in this bucket already established it.
+
+            // Displaced triangles occupy a band around their own plane, so their candidate voxel
+            // range has to grow to match. Untextured-by-height triangles keep the exact original
+            // range, which is what makes a no-displacement run bit-identical to before.
+            const int heightMapIndex = heightMapForTriangle(triangleIndex);
+            vec3 faceNormal{0.0f, 0.0f, 0.0f};
+            float heightZero = 0.5f;
+            bool heightIsInverted = false;
+            if (heightMapIndex >= 0) {
+                vec3 rawNormal = cross(edge0, edge1);
+                float normalLength = length(rawNormal);
+                if (normalLength > 1e-12f) {
+                    // A geometric face normal, not an interpolated vertex normal. At these voxel
+                    // sizes the difference is under a voxel — San Miguel's triangles are ~4 cm
+                    // against 8.4 mm voxels — and it saves carrying normals through the importer.
+                    faceNormal = rawNormal / normalLength;
+                    triMin = triMin - vec3(displaceReachVoxels);
+                    triMax = triMax + vec3(displaceReachVoxels);
+                    heightZero = heightZeroPoint[heightMapIndex];
+                    heightIsInverted = heightInvert[heightMapIndex];
+                }
             }
+            const bool displaceThisTriangle = (heightMapIndex >= 0) && length(faceNormal) > 0.0f;
 
             ivec3 minVoxel = ivec3(floor((triMin - chunkHeader.position) / voxelScale));
             ivec3 maxVoxel = ivec3(ceil((triMax - chunkHeader.position) / voxelScale));
@@ -623,13 +993,16 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
                         AABB voxelAABB;
                         voxelAABB.min = voxelMin;
                         voxelAABB.max = voxelMin + vec3(voxelScale);
+                        vec3 voxelCenter = (voxelAABB.min + voxelAABB.max) * 0.5f;
 
-                        if (!triAABBIntersect(tri, voxelAABB)) continue;
+                        // Undisplaced: the voxel is solid exactly when the triangle passes through
+                        // it. Displaced: the triangle itself is no longer the surface, so the SAT
+                        // test is replaced by the band test further down.
+                        if (!displaceThisTriangle && !triAABBIntersect(tri, voxelAABB)) continue;
 
                         // Interpolate UV at the voxel center (not the triangle centroid).
                         float bary0 = 1.0f, bary1 = 0.0f, bary2 = 0.0f;
                         if (!degenerate) {
-                            vec3 voxelCenter = (voxelAABB.min + voxelAABB.max) * 0.5f;
                             vec3 v0p = voxelCenter - p0;
                             float d20 = dot(v0p, edge0);
                             float d21 = dot(v0p, edge1);
@@ -637,6 +1010,19 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
                             bary1 = (d11 * d20 - d01 * d21) / baryDenom;
                             bary2 = (d00 * d21 - d01 * d20) / baryDenom;
                             bary0 = 1.0f - bary1 - bary2;
+
+                            // This formula already resolves the voxel centre against the triangle's
+                            // plane, so for displacement it is the barycentric of the projected
+                            // point — which is exactly what the height field has to be sampled at.
+                            // Outside the triangle it must be rejected rather than clamped, or the
+                            // displaced band would spill past the triangle's edges and thicken every
+                            // seam in the mesh.
+                            if (displaceThisTriangle) {
+                                const float edgeTolerance = -1e-4f;
+                                if (bary0 < edgeTolerance || bary1 < edgeTolerance || bary2 < edgeTolerance) {
+                                    continue;
+                                }
+                            }
 
                             // Clamp to valid barycentric range and renormalize
                             bary0 = std::max(0.0f, bary0);
@@ -648,9 +1034,38 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
                             }
                         }
 
+                        // The displaced surface test. Height is sampled at the voxel's projected
+                        // position and turned into a signed offset along the face normal; the voxel
+                        // is solid when it lies within the shell around that offset surface.
+                        //
+                        // A shell rather than a fill from the original surface outward, because a
+                        // recessed height (mortar, carving) has to *remove* material — filling the
+                        // gap between plane and displaced surface would raise grooves into ridges.
+                        // The 0.87 floor is half a voxel's diagonal, the smallest thickness that
+                        // cannot leave pinholes on a surface crossing the grid at an angle.
+                        if (displaceThisTriangle) {
+                            float height = sampleHeight(textures[heightMapIndex], flipTextureV,
+                                texCoordsV0, texCoordsV1, texCoordsV2, bary0, bary1, bary2);
+                            float offset = (height - heightZero) * 2.0f * displaceHalfRangeVoxels;
+                            if (heightIsInverted) offset = -offset;
+                            float distanceToSurface = dot(voxelCenter - p0, faceNormal) - offset;
+                            float halfThickness = std::max(0.87f, displace.thicknessVoxels * 0.5f);
+                            if (std::abs(distanceToSurface) > halfThickness) continue;
+                        }
+
+                        uint8_t alpha = 255;
                         projv::Color color = sampleFaceColor(degenerate ? nullptr : texture,
                             flipTextureV, texCoordsV0, texCoordsV1, texCoordsV2,
-                            bary0, bary1, bary2, fallbackColor);
+                            bary0, bary1, bary2, fallbackColor, &alpha);
+
+                        // A cutout texel means the triangle is transparent at this point, so there
+                        // is no surface here to occupy the voxel. This one test is what stops
+                        // alpha-tested foliage from voxelizing as solid slabs: a leaf card is mostly
+                        // transparent, and without it the whole quad fills in.
+                        if (alphaCutoff != 0 && alpha < alphaCutoff) {
+                            threadOutput.alphaSkipped++;
+                            continue;
+                        }
 
                         projv::utils::brickMapSetVoxel(*brickMap, x, y, z,
                             palette.idFor(color.r, color.g, color.b));
@@ -666,9 +1081,16 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
             for (uint32_t row = 0; row < projv::BRICK_MASK_ROWS; ++row)
                 chunkVoxels += __builtin_popcountll(brickMap->bricks[bz]->mask[row]);
         }
-        totalVoxels += chunkVoxels;
+        threadOutput.voxels += chunkVoxels;
 
-        // Skip chunks that received no geometry.
+        size_t done = chunksDone.fetch_add(1) + 1;
+        if (done % logEvery == 0 || done == chunksToProcess.size()) {
+            info("  Chunk {}/{} ({:.0f}%)", done, chunksToProcess.size(),
+                100.0 * double(done) / double(chunksToProcess.size()));
+        }
+
+        // A chunk can still come out empty even though triangles were binned into it: the bbox
+        // overlap that put them here is conservative, and the alpha cutoff can reject every texel.
         if (chunkVoxels == 0) {
             continue;
         }
@@ -684,7 +1106,41 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
         // offset into materialIDs, so the pair written to disk is exactly the pair the GPU reads.
         block.geometry = std::move(chunk.geometryData);
         projv::utils::bakeMaterialsFromBrickMap(block.geometry, block.materialIDs, *brickMap);
-        dataFile.blocks.push_back(std::move(block));
+        threadOutput.blocks.emplace_back(chunkIndex, std::move(block));
+      }
+    };
+
+    if (threadCount <= 1) {
+        voxelizeChunkRange(0);
+    } else {
+        std::vector<std::thread> pool;
+        pool.reserve(threadCount);
+        for (unsigned int threadIndex = 0; threadIndex < threadCount; threadIndex++) {
+            pool.emplace_back(voxelizeChunkRange, threadIndex);
+        }
+        for (std::thread& thread : pool) thread.join();
+    }
+
+    // Merge the per-thread output. Sorting by chunk index restores the order the serial loop
+    // produced, so --threads changes only the wall clock and never the bytes on disk.
+    size_t totalAlphaSkipped = 0;
+    std::vector<std::pair<int, projv::DataBlock>> orderedBlocks;
+    for (ThreadResult& threadOutput : threadResults) {
+        totalVoxels += threadOutput.voxels;
+        totalAlphaSkipped += threadOutput.alphaSkipped;
+        for (std::pair<int, projv::DataBlock>& entry : threadOutput.blocks) {
+            orderedBlocks.emplace_back(entry.first, std::move(entry.second));
+        }
+    }
+    std::sort(orderedBlocks.begin(), orderedBlocks.end(),
+        [](const std::pair<int, projv::DataBlock>& a, const std::pair<int, projv::DataBlock>& b) {
+            return a.first < b.first;
+        });
+    for (std::pair<int, projv::DataBlock>& entry : orderedBlocks) {
+        dataFile.blocks.push_back(std::move(entry.second));
+    }
+    if (totalAlphaSkipped > 0) {
+        info("  {} voxel placement(s) rejected by the alpha cutoff.", totalAlphaSkipped);
     }
 
     // Write the grid-volume .data container and a compose.json that references it.
@@ -714,9 +1170,22 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
     info("  Extents (W/H/D): {:.3f} x {:.3f} x {:.3f}", modelExtents.x, modelExtents.y, modelExtents.z);
     info("  Resolution:      {} requested -> {} effective", voxelizationResolution,
         numberOfChunksPerAxis * chunkResolution);
-    info("  Chunks:          {} ({} per axis, {}^3 each)", totalChunks, numberOfChunksPerAxis, chunkResolution);
+    info("  Chunks:          {} ({} per axis, {}^3 each), {} held geometry", totalChunks,
+        numberOfChunksPerAxis, chunkResolution, chunksToProcess.size());
+    info("  Binning:         {} incidence(s), {:.2f} per triangle", totalIncidences,
+        triangleCount > 0 ? double(totalIncidences) / double(triangleCount) : 0.0);
+    info("  Threads:         {}", threadCount);
     info("  Voxel size:      {:.5f} world units", voxelScale);
     info("  Materials:       {} palette entries", palette.colors.size());
+    if (alphaCutoff != 0) {
+        info("  Alpha cutoff:    {} — {} voxel placement(s) rejected", alphaCutoff, totalAlphaSkipped);
+    }
+    if (displace.enabled()) {
+        info("  Displacement:    +/-{:.2f} voxel(s), {} map(s) used ({} flipped), {} rejected "
+             "({} colour, {} normal)",
+            displaceHalfRangeVoxels, heightMapsUsed, heightMapsFlipped, heightMapsRejected,
+            heightMapsWereColor, heightMapsRejected - heightMapsWereColor);
+    }
     info("  Total voxels:    {}", totalVoxels);
     info("  Occupied blocks: {}", dataFile.blocks.size());
     info("  Output:          {}/model.data + {}/compose.json", outputDirectory, outputDirectory);
@@ -897,6 +1366,12 @@ int main(int argc, char** argv) {
     bool noFlipV = false;
     bool flipV = false;
     bool listFormats = false;
+    double alphaCutoffOption = double(ALPHA_CUTOFF_DEFAULT) / 255.0;
+    bool noAlphaCutoff = false;
+    unsigned int threadCount = 0;   // 0 = decide from hardware_concurrency below.
+    DisplaceOptions displaceOptions;
+    std::string displaceZero = "mid";
+    std::string displacePolarity = "auto";
 
     minecraft::ImportOptions minecraftOptions;
     std::vector<int> minecraftBounds;
@@ -920,6 +1395,38 @@ int main(int argc, char** argv) {
         "but individual models disagree with their own format often enough to need an override, "
         "particularly 3ds Max exports. The symptom is a model sampling the mirrored half of its "
         "atlas: foliage comes out uniformly gray, or a trunk takes on the leaves' color.");
+    app.add_option("--alpha-cutoff", alphaCutoffOption,
+        "Alpha below which a texel produces no voxel, as 0..1 (default: 0.5). Alpha-tested foliage "
+        "stores its leaf silhouette in the texture's alpha channel and leaves the rest of the quad "
+        "transparent, so ignoring alpha voxelizes every leaf card as a solid slab.")
+        ->check(CLI::Range(0.0, 1.0));
+    app.add_flag("--no-alpha-cutoff", noAlphaCutoff,
+        "Treat every texel as solid regardless of alpha. This is the pre-alpha behaviour; use it for "
+        "a model whose alpha channel is junk rather than a cutout mask.");
+    app.add_option("--threads", threadCount,
+        "Worker threads for voxelization (default: as many as the machine reports). Chunks are "
+        "independent, so this only changes wall clock — the .data is byte-identical either way.");
+    app.add_option("--displace-scale", displaceOptions.scaleMeters,
+        "Peak-to-trough displacement in model units, taken from each material's height/bump map. 0 "
+        "(the default) disables displacement. Relief is applied along the surface normal, so mortar "
+        "lines and carving become real geometry instead of texture. Only pays off when it is worth "
+        "more than a voxel: at -r 8192 on a 69 m scene a voxel is 8.4 mm.")
+        ->check(CLI::NonNegativeNumber);
+    app.add_option("--displace-zero", displaceZero,
+        "Which height counts as the original surface: 'mid' (0.5, the authoring convention) or "
+        "'mean' (each map's own average). Use 'mean' for maps that sit far from mid-gray, where "
+        "treating 0.5 as neutral shifts the whole surface instead of adding relief around it.")
+        ->check(CLI::IsMember({"mid", "mean"}));
+    app.add_option("--displace-polarity", displacePolarity,
+        "Which way height maps read: 'auto' (default, decided per map from its own histogram), "
+        "'bright' (white protrudes — the nominal convention), or 'dark' (black protrudes). Assets "
+        "routinely mix both because their maps came from different sources, which is why auto is "
+        "per-map rather than one global choice.")
+        ->check(CLI::IsMember({"auto", "bright", "dark"}));
+    app.add_option("--displace-thickness", displaceOptions.thicknessVoxels,
+        "Thickness in voxels of the displaced surface shell (default: 1). Raise it if a steep height "
+        "gradient leaves pinholes; the effective minimum is half a voxel diagonal.")
+        ->check(CLI::PositiveNumber);
     app.add_flag("--list-formats", listFormats, "Print every model format this build can read, then exit.");
 
     // --- Minecraft world options ---
@@ -1007,7 +1514,21 @@ int main(int argc, char** argv) {
     if (flipV) flipTextureV = true;
     if (noFlipV) flipTextureV = false;
 
-    voxelizeModel(modelPath, assetPath, resolution, outputDirectory, flipTextureV);
+    // 0 disables the test entirely, which is what --no-alpha-cutoff asks for. Otherwise the 0..1
+    // option becomes the 0..255 byte the sampler compares against.
+    uint8_t alphaCutoff = noAlphaCutoff
+        ? uint8_t(0)
+        : uint8_t(std::clamp(int(std::lround(alphaCutoffOption * 255.0)), 0, 255));
+    if (threadCount == 0) {
+        threadCount = std::max(1u, std::thread::hardware_concurrency());
+    }
+    displaceOptions.zeroAtMean = (displaceZero == "mean");
+    displaceOptions.polarity = displacePolarity == "bright" ? HeightPolarity::BrightIsHigh
+                            : displacePolarity == "dark"   ? HeightPolarity::DarkIsHigh
+                                                           : HeightPolarity::Auto;
+
+    voxelizeModel(modelPath, assetPath, resolution, outputDirectory, flipTextureV, alphaCutoff,
+                  threadCount, displaceOptions);
 
     return 0;
 }

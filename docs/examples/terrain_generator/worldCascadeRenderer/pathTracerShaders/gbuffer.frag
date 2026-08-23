@@ -35,10 +35,10 @@ bool sunVisible(vec3 p, vec3 n) {
     Ray shadow;
     shadow.origin = p + n * 0.02;
     shadow.direction = SUN_DIR;
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = 48u;
     rq.startLOD = 0u; rq.finishLOD = 0u; rq.distanceToFinishLOD = 30u;
-    return raySceneIntersect(shadow, rq).rayT < 0.0;
+    return raySceneIntersect(shadow, rq).hit.rayT < 0.0;
 }
 
 // ---- Water normal perturbation ---------------------------------------------
@@ -119,13 +119,13 @@ void main() {
 
     // Primary ray: keep LOD at 0 (coarse LOD on the visible surface looks bad).
     // Reduce step count only — most rays hit within 256 steps.
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps         = 256u;
     rq.startLOD            = 0u;
     rq.finishLOD           = 0u;
     rq.distanceToFinishLOD = 100000u;
 
-    SceneIntersectData hit = raySceneIntersect(ray, rq);
+    SceneIntersectData hit = raySceneIntersect(ray, rq).hit;
     vec3 n = hit.normal;
 
     // Miss / degenerate boundary hit -> sky background.

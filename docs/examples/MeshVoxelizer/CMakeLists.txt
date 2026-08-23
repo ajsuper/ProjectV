@@ -105,7 +105,12 @@ target_compile_definitions(mesh_voxelizer PRIVATE
     PROJV_ENABLE_ERROR
 )
 
-target_link_libraries(mesh_voxelizer PRIVATE assimp zlibstatic ${PROJECTV_LIB_PATHS})
+# std::thread needs the platform's threading library explicitly on Linux; the voxelization loop runs
+# one worker per core.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
+target_link_libraries(mesh_voxelizer PRIVATE assimp zlibstatic ${PROJECTV_LIB_PATHS} Threads::Threads)
 
 # Drop the binary next to the sources, where the README and the terrain_generator example expect it.
 set_target_properties(mesh_voxelizer PROPERTIES

@@ -7,6 +7,8 @@ namespace projv {
     GeometryBlob::GeometryBlob(const GeometryBlob& rhs)
         : geometry(rhs.geometry)
         , materialIDs(rhs.materialIDs)
+        , envelope(rhs.envelope)
+        , envelopeMotion(rhs.envelopeMotion)
         , brickMap(rhs.brickMap ? utils::cloneBrickMap(*rhs.brickMap) : nullptr)
         , sourceDataPath(rhs.sourceDataPath)
         , sourceBlockCoord(rhs.sourceBlockCoord)
@@ -20,6 +22,8 @@ namespace projv {
         if (this == &rhs) return *this;
         geometry       = rhs.geometry;
         materialIDs    = rhs.materialIDs;
+        envelope       = rhs.envelope;
+        envelopeMotion = rhs.envelopeMotion;
         brickMap       = rhs.brickMap ? utils::cloneBrickMap(*rhs.brickMap) : nullptr;
         sourceDataPath = rhs.sourceDataPath;
         sourceBlockCoord = rhs.sourceBlockCoord;

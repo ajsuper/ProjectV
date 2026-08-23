@@ -297,7 +297,7 @@ vec3 directSunLight(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
     shadowRay.origin = position + normal * (SUN_ORIGIN_BIAS_VOXELS * voxelSize);
     shadowRay.direction = lightDirection;
 
-    RayQuery query;
+    RayQuery query = pjvPrimaryQuery(100u);
     query.maxRaySteps = SUN_SHADOW_STEPS;
     // No LOD, for gi.frag's reason: a shadow cast by a coarsened version of the scene is the wrong
     // shape, and unlike a primary ray there is nothing on screen that tells you it happened.
@@ -305,7 +305,10 @@ vec3 directSunLight(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
     query.finishLOD = 0;
     query.distanceToFinishLOD = 100000;
 
-    vec3 visibility = raySceneTransmittance(shadowRay, query, 1e30, TRANSPARENT_LAYERS);
+    query.maxDistance = 1e30;
+    query.flags |= PJV_Q_OCCLUSION_ONLY;
+    pjvQueryTransparency(query, TRANSPARENT_LAYERS, 0u);
+    vec3 visibility = raySceneTransmittance(shadowRay, query);
     return irradiance * visibility * (cosLight / PI);
 }
 
@@ -529,13 +532,13 @@ float sunShadow(vec3 position, vec3 normal, float voxelSize) {
     shadowRay.origin = position + normal * (SHADOW_ORIGIN_BIAS_VOXELS * voxelSize);
     shadowRay.direction = SUN_DIRECTION;
 
-    RayQuery shadowQuery;
+    RayQuery shadowQuery = pjvPrimaryQuery(100u);
     shadowQuery.maxRaySteps = SHADOW_MAX_STEPS;
     shadowQuery.startLOD = 0;
     shadowQuery.finishLOD = 0;
     shadowQuery.distanceToFinishLOD = 10000;
 
-    SceneIntersectData shadowHit = raySceneIntersect(shadowRay, shadowQuery);
+    SceneIntersectData shadowHit = raySceneIntersect(shadowRay, shadowQuery).hit;
     return shadowHit.rayT < 0.0 ? 1.0 : SHADOW_DARKENING;
 }
 

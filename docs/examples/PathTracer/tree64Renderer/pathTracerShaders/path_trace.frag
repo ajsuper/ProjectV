@@ -108,7 +108,7 @@ returnStruct castRay(vec2 uv_coord, GBuffer gBuffer) {
     vec3 color;
     float balenceHeuristicBRDF = 1;
     for (uint step = 0; step < bounces + 1; step++) {
-        RayQuery intersectRQ;
+        RayQuery intersectRQ = pjvPrimaryQuery(100u);
         intersectRQ.maxRaySteps = 200;
         intersectRQ.startLOD = 0;
         intersectRQ.finishLOD = 1;
@@ -120,7 +120,7 @@ returnStruct castRay(vec2 uv_coord, GBuffer gBuffer) {
             //intersectRQ.maxRaySteps = randomFloat0to1(vec2(uv_coord), frameCount.x % 200) * 3 + 5;
         }
 
-        SceneIntersectData intersectHit = raySceneIntersect(ray, intersectRQ);
+        SceneIntersectData intersectHit = raySceneIntersect(ray, intersectRQ).hit;
         if (intersectHit.foundBox.size < 0) { // Explicit miss from the march: the ray hits the sky.
             if (dot(sunDirection, ray.direction) >= cos(thetaMax)) {
                 // Looking straight at the sun disk: its actual radiance, not the
@@ -288,7 +288,7 @@ returnStruct castRay(vec2 uv_coord, GBuffer gBuffer) {
         Ray NEERay;
         NEERay.origin = intersectPoint + voxelIntersection.normal * (0.0001f * WORLD_SCALE);
         NEERay.direction = NEEDirection;
-        SceneIntersectData NEEIntersect = raySceneIntersect(NEERay, intersectRQ);
+        SceneIntersectData NEEIntersect = raySceneIntersect(NEERay, intersectRQ).hit;
         float balenceHeuristicNEE = pow(pdfNEE, 2) / (pdfNEE*pdfNEE + pdfBRDFforNEE*pdfBRDFforNEE);
         if (NEEIntersect.foundBox.size < 0 && dot(NEEDirection, voxelIntersection.normal) > 0) {
             radiance += max(0, balenceHeuristicNEE * sunRadiance * (throughput * NEEBRDF)/pdfNEE);
@@ -322,13 +322,13 @@ GBuffer renderGBuffer(vec2 uv_coord) {
     );
 
     // Define ray query parameters.
-    RayQuery intersectRQ;
+    RayQuery intersectRQ = pjvPrimaryQuery(100u);
     intersectRQ.maxRaySteps = 100;
     intersectRQ.startLOD = 0;
     intersectRQ.finishLOD = 0;
     intersectRQ.distanceToFinishLOD = 100;
 
-    SceneIntersectData intersectHit = raySceneIntersect(ray, intersectRQ);
+    SceneIntersectData intersectHit = raySceneIntersect(ray, intersectRQ).hit;
     IntersectionResult voxelIntersection;
     voxelIntersection.distance = intersectHit.rayT;
     voxelIntersection.normal = intersectHit.normal;

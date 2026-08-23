@@ -128,6 +128,50 @@ namespace projv{
     inline float materialTransmission(const Material& m) { return float((m.packedExtra >> 16) & 0xFFu) / 255.0f; }
     inline uint32_t materialFlags(const Material& m)     { return (m.packedExtra >> 8) & 0xFFu; }
 
+    // ---- The flags byte, allocated ---------------------------------------------------------
+    //
+    // `packedExtra`'s flags lane is eight bits that were zero in every palette on disk, which is the
+    // property that makes animation opt-in with nothing to migrate: an existing scene means "not
+    // animated" without anyone deciding that it does.
+    //
+    //   bit 0     MATERIAL_FLAG_ANIMATED  -- voxels of this material move
+    //   bits 1-4  motion set index, 0..15 -- WHICH field moves them, and with what parameters
+    //   bits 5-7  reserved
+    //
+    // The motion set is an index into a small table rather than parameters stored per material, and
+    // that indirection is the difference between a mechanism and a menu: grass sway, leaf flutter, a
+    // rising flame and a water surface are one traversal and four table rows, not four code paths.
+    // The table is engine-owned and uploaded as a uniform array (see AnimationState in
+    // utils/animation.h) -- material data selects a row, it does not carry one.
+    //
+    // Note what does NOT appear here: any bit meaning "this is scaffolding" or "this is fire". The
+    // envelope is a separate structure now rather than voxels tagged in the palette, and fire is a
+    // motion set whose kind is advection. Both were flag bits in the prototype and both stopped
+    // being needed, which is why three bits are spare rather than none.
+    constexpr uint32_t MATERIAL_FLAG_ANIMATED   = 1u << 0;
+    constexpr uint32_t MATERIAL_MOTION_SET_SHIFT = 1u;
+    constexpr uint32_t MATERIAL_MOTION_SET_MASK  = 0xFu;
+    constexpr uint32_t MAX_MOTION_SETS = 16;
+
+    inline bool     materialIsAnimated(const Material& m) { return (materialFlags(m) & MATERIAL_FLAG_ANIMATED) != 0u; }
+    inline uint32_t materialMotionSet(const Material& m)  { return (materialFlags(m) >> MATERIAL_MOTION_SET_SHIFT) & MATERIAL_MOTION_SET_MASK; }
+    // The flags byte for an animated material. Compose with the other lanes through packExtraWord,
+    // or write the lane in place -- see setMaterialAnimation below for why in-place matters.
+    inline uint32_t packAnimationFlags(bool animated, uint32_t motionSet) {
+        return (animated ? MATERIAL_FLAG_ANIMATED : 0u) |
+               ((motionSet & MATERIAL_MOTION_SET_MASK) << MATERIAL_MOTION_SET_SHIFT);
+    }
+    // Read-modify-write of the flags LANE only.
+    //
+    // Deliberately not `packExtraWord(...)`: that builds a whole word and would zero this material's
+    // emissive strength, its transmission and the reserved byte along with them. The reserved byte is
+    // spoken for -- an advection chain walks materials by it -- so a whole-word write here is a
+    // silent way to break a flame while setting a flag on a leaf.
+    inline void setMaterialAnimation(Material& m, bool animated, uint32_t motionSet) {
+        uint32_t flags = packAnimationFlags(animated, motionSet);
+        m.packedExtra = (m.packedExtra & ~(0xFFu << 8)) | ((flags & 0xFFu) << 8);
+    }
+
     // Whether an entry carries anything beyond its colour. Used by the serializer to keep
     // colour-only palettes writing exactly the JSON they used to.
     inline bool materialHasExtendedProperties(const Material& m) {
@@ -294,12 +338,17 @@ namespace projv{
         // GPU data movement, just a shader-side "stop descending here" clamp. Computed in makeHeader
         // from Chunk::requestedLOD vs. the blob's actual uploadedLOD -- see the comment there.
         uint32_t traversalLOD;
-        // Forced into existence by texel granularity (a texel is 4 uint32s and this field alone
-        // pushed the header into a 5th texel; the struct must total a multiple of 4 words, so all
-        // 3 remaining slots in that texel are claimed now rather than left implicitly wasted).
-        uint32_t reserved0;
-        uint32_t reserved1;
-        uint32_t reserved2;
+        // ---- The animation envelope, in the three words the 5th texel already had spare ---------
+        //
+        // The 5th texel came into existence for traversalLOD alone, and its other three slots were
+        // claimed rather than left implicitly wasted. This is what they are for.
+        //
+        // `envelopeNodeCount == 0` is the test for "this chunk has no envelope", and it is the field
+        // that carries the answer rather than the start index because offset 0 is a perfectly valid
+        // place for the first blob's range to live.
+        uint32_t envelopeStartIndex;        // texel offset into the tree64 texture
+        uint32_t envelopeNodeCount;         // nodes; 0 = no envelope on this chunk
+        uint32_t envelopeMotionStartIndex;  // BYTE offset into the materialID texture, as materialIDStartIndex is
     };
     #pragma pack(pop)
     
@@ -349,8 +398,20 @@ struct GeometryBlob {
         // naming a slot in the owning component's palette. This is what the .data stores and what the
         // GPU reads: there is no second per-voxel colour representation to keep in step with it.
         std::vector<uint8_t>  materialIDs;
+        // The animation envelope, and the motion set per set cell. Adjacent and optional: empty is
+        // what every blob loaded from a v2 .data carries, and what almost every blob will always
+        // carry. See DataBlock in compose.h for what they are and why the envelope is a SEPARATE
+        // tree at a quarter resolution rather than voxels dilated into `geometry`.
+        //
+        // The short version, because it is the invariant the whole design rests on: `geometry` keeps
+        // meaning the REST POSE. Nothing in here changes what an animation-blind renderer, the fold,
+        // picking or the voxelizer see.
+        std::vector<uint32_t> envelope;
+        std::vector<uint8_t>  envelopeMotion;
         // The editable form. Built lazily from geometry + materialIDs on the first edit
         // (ensureBrickMapExists -> brickMapFromTree64) and rebaked back into that pair after.
+        // Deliberately covers the geometry only: the envelope is DERIVED from it by the bake, so an
+        // edit invalidates the envelope rather than editing it.
         std::unique_ptr<VoxelBrickMap> brickMap;
 
         GeometryBlob() = default;

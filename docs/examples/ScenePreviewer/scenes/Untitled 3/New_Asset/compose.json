@@ -24,15 +24,18 @@
           "name": "material 4"
         },
         {
-          "color": [0, 566, 853],
-          "name": "material 5"
+          "color": [970, 1000, 1016],
+          "glossiness": 1.0,
+          "ior": 1.34375,
+          "name": "material 5",
+          "transparency": 0.9686274528503418
         },
         {
-          "color": [265, 693, 853],
+          "color": [679, 852, 912],
           "name": "material 6"
         }
       ],
-      "position": [-453.0, -129.0, -727.0],
+      "position": [-709.0, -129.0, -727.0],
       "rotation": [0.0, 0.0, 0.0, 1.0],
       "scale": 1.0,
       "source": "Box.data",

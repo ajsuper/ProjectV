@@ -113,13 +113,13 @@ vec3 gatherRadiance(vec3 P, vec3 N, vec3 dir, uint maxSteps) {
     ray.origin    = P + N * (0.03 * WORLD_SCALE);
     ray.direction = dir;
 
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps         = maxSteps;
     rq.startLOD            = 0u;   // Full detail near the surface.
     rq.finishLOD           = 1u;   // Collapse distant geometry into coarse boxes.
     rq.distanceToFinishLOD = 24u;  // Reach the coarsest LOD after ~24 voxels.
 
-    SceneIntersectData hit = raySceneIntersect(ray, rq);
+    SceneIntersectData hit = raySceneIntersect(ray, rq).hit;
 
     // rayT < 0 (miss sentinel, incl. running out of steps) -> open sky. Gradient only,
     // no sun disk: a single stray ray landing on the disk would read as a bounded but

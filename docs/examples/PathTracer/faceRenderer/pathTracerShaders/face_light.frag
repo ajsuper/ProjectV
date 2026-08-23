@@ -101,11 +101,11 @@ bool sunVisible(vec3 p, vec3 n) {
     Ray shadow;
     shadow.origin = p + n * (0.02 * WORLD_SCALE);
     shadow.direction = SUN_DIR;
-    RayQuery rq;
+    RayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = 128u;
     rq.startLOD = 0u; rq.finishLOD = 0u; rq.distanceToFinishLOD = 30u;
     // Visibility only -- skip fetchVoxelData. rayT < 0 == genuine miss == unoccluded.
-    return raySceneIntersect(shadow, rq).rayT < 0.0;
+    return raySceneIntersect(shadow, rq).hit.rayT < 0.0;
 }
 
 // Direct sun reflected off a diffuse surface (albedo/PI * NdotL * sun, hard shadow).
@@ -156,13 +156,13 @@ void main() {
         Ray ray;
         ray.origin    = faceCtr + N * (0.03 * WORLD_SCALE);
         ray.direction = dir;
-        RayQuery rq;
+        RayQuery rq = pjvPrimaryQuery(100u);
         rq.maxRaySteps         = GI_STEPS + uint(hashKey(key, float(i) + frame) * 24.0);
         rq.startLOD            = 0u;
         rq.finishLOD           = 1u;   // coarse boxes far away so long rays stay cheap
         rq.distanceToFinishLOD = 24u;
 
-        SceneIntersectData h = raySceneIntersect(ray, rq);
+        SceneIntersectData h = raySceneIntersect(ray, rq).hit;
         if (h.rayT < 0.0 || h.foundBox.size < 0.0) {
             // Escaped -> this direction sees open sky (gradient only; the sun disk is
             // excluded so a stray ray onto it can't spike this averaged estimator).
