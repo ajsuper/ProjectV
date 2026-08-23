@@ -29,3 +29,24 @@ docs/examples/SceneEditor/brushes/*.params.json
 
 
 
+# Ignore compiled example executables. Each is 25-70 MiB and is rewritten on every build, so
+# tracking them buried the history in gigabytes of near-identical blobs. Build them from the
+# example's own Makefile instead.
+docs/examples/AdvancedRenderer/advanced_renderer
+docs/examples/edit_demo/edit_demo
+docs/examples/editing_p1/editing_p1
+docs/examples/MeshVoxelizer/mesh_voxelizer
+docs/examples/ObjVoxelizer/obj_voxelizer
+docs/examples/SceneEditor/scene_editor
+docs/examples/ScenePreviewer/scene_previewer
+docs/examples/terrain_generator/terrain_generator
+docs/examples/terrain_generator/terrain_probe
+
+# Ignore the large SanMiguel LOD bakes. These are MeshVoxelizer output (290 MiB - 4.7 GiB) and
+# every one of them is past GitHub's 100 MiB per-file ceiling. Re-bake them from the source mesh.
+docs/examples/ScenePreviewer/scenes/SanMiguel-8192/
+docs/examples/ScenePreviewer/scenes/SanMiguel-16384/
+docs/examples/ScenePreviewer/scenes/SanMiguel-32768/
+
+# Ignore RenderDoc captures
+*.rdc
