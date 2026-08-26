@@ -652,7 +652,23 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 );
             }
         }
-        uint32_t dataSize = textureWidth * textureHeight * 4; // e.g., 4 for RGBA8  
+        // The byte count comes from the texture's own FORMAT, not from an assumption about it.
+        //
+        // This was `textureWidth * textureHeight * 4`, which is right only for the 8-bit-per-channel
+        // formats. Anything wider silently uploaded a fraction of the data and left the rest of the
+        // texture whatever it happened to be: an RGBA32F table is 16 bytes per texel, so exactly the
+        // first quarter of it arrived. Nothing errored -- the handle was valid, the draw succeeded,
+        // and the shader simply read zeros past the quarter mark. A 64-row antenna table behaved
+        // like a 16-row one, and the entries past the sixteenth contributed nothing to the picture.
+        bgfx::TextureFormat::Enum format = bgfx::TextureFormat::RGBA8;
+        auto formatIt = constructedRenderer->resources.textures.textureFormats.find(textureID);
+        if (formatIt != constructedRenderer->resources.textures.textureFormats.end()) {
+            format = formatIt->second;
+        }
+        bgfx::TextureInfo info;
+        bgfx::calcTextureSize(info, uint16_t(textureWidth), uint16_t(textureHeight), 1, false, false, 1, format);
+        uint32_t dataSize = info.storageSize;
+
         
         const bgfx::Memory* textureMemory = bgfx::copy(data, dataSize);  
         

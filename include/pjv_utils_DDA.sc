@@ -288,6 +288,15 @@ struct RayQuery {
     float animResolveDistance;
     // Advanced by the peel's stochastic interface decision. Pass a per-pixel, per-frame value.
     uint  seed;
+    // Transmittance below which the peel abandons the ray as fully absorbed.
+    //
+    // Was a hardcoded 0.002 in pjvPeelConsume, which is right for a renderer: -27 dB, and nothing
+    // behind that survives to be seen. It is wrong for anything measuring transmitted energy
+    // rather than looking at it -- a link budget spans well over a hundred dB, and three concrete
+    // walls are already past the old floor, so a genuinely weak result and a fully blocked one
+    // became indistinguishable. Defaulted to 0.002 by every constructor, so nothing that predates
+    // this field changes by a bit.
+    float minTransmittance;
 };
 
 // The three constructors. One of these, or a copy of one, is the only sanctioned way to get a query.
@@ -308,6 +317,7 @@ RayQuery pjvRayQueryRaw(uint maxSteps) {
     q.maxDistance = 1e30;
     q.animResolveDistance = 0.0;
     q.seed = 0u;
+    q.minTransmittance = 0.002;
     return q;
 }
 // A camera or reflection ray: wants the nearest surface, over the whole ray.
@@ -367,6 +377,7 @@ RayQuery pjvValidateQuery(RayQuery q) {
     q.maxDistance = 1e30;
     q.animResolveDistance = 0.0;
     q.seed = 0u;
+    q.minTransmittance = 0.002;
     return q;
 }
 
@@ -1103,21 +1114,32 @@ SceneHit pjvEmptySceneHit() {
 vec3 mediumAbsorption(VoxelMaterial m, float segmentLength, float voxelSize) {
     float peak = max(max(m.albedo.r, max(m.albedo.g, m.albedo.b)), 1e-4);
     vec3 tint = clamp(m.albedo / peak, vec3(1e-6), vec3(1.0));
-    // ---- `transmission` is the DENSITY of the medium, and it is what the field was reserved for --
+
+    // ---- The tint is a HUE. `transmission` is the MAGNITUDE. --------------------------------
     //
-    // The tint above is a hue and nothing else -- it is the albedo normalised by its own peak, so a
-    // pale green and a deep green absorb identically and only the colour of what survives differs.
-    // That leaves "how strongly does this absorb at all" unexpressed, and it is exactly the quantity
-    // an author reaches for: a metre of pool water and a metre of ink are the same colour problem
-    // and completely different absorption problems.
+    // The tint above is normalised by its own peak, so a pale green and a deep green absorb
+    // identically and only the colour of what survives differs. That is the right shape for a
+    // colour, and it leaves "how strongly does this absorb at all" unexpressed -- which is exactly
+    // the quantity an author reaches for. A metre of pool water and a metre of ink are the same
+    // colour problem and completely different absorption problems.
     //
-    // Zero has to mean "as before" -- every palette on disk has it -- so it reads as a MULTIPLIER on
-    // the optical depth, biased to 1: at 0 the exponent is the plain voxels-crossed count this always
-    // used, at 1 it is four times that. Achromatic on purpose; the colour is the tint's job and
-    // giving the same idea two homes is how they end up disagreeing.
-    float density = 1.0 + 3.0 * clamp(m.transmission, 0.0, 1.0);
-    float opticalDepth = max(segmentLength / max(voxelSize, 1e-9), 0.0) * density;
-    return pow(tint, vec3(opticalDepth));
+    // Peak normalisation also has a consequence that is invisible in a render and fatal outside
+    // one: the BRIGHTEST channel always passes unattenuated, because tint.max is exactly 1 and
+    // pow(1, anything) is 1. For a renderer that is desirable -- thick red glass should saturate
+    // rather than darken. For any use that needs an absolute figure per channel it means the
+    // least-absorbed channel is transmitted for free, however thick the material.
+    //
+    // So `transmission` is an achromatic extinction coefficient in nepers per WORLD UNIT, applied
+    // on top of the tint. Zero still means "as before" -- exp(0) is 1, so every palette written
+    // before this behaves identically and nothing on disk needs migrating.
+    //
+    // Exponential, matching unpackEmissiveStrength, because the useful range spans four decades:
+    // a light haze and a solid wall are both real materials and a linear byte would put every
+    // usable haze inside its first step. raw 1 is 0.004/unit, raw 128 is 1.0, raw 255 is 245.
+    float extinction = m.transmission <= 0.0 ? 0.0 : exp2(m.transmission * 255.0 / 16.0 - 8.0);
+
+    float opticalDepth = max(segmentLength / max(voxelSize, 1e-9), 0.0);
+    return pow(tint, vec3(opticalDepth)) * exp(-extinction * max(segmentLength, 0.0));
 }
 
 // One round of PCG, so the peel can make the stochastic interface decision below. Named apart from any
@@ -1212,6 +1234,7 @@ struct PeelAccum {
     uint  maxLayers;
     uint  layers;
     uint  seed;
+    float minTransmittance;   // see RayQuery::minTransmittance
     vec3  transmittance;
     vec3  emission;
     // Interface-vs-interior tracking. Only an INTERFACE is charged the material's `transparency`;
@@ -1255,7 +1278,7 @@ struct PeelAccum {
 PeelAccum pjvNoPeel() {
     PeelAccum a;
     a.active = false; a.analytic = false;
-    a.maxLayers = 0u; a.layers = 0u; a.seed = 0u;
+    a.maxLayers = 0u; a.layers = 0u; a.seed = 0u; a.minTransmittance = 0.002;
     a.transmittance = vec3(1.0); a.emission = vec3(0.0);
     a.inMedium = false; a.previousExit = 0.0; a.previous = emptyVoxelMaterial();
     a.stopped = false; a.stopReason = PJV_STOP_OPAQUE;
@@ -1341,7 +1364,8 @@ int pjvPeelConsume(inout PeelAccum peel, VoxelMaterial m,
 
     // Fully absorbed: nothing behind this can contribute, so stop rather than spending the remaining
     // layers resolving a surface that will be multiplied by zero.
-    if (max(peel.transmittance.r, max(peel.transmittance.g, peel.transmittance.b)) < 0.002) {
+    if (max(peel.transmittance.r, max(peel.transmittance.g, peel.transmittance.b))
+            < peel.minTransmittance) {
         peel.stopped = true;
         peel.stopReason = PJV_STOP_ABSORBED;
         return PJV_PEEL_ABORT;
@@ -3937,6 +3961,7 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
     peel.analytic = (q.flags & PJV_Q_OCCLUSION_ONLY) != 0u;
     peel.maxLayers = q.maxTransparentLayers;
     peel.seed = q.seed;
+    peel.minTransmittance = q.minTransmittance;
     // Only when asked. See PJV_Q_WANT_MATERIAL for why this is opt-in rather than implied.
     peel.wantMaterial = (q.flags & PJV_Q_WANT_MATERIAL) != 0u;
     // Tells the in-march peel to hand a refracting interface back rather than consume it, because
