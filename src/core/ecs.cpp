@@ -8,7 +8,7 @@ namespace projv::core {
         return world;
     }
 
-    // Creates an application with default startup, update, and render functions.
+    // Creates an application with default stage functions.
     Application createApp() {
         Application app;
         app.Startup = []() {
@@ -20,6 +20,10 @@ namespace projv::core {
         app.Render = []() {
             core::info("Default Render!");
         };
+        // Shutdown has no default behaviour to speak of, but it must still be callable:
+        // runApplication() invokes it unconditionally when the loop ends, so leaving it empty
+        // makes a clean exit throw std::bad_function_call for every app that never registers one.
+        app.Shutdown = []() {};
         app.world = createWorld();
         return app;
     }

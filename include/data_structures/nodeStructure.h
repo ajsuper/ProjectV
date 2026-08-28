@@ -1,6 +1,5 @@
-#ifndef NODE_STRUCTURE_H
-#define NODE_STRUCTURE_H
-
+#ifndef PROJV_NODE_STRUCTURE_H
+#define PROJV_NODE_STRUCTURE_H
 #include <stdint.h>
 
 namespace projv{

@@ -3,7 +3,7 @@
 #include <bgfx/bgfx.h>
 
 namespace projv::graphics {
-    std::vector<bgfx::Attachment> getTextureAttachments(const std::unordered_map<uint, bgfx::TextureHandle>& textureHandles, std::vector<uint> textureIDs) {
+    std::vector<bgfx::Attachment> getTextureAttachments(const std::unordered_map<uint32_t, bgfx::TextureHandle>& textureHandles, std::vector<uint32_t> textureIDs) {
         std::vector<bgfx::TextureHandle> textures;
         for (size_t i = 0; i < textureIDs.size(); i++) {
             textures.emplace_back(textureHandles.at(textureIDs[i]));
@@ -122,7 +122,7 @@ namespace projv::graphics {
         ConstructedTextures texturesNew = textures;
         for (auto& frameBuffer : frameBuffers.frameBufferTextureMapping) {
             for (size_t i = 0; i < frameBuffer.second.size(); i++) {
-                uint textureID = frameBuffer.second[i];
+                uint32_t textureID = frameBuffer.second[i];
                 texturesNew.textureIDToFrameBufferID[textureID] = frameBuffer.first;
             }
         }
@@ -138,8 +138,8 @@ namespace projv::graphics {
         return constructedUniformHandles;
     }
 
-    std::unordered_map<uint, bgfx::ShaderHandle> constructShaders(const std::vector<Shader>& shaders) {
-        std::unordered_map<uint, bgfx::ShaderHandle> constructedShaderHandles;
+    std::unordered_map<uint32_t, bgfx::ShaderHandle> constructShaders(const std::vector<Shader>& shaders) {
+        std::unordered_map<uint32_t, bgfx::ShaderHandle> constructedShaderHandles;
         for (size_t i = 0; i < shaders.size(); i++) {
             Shader shader = shaders[i];
             constructedShaderHandles[shader.shaderID] = loadShader(shader.filePath);
@@ -160,7 +160,7 @@ namespace projv::graphics {
             dependencyGraph.depdendencies = getDependenciesList(frameBuffers, constructedResources.textures.textureSamplerHandles, renderPass); // Should be removed. We should only store the ID's.
             dependencyGraph.targetFrameBufferID = renderPass.frameBufferOutputID;
             dependencyGraph.shaderProgram = createShaderProgram(constructedResources.defaultVertexShader, constructedResources.shaderHandles.at(renderPass.shaderID));
-            dependencyGraph.renderPassID = uint(i);
+            dependencyGraph.renderPassID = uint32_t(i);
             dependencyGraph.multiPassPassNumber = renderPass.multiPassPassNumber;
             dependencyGraph.multiPassPassNumberUniform = bgfx::createUniform(("multiPassPassNumber" + std::to_string(i)).c_str(), bgfx::UniformType::Vec4);
 
@@ -239,9 +239,9 @@ namespace projv::graphics {
         // Which textures actually moved. Only the framebuffers holding one of these need rebuilding;
         // the old code rebuilt every framebuffer in the renderer on any window change, including
         // fixed-size ones whose attachments had not been touched.
-        std::vector<uint> resizedTextureIDs;
+        std::vector<uint32_t> resizedTextureIDs;
         for (const auto& relativeTexture : textures.relativeTextureScales) {
-            uint textureID = relativeTexture.first;
+            uint32_t textureID = relativeTexture.first;
             float scale = relativeTexture.second;
 
             // Rounded UP, in one place, so a half-resolution target of an odd-width image covers it
@@ -287,11 +287,11 @@ namespace projv::graphics {
 
         for (auto& frameBuffer : frameBuffers.frameBufferTextureMapping) {
             int frameBufferID = frameBuffer.first;
-            const std::vector<uint>& textureIDs = frameBuffer.second;
+            const std::vector<uint32_t>& textureIDs = frameBuffer.second;
 
             bool holdsAResizedTexture = false;
-            for (uint textureID : textureIDs) {
-                for (uint resizedID : resizedTextureIDs) {
+            for (uint32_t textureID : textureIDs) {
+                for (uint32_t resizedID : resizedTextureIDs) {
                     if (textureID == resizedID) { holdsAResizedTexture = true; break; }
                 }
                 if (holdsAResizedTexture) break;

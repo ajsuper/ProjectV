@@ -1,6 +1,5 @@
-#ifndef POS_TEX_VERTEX_H
-#define POS_TEX_VERTEX_H
-
+#ifndef PROJV_POS_TEX_VERTEX_H
+#define PROJV_POS_TEX_VERTEX_H
 namespace projv {
     struct PosTexVertex {  
         float x, y, z;    // position  

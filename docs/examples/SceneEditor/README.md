@@ -17,17 +17,16 @@ The viewport renderer itself is the [ScenePreviewer](../ScenePreviewer/)'s — o
 ## How to Build
 
 ```bash
-cd SceneEditor
-make               # builds ./scene_editor
-./compEditor.sh    # (re)compiles the viewport and ImGui shaders to .bin
+git submodule update --init external/imgui
+git submodule update --init docs/examples/SceneEditor/external/lua   # Lua 5.4.7, for the Brush Lab
+cmake --preset dev
+cmake --build --preset dev --target scene_editor
 ```
 
-Requires ProjectV built at `../../../` with its libraries in `../../../lib/`, bgfx built, and two submodules checked out — ImGui from the engine's `external/`, and **Lua** from this example's:
+ImGui comes from the engine's `external/`; Lua from this example's. Without either, the configure
+step skips this example with a message naming what to check out.
 
-```bash
-git submodule update --init ../../../external/imgui
-git submodule update --init external/lua        # Lua 5.4.7, for the Brush Lab
-```
+The binary and its staged renderer folders and brushes land in `build/examples/scene_editor/`.
 
 Lua lives in *this example's* `external/` rather than the engine's: nothing in the engine embeds a scripting language, and programmable brushes are the editor's feature rather than the renderer's. It is compiled straight into the binary like ImGui, so there is nothing to install and no shared library to find at runtime. `make` says which command to run if the folder is empty, rather than failing with forty errors from a header nobody in this repo wrote.
 
@@ -1212,7 +1211,7 @@ The two ImGui shaders live in their own directory, `editorRenderer/imguiShaders/
 ```
 main.cpp                              The editor: state, panels, camera, render loop
 imgui_impl_bgfx.{h,cpp}               Dear ImGui renderer backend for bgfx
-compEditor.sh                         Compiles both shader directories
+CMakeLists.txt                        Builds ImGui and Lua, then the editor and its shaders
 editorRenderer/render.json            Four passes: albedo, shade, accumulate, display (targets FBO 3)
 editorRenderer/resources.json         previewColor/Normal/Position, shadedColor, accumColor,
                                         viewportColor + their FBOs
@@ -1220,7 +1219,7 @@ editorRenderer/editorShaders/         albedo, shade, accumulate, display (+ full
 editorRenderer/imguiShaders/          vs_imgui, imgui (+ their own varying.def.sc)
 ```
 
-Scenes are not bundled: the editor points at `../ScenePreviewer/scenes/`, whose `.data` files are tens of megabytes and are already in the repository once.
+Scenes are not bundled: the editor points at `../scene_previewer/scenes/` in the build tree, whose `.data` files are tens of megabytes and are already in the repository once.
 
 ## ProjectV Features Used
 

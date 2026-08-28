@@ -30,20 +30,16 @@ Together these took San Miguel at `-r 8192` (9.97 M triangles, 174 M voxels) fro
 ## How to Build
 
 ```bash
-cd MeshVoxelizer
-make
+git submodule update --init --recursive docs/examples/MeshVoxelizer/external/assimp
+cmake --preset dev
+cmake --build --preset dev --target mesh_voxelizer
 ```
 
-`make` forwards to CMake, which builds Assimp from the submodule in `external/assimp` and then the tool. The first build takes a few minutes for Assimp; later ones do not rebuild it. If the submodule was not checked out, `make` fetches it.
+Assimp is built from the submodule in `external/assimp`. The first build takes a few minutes for
+it; later ones do not rebuild it. Without the submodule the configure step skips this example
+with a message rather than failing.
 
-CMake can also be driven directly, which is the path to use on Windows:
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j8
-```
-
-Requires ProjectV to be built at `../../../` with its libraries installed in `../../../lib/`.
+The binary lands in `build/examples/mesh_voxelizer/`.
 
 Assimp is a submodule **of this example**, not of the engine — nothing in `src/` depends on it, and the engine builds without it.
 

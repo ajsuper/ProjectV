@@ -1,6 +1,5 @@
-#ifndef CAMERA_H
-#define CAMERA_H
-
+#ifndef PROJV_CAMERA_H
+#define PROJV_CAMERA_H
 namespace projv{
     /**
      * @struct Camera

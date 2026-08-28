@@ -1,7 +1,20 @@
 #ifndef PROJV_CORE_MATH_H
 #define PROJV_CORE_MATH_H
 // This is a wrapper for the glm library, to provide consistency accross the engine.
-#define BX_CONFIG_DEBUG 1
+
+// bx requires BX_CONFIG_DEBUG to be defined before any of its headers are included, but this
+// must not overrule a value the build already set: bgfx.cmake defines it per configuration, and
+// defining it again here both warns and silently forced bx's debug config -- assertions and all
+// -- on every release build that included this header. Fall back to deriving it from NDEBUG so a
+// consumer that sets nothing still gets the sensible thing.
+#ifndef BX_CONFIG_DEBUG
+#  ifdef NDEBUG
+#    define BX_CONFIG_DEBUG 0
+#  else
+#    define BX_CONFIG_DEBUG 1
+#  endif
+#endif
+
 #include "bx/math.h"
 #include "bx/bx.h"
 #include "glm/glm.hpp"

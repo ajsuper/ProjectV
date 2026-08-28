@@ -63,12 +63,16 @@ namespace {
 }
 
 int main(int argc, char** argv) {
-    // Allow custom scene folder, default to the bundled Sponza scene.
+    // Allow custom scene folder, defaulting to the Sponza scene the path tracer example stages.
+    // Borrowed rather than staged again here: it is tens of megabytes and this driver only reads
+    // it. Examples are laid out side by side under build/examples/, so the sibling path resolves
+    // when this is run from its own directory, which is where its binary lands.
     std::string scenePath = (argc > 1) ? argv[1]
-                                       : "../PathTracer/SponzaScene/";
+                                       : "../path_tracer/SponzaScene/";
     if (!fs::exists(scenePath)) {
-        // Try relative to the binary's CWD; sometimes test runners chdir.
-        std::cerr << "Scene folder not found: " << scenePath << "\n";
+        std::cerr << "Scene folder not found: " << scenePath << "\n"
+                  << "Run this from its own build directory (build/examples/editing_p1), or pass "
+                     "a scene folder as the first argument.\n";
         return 2;
     }
 
@@ -78,6 +82,16 @@ int main(int argc, char** argv) {
     projv::core::info("Scene: {} chunks, {} loose, {} grids, {} blobs, {} components",
                scene.chunks.size(), scene.looseChunkCount, scene.grids.size(),
                scene.geometryPool.size(), scene.components.size());
+
+    // A scene can parse its compose.json and still contain no geometry -- most often because its
+    // .data containers are version 1, which the loader rejects with a message and then skips. Every
+    // test below indexes into the scene, so carry on and it is a segfault instead of a diagnosis.
+    if (scene.chunks.empty()) {
+        std::cerr << "Scene loaded no chunks. If the log above reports a .data version the loader "
+                     "rejects, this asset needs re-voxelizing; the driver needs a scene with "
+                     "geometry to exercise.\n";
+        return 3;
+    }
 
     for (projv::ComponentHandle h = 0; h < scene.components.size(); ++h) {
         projv::core::info("  component[{}]: kind={}", h,

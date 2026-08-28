@@ -28,3 +28,10 @@
 [submodule "docs/examples/SceneEditor/external/lua"]
 	path = docs/examples/SceneEditor/external/lua
 	url = https://github.com/lua/lua.git
+# bgfx.cmake is what vcpkg's bgfx port is built from, so the submodule build and the vcpkg
+# build produce the same targets. It is pinned to a revision contemporaneous with the bgfx, bx
+# and bimg pins below -- its build files reference sources that move between bgfx revisions, so
+# a mismatched pin fails to configure.
+[submodule "external/bgfx.cmake"]
+	path = external/bgfx.cmake
+	url = https://github.com/bkaradzic/bgfx.cmake.git

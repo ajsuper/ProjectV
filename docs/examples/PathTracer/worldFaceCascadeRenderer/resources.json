@@ -22,29 +22,29 @@
         {"shaderID": 10, "path": "./worldFaceCascadeRenderer/pathTracerShaders/display.bin"}
     ],
     "textures": [
-        {"texID": 1,  "name": "resourceTexture", "format": "RGBA8",        "resX": 256,  "resY": 256,  "resizable": true, "origin": "CPUBuffer"},
+        {"texID": 1,  "name": "resourceTexture", "format": "RGBA8",        "resX": 256,  "resY": 256,  "sizeMode": "fixed", "origin": "CPUBuffer"},
 
-        {"texID": 2,  "name": "gPos",       "format": "RGBA32_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 3,  "name": "gNormal",    "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 4,  "name": "gAlbedo",    "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 5,  "name": "gDirect",    "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 18, "name": "gFace",      "format": "RGBA32_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 19, "name": "gKey",       "format": "RGBA32_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
+        {"texID": 2,  "name": "gPos",       "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 3,  "name": "gNormal",    "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 4,  "name": "gAlbedo",    "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 5,  "name": "gDirect",    "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 18, "name": "gFace",      "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 19, "name": "gKey",       "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
 
-        {"texID": 6,  "name": "cascade3",   "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 7,  "name": "cascade2",   "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 8,  "name": "cascade1",   "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 9,  "name": "cascade0",   "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
+        {"texID": 6,  "name": "cascade3",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 7,  "name": "cascade2",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 8,  "name": "cascade1",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 9,  "name": "cascade0",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
 
-        {"texID": 10, "name": "resolveR",   "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
+        {"texID": 10, "name": "resolveR",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
 
-        {"texID": 11, "name": "accumR",     "format": "RGBA32_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 12, "name": "histInfo",   "format": "RGBA32_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
+        {"texID": 11, "name": "accumR",     "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 12, "name": "histInfo",   "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
 
-        {"texID": 15, "name": "composeHDR", "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
+        {"texID": 15, "name": "composeHDR", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
 
-        {"texID": 16, "name": "taaColor",   "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 17, "name": "taaPos",     "format": "RGBA32_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"}
+        {"texID": 16, "name": "taaColor",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 17, "name": "taaPos",     "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"}
     ],
     "framebuffers": [
         {"fboID": 1, "textureIDs": [2, 3, 4, 5, 18, 19]},

@@ -1,6 +1,5 @@
-#ifndef COLOR_H
-#define COLOR_H
-
+#ifndef PROJV_COLOR_H
+#define PROJV_COLOR_H
 #include <stdint.h>
 
 namespace projv{

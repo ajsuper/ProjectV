@@ -266,7 +266,7 @@ void update(projv::Application& app) {
             mn = std::min(mn, frameTimes[i]);
             mx = std::max(mx, frameTimes[i]);
         }
-        core::perf("Frame stats (last 100): avg={:.2f}ms min={:.2f}ms max={:.2f}ms",
+        projv::core::perf("Frame stats (last 100): avg={:.2f}ms min={:.2f}ms max={:.2f}ms",
                    sum / 100.0, mn, mx);
     }
 #endif

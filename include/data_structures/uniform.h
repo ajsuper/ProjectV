@@ -1,6 +1,5 @@
-#ifndef UNIFORM_H
-#define UNIFORM_H
-
+#ifndef PROJV_UNIFORM_H
+#define PROJV_UNIFORM_H
 #include <string>
 
 namespace projv {

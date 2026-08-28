@@ -14,14 +14,14 @@
         {"shaderID": 4, "path": "./tree64Renderer/pathTracerShaders/post_and_display.bin"}
     ],
     "textures": [
-        {"texID": 1, "name": "resourceTexture", "format": "RGBA8", "resX": 256, "resY": 256, "resizable": true, "origin": "CPUBuffer"},
-        {"texID": 2, "name": "globalIllumination", "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 3, "name": "directIllumination", "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 4, "name": "normal", "format": "RGBA8", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew", "readBack": true},
-        {"texID": 5, "name": "albedo", "format": "RGBA8", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 6, "name": "accumulatedRender", "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
+        {"texID": 1, "name": "resourceTexture", "format": "RGBA8", "resX": 256, "resY": 256, "sizeMode": "fixed", "origin": "CPUBuffer"},
+        {"texID": 2, "name": "globalIllumination", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 3, "name": "directIllumination", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 4, "name": "normal", "format": "RGBA8", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew", "readBack": true},
+        {"texID": 5, "name": "albedo", "format": "RGBA8", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 6, "name": "accumulatedRender", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
 
-        {"texID": 7, "name": "pickBuffer", "format": "RGBA32_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew", "readBack": true}
+        {"texID": 7, "name": "pickBuffer", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew", "readBack": true}
     ],
     "framebuffers": [
         {"fboID": 1, "textureIDs": [2, 3, 4, 5, 7]},

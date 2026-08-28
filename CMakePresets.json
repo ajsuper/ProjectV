@@ -1,0 +1,43 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "dev",
+            "displayName": "Developer build (submodules, examples on)",
+            "description": "Builds bgfx and the header-only dependencies from external/. Install and export are disabled in this configuration because the dependencies are vendored rather than found as packages.",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "PROJV_BUILD_EXAMPLES": "ON"
+            }
+        },
+        {
+            "name": "release",
+            "inherits": "dev",
+            "displayName": "Release (minimal logging)",
+            "description": "Optimised, with every optional log category compiled out. Only WARN and ERROR survive.",
+            "binaryDir": "${sourceDir}/build-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "PROJV_LOG_MINIMAL": "ON"
+            }
+        },
+        {
+            "name": "vcpkg",
+            "displayName": "vcpkg (installable)",
+            "description": "Resolves every dependency through find_package from a vcpkg toolchain, which is the configuration that can actually be installed and exported. Requires VCPKG_ROOT to be set.",
+            "binaryDir": "${sourceDir}/build-vcpkg",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "PROJV_BUILD_EXAMPLES": "OFF"
+            }
+        }
+    ],
+    "buildPresets": [
+        { "name": "dev",     "configurePreset": "dev" },
+        { "name": "release", "configurePreset": "release" },
+        { "name": "vcpkg",   "configurePreset": "vcpkg" }
+    ]
+}

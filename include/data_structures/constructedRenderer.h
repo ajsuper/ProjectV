@@ -1,6 +1,7 @@
-#ifndef CONSTRUCTED_RENDERER_H
-#define CONSTRUCTED_RENDERER_H
+#ifndef PROJV_CONSTRUCTED_RENDERER_H
+#define PROJV_CONSTRUCTED_RENDERER_H
 
+#include <cstdint>
 #include <unordered_map>
 #include <string.h>
 #include <vector>
@@ -8,14 +9,14 @@
 #include "core/math.h"
 #include "data_structures/texture.h"
 #include "data_structures/framebuffer.h"
-#include "../../external/bgfx/include/bgfx/bgfx.h"
+#include <bgfx/bgfx.h>
 
 namespace projv {
     struct BGFXResources {
         bgfx::ShaderHandle defaultVertexShader;
         std::unordered_map<std::string, bgfx::UniformHandle> uniformHandles;
         std::unordered_map<std::string, std::vector<uint8_t>> uniformValues;
-        std::unordered_map<uint, bgfx::ShaderHandle> shaderHandles;
+        std::unordered_map<uint32_t, bgfx::ShaderHandle> shaderHandles;
         ConstructedTextures textures;
         ConstructedFramebuffers framebuffers;
         // vec4(width, height, 1/width, 1/height) of the target the CURRENT pass is writing into, set
@@ -84,11 +85,11 @@ namespace projv {
     // set to 1/1 at construction and never read. Caching the resolved size here would just be a second
     // copy to keep in step with the textures, which is the bug class this whole cleanup is removing.
     struct BGFXDependencyGraph {
-        std::vector<std::pair<bgfx::UniformHandle, uint>> depdendencies; //UniformHandle = textureSampler, uint = textureID;
+        std::vector<std::pair<bgfx::UniformHandle, uint32_t>> depdendencies; //UniformHandle = textureSampler, uint32_t = textureID;
         int targetFrameBufferID;
         bgfx::ProgramHandle shaderProgram;
-        uint renderPassID;
-        uint multiPassPassNumber;
+        uint32_t renderPassID;
+        uint32_t multiPassPassNumber;
         bgfx::UniformHandle multiPassPassNumberUniform;
     };
 

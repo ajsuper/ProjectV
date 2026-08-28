@@ -1,10 +1,9 @@
-#ifndef GPU_DATA_H
-#define GPU_DATA_H
-
+#ifndef PROJV_GPU_DATA_H
+#define PROJV_GPU_DATA_H
 #include <cstdint>
 #include <vector>
 
-#include "../../external/bgfx/include/bgfx/bgfx.h"
+#include <bgfx/bgfx.h>
 #include "graphics/range_allocator.h"
 #include "utils/animation.h"
 

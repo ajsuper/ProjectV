@@ -28,7 +28,22 @@ void main() {
 The biggest difference from ProjectV GLSL and normal GLSL is that the shaders have to be compiled. This is because of the BGFX rendering backends way of making cross platform rendering possible.
 
 #### How to do it:
-You simply run the tool ``shadercDebug`` (``shadercRelease`` for release builds) located in ``/ProjectV/build/tools/shadercDebug``
+Shaders are compiled by the build. `projv_compile_shaders()` (see `cmake/ProjectVShaders.cmake`)
+runs bgfx's `shaderc` over a renderer's `vs_*.sc` and `*.frag`, writing each `.bin` beside its
+source, with the engine's shader library on the include path so `pjv_utils_DDA.sc` resolves:
+
+```cmake
+projv_compile_shaders(TARGET my_app SHADER_DIRS myRenderer/shaders)
+```
+
+`shaderc` itself is built from the bgfx submodule (`build/bin/shaderc`) or comes from an
+installed bgfx with its tools feature. To run it by hand:
+
+```bash
+build/bin/shaderc -f shader.frag -o shader.bin --type f \
+    --platform linux --profile spirv \
+    -i external/bgfx/src -i include
+```
 #### Example:
 ```
 ./shadercDebug -f shader.frag -o shader.bin --type f --platform linux --profile spirv -i /ProjectV/external/bgfx/src

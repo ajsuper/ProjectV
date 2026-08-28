@@ -392,12 +392,11 @@ plausible. The forked traversal was consuming the budget the feature that replac
 ## How to build
 
 ```bash
-cd AdvancedRenderer
-make                # builds ./advanced_renderer
-./compAdvanced.sh   # compiles the shaders to .bin
+cmake --preset dev
+cmake --build --preset dev --target advanced_renderer
 ```
 
-Requires ProjectV built at `../../../` (the repository root), with its libraries in `lib/`, bgfx built, and `build/tools/shadercRelease` present.
+Shaders are compiled as part of the build. The binary and its staged renderer folder land in `build/examples/advanced_renderer/`; run it from there.
 
 ## How to use
 
@@ -477,7 +476,7 @@ look right rather than merely sharp.
 One caveat when measuring: the render targets are resized to the live window every frame, so a tiling
 window manager that gives this window a size other than the 1920x1080 it asks for silently changes the
 pixel count — and the `Target size` lines are printed once at construction and never reprinted. Build
-with `make EXTRA_CXXFLAGS=-DPROJV_ENABLE_PERF` and the frame-stats line quotes the resolution it
+with `cmake --preset dev -DPROJV_LOG_PERF=ON` and the frame-stats line quotes the resolution it
 actually rendered at; compare only runs whose resolutions match.
 
 The camera's start position and its flight speed are both derived from the scene's bounding box, because this example takes its scene on the command line and a hardcoded position would be inside one scene's wall and a kilometre from the next one's.

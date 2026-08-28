@@ -1,16 +1,17 @@
-#ifndef DEPENDENCY_GRAPH_H
-#define DEPENDENCY_GRAPH_H
+#ifndef PROJV_DEPENDENCY_GRAPH_H
+#define PROJV_DEPENDENCY_GRAPH_H
 
+#include <cstdint>
 #include <vector>
 
 namespace projv {
     struct RenderPass {
-        uint shaderID;
-        std::vector<uint> frameBufferInputIDs;
-        std::vector<uint> textureResourceIDs;
+        uint32_t shaderID;
+        std::vector<uint32_t> frameBufferInputIDs;
+        std::vector<uint32_t> textureResourceIDs;
         int frameBufferOutputID;
-        uint multiPassPassNumber; // 0 if multipass is 0.
-        uint multiPass;
+        uint32_t multiPassPassNumber; // 0 if multipass is 0.
+        uint32_t multiPass;
     };
 
     struct DependencyGraph {

@@ -1,6 +1,5 @@
-#ifndef RENDERER_SPECIFICATION_H
-#define RENDERER_SPECIFICATION_H
-
+#ifndef PROJV_RENDERER_SPECIFICATION_H
+#define PROJV_RENDERER_SPECIFICATION_H
 #include <vector>
 
 #include "resources.h"

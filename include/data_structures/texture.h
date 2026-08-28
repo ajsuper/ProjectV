@@ -1,11 +1,12 @@
-#ifndef TEXTURE_H
-#define TEXTURE_H
+#ifndef PROJV_TEXTURE_H
+#define PROJV_TEXTURE_H
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 
 #include "core/math.h"
-#include "../../external/bgfx/include/bgfx/bgfx.h"
+#include <bgfx/bgfx.h>
 
 namespace projv{
     enum TextureOrigin { CreateNew, CPUBuffer };
@@ -41,25 +42,25 @@ namespace projv{
     };
 
     struct ConstructedTextures {
-        std::unordered_map<uint, bgfx::TextureHandle> textureHandles;
-        std::unordered_map<uint, bgfx::UniformHandle> textureSamplerHandles;
-        std::unordered_map<uint, bgfx::TextureHandle> textureHandlesAlternate; // Used in ping-poing rendering.
-        std::unordered_map<uint, bgfx::UniformHandle> textureSamplerHandlesAlternate; // Used in ping-pong rendering.
+        std::unordered_map<uint32_t, bgfx::TextureHandle> textureHandles;
+        std::unordered_map<uint32_t, bgfx::UniformHandle> textureSamplerHandles;
+        std::unordered_map<uint32_t, bgfx::TextureHandle> textureHandlesAlternate; // Used in ping-poing rendering.
+        std::unordered_map<uint32_t, bgfx::UniformHandle> textureSamplerHandlesAlternate; // Used in ping-pong rendering.
         // Scale factor per Relative texture. Presence in this map IS the sizing rule: a texture in
         // here follows the render resolution by its scale, one absent from it is Fixed. That is one
         // map instead of the two parallel bool maps this replaced, so a texture cannot be classified
         // inconsistently.
-        std::unordered_map<uint, float> relativeTextureScales;
-        std::unordered_map<uint, projv::core::ivec2> textureResolutions;
-        std::unordered_map<uint, bgfx::TextureFormat::Enum> textureFormats;
+        std::unordered_map<uint32_t, float> relativeTextureScales;
+        std::unordered_map<uint32_t, projv::core::ivec2> textureResolutions;
+        std::unordered_map<uint32_t, bgfx::TextureFormat::Enum> textureFormats;
         // The bgfx creation flags each texture was built with, so a resize can rebuild it as the
         // same kind of texture. Without this a resize recreates every target with BGFX_TEXTURE_RT
         // alone, which silently drops BGFX_TEXTURE_READ_BACK | BGFX_TEXTURE_BLIT_DST -- a texture
         // that is both resizable and readBack stops being readable the first time the window moves,
         // and nothing reports it because the handle is still perfectly valid.
-        std::unordered_map<uint, uint64_t> textureFlags;
-        std::unordered_map<uint, bool> pingPongFlags;
-        std::unordered_map<uint, uint> textureIDToFrameBufferID;
+        std::unordered_map<uint32_t, uint64_t> textureFlags;
+        std::unordered_map<uint32_t, bool> pingPongFlags;
+        std::unordered_map<uint32_t, uint32_t> textureIDToFrameBufferID;
     };
 }
 

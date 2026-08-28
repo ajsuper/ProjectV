@@ -1,6 +1,7 @@
-#ifndef VOXEL_H
-#define VOXEL_H
+#ifndef PROJV_VOXEL_H
+#define PROJV_VOXEL_H
 
+#include <cstdint>
 #include <vector>
 #include <memory>
 #include <unordered_map>
@@ -71,7 +72,7 @@ namespace projv{
     };
 
     struct VoxelGrid {
-        uint max;
+        uint32_t max;
         std::vector<Voxel> voxels;
     };
 

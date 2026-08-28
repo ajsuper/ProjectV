@@ -9,15 +9,15 @@ namespace projv::graphics {
         return this->constructedRenderer;
     }
 
-    void RenderInstance::addRendererSpecification(uint rendererID, const RendererSpecification &rendererSpecification) {
+    void RenderInstance::addRendererSpecification(uint32_t rendererID, const RendererSpecification &rendererSpecification) {
         this->renderers[rendererID] = rendererSpecification;
     }
 
-    void RenderInstance::removeRendererSpecification(uint rendererID) {
+    void RenderInstance::removeRendererSpecification(uint32_t rendererID) {
         this->renderers.erase(rendererID);
     }
 
-    RendererSpecification &RenderInstance::getRendererSpecification(uint rendererID) {
+    RendererSpecification &RenderInstance::getRendererSpecification(uint32_t rendererID) {
         return this->renderers.at(rendererID);
     }
 

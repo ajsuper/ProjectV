@@ -13,27 +13,26 @@ Because nothing is modulated by light transport, what you see is exactly what a 
 ## How to Build
 
 ```bash
-cd ScenePreviewer
-make               # builds ./scene_previewer
-./compPreview.sh   # (re)compiles the three shaders to .bin
+cmake --preset dev
+cmake --build --preset dev --target scene_previewer
 ```
 
-Requires ProjectV to be built at `../../../` with its libraries in `../../../lib/` and bgfx built.
+The binary and its staged renderer folder and scenes land in `build/examples/scene_previewer/`.
 
 ## How to Use
 
 ```bash
+cd build/examples/scene_previewer
 ./scene_previewer [scene-directory]
 ```
 
 The scene directory is any folder holding a `compose.json` — whatever `loadComposeFromDisk` opens. With no argument it opens `scenes/StonehillCastle/`, so it runs out of the box.
 
 ```bash
-./scene_previewer                                      # the bundled Minecraft castle
-./scene_previewer scenes/Sibenik                       # another bundled scene
-./scene_previewer ../MeshVoxelizer/trees/Oak_Leav      # a 64^3 asset
-./scene_previewer ../PathTracer/SponzaScene/           # the Sponza atrium
-./scene_previewer ~/voxelized/MyWorld/                 # anything you just voxelized
+./scene_previewer                                       # the bundled Minecraft castle
+./scene_previewer scenes/Sibenik                        # another bundled scene
+./scene_previewer ../path_tracer/SponzaScene/           # the Sponza atrium
+./scene_previewer ~/voxelized/MyWorld/                  # anything you just voxelized
 ```
 
 ## Bundled scenes
@@ -54,7 +53,7 @@ The scene directory is any folder holding a `compose.json` — whatever `loadCom
 To regenerate any of them:
 
 ```bash
-cd ../MeshVoxelizer
+cd build/examples/mesh_voxelizer
 
 ./mesh_voxelizer -f <world>/"Stonehill Castle - v1.3" -o ../ScenePreviewer/scenes/StonehillCastle \
     --mc-bounds -416 164 -224 356 --mc-y 70 200
@@ -107,10 +106,6 @@ If a scene's palette was authored linear rather than sRGB, set `PREVIEW_APPLY_GA
 ### Reading shape in an unlit image
 
 Pure albedo means every face of a voxel is the same colour, so form is carried entirely by silhouette and flat regions read as flat. That is the honest view of the data and it is the default. If you want form legible instead, set `PREVIEW_FACE_SHADING` to `1` at the top of `albedo.frag`: it multiplies in a fixed per-face gradient from the voxel normal — no rays, no light source, just a constant tint per axis. The image is then no longer the unmodified stored colour, which is why it is off by default.
-
-## Note on the shader build scripts
-
-`compPreview.sh` passes `-i $PROJECTV_DIR/include` so the engine's `pjv_utils_DDA.sc` resolves. The PathTracer example's `comp*.sh` scripts are currently missing that include path, so any shader of theirs that includes the DDA fails to compile (`Cannot open include file "pjv_utils_DDA.sc"`, followed by a cascade of parse errors on the now-undefined `Ray` / `RayQuery` / `raySceneIntersect`). Their committed `.bin` files still run, so it only bites when you recompile them.
 
 ## ProjectV Features Used
 

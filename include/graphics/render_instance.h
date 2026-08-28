@@ -1,18 +1,18 @@
 #ifndef PROJV_RENDER_INSTANCE_H
 #define PROJV_RENDER_INSTANCE_H
 
+
+#include <cstdint>
 #include <memory>
 #include <iostream>
 
 #include "data_structures/rendererSpecification.h"
 #include "data_structures/constructedRenderer.h"
-#include "data_structures/rendererSpecification.h"
 #include "data_structures/posTexVertex.h"
 
 #include "core/math.h"
 #include "core/log.h"
 
-#include "../../external/bgfx/include/bgfx/platform.h"
 #include "GLFW/glfw3.h"
 #include <bgfx/platform.h>
 // Define the correct platform-specific macro
@@ -41,6 +41,18 @@ namespace projv::graphics {
             GLFWwindow *window;
             bgfx::VertexBufferHandle vertexBuffer;
             bgfx::IndexBufferHandle indexBuffer;
+
+            /**
+            * True once the user has asked to close the window (the WM close button, Alt-F4, and so
+            * on). Refreshed by renderConstructedRenderer, which is where GLFW events are polled.
+            *
+            * Nothing in the engine acts on this. An application reads it and decides -- typically
+            * by setting Application::closeAppFlag to end the loop, but a tool with unsaved work
+            * may want to raise a prompt instead, which it could not do if the engine closed the
+            * window on its behalf. Note that projv::core cannot see this type at all: core has no
+            * dependency on graphics, so the hand-off is the application's to make.
+            */
+            bool shouldClose = false;
 
             /**
             * Initializes our window and bgfx.
@@ -74,24 +86,24 @@ namespace projv::graphics {
             * @param rendererID A unique identifier for this renderer configuration.
             * @param rendererSpecification The RendererSpecification object that defines the desired rendering setup.
             */
-            void addRendererSpecification(uint rendererID, const RendererSpecification &rendererSpecification);
+            void addRendererSpecification(uint32_t rendererID, const RendererSpecification &rendererSpecification);
 
             /**
             * Removes a previously added renderer specification from the render instance.
             * @param rendererID The unique identifier of the renderer configuration to be removed.
             */
-            void removeRendererSpecification(uint rendererID);
+            void removeRendererSpecification(uint32_t rendererID);
 
             /**
             * Retrieves a reference to the RendererSpecification associated with a given renderer ID.
             * @param rendererID The unique identifier of the desired renderer configuration.
             * @return A reference to the RendererSpecification object for that ID.
             */
-            RendererSpecification &getRendererSpecification(uint rendererID);
+            RendererSpecification &getRendererSpecification(uint32_t rendererID);
 
             RenderInstance() = default;
         private:
-            std::unordered_map<uint, RendererSpecification> renderers;
+            std::unordered_map<uint32_t, RendererSpecification> renderers;
             std::shared_ptr<ConstructedRenderer> constructedRenderer;
     };
 }

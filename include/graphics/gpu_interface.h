@@ -1,6 +1,8 @@
 #ifndef PROJV_GPU_INTERFACE_H
 #define PROJV_GPU_INTERFACE_H
 
+
+#include <cstdint>
 #include <vector>
 #include <iostream>
 #include <type_traits>
@@ -63,10 +65,10 @@ namespace projv::graphics {
      * @param textureWidth The width of the texture you are passing. It automatically checks if they are the same and warns and resizes if not.
      * @param textureHeight The height of the texture you are passing. It automatically checks if they are the same and warns and resizes if not.
      */
-    void setTextureToData(std::shared_ptr<ConstructedRenderer> constructedRenderer, uint textureID, unsigned char * data, uint textureWidth, uint textureHeight);
+    void setTextureToData(std::shared_ptr<ConstructedRenderer> constructedRenderer, uint32_t textureID, unsigned char * data, uint32_t textureWidth, uint32_t textureHeight);
 
     /**
-     * Creates a bgfx::TextureHandle from an std::vector<uint32_t>. It is row-major, RGBA32U. Examples of how to read from it can be found in the uint tree64s(int index); function in the tree64 traversal shader.
+     * Creates a bgfx::TextureHandle from an std::vector<uint32_t>. It is row-major, RGBA32U. Examples of how to read from it can be found in the uint32_t tree64s(int index); function in the tree64 traversal shader.
      * @param data The std::vector<uint32_t>& to create the texture based on. It is copied by bgfx.
      * @return Returns a bgfx::TextureHandle for the texture created from the data.
      */

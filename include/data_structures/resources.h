@@ -1,6 +1,5 @@
-#ifndef RESOURCES_H
-#define RESOURCES_H
-
+#ifndef PROJV_RESOURCES_H
+#define PROJV_RESOURCES_H
 #include <vector>
 
 #include "uniform.h"

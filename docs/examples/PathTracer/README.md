@@ -49,25 +49,21 @@ Renderers are registered modularly in `main.cpp` via `buildRendererRegistry()`. 
 ## How to Build
 
 ```bash
-cd PathTracer
-make                       # builds main.o
-./compTree64.sh            # (re)compiles the tree64Renderer shaders
-./compReproject.sh         # (re)compiles the reprojectionRenderer shaders
-./compFast.sh              # (re)compiles the fastRenderer shaders
-./compFace.sh              # (re)compiles the faceRenderer shaders
-./compWorldCascade.sh      # (re)compiles the worldCascadeRenderer shaders
-./compWorldFaceCascade.sh  # (re)compiles the worldFaceCascadeRenderer shaders
-./compRadianceCascade.sh   # (re)compiles the radianceCascadeRenderer shaders
+cmake --preset dev
+cmake --build --preset dev --target path_tracer
 ```
 
-Each `comp*.sh` shares the engine-level shaders in `sharedShaders/` (the voxel DDA in `pjv_utils_DDA.sc` and the sun/sky model in `pjv_sun_sky.sc`), so all renderers stay in sync.
+That builds every renderer's shaders too. All seven share the engine's voxel DDA
+(`pjv_utils_DDA.sc`, on the shader include path automatically) and this example's own
+`sharedShaders/` (the sun/sky model and the cascade maths), so they stay in sync.
 
-Requires ProjectV to be built at `../../../` (the repository root) with its libraries and bgfx installed.
+The binary and its staged renderer folders and scenes land in `build/examples/path_tracer/`.
 
 ## How to Use
 
 ```bash
-./main.o
+cd build/examples/path_tracer
+./path_tracer
 ```
 
 On startup the console prompts you to pick a renderer (`1` = tree64, `2` = reprojection, `3` = fast, `4` = face, `5` = radiance cascades, `6` = radiance cascades per-face; default `1`). The application then opens a 1920×1080 window and begins rendering the Sponza scene. Navigate the scene with the keyboard and mouse:

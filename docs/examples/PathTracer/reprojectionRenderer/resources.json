@@ -16,15 +16,15 @@
         {"shaderID": 4, "path": "./reprojectionRenderer/pathTracerShaders/denoise.bin"}
     ],
     "textures": [
-        {"texID": 1, "name": "resourceTexture", "format": "RGBA8",        "resX": 256,  "resY": 256,  "resizable": true, "origin": "CPUBuffer"},
-        {"texID": 2, "name": "curColor",        "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 3, "name": "curPos",          "format": "RGBA32_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 4, "name": "curNormal",       "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 5, "name": "curAlbedo",       "format": "RGBA8",        "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 6, "name": "histColor",       "format": "RGBA32_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 7, "name": "histPos",         "format": "RGBA32_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 8, "name": "histNormal",      "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 9, "name": "denoisedColor",   "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"}
+        {"texID": 1, "name": "resourceTexture", "format": "RGBA8",        "resX": 256,  "resY": 256,  "sizeMode": "fixed", "origin": "CPUBuffer"},
+        {"texID": 2, "name": "curColor",        "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 3, "name": "curPos",          "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 4, "name": "curNormal",       "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 5, "name": "curAlbedo",       "format": "RGBA8",        "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 6, "name": "histColor",       "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 7, "name": "histPos",         "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 8, "name": "histNormal",      "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 9, "name": "denoisedColor",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"}
     ],
     "framebuffers": [
         {"fboID": 1, "textureIDs": [2, 3, 4, 5]},

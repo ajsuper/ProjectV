@@ -624,7 +624,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         gpuData.componentPaletteVersion = totalVersion;
     }
 
-    void setTextureToData(std::shared_ptr<ConstructedRenderer> constructedRenderer, uint textureID, unsigned char * data, uint textureWidth, uint textureHeight) {  
+    void setTextureToData(std::shared_ptr<ConstructedRenderer> constructedRenderer, uint32_t textureID, unsigned char * data, uint32_t textureWidth, uint32_t textureHeight) {  
         projv::core::ivec2 textureDimensions = constructedRenderer->resources.textures.textureResolutions.at(textureID);
         // A keyed lookup, not a scan. This used to walk an unordered_map by integer index -- which
         // INSERTS key `i` on every iteration, because operator[] on a map does -- and then compared

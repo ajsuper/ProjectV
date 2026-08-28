@@ -186,7 +186,7 @@ namespace projv::graphics {
 
             for (size_t j = 0; j < renderPass.depdendencies.size(); j++) {
                 bgfx::UniformInfo info;
-                uint textureID = renderPass.depdendencies.at(j).second;
+                uint32_t textureID = renderPass.depdendencies.at(j).second;
 
                 if (j < PROJV_MAX_PASS_INPUTS) {
                     auto inputResolution = constructedRenderer->resources.textures.textureResolutions.find(textureID);
@@ -296,6 +296,12 @@ namespace projv::graphics {
         //static bool renderToPrimary = true;
 
         glfwPollEvents();
+
+        // This is the only place the engine polls GLFW, so it is the only place that can observe a
+        // close request. Record it; acting on it is the application's decision (see the field's
+        // comment in render_instance.h).
+        renderInstance.shouldClose = glfwWindowShouldClose(renderInstance.window) != 0;
+
         glfwGetWindowSize(renderInstance.window, &windowWidth, &windowHeight);
 
         projv::core::mat4 view = core::mat4(1.0f);

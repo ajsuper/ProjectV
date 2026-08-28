@@ -1,6 +1,8 @@
 #ifndef PROJV_TYPE_MAPPING_H
 #define PROJV_TYPE_MAPPING_H
 
+
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <iostream>
@@ -53,7 +55,7 @@ namespace projv::graphics {
      * @param renderPass The RenderPass object that defines the rendering operation and its dependencies.
      * @return A vector of texture samplers and their matching textureID.
      */
-    std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(const std::vector<FrameBuffer>& frameBuffers, const std::unordered_map<uint, bgfx::UniformHandle>& textureSamplerHandles, const RenderPass &renderPass);
+    std::vector<std::pair<bgfx::UniformHandle, uint32_t>> getDependenciesList(const std::vector<FrameBuffer>& frameBuffers, const std::unordered_map<uint32_t, bgfx::UniformHandle>& textureSamplerHandles, const RenderPass &renderPass);
 }
 
 #endif

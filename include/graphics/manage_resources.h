@@ -1,6 +1,8 @@
 #ifndef PROJV_MANAGE_RESOURCES_H
 #define PROJV_MANAGE_RESOURCES_H
 
+
+#include <cstdint>
 #include <vector>
 #include <iostream>
 
@@ -19,10 +21,10 @@
 namespace projv::graphics {
     /**
     * Creates a list of texture attachments based off of a list of textureIDs and their matching handles.
-    * @param textureHandles An std::unordered_map<uint, bgfx::TextureHandle>& containing at least the texture handles in our textureID vector.
+    * @param textureHandles An std::unordered_map<uint32_t, bgfx::TextureHandle>& containing at least the texture handles in our textureID vector.
     * @return Returns an std::vector<bgfx::Attachment> containing all of the created texture attachments for our texture IDs.
     */
-    std::vector<bgfx::Attachment> getTextureAttachments(const std::unordered_map<uint, bgfx::TextureHandle>& textureHandles, const std::vector<uint> textureIDs);
+    std::vector<bgfx::Attachment> getTextureAttachments(const std::unordered_map<uint32_t, bgfx::TextureHandle>& textureHandles, const std::vector<uint32_t> textureIDs);
 
     /**
     * Creates a bgfx::ProgramHandle from a vertex shader and a fragment shader.
@@ -56,9 +58,9 @@ namespace projv::graphics {
     /**
     * Constructs a map of shader handles for use in rendering, mapping shader id's to their corresponding bgfx::ShaderHandle.
     * @param shaders An std::vector<projv::Shader> containing all of our shaders information.
-    * @return Returns an std::unordered_map<uint, bgfx::ShaderHandle> mapping shader names to their handles.
+    * @return Returns an std::unordered_map<uint32_t, bgfx::ShaderHandle> mapping shader names to their handles.
     */
-    std::unordered_map<uint, bgfx::ShaderHandle> constructShaders(const std::vector<Shader>& shaders);
+    std::unordered_map<uint32_t, bgfx::ShaderHandle> constructShaders(const std::vector<Shader>& shaders);
 
     /**
     * Constructs a list of render passes for the dependency graph, mapping each pass to its dependencies and outputs.

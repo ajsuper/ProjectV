@@ -1,6 +1,5 @@
-#ifndef SCENE_H
-#define SCENE_H
-
+#ifndef PROJV_SCENE_H
+#define PROJV_SCENE_H
 #include <vector>
 #include <string>
 #include <memory>

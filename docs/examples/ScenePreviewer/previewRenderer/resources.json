@@ -12,8 +12,8 @@
         {"shaderID": 3, "path": "./previewRenderer/previewShaders/display.bin"}
     ],
     "textures": [
-        {"texID": 1, "name": "previewColor", "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"},
-        {"texID": 2, "name": "accumColor",   "format": "RGBA16_FLOAT", "resX": 1920, "resY": 1080, "resizable": true, "origin": "CreateNew"}
+        {"texID": 1, "name": "previewColor", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 2, "name": "accumColor",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"}
     ],
     "framebuffers": [
         {"fboID": 1, "textureIDs": [1]},

@@ -80,18 +80,18 @@ namespace projv::graphics {
         throw std::invalid_argument("Unkown origin: " + origin);
     }
 
-    std::vector<std::pair<bgfx::UniformHandle, uint>> getDependenciesList(const std::vector<FrameBuffer>& frameBuffers, const std::unordered_map<uint, bgfx::UniformHandle>& textureSamplerHandles, const RenderPass &renderPass) {
+    std::vector<std::pair<bgfx::UniformHandle, uint32_t>> getDependenciesList(const std::vector<FrameBuffer>& frameBuffers, const std::unordered_map<uint32_t, bgfx::UniformHandle>& textureSamplerHandles, const RenderPass &renderPass) {
         core::info("type_mapping: Loading resource dependencies...");
-        std::vector<std::pair<bgfx::UniformHandle, uint>> dependencies;
+        std::vector<std::pair<bgfx::UniformHandle, uint32_t>> dependencies;
 
         if (renderPass.frameBufferInputIDs.size() == 0 && renderPass.textureResourceIDs.size() == 0) {
             return dependencies;
         }
 
         // Adds the CreateNew/frame buffer texture ID's to the textureIDs.
-        std::vector<uint> textureIDs;
+        std::vector<uint32_t> textureIDs;
         for (size_t j = 0; j < renderPass.frameBufferInputIDs.size(); j++) {
-            uint frameBufferInputID = renderPass.frameBufferInputIDs[j];
+            uint32_t frameBufferInputID = renderPass.frameBufferInputIDs[j];
             for (size_t i = 0; i < frameBuffers.size(); i++) {
                 if (frameBuffers[i].frameBufferID == frameBufferInputID) {
                     for (size_t k = 0; k < frameBuffers[i].TextureIDs.size(); k++) {

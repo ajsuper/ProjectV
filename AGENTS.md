@@ -2,52 +2,48 @@
 
 ## Build Commands
 
-### Editing library (Phase 1+)
+Everything builds from the top-level CMake project. There are no per-example Makefiles and no
+per-example shader scripts any more -- one target, one shader rule.
+
 ```bash
-cmake -S . -B build && cmake --build build --target projectV-editing
+cmake --preset dev            # configure (submodule deps, examples on)
+cmake --build --preset dev    # build the library, the examples, and their shaders
 ```
 
-### Full project
+The first build is slow: it compiles bgfx, bx, bimg and shaderc from `external/bgfx.cmake`.
+
+Build just the library:
 ```bash
-cmake --build build
+cmake --build build --target projectV
 ```
 
-### Phase 1 test driver (CPU-only edit test)
+Examples land in `build/examples/<name>/`, with their renderer folders and scenes staged
+beside the binary. Run them from there -- the engine resolves relative paths against the
+working directory, and renderer folders name their shaders relative to it in `resources.json`:
+
 ```bash
-make -C docs/examples/editing_p1 clean && make -C docs/examples/editing_p1
+cd build/examples/scene_previewer && ./scene_previewer scenes/StonehillCastle
+cd build/examples/path_tracer     && ./path_tracer
+cd build/examples/scene_editor    && ./scene_editor
 ```
 
-Run from project root:
+Presets: `dev` (default), `release` (`PROJV_LOG_MINIMAL=ON`), `vcpkg` (dependencies through
+`find_package`; the only configuration that can be installed -- see the note in `CMakeLists.txt`).
+
+Options: `PROJV_BUILD_EXAMPLES`, `PROJV_USE_X11`, `PROJV_LOG_MINIMAL`, and the seven
+`PROJV_LOG_<CATEGORY>` switches. They are `PUBLIC` on the target, so consumers inherit them.
+
+MeshVoxelizer and SceneEditor need their submodules; without them the configure step skips
+each with a message naming what to check out.
+
 ```bash
-./docs/examples/editing_p1/editing_p1 [<scene-folder>]
+git submodule update --init --recursive
 ```
 
-### Interactive edit demo (GPU, windowed)
+Manual tests (need a display):
 ```bash
-make -C docs/examples/edit_demo clean && make -C docs/examples/edit_demo
+cd tests/manual && make && ./exit_path a && ./exit_path b
 ```
-
-Run from `docs/examples/edit_demo/`:
-```bash
-./docs/examples/edit_demo/edit_demo
-```
-
-Controls: WASD/R/F + mouse to fly, E to add voxel (cycles colors), Q to remove,
-1-4 to change edit distance.
-
-### Scene editor (GPU, windowed, ImGui docking)
-```bash
-git submodule update --init external/imgui   # once
-make -C docs/examples/SceneEditor
-```
-
-Shaders and the executable both resolve paths relative to the example folder:
-```bash
-cd docs/examples/SceneEditor && ./compEditor.sh && ./scene_editor [<scene-folder>]
-```
-
-Controls: right-mouse drag in the Viewport panel to fly (WASD/R/F, wheel = speed),
-H to re-frame, Ctrl+O to load a scene. Dock layout persists in `imgui.ini`.
 
 ## Codebase Conventions
 

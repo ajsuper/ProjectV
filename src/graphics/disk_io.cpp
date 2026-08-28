@@ -72,7 +72,7 @@ namespace projv::graphics {
         return shaders;
     }
 
-    FrameBuffer getFrameBuffer(uint frameBufferID, const std::vector<FrameBuffer>& frameBuffers) {
+    FrameBuffer getFrameBuffer(uint32_t frameBufferID, const std::vector<FrameBuffer>& frameBuffers) {
         for (size_t i = 0; i < frameBuffers.size(); i++) {
             if (frameBufferID == frameBuffers[i].frameBufferID) {
                 return frameBuffers[i];
@@ -81,10 +81,10 @@ namespace projv::graphics {
         throw std::runtime_error("Failed to find frame buffer");
     }
 
-    bool doesFrameBufferNeedPingPong(uint frameBufferID, const std::vector<RenderPass>& renderPasses) {
+    bool doesFrameBufferNeedPingPong(uint32_t frameBufferID, const std::vector<RenderPass>& renderPasses) {
         for (size_t i = 0; i < renderPasses.size(); i++) {
             RenderPass renderPass = renderPasses[i];
-            uint frameBufferOutputID = renderPass.frameBufferOutputID;
+            uint32_t frameBufferOutputID = renderPass.frameBufferOutputID;
             for (size_t j = 0; j < renderPass.frameBufferInputIDs.size(); j++) {
                 if (frameBufferID == frameBufferOutputID && (renderPass.frameBufferInputIDs[j] == frameBufferOutputID)) {
                     core::info("{} detected as a ping pong frame buffer.", frameBufferID);
@@ -202,7 +202,7 @@ namespace projv::graphics {
     void validateFrameBufferAttachmentSizes(const std::vector<FrameBuffer>& frameBuffers, const std::vector<Texture>& textures) {
         for (const FrameBuffer& frameBuffer : frameBuffers) {
             const Texture* reference = nullptr;
-            for (uint textureID : frameBuffer.TextureIDs) {
+            for (uint32_t textureID : frameBuffer.TextureIDs) {
                 const Texture* current = nullptr;
                 for (const Texture& texture : textures) {
                     if (texture.textureID == textureID) { current = &texture; break; }
@@ -247,7 +247,7 @@ namespace projv::graphics {
 
     std::vector<RenderPass> loadRenderPasses(nlohmann::json& dependencyGraphData) {
         std::vector<RenderPass> renderPasses;
-        uint renderPassID;
+        uint32_t renderPassID;
         for (const auto &renderPass : dependencyGraphData["renderer"]) {
             const std::string logFormat = "RenderPass:: shaderID: {}, frameBufferInputIDs: {}, resourceTexturesIDs: {}, frameBufferOutputID: {}, multiPass: {}";
             core::info(logFormat,
