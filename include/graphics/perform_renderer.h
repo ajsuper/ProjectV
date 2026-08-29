@@ -1,6 +1,10 @@
 #ifndef PROJV_PERFORM_RENDERER_H
 #define PROJV_PERFORM_RENDERER_H
 
+
+#include <memory>
+#include <string>
+#include <vector>
 #include <unordered_map>
 #include <iostream>
 #include <optional>

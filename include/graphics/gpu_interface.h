@@ -2,6 +2,9 @@
 #define PROJV_GPU_INTERFACE_H
 
 
+
+#include <memory>
+#include <string>
 #include <cstdint>
 #include <vector>
 #include <iostream>

@@ -34,6 +34,7 @@
 //   Mouse    — look (Esc releases the cursor, left-click re-captures)
 //   Esc      — release the cursor; close the window to quit
 
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <string>
@@ -258,6 +259,22 @@ void startup(projv::Application& app) {
 void update(projv::Application& app) {
     auto& renderInstance =
         projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
+
+#if defined(PROJV_ENABLE_PERF)
+    // Frame timing, so "is this slow?" has an answer without attaching a profiler. Compiled out
+    // unless performance logging is enabled.
+    static auto lastFrame = std::chrono::high_resolution_clock::now();
+    static double frameTimes[100];
+    static int timedFrames = 0;
+    auto now = std::chrono::high_resolution_clock::now();
+    frameTimes[timedFrames % 100] = std::chrono::duration<double>(now - lastFrame).count() * 1000.0;
+    lastFrame = now;
+    if (++timedFrames % 100 == 0) {
+        double sum = 0.0;
+        for (int i = 0; i < 100; ++i) sum += frameTimes[i];
+        projv::core::perf("Frame stats (last 100): avg={:.2f}ms", sum / 100.0);
+    }
+#endif
 
     // The hand-off. renderConstructedRenderer polls GLFW and records the close request; nothing in
     // the engine acts on it, so an application that wants to close has to say so.

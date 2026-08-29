@@ -2,6 +2,10 @@
 #define PROJV_MANAGE_RESOURCES_H
 
 
+
+#include <memory>
+#include <string>
+#include <unordered_map>
 #include <cstdint>
 #include <vector>
 #include <iostream>

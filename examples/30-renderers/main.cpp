@@ -359,7 +359,13 @@ static CameraFraming frameScene(const projv::Scene& scene) {
     // scene lands the camera inside a wall about as often as not. Drop a ray from above the scene
     // onto whatever is below the chosen spot and stand on it, using the engine's own CPU picker.
     // This is also the cheapest demonstration of utils::pickVoxel in the tree.
-    const float eyeHeight = std::max(radius * 0.02f, 2.0f * voxelScale);
+    // A person's height in voxels, not a fraction of the scene. Scaling this with the scene put the
+    // camera 46 units up in SanMiguel, which sounds harmless until you count steps: tree64's primary
+    // ray is 100 steps at LOD 0, so a floor 46 units below is only reachable by rays steeper than
+    // about 30 degrees. Everything shallower missed, and tree64 writes a miss as black -- the whole
+    // frame went dark while the other renderers, which coarsen to LOD 1-2 and reach much further,
+    // looked fine.
+    const float eyeHeight = 8.0f * voxelScale;
     projv::utils::VoxelPick ground = projv::utils::pickVoxel(
         scene,
         vec3(framing.position.x, boundsMax.y + radius * 0.1f, framing.position.z),

@@ -28,14 +28,17 @@ if(NOT PROJV_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
 endif()
 
-# CMake's stock RelWithDebInfo is -O2. This engine and its examples are compute-bound in ways that
-# care -- voxelization, noise generation, tree64 construction -- and the previous build hard-appended
-# -O3 to every configuration, so -O2 here would be a silent slowdown against what this code was
-# developed and profiled against. Raise the default, but leave it overridable.
-if(NOT CMAKE_CXX_FLAGS_RELWITHDEBINFO)
-    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g -DNDEBUG" CACHE STRING
-        "Flags used by the CXX compiler during RelWithDebInfo builds." FORCE)
-endif()
+# This engine and its examples are compute-bound in ways that care -- voxelization, noise
+# generation, tree64 construction -- and the previous build hard-appended -O3 to every
+# configuration, so CMake's stock RelWithDebInfo (-O2) would be a silent slowdown against what this
+# code was developed and profiled against.
+#
+# Applied per target rather than by raising CMAKE_CXX_FLAGS_RELWITHDEBINFO globally: that reaches
+# the vendored third-party code too, and Assimp's generated IFC readers are large enough that GCC
+# has been seen to segfault compiling them at -O3. Our code wants the optimisation; their code
+# should build the way upstream expects.
+set(PROJV_OPTIMISED_BUILD_FLAGS
+    $<$<AND:$<NOT:$<CONFIG:Debug>>,$<CXX_COMPILER_ID:GNU,Clang,AppleClang>>:-O3>)
 
 # Archives land in the build tree. They used to be written to an in-source lib/, which is
 # how that directory accumulated archives for targets that no longer existed and handed
@@ -234,6 +237,7 @@ endif()
 target_compile_options(projectV PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    ${PROJV_OPTIMISED_BUILD_FLAGS}
 )
 
 # glm and spdlog are used header-only, which is how they were used before the build was

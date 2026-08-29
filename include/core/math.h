@@ -15,6 +15,8 @@
 #  endif
 #endif
 
+#include <vector>
+
 #include "bx/math.h"
 #include "bx/bx.h"
 #include "glm/glm.hpp"

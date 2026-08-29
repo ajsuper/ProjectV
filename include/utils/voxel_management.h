@@ -1,6 +1,8 @@
 #ifndef PROJECTV_VOXEL_MANAGEMENT_H
 #define PROJECTV_VOXEL_MANAGEMENT_H
 
+
+#include <memory>
 #include <vector>
 #include <stdint.h>
 #include <iostream>

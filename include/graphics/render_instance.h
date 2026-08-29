@@ -2,6 +2,9 @@
 #define PROJV_RENDER_INSTANCE_H
 
 
+
+#include <string>
+#include <unordered_map>
 #include <cstdint>
 #include <memory>
 #include <iostream>

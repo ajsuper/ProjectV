@@ -32,6 +32,11 @@ function(projv_add_example name)
     add_executable(${name} ${ARG_SOURCES})
     target_link_libraries(${name} PRIVATE ProjectV::projectV ${ARG_LIBRARIES})
 
+    # Examples do real work on the CPU -- procedural generation, voxelization, tree64 builds -- so
+    # they get the same optimisation level as the engine. See the note in the top-level
+    # CMakeLists.txt for why this is per target rather than a global flag.
+    target_compile_options(${name} PRIVATE ${PROJV_OPTIMISED_BUILD_FLAGS})
+
     foreach(dir IN LISTS ARG_INCLUDE_DIRS)
         target_include_directories(${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/${dir}")
     endforeach()
