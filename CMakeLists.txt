@@ -28,6 +28,15 @@ if(NOT PROJV_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
 endif()
 
+# CMake's stock RelWithDebInfo is -O2. This engine and its examples are compute-bound in ways that
+# care -- voxelization, noise generation, tree64 construction -- and the previous build hard-appended
+# -O3 to every configuration, so -O2 here would be a silent slowdown against what this code was
+# developed and profiled against. Raise the default, but leave it overridable.
+if(NOT CMAKE_CXX_FLAGS_RELWITHDEBINFO)
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g -DNDEBUG" CACHE STRING
+        "Flags used by the CXX compiler during RelWithDebInfo builds." FORCE)
+endif()
+
 # Archives land in the build tree. They used to be written to an in-source lib/, which is
 # how that directory accumulated archives for targets that no longer existed and handed
 # stale objects to anything linking -L lib.
@@ -263,7 +272,13 @@ endif()
 include(ProjectVShaders)
 
 if(PROJV_BUILD_EXAMPLES)
-    add_subdirectory(docs/examples)
+    add_subdirectory(examples)
+endif()
+
+# Manual tests need a display and a GPU, so they are opt-in even in a developer build.
+option(PROJV_BUILD_MANUAL_TESTS "Build the manual (windowed) test harnesses" OFF)
+if(PROJV_BUILD_MANUAL_TESTS)
+    add_subdirectory(tests/manual)
 endif()
 
 # =====================================================================================

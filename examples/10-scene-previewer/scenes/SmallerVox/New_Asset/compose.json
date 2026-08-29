@@ -1,0 +1,431 @@
+{
+  "components": [
+    {
+      "mutability": "locked",
+      "name": "Box",
+      "palette": [
+        {
+          "color": [718, 718, 672],
+          "name": "default"
+        },
+        {
+          "color": [0, 0, 0]
+        },
+        {
+          "color": [563, 542, 512],
+          "name": "stone.fresh.1"
+        },
+        {
+          "color": [512, 493, 464],
+          "name": "stone.fresh.2"
+        },
+        {
+          "color": [460, 444, 417],
+          "name": "stone.fresh.3"
+        },
+        {
+          "color": [409, 395, 370],
+          "name": "stone.fresh.4"
+        },
+        {
+          "color": [358, 346, 323],
+          "name": "stone.fresh.5"
+        },
+        {
+          "color": [307, 297, 276],
+          "name": "stone.fresh.6"
+        },
+        {
+          "color": [307, 573, 184],
+          "name": "grass.lush.1"
+        },
+        {
+          "color": [278, 523, 168],
+          "name": "grass.lush.2"
+        },
+        {
+          "color": [248, 474, 152],
+          "name": "grass.lush.3"
+        },
+        {
+          "color": [219, 424, 136],
+          "name": "grass.lush.4"
+        },
+        {
+          "color": [190, 374, 120],
+          "name": "grass.lush.5"
+        },
+        {
+          "color": [161, 324, 104],
+          "name": "grass.lush.6"
+        },
+        {
+          "color": [132, 275, 88],
+          "name": "grass.lush.7"
+        },
+        {
+          "color": [102, 225, 72],
+          "name": "grass.lush.8"
+        },
+        {
+          "color": [593, 552, 266],
+          "name": "grass.dry.1"
+        },
+        {
+          "color": [544, 504, 243],
+          "name": "grass.dry.2"
+        },
+        {
+          "color": [494, 456, 219],
+          "name": "grass.dry.3"
+        },
+        {
+          "color": [444, 408, 196],
+          "name": "grass.dry.4"
+        },
+        {
+          "color": [395, 360, 172],
+          "name": "grass.dry.5"
+        },
+        {
+          "color": [345, 311, 149],
+          "name": "grass.dry.6"
+        },
+        {
+          "color": [295, 263, 126],
+          "name": "grass.dry.7"
+        },
+        {
+          "color": [246, 215, 102],
+          "name": "grass.dry.8"
+        },
+        {
+          "color": [641, 821, 970],
+          "ior": 1.5,
+          "name": "water.main",
+          "transparency": 0.8509804010391235
+        },
+        {
+          "color": [164, 348, 102],
+          "name": "grass.blade.1"
+        },
+        {
+          "color": [273, 471, 157],
+          "name": "grass.blade.2"
+        },
+        {
+          "color": [382, 593, 211],
+          "name": "grass.blade.3"
+        },
+        {
+          "color": [491, 716, 266],
+          "name": "grass.blade.4"
+        },
+        {
+          "color": [246, 450, 164],
+          "name": "grass.stem"
+        },
+        {
+          "color": [286, 563, 225],
+          "name": "clover.leaf"
+        },
+        {
+          "color": [972, 972, 941],
+          "name": "daisy.petal"
+        },
+        {
+          "color": [982, 839, 256],
+          "name": "daisy.eye"
+        },
+        {
+          "color": [798, 133, 113],
+          "name": "poppy.petal"
+        },
+        {
+          "color": [102, 92, 92],
+          "name": "poppy.eye"
+        },
+        {
+          "color": [1003, 870, 205],
+          "name": "buttercup"
+        },
+        {
+          "color": [389, 348, 818],
+          "name": "bluebell"
+        },
+        {
+          "color": [931, 931, 890],
+          "name": "dandelion.puff"
+        },
+        {
+          "color": [1003, 818, 153],
+          "name": "dandelion.head"
+        },
+        {
+          "color": [266, 184, 123],
+          "name": "tree.bark.1"
+        },
+        {
+          "color": [358, 261, 174],
+          "name": "tree.bark.2"
+        },
+        {
+          "color": [450, 338, 225],
+          "name": "tree.bark.3"
+        },
+        {
+          "color": [102, 266, 92],
+          "name": "tree.leaf.1"
+        },
+        {
+          "color": [198, 389, 136],
+          "name": "tree.leaf.2"
+        },
+        {
+          "color": [293, 512, 181],
+          "name": "tree.leaf.3"
+        },
+        {
+          "color": [389, 634, 225],
+          "name": "tree.leaf.4"
+        },
+        {
+          "color": [72, 205, 133],
+          "name": "tree.needle.1"
+        },
+        {
+          "color": [138, 307, 179],
+          "name": "tree.needle.2"
+        },
+        {
+          "color": [205, 409, 225],
+          "name": "tree.needle.3"
+        },
+        {
+          "color": [962, 777, 839],
+          "name": "tree.blossom"
+        },
+        {
+          "color": [307, 266, 225],
+          "name": "tree.dead.1"
+        },
+        {
+          "color": [471, 430, 379],
+          "name": "tree.dead.2"
+        },
+        {
+          "color": [317, 235, 153],
+          "name": "tree.branch.1"
+        },
+        {
+          "color": [425, 327, 220],
+          "name": "tree.branch.2"
+        },
+        {
+          "color": [532, 419, 286],
+          "name": "tree.branch.3"
+        },
+        {
+          "color": [358, 317, 276],
+          "name": "tree.deadlimb.1"
+        },
+        {
+          "color": [542, 501, 450],
+          "name": "tree.deadlimb.2"
+        },
+        {
+          "color": [851, 777, 777],
+          "name": "material 57"
+        },
+        {
+          "color": [614, 593, 552],
+          "name": "rock.1"
+        },
+        {
+          "color": [567, 548, 511],
+          "name": "rock.2"
+        },
+        {
+          "color": [521, 503, 469],
+          "name": "rock.3"
+        },
+        {
+          "color": [474, 458, 427],
+          "name": "rock.4"
+        },
+        {
+          "color": [428, 413, 385],
+          "name": "rock.5"
+        },
+        {
+          "color": [381, 368, 343],
+          "name": "rock.6"
+        },
+        {
+          "color": [335, 323, 301],
+          "name": "rock.7"
+        },
+        {
+          "color": [288, 278, 259],
+          "name": "rock.8"
+        },
+        {
+          "color": [242, 232, 218],
+          "name": "rock.9"
+        },
+        {
+          "color": [195, 187, 176],
+          "name": "rock.10"
+        },
+        {
+          "color": [149, 142, 134],
+          "name": "rock.11"
+        },
+        {
+          "color": [102, 97, 92],
+          "name": "rock.12"
+        },
+        {
+          "color": [1023, 1023, 1023],
+          "name": "fire.envelope"
+        },
+        {
+          "color": [1023, 778, 433],
+          "emissiveStrength": 20.749433517456055,
+          "name": "lamp"
+        },
+        {
+          "color": [737, 716, 675],
+          "name": "shade.1"
+        },
+        {
+          "color": [698, 679, 640],
+          "name": "shade.2"
+        },
+        {
+          "color": [660, 641, 604],
+          "name": "shade.3"
+        },
+        {
+          "color": [622, 604, 569],
+          "name": "shade.4"
+        },
+        {
+          "color": [584, 566, 533],
+          "name": "shade.5"
+        },
+        {
+          "color": [546, 529, 498],
+          "name": "shade.6"
+        },
+        {
+          "color": [507, 491, 462],
+          "name": "shade.7"
+        },
+        {
+          "color": [469, 454, 427],
+          "name": "shade.8"
+        },
+        {
+          "color": [431, 416, 391],
+          "name": "shade.9"
+        },
+        {
+          "color": [393, 379, 356],
+          "name": "shade.10"
+        },
+        {
+          "color": [355, 341, 321],
+          "name": "shade.11"
+        },
+        {
+          "color": [316, 303, 285],
+          "name": "shade.12"
+        },
+        {
+          "color": [278, 266, 250],
+          "name": "shade.13"
+        },
+        {
+          "color": [240, 228, 214],
+          "name": "shade.14"
+        },
+        {
+          "color": [202, 191, 179],
+          "name": "shade.15"
+        },
+        {
+          "color": [164, 153, 143],
+          "name": "shade.16"
+        },
+        {
+          "color": [701, 923, 1023],
+          "emissiveStrength": 8.724061965942383,
+          "name": "fire.origin"
+        },
+        {
+          "color": [1023, 805, 380],
+          "emission": [1023, 216, 259],
+          "emissiveStrength": 56.200069427490234,
+          "name": "fire.middle"
+        },
+        {
+          "color": [1023, 498, 194],
+          "emission": [1023, 155, 116],
+          "emissiveStrength": 98.70149230957031,
+          "name": "fire.top"
+        },
+        {
+          "color": [1023, 1023, 1023],
+          "name": "fire.envelope"
+        }
+      ],
+      "position": [-407.0, -128.0, -488.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Box.data",
+      "type": "data"
+    },
+    {
+      "mutability": "locked",
+      "name": "Box 2",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [1023, 1023, 1023],
+          "ior": 1.2109375,
+          "transparency": 1.0
+        },
+        {
+          "color": [718, 718, 672]
+        }
+      ],
+      "position": [-410.0, -135.0, -292.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Box_2.data",
+      "type": "data"
+    },
+    {
+      "mutability": "locked",
+      "name": "Box 3",
+      "op": "union",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        }
+      ],
+      "position": [510.0, 801.0, 387.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Box_3.data",
+      "type": "data"
+    }
+  ],
+  "name": "New Asset",
+  "version": 1
+}

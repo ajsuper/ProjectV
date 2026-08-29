@@ -18,7 +18,7 @@
 	path = external/bx
 	url = https://github.com/bkaradzic/bx.git
 [submodule "docs/examples/MeshVoxelizer/external/assimp"]
-	path = docs/examples/MeshVoxelizer/external/assimp
+	path = examples/20-mesh-voxelizer/external/assimp
 	url = https://github.com/assimp/assimp.git
 	shallow = true
 [submodule "external/imgui"]
@@ -26,7 +26,7 @@
 	url = https://github.com/ocornut/imgui.git
 	branch = docking
 [submodule "docs/examples/SceneEditor/external/lua"]
-	path = docs/examples/SceneEditor/external/lua
+	path = examples/60-scene-editor/external/lua
 	url = https://github.com/lua/lua.git
 # bgfx.cmake is what vcpkg's bgfx port is built from, so the submodule build and the vcpkg
 # build produce the same targets. It is pinned to a revision contemporaneous with the bgfx, bx

@@ -1,0 +1,49 @@
+{
+    "uniforms": [
+        {"name": "windowRes", "type": "vec4"},
+        {"name": "sunDir",    "type": "vec4"},
+        {"name": "cameraPos", "type": "vec4"},
+        {"name": "cameraDir", "type": "vec4"},
+        {"name": "prevCameraPos", "type": "vec4"},
+        {"name": "prevCameraDir", "type": "vec4"},
+        {"name": "frameCount", "type": "vec4"},
+        {"name": "texelSize", "type": "vec4"}
+    ],
+    "shaders": [
+        {"shaderID": 1, "path": "./renderers/fast/shaders/gbuffer_shade.bin"},
+        {"shaderID": 2, "path": "./renderers/fast/shaders/rtao.bin"},
+        {"shaderID": 3, "path": "./renderers/fast/shaders/combine_blur.bin"},
+        {"shaderID": 4, "path": "./renderers/fast/shaders/taa.bin"},
+        {"shaderID": 5, "path": "./renderers/fast/shaders/display.bin"},
+        {"shaderID": 6, "path": "./renderers/fast/shaders/sky_reproject.bin"}
+    ],
+    "textures": [
+        {"texID": 1,  "name": "resourceTexture", "format": "RGBA8",        "resX": 256,  "resY": 256,  "sizeMode": "fixed", "origin": "CPUBuffer"},
+
+        {"texID": 2,  "name": "gDirect",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 3,  "name": "gPos",      "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 4,  "name": "gNormal",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 5,  "name": "gAmbient",  "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+
+        {"texID": 6,  "name": "aoRaw",     "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+
+        {"texID": 7,  "name": "curColor",  "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 8,  "name": "curPos",    "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 9,  "name": "curNormal", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+
+        {"texID": 10, "name": "histColor",  "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 11, "name": "histPos",    "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 12, "name": "histNormal", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+
+        {"texID": 13, "name": "accumSky",   "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 14, "name": "skyPos",     "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 15, "name": "skyNormal",  "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"}
+    ],
+    "framebuffers": [
+        {"fboID": 1, "textureIDs": [2, 3, 4, 5]},
+        {"fboID": 2, "textureIDs": [6]},
+        {"fboID": 3, "textureIDs": [7, 8, 9]},
+        {"fboID": 4, "textureIDs": [10, 11, 12]},
+        {"fboID": 5, "textureIDs": [13, 14, 15]}
+    ]
+}

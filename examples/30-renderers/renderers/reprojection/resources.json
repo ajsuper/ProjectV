@@ -1,0 +1,34 @@
+{
+    "uniforms": [
+        {"name": "windowRes", "type": "vec4"},
+        {"name": "sunDir",    "type": "vec4"},
+        {"name": "cameraPos", "type": "vec4"},
+        {"name": "cameraDir", "type": "vec4"},
+        {"name": "prevCameraPos", "type": "vec4"},
+        {"name": "prevCameraDir", "type": "vec4"},
+        {"name": "frameCount", "type": "vec4"},
+        {"name": "texelSize", "type": "vec4"}
+    ],
+    "shaders": [
+        {"shaderID": 1, "path": "./renderers/reprojection/shaders/path_trace.bin"},
+        {"shaderID": 2, "path": "./renderers/reprojection/shaders/reproject_accumulate.bin"},
+        {"shaderID": 3, "path": "./renderers/reprojection/shaders/display.bin"},
+        {"shaderID": 4, "path": "./renderers/reprojection/shaders/denoise.bin"}
+    ],
+    "textures": [
+        {"texID": 1, "name": "resourceTexture", "format": "RGBA8",        "resX": 256,  "resY": 256,  "sizeMode": "fixed", "origin": "CPUBuffer"},
+        {"texID": 2, "name": "curColor",        "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 3, "name": "curPos",          "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 4, "name": "curNormal",       "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 5, "name": "curAlbedo",       "format": "RGBA8",        "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 6, "name": "histColor",       "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 7, "name": "histPos",         "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 8, "name": "histNormal",      "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 9, "name": "denoisedColor",   "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"}
+    ],
+    "framebuffers": [
+        {"fboID": 1, "textureIDs": [2, 3, 4, 5]},
+        {"fboID": 2, "textureIDs": [6, 7, 8]},
+        {"fboID": 3, "textureIDs": [9]}
+    ]
+}

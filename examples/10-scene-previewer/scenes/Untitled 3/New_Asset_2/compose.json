@@ -1,0 +1,28 @@
+{
+  "components": [
+    {
+      "mutability": "locked",
+      "name": "Box 2",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [75, 432, 44]
+        },
+        {
+          "color": [109, 678, 253],
+          "name": "material 2"
+        }
+      ],
+      "position": [-145.0, 46.0, -117.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Box_2.data",
+      "type": "data"
+    }
+  ],
+  "name": "New Asset 2",
+  "version": 1
+}

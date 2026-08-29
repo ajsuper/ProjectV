@@ -1,0 +1,12 @@
+{
+    "uniforms": [
+        {"name": "windowRes", "type": "vec4"},
+        {"name": "cameraPos", "type": "vec4"},
+        {"name": "cameraDir", "type": "vec4"}
+    ],
+    "shaders": [
+        {"shaderID": 1, "path": "./helloRenderer/helloShaders/hello.bin"}
+    ],
+    "textures": [],
+    "framebuffers": []
+}

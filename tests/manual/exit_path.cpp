@@ -40,7 +40,7 @@ namespace {
     bool g_shutdownRan = false;
     int  g_framesBeforeClose = 10;
 
-    // Borrows the ScenePreviewer's renderer so the test drives a real ConstructedRenderer
+    // Borrows the scene previewer's renderer so the test drives a real ConstructedRenderer
     // through the real submit path rather than a stand-in. The scene is left empty: this test
     // is about the loop, not about what is drawn.
     //
@@ -50,7 +50,7 @@ namespace {
     // the folder from elsewhere finds the JSON and then fails on every shader it names.
     // executableDirectory() does not help here: the coupling is in the scene data, not the call.
     // Making renderer folders relocatable is its own change; this test just obeys the rule.
-    const char* kExampleDir      = "../../docs/examples/ScenePreviewer";
+    const char* kExampleDir      = "../../examples/10-scene-previewer";
     const char* kRendererDir     = "./previewRenderer/";
     const char* kVertexShaderBin = "./previewRenderer/previewShaders/vs_quad.bin";
 

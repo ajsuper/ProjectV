@@ -13,11 +13,11 @@ SceneTest/
 # A brush's tuned parameter values, written beside the brush by the SceneEditor's Brush Lab. The .lua
 # is the brush and belongs in version control; the sidecar is one user's dial settings and is rewritten
 # every time a slider moves.
-docs/examples/SceneEditor/brushes/*.params.json
+examples/60-scene-editor/brushes/*.params.json
 
 # Allow example models
-!docs/examples/PathTracer/SponzaScene/**/*.bin
-!docs/examples/MeshVoxelizer/testScene/**/*.bin
+!examples/30-renderers/SponzaScene/**/*.bin
+!examples/20-mesh-voxelizer/testScene/**/*.bin
 
 # Ignore VS Code config files
 .vscode/
@@ -28,9 +28,9 @@ docs/examples/SceneEditor/brushes/*.params.json
 
 # Ignore the large SanMiguel LOD bakes. These are MeshVoxelizer output (290 MiB - 4.7 GiB) and
 # every one of them is past GitHub's 100 MiB per-file ceiling. Re-bake them from the source mesh.
-docs/examples/ScenePreviewer/scenes/SanMiguel-8192/
-docs/examples/ScenePreviewer/scenes/SanMiguel-16384/
-docs/examples/ScenePreviewer/scenes/SanMiguel-32768/
+examples/10-scene-previewer/scenes/SanMiguel-8192/
+examples/10-scene-previewer/scenes/SanMiguel-16384/
+examples/10-scene-previewer/scenes/SanMiguel-32768/
 
 # Ignore RenderDoc captures
 *.rdc

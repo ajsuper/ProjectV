@@ -149,7 +149,7 @@ Each loaded `compose.json` component becomes exactly one `ComponentRecord`:
 The editing mechanism (`utils::addVoxelsToComponent`, `utils::removeVoxelsFromComponent`) is
 addressed by `ComponentHandle` so callers never need to know or care which kind the component
 turned out to be. `projv::resolveComponentLocation(scene, chunkHandle)` maps a chunk handle back
-to its owning component (used by PathTracer's picking).
+to its owning component (used by the renderer gallery's picking).
 
 ### GPU side: `GPUData`
 

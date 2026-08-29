@@ -3,7 +3,7 @@ Hello!! Thank you for visiting our contributions file! If you choose to contribu
 
 ### Changes to the API:
 
-If you make any changes to the API that might interfere with existing programs, please ensure that these changes are reflected in the examples section [EXAMPLES](/docs/examples)
+If you make any changes to the API that might interfere with existing programs, please ensure that these changes are reflected in the examples section [EXAMPLES](/examples)
 
 ### Philosophy
 

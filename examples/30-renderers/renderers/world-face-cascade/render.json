@@ -1,0 +1,74 @@
+{
+    "renderer": [
+        {
+            "shaderID": 1,
+            "frameBufferInputIDs": [],
+            "resourceTexturesIDs": [],
+            "frameBufferOutputID": 1,
+            "multiPass": 0
+        },
+        {
+            "shaderID": 2,
+            "frameBufferInputIDs": [1],
+            "resourceTexturesIDs": [],
+            "frameBufferOutputID": 2,
+            "multiPass": 0
+        },
+        {
+            "shaderID": 3,
+            "frameBufferInputIDs": [1, 2],
+            "resourceTexturesIDs": [],
+            "frameBufferOutputID": 3,
+            "multiPass": 0
+        },
+        {
+            "shaderID": 4,
+            "frameBufferInputIDs": [1, 3],
+            "resourceTexturesIDs": [],
+            "frameBufferOutputID": 4,
+            "multiPass": 0
+        },
+        {
+            "shaderID": 5,
+            "frameBufferInputIDs": [1, 4],
+            "resourceTexturesIDs": [],
+            "frameBufferOutputID": 5,
+            "multiPass": 0
+        },
+        {
+            "shaderID": 6,
+            "frameBufferInputIDs": [1, 5],
+            "resourceTexturesIDs": [],
+            "frameBufferOutputID": 6,
+            "multiPass": 0
+        },
+        {
+            "shaderID": 7,
+            "frameBufferInputIDs": [6, 7, 1],
+            "resourceTexturesIDs": [],
+            "frameBufferOutputID": 7,
+            "multiPass": 0
+        },
+        {
+            "shaderID": 8,
+            "frameBufferInputIDs": [7, 1, 5],
+            "resourceTexturesIDs": [],
+            "frameBufferOutputID": 8,
+            "multiPass": 0
+        },
+        {
+            "shaderID": 9,
+            "frameBufferInputIDs": [8, 1, 9],
+            "resourceTexturesIDs": [],
+            "frameBufferOutputID": 9,
+            "multiPass": 0
+        },
+        {
+            "shaderID": 10,
+            "frameBufferInputIDs": [9],
+            "resourceTexturesIDs": [],
+            "frameBufferOutputID": -1,
+            "multiPass": 0
+        }
+    ]
+}

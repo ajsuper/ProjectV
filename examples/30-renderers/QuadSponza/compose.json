@@ -1,0 +1,9 @@
+{
+    "components": [
+        {"type": "asset", "source": "sponza_a", "position": [-400, 0, -400], "name": "sponza_a"},
+        {"type": "asset", "source": "sponza_b", "position": [ 400, 0, -400], "name": "sponza_b"},
+        {"type": "asset", "source": "sponza_c", "position": [-400, 0,  400], "name": "sponza_c"},
+        {"type": "asset", "source": "sponza_d", "position": [ 400, 0,  400], "name": "sponza_d"}
+    ],
+    "version": 1
+}

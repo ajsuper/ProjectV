@@ -1,0 +1,68 @@
+{
+  "components": [
+    {
+      "mutability": "locked",
+      "name": "Box",
+      "palette": [
+        {
+          "color": [547, 573, 602],
+          "name": "default"
+        },
+        {
+          "color": [0, 0, 0]
+        },
+        {
+          "color": [180, 651, 0],
+          "name": "material 2"
+        },
+        {
+          "color": [678, 766, 788],
+          "name": "material 3"
+        },
+        {
+          "color": [43, 547, 38],
+          "name": "material 4"
+        },
+        {
+          "color": [970, 1000, 1016],
+          "glossiness": 1.0,
+          "ior": 1.34375,
+          "name": "material 5",
+          "transparency": 0.9686274528503418
+        },
+        {
+          "color": [679, 852, 912],
+          "name": "material 6"
+        }
+      ],
+      "position": [-709.0, -129.0, -727.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Box.data",
+      "type": "data"
+    },
+    {
+      "mutability": "locked",
+      "name": "Box 2 (#302)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [75, 432, 44]
+        },
+        {
+          "color": [109, 678, 253]
+        }
+      ],
+      "position": [-433.0, -15.0, -429.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Box_2___302_.data",
+      "type": "data"
+    }
+  ],
+  "name": "New Asset",
+  "version": 1
+}

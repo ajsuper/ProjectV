@@ -66,8 +66,11 @@ Examples land in `build/examples/<name>/` with their renderer folders and scenes
 binary. Run them from there — the engine resolves relative paths against the working directory:
 
 ```bash
-cd build/examples/scene_previewer && ./scene_previewer scenes/StonehillCastle
+cd build/examples/hello_voxel && ./hello_voxel
 ```
+
+The examples are numbered in reading order — `00-hello-voxel` is the smallest thing that draws a
+voxel, `60-scene-editor` is a complete tool. See [examples/README.md](/examples/README.md).
 
 #### Build options
 
@@ -81,6 +84,9 @@ cd build/examples/scene_previewer && ./scene_previewer scenes/StonehillCastle
 
 Presets: `dev` (submodule dependencies, examples on), `release` (optimised, minimal logging),
 `vcpkg` (dependencies via `find_package`).
+
+For everything else — platform notes, the shader rule, troubleshooting — see
+[docs/BUILDING.md](/docs/BUILDING.md).
 
 **On installing.** `cmake --install build --prefix <dir>` produces a config package a consumer
 finds with `find_package(ProjectV CONFIG REQUIRED)`. A submodule build installs the vendored
@@ -124,7 +130,7 @@ From the system:
 - Up-to-date graphics drivers with a Vulkan (Linux) or Metal (macOS) capable GPU
 
 Two examples carry submodules of their own and are skipped, with a message, when they are not
-checked out: MeshVoxelizer needs Assimp, and SceneEditor needs ImGui and Lua. `git submodule
+checked out: `20-mesh-voxelizer` needs Assimp, and `60-scene-editor` needs ImGui and Lua. `git submodule
 update --init --recursive` gets everything.
 
 ### Modules
@@ -196,11 +202,12 @@ const auto assets = projv::core::executableDirectory() / "assets";
 scene = projv::utils::loadComposeFromDisk((assets / "scenes/Castle").string());
 ```
 
-For worked examples, see [the examples](/docs/examples).
+For worked examples, see [examples/README.md](/examples/README.md) — seven programs ordered so
+that reading them in sequence teaches the engine.
 
 ### Contributing
 
-This is my first time open sourcing any project, and my first project on this scale. If there is anything that I should've done differently, or if something could be greatly improved, please feel free to change it or let me know! ProjectV is open source under the [MIT License](/LICENSE.md) and is welcoming as many contributors as possible! All contributions are welcome, whether it's features additions, optimizations, or just spelling corrections. If you choose to contribute, please visit the [MIT License](/LICENSE.md) and make sure you read the [CODE_OF_CONDUCT.md](/CODE_OF_CONDUCT.md). Also be sure to visit [CONTRIBUTING.md](/CONTRIBUTING.md) to get instructions on how to contribute! Thank you!!
+This is my first time open sourcing any project, and my first project on this scale. If there is anything that I should've done differently, or if something could be greatly improved, please feel free to change it or let me know! ProjectV is open source under the [MIT License](/LICENSE) and is welcoming as many contributors as possible! All contributions are welcome, whether it's features additions, optimizations, or just spelling corrections. If you choose to contribute, please visit the [MIT License](/LICENSE) and make sure you read the [CODE_OF_CONDUCT.md](/CODE_OF_CONDUCT.md). Also be sure to visit [CONTRIBUTING.md](/CONTRIBUTING.md) to get instructions on how to contribute! Thank you!!
 
 #### Citations
 

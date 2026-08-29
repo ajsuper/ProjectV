@@ -219,7 +219,7 @@ Grid volumes can be loaded **lazily**: `loadComposeFromDisk(folder, &streamingCo
 - **Per-block IO.** `readDataFileHeader` reads only a `.data`'s header + block table (grid coords + byte offsets/lengths, ~40 bytes/block, no geometry); `readDataBlock` seeks and reads exactly one block. The block table already in the `.data` format *is* the streaming index.
 - **Materialize / release.** `materializeGridCell(scene, ctx, grid, cell)` reads a cell's block, dedup-or-interns its refcounted blob, synthesizes the chunk header from the grid descriptor, and enqueues an add; `releaseGridCell` enqueues a remove. Both are coordinate-level and **policy-free**.
 - **Apply seam.** Producers enqueue `PendingSceneMutation`s; `applySceneMutations` drains them through the incremental GPU primitives and rebuilds the small scene tables **once per frame** (not once per cell). Live edits feed the same seam via `applyChunkEdit`.
-- **Residency is user policy.** *Which* cells should be resident is decided by a user system — keyed on one camera, several (split-screen), networked interest, portals, predicted paths, anything. The engine ships **no default**; the PathTracer example includes one interest-source policy (`residencyPolicy.h`), selectable/replaceable like a renderer module.
+- **Residency is user policy.** *Which* cells should be resident is decided by a user system — keyed on one camera, several (split-screen), networked interest, portals, predicted paths, anything. The engine ships **no default**; the renderer gallery example includes one interest-source policy (`residencyPolicy.h`), selectable/replaceable like a renderer module.
 
 **Memory & scaling.** The engine's mandatory footprint is only `O(#grids)` descriptors plus the resident set; the on-disk block-table index is read on demand and held in a **budgeted** LRU cache (a policy choice), never fully pinned. The remaining per-grid ceiling is the dense `SceneGrid.cellToChunk` (and its GPU `cellMap`), sized by a grid's cell count — so worlds scale by composing **many bounded grid volumes**, each streamed independently. Lifting that ceiling for a single unbounded volume would need sparse/hierarchical grids (deferred).
 
@@ -236,7 +236,7 @@ Grid volumes can be loaded **lazily**: `loadComposeFromDisk(folder, &streamingCo
 | Chunk ID | authored in file | assigned internally on load |
 | Status | **Removed** — no loader/writer remains in the engine | Current; produced by MeshVoxelizer, loaded by `loadComposeFromDisk` |
 
-The legacy loader/writer (`utils/voxel_io.h` / `loadSceneFromDisk` / `writeSceneToDisk`) was removed because the per-chunk `.bin` layout offered nothing Compose doesn't, and the only existing scenes can be regenerated from their source meshes via [MeshVoxelizer](/docs/examples/MeshVoxelizer). The intrinsic fields a `.data` carries (`resolution`, `voxelScale`, geometry `uint32[]`, `voxelTypeData` `uint32[]`) are exactly the per-chunk fields the old `loadChunkFromDisk` read.
+The legacy loader/writer (`utils/voxel_io.h` / `loadSceneFromDisk` / `writeSceneToDisk`) was removed because the per-chunk `.bin` layout offered nothing Compose doesn't, and the only existing scenes can be regenerated from their source meshes via [MeshVoxelizer](/examples/20-mesh-voxelizer). The intrinsic fields a `.data` carries (`resolution`, `voxelScale`, geometry `uint32[]`, `voxelTypeData` `uint32[]`) are exactly the per-chunk fields the old `loadChunkFromDisk` read.
 
 ---
 

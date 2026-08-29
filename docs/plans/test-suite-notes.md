@@ -98,12 +98,14 @@ so the claim had gone stale without anyone noticing. A test would have kept it h
 Note the committed `.bin` files can mask a broken shader source: delete them before
 compiling, or the test only proves the old artefacts still exist.
 
-**Every renderer folder on disk should be reachable.** PathTracer ships seven renderer
-folders; its menu offers six. `radianceCascadeRenderer/` is complete — its shaders compile
-and its `resources.json` is valid — but nothing can select it. A test asserting that every
-`*/render.json` under an example is reachable from that example's own entry points would
-have caught it. The `--renderer <name>` rehost removes the failure mode by making the
-folder the unit of selection.
+**Every renderer folder on disk should be reachable.** The path tracer shipped seven renderer
+folders and offered six; `radianceCascadeRenderer/` was complete — shaders compiled, valid
+`resources.json` — but nothing could select it.
+
+**Resolved** by the `30-renderers` rehost: `--renderer <name>` makes the folder the unit of
+selection, and `--list` enumerates them, so an unreachable folder is now impossible by
+construction rather than merely noticed. Worth a test anyway: assert that every directory under
+`renderers/` appears in `--list`.
 
 ## 6. Scene / Compose I/O — gap, and the highest-value pure-CPU target
 
@@ -151,6 +153,22 @@ it should become the seed of the real suite rather than being deleted.
   installed package from outside CMake would catch this class of change directly.
 
 ---
+
+## 10. Asset paths and relocatability — gap
+
+Three separate failures in this class turned up while restructuring, all invisible until a
+directory moved:
+
+- A relative symlink between examples (`edit_demo` → `PathTracer`'s `stb_image.h`).
+- A runtime `chdir` built from `__FILE__`, which baked the build machine's source path into the
+  binary.
+- Renderer folders naming their shaders relative to the process working directory inside
+  `resources.json`, so a renderer can only be loaded by a program standing in the right place.
+
+The first two are fixed. The third is structural and still true: it is why every example must be
+run from its own directory, and why `edit_demo` has to `chdir` into a *sibling* example's
+directory to borrow its renderer. A test that runs each example from `/` would catch regressions
+in the first two and document the third.
 
 ## Suggested shape
 

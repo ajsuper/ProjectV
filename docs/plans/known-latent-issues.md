@@ -130,3 +130,70 @@ this effort, rebuilding, and re-running: identical results, the same 80 pass and
 Plausibly these have been failing for some time without being seen: the driver's default scene is
 one of the v1 assets, so it could not run at all without being handed a different scene by hand.
 Worth a real look when the editing phases resume.
+
+---
+
+## 7. A relative symlink across the example tree
+
+`tests/manual/edit_demo/include/stb_image.h` was a symlink to
+`../../PathTracer/include/stb_image.h` -- a relative path into a *different* example's vendored
+copy. It broke the moment either directory was renamed, and surfaced as
+`fatal error: stb_image.h: No such file or directory` rather than as anything mentioning a symlink.
+
+**Resolved.** Vendored properly, which is what the other two consumers of that header already do.
+
+Worth noting as a pattern to avoid: sharing a vendored header between examples by symlink couples
+their directory layouts together invisibly, and a broken symlink reports as a missing file.
+
+## 8. `edit_demo` baked its author's source tree into the binary
+
+It called `fs::current_path(fs::path(__FILE__).parent_path() / "../PathTracer")` -- resolving
+`__FILE__` at runtime, so the binary only worked on a machine that still had the source checkout
+at the path it was compiled on, with that directory name.
+
+**Resolved.** It now derives its own location with `projv::core::executableDirectory()` and enters
+the renderer gallery's staged directory, because the renderer it borrows names its shaders relative
+to the working directory.
+
+---
+
+## 9. `setUniformToValue` rejects const arguments, at runtime
+
+`setUniformToValue` is a template that dispatches on the deduced type. Handed a `const vec3` --
+which is what you get from an ordinary `const` local, not just from a const struct member -- the
+dispatch finds no match and logs:
+
+```
+Function: setUniformToValue. Typename T for data is unknown.
+Missing uniform value: 'cameraDir'.
+```
+
+The uniform then silently never reaches the shader. It is a **runtime** failure for what is a
+type-level mistake, and the diagnostic, while unusually helpful, only fires once the program is
+running.
+
+Hit while writing `00-hello-voxel`, whose uniform locals were declared `const` out of habit.
+
+**Worth fixing properly** by decaying the deduced type (`std::remove_cv_t<std::remove_reference_t<T>>`)
+before the dispatch, so const and reference arguments simply work. That is a small change to a
+template in `gpu_interface.h`, deliberately not made as part of the build/docs work.
+
+## 10. `RelWithDebInfo` silently dropped optimisation from -O3 to -O2
+
+The pre-CMake-rewrite build hard-appended `-O3` to `CMAKE_CXX_FLAGS` for every configuration.
+Moving to proper build types meant `RelWithDebInfo` -- what the `dev` preset uses -- became CMake's
+stock `-O2`, a silent slowdown against what this code was developed and profiled against.
+
+**Resolved.** `CMAKE_CXX_FLAGS_RELWITHDEBINFO` now defaults to `-O3 -g -DNDEBUG`, overridable.
+
+## 11. Two examples carried paths that did not survive the directory rename
+
+- `50-terrain-generator` looked for tree assets at `../MeshVoxelizer/trees`. Corrected to
+  `../mesh_voxelizer/trees` (the build-tree sibling). The assets themselves are version 1 and will
+  not load either way; the example warns clearly and renders bare terrain.
+- `30-renderers` had its camera hardcoded to `(1018, 413, -330)`, a position tuned for the Sponza
+  scene. With `--scene` now accepting anything, that meant every other scene opened inside the
+  geometry or in the void. **Resolved** by porting the automatic framing from `10-scene-previewer`.
+
+It also printed the camera position via `core::warn` on **every frame** -- leftover debugging that
+made the log unreadable. Removed.

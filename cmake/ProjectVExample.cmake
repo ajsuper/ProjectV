@@ -62,6 +62,13 @@ function(projv_add_example name)
     # Staged after the build so freshly compiled .bin shaders are copied along with the
     # renderer JSON that names them.
     foreach(assetDir IN LISTS ARG_ASSET_DIRS)
+        # The staged copy would land on top of the executable itself, which sits at the root of
+        # the same directory. CMake reports this only as "Error copying directory", so name it.
+        if(assetDir STREQUAL name)
+            message(FATAL_ERROR
+                "projv_add_example(${name}): ASSET_DIRS contains \"${assetDir}\", which is also "
+                "the target name -- staging it would collide with the executable. Rename one.")
+        endif()
         add_custom_command(TARGET ${name} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory
                     "${CMAKE_CURRENT_SOURCE_DIR}/${assetDir}"
