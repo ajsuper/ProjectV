@@ -10,10 +10,10 @@
         {"name": "texelSize", "type": "vec4"}
     ],
     "shaders": [
-        {"shaderID": 1, "path": "./renderers/reprojection/shaders/path_trace.bin"},
-        {"shaderID": 2, "path": "./renderers/reprojection/shaders/reproject_accumulate.bin"},
-        {"shaderID": 3, "path": "./renderers/reprojection/shaders/display.bin"},
-        {"shaderID": 4, "path": "./renderers/reprojection/shaders/denoise.bin"}
+        {"shaderID": 1, "path": "./renderers/taa/shaders/path_trace.bin"},
+        {"shaderID": 2, "path": "./renderers/taa/shaders/reproject_accumulate.bin"},
+        {"shaderID": 3, "path": "./renderers/taa/shaders/display.bin"},
+        {"shaderID": 4, "path": "./renderers/taa/shaders/denoise.bin"}
     ],
     "textures": [
         {"texID": 1, "name": "resourceTexture", "format": "RGBA8",        "resX": 256,  "resY": 256,  "sizeMode": "fixed", "origin": "CPUBuffer"},

@@ -117,6 +117,11 @@ function(projv_compile_shaders)
 
     add_custom_target(${ARG_TARGET}_shaders DEPENDS ${allOutputs})
     add_dependencies(${ARG_TARGET} ${ARG_TARGET}_shaders)
+
+    # Published so the example helper can make the executable's link depend on the compiled shaders.
+    # Without that, a shader-only edit rebuilds the .bin but never re-runs the POST_BUILD staging
+    # step, and the example keeps loading the previously staged copy.
+    set_property(TARGET ${ARG_TARGET}_shaders PROPERTY PROJV_SHADER_OUTPUTS "${allOutputs}")
 endfunction()
 
 # --- helpers -------------------------------------------------------------------------

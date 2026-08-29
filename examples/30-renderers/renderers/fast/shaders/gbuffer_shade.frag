@@ -10,7 +10,7 @@ $input v_texcoord0
 // stable and "pretty" before any temporal work.
 //
 // Per pixel:
-//   - 1 primary ray (sub-pixel JITTERED each frame; the jitter is the only
+//   - 1 primary ray (deterministic -- no jitter, since there is no temporal pass
 //     stochastic element and exists purely so the temporal pass can resolve it
 //     into anti-aliased edges).
 //   - 1 HARD sun shadow ray (single deterministic direction -> crisp, reliable
@@ -47,18 +47,6 @@ uniform vec4 frameCount;   // x = frame index
 // renderers so they read as the same scene under the same light.
 #include <pjv_sun_sky.sc>
 
-// Van der Corput / Halton for the sub-pixel jitter (base 2 and 3).
-float halton(int i, int base) {
-    float f = 1.0;
-    float r = 0.0;
-    for (int k = 0; k < 16; k++) {
-        if (i <= 0) break;
-        f /= float(base);
-        r += f * float(i - (i / base) * base);
-        i /= base;
-    }
-    return r;
-}
 
 struct Hit {
     bool  hit;
@@ -136,13 +124,15 @@ bool sunVisible(vec3 p, vec3 n) {
 }
 
 void main() {
-    // Sub-pixel jitter: the ONLY stochastic input. Halton keeps the offsets well
-    // distributed over frames so the temporal pass converges to clean edges. The
-    // offset is +/-0.5 px (the standard TAA amount) -- a wider spread just samples
-    // across neighbouring pixels and over-softens the image.
-    int   frame  = int(frameCount.x);
-    vec2  jitter = vec2(halton(frame + 1, 2), halton(frame + 1, 3)) - 0.5;
-    vec2  uvJit  = v_texcoord0 + jitter / windowRes.xy;
+    // No sub-pixel jitter. It existed to feed a temporal pass that would average it into clean
+    // edges, and this renderer no longer has one -- see renderers/taa for where that technique
+    // lives now. Left in, the jitter is pure shimmer: every frame samples a different sub-pixel
+    // position and nothing ever reconciles them.
+    //
+    // With it gone this renderer is fully deterministic: two frames of a static scene are
+    // identical, which is the property that makes it usable as a stable comparison point for the
+    // temporal renderers next door.
+    vec2  uvJit  = v_texcoord0;
 
     Ray ray;
     ray.origin = cameraPos.xyz;

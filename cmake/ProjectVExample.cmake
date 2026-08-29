@@ -49,6 +49,7 @@ function(projv_add_example name)
     if(ARG_SHADERS)
         # One call for all of an example's shader directories; projv_compile_shaders makes a
         # single <name>_shaders target from them.
+        set(PROJV_STAGE_AFTER_SHADERS TRUE)
         set(shaderDirs "")
         foreach(shaderDir IN LISTS ARG_SHADERS)
             list(APPEND shaderDirs "${CMAKE_CURRENT_SOURCE_DIR}/${shaderDir}")
@@ -62,6 +63,17 @@ function(projv_add_example name)
             SHADER_DIRS  ${shaderDirs}
             INCLUDE_DIRS ${shaderIncludeDirs}
         )
+    endif()
+
+    # Staging runs POST_BUILD on the executable, which is only rebuilt when its *sources* change --
+    # so a shader-only edit recompiles the .bin beside the source and then never copies it here,
+    # leaving the running example on a stale shader with nothing to indicate it. Ordering the
+    # shader target before the executable makes the relink (and therefore the staging) happen
+    # whenever a shader changes.
+    if(PROJV_STAGE_AFTER_SHADERS)
+        add_dependencies(${name} ${name}_shaders)
+        set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
+                     $<TARGET_PROPERTY:${name}_shaders,PROJV_SHADER_OUTPUTS>)
     endif()
 
     # Staged after the build so freshly compiled .bin shaders are copied along with the

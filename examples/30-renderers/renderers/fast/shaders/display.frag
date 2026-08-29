@@ -7,12 +7,12 @@ $input v_texcoord0
 // Reads the anti-aliased HDR radiance from the ping-pong history buffer, applies
 // ACES tone mapping + gamma, and writes to the back buffer.
 //
-// Input (FBO 2): 0 accumColor.
+// Input (FBO 2): 0 shaded.
 // =============================================================================
 
 #include <bgfx_shader.sh>
 
-SAMPLER2D(accumColor, 0);
+SAMPLER2D(shaded, 0);
 
 uniform vec4 windowRes;
 
@@ -26,7 +26,7 @@ vec3 acesToneMap(vec3 x) {
 }
 
 void main() {
-    vec3 hdr = texture2D(accumColor, v_texcoord0).rgb;
+    vec3 hdr = texture2D(shaded, v_texcoord0).rgb;
     vec3 mapped = acesToneMap(hdr);
     mapped = pow(mapped, vec3(1.0 / 2.2));
     gl_FragColor = vec4(mapped, 1.0);

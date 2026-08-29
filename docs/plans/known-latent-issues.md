@@ -197,3 +197,31 @@ stock `-O2`, a silent slowdown against what this code was developed and profiled
 
 It also printed the camera position via `core::warn` on **every frame** -- leftover debugging that
 made the log unreadable. Removed.
+
+---
+
+## 12. A killed build leaves zero-byte objects that survive the next build
+
+Killing a compiler mid-write (`pkill cc1plus`, a hard Ctrl-C, an OOM kill) can leave a **zero-byte
+`.o`**. Its timestamp is newer than its source, so make considers it up to date and never rebuilds
+it -- and `ar` will happily archive an empty object.
+
+The symptom is a link error that makes no sense: an undefined reference to a function that is
+plainly declared in the header and defined in the `.cpp`, with matching signatures.
+
+```
+undefined reference to `projv::utils::loadComposeFromDisk(std::string const&)'
+```
+
+Check for it before doubting the code:
+
+```bash
+find build -name '*.o' -size 0
+```
+
+Deleting the empty objects is enough; the next build recompiles them. A full `rm -rf build` also
+works but is not necessary.
+
+Seen in this repository after a build was killed with `pkill`: three objects were truncated
+(`compose_io.cpp.o` and two Lua translation units), and the resulting `libprojectV.a` was missing
+every symbol from `compose_io.cpp` while containing 173 other `projv::utils::` symbols.

@@ -46,7 +46,7 @@ $input v_texcoord0
 // `x / (1.0 + x)`, or a filmic/AgX curve) -- everything else stays the same. To change the sky/sun
 // look with the time of day, that lives in sharedShaders/pjv_sun_sky.sc, not here.
 //
-// Input (FBO 9): 0 accumColor (anti-aliased HDR).
+// Input (FBO 9): 0 upscaledColor (anti-aliased HDR).
 // =============================================================================
 
 #include <bgfx_shader.sh>
@@ -54,12 +54,12 @@ $input v_texcoord0
 // taaColor is now at OUTPUT resolution and is read 1:1 -- the magnify that used to live in this pass
 // moved ahead of taa into upscale.frag, so that the edges it reconstructs are averaged by the temporal
 // filter instead of being created after it. All this pass does is grade.
-SAMPLER2D(accumColor, 0);
+SAMPLER2D(upscaledColor, 0);
 
 // FBO 9[1]: taa's position target -- xyz the face centre, a = camDist (a < 0 => sky). Already bound
 // by the framebuffer, just never declared until the shaft magnify below needed a full-resolution
 // depth to reject half-resolution taps against.
-SAMPLER2D(taaPos, 1);
+
 
 // FBO 11: the crepuscular shafts, at half the render resolution and already tinted by the sun's own
 // colour -- see godrays.frag. It arrives here, after taa, rather than being folded into compose for
@@ -71,7 +71,7 @@ SAMPLER2D(taaPos, 1);
 // It is added in LINEAR HDR, before the tone map below, which is the only place it can go and be
 // right: shafts are light, so they must roll off through the same curve as every other bright thing
 // in the frame rather than being pasted onto an already-compressed image.
-SAMPLER2D(godrays, 2);
+SAMPLER2D(godrays, 1);
 
 // FBO 13: the bloom, at an eighth of the render resolution on each axis. Added here alongside the
 // shafts and for the same reasons -- in LINEAR HDR before the tone map, so it rolls off through the
@@ -85,13 +85,16 @@ SAMPLER2D(godrays, 2);
 // supplies the tail. Real bloom is a bright tight centre with a faint wide skirt, and a single
 // Gaussian is neither -- at one scale a small emitter magnifies into a flat-edged diamond, which is
 // what "it stands out as a square" was. See the note at the top of bloomdown.frag.
-SAMPLER2D(bloomTight, 3);
-SAMPLER2D(bloomWide,  4);
+SAMPLER2D(bloomTight, 2);
+SAMPLER2D(bloomWide,  3);
 
 // FBO 15: the traced volumetric shafts, filtered along the shaft direction. Zero unless the `.` key
 // has them on -- volumetric.frag returns black immediately when volParams.x is 0, so the whole thing
 // costs nothing while it is off.
-SAMPLER2D(volumetric, 5);
+SAMPLER2D(volumetric, 4);
+// Bound for its DEPTH alone (a = camDist). This used to come from taaPos, which carried the same
+// value (gPos.a) at output resolution; with the TAA pass gone it is read from the source.
+SAMPLER2D(gPos, 5);
 uniform vec4 volParams;
 
 // x = the debug view selector (see the P key in main.cpp). Declared directly rather than pulled in
@@ -309,7 +312,7 @@ void main() {
     // would have swallowed the AO view compose adds at 3 -- compose would render it and this pass would
     // paint over it with an age ramp.
     if (renderParams.x > 1.5 && renderParams.x < 2.5) {
-        float t = clamp(abs(texture2D(accumColor, v_texcoord0).a) / 64.0, 0.0, 1.0);
+        float t = clamp(abs(texture2D(upscaledColor, v_texcoord0).a) / 64.0, 0.0, 1.0);
         gl_FragColor = vec4(clamp(t * 4.0, 0.0, 1.0),
                             clamp(t * 2.0, 0.0, 1.0),
                             clamp((t - 0.5) * 2.0, 0.0, 1.0), 1.0);
@@ -323,11 +326,11 @@ void main() {
     // and in fact useful: the view is constant per pixel over time, so any part of it that shimmers is
     // the reconstruction changing its mind frame to frame.
     if (renderParams.x > 3.5) {
-        gl_FragColor = vec4(texture2D(accumColor, v_texcoord0).rgb, 1.0);
+        gl_FragColor = vec4(texture2D(upscaledColor, v_texcoord0).rgb, 1.0);
         return;
     }
 
-    vec3 hdr = texture2D(accumColor, v_texcoord0).rgb;
+    vec3 hdr = texture2D(upscaledColor, v_texcoord0).rgb;
 
     // The shafts, bilinearly magnified from half resolution -- which is the one place in this
     // renderer where a plain bilinear upsample is exactly right rather than a compromise. There is
@@ -347,14 +350,14 @@ void main() {
         // Turned DOWN rather than left alone because both are estimating the same inscatter -- adding
         // two full-strength copies would simply double the haze on the sunward half of the frame.
         // The full-resolution depth this pixel actually belongs to, which is what decides whether a
-        // half-resolution tap is describing the same surface. taaPos carries it in alpha (curD, which
-        // is gPos.a) at output resolution, and it was already bound here -- see sampleShaftDepthAware.
-        float refDepth = texture2D(taaPos, v_texcoord0).a;
+        // half-resolution tap is describing the same surface. Read straight from the G-buffer's
+        // gPos.a; the removed TAA pass used to republish exactly this value as taaPos.a.
+        float refDepth = texture2D(gPos, v_texcoord0).a;
 
-        vec3 shafts = sampleShaftDepthAware(godrays, v_texcoord0, passInputRes[2], refDepth);
+        vec3 shafts = sampleShaftDepthAware(godrays, v_texcoord0, passInputRes[1], refDepth);
         if (volParams.x > 0.5) {
             shafts = shafts * GODRAY_SS_MIX_WITH_VOLUMETRIC
-                   + sampleShaftDepthAware(volumetric, v_texcoord0, passInputRes[5], refDepth);
+                   + sampleShaftDepthAware(volumetric, v_texcoord0, passInputRes[4], refDepth);
         }
         // ---- MODE 5: THE HALF-RESOLUTION SHAFT TERM, ALONE ----------------------------------
         // Both terms are magnified from half resolution and ADDED to a full-resolution image with no

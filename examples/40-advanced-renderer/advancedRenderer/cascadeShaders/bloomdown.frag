@@ -28,15 +28,15 @@ $input v_texcoord0
 // output texel centre maps to the centre of a 4x4 source block, and 4 is even -- that point is a
 // corner between texels. Even offsets keep it on corners.
 //
-// Input (FBO 9): 0 taaColor (the anti-aliased HDR frame), 1 taaPos (unread).
-// Input (FBO 1): 2 gPos (a = camDist, a < 0 => sky). Bound for its DEPTH alone.
+// Input (FBO 10): 0 upscaledColor (the reconstructed HDR frame).
+// Input (FBO 1):  1 gPos (a = camDist, a < 0 => sky). Bound for its DEPTH alone.
 // Output (FBO 12): 0 rgb the tight bloom, a the scene depth, for bloomblur and for display.
 // =============================================================================
 
 #include <bgfx_shader.sh>
 
-SAMPLER2D(taaColor, 0);
-SAMPLER2D(gPos,     2);
+SAMPLER2D(upscaledColor, 0);
+SAMPLER2D(gPos,     1);
 
 uniform vec4 passTargetRes;
 uniform vec4 passInputRes[8];
@@ -105,7 +105,7 @@ void main() {
         vec2  o = vec2(float(x), float(y));
         float w = exp(-dot(o, o) / (2.0 * BLOOM_DOWN_SIGMA * BLOOM_DOWN_SIGMA));
         // Two source texels per grid step, which keeps every tap on a corner.
-        sum    += brightPass(texture2D(taaColor, v_texcoord0 + o * 2.0 * srcTexel).rgb) * w;
+        sum    += brightPass(texture2D(upscaledColor, v_texcoord0 + o * 2.0 * srcTexel).rgb) * w;
         weight += w;
     }
 

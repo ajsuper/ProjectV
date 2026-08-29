@@ -38,7 +38,7 @@ SAMPLER2D(gAmbient, 3);
 // (sky_reproject.frag output). Same slot the raw sky occupied before the temporal
 // pass was inserted; the bilateral blur below is unchanged, it just now smooths an
 // already-denoised signal instead of raw few-ray noise.
-SAMPLER2D(skyRaw,   4);
+SAMPLER2D(aoRaw,    4);
 
 uniform vec4 windowRes;
 
@@ -47,16 +47,15 @@ uniform vec4 windowRes;
 #define SIGMA_P     0.35   // Plane-distance tolerance (voxels). Well under 1 so a
                            // voxel one step in front/behind is rejected, not blurred.
 
-// Skip the blur once a pixel's TEMPORAL history has converged. sky_reproject.frag
-// accumulates the AO over time and stores its age in skyRaw.a; a still pixel's age
-// grows without bound, so above this threshold the per-pixel value is already
-// noise-free and the 5x5 bilateral loop is pure wasted work. Set comfortably above
-// MOVING_MAX_AGE (24) so the blur stays fully on WHILE MOVING (where the few-sample
-// noise is real) and only switches off after the view has been parked ~half a second.
-// This is where most of the blur's cost is reclaimed: a parked frame -- the common
-// case -- skips the 25-tap kernel across essentially the whole screen at once (no
-// warp divergence, since a converged region is uniformly converged).
-#define CONVERGED_AGE 32.0
+// This used to skip the blur once a pixel's TEMPORAL history had converged: the removed
+// sky_reproject pass accumulated AO over time and stored its age in the alpha channel, and a parked
+// frame could skip the 25-tap kernel almost everywhere.
+//
+// The screen-space AO feeding this pass has no history and therefore no age, so there is nothing to
+// test and the blur now runs every frame. That is the honest cost of dropping the temporal pass, and
+// it is affordable here because SSAO is cheap enough that the blur is no longer the cheap part of an
+// expensive renderer. Left as a named constant, unreachable, to say where the shortcut went.
+#define CONVERGED_AGE 1e30
 
 void main() {
     vec2 uv = v_texcoord0;
@@ -70,15 +69,13 @@ void main() {
     // Sky / background: no AO, pass the sky colour straight through.
     if (hitMask < 0.5) {
         gl_FragData[0] = vec4(direct4.rgb, 0.0);
-        gl_FragData[1] = pos4;
-        gl_FragData[2] = vec4(N0, 0.0);
         return;
     }
 
     vec3  P0     = pos4.xyz;
     vec2  texel  = 1.0 / windowRes.xy;
 
-    vec4  sky0   = texture2D(skyRaw, uv);   // rgb = accumulated AO, a = temporal age
+    vec4  sky0   = texture2D(aoRaw, uv);   // rgb = accumulated AO, a = temporal age
 
     vec3 skyLight;
     if (sky0.a >= CONVERGED_AGE) {
@@ -110,7 +107,7 @@ void main() {
                 float wp = exp(-(planeDist * planeDist) / (2.0 * SIGMA_P * SIGMA_P));
                 float w  = wn * wp;
 
-                skySum += texture2D(skyRaw, su).rgb * w;
+                skySum += texture2D(aoRaw, su).rgb * w;
                 wSum   += w;
             }
         }
@@ -121,6 +118,4 @@ void main() {
     vec3 finalColor = direct4.rgb + albedo * skyLight;
 
     gl_FragData[0] = vec4(finalColor, 1.0);
-    gl_FragData[1] = pos4;
-    gl_FragData[2] = vec4(N0, 0.0);
 }

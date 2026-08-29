@@ -357,6 +357,11 @@ namespace projv{
         // Levels dropped below this chunk's own native resolution (header.resolution), last
         // requested via requestChunkLOD. Drives this instance's GPU traversal cap (see makeHeader's
         // traversalLOD computation) independent of what's actually uploaded for a shared blob.
+        //
+        // This is a **VRAM** lever, not a rendering performance one: a coarser LOD means fewer nodes
+        // resident, which is what it exists to control. Do not reach for it to fix a frame-time
+        // problem -- it has very little effect on render cost. The same warning, at length and with
+        // what to look at instead, is at the top of the RayQuery struct in include/pjv_utils_DDA.sc.
         uint32_t requestedLOD = 0;
         // Instancing: when >= 0, this chunk's geometry lives once in Scene.geometryPool[idx]
         // (shared across every instance of the same .data block) and geometryData above is left

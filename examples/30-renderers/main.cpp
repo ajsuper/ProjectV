@@ -97,6 +97,11 @@ struct RendererModule {
     std::function<void(std::shared_ptr<projv::ConstructedRenderer>, const FrameContext&)> uploadUniforms;
 };
 
+// Bypass the reconstruction and point-sample the render-resolution frame instead (Q). Only the
+// `reconstruction` renderer reads it; the others declare no such uniform. Flipping between the two
+// on the same view is the only honest way to judge an upscaler, so the demo carries the A/B.
+static bool g_reconstructBypass = false;
+
 // Uniforms shared by every renderer in the project.
 static void uploadCommonUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
     projv::core::vec3 cameraPosition = ctx.cameraPosition;
@@ -123,6 +128,17 @@ static void uploadTree64Uniforms(std::shared_ptr<projv::ConstructedRenderer> ren
 // Renderer 2: reprojection renderer — additionally needs last frame's camera
 // so it can project this frame's hits into the previous frame's screen space.
 // Renderer 3 (fast) uses the same set: its TAA pass reprojects the same way.
+// The reconstruction demo. Its G-buffer and compose run at half resolution and the reconstruction
+// magnifies to the output grid, so it needs the two uniforms that pass reads: debugParams.x carries
+// the bypass, renderParams.x a debug view it does not use here.
+static void uploadReconstructionUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
+    uploadCommonUniforms(renderer, ctx);
+    projv::core::vec4 debugParams  = { g_reconstructBypass ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+    projv::core::vec4 renderParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+    projv::graphics::setUniformToValue(renderer, "debugParams",  debugParams);
+    projv::graphics::setUniformToValue(renderer, "renderParams", renderParams);
+}
+
 static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
     uploadCommonUniforms(renderer, ctx);
     projv::core::vec3 prevCameraPosition = ctx.prevCameraPosition;
@@ -146,11 +162,16 @@ static std::vector<RendererModule> buildRendererRegistry() {
         "./renderers/tree64/shaders/vs_quad.bin",
         uploadTree64Uniforms
     });
+    // The temporal filtering demo. It happens to be built on a path tracer, but the path trace is
+    // the *input* here rather than the subject: what this shows is how to reproject last frame's
+    // result through this frame's camera, validate the match, and blend -- the machinery every
+    // temporal upscaler and antialiaser is made of. AdvancedRenderer used to carry a TAA pass; this
+    // is where that technique is taught now.
     registry.push_back({
-        "reprojection",
-        "Path traced with temporal reprojection, so it stays converged while the camera moves.",
-        "./renderers/reprojection/",
-        "./renderers/reprojection/shaders/vs_quad.bin",
+        "taa",
+        "Temporal reprojection and accumulation -- the TAA technique, shown on a path traced input.",
+        "./renderers/taa/",
+        "./renderers/taa/shaders/vs_quad.bin",
         uploadReprojectionUniforms
     });
     registry.push_back({
@@ -160,50 +181,19 @@ static std::vector<RendererModule> buildRendererRegistry() {
         "./renderers/fast/shaders/vs_quad.bin",
         uploadReprojectionUniforms
     });
-    // Shades each voxel FACE as one flat colour with full GI and direct sun. Uses the same
-    // uniform set as reprojection/fast: its accumulation pass reprojects this frame's hit into
-    // last frame's camera the same way.
+
+    // Rendering below native resolution and rebuilding the missing pixels from voxel FACE identity
+    // rather than blurring between samples. The single most effective thing here for a weak GPU:
+    // half resolution is a quarter of the pixels traced, and the reconstruction gives most of the
+    // detail back because a voxel face is a flat quad whose whole extent one sample describes.
+    //
+    // Press Q to bypass it and point-sample instead -- that A/B is the demo.
     registry.push_back({
-        "face",
-        "Per-face flat shading with full GI, accumulated by exact voxel-face identity.",
-        "./renderers/face/",
-        "./renderers/face/shaders/vs_quad.bin",
-        uploadReprojectionUniforms
-    });
-    // Screen-space radiance cascades. Kept for the comparison it makes against world-cascade:
-    // this is where the off-screen blind spots that motivated the world-space gather show up.
-    registry.push_back({
-        "radiance-cascade",
-        "Screen-space radiance cascades. Cheap, and wrong in the ways screen space is wrong.",
-        "./renderers/radiance-cascade/",
-        "./renderers/radiance-cascade/shaders/vs_quad.bin",
-        uploadReprojectionUniforms
-    });
-    // World-space radiance cascades: the gather traces real voxel-DDA rays through the scene
-    // rather than sampling the depth buffer, so occlusion and sky visibility are correct and
-    // there are no off-screen blind spots. Probe positions snap to a stable world grid for
-    // temporal stability, and probe interpolation is geometry-aware (depth + normal) so light
-    // does not leak across surfaces.
-    registry.push_back({
-        "world-cascade",
-        "World-space radiance cascades: the gather traces real voxel rays, so off-screen "
-        "occlusion and sky visibility are correct.",
-        "./renderers/world-cascade/",
-        "./renderers/world-cascade/shaders/vs_quad.bin",
-        uploadReprojectionUniforms
-    });
-    // Fuses world-cascade's gather with face's per-face identity. Cascade probes are anchored to
-    // voxel FACE CENTRES, so every screen probe on a face shares one stable world origin --
-    // effectively one probe per voxel face, and a coarser probe spacing means far fewer gather
-    // rays. The resolved indirect irradiance is then accumulated by exact voxel-face key (face's
-    // ghost-free gate) before TAA anti-aliases the composite.
-    registry.push_back({
-        "world-face-cascade",
-        "World-space cascades anchored to voxel face centres, accumulated per face. Fewest "
-        "gather rays of the cascade renderers.",
-        "./renderers/world-face-cascade/",
-        "./renderers/world-face-cascade/shaders/vs_quad.bin",
-        uploadReprojectionUniforms
+        "reconstruction",
+        "Traces at half resolution and reconstructs to full from voxel face identity. Q toggles it.",
+        "./renderers/reconstruction/",
+        "./renderers/reconstruction/shaders/vs_quad.bin",
+        uploadReconstructionUniforms
     });
 
     return registry;
@@ -588,6 +578,19 @@ void render(projv::Application& app) {
     // Vertical movement (R/F).
     if (glfwGetKey(renderInstance.window, GLFW_KEY_R)) { cameraPosition[1] += moveSpeed; cameraMoved = true; }
     if (glfwGetKey(renderInstance.window, GLFW_KEY_F)) { cameraPosition[1] -= moveSpeed; cameraMoved = true; }
+
+    // Q toggles the reconstruction bypass (reconstruction renderer only). Edge-triggered: holding a
+    // key down would flip it every frame.
+    {
+        static bool prevQ = false;
+        bool q = glfwGetKey(renderInstance.window, GLFW_KEY_Q) == GLFW_PRESS;
+        if (q && !prevQ) {
+            g_reconstructBypass = !g_reconstructBypass;
+            projv::core::info("Reconstruction: {}",
+                              g_reconstructBypass ? "BYPASSED (point sampled)" : "on");
+        }
+        prevQ = q;
+    }
 
     // H re-frames on the scene, for when navigation has left the subject behind.
     if (glfwGetKey(renderInstance.window, GLFW_KEY_H)) {

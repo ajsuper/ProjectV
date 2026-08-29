@@ -5,10 +5,6 @@
             "type": "vec4"
         },
         {
-            "name": "sunDir",
-            "type": "vec4"
-        },
-        {
             "name": "cameraPos",
             "type": "vec4"
         },
@@ -17,15 +13,19 @@
             "type": "vec4"
         },
         {
-            "name": "prevCameraPos",
-            "type": "vec4"
-        },
-        {
-            "name": "prevCameraDir",
-            "type": "vec4"
-        },
-        {
             "name": "frameCount",
+            "type": "vec4"
+        },
+        {
+            "name": "sunDir",
+            "type": "vec4"
+        },
+        {
+            "name": "renderParams",
+            "type": "vec4"
+        },
+        {
+            "name": "debugParams",
             "type": "vec4"
         },
         {
@@ -36,74 +36,81 @@
     "shaders": [
         {
             "shaderID": 1,
-            "path": "./renderers/fast/shaders/gbuffer_shade.bin"
+            "path": "./renderers/reconstruction/shaders/gbuffer.bin"
         },
         {
             "shaderID": 2,
-            "path": "./renderers/fast/shaders/ssao.bin"
+            "path": "./renderers/reconstruction/shaders/shade.bin"
         },
         {
             "shaderID": 3,
-            "path": "./renderers/fast/shaders/combine_blur.bin"
+            "path": "./renderers/reconstruction/shaders/reconstruct.bin"
         },
         {
-            "shaderID": 5,
-            "path": "./renderers/fast/shaders/display.bin"
+            "shaderID": 4,
+            "path": "./renderers/reconstruction/shaders/display.bin"
         }
     ],
     "textures": [
         {
             "texID": 1,
-            "name": "resourceTexture",
-            "format": "RGBA8",
-            "resX": 256,
-            "resY": 256,
-            "sizeMode": "fixed",
-            "origin": "CPUBuffer"
+            "name": "gPos",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
         },
         {
             "texID": 2,
-            "name": "gDirect",
+            "name": "gNormal",
             "format": "RGBA16_FLOAT",
             "sizeMode": "relative",
-            "scale": 1.0,
+            "scale": 0.5,
             "origin": "CreateNew"
         },
         {
             "texID": 3,
-            "name": "gPos",
-            "format": "RGBA32_FLOAT",
+            "name": "gAmbient",
+            "format": "RGBA16_FLOAT",
             "sizeMode": "relative",
-            "scale": 1.0,
+            "scale": 0.5,
             "origin": "CreateNew"
         },
         {
             "texID": 4,
-            "name": "gNormal",
+            "name": "gDirect",
             "format": "RGBA16_FLOAT",
             "sizeMode": "relative",
-            "scale": 1.0,
+            "scale": 0.5,
             "origin": "CreateNew"
         },
         {
             "texID": 5,
-            "name": "gAmbient",
-            "format": "RGBA16_FLOAT",
+            "name": "gFace",
+            "format": "RGBA32_FLOAT",
             "sizeMode": "relative",
-            "scale": 1.0,
+            "scale": 0.5,
             "origin": "CreateNew"
         },
         {
             "texID": 6,
-            "name": "aoRaw",
-            "format": "RGBA16_FLOAT",
+            "name": "gKey",
+            "format": "RGBA32_FLOAT",
             "sizeMode": "relative",
-            "scale": 1.0,
+            "scale": 0.5,
             "origin": "CreateNew"
         },
         {
             "texID": 7,
-            "name": "shaded",
+            "name": "composedHDR",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 8,
+            "name": "reconstructed",
             "format": "RGBA16_FLOAT",
             "sizeMode": "relative",
             "scale": 1.0,
@@ -114,22 +121,24 @@
         {
             "fboID": 1,
             "textureIDs": [
+                1,
                 2,
                 3,
                 4,
-                5
+                5,
+                6
             ]
         },
         {
             "fboID": 2,
             "textureIDs": [
-                6
+                7
             ]
         },
         {
             "fboID": 3,
             "textureIDs": [
-                7
+                8
             ]
         }
     ]

@@ -70,6 +70,11 @@ SAMPLER2D(gKey,     8);   // FBO1[5]: voxel identity. Read ONLY by the per-voxel
 // included because this pass has no other business with those keys: the uniform is already in
 // resources.json and uploaded every frame. PJV_PER_VOXEL_LIGHTING in pjv_face_key.sc names .w.
 uniform vec4 debugParams;
+// x = global illumination on (1) / off (0). Its own uniform rather than another debugParams bit,
+// because it is a feature switch a user reaches for -- "what is the GI actually contributing" -- and
+// not a diagnostic. renderParams and debugParams are both full, and overloading a lighting slot with
+// a feature flag is how those two ended up holding four unrelated things each.
+uniform vec4 featureToggles;
 
 // ---- WHY THIS PASS HAS TO KNOW ABOUT THE DEBUG MODE -------------------------------------------
 // .y is the why-does-this-pixel-look-wrong cycle (the `/` key). gbuffer.frag marks pixels by writing
@@ -838,7 +843,13 @@ void main() {
     // AO on the indirect term alone. `direct` carries the sun, whose visibility was traced per pixel
     // and blurred above, and the emission, which is the surface's own light -- neither is an ambient
     // quantity and occluding them would be double-counting at best.
-    vec3 hdr = direct + albedo * R * ao;
+    // GI off leaves the direct sun and a flat ambient in its place, so the image stays readable
+    // rather than going black in shadow -- the question the toggle answers is what the indirect
+    // bounce is contributing, and that is only visible against something.
+    vec3 indirect = (featureToggles.x > 0.5)
+                  ? R
+                  : vec3(0.10, 0.11, 0.13);
+    vec3 hdr = direct + albedo * indirect * ao;
 
     // Fog LAST, over the assembled radiance, because that is where it belongs physically: everything
     // above describes light leaving the surface, and this is what happens to it on the way here. It is

@@ -262,12 +262,37 @@ vec3 pjvMotionDisplacement(MotionSet m, vec3 worldPos, float voxelSize, float t)
 // the reasoning is at computeTargetLOD.
 #define PJV_LOD_FOOTPRINT 255u
 
+// ============================================================================================
+// LOD IS NOT A RENDERING PERFORMANCE LEVER. Read this before tuning the fields below.
+// ============================================================================================
+//
+// The LOD fields are a lever for **VRAM usage** (the CPU-side path, where a coarser storage LOD
+// means fewer nodes resident) and for **anti-aliasing** (the shader-side path, where marching at a
+// coarser level filters high-frequency voxel detail). They are NOT a frame-time dial.
+//
+// Changing startLOD / finishLOD / distanceToFinishLOD has very little effect on rendering
+// performance. If a renderer here is slower than another, the difference is not in these fields,
+// and tuning them will not recover it. Look instead at which GPU and driver were actually selected
+// (integrated vs discrete, or a software Vulkan fallback such as lavapipe), at render target
+// resolution and count, at the number of passes, and at whether the cost is CPU-side work --
+// generation, upload, repacking -- rather than GPU-side. An order-of-magnitude gap is never one of
+// these constants; it is the wrong device or a pathological stall.
+//
+// What these fields CAN legitimately explain is a **black screen**. A ray that exhausts maxRaySteps
+// before reaching geometry reports a miss, and a renderer without a sky model draws that as black --
+// while running fast, because nothing was traversed. That is a correctness question, not a
+// performance one, and a suspiciously *low* frame time is evidence for it rather than against.
+//
+// This note exists because the mistake has been made repeatedly. Please leave it here.
+// ============================================================================================
+
 struct RayQuery {
     // Set by the constructors; validated by the scene query. See the note above.
     uint  magic;
     uint  flags;                  // PJV_Q_*
 
     // ---- pre-existing fields. Assigned explicitly by every call site, migrated or not. ----
+    // See the LOD note above: these tune VRAM and anti-aliasing, not frame time.
     uint startLOD;
     uint finishLOD;
     uint distanceToFinishLOD;     // Measured in voxels. In footprint mode: the crossover distance.

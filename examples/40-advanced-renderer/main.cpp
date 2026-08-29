@@ -130,6 +130,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -158,7 +159,12 @@
 //
 // Several scenes in that library are older than the current .data container version (2) and load as
 // zero chunks, saying so in the log. This one is current. See the README.
-static const char* DEFAULT_SCENE_PATH = "../ScenePreviewer/scenes/SmallerVox/";
+// Sibling path in the BUILD tree: examples land side by side under build/examples/, and the scene
+// previewer stages the shared scene library beside its own binary. This said "../ScenePreviewer/..."
+// until the examples were renumbered, at which point it silently loaded nothing -- loadComposeFromDisk
+// reports a missing folder and carries on with an empty scene, so the window opened on a blank frame
+// with no obvious cause.
+static const char* DEFAULT_SCENE_PATH = "../scene_previewer/scenes/SmallerVox/";
 
 // The renderer's own files. Both paths inside resources.json are relative to the working directory,
 // so this example is run from its own folder.
@@ -329,10 +335,13 @@ struct AnimControls {
     // ray crosses a target.
     float resolveVoxels = 300.0f;
 
-    // Diagnostic lighting: a flat ambient instead of the GI. Both of this renderer's noisy terms are
-    // one sample per pixel per frame; this one is still rescued only by a temporal mean that animation
-    // breaks, so it stays substituted by default. The SHADOW half of that pairing has been undone --
-    // the sun is soft again, because taa.frag converges it.
+    // Diagnostic lighting: a flat ambient instead of the GI.
+    //
+    // NO LONGER READ. compose.frag and probe.frag branch on animParams.z, which is now driven by
+    // FrameState::globalIllumination and the G key instead -- this field being the real switch while
+    // a separate "GI on/off" control sat downstream of it was why that control appeared to do
+    // nothing. Kept as a field only so the struct's layout is not disturbed mid-review; the value
+    // here is dead.
     bool  cleanView = true;
     // Draw every envelope cell as SOLID instead of resolving it, so the baked envelope is directly
     // visible. The `O`-shift view, and the first diagnostic to reach for: blobs mean the bake, the
@@ -708,122 +717,6 @@ static float detectVoxelSize(const projv::Scene& scene) {
     return 1.0f;
 }
 
-// Number row scales the field, G/H/J switch things. Deliberately clear of WASD/R/F and of Esc.
-//
-// `outNeedsRebake` is set when a key changed something the ENVELOPE's SHAPE depends on, which is only
-// two of the controls: `amplitude` (how far a swaying voxel can be drawn from its source) and
-// `fireTravel` (how far a parcel can rise). Everything else -- speed, gust size, turbulence, the
-// flame's swirl and dissolve, the resolve distance -- changes the field WITHIN a fixed reachable set,
-// so the baked envelope still bounds it and the traversal picks the new value up next frame for free.
-//
-// Getting that split wrong is the failure this system has had by three separate routes: a voxel drawn
-// outside its envelope is skipped by the geometry march as animated and unreachable by the animated
-// march because its cell was never marked, so it is drawn NOWHERE -- not stale, not misplaced, absent.
-// The prototype's answer was a fixed maximum amplitude plus a live warning when a key exceeded it.
-// Re-baking is better: it costs a few seconds on a key press and there is no ceiling to hit.
-static bool updateAnimControls(GLFWwindow* window, AnimControls& wave, bool& outNeedsRebake) {
-    const float amplitudeBefore = wave.amplitude;
-    const float travelBefore = wave.fireTravel;
-    // Edge-triggered for the toggles; everything else is a continuous drag.
-    static bool prevG = false, prevH = false, prevJ = false;
-    bool changed = false;
-
-    // G SUSPENDS THE ANIMATED TRAVERSAL. It used to cycle the sway prototypes, and there is nothing
-    // left to cycle -- so it takes over the switch that is actually worth having a key for, rather
-    // than becoming a key that prints an apology. See animationSuspended for why the distinction it
-    // draws is the useful one: everything except the traversal stays in place.
-    bool g = glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS;
-    if (g && !prevG) { wave.animationSuspended = !wave.animationSuspended; changed = true; }
-    prevG = g;
-
-    bool h = glfwGetKey(window, GLFW_KEY_H) == GLFW_PRESS;
-    if (h && !prevH) { wave.waveShadows = !wave.waveShadows; changed = true; }
-    prevH = h;
-
-    // J CYCLES THE REFRACTION BUDGET, 0..3. It used to switch the snap quantum between a whole voxel
-    // and free placement, and free placement is not a knob any more: the engine quantises to the
-    // lattice unconditionally, because the drawn position has to be a function of the VOXEL alone or
-    // two rays crossing one voxel compute different offsets and it is drawn in two places at once --
-    // which shows as single voxels sliced in half along silhouettes. That was the bug the quantiser
-    // was introduced to fix, so exposing its absence as a toggle was only ever a way to reproduce it.
-    bool j = glfwGetKey(window, GLFW_KEY_J) == GLFW_PRESS;
-    if (j && !prevJ) { wave.refractionSegments = (wave.refractionSegments + 2) % 10; changed = true; }
-    prevJ = j;
-
-    static bool prevO = false;
-    bool o = glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS;
-    if (o && !prevO) { wave.debugEnvelope = !wave.debugEnvelope; changed = true; }
-    prevO = o;
-
-    static bool prevSlash = false;
-    bool slash = glfwGetKey(window, GLFW_KEY_SLASH) == GLFW_PRESS;
-    if (slash && !prevSlash) { wave.debugWhy = (wave.debugWhy + 1) % 6; changed = true; }
-    prevSlash = slash;
-
-    static bool prevI = false;
-    bool i = glfwGetKey(window, GLFW_KEY_I) == GLFW_PRESS;
-    if (i && !prevI) { wave.cleanView = !wave.cleanView; changed = true; }
-    prevI = i;
-
-    struct Drag { int key; float* value; float step; float lo; float hi; };
-    const Drag drags[] = {
-        {GLFW_KEY_1, &wave.amplitude,       -0.02f,  0.0f,  8.0f},
-        {GLFW_KEY_2, &wave.amplitude,        0.02f,  0.0f,  8.0f},
-        {GLFW_KEY_3, &wave.gustSize,        -0.5f,   4.0f,  400.0f},
-        {GLFW_KEY_4, &wave.gustSize,         0.5f,   4.0f,  400.0f},
-        {GLFW_KEY_5, &wave.speed,           -0.02f, -8.0f,  8.0f},
-        {GLFW_KEY_6, &wave.speed,            0.02f, -8.0f,  8.0f},
-        {GLFW_KEY_7, &wave.turbulence,      -0.01f,  0.0f,  1.0f},
-        {GLFW_KEY_8, &wave.turbulence,       0.01f,  0.0f,  1.0f},
-        // 9 and 0 were the per-class height profile, which the engine's field does not have: it is
-        // coherent, so every voxel of a blade moves together, which is what stops a blade separating
-        // into floating segments. K and L were the snap quantum -- see the J key above. Both left
-        // unbound rather than given something else to do: a key that has MOVED is worse than one that
-        // is gone, because muscle memory then does the wrong thing silently.
-        //
-        // Resolve distance. Drag it down until the frame rate is usable, then up until you can see
-        // geometry stop moving in the middle distance -- the gap between those is the budget.
-        {GLFW_KEY_N, &wave.resolveVoxels,  -4.0f,   4.0f, 4096.0f},
-        {GLFW_KEY_M, &wave.resolveVoxels,   4.0f,   4.0f, 4096.0f},
-        // The flame. Every one of these is a MotionSet field now rather than a shader uniform, so a
-        // drag here edits the engine's motion table and the traversal picks it up next frame.
-        {GLFW_KEY_F1, &wave.fireTravel,        -0.1f,  1.0f, 32.0f},
-        {GLFW_KEY_F2, &wave.fireTravel,         0.1f,  1.0f, 32.0f},
-        {GLFW_KEY_F3, &wave.fireTurbulence,    -0.01f, 0.0f, 4.0f},
-        {GLFW_KEY_F4, &wave.fireTurbulence,     0.01f, 0.0f, 4.0f},
-        {GLFW_KEY_F5, &wave.fireScale,         -0.2f,  1.0f, 200.0f},
-        {GLFW_KEY_F6, &wave.fireScale,          0.2f,  1.0f, 200.0f},
-        {GLFW_KEY_F7, &wave.fireSpeed,         -0.05f, -32.0f, 32.0f},
-        {GLFW_KEY_F8, &wave.fireSpeed,          0.05f, -32.0f, 32.0f},
-        {GLFW_KEY_F9,  &wave.fireEmissionScale, -0.002f, 0.0f, 2.0f},
-        {GLFW_KEY_F10, &wave.fireEmissionScale,  0.002f, 0.0f, 2.0f},
-        {GLFW_KEY_F11, &wave.fireDissolve,      -0.01f,  0.0f, 1.0f},
-        {GLFW_KEY_F12, &wave.fireDissolve,       0.01f,  0.0f, 1.0f},
-        {GLFW_KEY_PAGE_DOWN, &wave.fireTurbGrowth, -0.05f, 0.0f, 12.0f},
-        {GLFW_KEY_PAGE_UP,   &wave.fireTurbGrowth,  0.05f, 0.0f, 12.0f},
-        // Wind direction, as a rotation of the XZ vector. Two keys rather than four so it stays a
-        // compass dial instead of a pair of independent numbers.
-        {GLFW_KEY_LEFT,  nullptr, -0.03f, 0.0f, 0.0f},
-        {GLFW_KEY_RIGHT, nullptr,  0.03f, 0.0f, 0.0f},
-    };
-
-    for (const Drag& drag : drags) {
-        if (glfwGetKey(window, drag.key) != GLFW_PRESS) continue;
-        if (drag.value == nullptr) {
-            float c = std::cos(drag.step), s = std::sin(drag.step);
-            float x = wave.windX * c - wave.windZ * s;
-            float z = wave.windX * s + wave.windZ * c;
-            wave.windX = x; wave.windZ = z;
-        } else {
-            *drag.value = std::max(drag.lo, std::min(drag.hi, *drag.value + drag.step));
-        }
-        changed = true;
-    }
-
-    outNeedsRebake = std::fabs(wave.amplitude - amplitudeBefore) > 1e-6f ||
-                     std::fabs(wave.fireTravel - travelBefore) > 1e-6f;
-    return changed;
-}
 
 // =============================================================================
 // Camera framing
@@ -1024,25 +917,11 @@ struct FrameState {
     // on its own.
     bool upscaleBypass = false;
 
-    // T: cast the sun shadow ray at all. ON, obviously -- this exists to be turned OFF for one
-    // measurement and turned back on.
-    //
-    // WHAT IT IS FOR. gbuffer.frag casts two voxel rays per pixel, the camera ray and the sun shadow
-    // ray, and the render scale (Z/X/C/`) moves both together. So the -25% at 0.75 is the sum of the
-    // two and does not say which one it came from -- which matters, because they are not the same kind
-    // of cost and do not have the same fixes. The camera ray's cost is pixels and nothing else. The
-    // shadow ray's is pixels times how far a ray has to travel through geometry before it escapes to
-    // the sun, which on a grass-filled view is a long way, at LOD 0, with a 128-step budget.
-    //
-    // The measurement is a 2x2: sweep the render scale with shadows on, sweep it again with shadows
-    // off, and the difference between the two curves is the shadow ray's share. Both sweeps hold
-    // everything else identical -- same scene, same camera, same GI, same upscale -- so the subtraction
-    // is meaningful.
-    //
-    // It is a diagnostic and not a quality setting: the image loses cast shadow entirely and keeps only
-    // NdotL, which looks flat and is meant to. Reported in the window title so a screenshot of a
-    // measurement cannot be misread as the renderer's normal output.
-    bool shadowRays = true;
+    // Global illumination on/off. The probe chain still runs -- switching it off here changes what
+    // compose.frag does with the result, not what is computed -- because the question it answers is
+    // what the indirect bounce contributes to the image, not what it costs.
+    bool globalIllumination = true;
+
 
     // Y: per-pass GPU timing, off until asked for. See the readout in render().
     bool gpuProfile = false;
@@ -1088,24 +967,7 @@ struct FrameState {
     // physical relationship. The dial that has been separated is the artistic one.
     float godrayScale = 1.0f;
 
-    // B: foliage translucency on/off. Uploaded as debugParams.z and read by compose.frag. A toggle
-    // rather than three states, unlike the fog: it has no meaningful "more" -- it is either the right
-    // amount of light through a leaf or it is a green glow -- and the comparison worth having is
-    // against its absence, which is what every voxel scene here looked like before it.
-    bool foliageSSS = true;
 
-    // U: per-voxel lighting. OFF by default -- per FACE is the finer and more correct answer, and it
-    // is what makes a voxel's top read differently from its side with no direct light involved.
-    //
-    // On, the indirect term is resolved per VOXEL instead: a probe integrates the whole sphere around
-    // the voxel rather than one face's hemisphere, and every face of that voxel converges to the same
-    // number. See PJV_PER_VOXEL_LIGHTING in pjv_face_key.sc for what the three shaders do with it.
-    //
-    // Worth having as a live toggle rather than a rebuild because the two are a genuine trade and
-    // which one wins is a judgement about a particular scene: per-voxel is a sixth as many distinct
-    // values to converge, so it settles faster and survives more camera motion, at the cost of
-    // flat-shading every voxel.
-    bool perVoxelLighting = false;
 
     // `.`: TRACED volumetric god rays, on top of the screen-space ones. OFF by default, and the only
     // effect here that is off for cost rather than for taste: it casts VOL_SAMPLES real shadow rays
@@ -1125,43 +987,7 @@ struct FrameState {
     // disabled" and "still seeing temporal blur" could both be true at once.
     bool temporalFilter = true;
 
-    // Sub-pixel jitter amplitude, cycled by E. ON at full, having been compared against off: the
-    // analytic coverage antialiasing in display.frag handles EDGES between faces that were sampled,
-    // but only the jitter recovers detail finer than one sample -- distant grass that no unjittered ray
-    // ever hits. That is what it is still earning its place for.
-    //
-    // It only earns it if the history it feeds actually accumulates, which for a while it did not:
-    // see the note at the face tolerance in taa.frag.
-    float jitterScale = 1.0f;
 
-    // Debug view, cycled by P and read through renderParams.x.
-    //   0 = off, the normal composite
-    //   1 = GI AGE, drawn by compose.frag: the temporal age of the indirect term. black = 1 (no
-    //       history at all), red ~8, gold ~32, green ~64, white = 128 (fully converged).
-    //   2 = TAA AGE, drawn by display.frag: the same for the final anti-aliased colour, capped at 64.
-    //
-    // Two ages rather than one because they answer different questions and a fault in either looks
-    // the same on screen. The GI age says whether a SURFACE is holding its indirect light; the TAA
-    // age says whether a PIXEL is holding its resolved colour. A silhouette pixel is expected to fail
-    // the first -- it straddles two surfaces and genuinely has no single one to accumulate -- and is
-    // supposed to be rescued by the second, which averages the jitter into coverage. So dark threads
-    // in view 1 along edges are normal; dark threads in view 2 along the same edges are the bug.
-    //
-    // This is the single most useful picture in the renderer when the GI misbehaves, and it earned a
-    // key rather than a rebuild because every GI fault so far has been an accumulation fault wearing
-    // a disguise. The indirect term is a Monte Carlo estimate of a handful of rays per frame (see
-    // pjv_probe.sc) and is only watchable because it is averaged over a long history, so ANY bug that
-    // silently stops that average building presents identically -- as noise or flicker -- whatever
-    // its actual cause. Guessing between the causes from the composite is hopeless; the age map names
-    // the culprit immediately, and has now done so three times:
-    //
-    //   the whole image dark      -> the exact-identity gate was reading a scene texture (engine
-    //                                binding-order bug, fixed in performRenderPasses)
-    //   only vegetation dark      -> swaying blades can never match a face key (fixed by the
-    //                                positional gate for animated surfaces in accumulate.frag)
-    //   dark lines on silhouettes -> the sub-pixel jitter flips a pixel between two faces of
-    //                                different orientation (fixed by the edge tier, same file)
-    float giDebugView = 0.0f;
 };
 
 // =============================================================================
@@ -1368,6 +1194,22 @@ void startup(projv::Application& app) {
 
     projv::core::info("Loading scene: {}", request.path);
     scene = projv::utils::loadComposeFromDisk(request.path);
+
+    // A scene that loads no geometry still opens a window and renders a perfectly clean empty frame,
+    // which looks like a renderer bug rather than a missing scene. Two causes, both silent: the
+    // folder is not there, or its .data containers are a version this loader rejects (several
+    // scenes in the shared library are still version 1). Say which.
+    if (scene.chunks.empty()) {
+        if (!std::filesystem::exists(request.path)) {
+            projv::core::error("Scene folder not found: {}\n"
+                               "Pass one on the command line, or run this from its own build "
+                               "directory so the sibling path resolves.", request.path);
+        } else {
+            projv::core::error("Scene at {} loaded no chunks -- the image will be empty. If the log "
+                               "above reports a rejected .data version, that asset needs "
+                               "re-voxelizing.", request.path);
+        }
+    }
     // Before the palette is uploaded, so an overridden entry is transparent everywhere that reads it
     // rather than only where this example happens to look.
     applyTransparencyOverrides(scene);
@@ -1485,10 +1327,56 @@ void startup(projv::Application& app) {
                               PASS_NAMES[i]);
         }
     }
+
 }
 
 // Frame timing profiler. Compiled out entirely unless PROJV_ENABLE_PERF is defined.
 void update(projv::Application& app) {
+    // ---- The controls, printed once, after everything else has had its say -------------------
+    //
+    // Not at the end of startup(): the renderer logs its uniform and pass names while submitting the
+    // FIRST FRAME, which happens after startup returns, so a list printed there still ends up buried
+    // under thirty lines of [RND]. Waiting two frames puts it last, where it will actually be read.
+    //
+    // Written straight to stdout rather than through the logger so it arrives as one block, without
+    // timestamps and level tags breaking up a table.
+    {
+        static bool controlsPrinted = false;
+        if (!controlsPrinted && app.frameCount >= 2) {
+            controlsPrinted = true;
+        std::printf(
+            "\n"
+            "  ProjectV Advanced Renderer\n"
+            "  ---------------------------------------------------------------------------\n"
+            "   Move        W A S D          forward / left / back / right\n"
+            "               R F              up / down\n"
+            "               Shift            hold to move 5x faster\n"
+            "               Mouse            look around  (Esc releases, left-click recaptures)\n"
+            "\n"
+            "   Sun         Scroll wheel     raise / lower  (a full day-night cycle)\n"
+            "\n"
+            "   Render      Z X C `          render scale: full / 0.75 / 0.5 / 0.25\n"
+            "   scale                        lower is faster; the reconstruction fills it back in\n"
+            "\n"
+            "   Upscale     Q                reconstruction on / off\n"
+            "                                off shows the raw render resolution, point sampled --\n"
+            "                                the A/B that isolates what the reconstruction is worth\n"
+            "\n"
+            "   GI          G                global illumination on / off\n"
+            "                                off substitutes a flat ambient, so the image stays\n"
+            "                                readable and the bounce's contribution is visible\n"
+            "\n"
+            "   God rays    [ ]              strength down / up\n"
+            "               .                traced volumetric god rays on / off (the expensive path)\n"
+            "\n"
+            "   Fog         V                off / normal / heavy\n"
+            "               ; '              hold to drag it to a value between those presets\n"
+            "  ---------------------------------------------------------------------------\n"
+            "\n");
+        std::fflush(stdout);
+        }
+    }
+
 #if defined(PROJV_ENABLE_PERF)
     static auto lastFrameTime = std::chrono::high_resolution_clock::now();
     auto currentFrameTime = std::chrono::high_resolution_clock::now();
@@ -1641,25 +1529,21 @@ static void uploadFrameUniforms(const std::shared_ptr<projv::ConstructedRenderer
     setUniformToValue(renderer, "frameCount", frameCount);
 
     setUniformToValue(renderer, "sunDir", sunDirection);
-    // x = GI debug view, read by compose.frag (see FrameState::giDebugView and the P key), y = sun
-    // intensity, z = sky intensity, w = the sub-pixel jitter amplitude, 0 = fully deterministic.
-    // See the note at the jitter in gbuffer.frag, and the E key.
-    projv::core::vec4 renderParams = {state.giDebugView, SUN_INTENSITY, SKY_INTENSITY,
-                                      state.jitterScale};
+    // x is the GI debug view selector the shaders still branch on; 0 is the normal renderer and
+    // this example no longer offers the views, so it stays 0. w was the sub-pixel jitter amplitude,
+    // and 0 means fully deterministic -- display.frag antialiases analytically, so nothing is lost.
+    projv::core::vec4 renderParams = {0.0f, SUN_INTENSITY, SKY_INTENSITY, 0.0f};
     setUniformToValue(renderer, "renderParams", renderParams);
 
-    // x = upscale bypass (Q), y = shadow rays OFF (T), z = foliage translucency OFF (B),
-    // w = PER-VOXEL LIGHTING ON (U). This exists because renderParams has no free component left and
-    // overloading one of its lighting slots with a debug flag would be worse.
-    //
-    // y and z are inverted relative to the state they carry -- the shader asks "am I skipping this",
-    // which is the question at the branch. w is NOT inverted, because it selects a mode rather than
-    // suppressing one, and 0 is still the normal renderer in every slot.
-    projv::core::vec4 debugParams = {state.upscaleBypass ? 1.0f : 0.0f,
-                                     state.shadowRays ? 0.0f : 1.0f,
-                                     state.foliageSSS ? 0.0f : 1.0f,
-                                     state.perVoxelLighting ? 1.0f : 0.0f};
+    // x = upscale reconstruction bypass (Q). The other three carried debug switches this example no
+    // longer exposes -- shadow rays off, foliage translucency off, per-voxel lighting -- and every
+    // one of them is 0 for the normal renderer, so the shaders take their usual path unchanged.
+    projv::core::vec4 debugParams = {state.upscaleBypass ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
     setUniformToValue(renderer, "debugParams", debugParams);
+
+    // x = global illumination on. Its own uniform rather than a fifth meaning for debugParams.
+    projv::core::vec4 featureToggles = {state.globalIllumination ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+    setUniformToValue(renderer, "featureToggles", featureToggles);
 
     // x = extinction per world unit at the floor, y = the height it thins over, z = that floor,
     // w = sun inscatter strength. Read by compose.frag through the shared pjv_atmosphere.sc; see the
@@ -1707,7 +1591,7 @@ static void uploadFrameUniforms(const std::shared_ptr<projv::ConstructedRenderer
     const AnimControls& wave = state.wave;
 
     projv::core::vec4 animParams = {wave.voxelSize, wave.resolveVoxels,
-                                    wave.cleanView ? 1.0f : 0.0f,
+                                    state.globalIllumination ? 0.0f : 1.0f,
                                     wave.waveShadows ? 1.0f : 0.0f};
     setUniformToValue(renderer, "animParams", animParams);
 
@@ -1735,8 +1619,10 @@ void render(projv::Application& app) {
         cameraMoved = updateMovement(renderInstance, state) || cameraMoved;
     }
 
+    // The animation prototype's control surface is gone -- it existed to tune the wave/fire/refraction
+    // parameters while they were being developed, and they are settled. The features remain, at their
+    // tuned values; what went is the ~30 keys that let you change them at runtime.
     bool needsRebake = false;
-    if (updateAnimControls(renderInstance.window, state.wave, needsRebake)) state.wave.dirty = true;
     // ---- RE-BAKE WHEN THE ENVELOPE'S SHAPE CHANGED --------------------------------------------
     //
     // Only for the two controls that change WHERE animated geometry can be drawn; see
@@ -1798,42 +1684,7 @@ void render(projv::Application& app) {
         prevZ = z; prevX = x; prevC = c; prevTick = tick;
     }
 
-    // ---- E: sub-pixel jitter amplitude ---------------------------------------------------------
-    // Off / half / full. Three states rather than a toggle because "is it needed" and "is it needed at
-    // this strength" are different questions, and half answers the second without a rebuild.
-    {
-        static bool prevE = false;
-        bool e = glfwGetKey(renderInstance.window, GLFW_KEY_E) == GLFW_PRESS;
-        if (e && !prevE) {
-            state.jitterScale = state.jitterScale <= 0.001f  ? 0.5f
-                              : (state.jitterScale <= 0.501f ? 1.0f : 0.0f);
-            projv::core::info("Sub-pixel jitter -> {:.2f}{}", state.jitterScale,
-                              state.jitterScale <= 0.001f
-                                  ? " (off: the G-buffer is deterministic, nothing can shimmer)" : "");
-        }
-        prevE = e;
-    }
 
-    // ---- P: GI debug view ----------------------------------------------------------------------
-    // Live for the same reason the render-scale keys are: the fault you are chasing is usually only
-    // reproducible from one particular viewpoint, and a relaunch loses it. See FrameState::giDebugView.
-    {
-        static bool prevP = false;
-        bool p = glfwGetKey(renderInstance.window, GLFW_KEY_P) == GLFW_PRESS;
-        if (p && !prevP) {
-            state.giDebugView = state.giDebugView >= 4.5f ? 0.0f : state.giDebugView + 1.0f;
-            projv::core::info("GI debug view -> {}",
-                state.giDebugView < 0.5f ? "off (normal composite)"
-              : state.giDebugView < 1.5f ? "GI AGE, in accumulate (black=1 none, gold~32, white=128)"
-              : state.giDebugView < 2.5f ? "TAA AGE, in display (black=1 none, gold~16, white=64)"
-              : state.giDebugView < 3.5f ? "AMBIENT OCCLUSION, in compose (white=open, black=occluded)"
-              : state.giDebugView < 4.5f ? "UPSCALE, in upscale (green=reconstructed, yellow=edge, "
-                                           "red=bilinear fallback, ALL BLUE=not magnifying)"
-                                         : "SAMPLE BUDGET, in upscale (blue=few rays would do, "
-                                           "red=full rate needed). Map of what adaptive res could win.");
-        }
-        prevP = p;
-    }
 
     // Q: reconstruction on/off, at the SAME render scale. See FrameState::upscaleBypass.
     {
@@ -1842,25 +1693,25 @@ void render(projv::Application& app) {
         if (q && !prevQ) {
             state.upscaleBypass = !state.upscaleBypass;
             projv::core::info("Upscale -> {}", state.upscaleBypass
-                ? "BYPASSED (raw render resolution, point sampled, taa off)"
+                ? "BYPASSED (raw render resolution, point sampled)"
                 : "face reconstruction");
         }
         prevQ = q;
     }
 
-    // T: sun shadow rays on/off, to split the render scale's win between the two rays gbuffer.frag
-    // casts. See FrameState::shadowRays.
+    // G: global illumination on/off. Off substitutes a flat ambient so the image stays readable --
+    // the question is what the indirect bounce contributes, and that only shows against something.
     {
-        static bool prevT = false;
-        bool t = glfwGetKey(renderInstance.window, GLFW_KEY_T) == GLFW_PRESS;
-        if (t && !prevT) {
-            state.shadowRays = !state.shadowRays;
-            projv::core::info("Shadow rays -> {}", state.shadowRays
-                ? "ON (normal: camera ray + sun shadow ray per pixel)"
-                : "OFF (camera ray only -- diagnostic, no cast shadow)");
+        static bool prevG = false;
+        bool g = glfwGetKey(renderInstance.window, GLFW_KEY_G) == GLFW_PRESS;
+        if (g && !prevG) {
+            state.globalIllumination = !state.globalIllumination;
+            projv::core::info("Global illumination -> {}",
+                              state.globalIllumination ? "on" : "off (flat ambient)");
         }
-        prevT = t;
+        prevG = g;
     }
+
 
     // V: distance fog off / normal / heavy. See FrameState::fogScale. No longer drags the god rays
     // along by their gain -- they keep only the physical dependence, through the air in front of
@@ -1903,18 +1754,6 @@ void render(projv::Application& app) {
         }
     }
 
-    // B: foliage translucency on/off. See FrameState::foliageSSS.
-    {
-        static bool prevB = false;
-        bool b = glfwGetKey(renderInstance.window, GLFW_KEY_B) == GLFW_PRESS;
-        if (b && !prevB) {
-            state.foliageSSS = !state.foliageSSS;
-            projv::core::info("Foliage translucency -> {}", state.foliageSSS
-                ? "ON (backlit grass and leaves transmit)"
-                : "off (every blade fully opaque)");
-        }
-        prevB = b;
-    }
 
     // `.`: traced volumetric god rays on/off. See FrameState::volumetricGodrays.
     {
@@ -1929,61 +1768,8 @@ void render(projv::Application& app) {
         prevPeriod = period;
     }
 
-    // `,`: the temporal filter on/off. See FrameState::temporalFilter.
-    {
-        static bool prevComma = false;
-        bool comma = glfwGetKey(renderInstance.window, GLFW_KEY_COMMA) == GLFW_PRESS;
-        if (comma && !prevComma) {
-            state.temporalFilter = !state.temporalFilter;
-            projv::core::info("Temporal filter (TAA) -> {}", state.temporalFilter
-                ? "ON (reprojected history, Catmull-Rom resample, neighbourhood clamp)"
-                : "OFF (this frame only -- no reprojection, no blending, no history)");
-        }
-        prevComma = comma;
-    }
 
-    // U: per-face vs per-voxel indirect lighting. See FrameState::perVoxelLighting.
-    //
-    // Sets g_lightingModeChanged, which is folded into sunMoved below. That is not housekeeping: the
-    // two modes accumulate DIFFERENT QUANTITIES into the same buffer -- one face's hemisphere against
-    // a whole voxel's sphere -- so every value in a 128-frame history becomes an answer to a question
-    // nobody is asking any more the instant this flips. Without the reset the new mode fades in over
-    // the length of that history, which reads as the toggle being slow rather than as the modes being
-    // different, and makes an A/B between them worthless for the first two seconds.
-    {
-        static bool prevU = false;
-        bool u = glfwGetKey(renderInstance.window, GLFW_KEY_U) == GLFW_PRESS;
-        if (u && !prevU) {
-            state.perVoxelLighting = !state.perVoxelLighting;
-            g_lightingModeChanged = true;
-            projv::core::info("Indirect lighting -> {}", state.perVoxelLighting
-                ? "PER VOXEL (all six faces share one value; probes integrate the sphere)"
-                : "per face (each face keeps its own; probes integrate that face's hemisphere)");
-        }
-        prevU = u;
-    }
 
-    // ---- Y: WHERE THE FRAME ACTUALLY GOES -------------------------------------------------------
-    // Per-pass GPU time, straight from the hardware timer, instead of inferring a pass's cost by
-    // toggling it off and watching the whole-frame number. That inference is what keeps failing here:
-    // it only works when the thing toggled is the bottleneck, so a "no change" result is ambiguous
-    // between "this costs nothing" and "something else is the wall". This answers the question
-    // directly, per pass, with nothing switched off and the renderer in its normal configuration.
-    //
-    // bgfx collects it only with BGFX_DEBUG_PROFILER set, which is why this is a toggle rather than
-    // always on: the timestamps cost something themselves.
-    {
-        static bool prevY = false;
-        bool y = glfwGetKey(renderInstance.window, GLFW_KEY_Y) == GLFW_PRESS;
-        if (y && !prevY) {
-            state.gpuProfile = !state.gpuProfile;
-            bgfx::setDebug(state.gpuProfile ? BGFX_DEBUG_PROFILER : BGFX_DEBUG_NONE);
-            projv::core::info("GPU pass timing -> {}", state.gpuProfile
-                ? "ON -- mean of 120 frames, logged as they complete"
-                : "off");
-        }
-        prevY = y;
-    }
 
     if (state.gpuProfile) {
         // ACCUMULATED over 120 frames rather than read per frame. A single frame's GPU timestamps are
@@ -2010,9 +1796,8 @@ void render(projv::Application& app) {
         if (samples >= 120) {
             const double inv = 1.0 / double(samples);
             projv::core::info("---- GPU per pass, mean of {} frames  |  render {:.0f}% scale, "
-                              "shadow rays {} ----",
-                              samples, state.renderScale * 100.0f,
-                              state.shadowRays ? "on" : "OFF");
+                              "----",
+                              samples, state.renderScale * 100.0f);
             for (size_t i = 0; i < 32; i++) {
                 if (passMs[i] <= 0.0) continue;
                 const char* name = i < PASS_NAME_COUNT ? PASS_NAMES[i] : "?";
@@ -2042,7 +1827,7 @@ void render(projv::Application& app) {
                           w.resolveVoxels, w.waveShadows ? "resolved" : "from rest pose",
                           w.refractionSegments == 0 ? std::string("off")
                                                     : std::to_string(w.refractionSegments) + " bend(s)",
-                          w.cleanView ? "FLAT (GI off, soft sun)" : "full GI");
+                          state.globalIllumination ? "full GI" : "FLAT (GI off, soft sun)");
         projv::core::info("Anim: flame travel={:.1f}v turbulence={:.2f} growth={:.2f} dissolve={:.2f} "
                           "scale={:.1f}v speed={:.2f} emissionScale={:.4f}",
                           w.fireTravel, w.fireTurbulence, w.fireTurbGrowth, w.fireDissolve,
@@ -2211,18 +1996,14 @@ void render(projv::Application& app) {
             char title[256];
             std::snprintf(title, sizeof(title),
                           "AdvancedRenderer  |  %.2f ms  (%.0f fps)  |  render %dx%d -> %dx%d "
-                          "(%.0f%% scale, %.0f%% pixels)  |  upscale: %s  |  jitter: %s%s",
+                          "(%.0f%% scale, %.0f%% pixels)  |  upscale: %s  |  GI: %s",
                           emaMilliseconds,
                           emaMilliseconds > 0.0 ? 1000.0 / emaMilliseconds : 0.0,
                           renderWidth, renderHeight, windowWidth, windowHeight,
                           state.renderScale * 100.0f,
                           state.renderScale * state.renderScale * 100.0f,
                           state.upscaleBypass ? "RAW (bypassed)" : "reconstruction",
-                          state.jitterScale > 0.001f ? "on" : "off",
-                          // Only when OFF. The normal case is the absence of a warning rather than a
-                          // "shadows: on" nobody reads, and this way a screenshot of the flat-looking
-                          // diagnostic image always carries the reason it looks that way.
-                          state.shadowRays ? "" : "  |  SHADOW RAYS OFF");
+                          state.globalIllumination ? "on" : "off");
             glfwSetWindowTitle(renderInstance.window, title);
         }
     }

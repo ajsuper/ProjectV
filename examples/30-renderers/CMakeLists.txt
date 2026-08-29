@@ -1,14 +1,14 @@
-# Seven renderers, one host. Each is a folder under renderers/ holding render.json,
+# One host, several renderers. Each is a folder under renderers/ holding render.json,
 # resources.json and its shaders; the host picks between them with --renderer.
+#
+# Every entry here is an *implementation example* of one technique, not a tuned production
+# renderer -- they are meant to be read and compared, so none of them borrows another's tricks.
 projv_add_example(renderer_gallery
     SOURCES             main.cpp
     SHADERS             renderers/tree64/shaders
-                        renderers/reprojection/shaders
+                        renderers/taa/shaders
                         renderers/fast/shaders
-                        renderers/face/shaders
-                        renderers/radiance-cascade/shaders
-                        renderers/world-cascade/shaders
-                        renderers/world-face-cascade/shaders
+                        renderers/reconstruction/shaders
     # The example's own shader library: the sun/sky model and the cascade maths. The engine's
     # pjv_utils_DDA.sc is on the include path already.
     SHADER_INCLUDE_DIRS sharedShaders

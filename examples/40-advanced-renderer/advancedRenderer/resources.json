@@ -47,6 +47,10 @@
         {
             "name": "volParams",
             "type": "vec4"
+        },
+        {
+            "name": "featureToggles",
+            "type": "vec4"
         }
     ],
     "shaders": [
@@ -73,10 +77,6 @@
         {
             "shaderID": 8,
             "path": "./advancedRenderer/cascadeShaders/compose.bin"
-        },
-        {
-            "shaderID": 9,
-            "path": "./advancedRenderer/cascadeShaders/taa.bin"
         },
         {
             "shaderID": 10,
@@ -213,22 +213,6 @@
             "origin": "CreateNew"
         },
         {
-            "texID": 16,
-            "name": "taaColor",
-            "format": "RGBA16_FLOAT",
-            "sizeMode": "relative",
-            "scale": 1.0,
-            "origin": "CreateNew"
-        },
-        {
-            "texID": 17,
-            "name": "taaPos",
-            "format": "RGBA32_FLOAT",
-            "sizeMode": "relative",
-            "scale": 1.0,
-            "origin": "CreateNew"
-        },
-        {
             "texID": 18,
             "name": "upscaled",
             "format": "RGBA16_FLOAT",
@@ -319,13 +303,6 @@
             "fboID": 8,
             "textureIDs": [
                 15
-            ]
-        },
-        {
-            "fboID": 9,
-            "textureIDs": [
-                16,
-                17
             ]
         },
         {
