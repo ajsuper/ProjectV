@@ -77,7 +77,7 @@ Small assets are what this step is for: scattering props into a scene wants a tr
 
 ### `--flip-v` / `--no-flip-v`
 
-Image loaders return the top row first, so V has to be flipped exactly when the format places `v = 0` at the **bottom** of the image. Formats disagree: OBJ, FBX, Collada and 3DS use a bottom-left origin, while glTF 2.0 specifies a top-left one. The voxelizer picks the default from the file extension, so normally neither flag is needed.
+Image loaders return the top row first, so V has to be flipped exactly when the UVs place `v = 0` at the **bottom** of the image. As Assimp delivers them, every format does: OBJ, FBX, Collada and 3DS are authored with a bottom-left origin, and glTF 2.0 — which specifies a top-left one — is converted on import, because Assimp's glTF importers rewrite each coordinate as `1 - v`. So the default is to flip for every format, glTF included; skipping it for glTF because of what the spec says flips those models twice. Normally neither flag is needed.
 
 Individual models disagree with their own format often enough to need an override — particularly anything converted out of 3ds Max. Sampling with the wrong setting lands on the mirrored half of the atlas: you get whatever happens to sit opposite the artwork, often filler or a second material's texture.
 

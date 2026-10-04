@@ -76,20 +76,23 @@ struct ImportedModel {
 /**
  * Whether the V texture coordinate should be flipped when sampling, for a given file extension.
  *
- * Image loaders hand back the top row first, so the flip is needed exactly when the format places
- * v = 0 at the *bottom* of the image. OBJ, FBX, Collada and 3DS all do (the OpenGL convention);
- * glTF 2.0 is the odd one out and specifies a top-left origin, so it must not be flipped. Getting
- * this wrong is not subtle — the model samples the mirrored half of its atlas and comes out wearing
- * another material's colors.
+ * Image loaders hand back the top row first, so the flip is needed exactly when the UVs place
+ * v = 0 at the *bottom* of the image. That is every format as Assimp delivers it: OBJ, FBX, Collada
+ * and 3DS are authored that way (the OpenGL convention), and glTF — whose files specify a top-left
+ * origin — is converted to it on import, because Assimp's glTF and glTF2 importers rewrite every
+ * texture coordinate as 1 - v. Reading the glTF spec and skipping the flip for it therefore flips
+ * it twice, which is not subtle — the model samples the mirrored half of its atlas and comes out
+ * wearing another material's colors.
+ *
+ * It stays a per-extension query so a format Assimp passes through unconverted has one place to
+ * go, but today there is none.
  *
  * @param extension File extension including the dot, any case (e.g. ".glb").
  * @return bool True if V should be flipped for that format.
  */
 inline bool defaultFlipVForFormat(const std::string& extension) {
-    std::string lowered = extension;
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                   [](unsigned char c) { return char(std::tolower(c)); });
-    return !(lowered == ".gltf" || lowered == ".glb");
+    (void)extension;
+    return true;
 }
 
 /**

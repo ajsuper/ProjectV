@@ -175,10 +175,10 @@ Texture decodeTexture(const meshimport::ImportedTexture& source) {
 // to, or the material's flat diffuse color when the triangle has no usable texture. Shared by the
 // palette pre-pass and the voxel loop so both see exactly the same colors.
 //
-// `flipV` selects the texture-coordinate convention, which differs per format: OBJ, FBX and Collada
-// put v=0 at the *bottom* of the image while stb_image hands back the top row first, so those need
-// the flip, whereas glTF specifies a top-left origin and must not be flipped. meshimport picks the
-// default from the file extension. It stays overridable because plenty of individual models
+// `flipV` selects the texture-coordinate convention. Assimp delivers every format with v=0 at the
+// *bottom* of the image — glTF included, whose top-left UVs its importer converts — while stb_image
+// hands back the top row first, so the default is to flip (see meshimport::defaultFlipVForFormat).
+// It stays overridable because plenty of individual models
 // (particularly ones converted out of 3ds Max) disagree with their own format, and sampling those
 // with the wrong setting lands on whatever occupies the mirrored half of the atlas.
 // `outAlpha`, when given, receives the texel's alpha — 255 for anything untextured, since a flat
@@ -1386,13 +1386,13 @@ int main(int argc, char** argv) {
     app.add_option("-f, --file, --objDir", modelFile, "Path to the model file to voxelize.");
     app.add_option("-o, --outputDir", outputDirectory, "Path to put the generated scene.");
     app.add_option("-r, --resolution", resolutionString, "Resolution to voxelize the scene at.");
-    // Tri-state: the sensible flip differs per format, so the default is chosen from the file
-    // extension and either flag pins it explicitly.
+    // Tri-state: the default comes from meshimport::defaultFlipVForFormat, and either flag pins it
+    // explicitly.
     app.add_flag("--flip-v", flipV, "Force the V texture coordinate to be flipped.");
     app.add_flag("--no-flip-v", noFlipV,
-        "Sample textures without flipping the V coordinate. The default is chosen per format — "
-        "flipped for OBJ/FBX/Collada (bottom-left origin), unflipped for glTF (top-left origin) — "
-        "but individual models disagree with their own format often enough to need an override, "
+        "Sample textures without flipping the V coordinate. The default is flipped for every "
+        "format, glTF included — Assimp converts glTF's top-left UVs to a bottom-left origin on "
+        "import — but individual models disagree with their own format often enough to need an override, "
         "particularly 3ds Max exports. The symptom is a model sampling the mirrored half of its "
         "atlas: foliage comes out uniformly gray, or a trunk takes on the leaves' color.");
     app.add_option("--alpha-cutoff", alphaCutoffOption,
