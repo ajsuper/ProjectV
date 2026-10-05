@@ -41,7 +41,7 @@ $input v_texcoord0
 SAMPLER2D(previewColor,     0);
 SAMPLER2D(previewNormal,    1);
 SAMPLER2D(previewPosition,  2);
-SAMPLER2D(giLight,          4);
+SAMPLER2D(giLight,          5);   // After FBO 1's five targets, previewDistance the fifth.
 
 uniform vec4 passTargetRes;                        // (w, h, 1/w, 1/h) of THIS pass's target.
 // 8 must equal PROJV_MAX_PASS_INPUTS in constructedRenderer.h -- the engine sets that many.

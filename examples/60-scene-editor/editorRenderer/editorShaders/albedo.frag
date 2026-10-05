@@ -77,6 +77,7 @@ $input v_texcoord0
 //   gl_FragData[2] previewPosition rgb = world hit position, a = hit mask
 //   gl_FragData[3] previewGlow     rgb = emission + reflection (advanced preview
 //                                  only; zero otherwise), a unused
+//   gl_FragData[4] previewDistance r = distance along the primary ray, 0 on background
 // =============================================================================
 
 #include <bgfx_shader.sh>
@@ -138,6 +139,7 @@ int refractDebugMode() { return int(previewSettings.w + 0.5); }
 bool refractDebug() { return refractDebugMode() == 1; }
 
 #define FOV 60.0
+#include "viewport_ray.sc"
 
 #define PI 3.14159265359
 
@@ -169,19 +171,6 @@ bool refractDebug() { return refractDebugMode() == 1; }
 // first. Well above any weight a sample away from grazing produces, so it only ever catches the tail.
 #define SPECULAR_WEIGHT_CLAMP 4.0
 
-// Van der Corput / Halton for the sub-pixel jitter (base 2 and 3). Same sequence
-// the fast renderer uses, so edges converge at the same rate.
-float halton(int i, int base) {
-    float f = 1.0;
-    float r = 0.0;
-    for (int k = 0; k < 16; k++) {
-        if (i <= 0) break;
-        f /= float(base);
-        r += f * float(i - (i / base) * base);
-        i /= base;
-    }
-    return r;
-}
 
 vec3 backgroundColor(vec3 direction) {
     float height = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
@@ -319,60 +308,41 @@ vec3 specularPreview(vec3 position, vec3 normal, vec3 viewDirection, VoxelMateri
     return weight * (reflected.albedo + reflected.emission);
 }
 
-// The primary ray, under whichever projection the editor has selected.
+
+// The primary query every viewport pass uses -- this one, albedo_low.frag's reduced-resolution trace
+// and reconstruct.frag's fallback -- so a pixel the reconstruction re-traces gets exactly the ray this
+// pass would have cast.
 //
-// Perspective is rayStartDirection's job and unchanged. Orthographic is the same
-// camera basis used the other way round: every ray points along the view direction,
-// and it is the *origin* that slides across a plane `orthoHeight` world units tall.
-// The plane is pushed back by cameraProjection.z rather than left at the camera
-// position, because parallel rays have no equivalent of "the camera is outside
-// everything in front of it" -- without the offset, anything the camera has flown
-// past would simply be missing from an orthographic view of the same scene.
-Ray primaryRay(vec2 uv) {
-    vec3 forward = normalize(cameraDir.xyz);
-
-    Ray ray;
-    if (cameraProjection.x < 0.5) {
-        ray.origin = cameraPos.xyz;
-        ray.direction = rayStartDirection(uv, passTargetRes.xy, cameraPos.xyz, forward, FOV);
-        return ray;
-    }
-
-    // Identical to rayStartDirection's basis, including the +Z fallback for a view
-    // pointing straight up or down. The two must agree exactly: the editor projects
-    // its outlines and gizmo onto this image with the same construction on the CPU.
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right   = normalize(cross(forward, worldUp));
-    vec3 up      = normalize(cross(right, forward));
-
-    vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float aspectRatio = passTargetRes.x / passTargetRes.y;
-    float halfHeight = cameraProjection.y * 0.5;
-
-    ray.origin = cameraPos.xyz - forward * cameraProjection.z +
-                 right * (ndc.x * halfHeight * aspectRatio) +
-                 up * (ndc.y * halfHeight);
-    ray.direction = forward;
-    return ray;
-}
-
-void main() {
-    int  frame  = int(frameCount.x);
-    vec2 jitter = vec2(halton(frame + 1, 2), halton(frame + 1, 3)) - 0.5;
-    vec2 uvJit  = v_texcoord0 + jitter / passTargetRes.xy;
-
-    Ray ray = primaryRay(uvJit);
-
+// Full-resolution primary march, matching the fast renderer. Distance LOD was measured there to buy
+// almost nothing while making distant geometry blocky, and a previewer is exactly where
+// blocky-at-distance would mislead.
+RayQuery viewportPrimaryQuery() {
     RayQuery rayQuery = pjvPrimaryQuery(100u);
     rayQuery.maxRaySteps = 256u;
-    // Full-resolution primary march, matching the fast renderer. Distance LOD was
-    // measured there to buy almost nothing while making distant geometry blocky,
-    // and a previewer is exactly where blocky-at-distance would mislead.
     rayQuery.startLOD = 0;
     rayQuery.finishLOD = 2;
     rayQuery.distanceToFinishLOD = 10000;
+    return rayQuery;
+}
 
+
+// albedo_low.frag and reconstruct.frag include this file for everything above and bring their own main.
+#if !defined(EDITOR_ALBEDO_NO_MAIN)
+void main() {
+    int  frame  = int(frameCount.x);
+    vec2 uvJit  = v_texcoord0 + viewportJitter() / passTargetRes.xy;
+
+    Ray ray = primaryRay(uvJit);
+
+    RayQuery rayQuery = viewportPrimaryQuery();
+
+#if defined(EDITOR_ALBEDO_LEAN)
+    // The lean variant (albedo_lean.frag): a constant, so the peel, refraction and specular
+    // paths below are compiled out rather than branched around. See that file for why.
+    bool advanced = false;
+#else
     bool advanced = previewSettings.x > 0.5;
+#endif
 
     // Per pixel, per frame. The pixel term decorrelates neighbours, so the peel's stochastic alpha
     // and the reflection sample read as noise rather than as a pattern; the frame term is what the
@@ -448,12 +418,14 @@ void main() {
     //
     // Both markers mean "the traversal found this and the renderer refused it", which is a different
     // bug from "the traversal did not find it" and wants looking at in a different place.
+#if !defined(EDITOR_ALBEDO_LEAN)   // Refraction debug views: only meaningful with the advanced preview.
     if (refractDebug() && sceneHit.foundBox.size > 0.0) {
         if (sceneHit.rayT <= 0.0) {
             gl_FragData[0] = vec4(1.0, 0.0, 1.0, 1.0);
             gl_FragData[1] = vec4(0.0, 1.0, 0.0, 1.0);
             gl_FragData[2] = vec4(hitRay.origin, 1.0);
             gl_FragData[3] = vec4(4.0, 0.0, 4.0, 0.0);
+            gl_FragData[4] = vec4(0.0, 0.0, 0.0, 0.0);
             return;
         }
         if (dot(normal, normal) < 0.5) {
@@ -461,6 +433,7 @@ void main() {
             gl_FragData[1] = vec4(0.0, 1.0, 0.0, 1.0);
             gl_FragData[2] = vec4(hitRay.origin + hitRay.direction * sceneHit.rayT, 1.0);
             gl_FragData[3] = vec4(0.0, 4.0, 4.0, 0.0);
+            gl_FragData[4] = vec4(sceneHit.rayT, 0.0, 0.0, 0.0);
             return;
         }
     }
@@ -553,8 +526,10 @@ void main() {
         gl_FragData[1] = vec4(0.0, 1.0, 0.0, 1.0);
         gl_FragData[2] = vec4(hitRay.origin + hitRay.direction * max(sceneHit.rayT, 0.0), 1.0);
         gl_FragData[3] = vec4(dbg * 4.0, 0.0);
+        gl_FragData[4] = vec4(max(sceneHit.rayT, 0.0), 0.0, 0.0, 0.0);
         return;
     }
+#endif
 
     if (sceneHit.foundBox.size < 0.0 || sceneHit.rayT <= 0.0 || dot(normal, normal) < 0.5) {
         // The background, filtered by any transparent layers between it and the camera -- which is
@@ -571,6 +546,7 @@ void main() {
         // A glowing pane in front of nothing still glows, so this is written on the miss path too.
         // Zero under the plain path, which is what keeps shade.frag's background branch a copy.
         gl_FragData[3] = vec4(glow, 0.0);
+        gl_FragData[4] = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
 
@@ -610,4 +586,10 @@ void main() {
     gl_FragData[1] = vec4(normalize(normal), sceneHit.foundBox.size);
     gl_FragData[2] = vec4(hitPosition, 1.0);
     gl_FragData[3] = vec4(glow, 0.0);
+    // Distance along the primary ray, which with the ray itself is the hit position in 4 bytes rather
+    // than 16. What shade_lean.frag's occlusion taps read -- see SAMPLER2D(previewDistance) there.
+    // Along hitRay, not ray, when the advanced preview has bent it; only the full shade.frag runs then,
+    // and that one reads previewPosition.
+    gl_FragData[4] = vec4(sceneHit.rayT, 0.0, 0.0, 0.0);
 }
+#endif // !EDITOR_ALBEDO_NO_MAIN

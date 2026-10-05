@@ -2730,6 +2730,201 @@ struct EditorRenderers {
     std::shared_ptr<projv::ConstructedRenderer> pathTrace;
 };
 
+// The viewport's two program variants per heavy pass, and which passes to switch off. See
+// albedo_lean.frag and shade_lean.frag for why the variants exist: the default viewport (no Advanced
+// preview, no Sun shadow) never casts the rays those paths add, but with them compiled in it still
+// paid their register budget -- 39% of the frame's dominant pass on an integrated GPU.
+struct ViewportPrograms {
+    // Index into the viewport renderer's dependencyGraph, found by shader ID; -1 = not in this renderer.
+    int albedoPass = -1;
+    int shadePass = -1;
+    int lowPass = -1;            // albedo_low: the reduced-resolution march, while moving.
+    int reconstructPass = -1;    // reconstruct: rebuilds the full-resolution G-buffer from it...
+    int reconstructTracePass = -1;   // ...and reconstruct_trace casts the real ray where it cannot.
+    std::vector<int> giPasses;          // gi, gi_temporal and the denoise steps: Advanced preview only.
+    bgfx::ProgramHandle albedoFull = BGFX_INVALID_HANDLE;   // Owned by the renderer.
+    bgfx::ProgramHandle shadeFull = BGFX_INVALID_HANDLE;    // Owned by the renderer.
+    bgfx::ProgramHandle albedoLean = BGFX_INVALID_HANDLE;   // Owned here.
+    bgfx::ProgramHandle shadeLean = BGFX_INVALID_HANDLE;    // Owned here.
+    bool advancedWasOn = false;
+    // EDITOR_VIEWPORT_LEAN=<mask> picks which of the three savings apply: 1 the lean albedo, 2 the lean
+    // shade, 4 skipping the GI chain. Default 7, all three; 0 runs the full programs and every pass as
+    // before the variants existed -- the A/B for checking each one changes cost and nothing else.
+    int leanMask = 7;
+    // EDITOR_VIEWPORT_RECONSTRUCT=0 traces at full resolution while moving too.
+    bool reconstructAllowed = true;
+    // EDITOR_RECONSTRUCT_DEBUG=1 tints the pixels reconstruct.frag had to trace; =2 traces every pixel
+    // and paints disagreements magenta. EDITOR_RECONSTRUCT_TRUST overrides its TRUST_SPACINGS.
+    float reconstructDebug = 0.0f;
+    float reconstructTrust = 0.0f;
+
+    // Which path is cheaper while moving is decided by measuring both, not by guessing. The reduced
+    // path wins when voxels are a few pixels or more on screen and loses when they are sub-pixel (a
+    // 1024^3 model framed small: every pixel falls back to a real ray, and the coarse trace and the
+    // rebuild are pure overhead) -- and one scene can be either, depending on where the camera is.
+    // So each path's GPU cost is tracked from bgfx's per-view timers, and while moving the cheaper one
+    // runs. Still frames always run the full path, which keeps its figure current for free; during a
+    // long move the path not in use is re-measured every VIEWPORT_COST_PROBE_FRAMES frames.
+    // EDITOR_RECONSTRUCT_AUTO=0 always takes the reduced path while moving (for A/B measurement).
+    bool autoSelect = true;
+    float fullCostMs = -1.0f;      // Moving average; -1 = not yet measured.
+    float reducedCostMs = -1.0f;
+    int movingFrames = 0;
+};
+
+static constexpr float VIEWPORT_COST_SMOOTHING = 0.2f;
+static constexpr int VIEWPORT_COST_PROBE_FRAMES = 45;
+
+// How many frames after the last camera move or scene edit the viewport keeps tracing at reduced
+// resolution. One is enough for correctness -- reconstruct.frag's image is the full-resolution one
+// wherever it is not provably so, and traces the rest -- but the accumulation restarts on every move,
+// so a frame or two of hysteresis keeps an unsteady hand from flipping the path back and forth.
+static constexpr int VIEWPORT_REDUCED_HOLD_FRAMES = 2;
+static ViewportPrograms g_viewportPrograms;
+
+// Shader IDs from editorRenderer/resources.json.
+static constexpr uint32_t VIEWPORT_SHADER_ALBEDO = 1;
+static constexpr uint32_t VIEWPORT_SHADER_SHADE = 4;
+static constexpr uint32_t VIEWPORT_SHADER_GI = 5;
+static constexpr uint32_t VIEWPORT_SHADER_DENOISE_FIRST = 6;   // 6, 7, 8: the three denoise steps.
+static constexpr uint32_t VIEWPORT_SHADER_DENOISE_LAST = 8;
+static constexpr uint32_t VIEWPORT_SHADER_GI_TEMPORAL = 9;
+static constexpr uint32_t VIEWPORT_SHADER_ALBEDO_LOW = 10;
+static constexpr uint32_t VIEWPORT_SHADER_RECONSTRUCT = 11;
+static constexpr uint32_t VIEWPORT_SHADER_RECONSTRUCT_TRACE = 12;
+
+static void setupViewportPrograms(const projv::RendererSpecification& specification,
+                                  projv::ConstructedRenderer& renderer) {
+    ViewportPrograms& programs = g_viewportPrograms;
+    const std::vector<projv::RenderPass>& passes = specification.dependencyGraph.renderPasses;
+    for (size_t i = 0; i < passes.size() && i < renderer.dependencyGraph.size(); i++) {
+        uint32_t id = passes[i].shaderID;
+        if (id == VIEWPORT_SHADER_ALBEDO) programs.albedoPass = int(i);
+        if (id == VIEWPORT_SHADER_SHADE) programs.shadePass = int(i);
+        if (id == VIEWPORT_SHADER_ALBEDO_LOW) programs.lowPass = int(i);
+        if (id == VIEWPORT_SHADER_RECONSTRUCT) programs.reconstructPass = int(i);
+        if (id == VIEWPORT_SHADER_RECONSTRUCT_TRACE) programs.reconstructTracePass = int(i);
+        if (id == VIEWPORT_SHADER_GI || id == VIEWPORT_SHADER_GI_TEMPORAL ||
+            (id >= VIEWPORT_SHADER_DENOISE_FIRST && id <= VIEWPORT_SHADER_DENOISE_LAST)) {
+            programs.giPasses.push_back(int(i));
+        }
+    }
+    if (const char* lean = std::getenv("EDITOR_VIEWPORT_LEAN")) programs.leanMask = std::atoi(lean);
+    if (const char* value = std::getenv("EDITOR_VIEWPORT_RECONSTRUCT")) programs.reconstructAllowed = std::atoi(value) != 0;
+    if (const char* value = std::getenv("EDITOR_RECONSTRUCT_DEBUG")) programs.reconstructDebug = float(std::atof(value));
+    if (const char* value = std::getenv("EDITOR_RECONSTRUCT_TRUST")) programs.reconstructTrust = float(std::atof(value));
+    if (const char* value = std::getenv("EDITOR_RECONSTRUCT_AUTO")) programs.autoSelect = std::atoi(value) != 0;
+    // Per-view GPU timestamps, for the cost tracking above. Timer queries only; nothing is drawn.
+    bgfx::setDebug(BGFX_DEBUG_PROFILER);
+    if (programs.lowPass < 0 || programs.reconstructPass < 0 || programs.reconstructTracePass < 0) {
+        programs.reconstructAllowed = false;
+    }
+    // A lean program with a missing binary stays invalid and the full one simply keeps running.
+    auto loadLean = [](const char* path) -> bgfx::ProgramHandle {
+        if (!std::filesystem::exists(path)) {
+            projv::core::warn("Viewport: {} not found, using the full shader in its place.", path);
+            return BGFX_INVALID_HANDLE;
+        }
+        bgfx::ShaderHandle vertex = projv::graphics::loadShader("./editorRenderer/editorShaders/vs_quad.bin");
+        bgfx::ShaderHandle fragment = projv::graphics::loadShader(path);
+        return bgfx::createProgram(vertex, fragment, true);
+    };
+    if (programs.albedoPass >= 0) {
+        programs.albedoFull = renderer.dependencyGraph[programs.albedoPass].shaderProgram;
+        programs.albedoLean = loadLean("./editorRenderer/editorShaders/albedo_lean.bin");
+    }
+    if (programs.shadePass >= 0) {
+        programs.shadeFull = renderer.dependencyGraph[programs.shadePass].shaderProgram;
+        programs.shadeLean = loadLean("./editorRenderer/editorShaders/shade_lean.bin");
+    }
+}
+
+// Per frame, before the viewport's passes are submitted: the cheapest program that still computes
+// everything the current toggles ask for, and the GI chain only when something reads it.
+static void selectViewportPrograms(std::shared_ptr<projv::ConstructedRenderer>& rendererPointer, EditorState& editor,
+                                   int framesSinceMoved) {
+    projv::ConstructedRenderer& renderer = *rendererPointer;
+    ViewportPrograms& programs = g_viewportPrograms;
+    bool advanced = editor.advancedPreviewEnabled;
+    // The refraction debug views are drawn by albedo.frag's full variant only.
+    bool fullAlbedo = advanced || editor.refractDebugMode != 0 || (programs.leanMask & 1) == 0;
+    bool fullShade = advanced || editor.sunShadowEnabled || (programs.leanMask & 2) == 0;
+    if (programs.albedoPass >= 0) {
+        renderer.dependencyGraph[programs.albedoPass].shaderProgram =
+            (fullAlbedo || !bgfx::isValid(programs.albedoLean)) ? programs.albedoFull : programs.albedoLean;
+    }
+    if (programs.shadePass >= 0) {
+        renderer.dependencyGraph[programs.shadePass].shaderProgram =
+            (fullShade || !bgfx::isValid(programs.shadeLean)) ? programs.shadeFull : programs.shadeLean;
+    }
+    for (int pass : programs.giPasses) renderer.dependencyGraph[pass].enabled = advanced || (programs.leanMask & 4) == 0;
+
+    // Reduced resolution while moving. Only the plain viewport: its colour is per voxel, which is what
+    // makes reconstruct.frag exact, and a peeled or reflective colour is not.
+    // The most recent frame bgfx has timed. Which views carry time says which path it ran.
+    if (const bgfx::Stats* stats = bgfx::getStats(); stats != nullptr && stats->gpuTimerFreq > 0) {
+        const double toMs = 1000.0 / double(stats->gpuTimerFreq);
+        auto viewMs = [&](int pass) -> double {
+            if (pass < 0) return 0.0;
+            bgfx::ViewId view = bgfx::ViewId(renderer.dependencyGraph[pass].renderPassID);
+            for (uint16_t v = 0; v < stats->numViews; v++) {
+                if (stats->viewStats[v].view == view) {
+                    return double(stats->viewStats[v].gpuTimeEnd - stats->viewStats[v].gpuTimeBegin) * toMs;
+                }
+            }
+            return 0.0;
+        };
+        auto smooth = [](float& average, double sample) {
+            average = average < 0.0f ? float(sample)
+                                     : average + VIEWPORT_COST_SMOOTHING * (float(sample) - average);
+        };
+        double fullMs = viewMs(programs.albedoPass);
+        double lowMs = viewMs(programs.lowPass);
+        if (fullMs > 0.0 && lowMs <= 0.0 && !fullAlbedo) smooth(programs.fullCostMs, fullMs);
+        if (lowMs > 0.0 && fullMs <= 0.0) {
+            smooth(programs.reducedCostMs,
+                   lowMs + viewMs(programs.reconstructPass) + viewMs(programs.reconstructTracePass));
+        }
+    }
+
+    bool moving = framesSinceMoved < VIEWPORT_REDUCED_HOLD_FRAMES;
+    programs.movingFrames = moving ? programs.movingFrames + 1 : 0;
+    bool reduced = programs.reconstructAllowed && !fullAlbedo && moving;
+    if (reduced && programs.autoSelect) {
+        if (programs.reducedCostMs < 0.0f) {
+            reduced = true;                     // Never measured: try it.
+        } else if (programs.fullCostMs < 0.0f) {
+            reduced = false;
+        } else {
+            reduced = programs.reducedCostMs < programs.fullCostMs;
+            if (programs.movingFrames % VIEWPORT_COST_PROBE_FRAMES == 0) reduced = !reduced;
+        }
+    }
+    if (programs.albedoPass >= 0) renderer.dependencyGraph[programs.albedoPass].enabled = !reduced;
+    if (programs.lowPass >= 0) renderer.dependencyGraph[programs.lowPass].enabled = reduced;
+    if (programs.reconstructPass >= 0) renderer.dependencyGraph[programs.reconstructPass].enabled = reduced;
+    if (programs.reconstructTracePass >= 0) renderer.dependencyGraph[programs.reconstructTracePass].enabled = reduced;
+    projv::core::vec4 reconstructParams = { programs.reconstructDebug, programs.reconstructTrust, 0.0f, 0.0f };
+    projv::graphics::setUniformToValue(rendererPointer, "reconstructParams", reconstructParams);
+    // The GI chain's temporal history stopped being written while it was off, so it describes some
+    // earlier camera. Turning it back on must not reproject from that.
+    if (advanced && !programs.advancedWasOn) editor.prevCameraValid = false;
+    programs.advancedWasOn = advanced;
+}
+
+// Puts the renderer's own programs back so its teardown destroys what it created, then releases ours.
+static void releaseViewportPrograms(projv::ConstructedRenderer* renderer) {
+    ViewportPrograms& programs = g_viewportPrograms;
+    if (renderer != nullptr) {
+        if (programs.albedoPass >= 0) renderer->dependencyGraph[programs.albedoPass].shaderProgram = programs.albedoFull;
+        if (programs.shadePass >= 0) renderer->dependencyGraph[programs.shadePass].shaderProgram = programs.shadeFull;
+    }
+    if (bgfx::isValid(programs.albedoLean)) bgfx::destroy(programs.albedoLean);
+    if (bgfx::isValid(programs.shadeLean)) bgfx::destroy(programs.shadeLean);
+    programs.albedoLean = BGFX_INVALID_HANDLE;
+    programs.shadeLean = BGFX_INVALID_HANDLE;
+}
+
 // Whichever renderer the tab on screen is drawn by. The Brush Lab shares Edit's, which is why a third
 // tab costs no VRAM and why its preview looks exactly like the Viewport -- stored colour, no lighting,
 // which is the only honest view of what a brush actually wrote.
@@ -24606,6 +24801,75 @@ static void runNewSceneSelfTest(projv::Scene& scene, projv::GPUData& gpuData, Ed
 // Application stages
 // =============================================================================
 
+// =============================================================================
+// Benchmark mode
+// =============================================================================
+//
+// EDITOR_BENCH=<frames> flies a scripted camera in the Edit viewport, moving on EVERY frame -- the case
+// that matters, because a moving camera resets the accumulation and gets no help from history -- and
+// logs the mean GPU time of each pass over <frames> frames, then exits. Two runs measure the same views
+// at the same panel size, so two builds are comparable. EDITOR_BENCH_PATH picks the path:
+//   orbit (default) -- circles the scene's centre at the framing distance: the subject from outside.
+//   spin            -- stands at the scene's centre and turns: the inside-a-level case, where every
+//                      pixel hits something and rays cross the most structure.
+struct EditorBench {
+    int frames = 0;             // 0 = off.
+    std::string path = "orbit";
+    int warmup = 30;            // Shader compiles, uploads, panel sizing, clocks ramping up.
+    int measured = 0;
+    double passMs[256] = {};
+    double frameMs = 0.0;
+    double wallMs = 0.0;
+    // EDITOR_BENCH_CAPTURE=<file.png>: when the timing run ends, write the next frame's viewport image
+    // there before exiting. The camera path is a function of the frame index alone, so two runs capture
+    // the same view with the same jitter -- which is what makes a pixel diff between them meaningful.
+    std::string capturePath;
+    // EDITOR_BENCH_SIZE=<w>x<h>: render the Edit viewport at exactly this size, whatever the panel's
+    // size. The panel just scales the image. GPU timings then do not depend on the window size, which
+    // on a tiling or scaling desktop cannot be pinned -- and without this, two runs a day apart (or a
+    // window manager's whim apart) were not comparable at all. 0 = follow the panel, as normal.
+    int fixedWidth = 0;
+    int fixedHeight = 0;
+    int captureState = 0;           // 0 idle, 1 blit this frame, 2 waiting for the readback.
+    uint32_t captureReadyFrame = 0;
+    bgfx::TextureHandle captureTexture = BGFX_INVALID_HANDLE;
+    std::vector<uint8_t> capturePixels;
+    int captureWidth = 0;
+    int captureHeight = 0;
+};
+static EditorBench g_editorBench;
+
+// Returns true once the run is complete and the editor should exit.
+static bool recordEditorBenchFrame(int frameIndex, int viewportWidth, int viewportHeight) {
+    EditorBench& bench = g_editorBench;
+    if (frameIndex < bench.warmup) return false;
+    static auto lastFrame = std::chrono::high_resolution_clock::now();
+    auto now = std::chrono::high_resolution_clock::now();
+    if (frameIndex > bench.warmup) bench.wallMs += std::chrono::duration<double, std::milli>(now - lastFrame).count();
+    lastFrame = now;
+
+    const bgfx::Stats* stats = bgfx::getStats();
+    if (stats != nullptr && stats->gpuTimerFreq > 0) {
+        const double toMs = 1000.0 / double(stats->gpuTimerFreq);
+        for (uint16_t v = 0; v < stats->numViews; v++) {
+            const bgfx::ViewStats& viewStats = stats->viewStats[v];
+            bench.passMs[viewStats.view] += double(viewStats.gpuTimeEnd - viewStats.gpuTimeBegin) * toMs;
+        }
+        bench.frameMs += double(stats->gpuTimeEnd - stats->gpuTimeBegin) * toMs;
+    }
+    if (++bench.measured < bench.frames) return false;
+
+    const double inv = 1.0 / double(bench.measured);
+    projv::core::info("BENCH path={} frames={} viewport={}x{}", bench.path, bench.measured,
+                      viewportWidth, viewportHeight);
+    for (int i = 0; i < 256; i++) {
+        if (bench.passMs[i] > 0.0) projv::core::info("BENCH   view {:3d}  {:7.3f} ms", i, bench.passMs[i] * inv);
+    }
+    projv::core::info("BENCH   gpu frame  {:7.3f} ms", bench.frameMs * inv);
+    projv::core::info("BENCH   wall frame {:7.3f} ms", bench.wallMs / double(bench.measured - 1));
+    return true;
+}
+
 void startup(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance =
         projv::core::createGlobalResource<projv::graphics::RenderInstance>(app.world);
@@ -24628,6 +24892,7 @@ void startup(projv::Application& app) {
     renderers.viewport =
         projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader);
     renderInstance.setActiveRenderer(renderers.viewport);
+    setupViewportPrograms(renderInstance.getRendererSpecification(1), *renderers.viewport);
 
     // Render mode's path tracer, built up front alongside the viewport's renderer. Its three passes
     // draw the same fullscreen quad, so it takes a second handle on the same compiled vertex shader
@@ -24683,6 +24948,22 @@ void startup(projv::Application& app) {
     // Which tab the editor opens on. Edit unless asked otherwise -- Render mode is a place you go to
     // look at a shot you have already framed, not a place to start. The switch exists because
     // Render mode is reached by clicking, and a screenshot or a smoke test has no way to click.
+    if (const char* benchFrames = std::getenv("EDITOR_BENCH")) {
+        g_editorBench.frames = std::max(0, std::atoi(benchFrames));
+        if (const char* benchPath = std::getenv("EDITOR_BENCH_PATH")) g_editorBench.path = benchPath;
+        if (const char* capture = std::getenv("EDITOR_BENCH_CAPTURE")) g_editorBench.capturePath = capture;
+        if (const char* size = std::getenv("EDITOR_BENCH_SIZE")) {
+            int w = 0, h = 0;
+            if (std::sscanf(size, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+                g_editorBench.fixedWidth = w;
+                g_editorBench.fixedHeight = h;
+            } else {
+                projv::core::warn("EDITOR_BENCH_SIZE: expected \"<width>x<height>\", got \"{}\" - ignoring.", size);
+            }
+        }
+        // Per-view GPU timestamps are only collected with the profiler on.
+        if (g_editorBench.frames > 0) bgfx::setDebug(BGFX_DEBUG_PROFILER);
+    }
     if (const char* startMode = std::getenv("EDITOR_START_MODE")) {
         std::string requested(startMode);
         if (requested == "render") {
@@ -24998,6 +25279,10 @@ void render(projv::Application& app) {
     } else {
         editor.viewportWidth = editor.requestedViewportWidth;
         editor.viewportHeight = editor.requestedViewportHeight;
+        if (g_editorBench.fixedWidth > 0) {
+            editor.viewportWidth = g_editorBench.fixedWidth;
+            editor.viewportHeight = g_editorBench.fixedHeight;
+        }
         if (projv::graphics::resizeRenderTargets(renderer->resources.textures, renderer->resources.framebuffers,
                                                  editor.viewportWidth, editor.viewportHeight)) {
             cameraMoved = true;
@@ -25088,6 +25373,24 @@ void render(projv::Application& app) {
     if (editor.gpuFlushNeeded && editor.sceneLoaded) {
         projv::graphics::flushSceneUpdates(scene, gpuData);
         editor.gpuFlushNeeded = false;
+        cameraMoved = true;
+    }
+
+    if (g_editorBench.frames > 0 && editor.sceneLoaded) {
+        // One full turn across the run, so it covers every side of the subject.
+        float turn = 6.2831853f * float(app.frameCount) / float(g_editorBench.frames + g_editorBench.warmup);
+        editor.cameraYaw = editor.framing.yaw + turn;
+        if (g_editorBench.path == "spin") {
+            editor.cameraPosition = editor.framing.center;
+            editor.cameraPitch = -0.15f;
+        } else {
+            editor.cameraPitch = editor.framing.pitch;
+            float distance = projv::core::length(editor.framing.position - editor.framing.center);
+            projv::core::vec3 look = {
+                std::cos(editor.cameraPitch) * std::cos(editor.cameraYaw), std::sin(editor.cameraPitch),
+                std::cos(editor.cameraPitch) * std::sin(editor.cameraYaw) };
+            editor.cameraPosition = editor.framing.center - look * distance;
+        }
         cameraMoved = true;
     }
 
@@ -25314,6 +25617,7 @@ void render(projv::Application& app) {
         projv::graphics::setUniformToValue(renderer, "cameraProjection", cameraProjection);
         projv::graphics::setUniformToValue(renderer, "sunDir", sunDirection);
         projv::graphics::setUniformToValue(renderer, "renderParams", renderParams);
+        selectViewportPrograms(renderer, editor, app.frameCount - editor.frameCameraLastMovedOn);
         projv::graphics::updateUniforms(renderer->resources.uniformHandles, renderer->resources.uniformValues);
 
         // Views 0..2, all rendering offscreen; each pass takes its resolution from the target it
@@ -25414,7 +25718,43 @@ void render(projv::Application& app) {
         }
     }
 
+    EditorBench& bench = g_editorBench;
+    if (bench.captureState == 1) {
+        bench.captureWidth = editor.viewportWidth;
+        bench.captureHeight = editor.viewportHeight;
+        bench.captureTexture = bgfx::createTexture2D(uint16_t(bench.captureWidth), uint16_t(bench.captureHeight),
+            false, 1, bgfx::TextureFormat::RGBA8,
+            BGFX_TEXTURE_BLIT_DST | BGFX_TEXTURE_READ_BACK | BGFX_SAMPLER_POINT | BGFX_SAMPLER_UVW_CLAMP);
+        bench.capturePixels.assign(size_t(bench.captureWidth) * size_t(bench.captureHeight) * 4, 0);
+        bgfx::blit(EDITOR_IMGUI_VIEW_ID + 2, bench.captureTexture, 0, 0, getViewportTexture(renderers.viewport),
+                   0, 0, uint16_t(bench.captureWidth), uint16_t(bench.captureHeight));
+        bench.captureReadyFrame = bgfx::readTexture(bench.captureTexture, bench.capturePixels.data());
+        bench.captureState = 2;
+    }
+
     uint32_t completedFrame = bgfx::frame();
+
+    if (bench.captureState == 2 && completedFrame >= bench.captureReadyFrame) {
+        bx::FileWriter writer;
+        bx::Error error;
+        if (bx::open(&writer, bench.capturePath.c_str(), false, &error)) {
+            bimg::imageWritePng(&writer, uint32_t(bench.captureWidth), uint32_t(bench.captureHeight),
+                                uint32_t(bench.captureWidth) * 4, bench.capturePixels.data(),
+                                bimg::TextureFormat::RGBA8, false, &error);
+            bx::close(&writer);
+            projv::core::info("BENCH   captured {} ({}x{})", bench.capturePath, bench.captureWidth, bench.captureHeight);
+        } else {
+            projv::core::error("BENCH   could not write {}", bench.capturePath);
+        }
+        bgfx::destroy(bench.captureTexture);
+        bench.captureTexture = BGFX_INVALID_HANDLE;
+        app.closeAppFlag = true;
+    } else if (bench.frames > 0 && bench.captureState == 0 && editor.sceneLoaded &&
+               bench.measured < bench.frames &&
+               recordEditorBenchFrame(app.frameCount, editor.viewportWidth, editor.viewportHeight)) {
+        if (bench.capturePath.empty()) app.closeAppFlag = true;
+        else bench.captureState = 1;
+    }
 
     if (editor.renderSaveReadyFrame != 0 && completedFrame >= editor.renderSaveReadyFrame) {
         uint32_t width = uint32_t(editor.renderSaveWidth);
@@ -25455,6 +25795,8 @@ void shutdown(projv::Application& app) {
     projv::editor::shutdownImGuiBgfx();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+
+    releaseViewportPrograms(projv::core::getGlobalResource<EditorRenderers>(app.world).viewport.get());
 
     // The screenshot staging texture, if one was ever made. Owned by the editor rather than by the
     // renderer -- it is not part of any pass -- so nothing else would release it.

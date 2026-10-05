@@ -39,6 +39,10 @@
         {
             "name": "prevCameraDir",
             "type": "vec4"
+        },
+        {
+            "name": "reconstructParams",
+            "type": "vec4"
         }
     ],
     "shaders": [
@@ -77,6 +81,18 @@
         {
             "shaderID": 9,
             "path": "./editorRenderer/editorShaders/gi_temporal.bin"
+        },
+        {
+            "shaderID": 10,
+            "path": "./editorRenderer/editorShaders/albedo_low.bin"
+        },
+        {
+            "shaderID": 11,
+            "path": "./editorRenderer/editorShaders/reconstruct.bin"
+        },
+        {
+            "shaderID": 12,
+            "path": "./editorRenderer/editorShaders/reconstruct_trace.bin"
         }
     ],
     "textures": [
@@ -151,6 +167,38 @@
             "sizeMode": "relative",
             "scale": 0.25,
             "origin": "CreateNew"
+        },
+        {
+            "texID": 10,
+            "name": "lowMaterial",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 11,
+            "name": "lowSurface",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 12,
+            "name": "reconstructMask",
+            "format": "RGBA8",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 13,
+            "name": "previewDistance",
+            "format": "R32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
         }
     ],
     "framebuffers": [
@@ -160,7 +208,8 @@
                 1,
                 4,
                 5,
-                8
+                8,
+                13
             ]
         },
         {
@@ -191,6 +240,30 @@
             "fboID": 6,
             "textureIDs": [
                 9
+            ]
+        },
+        {
+            "fboID": 7,
+            "textureIDs": [
+                10,
+                11
+            ]
+        },
+        {
+            "fboID": 8,
+            "textureIDs": [
+                1,
+                4,
+                5,
+                8,
+                13,
+                12
+            ]
+        },
+        {
+            "fboID": 9,
+            "textureIDs": [
+                12
             ]
         }
     ]

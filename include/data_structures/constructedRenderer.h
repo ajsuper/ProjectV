@@ -94,6 +94,12 @@ namespace projv {
         uint32_t renderPassID;
         uint32_t multiPassPassNumber;
         bgfx::UniformHandle multiPassPassNumberUniform;
+        // False skips the pass outright: nothing submitted, no ping-pong swap, its target keeps what it
+        // last held. For a pass whose output the frame provably does not read -- a chain behind a
+        // toggle that is off -- where an early-out in the shader would still cost a full-screen pass.
+        // The application owns the decision, and owns invalidating any history the pass keeps when it
+        // turns it back on.
+        bool enabled = true;
     };
 
     struct ConstructedRenderer {

@@ -33,6 +33,7 @@ namespace projv::graphics {
 
         for (size_t i = 0; i < constructedRenderer->dependencyGraph.size(); i++) {
             BGFXDependencyGraph &renderPass = constructedRenderer->dependencyGraph[i];
+            if (!renderPass.enabled) continue;
 #if defined(PROJV_ENABLE_RENDER)
             if (!renderGraphLogged) {
                 core::render("RenderPassID: {}", renderPass.renderPassID);

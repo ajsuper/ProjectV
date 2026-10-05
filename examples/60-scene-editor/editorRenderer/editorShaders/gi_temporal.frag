@@ -60,8 +60,8 @@ SAMPLER2D(previewColor,    0);
 SAMPLER2D(previewNormal,   1);
 SAMPLER2D(previewPosition, 2);
 SAMPLER2D(previewGlow,     3);
-SAMPLER2D(giRaw,           4);
-SAMPLER2D(giLight,         5);
+SAMPLER2D(giRaw,           5);   // After FBO 1's five targets, previewDistance the fifth.
+SAMPLER2D(giLight,         6);
 
 uniform vec4 passTargetRes;   // (w, h, 1/w, 1/h) of THIS pass's target.
 // 8 must equal PROJV_MAX_PASS_INPUTS in constructedRenderer.h -- the engine sets that many.

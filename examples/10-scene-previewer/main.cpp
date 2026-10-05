@@ -45,6 +45,10 @@
 #include "graphics/type_mapping.h"
 #include "utils/compose_io.h"
 
+#include <bgfx/bgfx.h>
+#include <chrono>
+#include <cstdlib>
+
 // Scene path from the command line. The ECS entry points take only the Application, and this is
 // fixed for the process's life, so it lives at file scope alongside the GLFW callback state.
 static std::string g_scenePath = "./scenes/StonehillCastle/";
@@ -67,6 +71,8 @@ struct CameraFraming {
     float yaw;          // Radians; matches the cameraPhi convention below.
     float pitch;
     float moveSpeed;    // World units per frame at the default scroll setting.
+    projv::core::vec3 center = {0.0f, 0.0f, 0.0f};  // What the framing looks at; the benchmark orbits it.
+    float distance = 100.0f;                        // From position to center.
 };
 
 // Measures the world-space bounding box of every live chunk. A chunk header carries its world
@@ -134,10 +140,69 @@ static CameraFraming frameScene(const projv::Scene& scene) {
         std::cos(framing.pitch) * std::sin(framing.yaw)
     };
     framing.position = center - viewDirection * distance;
+    framing.center = center;
+    framing.distance = distance;
 
     // Roughly two seconds to cross the scene at 60fps, which feels the same at any scale.
     framing.moveSpeed = std::max(radius * 2.0f / 120.0f, 0.01f);
     return framing;
+}
+
+// =============================================================================
+// Benchmark mode
+// =============================================================================
+
+// PREVIEW_BENCH=<frames> flies a scripted camera path, moving on EVERY frame -- the case that
+// matters, because a moving camera resets the accumulation and gets no help from history -- and
+// prints the mean GPU time of each pass over <frames> frames, then exits. Two runs measure the same
+// views, so two builds are comparable. PREVIEW_BENCH_PATH picks the path:
+//   orbit (default) -- circles the framing's look-at point at the framing distance: the subject
+//                      seen from outside, mostly geometry with sky around it.
+//   spin            -- stands at the scene's centre and turns: the inside-a-level case, where every
+//                      pixel hits something and rays travel through the most structure.
+struct BenchState {
+    int frames = 0;             // 0 = off.
+    std::string path = "orbit";
+    int warmup = 30;            // Frames skipped first: shader compiles, uploads, clocks ramping up.
+    int measured = 0;
+    double passMs[32] = {};
+    double frameMs = 0.0;
+    double cpuMs = 0.0;
+};
+static BenchState g_bench;
+
+static void readBenchEnvironment() {
+    if (const char* value = std::getenv("PREVIEW_BENCH")) g_bench.frames = std::max(0, std::atoi(value));
+    if (const char* value = std::getenv("PREVIEW_BENCH_PATH")) g_bench.path = value;
+}
+
+// Accumulates this frame's timings; returns true once the run is complete and the app should exit.
+static bool recordBenchFrame(int frameIndex, int width, int height) {
+    if (frameIndex < g_bench.warmup) return false;
+    static auto lastFrame = std::chrono::high_resolution_clock::now();
+    auto now = std::chrono::high_resolution_clock::now();
+    if (frameIndex > g_bench.warmup) g_bench.cpuMs += std::chrono::duration<double, std::milli>(now - lastFrame).count();
+    lastFrame = now;
+
+    const bgfx::Stats* stats = bgfx::getStats();
+    if (stats != nullptr && stats->gpuTimerFreq > 0) {
+        const double toMs = 1000.0 / double(stats->gpuTimerFreq);
+        for (uint16_t v = 0; v < stats->numViews; v++) {
+            const bgfx::ViewStats& viewStats = stats->viewStats[v];
+            if (viewStats.view < 32) g_bench.passMs[viewStats.view] += double(viewStats.gpuTimeEnd - viewStats.gpuTimeBegin) * toMs;
+        }
+        g_bench.frameMs += double(stats->gpuTimeEnd - stats->gpuTimeBegin) * toMs;
+    }
+    if (++g_bench.measured < g_bench.frames) return false;
+
+    const double inv = 1.0 / double(g_bench.measured);
+    projv::core::info("BENCH path={} frames={} resolution={}x{}", g_bench.path, g_bench.measured, width, height);
+    for (int i = 0; i < 32; i++) {
+        if (g_bench.passMs[i] > 0.0) projv::core::info("BENCH   pass {:2d}  {:7.3f} ms", i, g_bench.passMs[i] * inv);
+    }
+    projv::core::info("BENCH   gpu frame {:7.3f} ms", g_bench.frameMs * inv);
+    projv::core::info("BENCH   wall frame {:7.3f} ms", g_bench.cpuMs / double(g_bench.measured - 1));
+    return true;
 }
 
 // =============================================================================
@@ -180,6 +245,8 @@ void startup(projv::Application& app) {
     // stochastic to decorrelate beyond the Halton sub-pixel jitter, which is analytic.
 
     renderInstance.setActiveRenderer(constructedRenderer);
+    // Per-view GPU timestamps are only collected with the profiler on.
+    if (g_bench.frames > 0) bgfx::setDebug(BGFX_DEBUG_PROFILER);
     gpuData = projv::graphics::createTexturesForScene(scene);
 }
 
@@ -270,6 +337,24 @@ void render(projv::Application& app) {
         cameraMoved = true;
     }
 
+    if (g_bench.frames > 0) {
+        // One full turn over the measured frames, so the run covers every side of the subject.
+        float turn = 6.2831853f * float(app.frameCount) / float(g_bench.frames + g_bench.warmup);
+        if (g_bench.path == "spin") {
+            cameraPosition = framing.center;
+            cameraPhi = framing.yaw + turn;
+            cameraPitch = -0.15f;
+        } else {
+            cameraPhi = framing.yaw + turn;
+            cameraPitch = framing.pitch;
+            projv::core::vec3 lookDirection = {
+                std::cos(cameraPitch) * std::cos(cameraPhi), std::sin(cameraPitch),
+                std::cos(cameraPitch) * std::sin(cameraPhi) };
+            cameraPosition = framing.center - lookDirection * framing.distance;
+        }
+        cameraMoved = true;
+    }
+
     projv::core::vec3 cameraDirection;
     cameraDirection.x = projv::core::cos(cameraPitch) * projv::core::cos(cameraPhi);
     cameraDirection.y = projv::core::sin(cameraPitch);
@@ -327,6 +412,11 @@ void render(projv::Application& app) {
     projv::graphics::setUniformToValue(renderer, "texelSize",  texelSize);
 
     projv::graphics::renderConstructedRenderer(renderInstance, renderer, &gpuData);
+
+    if (g_bench.frames > 0 &&
+        recordBenchFrame(app.frameCount, int(windowResolution.x), int(windowResolution.y))) {
+        app.closeAppFlag = true;
+    }
 }
 
 int main(int argc, char** argv) {
@@ -336,6 +426,8 @@ int main(int argc, char** argv) {
         // way to get this wrong from a shell that does not tab-complete one.
         if (!g_scenePath.empty() && g_scenePath.back() != '/') g_scenePath += '/';
     }
+
+    readBenchEnvironment();
 
     projv::Application app = projv::core::createApp();
     projv::core::assignSystemStage(app, projv::SystemStage::Startup, startup);

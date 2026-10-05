@@ -91,6 +91,15 @@ function(projv_compile_shaders)
         if(vertexShaders)
             list(REMOVE_ITEM sharedIncludes ${vertexShaders})
         endif()
+        # A fragment shader may also include a sibling .frag -- a variant is a few #defines in front
+        # of another shader (see the scene editor's albedo_lean.frag) -- and the engine's own shader
+        # library (pjv_utils_DDA.sc) is included by nearly everything. Neither showed up as a
+        # dependency, so editing either left stale binaries that the next run quietly loaded.
+        list(APPEND sharedIncludes ${fragmentShaders})
+        if(engineShaderInclude)
+            file(GLOB engineShaderSources "${engineShaderInclude}/*.sc")
+            list(APPEND sharedIncludes ${engineShaderSources})
+        endif()
 
         foreach(shader IN LISTS vertexShaders fragmentShaders)
             if(shader IN_LIST vertexShaders)

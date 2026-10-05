@@ -86,14 +86,17 @@ SAMPLER2D(previewColor,    0);
 SAMPLER2D(previewNormal,   1);
 SAMPLER2D(previewPosition, 2);
 SAMPLER2D(previewGlow,     3);
-SAMPLER2D(giLight,         4);
+// previewDistance is the G-buffer's fifth target (FBO 1), so the traced light moved from slot 4 to 5.
+SAMPLER2D(previewDistance, 4);
+SAMPLER2D(giLight,         5);
 
 // 8 must equal PROJV_MAX_PASS_INPUTS in constructedRenderer.h -- the engine sets that many.
-uniform vec4 passInputRes[8];  // Per input slot; [4] is the traced light.
+uniform vec4 passInputRes[8];  // Per input slot; [5] is the traced light.
 
 uniform vec4 passTargetRes;   // Engine-set: (w, h, 1/w, 1/h) of THIS pass's target.
 uniform vec4 cameraPos;
 uniform vec4 frameCount;     // x = frame index
+uniform vec4 cameraDir;      // For viewport_ray.sc: the occlusion taps rebuild their rays.
 // x = ambient occlusion, y = normal shading, z = sun shadow, w = ray occlusion
 uniform vec4 renderSettings;
 // x = advanced preview. When it is on, the path traced light replaces the four aids above rather
@@ -113,6 +116,7 @@ uniform vec4 renderParams;
 // Matches albedo.frag's primary ray. Only the vertical FOV is needed here, to turn
 // a world-space radius into the screen-space one the taps walk.
 #define FOV 60.0
+#include "viewport_ray.sc"
 
 #define TAU 6.28318530718
 #define PI 3.14159265359
@@ -410,6 +414,9 @@ float ambientOcclusion(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
 
     float radiusSquared = worldRadius * worldRadius;
     float occlusion = 0.0;
+#if defined(EDITOR_SHADE_LEAN)
+    vec2 jitterUV = viewportJitter() * texelSize;   // This frame's, as albedo.frag cast it.
+#endif
 
     for (int i = 0; i < AO_SAMPLES; i++) {
         // alpha spreads the taps along the disc's radius while the turns spread them
@@ -420,12 +427,31 @@ float ambientOcclusion(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
         vec2 tapUV = uv + vec2(cos(angle), sin(angle)) * alpha * radiusPixels * texelSize;
         tapUV = clamp(tapUV, uvMin, uvMax);
 
+#if defined(EDITOR_SHADE_LEAN)
+        // The tap's hit point, rebuilt from its distance along its own primary ray: 4 bytes a tap
+        // instead of previewPosition's 16. Sixteen scattered taps out to 48 pixels are what this pass
+        // spends its time waiting on -- halving the bytes per tap alone took it from 6.4 ms to 3.2 ms
+        // from inside Bistro at 2052x1308 -- so the bytes are the cost, and the ray is nearly free.
+        //
+        // Nearest texel rather than filtered. The filtered position this used to read blended the
+        // four texels around the tap, which across a depth edge is a point on neither surface; this
+        // is the exact point one pixel's ray hit. The full shade.frag still reads positions, because
+        // with the advanced preview on a refracted ray's hit is not along its primary ray.
+        ivec2 tapTexel = clamp(ivec2(tapUV * passTargetRes.xy), ivec2(0, 0), ivec2(passTargetRes.xy) - 1);
+        float tapDistance = texelFetch(previewDistance, tapTexel, 0).x;
+        if (tapDistance <= 0.0) {
+            continue;   // Background: there is nothing there to be occluded by.
+        }
+        Ray tapRay = primaryRay((vec2(tapTexel) + 0.5) * texelSize + jitterUV);
+        vec3 toSample = tapRay.origin + tapRay.direction * tapDistance - position;
+#else
         vec4 tap = texture2D(previewPosition, tapUV);
         if (tap.w < 0.5) {
             continue;   // Background: there is nothing there to be occluded by.
         }
 
         vec3 toSample = tap.xyz - position;
+#endif
         float distanceSquared = dot(toSample, toSample);
         float elevation = dot(toSample, normal) / max(sqrt(distanceSquared), 0.0001);
         // Linear in the squared distance: full weight at the point itself, none at
@@ -456,8 +482,8 @@ float normalShade(vec3 normal) {
 // Falls back to the centre sample if every neighbour is rejected, which happens on a one-pixel
 // feature whose low-resolution neighbours are all elsewhere. Slightly blocky beats haloed.
 vec3 upsampleIndirectLight(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
-    vec2 sourceRes = passInputRes[4].xy;
-    vec2 sourceTexel = passInputRes[4].zw;
+    vec2 sourceRes = passInputRes[5].xy;
+    vec2 sourceTexel = passInputRes[5].zw;
     if (sourceRes.x < 0.5) {
         return texture2D(giLight, uv).rgb;   // Size unknown: nothing better to do than sample.
     }
@@ -581,6 +607,7 @@ void main() {
 
     shaded *= occlusion;
 
+#if !defined(EDITOR_SHADE_LEAN)   // Both traced terms: see shade_lean.frag.
     if (renderSettings.z > 0.5) {
         shaded *= sunShadow(surface.xyz, normal, geometry.w);
     }
@@ -627,6 +654,7 @@ void main() {
         vec3 indirect = upsampleIndirectLight(v_texcoord0, surface.xyz, normal, geometry.w);
         shaded = color.rgb * (direct + indirect * mix(1.0, occlusion, AO_OVER_TRACED_LIGHT));
     }
+#endif
 
     // Added, not multiplied, and added last -- after every darkening above has had its say about the
     // diffuse reflectance and none of them has had any say about this. Zero with the advanced
