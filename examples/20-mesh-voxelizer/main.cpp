@@ -24,6 +24,7 @@
 #include "utils/voxel_math.h"
 #include "utils/material.h"
 #include "utils/compose_io.h"
+#include "utils/surface_quadrics.h"
 #include "nlohmann/json.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -38,11 +39,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <numeric>
 #include <string>
 #include <thread>
+#include <unordered_map>
 using namespace projv::core;
 
 struct Triangle {
@@ -554,7 +557,279 @@ void writeComposeScene(projv::DataFile& dataFile, const std::string& outputDirec
     composeOut.close();
 }
 
-void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetDirectory, int voxelizationResolution, std::string outputDirectory, bool flipTextureV, uint8_t alphaCutoff, unsigned int threadCount, const DisplaceOptions& displace) {
+// ---- Surface quadrics (--surfaces) ----------------------------------------------------------
+//
+// A voxelization keeps only which voxels the triangles touch. With --surfaces the voxelizer also
+// keeps where, inside each voxel, the surface actually runs: a quadric fitted to the triangles in
+// and around the voxel, written to model.surfaces beside model.data. See
+// include/utils/surface_quadrics.h for the format and examples/35-surface-voxels for the viewer.
+//
+// The fit sees a neighbourhood a little larger than the voxel (SURFACE_FIT_REACH voxels beyond each
+// face), so adjacent voxels fit overlapping data and their surfaces meet closely, and samples are
+// weighted toward the voxel's own centre.
+
+constexpr float SURFACE_FIT_REACH   = 0.5f;   // Voxels beyond each face the fit gathers triangles.
+constexpr float SURFACE_FIT_SPACING = 0.2f;   // Sample spacing on the triangles, in voxels.
+constexpr float SURFACE_FIT_SIGMA   = 0.6f;   // Gaussian falloff of sample weight, in voxels.
+
+struct SurfaceFitStats {
+    size_t fitted = 0, planes = 0, multiTerm = 0, tooFew = 0, singular = 0, normalsDisagree = 0,
+           poorFit = 0, signMismatch = 0, flipped = 0, oneSided = 0, repaired = 0, breaching = 0,
+           approximate = 0;
+    void add(const SurfaceFitStats& o) {
+        fitted += o.fitted; planes += o.planes; multiTerm += o.multiTerm; tooFew += o.tooFew;
+        singular += o.singular; normalsDisagree += o.normalsDisagree; poorFit += o.poorFit;
+        signMismatch += o.signMismatch; flipped += o.flipped; oneSided += o.oneSided;
+        repaired += o.repaired; breaching += o.breaching; approximate += o.approximate;
+    }
+};
+
+// What the flood fill learned about every voxel of the whole grid, when it could run.
+enum : uint8_t { CELL_UNKNOWN = 0, CELL_SHELL = 1, CELL_EXTERIOR = 2, CELL_INTERIOR = 3 };
+
+struct Classification {
+    int size = 0;                       // Voxels per axis across the whole grid; 0 = unavailable.
+    std::vector<uint8_t> cell;
+    uint8_t at(int x, int y, int z) const {
+        if (size == 0) return CELL_UNKNOWN;
+        if (x < 0 || y < 0 || z < 0 || x >= size || y >= size || z >= size) return CELL_EXTERIOR;
+        return cell[(size_t(z) * size + y) * size + x];
+    }
+};
+
+uint8_t brickMapMaterial(const projv::VoxelBrickMap& map, int x, int y, int z) {
+    const ivec3 brick = projv::utils::computeBrickCoord(x, y, z);
+    const uint32_t index = projv::utils::computeBrickZOrder(brick, map.brickDims);
+    if (index >= map.bricks.size() || !map.bricks[index]) return 0;
+    auto found = map.bricks[index]->materials.find(
+        projv::utils::computeLocalZOrder(projv::utils::computeBrickLocalPos(x, y, z)));
+    return found == map.bricks[index]->materials.end() ? 0 : found->second;
+}
+
+// Clips a convex polygon to the axis-aligned box [lo, hi] (Sutherland-Hodgman, one plane at a time).
+std::vector<vec3> clipPolygonToBox(std::vector<vec3> polygon, const vec3& lo, const vec3& hi) {
+    for (int axis = 0; axis < 3 && !polygon.empty(); ++axis) {
+        for (int side = 0; side < 2 && !polygon.empty(); ++side) {
+            const float bound = side == 0 ? lo[axis] : hi[axis];
+            auto inside = [&](const vec3& p) { return side == 0 ? p[axis] >= bound : p[axis] <= bound; };
+            std::vector<vec3> out;
+            for (size_t i = 0; i < polygon.size(); ++i) {
+                const vec3& a = polygon[i];
+                const vec3& b = polygon[(i + 1) % polygon.size()];
+                const bool ina = inside(a), inb = inside(b);
+                if (ina) out.push_back(a);
+                if (ina != inb) {
+                    const float t = (bound - a[axis]) / (b[axis] - a[axis]);
+                    out.push_back(a + (b - a) * t);
+                }
+            }
+            polygon = std::move(out);
+        }
+    }
+    return polygon;
+}
+
+// Fits every shell voxel of one chunk from the triangles binned into it: one term where one surface
+// fits, up to three (edges, corners, thin walls) where it does not, both styles. Then each voxel is
+// oriented against the flood fill (its surface must face the exterior) and made one-sided where the
+// solid side is known, so cracks between voxels land on solid material instead of opening holes.
+std::vector<projv::utils::SurfaceVoxel> fitChunkSurfaces(
+        const std::vector<meshimport::ImportedVertex>& vertices,
+        const uint32_t* triangles, size_t triangleCount,
+        const projv::VoxelBrickMap& brickMap, const vec3& chunkPosition, int resolution,
+        const ivec3& chunkOrigin, const Classification& classes, SurfaceFitStats& statsOut) {
+    // Which triangles reach into each shell voxel's neighbourhood.
+    std::unordered_map<uint32_t, std::vector<uint32_t>> trianglesByVoxel;
+    for (size_t i = 0; i < triangleCount; ++i) {
+        const uint32_t triangleIndex = triangles[i];
+        const vec3 p0 = vertices[triangleIndex * 3 + 0].position - chunkPosition;
+        const vec3 p1 = vertices[triangleIndex * 3 + 1].position - chunkPosition;
+        const vec3 p2 = vertices[triangleIndex * 3 + 2].position - chunkPosition;
+        const Triangle tri{p0, p1, p2};
+        const ivec3 lo = clamp(ivec3(floor(min(min(p0, p1), p2) - vec3(SURFACE_FIT_REACH))),
+                               ivec3(0), ivec3(resolution - 1));
+        const ivec3 hi = clamp(ivec3(floor(max(max(p0, p1), p2) + vec3(SURFACE_FIT_REACH))),
+                               ivec3(0), ivec3(resolution - 1));
+        for (int z = lo.z; z <= hi.z; ++z)
+            for (int y = lo.y; y <= hi.y; ++y)
+                for (int x = lo.x; x <= hi.x; ++x) {
+                    if (!projv::utils::brickMapHasVoxel(brickMap, x, y, z)) continue;
+                    AABB box{vec3(x, y, z) - vec3(SURFACE_FIT_REACH),
+                             vec3(x + 1, y + 1, z + 1) + vec3(SURFACE_FIT_REACH)};
+                    if (!triAABBIntersect(tri, box)) continue;
+                    trianglesByVoxel[projv::utils::packSurfaceVoxel(x, y, z)].push_back(triangleIndex);
+                }
+    }
+
+    const projv::utils::SurfaceFitOptions options;
+    const float inverseTwoSigmaSq = 1.0f / (2.0f * SURFACE_FIT_SIGMA * SURFACE_FIT_SIGMA);
+    static const ivec3 faces[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+
+    // Voxels are independent: fit them across every core. (Chunks are already spread over threads
+    // too; this matters when there are few chunks, which is the common case for one model.)
+    std::vector<std::pair<uint32_t, const std::vector<uint32_t>*>> work;
+    work.reserve(trianglesByVoxel.size());
+    for (auto& [packed, voxelTriangles] : trianglesByVoxel) work.push_back({packed, &voxelTriangles});
+    const unsigned int workers = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<std::vector<projv::utils::SurfaceVoxel>> partial(workers);
+    std::vector<SurfaceFitStats> partialStats(workers);
+    std::atomic<size_t> nextVoxel{0};
+    auto fitRange = [&](unsigned int worker) {
+      std::vector<projv::utils::SurfaceVoxel>& result = partial[worker];
+      SurfaceFitStats& stats = partialStats[worker];
+      std::vector<projv::utils::SurfaceSample> samples;
+      for (;;) {
+        const size_t item = nextVoxel.fetch_add(1);
+        if (item >= work.size()) break;
+        const uint32_t packed = work[item].first;
+        const std::vector<uint32_t>& voxelTriangles = *work[item].second;
+        const ivec3 voxel(int(packed & 1023u), int((packed >> 10) & 1023u), int((packed >> 20) & 1023u));
+        const vec3 centre = vec3(voxel) + vec3(0.5f);
+        const vec3 lo = vec3(-0.5f - SURFACE_FIT_REACH);
+        const vec3 hi = vec3(0.5f + SURFACE_FIT_REACH);
+
+        samples.clear();
+        for (uint32_t triangleIndex : voxelTriangles) {
+            const vec3 a = vertices[triangleIndex * 3 + 0].position - chunkPosition - centre;
+            const vec3 b = vertices[triangleIndex * 3 + 1].position - chunkPosition - centre;
+            const vec3 c = vertices[triangleIndex * 3 + 2].position - chunkPosition - centre;
+            vec3 normal = cross(b - a, c - a);
+            const float normalLength = length(normal);
+            if (normalLength < 1e-12f) continue;
+            normal /= normalLength;
+
+            // Only the part of the triangle inside the neighbourhood, fanned back into triangles.
+            const std::vector<vec3> polygon = clipPolygonToBox({a, b, c}, lo, hi);
+            for (size_t k = 1; k + 1 < polygon.size(); ++k) {
+                const vec3& q0 = polygon[0];
+                const vec3& q1 = polygon[k];
+                const vec3& q2 = polygon[k + 1];
+                const float area = 0.5f * length(cross(q1 - q0, q2 - q0));
+                if (area < 1e-8f) continue;
+                const float longest = std::max({length(q1 - q0), length(q2 - q1), length(q0 - q2)});
+                const int n = std::clamp(int(std::ceil(longest / SURFACE_FIT_SPACING)), 1, 16);
+                const int count = (n + 1) * (n + 2) / 2;
+                const float sampleArea = area / float(count);
+                for (int i = 0; i <= n; ++i)
+                    for (int j = 0; j <= n - i; ++j) {
+                        const float u = float(i) / float(n), v = float(j) / float(n);
+                        const vec3 p = q0 + (q1 - q0) * u + (q2 - q0) * v;
+                        const float weight = sampleArea * std::exp(-dot(p, p) * inverseTwoSigmaSq);
+                        samples.push_back({p, normal, weight});
+                    }
+            }
+        }
+
+        projv::utils::SurfaceVoxel entry;
+        entry.voxel = packed;
+        projv::utils::SurfaceFitKind kind;
+        switch (projv::utils::fitSurfaceVoxel(samples, options, entry, &kind)) {
+            case projv::utils::SurfaceFitResult::Ok: break;
+            case projv::utils::SurfaceFitResult::SignMismatch:    stats.signMismatch++; continue;
+            case projv::utils::SurfaceFitResult::TooFewSamples:   stats.tooFew++; continue;
+            case projv::utils::SurfaceFitResult::Singular:        stats.singular++; continue;
+            case projv::utils::SurfaceFitResult::NormalsDisagree: {
+                stats.normalsDisagree++;
+                // DEBUG: SURFACE_DUMP=<file> appends the first failing voxels' samples.
+                static std::mutex dumpMutex;
+                static int dumped = 0;
+                if (const char* path = std::getenv("SURFACE_DUMP")) {
+                    std::lock_guard<std::mutex> lock(dumpMutex);
+                    if (dumped < 300) {
+                        std::ofstream dump(path, std::ios::app);
+                        dump << "voxel " << dumped++ << " " << samples.size() << "\n";
+                        for (const auto& sm : samples)
+                            dump << sm.position.x << " " << sm.position.y << " " << sm.position.z << " "
+                                 << sm.normal.x << " " << sm.normal.y << " " << sm.normal.z << " " << sm.weight << "\n";
+                    }
+                }
+                continue;
+            }
+            case projv::utils::SurfaceFitResult::PoorFit:         stats.poorFit++; continue;
+        }
+        stats.fitted++;
+        if (kind == projv::utils::SurfaceFitKind::Plane) stats.planes++;
+        if (kind == projv::utils::SurfaceFitKind::MultiTerm) stats.multiTerm++;
+        if (kind == projv::utils::SurfaceFitKind::Approximate) stats.approximate++;
+
+        // Orientation and sidedness from the flood fill. The surface must be outside (f > 0) where
+        // it meets the exterior and inside where it meets the interior; mesh winding is not trusted.
+        bool touchesInterior = false;
+        uint8_t exteriorFaces = 0;
+        for (int fi = 0; fi < 6; ++fi) {
+            const ivec3 g = chunkOrigin + voxel + faces[fi];
+            const uint8_t cls = classes.at(g.x, g.y, g.z);
+            touchesInterior |= cls == CELL_INTERIOR;
+            if (cls == CELL_EXTERIOR) exteriorFaces |= uint8_t(1u << fi);
+        }
+        // One-sided wherever the inside is known nearby: the conservative shell is often two voxels
+        // thick, and its outer layer never touches the interior directly.
+        bool nearInterior = touchesInterior;
+        for (int dz = -2; dz <= 2 && !nearInterior; ++dz)
+            for (int dy = -2; dy <= 2 && !nearInterior; ++dy)
+                for (int dx = -2; dx <= 2 && !nearInterior; ++dx) {
+                    const ivec3 g = chunkOrigin + voxel + ivec3(dx, dy, dz);
+                    nearInterior = classes.at(g.x, g.y, g.z) == CELL_INTERIOR;
+                }
+        auto orient = [&](projv::utils::SurfaceVoxel& v) {
+            int vote = 0;
+            for (const ivec3& d : faces) {
+                const ivec3 g = chunkOrigin + voxel + d;
+                const uint8_t cls = classes.at(g.x, g.y, g.z);
+                if (cls != CELL_EXTERIOR && cls != CELL_INTERIOR) continue;
+                const double f = projv::utils::evaluateSurfaceVoxel(v, false, vec3(d) * 0.5f);
+                vote += ((f > 0.0) == (cls == CELL_EXTERIOR)) ? 1 : -1;
+            }
+            if (vote < 0) projv::utils::flipSurfaceVoxel(v);
+            return vote < 0;
+        };
+        if (entry.voxel & projv::utils::SURFACE_TWO_SIDED) {   // A double-sided face: a sheet.
+            result.push_back(entry);
+            continue;
+        }
+        // Without an interior nearby (an open mesh, or one with holes the flood leaked through)
+        // "exterior" is on both sides and says nothing about which way the surface faces: trust the
+        // mesh's normals, and leave the voxel two-sided.
+        if (nearInterior && orient(entry)) stats.flipped++;
+        // A surface that claims solid on a face open to the exterior is a face extended past where
+        // it ends -- an edge the fit did not see. Try again with several terms.
+        if (nearInterior && exteriorFaces && projv::utils::surfaceVoxelBreachesExterior(entry, exteriorFaces)) {
+            projv::utils::SurfaceVoxel multi;
+            multi.voxel = packed;
+            projv::utils::SurfaceFitKind multiKind;
+            if (projv::utils::fitSurfaceVoxel(samples, options, multi, &multiKind, true) == projv::utils::SurfaceFitResult::Ok &&
+                !(multi.voxel & projv::utils::SURFACE_TWO_SIDED)) {
+                orient(multi);
+                if (!projv::utils::surfaceVoxelBreachesExterior(multi, exteriorFaces)) {
+                    if (entry.termCount == 1 && multi.termCount > 1) stats.multiTerm++;
+                    entry = multi;
+                    stats.repaired++;
+                } else {
+                    stats.breaching++;
+                }
+            } else {
+                stats.breaching++;
+            }
+        }
+        const bool oneSided = nearInterior || entry.termCount > 1;
+        if (oneSided) stats.oneSided++;
+        else entry.voxel |= projv::utils::SURFACE_TWO_SIDED;
+        result.push_back(entry);
+      }
+    };
+    std::vector<std::thread> pool;
+    for (unsigned int w = 0; w < workers; ++w) pool.emplace_back(fitRange, w);
+    for (std::thread& t : pool) t.join();
+
+    std::vector<projv::utils::SurfaceVoxel> result;
+    for (unsigned int w = 0; w < workers; ++w) {
+        result.insert(result.end(), partial[w].begin(), partial[w].end());
+        statsOut.add(partialStats[w]);
+    }
+    return result;
+}
+
+void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetDirectory, int voxelizationResolution, std::string outputDirectory, bool flipTextureV, uint8_t alphaCutoff, unsigned int threadCount, const DisplaceOptions& displace, bool fitSurfaces) {
     using namespace projv::core;
     info("--------------------------------------------");
     info("  ProjectV Voxelizer");
@@ -906,8 +1181,35 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
         std::vector<std::pair<int, projv::DataBlock>> blocks;
         size_t voxels = 0;
         size_t alphaSkipped = 0;
+        std::vector<std::pair<int, projv::utils::SurfaceBlock>> surfaces;
+        SurfaceFitStats surfaceStats;
     };
     std::vector<ThreadResult> threadResults(threadCount);
+
+    // Chunks held back for the surface pass (see the end of the chunk loop).
+    struct PendingChunk {
+        int chunkIndex;
+        ivec3 gridPosition;
+        projv::ChunkHeader header;
+        size_t cell;
+        std::unique_ptr<projv::VoxelBrickMap> brickMap;
+    };
+    std::vector<PendingChunk> pending;
+    std::mutex pendingMutex;
+
+    auto bakeBlock = [&](const projv::ChunkHeader& header, const ivec3& gridPosition, const projv::VoxelBrickMap& map) {
+        projv::Chunk chunk = projv::utils::createChunk(header);
+        projv::utils::updateChunkFromBrickMap(chunk, map);
+        projv::DataBlock block;
+        block.gridX = gridPosition.x;
+        block.gridY = gridPosition.y;
+        block.gridZ = gridPosition.z;
+        // Baked here rather than at load: bakeMaterialsFromBrickMap stamps each leaf node with its
+        // offset into materialIDs, so the pair written to disk is exactly the pair the GPU reads.
+        block.geometry = std::move(chunk.geometryData);
+        projv::utils::bakeMaterialsFromBrickMap(block.geometry, block.materialIDs, map);
+        return block;
+    };
     std::atomic<size_t> nextWorkItem{0};
     std::atomic<size_t> chunksDone{0};
     const size_t logEvery = std::max<size_t>(1, chunksToProcess.size() / 10);
@@ -1095,18 +1397,14 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
             continue;
         }
 
-        projv::Chunk chunk = projv::utils::createChunk(chunkHeader);
-        projv::utils::updateChunkFromBrickMap(chunk, *brickMap);
-
-        projv::DataBlock block;
-        block.gridX = chunkIndexPosition.x;
-        block.gridY = chunkIndexPosition.y;
-        block.gridZ = chunkIndexPosition.z;
-        // Baked here rather than at load: bakeMaterialsFromBrickMap stamps each leaf node with its
-        // offset into materialIDs, so the pair written to disk is exactly the pair the GPU reads.
-        block.geometry = std::move(chunk.geometryData);
-        projv::utils::bakeMaterialsFromBrickMap(block.geometry, block.materialIDs, *brickMap);
-        threadOutput.blocks.emplace_back(chunkIndex, std::move(block));
+        // With --surfaces the bake waits: the interior can only be filled once every chunk's shell
+        // exists, because the flood fill that finds it runs across the whole grid.
+        if (fitSurfaces) {
+            std::lock_guard<std::mutex> lock(pendingMutex);
+            pending.push_back({chunkIndex, chunkIndexPosition, chunkHeader, chunkCell, std::move(brickMap)});
+            continue;
+        }
+        threadOutput.blocks.emplace_back(chunkIndex, bakeBlock(chunkHeader, chunkIndexPosition, *brickMap));
       }
     };
 
@@ -1119,6 +1417,169 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
             pool.emplace_back(voxelizeChunkRange, threadIndex);
         }
         for (std::thread& thread : pool) thread.join();
+    }
+
+    // ---- Surface pass: classify the whole grid, fit, fill the interior, bake ----
+    size_t interiorVoxels = 0;
+    bool interiorFilled = false;
+    if (fitSurfaces && !pending.empty()) {
+        const int R = int(chunkResolution);
+        const int N = chunksPerAxis * R;
+        Classification classes;
+        std::vector<uint8_t> material;
+        if (N <= 512) {
+            info("Classifying {}^3 voxels (flood fill from outside)...", N);
+            classes.size = N;
+            classes.cell.assign(size_t(N) * N * N, CELL_UNKNOWN);
+            material.assign(classes.cell.size(), 0);
+            auto index = [&](int x, int y, int z) { return (size_t(z) * N + y) * N + x; };
+            for (const PendingChunk& chunk : pending) {
+                const ivec3 o = chunk.gridPosition * R;
+                for (int z = 0; z < R; ++z)
+                    for (int y = 0; y < R; ++y)
+                        for (int x = 0; x < R; ++x) {
+                            if (!projv::utils::brickMapHasVoxel(*chunk.brickMap, x, y, z)) continue;
+                            const size_t i = index(o.x + x, o.y + y, o.z + z);
+                            classes.cell[i] = CELL_SHELL;
+                            material[i] = brickMapMaterial(*chunk.brickMap, x, y, z);
+                        }
+            }
+            // Exterior: every empty voxel reachable from the grid's boundary.
+            std::vector<uint32_t> queue;
+            auto seed = [&](int x, int y, int z) {
+                const size_t i = index(x, y, z);
+                if (classes.cell[i] != CELL_UNKNOWN) return;
+                classes.cell[i] = CELL_EXTERIOR;
+                queue.push_back(uint32_t(i));
+            };
+            for (int a = 0; a < N; ++a)
+                for (int b = 0; b < N; ++b) {
+                    seed(0, a, b); seed(N - 1, a, b); seed(a, 0, b); seed(a, N - 1, b); seed(a, b, 0); seed(a, b, N - 1);
+                }
+            static const int step[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+            for (size_t head = 0; head < queue.size(); ++head) {
+                const size_t i = queue[head];
+                const int x = int(i % N), y = int((i / N) % N), z = int(i / (size_t(N) * N));
+                for (const auto& d : step) {
+                    const int nx = x + d[0], ny = y + d[1], nz = z + d[2];
+                    if (nx < 0 || ny < 0 || nz < 0 || nx >= N || ny >= N || nz >= N) continue;
+                    seed(nx, ny, nz);
+                }
+            }
+            // Interior: what the flood never reached. The first few voxels in are coloured from the
+            // nearest shell voxel, so a crack that shows one shows the right material; deeper ones,
+            // which nothing can show, all take one material, so their leaves bake as uniform (one
+            // material byte each instead of one per voxel).
+            constexpr uint8_t PAINT_DEPTH = 3;
+            uint8_t deepMaterial = 0;
+            {
+                std::vector<size_t> counts(256, 0);
+                for (size_t i = 0; i < classes.cell.size(); ++i) if (classes.cell[i] == CELL_SHELL) counts[material[i]]++;
+                deepMaterial = uint8_t(std::max_element(counts.begin(), counts.end()) - counts.begin());
+            }
+            queue.clear();
+            for (size_t i = 0; i < classes.cell.size(); ++i) {
+                if (classes.cell[i] == CELL_UNKNOWN) { classes.cell[i] = CELL_INTERIOR; interiorVoxels++; }
+            }
+            for (size_t i = 0; i < classes.cell.size(); ++i)
+                if (classes.cell[i] == CELL_SHELL) queue.push_back(uint32_t(i));
+            std::vector<uint8_t> painted(classes.cell.size(), 0);   // depth from the shell, 0 = not yet
+            for (size_t head = 0; head < queue.size(); ++head) {
+                const size_t i = queue[head];
+                const uint8_t depth = classes.cell[i] == CELL_SHELL ? 0 : painted[i];
+                if (depth >= PAINT_DEPTH) continue;
+                const int x = int(i % N), y = int((i / N) % N), z = int(i / (size_t(N) * N));
+                for (const auto& d : step) {
+                    const int nx = x + d[0], ny = y + d[1], nz = z + d[2];
+                    if (nx < 0 || ny < 0 || nz < 0 || nx >= N || ny >= N || nz >= N) continue;
+                    const size_t j = index(nx, ny, nz);
+                    if (classes.cell[j] != CELL_INTERIOR || painted[j]) continue;
+                    painted[j] = uint8_t(depth + 1);
+                    material[j] = material[i];
+                    queue.push_back(uint32_t(j));
+                }
+            }
+            for (size_t i = 0; i < classes.cell.size(); ++i)
+                if (classes.cell[i] == CELL_INTERIOR && !painted[i]) material[i] = deepMaterial;
+            interiorFilled = true;
+            info("  {} interior voxel(s){}", interiorVoxels,
+                 interiorVoxels == 0 ? " -- the mesh is open (or thinner than a voxel); surfaces stay two-sided" : "");
+        } else {
+            projv::core::warn("Grid is {}^3: too large for the interior flood fill in this prototype "
+                              "(limit 512). Surfaces stay two-sided and nothing is filled.", N);
+        }
+
+        info("Fitting surfaces...");
+        std::atomic<size_t> nextPending{0};
+        auto surfaceRange = [&](unsigned int threadIndex) {
+            ThreadResult& threadOutput = threadResults[threadIndex];
+            for (;;) {
+                const size_t item = nextPending.fetch_add(1);
+                if (item >= pending.size()) break;
+                PendingChunk& chunk = pending[item];
+                const ivec3 origin = chunk.gridPosition * R;
+
+                // Fit before filling: only the shell carries surfaces.
+                projv::utils::SurfaceBlock surfaceBlock;
+                surfaceBlock.gridCoord = chunk.gridPosition;
+                surfaceBlock.voxels = fitChunkSurfaces(vertices,
+                    binTriangles.data() + binOffsets[chunk.cell], size_t(binOffsets[chunk.cell + 1] - binOffsets[chunk.cell]),
+                    *chunk.brickMap, chunk.header.position, R, origin, classes, threadOutput.surfaceStats);
+                threadOutput.surfaces.emplace_back(chunk.chunkIndex, std::move(surfaceBlock));
+
+                if (interiorFilled) {
+                    for (int z = 0; z < R; ++z)
+                        for (int y = 0; y < R; ++y)
+                            for (int x = 0; x < R; ++x) {
+                                const size_t i = (size_t(origin.z + z) * N + (origin.y + y)) * N + (origin.x + x);
+                                if (classes.cell[i] == CELL_INTERIOR) {
+                                    projv::utils::brickMapSetVoxel(*chunk.brickMap, x, y, z, material[i]);
+                                }
+                            }
+                }
+                threadOutput.blocks.emplace_back(chunk.chunkIndex, bakeBlock(chunk.header, chunk.gridPosition, *chunk.brickMap));
+                chunk.brickMap.reset();
+            }
+        };
+        if (threadCount <= 1) {
+            surfaceRange(0);
+        } else {
+            std::vector<std::thread> pool;
+            for (unsigned int t = 0; t < threadCount; t++) pool.emplace_back(surfaceRange, t);
+            for (std::thread& thread : pool) thread.join();
+        }
+        // Chunks inside a closed mesh can be entirely interior and never received a triangle: they
+        // exist only now. Add them as solid blocks.
+        if (interiorFilled) {
+            std::vector<char> present(size_t(chunksPerAxis) * chunksPerAxis * chunksPerAxis, 0);
+            for (const PendingChunk& chunk : pending)
+                present[linearCell(chunk.gridPosition.x, chunk.gridPosition.y, chunk.gridPosition.z)] = 1;
+            for (int cz = 0; cz < chunksPerAxis; ++cz)
+                for (int cy = 0; cy < chunksPerAxis; ++cy)
+                    for (int cx = 0; cx < chunksPerAxis; ++cx) {
+                        if (present[linearCell(cx, cy, cz)]) continue;
+                        const ivec3 gp(cx, cy, cz), origin = gp * R;
+                        auto map = projv::utils::createVoxelBrickMap(projv::utils::computeBrickDims(chunkResolution));
+                        bool any = false;
+                        for (int z = 0; z < R; ++z)
+                            for (int y = 0; y < R; ++y)
+                                for (int x = 0; x < R; ++x) {
+                                    const size_t i = (size_t(origin.z + z) * N + (origin.y + y)) * N + (origin.x + x);
+                                    if (classes.cell[i] != CELL_INTERIOR) continue;
+                                    projv::utils::brickMapSetVoxel(*map, x, y, z, material[i]);
+                                    any = true;
+                                }
+                        if (!any) continue;
+                        projv::ChunkHeader header;
+                        header.chunkID = uint32_t(projv::utils::createZOrderIndex(gp));
+                        header.position = vec3(gp) * vec3(chunkScale);
+                        header.voxelScale = voxelScale;
+                        header.resolution = chunkResolution;
+                        header.scale = chunkScale;
+                        threadResults[0].blocks.emplace_back(int(header.chunkID), bakeBlock(header, gp, *map));
+                    }
+        }
+        totalVoxels += interiorVoxels;
     }
 
     // Merge the per-thread output. Sorting by chunk index restores the order the serial loop
@@ -1147,6 +1608,24 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
     std::string modelName = modelPath.stem().string();
     if (modelName.empty()) modelName = "model";
     writeComposeScene(dataFile, outputDirectory, modelName, palette);
+
+    SurfaceFitStats surfaceStats;
+    if (fitSurfaces) {
+        std::vector<std::pair<int, projv::utils::SurfaceBlock>> orderedSurfaces;
+        for (ThreadResult& threadOutput : threadResults) {
+            surfaceStats.add(threadOutput.surfaceStats);
+            for (auto& entry : threadOutput.surfaces) orderedSurfaces.emplace_back(entry.first, std::move(entry.second));
+        }
+        std::sort(orderedSurfaces.begin(), orderedSurfaces.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+        projv::utils::SurfaceFile surfaceFile;
+        surfaceFile.resolution = chunkResolution;
+        for (auto& entry : orderedSurfaces) surfaceFile.blocks.push_back(std::move(entry.second));
+        const std::string surfacePath = projv::utils::surfaceFilePathFor(outputDirectory + "/model.data");
+        if (projv::utils::writeSurfaceFile(surfacePath, surfaceFile)) {
+            info("Wrote surfaces to {}", surfacePath);
+        }
+    }
 
     // Free all loaded texture data
     for (Texture& texture : textures) {
@@ -1187,6 +1666,25 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
             heightMapsWereColor, heightMapsRejected - heightMapsWereColor);
     }
     info("  Total voxels:    {}", totalVoxels);
+    if (fitSurfaces) {
+        const size_t attempted = surfaceStats.fitted + surfaceStats.tooFew + surfaceStats.singular +
+                                 surfaceStats.normalsDisagree + surfaceStats.poorFit + surfaceStats.signMismatch;
+        info("  Surfaces:        {} of {} shell voxel(s) fitted ({:.1f}%): {} single quadric/plane, {} multi-term "
+             "(edges, corners, thin parts); {} one-sided, {} flipped to face outward",
+            surfaceStats.fitted, attempted,
+            attempted ? 100.0 * double(surfaceStats.fitted) / double(attempted) : 0.0,
+            surfaceStats.fitted - surfaceStats.multiTerm, surfaceStats.multiTerm,
+            surfaceStats.oneSided, surfaceStats.flipped);
+        info("  Left as boxes:   {} sharp / opposing normals, {} wrong side, {} poor fit, {} degenerate, {} too few samples",
+            surfaceStats.normalsDisagree, surfaceStats.signMismatch, surfaceStats.poorFit,
+            surfaceStats.singular, surfaceStats.tooFew);
+        info("  Interior:        {} voxel(s) filled solid", interiorVoxels);
+        info("  Approximate:     {} voxel(s) kept a best-effort surface rather than becoming a box",
+            surfaceStats.approximate);
+        info("  Exterior check:  {} surface(s) reached into open space; {} refitted with several terms, {} still do",
+            surfaceStats.repaired + surfaceStats.breaching, surfaceStats.repaired, surfaceStats.breaching);
+        projv::utils::reportMultiTermFailures();
+    }
     info("  Occupied blocks: {}", dataFile.blocks.size());
     info("  Output:          {}/model.data + {}/compose.json", outputDirectory, outputDirectory);
     info("--------------------------------------------");
@@ -1379,6 +1877,7 @@ int main(int argc, char** argv) {
     std::string resourcePack = "";
     bool minecraftNoWater = false;
     bool forceMinecraft = false;
+    bool fitSurfaces = false;
 
     app.add_option("-m, --modelDir, -a, --assetDir", assetDirectory,
         "Root directory to search for the model's textures. Defaults to the model file's own "
@@ -1427,6 +1926,9 @@ int main(int argc, char** argv) {
         "Thickness in voxels of the displaced surface shell (default: 1). Raise it if a steep height "
         "gradient leaves pinholes; the effective minimum is half a voxel diagonal.")
         ->check(CLI::PositiveNumber);
+    app.add_flag("--surfaces", fitSurfaces,
+        "Also fit a quadric surface per voxel from the triangles, written to model.surfaces "
+        "(prototype; view with surface_voxels --scene).");
     app.add_flag("--list-formats", listFormats, "Print every model format this build can read, then exit.");
 
     // --- Minecraft world options ---
@@ -1527,8 +2029,13 @@ int main(int argc, char** argv) {
                             : displacePolarity == "dark"   ? HeightPolarity::DarkIsHigh
                                                            : HeightPolarity::Auto;
 
+    if (fitSurfaces && displaceOptions.enabled()) {
+        projv::core::warn("--surfaces ignores displacement: the fitted surface is the undisplaced "
+                          "triangles, so it would disagree with the voxels. Fitting is turned off.");
+        fitSurfaces = false;
+    }
     voxelizeModel(modelPath, assetPath, resolution, outputDirectory, flipTextureV, alphaCutoff,
-                  threadCount, displaceOptions);
+                  threadCount, displaceOptions, fitSurfaces);
 
     return 0;
 }

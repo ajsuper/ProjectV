@@ -8,6 +8,7 @@ include(ProjectVExample)
 add_subdirectory(00-hello-voxel)
 add_subdirectory(10-scene-previewer)
 add_subdirectory(30-renderers)
+add_subdirectory(35-surface-voxels)
 add_subdirectory(40-advanced-renderer)
 add_subdirectory(50-terrain-generator)
 

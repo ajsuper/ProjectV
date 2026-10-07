@@ -1967,6 +1967,22 @@ float cellExitDistance(Ray ray, vec3 invRayDir, ivec3 cellMin, uint cellSize) {
 // consumed there, and they belong to the same body of glass. The symptom would be an interface alpha
 // charged twice (a body darkening with depth) or skipped (a surface losing its reflection), varying
 // with the chunk's scale, which is about as hard to attribute as this file gets.
+// ---- Optional per-voxel surface hook ----------------------------------------------------------
+//
+// A shader that defines PJV_SURFACE_HOOK before including this file supplies this function (see
+// pjv_surface.sc), and the march asks it about every solid voxel it lands on. It answers in the
+// peel's vocabulary: PJV_PEEL_STOP_HERE, optionally moving the hit to a point inside the voxel and
+// giving it a normal, or PJV_PEEL_CONTINUE, which steps on through the voxel exactly as a consumed
+// transparent layer does -- no restart, no re-descent. Everything is in the chunk's local voxel
+// frame: `localRay` is the march's own ray, `leafNode` and its occupancy masks the leaf holding the
+// voxel and `voxelZ` its index among the leaf's 64 children, `voxel` the cell, `rayT`/`exitT` where the ray enters
+// and leaves it, `normal` the face it entered through (zero when the ray started inside it).
+// Without the define nothing here is compiled and the march is unchanged.
+#ifdef PJV_SURFACE_HOOK
+int pjvSurfaceLeafVerdict(Ray localRay, uint leafNode, uint leafMask1, uint leafMask2, uint voxelZ,
+                          ivec3 voxel, float exitT, inout float rayT, inout vec3 normal);
+#endif
+
 SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float tMin, BoxAABB boundingBox, uint tree64StartIndex, uint tree64EndIndex, uint tree64Resolution, uint chunkTraversalLOD, uint materialIDStart, uint paletteOffsetIn, float limitT, float localToWorld, bool skipAnimated, inout PeelAccum peel) {
     SceneIntersectData returnData;
     returnData.rayT = -1.0;
@@ -2032,6 +2048,14 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
                             data, nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent);
                         float cellExitT = cellExitDistance(ray, invRayDir, traversalPosition, stepSize);
                         int verdict = PJV_PEEL_STOP_HERE;
+                        float surfaceT = rayT;
+                        vec3 surfaceNormal = hitNormal;
+#ifdef PJV_SURFACE_HOOK
+                        verdict = pjvSurfaceLeafVerdict(ray, nodeStack[nodeStackQuantity - 2u].dataIndex,
+                            data.data1, data.data2,
+                            nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent, traversalPosition,
+                            cellExitT, surfaceT, surfaceNormal);
+#endif
                         // Held LOCALLY until the verdict is known. Publishing it to `peel` before
                         // deciding is what made a skipped voxel's material outlive the skip: the
                         // march walks past every animated voxel publishing each one, then stops on
@@ -2041,7 +2065,7 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
                         // the ALBEDO is another voxel's, which on screen reads as seeing through the
                         // geometry rather than as a material bug.
                         VoxelMaterial leafMaterial = emptyVoxelMaterial();
-                        if (needMaterial) {
+                        if (needMaterial && verdict == PJV_PEEL_STOP_HERE) {
                             leafMaterial = decodeMaterial(materialPaletteTexel(
                                 materialID(leafOffset + materialIDStart) + paletteOffsetIn));
                             // This voxel's drawn position belongs to the envelope, not to its own
@@ -2079,9 +2103,9 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
                             returnData.voxelCoord = traversalPosition;
                             returnData.foundBox.size = stepSize;
                             returnData.steps = stepCount;
-                            returnData.rayT = rayT;
+                            returnData.rayT = surfaceT;
                             returnData.exitT = cellExitT;
-                            returnData.normal = hitNormal;
+                            returnData.normal = surfaceNormal;
                             returnData.materialListIndex = leafOffset;
                             return returnData;
                         }
@@ -2244,8 +2268,16 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
                         uint leafOffset2 = leafMaterialListOffset(
                             data, nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent);
                         int verdict2 = PJV_PEEL_STOP_HERE;
+                        float surfaceT2 = rayT;
+                        vec3 surfaceNormal2 = hitNormal;
+#ifdef PJV_SURFACE_HOOK
+                        verdict2 = pjvSurfaceLeafVerdict(ray, nodeStack[nodeStackQuantity - 2u].dataIndex,
+                            data.data1, data.data2,
+                            nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent, traversalPosition,
+                            cellExitT, surfaceT2, surfaceNormal2);
+#endif
                         VoxelMaterial leafMaterial2 = emptyVoxelMaterial();   // see the descent site
-                        if (needMaterial) {
+                        if (needMaterial && verdict2 == PJV_PEEL_STOP_HERE) {
                             leafMaterial2 = decodeMaterial(materialPaletteTexel(
                                 materialID(leafOffset2 + materialIDStart) + paletteOffsetIn));
                             if (skipAnimated && rayT * localToWorld <= rayQuery.animResolveDistance &&
@@ -2273,9 +2305,9 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
                             returnData.voxelCoord = traversalPosition;
                             returnData.foundBox.size = stepSize;
                             returnData.steps = stepCount;
-                            returnData.rayT = rayT;
+                            returnData.rayT = surfaceT2;
                             returnData.exitT = cellExitT;
-                            returnData.normal = hitNormal;
+                            returnData.normal = surfaceNormal2;
                             returnData.materialListIndex = leafOffset2;
                             return returnData;
                         }

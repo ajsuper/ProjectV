@@ -1,0 +1,36 @@
+{
+    "uniforms": [
+        {"name": "windowRes",           "type": "vec4"},
+        {"name": "cameraPos",           "type": "vec4"},
+        {"name": "cameraDir",           "type": "vec4"},
+        {"name": "surfaceMode",         "type": "vec4"},
+        {"name": "pjvSurfaceInfo",      "type": "vec4"},
+        {"name": "pjvSurfaceInfo2",     "type": "vec4"}
+    ],
+    "shaders": [
+        {"shaderID": 1, "path": "./surfaceRenderer/surfaceShaders/surface.bin"},
+        {"shaderID": 2, "path": "./surfaceRenderer/surfaceShaders/display.bin"}
+    ],
+    "textures": [
+        {
+            "texID": 1,
+            "name": "surfaceData",
+            "format": "RGBA32_UINT",
+            "resX": 1,
+            "resY": 1,
+            "sizeMode": "fixed",
+            "origin": "CPUBuffer"
+        },
+        {
+            "texID": 2,
+            "name": "frameColour",
+            "format": "RGBA8",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        }
+    ],
+    "framebuffers": [
+        {"fboID": 1, "textureIDs": [2]}
+    ]
+}
