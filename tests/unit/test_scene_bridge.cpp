@@ -270,3 +270,14 @@ TEST_CASE("EntityLinked is sent for every link") {
     CHECK(linked[0].entity == e);
     CHECK(linked[0].component == house);
 }
+
+TEST_CASE("a component spawned with OnUnlink::Destroy goes when its entity does") {
+    Fixture f;
+    ComponentHandle prefab = f.asset("Prefab");
+    ComponentHandle part = f.asset("Part", prefab);
+    Entity e = runtime::spawnComponent(f.app.world, prefab, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+    REQUIRE(e != projv::NullEntity);
+    f.app.world.destroy(e);
+    CHECK_FALSE(utils::isComponentAlive(f.scene, prefab));
+    CHECK_FALSE(utils::isComponentAlive(f.scene, part));
+}

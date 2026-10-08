@@ -129,8 +129,10 @@ namespace projv::runtime {
     void registerDocumentSpawnHandler(World& world, std::function<void(World&, Entity, const T&)> handler);
 
     // Creates an entity, links it (see linkComponent) and runs the spawn handlers for the
-    // component's attachments. NullEntity if the link is refused.
-    Entity spawnComponent(World& world, ComponentHandle component, LinkMode mode = LinkMode::Root);
+    // component's attachments. NullEntity if the link is refused. With OnUnlink::Destroy the
+    // component goes when the entity does -- what a spawned prefab usually wants.
+    Entity spawnComponent(World& world, ComponentHandle component, LinkMode mode = LinkMode::Root,
+                          OnUnlink onUnlink = OnUnlink::Keep);
 
     struct SpawnedDocument {
         Entity              document = NullEntity;   // tagged SceneDocument; document handlers ran on it

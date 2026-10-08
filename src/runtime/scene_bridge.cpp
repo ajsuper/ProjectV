@@ -203,9 +203,9 @@ namespace projv::runtime {
         }
     }
 
-    Entity spawnComponent(World& world, ComponentHandle component, LinkMode mode) {
+    Entity spawnComponent(World& world, ComponentHandle component, LinkMode mode, OnUnlink onUnlink) {
         Entity entity = world.create();
-        if (!linkComponent(world, entity, component, mode)) {
+        if (!linkComponent(world, entity, component, mode, onUnlink)) {
             world.destroy(entity);
             return NullEntity;
         }
