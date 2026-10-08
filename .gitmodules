@@ -35,3 +35,6 @@
 [submodule "external/bgfx.cmake"]
 	path = external/bgfx.cmake
 	url = https://github.com/bkaradzic/bgfx.cmake.git
+[submodule "external/doctest"]
+	path = external/doctest
+	url = https://github.com/doctest/doctest.git

@@ -9,7 +9,8 @@
             "binaryDir": "${sourceDir}/build",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-                "PROJV_BUILD_EXAMPLES": "ON"
+                "PROJV_BUILD_EXAMPLES": "ON",
+                "PROJV_BUILD_TESTS": "ON"
             }
         },
         {
@@ -39,5 +40,8 @@
         { "name": "dev",     "configurePreset": "dev" },
         { "name": "release", "configurePreset": "release" },
         { "name": "vcpkg",   "configurePreset": "vcpkg" }
+    ],
+    "testPresets": [
+        { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true } }
     ]
 }

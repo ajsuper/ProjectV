@@ -1,6 +1,7 @@
 #ifndef PROJECTV_COMPOSE_H
 #define PROJECTV_COMPOSE_H
 
+#include <map>
 #include <vector>
 #include <string>
 #include <stdint.h>
@@ -122,12 +123,6 @@ namespace projv {
         core::quat    rotation = core::quat(1.0f, 0.0f, 0.0f, 0.0f); // identity (w,x,y,z)
         core::vec3    scale = core::vec3(1.0f);
         Mutability    mutability = Mutability::Locked; // only meaningful for `data`
-        // How this entry combines with the ones above it in the list -- see projv::BooleanOp. `none`
-        // is the default and the only thing a compose.json written before this field existed can
-        // mean, so adding it reinterprets nothing already on disk. Because `asset` entries recurse,
-        // this one field gives nested CSG for free: subtracting a whole sub-assembly is an `asset`
-        // entry with `op: subtract`, and loadComposeFromDisk already walks it.
-        BooleanOp     op = BooleanOp::None;
         // The colours this component's material slots name, in slot order -- the palette that the
         // .data's materialIDs index into, and the same list that becomes
         // ComponentRecord::materialPalette at load. It lives here rather than in the .data so that two
@@ -135,12 +130,17 @@ namespace projv {
         // a recolour is a small JSON edit instead of a geometry rewrite. Empty for `asset` entries,
         // which own no voxels.
         std::vector<Material> palette;
+        // Program data saved with this entry: attachment key -> the value as JSON text. Carried
+        // through without interpretation -- see AttachmentStore in scene.h and utils/attachments.h.
+        std::map<std::string, std::string> attachments;
     };
 
     // A parsed compose.json.
     struct ComposeDoc {
         uint32_t version = 1;
         std::string name;
+        // The folder's own attachments, as for ComposeComponent::attachments.
+        std::map<std::string, std::string> attachments;
         std::vector<ComposeComponent> components;
     };
 }

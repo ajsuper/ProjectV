@@ -32,6 +32,12 @@ Examples live in `examples/`, numbered in reading order (`00-hello-voxel` .. `60
 Target names are not the directory names: `00-hello-voxel` builds `hello_voxel`, `30-renderers`
 builds `renderer_gallery`.
 
+Unit tests (CPU only, no display) live in `tests/unit/` and build in the `dev` preset:
+
+```bash
+ctest --preset dev
+```
+
 Manual test harnesses live in `tests/manual/` and are opt-in:
 
 ```bash
@@ -41,7 +47,7 @@ cmake --preset dev -DPROJV_BUILD_MANUAL_TESTS=ON
 Presets: `dev` (default), `release` (`PROJV_LOG_MINIMAL=ON`), `vcpkg` (every dependency through
 `find_package`, so the install carries only ProjectV rather than the vendored copies too).
 
-Options: `PROJV_BUILD_EXAMPLES`, `PROJV_BUILD_MANUAL_TESTS`, `PROJV_USE_X11`, `PROJV_LOG_MINIMAL`,
+Options: `PROJV_BUILD_EXAMPLES`, `PROJV_BUILD_TESTS`, `PROJV_BUILD_MANUAL_TESTS`, `PROJV_USE_X11`, `PROJV_LOG_MINIMAL`,
 and the seven `PROJV_LOG_<CATEGORY>` switches. They are `PUBLIC` on the target, so consumers
 inherit them.
 
@@ -76,6 +82,7 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 | `include/` `src/` | The engine. `core/`, `graphics/`, `utils/`, `data_structures/`. |
 | `cmake/` | `ProjectVConfig.cmake.in`, plus the `projv_compile_shaders()` and `projv_add_example()` helpers. |
 | `examples/` | Seven examples, numbered in reading order. See `examples/README.md`. |
+| `tests/unit/` | The automated suite (doctest, ctest). CPU only. |
 | `tests/manual/` | Harnesses that need a display. Not examples. See `tests/README.md`. |
 | `docs/data_structures/` | Format references: the `.data` container, compose scenes, tree64, renderers. |
 | `docs/plans/` | Design notes, delivery logs, and `known-latent-issues.md` / `test-suite-notes.md`. |

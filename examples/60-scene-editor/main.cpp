@@ -47,6 +47,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -62,6 +63,7 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/type_mapping.h"
+#include "utils/attachments.h"
 #include "utils/compose_io.h"
 #include "utils/editing.h"
 #include "utils/material.h"
@@ -750,16 +752,106 @@ static const char* ShapeKindHint(ShapeKind kind) {
     return "";
 }
 
-// How a part combines with the parts above it in the stack. This is projv::BooleanOp -- the same
-// enum the ComponentRecord carries and compose.json round-trips -- rather than an editor-local
-// "merge mode", because it is a property of the part rather than of the act of committing.
+// How a part combines with the parts above it in the stack -- a property of the part rather than of
+// the act of committing, which is the whole difference between this and the "merge mode" it replaced.
+// A merge mode said what a stamp would do *to a target*, so two floating stamps had no relationship
+// to each other at all and "box minus sphere" could not be said until the box was already committed
+// scene geometry. An op says what a part does *to the parts above it*, which is the thing a user is
+// actually thinking about, and it is expressible from the first primitive onward.
 //
-// That distinction is the whole difference between this and what it replaces. A merge mode said what
-// a stamp would do *to a target*, so two floating stamps had no relationship to each other at all
-// and "box minus sphere" could not be said until the box was already committed scene geometry. An op
-// says what a part does *to the parts above it*, which is the thing a user is actually thinking
-// about, and it is expressible from the first primitive onward.
-using BooleanOp = projv::BooleanOp;
+// `None` is a *placed* component -- parented, transformed, and rendered as its own geometry, with no
+// relationship to its siblings. The other three make it *resolved*: its cells are folded into its
+// parent's voxels, left to right down the child list, and it stops being a thing you look at on its
+// own. Only meaningful on a child of an Asset node, and it means the same thing for all three kinds.
+// A Grid used to be excluded, which was invisible where it mattered: a Chunk becomes a Grid on its
+// own the first time a sculpt writes outside its resolution (convertChunkToGrid), so an ordinary
+// .data could quietly stop composing.
+//
+// **The editor's own, not the engine's.** This used to be projv::BooleanOp and a field on every
+// ComponentRecord, although nothing in the engine ever acted on it. It is now this program's
+// attachment, `projv.editor.csg` (see CsgRole below): stored and saved by the engine, meaningful only
+// here. Another program renders a stack as its placed parts, which is the defined meaning of an
+// unbaked stack -- bake it to ship it.
+enum class BooleanOp {
+    None,       // Placed. Its own object, its own lattice, rendered as itself.
+    Union,      // Add its cells to the accumulator. Its own colours win.
+    Subtract,   // Remove its cells from the accumulator. Contributes no colour.
+    Intersect   // Keep only cells in both. The accumulator's colours survive.
+};
+
+// The spelling in compose.json, inside the attachment.
+static const char* booleanOpName(BooleanOp op) {
+    switch (op) {
+        case BooleanOp::None:      return "none";
+        case BooleanOp::Union:     return "union";
+        case BooleanOp::Subtract:  return "subtract";
+        case BooleanOp::Intersect: return "intersect";
+    }
+    return "none";
+}
+
+static std::optional<BooleanOp> parseBooleanOp(const std::string& name) {
+    if (name == "none")      return BooleanOp::None;
+    if (name == "union")     return BooleanOp::Union;
+    if (name == "subtract")  return BooleanOp::Subtract;
+    if (name == "intersect") return BooleanOp::Intersect;
+    return std::nullopt;
+}
+
+// A component's op, as the attachment the engine carries for this program.
+struct CsgRole {
+    BooleanOp op = BooleanOp::None;
+};
+
+template<> struct projv::utils::AttachmentTraits<CsgRole> {
+    static constexpr const char* key = "projv.editor.csg";
+    static constexpr uint32_t version = 1;
+    // Copied, which is the fix this field needed when it lived on the record: a duplicate that
+    // dropped it came back placed, and the copy of a subtracted window filled the hole it was cut from.
+    static constexpr projv::OnDuplicate onDuplicate = projv::OnDuplicate::Copy;
+
+    static nlohmann::json save(const CsgRole& role) {
+        return nlohmann::json{{"op", booleanOpName(role.op)}};
+    }
+    // An op this build does not know is refused rather than guessed at, which the engine answers by
+    // keeping it as written: it reads as `none` here (opOf finds nothing) and goes back to disk
+    // unchanged. Reading a typo as a boolean would fold a component into its parent on the strength
+    // of it, which is a destructive way to be wrong.
+    static std::optional<CsgRole> load(const nlohmann::json& json, uint32_t) {
+        if (!json.is_object() || !json.contains("op") || !json["op"].is_string()) return std::nullopt;
+        std::optional<BooleanOp> op = parseBooleanOp(json["op"].get<std::string>());
+        if (!op) return std::nullopt;
+        return CsgRole{*op};
+    }
+};
+
+// Every read and write of an op goes through these two. An absent attachment is `None`, and setting
+// `None` removes it, so a placement-only document never carries one -- the same rule the field
+// followed when `"op": "none"` was never written.
+static BooleanOp opOf(const projv::Scene& scene, projv::ComponentHandle component) {
+    const CsgRole* role = projv::utils::getAttachment<CsgRole>(scene, component);
+    return role ? role->op : BooleanOp::None;
+}
+
+static void setOp(projv::Scene& scene, projv::ComponentHandle component, BooleanOp op) {
+    if (op == BooleanOp::None) {
+        projv::utils::removeAttachment<CsgRole>(scene, component);
+    } else {
+        projv::utils::setAttachment(scene, component, CsgRole{op});
+    }
+}
+
+// The op on a parsed compose.json entry, which is not in any Scene -- the Library panel lists a
+// folder's contents without loading them.
+static BooleanOp opOfEntry(const projv::ComposeComponent& entry) {
+    using Traits = projv::utils::AttachmentTraits<CsgRole>;
+    auto it = entry.attachments.find(Traits::key);
+    if (it == entry.attachments.end()) return BooleanOp::None;
+    nlohmann::json json = nlohmann::json::parse(it->second, nullptr, false);
+    if (!json.is_object()) return BooleanOp::None;
+    std::optional<CsgRole> role = Traits::load(json, json.value("v", 1u));
+    return role ? role->op : BooleanOp::None;
+}
 
 static constexpr int BOOLEAN_OP_COUNT = 4;
 
@@ -3861,7 +3953,9 @@ static void deleteComponent(projv::Scene& scene, EditorState& editor, projv::Com
         current_record.children.clear();
         current_record.name = "__deleted__";
         current_record.parent = projv::INVALID_COMPONENT_HANDLE;
-        current_record.op = projv::BooleanOp::None;
+        // Every attachment, not only the op: the record stays as a tombstone, and whatever any
+        // program had attached to it describes a component that no longer exists.
+        projv::utils::clearAttachments(scene, current);
         removed.push_back(current);
     };
     disableSubtree(handle, disableSubtree);
@@ -4097,13 +4191,13 @@ static bool moveComponentInto(projv::Scene& scene, EditorState& editor,
             if (order[index] == child) { oldIndex = index; break; }
         }
     }
-    BooleanOp oldOp = scene.components[child].op;
+    BooleanOp oldOp = opOf(scene, child);
 
     if (!projv::utils::setComponentParent(scene, child, newParent)) {
         editor.statusMessage = "Could not move " + scene.components[child].name + ".";
         return false;
     }
-    scene.components[child].op = BooleanOp::None;
+    setOp(scene, child, BooleanOp::None);
 
     // Both ends change: the old asset lost a row and the new one gained one.
     invalidateResolveOf(scene, editor, oldParent, true);
@@ -4122,7 +4216,7 @@ static bool moveComponentInto(projv::Scene& scene, EditorState& editor,
     record.undo = [=] {
         if (child >= scenePointer->components.size()) return;
         if (!projv::utils::setComponentParent(*scenePointer, child, oldParent)) return;
-        scenePointer->components[child].op = oldOp;
+        setOp(*scenePointer, child, oldOp);
         reorderChildTo(*scenePointer, oldParent, child, oldIndex);
         invalidateResolveOf(*scenePointer, *editorPointer, oldParent, true);
         invalidateResolveOf(*scenePointer, *editorPointer, newParent, true);
@@ -4132,7 +4226,7 @@ static bool moveComponentInto(projv::Scene& scene, EditorState& editor,
     record.redo = [=] {
         if (child >= scenePointer->components.size()) return;
         if (!projv::utils::setComponentParent(*scenePointer, child, newParent)) return;
-        scenePointer->components[child].op = BooleanOp::None;
+        setOp(*scenePointer, child, BooleanOp::None);
         invalidateResolveOf(*scenePointer, *editorPointer, oldParent, true);
         invalidateResolveOf(*scenePointer, *editorPointer, newParent, true);
         editorPointer->isolationDirty = true;
@@ -4308,9 +4402,9 @@ static void drawLibraryPanel(EditorState& editor) {
                                                            : component.name.c_str());
             ImGui::SameLine();
             ImGui::TextColored(color, "(%s)", isAsset ? "asset" : "data");
-            if (component.op != projv::BooleanOp::None) {
+            if (BooleanOp op = opOfEntry(component); op != BooleanOp::None) {
                 ImGui::SameLine();
-                ImGui::TextDisabled("%s", BooleanOpGlyph(component.op));
+                ImGui::TextDisabled("%s", BooleanOpGlyph(op));
             }
         }
         ImGui::EndChild();
@@ -4578,7 +4672,7 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
     if (inspectedPart && ownerOf(scene, editor.selectedComponent) < scene.components.size()) {
         ImGui::TextDisabled("Part of %s  (%s)",
                             scene.components[ownerOf(scene, editor.selectedComponent)].name.c_str(),
-                            BooleanOpLabel(scene.components[editor.selectedComponent].op));
+                            BooleanOpLabel(opOf(scene, editor.selectedComponent)));
         if (inspectedPart->procedural) {
             ImGui::TextDisabled("%s %d x %d x %d", ShapeKindLabel(inspectedPart->kind),
                                 inspectedPart->dimensions[0], inspectedPart->dimensions[1],
@@ -4925,7 +5019,7 @@ static bool rowFolds(const projv::Scene& scene, projv::ComponentHandle child) {
     if (child >= scene.components.size()) return false;
     const projv::ComponentRecord& record = scene.components[child];
     if (record.name == "__deleted__") return false;
-    return record.op != BooleanOp::None;
+    return opOf(scene, child) != BooleanOp::None;
 }
 
 // **Setting a row's op, and the one authoring assist that has to go with it.**
@@ -4956,11 +5050,11 @@ static bool rowFolds(const projv::Scene& scene, projv::ComponentHandle child) {
 static void setComponentOpInEditor(projv::Scene& scene, EditorState& editor,
                                    projv::ComponentHandle component, BooleanOp op) {
     if (component >= scene.components.size()) return;
-    BooleanOp previousOp = scene.components[component].op;
+    BooleanOp previousOp = opOf(scene, component);
     if (op == previousOp) return;
     projv::ComponentHandle node = ownerOf(scene, component);
 
-    scene.components[component].op = op;
+    setOp(scene, component, op);
 
     // "Above" is the earlier siblings, because the fold is ordered and reads down the list. The scan
     // stops at the first row that folds: finding one means the stack already has something to
@@ -4983,7 +5077,7 @@ static void setComponentOpInEditor(projv::Scene& scene, EditorState& editor,
         }
         if (!foldsAbove) {
             if (candidate != projv::INVALID_COMPONENT_HANDLE) {
-                scene.components[candidate].op = BooleanOp::Union;
+                setOp(scene, candidate, BooleanOp::Union);
                 promoted = candidate;
             } else {
                 nothingAbove = true;
@@ -4999,17 +5093,17 @@ static void setComponentOpInEditor(projv::Scene& scene, EditorState& editor,
     record.label = "Set " + scene.components[component].name + " to " + BooleanOpLabel(op);
     record.undo = [=] {
         if (component >= scenePointer->components.size()) return;
-        scenePointer->components[component].op = previousOp;
+        setOp(*scenePointer, component, previousOp);
         if (promoted < scenePointer->components.size()) {
-            scenePointer->components[promoted].op = BooleanOp::None;
+            setOp(*scenePointer, promoted, BooleanOp::None);
         }
         invalidateResolveOf(*scenePointer, *editorPointer, node, true);
     };
     record.redo = [=] {
         if (component >= scenePointer->components.size()) return;
-        scenePointer->components[component].op = op;
+        setOp(*scenePointer, component, op);
         if (promoted < scenePointer->components.size()) {
-            scenePointer->components[promoted].op = BooleanOp::Union;
+            setOp(*scenePointer, promoted, BooleanOp::Union);
         }
         invalidateResolveOf(*scenePointer, *editorPointer, node, true);
     };
@@ -5157,7 +5251,7 @@ static void drawRowVerbs(projv::Scene& scene, EditorState& editor, projv::Compon
     if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoDisableHover)) {
         RowDrag payload{ reorderIndex, handle };
         ImGui::SetDragDropPayload("ASSET_ROW", &payload, sizeof(payload));
-        ImGui::Text("%s %s", BooleanOpGlyph(record.op), record.name.c_str());
+        ImGui::Text("%s %s", BooleanOpGlyph(opOf(scene, handle)), record.name.c_str());
         ImGui::EndDragDropSource();
     }
     if (ImGui::BeginDragDropTarget()) {
@@ -5327,7 +5421,7 @@ static void drawAssetsPanel(projv::Scene& scene, EditorState& editor) {
     size_t contributing = 0;
     for (projv::ComponentHandle child : contents) {
         if (const Part* part = findPart(editor, child)) voxels += part->voxelCount;
-        if (scene.components[child].op != BooleanOp::None) contributing++;
+        if (opOf(scene, child) != BooleanOp::None) contributing++;
     }
 
     ImGui::Text("%zu item(s)", contents.size());
@@ -5389,7 +5483,7 @@ static void drawAssetsPanel(projv::Scene& scene, EditorState& editor) {
         // inside anything, so there is nothing for it to be unioned *into* -- showing a control
         // there would offer a choice with no effect.
         if (resolve) {
-            BooleanOp op = record.op;
+            BooleanOp op = opOf(scene, child);
             bool isFirst = firstContributor && op != BooleanOp::None;
             if (op != BooleanOp::None) firstContributor = false;
             if (drawStackOpControl("op", op, isFirst)) {
@@ -7737,7 +7831,7 @@ static void drawPlaceToolSettings(projv::Scene& scene, EditorState& editor) {
         scene.components[editor.selectedComponent].name != "__deleted__") {
         opTarget = editor.selectedComponent;
     }
-    BooleanOp op = opTarget != projv::INVALID_COMPONENT_HANDLE ? scene.components[opTarget].op
+    BooleanOp op = opTarget != projv::INVALID_COMPONENT_HANDLE ? opOf(scene, opTarget)
                                                               : editor.shapeOp;
     BooleanOp chosen = op;
 
@@ -9997,7 +10091,7 @@ static void processSculptSample(projv::Scene& scene, EditorState& editor,
                 for (projv::ComponentHandle child : scene.components[node].children) {
                     if (child >= scene.components.size()) continue;
                     if (scene.components[child].name == "__deleted__") continue;
-                    if (scene.components[child].op == BooleanOp::Subtract) continue;
+                    if (opOf(scene, child) == BooleanOp::Subtract) continue;
                     ComponentVoxelSpace childSpace = resolveComponentVoxelSpace(scene, child);
                     if (!childSpace.valid || childSpace.resolution <= 0) continue;
                     uint8_t slot = 0;
@@ -11436,7 +11530,7 @@ static Fold foldChildren(const projv::Scene& scene, EditorState& editor, Resolve
         if (child >= scene.components.size()) continue;
         const projv::ComponentRecord& record = scene.components[child];
         if (record.name == "__deleted__") continue;
-        BooleanOp op = record.op;
+        BooleanOp op = opOf(scene, child);
         if (op == BooleanOp::None) {
             if (!placeAsUnion) continue;
             op = BooleanOp::Union;
@@ -11651,7 +11745,7 @@ static void rebuildResult(projv::Scene& scene, EditorState& editor, Resolve& res
     // The parts step aside while their own result stands in for them.
     for (projv::ComponentHandle child : scene.components[resolve.node].children) {
         if (child >= scene.components.size()) continue;
-        setComponentRendered(scene, editor, child, scene.components[child].op == BooleanOp::None);
+        setComponentRendered(scene, editor, child, opOf(scene, child) == BooleanOp::None);
     }
     setComponentRendered(scene, editor, resolve.result, true);
     resolve.resultShown = true;
@@ -11822,7 +11916,7 @@ static bool nodeHasStack(const projv::Scene& scene, projv::ComponentHandle node)
     if (scene.components[node].kind != projv::ComponentKind::Asset) return false;
     if (scene.components[node].name == "__deleted__") return false;
     for (projv::ComponentHandle child : scene.components[node].children) {
-        if (child < scene.components.size() && scene.components[child].op != BooleanOp::None) return true;
+        if (child < scene.components.size() && opOf(scene, child) != BooleanOp::None) return true;
     }
     return false;
 }
@@ -11893,9 +11987,10 @@ static void syncResolves(projv::Scene& scene, EditorState& editor) {
 // one thing that is not derivable, because it changes the scene graph rather than reading it.
 static void wrapRootStack(projv::Scene& scene, EditorState& editor) {
     bool rootOps = false;
-    for (const projv::ComponentRecord& record : scene.components) {
+    for (projv::ComponentHandle handle = 0; handle < scene.components.size(); handle++) {
+        const projv::ComponentRecord& record = scene.components[handle];
         if (record.parent == projv::INVALID_COMPONENT_HANDLE && record.name != "__deleted__" &&
-            record.op != BooleanOp::None) {
+            opOf(scene, handle) != BooleanOp::None) {
             rootOps = true;
             break;
         }
@@ -12096,7 +12191,7 @@ static void importPendingAsset(projv::Scene& scene, EditorState& editor) {
         // immediately would resample it before the user has said they want that. Setting the row's
         // op is one click, and it is the click that says "yes, resolve this into my lattice".
         bool baked = scene.components[imported].kind == projv::ComponentKind::Chunk;
-        scene.components[imported].op = baked ? editor.shapeOp : BooleanOp::None;
+        setOp(scene, imported, baked ? editor.shapeOp : BooleanOp::None);
 
         Part part;
         part.component = imported;
@@ -12247,6 +12342,12 @@ struct PartRecipe {
 
     std::vector<projv::core::ivec3> coords;    // Part-local voxel coordinates.
     std::vector<uint32_t> colors;
+
+    // Every attachment the part carried, as the text a save would write -- this editor's own and
+    // any other program's. The engine keeps no history of attachments; deleting a component clears
+    // them (see deleteComponent), so whatever is to come back on undo has to be recorded here.
+    // `op` above is restored after these and wins, though the two agree whenever this was taken.
+    projv::utils::AttachmentTexts attachments;
 };
 
 struct NodeRecipe {
@@ -12257,6 +12358,9 @@ struct NodeRecipe {
     projv::core::quat rotation = projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f);
     float scale = 1.0f;
     std::vector<PartRecipe> parts;
+    // The node's attachments in both scopes: on its entry, and on the folder it stands for.
+    projv::utils::AttachmentTexts attachments;
+    projv::utils::AttachmentTexts documentAttachments;
 };
 
 // Every solid voxel of a component, with its colour, in the component's own continuous voxel space.
@@ -12302,7 +12406,9 @@ static PartRecipe recipeFromPart(const projv::Scene& scene, const Part& part) {
 
     const projv::ComponentRecord& record = scene.components[part.component];
     recipe.name = record.name;
-    recipe.op = record.op;
+    recipe.op = opOf(scene, part.component);
+    recipe.attachments = projv::utils::attachmentsForSave(scene, part.component,
+                                                          projv::AttachmentScope::Component);
     recipe.position = record.localPosition;
     recipe.rotation = record.localRotation;
     if (record.chunkHandle < scene.chunks.size()) {
@@ -12344,6 +12450,14 @@ static PartRecipe recipeFromPart(const projv::Scene& scene, const Part& part) {
     return recipe;
 }
 
+// Puts a part's attachments back onto the component rebuilt for it: everything the recipe recorded,
+// then its op, so the two cannot disagree.
+static void restoreRecipeAttachments(projv::Scene& scene, projv::ComponentHandle component,
+                                     const PartRecipe& recipe) {
+    projv::utils::attachRaw(scene, component, projv::AttachmentScope::Component, recipe.attachments);
+    setOp(scene, component, recipe.op);
+}
+
 static NodeRecipe recipeFromNode(const projv::Scene& scene, const EditorState& editor,
                                          const Resolve& resolve) {
     NodeRecipe recipe;
@@ -12356,6 +12470,10 @@ static NodeRecipe recipeFromNode(const projv::Scene& scene, const EditorState& e
     recipe.rotation = node.localRotation;
     recipe.scale = node.localScale;
     recipe.voxelScale = resolve.voxelScale;
+    recipe.attachments = projv::utils::attachmentsForSave(scene, resolve.node,
+                                                          projv::AttachmentScope::Component);
+    recipe.documentAttachments = projv::utils::attachmentsForSave(scene, resolve.node,
+                                                                  projv::AttachmentScope::Document);
 
     for (projv::ComponentHandle child : node.children) {
         const Part* part = findPart(editor, child);
@@ -12401,7 +12519,7 @@ static std::vector<projv::ComponentHandle> materialisePartsInto(
             scene, editor, node, partRecipe.name.empty() ? "Part" : partRecipe.name.c_str(),
             partRecipe.resolution, partRecipe.voxelScale);
         if (component == projv::INVALID_COMPONENT_HANDLE) continue;
-        scene.components[component].op = partRecipe.op;
+        restoreRecipeAttachments(scene, component, partRecipe);
 
         Part part;
         part.component = component;
@@ -12443,6 +12561,8 @@ static projv::ComponentHandle materialiseNode(projv::Scene& scene, EditorState& 
         CHUNK_RESOLUTION_CHOICES[0], recipe.voxelScale);   // Both ignored for an Asset.
     if (node == projv::INVALID_COMPONENT_HANDLE) return node;
     projv::utils::setComponentTransform(scene, node, recipe.position, recipe.rotation, recipe.scale);
+    projv::utils::attachRaw(scene, node, projv::AttachmentScope::Component, recipe.attachments);
+    projv::utils::attachRaw(scene, node, projv::AttachmentScope::Document, recipe.documentAttachments);
 
     Resolve resolve;
     resolve.node = node;
@@ -12771,7 +12891,7 @@ static projv::ComponentHandle addPrimitivePart(projv::Scene& scene, EditorState&
         editor.statusMessage = "Could not create the part component (see log).";
         return component;
     }
-    scene.components[component].op = op;
+    setOp(scene, component, op);
 
     Part part;
     part.component = component;
@@ -12840,7 +12960,7 @@ static void recordPartAdded(projv::Scene& scene, EditorState& editor, const std:
             partRecipe.name.empty() ? "Part" : partRecipe.name.c_str(),
             partRecipe.resolution, partRecipe.voxelScale);
         if (component == projv::INVALID_COMPONENT_HANDLE) return;
-        scenePointer->components[component].op = partRecipe.op;
+        restoreRecipeAttachments(*scenePointer, component, partRecipe);
 
         Part rebuilt;
         rebuilt.component = component;
@@ -12966,7 +13086,7 @@ static void regeneratePart(projv::Scene& scene, EditorState& editor, projv::Comp
         // new one takes its place in the stack rather than being appended to the end of it -- a
         // resize must not reorder the fold.
         std::string name = scene.components[component].name;
-        BooleanOp op = scene.components[component].op;
+        BooleanOp op = opOf(scene, component);
         std::vector<projv::ComponentHandle>& stack = scene.components[resolve->node].children;
         auto at = std::find(stack.begin(), stack.end(), component);
         size_t position = at == stack.end() ? stack.size() : size_t(at - stack.begin());
@@ -12975,7 +13095,7 @@ static void regeneratePart(projv::Scene& scene, EditorState& editor, projv::Comp
                                                                   name.c_str(), resolution,
                                                                   resolve->voxelScale);
         if (replacement == projv::INVALID_COMPONENT_HANDLE) return;
-        scene.components[replacement].op = op;
+        setOp(scene, replacement, op);
 
         std::vector<projv::ComponentHandle>& reordered = scene.components[resolve->node].children;
         reordered.erase(std::remove(reordered.begin(), reordered.end(), replacement), reordered.end());
@@ -13245,7 +13365,7 @@ static bool mergeContentsToData(projv::Scene& scene, EditorState& editor, Resolv
         if (wholeStack) {
             // Bake-all keeps what it always kept: a Place row is not composition, and the format has
             // always let it survive a bake as its own component.
-            if (scene.components[child].op == BooleanOp::None) continue;
+            if (opOf(scene, child) == BooleanOp::None) continue;
         } else if (std::find(selection.begin(), selection.end(), child) == selection.end()) {
             continue;
         }
@@ -13353,8 +13473,8 @@ static bool mergeContentsToData(projv::Scene& scene, EditorState& editor, Resolv
     // the first row it consumed: that row seeded the accumulator, and the merged form stands exactly
     // where it stood.
     bool onlyChild = scene.components[node].children.size() == 1;
-    BooleanOp mergedOp = onlyChild ? BooleanOp::None : scene.components[merging.front()].op;
-    scene.components[baked].op = mergedOp;
+    BooleanOp mergedOp = onlyChild ? BooleanOp::None : opOf(scene, merging.front());
+    setOp(scene, baked, mergedOp);
 
     auto liveBaked = std::make_shared<projv::ComponentHandle>(baked);
     // What undo put back, so redo can take away exactly those rows. Handles are indices and a
@@ -13395,7 +13515,7 @@ static bool mergeContentsToData(projv::Scene& scene, EditorState& editor, Resolv
         applyVoxelSculpt(scenePointer, editorPointer, rebuilt, *coords, *colors, true);
         projv::utils::setComponentTransform(*scenePointer, rebuilt, localOrigin, localRotation, 1.0f);
         reorderChildTo(*scenePointer, node, rebuilt, insertAt);
-        scenePointer->components[rebuilt].op = mergedOp;
+        setOp(*scenePointer, rebuilt, mergedOp);
         invalidateResolveOf(*scenePointer, *editorPointer, node, true);
         editorPointer->gpuFlushNeeded = true;
         *liveBaked = rebuilt;
@@ -13893,8 +14013,7 @@ static void liftSelection(projv::Scene& scene, EditorState& editor, bool cut) {
         editor.statusMessage = "Could not create the part component (see log).";
         return;
     }
-    scene.components[component].op = editor.shapeOp == BooleanOp::None ? BooleanOp::Union
-                                                                       : editor.shapeOp;
+    setOp(scene, component, editor.shapeOp == BooleanOp::None ? BooleanOp::Union : editor.shapeOp);
 
     Part part;
     part.component = component;
@@ -16327,7 +16446,7 @@ static void drawContentsOutlines(const projv::Scene& scene, const EditorState& e
         int alpha = selected ? 255 : 110;
         ImU32 color;
         float dash = 0.0f;
-        switch (scene.components[child].op) {
+        switch (opOf(scene, child)) {
             case BooleanOp::Subtract:  color = IM_COL32(255,  70,  60, alpha); dash = 6.0f; break;
             case BooleanOp::Intersect: color = IM_COL32( 90, 170, 255, alpha); dash = 3.0f; break;
             case BooleanOp::None:      color = IM_COL32(170, 170, 170, alpha); break;
@@ -16358,7 +16477,7 @@ static void drawOpenAssetBanner(const projv::Scene& scene, const EditorState& ed
     const projv::ComponentRecord& node = scene.components[resolve->node];
     size_t folded = 0;
     for (projv::ComponentHandle child : node.children) {
-        if (child < scene.components.size() && scene.components[child].op != BooleanOp::None) folded++;
+        if (child < scene.components.size() && opOf(scene, child) != BooleanOp::None) folded++;
     }
 
     std::string label = node.name + "   " + std::to_string(node.children.size()) + " item(s)";
@@ -23040,7 +23159,7 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
                 bakedVoxels = projv::utils::getComponentVoxelCount(scene, result);
                 mergedIsChild = scene.components[result].parent == node;
                 // The whole stack merged, so nothing is left to compose with: it is a placed .data.
-                mergedIsPlaced = scene.components[result].op == BooleanOp::None;
+                mergedIsPlaced = opOf(scene, result) == BooleanOp::None;
             }
 
             if (merged && editor.history.entries().size() > historyBefore) editor.history.undo();
@@ -23053,6 +23172,50 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
                           "row(s) | {}", nodeSurvived ? "yes" : "NO", childrenAfterMerge,
                           (mergedIsChild && mergedIsPlaced) ? "yes" : "NO", bakedVoxels,
                           partsAfter, partsBefore, ok ? "PASS" : "FAIL");
+        for (const Resolve& revived : editor.resolves) created.push_back(revived.node);
+        while (!editor.resolves.empty()) {
+            destroyAssetNode(scene, editor, editor.resolves.back().node, false);
+        }
+    }
+
+    // --- 7a. Undo of a merge brings back every attachment, not only the op -----------------------
+    // Merging deletes the parts, and deleting clears their attachments: the engine keeps no history
+    // of them, so the recipe has to. Another program's data on a part is the case that proves it,
+    // because nothing in this editor would ever write it back on its own.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false, clearedByMerge = false, foreignBack = false, opBack = false;
+        if (resolve) {
+            projv::ComponentHandle node = resolve->node;
+            created.push_back(node);
+            addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            projv::ComponentHandle cut = addBox(*resolve, 8, vec3(4.0f, 0.0f, 0.0f), BooleanOp::Subtract);
+            const std::string foreignKey = "othertool.selftest";
+            const std::string foreignText = R"({"keep":true,"v":1})";
+            projv::utils::attachRaw(scene, cut, projv::AttachmentScope::Component, {{foreignKey, foreignText}});
+
+            bool merged = mergeContentsToData(scene, editor, *resolve, {});
+            clearedByMerge = !projv::utils::hasAttachment(scene, cut, foreignKey);
+            // Not "did the history grow": the test before this one ends on an undo, and recording the
+            // merge drops that redo step, so the length can stay the same. A merge that succeeded
+            // recorded itself; that is the step to take back.
+            if (merged && editor.history.canUndo()) editor.history.undo();
+
+            if (node < scene.components.size()) {
+                for (projv::ComponentHandle child : scene.components[node].children) {
+                    auto texts = projv::utils::attachmentsForSave(scene, child, projv::AttachmentScope::Component);
+                    auto it = texts.find(foreignKey);
+                    if (it == texts.end()) continue;
+                    foreignBack = it->second == foreignText;
+                    opBack = opOf(scene, child) == BooleanOp::Subtract;
+                }
+            }
+            ok = merged && clearedByMerge && foreignBack && opBack;
+        }
+        projv::core::info("ASSEMBLYTEST: undo of a merge restores attachments - cleared by the merge {} , "
+                          "another program's data back {} , op back {} | {}",
+                          clearedByMerge ? "yes" : "NO", foreignBack ? "yes" : "NO",
+                          opBack ? "yes" : "NO", ok ? "PASS" : "FAIL");
         for (const Resolve& revived : editor.resolves) created.push_back(revived.node);
         while (!editor.resolves.empty()) {
             destroyAssetNode(scene, editor, editor.resolves.back().node, false);
@@ -23089,7 +23252,7 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
 
             moveComponentInto(scene, editor, pillarNode, templeNode);
             movedIn = scene.components[pillarNode].parent == templeNode;
-            placed = scene.components[pillarNode].op == BooleanOp::None;
+            placed = opOf(scene, pillarNode) == BooleanOp::None;
             templeContents = scene.components[templeNode].children.size();
             // setComponentParent composes the transforms, so the geometry must not budge in world
             // space -- a move is a change of ownership, not a change of place.
@@ -23141,7 +23304,7 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
                 // which at voxelScale 1 is exactly the +4 test 2 uses.
                 projv::ComponentHandle copy = duplicateComponentInEditor(scene, editor, roof);
                 if (copy < scene.components.size()) {
-                    scene.components[copy].op = BooleanOp::Subtract;
+                    setOp(scene, copy, BooleanOp::Subtract);
                     invalidateResolveOf(scene, editor, resolve->node, true);
                     // Both rows picked, which is the gesture the panel offers: placeAsUnion promotes
                     // the placed roof to Union so the copy has something to subtract from.
@@ -23393,7 +23556,7 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
 
             projv::ComponentHandle roof = editor.selectedComponent;
             if (roof < scene.components.size() && scene.components[roof].parent == node &&
-                scene.components[roof].op == BooleanOp::None) {
+                opOf(scene, roof) == BooleanOp::None) {
                 projv::ComponentHandle copy = duplicateComponentInEditor(scene, editor, roof);
                 // Re-looked-up: the duplicate appends to scene.components and can append to
                 // editor.resolves, which moves the vector the pointer above points into.
@@ -23403,13 +23566,13 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
                     // the Place panel's radio row is the only route to this row, because the Assets
                     // panel greys the op control on whichever row seeds.
                     setComponentOpInEditor(scene, editor, copy, BooleanOp::Subtract);
-                    promoted = scene.components[roof].op == BooleanOp::Union;
+                    promoted = opOf(scene, roof) == BooleanOp::Union;
 
                     folded = foldOf(*resolve).coords.size();
 
                     restored = editor.history.undo() &&
-                               scene.components[roof].op == BooleanOp::None &&
-                               scene.components[copy].op == BooleanOp::None;
+                               opOf(scene, roof) == BooleanOp::None &&
+                               opOf(scene, copy) == BooleanOp::None;
                     ok = promoted && folded == 256u && restored;
                 }
             }
@@ -23442,8 +23605,8 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
             if (first < scene.components.size() && placed < scene.components.size() &&
                 third < scene.components.size()) {
                 setComponentOpInEditor(scene, editor, third, BooleanOp::Subtract);
-                firstHeld = scene.components[first].op == BooleanOp::Union;
-                placedHeld = scene.components[placed].op == BooleanOp::None;
+                firstHeld = opOf(scene, first) == BooleanOp::Union;
+                placedHeld = opOf(scene, placed) == BooleanOp::None;
                 folded = foldOf(*resolve).coords.size();
                 ok = firstHeld && placedHeld && folded == 256u;
             }
@@ -23498,9 +23661,9 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
 
             // The subtracting row set aside first, so the union is measured on its own -- a fold that
             // came out at 256 with both rows live would not say which of the two was being walked.
-            scene.components[cut].op = BooleanOp::None;
+            setOp(scene, cut, BooleanOp::None);
             unionCells = foldOf(*resolve).coords.size();
-            scene.components[cut].op = BooleanOp::Subtract;
+            setOp(scene, cut, BooleanOp::Subtract);
             subtractCells = foldOf(*resolve).coords.size();
 
             // A row that folds must stop being drawn while its result stands in for it. A grid's
@@ -23704,14 +23867,14 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
             addBox(*resolve, 8, vec3(4.0f, 0.0f, 0.0f), BooleanOp::Subtract);
             addBox(*resolve, 8, vec3(0.0f, 4.0f, 0.0f), BooleanOp::Intersect);
             for (projv::ComponentHandle child : scene.components[resolve->node].children) {
-                wrote += projv::booleanOpName(scene.components[child].op);
+                wrote += booleanOpName(opOf(scene, child));
                 wrote += " ";
             }
 
             if (projv::utils::saveComposeToDisk(scene, resolve->node, folder.string())) {
                 projv::ComposeDoc doc = projv::utils::parseComposeJson((folder / "compose.json").string());
                 for (const projv::ComposeComponent& entry : doc.components) {
-                    read += projv::booleanOpName(entry.op);
+                    read += booleanOpName(opOfEntry(entry));
                     read += " ";
                 }
                 ok = doc.version != 0 && read == wrote;
@@ -24146,7 +24309,7 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
 
             // Ops gone, nothing open: no reason for a fold to exist.
             for (projv::ComponentHandle child : scene.components[node].children) {
-                scene.components[child].op = BooleanOp::None;
+                setOp(scene, child, BooleanOp::None);
             }
             syncResolves(scene, editor);
             retired = findResolve(editor, node) == nullptr;
@@ -24321,7 +24484,7 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
                     step = glm::length(copyHeader - sourceHeader);
                     const std::vector<projv::ChunkHandle>& loose = scene.looseChunks;
                     drawn = std::find(loose.begin(), loose.end(), record.chunkHandle) != loose.end();
-                    keptOp = record.op == BooleanOp::Subtract;
+                    keptOp = opOf(scene, copy) == BooleanOp::Subtract;
                     const Part* copiedPart = findPart(editor, copy);
                     keptRecipe = copiedPart && copiedPart->procedural &&
                                  copiedPart->dimensions[0] == 8;

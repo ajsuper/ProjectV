@@ -1,7 +1,19 @@
 # Tests
 
-There is no automated test suite yet. What exists is `manual/` — harnesses that need a display and
-a GPU, run by hand.
+Two kinds:
+
+- **`unit/`** — the automated suite. CPU only, no window, run with `ctest`. Built by default in the
+  `dev` preset (`PROJV_BUILD_TESTS`). It uses [doctest](https://github.com/doctest/doctest), vendored
+  as the `external/doctest` submodule.
+- **`manual/`** — harnesses that need a display and a GPU, run by hand.
+
+```bash
+cmake --preset dev && cmake --build --preset dev && ctest --preset dev
+```
+
+| Suite | What it checks |
+|---|---|
+| [`unit/test_attachments.cpp`](unit/test_attachments.cpp) | Component attachments: typed and raw access, decode-on-first-use and versions, refused values kept, unknown keys surviving load and save in both scopes, duplicate and clear policies, Scene copy/move, grafting, and the legacy `op` migration. |
 
 [`docs/plans/test-suite-notes.md`](../docs/plans/test-suite-notes.md) is the design input for a
 real suite: what should be covered, organised by subsystem, with the confirmed failure mode for

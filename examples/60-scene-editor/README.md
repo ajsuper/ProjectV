@@ -589,7 +589,7 @@ That replaced four separate mechanisms that all existed to answer *which contain
 
 #### Ops
 
-`projv::BooleanOp` — the same enum the `ComponentRecord` carries and `compose.json` round-trips, rather than an editor-local "merge mode", because it is a property of the part rather than of the act of committing.
+`BooleanOp` — a property of the part rather than of the act of committing, which is the difference between it and the "merge mode" it replaced. It is this editor's own: the engine carries it as the `projv.editor.csg` [attachment](../../docs/data_structures/compose_data_structure.md#attachments) and never interprets it, and every read and write in `main.cpp` goes through `opOf` / `setOp`.
 
 | Op | | Does |
 |----|---|------|
@@ -758,7 +758,9 @@ Unlike a stamp's placement, **moving a part is an ordinary undoable edit**. The 
 
 #### `op` on disk, and the loop closing
 
-`ComposeComponent::op` is written as `none` | `union` | `subtract` | `intersect`, and **omitted entirely when it is `none`** — so a plain placement list comes off this writer looking exactly like the ones already on disk. The default of `none` is what makes the field backward compatible in both directions: it reinterprets nothing already written, and a loader that does not know the field reads a composed asset as its placed parts, which is a degraded but coherent picture.
+An op is saved as the entry's `projv.editor.csg` attachment, `{ "v": 1, "op": "union" | "subtract" | "intersect" }`, and **not written at all when it is `none`** — `setOp(..., None)` removes the attachment — so a plain placement list comes off the writer looking exactly like the ones already on disk. Every other program renders a stack as its placed parts: an unbaked stack is this editor's working data, and baking it is how it ships. An op string this build does not recognise reads as `none` and is written back unchanged.
+
+Files from before the attachment carry a top-level `"op"` on the entry. The loader moves it into the attachment, so they open as they did and switch to the new form on their next save.
 
 Because assets recurse, that one field gives **nested CSG for free**: subtracting a whole sub-asset is a child of `type: asset` with `op: subtract`, and `loadComposeFromDisk` already walks it. An Asset item resolves as the union of the leaves under it, and a sub-asset resolves to its own result first — one recursive walk rather than a second evaluator.
 
@@ -816,7 +818,8 @@ Four engine bugs sat under this, and the first explains why a duplicate used to 
   selection outline and gizmo pivot, both derived from those headers — sat somewhere else entirely.
   The same mistake, at a third site, as the one `setComponentParent` had; `getComponentWorldMatrix`
   is the form that cannot make it, because it ends at the handle inclusive.
-* **`op` and `externalSource` were not copied.** Without the first, a duplicated child of a boolean
+* **`op` and `externalSource` were not copied.** (`op` is an attachment now, and `duplicateComponent`
+  copies attachments by each key's own policy.) Without the first, a duplicated child of a boolean
   stack came back as a plain placement — the copy of a subtracted window filled the hole it was cut
   from. Without the second, a duplicated link quietly became a copy, which is the one distinction the
   two modes exist to make.
@@ -1226,7 +1229,7 @@ Scenes are not bundled: the editor points at `../scene_previewer/scenes/` in the
 * `utils::loadComposeFromDisk` — Compose scene folder → `Scene`
 * `utils::instantiateComposeInto` — the same walk grafted onto a branch of a scene already open, so an asset on disk can become a part
 * `utils::saveComposeToDisk` / `writeComposeJson` / `writeDataFile` — the write path a bake to disk goes down
-* `ComponentRecord::op` / `ComposeComponent::op` (`projv::BooleanOp`) — the one field that makes an asset a re-openable stack rather than a folder of parts
+* `utils::getAttachment` / `setAttachment` / `clearAttachments` — the `projv.editor.csg` attachment that makes an asset a re-openable stack rather than a folder of parts
 * `Scene::components` (name, kind, parent/children, local transform) — the component tree the Assets panel walks one level of
 * `utils::getComponentPath`, `getComponentWorldPosition`, `getComponentVoxelCount` — the inspector panel
 * `graphics::createTexturesForScene` / `destroyGPUData` — per-load GPU upload and teardown

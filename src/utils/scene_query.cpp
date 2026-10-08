@@ -7,6 +7,7 @@
 
 #include "core/log.h"
 #include "utils/voxel_management.h"
+#include "utils/attachments.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -456,12 +457,8 @@ namespace projv::utils {
             component.sourcePath = src.sourcePath;
             component.materialPalette = src.materialPalette;
             component.paletteVersion = src.paletteVersion;
-            // Both are part of what the record *is*, and both were being dropped. Without `op` a
-            // duplicated child of a boolean stack came back as a plain placement -- the copy of a
-            // subtracted window filled the hole it was cut from. Without `externalSource` a
-            // duplicated link quietly became a copy, which is the one distinction the two modes
-            // exist to make.
-            component.op = src.op;
+            // Part of what the record *is*, and it was being dropped: without it a duplicated link
+            // quietly became a copy, which is the one distinction the two modes exist to make.
             component.externalSource = src.externalSource;
         }
 
@@ -605,6 +602,12 @@ namespace projv::utils {
         } else {
             scene.components[handle].parent = INVALID_COMPONENT_HANDLE;
         }
+
+        // Attachments are part of what a component is, too, and this is where the same mistake would
+        // be made next: the scene editor's boolean op lived on the record as a field, and a copy that
+        // dropped it came back as a plain placement -- the copy of a subtracted window filled the
+        // hole it was cut from. Each key's own OnDuplicate decides; see utils/attachments.h.
+        duplicateAttachments(scene, source, handle);
 
         // Recursively duplicate children (only for Asset kind). Driven from the copy taken above --
         // both because the reference it used to come from is invalid by now, and because each

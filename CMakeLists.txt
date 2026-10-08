@@ -203,6 +203,7 @@ add_library(projectV STATIC
     src/graphics/type_mapping.cpp
 
     src/utils/animation.cpp
+    src/utils/attachments.cpp
     src/utils/compose_io.cpp
     src/utils/editing.cpp
     src/utils/material.cpp
@@ -277,6 +278,13 @@ include(ProjectVShaders)
 
 if(PROJV_BUILD_EXAMPLES)
     add_subdirectory(examples)
+endif()
+
+# Unit tests: CPU only, no display, run with ctest. On in the dev preset.
+option(PROJV_BUILD_TESTS "Build the unit tests (CPU only, run with ctest)" OFF)
+if(PROJV_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests/unit)
 endif()
 
 # Manual tests need a display and a GPU, so they are opt-in even in a developer build.

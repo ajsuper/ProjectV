@@ -9,7 +9,7 @@ This format supersedes the flat `headers.json` layout described in [scene_data_s
   - [Top-level fields](#top-level-fields)
   - [Component fields](#component-fields)
   - [Transforms](#transforms)
-  - [Boolean ops](#boolean-ops)
+  - [Attachments](#attachments)
   - [Mutability](#mutability)
 - [`.data` Container Format](#data-container-format)
 - [Loading Rules](#loading-rules)
@@ -58,6 +58,7 @@ The wire format is **strict JSON** (RFC 8259). The loader is configured with `ig
 |-------|------|----------|---------|
 | `version` | integer | **yes** | Format version. Current: `1`. Lets the loader reject/upgrade old files. |
 | `name` | string | no | Human identification only. The engine assigns an internal ID on load; `name` has no runtime meaning and need not be unique. |
+| `attachments` | object | no | Program data about the folder itself. See [Attachments](#attachments). |
 | `components` | array | **yes** | The list of components (see below). May be empty. |
 
 #### Component fields
@@ -81,7 +82,7 @@ The wire format is **strict JSON** (RFC 8259). The loader is configured with `ig
 | `rotation` | float array | no (default identity) | Length **3** = Euler degrees `[x, y, z]`; length **4** = quaternion `[x, y, z, w]`. See [Transforms](#transforms). |
 | `scale` | number \| `[x,y,z]` | no (default `1.0`) | A single number is uniform scale. A 3-array is per-axis scale. |
 | `mutability` | `"locked"` \| `"direct"` \| `"copy"` | no (default `"locked"`) | Only meaningful for `type: data`. See [Mutability](#mutability). Ignored on `asset` (each inner `data` declares its own). |
-| `op` | `"none"` \| `"union"` \| `"subtract"` \| `"intersect"` | no (default `"none"`) | How this entry combines with the ones above it in the list. See [Boolean ops](#boolean-ops). |
+| `attachments` | object | no | Program data about this entry. See [Attachments](#attachments). |
 
 > **Note on `source` naming:** the key is `source`, not `data`, because it points to a *file* for `type:data` but a *folder* for `type:asset`. One key, two resolutions, disambiguated by `type`.
 
@@ -101,27 +102,43 @@ For an `asset` component, `worldMatrix(component)` becomes the parent transform 
 
 > The engine stores rotation internally as a quaternion (or matrix). Euler input is a convenience for hand-authoring. This is a change from the current renderer, which assumes axis-aligned chunks and has **no** rotation support — see [Open Questions](#open-questions).
 
-#### Boolean ops
+#### Attachments
 
-`op` turns an ordered placement list into a **constructive-solid stack**: the parent's voxels become the fold of its children, evaluated left to right from an empty accumulator.
+An `attachments` object, on the document or on any entry, holds data that some **program** saves
+with the scene and that the engine does not interpret. The engine reads it, keeps it with the
+component (or folder) through duplicates and grafts, and writes it back on save. It never acts on
+it.
 
-| Value | Means |
-|-------|-------|
-| `none` | **Placed.** The component is parented, transformed and rendered as its own geometry, with no relationship to its siblings. |
-| `union` | Add its cells to the accumulator. Its own colours win. |
-| `subtract` | Remove its cells from the accumulator. Contributes no colour. |
-| `intersect` | Keep only cells in both. The accumulator's colours survive. |
+```json
+"attachments": {
+    "projv.editor.csg":       { "v": 1, "op": "subtract" },
+    "mygame.spawn":           { "v": 1, "kind": "door" }
+}
+```
 
-**The default is `none`, and that matters in both directions.** Every `compose.json` written before this field existed is a pure placement list; a default of `union` would silently reinterpret all of them as boolean resolves. And a loader that does not know the field reads a composed asset as its placed parts — a degraded picture, but a coherent one, rather than a parse failure.
+- **Keys** are namespaced strings. `projv.` is reserved for programs in this repository; anything
+  else should use a prefix of its own.
+- **Values** are whatever the owning program writes. By convention each is an object carrying `"v"`,
+  that attachment's own schema version (absent means 1), so a program can change its JSON without
+  breaking older files.
+- **Unknown keys are preserved.** A program that loads and saves a scene writes back every attachment
+  it did not ask for, unchanged. That is the rule that lets several programs share one file.
+- **The block is omitted when empty**, so a scene nothing has attached to is written exactly as it was
+  before attachments existed.
+- **Placement in memory:** an entry's block belongs to that component. A folder's own block belongs to
+  the `asset` component that stands for it, or, for the folder that was opened at the top, to the
+  scene itself.
 
-Two rules the evaluator has to state, because neither is discoverable from the file:
+The API is `utils/attachments.h`. The test for what belongs here rather than in a first-class field:
+if engine code would ever branch on it, it is engine data and gets a field.
 
-- **The first contributing entry seeds the accumulator whatever its `op` says.** An empty set intersected with anything is empty, and subtracting from an empty set leaves it empty, so a stack whose first boolean entry is `intersect` or `subtract` would resolve to nothing at all — an outcome with no visible cause.
-- **`op` on a `type: data` component whose `.data` is a grid volume is treated as `none`.** A grid is many blocks across many cells, and folding one into its parent's single-lattice `.data` is a rebuild rather than a bake. The writer emits `none` for these rather than recording a promise nothing keeps.
-
-Because `asset` entries recurse, this one field gives **nested CSG** with no new tree and no second evaluator: subtracting a whole sub-assembly is an `asset` entry with `"op": "subtract"`, and the ordinary load walk already reaches it.
-
-A **shared lattice** is required of everything that folds — one `resolution` and one `voxelScale` — because that is the invariant of the `.data` file the fold has to produce. Composition by *placement* never needed that; only composition by boolean does, which is exactly why stating it per entry lets both live in one list.
+**Boolean ops are an attachment.** Earlier versions of this format had a top-level `op` field on each
+entry (`none` / `union` / `subtract` / `intersect`), describing a constructive-solid stack that only
+the scene editor ever evaluated. It is now the editor's `projv.editor.csg` attachment; what it means
+is documented with the editor (`examples/60-scene-editor/README.md`). Every other program renders a
+stack as its placed parts. The loader still reads a top-level `op` and moves it into that attachment,
+so files written before the change open unchanged and are rewritten in the new form on their next
+save.
 
 #### Mutability
 

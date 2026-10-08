@@ -14,6 +14,7 @@
 
 #include "utils/voxel_management.h"
 #include "utils/scene_query.h"
+#include "utils/attachments.h"
 #include "nlohmann/json.hpp"
 
 namespace projv::utils {
@@ -352,6 +353,46 @@ namespace projv::utils {
         return readDataBlock(path, hdr.blocks[blockIndex]);
     }
 
+    namespace {
+        // The key every compose.json written before attachments existed used for the scene editor's
+        // boolean op, which is now that program's attachment. See readLegacyOp.
+        constexpr const char* LEGACY_OP_ATTACHMENT = "projv.editor.csg";
+
+        // An `attachments` object: key -> value, each value kept as JSON text. Values are not
+        // looked inside -- what they mean is the business of whichever program owns the key -- so
+        // anything that parsed as JSON is kept, including shapes no program here would write.
+        std::map<std::string, std::string> readAttachments(const nlohmann::json& owner,
+                                                           const std::string& where) {
+            std::map<std::string, std::string> attachments;
+            if (!owner.contains("attachments")) return attachments;
+            const nlohmann::json& block = owner["attachments"];
+            if (!block.is_object()) {
+                core::warn("parseComposeJson: 'attachments' in {} is not an object - ignoring it", where);
+                return attachments;
+            }
+            for (const auto& [key, value] : block.items()) attachments[key] = value.dump();
+            return attachments;
+        }
+
+        // **A migration, and the one place the engine names an editor key.** Boolean ops used to be
+        // a top-level `op` field on each entry, owned by the engine format although only the scene
+        // editor ever acted on one. That field is now the editor's `projv.editor.csg` attachment.
+        //
+        // The value is moved, not read: whatever string the file held -- including one the editor
+        // will not recognise -- goes across verbatim, and the editor decides what it means. `none`
+        // is dropped, because an absent attachment already means that. An entry that has both keeps
+        // the attachment, which is the newer of the two.
+        //
+        // The file is rewritten in the new form on its next save. Remove this once the bundled
+        // scenes have all been re-saved.
+        void readLegacyOp(const nlohmann::json& entry, std::map<std::string, std::string>& attachments) {
+            if (!entry.contains("op") || !entry["op"].is_string()) return;
+            std::string op = entry["op"].get<std::string>();
+            if (op == "none" || attachments.count(LEGACY_OP_ATTACHMENT) != 0) return;
+            attachments[LEGACY_OP_ATTACHMENT] = nlohmann::json{{"v", 1}, {"op", op}}.dump();
+        }
+    }
+
     ComposeDoc parseComposeJson(const std::string& composeJsonPath) {
         core::info("parseComposeJson: Parsing {}", composeJsonPath);
         ComposeDoc doc;
@@ -380,6 +421,7 @@ namespace projv::utils {
             return doc;
         }
         doc.name = json.value("name", std::string(""));
+        doc.attachments = readAttachments(json, composeJsonPath);
 
         if (!json.contains("components") || !json["components"].is_array()) {
             core::error("parseComposeJson: Missing or invalid 'components' array in {}", composeJsonPath);
@@ -448,21 +490,8 @@ namespace projv::utils {
             else if (mutStr == "copy") c.mutability = Mutability::Copy;
             else c.mutability = Mutability::Locked;
 
-            // Absent means `none`, which is what every compose.json written before this field
-            // existed means -- a pure placement list. An unrecognised value is warned about and read
-            // as `none` rather than guessed at: reading it as a boolean would fold a component into
-            // its parent on the strength of a typo, which is a destructive way to be wrong.
-            std::string opStr = jc.value("op", std::string("none"));
-            if (opStr == "union") c.op = BooleanOp::Union;
-            else if (opStr == "subtract") c.op = BooleanOp::Subtract;
-            else if (opStr == "intersect") c.op = BooleanOp::Intersect;
-            else {
-                if (opStr != "none") {
-                    core::warn("parseComposeJson: '{}' has unknown op \"{}\" in {} - reading it as "
-                               "\"none\" (placed)", c.source, opStr, composeJsonPath);
-                }
-                c.op = BooleanOp::None;
-            }
+            c.attachments = readAttachments(jc, composeJsonPath);
+            readLegacyOp(jc, c.attachments);
 
             // The palette, in slot order -- the .data's material bytes are indices into it, so the
             // order is data and a reordering here recolours the geometry. Colours are [R, G, B] at
@@ -577,6 +606,10 @@ namespace projv::utils {
                 core::error("loadComposeFromDisk: Failed to load compose.json at {}", folder);
                 return;
             }
+            // The folder's own block belongs to the node that stands for the folder -- the Asset
+            // record this call is expanding -- or, for the document's top-level folder, which has no
+            // node, to INVALID_COMPONENT_HANDLE. saveComposeToDisk writes it back from the same place.
+            attachRaw(scene, parentHandle, AttachmentScope::Document, doc.attachments);
 
             for (ComposeComponent& c : doc.components) {
                 core::trace("loadComposeFromDisk:   component type={} source=\"{}\" name=\"{}\"",
@@ -614,12 +647,10 @@ namespace projv::utils {
                 rec.localRotation  = c.rotation;
                 rec.localScale     = c.scale.x; // uniform scale, v0.0
                 rec.parent         = parentHandle;
-                // Carried straight through, so an assembly saved as a compose folder re-opens as the
-                // editable stack of parts that produced it rather than as finished geometry. Nothing
-                // in the loader acts on it -- resolving the fold is the editor's job -- so a runtime
-                // that only places components reads a composed asset as its parts, which is the
-                // degraded-but-coherent picture the default of None is chosen to give.
-                rec.op             = c.op;
+                // Carried through as text, uninterpreted: whatever program owns a key decodes it when
+                // it asks for it, and a key no program in this process asks for is written back as it
+                // was read.
+                attachRaw(scene, myHandle, AttachmentScope::Component, c.attachments);
                 // The palette the .data's material bytes index into. It travels in compose.json, so
                 // it lands here directly rather than being interned voxel by voxel out of the geometry
                 // -- and two components instancing one .data can carry different colours for it.
@@ -974,6 +1005,14 @@ namespace projv::utils {
             scene.components.push_back(std::move(moved));
         }
 
+        // Each incoming component's attachments move with it. The incoming document's own block
+        // (INVALID_COMPONENT_HANDLE in Document scope: its top-level folder had no node) now has one --
+        // the asset node made above -- so it lands there, which is where a later save of that node
+        // writes it back from.
+        appendAttachments(scene, loaded, [&](ComponentHandle handle) {
+            return handle == INVALID_COMPONENT_HANDLE ? root : handle + componentOffset;
+        });
+
         for (ChunkHandle handle : loaded.looseChunks) {
             scene.looseChunks.push_back(handle + chunkBase);
         }
@@ -1009,6 +1048,26 @@ namespace projv::utils {
         nlohmann::json json;
         json["version"] = COMPOSE_VERSION;
         json["name"] = doc.name;
+        // Written only when there are any, so a document no program has attached anything to comes
+        // back off this writer exactly as it would have before attachments existed.
+        auto writeAttachments = [&composeJsonPath](nlohmann::json& owner,
+                                                   const std::map<std::string, std::string>& attachments) {
+            if (attachments.empty()) return;
+            nlohmann::json block = nlohmann::json::object();
+            for (const auto& [key, text] : attachments) {
+                nlohmann::json value = nlohmann::json::parse(text, nullptr, false);
+                if (value.is_discarded()) {
+                    // Only reachable through a traits `save` that produced something unparseable,
+                    // since raw text is only ever text that already parsed.
+                    core::error("writeComposeJson: attachment '{}' is not valid JSON in {} - not written",
+                                key, composeJsonPath);
+                    continue;
+                }
+                block[key] = std::move(value);
+            }
+            owner["attachments"] = std::move(block);
+        };
+        writeAttachments(json, doc.attachments);
         json["components"] = nlohmann::json::array();
 
         for (const ComposeComponent& c : doc.components) {
@@ -1030,10 +1089,6 @@ namespace projv::utils {
                 case Mutability::Copy:   entry["mutability"] = "copy";   break;
                 case Mutability::Locked: entry["mutability"] = "locked"; break;
             }
-            // Written only when it is not the default, so a plain placement list comes back off this
-            // writer looking exactly like the ones already on disk -- an `"op": "none"` on every
-            // entry of every scene would be noise describing the absence of a feature.
-            if (c.op != BooleanOp::None) entry["op"] = booleanOpName(c.op);
             // Slot order is the .data's material bytes' index space, so it is written verbatim --
             // including empty trailing slots, which still occupy an index.
             if (!c.palette.empty()) {
@@ -1065,6 +1120,7 @@ namespace projv::utils {
                 }
                 entry["palette"] = std::move(palette);
             }
+            writeAttachments(entry, c.attachments);
             json["components"].push_back(std::move(entry));
         }
 
@@ -1197,6 +1253,8 @@ namespace projv::utils {
         doc.name = root == INVALID_COMPONENT_HANDLE
             ? std::filesystem::path(folderPath).filename().string()
             : scene.components[root].name;
+        // The folder's own block comes off the node that stands for it, the inverse of the loader.
+        doc.attachments = attachmentsForSave(scene, root, AttachmentScope::Document);
 
         bool allWritten = true;
         std::unordered_set<std::string> usedNames;
@@ -1254,12 +1312,7 @@ namespace projv::utils {
             // Per component, even where the geometry is shared: two instances of one .data each write
             // their own palette, which is what lets them be coloured apart.
             entry.palette = comp.materialPalette;
-            // Every kind writes the op it carries, Grid included. This used to force `none` on a
-            // Grid child on the grounds that the fold would refuse to honour it, and that made the
-            // file a lossy record of a document the editor could express: a Grid row set to Subtract
-            // reloaded as a placement, so the hole it cut was gone. The fold now walks a grid cell by
-            // cell, so the promise is one that is kept.
-            entry.op = comp.op;
+            entry.attachments = attachmentsForSave(scene, handle, AttachmentScope::Component);
 
             std::string base = sanitizeForFilename(comp.name.empty() ? "component" : comp.name);
             std::string unique = base;

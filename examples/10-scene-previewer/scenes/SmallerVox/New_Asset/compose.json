@@ -412,7 +412,7 @@
     {
       "mutability": "locked",
       "name": "Box 3",
-      "op": "union",
+      "attachments": { "projv.editor.csg": { "op": "union", "v": 1 } },
       "palette": [
         {
           "color": [1023, 1023, 1023],

@@ -4,6 +4,9 @@
 #include <string>
 #include <memory>
 #include <mutex>
+#include <map>
+#include <unordered_map>
+#include <any>
 #include <algorithm>
 #include <cmath>
 #include <stdint.h>
@@ -189,40 +192,52 @@ namespace projv{
 
     enum class ComponentKind { Chunk, Grid, Asset };
 
-    // The boolean role a component plays inside its parent. `None` is the historical behaviour and
-    // the only value any compose.json written before this field existed can mean: the component is
-    // *placed* -- parented, transformed, and rendered as its own geometry, with no relationship to
-    // its siblings. The other three make it *resolved*: its cells are folded into its parent's
-    // voxels, left to right down the child list, and it stops being a thing you look at on its own.
+    // ---- Attachments ------------------------------------------------------------------------
     //
-    // Defaulting to None is what makes the field backward compatible in both directions. A default
-    // of Union would silently reinterpret every scene already on disk as a boolean resolve, and a
-    // loader that does not know the field reads a composed asset as its placed parts -- a degraded
-    // picture, but a coherent one.
+    // Data a *program* attaches to scene components and saves with them, which the engine stores,
+    // copies and writes back but never interprets. The test for which side of that line a field
+    // falls on: if engine code would ever branch on it, it is engine data and belongs on
+    // ComponentRecord instead. The scene editor's boolean ops are the first attachment
+    // ("projv.editor.csg") -- they used to be a field here, which put editor semantics in a format
+    // no other program acts on.
     //
-    // Only meaningful on a child of an Asset node, and it means the same thing for all three kinds.
-    // A Grid used to be excluded -- treated as None whatever the file said, on the grounds that
-    // folding many blocks on many cells into a single-lattice .data is a rebuild rather than a bake.
-    // That exclusion was invisible where it mattered: a Chunk becomes a Grid on its own the first
-    // time a sculpt writes outside its resolution (convertChunkToGrid), so an ordinary .data could
-    // quietly stop composing, and a stack of two of them resolved to nothing with no stated cause.
-    // The cost argument was real but it is a budget question, and the fold already has budgets.
-    enum class BooleanOp {
-        None,       // Placed. Its own object, its own lattice, rendered as itself.
-        Union,      // Add its cells to the accumulator. Its own colours win.
-        Subtract,   // Remove its cells from the accumulator. Contributes no colour.
-        Intersect   // Keep only cells in both. The accumulator's colours survive.
+    // Read and written through utils/attachments.h, never directly. It is here rather than there so
+    // that Scene can hold it without this header pulling in a JSON library.
+    enum class AttachmentScope {
+        Component,   // The entry for one component in its folder's compose.json.
+        Document     // A folder's own compose.json: keyed by the Asset node that stands for the
+                     // folder, or INVALID_COMPONENT_HANDLE for the top-level folder, which has none.
     };
 
-    inline const char* booleanOpName(BooleanOp op) {
-        switch (op) {
-            case BooleanOp::None:      return "none";
-            case BooleanOp::Union:     return "union";
-            case BooleanOp::Subtract:  return "subtract";
-            case BooleanOp::Intersect: return "intersect";
-        }
-        return "none";
-    }
+    // What duplicating a component does to an attachment. Declared by the attachment's type; an
+    // attachment nobody in this process has a type for is copied, because copying data whose
+    // meaning is unknown is the choice that cannot lose it.
+    enum class OnDuplicate { Copy, Drop };
+
+    // Every attachment under one key.
+    struct AttachmentTable {
+        // Values that have been asked for as their type, keyed by handle. std::any rather than a
+        // virtual clone hierarchy, so the table -- and with it Scene -- copies with no help.
+        std::unordered_map<ComponentHandle, std::any> typed;
+        // Values as they came off disk: JSON text, "v" included. Held this way until something asks
+        // for the key as a type, and written back unchanged if nothing ever does -- which is what
+        // lets a program open and save an asset without erasing another program's data.
+        std::unordered_map<ComponentHandle, std::string> raw;
+        // Set the first time the key is used as a type: how a typed value goes back to JSON text.
+        std::string (*encode)(const std::any&) = nullptr;
+        OnDuplicate onDuplicate = OnDuplicate::Copy;
+        // Whether every entry in `raw` has already been offered to the type. Entries the type
+        // refuses stay raw, so they are still written back, and are not offered again.
+        bool rawDecoded = false;
+    };
+
+    struct AttachmentStore {
+        // Decoding on first typed access is a cache fill, so a read through a const Scene may do it.
+        // Main thread only, like the rest of the component tree.
+        //
+        // An ordered map, so every save writes keys in the same order.
+        mutable std::map<std::string, AttachmentTable> tables;
+    };
 
     // One queued edit. Continuous component-space coords (not Z-order). P1: append via
     // queueVoxelAdd/queueVoxelRemove, drained by updateScene.
@@ -275,13 +290,6 @@ namespace projv{
         // P6: Hierarchy (Chunk, Grid, Asset -- all three participate)
         ComponentHandle parent = INVALID_COMPONENT_HANDLE;
         std::vector<ComponentHandle> children;   // populated for Asset; empty for Chunk/Grid
-
-        // How this component combines with its siblings inside its parent. See BooleanOp: None means
-        // "placed", which is what every component loaded from a compose.json without an `op` field
-        // is, and the three boolean values make the parent Asset node an *assembly* whose voxels are
-        // the fold of its children. Travels through compose.json, so an assembly re-opens as the
-        // editable stack that produced it rather than as a finished mesh.
-        BooleanOp op = BooleanOp::None;
 
         // P6: Local transform (relative to parent; all three use this)
         core::vec3 localPosition = core::vec3(0.0f);
@@ -495,6 +503,10 @@ struct GeometryBlob {
         std::vector<ComponentRecord> components;
         // P1 addition: lazily populated by editing::updateScene on first edit per source.
         std::vector<DataReference>   dataReferences;
+        // Program data saved with the components and folders of this scene. See AttachmentStore,
+        // and utils/attachments.h for the only supported way to read or write it.
+        AttachmentStore attachments;          // AttachmentScope::Component
+        AttachmentStore documentAttachments;  // AttachmentScope::Document
         // Guards every ComponentRecord::materialPalette (+ paletteVersion) against concurrent
         // interning. One mutex for the whole Scene rather than one per ComponentRecord: std::mutex
         // is neither movable nor copyable, so a per-component mutex would break growth of the
@@ -512,6 +524,9 @@ struct GeometryBlob {
         // value. Both special members below move/copy every field except the mutex, which is left
         // freshly default-constructed on the destination (a mutex has no state worth moving or
         // copying; each Scene instance just needs its own).
+        //
+        // **A member added to Scene has to be added to all four of these**, or a copy or a move
+        // silently drops it. tests/unit/test_attachments.cpp checks it for the attachment stores.
         Scene() = default;
         Scene(Scene&& other) noexcept
             : chunks(std::move(other.chunks))
@@ -522,6 +537,8 @@ struct GeometryBlob {
             , blobFreeList(std::move(other.blobFreeList))
             , components(std::move(other.components))
             , dataReferences(std::move(other.dataReferences))
+            , attachments(std::move(other.attachments))
+            , documentAttachments(std::move(other.documentAttachments))
         {}
         Scene& operator=(Scene&& other) noexcept {
             if (this == &other) return *this;
@@ -533,6 +550,8 @@ struct GeometryBlob {
             blobFreeList = std::move(other.blobFreeList);
             components = std::move(other.components);
             dataReferences = std::move(other.dataReferences);
+            attachments = std::move(other.attachments);
+            documentAttachments = std::move(other.documentAttachments);
             return *this;
         }
         Scene(const Scene& other)
@@ -544,6 +563,8 @@ struct GeometryBlob {
             , blobFreeList(other.blobFreeList)
             , components(other.components)
             , dataReferences(other.dataReferences)
+            , attachments(other.attachments)
+            , documentAttachments(other.documentAttachments)
         {}
         Scene& operator=(const Scene& other) {
             if (this == &other) return *this;
@@ -555,6 +576,8 @@ struct GeometryBlob {
             blobFreeList = other.blobFreeList;
             components = other.components;
             dataReferences = other.dataReferences;
+            attachments = other.attachments;
+            documentAttachments = other.documentAttachments;
             return *this;
         }
     };
