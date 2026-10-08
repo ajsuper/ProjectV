@@ -122,6 +122,8 @@ Vendored as submodules and built automatically — nothing to install:
 - [glm](https://github.com/g-truc/glm) — maths
 - [spdlog](https://github.com/gabime/spdlog) — logging
 - [nlohmann/json](https://github.com/nlohmann/json) — renderer and scene descriptions
+- [EnTT](https://github.com/skypjack/entt) — the entity registry the runtime is built on (header-only, pinned at v4.0.0)
+- [doctest](https://github.com/doctest/doctest) — the unit tests (`ctest --preset dev`)
 
 From the system:
 
@@ -135,19 +137,22 @@ update --init --recursive` gets everything.
 
 ### Modules
 
-ProjectV is organised into four groups of headers under `include/`, all built into a single
+ProjectV is organised into five groups of headers under `include/`, all built into a single
 library. There is one target to link, `ProjectV::projectV` — the per-module archives and their
 hand-ordered link lists are gone.
 
 | Group | Header example | What it provides |
 |---|---|---|
-| **Core** | `#include "core/ecs.h"` | `projv::Application`, the system stages and the game loop, maths, logging, `executableDirectory()`. See [core.md](/include/core/core.md) |
+| **Core** | `#include "core/application.h"` | `projv::Application`: the stages, the game loop, `Time` and `Events`. The world is an [EnTT](https://github.com/skypjack/entt) registry. Also maths, logging, `executableDirectory()`. See [core.md](/include/core/core.md) |
 | **Utils** | `#include "utils/voxel_math.h"` | Voxel data: scene composition and I/O, materials, editing, picking, animation, scene queries. See [utils.md](/include/utils/utils.md) |
 | **Graphics** | `#include "graphics/render_instance.h"` | Window and bgfx setup, renderer specifications, GPU upload, the render loop. See [graphics.md](/include/graphics/graphics.md) |
 | **Data structures** | `#include "data_structures/scene.h"` | The plain types the three above operate on — `Scene`, `Chunk`, `GPUData`, `RendererSpecification` |
+| **Runtime** | `#include "runtime/scene_bridge.h"` | Entities linked to voxel components: `Transform`, `VoxelComponent`, spawning from attachments. The one layer that sees both EnTT and the Scene |
 
-Everything lives under the `projv` namespace, with `projv::core`, `projv::utils` and
-`projv::graphics` for the three functional groups.
+Everything lives under the `projv` namespace, with `projv::core`, `projv::utils`,
+`projv::graphics` and `projv::runtime` for the functional groups. The voxel layer (`utils`,
+`data_structures`) never includes EnTT or the runtime, so a tool with no game loop can still load,
+edit and save scenes; a ctest check enforces it.
 
 ### Usage
 
@@ -164,34 +169,43 @@ target_link_libraries(my_game PRIVATE ProjectV::projectV)
 projv_compile_shaders(TARGET my_game SHADER_DIRS myRenderer/shaders)
 ```
 
-A minimal application registers its stages and runs the loop:
+A minimal application adds systems to stages and runs the loop:
 
 ```cpp
-#include "core/ecs.h"
+#include "core/application.h"
+#include "graphics/input.h"
 #include "graphics/render_instance.h"
 
 void startup(projv::Application& app) {
-    auto& renderInstance =
-        projv::core::createGlobalResource<projv::graphics::RenderInstance>(app.world);
+    auto& renderInstance = app.world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1920, 1080, "My Game");
+    // Polls the window each frame, fills projv::Input, and turns the close button into a
+    // CloseRequested event -- which ends the application unless you set app.closeOnRequest = false.
+    projv::graphics::installPlatform(app, renderInstance);
     // ... load a scene, build a renderer, upload it to the GPU
 }
 
 void update(projv::Application& app) {
-    auto& renderInstance =
-        projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
-    // The engine records the window-manager close request; acting on it is yours to decide.
-    if (renderInstance.shouldClose) app.closeAppFlag = true;
+    const auto& input = app.world.ctx().get<projv::Input>();
+    float step = 10.0f * app.time().delta;          // units per second, whatever the frame rate
+    if (input.down(projv::Key::W)) { /* move by step */ }
 }
 
 int main() {
-    projv::Application app = projv::core::createApp();
-    projv::core::assignSystemStage(app, projv::SystemStage::Startup, startup);
-    projv::core::assignSystemStage(app, projv::SystemStage::Update,  update);
-    projv::core::assignSystemStage(app, projv::SystemStage::Render,  render);
-    projv::core::runApplication(app);
+    projv::Application app;
+    app.addSystem(projv::Stage::Startup, "startup", startup);
+    app.addSystem(projv::Stage::Update,  "update",  update);
+    app.addSystem(projv::Stage::Render,  "render",  render);
+    app.run();
 }
 ```
+
+The stages run Startup once, then every frame PreUpdate, FixedUpdate (zero or more times, at
+`Time::fixedDelta`), Update, PostUpdate, the event pump and Render, then Shutdown once. Several
+systems can share a stage; they run in the order they were added. Global resources live in the
+registry's context (`app.world.ctx()`), and entities are ordinary EnTT entities. To link them to
+voxel components, use the Scene bridge (`runtime/scene_bridge.h`); `examples/15-entities` shows it
+end to end.
 
 Assets are ordinary paths. The engine's load functions open what they are given, resolving a
 relative path against the working directory, so an application whose assets sit beside its binary
@@ -202,7 +216,7 @@ const auto assets = projv::core::executableDirectory() / "assets";
 scene = projv::utils::loadComposeFromDisk((assets / "scenes/Castle").string());
 ```
 
-For worked examples, see [examples/README.md](/examples/README.md) — seven programs ordered so
+For worked examples, see [examples/README.md](/examples/README.md) — eight programs ordered so
 that reading them in sequence teaches the engine.
 
 ### Contributing

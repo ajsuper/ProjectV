@@ -23,8 +23,9 @@ directory, and renderer folders name their shaders relative to it in `resources.
 
 ```bash
 cd build/examples/hello_voxel      && ./hello_voxel
+cd build/examples/entities         && ./entities
 cd build/examples/scene_previewer  && ./scene_previewer scenes/SmallVox
-cd build/examples/renderer_gallery && ./renderer_gallery --renderer world-cascade
+cd build/examples/renderer_gallery && ./renderer_gallery --renderer fast
 cd build/examples/scene_editor     && ./scene_editor
 ```
 
@@ -67,7 +68,16 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 
 ## Codebase Conventions
 
-- Namespace `projv` for core types, `projv::utils` for utilities, `projv::graphics` for GPU.
+- Namespace `projv` for core types, `projv::utils` for utilities, `projv::graphics` for GPU,
+  `projv::runtime` for the Scene bridge.
+- `projv::Application` (`core/application.h`) owns the loop; add systems with `addSystem(Stage, name, fn)`.
+  `World` is an `entt::registry` (`core/world.h`); global resources live in `world.ctx()`.
+- **Layering:** `utils/` and `data_structures/` never include EnTT, `core/world.h`/`application.h`/
+  `events.h` or `runtime/`. The `layering` ctest enforces it. `runtime/` is the one layer that sees both.
+- Component deletion is `utils::deleteComponent` (tombstone; handles are never reused).
+  `utils::isComponentAlive` is the liveness check.
+- Program data on components goes in attachments (`utils/attachments.h`), not new
+  `ComponentRecord` fields, unless engine code needs to read it.
 - Chunk handle = index into `Scene.chunks` (stable).
 - Component handle = index into `Scene.components` (stable).
 - Geometry pool blobs are refcounted; `chunk.geometryPoolIndex < 0` = unpooled.
@@ -79,9 +89,9 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 
 | Path | What |
 |---|---|
-| `include/` `src/` | The engine. `core/`, `graphics/`, `utils/`, `data_structures/`. |
+| `include/` `src/` | The engine. `core/`, `graphics/`, `utils/`, `data_structures/`, `runtime/`. |
 | `cmake/` | `ProjectVConfig.cmake.in`, plus the `projv_compile_shaders()` and `projv_add_example()` helpers. |
-| `examples/` | Seven examples, numbered in reading order. See `examples/README.md`. |
+| `examples/` | Eight examples, numbered in reading order. See `examples/README.md`. |
 | `tests/unit/` | The automated suite (doctest, ctest). CPU only. |
 | `tests/manual/` | Harnesses that need a display. Not examples. See `tests/README.md`. |
 | `docs/data_structures/` | Format references: the `.data` container, compose scenes, tree64, renderers. |

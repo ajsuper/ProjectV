@@ -18,10 +18,18 @@ projv::utils::convertVoxelPositionToWorldPosition();
 ```
 
 ### Utils modules:
-- lod -> Handles changing the LOD of a voxel chunk.
-- voxel_io -> Handles reading/writing of voxel data to and from disk.
-- voxel_management -> Handles the voxel data, responsible for creating and converting voxel data structures.
-- voxel_math -> Responsible for all of the voxel related math functionalities.
+- **compose_io** -> Reading and writing compose folders (`compose.json` + `.data`): load, save, graft one into another.
+- **attachments** -> Program data saved with components and folders, stored and written back but never interpreted by the engine.
+- **scene_query** -> The component tree: find, list, transform, add, duplicate, delete, reparent.
+- **editing** -> Per-component edit queues and `updateScene`, which applies them; chunk-to-grid growth.
+- **voxel_management** -> Creating and converting voxel data structures: brick maps, tree64, geometry blobs.
+- **voxel_math** -> Voxel-related maths.
+- **material** -> Per-component palettes.
+- **picking** -> Ray casts against the voxel scene.
+- **animation** -> Motion sets for animated materials.
+
+**No EnTT, and nothing from the runtime.** Utils is the voxel layer, and a tool with no game loop
+must be able to use all of it. The `layering` ctest enforces this.
 
 ### More
 

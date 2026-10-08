@@ -1,6 +1,6 @@
 # ProjectV Examples
 
-Seven programs, ordered so that reading them in sequence teaches the engine. Each one is a
+Eight programs, ordered so that reading them in sequence teaches the engine. Each one is a
 complete application, not a snippet, and each has its own README explaining not just how to run it
 but why it exists and what it decided differently from its neighbours.
 
@@ -25,6 +25,7 @@ cd build/examples/hello_voxel && ./hello_voxel
 |---|---|---|---|
 | **00** | [hello-voxel](00-hello-voxel/) | The startup sequence, at the smallest size that draws anything. Builds its voxels in memory, so there is nothing to download. | — |
 | **10** | [scene-previewer](10-scene-previewer/) | Loading a scene from disk, framing it automatically, flying around it. Pure albedo, no lighting — it shows what is *in* a scene rather than how it looks. | — |
+| **15** | [entities](15-entities/) | The runtime: entities linked to voxel components, systems driven by `Time`, `Input` and events, and attachments in compose.json turning into behaviour when the scene is spawned. | — |
 | **20** | [mesh-voxelizer](20-mesh-voxelizer/) | Getting your own data in: meshes and Minecraft worlds to Compose scenes. Headless command-line tool. | Assimp submodule |
 | **30** | [renderers](30-renderers/) | Seven renderers over one scene and one camera — the comparison is the point. Accumulation, reprojection, per-face GI, and four cascade variants. | — |
 | **40** | [advanced-renderer](40-advanced-renderer/) | The good renderer, brought up to the engine as it is today: fourteen passes, world-space probe GI, animation, transparency and refraction. | — |
@@ -40,6 +41,10 @@ rather than failing the build. `git submodule update --init --recursive` gets ev
 **Never used the engine before** — read [00-hello-voxel](00-hello-voxel/) end to end. It is one
 file, it builds its own geometry, and it is the only place the whole startup sequence appears
 without anything else competing for attention.
+
+**Writing a game, not a renderer** — [15-entities](15-entities/) is hello-voxel with things that
+move: the Application's stages, `Time`, `Input`, events, and the Scene bridge that links entities to
+voxel components.
 
 **Want to see your own model** — [20-mesh-voxelizer](20-mesh-voxelizer/) converts it, then
 [10-scene-previewer](10-scene-previewer/) shows you what came out. That pairing is deliberate: the

@@ -1,0 +1,39 @@
+{
+  "components": [
+    {
+      "attachments": {
+        "example.motion": {
+          "kind": "spin",
+          "speed": 0.4,
+          "v": 1
+        }
+      },
+      "mutability": "locked",
+      "name": "Sun",
+      "position": [0.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Sun",
+      "type": "asset"
+    },
+    {
+      "attachments": {
+        "example.motion": {
+          "kind": "orbit",
+          "radius": 45.0,
+          "speed": 0.35,
+          "v": 1
+        }
+      },
+      "mutability": "locked",
+      "name": "Planet",
+      "position": [45.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Planet",
+      "type": "asset"
+    }
+  ],
+  "name": "scene",
+  "version": 1
+}

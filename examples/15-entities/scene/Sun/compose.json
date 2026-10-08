@@ -1,0 +1,27 @@
+{
+  "components": [
+    {
+      "mutability": "locked",
+      "name": "Sun ball",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [972, 460, 102]
+        },
+        {
+          "color": [1023, 767, 205]
+        }
+      ],
+      "position": [-10.0, -10.0, -10.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Sun_ball.data",
+      "type": "data"
+    }
+  ],
+  "name": "Sun",
+  "version": 1
+}

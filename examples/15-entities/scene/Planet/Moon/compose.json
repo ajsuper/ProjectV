@@ -1,0 +1,27 @@
+{
+  "components": [
+    {
+      "mutability": "locked",
+      "name": "Moon ball",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [563, 563, 614]
+        },
+        {
+          "color": [870, 870, 870]
+        }
+      ],
+      "position": [-1.5, -1.5, -1.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Moon_ball.data",
+      "type": "data"
+    }
+  ],
+  "name": "Moon",
+  "version": 1
+}
