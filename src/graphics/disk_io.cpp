@@ -231,8 +231,9 @@ namespace projv::graphics {
     std::vector<FrameBuffer> loadFrameBuffers(nlohmann::json& resourceData) {
         std::vector<FrameBuffer> frameBuffers;
         for (const auto &frameBuffer : resourceData["framebuffers"]) {
-            const std::string logFormat = "Framebuffer:: fboID: {} , textureIDs: {}";
-            core::info(logFormat,
+            // A literal, not a std::string: under C++20 fmt checks the format string at compile
+            // time, which needs it to be a constant expression.
+            core::info("Framebuffer:: fboID: {} , textureIDs: {}",
                         frameBuffer["fboID"].dump(), 
                         frameBuffer["textureIDs"].dump());
             FrameBuffer frameBufferResource;
@@ -249,8 +250,8 @@ namespace projv::graphics {
         std::vector<RenderPass> renderPasses;
         uint32_t renderPassID;
         for (const auto &renderPass : dependencyGraphData["renderer"]) {
-            const std::string logFormat = "RenderPass:: shaderID: {}, frameBufferInputIDs: {}, resourceTexturesIDs: {}, frameBufferOutputID: {}, multiPass: {}";
-            core::info(logFormat,
+            core::info("RenderPass:: shaderID: {}, frameBufferInputIDs: {}, resourceTexturesIDs: {}, "
+                       "frameBufferOutputID: {}, multiPass: {}",
                         renderPass["shaderID"].dump(), 
                         renderPass["frameBufferInputIDs"].dump(),
                         renderPass["resourceTexturesIDs"].dump(),

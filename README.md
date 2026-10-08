@@ -125,7 +125,7 @@ Vendored as submodules and built automatically — nothing to install:
 
 From the system:
 
-- A C++17 compiler, CMake ≥ 3.20, git
+- A C++20 compiler, CMake ≥ 3.20, git
 - **GLFW** — the one hard system dependency (`glfw-devel` on Fedora), plus `wayland-devel` on Linux
 - Up-to-date graphics drivers with a Vulkan (Linux) or Metal (macOS) capable GPU
 

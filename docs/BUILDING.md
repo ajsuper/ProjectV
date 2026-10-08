@@ -6,7 +6,7 @@ The short version lives in the [README](../README.md). This is everything else.
 
 | | |
 |---|---|
-| Compiler | C++17. GCC and Clang are tested. |
+| Compiler | C++20. GCC and Clang are tested. |
 | CMake | 3.20 or newer (bgfx.cmake requires it) |
 | GPU | Vulkan on Linux, Metal on macOS |
 | System packages | **GLFW** is the one hard system dependency. On Linux also `wayland-devel` (or X11 development headers if building with `PROJV_USE_X11=ON`). |

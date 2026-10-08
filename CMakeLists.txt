@@ -14,7 +14,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -224,7 +224,7 @@ target_include_directories(projectV PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/projv>
 )
 
-target_compile_features(projectV PUBLIC cxx_std_17)
+target_compile_features(projectV PUBLIC cxx_std_20)
 
 # PUBLIC. The log macros compile their call sites out, so a consumer built with a different
 # set than the library silently gets different behaviour -- which is the situation the

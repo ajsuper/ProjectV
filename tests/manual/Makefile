@@ -16,7 +16,7 @@ USED_LIBRARIES := -lprojectV
 BGFX_LIBRARIES := -lbgfx -lbimg -lbx -lglfw
 
 CXX ?= g++
-CXXFLAGS := -O2 --std=c++17 -Wall -Wextra \
+CXXFLAGS := -O2 --std=c++20 -Wall -Wextra \
 	-DPROJV_ENABLE_INFO -DPROJV_ENABLE_WARN -DPROJV_ENABLE_ERROR $(INCLUDE_DIRS)
 LDFLAGS := $(LIB_DIR) $(USED_LIBRARIES) $(BGFX_LIBRARIES)
 
