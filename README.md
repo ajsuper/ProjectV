@@ -216,7 +216,7 @@ const auto assets = projv::core::executableDirectory() / "assets";
 scene = projv::utils::loadComposeFromDisk((assets / "scenes/Castle").string());
 ```
 
-For worked examples, see [examples/README.md](/examples/README.md) — eight programs ordered so
+For worked examples, see [examples/README.md](/examples/README.md) — nine programs ordered so
 that reading them in sequence teaches the engine.
 
 ### Contributing

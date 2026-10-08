@@ -24,6 +24,7 @@ directory, and renderer folders name their shaders relative to it in `resources.
 ```bash
 cd build/examples/hello_voxel      && ./hello_voxel
 cd build/examples/entities         && ./entities
+cd build/examples/sandbox          && ./sandbox            # SANDBOX_SELFTEST=600 plays itself
 cd build/examples/scene_previewer  && ./scene_previewer scenes/SmallVox
 cd build/examples/renderer_gallery && ./renderer_gallery --renderer fast
 cd build/examples/scene_editor     && ./scene_editor
@@ -91,7 +92,7 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 |---|---|
 | `include/` `src/` | The engine. `core/`, `graphics/`, `utils/`, `data_structures/`, `runtime/`. |
 | `cmake/` | `ProjectVConfig.cmake.in`, plus the `projv_compile_shaders()` and `projv_add_example()` helpers. |
-| `examples/` | Eight examples, numbered in reading order. See `examples/README.md`. |
+| `examples/` | Nine examples, numbered in reading order. See `examples/README.md`. |
 | `tests/unit/` | The automated suite (doctest, ctest). CPU only. |
 | `tests/manual/` | Harnesses that need a display. Not examples. See `tests/README.md`. |
 | `docs/data_structures/` | Format references: the `.data` container, compose scenes, tree64, renderers. |

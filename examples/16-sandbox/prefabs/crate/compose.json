@@ -1,0 +1,35 @@
+{
+  "attachments": {
+    "sandbox.body": {
+      "mass": 2.5,
+      "radius": 1.6,
+      "restitution": 0.25,
+      "v": 1
+    }
+  },
+  "components": [
+    {
+      "mutability": "locked",
+      "name": "shape",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [460, 286, 123]
+        },
+        {
+          "color": [798, 573, 307]
+        }
+      ],
+      "position": [-1.5, -1.5, -1.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "shape.data",
+      "type": "data"
+    }
+  ],
+  "name": "crate",
+  "version": 1
+}

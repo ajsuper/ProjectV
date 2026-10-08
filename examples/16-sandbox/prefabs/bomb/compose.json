@@ -1,0 +1,36 @@
+{
+  "attachments": {
+    "sandbox.body": {
+      "explosive": 9.0,
+      "mass": 1.5,
+      "radius": 1.2,
+      "restitution": 0.4,
+      "v": 1
+    }
+  },
+  "components": [
+    {
+      "mutability": "locked",
+      "name": "shape",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [870, 102, 82]
+        },
+        {
+          "color": [1023, 870, 102]
+        }
+      ],
+      "position": [-1.25, -1.25, -1.25],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "shape.data",
+      "type": "data"
+    }
+  ],
+  "name": "bomb",
+  "version": 1
+}

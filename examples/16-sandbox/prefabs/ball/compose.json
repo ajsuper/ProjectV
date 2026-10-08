@@ -1,0 +1,35 @@
+{
+  "attachments": {
+    "sandbox.body": {
+      "mass": 1.0,
+      "radius": 1.5,
+      "restitution": 0.8,
+      "v": 1
+    }
+  },
+  "components": [
+    {
+      "mutability": "locked",
+      "name": "shape",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [205, 563, 1023]
+        },
+        {
+          "color": [972, 972, 1023]
+        }
+      ],
+      "position": [-1.5, -1.5, -1.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "shape.data",
+      "type": "data"
+    }
+  ],
+  "name": "ball",
+  "version": 1
+}

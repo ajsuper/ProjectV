@@ -49,7 +49,7 @@ cmake --preset release && cmake --build --preset release
 
 | Option | Default | Effect |
 |---|---|---|
-| `PROJV_BUILD_EXAMPLES` | `OFF` (`ON` in `dev`) | Build the eight bundled examples |
+| `PROJV_BUILD_EXAMPLES` | `OFF` (`ON` in `dev`) | Build the nine bundled examples |
 | `PROJV_BUILD_TESTS` | `OFF` (`ON` in `dev`) | Build the unit tests in `tests/unit/`; run them with `ctest --preset dev`. Needs the `external/doctest` submodule or an installed doctest |
 | `PROJV_BUILD_MANUAL_TESTS` | `OFF` | Build the windowed test harnesses in `tests/manual/` |
 | `PROJV_INSTALL` | `ON` | Generate install and export rules |

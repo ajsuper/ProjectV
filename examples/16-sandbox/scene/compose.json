@@ -1,0 +1,91 @@
+{
+  "components": [
+    {
+      "mutability": "locked",
+      "name": "Arena",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [348, 368, 409]
+        },
+        {
+          "color": [266, 286, 317]
+        },
+        {
+          "color": [512, 532, 573]
+        },
+        {
+          "color": [921, 563, 205]
+        }
+      ],
+      "position": [-64.0, -1.0, -64.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Arena.data",
+      "type": "data"
+    },
+    {
+      "attachments": {
+        "sandbox.spawner": {
+          "interval": 1.1,
+          "prefab": "ball",
+          "speed": 24.0,
+          "v": 1
+        }
+      },
+      "mutability": "locked",
+      "name": "Pylon A",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [205, 225, 266]
+        },
+        {
+          "color": [307, 1023, 614]
+        }
+      ],
+      "position": [-42.0, 0.0, -42.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Pylon_A.data",
+      "type": "data"
+    },
+    {
+      "attachments": {
+        "sandbox.spawner": {
+          "interval": 1.7,
+          "prefab": "crate",
+          "speed": 20.0,
+          "v": 1
+        }
+      },
+      "mutability": "locked",
+      "name": "Pylon B",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [205, 225, 266]
+        },
+        {
+          "color": [307, 1023, 614]
+        }
+      ],
+      "position": [38.0, 0.0, 38.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "Pylon_B.data",
+      "type": "data"
+    }
+  ],
+  "name": "scene",
+  "version": 1
+}
