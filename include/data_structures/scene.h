@@ -507,6 +507,10 @@ struct GeometryBlob {
         // and utils/attachments.h for the only supported way to read or write it.
         AttachmentStore attachments;          // AttachmentScope::Component
         AttachmentStore documentAttachments;  // AttachmentScope::Document
+        // How many times utils::deleteComponent has removed something. Code that holds component
+        // handles across frames -- the runtime's scene bridge -- compares it with the value it last
+        // saw and re-checks its handles only when it has moved, instead of on every frame.
+        uint64_t deletions = 0;
         // Guards every ComponentRecord::materialPalette (+ paletteVersion) against concurrent
         // interning. One mutex for the whole Scene rather than one per ComponentRecord: std::mutex
         // is neither movable nor copyable, so a per-component mutex would break growth of the
@@ -539,6 +543,7 @@ struct GeometryBlob {
             , dataReferences(std::move(other.dataReferences))
             , attachments(std::move(other.attachments))
             , documentAttachments(std::move(other.documentAttachments))
+            , deletions(other.deletions)
         {}
         Scene& operator=(Scene&& other) noexcept {
             if (this == &other) return *this;
@@ -552,6 +557,7 @@ struct GeometryBlob {
             dataReferences = std::move(other.dataReferences);
             attachments = std::move(other.attachments);
             documentAttachments = std::move(other.documentAttachments);
+            deletions = other.deletions;
             return *this;
         }
         Scene(const Scene& other)
@@ -565,6 +571,7 @@ struct GeometryBlob {
             , dataReferences(other.dataReferences)
             , attachments(other.attachments)
             , documentAttachments(other.documentAttachments)
+            , deletions(other.deletions)
         {}
         Scene& operator=(const Scene& other) {
             if (this == &other) return *this;
@@ -578,6 +585,7 @@ struct GeometryBlob {
             dataReferences = other.dataReferences;
             attachments = other.attachments;
             documentAttachments = other.documentAttachments;
+            deletions = other.deletions;
             return *this;
         }
     };

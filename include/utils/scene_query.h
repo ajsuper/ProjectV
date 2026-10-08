@@ -101,6 +101,22 @@ namespace projv::utils {
     ComponentHandle duplicateComponent(Scene& scene, ComponentHandle source,
                                         ComponentHandle parent = INVALID_COMPONENT_HANDLE);
 
+    // Deletes a component and its whole subtree, and returns every handle it removed, leaves first.
+    // Returns nothing if `handle` is out of range or already deleted.
+    //
+    // **A deleted component keeps its slot.** Handles are indices into Scene.components, which is
+    // never compacted, so the record stays as a tombstone (renamed to "__deleted__", detached, no
+    // children) and the handle is never handed out again -- a stale handle can be detected with
+    // isComponentAlive rather than silently naming some newer component. Its chunks are killed and
+    // their geometry released, a grid's cells are emptied (the SceneGrid itself stays, emptied, for
+    // the same reason), and its attachments are cleared. Scene.deletions is incremented.
+    //
+    // What it does not do is reach the GPU: the caller re-uploads, as after any other edit.
+    std::vector<ComponentHandle> deleteComponent(Scene& scene, ComponentHandle handle);
+
+    // False for a handle out of range or one deleteComponent has removed.
+    bool isComponentAlive(const Scene& scene, ComponentHandle handle);
+
     // Moves `child` from its current parent to `newParent`. Pass INVALID_COMPONENT_HANDLE to
     // make it a root. Re-bakes the subtree world transforms. `newParent` must not be a descendant
     // of `child` (checked; returns false on cycle).

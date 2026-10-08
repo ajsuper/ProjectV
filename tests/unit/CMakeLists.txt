@@ -19,6 +19,7 @@ endif()
 add_executable(projv_unit_tests
     main.cpp
     test_attachments.cpp
+    test_scene_delete.cpp
 )
 target_link_libraries(projv_unit_tests PRIVATE projectV doctest::doctest)
 target_compile_options(projv_unit_tests PRIVATE

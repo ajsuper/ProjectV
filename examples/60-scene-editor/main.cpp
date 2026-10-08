@@ -3892,73 +3892,10 @@ static ComponentKindStyle componentKindStyle(const projv::Scene& scene, const Ed
 }
 
 static void deleteComponent(projv::Scene& scene, EditorState& editor, projv::ComponentHandle handle) {
-    if (handle >= scene.components.size()) return;
-
-    projv::ComponentHandle oldParent = scene.components[handle].parent;
-    if (oldParent < scene.components.size()) {
-        std::vector<projv::ComponentHandle>& siblings = scene.components[oldParent].children;
-        siblings.erase(std::remove(siblings.begin(), siblings.end(), handle), siblings.end());
-    }
-
-    // **Every node in the subtree is renamed, not just the root.** The rename to "__deleted__" is
-    // what marks a record dead -- there is no liveness flag, and the record itself has to survive
-    // because handles are indices into a vector that is never compacted. Every flat scan over
-    // scene.components in this editor and in saveComposeToDisk filters on exactly that name, so a
-    // descendant left with its own name is still a live component to all of them, pointing at a
-    // chunk that has just been killed and at a parent that has disowned it.
-    //
-    // Nothing used to delete a parent that had children, which is why this never bit. An asset
-    // deletes one every time it is baked or cancelled.
-    std::vector<projv::ComponentHandle> removed;
-    auto disableSubtree = [&scene, &removed](projv::ComponentHandle current, auto& self) -> void {
-        if (current >= scene.components.size()) return;
-        projv::ComponentRecord& record = scene.components[current];
-        if (record.kind == projv::ComponentKind::Chunk) {
-            projv::ChunkHandle chunkHandle = record.chunkHandle;
-            if (chunkHandle < scene.chunks.size()) {
-                scene.chunks[chunkHandle].alive = false;
-                projv::releaseBlob(scene, scene.chunks[chunkHandle].geometryPoolIndex);
-            }
-            std::vector<projv::ChunkHandle>& loose = scene.looseChunks;
-            loose.erase(std::remove(loose.begin(), loose.end(), chunkHandle), loose.end());
-            scene.looseChunkCount = static_cast<uint32_t>(loose.size());
-        } else if (record.kind == projv::ComponentKind::Grid) {
-            // A grid owns one chunk per populated cell and none of them are in looseChunks, so the
-            // Chunk branch above reaches exactly none of them. Left undone, deleting a grid killed
-            // the component and left its blocks on screen -- which is what a merge that consumes a
-            // grid row does, so the merged .data appeared *on top of* the rows it replaced.
-            //
-            // The SceneGrid record itself stays in scene.grids, emptied. Grid indices are positions
-            // in that vector and every chunk carries one, so removing an entry would renumber every
-            // grid after it -- the same reason a deleted component keeps its slot.
-            if (record.gridIndex >= 0 && size_t(record.gridIndex) < scene.grids.size()) {
-                projv::SceneGrid& grid = scene.grids[size_t(record.gridIndex)];
-                for (int32_t& cell : grid.cellToChunk) {
-                    if (cell >= 0 && size_t(cell) < scene.chunks.size()) {
-                        scene.chunks[cell].alive = false;
-                        projv::releaseBlob(scene, scene.chunks[cell].geometryPoolIndex);
-                    }
-                    cell = -1;
-                }
-                grid.componentHandle = projv::INVALID_COMPONENT_HANDLE;
-            }
-        }
-        // Copied rather than iterated in place: the recursion below clears the child list it is
-        // walking, and the walk has to outlive that.
-        std::vector<projv::ComponentHandle> children = record.children;
-        for (projv::ComponentHandle child : children) {
-            self(child, self);
-        }
-        projv::ComponentRecord& current_record = scene.components[current];
-        current_record.children.clear();
-        current_record.name = "__deleted__";
-        current_record.parent = projv::INVALID_COMPONENT_HANDLE;
-        // Every attachment, not only the op: the record stays as a tombstone, and whatever any
-        // program had attached to it describes a component that no longer exists.
-        projv::utils::clearAttachments(scene, current);
-        removed.push_back(current);
-    };
-    disableSubtree(handle, disableSubtree);
+    // The deletion itself -- tombstoning the whole subtree, killing chunks, emptying grids, releasing
+    // geometry, clearing attachments -- is the engine's (utils::deleteComponent), promoted from here.
+    // What stays is the editor's own state that pointed into what was removed.
+    std::vector<projv::ComponentHandle> removed = projv::utils::deleteComponent(scene, handle);
 
     // Anything the editor was pointing *into* the subtree, not only at its root: deleting a folder
     // whose child was selected has to clear the selection too, or the gizmo goes on driving a dead
@@ -3975,9 +3912,8 @@ static void deleteComponent(projv::Scene& scene, EditorState& editor, projv::Com
             editor.materialUsageValid = false;
             editor.materialChunkUsageValid = false;
         }
-        // Handles are indices into a vector that is never compacted, but addComponent recycles dead
-        // slots -- so a free-placement flag left behind here would be inherited by whatever component
-        // is created into that slot next, exempting it from the grid for no reason anyone could see.
+        // Handles are never reused, so a flag left behind would not be inherited by a new component
+        // -- but it would outlive the one it describes, and every scan of the free set would carry it.
         setFreePlacement(editor, gone, false);
     }
     editor.gpuFlushNeeded = true;

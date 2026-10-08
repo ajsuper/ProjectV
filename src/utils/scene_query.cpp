@@ -636,6 +636,86 @@ namespace projv::utils {
         return handle;
     }
 
+    namespace {
+        // The tombstone. A name rather than a flag because the scene editor and saveComposeToDisk
+        // have always read it this way; isComponentAlive is the one engine-side reader, so changing
+        // the representation later is a change to it and to the editor.
+        constexpr const char* DELETED_NAME = "__deleted__";
+    }
+
+    bool isComponentAlive(const Scene& scene, ComponentHandle handle) {
+        return handle < scene.components.size() && scene.components[handle].name != DELETED_NAME;
+    }
+
+    std::vector<ComponentHandle> deleteComponent(Scene& scene, ComponentHandle handle) {
+        std::vector<ComponentHandle> removed;
+        if (!isComponentAlive(scene, handle)) return removed;
+
+        ComponentHandle oldParent = scene.components[handle].parent;
+        if (oldParent < scene.components.size()) {
+            std::vector<ComponentHandle>& siblings = scene.components[oldParent].children;
+            siblings.erase(std::remove(siblings.begin(), siblings.end(), handle), siblings.end());
+        }
+
+        // **Every node in the subtree is tombstoned, not just the root.** Every flat scan over
+        // scene.components -- saveComposeToDisk's, and the scene editor's many -- filters on the
+        // tombstone, so a descendant left with its own name would still be a live component to all
+        // of them, pointing at a chunk that has just been killed and at a parent that has disowned
+        // it. (Promoted from the scene editor, where this was learned: nothing deleted a parent with
+        // children until an asset did, every time it was baked.)
+        auto disableSubtree = [&scene, &removed](ComponentHandle current, auto& self) -> void {
+            if (current >= scene.components.size()) return;
+            ComponentRecord& record = scene.components[current];
+            if (record.kind == ComponentKind::Chunk) {
+                ChunkHandle chunkHandle = record.chunkHandle;
+                if (chunkHandle < scene.chunks.size()) {
+                    scene.chunks[chunkHandle].alive = false;
+                    releaseBlob(scene, scene.chunks[chunkHandle].geometryPoolIndex);
+                }
+                std::vector<ChunkHandle>& loose = scene.looseChunks;
+                loose.erase(std::remove(loose.begin(), loose.end(), chunkHandle), loose.end());
+                scene.looseChunkCount = static_cast<uint32_t>(loose.size());
+            } else if (record.kind == ComponentKind::Grid) {
+                // A grid owns one chunk per populated cell and none of them are in looseChunks, so
+                // the Chunk branch above reaches none of them. Left undone, deleting a grid killed
+                // the component and left its blocks on screen.
+                //
+                // The SceneGrid itself stays in scene.grids, emptied: grid indices are positions in
+                // that vector and every chunk carries one, so removing an entry would renumber every
+                // grid after it -- the same reason a deleted component keeps its slot.
+                if (record.gridIndex >= 0 && size_t(record.gridIndex) < scene.grids.size()) {
+                    SceneGrid& grid = scene.grids[size_t(record.gridIndex)];
+                    for (int32_t& cell : grid.cellToChunk) {
+                        if (cell >= 0 && size_t(cell) < scene.chunks.size()) {
+                            scene.chunks[cell].alive = false;
+                            releaseBlob(scene, scene.chunks[cell].geometryPoolIndex);
+                        }
+                        cell = -1;
+                    }
+                    grid.componentHandle = INVALID_COMPONENT_HANDLE;
+                }
+            }
+            // Copied rather than iterated in place: the recursion below clears the child list it is
+            // walking, and the walk has to outlive that.
+            std::vector<ComponentHandle> children = record.children;
+            for (ComponentHandle child : children) {
+                self(child, self);
+            }
+            ComponentRecord& tombstone = scene.components[current];
+            tombstone.children.clear();
+            tombstone.name = DELETED_NAME;
+            tombstone.parent = INVALID_COMPONENT_HANDLE;
+            // Every attachment: whatever any program had attached describes a component that no
+            // longer exists.
+            clearAttachments(scene, current);
+            removed.push_back(current);
+        };
+        disableSubtree(handle, disableSubtree);
+
+        scene.deletions++;
+        return removed;
+    }
+
     bool setComponentParent(Scene& scene, ComponentHandle child, ComponentHandle newParent) {
         if (child >= scene.components.size()) return false;
         if (child == newParent) return false;
