@@ -45,7 +45,7 @@
 #include <string>
 #include <vector>
 
-#include "core/ecs.h"
+#include "core/application.h"
 #include "core/math.h"
 #include "core/log.h"
 #include "core/paths.h"
@@ -390,7 +390,7 @@ static std::string    g_scenePath;
 // Startup: create the window, load the scene and the chosen renderer, upload all GPU resources.
 void startup(projv::Application& app) {
 
-    projv::graphics::RenderInstance& renderInstance = projv::core::createGlobalResource<projv::graphics::RenderInstance>(app.world);
+    projv::graphics::RenderInstance& renderInstance = app.world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1920, 1080, ("ProjectV — " + g_selectedRenderer.id).c_str());
 
     // Capture the cursor so mouse motion drives the camera (FPS-style mouse look).
@@ -399,11 +399,11 @@ void startup(projv::Application& app) {
     // Scroll wheel controls the sun's elevation (day cycle).
     glfwSetScrollCallback(renderInstance.window, sunScrollCallback);
 
-    projv::Scene& scene     = projv::core::createGlobalResource<projv::Scene>(app.world);
-    float& cameraPhi         = projv::core::createGlobalResource<float>(app.world);
-    projv::GPUData& gpuData  = projv::core::createGlobalResource<projv::GPUData>(app.world);
-    RendererModule& selectedRenderer = projv::core::createGlobalResource<RendererModule>(app.world);
-    CameraFraming& framing = projv::core::createGlobalResource<CameraFraming>(app.world);
+    projv::Scene& scene     = app.world.ctx().emplace<projv::Scene>();
+    float& cameraPhi         = app.world.ctx().emplace<float>();
+    projv::GPUData& gpuData  = app.world.ctx().emplace<projv::GPUData>();
+    RendererModule& selectedRenderer = app.world.ctx().emplace<RendererModule>();
+    CameraFraming& framing = app.world.ctx().emplace<CameraFraming>();
     selectedRenderer = g_selectedRenderer;
 
     // Eager load: loads all scene geometry up front.
@@ -449,9 +449,9 @@ void update(projv::Application& app) {
     // The engine records a window-manager close request on the RenderInstance; acting on it is the
     // application's decision. Ending the loop here runs the Shutdown stage on the way out.
     projv::graphics::RenderInstance& renderInstance =
-        projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
+        app.world.ctx().get<projv::graphics::RenderInstance>();
     if (renderInstance.shouldClose) {
-        app.closeAppFlag = true;
+        app.closeRequested = true;
     }
 
 #if defined(PROJV_ENABLE_PERF)
@@ -479,11 +479,11 @@ void update(projv::Application& app) {
 // Render: handle camera input, then hand off per-frame uniform upload to the
 // selected renderer module before dispatching it.
 void render(projv::Application& app) {
-    projv::graphics::RenderInstance& renderInstance = projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
-    projv::GPUData& gpuData          = projv::core::getGlobalResource<projv::GPUData>(app.world);
-    float& cameraPhi                 = projv::core::getGlobalResource<float>(app.world);
-    RendererModule& selectedRenderer = projv::core::getGlobalResource<RendererModule>(app.world);
-    CameraFraming& framing           = projv::core::getGlobalResource<CameraFraming>(app.world);
+    projv::graphics::RenderInstance& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
+    projv::GPUData& gpuData          = app.world.ctx().get<projv::GPUData>();
+    float& cameraPhi                 = app.world.ctx().get<float>();
+    RendererModule& selectedRenderer = app.world.ctx().get<RendererModule>();
+    CameraFraming& framing           = app.world.ctx().get<CameraFraming>();
 
     // Seeded from the automatic framing on the first frame, so --scene works at any scale.
     static projv::core::vec3 cameraPosition;
@@ -648,7 +648,7 @@ void render(projv::Application& app) {
 }
 
 void shutdown(projv::Application& app) {
-    projv::GPUData& gpuData = projv::core::getGlobalResource<projv::GPUData>(app.world);
+    projv::GPUData& gpuData = app.world.ctx().get<projv::GPUData>();
     projv::graphics::destroyGPUData(gpuData);
 }
 
@@ -692,11 +692,11 @@ int main(int argc, char** argv) {
         : options.scenePath;
     if (!g_scenePath.empty() && g_scenePath.back() != '/') g_scenePath += '/';
 
-    projv::Application app = projv::core::createApp();
-    projv::core::assignSystemStage(app, projv::SystemStage::Startup,  startup);
-    projv::core::assignSystemStage(app, projv::SystemStage::Update,   update);
-    projv::core::assignSystemStage(app, projv::SystemStage::Render,   render);
-    projv::core::assignSystemStage(app, projv::SystemStage::Shutdown, shutdown);
-    projv::core::runApplication(app);
+    projv::Application app;
+    app.addSystem(projv::Stage::Startup, "startup", startup);
+    app.addSystem(projv::Stage::Update, "update", update);
+    app.addSystem(projv::Stage::Render, "render", render);
+    app.addSystem(projv::Stage::Shutdown, "shutdown", shutdown);
+    app.run();
     return 0;
 }

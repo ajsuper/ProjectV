@@ -34,7 +34,7 @@
 #include <vector>
 #include <iostream>
 
-#include "core/ecs.h"
+#include "core/application.h"
 #include "core/math.h"
 #include "core/log.h"
 #include "graphics/render_instance.h"
@@ -213,16 +213,16 @@ static bool recordBenchFrame(int frameIndex, int width, int height) {
 // to the GPU.
 void startup(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance =
-        projv::core::createGlobalResource<projv::graphics::RenderInstance>(app.world);
+        app.world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1920, 1080, "ProjectV Scene Previewer");
 
     // Capture the cursor so mouse motion drives the camera (FPS-style mouse look).
     glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     glfwSetScrollCallback(renderInstance.window, speedScrollCallback);
 
-    projv::Scene& scene         = projv::core::createGlobalResource<projv::Scene>(app.world);
-    projv::GPUData& gpuData     = projv::core::createGlobalResource<projv::GPUData>(app.world);
-    CameraFraming& framing      = projv::core::createGlobalResource<CameraFraming>(app.world);
+    projv::Scene& scene         = app.world.ctx().emplace<projv::Scene>();
+    projv::GPUData& gpuData     = app.world.ctx().emplace<projv::GPUData>();
+    CameraFraming& framing      = app.world.ctx().emplace<CameraFraming>();
 
     projv::core::info("Loading scene: {}", g_scenePath);
     scene = projv::utils::loadComposeFromDisk(g_scenePath);
@@ -280,9 +280,9 @@ void update(projv::Application& app) {
 // Render: handle camera input, upload the per-frame uniforms, dispatch the three passes.
 void render(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance =
-        projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
-    projv::GPUData& gpuData = projv::core::getGlobalResource<projv::GPUData>(app.world);
-    CameraFraming& framing  = projv::core::getGlobalResource<CameraFraming>(app.world);
+        app.world.ctx().get<projv::graphics::RenderInstance>();
+    projv::GPUData& gpuData = app.world.ctx().get<projv::GPUData>();
+    CameraFraming& framing  = app.world.ctx().get<CameraFraming>();
 
     // Camera state, seeded from the automatic framing on the first frame.
     static bool cameraInitialized = false;
@@ -415,7 +415,7 @@ void render(projv::Application& app) {
 
     if (g_bench.frames > 0 &&
         recordBenchFrame(app.frameCount, int(windowResolution.x), int(windowResolution.y))) {
-        app.closeAppFlag = true;
+        app.closeRequested = true;
     }
 }
 
@@ -429,10 +429,10 @@ int main(int argc, char** argv) {
 
     readBenchEnvironment();
 
-    projv::Application app = projv::core::createApp();
-    projv::core::assignSystemStage(app, projv::SystemStage::Startup, startup);
-    projv::core::assignSystemStage(app, projv::SystemStage::Update,  update);
-    projv::core::assignSystemStage(app, projv::SystemStage::Render,  render);
-    projv::core::runApplication(app);
+    projv::Application app;
+    app.addSystem(projv::Stage::Startup, "startup", startup);
+    app.addSystem(projv::Stage::Update, "update", update);
+    app.addSystem(projv::Stage::Render, "render", render);
+    app.run();
     return 0;
 }

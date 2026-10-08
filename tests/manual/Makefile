@@ -5,6 +5,7 @@ INCLUDE_DIRS := \
     -I$(PROJECTV_DIR)/external/spdlog/include \
     -I$(PROJECTV_DIR)/external/json/include \
     -I$(PROJECTV_DIR)/external/glm \
+    -I$(PROJECTV_DIR)/external/entt/src \
     -I$(PROJECTV_DIR)/external/bx/include \
     -I$(PROJECTV_DIR)/external/bgfx/include \
     -I$(PROJECTV_DIR)/external/bimg/include

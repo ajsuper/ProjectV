@@ -325,6 +325,11 @@ within the 255-entry palette budget.  The engine provides `internMaterial` and
 
 ## 7. Entry-Point Plumbing (ECS Resource Wiring)
 
+> **Status:** the API this section describes is gone. Resources are now `world.ctx().emplace<T>()`
+> on an EnTT registry, and stages are `Application::addSystem` (see `core/application.h`). The
+> boilerplate argument -- that every application wires the same Scene, GPUData and RenderInstance --
+> still stands.
+
 ### Short Outline
 
 `main()` wires all ECS resources by hand: `createGlobalResource<Scene>`,

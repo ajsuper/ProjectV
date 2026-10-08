@@ -47,7 +47,8 @@ the rest of the examples are this plus their own subject.
 
 ```
 1. RenderInstance::initialize          create the window, bring bgfx up
-2. createGlobalResource<Scene/GPUData> put the scene and its GPU mirror in the world
+   graphics::installPlatform           connect the window: Input, and close/resize events
+2. world.ctx().emplace<Scene/GPUData>  put the scene and its GPU mirror in the world
 3. buildScene() or loadComposeFromDisk get some voxels
 4. loadRendererSpecification           read render.json + resources.json
 5. loadShader                          load the compiled vertex shader
@@ -55,10 +56,12 @@ the rest of the examples are this plus their own subject.
 7. createTexturesForScene              upload the voxels
 ```
 
-Then each frame: set the uniforms the shaders read, and call `renderConstructedRenderer`.
+Then each frame: move the camera from `Input` and `Time`, set the uniforms the shaders read, and call
+`renderConstructedRenderer`.
 
-The application itself is three (here, four) functions registered against `SystemStage::Startup`,
-`Update`, `Render` and `Shutdown`, and `runApplication` drives the loop.
+The application itself is a handful of named systems added to stages -- `Startup`, two on `Update`
+(the camera, then frame statistics), `Render` and `Shutdown` -- and `Application::run` drives the
+loop. Camera speed is in units per second (`Time::delta`), so it is the same at any frame rate.
 
 ## Building geometry in memory
 
@@ -78,16 +81,17 @@ understanding what a scene *is*:
 Colours come from `internMaterial`, which dedupes: you ask for a colour and get back the slot that
 has it, rather than managing indices yourself.
 
-## Two things no other example demonstrates
+## Two things worth copying into every application
 
-**It exits cleanly.** The engine records a window-manager close request on
-`RenderInstance::shouldClose` and does nothing else with it. The application decides what a close
-request means:
+**It exits cleanly.** `installPlatform` turns the window's close button into a `CloseRequested`
+event, and the `Application` ends when it hears one. Nothing else in the engine closes anything.
+An application that wants to decide for itself turns that off and handles the event:
 
 ```cpp
-if (renderInstance.shouldClose) {
-    app.closeAppFlag = true;
-}
+app.closeOnRequest = false;
+app.events().on<projv::CloseRequested>([&app](const projv::CloseRequested&) {
+    if (!hasUnsavedWork()) app.closeRequested = true;   // otherwise, raise a prompt
+});
 ```
 
 That indirection is deliberate. A tool with unsaved work wants to raise a prompt instead, which it

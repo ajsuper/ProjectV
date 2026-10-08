@@ -18,13 +18,13 @@ projv::graphics::passSceneToOpenGL();
 ```
 
 ### Graphics modules:
-- fbo -> Creating FBO's (Frame Buffer Objects), adding textures to FBO's, adding FBO's to a render instance.
-- render -> Rendering shaders to target FBO's, using FBO's as inputs to shaders.
-- scene -> Passing a voxel scene to OpenGL to be rendered.
-- shader -> Loading and compiling our shaders, adding our shaders to a render instance.
-- uniforms -> Passing variables from the CPU to the GPU.
-- user_input -> Handling the inputs from the user.
-- window -> Handles creating our window, render instance, and callbacks.
+- **render_instance** -> The window and bgfx: creating them, the active renderer, renderer specifications.
+- **disk_io** -> Reading renderer descriptions (`render.json`, `resources.json`) and shaders from disk.
+- **manage_resources** -> Turning a renderer specification into GPU objects: framebuffers, textures, programs, uniforms.
+- **perform_renderer** -> Running a renderer's passes for one frame.
+- **gpu_interface** -> Uploading a Scene to the GPU and keeping it current (`createTexturesForScene`, `flushSceneUpdates`).
+- **input** (`graphics/input.h`) -> `projv::Input` and `installPlatform`: the per-frame platform system that polls the window, fills Input, and sends `CloseRequested` / `WindowResized`.
+- **type_mapping**, **range_allocator** -> Internals of the above.
 
 ### More
 

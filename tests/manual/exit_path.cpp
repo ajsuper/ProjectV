@@ -1,9 +1,11 @@
 // Exit-path test for the two fixes in the engine's application loop.
 //
 // Case A: an application that registers NO Shutdown stage still exits cleanly.
-//         createApp() used to leave Application::Shutdown empty while runApplication()
-//         called it unconditionally, so every such app threw std::bad_function_call
-//         on the way out.
+//         The original loop left Application::Shutdown empty while the run loop called it
+//         unconditionally, so every such app threw std::bad_function_call on the way out.
+//         (Application now runs a list of systems per stage, so an empty stage is simply
+//         empty -- tests/unit/test_application.cpp covers it without a window. This harness
+//         stays for the windowed half, Case B.)
 //
 // Case B: RenderInstance::shouldClose reflects a window-manager close request, and an
 //         application that reads it can end the loop. Nothing in the engine acts on the
@@ -28,7 +30,7 @@
 #include <string>
 #include <system_error>
 
-#include "core/ecs.h"
+#include "core/application.h"
 #include "core/paths.h"
 #include "graphics/render_instance.h"
 #include "graphics/perform_renderer.h"
@@ -64,11 +66,11 @@ namespace {
             std::exit(5);
         }
 
-        auto& ri = projv::core::createGlobalResource<projv::graphics::RenderInstance>(app.world);
+        auto& ri = app.world.ctx().emplace<projv::graphics::RenderInstance>();
         ri.initialize(320, 240, "ProjectV exit-path test");
 
-        auto& scene   = projv::core::createGlobalResource<projv::Scene>(app.world);
-        auto& gpuData = projv::core::createGlobalResource<projv::GPUData>(app.world);
+        auto& scene   = app.world.ctx().emplace<projv::Scene>();
+        auto& gpuData = app.world.ctx().emplace<projv::GPUData>();
 
         projv::RendererSpecification spec =
             projv::graphics::loadRendererSpecification(kRendererDir);
@@ -82,7 +84,7 @@ namespace {
 
     // Case B's hand-off: the engine records the request, the application decides what it means.
     void update(projv::Application& app) {
-        auto& ri = projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
+        auto& ri = app.world.ctx().get<projv::graphics::RenderInstance>();
 
         // Before the request is delivered the flag must be false; a stuck-true flag would
         // make the rest of this test pass for the wrong reason.
@@ -97,7 +99,7 @@ namespace {
         }
         if (ri.shouldClose) {
             std::printf("[test] frame %d: shouldClose observed, ending loop\n", app.frameCount);
-            app.closeAppFlag = true;
+            app.closeRequested = true;
         }
         // A close request that is never observed would hang the test forever.
         if (app.frameCount > g_framesBeforeClose + 300) {
@@ -110,8 +112,8 @@ namespace {
     // the close request on the RenderInstance. The test deliberately does not touch
     // shouldClose anywhere -- every observation of it comes from this call.
     void render(projv::Application& app) {
-        auto& ri = projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
-        auto& gpuData = projv::core::getGlobalResource<projv::GPUData>(app.world);
+        auto& ri = app.world.ctx().get<projv::graphics::RenderInstance>();
+        auto& gpuData = app.world.ctx().get<projv::GPUData>();
         projv::graphics::renderConstructedRenderer(ri, ri.getActiveRenderer(), &gpuData);
     }
 
@@ -124,19 +126,19 @@ namespace {
 int main(int argc, char** argv) {
     const std::string mode = (argc > 1) ? argv[1] : "b";
 
-    projv::Application app = projv::core::createApp();
-    projv::core::assignSystemStage(app, projv::SystemStage::Startup, startup);
-    projv::core::assignSystemStage(app, projv::SystemStage::Update,  update);
-    projv::core::assignSystemStage(app, projv::SystemStage::Render,  render);
+    projv::Application app;
+    app.addSystem(projv::Stage::Startup, "startup", startup);
+    app.addSystem(projv::Stage::Update, "update", update);
+    app.addSystem(projv::Stage::Render, "render", render);
 
     if (mode == "b") {
-        projv::core::assignSystemStage(app, projv::SystemStage::Shutdown, shutdown);
+        app.addSystem(projv::Stage::Shutdown, "shutdown", shutdown);
     } else {
         std::printf("[test] case A: no Shutdown stage registered\n");
     }
 
-    // Throws std::bad_function_call here, before the fix, whenever mode == "a".
-    projv::core::runApplication(app);
+    // Threw std::bad_function_call here, in the original loop, whenever mode == "a".
+    app.run();
 
     if (mode == "b" && !g_shutdownRan) {
         std::fprintf(stderr, "FAIL: registered Shutdown stage never ran\n");

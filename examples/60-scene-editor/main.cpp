@@ -54,7 +54,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "core/ecs.h"
+#include "core/application.h"
 #include "core/math.h"
 #include "core/log.h"
 #include "graphics/render_instance.h"
@@ -20696,7 +20696,7 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4")) {
-                app.closeAppFlag = true;
+                app.closeRequested = true;
             }
             ImGui::EndMenu();
         }
@@ -24971,15 +24971,15 @@ static bool recordEditorBenchFrame(int frameIndex, int viewportWidth, int viewpo
 
 void startup(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance =
-        projv::core::createGlobalResource<projv::graphics::RenderInstance>(app.world);
+        app.world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1600, 900, "ProjectV Scene Editor");
 
     // Installed before ImGui's callbacks so ImGui chains into it rather than replacing it.
     glfwSetScrollCallback(renderInstance.window, scrollCallback);
 
-    projv::Scene& scene = projv::core::createGlobalResource<projv::Scene>(app.world);
-    projv::GPUData& gpuData = projv::core::createGlobalResource<projv::GPUData>(app.world);
-    EditorState& editor = projv::core::createGlobalResource<EditorState>(app.world);
+    projv::Scene& scene = app.world.ctx().emplace<projv::Scene>();
+    projv::GPUData& gpuData = app.world.ctx().emplace<projv::GPUData>();
+    EditorState& editor = app.world.ctx().emplace<EditorState>();
 
     projv::RendererSpecification rendererSpecification =
         projv::graphics::loadRendererSpecification("./editorRenderer/");
@@ -24987,7 +24987,7 @@ void startup(projv::Application& app) {
 
     bgfx::ShaderHandle vertexShader =
         projv::graphics::loadShader("./editorRenderer/editorShaders/vs_quad.bin");
-    EditorRenderers& renderers = projv::core::createGlobalResource<EditorRenderers>(app.world);
+    EditorRenderers& renderers = app.world.ctx().emplace<EditorRenderers>();
     renderers.viewport =
         projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader);
     renderInstance.setActiveRenderer(renderers.viewport);
@@ -25040,7 +25040,7 @@ void startup(projv::Application& app) {
                                             "./editorRenderer/imguiShaders/vs_imgui.bin",
                                             "./editorRenderer/imguiShaders/imgui.bin")) {
         projv::core::error("The editor cannot run without its interface shaders. Exiting.");
-        app.closeAppFlag = true;
+        app.closeRequested = true;
         return;
     }
 
@@ -25271,11 +25271,11 @@ static void core_info_once_grade(const projv::core::vec4& p, const projv::core::
 
 void render(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance =
-        projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
-    projv::Scene& scene = projv::core::getGlobalResource<projv::Scene>(app.world);
-    projv::GPUData& gpuData = projv::core::getGlobalResource<projv::GPUData>(app.world);
-    EditorState& editor = projv::core::getGlobalResource<EditorState>(app.world);
-    EditorRenderers& renderers = projv::core::getGlobalResource<EditorRenderers>(app.world);
+        app.world.ctx().get<projv::graphics::RenderInstance>();
+    projv::Scene& scene = app.world.ctx().get<projv::Scene>();
+    projv::GPUData& gpuData = app.world.ctx().get<projv::GPUData>();
+    EditorState& editor = app.world.ctx().get<EditorState>();
+    EditorRenderers& renderers = app.world.ctx().get<EditorRenderers>();
 
     // The one place editor.mode is written. Everything downstream -- which renderer is resized,
     // whose texture reaches ImGui, whose passes are dispatched -- keys off it, so it has to settle
@@ -25319,7 +25319,7 @@ void render(projv::Application& app) {
 
     glfwPollEvents();
     if (glfwWindowShouldClose(renderInstance.window)) {
-        app.closeAppFlag = true;
+        app.closeRequested = true;
         return;
     }
 
@@ -25847,11 +25847,11 @@ void render(projv::Application& app) {
         }
         bgfx::destroy(bench.captureTexture);
         bench.captureTexture = BGFX_INVALID_HANDLE;
-        app.closeAppFlag = true;
+        app.closeRequested = true;
     } else if (bench.frames > 0 && bench.captureState == 0 && editor.sceneLoaded &&
                bench.measured < bench.frames &&
                recordEditorBenchFrame(app.frameCount, editor.viewportWidth, editor.viewportHeight)) {
-        if (bench.capturePath.empty()) app.closeAppFlag = true;
+        if (bench.capturePath.empty()) app.closeRequested = true;
         else bench.captureState = 1;
     }
 
@@ -25888,14 +25888,14 @@ void render(projv::Application& app) {
 
 
 void shutdown(projv::Application& app) {
-    projv::GPUData& gpuData = projv::core::getGlobalResource<projv::GPUData>(app.world);
-    EditorState& editor = projv::core::getGlobalResource<EditorState>(app.world);
+    projv::GPUData& gpuData = app.world.ctx().get<projv::GPUData>();
+    EditorState& editor = app.world.ctx().get<EditorState>();
 
     projv::editor::shutdownImGuiBgfx();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 
-    releaseViewportPrograms(projv::core::getGlobalResource<EditorRenderers>(app.world).viewport.get());
+    releaseViewportPrograms(app.world.ctx().get<EditorRenderers>().viewport.get());
 
     // The screenshot staging texture, if one was ever made. Owned by the editor rather than by the
     // renderer -- it is not part of any pass -- so nothing else would release it.
@@ -25913,21 +25913,21 @@ void shutdown(projv::Application& app) {
 }
 
 int main(int argc, char** argv) {
-    projv::Application app = projv::core::createApp();
+    projv::Application app;
 
-    projv::core::assignSystemStage(app, projv::SystemStage::Startup, startup);
-    projv::core::assignSystemStage(app, projv::SystemStage::Update, update);
-    projv::core::assignSystemStage(app, projv::SystemStage::Render, render);
-    projv::core::assignSystemStage(app, projv::SystemStage::Shutdown, shutdown);
+    app.addSystem(projv::Stage::Startup, "startup", startup);
+    app.addSystem(projv::Stage::Update, "update", update);
+    app.addSystem(projv::Stage::Render, "render", render);
+    app.addSystem(projv::Stage::Shutdown, "shutdown", shutdown);
 
     // The scene given on the command line has to survive until startup runs, and the ECS stages take
     // only the Application — so it is parked in the editor state, which startup creates and reads.
     if (argc > 1) {
-        EditorState& editor = projv::core::createGlobalResource<EditorState>(app.world);
+        EditorState& editor = app.world.ctx().emplace<EditorState>();
         editor.scenePath = argv[1];
         if (!editor.scenePath.empty() && editor.scenePath.back() != '/') editor.scenePath += '/';
     }
 
-    projv::core::runApplication(app);
+    app.run();
     return 0;
 }

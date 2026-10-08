@@ -183,7 +183,7 @@ struct StructName {
   #include "bgfx/bgfx.h"
   #include "glm/glm.hpp"
   
-  #include "core/ecs.h"
+  #include "core/application.h"
   #include "graphics/gpu_interface.h"
   #include "utils/voxel_management.h"
   ```

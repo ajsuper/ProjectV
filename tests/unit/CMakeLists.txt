@@ -18,8 +18,12 @@ endif()
 
 add_executable(projv_unit_tests
     main.cpp
+    test_application.cpp
     test_attachments.cpp
+    test_events.cpp
+    test_input.cpp
     test_scene_delete.cpp
+    test_time.cpp
 )
 target_link_libraries(projv_unit_tests PRIVATE projectV doctest::doctest)
 target_compile_options(projv_unit_tests PRIVATE
@@ -27,3 +31,7 @@ target_compile_options(projv_unit_tests PRIVATE
 )
 
 add_test(NAME projv_unit_tests COMMAND projv_unit_tests)
+
+# Not a compile: a scan of the voxel layer's includes. See check_layering.cmake.
+add_test(NAME layering
+         COMMAND ${CMAKE_COMMAND} -DPROJV_ROOT=${PROJECT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/check_layering.cmake)

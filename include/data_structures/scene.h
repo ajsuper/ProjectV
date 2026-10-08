@@ -520,14 +520,12 @@ struct GeometryBlob {
         mutable std::mutex materialPaletteMutex;
 
         // std::mutex is neither movable nor copyable, which would otherwise make Scene itself
-        // neither -- and that breaks two real things: loadComposeFromDisk (compose_io.cpp) returns
-        // a Scene by value (needs move), and the ECS's createGlobalResource<T> (core/ecs.h) stores
-        // Scene inside a std::any, whose in-place constructor is SFINAE-constrained on
-        // is_copy_constructible_v<T> as a *static* requirement -- even though it only ever
-        // default-constructs Scene in place and nothing in the engine actually copies a live Scene
-        // value. Both special members below move/copy every field except the mutex, which is left
-        // freshly default-constructed on the destination (a mutex has no state worth moving or
-        // copying; each Scene instance just needs its own).
+        // neither. Moving is needed: loadComposeFromDisk (compose_io.cpp) returns a Scene by value.
+        // Copying is a real operation too -- a whole scene, attachments included, which the unit
+        // tests rely on -- though nothing in the engine copies a live Scene on a hot path. (It used
+        // to be forced by the old ECS, which stored resources in a std::any; the registry's context
+        // does not need it.) Every field except the mutex is moved or copied; the destination gets
+        // a fresh mutex, since a mutex has no state worth carrying and each Scene needs its own.
         //
         // **A member added to Scene has to be added to all four of these**, or a copy or a move
         // silently drops it. tests/unit/test_attachments.cpp checks it for the attachment stores.

@@ -296,12 +296,13 @@ namespace projv::graphics {
         static int prevWindowHeight = 0;
         //static bool renderToPrimary = true;
 
-        glfwPollEvents();
-
-        // This is the only place the engine polls GLFW, so it is the only place that can observe a
-        // close request. Record it; acting on it is the application's decision (see the field's
-        // comment in render_instance.h).
-        renderInstance.shouldClose = glfwWindowShouldClose(renderInstance.window) != 0;
+        // Unless the platform system has taken over (graphics::installPlatform), this is where the
+        // engine polls GLFW, so it is where a close request is observed. Record it; acting on it is
+        // the application's decision (see the field's comment in render_instance.h).
+        if (renderInstance.pollEventsInRender) {
+            glfwPollEvents();
+            renderInstance.shouldClose = glfwWindowShouldClose(renderInstance.window) != 0;
+        }
 
         glfwGetWindowSize(renderInstance.window, &windowWidth, &windowHeight);
 

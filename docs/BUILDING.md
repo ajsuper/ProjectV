@@ -17,7 +17,7 @@ Fedora:
 sudo dnf install gcc-c++ cmake git glfw-devel wayland-devel
 ```
 
-Everything else — bgfx, bx, bimg, glm, spdlog, nlohmann/json — is a submodule and is built for you.
+Everything else — bgfx, bx, bimg, glm, spdlog, nlohmann/json, EnTT, and doctest for the unit tests — is a submodule and is built for you.
 
 ## First build
 
@@ -49,7 +49,7 @@ cmake --preset release && cmake --build --preset release
 
 | Option | Default | Effect |
 |---|---|---|
-| `PROJV_BUILD_EXAMPLES` | `OFF` (`ON` in `dev`) | Build the seven bundled examples |
+| `PROJV_BUILD_EXAMPLES` | `OFF` (`ON` in `dev`) | Build the eight bundled examples |
 | `PROJV_BUILD_TESTS` | `OFF` (`ON` in `dev`) | Build the unit tests in `tests/unit/`; run them with `ctest --preset dev`. Needs the `external/doctest` submodule or an installed doctest |
 | `PROJV_BUILD_MANUAL_TESTS` | `OFF` | Build the windowed test harnesses in `tests/manual/` |
 | `PROJV_INSTALL` | `ON` | Generate install and export rules |
@@ -112,8 +112,10 @@ target_link_libraries(my_game PRIVATE ProjectV::projectV)
 ```
 
 Headers install under `<prefix>/include/projv/`, and the exported target points at that directory —
-so `#include "core/ecs.h"` keeps working while the install root stays free of a top-level `core/`
-and `utils/`.
+so `#include "core/application.h"` keeps working while the install root stays free of a top-level
+`core/` and `utils/`. A submodule build also installs EnTT's headers under
+`<prefix>/include/projv/third_party/` with a small `EnTTConfig.cmake` beside ProjectV's, since
+EnTT is header-only and ProjectV builds it without running its own install.
 
 **A submodule build installs the vendored dependencies too**, so the prefix is self-contained and
 `find_dependency` resolves within it. Give it a prefix of its own rather than one that already

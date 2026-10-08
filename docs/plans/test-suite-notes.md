@@ -33,21 +33,24 @@ A clean exit proves nothing.
 
 ---
 
-## 1. Application lifecycle — partly covered by `tests/manual/exit_path.cpp`
+## 1. Application lifecycle — covered by `tests/unit/test_application.cpp`, plus `tests/manual/exit_path.cpp`
 
-- **No Shutdown stage registered → clean exit.** `createApp()` left `Application::Shutdown`
-  empty while `runApplication()` called it unconditionally.
+- **No Shutdown stage registered → clean exit.** The original loop left `Application::Shutdown`
+  empty while the run loop called it unconditionally.
   *Confirmed failure mode:* `terminate called after throwing an instance of
-  'std::bad_function_call'`, exit 134.
-- **A registered Shutdown stage actually runs**, exactly once, after the loop ends.
+  'std::bad_function_call'`, exit 134. Now a unit test, with no window.
+- **A registered Shutdown stage actually runs**, exactly once, after the loop ends. Unit test.
+- **Stage order, several systems per stage in registration order, FixedUpdate counts, time scale
+  pausing FixedUpdate, CloseRequested ending (or not ending) the app.** Unit tests.
+- **`Application` is neither copyable nor movable.** `static_assert`ed. (It was blocked on
+  known-latent-issues #1, now resolved.)
 - **`RenderInstance::shouldClose` tracks the window manager.** False before any request,
-  true within one frame of one, observed only through `renderConstructedRenderer`.
+  true within one frame of one, observed only through `renderConstructedRenderer`. Still the
+  windowed half, in `exit_path`. With `graphics::installPlatform` the same request arrives as a
+  `CloseRequested` event instead; that path has no windowed test yet.
   *Confirmed failure mode:* loop never ends.
-- **Not yet covered:** `closeAppFlag` set during Startup (should the loop body run at all?);
-  Shutdown running when the loop is ended by something other than a close request;
-  `frameCount` monotonicity.
-- **Blocked:** moving/copying an `Application` — `assignSystemStage` captures `[=, &app]`,
-  so this is known-broken. See `known-latent-issues.md`; write the test with the fix.
+- **Not yet covered:** `closeRequested` set during Startup (the loop body currently does not run at
+  all, which is the behaviour to pin down); `frameCount` monotonicity under a replaced clock.
 
 ## 2. Paths — partly covered by `tests/manual/paths_probe.cpp`
 

@@ -29,7 +29,7 @@
 #include <iostream>
 #include <filesystem>
 
-#include "core/ecs.h"
+#include "core/application.h"
 #include "core/paths.h"
 #include "core/math.h"
 #include "core/log.h"
@@ -365,15 +365,15 @@ void startup(projv::Application& app) {
         return;
     }
 
-    projv::graphics::RenderInstance& renderInstance = projv::core::createGlobalResource<projv::graphics::RenderInstance>(app.world);
+    projv::graphics::RenderInstance& renderInstance = app.world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1920, 1080, "ProjectV Edit Demo");
 
     glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
-    projv::Scene& scene    = projv::core::createGlobalResource<projv::Scene>(app.world);
-    projv::GPUData& gpuData = projv::core::createGlobalResource<projv::GPUData>(app.world);
-    EditState& editState    = projv::core::createGlobalResource<EditState>(app.world);
-    PreviewState& preview   = projv::core::createGlobalResource<PreviewState>(app.world);
+    projv::Scene& scene    = app.world.ctx().emplace<projv::Scene>();
+    projv::GPUData& gpuData = app.world.ctx().emplace<projv::GPUData>();
+    EditState& editState    = app.world.ctx().emplace<EditState>();
+    PreviewState& preview   = app.world.ctx().emplace<PreviewState>();
 
     // Load the Sponza scene.
     scene = projv::utils::loadComposeFromDisk((selfDirectory / "SponzaScene").string() + "/");
@@ -487,11 +487,11 @@ void update(projv::Application& app) {
 }
 
 void render(projv::Application& app) {
-    projv::graphics::RenderInstance& renderInstance = projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
-    projv::Scene& scene        = projv::core::getGlobalResource<projv::Scene>(app.world);
-    projv::GPUData& gpuData    = projv::core::getGlobalResource<projv::GPUData>(app.world);
-    EditState& editState       = projv::core::getGlobalResource<EditState>(app.world);
-    PreviewState& preview      = projv::core::getGlobalResource<PreviewState>(app.world);
+    projv::graphics::RenderInstance& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
+    projv::Scene& scene        = app.world.ctx().get<projv::Scene>();
+    projv::GPUData& gpuData    = app.world.ctx().get<projv::GPUData>();
+    EditState& editState       = app.world.ctx().get<EditState>();
+    PreviewState& preview      = app.world.ctx().get<PreviewState>();
 
     static projv::core::vec3 cameraPosition = projv::core::vec3(1018.0, 413.0, -330.0);
     static projv::core::vec3 prevCameraPosition  = cameraPosition;
@@ -716,10 +716,10 @@ uint32_t packed = isAdd
 }
 
 int main() {
-    projv::Application app = projv::core::createApp();
-    projv::core::assignSystemStage(app, projv::SystemStage::Startup, startup);
-    projv::core::assignSystemStage(app, projv::SystemStage::Update,  update);
-    projv::core::assignSystemStage(app, projv::SystemStage::Render,  render);
-    projv::core::runApplication(app);
+    projv::Application app;
+    app.addSystem(projv::Stage::Startup, "startup", startup);
+    app.addSystem(projv::Stage::Update, "update", update);
+    app.addSystem(projv::Stage::Render, "render", render);
+    app.run();
     return 0;
 }

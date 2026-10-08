@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/ecs.h"
+#include "core/application.h"
 #include "core/math.h"
 #include "core/log.h"
 #include "graphics/render_instance.h"
@@ -2951,18 +2951,18 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
 void startup(projv::Application& app) {
     using namespace projv::core;
 
-    std::string& exeDir = projv::core::getGlobalResource<std::string>(app.world);
+    std::string& exeDir = app.world.ctx().get<std::string>();
     fs::current_path(exeDir);
 
     projv::graphics::RenderInstance& renderInstance =
-        projv::core::createGlobalResource<projv::graphics::RenderInstance>(app.world);
+        app.world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1920, 1080, "ProjectV Terrain Generator");
     glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     glfwSetScrollCallback(renderInstance.window, sunScrollCallback);
 
-    projv::Scene& scene    = projv::core::createGlobalResource<projv::Scene>(app.world);
-    projv::GPUData& gpuData = projv::core::createGlobalResource<projv::GPUData>(app.world);
-    TerrainState& ts        = projv::core::createGlobalResource<TerrainState>(app.world);
+    projv::Scene& scene    = app.world.ctx().emplace<projv::Scene>();
+    projv::GPUData& gpuData = app.world.ctx().emplace<projv::GPUData>();
+    TerrainState& ts        = app.world.ctx().emplace<TerrainState>();
     ts.noiseGen.reseed(uint32_t(ts.seed));
 
     // --- Create terrain grid (centered on world origin, expands dynamically via expandGridToInclude) ---
@@ -3123,11 +3123,11 @@ void startup(projv::Application& app) {
 void update(projv::Application& app) {
     using namespace projv::core;
 
-    projv::Scene& scene    = projv::core::getGlobalResource<projv::Scene>(app.world);
-    projv::GPUData& gpuData = projv::core::getGlobalResource<projv::GPUData>(app.world);
-    TerrainState& ts        = projv::core::getGlobalResource<TerrainState>(app.world);
-    CameraState& cam        = projv::core::getGlobalResource<CameraState>(app.world);
-    projv::graphics::RenderInstance& ri = projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
+    projv::Scene& scene    = app.world.ctx().get<projv::Scene>();
+    projv::GPUData& gpuData = app.world.ctx().get<projv::GPUData>();
+    TerrainState& ts        = app.world.ctx().get<TerrainState>();
+    CameraState& cam        = app.world.ctx().get<CameraState>();
+    projv::graphics::RenderInstance& ri = app.world.ctx().get<projv::graphics::RenderInstance>();
 
     // --- Mouse/keyboard input ---
     static bool mouseCaptured = true;
@@ -3556,9 +3556,9 @@ void render(projv::Application& app) {
     using namespace projv::core;
     using namespace std::chrono;
 
-    projv::graphics::RenderInstance& ri = projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
-    projv::GPUData& gpuData = projv::core::getGlobalResource<projv::GPUData>(app.world);
-    CameraState& cam = projv::core::getGlobalResource<CameraState>(app.world);
+    projv::graphics::RenderInstance& ri = app.world.ctx().get<projv::graphics::RenderInstance>();
+    projv::GPUData& gpuData = app.world.ctx().get<projv::GPUData>();
+    CameraState& cam = app.world.ctx().get<CameraState>();
 
     static vec3 prevCameraPosition = cam.position;
     static vec3 prevCameraDirection{0, 0, 1};
@@ -3662,14 +3662,14 @@ void shutdownApp(projv::Application&) {
 }
 
 int main(int argc, char** argv) {
-    projv::Application app = projv::core::createApp();
+    projv::Application app;
     std::string exeDir = fs::canonical(fs::path(argv[0])).parent_path().string();
-    projv::core::createGlobalResource<std::string>(app.world) = std::move(exeDir);
-    projv::core::createGlobalResource<CameraState>(app.world);
-    projv::core::assignSystemStage(app, projv::SystemStage::Startup, startup);
-    projv::core::assignSystemStage(app, projv::SystemStage::Update,  update);
-    projv::core::assignSystemStage(app, projv::SystemStage::Render,  render);
-    projv::core::assignSystemStage(app, projv::SystemStage::Shutdown, shutdownApp);
-    projv::core::runApplication(app);
+    app.world.ctx().emplace<std::string>() = std::move(exeDir);
+    app.world.ctx().emplace<CameraState>();
+    app.addSystem(projv::Stage::Startup, "startup", startup);
+    app.addSystem(projv::Stage::Update, "update", update);
+    app.addSystem(projv::Stage::Render, "render", render);
+    app.addSystem(projv::Stage::Shutdown, "shutdownApp", shutdownApp);
+    app.run();
     return 0;
 }

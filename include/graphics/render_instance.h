@@ -50,12 +50,20 @@ namespace projv::graphics {
             * on). Refreshed by renderConstructedRenderer, which is where GLFW events are polled.
             *
             * Nothing in the engine acts on this. An application reads it and decides -- typically
-            * by setting Application::closeAppFlag to end the loop, but a tool with unsaved work
+            * by setting Application::closeRequested to end the loop, but a tool with unsaved work
             * may want to raise a prompt instead, which it could not do if the engine closed the
             * window on its behalf. Note that projv::core cannot see this type at all: core has no
             * dependency on graphics, so the hand-off is the application's to make.
             */
             bool shouldClose = false;
+
+            /**
+            * Whether renderConstructedRenderer calls glfwPollEvents itself. True by default, which
+            * is how every application without the platform system gets its events at all.
+            * graphics::installPlatform clears it and polls at the top of the frame instead, in
+            * PreUpdate, where Input is filled.
+            */
+            bool pollEventsInRender = true;
 
             /**
             * Initializes our window and bgfx.

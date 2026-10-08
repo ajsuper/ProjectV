@@ -38,3 +38,6 @@
 [submodule "external/doctest"]
 	path = external/doctest
 	url = https://github.com/doctest/doctest.git
+[submodule "external/entt"]
+	path = external/entt
+	url = https://github.com/skypjack/entt.git

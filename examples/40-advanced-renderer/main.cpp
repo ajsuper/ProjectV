@@ -138,7 +138,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "core/ecs.h"
+#include "core/application.h"
 #include "core/math.h"
 #include "core/log.h"
 #include "graphics/render_instance.h"
@@ -1177,20 +1177,20 @@ static const size_t PASS_NAME_COUNT = sizeof(PASS_NAMES) / sizeof(PASS_NAMES[0])
 
 void startup(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance =
-        projv::core::createGlobalResource<projv::graphics::RenderInstance>(app.world);
+        app.world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1920, 1080, "ProjectV Advanced Renderer");
 
     // Capture the cursor so mouse motion drives the camera (FPS-style mouse look).
     glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     glfwSetScrollCallback(renderInstance.window, sunScrollCallback);
 
-    // createGlobalResource returns the existing one if main() already made it, so a path given on
+    // ctx().emplace returns the existing one if main() already made it, so a path given on
     // the command line survives to here and the default fills in when none was.
-    SceneRequest& request = projv::core::createGlobalResource<SceneRequest>(app.world);
+    SceneRequest& request = app.world.ctx().emplace<SceneRequest>();
 
-    projv::Scene& scene = projv::core::createGlobalResource<projv::Scene>(app.world);
-    projv::GPUData& gpuData = projv::core::createGlobalResource<projv::GPUData>(app.world);
-    FrameState& state = projv::core::createGlobalResource<FrameState>(app.world);
+    projv::Scene& scene = app.world.ctx().emplace<projv::Scene>();
+    projv::GPUData& gpuData = app.world.ctx().emplace<projv::GPUData>();
+    FrameState& state = app.world.ctx().emplace<FrameState>();
 
     projv::core::info("Loading scene: {}", request.path);
     scene = projv::utils::loadComposeFromDisk(request.path);
@@ -1402,7 +1402,7 @@ void update(projv::Application& app) {
         // time or the time does not mean anything.
         int windowWidth = 0, windowHeight = 0;
         glfwGetWindowSize(
-            projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world).window,
+            app.world.ctx().get<projv::graphics::RenderInstance>().window,
             &windowWidth, &windowHeight);
         projv::core::perf("Frame stats (last 100): avg={:.2f}ms min={:.2f}ms max={:.2f}ms at {}x{}",
                           sum / 100.0, mn, mx, windowWidth, windowHeight);
@@ -1604,9 +1604,9 @@ static void uploadFrameUniforms(const std::shared_ptr<projv::ConstructedRenderer
 
 void render(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance =
-        projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
-    projv::GPUData& gpuData = projv::core::getGlobalResource<projv::GPUData>(app.world);
-    FrameState& state = projv::core::getGlobalResource<FrameState>(app.world);
+        app.world.ctx().get<projv::graphics::RenderInstance>();
+    projv::GPUData& gpuData = app.world.ctx().get<projv::GPUData>();
+    FrameState& state = app.world.ctx().get<FrameState>();
 
     // ADVANCED_LOCK_CAMERA=1 ignores input entirely. Needed for any measurement or capture: the
     // cursor is captured, so a pointer nudge from the window manager -- or from the screenshot tool
@@ -1636,7 +1636,7 @@ void render(projv::Application& app) {
     if (needsRebake) state.animRebakePending = true;
     else if (state.animRebakePending) {
         state.animRebakePending = false;
-        projv::Scene& scene = projv::core::getGlobalResource<projv::Scene>(app.world);
+        projv::Scene& scene = app.world.ctx().get<projv::Scene>();
         configureEngineMotion(gpuData.animation, state.wave);
         projv::utils::EnvelopeBakeReport report =
             projv::utils::bakeAnimationEnvelope(scene, gpuData.animation);
@@ -2010,19 +2010,19 @@ void render(projv::Application& app) {
 }
 
 int main(int argc, char** argv) {
-    projv::Application app = projv::core::createApp();
-    projv::core::assignSystemStage(app, projv::SystemStage::Startup, startup);
-    projv::core::assignSystemStage(app, projv::SystemStage::Update, update);
-    projv::core::assignSystemStage(app, projv::SystemStage::Render, render);
+    projv::Application app;
+    app.addSystem(projv::Stage::Startup, "startup", startup);
+    app.addSystem(projv::Stage::Update, "update", update);
+    app.addSystem(projv::Stage::Render, "render", render);
 
     // The scene given on the command line has to survive until startup runs, and the ECS stages take
     // only the Application -- so it is parked in a global resource that startup reads.
     if (argc > 1) {
-        SceneRequest& request = projv::core::createGlobalResource<SceneRequest>(app.world);
+        SceneRequest& request = app.world.ctx().emplace<SceneRequest>();
         request.path = argv[1];
         if (!request.path.empty() && request.path.back() != '/') request.path += '/';
     }
 
-    projv::core::runApplication(app);
+    app.run();
     return 0;
 }

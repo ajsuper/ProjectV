@@ -8,21 +8,23 @@
 // Every other example is this plus its own subject.
 //
 //   1. create the window and bring bgfx up      RenderInstance::initialize
-//   2. put the scene and its GPU mirror in the world   createGlobalResource
+//   2. put the scene and its GPU mirror in the world   world.ctx().emplace
+//      and connect the window to the application       installPlatform
 //   3. get some voxels                           buildScene() below, or loadComposeFromDisk
 //   4. describe the renderer                     loadRendererSpecification (render.json + resources.json)
 //   5. load the vertex shader                    loadShader
 //   6. turn the description into GPU objects     constructRendererSpecification
 //   7. upload the voxels                         createTexturesForScene
 //
-// Then each frame: set the uniforms the shaders read, and call renderConstructedRenderer.
+// Then each frame: move the camera from Input and Time (Update), set the uniforms the shaders read,
+// and call renderConstructedRenderer (Render).
 //
-// Two things worth copying into your own application, because no other example demonstrates them:
+// Two things worth copying into every application of your own:
 //
-//   * It exits cleanly. The engine records a window-manager close request on
-//     RenderInstance::shouldClose; the application decides what that means. Here it ends the loop.
-//     A tool with unsaved work would raise a prompt instead, which it could not do if the engine
-//     closed the window on its behalf.
+//   * It exits cleanly, through the event system. The platform system turns the window's close
+//     button into a CloseRequested event, and the Application ends when it hears one. A tool with
+//     unsaved work would set Application::closeOnRequest to false and handle the event itself --
+//     raise a prompt, then close -- which it could not do if the engine closed the window for it.
 //
 //   * It finds its assets from its own location rather than the working directory, using
 //     projv::core::executableDirectory(). Run it from anywhere and the renderer folder still
@@ -34,17 +36,17 @@
 //   Mouse    — look (Esc releases the cursor, left-click re-captures)
 //   Esc      — release the cursor; close the window to quit
 
-#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <string>
 
-#include "core/ecs.h"
+#include "core/application.h"
 #include "core/log.h"
 #include "core/math.h"
 #include "core/paths.h"
 #include "graphics/disk_io.h"
 #include "graphics/gpu_interface.h"
+#include "graphics/input.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
@@ -174,50 +176,38 @@ struct Camera {
     float pitch = -0.45f;
 };
 
-// Cursor capture is a mode, not a key state, so it is tracked rather than polled.
-bool  g_cursorCaptured = true;
-double g_lastMouseX = 0.0, g_lastMouseY = 0.0;
-bool  g_mouseTracking = false;
+// Mouse look and movement, from the Input resource the platform system fills each frame. Speeds are
+// per second, scaled by Time::delta, so the camera moves the same on a 60 Hz and a 144 Hz display.
+void moveCamera(projv::Application& app) {
+    auto& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
+    const auto& input = app.world.ctx().get<projv::Input>();
+    auto& camera = app.world.ctx().get<Camera>();
 
-void updateCamera(Camera& camera, GLFWwindow* window) {
-    if (g_cursorCaptured && glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        g_cursorCaptured = false;
-    } else if (!g_cursorCaptured && glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        g_cursorCaptured = true;
+    // Cursor capture is a mode, not a key state: Esc leaves it, a click re-enters it.
+    if (input.cursorCaptured && input.pressed(projv::Key::Escape)) {
+        projv::graphics::setCursorCaptured(app, renderInstance, false);
+    } else if (!input.cursorCaptured && input.pressed(projv::MouseButton::Left)) {
+        projv::graphics::setCursorCaptured(app, renderInstance, true);
     }
-
-    double mouseX, mouseY;
-    glfwGetCursorPos(window, &mouseX, &mouseY);
-    // Re-seed the reference point whenever tracking (re)starts, so re-capturing the cursor after a
-    // release does not apply one huge jump.
-    if (!g_mouseTracking || !g_cursorCaptured) {
-        g_lastMouseX = mouseX;
-        g_lastMouseY = mouseY;
-        g_mouseTracking = true;
-    }
-    if (g_cursorCaptured) {
+    if (input.cursorCaptured) {
         const float sensitivity = 0.0025f;
-        camera.yaw   += static_cast<float>(mouseX - g_lastMouseX) * sensitivity;
-        camera.pitch -= static_cast<float>(mouseY - g_lastMouseY) * sensitivity;
+        camera.yaw   += input.cursorDelta.x * sensitivity;
+        camera.pitch -= input.cursorDelta.y * sensitivity;
         const float pitchLimit = 1.55f;  // Just shy of straight up, where yaw would gimbal.
         camera.pitch = std::fmax(-pitchLimit, std::fmin(pitchLimit, camera.pitch));
     }
-    g_lastMouseX = mouseX;
-    g_lastMouseY = mouseY;
 
     // Forward from yaw only, so W/S flies level regardless of where you are looking.
     const projv::core::vec3 forward{std::cos(camera.yaw), 0.0f, std::sin(camera.yaw)};
     const projv::core::vec3 right{std::cos(camera.yaw - 1.5708f), 0.0f, std::sin(camera.yaw - 1.5708f)};
-    const float speed = 0.4f;
+    const float speed = 24.0f * app.time().delta;   // world units per second
 
-    if (glfwGetKey(window, GLFW_KEY_W)) camera.position += forward * speed;
-    if (glfwGetKey(window, GLFW_KEY_S)) camera.position -= forward * speed;
-    if (glfwGetKey(window, GLFW_KEY_D)) camera.position += right * speed;
-    if (glfwGetKey(window, GLFW_KEY_A)) camera.position -= right * speed;
-    if (glfwGetKey(window, GLFW_KEY_R)) camera.position[1] += speed;
-    if (glfwGetKey(window, GLFW_KEY_F)) camera.position[1] -= speed;
+    if (input.down(projv::Key::W)) camera.position += forward * speed;
+    if (input.down(projv::Key::S)) camera.position -= forward * speed;
+    if (input.down(projv::Key::D)) camera.position += right * speed;
+    if (input.down(projv::Key::A)) camera.position -= right * speed;
+    if (input.down(projv::Key::R)) camera.position[1] += speed;
+    if (input.down(projv::Key::F)) camera.position[1] -= speed;
 }
 
 // -----------------------------------------------------------------------------------------
@@ -226,13 +216,16 @@ void updateCamera(Camera& camera, GLFWwindow* window) {
 
 void startup(projv::Application& app) {
     auto& renderInstance =
-        projv::core::createGlobalResource<projv::graphics::RenderInstance>(app.world);
+        app.world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1280, 720, "ProjectV Hello Voxel");
-    glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    // Events and Input from here on: the platform system polls the window at the top of every
+    // frame, and turns the close button into a CloseRequested event, which ends the application.
+    projv::graphics::installPlatform(app, renderInstance);
+    projv::graphics::setCursorCaptured(app, renderInstance, true);
 
-    auto& scene   = projv::core::createGlobalResource<projv::Scene>(app.world);
-    auto& gpuData = projv::core::createGlobalResource<projv::GPUData>(app.world);
-    projv::core::createGlobalResource<Camera>(app.world);
+    auto& scene   = app.world.ctx().emplace<projv::Scene>();
+    auto& gpuData = app.world.ctx().emplace<projv::GPUData>();
+    app.world.ctx().emplace<Camera>();
 
     scene = buildScene();
 
@@ -257,39 +250,27 @@ void startup(projv::Application& app) {
 }
 
 void update(projv::Application& app) {
-    auto& renderInstance =
-        projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
-
 #if defined(PROJV_ENABLE_PERF)
     // Frame timing, so "is this slow?" has an answer without attaching a profiler. Compiled out
     // unless performance logging is enabled.
-    static auto lastFrame = std::chrono::high_resolution_clock::now();
     static double frameTimes[100];
     static int timedFrames = 0;
-    auto now = std::chrono::high_resolution_clock::now();
-    frameTimes[timedFrames % 100] = std::chrono::duration<double>(now - lastFrame).count() * 1000.0;
-    lastFrame = now;
+    frameTimes[timedFrames % 100] = app.time().unscaledDelta * 1000.0;
     if (++timedFrames % 100 == 0) {
         double sum = 0.0;
         for (int i = 0; i < 100; ++i) sum += frameTimes[i];
         projv::core::perf("Frame stats (last 100): avg={:.2f}ms", sum / 100.0);
     }
+#else
+    (void)app;
 #endif
-
-    // The hand-off. renderConstructedRenderer polls GLFW and records the close request; nothing in
-    // the engine acts on it, so an application that wants to close has to say so.
-    if (renderInstance.shouldClose) {
-        app.closeAppFlag = true;
-    }
 }
 
 void render(projv::Application& app) {
     auto& renderInstance =
-        projv::core::getGlobalResource<projv::graphics::RenderInstance>(app.world);
-    auto& gpuData = projv::core::getGlobalResource<projv::GPUData>(app.world);
-    auto& camera  = projv::core::getGlobalResource<Camera>(app.world);
-
-    updateCamera(camera, renderInstance.window);
+        app.world.ctx().get<projv::graphics::RenderInstance>();
+    auto& gpuData = app.world.ctx().get<projv::GPUData>();
+    auto& camera  = app.world.ctx().get<Camera>();
 
     // Deliberately not const: setUniformToValue is a template that dispatches on the deduced type,
     // and a const vec3 is not one of the types it knows about. Passing one gets you
@@ -311,7 +292,7 @@ void render(projv::Application& app) {
 
 void shutdown(projv::Application& app) {
     // Frees the GPU-side scene textures. bgfx and GLFW are torn down by the RenderInstance.
-    auto& gpuData = projv::core::getGlobalResource<projv::GPUData>(app.world);
+    auto& gpuData = app.world.ctx().get<projv::GPUData>();
     projv::graphics::destroyGPUData(gpuData);
     projv::core::info("Goodbye.");
 }
@@ -319,11 +300,12 @@ void shutdown(projv::Application& app) {
 } // namespace
 
 int main() {
-    projv::Application app = projv::core::createApp();
-    projv::core::assignSystemStage(app, projv::SystemStage::Startup,  startup);
-    projv::core::assignSystemStage(app, projv::SystemStage::Update,   update);
-    projv::core::assignSystemStage(app, projv::SystemStage::Render,   render);
-    projv::core::assignSystemStage(app, projv::SystemStage::Shutdown, shutdown);
-    projv::core::runApplication(app);
+    projv::Application app;
+    app.addSystem(projv::Stage::Startup, "startup", startup);
+    app.addSystem(projv::Stage::Update, "move camera", moveCamera);
+    app.addSystem(projv::Stage::Update, "frame stats", update);
+    app.addSystem(projv::Stage::Render, "render", render);
+    app.addSystem(projv::Stage::Shutdown, "shutdown", shutdown);
+    app.run();
     return 0;
 }

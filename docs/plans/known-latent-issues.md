@@ -6,29 +6,17 @@ because fixing it is a change of its own scope.
 
 ---
 
-## 1. `assignSystemStage` captures a dangling reference
+## 1. `assignSystemStage` captures a dangling reference — **resolved**
 
-`src/core/ecs.cpp`, `assignSystemStage`:
+The old `assignSystemStage` stored `app.Startup = [=, &app]() { system(app); };` -- a lambda that
+captured `app` by reference and lived inside `app` -- so an `Application` could not be moved,
+copied or returned from a factory without every stage pointing at the old object.
 
-```cpp
-app.Startup = [=, &app]() { system(app); };
-```
-
-The lambda captures `app` **by reference** and is stored *inside* `app`. That is fine
-for the way every current example uses it — `createApp()` into a local, register stages,
-`runApplication(app)`, all on one stack frame — but it means an `Application` cannot be
-moved, copied, returned from a factory, or stored in a container. Any of those leaves all
-four stage callbacks pointing at the old object.
-
-Not triggered today because nothing does that.
-
-**Why it is not a one-line fix.** The stage signature is `void(Application&)` while the
-stored type is `std::function<void()>`, so the `Application` has to come from *somewhere*
-at call time. Fixing it properly means storing `std::function<void(Application&)>` and
-having `runApplication` pass itself in — which changes the type of the four members and
-touches every stage registration. Worth doing, but deliberately.
-
-**Until then:** create an `Application` where it will live and do not move it.
+**Fixed by the runtime spine (branch `runtime-spine`).** `core/ecs.h` and `assignSystemStage` are
+gone. `projv::Application` (`core/application.h`) stores `std::function<void(Application&)>`
+systems and passes itself in when it runs them, so nothing captures it. It is also deliberately
+neither copyable nor movable: it keeps pointers to its own `Time` and `Events` and connects a
+`CloseRequested` handler to itself. `tests/unit/test_application.cpp` `static_assert`s both.
 
 ---
 

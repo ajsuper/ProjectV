@@ -165,6 +165,25 @@ if(NOT nlohmann_json_FOUND)
     set(PROJV_VENDORED_DEPS ON)
 endif()
 
+# EnTT: header-only, so the submodule path declares its target directly rather than running
+# EnTT's own CMake, which needs 3.28 against our 3.20 floor. The vendored target is IMPORTED and
+# named EnTT::EnTT, the same name the installed package exports, so ProjectV's export set records
+# `EnTT::EnTT` whichever path produced it and find_dependency(EnTT) resolves it for a consumer.
+# Pinned (v4.0.0); upgrade it deliberately, with the unit tests run.
+find_package(EnTT CONFIG QUIET)
+if(NOT TARGET EnTT::EnTT)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/entt/src/entt/entt.hpp")
+        message(FATAL_ERROR "EnTT was not found and external/entt is missing: run "
+                            "`git submodule update --init external/entt`, or install EnTT.")
+    endif()
+    add_library(EnTT::EnTT INTERFACE IMPORTED GLOBAL)
+    set_target_properties(EnTT::EnTT PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/external/entt/src"
+        INTERFACE_COMPILE_FEATURES cxx_std_20)
+    set(PROJV_VENDORED_ENTT ON)
+    set(PROJV_VENDORED_DEPS ON)
+endif()
+
 # GLFW has no submodule; it is a system package on every platform ProjectV supports.
 find_package(glfw3 CONFIG QUIET)
 if(glfw3_FOUND)
@@ -191,14 +210,17 @@ endif()
 # other, so every caller had to wrap the archives in -Wl,--start-group and get the order
 # right. Four of the seven example Makefiles did not, and worked only by luck.
 add_library(projectV STATIC
-    src/core/ecs.cpp
+    src/core/application.cpp
+    src/core/events.cpp
     src/core/math.cpp
     src/core/paths.cpp
+    src/core/time.cpp
 
     src/graphics/disk_io.cpp
     src/graphics/gpu_interface.cpp
     src/graphics/manage_resources.cpp
     src/graphics/perform_renderer.cpp
+    src/graphics/platform.cpp
     src/graphics/render_instance.cpp
     src/graphics/type_mapping.cpp
 
@@ -266,6 +288,7 @@ target_link_libraries(projectV PUBLIC
     ${PROJV_GLM_TARGET}
     ${PROJV_SPDLOG_TARGET}
     nlohmann_json::nlohmann_json
+    EnTT::EnTT
     ${PROJV_GLFW_TARGET}
 )
 
@@ -327,6 +350,17 @@ if(PROJV_INSTALL)
             PATTERN "*.h"
             PATTERN "*.sc"
     )
+
+    # A vendored EnTT has no install of its own, so it gets one here: its headers, and a config
+    # package that recreates the EnTT::EnTT target the export set names.
+    if(PROJV_VENDORED_ENTT)
+        install(DIRECTORY external/entt/src/entt
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/projv/third_party)
+        configure_file(cmake/EnTTConfig.vendored.cmake.in
+            "${CMAKE_CURRENT_BINARY_DIR}/EnTTConfig.cmake" @ONLY)
+        install(FILES "${CMAKE_CURRENT_BINARY_DIR}/EnTTConfig.cmake"
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/EnTT)
+    endif()
 
     install(EXPORT ProjectVTargets
         FILE ProjectVTargets.cmake
