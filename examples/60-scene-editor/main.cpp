@@ -2602,6 +2602,16 @@ static void dropResolveResults(projv::Scene& scene, EditorState& editor);
 
 // Drops every piece of editor state that refers to the document being replaced.
 //
+// The editor keeps bare ComponentHandles across frames -- the selection, stroke targets, the open
+// asset, row sets and maps keyed by handle, and its undo history, which keeps chunk handles too. A
+// deleted row that the scene then reused would make every one of them name some other component, so
+// the editor's scenes keep deleted rows as tombstones (Scene::slots). Applied wherever the editor's
+// scene is replaced, because a fresh Scene recycles by default. Converting those holders to
+// ComponentRef is what would let this go; see ~/Documents/ProjectVPlans/slot-reuse.md.
+static void applyEditorScenePolicy(projv::Scene& scene) {
+    scene.slots.enabled = false;
+}
+
 // **Shared by loadScene and newScene, and that is the point.** Every field here names a handle, a
 // slot, a blob or a coordinate belonging to the outgoing scene, and means something else entirely in
 // whatever arrives next. The list is long and has only ever grown, so a second hand-maintained copy
@@ -2706,6 +2716,7 @@ static bool loadScene(projv::Scene& scene, projv::GPUData& gpuData, EditorState&
     projv::Scene loadedScene = projv::utils::loadComposeFromDisk(normalizedPath);
 
     scene = std::move(loadedScene);
+    applyEditorScenePolicy(scene);
 
     // Scripted material overrides, applied BEFORE the palette reaches the GPU so an overridden entry
     // is what every pass reads rather than needing a re-upload. Same reason EDITOR_CAMERA and
@@ -2790,6 +2801,7 @@ static void newScene(projv::Scene& scene, projv::GPUData& gpuData, EditorState& 
     projv::core::info("New scene");
 
     scene = projv::Scene();
+    applyEditorScenePolicy(scene);
     gpuData = projv::graphics::createTexturesForScene(scene);
 
     editor.scenePath.clear();
@@ -23846,6 +23858,7 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
                 // Into a scene and an editor of its own, so the reload cannot be confused with what
                 // is already open -- which is exactly the situation a load meets.
                 projv::Scene reloaded = projv::utils::loadComposeFromDisk(folder.string());
+                applyEditorScenePolicy(reloaded);
                 EditorState scratch;
                 // The two halves of what a load does, in the order loadScene does them: wrap the
                 // root components the writer left carrying ops, then let the per-frame sync notice
@@ -24978,6 +24991,7 @@ void startup(projv::Application& app) {
     glfwSetScrollCallback(renderInstance.window, scrollCallback);
 
     projv::Scene& scene = app.world.ctx().emplace<projv::Scene>();
+    applyEditorScenePolicy(scene);
     projv::GPUData& gpuData = app.world.ctx().emplace<projv::GPUData>();
     EditorState& editor = app.world.ctx().emplace<EditorState>();
 

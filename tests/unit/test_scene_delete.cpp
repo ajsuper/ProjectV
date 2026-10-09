@@ -81,8 +81,10 @@ TEST_CASE("deleting a grid empties every cell") {
     for (int32_t cell : grid.cellToChunk) if (cell >= 0) cells.push_back(cell);
     REQUIRE(cells.size() >= 2);
 
+    // Read before deleting: the freed row is emptied, gridIndex included.
+    const int32_t gridIndex = scene.components[h].gridIndex;
     utils::deleteComponent(scene, h);
-    const projv::SceneGrid& emptied = scene.grids[scene.components[h].gridIndex];
+    const projv::SceneGrid& emptied = scene.grids[gridIndex];
     CHECK(std::all_of(emptied.cellToChunk.begin(), emptied.cellToChunk.end(), [](int32_t c) { return c < 0; }));
     CHECK(emptied.componentHandle == INVALID_COMPONENT_HANDLE);
     for (int32_t cell : cells) CHECK_FALSE(scene.chunks[cell].alive);

@@ -117,18 +117,55 @@ namespace projv::utils {
     // Deletes a component and its whole subtree, and returns every handle it removed, leaves first.
     // Returns nothing if `handle` is out of range or already deleted.
     //
-    // **A deleted component keeps its slot.** Handles are indices into Scene.components, which is
-    // never compacted, so the record stays as a tombstone (renamed to "__deleted__", detached, no
-    // children) and the handle is never handed out again -- a stale handle can be detected with
-    // isComponentAlive rather than silently naming some newer component. Its chunks are killed and
-    // their geometry released, a grid's cells are emptied (the SceneGrid itself stays, emptied, for
-    // the same reason), and its attachments are cleared. Scene.deletions is incremented.
+    // Every removed row is renamed "__deleted__" (so isComponentAlive is false for it), detached and
+    // emptied, and its generation is bumped (so a ComponentRef to it no longer resolves). Its chunks
+    // are killed and their geometry released, a grid's cells are emptied (the SceneGrid itself stays,
+    // for the same reason a row does: grids are indexed by position), and its attachments are
+    // cleared. Scene.deletions is incremented.
+    //
+    // **The rows are reused** when Scene::slots.enabled (the default): a later addComponent,
+    // duplicateComponent or instantiateComposeInto takes the slot, and the chunk rows, back. A bare
+    // handle kept past this call can therefore come to name a different component -- keep a
+    // ComponentRef for anything held across frames. With recycling off, the rows stay tombstones
+    // forever, which is how a program that keeps bare handles stays safe.
     //
     // What it does not do is reach the GPU: the caller re-uploads, as after any other edit.
     std::vector<ComponentHandle> deleteComponent(Scene& scene, ComponentHandle handle);
 
     // False for a handle out of range or one deleteComponent has removed.
     bool isComponentAlive(const Scene& scene, ComponentHandle handle);
+
+    // ---- Holding a component across frames (see ComponentRef) ----
+
+    // A ref to `handle` as it is now; an empty ref if it is not alive.
+    ComponentRef refOf(const Scene& scene, ComponentHandle handle);
+
+    // The handle `ref` names, while it still names the component it was made for;
+    // INVALID_COMPONENT_HANDLE once that component is deleted, whatever has reused its slot since.
+    ComponentHandle resolve(const Scene& scene, ComponentRef ref);
+    inline bool isComponentAlive(const Scene& scene, ComponentRef ref) {
+        return resolve(scene, ref) != INVALID_COMPONENT_HANDLE;
+    }
+
+    // ---- Rows ----
+
+    // The live top-level components, in the order they were created. Cheap: kept by the engine's
+    // own create, reparent and delete, and brought up to date with any rows appended to
+    // Scene.components directly. Everything that asks for "the roots" reads this rather than
+    // scanning every row, which is what made creating a root cost O(every row ever made).
+    const std::vector<ComponentHandle>& rootComponents(const Scene& scene);
+
+    // A row for a new component: a freed one when recycling is on and one is waiting, otherwise a new
+    // one at the end. The row holds a dead placeholder until placeComponent fills it, so nothing
+    // mistakes it for a component in between. For code that builds records by hand; addComponent and
+    // the loaders already use it.
+    ComponentHandle reserveComponentSlot(Scene& scene);
+    // Fills a reserved row. Keeps the row's generation, and indexes it as a root if it has no parent.
+    void placeComponent(Scene& scene, ComponentHandle handle, ComponentRecord&& record);
+
+    // A chunk row: a freed one when recycling is on and one is waiting, otherwise a new one. The
+    // chunk is moved in, given chunkID = its row, and marked headerDirty so the GPU writes the row.
+    ChunkHandle allocateChunkSlot(Scene& scene, Chunk&& chunk);
 
     // Moves `child` from its current parent to `newParent`. Pass INVALID_COMPONENT_HANDLE to
     // make it a root. Re-bakes the subtree world transforms. `newParent` must not be a descendant

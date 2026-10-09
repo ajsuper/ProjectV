@@ -527,7 +527,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         // the GPU cannot be holding what the CPU has, whatever the versions say.
         bool haveTexture = bgfx::isValid(gpuData.materialPaletteTexture);
         bool upToDate = totalVersion == gpuData.componentPaletteVersion && !globalPalette.empty() &&
-                        haveTexture;
+                        haveTexture && scene.slots.epoch == gpuData.componentSlotEpoch;
 
         core::trace("PAL-CPU: compOffsets[0]={} totalVer={} storedVer={} haveTexture={} rebuilt={}",
                    gpuData.componentPaletteOffsets.empty() ? 0xFFFF : gpuData.componentPaletteOffsets[0],
@@ -535,6 +535,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
         if (upToDate) return false;
         gpuData.componentPaletteVersion = totalVersion;
+        gpuData.componentSlotEpoch = scene.slots.epoch;
 
         // **No palette at all still gets a texture.** Returning here instead left the sampler with no
         // texture behind it, and a voxel's palette slot then read whatever the driver had bound in

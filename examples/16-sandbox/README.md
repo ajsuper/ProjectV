@@ -113,8 +113,19 @@ Render       flushSceneUpdates (new prefabs, moved headers, deleted voxels), the
   spawners hold off above 300. A real broadphase is what the engine's content bounds (promotion
   candidate #4) are for, and a real dynamics library would replace all of `physics()`.
 - A crate collides as a sphere.
-- Every throw reads the prefab from disk again, and every deleted body leaves a tombstoned
-  component behind. Both are invisible at this scale.
+- **Spawning and destroying for as long as you like costs nothing extra.** A prefab folder is read
+  once (`runtime::instantiatePrefab` caches it), and every instance shares its geometry. A destroyed
+  body's component and chunk rows are reused by the next spawn. `SANDBOX_MEASURE=150 SANDBOX_CHURN=50`
+  destroys and respawns 50 balls a frame for 1200 frames and reports the tables at the end. After about
+  60,000 spawns:
+
+  | | before rows were reused | now |
+  |---|---|---|
+  | component rows | 120,103 | 303 |
+  | chunk rows | 60,310 | 410 |
+  | GPU header rows | 89,914 | 1,414 |
+  | palette entries | 180,161 | 461 |
+  | CPU frame | 6 ms, climbing to 28 ms | 6.3 ms, flat |
 
 ## Self-test
 

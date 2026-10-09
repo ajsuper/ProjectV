@@ -100,6 +100,9 @@ namespace projv {
         std::vector<uint32_t> componentPaletteOffsets;
         // Sum of all components' paletteVersion values; rebuilt when any changes.
         uint64_t componentPaletteVersion = 0;
+        // Scene::slots.epoch at the last palette upload: offsets are per row, and a reused row can carry
+        // the same palette version its old occupant had.
+        uint64_t componentSlotEpoch = ~0ull;
 
         std::vector<GPUBlobRange> blobRanges;
 

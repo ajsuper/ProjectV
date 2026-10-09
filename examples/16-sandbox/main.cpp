@@ -422,6 +422,7 @@ struct SelfTest {
     double frameSeconds = 0.0, gpuSeconds = 0.0, worstFrame = 0.0;
     int timedFrames = 0;
     int measureBodies = -1;   // SANDBOX_MEASURE: a fixed crowd, no actions, just timing
+    int churn = 0;            // SANDBOX_CHURN: bodies destroyed and respawned every frame
 };
 
 void selfTestSystem(projv::Application& app) {
@@ -468,17 +469,34 @@ void selfTestSystem(projv::Application& app) {
                 app.time().scale = 0.0f;
             }
         }
+        // Churn: the oldest bodies destroyed and as many new ones thrown in, every frame -- what
+        // debris, fragments and projectiles do to the tables. With rows recycled, every table stays
+        // the size of what is alive, and so does the frame.
+        if (test->churn > 0 && frame > 2) {
+            std::vector<Entity> oldest;
+            for (auto [entity, body] : world.view<Body>().each()) oldest.push_back(entity);
+            for (int k = 0; k < test->churn && k < int(oldest.size()); k++) world.destroy(oldest[size_t(k)]);
+            for (int k = 0; k < test->churn; k++) {
+                spawn("ball", vec3(-45.0f + float((frame * 7 + k * 13) % 90), 1.5f, -45.0f + float((k * 31) % 90)), vec3(0));
+            }
+        }
         if (frame == test->frames - 5) {
             if (const char* capture = std::getenv("SANDBOX_CAPTURE")) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capture);
         }
         if (frame < 60) { test->frameSeconds = test->gpuSeconds = test->worstFrame = 0.0; test->timedFrames = 0; }
         if (frame < test->frames) return;
         const auto& scene = world.ctx().get<projv::Scene>();
+        const auto& gpuData = world.ctx().get<projv::GPUData>();
+        size_t paletteEntries = 0;
+        for (const projv::ComponentRecord& record : scene.components) paletteEntries += record.materialPalette.size();
         projv::core::info("SANDBOXMEASURE: {} bodies, {} loose chunks, {} grids | frames average {:.1f} ms "
                           "(worst {:.1f} ms), GPU average {:.1f} ms", world.view<Body>().size(),
                           scene.looseChunks.size(), scene.grids.size(),
                           1000.0 * test->frameSeconds / std::max(test->timedFrames, 1), 1000.0 * test->worstFrame,
                           1000.0 * test->gpuSeconds / std::max(test->timedFrames, 1));
+        projv::core::info("SANDBOXMEASURE: tables after {} spawns: {} component rows, {} chunk rows, {} blobs, "
+                          "{} header rows, {} palette entries", test->spawned, scene.components.size(), scene.chunks.size(),
+                          scene.geometryPool.size(), gpuData.headerCapacity, paletteEntries);
         app.closeRequested = true;
         return;
     }
@@ -605,6 +623,10 @@ void startup(projv::Application& app) {
         SelfTest& test = world.ctx().emplace<SelfTest>();
         test.frames = 240;
         test.measureBodies = std::max(0, std::atoi(bodies));
+        if (const char* churn = std::getenv("SANDBOX_CHURN")) {
+            test.churn = std::max(0, std::atoi(churn));
+            test.frames = 1200;   // long enough for anything that grows to show
+        }
     }
     // Unattended runs leave the pointer alone.
     if (world.ctx().contains<SelfTest>()) projv::graphics::setCursorCaptured(app, renderInstance, false);

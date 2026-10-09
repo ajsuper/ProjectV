@@ -4,6 +4,7 @@
 #include "utils/voxel_math.h"
 #include "utils/voxel_management.h"
 #include "utils/material.h"
+#include "utils/scene_query.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -310,8 +311,7 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
                         newBlob.brickMap = std::move(brickMap);
                     }
 
-                    ChunkHandle newHandle = static_cast<ChunkHandle>(scene.chunks.size());
-                    scene.chunks.push_back(std::move(newChunk));
+                    ChunkHandle newHandle = allocateChunkSlot(scene, std::move(newChunk));
                     grid.cellToChunk[lin] = static_cast<int32_t>(newHandle);
 
                     core::edit(" Grid path: created new chunk handle={} at cell lin={} pos=({},{},{}) res={}",

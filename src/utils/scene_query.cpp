@@ -158,8 +158,7 @@ namespace projv::utils {
         auto parts = split(path, '/');
         if (parts.empty()) return INVALID_COMPONENT_HANDLE;
 
-        for (ComponentHandle h = 0; h < scene.components.size(); ++h) {
-            if (scene.components[h].parent != INVALID_COMPONENT_HANDLE) continue;
+        for (ComponentHandle h : rootComponents(scene)) {
             if (scene.components[h].name == parts[0]) {
                 return findChildByPath(scene, h, parts, 1);
             }
@@ -180,11 +179,7 @@ namespace projv::utils {
 
     std::vector<ComponentInfo> listComponents(const Scene& scene) {
         std::vector<ComponentInfo> result;
-        for (ComponentHandle h = 0; h < scene.components.size(); ++h) {
-            if (scene.components[h].parent == INVALID_COMPONENT_HANDLE) {
-                listTree(scene, h, "", result);
-            }
-        }
+        for (ComponentHandle h : rootComponents(scene)) listTree(scene, h, "", result);
         return result;
     }
 
@@ -350,7 +345,8 @@ namespace projv::utils {
             }
         }
 
-        ComponentHandle handle = static_cast<ComponentHandle>(scene.components.size());
+        // A freed row when one is waiting (Scene::slots), else a new one at the end.
+        ComponentHandle handle = reserveComponentSlot(scene);
         ComponentRecord component;
         component.kind = kind;
         component.name = name;
@@ -364,7 +360,6 @@ namespace projv::utils {
             component.sourcePath = makeDefaultDataPath(name, handle);
 
             Chunk chunk;
-            chunk.header.chunkID = static_cast<uint32_t>(scene.chunks.size());
             chunk.header.position = core::vec3(0.0f);
             chunk.header.voxelScale = voxelScale;
             chunk.header.resolution = resolution;
@@ -381,8 +376,7 @@ namespace projv::utils {
             // copy-on-write fork of someone else's read-only file, so the first persist writes here.
             scene.geometryPool[chunk.geometryPoolIndex].sourceDataPath = component.sourcePath;
             scene.geometryPool[chunk.geometryPoolIndex].ownsSourceFile = true;
-            scene.chunks.push_back(std::move(chunk));
-            component.chunkHandle = static_cast<ChunkHandle>(scene.chunks.size() - 1);
+            component.chunkHandle = allocateChunkSlot(scene, std::move(chunk));
             scene.looseChunks.push_back(component.chunkHandle);
             scene.looseChunkCount = static_cast<uint32_t>(scene.looseChunks.size());
 
@@ -404,7 +398,7 @@ namespace projv::utils {
             component.parent = INVALID_COMPONENT_HANDLE;
         }
 
-        scene.components.push_back(std::move(component));
+        placeComponent(scene, handle, std::move(component));
         ensureUniqueLocalId(scene, handle);
 
         // Re-bake the new component so its world transform is correct. getComponentWorldMatrix
@@ -422,7 +416,9 @@ namespace projv::utils {
                                         ComponentHandle parent) {
         if (source >= scene.components.size()) return INVALID_COMPONENT_HANDLE;
 
-        ComponentHandle handle = static_cast<ComponentHandle>(scene.components.size());
+        // Reserved before the source is read below: reserving can append a row, which moves the
+        // buffer every reference into `components` points at.
+        ComponentHandle handle = reserveComponentSlot(scene);
 
         // **Everything the source is read for is read here, into values, and no reference to it
         // outlives this block.**
@@ -471,7 +467,6 @@ namespace projv::utils {
             Chunk chunk;
             const Chunk& srcChunk = scene.chunks[srcChunkHandle];
             chunk.header = srcChunk.header;
-            chunk.header.chunkID = static_cast<uint32_t>(scene.chunks.size());
             chunk.nativeScale = srcChunk.nativeScale;
             chunk.alive = true;
             chunk.componentHandle = handle;
@@ -488,8 +483,7 @@ namespace projv::utils {
             }
             chunk.geometryPoolIndex = forkedIdx;
 
-            scene.chunks.push_back(std::move(chunk));
-            component.chunkHandle = static_cast<ChunkHandle>(scene.chunks.size() - 1);
+            component.chunkHandle = allocateChunkSlot(scene, std::move(chunk));
             scene.looseChunks.push_back(component.chunkHandle);
             scene.looseChunkCount = static_cast<uint32_t>(scene.looseChunks.size());
         }
@@ -559,7 +553,6 @@ namespace projv::utils {
                     chunk.geometryData = srcChunk.geometryData;
                     srcBlobIndex       = srcChunk.geometryPoolIndex;
                 }
-                chunk.header.chunkID  = static_cast<uint32_t>(scene.chunks.size());
                 chunk.alive           = true;
                 chunk.gridIndex       = gridIndex;
                 chunk.cellIndex       = static_cast<int32_t>(cell);
@@ -584,8 +577,7 @@ namespace projv::utils {
                 }
                 chunk.geometryPoolIndex = blobIndex;
 
-                grid.cellToChunk[cell] = static_cast<int32_t>(scene.chunks.size());
-                scene.chunks.push_back(std::move(chunk));
+                grid.cellToChunk[cell] = static_cast<int32_t>(allocateChunkSlot(scene, std::move(chunk)));
             }
 
             scene.grids.push_back(std::move(grid));
@@ -596,17 +588,17 @@ namespace projv::utils {
             component.children.reserve(srcChildren.size());
         }
 
-        scene.components.push_back(std::move(component));
-
-        // Attach to parent. Parent must be an Asset folder.
+        // Attach to parent, before placing, so the row is indexed as a root only if it is one.
+        // Parent must be an Asset folder.
         if (parent != INVALID_COMPONENT_HANDLE) {
             assert(parent < scene.components.size());
             assert(scene.components[parent].kind == ComponentKind::Asset);
             scene.components[parent].children.push_back(handle);
-            scene.components[handle].parent = parent;
+            component.parent = parent;
         } else {
-            scene.components[handle].parent = INVALID_COMPONENT_HANDLE;
+            component.parent = INVALID_COMPONENT_HANDLE;
         }
+        placeComponent(scene, handle, std::move(component));
 
         ensureUniqueLocalId(scene, handle);
 
@@ -648,6 +640,90 @@ namespace projv::utils {
         // have always read it this way; isComponentAlive is the one engine-side reader, so changing
         // the representation later is a change to it and to the editor.
         constexpr const char* DELETED_NAME = "__deleted__";
+
+        void indexRoot(const Scene& scene, ComponentHandle handle) {
+            rootComponents(scene);   // caught up first, so `handle` is behind indexedUpTo
+            std::vector<ComponentHandle>& roots = scene.rootIndex.roots;
+            if (std::find(roots.begin(), roots.end(), handle) == roots.end()) roots.push_back(handle);
+        }
+
+        void unindexRoot(const Scene& scene, ComponentHandle handle) {
+            std::vector<ComponentHandle>& roots = scene.rootIndex.roots;
+            roots.erase(std::remove(roots.begin(), roots.end(), handle), roots.end());
+        }
+    }
+
+    const std::vector<ComponentHandle>& rootComponents(const Scene& scene) {
+        Scene::RootIndex& index = scene.rootIndex;
+        if (index.indexedUpTo > scene.components.size()) {   // the rows were replaced wholesale
+            index.roots.clear();
+            index.indexedUpTo = 0;
+        }
+        for (; index.indexedUpTo < scene.components.size(); index.indexedUpTo++) {
+            ComponentHandle h = static_cast<ComponentHandle>(index.indexedUpTo);
+            if (scene.components[h].parent == INVALID_COMPONENT_HANDLE && isComponentAlive(scene, h)) {
+                index.roots.push_back(h);
+            }
+        }
+        // Rows a program filled in after appending them -- a loader pushes a blank record and sets its
+        // parent later -- were indexed as roots when they were not. Dropped here; this is a pass over
+        // the roots, not over the rows, so it costs what reading them does.
+        std::erase_if(index.roots, [&](ComponentHandle h) {
+            return h >= scene.components.size() || !isComponentAlive(scene, h) ||
+                   scene.components[h].parent != INVALID_COMPONENT_HANDLE;
+        });
+        return index.roots;
+    }
+
+    ComponentHandle reserveComponentSlot(Scene& scene) {
+        rootComponents(scene);   // so the placeholder below lands behind indexedUpTo, never indexed
+        if (scene.slots.enabled && !scene.slots.components.empty()) {
+            ComponentHandle handle = scene.slots.components.back();
+            scene.slots.components.pop_back();
+            return handle;       // already a dead, emptied row: deleteComponent left it so
+        }
+        ComponentRecord placeholder;
+        placeholder.kind = ComponentKind::Asset;
+        placeholder.name = DELETED_NAME;
+        scene.components.push_back(std::move(placeholder));
+        scene.rootIndex.indexedUpTo = scene.components.size();
+        return static_cast<ComponentHandle>(scene.components.size() - 1);
+    }
+
+    void placeComponent(Scene& scene, ComponentHandle handle, ComponentRecord&& record) {
+        const uint32_t generation = scene.components[handle].generation;
+        scene.components[handle] = std::move(record);
+        scene.components[handle].generation = generation;
+        scene.slots.epoch++;
+        if (scene.components[handle].parent == INVALID_COMPONENT_HANDLE && isComponentAlive(scene, handle)) {
+            indexRoot(scene, handle);
+        }
+    }
+
+    ChunkHandle allocateChunkSlot(Scene& scene, Chunk&& chunk) {
+        ChunkHandle handle;
+        if (scene.slots.enabled && !scene.slots.chunks.empty()) {
+            handle = scene.slots.chunks.back();
+            scene.slots.chunks.pop_back();
+            scene.chunks[handle] = std::move(chunk);
+        } else {
+            handle = static_cast<ChunkHandle>(scene.chunks.size());
+            scene.chunks.push_back(std::move(chunk));
+        }
+        scene.chunks[handle].header.chunkID = handle;
+        // A reused row still holds the old occupant's header on the GPU; a new one holds nothing.
+        scene.chunks[handle].headerDirty = true;
+        return handle;
+    }
+
+    ComponentRef refOf(const Scene& scene, ComponentHandle handle) {
+        if (!isComponentAlive(scene, handle)) return {};
+        return {handle, scene.components[handle].generation};
+    }
+
+    ComponentHandle resolve(const Scene& scene, ComponentRef ref) {
+        if (!isComponentAlive(scene, ref.handle)) return INVALID_COMPONENT_HANDLE;
+        return scene.components[ref.handle].generation == ref.generation ? ref.handle : INVALID_COMPONENT_HANDLE;
     }
 
     namespace {
@@ -655,9 +731,7 @@ namespace projv::utils {
         template<typename Visit>
         void forEachSibling(const Scene& scene, ComponentHandle parent, Visit visit) {
             if (parent == INVALID_COMPONENT_HANDLE) {
-                for (ComponentHandle h = 0; h < scene.components.size(); h++) {
-                    if (scene.components[h].parent == INVALID_COMPONENT_HANDLE && isComponentAlive(scene, h)) visit(h);
-                }
+                for (ComponentHandle h : rootComponents(scene)) visit(h);
             } else if (parent < scene.components.size()) {
                 for (ComponentHandle h : scene.components[parent].children) {
                     if (isComponentAlive(scene, h)) visit(h);
@@ -713,7 +787,9 @@ namespace projv::utils {
         // of them, pointing at a chunk that has just been killed and at a parent that has disowned
         // it. (Promoted from the scene editor, where this was learned: nothing deleted a parent with
         // children until an asset did, every time it was baked.)
-        auto disableSubtree = [&scene, &removed](ComponentHandle current, auto& self) -> void {
+        // Every chunk row the subtree owned, freed below once nothing points at them.
+        std::vector<ChunkHandle> deadChunks;
+        auto disableSubtree = [&scene, &removed, &deadChunks](ComponentHandle current, auto& self) -> void {
             if (current >= scene.components.size()) return;
             ComponentRecord& record = scene.components[current];
             if (record.kind == ComponentKind::Chunk) {
@@ -721,6 +797,7 @@ namespace projv::utils {
                 if (chunkHandle < scene.chunks.size()) {
                     scene.chunks[chunkHandle].alive = false;
                     releaseBlob(scene, scene.chunks[chunkHandle].geometryPoolIndex);
+                    deadChunks.push_back(chunkHandle);
                 }
                 std::vector<ChunkHandle>& loose = scene.looseChunks;
                 loose.erase(std::remove(loose.begin(), loose.end(), chunkHandle), loose.end());
@@ -739,6 +816,7 @@ namespace projv::utils {
                         if (cell >= 0 && size_t(cell) < scene.chunks.size()) {
                             scene.chunks[cell].alive = false;
                             releaseBlob(scene, scene.chunks[cell].geometryPoolIndex);
+                            deadChunks.push_back(ChunkHandle(cell));
                         }
                         cell = -1;
                     }
@@ -760,7 +838,41 @@ namespace projv::utils {
             clearAttachments(scene, current);
             removed.push_back(current);
         };
+        const bool wasRoot = scene.components[handle].parent == INVALID_COMPONENT_HANDLE;
         disableSubtree(handle, disableSubtree);
+        if (wasRoot) unindexRoot(scene, handle);
+
+        // Every removed row stops matching the refs made to it, recycled or not.
+        for (ComponentHandle h : removed) scene.components[h].generation++;
+        scene.slots.epoch++;
+
+        // ---- Recycling ----
+        //
+        // The rows are emptied and queued for reuse. Emptying is what makes a waiting row cost almost
+        // nothing -- its palette, paths and queues go now rather than when it is reused -- and it is
+        // also what keeps the dead from leaking into anything that scans rows: the GPU palette, which
+        // used to carry every palette ever loaded.
+        if (scene.slots.enabled) {
+            for (ChunkHandle c : deadChunks) {
+                Chunk& chunk = scene.chunks[c];
+                chunk.geometryPoolIndex = -1;   // released above; the row must not release it again
+                chunk.geometryData.clear();
+                chunk.gridIndex = -1;
+                chunk.cellIndex = -1;
+                chunk.componentHandle = INVALID_COMPONENT_HANDLE;
+                chunk.headerDirty = true;       // its GPU row becomes the degenerate header
+                scene.slots.chunks.push_back(c);
+            }
+            for (ComponentHandle h : removed) {
+                ComponentRecord dead;
+                dead.kind = ComponentKind::Asset;
+                dead.chunkHandle = INVALID_CHUNK_HANDLE;
+                dead.name = DELETED_NAME;
+                dead.generation = scene.components[h].generation;
+                scene.components[h] = std::move(dead);
+                scene.slots.components.push_back(h);
+            }
+        }
 
         scene.deletions++;
         return removed;
@@ -795,6 +907,8 @@ namespace projv::utils {
         } else {
             comp.parent = INVALID_COMPONENT_HANDLE;
         }
+        if (oldParent == INVALID_COMPONENT_HANDLE && newParent != INVALID_COMPONENT_HANDLE) unindexRoot(scene, child);
+        if (oldParent != INVALID_COMPONENT_HANDLE && newParent == INVALID_COMPONENT_HANDLE) indexRoot(scene, child);
         // Its id was unique among its old siblings; it may not be among its new ones.
         ensureUniqueLocalId(scene, child);
 

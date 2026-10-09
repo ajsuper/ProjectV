@@ -95,6 +95,7 @@ namespace projv::runtime {
             for (const nlohmann::json& record : json["entities"]) {
                 Authored authored;
                 authored.document = document.node;
+                if (document.node < scene.components.size()) authored.documentGeneration = scene.components[document.node].generation;
                 authored.name = record.value("name", std::string());
                 authored.order = order++;
 
@@ -183,6 +184,39 @@ namespace projv::runtime {
         return spawnDocuments(world, std::move(documents));
     }
 
+    namespace {
+        // Whether the cache's pin at `index` still holds the blob it copied. It always does while the
+        // cache and the Scene live together -- a pinned blob cannot be freed, and an edit forks rather
+        // than writing to it -- but the Scene can be replaced wholesale under the cache, and then the
+        // index names whatever the new scene keeps there.
+        bool stillPinned(const Scene& scene, int32_t index, const GeometryBlob& source) {
+            if (index < 0 || static_cast<size_t>(index) >= scene.geometryPool.size()) return false;
+            const GeometryBlob& blob = scene.geometryPool[index];
+            return blob.refCount > 0 && blob.geometry == source.geometry && blob.materialIDs == source.materialIDs;
+        }
+
+        std::string cacheKey(const std::string& folder) {
+            std::error_code error;
+            std::filesystem::path canonical = std::filesystem::weakly_canonical(folder, error);
+            return error ? folder : canonical.string();
+        }
+    }
+
+    void clearPrefabCache(World& world) {
+        PrefabCache* cache = world.ctx().find<PrefabCache>();
+        if (!cache) return;
+        if (Scene* scene = world.ctx().find<Scene>()) {
+            for (auto& [folder, entry] : cache->byFolder) {
+                for (size_t i = 0; i < entry.pinned.size(); i++) {
+                    if (stillPinned(*scene, entry.pinned[i], entry.loaded.geometryPool[i])) {
+                        releaseBlob(*scene, entry.pinned[i]);
+                    }
+                }
+            }
+        }
+        cache->byFolder.clear();
+    }
+
     Entity instantiatePrefab(World& world, const std::string& folder, core::vec3 position, core::quat rotation,
                              float scale, OnUnlink onUnlink) {
         Scene* scene = world.ctx().find<Scene>();
@@ -190,8 +224,29 @@ namespace projv::runtime {
             core::error("instantiatePrefab: there is no projv::Scene in world.ctx()");
             return NullEntity;
         }
-        ComponentHandle root = utils::instantiateComposeInto(*scene, folder, INVALID_COMPONENT_HANDLE,
-                                                             position, rotation, scale);
+        PrefabCache& cache = world.ctx().contains<PrefabCache>() ? world.ctx().get<PrefabCache>()
+                                                                 : world.ctx().emplace<PrefabCache>();
+        const std::string key = cacheKey(folder);
+        auto found = cache.byFolder.find(key);
+        if (found == cache.byFolder.end()) {
+            Scene loaded = utils::loadComposeFromDisk(folder);
+            if (loaded.components.empty()) {
+                core::error("instantiatePrefab: {} loaded no components", folder);
+                return NullEntity;
+            }
+            found = cache.byFolder.emplace(key, PrefabCache::Entry{std::move(loaded), {}}).first;
+        }
+        PrefabCache::Entry& entry = found->second;
+        // Pins the Scene no longer holds are forgotten, not released: they are not the cache's any more.
+        for (size_t i = 0; i < entry.pinned.size(); i++) {
+            if (entry.pinned[i] >= 0 && !stillPinned(*scene, entry.pinned[i], entry.loaded.geometryPool[i])) {
+                entry.pinned[i] = -1;
+            }
+        }
+        ComponentHandle root = utils::instantiateSceneInto(*scene, entry.loaded,
+                                                           std::filesystem::path(folder).filename().string(),
+                                                           INVALID_COMPONENT_HANDLE, position, rotation, scale,
+                                                           &entry.pinned);
         if (root == INVALID_COMPONENT_HANDLE) return NullEntity;
         spawnEntitiesUnder(world, root);
 
@@ -228,7 +283,11 @@ namespace projv::runtime {
         for (auto entity : world.view<entt::entity>()) {
             const Authored* authored = world.try_get<Authored>(entity);
             const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
-            bool mine = authored ? authored->document == document : (link && isEntryOfThisFolder(link->handle));
+            // An authored entity matches by ref: its folder's row may since have been freed and reused.
+            bool mine = authored ? authored->document == document &&
+                                       (document == INVALID_COMPONENT_HANDLE ||
+                                        authored->documentGeneration == scene->components[document].generation)
+                                 : (link && utils::isComponentAlive(*scene, link->ref()) && isEntryOfThisFolder(link->handle));
             if (mine) rows.push_back({entity, authored ? authored->order : UINT32_MAX});
         }
         std::stable_sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {

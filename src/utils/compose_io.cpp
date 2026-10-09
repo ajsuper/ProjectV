@@ -946,7 +946,7 @@ namespace projv::utils {
                                            ComponentHandle parent,
                                            core::vec3 localPosition, core::quat localRotation,
                                            float localScale) {
-        core::info("instantiateComposeInto: Grafting {} into the open scene", folderPath);
+        core::trace("instantiateComposeInto: Grafting {} into the open scene", folderPath);
 
         if (parent != INVALID_COMPONENT_HANDLE &&
             (parent >= scene.components.size() ||
@@ -960,16 +960,34 @@ namespace projv::utils {
             core::error("instantiateComposeInto: {} loaded no components", folderPath);
             return INVALID_COMPONENT_HANDLE;
         }
+        std::string name = std::filesystem::path(folderPath).filename().string();
+        return instantiateSceneInto(scene, loaded, name, parent, localPosition, localRotation, localScale);
+    }
 
-        // The bases every handle in the incoming scene is shifted by. Taken before anything is
-        // appended, so they describe where the incoming rows will land rather than where they did.
-        const uint32_t componentBase = static_cast<uint32_t>(scene.components.size());
-        const uint32_t chunkBase     = static_cast<uint32_t>(scene.chunks.size());
-        const int32_t  gridBase      = static_cast<int32_t>(scene.grids.size());
+    ComponentHandle instantiateSceneInto(Scene& scene, const Scene& loaded, const std::string& nameIn,
+                                         ComponentHandle parent,
+                                         core::vec3 localPosition, core::quat localRotation,
+                                         float localScale, std::vector<int32_t>* sharedBlobs) {
+        if (parent != INVALID_COMPONENT_HANDLE &&
+            (parent >= scene.components.size() ||
+             scene.components[parent].kind != ComponentKind::Asset)) {
+            core::error("instantiateSceneInto: parent {} is not an Asset component", parent);
+            return INVALID_COMPONENT_HANDLE;
+        }
+        if (loaded.components.empty()) {
+            core::error("instantiateSceneInto: '{}' has no components", nameIn);
+            return INVALID_COMPONENT_HANDLE;
+        }
+        if (sharedBlobs) sharedBlobs->resize(loaded.geometryPool.size(), -1);
+
+        // Grids are appended, so they shift by a base. Components and chunks do not: their rows can
+        // be reused ones scattered through the tables (Scene::slots), so each incoming row is mapped
+        // to wherever it actually lands.
+        const int32_t gridBase = static_cast<int32_t>(scene.grids.size());
 
         // The node the whole folder hangs from, created first so it owns componentBase and every
         // incoming component lands after it.
-        std::string name = std::filesystem::path(folderPath).filename().string();
+        std::string name = nameIn;
         if (name.empty()) name = "Asset";
         ComponentHandle root = addComponent(scene, ComponentKind::Asset, name, parent, 4, 1.0f);
         if (root == INVALID_COMPONENT_HANDLE) {
@@ -979,9 +997,9 @@ namespace projv::utils {
         // The node stands for the folder, as a nested asset's node does after a load, so anything
         // that reads files beside its compose.json -- the runtime's entities.json -- can find them.
         scene.components[root].sourcePath = loaded.documentPath;
-        // addComponent may have grown `components`, so the incoming rows start after whatever it did.
-        const uint32_t componentOffset = static_cast<uint32_t>(scene.components.size());
-        (void)componentBase;
+        std::vector<ComponentHandle> componentRemap(loaded.components.size());
+        for (ComponentHandle& slot : componentRemap) slot = reserveComponentSlot(scene);
+        std::vector<ChunkHandle> chunkRemap(loaded.chunks.size(), INVALID_CHUNK_HANDLE);
 
         // Geometry pool first: the chunks appended below point into it, and a blob copied in has to
         // already have its destination index before anything references it. Blobs are copied whole
@@ -989,48 +1007,71 @@ namespace projv::utils {
         // because exactly the same set of incoming chunks will reference them.
         std::vector<int32_t> poolRemap(loaded.geometryPool.size(), -1);
         for (size_t index = 0; index < loaded.geometryPool.size(); index++) {
-            GeometryBlob& source = loaded.geometryPool[index];
+            const GeometryBlob& source = loaded.geometryPool[index];
             if (source.refCount == 0) continue;   // A hole in the incoming pool; nothing points at it.
-            source.dirty = true;                  // Nothing of it has reached this scene's GPU yet.
-            poolRemap[index] = poolInsertBlob(scene, std::move(source));
+            int32_t shared = sharedBlobs ? (*sharedBlobs)[index] : -1;
+            if (shared >= 0) {
+                // The caller's pinned copy: the incoming chunks become further owners of it.
+                scene.geometryPool[shared].refCount += source.refCount;
+                poolRemap[index] = shared;
+                continue;
+            }
+            GeometryBlob copy = source;
+            copy.dirty = true;                    // Nothing of it has reached this scene's GPU yet.
+            poolRemap[index] = poolInsertBlob(scene, std::move(copy));
+            if (sharedBlobs) {
+                scene.geometryPool[poolRemap[index]].refCount++;   // the caller's pin
+                (*sharedBlobs)[index] = poolRemap[index];
+            }
         }
 
         auto remapComponent = [&](ComponentHandle handle) -> ComponentHandle {
-            return handle == INVALID_COMPONENT_HANDLE ? INVALID_COMPONENT_HANDLE
-                                                      : handle + componentOffset;
+            return handle < componentRemap.size() ? componentRemap[handle] : INVALID_COMPONENT_HANDLE;
+        };
+        auto remapChunk = [&](ChunkHandle handle) -> ChunkHandle {
+            return handle < chunkRemap.size() ? chunkRemap[handle] : INVALID_CHUNK_HANDLE;
         };
 
-        for (Chunk& chunk : loaded.chunks) {
-            Chunk moved = std::move(chunk);
+        for (size_t index = 0; index < loaded.chunks.size(); index++) {
+            Chunk moved = loaded.chunks[index];
             if (moved.geometryPoolIndex >= 0 &&
                 static_cast<size_t>(moved.geometryPoolIndex) < poolRemap.size()) {
                 moved.geometryPoolIndex = poolRemap[moved.geometryPoolIndex];
             }
             moved.componentHandle = remapComponent(moved.componentHandle);
             if (moved.gridIndex >= 0) moved.gridIndex += gridBase;
-            moved.headerDirty = true;
-            scene.chunks.push_back(std::move(moved));
+            chunkRemap[index] = allocateChunkSlot(scene, std::move(moved));
         }
 
-        for (SceneGrid& grid : loaded.grids) {
-            SceneGrid moved = std::move(grid);
+        for (const SceneGrid& grid : loaded.grids) {
+            SceneGrid moved = grid;
             moved.componentHandle = remapComponent(moved.componentHandle);
             for (int32_t& cell : moved.cellToChunk) {
-                if (cell >= 0) cell += static_cast<int32_t>(chunkBase);
+                if (cell >= 0) cell = static_cast<int32_t>(remapChunk(ChunkHandle(cell)));
             }
             scene.grids.push_back(std::move(moved));
         }
 
-        for (ComponentRecord& record : loaded.components) {
-            ComponentRecord moved = std::move(record);
-            moved.parent = remapComponent(moved.parent);
+        // The incoming roots become the new node's children: given their parent before they are
+        // placed, so none of them is ever indexed as a root of this scene. Everything below them
+        // already points at its own parent.
+        size_t adopted = 0;
+        for (size_t index = 0; index < loaded.components.size(); index++) {
+            ComponentRecord moved = loaded.components[index];
+            if (moved.parent == INVALID_COMPONENT_HANDLE) {
+                moved.parent = root;
+                scene.components[root].children.push_back(componentRemap[index]);
+                adopted++;
+            } else {
+                moved.parent = remapComponent(moved.parent);
+            }
             for (ComponentHandle& child : moved.children) child = remapComponent(child);
-            if (moved.kind == ComponentKind::Chunk) moved.chunkHandle += chunkBase;
+            if (moved.kind == ComponentKind::Chunk) moved.chunkHandle = remapChunk(moved.chunkHandle);
             if (moved.gridIndex >= 0) moved.gridIndex += gridBase;
             // dataRefID indexes the incoming scene's dataReferences, which are not carried across --
             // they are a lazily built cache, and the first edit of each component rebuilds its own.
             moved.dataRefID = -1;
-            scene.components.push_back(std::move(moved));
+            placeComponent(scene, componentRemap[index], std::move(moved));
         }
 
         // Each incoming component's attachments move with it. The incoming document's own block
@@ -1038,24 +1079,13 @@ namespace projv::utils {
         // the asset node made above -- so it lands there, which is where a later save of that node
         // writes it back from.
         appendAttachments(scene, loaded, [&](ComponentHandle handle) {
-            return handle == INVALID_COMPONENT_HANDLE ? root : handle + componentOffset;
+            return handle == INVALID_COMPONENT_HANDLE ? root : remapComponent(handle);
         });
 
         for (ChunkHandle handle : loaded.looseChunks) {
-            scene.looseChunks.push_back(handle + chunkBase);
+            scene.looseChunks.push_back(remapChunk(handle));
         }
         scene.looseChunkCount = static_cast<uint32_t>(scene.looseChunks.size());
-
-        // The incoming roots become the new node's children. Everything below them already points at
-        // its own parent, so only this one edge has to be made.
-        size_t adopted = 0;
-        for (size_t index = 0; index < loaded.components.size(); index++) {
-            ComponentHandle handle = static_cast<ComponentHandle>(index) + componentOffset;
-            if (scene.components[handle].parent != INVALID_COMPONENT_HANDLE) continue;
-            scene.components[handle].parent = root;
-            scene.components[root].children.push_back(handle);
-            adopted++;
-        }
 
         // Last, and through the ordinary setter: loadComposeFromDisk bakes world transforms into
         // every chunk header assuming its roots sit at the origin of the world, and this subtree no
@@ -1064,7 +1094,7 @@ namespace projv::utils {
         // be somewhere else entirely.
         setComponentTransform(scene, root, localPosition, localRotation, localScale);
 
-        core::info("instantiateComposeInto: Grafted '{}' as component {} - {} top-level, {} "
+        core::trace("instantiateSceneInto: Grafted '{}' as component {} - {} top-level, {} "
                    "component(s), {} chunk(s), {} grid(s)", name, root, adopted,
                    loaded.components.size(), loaded.chunks.size(), loaded.grids.size());
         return root;
@@ -1260,9 +1290,7 @@ namespace projv::utils {
         // component when there is no Asset to stand in for the whole scene.
         std::vector<ComponentHandle> members;
         if (root == INVALID_COMPONENT_HANDLE) {
-            for (ComponentHandle handle = 0; handle < scene.components.size(); handle++) {
-                if (scene.components[handle].parent == INVALID_COMPONENT_HANDLE) members.push_back(handle);
-            }
+            members = rootComponents(scene);   // creation order, whatever rows they sit in
         } else if (root < scene.components.size()) {
             members = scene.components[root].children;
         } else {

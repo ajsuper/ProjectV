@@ -75,8 +75,13 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   `World` is an `entt::registry` (`core/world.h`); global resources live in `world.ctx()`.
 - **Layering:** `utils/` and `data_structures/` never include EnTT, `core/world.h`/`application.h`/
   `events.h` or `runtime/`. The `layering` ctest enforces it. `runtime/` is the one layer that sees both.
-- Component deletion is `utils::deleteComponent` (tombstone; handles are never reused).
-  `utils::isComponentAlive` is the liveness check.
+- Component deletion is `utils::deleteComponent`. Freed component and chunk rows are **reused**
+  (`Scene::slots`), so a bare `ComponentHandle` is only good within a frame: anything held across
+  frames keeps a `ComponentRef` and checks it with `utils::resolve`. `utils::isComponentAlive` is the
+  liveness check for a handle. The scene editor turns recycling off (it still keeps bare handles).
+- Create rows through the engine (`addComponent`, `reserveComponentSlot`/`placeComponent`,
+  `allocateChunkSlot`), not `push_back`, so freed rows are reused; the top-level components are
+  `utils::rootComponents`.
 - **Where data goes.** Engine-read data: a `ComponentRecord` field. Data *about the voxel structure*
   written by tools (editor boolean ops, primitive parameters): an attachment (`utils/attachments.h`),
   saved in compose.json. What a running program *does* (physics, spawners, gameplay): ECS components

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "nlohmann/json.hpp"
+#include "data_structures/scene.h"
 #include "runtime/scene_bridge.h"
 
 // Authored entities: gameplay data saved as the ECS components themselves.
@@ -65,6 +66,9 @@ namespace projv::runtime {
         Link link = Link::None;                                // as the file wrote it
         uint32_t linkId = 0;
         uint32_t order = 0;                                    // position in the file
+        // `document`'s generation, so a later occupant of its row is not mistaken for it. Filled in
+        // by spawnEntities; one made by hand for a live node takes the node's generation.
+        uint32_t documentGeneration = 0;
     };
 
     // Components a file named that nothing registered, as JSON text by key.
@@ -84,13 +88,33 @@ namespace projv::runtime {
     // The same, for `node` and the folders inside it: what a freshly grafted folder needs.
     SpawnedEntities spawnEntitiesUnder(World& world, ComponentHandle node);
 
-    // Grafts a prefab folder into the Scene (utils::instantiateComposeInto) and spawns its
+    // Grafts a prefab folder into the Scene (utils::instantiateSceneInto) and spawns its
     // entities. Returns the entity linked to the new node -- the one its "document" entry made, or
     // a bare linked one if it has none. With OnUnlink::Destroy (the default), destroying that entity
     // deletes the prefab's voxels.
+    //
+    // **A folder is read once.** The first spawn loads it into the PrefabCache in world.ctx(); every
+    // later one grafts that copy, and every instance *shares* its geometry: one blob in the pool and
+    // on the GPU however many are alive, held by the cache's pin. Editing one instance forks its own
+    // copy (copy-on-write), so instances stay independent. A changed folder on disk is not noticed
+    // until clearPrefabCache.
     Entity instantiatePrefab(World& world, const std::string& folder, core::vec3 position,
                              core::quat rotation = core::quat(1.0f, 0.0f, 0.0f, 0.0f), float scale = 1.0f,
                              OnUnlink onUnlink = OnUnlink::Destroy);
+
+    // What instantiatePrefab keeps, by canonical folder path.
+    struct PrefabCache {
+        struct Entry {
+            Scene loaded;
+            // Per blob of `loaded`: the pool index in the live Scene that the cache pins, or -1.
+            std::vector<int32_t> pinned;
+        };
+        std::map<std::string, Entry> byFolder;
+    };
+
+    // Forgets every cached prefab and drops the cache's pins, so geometry no instance uses is freed
+    // on the next flush, and the next spawn of each folder reads it from disk again.
+    void clearPrefabCache(World& world);
 
     // Writes `folder`/entities.json for the folder whose node is `document` (INVALID: the top-level
     // folder). Each entity belongs to exactly one file: one spawned from a file (it has an Authored)

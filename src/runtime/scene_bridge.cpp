@@ -42,7 +42,7 @@ namespace projv::runtime {
         void onLinked(World& world, Entity entity) {
             Scene* scene = sceneOf(world);
             const VoxelComponent& link = world.get<VoxelComponent>(entity);
-            if (!scene || !utils::isComponentAlive(*scene, link.handle)) {
+            if (!scene || !utils::isComponentAlive(*scene, link.ref())) {
                 core::error("scene bridge: entity {} links component {}, which is not alive - use "
                             "runtime::linkComponent, which refuses it",
                             static_cast<uint32_t>(entity), link.handle);
@@ -61,7 +61,7 @@ namespace projv::runtime {
             const VoxelComponent& link = world.get<VoxelComponent>(entity);
             if (link.onUnlink != OnUnlink::Destroy) return;
             Scene* scene = sceneOf(world);
-            if (scene && utils::isComponentAlive(*scene, link.handle)) {
+            if (scene && utils::isComponentAlive(*scene, link.ref())) {
                 utils::deleteComponent(*scene, link.handle);
             }
         }
@@ -79,7 +79,7 @@ namespace projv::runtime {
                 state.seenDeletions = scene->deletions;
                 std::vector<std::pair<Entity, ComponentHandle>> dead;
                 for (auto [entity, link] : world.view<VoxelComponent>().each()) {
-                    if (!utils::isComponentAlive(*scene, link.handle)) dead.push_back({entity, link.handle});
+                    if (!utils::isComponentAlive(*scene, link.ref())) dead.push_back({entity, link.handle});
                 }
                 for (auto [entity, handle] : dead) {
                     world.remove<VoxelComponent>(entity);
@@ -94,7 +94,7 @@ namespace projv::runtime {
             for (auto [entity, transform] : dirty.each()) {
                 world.emplace_or_replace<WorldTransform>(entity, matrixOf(transform));
                 const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
-                if (!link || !scene || !utils::isComponentAlive(*scene, link->handle)) continue;
+                if (!link || !scene || !utils::isComponentAlive(*scene, link->ref())) continue;
                 utils::setComponentTransform(*scene, link->handle, transform.position,
                                              transform.rotation, transform.scale);
             }
@@ -117,8 +117,13 @@ namespace projv::runtime {
     }
 
     Entity entityFor(const World& world, ComponentHandle component) {
+        // By ref, not by handle: a link whose component was deleted, and not yet noticed by the
+        // bridge's sync, still carries the handle -- and a new component may already sit in that row.
+        const Scene* scene = world.ctx().find<Scene>();
+        if (!scene || !utils::isComponentAlive(*scene, component)) return NullEntity;
+        ComponentRef wanted = utils::refOf(*scene, component);
         for (auto [entity, link] : world.view<VoxelComponent>().each()) {
-            if (link.handle == component) return entity;
+            if (link.ref() == wanted) return entity;
         }
         return NullEntity;
     }
@@ -150,7 +155,8 @@ namespace projv::runtime {
             return false;
         }
         if (world.all_of<VoxelComponent>(entity)) world.remove<VoxelComponent>(entity);
-        world.emplace<VoxelComponent>(entity, VoxelComponent{component, mode, onUnlink});
+        world.emplace<VoxelComponent>(entity, VoxelComponent{component, mode, onUnlink,
+                                                             scene->components[component].generation});
         send(world, EntityLinked{entity, component});
         return true;
     }
@@ -164,7 +170,7 @@ namespace projv::runtime {
         if (!scene) return;
         std::vector<std::pair<Entity, Transform>> changed;
         for (auto [entity, link] : world.view<VoxelComponent>().each()) {
-            if (!utils::isComponentAlive(*scene, link.handle)) continue;
+            if (!utils::isComponentAlive(*scene, link.ref())) continue;
             Transform fromScene = transformOf(scene->components[link.handle]);
             const Transform* current = world.try_get<Transform>(entity);
             bool same = current && current->position == fromScene.position &&

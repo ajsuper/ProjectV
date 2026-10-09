@@ -189,6 +189,7 @@ namespace projv{
     // whole SceneGrid (when its .data file has more than one block).
     using ComponentHandle = uint32_t;
     static constexpr ComponentHandle INVALID_COMPONENT_HANDLE = 0xFFFFFFFFu;
+    static constexpr ChunkHandle INVALID_CHUNK_HANDLE = 0xFFFFFFFFu;
 
     enum class ComponentKind { Chunk, Grid, Asset };
 
@@ -314,6 +315,22 @@ namespace projv{
         // paletteOffset + the local slot = global palette index.
         std::vector<Material> materialPalette;
         uint32_t paletteVersion = 0;
+        // Bumped each time this row is freed. A ComponentRef carries the value it was made with, so
+        // a holder can tell its component from whatever later reuses the slot. See ComponentRef.
+        uint32_t generation = 0;
+    };
+
+    // A component named so that it can be told apart from a later occupant of its slot.
+    //
+    // A ComponentHandle is a row index, and rows are reused once freed (Scene::slots). Within one
+    // call or one frame a bare handle is fine -- nothing frees a row under you -- but anything that
+    // keeps a component across frames (an entity's link, a selection, an undo step) keeps one of
+    // these: utils::resolve answers INVALID_COMPONENT_HANDLE once the component it named is gone,
+    // rather than the handle of whatever took the slot.
+    struct ComponentRef {
+        ComponentHandle handle = INVALID_COMPONENT_HANDLE;
+        uint32_t generation = 0;
+        bool operator==(const ComponentRef&) const = default;
     };
 
     // Governs what happens when a `data` component's voxel data is modified and persisted.
@@ -536,6 +553,31 @@ struct GeometryBlob {
         // The top-level folder has no node of its own, so this is how anything that reads files
         // beside its compose.json -- the runtime's entities.json -- finds it.
         std::string documentPath;
+
+        // Free rows waiting for reuse, and whether to reuse them at all.
+        struct SlotRecycling {
+            // Off: a deleted row stays a tombstone forever, as it always did. A program that keeps
+            // bare handles across frames (the scene editor, until it moves to ComponentRef) turns it
+            // off so nothing it holds can come to name a different component.
+            bool enabled = true;
+            std::vector<ChunkHandle> chunks;          // dead chunk rows (LIFO)
+            std::vector<ComponentHandle> components;  // dead component rows (LIFO)
+            // Bumped whenever a component row is created or freed. Per-component caches indexed by
+            // row (the GPU palette offsets) compare it, because a reused row can carry the very
+            // palette version the old occupant had.
+            uint64_t epoch = 0;
+        };
+        SlotRecycling slots;
+
+        // The top-level components in creation order: utils::rootComponents, which keeps it. The
+        // engine's own create / reparent / delete maintain it; rows a program appends to `components`
+        // directly are picked up on the next read, by `indexedUpTo`.
+        struct RootIndex {
+            std::vector<ComponentHandle> roots;
+            size_t indexedUpTo = 0;
+        };
+        mutable RootIndex rootIndex;
+
         // Guards every ComponentRecord::materialPalette (+ paletteVersion) against concurrent
         // interning. One mutex for the whole Scene rather than one per ComponentRecord: std::mutex
         // is neither movable nor copyable, so a per-component mutex would break growth of the
@@ -568,6 +610,8 @@ struct GeometryBlob {
             , documentAttachments(std::move(other.documentAttachments))
             , deletions(other.deletions)
             , documentPath(std::move(other.documentPath))
+            , slots(std::move(other.slots))
+            , rootIndex(std::move(other.rootIndex))
         {}
         Scene& operator=(Scene&& other) noexcept {
             if (this == &other) return *this;
@@ -583,6 +627,8 @@ struct GeometryBlob {
             documentAttachments = std::move(other.documentAttachments);
             deletions = other.deletions;
             documentPath = std::move(other.documentPath);
+            slots = std::move(other.slots);
+            rootIndex = std::move(other.rootIndex);
             return *this;
         }
         Scene(const Scene& other)
@@ -598,6 +644,8 @@ struct GeometryBlob {
             , documentAttachments(other.documentAttachments)
             , deletions(other.deletions)
             , documentPath(other.documentPath)
+            , slots(other.slots)
+            , rootIndex(other.rootIndex)
         {}
         Scene& operator=(const Scene& other) {
             if (this == &other) return *this;
@@ -613,6 +661,8 @@ struct GeometryBlob {
             documentAttachments = other.documentAttachments;
             deletions = other.deletions;
             documentPath = other.documentPath;
+            slots = other.slots;
+            rootIndex = other.rootIndex;
             return *this;
         }
     };

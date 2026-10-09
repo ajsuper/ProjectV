@@ -64,6 +64,11 @@ namespace projv {
         ComponentHandle handle = INVALID_COMPONENT_HANDLE;
         LinkMode        mode = LinkMode::Root;
         OnUnlink        onUnlink = OnUnlink::Keep;
+        // The component's generation when it was linked. Rows are reused once freed, so `handle`
+        // alone can come to name a newer component; the link is to this one only while the row's
+        // generation still matches. linkComponent fills it in.
+        uint32_t        generation = 0;
+        ComponentRef ref() const { return {handle, generation}; }
     };
 
     // A Transform changed since the last sync. Set by the bridge's signals, cleared by its sync.

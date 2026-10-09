@@ -102,6 +102,25 @@ namespace projv::utils {
                                            float localScale = 1.0f);
 
     /**
+     * instantiateComposeInto without the load: grafts `loaded`, a scene already read from a folder,
+     * under a new Asset node named `name`. `loaded` is copied, not consumed, so one load can be
+     * grafted any number of times -- which is what runtime::instantiatePrefab's cache does.
+     *
+     * `sharedBlobs`, when given, has one entry per blob in `loaded.geometryPool`: a pool index in
+     * `scene` whose blob the incoming chunks should share instead of copying, or -1. A -1 entry is
+     * copied in and then replaced with the copy's index, **and the copy gets one extra reference that
+     * belongs to the caller** -- a pin, so the blob outlives its instances and later grafts can share
+     * it. Because the pin is a reference, an edit to any one instance forks it (copy-on-write) and
+     * the rest keep the prefab's geometry. The caller drops each pin with releaseBlob when done.
+     */
+    ComponentHandle instantiateSceneInto(Scene& scene, const Scene& loaded, const std::string& name,
+                                         ComponentHandle parent,
+                                         core::vec3 localPosition = core::vec3(0.0f),
+                                         core::quat localRotation = core::quat(1.0f, 0.0f, 0.0f, 0.0f),
+                                         float localScale = 1.0f,
+                                         std::vector<int32_t>* sharedBlobs = nullptr);
+
+    /**
      * Writes a ComposeDoc to a compose.json. The exact inverse of parseComposeJson: rotation goes out
      * as a 4-array [x, y, z, w] and scale as a single number when uniform, both of which the parser
      * accepts. Comments are not preserved -- the parser tolerates them, but nothing carries them into
