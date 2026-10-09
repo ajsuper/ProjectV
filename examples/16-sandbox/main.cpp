@@ -186,7 +186,9 @@ Entity spawnPrefab(World& world, const std::string& kind, vec3 position, vec3 ve
     auto& sandbox = world.ctx().get<Sandbox>();
     Entity entity = projv::runtime::instantiatePrefab(world, (sandbox.prefabs / kind).string(), position);
     // Its body is made at the next fixed step, and this applies right after: thrown, with a tumble.
+    // The NetId is what a server would hand out; here it is what orders the bodies made in a step.
     if (entity != projv::NullEntity) {
+        projv::runtime::assignNetId(world, entity);
         vec3 spin(uniform(sandbox, -3, 3), uniform(sandbox, -3, 3), uniform(sandbox, -3, 3));
         projv::runtime::setVelocity(world, entity, velocity, spin);
     }
@@ -472,7 +474,15 @@ void selfTestSystem(projv::Application& app) {
     const auto& stats = projv::runtime::physicsWorld(world).stats();
     bool physics = simulated == alive && stats.stepsWithDroppedContacts == 0 && stats.refusedBodies == 0 &&
                    sandbox.fellThrough == 0;
-    bool pass = books && voxels && physics;
+    // The whole session's physics, replayed in a fresh world: every step must come out the same.
+    projv::runtime::PhysicsLog log = projv::runtime::physicsWorld(world).recording();
+    projv::runtime::ReplayResult replay = projv::runtime::PhysicsWorld::replay(log);
+    if (const char* path = std::getenv("SANDBOX_RECORD")) {
+        if (log.saveToFile(path)) projv::core::info("SANDBOXTEST: physics recording written to {}", path);
+    }
+    projv::core::info("SANDBOXTEST: replay of {} steps ({} KB recorded): {}{}", replay.stepsReplayed,
+                      log.bytes.size() / 1024, replay.matched ? "identical" : "DIVERGED: ", replay.problem);
+    bool pass = books && voxels && physics && replay.matched;
     projv::core::info("SANDBOXTEST: spawned {} (+{} by spawners), popped {}, lost over the walls {}, alive {}, "
                       "live root components {} (expected {}) | books {} | voxels {}", test->spawned,
                       sandbox.spawnerLaunches, sandbox.popped, sandbox.lost, alive, liveRoots, arenaRoots + alive,
@@ -550,6 +560,8 @@ void startup(projv::Application& app) {
     // reports it (BodyLeftWorld) and retires it.
     projv::runtime::PhysicsConfig physics;
     physics.settings.worldMin = vec3(-1e4f, KILL_PLANE, -1e4f);
+    // Unattended runs record every physics input, and replay it at the end (see the self-test).
+    physics.settings.record = std::getenv("SANDBOX_SELFTEST") != nullptr;
     projv::runtime::installPhysics(app, physics);
     projv::runtime::setGravity(world, vec3(0, GRAVITY, 0));
     projv::runtime::registerComponent<Body>(world);

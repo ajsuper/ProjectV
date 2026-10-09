@@ -146,7 +146,10 @@ Plays by itself for 600 frames: it throws every kind, rains bombs into a crowd, 
 sets off chain reactions, and finishes in slow motion. It then checks that every body spawned is
 alive, popped or lost over a wall; that every popped body's voxels are gone from the Scene; and that
 the physics held: every live body simulated, no step dropped contacts, no body refused, nothing
-through the floor. The result is logged as `SANDBOXTEST: ... | PASS` or `FAIL`. Longer runs
+through the floor. It records every physics input as it plays and, at the end, replays the
+recording in a fresh simulation: every step must come out bit-identical
+(`SANDBOX_RECORD=<path>` also writes the recording to a file, which `PhysicsWorld::replay` reads).
+The result is logged as `SANDBOXTEST: ... | PASS` or `FAIL`. Longer runs
 (`SANDBOX_SELFTEST=3000`) are the better physics check: 600 uncapped frames are only a couple of
 seconds of simulation.
 

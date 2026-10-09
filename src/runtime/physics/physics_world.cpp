@@ -11,6 +11,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <map>
 #include <set>
 #include <mutex>
@@ -322,6 +323,130 @@ namespace projv::runtime {
         return 0.0f;
     }
 
+    // ---- Recording ---------------------------------------------------------------------------------
+    // A log is a header (magic, version, the settings) and then one record per call that changes the
+    // simulation, in the order made: what a fresh world needs to be given to end up the same.
+    namespace {
+        constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
+        constexpr uint32_t LOG_VERSION = 1;
+
+        enum class Op : uint8_t {
+            Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
+            Gravity, Step, Restore
+        };
+
+        void writeSettings(std::vector<uint8_t>& out, const PhysicsSettings& s) {
+            put(out, s.maxBodies); put(out, s.maxBodyPairs); put(out, s.maxContactConstraints);
+            put(out, s.gravity); put(out, s.worldMin); put(out, s.worldMax);
+            put(out, s.maxLinearSpeed); put(out, s.maxAngularSpeed); put(out, s.minMass); put(out, s.minGyrationRadius);
+            put(out, s.restRadius); put(out, s.restAngle); put(out, s.restSeconds); put(out, s.restDamping);
+            put(out, int32_t(s.velocitySteps)); put(out, int32_t(s.positionSteps));
+        }
+        bool readSettings(const std::vector<uint8_t>& in, size_t& at, PhysicsSettings& s) {
+            int32_t velocity = 0, position = 0;
+            bool ok = get(in, at, s.maxBodies) && get(in, at, s.maxBodyPairs) && get(in, at, s.maxContactConstraints) &&
+                      get(in, at, s.gravity) && get(in, at, s.worldMin) && get(in, at, s.worldMax) &&
+                      get(in, at, s.maxLinearSpeed) && get(in, at, s.maxAngularSpeed) && get(in, at, s.minMass) &&
+                      get(in, at, s.minGyrationRadius) && get(in, at, s.restRadius) && get(in, at, s.restAngle) &&
+                      get(in, at, s.restSeconds) && get(in, at, s.restDamping) && get(in, at, velocity) &&
+                      get(in, at, position);
+            s.velocitySteps = velocity;
+            s.positionSteps = position;
+            return ok;
+        }
+
+        void writeShape(std::vector<uint8_t>& out, const PhysicsShape& shape) {
+            put(out, uint8_t(shape.kind));
+            switch (shape.kind) {
+                case PhysicsShape::Kind::Box:     put(out, shape.halfExtents); break;
+                case PhysicsShape::Kind::Sphere:  put(out, shape.radius); break;
+                case PhysicsShape::Kind::Capsule: put(out, shape.halfHeight); put(out, shape.radius); break;
+                case PhysicsShape::Kind::Voxels: {
+                    put(out, shape.voxelSize);
+                    const utils::CollisionPieces* pieces = shape.voxels ? shape.voxels->source.get() : nullptr;
+                    put(out, uint8_t(pieces != nullptr));
+                    if (!pieces) break;
+                    put(out, uint8_t(pieces->fallback));
+                    put(out, uint32_t(pieces->pieces.size()));
+                    for (const utils::CollisionPiece& p : pieces->pieces) {
+                        put(out, p.min); put(out, p.max); put(out, p.voxelMin); put(out, p.voxelMax);
+                    }
+                    break;
+                }
+                case PhysicsShape::Kind::Compound:
+                    put(out, uint32_t(shape.parts.size()));
+                    for (const PhysicsShapePart& part : shape.parts) {
+                        writeShape(out, part.shape);
+                        put(out, part.position);
+                        put(out, part.rotation);
+                    }
+                    break;
+            }
+        }
+
+        template <typename BuildVoxels>
+        bool readShape(const std::vector<uint8_t>& in, size_t& at, PhysicsShape& shape, BuildVoxels& build, int depth = 0) {
+            uint8_t kind = 0;
+            if (depth > 64 || !get(in, at, kind) || kind > uint8_t(PhysicsShape::Kind::Compound)) return false;
+            shape.kind = PhysicsShape::Kind(kind);
+            switch (shape.kind) {
+                case PhysicsShape::Kind::Box:     return get(in, at, shape.halfExtents);
+                case PhysicsShape::Kind::Sphere:  return get(in, at, shape.radius);
+                case PhysicsShape::Kind::Capsule: return get(in, at, shape.halfHeight) && get(in, at, shape.radius);
+                case PhysicsShape::Kind::Voxels: {
+                    uint8_t has = 0;
+                    if (!get(in, at, shape.voxelSize) || !get(in, at, has)) return false;
+                    if (!has) return true;
+                    utils::CollisionPieces pieces;
+                    uint8_t fallback = 0;
+                    uint32_t count = 0;
+                    if (!get(in, at, fallback) || !get(in, at, count) || count > (1u << 24)) return false;
+                    pieces.fallback = utils::CollisionFallback(fallback);
+                    pieces.pieces.resize(count);
+                    for (utils::CollisionPiece& p : pieces.pieces)
+                        if (!get(in, at, p.min) || !get(in, at, p.max) || !get(in, at, p.voxelMin) || !get(in, at, p.voxelMax))
+                            return false;
+                    shape.voxels = build(pieces);
+                    return true;
+                }
+                case PhysicsShape::Kind::Compound: {
+                    uint32_t count = 0;
+                    if (!get(in, at, count) || count > (1u << 20)) return false;
+                    shape.parts.resize(count);
+                    for (PhysicsShapePart& part : shape.parts)
+                        if (!readShape(in, at, part.shape, build, depth + 1) || !get(in, at, part.position) ||
+                            !get(in, at, part.rotation))
+                            return false;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void writeDesc(std::vector<uint8_t>& out, const BodyDesc& d) {
+            writeShape(out, d.shape);
+            put(out, uint8_t(d.motion)); put(out, uint8_t(d.layer));
+            put(out, d.position); put(out, d.rotation); put(out, d.linearVelocity); put(out, d.angularVelocity);
+            put(out, d.density); put(out, d.mass); put(out, d.friction); put(out, d.restitution);
+            put(out, d.linearDamping); put(out, d.angularDamping); put(out, d.gravityFactor);
+            put(out, uint8_t(d.continuous));
+        }
+
+        template <typename BuildVoxels>
+        bool readDesc(const std::vector<uint8_t>& in, size_t& at, BodyDesc& d, BuildVoxels& build) {
+            uint8_t motion = 0, layer = 0, continuous = 0;
+            bool ok = readShape(in, at, d.shape, build) && get(in, at, motion) && get(in, at, layer) &&
+                      get(in, at, d.position) && get(in, at, d.rotation) && get(in, at, d.linearVelocity) &&
+                      get(in, at, d.angularVelocity) && get(in, at, d.density) && get(in, at, d.mass) &&
+                      get(in, at, d.friction) && get(in, at, d.restitution) && get(in, at, d.linearDamping) &&
+                      get(in, at, d.angularDamping) && get(in, at, d.gravityFactor) && get(in, at, continuous);
+            d.motion = MotionType(motion);
+            d.layer = PhysicsLayer(layer);
+            d.continuous = continuous != 0;
+            return ok;
+        }
+    }
+
     struct PhysicsWorld::Impl {
         // Declared in the order they must be built: the layer objects outlive the system that
         // points at them, and the allocators outlive every step.
@@ -353,6 +478,12 @@ namespace projv::runtime {
         std::vector<BodyId>   leftWorld;
         std::set<uint32_t>    faultInjected;      // corruptBodyForTesting
         bool                  warnedCapacity = false;
+
+        // ---- Recording (PhysicsSettings::record) ----
+        bool                  recording = false;
+        std::vector<uint8_t>  log;
+        uint64_t              loggedSteps = 0;
+        void op(Op o) { log.push_back(uint8_t(o)); }
         // Voxel shapes by (content stamp, parameters). Ordered, so nothing about it can make two
         // runs differ (it does not feed the simulation, but it costs nothing to rule out).
         std::map<std::pair<uint64_t, uint64_t>, std::shared_ptr<const CollisionShape>> shapeCache;
@@ -392,6 +523,12 @@ namespace projv::runtime {
         solver.mNumVelocitySteps = uint32_t(std::max(settings.velocitySteps, 1));
         solver.mNumPositionSteps = uint32_t(std::max(settings.positionSteps, 1));
         impl->system.SetPhysicsSettings(solver);
+        if (settings.record) {
+            impl->recording = true;
+            put(impl->log, LOG_MAGIC);
+            put(impl->log, LOG_VERSION);
+            writeSettings(impl->log, settings);
+        }
     }
 
     PhysicsWorld::~PhysicsWorld() {
@@ -400,6 +537,16 @@ namespace projv::runtime {
     }
 
     BodyId PhysicsWorld::createBody(const BodyDesc& desc) {
+        BodyId id = createBodyUnrecorded(desc);
+        if (impl->recording) {
+            impl->op(Op::Create);
+            writeDesc(impl->log, desc);
+            put(impl->log, id.value);
+        }
+        return id;
+    }
+
+    BodyId PhysicsWorld::createBodyUnrecorded(const BodyDesc& desc) {
         auto refuse = [&](const char* why) {
             core::warn("physics: refused a body: {}", why);
             impl->stats.refusedBodies++;
@@ -477,6 +624,7 @@ namespace projv::runtime {
     }
 
     void PhysicsWorld::destroyBody(BodyId id) {
+        if (impl->recording) { impl->op(Op::Destroy); put(impl->log, id.value); }
         if (!isAlive(id)) return;
         JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
         JPH::BodyID jid(id.value);
@@ -513,6 +661,12 @@ namespace projv::runtime {
         impl->stats.lastStepMilliseconds =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
         impl->tick++;
+        if (impl->recording) {
+            impl->op(Op::Step);
+            put(impl->log, dt);
+            put(impl->log, stateHash());
+            impl->loggedSteps++;
+        }
         impl->stats.steps++;
         if (impl->tick % 60 == 0) pruneShapeCache();
         impl->stats.bodies = impl->system.GetNumBodies();
@@ -613,28 +767,33 @@ namespace projv::runtime {
     }
 
     void PhysicsWorld::addImpulse(BodyId id, core::vec3 impulse) {
+        if (impl->recording) { impl->op(Op::Impulse); put(impl->log, id.value); put(impl->log, impulse); }
         if (!finite(impulse) || !canMove(impl->system, id)) return;
         impl->system.GetBodyInterface().AddImpulse(JPH::BodyID(id.value), toJolt(impulse));
     }
 
     void PhysicsWorld::addAngularImpulse(BodyId id, core::vec3 impulse) {
+        if (impl->recording) { impl->op(Op::AngularImpulse); put(impl->log, id.value); put(impl->log, impulse); }
         if (!finite(impulse) || !canMove(impl->system, id)) return;
         impl->system.GetBodyInterface().AddAngularImpulse(JPH::BodyID(id.value), toJolt(impulse));
     }
 
     void PhysicsWorld::addVelocity(BodyId id, core::vec3 linear) {
+        if (impl->recording) { impl->op(Op::AddVelocity); put(impl->log, id.value); put(impl->log, linear); }
         if (!finite(linear) || !canMove(impl->system, id)) return;
         JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
         bodies.AddLinearVelocity(JPH::BodyID(id.value), toJolt(linear));
     }
 
     void PhysicsWorld::setVelocity(BodyId id, core::vec3 linear, core::vec3 angular) {
+        if (impl->recording) { impl->op(Op::SetVelocity); put(impl->log, id.value); put(impl->log, linear); put(impl->log, angular); }
         if (!finite(linear) || !finite(angular) || !canMove(impl->system, id)) return;
         impl->system.GetBodyInterface().SetLinearAndAngularVelocity(JPH::BodyID(id.value), toJolt(linear),
                                                                     toJolt(angular));
     }
 
     void PhysicsWorld::setPose(BodyId id, core::vec3 position, core::quat rotation) {
+        if (impl->recording) { impl->op(Op::SetPose); put(impl->log, id.value); put(impl->log, position); put(impl->log, rotation); }
         if (!finite(position) || !finite(rotation) || !isAlive(id)) return;
         float length = glm::length(glm::vec4(rotation.x, rotation.y, rotation.z, rotation.w));
         if (length < 0.5f) return;
@@ -643,6 +802,7 @@ namespace projv::runtime {
     }
 
     void PhysicsWorld::moveKinematic(BodyId id, core::vec3 position, core::quat rotation, float dt) {
+        if (impl->recording) { impl->op(Op::MoveKinematic); put(impl->log, id.value); put(impl->log, position); put(impl->log, rotation); put(impl->log, dt); }
         if (!finite(position) || !finite(rotation) || !(dt > 0.0f) || !canMove(impl->system, id)) return;
         float length = glm::length(glm::vec4(rotation.x, rotation.y, rotation.z, rotation.w));
         if (length < 0.5f) return;
@@ -651,6 +811,7 @@ namespace projv::runtime {
     }
 
     void PhysicsWorld::setGravity(core::vec3 gravity) {
+        if (impl->recording) { impl->op(Op::Gravity); put(impl->log, gravity); }
         if (finite(gravity)) impl->system.SetGravity(toJolt(gravity));
     }
 
@@ -708,6 +869,7 @@ namespace projv::runtime {
         out->pieces = uint32_t(pieces.pieces.size());
         out->volume = volume;
         out->fallback = pieces.fallback;
+        out->source = std::make_shared<const utils::CollisionPieces>(pieces);
         out->native = std::make_shared<CollisionShape::Native>();
         out->native->shape = shape;
         return out;
@@ -762,6 +924,7 @@ namespace projv::runtime {
     }
 
     bool PhysicsWorld::restoreState(const std::vector<uint8_t>& snapshot) {
+        if (impl->recording) { impl->op(Op::Restore); put(impl->log, uint64_t(snapshot.size())); impl->log.insert(impl->log.end(), snapshot.begin(), snapshot.end()); }
         size_t at = 0;
         uint32_t magic = 0, version = 0, count = 0;
         uint64_t tick = 0, joltSize = 0;
@@ -830,4 +993,126 @@ namespace projv::runtime {
     }
 
     const PhysicsStats& PhysicsWorld::stats() const { return impl->stats; }
+
+    PhysicsLog PhysicsWorld::recording() const {
+        PhysicsLog log;
+        if (!impl->recording) return log;
+        log.bytes = impl->log;
+        log.steps = impl->loggedSteps;
+        return log;
+    }
+
+    ReplayResult PhysicsWorld::replay(const PhysicsLog& log) {
+        ReplayResult result;
+        const std::vector<uint8_t>& in = log.bytes;
+        size_t at = 0;
+        uint32_t magic = 0, version = 0;
+        PhysicsSettings settings;
+        if (!get(in, at, magic) || magic != LOG_MAGIC || !get(in, at, version) || version != LOG_VERSION ||
+            !readSettings(in, at, settings)) {
+            result.problem = "not a physics recording (or another version)";
+            return result;
+        }
+        settings.record = false;
+        PhysicsWorld world(settings);
+        auto build = [&](const utils::CollisionPieces& pieces) { return world.shapeFromPieces(pieces); };
+        auto truncated = [&] {
+            result.problem = "the recording is truncated after step " + std::to_string(result.stepsReplayed);
+            return result;
+        };
+        while (at < in.size()) {
+            uint8_t raw = in[at++];
+            uint32_t id = 0;
+            core::vec3 a{0.0f}, b{0.0f};
+            core::quat q{1.0f, 0.0f, 0.0f, 0.0f};
+            float dt = 0.0f;
+            switch (Op(raw)) {
+                case Op::Create: {
+                    BodyDesc desc;
+                    uint32_t expected = 0;
+                    if (!readDesc(in, at, desc, build) || !get(in, at, expected)) return truncated();
+                    BodyId made = world.createBody(desc);
+                    if (made.value != expected) {
+                        result.firstDivergentStep = result.stepsReplayed + 1;
+                        result.problem = "a body was given a different id than when recorded";
+                        return result;
+                    }
+                    break;
+                }
+                case Op::Destroy:
+                    if (!get(in, at, id)) return truncated();
+                    world.destroyBody(BodyId{id});
+                    break;
+                case Op::Impulse:
+                    if (!get(in, at, id) || !get(in, at, a)) return truncated();
+                    world.addImpulse(BodyId{id}, a);
+                    break;
+                case Op::AngularImpulse:
+                    if (!get(in, at, id) || !get(in, at, a)) return truncated();
+                    world.addAngularImpulse(BodyId{id}, a);
+                    break;
+                case Op::AddVelocity:
+                    if (!get(in, at, id) || !get(in, at, a)) return truncated();
+                    world.addVelocity(BodyId{id}, a);
+                    break;
+                case Op::SetVelocity:
+                    if (!get(in, at, id) || !get(in, at, a) || !get(in, at, b)) return truncated();
+                    world.setVelocity(BodyId{id}, a, b);
+                    break;
+                case Op::SetPose:
+                    if (!get(in, at, id) || !get(in, at, a) || !get(in, at, q)) return truncated();
+                    world.setPose(BodyId{id}, a, q);
+                    break;
+                case Op::MoveKinematic:
+                    if (!get(in, at, id) || !get(in, at, a) || !get(in, at, q) || !get(in, at, dt)) return truncated();
+                    world.moveKinematic(BodyId{id}, a, q, dt);
+                    break;
+                case Op::Gravity:
+                    if (!get(in, at, a)) return truncated();
+                    world.setGravity(a);
+                    break;
+                case Op::Step: {
+                    uint64_t expected = 0;
+                    if (!get(in, at, dt) || !get(in, at, expected)) return truncated();
+                    world.step(dt);
+                    result.stepsReplayed++;
+                    if (world.stateHash() != expected) {
+                        result.firstDivergentStep = result.stepsReplayed;
+                        result.problem = "the state after step " + std::to_string(result.stepsReplayed) +
+                                         " differs from the recording";
+                        return result;
+                    }
+                    break;
+                }
+                case Op::Restore: {
+                    uint64_t size = 0;
+                    if (!get(in, at, size) || in.size() - at < size) return truncated();
+                    std::vector<uint8_t> snapshot(in.begin() + long(at), in.begin() + long(at + size));
+                    at += size;
+                    world.restoreState(snapshot);
+                    break;
+                }
+                default:
+                    result.problem = "an unknown record after step " + std::to_string(result.stepsReplayed);
+                    return result;
+            }
+        }
+        result.matched = true;
+        return result;
+    }
+
+    bool PhysicsLog::saveToFile(const std::string& path) const {
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        if (!file) return false;
+        file.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+        return bool(file);
+    }
+
+    bool PhysicsLog::loadFromFile(const std::string& path, PhysicsLog& out) {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) return false;
+        out.bytes.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        out.steps = 0;   // counted again by replay
+        return true;
+    }
 }

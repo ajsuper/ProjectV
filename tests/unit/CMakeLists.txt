@@ -26,6 +26,7 @@ add_executable(projv_unit_tests
     test_input.cpp
     test_local_ids.cpp
     test_loose_bvh.cpp
+    test_physics_net.cpp
     test_physics_reliability.cpp
     test_physics_runtime.cpp
     test_physics_world.cpp

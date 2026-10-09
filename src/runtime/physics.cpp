@@ -6,6 +6,8 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <cstring>
+#include <tuple>
 
 #include <glm/gtc/quaternion.hpp>
 
@@ -17,12 +19,11 @@ namespace projv::runtime {
     namespace {
         // ---- The physics resource, in world.ctx() ---------------------------------------------
 
+        // A command as queued: the public one, plus the local entity when it was issued here (an
+        // entity without a NetId can still be pushed).
         struct Command {
-            enum class Kind : uint8_t { Impulse, AngularImpulse, AddVelocity, SetVelocity, Teleport, Gravity };
-            Kind       kind;
-            Entity     entity = NullEntity;
-            core::vec3 a{0.0f}, b{0.0f};
-            core::quat q{1.0f, 0.0f, 0.0f, 0.0f};
+            PhysicsCommand c;
+            Entity         entity = NullEntity;
         };
 
         struct PhysicsRuntime {
@@ -31,7 +32,9 @@ namespace projv::runtime {
             bool                          destroyLeavers = true;
             uint64_t                      seenDroppedSteps = 0;
             uint64_t                      lastSlowWarningTick = 0;
-            std::vector<Command>          commands;     // in the order issued
+            std::vector<Command>          commands;     // waiting; applied by stamp, not arrival
+            uint32_t                      sequence = 0;
+            uint64_t                      late = 0;
             std::vector<BodyId>           doomed;       // bodies whose entity or component went
             std::vector<Entity>           pending;      // want a body made (or remade)
             std::vector<Entity>           rebuild;      // want their body destroyed, then remade
@@ -280,10 +283,16 @@ namespace projv::runtime {
             }
             physics.rebuild.clear();
 
-            // 3. New bodies, in entity order.
+            // 3. New bodies: those with NetIds first, by NetId -- the order every peer agrees on -- then
+            //    the local-only rest, by entity.
             std::vector<Entity> pending;
             pending.swap(physics.pending);
-            std::sort(pending.begin(), pending.end());
+            auto order = [&](Entity e) {
+                const NetId* id = world.valid(e) ? world.try_get<NetId>(e) : nullptr;
+                uint32_t net = id ? id->value : 0;
+                return std::make_tuple(net == 0, net, e);
+            };
+            std::sort(pending.begin(), pending.end(), [&](Entity a, Entity b) { return order(a) < order(b); });
             pending.erase(std::unique(pending.begin(), pending.end()), pending.end());
             for (Entity e : pending) {
                 if (!wantsBody(world, e) || world.all_of<PhysicsBody>(e)) continue;
@@ -304,26 +313,35 @@ namespace projv::runtime {
                 world.emplace<PhysicsBody>(e, body);
             }
 
-            // 4. Commands, in the order they were issued.
-            std::vector<Command> commands;
-            commands.swap(physics.commands);
-            for (const Command& c : commands) {
-                if (c.kind == Command::Kind::Gravity) { sim.setGravity(c.a); continue; }
-                PhysicsBody* body = world.valid(c.entity) ? world.try_get<PhysicsBody>(c.entity) : nullptr;
+            // 4. Commands due at this step, in (tick, issuer, sequence) order. Later ones wait.
+            const uint64_t thisTick = sim.tick() + 1;
+            std::vector<Command> due, later;
+            for (Command& c : physics.commands) (c.c.tick <= thisTick ? due : later).push_back(c);
+            physics.commands.swap(later);
+            std::stable_sort(due.begin(), due.end(), [](const Command& x, const Command& y) {
+                return std::tie(x.c.tick, x.c.issuer, x.c.sequence) < std::tie(y.c.tick, y.c.issuer, y.c.sequence);
+            });
+            using Kind = PhysicsCommand::Kind;
+            for (const Command& command : due) {
+                const PhysicsCommand& c = command.c;
+                if (c.tick < thisTick) physics.late++;
+                if (c.kind == Kind::Gravity) { sim.setGravity(c.a); continue; }
+                Entity target = command.entity != NullEntity ? command.entity : entityForNetId(world, c.target);
+                PhysicsBody* body = world.valid(target) ? world.try_get<PhysicsBody>(target) : nullptr;
                 if (!body) continue;
                 switch (c.kind) {
-                    case Command::Kind::Impulse:        sim.addImpulse(body->id, c.a); break;
-                    case Command::Kind::AngularImpulse: sim.addAngularImpulse(body->id, c.a); break;
-                    case Command::Kind::AddVelocity:    sim.addVelocity(body->id, c.a); break;
-                    case Command::Kind::SetVelocity:    sim.setVelocity(body->id, c.a, c.b); break;
-                    case Command::Kind::Teleport:
+                    case Kind::Impulse:        sim.addImpulse(body->id, c.a); break;
+                    case Kind::AngularImpulse: sim.addAngularImpulse(body->id, c.a); break;
+                    case Kind::AddVelocity:    sim.addVelocity(body->id, c.a); break;
+                    case Kind::SetVelocity:    sim.setVelocity(body->id, c.a, c.b); break;
+                    case Kind::Teleport:
                         sim.setPose(body->id, c.a, c.q);
                         // Not interpolated from where it was: a teleport is a jump, drawn as one.
                         body->previousPosition = body->position = c.a;
                         body->previousRotation = body->rotation = glm::normalize(c.q);
                         body->presented = false;
                         break;
-                    case Command::Kind::Gravity: break;
+                    case Kind::Gravity: break;
                 }
             }
 
@@ -378,8 +396,11 @@ namespace projv::runtime {
                 send(world, SimulationSlow{time.droppedFixedSteps});
                 if (sim.tick() >= physics.lastSlowWarningTick + 300 || physics.lastSlowWarningTick == 0) {
                     physics.lastSlowWarningTick = sim.tick();
-                    core::warn("physics: running slower than real time ({} fixed steps dropped so far); the "
-                               "last step took {:.2f} ms", time.droppedFixedSteps, sim.stats().lastStepMilliseconds);
+                    // Say where the time went: a frame hitch (a load, a window drag) drops steps too,
+                    // and then physics is not what to look at.
+                    core::warn("physics: frames fell behind the fixed clock and {} fixed steps were dropped so far "
+                               "(the simulation runs slower than real time while that lasts); the last physics "
+                               "step took {:.2f} ms", time.droppedFixedSteps, sim.stats().lastStepMilliseconds);
                 }
             }
         }
@@ -412,7 +433,56 @@ namespace projv::runtime {
             physics.writingTransforms = false;
         }
 
-        void queue(World& world, Command command) { runtimeOf(world).commands.push_back(command); }
+        // A local command: for the next step, issuer 0, in issue order.
+        void queue(World& world, PhysicsCommand::Kind kind, Entity entity, core::vec3 a, core::vec3 b = core::vec3(0.0f),
+                   core::quat q = core::quat(1, 0, 0, 0)) {
+            PhysicsRuntime& physics = runtimeOf(world);
+            Command command;
+            command.c.kind = kind;
+            command.c.a = a;
+            command.c.b = b;
+            command.c.q = q;
+            command.c.tick = physics.world->tick() + 1;
+            command.c.sequence = physics.sequence++;
+            if (entity != NullEntity && world.valid(entity)) {
+                command.entity = entity;
+                if (const NetId* id = world.try_get<NetId>(entity)) command.c.target = *id;
+            }
+            physics.commands.push_back(command);
+        }
+
+        struct Hash {
+            uint64_t value = 1469598103934665603ull;
+            template <typename T> void add(const T& v) {
+                const auto* p = reinterpret_cast<const uint8_t*>(&v);
+                for (size_t i = 0; i < sizeof(T); i++) { value ^= p[i]; value *= 1099511628211ull; }
+            }
+        };
+
+        // Bodies in the order the hash and the snapshot use: NetId order, then the rest by entity.
+        std::vector<std::pair<Entity, uint32_t>> bodiesInOrder(const World& world) {
+            std::vector<std::pair<Entity, uint32_t>> out;
+            for (auto [entity, body] : world.view<PhysicsBody>().each()) {
+                const NetId* id = world.try_get<NetId>(entity);
+                out.push_back({entity, id ? id->value : 0});
+            }
+            std::sort(out.begin(), out.end(), [](const auto& x, const auto& y) {
+                return std::make_tuple(x.second == 0, x.second, x.first) < std::make_tuple(y.second == 0, y.second, y.first);
+            });
+            return out;
+        }
+
+        template <typename T> void put(std::vector<uint8_t>& out, const T& v) {
+            const auto* p = reinterpret_cast<const uint8_t*>(&v);
+            out.insert(out.end(), p, p + sizeof(T));
+        }
+        template <typename T> bool get(const std::vector<uint8_t>& in, size_t& at, T& v) {
+            if (at > in.size() || in.size() - at < sizeof(T)) return false;
+            std::memcpy(&v, in.data() + at, sizeof(T));
+            at += sizeof(T);
+            return true;
+        }
+        constexpr uint32_t RUNTIME_SNAPSHOT_MAGIC = 0x52564a50u;   // "PJVR"
 
         // ---- entities.json helpers -------------------------------------------------------------------
 
@@ -438,6 +508,7 @@ namespace projv::runtime {
         physics.collision = config.collision;
         physics.destroyLeavers = config.destroyBodiesThatLeaveTheWorld;
 
+        installNetIds(world);
         registerComponent<RigidBody>(world);
         registerComponent<StaticCollider>(world);
 
@@ -459,16 +530,116 @@ namespace projv::runtime {
     PhysicsWorld& physicsWorld(World& world) { return *runtimeOf(world).world; }
     const PhysicsWorld& physicsWorld(const World& world) { return *world.ctx().get<PhysicsRuntime>().world; }
 
-    void addImpulse(World& world, Entity e, core::vec3 v) { queue(world, {Command::Kind::Impulse, e, v}); }
-    void addAngularImpulse(World& world, Entity e, core::vec3 v) { queue(world, {Command::Kind::AngularImpulse, e, v}); }
-    void addVelocity(World& world, Entity e, core::vec3 v) { queue(world, {Command::Kind::AddVelocity, e, v}); }
+    using Kind = PhysicsCommand::Kind;
+    void addImpulse(World& world, Entity e, core::vec3 v) { queue(world, Kind::Impulse, e, v); }
+    void addAngularImpulse(World& world, Entity e, core::vec3 v) { queue(world, Kind::AngularImpulse, e, v); }
+    void addVelocity(World& world, Entity e, core::vec3 v) { queue(world, Kind::AddVelocity, e, v); }
     void setVelocity(World& world, Entity e, core::vec3 linear, core::vec3 angular) {
-        queue(world, {Command::Kind::SetVelocity, e, linear, angular});
+        queue(world, Kind::SetVelocity, e, linear, angular);
     }
     void teleport(World& world, Entity e, core::vec3 position, core::quat rotation) {
-        queue(world, {Command::Kind::Teleport, e, position, core::vec3(0.0f), rotation});
+        queue(world, Kind::Teleport, e, position, core::vec3(0.0f), rotation);
     }
-    void setGravity(World& world, core::vec3 gravity) { queue(world, {Command::Kind::Gravity, NullEntity, gravity}); }
+    void setGravity(World& world, core::vec3 gravity) { queue(world, Kind::Gravity, NullEntity, gravity); }
+
+    void submitCommand(World& world, const PhysicsCommand& command) {
+        runtimeOf(world).commands.push_back(Command{command, NullEntity});
+    }
+    uint64_t nextPhysicsTick(const World& world) { return physicsWorld(world).tick() + 1; }
+    uint64_t lateCommands(const World& world) { return world.ctx().get<PhysicsRuntime>().late; }
+
+    uint64_t physicsStateHash(const World& world) {
+        const PhysicsWorld& sim = physicsWorld(world);
+        Hash h;
+        h.add(sim.tick());
+        for (auto [entity, net] : bodiesInOrder(world)) {
+            BodyState s = sim.bodyState(world.get<PhysicsBody>(entity).id);
+            h.add(net);
+            if (net == 0) h.add(entity);
+            h.add(s.position); h.add(s.rotation); h.add(s.linearVelocity); h.add(s.angularVelocity);
+            h.add(uint8_t(s.awake));
+        }
+        return h.value;
+    }
+
+    std::vector<uint8_t> savePhysics(const World& world) {
+        const PhysicsRuntime& physics = world.ctx().get<PhysicsRuntime>();
+        std::vector<uint8_t> out;
+        put(out, RUNTIME_SNAPSHOT_MAGIC);
+        std::vector<uint8_t> sim = physics.world->saveState();
+        put(out, uint64_t(sim.size()));
+        out.insert(out.end(), sim.begin(), sim.end());
+        auto bodies = bodiesInOrder(world);
+        put(out, uint32_t(bodies.size()));
+        for (auto [entity, net] : bodies) {
+            const PhysicsBody& b = world.get<PhysicsBody>(entity);
+            put(out, net);
+            put(out, entity);
+            put(out, b.previousPosition); put(out, b.position); put(out, b.previousRotation); put(out, b.rotation);
+        }
+        put(out, uint32_t(physics.commands.size()));
+        for (const Command& c : physics.commands) { put(out, c.c); put(out, c.entity); }
+        put(out, physics.sequence);
+        return out;
+    }
+
+    bool restorePhysics(World& world, const std::vector<uint8_t>& snapshot) {
+        PhysicsRuntime& physics = runtimeOf(world);
+        size_t at = 0;
+        uint32_t magic = 0, count = 0, commandCount = 0, sequence = 0;
+        uint64_t simSize = 0;
+        if (!get(snapshot, at, magic) || magic != RUNTIME_SNAPSHOT_MAGIC || !get(snapshot, at, simSize) ||
+            snapshot.size() - at < simSize) {
+            core::warn("physics: restorePhysics refused: not a physics snapshot");
+            return false;
+        }
+        std::vector<uint8_t> sim(snapshot.begin() + long(at), snapshot.begin() + long(at + simSize));
+        at += simSize;
+        struct Saved { uint32_t net; Entity entity; PhysicsBody poses; };
+        std::vector<Saved> saved;
+        if (!get(snapshot, at, count)) return false;
+        for (uint32_t i = 0; i < count; i++) {
+            Saved s{};
+            if (!get(snapshot, at, s.net) || !get(snapshot, at, s.entity) || !get(snapshot, at, s.poses.previousPosition) ||
+                !get(snapshot, at, s.poses.position) || !get(snapshot, at, s.poses.previousRotation) ||
+                !get(snapshot, at, s.poses.rotation)) {
+                core::warn("physics: restorePhysics refused: the snapshot is truncated");
+                return false;
+            }
+            saved.push_back(s);
+        }
+        std::vector<Command> commands;
+        if (!get(snapshot, at, commandCount)) return false;
+        for (uint32_t i = 0; i < commandCount; i++) {
+            Command c;
+            if (!get(snapshot, at, c.c) || !get(snapshot, at, c.entity)) return false;
+            commands.push_back(c);
+        }
+        if (!get(snapshot, at, sequence)) return false;
+
+        // The same bodies, matched by NetId (or by entity, for those without): checked before
+        // anything is touched.
+        auto bodies = bodiesInOrder(world);
+        bool same = bodies.size() == saved.size();
+        for (size_t i = 0; same && i < bodies.size(); i++)
+            same = bodies[i].second == saved[i].net && (saved[i].net != 0 || bodies[i].first == saved[i].entity);
+        if (!same) {
+            core::warn("physics: restorePhysics refused: the snapshot's bodies are not this world's");
+            return false;
+        }
+        if (!physics.world->restoreState(sim)) return false;
+        for (size_t i = 0; i < bodies.size(); i++) {
+            PhysicsBody& b = world.get<PhysicsBody>(bodies[i].first);
+            b.previousPosition = saved[i].poses.previousPosition;
+            b.position = saved[i].poses.position;
+            b.previousRotation = saved[i].poses.previousRotation;
+            b.rotation = saved[i].poses.rotation;
+            b.presented = false;
+        }
+        physics.commands = std::move(commands);
+        physics.sequence = sequence;
+        return true;
+    }
 
     BodyState bodyPose(const World& world, Entity entity) {
         if (!world.valid(entity)) return {};

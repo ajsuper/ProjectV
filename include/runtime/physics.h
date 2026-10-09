@@ -8,6 +8,7 @@
 #include "core/application.h"
 #include "core/world.h"
 #include "runtime/entities.h"
+#include "runtime/net.h"
 #include "runtime/physics/physics_world.h"
 #include "runtime/scene_bridge.h"
 
@@ -138,6 +139,39 @@ namespace projv::runtime {
     // Moves a body without sweeping it; velocity kept. Its Transform follows, uninterpolated.
     void teleport(World& world, Entity entity, core::vec3 position, core::quat rotation);
     void setGravity(World& world, core::vec3 gravity);
+
+    // ---- Commands from elsewhere: a server, a peer, a replay --------------------------------------
+    // The same commands, named by NetId rather than Entity, and stamped with the fixed step they
+    // belong to. A command applies just before the step that takes PhysicsWorld::tick() to `tick`,
+    // and the commands of a step apply in (tick, issuer, sequence) order -- never in the order they
+    // happened to arrive. Local commands (the calls above) are stamped for the next step with
+    // issuer 0 and a running sequence. One stamped for a step already run applies at the next one,
+    // and is counted (lateCommands): a networked game that sees them is falling behind.
+    struct PhysicsCommand {
+        enum class Kind : uint8_t { Impulse, AngularImpulse, AddVelocity, SetVelocity, Teleport, Gravity };
+        Kind       kind = Kind::Impulse;
+        NetId      target;                  // ignored for Gravity
+        core::vec3 a{0.0f}, b{0.0f};        // impulse / velocity / position; b: angular velocity
+        core::quat q{1.0f, 0.0f, 0.0f, 0.0f};   // Teleport
+        uint64_t   tick = 0;
+        uint16_t   issuer = 0;
+        uint32_t   sequence = 0;
+    };
+    void submitCommand(World& world, const PhysicsCommand& command);
+    // The step a command issued now lands on.
+    uint64_t nextPhysicsTick(const World& world);
+    uint64_t lateCommands(const World& world);
+
+    // ---- State, for comparing and for rewinding ---------------------------------------------------
+    // A hash of every body's pose and velocities, keyed by NetId (bodies without one follow, in
+    // entity order): two peers with the same NetIds and the same simulation hash the same, whatever
+    // their local ids are.
+    uint64_t physicsStateHash(const World& world);
+    // Everything the physics runtime would need to rewind to now: the simulation, each body's
+    // presentation poses, and the commands waiting for later steps. Restore needs the same bodies
+    // (by NetId, or entity for those without), and changes nothing when it refuses.
+    std::vector<uint8_t> savePhysics(const World& world);
+    bool restorePhysics(World& world, const std::vector<uint8_t>& snapshot);
 
     // Where the simulation has the body: the end of the last fixed step, not the interpolated pose
     // that is drawn. Default (and `awake` false) for an entity with no body.

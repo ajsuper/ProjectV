@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "core/math.h"
@@ -66,6 +67,8 @@ namespace projv::runtime {
         uint32_t                 pieces = 0;
         float                    volume = 0.0f;   // in voxels (cubic voxel units)
         utils::CollisionFallback fallback = utils::CollisionFallback::None;
+        // What it was built from, kept so a recording can carry the shape as data.
+        std::shared_ptr<const utils::CollisionPieces> source;
         struct Native;                            // the Jolt shape; defined where Jolt is
         std::shared_ptr<Native>  native;
     };
@@ -198,6 +201,12 @@ namespace projv::runtime {
         int        velocitySteps = 15;
         int        positionSteps = 2;
 
+        // Record every call that changes the simulation, from construction on, with the state hash
+        // after each step: PhysicsWorld::recording() returns it, and PhysicsWorld::replay plays it
+        // into a fresh world and says whether every step came out the same. A determinism check
+        // end to end, and a file a physics bug can be reported with.
+        bool       record = false;
+
         // Worker threads for the step: 0 runs it on the calling thread alone, -1 picks from the
         // machine (one fewer than it has cores, at most 7). Results do not depend on the count --
         // a test holds that -- so this is a speed setting only.
@@ -218,6 +227,21 @@ namespace projv::runtime {
         uint64_t leftWorld = 0;         // reports of bodies outside the world bounds
         double   lastStepMilliseconds = 0.0;   // wall time of the last step(), for profiling only
         int      threads = 0;           // worker threads the step uses (0: the calling thread)
+    };
+
+    // Everything a simulation was given, in order: what replay needs to run it again.
+    struct PhysicsLog {
+        std::vector<uint8_t> bytes;
+        uint64_t             steps = 0;
+        bool saveToFile(const std::string& path) const;
+        static bool loadFromFile(const std::string& path, PhysicsLog& out);
+    };
+
+    struct ReplayResult {
+        bool        matched = false;      // every step's state hash equal to the recording's
+        uint64_t    stepsReplayed = 0;
+        uint64_t    firstDivergentStep = 0;   // 1-based; 0 when none diverged
+        std::string problem;              // why it did not match, for a log
     };
 
     class PhysicsWorld {
@@ -289,6 +313,12 @@ namespace projv::runtime {
         // order, plus the tick. Equal hashes: the same simulation state, for every practical purpose.
         uint64_t stateHash() const;
 
+        // What has been recorded so far (PhysicsSettings::record), or an empty log.
+        PhysicsLog recording() const;
+        // Runs a recording in a fresh world made with the recorded settings, and compares every
+        // step's state hash with the one recorded.
+        static ReplayResult replay(const PhysicsLog& log);
+
         // Bodies found outside the world bounds since the last call, in body id order. Each is
         // reported once per excursion: again only after it has come back inside.
         std::vector<BodyId> takeBodiesThatLeftTheWorld();
@@ -302,6 +332,7 @@ namespace projv::runtime {
 
     private:
         void sanityPass(float dt);
+        BodyId createBodyUnrecorded(const BodyDesc& desc);
         struct Impl;
         std::unique_ptr<Impl> impl;
     };

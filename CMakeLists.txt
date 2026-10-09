@@ -268,6 +268,7 @@ add_library(projectV STATIC
     src/graphics/type_mapping.cpp
 
     src/runtime/entities.cpp
+    src/runtime/net.cpp
     src/runtime/physics.cpp
     src/runtime/scene_bridge.cpp
 

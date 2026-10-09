@@ -95,6 +95,10 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   is the core. It must stay deterministic and restorable: no clocks, thread counts or unordered
   iteration in anything that feeds a step, and a Jolt upgrade is deliberate, with the physics
   tests run. Plan: `~/Documents/ProjectVPlans/physics-jolt.md`.
+- **What crosses machines is a `NetId`** (`runtime/net.h`), never an Entity, handle, ref or body
+  id. Physics makes a step's new bodies in NetId order and applies commands in
+  (tick, issuer, sequence) order, so nothing that feeds a step may depend on registry or arrival
+  order. `PhysicsSettings::record` + `PhysicsWorld::replay` check a whole session for determinism.
 - **Where data goes.** Engine-read data: a `ComponentRecord` field. Data *about the voxel structure*
   written by tools (editor boolean ops, primitive parameters): an attachment (`utils/attachments.h`),
   saved in compose.json. What a running program *does* (physics, spawners, gameplay): ECS components
