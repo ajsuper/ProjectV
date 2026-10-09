@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 3.20) # bgfx.cmake requires 3.20.
+# $<LINK_ONLY:...> in a target's own link libraries: how the engine links Jolt without taking on
+# its compile flags (see projv_physics). CMake 3.24+; older versions fall back to passing Jolt's
+# flags to the whole engine, which builds and runs the same but needs the same CPU features.
+if(POLICY CMP0131)
+    cmake_policy(SET CMP0131 NEW)
+endif()
 # C as well as C++: several dependencies and one example bring C sources -- bgfx's 3rdparty,
 # Assimp's bundled zlib, and Lua, which the SceneEditor's brush system embeds.
 project(ProjectV VERSION 0.1.0 LANGUAGES C CXX)
@@ -184,6 +190,43 @@ if(NOT TARGET EnTT::EnTT)
     set(PROJV_VENDORED_DEPS ON)
 endif()
 
+# Jolt Physics: the dynamics library (runtime/physics). Pinned (v5.6.0); upgrade it deliberately,
+# with the physics determinism tests run, because a new Jolt can change simulation results.
+#
+# The options are part of the engine's contract, not tuning:
+# - CROSS_PLATFORM_DETERMINISTIC: the same inputs give bit-identical results on every platform
+#   and compiler Jolt supports. Networking, replays and the save/restore tests rest on it.
+# - CPP_RTTI_ENABLED: our physics code subclasses Jolt interfaces and is compiled with RTTI, which
+#   needs the base classes' typeinfo; Jolt without RTTI would leave it undefined at link time.
+# - USE_ASSERTS: misuse fails loudly in the dev build. PROJV_PHYSICS_ASSERTS, off in release.
+# - Everything Jolt can build that the engine does not use (GPU compute, the debug renderer, the
+#   profiler, object streams, LTO, warnings-as-errors) is off.
+option(PROJV_PHYSICS_ASSERTS "Build Jolt with its assertions on" ON)
+find_package(Jolt CONFIG QUIET)
+if(NOT TARGET Jolt::Jolt)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/JoltPhysics/Build/CMakeLists.txt")
+        message(FATAL_ERROR "Jolt was not found and external/JoltPhysics is missing: run "
+                            "`git submodule update --init external/JoltPhysics`, or install Jolt.")
+    endif()
+    set(CROSS_PLATFORM_DETERMINISTIC ON CACHE BOOL "" FORCE)
+    set(DOUBLE_PRECISION OFF CACHE BOOL "" FORCE)
+    set(CPP_RTTI_ENABLED ON CACHE BOOL "" FORCE)
+    set(USE_ASSERTS ${PROJV_PHYSICS_ASSERTS} CACHE BOOL "" FORCE)
+    set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
+    set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+    set(ENABLE_OBJECT_STREAM OFF CACHE BOOL "" FORCE)
+    set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+    set(PROFILER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+    set(JPH_USE_DX12 OFF CACHE BOOL "" FORCE)
+    set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
+    set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
+    set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+    set(JPH_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(ENABLE_INSTALL ${PROJV_INSTALL} CACHE BOOL "" FORCE)
+    add_subdirectory(external/JoltPhysics/Build)
+    set(PROJV_VENDORED_DEPS ON)
+endif()
+
 # GLFW has no submodule; it is a system package on every platform ProjectV supports.
 find_package(glfw3 CONFIG QUIET)
 if(glfw3_FOUND)
@@ -295,6 +338,28 @@ target_link_libraries(projectV PUBLIC
     EnTT::EnTT
     ${PROJV_GLFW_TARGET}
 )
+
+# The physics sources are the only code that includes Jolt (the `layering` test enforces it), and
+# they are compiled apart from the rest of the engine: Jolt's usage requirements carry its SIMD
+# flags (-mavx2 and friends) and its configuration defines, which must reach every file that
+# includes a Jolt header and no other. -ffp-contract=off keeps the compiler from fusing our own
+# multiply-adds in code that feeds the simulation, the same rule Jolt's deterministic build follows.
+add_library(projv_physics OBJECT
+    src/runtime/physics/physics_world.cpp
+)
+target_include_directories(projv_physics PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(projv_physics PRIVATE cxx_std_20)
+target_compile_definitions(projv_physics PRIVATE ${PROJV_LOG_DEFS})
+target_compile_options(projv_physics PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra;-ffp-contract=off>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4;/fp:precise>
+    ${PROJV_OPTIMISED_BUILD_FLAGS}
+)
+target_link_libraries(projv_physics PRIVATE
+    Jolt::Jolt bgfx::bx ${PROJV_GLM_TARGET} ${PROJV_SPDLOG_TARGET} nlohmann_json::nlohmann_json EnTT::EnTT)
+target_sources(projectV PRIVATE $<TARGET_OBJECTS:projv_physics>)
+# Link only: Jolt's compile flags and defines stay on projv_physics.
+target_link_libraries(projectV PRIVATE $<LINK_ONLY:Jolt::Jolt>)
 
 if(APPLE)
     target_link_libraries(projectV PUBLIC

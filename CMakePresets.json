@@ -21,7 +21,8 @@
             "binaryDir": "${sourceDir}/build-release",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
-                "PROJV_LOG_MINIMAL": "ON"
+                "PROJV_LOG_MINIMAL": "ON",
+                "PROJV_PHYSICS_ASSERTS": "OFF"
             }
         },
         {

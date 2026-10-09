@@ -49,7 +49,7 @@ cmake --preset dev -DPROJV_BUILD_MANUAL_TESTS=ON
 Presets: `dev` (default), `release` (`PROJV_LOG_MINIMAL=ON`), `vcpkg` (every dependency through
 `find_package`, so the install carries only ProjectV rather than the vendored copies too).
 
-Options: `PROJV_BUILD_EXAMPLES`, `PROJV_BUILD_TESTS`, `PROJV_BUILD_MANUAL_TESTS`, `PROJV_USE_X11`, `PROJV_LOG_MINIMAL`,
+Options: `PROJV_PHYSICS_ASSERTS` (Jolt's asserts; off in `release`), `PROJV_BUILD_EXAMPLES`, `PROJV_BUILD_TESTS`, `PROJV_BUILD_MANUAL_TESTS`, `PROJV_USE_X11`, `PROJV_LOG_MINIMAL`,
 and the seven `PROJV_LOG_<CATEGORY>` switches. They are `PUBLIC` on the target, so consumers
 inherit them.
 
@@ -82,6 +82,12 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 - Create rows through the engine (`addComponent`, `reserveComponentSlot`/`placeComponent`,
   `allocateChunkSlot`), not `push_back`, so freed rows are reused; the top-level components are
   `utils::rootComponents`.
+- **Physics is Jolt, and only `src/runtime/physics/` includes it** (the `layering` ctest enforces
+  it). Those files build as the `projv_physics` object library with Jolt's SIMD flags and defines;
+  no public header names a Jolt type. `runtime::PhysicsWorld` (`runtime/physics/physics_world.h`)
+  is the core. It must stay deterministic and restorable: no clocks, thread counts or unordered
+  iteration in anything that feeds a step, and a Jolt upgrade is deliberate, with the physics
+  tests run. Plan: `~/Documents/ProjectVPlans/physics-jolt.md`.
 - **Where data goes.** Engine-read data: a `ComponentRecord` field. Data *about the voxel structure*
   written by tools (editor boolean ops, primitive parameters): an attachment (`utils/attachments.h`),
   saved in compose.json. What a running program *does* (physics, spawners, gameplay): ECS components

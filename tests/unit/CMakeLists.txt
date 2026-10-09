@@ -25,6 +25,7 @@ add_executable(projv_unit_tests
     test_input.cpp
     test_local_ids.cpp
     test_loose_bvh.cpp
+    test_physics_world.cpp
     test_slot_reuse.cpp
     test_scene_bridge.cpp
     test_scene_delete.cpp
