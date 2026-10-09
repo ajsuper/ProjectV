@@ -12,9 +12,13 @@
 //   The arena is data too.           scene/compose.json is the arena and two pylons;
 //                                    scene/entities.json gives each pylon a Spawner. No line of this
 //                                    file names a pylon.
-//   Physics is FixedUpdate.          60 steps a second whatever the frame rate; Update draws each
-//                                    body between its last two steps by Time::fixedAlpha, so slow
-//                                    motion (T) is smooth rather than steppy.
+//   Physics is the engine's.         A prefab's entities.json gives it a physics.rigidbody (the
+//                                    ball a sphere, the crate and the bomb their own voxels); the
+//                                    arena's gives the floor, walls and pylons a physics.static.
+//                                    Jolt steps it 60 times a second in FixedUpdate, and each body
+//                                    is drawn between its last two steps, so slow motion (T) is
+//                                    smooth. This file never integrates or collides anything: it
+//                                    throws, pushes and pulls, with impulses and velocities.
 //   Popping is an event.             Right-click sends Popped. Three handlers answer it, none
 //                                    knowing about the others: a shockwave, a score, and removal.
 //                                    A bomb's handler pops its neighbours -- and because anything
@@ -55,6 +59,7 @@
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
 #include "runtime/entities.h"
+#include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
 #include "utils/compose_io.h"
 #include "utils/editing.h"
@@ -70,23 +75,18 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr float ARENA_HALF = 62.0f;    // inner face of the walls
-constexpr float FLOOR_TOP = 0.0f;
+constexpr float KILL_PLANE = -30.0f;   // a body below this has left the arena for good
+constexpr float GRAVITY = -28.0f, LOW_GRAVITY = -5.0f;
 constexpr size_t MAX_BODIES = 300;     // spawners hold off above this
 
 // =========================================================================================
 // Components: what the files say, and what runs
 // =========================================================================================
 
-// Physics state. The first four fields are what a prefab's entities.json says; the rest is the
-// simulation's, set up by setUpBody when the component is made, and never saved.
+// What a sandbox body is, beyond its physics: whether popping it sets off its neighbours. Its
+// shape, mass and bounce are its physics.rigidbody, which the engine simulates.
 struct Body {
-    float radius = 1.0f;
-    float restitution = 0.5f;    // bounciness, 0..1
-    float mass = 1.0f;
     float explosive = 0.0f;      // > 0: popping it pops everything within this radius
-    vec3 position{0.0f}, previous{0.0f}, velocity{0.0f}, spin{0.0f};
-    quat orientation{1, 0, 0, 0}, previousOrientation{1, 0, 0, 0};
-    float inverseMass = 1.0f;
 };
 
 // Launch a prefab every `interval` seconds. The first three fields are the file's.
@@ -103,17 +103,16 @@ double tidy(float v) { return std::round(double(v) * 1e4) / 1e4; }
 
 template<> struct projv::runtime::ComponentTraits<Body> {
     static constexpr const char* key = "sandbox.body";
-    static constexpr uint32_t version = 1;
+    // 2: the physics moved to physics.rigidbody. A version 1 value's radius, mass and restitution
+    // are ignored -- they described the sandbox's own sphere simulation, which is gone.
+    static constexpr uint32_t version = 2;
     static nlohmann::json save(const Body& b) {
-        nlohmann::json j{{"radius", tidy(b.radius)}, {"restitution", tidy(b.restitution)}, {"mass", tidy(b.mass)}};
+        nlohmann::json j = nlohmann::json::object();
         if (b.explosive > 0.0f) j["explosive"] = tidy(b.explosive);
         return j;
     }
     static std::optional<Body> load(const nlohmann::json& j, uint32_t) {
         Body b;
-        b.radius = j.value("radius", 1.0f);
-        b.restitution = j.value("restitution", 0.5f);
-        b.mass = j.value("mass", 1.0f);
         b.explosive = j.value("explosive", 0.0f);
         return b;
     }
@@ -141,7 +140,6 @@ struct Popping {};   // a Popped event is already on its way for this entity
 struct Popped {
     Entity entity;
     vec3 position;
-    float radius;
     float explosive;
 };
 
@@ -152,6 +150,8 @@ struct Sandbox {
     int selected = 0;
     int popped = 0;
     int spawnerLaunches = 0;
+    int lost = 0;             // left the arena (over a wall) and fell past the kill plane
+    int fellThrough = 0;      // ...from *inside* the walls: through the floor. Must stay 0.
     bool lowGravity = false;
     bool spawners = true;
     float titleTimer = 0.0f;
@@ -173,17 +173,6 @@ float uniform(Sandbox& s, float lo, float hi) { return std::uniform_real_distrib
 // Spawning
 // =========================================================================================
 
-// Setup a component needs from its entity, in on_construct: it runs after the link has seeded the
-// Transform, so a body starts where its prefab was placed.
-void setUpBody(World& world, Entity entity) {
-    Body& body = world.get<Body>(entity);
-    if (const auto* t = world.try_get<projv::Transform>(entity)) {
-        body.position = body.previous = t->position;
-        body.orientation = body.previousOrientation = t->rotation;
-    }
-    body.inverseMass = body.mass > 0.0f ? 1.0f / body.mass : 0.0f;
-}
-
 void setUpSpawner(World& world, Entity entity) {
     Spawner& spawner = world.get<Spawner>(entity);
     spawner.timer = spawner.interval * 0.5f;
@@ -196,9 +185,10 @@ void setUpSpawner(World& world, Entity entity) {
 Entity spawnPrefab(World& world, const std::string& kind, vec3 position, vec3 velocity) {
     auto& sandbox = world.ctx().get<Sandbox>();
     Entity entity = projv::runtime::instantiatePrefab(world, (sandbox.prefabs / kind).string(), position);
-    if (Body* body = world.try_get<Body>(entity)) {
-        body->velocity = velocity;
-        body->spin = vec3(uniform(sandbox, -3, 3), uniform(sandbox, -3, 3), uniform(sandbox, -3, 3));
+    // Its body is made at the next fixed step, and this applies right after: thrown, with a tumble.
+    if (entity != projv::NullEntity) {
+        vec3 spin(uniform(sandbox, -3, 3), uniform(sandbox, -3, 3), uniform(sandbox, -3, 3));
+        projv::runtime::setVelocity(world, entity, velocity, spin);
     }
     return entity;
 }
@@ -243,7 +233,10 @@ void controls(projv::Application& app) {
     if (input.pressed(projv::Key::Num3)) sandbox.selected = 2;
     if (input.pressed(projv::Key::T)) time.scale = time.scale == 1.0f ? 0.2f : 1.0f;
     if (input.pressed(projv::Key::P)) time.scale = time.scale == 0.0f ? 1.0f : 0.0f;
-    if (input.pressed(projv::Key::G)) sandbox.lowGravity = !sandbox.lowGravity;
+    if (input.pressed(projv::Key::G)) {
+        sandbox.lowGravity = !sandbox.lowGravity;
+        projv::runtime::setGravity(world, vec3(0, sandbox.lowGravity ? LOW_GRAVITY : GRAVITY, 0));
+    }
     if (input.pressed(projv::Key::X)) sandbox.spawners = !sandbox.spawners;
 
     const std::string& kind = sandbox.kinds[sandbox.selected];
@@ -271,29 +264,30 @@ void controls(projv::Application& app) {
             h = scene.components[h].parent;
         }
         if (target != projv::NullEntity && world.all_of<Body>(target) && !world.all_of<Popping>(target)) {
-            const Body& body = world.get<Body>(target);
             world.emplace<Popping>(target);
-            app.events().send(Popped{target, body.position, body.radius, body.explosive});
+            app.events().send(Popped{target, projv::runtime::bodyPose(world, target).position, world.get<Body>(target).explosive});
         }
     }
     if (input.pressed(projv::Key::C)) {
         for (Entity e : world.view<Body>()) {
-            if (!world.all_of<Popping>(e)) { world.emplace<Popping>(e); app.events().send(Popped{e, world.get<Body>(e).position, 0.0f, 0.0f}); }
+            if (!world.all_of<Popping>(e)) {
+                world.emplace<Popping>(e);
+                app.events().send(Popped{e, projv::runtime::bodyPose(world, e).position, 0.0f});
+            }
         }
     }
 }
 
-// FixedUpdate: launch from spawners, then integrate and collide. Every step is exactly fixedDelta.
-void physics(projv::Application& app) {
+// FixedUpdate: launch from spawners, pull with the tractor beam, and retire whatever has left the
+// arena. The engine's "physics" system, also on FixedUpdate, does the simulating; everything here
+// is commands to it, which land at the next step.
+void spawners(projv::Application& app) {
     World& world = app.world;
     auto& sandbox = world.ctx().get<Sandbox>();
-    const auto& input = world.ctx().get<projv::Input>();
-    const auto& camera = world.ctx().get<Camera>();
     const float dt = app.time().fixedDelta;
-    const float gravity = sandbox.lowGravity ? -5.0f : -28.0f;
 
-    // Spawners: requests are collected and made after the loop, so the loop never walks a storage
-    // that spawning is adding to.
+    // Requests are collected and made after the loop, so the loop never walks a storage that
+    // spawning is adding to.
     struct Launch { std::string kind; vec3 at, velocity; };
     std::vector<Launch> launches;
     size_t bodies = world.view<Body>().size();
@@ -309,86 +303,44 @@ void physics(projv::Application& app) {
     for (const Launch& l : launches) {
         if (spawnPrefab(world, l.kind, l.at, l.velocity) != projv::NullEntity) sandbox.spawnerLaunches++;
     }
+}
 
-    // Integrate.
-    const bool tractor = input.down(projv::Key::E);
+void tractorBeam(projv::Application& app) {
+    World& world = app.world;
+    if (!world.ctx().get<projv::Input>().down(projv::Key::E)) return;
+    const auto& camera = world.ctx().get<Camera>();
+    const float dt = app.time().fixedDelta;
     const vec3 beamPoint = camera.position + camera.forward() * 22.0f;
-    auto view = world.view<Body>();
-    for (auto [entity, b] : view.each()) {
-        b.previous = b.position;
-        b.previousOrientation = b.orientation;
-        b.velocity.y += gravity * dt;
-        if (tractor) {
-            vec3 pull = beamPoint - b.position;
-            float distance = glm::length(pull);
-            if (distance > 0.01f) b.velocity += pull / distance * std::min(distance, 30.0f) * 6.0f * dt;
-            b.velocity *= 1.0f - 2.5f * dt;   // damped, or everything orbits the beam point forever
-        }
-        b.position += b.velocity * dt;
-
-        // The floor and the walls.
-        if (b.position.y - b.radius < FLOOR_TOP) {
-            b.position.y = FLOOR_TOP + b.radius;
-            if (b.velocity.y < 0.0f) b.velocity.y = -b.velocity.y * b.restitution;
-            b.velocity.x *= 1.0f - 1.5f * dt;   // rolling friction
-            b.velocity.z *= 1.0f - 1.5f * dt;
-            // Roll with the ground rather than tumble freely.
-            vec3 rolling = glm::cross(vec3(0, 1, 0), b.velocity) / b.radius;
-            b.spin = glm::mix(b.spin, rolling, 0.25f);
-        }
-        for (int axis : {0, 2}) {
-            float limit = ARENA_HALF - b.radius;
-            if (b.position[axis] > limit)  { b.position[axis] = limit;  if (b.velocity[axis] > 0) b.velocity[axis] *= -b.restitution; }
-            if (b.position[axis] < -limit) { b.position[axis] = -limit; if (b.velocity[axis] < 0) b.velocity[axis] *= -b.restitution; }
-        }
-
-        float angle = glm::length(b.spin) * dt;
-        if (angle > 1e-5f) b.orientation = glm::normalize(glm::angleAxis(angle, glm::normalize(b.spin)) * b.orientation);
-    }
-
-    // Collide every pair. A few hundred bodies is a few tens of thousands of pairs, which is fine for
-    // a toy; a real broadphase is what the engine's content bounds (promotion #4) are for.
-    std::vector<Body*> all;
-    for (auto [entity, b] : view.each()) all.push_back(&b);
-    for (size_t i = 0; i < all.size(); i++) {
-        for (size_t j = i + 1; j < all.size(); j++) {
-            Body& a = *all[i];
-            Body& c = *all[j];
-            vec3 d = c.position - a.position;
-            float reach = a.radius + c.radius;
-            float distanceSquared = glm::dot(d, d);
-            if (distanceSquared >= reach * reach || distanceSquared < 1e-8f) continue;
-            float distance = std::sqrt(distanceSquared);
-            vec3 n = d / distance;
-            float totalInverse = a.inverseMass + c.inverseMass;
-            if (totalInverse <= 0.0f) continue;
-            float overlap = reach - distance;
-            a.position -= n * overlap * (a.inverseMass / totalInverse);
-            c.position += n * overlap * (c.inverseMass / totalInverse);
-            float approaching = glm::dot(c.velocity - a.velocity, n);
-            if (approaching < 0.0f) {
-                float e = std::min(a.restitution, c.restitution);
-                float impulse = -(1.0f + e) * approaching / totalInverse;
-                a.velocity -= n * impulse * a.inverseMass;
-                c.velocity += n * impulse * c.inverseMass;
-            }
-        }
+    for (Entity e : world.view<Body>()) {
+        projv::runtime::BodyState pose = projv::runtime::bodyPose(world, e);
+        vec3 pull = beamPoint - pose.position;
+        float distance = glm::length(pull);
+        vec3 change = -pose.linearVelocity * 2.5f * dt;   // damped, or everything orbits the beam point
+        if (distance > 0.01f) change += pull / distance * std::min(distance, 30.0f) * 6.0f * dt;
+        projv::runtime::addVelocity(world, e, change);
     }
 }
 
-// Update: draw each body where it is *between* its last two fixed steps. This is what keeps a
-// 60 Hz simulation smooth on a faster display, and slow motion smooth at all.
-void present(projv::Application& app) {
+// A body thrown over a wall falls forever; past the kill plane it is retired, and counted. One that
+// went from *inside* the walls went through the floor, which must never happen: the self-test fails
+// on it.
+void killPlane(projv::Application& app) {
     World& world = app.world;
-    const float alpha = app.time().fixedAlpha;
-    for (auto [entity, b] : world.view<Body>().each()) {
-        vec3 position = glm::mix(b.previous, b.position, alpha);
-        quat rotation = glm::slerp(b.previousOrientation, b.orientation, alpha);
-        world.patch<projv::Transform>(entity, [&](projv::Transform& t) {
-            t.position = position;
-            t.rotation = rotation;
-        });
+    auto& sandbox = world.ctx().get<Sandbox>();
+    std::vector<Entity> gone;
+    for (Entity e : world.view<Body>()) {
+        if (!projv::runtime::hasBody(world, e)) continue;
+        vec3 at = projv::runtime::bodyPose(world, e).position;
+        if (at.y > KILL_PLANE) continue;
+        gone.push_back(e);
+        sandbox.lost++;
+        if (std::abs(at.x) < ARENA_HALF - 1.0f && std::abs(at.z) < ARENA_HALF - 1.0f) {
+            sandbox.fellThrough++;
+            projv::core::error("sandbox: entity {} fell through the floor at ({:.1f}, {:.1f})",
+                               static_cast<uint32_t>(e), at.x, at.z);
+        }
     }
+    for (Entity e : gone) world.destroy(e);
 }
 
 void titleBar(projv::Application& app) {
@@ -464,11 +416,11 @@ void selfTestSystem(projv::Application& app) {
             // SANDBOX_MEASURE_MOVING=1 keeps the bodies spinning instead: every Transform changes
             // every frame, so the bridge rewrites every header and the BVH is rebuilt each flush --
             // what playing costs.
-            if (!std::getenv("SANDBOX_MEASURE_MOVING")) {
-                for (auto [entity, body] : world.view<Body>().each()) body.spin = vec3(0.0f);
-                app.time().scale = 0.0f;
-            }
+            if (!std::getenv("SANDBOX_MEASURE_MOVING")) app.time().scale = 0.0f;
         }
+        // Moving: every body spins in place about the vertical, so it never settles or rolls away.
+        if (std::getenv("SANDBOX_MEASURE_MOVING") && frame > 2)
+            for (Entity e : world.view<Body>()) projv::runtime::setVelocity(world, e, vec3(0), vec3(0, 3, 0));
         // Churn: the oldest bodies destroyed and as many new ones thrown in, every frame -- what
         // debris, fragments and projectiles do to the tables. With rows recycled, every table stays
         // the size of what is alive, and so does the frame.
@@ -516,9 +468,8 @@ void selfTestSystem(projv::Application& app) {
         }
         if (!candidates.empty()) {
             Entity e = candidates[std::uniform_int_distribution<size_t>(0, candidates.size() - 1)(sandbox.random)];
-            const Body& b = world.get<Body>(e);
             world.emplace<Popping>(e);
-            app.events().send(Popped{e, b.position, b.radius, b.explosive});
+            app.events().send(Popped{e, projv::runtime::bodyPose(world, e).position, world.get<Body>(e).explosive});
         }
     }
     if (frame == test->frames - 60) app.time().scale = 0.2f;   // slow motion, for the interpolation
@@ -531,12 +482,24 @@ void selfTestSystem(projv::Application& app) {
         if (scene.components[h].parent == projv::INVALID_COMPONENT_HANDLE && projv::utils::isComponentAlive(scene, h)) liveRoots++;
     }
     size_t arenaRoots = 3;   // the arena and two pylons
-    bool books = int(alive) + sandbox.popped == test->spawned + sandbox.spawnerLaunches;
+    bool books = int(alive) + sandbox.popped + sandbox.lost == test->spawned + sandbox.spawnerLaunches;
     bool voxels = liveRoots == arenaRoots + alive;
-    projv::core::info("SANDBOXTEST: spawned {} (+{} by spawners), popped {}, alive {}, live root components {} "
-                      "(expected {}) | books {} | voxels {} | {}", test->spawned, sandbox.spawnerLaunches,
-                      sandbox.popped, alive, liveRoots, arenaRoots + alive, books ? "ok" : "WRONG",
-                      voxels ? "ok" : "WRONG", books && voxels ? "PASS" : "FAIL");
+    // Physics: every body alive has its simulation body (none were refused), no step dropped
+    // contacts, and nothing went through the floor.
+    size_t simulated = 0;
+    for (Entity e : world.view<Body>()) simulated += projv::runtime::hasBody(world, e);
+    const auto& stats = projv::runtime::physicsWorld(world).stats();
+    bool physics = simulated == alive && stats.stepsWithDroppedContacts == 0 && stats.refusedBodies == 0 &&
+                   sandbox.fellThrough == 0;
+    bool pass = books && voxels && physics;
+    projv::core::info("SANDBOXTEST: spawned {} (+{} by spawners), popped {}, lost over the walls {}, alive {}, "
+                      "live root components {} (expected {}) | books {} | voxels {}", test->spawned,
+                      sandbox.spawnerLaunches, sandbox.popped, sandbox.lost, alive, liveRoots, arenaRoots + alive,
+                      books ? "ok" : "WRONG", voxels ? "ok" : "WRONG");
+    projv::core::info("SANDBOXTEST: physics: {} of {} bodies simulated, {} steps, {} with dropped contacts, {} refused, "
+                      "{} fell through the floor | {} | {}", simulated, alive, stats.steps,
+                      stats.stepsWithDroppedContacts, stats.refusedBodies, sandbox.fellThrough,
+                      physics ? "ok" : "WRONG", pass ? "PASS" : "FAIL");
     if (test->timedFrames > 0) {
         projv::core::info("SANDBOXTEST: frames average {:.1f} ms (worst {:.1f} ms), GPU average {:.1f} ms",
                           1000.0 * test->frameSeconds / test->timedFrames, 1000.0 * test->worstFrame,
@@ -561,14 +524,16 @@ void connectPopHandlers(projv::Application& app) {
         float strength = p.explosive > 0.0f ? 55.0f : 18.0f;
         for (auto [entity, b] : world.view<Body>().each()) {
             if (entity == p.entity) continue;
-            vec3 d = b.position - p.position;
+            vec3 at = projv::runtime::bodyPose(world, entity).position;
+            vec3 d = at - p.position;
             float distance = glm::length(d);
             if (distance > reach || distance < 1e-4f) continue;
             float falloff = 1.0f - distance / reach;
-            b.velocity += (d / distance * strength + vec3(0, strength * 0.5f, 0)) * falloff * b.inverseMass;
+            // An impulse, so a heavy crate is shoved less than a light ball.
+            projv::runtime::addImpulse(world, entity, (d / distance * strength + vec3(0, strength * 0.5f, 0)) * falloff);
             if (p.explosive > 0.0f && distance < p.explosive && !world.all_of<Popping>(entity)) {
                 world.emplace<Popping>(entity);
-                events.send(Popped{entity, b.position, b.radius, b.explosive});
+                events.send(Popped{entity, at, b.explosive});
             }
         }
     });
@@ -600,9 +565,10 @@ void startup(projv::Application& app) {
     auto& scene = world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk((here / "scene").string()));
 
     projv::runtime::installSceneBridge(app);
+    projv::runtime::installPhysics(app);
+    projv::runtime::setGravity(world, vec3(0, GRAVITY, 0));
     projv::runtime::registerComponent<Body>(world);
     projv::runtime::registerComponent<Spawner>(world);
-    world.on_construct<Body>().connect<&setUpBody>();
     world.on_construct<Spawner>().connect<&setUpSpawner>();
     projv::runtime::spawnEntities(world);   // the arena: its spawners come to life here
     connectPopHandlers(app);
@@ -691,13 +657,14 @@ bool writeEntities(const fs::path& folder, Make make) {
     projv::Application app;
     auto& scene = app.world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk(folder.string()));
     projv::runtime::installSceneBridge(app);
+    projv::runtime::installPhysics(app);   // registers physics.rigidbody and physics.static
     projv::runtime::registerComponent<Body>(app.world);
     projv::runtime::registerComponent<Spawner>(app.world);
     make(app.world, scene);
     return projv::runtime::saveEntities(app.world, projv::INVALID_COMPONENT_HANDLE, folder.string());
 }
 
-bool writePrefab(const fs::path& folder, const Body& body, auto colourAt, int diameter) {
+bool writePrefab(const fs::path& folder, const Body& body, const projv::RigidBody& rigid, auto colourAt, int diameter) {
     projv::Scene scene;
     float half = diameter * 0.5f * VOXEL;
     shape(scene, "shape", projv::INVALID_COMPONENT_HANDLE, projv::core::ivec3(diameter), vec3(-half), colourAt);
@@ -709,36 +676,38 @@ bool writePrefab(const fs::path& folder, const Body& body, auto colourAt, int di
         world.emplace<projv::runtime::Authored>(e, projv::runtime::Authored{
             projv::INVALID_COMPONENT_HANDLE, folder.filename().string(), projv::runtime::Authored::Link::Document});
         world.emplace<Body>(e, body);
+        world.emplace<projv::RigidBody>(e, rigid);
     });
 }
 
-Body bodyOf(float radius, float restitution, float mass, float explosive) {
-    Body b;
-    b.radius = radius; b.restitution = restitution; b.mass = mass; b.explosive = explosive;
-    return b;
+projv::RigidBody rigidOf(projv::RigidBody::Shape shape, float mass, float restitution) {
+    projv::RigidBody r;
+    r.shape = shape; r.mass = mass; r.restitution = restitution;
+    return r;
 }
 
 int writeAssets(const fs::path& dir) {
     using projv::packRGB10;
     bool ok = true;
 
-    // Prefabs: a striped ball, a crate, a bomb with a fuse band. Their physics is the Body on the
-    // prefab's own entity.
+    // Prefabs: a striped ball, a crate, a bomb with a fuse band. Their physics is the RigidBody on
+    // the prefab's own entity: the ball collides as a sphere, the others as their voxels.
     auto sphere = [](int n, auto inside) {
         return [n, inside](int x, int y, int z) -> uint32_t {
             vec3 d = vec3(x, y, z) + vec3(0.5f) - vec3(n * 0.5f);
             return glm::length(d) <= n * 0.5f ? inside(d) : 0u;
         };
     };
-    ok &= writePrefab(dir / "prefabs/ball", bodyOf(1.5f, 0.8f, 1.0f, 0.0f),
+    using Shape = projv::RigidBody::Shape;
+    ok &= writePrefab(dir / "prefabs/ball", Body{}, rigidOf(Shape::Sphere, 1.0f, 0.8f),
         sphere(6, [](vec3 d) { return std::fmod(std::atan2(d.z, d.x) + 3.15f, 1.05f) < 0.52f
                                    ? packRGB10(0.2f, 0.55f, 1.0f) : packRGB10(0.95f, 0.95f, 1.0f); }), 6);
-    ok &= writePrefab(dir / "prefabs/crate", bodyOf(1.6f, 0.25f, 2.5f, 0.0f),
+    ok &= writePrefab(dir / "prefabs/crate", Body{}, rigidOf(Shape::Voxels, 2.5f, 0.25f),
         [](int x, int y, int z) -> uint32_t {
             int edges = (x == 0 || x == 5) + (y == 0 || y == 5) + (z == 0 || z == 5);
             return edges >= 2 ? packRGB10(0.45f, 0.28f, 0.12f) : packRGB10(0.78f, 0.56f, 0.3f);
         }, 6);
-    ok &= writePrefab(dir / "prefabs/bomb", bodyOf(1.2f, 0.4f, 1.5f, 9.0f),
+    ok &= writePrefab(dir / "prefabs/bomb", Body{9.0f}, rigidOf(Shape::Voxels, 1.5f, 0.4f),
         sphere(5, [](vec3 d) { return std::abs(d.y) < 0.6f ? packRGB10(1.0f, 0.85f, 0.1f) : packRGB10(0.85f, 0.1f, 0.08f); }), 5);
 
     // The arena: a checkered floor whose top is y = 0 and a low wall round its edge -- one continuous
@@ -758,17 +727,25 @@ int writeAssets(const fs::path& dir) {
     projv::utils::updateScene(arena);
     ok &= projv::utils::saveComposeToDisk(arena, projv::INVALID_COMPONENT_HANDLE, (dir / "scene").string());
 
-    // Each pylon's entity, with its Spawner.
+    // The arena's entity, which makes it solid, and each pylon's, with its Spawner (and solid too).
     ok &= writeEntities(dir / "scene", [](World& world, projv::Scene& scene) {
-        auto pylonEntity = [&](const char* name, const char* prefab, float interval, float speed) {
+        auto entityFor = [&](const char* name) {
             for (projv::ComponentHandle h = 0; h < scene.components.size(); h++) {
                 if (scene.components[h].name != name) continue;
                 Entity e = projv::runtime::spawnComponent(world, h);
                 world.emplace<projv::runtime::Authored>(e, projv::runtime::Authored{projv::INVALID_COMPONENT_HANDLE, name});
-                Spawner spawner;
-                spawner.prefab = prefab; spawner.interval = interval; spawner.speed = speed;
-                world.emplace<Spawner>(e, spawner);
+                world.emplace<projv::StaticCollider>(e);
+                return e;
             }
+            return Entity(projv::NullEntity);
+        };
+        entityFor("Arena");
+        auto pylonEntity = [&](const char* name, const char* prefab, float interval, float speed) {
+            Entity e = entityFor(name);
+            if (e == projv::NullEntity) return;
+            Spawner spawner;
+            spawner.prefab = prefab; spawner.interval = interval; spawner.speed = speed;
+            world.emplace<Spawner>(e, spawner);
         };
         pylonEntity("Pylon A", "ball", 1.1f, 24.0f);
         pylonEntity("Pylon B", "crate", 1.7f, 20.0f);
@@ -786,8 +763,9 @@ int main(int argc, char** argv) {
     projv::Application app;
     app.addSystem(projv::Stage::Startup,     "startup",   startup);
     app.addSystem(projv::Stage::Update,      "controls",  controls);
-    app.addSystem(projv::Stage::FixedUpdate, "physics",   physics);
-    app.addSystem(projv::Stage::Update,      "present",   present);
+    app.addSystem(projv::Stage::FixedUpdate, "spawners",  spawners);
+    app.addSystem(projv::Stage::FixedUpdate, "tractor beam", tractorBeam);
+    app.addSystem(projv::Stage::FixedUpdate, "kill plane", killPlane);
     app.addSystem(projv::Stage::Update,      "title bar", titleBar);
     app.addSystem(projv::Stage::Update,      "self-test", selfTestSystem);
     app.addSystem(projv::Stage::Render,      "render",    render);

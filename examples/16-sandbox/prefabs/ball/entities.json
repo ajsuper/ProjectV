@@ -2,11 +2,15 @@
   "entities": [
     {
       "components": {
-        "sandbox.body": {
+        "physics.rigidbody": {
           "mass": 1.0,
-          "radius": 1.5,
+          "motion": "dynamic",
           "restitution": 0.8,
+          "shape": "sphere",
           "v": 1
+        },
+        "sandbox.body": {
+          "v": 2
         }
       },
       "link": "document",

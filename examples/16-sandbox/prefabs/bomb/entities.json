@@ -2,12 +2,15 @@
   "entities": [
     {
       "components": {
-        "sandbox.body": {
-          "explosive": 9.0,
+        "physics.rigidbody": {
           "mass": 1.5,
-          "radius": 1.2,
+          "motion": "dynamic",
           "restitution": 0.4,
           "v": 1
+        },
+        "sandbox.body": {
+          "explosive": 9.0,
+          "v": 2
         }
       },
       "link": "document",

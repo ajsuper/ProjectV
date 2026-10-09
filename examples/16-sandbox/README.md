@@ -37,13 +37,14 @@ carries its physics. Open `prefabs/bomb/entities.json`:
 
 ```json
 { "name": "bomb", "link": "document",
-  "components": { "sandbox.body": { "explosive": 9.0, "mass": 1.5, "radius": 1.2, "restitution": 0.4, "v": 1 } } }
+  "components": { "physics.rigidbody": { "motion": "dynamic", "mass": 1.5, "restitution": 0.4, "v": 1 },
+                  "sandbox.body":      { "explosive": 9.0, "v": 2 } } }
 ```
 
-`"document"` is the node the folder becomes once it is grafted into a scene. `sandbox.body` is the
-`Body` component itself, not a description to be translated into one. Setup the file cannot say
-(where the body starts, its inverse mass) is done by an `on_construct` signal when the component is
-made.
+`"document"` is the node the folder becomes once it is grafted into a scene. `physics.rigidbody`
+is the engine's `RigidBody` and `sandbox.body` the sandbox's own `Body`: the components themselves,
+not descriptions to be translated into them. The bomb collides as its voxels (the default); the
+ball's says `"shape": "sphere"`, fitted to its voxels, because a ball should roll like one.
 
 **Spawning is one call.**
 
@@ -57,14 +58,18 @@ Throw the same prefab twice and each copy resolves its links against its own nod
 never interfere.
 
 **The arena is data too.** `scene/compose.json` is the arena (floor and walls: one component, one
-grid) and two pylons. `scene/entities.json` gives each pylon an entity with a `sandbox.spawner`
-component. No line of code names a pylon. Edit the interval or the prefab in that file and the
-arena behaves differently.
+grid) and two pylons. `scene/entities.json` gives the arena an entity with `physics.static`, which
+is what makes it solid -- nothing collides unless a file asks -- and each pylon one with
+`physics.static` and a `sandbox.spawner`. No line of code names a pylon. Edit the interval or the
+prefab in that file and the arena behaves differently.
 
-**Physics is `FixedUpdate`.** It runs 60 steps a second whatever the frame rate: gravity, the floor
-and walls, ball-to-ball collisions and rolling. `Update` then draws each body between its last two
-steps by `Time::fixedAlpha`. That is why slow motion (**T**) is smooth: at a fifth of the speed
-there is a fixed step only every few frames, and every frame between them is interpolated.
+**Physics is the engine's** (`runtime/physics.h`, Jolt underneath). It runs 60 steps a second in
+`FixedUpdate` whatever the frame rate, and draws each body between its last two steps by
+`Time::fixedAlpha`. That is why slow motion (**T**) is smooth: at a fifth of the speed there is a
+fixed step only every few frames, and every frame between them is interpolated. This program never
+integrates or collides anything. It throws (a velocity on spawn), shoves (a shockwave is an impulse
+per neighbour), pulls (the tractor beam adds velocity each step) and changes gravity (**G**), all as
+commands that land at the next step.
 
 **A pop is an event.** Right-click sends `Popped`, and three handlers answer it, none of which knows
 about the others: a shockwave that pushes neighbours away, the score, and removal. A bomb's
@@ -79,9 +84,11 @@ not freeze the camera.
 
 ```
 PreUpdate    platform: poll the window, fill Input, queue the close button
-FixedUpdate  physics (0..n times): spawners launch, bodies integrate and collide
-Update       controls (throw, pop, keys) -> present (interpolate into Transforms) -> title bar
-PostUpdate   the Scene bridge writes every changed Transform into its component
+FixedUpdate  (0..n times) physics: new bodies, last step's commands, the Jolt step
+             -> spawners launch -> tractor beam -> kill plane retires what fell out of the arena
+Update       controls (throw, pop, keys) -> title bar
+PostUpdate   physics: present (interpolate into Transforms) -> the Scene bridge writes every
+             changed Transform into its component
   (pump)     Popped and friends are delivered: shockwave, score, removal
 Render       flushSceneUpdates (new prefabs, moved headers, deleted voxels), then draw
 ```
@@ -109,10 +116,9 @@ Render       flushSceneUpdates (new prefabs, moved headers, deleted voxels), the
   floor chunk and four wall chunks instead, it cost 65 ms a frame on its own, because each chunk's
   cubic bounds filled the arena's whole airspace and every ray marched through them.
 
-- Collisions are spheres against spheres, over every pair. A few hundred bodies is fine; the
-  spawners hold off above 300. A real broadphase is what the engine's content bounds (promotion
-  candidate #4) are for, and a real dynamics library would replace all of `physics()`.
-- A crate collides as a sphere.
+- Bodies thrown over a wall fall forever, so below y = -30 they are retired and counted as lost.
+  One that falls from *inside* the walls went through the floor; the self-test fails if any does.
+- The spawners hold off above 300 bodies.
 - **Spawning and destroying for as long as you like costs nothing extra.** A prefab folder is read
   once (`runtime::instantiatePrefab` caches it), and every instance shares its geometry. A destroyed
   body's component and chunk rows are reused by the next spawn. `SANDBOX_MEASURE=150 SANDBOX_CHURN=50`
@@ -135,8 +141,11 @@ SANDBOX_SELFTEST=600 ./sandbox
 
 Plays by itself for 600 frames: it throws every kind, rains bombs into a crowd, pops at random and
 sets off chain reactions, and finishes in slow motion. It then checks that every body spawned is
-either alive or was popped, and that every popped body's voxels are gone from the Scene. The result
-is logged as `SANDBOXTEST: ... | PASS` or `FAIL`.
+alive, popped or lost over a wall; that every popped body's voxels are gone from the Scene; and that
+the physics held: every live body simulated, no step dropped contacts, no body refused, nothing
+through the floor. The result is logged as `SANDBOXTEST: ... | PASS` or `FAIL`. Longer runs
+(`SANDBOX_SELFTEST=3000`) are the better physics check: 600 uncapped frames are only a couple of
+seconds of simulation.
 
 ## Regenerating the assets
 
@@ -146,3 +155,6 @@ is logged as `SANDBOXTEST: ... | PASS` or `FAIL`.
 
 writes `scene/` and `prefabs/` from code: the voxels with `saveComposeToDisk`, and the entities
 with `saveEntities`, the same path a game's save would take.
+
+Assets are staged into the build directory when the sandbox relinks, so after changing only them,
+copy them across (or touch `main.cpp`) before running from `build/`.

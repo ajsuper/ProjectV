@@ -2,6 +2,18 @@
   "entities": [
     {
       "components": {
+        "physics.static": {
+          "v": 1
+        }
+      },
+      "link": 1,
+      "name": "Arena"
+    },
+    {
+      "components": {
+        "physics.static": {
+          "v": 1
+        },
         "sandbox.spawner": {
           "interval": 1.1,
           "prefab": "ball",
@@ -14,6 +26,9 @@
     },
     {
       "components": {
+        "physics.static": {
+          "v": 1
+        },
         "sandbox.spawner": {
           "interval": 1.7,
           "prefab": "crate",
