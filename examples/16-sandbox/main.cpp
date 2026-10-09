@@ -75,7 +75,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr float ARENA_HALF = 62.0f;    // inner face of the walls
-constexpr float KILL_PLANE = -30.0f;   // a body below this has left the arena for good
+constexpr float KILL_PLANE = -30.0f;   // the world's floor: a body below it has left the arena for good
 constexpr float GRAVITY = -28.0f, LOW_GRAVITY = -5.0f;
 constexpr size_t MAX_BODIES = 300;     // spawners hold off above this
 
@@ -321,28 +321,6 @@ void tractorBeam(projv::Application& app) {
     }
 }
 
-// A body thrown over a wall falls forever; past the kill plane it is retired, and counted. One that
-// went from *inside* the walls went through the floor, which must never happen: the self-test fails
-// on it.
-void killPlane(projv::Application& app) {
-    World& world = app.world;
-    auto& sandbox = world.ctx().get<Sandbox>();
-    std::vector<Entity> gone;
-    for (Entity e : world.view<Body>()) {
-        if (!projv::runtime::hasBody(world, e)) continue;
-        vec3 at = projv::runtime::bodyPose(world, e).position;
-        if (at.y > KILL_PLANE) continue;
-        gone.push_back(e);
-        sandbox.lost++;
-        if (std::abs(at.x) < ARENA_HALF - 1.0f && std::abs(at.z) < ARENA_HALF - 1.0f) {
-            sandbox.fellThrough++;
-            projv::core::error("sandbox: entity {} fell through the floor at ({:.1f}, {:.1f})",
-                               static_cast<uint32_t>(e), at.x, at.z);
-        }
-    }
-    for (Entity e : gone) world.destroy(e);
-}
-
 void titleBar(projv::Application& app) {
     auto& sandbox = app.world.ctx().get<Sandbox>();
     sandbox.titleTimer -= app.time().unscaledDelta;
@@ -356,7 +334,8 @@ void titleBar(projv::Application& app) {
                         std::to_string(sandbox.popped) + "  |  " + speed +
                         (sandbox.lowGravity ? "  |  low gravity" : "") +
                         (sandbox.spawners ? "" : "  |  spawners off") + "  |  " +
-                        std::to_string(int(1.0f / std::max(time.unscaledDelta, 1e-4f))) + " fps";
+                        std::to_string(int(1.0f / std::max(time.unscaledDelta, 1e-4f))) + " fps  |  " +
+                        fmt::format("physics {:.2f} ms", projv::runtime::physicsWorld(app.world).stats().lastStepMilliseconds);
     glfwSetWindowTitle(app.world.ctx().get<projv::graphics::RenderInstance>().window, title.c_str());
 }
 
@@ -442,10 +421,12 @@ void selfTestSystem(projv::Application& app) {
         size_t paletteEntries = 0;
         for (const projv::ComponentRecord& record : scene.components) paletteEntries += record.materialPalette.size();
         projv::core::info("SANDBOXMEASURE: {} bodies, {} loose chunks, {} grids | frames average {:.1f} ms "
-                          "(worst {:.1f} ms), GPU average {:.1f} ms", world.view<Body>().size(),
-                          scene.looseChunks.size(), scene.grids.size(),
+                          "(worst {:.1f} ms), GPU average {:.1f} ms, physics step {:.2f} ms ({} threads)",
+                          world.view<Body>().size(), scene.looseChunks.size(), scene.grids.size(),
                           1000.0 * test->frameSeconds / std::max(test->timedFrames, 1), 1000.0 * test->worstFrame,
-                          1000.0 * test->gpuSeconds / std::max(test->timedFrames, 1));
+                          1000.0 * test->gpuSeconds / std::max(test->timedFrames, 1),
+                          projv::runtime::physicsWorld(world).stats().lastStepMilliseconds,
+                          projv::runtime::physicsWorld(world).stats().threads);
         projv::core::info("SANDBOXMEASURE: tables after {} spawns: {} component rows, {} chunk rows, {} blobs, "
                           "{} header rows, {} palette entries", test->spawned, scene.components.size(), scene.chunks.size(),
                           scene.geometryPool.size(), gpuData.headerCapacity, paletteEntries);
@@ -565,13 +546,27 @@ void startup(projv::Application& app) {
     auto& scene = world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk((here / "scene").string()));
 
     projv::runtime::installSceneBridge(app);
-    projv::runtime::installPhysics(app);
+    // The world ends below the kill plane: a body thrown over a wall falls past it, and the engine
+    // reports it (BodyLeftWorld) and retires it.
+    projv::runtime::PhysicsConfig physics;
+    physics.settings.worldMin = vec3(-1e4f, KILL_PLANE, -1e4f);
+    projv::runtime::installPhysics(app, physics);
     projv::runtime::setGravity(world, vec3(0, GRAVITY, 0));
     projv::runtime::registerComponent<Body>(world);
     projv::runtime::registerComponent<Spawner>(world);
     world.on_construct<Spawner>().connect<&setUpSpawner>();
     projv::runtime::spawnEntities(world);   // the arena: its spawners come to life here
     connectPopHandlers(app);
+    // Counted as lost. One that left from *inside* the walls went through the floor, which must
+    // never happen: the self-test fails on it.
+    app.events().on<projv::BodyLeftWorld>([&world](const projv::BodyLeftWorld& e) {
+        auto& sandbox = world.ctx().get<Sandbox>();
+        sandbox.lost++;
+        if (std::abs(e.position.x) < ARENA_HALF - 1.0f && std::abs(e.position.z) < ARENA_HALF - 1.0f) {
+            sandbox.fellThrough++;
+            projv::core::error("sandbox: a body fell through the floor at ({:.1f}, {:.1f})", e.position.x, e.position.z);
+        }
+    });
 
     projv::RendererSpecification specification =
         projv::graphics::loadRendererSpecification((here / "sandboxRenderer").string() + "/");
@@ -765,7 +760,6 @@ int main(int argc, char** argv) {
     app.addSystem(projv::Stage::Update,      "controls",  controls);
     app.addSystem(projv::Stage::FixedUpdate, "spawners",  spawners);
     app.addSystem(projv::Stage::FixedUpdate, "tractor beam", tractorBeam);
-    app.addSystem(projv::Stage::FixedUpdate, "kill plane", killPlane);
     app.addSystem(projv::Stage::Update,      "title bar", titleBar);
     app.addSystem(projv::Stage::Update,      "self-test", selfTestSystem);
     app.addSystem(projv::Stage::Render,      "render",    render);

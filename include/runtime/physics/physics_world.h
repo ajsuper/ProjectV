@@ -131,7 +131,9 @@ namespace projv::runtime {
         float        density = 1000.0f;
         float        mass = 0.0f;
         float        friction = 0.6f;
-        float        restitution = 0.2f;
+        // 0, Jolt's default: bounce is something a body asks for. Restitution in a resting stack
+        // is what starts the rocking described at PhysicsSettings::velocitySteps.
+        float        restitution = 0.0f;
         float        linearDamping = 0.05f;
         float        angularDamping = 0.05f;
         float        gravityFactor = 1.0f;
@@ -157,10 +159,49 @@ namespace projv::runtime {
     struct PhysicsSettings {
         // Capacities. Jolt allocates these up front; a full body table refuses creation, and a full
         // pair or contact buffer drops contacts for that step, which step() reports (PhysicsStats).
+        // Crossing 80% of maxBodies is warned about, once.
         uint32_t   maxBodies = 65536;
         uint32_t   maxBodyPairs = 65536;
         uint32_t   maxContactConstraints = 32768;
         core::vec3 gravity{0.0f, -9.81f, 0.0f};
+
+        // ---- Guards (the physics plan, A8) ----
+        // A body outside this box after a step has left the world: it is reported
+        // (takeBodiesThatLeftTheWorld) for the game to deal with, never moved or deleted here.
+        core::vec3 worldMin{-10000.0f}, worldMax{10000.0f};
+        // Jolt clamps every body to these, every step.
+        float      maxLinearSpeed = 500.0f;     // m/s
+        float      maxAngularSpeed = 47.1f;     // rad/s, Jolt's default (450 rpm)
+        // Floors on what a body's mass properties may be: a sliver of voxels can otherwise be a
+        // body light enough, or with little enough inertia about some axis, for the solver to spin
+        // it up without limit. Inertia is floored at mass * minGyrationRadius^2 about every axis.
+        float      minMass = 0.01f;             // kg
+        float      minGyrationRadius = 0.05f;   // m
+
+        // Rest damping. A dynamic body that stays awake but within restRadius and restAngle of one
+        // pose for restSeconds is going nowhere -- typically a stack rocking in a slow circle the
+        // solver never damps, which Jolt's speed-based sleep test then never ends (the 200-crate
+        // pile tests: towers swaying for good at 0.2 m/s). Its velocities are multiplied by
+        // restDamping every step after that, until it sleeps. A body rolling or spinning leaves
+        // the radius or the angle quickly and is never touched. restSeconds 0 turns it off.
+        float      restRadius = 0.05f;    // m
+        float      restAngle = 0.1f;      // rad
+        float      restSeconds = 1.0f;
+        float      restDamping = 0.9f;
+
+        // Solver iterations per step. 15 velocity steps, not Jolt's 10: stacks are stiffer and
+        // settle sooner. With 10, the first 200-crate pile test (tests/unit/
+        // test_physics_reliability.cpp) left two 8-high columns rocking at 0.2 m/s after 20 s; with
+        // 15 they slept within 4 s. Other layouts still rocked at 15, which is what rest damping
+        // above is for: the iterations make it rarer, the damping makes it end. Roughly a third
+        // more solver time.
+        int        velocitySteps = 15;
+        int        positionSteps = 2;
+
+        // Worker threads for the step: 0 runs it on the calling thread alone, -1 picks from the
+        // machine (one fewer than it has cores, at most 7). Results do not depend on the count --
+        // a test holds that -- so this is a speed setting only.
+        int        threads = -1;
     };
 
     struct PhysicsStats {
@@ -171,6 +212,12 @@ namespace projv::runtime {
         // the log too; a nonzero count means the capacities above are too small for the scene.
         uint64_t stepsWithDroppedContacts = 0;
         uint64_t refusedBodies = 0;     // createBody calls refused (bad input or a full table)
+        // Bodies found with a non-finite pose or velocity after a step, and put back where they last
+        // were, at rest. Each is logged; a nonzero count is a bug to report, not a state to live in.
+        uint64_t nonFiniteRecoveries = 0;
+        uint64_t leftWorld = 0;         // reports of bodies outside the world bounds
+        double   lastStepMilliseconds = 0.0;   // wall time of the last step(), for profiling only
+        int      threads = 0;           // worker threads the step uses (0: the calling thread)
     };
 
     class PhysicsWorld {
@@ -242,9 +289,19 @@ namespace projv::runtime {
         // order, plus the tick. Equal hashes: the same simulation state, for every practical purpose.
         uint64_t stateHash() const;
 
+        // Bodies found outside the world bounds since the last call, in body id order. Each is
+        // reported once per excursion: again only after it has come back inside.
+        std::vector<BodyId> takeBodiesThatLeftTheWorld();
+
+        // **Tests only.** Makes the next step's check find this body non-finite, as a solver blow-up
+        // would leave it, so the recovery can be exercised. (Real NaN cannot be written through
+        // Jolt's API: its asserts reject it, which is the first line of defence in dev builds.)
+        void corruptBodyForTesting(BodyId id);
+
         const PhysicsStats& stats() const;
 
     private:
+        void sanityPass(float dt);
         struct Impl;
         std::unique_ptr<Impl> impl;
     };

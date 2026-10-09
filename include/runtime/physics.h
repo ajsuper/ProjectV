@@ -61,7 +61,7 @@ namespace projv {
         float                 density = 1000.0f;   // kg/m^3
         float                 mass = 0.0f;         // > 0 overrides density
         float                 friction = 0.6f;
-        float                 restitution = 0.2f;
+        float                 restitution = 0.0f;    // bounce is asked for, not assumed
         float                 linearDamping = 0.05f;
         float                 angularDamping = 0.05f;
         float                 gravityFactor = 1.0f;
@@ -72,7 +72,7 @@ namespace projv {
     // Solid, immovable geometry: the linked component's voxels.
     struct StaticCollider {
         float                 friction = 0.6f;
-        float                 restitution = 0.2f;
+        float                 restitution = 0.0f;
         runtime::PhysicsLayer layer = runtime::PhysicsLayer::Static;
         // Whether pieces cut loose by an edit fall away as bodies of their own (destruction, M5 of
         // the physics plan). Saved, not acted on yet.
@@ -97,12 +97,24 @@ namespace projv {
 
     // An entity asked for a body and could not have one; the reason is in the message and the log.
     struct PhysicsBodyRefused { Entity entity; std::string reason; };
+
+    // A body went outside PhysicsSettings::worldMin/worldMax -- thrown over a wall and falling, say.
+    // With PhysicsConfig::destroyBodiesThatLeaveTheWorld (the default) its entity is destroyed in
+    // the same step, so `entity` is no longer valid when this arrives; `position` is where it was.
+    struct BodyLeftWorld { Entity entity; core::vec3 position; };
+
+    // Time dropped fixed steps (Time::maxFixedStepsPerFrame) because the frames could not keep up:
+    // the simulation is running slower than real time. `droppedSteps` is the total so far.
+    struct SimulationSlow { uint64_t droppedSteps; };
 }
 
 namespace projv::runtime {
     struct PhysicsConfig {
         PhysicsSettings        settings;
         utils::CollisionParams collision;
+        // A body that leaves the world bounds is falling forever or flung away; by default its
+        // entity goes (after BodyLeftWorld is sent). False leaves the decision to the game.
+        bool                   destroyBodiesThatLeaveTheWorld = true;
     };
 
     // Creates the physics world (in world.ctx()), registers RigidBody and StaticCollider with

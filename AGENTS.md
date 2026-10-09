@@ -40,6 +40,13 @@ Unit tests (CPU only, no display) live in `tests/unit/` and build in the `dev` p
 ctest --preset dev
 ```
 
+The physics soak (2000 bodies, ten simulated minutes, ~30 s) is left out of that run; run it
+after changing physics:
+
+```bash
+ctest --preset soak
+```
+
 Manual test harnesses live in `tests/manual/` and are opt-in:
 
 ```bash

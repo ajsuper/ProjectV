@@ -21,8 +21,8 @@ cd build/examples/sandbox && ./sandbox
 | **X** | turn the arena's spawners off and on |
 | **C** | pop everything |
 
-The window title shows the selection, how many bodies exist, how many you have popped, and the
-time scale.
+The window title shows the selection, how many bodies exist, how many you have popped, the time
+scale, and what the last physics step cost.
 
 Try this: press **3** and throw a few bombs into a crowd, then right-click one.
 
@@ -85,7 +85,8 @@ not freeze the camera.
 ```
 PreUpdate    platform: poll the window, fill Input, queue the close button
 FixedUpdate  (0..n times) physics: new bodies, last step's commands, the Jolt step
-             -> spawners launch -> tractor beam -> kill plane retires what fell out of the arena
+             (and bodies below the world's floor are reported and retired)
+             -> spawners launch -> tractor beam
 Update       controls (throw, pop, keys) -> title bar
 PostUpdate   physics: present (interpolate into Transforms) -> the Scene bridge writes every
              changed Transform into its component
@@ -116,8 +117,10 @@ Render       flushSceneUpdates (new prefabs, moved headers, deleted voxels), the
   floor chunk and four wall chunks instead, it cost 65 ms a frame on its own, because each chunk's
   cubic bounds filled the arena's whole airspace and every ray marched through them.
 
-- Bodies thrown over a wall fall forever, so below y = -30 they are retired and counted as lost.
-  One that falls from *inside* the walls went through the floor; the self-test fails if any does.
+- Bodies thrown over a wall would fall forever. The sandbox sets the physics world's floor at
+  y = -30 (`PhysicsSettings::worldMin`), so the engine reports them (`BodyLeftWorld`) and retires
+  them; the sandbox counts them as lost. One that left from *inside* the walls went through the
+  floor, and the self-test fails if any does.
 - The spawners hold off above 300 bodies.
 - **Spawning and destroying for as long as you like costs nothing extra.** A prefab folder is read
   once (`runtime::instantiatePrefab` caches it), and every instance shares its geometry. A destroyed

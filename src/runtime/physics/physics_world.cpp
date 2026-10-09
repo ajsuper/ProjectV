@@ -5,11 +5,14 @@
 #include "runtime/physics/physics_world.h"
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 
@@ -17,6 +20,7 @@
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/JobSystemSingleThreaded.h>
+#include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyLock.h>
@@ -275,7 +279,7 @@ namespace projv::runtime {
         // Snapshot layout: a header that lets restoreState check, before touching anything, that the
         // snapshot is one and fits this world; then Jolt's own bytes.
         constexpr uint32_t SNAPSHOT_MAGIC = 0x50564a50u;   // "PJVP"
-        constexpr uint32_t SNAPSHOT_VERSION = 1;
+        constexpr uint32_t SNAPSHOT_VERSION = 2;   // 2: rest damping state per body
 
         template <typename T> void put(std::vector<uint8_t>& out, const T& v) {
             const auto* p = reinterpret_cast<const uint8_t*>(&v);
@@ -327,13 +331,28 @@ namespace projv::runtime {
         // Starts at 32 MB and falls back to malloc past it, rather than aborting mid-step the way
         // the fixed-block allocator does when a scene outgrows it.
         std::unique_ptr<JPH::TempAllocatorImplWithMallocFallback> tempAllocator;
-        // One thread, so nothing depends on scheduling. Jolt is deterministic with a thread pool
-        // too; switching is a later step, made once the determinism tests can prove it changes
-        // nothing.
-        std::unique_ptr<JPH::JobSystemSingleThreaded> jobSystem;
+        // A thread pool, or the calling thread alone. Jolt's results do not depend on which, or on
+        // the thread count: "the same results with any number of threads" is a test, not a hope.
+        std::unique_ptr<JPH::JobSystem> jobSystem;
         JPH::PhysicsSystem system;
+        PhysicsSettings    settings;
         PhysicsStats       stats;
         uint64_t           tick = 0;
+
+        // ---- Guards ----
+        // Per body index: the pose after the last step it came through finite (or its creation
+        // pose), what a non-finite body is put back to; and whether it is outside the world now.
+        struct GoodPose { JPH::RVec3 position; JPH::Quat rotation; };
+        std::vector<GoodPose> lastGood;
+        // Rest damping (PhysicsSettings::restSeconds): where each awake body was when it last
+        // moved appreciably, and how long it has stayed there since. Part of the snapshot, since it
+        // changes what the next steps do.
+        struct Rest { JPH::RVec3 position; JPH::Quat rotation; float seconds; };
+        std::vector<Rest>     rest;
+        std::vector<uint8_t>  outside;
+        std::vector<BodyId>   leftWorld;
+        std::set<uint32_t>    faultInjected;      // corruptBodyForTesting
+        bool                  warnedCapacity = false;
         // Voxel shapes by (content stamp, parameters). Ordered, so nothing about it can make two
         // runs differ (it does not feed the simulation, but it costs nothing to rule out).
         std::map<std::pair<uint64_t, uint64_t>, std::shared_ptr<const CollisionShape>> shapeCache;
@@ -355,11 +374,24 @@ namespace projv::runtime {
         acquireJolt();
         impl = std::make_unique<Impl>();
         impl->tempAllocator = std::make_unique<JPH::TempAllocatorImplWithMallocFallback>(32u * 1024u * 1024u);
-        impl->jobSystem = std::make_unique<JPH::JobSystemSingleThreaded>(JPH::cMaxPhysicsJobs);
+        impl->settings = settings;
+        int threads = settings.threads;
+        if (threads < 0) threads = std::clamp(int(std::thread::hardware_concurrency()) - 1, 0, 7);
+        if (threads == 0) impl->jobSystem = std::make_unique<JPH::JobSystemSingleThreaded>(JPH::cMaxPhysicsJobs);
+        else impl->jobSystem = std::make_unique<JPH::JobSystemThreadPool>(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, threads);
+        impl->stats.threads = threads;
+        impl->lastGood.resize(settings.maxBodies);
+        impl->rest.resize(settings.maxBodies);
+        impl->outside.assign(settings.maxBodies, 0);
         // Body mutexes: 0 lets Jolt pick a default.
         impl->system.Init(settings.maxBodies, 0, settings.maxBodyPairs, settings.maxContactConstraints,
                           impl->broadPhaseLayers, impl->objectVsBroadPhase, impl->objectPairs);
         impl->system.SetGravity(toJolt(settings.gravity));
+        // Solver iterations: see PhysicsSettings::velocitySteps for why not Jolt's default.
+        JPH::PhysicsSettings solver = impl->system.GetPhysicsSettings();
+        solver.mNumVelocitySteps = uint32_t(std::max(settings.velocitySteps, 1));
+        solver.mNumPositionSteps = uint32_t(std::max(settings.positionSteps, 1));
+        impl->system.SetPhysicsSettings(solver);
     }
 
     PhysicsWorld::~PhysicsWorld() {
@@ -399,11 +431,28 @@ namespace projv::runtime {
             settings.mLinearVelocity = toJolt(desc.linearVelocity);
             settings.mAngularVelocity = toJolt(desc.angularVelocity);
         }
+        settings.mMaxLinearVelocity = impl->settings.maxLinearSpeed;
+        settings.mMaxAngularVelocity = impl->settings.maxAngularSpeed;
         if (desc.motion == MotionType::Dynamic) {
             float mass = desc.mass > 0.0f ? desc.mass : desc.shape.volume() * desc.density;
             if (!(mass > 0.0f) || !std::isfinite(mass)) return refuse("a shape with no volume, so no mass");
-            settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
-            settings.mMassPropertiesOverride.mMass = mass;
+            mass = std::max(mass, impl->settings.minMass);
+            // The shape's own distribution, scaled to the mass -- and then floored about every axis,
+            // so no body is light enough to turn for the solver to spin it up without limit.
+            JPH::MassProperties properties = shape->GetMassProperties();
+            properties.ScaleToMass(mass);
+            JPH::Mat44 axes;
+            JPH::Vec3 moments;
+            if (properties.DecomposePrincipalMomentsOfInertia(axes, moments)) {
+                float floor = mass * impl->settings.minGyrationRadius * impl->settings.minGyrationRadius;
+                moments = JPH::Vec3::sMax(moments, JPH::Vec3::sReplicate(floor));
+                properties.mInertia = axes * JPH::Mat44::sScale(moments) * axes.Transposed3x3();
+                settings.mOverrideMassProperties = JPH::EOverrideMassProperties::MassAndInertiaProvided;
+                settings.mMassPropertiesOverride = properties;
+            } else {
+                settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+                settings.mMassPropertiesOverride.mMass = mass;
+            }
         }
         // Voxel shapes are many boxes side by side; without this a body sliding across them catches
         // on the seams between neighbours.
@@ -414,6 +463,16 @@ namespace projv::runtime {
         if (!body) return refuse("the body table is full (PhysicsSettings::maxBodies)");
         bodies.AddBody(body->GetID(), desc.motion == MotionType::Static ? JPH::EActivation::DontActivate
                                                                         : JPH::EActivation::Activate);
+        uint32_t index = body->GetID().GetIndex();
+        impl->lastGood[index] = {body->GetPosition(), body->GetRotation()};
+        impl->rest[index] = {body->GetPosition(), body->GetRotation(), 0.0f};
+        impl->outside[index] = 0;
+        uint32_t count = impl->system.GetNumBodies();
+        if (!impl->warnedCapacity && count * 5 > impl->settings.maxBodies * 4) {
+            impl->warnedCapacity = true;
+            core::warn("physics: {} bodies is over 80% of PhysicsSettings::maxBodies ({}); past it, bodies are refused",
+                       count, impl->settings.maxBodies);
+        }
         return BodyId{body->GetID().GetIndexAndSequenceNumber()};
     }
 
@@ -447,8 +506,12 @@ namespace projv::runtime {
     }
 
     void PhysicsWorld::step(float dt) {
+        auto started = std::chrono::steady_clock::now();
         JPH::EPhysicsUpdateError errors =
             impl->system.Update(dt, 1, impl->tempAllocator.get(), impl->jobSystem.get());
+        sanityPass(dt);
+        impl->stats.lastStepMilliseconds =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
         impl->tick++;
         impl->stats.steps++;
         if (impl->tick % 60 == 0) pruneShapeCache();
@@ -466,6 +529,79 @@ namespace projv::runtime {
                         has(JPH::EPhysicsUpdateError::ContactConstraintsFull) ? "contact constraints full" : "",
                         impl->stats.bodies);
         }
+    }
+
+    // After every step: what moved is checked. A non-finite pose or velocity -- a solver blow-up --
+    // is put back to the body's last finite pose, at rest and asleep, rather than spreading to
+    // everything it touches next step. A body outside the world bounds is reported once per
+    // excursion. Only awake bodies can have changed, so only they are looked at; Jolt's list of them
+    // is in a deterministic order, so the recoveries are too.
+    void PhysicsWorld::sanityPass(float dt) {
+        JPH::BodyIDVector active;
+        impl->system.GetActiveBodies(JPH::EBodyType::RigidBody, active);
+        const JPH::Vec3 low = toJolt(impl->settings.worldMin), high = toJolt(impl->settings.worldMax);
+        std::vector<JPH::BodyID> broken, resting;
+        const float restRadius = impl->settings.restRadius;
+        const float restCos = std::cos(0.5f * impl->settings.restAngle);   // |dot| of quaternions within the angle
+        {
+            const JPH::BodyLockInterfaceLocking& locks = impl->system.GetBodyLockInterface();
+            for (const JPH::BodyID& id : active) {
+                JPH::BodyLockRead lock(locks, id);
+                if (!lock.Succeeded()) continue;
+                const JPH::Body& body = lock.GetBody();
+                JPH::Vec3 position(body.GetPosition());
+                JPH::Quat rotation = body.GetRotation();
+                bool finiteState = !position.IsNaN() && !rotation.IsNaN() && !body.GetLinearVelocity().IsNaN() &&
+                                   !body.GetAngularVelocity().IsNaN() &&
+                                   std::isfinite(position.GetX() + position.GetY() + position.GetZ()) &&
+                                   !impl->faultInjected.count(id.GetIndexAndSequenceNumber());
+                uint32_t index = id.GetIndex();
+                if (!finiteState) { broken.push_back(id); continue; }
+                impl->lastGood[index] = {body.GetPosition(), rotation};
+                if (impl->settings.restSeconds > 0.0f && body.IsDynamic()) {
+                    Impl::Rest& r = impl->rest[index];
+                    bool moved = JPH::Vec3(body.GetPosition() - r.position).LengthSq() > restRadius * restRadius ||
+                                 std::abs(r.rotation.Dot(rotation)) < restCos;
+                    if (moved) r = {body.GetPosition(), rotation, 0.0f};
+                    else if ((r.seconds += dt) >= impl->settings.restSeconds) resting.push_back(id);
+                }
+                bool out = JPH::Vec3::sLess(position, low).TestAnyXYZTrue() ||
+                           JPH::Vec3::sGreater(position, high).TestAnyXYZTrue();
+                if (out && !impl->outside[index]) impl->leftWorld.push_back(BodyId{id.GetIndexAndSequenceNumber()});
+                impl->outside[index] = out ? 1 : 0;
+            }
+        }
+        JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
+        // Awake, and going nowhere: the slow rocking a stack can settle into, which the solver does
+        // not damp and Jolt's sleep test, watching speeds, never ends. Bled off until it sleeps.
+        for (const JPH::BodyID& id : resting) {
+            JPH::Vec3 linear = bodies.GetLinearVelocity(id), angular = bodies.GetAngularVelocity(id);
+            float keep = impl->settings.restDamping;
+            bodies.SetLinearAndAngularVelocity(id, linear * keep, angular * keep);
+        }
+        for (const JPH::BodyID& id : broken) {
+            const Impl::GoodPose& good = impl->lastGood[id.GetIndex()];
+            bodies.SetLinearAndAngularVelocity(id, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+            bodies.SetPositionAndRotation(id, good.position, good.rotation, JPH::EActivation::DontActivate);
+            bodies.DeactivateBody(id);
+            impl->faultInjected.erase(id.GetIndexAndSequenceNumber());
+            impl->stats.nonFiniteRecoveries++;
+            core::error("physics: body {} had a non-finite pose or velocity after tick {}; put back where it "
+                        "last was, at rest. This is a bug worth reporting with the scene that caused it.",
+                        id.GetIndexAndSequenceNumber(), impl->tick + 1);
+        }
+    }
+
+    std::vector<BodyId> PhysicsWorld::takeBodiesThatLeftTheWorld() {
+        std::vector<BodyId> out;
+        out.swap(impl->leftWorld);
+        std::sort(out.begin(), out.end(), [](BodyId a, BodyId b) { return a.value < b.value; });
+        impl->stats.leftWorld += out.size();
+        return out;
+    }
+
+    void PhysicsWorld::corruptBodyForTesting(BodyId id) {
+        if (isAlive(id)) impl->faultInjected.insert(id.value);
     }
 
     namespace {
@@ -609,7 +745,13 @@ namespace projv::runtime {
         put(out, SNAPSHOT_VERSION);
         put(out, impl->tick);
         put(out, static_cast<uint32_t>(bodies.size()));
-        for (uint32_t b : bodies) put(out, b);
+        for (uint32_t b : bodies) {
+            put(out, b);
+            const Impl::Rest& r = impl->rest[JPH::BodyID(b).GetIndex()];
+            put(out, r.position);
+            put(out, r.rotation);
+            put(out, r.seconds);
+        }
 
         JPH::StateRecorderImpl recorder;
         impl->system.SaveState(recorder, JPH::EStateRecorderState::All);
@@ -629,8 +771,10 @@ namespace projv::runtime {
             return false;
         }
         std::vector<uint32_t> saved(count);
-        for (uint32_t& b : saved)
-            if (!get(snapshot, at, b)) {
+        std::vector<Impl::Rest> savedRest(count);
+        for (uint32_t i = 0; i < count; i++)
+            if (!get(snapshot, at, saved[i]) || !get(snapshot, at, savedRest[i].position) ||
+                !get(snapshot, at, savedRest[i].rotation) || !get(snapshot, at, savedRest[i].seconds)) {
                 core::warn("physics: restoreState refused: the snapshot is truncated");
                 return false;
             }
@@ -663,6 +807,7 @@ namespace projv::runtime {
             return false;
         }
         impl->tick = tick;
+        for (uint32_t i = 0; i < count; i++) impl->rest[JPH::BodyID(saved[i]).GetIndex()] = savedRest[i];
         return true;
     }
 

@@ -26,6 +26,7 @@ add_executable(projv_unit_tests
     test_input.cpp
     test_local_ids.cpp
     test_loose_bvh.cpp
+    test_physics_reliability.cpp
     test_physics_runtime.cpp
     test_physics_world.cpp
     test_slot_reuse.cpp
@@ -39,6 +40,11 @@ target_compile_options(projv_unit_tests PRIVATE
 )
 
 add_test(NAME projv_unit_tests COMMAND projv_unit_tests)
+
+# The physics soak: thousands of bodies for minutes of simulated time. Not in the default run
+# (`ctest --preset dev` excludes the label); `ctest --preset soak`, or set PROJV_SOAK yourself.
+add_test(NAME physics_soak COMMAND projv_unit_tests -tc=soak*)
+set_tests_properties(physics_soak PROPERTIES ENVIRONMENT "PROJV_SOAK=1" LABELS soak TIMEOUT 3600)
 
 # Not a compile: a scan of the voxel layer's includes. See check_layering.cmake.
 add_test(NAME layering

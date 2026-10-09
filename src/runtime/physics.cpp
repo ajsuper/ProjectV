@@ -28,6 +28,9 @@ namespace projv::runtime {
         struct PhysicsRuntime {
             std::unique_ptr<PhysicsWorld> world;
             utils::CollisionParams        collision;
+            bool                          destroyLeavers = true;
+            uint64_t                      seenDroppedSteps = 0;
+            uint64_t                      lastSlowWarningTick = 0;
             std::vector<Command>          commands;     // in the order issued
             std::vector<BodyId>           doomed;       // bodies whose entity or component went
             std::vector<Entity>           pending;      // want a body made (or remade)
@@ -351,6 +354,34 @@ namespace projv::runtime {
                 body.position = state.position;
                 body.rotation = state.rotation;
             }
+
+            // 8. Bodies that left the world: reported, and by default retired.
+            std::vector<BodyId> leavers = sim.takeBodiesThatLeftTheWorld();
+            if (!leavers.empty()) {
+                std::vector<std::pair<Entity, core::vec3>> gone;
+                for (auto [entity, body] : world.view<PhysicsBody>().each())
+                    if (std::find(leavers.begin(), leavers.end(), body.id) != leavers.end())
+                        gone.push_back({entity, body.position});
+                std::sort(gone.begin(), gone.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+                for (auto [entity, position] : gone) {
+                    core::trace("physics: entity {} left the world at ({}, {}, {})", static_cast<uint32_t>(entity),
+                                position.x, position.y, position.z);
+                    send(world, BodyLeftWorld{entity, position});
+                    if (physics.destroyLeavers) world.destroy(entity);
+                }
+            }
+
+            // 9. Steps dropped because frames could not keep up: said, but not every frame.
+            const Time& time = app.time();
+            if (time.droppedFixedSteps != physics.seenDroppedSteps) {
+                physics.seenDroppedSteps = time.droppedFixedSteps;
+                send(world, SimulationSlow{time.droppedFixedSteps});
+                if (sim.tick() >= physics.lastSlowWarningTick + 300 || physics.lastSlowWarningTick == 0) {
+                    physics.lastSlowWarningTick = sim.tick();
+                    core::warn("physics: running slower than real time ({} fixed steps dropped so far); the "
+                               "last step took {:.2f} ms", time.droppedFixedSteps, sim.stats().lastStepMilliseconds);
+                }
+            }
         }
 
         // ---- The PostUpdate system: what is drawn -----------------------------------------------------
@@ -405,6 +436,7 @@ namespace projv::runtime {
         PhysicsRuntime& physics = world.ctx().emplace<PhysicsRuntime>();
         physics.world = std::make_unique<PhysicsWorld>(config.settings);
         physics.collision = config.collision;
+        physics.destroyLeavers = config.destroyBodiesThatLeaveTheWorld;
 
         registerComponent<RigidBody>(world);
         registerComponent<StaticCollider>(world);

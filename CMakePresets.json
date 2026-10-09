@@ -43,6 +43,9 @@
         { "name": "vcpkg",   "configurePreset": "vcpkg" }
     ],
     "testPresets": [
-        { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true } }
+        { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true },
+          "filter": { "exclude": { "label": "soak" } } },
+        { "name": "soak", "configurePreset": "dev", "output": { "outputOnFailure": true, "verbosity": "verbose" },
+          "filter": { "include": { "label": "soak" } } }
     ]
 }
