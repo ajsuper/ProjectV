@@ -452,6 +452,11 @@ namespace projv::utils {
             if (jc.contains("name") && jc["name"].is_string()) {
                 c.name = jc["name"].get<std::string>();
             }
+            // Optional persistent id, unique within this file. Absent in files written before ids
+            // existed; the loader assigns one, and the next save writes it.
+            if (jc.contains("id") && jc["id"].is_number_unsigned()) {
+                c.id = jc["id"].get<uint32_t>();
+            }
 
             if (jc.contains("position") && jc["position"].is_array() && jc["position"].size() == 3) {
                 c.position = core::vec3(jc["position"][0].get<float>(),
@@ -611,6 +616,8 @@ namespace projv::utils {
             // node, to INVALID_COMPONENT_HANDLE. saveComposeToDisk writes it back from the same place.
             attachRaw(scene, parentHandle, AttachmentScope::Document, doc.attachments);
 
+            // Every record this file makes, for the id pass after the loop.
+            std::vector<ComponentHandle> created;
             for (ComposeComponent& c : doc.components) {
                 core::trace("loadComposeFromDisk:   component type={} source=\"{}\" name=\"{}\"",
                             c.type == ComponentType::Data ? "data" : "asset",
@@ -647,6 +654,8 @@ namespace projv::utils {
                 rec.localRotation  = c.rotation;
                 rec.localScale     = c.scale.x; // uniform scale, v0.0
                 rec.parent         = parentHandle;
+                rec.localId        = c.id;
+                created.push_back(myHandle);
                 // Carried through as text, uninterpreted: whatever program owns a key decodes it when
                 // it asks for it, and a key no program in this process asks for is written back as it
                 // was read.
@@ -831,8 +840,24 @@ namespace projv::utils {
                     folderStack.pop_back();
                 }
             }
+
+            // Ids. The file's own win: an entity file links by them, so renumbering one that was
+            // written would silently point its links at something else. Only a missing id, or the
+            // second of two that clash (a hand edit), is assigned -- after every written one is in
+            // place, so an assigned id cannot take a number a later entry already owns.
+            std::unordered_set<uint32_t> seen;
+            for (ComponentHandle h : created) {
+                uint32_t& id = scene.components[h].localId;
+                if (id != 0 && !seen.insert(id).second) {
+                    core::warn("loadComposeFromDisk: id {} appears twice in {} - '{}' gets a new one",
+                               id, composeJsonPath, scene.components[h].name);
+                    id = 0;
+                }
+            }
+            for (ComponentHandle h : created) ensureUniqueLocalId(scene, h);
         };
 
+        scene.documentPath = documentRoot;
         const std::string& rootCanonical = documentRoot;
         folderStack.push_back(rootCanonical);
         expand(rootCanonical, core::mat4(1.0f), INVALID_COMPONENT_HANDLE, 0,
@@ -951,6 +976,9 @@ namespace projv::utils {
             core::error("instantiateComposeInto: could not create the asset node");
             return INVALID_COMPONENT_HANDLE;
         }
+        // The node stands for the folder, as a nested asset's node does after a load, so anything
+        // that reads files beside its compose.json -- the runtime's entities.json -- can find them.
+        scene.components[root].sourcePath = loaded.documentPath;
         // addComponent may have grown `components`, so the incoming rows start after whatever it did.
         const uint32_t componentOffset = static_cast<uint32_t>(scene.components.size());
         (void)componentBase;
@@ -1075,6 +1103,7 @@ namespace projv::utils {
             entry["type"] = c.type == ComponentType::Data ? "data" : "asset";
             entry["source"] = c.source;
             if (!c.name.empty()) entry["name"] = c.name;
+            if (c.id != 0) entry["id"] = c.id;
             entry["position"] = { c.position.x, c.position.y, c.position.z };
             // Four elements, so the parser takes it as a quaternion. Three would be read as Euler
             // degrees and would have to survive a conversion each way for no gain.
@@ -1272,6 +1301,7 @@ namespace projv::utils {
 
             ComposeComponent entry;
             entry.name = comp.name;
+            entry.id = comp.localId;
             entry.position = comp.localPosition;
             entry.rotation = comp.localRotation;
             entry.scale = core::vec3(comp.localScale);
@@ -1380,6 +1410,21 @@ namespace projv::utils {
             }
 
             doc.components.push_back(std::move(entry));
+        }
+
+        // Every entry leaves with an id unique in this file. A record built by hand can still have
+        // none (0) -- the scene is const here, so it is numbered in the file rather than in memory,
+        // and gets the same number back when the file is next loaded.
+        {
+            std::unordered_set<uint32_t> used;
+            uint32_t highest = 0;
+            for (const ComposeComponent& entry : doc.components) highest = std::max(highest, entry.id);
+            for (ComposeComponent& entry : doc.components) {
+                if (entry.id == 0 || !used.insert(entry.id).second) {
+                    entry.id = ++highest;
+                    used.insert(entry.id);
+                }
+            }
         }
 
         std::string composeJsonPath = (std::filesystem::path(folderPath) / "compose.json").string();

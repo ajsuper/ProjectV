@@ -77,6 +77,7 @@ The wire format is **strict JSON** (RFC 8259). The loader is configured with `ig
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
 | `type` | `"data"` \| `"asset"` | **yes** | `data` → `source` is a `.data` file. `asset` → `source` is a folder containing a `compose.json`. |
+| `id` | integer | no (assigned on load, written on save) | Persistent id, unique within this file. Survives reloads, renames and reorders, which is what `entities.json` links by. See [entities_data_structure.md](entities_data_structure.md#links). |
 | `source` | string | **yes** | Path to the file (`data`) or folder (`asset`), resolved relative to **this** `compose.json`'s directory. See [Path resolution](#path-resolution). |
 | `position` | `[x, y, z]` float | no (default `[0,0,0]`) | Translation, relative to the parent. |
 | `rotation` | float array | no (default identity) | Length **3** = Euler degrees `[x, y, z]`; length **4** = quaternion `[x, y, z, w]`. See [Transforms](#transforms). |

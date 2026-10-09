@@ -101,6 +101,19 @@ namespace projv::utils {
     ComponentHandle duplicateComponent(Scene& scene, ComponentHandle source,
                                         ComponentHandle parent = INVALID_COMPONENT_HANDLE);
 
+    // ---- Persistent local ids (see ComponentRecord::localId) ----
+
+    // The component under `document` -- an Asset node, or INVALID_COMPONENT_HANDLE for the scene's
+    // roots -- whose localId is `id`, or INVALID_COMPONENT_HANDLE. Dead components are not found.
+    ComponentHandle findComponentByLocalId(const Scene& scene, ComponentHandle document, uint32_t id);
+
+    // One more than the largest localId among `parent`'s live children (or the roots).
+    uint32_t nextLocalId(const Scene& scene, ComponentHandle parent);
+
+    // Gives `handle` a fresh localId if it has none or shares one with a live sibling. Called by
+    // everything that creates or moves a component; exposed for code that builds records by hand.
+    void ensureUniqueLocalId(Scene& scene, ComponentHandle handle);
+
     // Deletes a component and its whole subtree, and returns every handle it removed, leaves first.
     // Returns nothing if `handle` is out of range or already deleted.
     //

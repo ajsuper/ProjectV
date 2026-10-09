@@ -287,6 +287,18 @@ namespace projv{
         // P6: Identity
         std::string name;                    // local name (from compose.json or auto-generated)
 
+        // **Persistent identity, local to the folder.** Unique among this component's siblings --
+        // the entries of one compose.json -- and saved with it as the entry's "id", so it survives
+        // a reload, a rename and a reorder, none of which a ComponentHandle does: handles are
+        // positions in Scene.components for one load. 0 means "not assigned yet"; loading,
+        // addComponent, duplicateComponent and setComponentParent all assign one.
+        //
+        // Local rather than global because one folder can be loaded more than once (two houses,
+        // two copies of a prefab): its ids are the same in every copy, and each copy resolves them
+        // against its own node -- utils::findComponentByLocalId(scene, node, id). This is what an
+        // entity file (runtime/entities.h) links by.
+        uint32_t localId = 0;
+
         // P6: Hierarchy (Chunk, Grid, Asset -- all three participate)
         ComponentHandle parent = INVALID_COMPONENT_HANDLE;
         std::vector<ComponentHandle> children;   // populated for Asset; empty for Chunk/Grid
@@ -511,6 +523,10 @@ struct GeometryBlob {
         // handles across frames -- the runtime's scene bridge -- compares it with the value it last
         // saw and re-checks its handles only when it has moved, instead of on every frame.
         uint64_t deletions = 0;
+        // The folder loadComposeFromDisk was given, canonical; empty for a scene built in memory.
+        // The top-level folder has no node of its own, so this is how anything that reads files
+        // beside its compose.json -- the runtime's entities.json -- finds it.
+        std::string documentPath;
         // Guards every ComponentRecord::materialPalette (+ paletteVersion) against concurrent
         // interning. One mutex for the whole Scene rather than one per ComponentRecord: std::mutex
         // is neither movable nor copyable, so a per-component mutex would break growth of the
@@ -542,6 +558,7 @@ struct GeometryBlob {
             , attachments(std::move(other.attachments))
             , documentAttachments(std::move(other.documentAttachments))
             , deletions(other.deletions)
+            , documentPath(std::move(other.documentPath))
         {}
         Scene& operator=(Scene&& other) noexcept {
             if (this == &other) return *this;
@@ -556,6 +573,7 @@ struct GeometryBlob {
             attachments = std::move(other.attachments);
             documentAttachments = std::move(other.documentAttachments);
             deletions = other.deletions;
+            documentPath = std::move(other.documentPath);
             return *this;
         }
         Scene(const Scene& other)
@@ -570,6 +588,7 @@ struct GeometryBlob {
             , attachments(other.attachments)
             , documentAttachments(other.documentAttachments)
             , deletions(other.deletions)
+            , documentPath(other.documentPath)
         {}
         Scene& operator=(const Scene& other) {
             if (this == &other) return *this;
@@ -584,6 +603,7 @@ struct GeometryBlob {
             attachments = other.attachments;
             documentAttachments = other.documentAttachments;
             deletions = other.deletions;
+            documentPath = other.documentPath;
             return *this;
         }
     };

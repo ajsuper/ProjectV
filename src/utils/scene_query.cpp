@@ -405,6 +405,7 @@ namespace projv::utils {
         }
 
         scene.components.push_back(std::move(component));
+        ensureUniqueLocalId(scene, handle);
 
         // Re-bake the new component so its world transform is correct. getComponentWorldMatrix
         // includes `handle`'s own local transform, which is the whole point: rebakeSubtree bakes the
@@ -460,6 +461,10 @@ namespace projv::utils {
             // Part of what the record *is*, and it was being dropped: without it a duplicated link
             // quietly became a copy, which is the one distinction the two modes exist to make.
             component.externalSource = src.externalSource;
+            // Kept, then made unique once attached: a subtree's children keep their ids (they are
+            // local to the new copy, so nothing clashes and an entity file inside still resolves),
+            // while the top of the copy, beside its original, gets a fresh one.
+            component.localId = src.localId;
         }
 
         if (srcKind == ComponentKind::Chunk) {
@@ -603,6 +608,8 @@ namespace projv::utils {
             scene.components[handle].parent = INVALID_COMPONENT_HANDLE;
         }
 
+        ensureUniqueLocalId(scene, handle);
+
         // Attachments are part of what a component is, too, and this is where the same mistake would
         // be made next: the scene editor's boolean op lived on the record as a field, and a copy that
         // dropped it came back as a plain placement -- the copy of a subtracted window filled the
@@ -641,6 +648,49 @@ namespace projv::utils {
         // have always read it this way; isComponentAlive is the one engine-side reader, so changing
         // the representation later is a change to it and to the editor.
         constexpr const char* DELETED_NAME = "__deleted__";
+    }
+
+    namespace {
+        // The live children of `parent`, or the live roots when it is INVALID_COMPONENT_HANDLE.
+        template<typename Visit>
+        void forEachSibling(const Scene& scene, ComponentHandle parent, Visit visit) {
+            if (parent == INVALID_COMPONENT_HANDLE) {
+                for (ComponentHandle h = 0; h < scene.components.size(); h++) {
+                    if (scene.components[h].parent == INVALID_COMPONENT_HANDLE && isComponentAlive(scene, h)) visit(h);
+                }
+            } else if (parent < scene.components.size()) {
+                for (ComponentHandle h : scene.components[parent].children) {
+                    if (isComponentAlive(scene, h)) visit(h);
+                }
+            }
+        }
+    }
+
+    ComponentHandle findComponentByLocalId(const Scene& scene, ComponentHandle document, uint32_t id) {
+        ComponentHandle found = INVALID_COMPONENT_HANDLE;
+        if (id == 0) return found;
+        forEachSibling(scene, document, [&](ComponentHandle h) {
+            if (found == INVALID_COMPONENT_HANDLE && scene.components[h].localId == id) found = h;
+        });
+        return found;
+    }
+
+    uint32_t nextLocalId(const Scene& scene, ComponentHandle parent) {
+        uint32_t highest = 0;
+        forEachSibling(scene, parent, [&](ComponentHandle h) { highest = std::max(highest, scene.components[h].localId); });
+        return highest + 1;
+    }
+
+    void ensureUniqueLocalId(Scene& scene, ComponentHandle handle) {
+        if (handle >= scene.components.size()) return;
+        ComponentRecord& record = scene.components[handle];
+        bool clash = record.localId == 0;
+        if (!clash) {
+            forEachSibling(scene, record.parent, [&](ComponentHandle h) {
+                if (h != handle && scene.components[h].localId == record.localId) clash = true;
+            });
+        }
+        if (clash) scene.components[handle].localId = nextLocalId(scene, scene.components[handle].parent);
     }
 
     bool isComponentAlive(const Scene& scene, ComponentHandle handle) {
@@ -745,6 +795,8 @@ namespace projv::utils {
         } else {
             comp.parent = INVALID_COMPONENT_HANDLE;
         }
+        // Its id was unique among its old siblings; it may not be among its new ones.
+        ensureUniqueLocalId(scene, child);
 
         // Re-bake the moved subtree.
         core::mat4 world = core::mat4(1.0f);

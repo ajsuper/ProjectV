@@ -22,6 +22,7 @@ add_executable(projv_unit_tests
     test_attachments.cpp
     test_events.cpp
     test_input.cpp
+    test_local_ids.cpp
     test_scene_bridge.cpp
     test_scene_delete.cpp
     test_time.cpp
