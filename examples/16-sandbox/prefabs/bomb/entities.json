@@ -1,0 +1,18 @@
+{
+  "entities": [
+    {
+      "components": {
+        "sandbox.body": {
+          "explosive": 9.0,
+          "mass": 1.5,
+          "radius": 1.2,
+          "restitution": 0.4,
+          "v": 1
+        }
+      },
+      "link": "document",
+      "name": "bomb"
+    }
+  ],
+  "version": 1
+}

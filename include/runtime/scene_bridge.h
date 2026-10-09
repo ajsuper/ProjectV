@@ -8,7 +8,6 @@
 #include "core/math.h"
 #include "core/world.h"
 #include "data_structures/scene.h"
-#include "utils/attachments.h"
 
 // The Scene bridge: how entities (the registry -- what the running game is doing) relate to voxel
 // components (the Scene -- what the assets are made of).
@@ -21,8 +20,8 @@
 //
 //     app.world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk(folder));
 //     projv::runtime::installSceneBridge(app);
-//     auto spawned = projv::runtime::spawnFromCompose(app.world);      // one entity per root
-//     app.world.patch<projv::Transform>(spawned.roots[0], [](auto& t) { t.position.y += 1.0f; });
+//     projv::Entity e = projv::runtime::spawnComponent(app.world, house);   // or entities.json:
+//     app.world.patch<projv::Transform>(e, [](auto& t) { t.position.y += 1.0f; });   // runtime/entities.h
 //
 // Each frame, in PostUpdate, the bridge writes every *changed* Transform into its component
 // (utils::setComponentTransform, which rebakes the subtree's chunk headers), notices components
@@ -70,10 +69,6 @@ namespace projv {
     // A Transform changed since the last sync. Set by the bridge's signals, cleared by its sync.
     struct TransformDirty {};
 
-    // Tags the entity spawnFromCompose makes for the opened folder itself, which document-scope
-    // spawn handlers act on.
-    struct SceneDocument {};
-
     // ---- Events the bridge sends --------------------------------------------------------------
 
     struct EntityLinked              { Entity entity; ComponentHandle component; };
@@ -106,67 +101,12 @@ namespace projv::runtime {
     // other than an entity -- an editor tool, a load into the same Scene.
     void reseedTransforms(World& world);
 
-    // ---- Spawning: attachments become ECS components --------------------------------------------
-    //
-    // An attachment is what an asset says (saved in compose.json, see utils/attachments.h); an ECS
-    // component is what the running game is doing. A module registers, per attachment type, what
-    // spawning a component that carries it means:
-    //
-    //     projv::runtime::registerSpawnHandler<Spawner>(world, [](projv::World& w, projv::Entity e,
-    //                                                            const Spawner& s) {
-    //         w.emplace<SpawnPoint>(e, s.kind);
-    //     });
-    //
-    // Handlers read attachments and never write them. Keys nothing registered for are ignored here
-    // and still saved with the Scene.
-
-    template<typename T>
-    void registerSpawnHandler(World& world, std::function<void(World&, Entity, const T&)> handler);
-
-    // For folder-level (document-scope) attachments: a level's settings, a spawn table. Run for the
-    // opened folder by spawnFromCompose, and for an Asset root's own folder when it is spawned.
-    template<typename T>
-    void registerDocumentSpawnHandler(World& world, std::function<void(World&, Entity, const T&)> handler);
-
-    // Creates an entity, links it (see linkComponent) and runs the spawn handlers for the
-    // component's attachments. NullEntity if the link is refused. With OnUnlink::Destroy the
-    // component goes when the entity does -- what a spawned prefab usually wants.
+    // Creates an entity and links it (see linkComponent). NullEntity if the link is refused. With
+    // OnUnlink::Destroy the component goes when the entity does -- what a spawned prefab usually
+    // wants. Authored entities, with their components, come from entities.json instead
+    // (runtime/entities.h).
     Entity spawnComponent(World& world, ComponentHandle component, LinkMode mode = LinkMode::Root,
                           OnUnlink onUnlink = OnUnlink::Keep);
-
-    struct SpawnedDocument {
-        Entity              document = NullEntity;   // tagged SceneDocument; document handlers ran on it
-        std::vector<Entity> roots;                   // one per live root component, Root-linked
-    };
-    // Spawns the whole Scene in world.ctx(): an entity for the opened folder, then one per root.
-    SpawnedDocument spawnFromCompose(World& world);
-}
-
-// ---- Template definitions -------------------------------------------------------------------
-
-namespace projv::runtime {
-    namespace detail {
-        using RawSpawnHandler = std::function<void(World&, Entity, const Scene&, ComponentHandle)>;
-        void addSpawnHandler(World& world, AttachmentScope scope, RawSpawnHandler handler);
-    }
-
-    template<typename T>
-    void registerSpawnHandler(World& world, std::function<void(World&, Entity, const T&)> handler) {
-        detail::addSpawnHandler(world, AttachmentScope::Component,
-            [handler = std::move(handler)](World& w, Entity e, const Scene& scene, ComponentHandle h) {
-                if (const T* value = utils::getAttachment<T>(scene, h)) handler(w, e, *value);
-            });
-    }
-
-    template<typename T>
-    void registerDocumentSpawnHandler(World& world, std::function<void(World&, Entity, const T&)> handler) {
-        detail::addSpawnHandler(world, AttachmentScope::Document,
-            [handler = std::move(handler)](World& w, Entity e, const Scene& scene, ComponentHandle h) {
-                if (const T* value = utils::getAttachment<T>(scene, h, AttachmentScope::Document)) {
-                    handler(w, e, *value);
-                }
-            });
-    }
 }
 
 #endif

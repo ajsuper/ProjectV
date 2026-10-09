@@ -1,0 +1,29 @@
+{
+  "entities": [
+    {
+      "components": {
+        "sandbox.spawner": {
+          "interval": 1.1,
+          "prefab": "ball",
+          "speed": 24.0,
+          "v": 1
+        }
+      },
+      "link": 2,
+      "name": "Pylon A"
+    },
+    {
+      "components": {
+        "sandbox.spawner": {
+          "interval": 1.7,
+          "prefab": "crate",
+          "speed": 20.0,
+          "v": 1
+        }
+      },
+      "link": 3,
+      "name": "Pylon B"
+    }
+  ],
+  "version": 1
+}

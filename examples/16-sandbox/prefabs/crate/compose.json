@@ -1,14 +1,7 @@
 {
-  "attachments": {
-    "sandbox.body": {
-      "mass": 2.5,
-      "radius": 1.6,
-      "restitution": 0.25,
-      "v": 1
-    }
-  },
   "components": [
     {
+      "id": 1,
       "mutability": "locked",
       "name": "shape",
       "palette": [

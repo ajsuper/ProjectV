@@ -25,8 +25,8 @@ cd build/examples/hello_voxel && ./hello_voxel
 |---|---|---|---|
 | **00** | [hello-voxel](00-hello-voxel/) | The startup sequence, at the smallest size that draws anything. Builds its voxels in memory, so there is nothing to download. | — |
 | **10** | [scene-previewer](10-scene-previewer/) | Loading a scene from disk, framing it automatically, flying around it. Pure albedo, no lighting — it shows what is *in* a scene rather than how it looks. | — |
-| **15** | [entities](15-entities/) | The runtime: entities linked to voxel components, systems driven by `Time`, `Input` and events, and attachments in compose.json turning into behaviour when the scene is spawned. | — |
-| **16** | [sandbox](16-sandbox/) | Everything at once, as a toy: prefabs as compose folders spawned at runtime, physics in FixedUpdate with interpolated rendering, popping as an event with chain reactions, and an arena whose spawners are attachments. Interactive. | — |
+| **15** | [entities](15-entities/) | The runtime: entities linked to voxel components, systems driven by `Time`, `Input` and events, and entities saved beside the voxels in `entities.json` -- ECS components as themselves, linked by component id. | — |
+| **16** | [sandbox](16-sandbox/) | Everything at once, as a toy: prefabs (voxels plus their entity) spawned at runtime, physics in FixedUpdate with interpolated rendering, popping as an event with chain reactions, and an arena whose spawners are entities in its `entities.json`. Interactive. | — |
 | **20** | [mesh-voxelizer](20-mesh-voxelizer/) | Getting your own data in: meshes and Minecraft worlds to Compose scenes. Headless command-line tool. | Assimp submodule |
 | **30** | [renderers](30-renderers/) | Seven renderers over one scene and one camera — the comparison is the point. Accumulation, reprojection, per-face GI, and four cascade variants. | — |
 | **40** | [advanced-renderer](40-advanced-renderer/) | The good renderer, brought up to the engine as it is today: fourteen passes, world-space probe GI, animation, transparency and refraction. | — |

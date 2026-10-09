@@ -15,6 +15,10 @@
 // engine stores, copies and writes back without interpreting. See AttachmentStore in scene.h for
 // what the storage holds, and docs/data_structures/compose_data_structure.md for the file format.
 //
+// **For data about the voxel structure, written by tools** -- the scene editor's boolean ops, a
+// primitive's parameters. What a running program *does* with an asset is an entity's ECS components,
+// saved in entities.json beside compose.json (runtime/entities.h), not an attachment.
+//
 // A program gives a type an attachment key by specialising AttachmentTraits:
 //
 //     struct CsgRole { BooleanOp op = BooleanOp::None; };

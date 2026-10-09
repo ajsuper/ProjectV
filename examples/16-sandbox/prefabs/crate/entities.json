@@ -1,0 +1,17 @@
+{
+  "entities": [
+    {
+      "components": {
+        "sandbox.body": {
+          "mass": 2.5,
+          "radius": 1.6,
+          "restitution": 0.25,
+          "v": 1
+        }
+      },
+      "link": "document",
+      "name": "crate"
+    }
+  ],
+  "version": 1
+}

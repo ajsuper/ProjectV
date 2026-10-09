@@ -3,15 +3,15 @@
 // A physics toy built entirely out of the runtime: throw things into an arena, watch them bounce,
 // pop them, set off chain reactions. Every system the engine now has is load-bearing here:
 //
-//   Prefabs are compose folders.     prefabs/ball, prefabs/crate, prefabs/bomb each hold their
-//                                    voxels and, as a folder-level attachment, their physics
-//                                    ("sandbox.body") -- open prefabs/bomb/compose.json.
-//   Spawning is the Scene bridge.    instantiateComposeInto grafts a prefab into the live Scene;
-//                                    spawnComponent links it to a new entity and runs the spawn
-//                                    handler that turns "sandbox.body" into a Body component.
-//   The arena is data too.           scene/compose.json: a floor, walls, and two pylons whose
-//                                    "sandbox.spawner" attachment makes them launch balls on their
-//                                    own. No line of this file names a pylon.
+//   Prefabs are folders.             prefabs/ball, prefabs/crate, prefabs/bomb each hold their
+//                                    voxels (compose.json) and an entity (entities.json) that links
+//                                    to the prefab itself and carries its Body -- open
+//                                    prefabs/bomb/entities.json. What the file says is what runs.
+//   Spawning is one call.            runtime::instantiatePrefab grafts the folder into the live
+//                                    Scene and spawns its entity, which owns the voxels.
+//   The arena is data too.           scene/compose.json is the arena and two pylons;
+//                                    scene/entities.json gives each pylon a Spawner. No line of this
+//                                    file names a pylon.
 //   Physics is FixedUpdate.          60 steps a second whatever the frame rate; Update draws each
 //                                    body between its last two steps by Time::fixedAlpha, so slow
 //                                    motion (T) is smooth rather than steppy.
@@ -54,8 +54,8 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
+#include "runtime/entities.h"
 #include "runtime/scene_bridge.h"
-#include "utils/attachments.h"
 #include "utils/compose_io.h"
 #include "utils/editing.h"
 #include "utils/picking.h"
@@ -74,72 +74,67 @@ constexpr float FLOOR_TOP = 0.0f;
 constexpr size_t MAX_BODIES = 300;     // spawners hold off above this
 
 // =========================================================================================
-// Attachments: what the assets say
+// Components: what the files say, and what runs
 // =========================================================================================
 
-// On a prefab folder (document scope): how the thing behaves when it exists.
-struct BodyDef {
+// Physics state. The first four fields are what a prefab's entities.json says; the rest is the
+// simulation's, set up by setUpBody when the component is made, and never saved.
+struct Body {
     float radius = 1.0f;
     float restitution = 0.5f;    // bounciness, 0..1
     float mass = 1.0f;
     float explosive = 0.0f;      // > 0: popping it pops everything within this radius
+    vec3 position{0.0f}, previous{0.0f}, velocity{0.0f}, spin{0.0f};
+    quat orientation{1, 0, 0, 0}, previousOrientation{1, 0, 0, 0};
+    float inverseMass = 1.0f;
 };
 
-// On an arena component: launch a prefab every `interval` seconds.
-struct SpawnerDef {
+// Launch a prefab every `interval` seconds. The first three fields are the file's.
+struct Spawner {
     std::string prefab;
-    float interval = 2.0f;
-    float speed = 20.0f;
+    float interval = 2.0f, speed = 20.0f;
+    float timer = 0.0f;
+    vec3 muzzle{0.0f};
 };
 
 double tidy(float v) { return std::round(double(v) * 1e4) / 1e4; }
 
 }  // namespace
 
-template<> struct projv::utils::AttachmentTraits<BodyDef> {
+template<> struct projv::runtime::ComponentTraits<Body> {
     static constexpr const char* key = "sandbox.body";
     static constexpr uint32_t version = 1;
-    static constexpr projv::OnDuplicate onDuplicate = projv::OnDuplicate::Copy;
-    static nlohmann::json save(const BodyDef& b) {
+    static nlohmann::json save(const Body& b) {
         nlohmann::json j{{"radius", tidy(b.radius)}, {"restitution", tidy(b.restitution)}, {"mass", tidy(b.mass)}};
         if (b.explosive > 0.0f) j["explosive"] = tidy(b.explosive);
         return j;
     }
-    static std::optional<BodyDef> load(const nlohmann::json& j, uint32_t) {
-        return BodyDef{j.value("radius", 1.0f), j.value("restitution", 0.5f), j.value("mass", 1.0f),
-                       j.value("explosive", 0.0f)};
+    static std::optional<Body> load(const nlohmann::json& j, uint32_t) {
+        Body b;
+        b.radius = j.value("radius", 1.0f);
+        b.restitution = j.value("restitution", 0.5f);
+        b.mass = j.value("mass", 1.0f);
+        b.explosive = j.value("explosive", 0.0f);
+        return b;
     }
 };
 
-template<> struct projv::utils::AttachmentTraits<SpawnerDef> {
+template<> struct projv::runtime::ComponentTraits<Spawner> {
     static constexpr const char* key = "sandbox.spawner";
     static constexpr uint32_t version = 1;
-    static constexpr projv::OnDuplicate onDuplicate = projv::OnDuplicate::Copy;
-    static nlohmann::json save(const SpawnerDef& s) {
+    static nlohmann::json save(const Spawner& s) {
         return nlohmann::json{{"prefab", s.prefab}, {"interval", tidy(s.interval)}, {"speed", tidy(s.speed)}};
     }
-    static std::optional<SpawnerDef> load(const nlohmann::json& j, uint32_t) {
-        return SpawnerDef{j.at("prefab").get<std::string>(), j.value("interval", 2.0f), j.value("speed", 20.0f)};
+    static std::optional<Spawner> load(const nlohmann::json& j, uint32_t) {
+        Spawner s;
+        s.prefab = j.at("prefab").get<std::string>();
+        s.interval = j.value("interval", 2.0f);
+        s.speed = j.value("speed", 20.0f);
+        return s;
     }
 };
 
 namespace {
-
-// =========================================================================================
-// ECS components and events: what the running program is doing
-// =========================================================================================
-
-struct Body {
-    vec3 position{0.0f}, previous{0.0f}, velocity{0.0f}, spin{0.0f};
-    quat orientation{1, 0, 0, 0}, previousOrientation{1, 0, 0, 0};
-    float radius = 1.0f, restitution = 0.5f, inverseMass = 1.0f, explosive = 0.0f;
-};
-
-struct Spawner {
-    std::string prefab;
-    float interval = 2.0f, speed = 20.0f, timer = 0.0f;
-    vec3 muzzle{0.0f};
-};
 
 struct Popping {};   // a Popped event is already on its way for this entity
 
@@ -178,36 +173,29 @@ float uniform(Sandbox& s, float lo, float hi) { return std::uniform_real_distrib
 // Spawning
 // =========================================================================================
 
-// The spawn handler for "sandbox.body": a prefab that says how it behaves becomes a Body.
-void spawnBody(World& world, Entity entity, const BodyDef& def) {
-    const projv::Transform& t = world.get<projv::Transform>(entity);
-    Body body;
-    body.position = body.previous = t.position;
-    body.orientation = body.previousOrientation = t.rotation;
-    body.radius = def.radius;
-    body.restitution = def.restitution;
-    body.inverseMass = def.mass > 0.0f ? 1.0f / def.mass : 0.0f;
-    body.explosive = def.explosive;
-    world.emplace<Body>(entity, body);
+// Setup a component needs from its entity, in on_construct: it runs after the link has seeded the
+// Transform, so a body starts where its prefab was placed.
+void setUpBody(World& world, Entity entity) {
+    Body& body = world.get<Body>(entity);
+    if (const auto* t = world.try_get<projv::Transform>(entity)) {
+        body.position = body.previous = t->position;
+        body.orientation = body.previousOrientation = t->rotation;
+    }
+    body.inverseMass = body.mass > 0.0f ? 1.0f / body.mass : 0.0f;
 }
 
-// The spawn handler for "sandbox.spawner": an arena component that launches things.
-void spawnSpawner(World& world, Entity entity, const SpawnerDef& def) {
-    const projv::Transform& t = world.get<projv::Transform>(entity);
-    // A pylon's origin is its chunk's corner; the muzzle is the middle of its top.
-    world.emplace<Spawner>(entity, def.prefab, def.interval, def.speed, def.interval * 0.5f,
-                           t.position + vec3(2.0f, 13.0f, 2.0f));
+void setUpSpawner(World& world, Entity entity) {
+    Spawner& spawner = world.get<Spawner>(entity);
+    spawner.timer = spawner.interval * 0.5f;
+    // A pylon's origin is its corner; the muzzle is the middle of its top.
+    if (const auto* t = world.try_get<projv::Transform>(entity)) spawner.muzzle = t->position + vec3(2.0f, 13.0f, 2.0f);
 }
 
-// Graft a prefab folder into the live Scene and give it an entity. OnUnlink::Destroy: when the
-// entity goes, so do its voxels.
+// A prefab, thrown. instantiatePrefab grafts the folder and spawns its entity, which owns the
+// voxels (OnUnlink::Destroy): destroying the entity later removes them.
 Entity spawnPrefab(World& world, const std::string& kind, vec3 position, vec3 velocity) {
-    auto& scene = world.ctx().get<projv::Scene>();
     auto& sandbox = world.ctx().get<Sandbox>();
-    projv::ComponentHandle root = projv::utils::instantiateComposeInto(
-        scene, (sandbox.prefabs / kind).string(), projv::INVALID_COMPONENT_HANDLE, position);
-    if (root == projv::INVALID_COMPONENT_HANDLE) return projv::NullEntity;
-    Entity entity = projv::runtime::spawnComponent(world, root, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+    Entity entity = projv::runtime::instantiatePrefab(world, (sandbox.prefabs / kind).string(), position);
     if (Body* body = world.try_get<Body>(entity)) {
         body->velocity = velocity;
         body->spin = vec3(uniform(sandbox, -3, 3), uniform(sandbox, -3, 3), uniform(sandbox, -3, 3));
@@ -582,9 +570,11 @@ void startup(projv::Application& app) {
     auto& scene = world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk((here / "scene").string()));
 
     projv::runtime::installSceneBridge(app);
-    projv::runtime::registerDocumentSpawnHandler<BodyDef>(world, spawnBody);
-    projv::runtime::registerSpawnHandler<SpawnerDef>(world, spawnSpawner);
-    projv::runtime::spawnFromCompose(world);   // the arena: its spawners come to life here
+    projv::runtime::registerComponent<Body>(world);
+    projv::runtime::registerComponent<Spawner>(world);
+    world.on_construct<Body>().connect<&setUpBody>();
+    world.on_construct<Spawner>().connect<&setUpSpawner>();
+    projv::runtime::spawnEntities(world);   // the arena: its spawners come to life here
     connectPopHandlers(app);
 
     projv::RendererSpecification specification =
@@ -660,41 +650,66 @@ projv::ComponentHandle shape(projv::Scene& scene, const char* name, projv::Compo
     return h;
 }
 
-bool writePrefab(const fs::path& folder, const BodyDef& def, auto colourAt, int diameter) {
+// Saves entities made in code into `folder`/entities.json, the way a tool would: a throwaway
+// Application with the folder's Scene loaded, the bridge, and the sandbox's components registered.
+template<typename Make>
+bool writeEntities(const fs::path& folder, Make make) {
+    projv::Application app;
+    auto& scene = app.world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk(folder.string()));
+    projv::runtime::installSceneBridge(app);
+    projv::runtime::registerComponent<Body>(app.world);
+    projv::runtime::registerComponent<Spawner>(app.world);
+    make(app.world, scene);
+    return projv::runtime::saveEntities(app.world, projv::INVALID_COMPONENT_HANDLE, folder.string());
+}
+
+bool writePrefab(const fs::path& folder, const Body& body, auto colourAt, int diameter) {
     projv::Scene scene;
     float half = diameter * 0.5f * VOXEL;
     shape(scene, "shape", projv::INVALID_COMPONENT_HANDLE, projv::core::ivec3(diameter), vec3(-half), colourAt);
-    projv::utils::setAttachment(scene, projv::INVALID_COMPONENT_HANDLE, def, projv::AttachmentScope::Document);
     projv::utils::updateScene(scene);
-    return projv::utils::saveComposeToDisk(scene, projv::INVALID_COMPONENT_HANDLE, folder.string());
+    if (!projv::utils::saveComposeToDisk(scene, projv::INVALID_COMPONENT_HANDLE, folder.string())) return false;
+    // The prefab's own entity: linked to "document", the node the folder becomes when grafted.
+    return writeEntities(folder, [&](World& world, projv::Scene&) {
+        Entity e = world.create();
+        world.emplace<projv::runtime::Authored>(e, projv::runtime::Authored{
+            projv::INVALID_COMPONENT_HANDLE, folder.filename().string(), projv::runtime::Authored::Link::Document});
+        world.emplace<Body>(e, body);
+    });
+}
+
+Body bodyOf(float radius, float restitution, float mass, float explosive) {
+    Body b;
+    b.radius = radius; b.restitution = restitution; b.mass = mass; b.explosive = explosive;
+    return b;
 }
 
 int writeAssets(const fs::path& dir) {
     using projv::packRGB10;
     bool ok = true;
 
-    // Prefabs: a striped ball, a crate, a bomb with a fuse band. Their physics is the folder's
-    // own attachment.
+    // Prefabs: a striped ball, a crate, a bomb with a fuse band. Their physics is the Body on the
+    // prefab's own entity.
     auto sphere = [](int n, auto inside) {
         return [n, inside](int x, int y, int z) -> uint32_t {
             vec3 d = vec3(x, y, z) + vec3(0.5f) - vec3(n * 0.5f);
             return glm::length(d) <= n * 0.5f ? inside(d) : 0u;
         };
     };
-    ok &= writePrefab(dir / "prefabs/ball", BodyDef{1.5f, 0.8f, 1.0f, 0.0f},
+    ok &= writePrefab(dir / "prefabs/ball", bodyOf(1.5f, 0.8f, 1.0f, 0.0f),
         sphere(6, [](vec3 d) { return std::fmod(std::atan2(d.z, d.x) + 3.15f, 1.05f) < 0.52f
                                    ? packRGB10(0.2f, 0.55f, 1.0f) : packRGB10(0.95f, 0.95f, 1.0f); }), 6);
-    ok &= writePrefab(dir / "prefabs/crate", BodyDef{1.6f, 0.25f, 2.5f, 0.0f},
+    ok &= writePrefab(dir / "prefabs/crate", bodyOf(1.6f, 0.25f, 2.5f, 0.0f),
         [](int x, int y, int z) -> uint32_t {
             int edges = (x == 0 || x == 5) + (y == 0 || y == 5) + (z == 0 || z == 5);
             return edges >= 2 ? packRGB10(0.45f, 0.28f, 0.12f) : packRGB10(0.78f, 0.56f, 0.3f);
         }, 6);
-    ok &= writePrefab(dir / "prefabs/bomb", BodyDef{1.2f, 0.4f, 1.5f, 9.0f},
+    ok &= writePrefab(dir / "prefabs/bomb", bodyOf(1.2f, 0.4f, 1.5f, 9.0f),
         sphere(5, [](vec3 d) { return std::abs(d.y) < 0.6f ? packRGB10(1.0f, 0.85f, 0.1f) : packRGB10(0.85f, 0.1f, 0.08f); }), 5);
 
     // The arena: a checkered floor whose top is y = 0 and a low wall round its edge -- one continuous
     // object on one lattice, so one component, which the edit queue makes one grid. The pylons are
-    // separate components only because each carries its own spawner attachment.
+    // separate components only because each has its own entity, with its own Spawner.
     projv::Scene arena;
     shape(arena, "Arena", projv::INVALID_COMPONENT_HANDLE, {256, 14, 256}, vec3(-64, -1, -64),
           [](int x, int y, int z) -> uint32_t {
@@ -704,12 +719,26 @@ int writeAssets(const fs::path& dir) {
               return y > 11 ? packRGB10(0.9f, 0.55f, 0.2f) : packRGB10(0.5f, 0.52f, 0.56f);
           });
     auto pylon = [](int, int y, int) { return y > 21 ? packRGB10(0.3f, 1.0f, 0.6f) : packRGB10(0.2f, 0.22f, 0.26f); };
-    projv::ComponentHandle a = shape(arena, "Pylon A", projv::INVALID_COMPONENT_HANDLE, {8, 24, 8}, vec3(-42, 0, -42), pylon);
-    projv::ComponentHandle b = shape(arena, "Pylon B", projv::INVALID_COMPONENT_HANDLE, {8, 24, 8}, vec3(38, 0, 38), pylon);
-    projv::utils::setAttachment(arena, a, SpawnerDef{"ball", 1.1f, 24.0f});
-    projv::utils::setAttachment(arena, b, SpawnerDef{"crate", 1.7f, 20.0f});
+    shape(arena, "Pylon A", projv::INVALID_COMPONENT_HANDLE, {8, 24, 8}, vec3(-42, 0, -42), pylon);
+    shape(arena, "Pylon B", projv::INVALID_COMPONENT_HANDLE, {8, 24, 8}, vec3(38, 0, 38), pylon);
     projv::utils::updateScene(arena);
     ok &= projv::utils::saveComposeToDisk(arena, projv::INVALID_COMPONENT_HANDLE, (dir / "scene").string());
+
+    // Each pylon's entity, with its Spawner.
+    ok &= writeEntities(dir / "scene", [](World& world, projv::Scene& scene) {
+        auto pylonEntity = [&](const char* name, const char* prefab, float interval, float speed) {
+            for (projv::ComponentHandle h = 0; h < scene.components.size(); h++) {
+                if (scene.components[h].name != name) continue;
+                Entity e = projv::runtime::spawnComponent(world, h);
+                world.emplace<projv::runtime::Authored>(e, projv::runtime::Authored{projv::INVALID_COMPONENT_HANDLE, name});
+                Spawner spawner;
+                spawner.prefab = prefab; spawner.interval = interval; spawner.speed = speed;
+                world.emplace<Spawner>(e, spawner);
+            }
+        };
+        pylonEntity("Pylon A", "ball", 1.1f, 24.0f);
+        pylonEntity("Pylon B", "crate", 1.7f, 20.0f);
+    });
 
     projv::core::info("Wrote the sandbox assets to {}{}", dir.string(), ok ? "" : " (with errors)");
     return ok ? 0 : 1;

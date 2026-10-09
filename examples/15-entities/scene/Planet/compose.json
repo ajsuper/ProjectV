@@ -1,6 +1,7 @@
 {
   "components": [
     {
+      "id": 1,
       "mutability": "locked",
       "name": "Planet ball",
       "palette": [
@@ -22,14 +23,7 @@
       "type": "data"
     },
     {
-      "attachments": {
-        "example.motion": {
-          "kind": "orbit",
-          "radius": 12.0,
-          "speed": 1.4,
-          "v": 1
-        }
-      },
+      "id": 2,
       "mutability": "locked",
       "name": "Moon",
       "position": [12.0, 0.0, 0.0],

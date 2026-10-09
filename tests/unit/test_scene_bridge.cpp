@@ -12,7 +12,6 @@
 
 #include "core/application.h"
 #include "runtime/scene_bridge.h"
-#include "utils/attachments.h"
 #include "utils/scene_query.h"
 
 namespace {
@@ -23,24 +22,7 @@ namespace {
     namespace utils = projv::utils;
     namespace runtime = projv::runtime;
 
-    struct SpawnKind { std::string kind; };
-    struct Gravity { float y = 0.0f; };
 }
-
-template<> struct projv::utils::AttachmentTraits<SpawnKind> {
-    static constexpr const char* key = "test.spawn";
-    static constexpr uint32_t version = 1;
-    static constexpr projv::OnDuplicate onDuplicate = projv::OnDuplicate::Copy;
-    static nlohmann::json save(const SpawnKind& s) { return nlohmann::json{{"kind", s.kind}}; }
-    static std::optional<SpawnKind> load(const nlohmann::json& j, uint32_t) { return SpawnKind{j.at("kind").get<std::string>()}; }
-};
-template<> struct projv::utils::AttachmentTraits<Gravity> {
-    static constexpr const char* key = "test.gravity";
-    static constexpr uint32_t version = 1;
-    static constexpr projv::OnDuplicate onDuplicate = projv::OnDuplicate::Copy;
-    static nlohmann::json save(const Gravity& g) { return nlohmann::json{{"y", g.y}}; }
-    static std::optional<Gravity> load(const nlohmann::json& j, uint32_t) { return Gravity{j.at("y").get<float>()}; }
-};
 
 namespace {
     // An Application with a Scene and the bridge, and Startup already run.
@@ -193,70 +175,6 @@ TEST_CASE("a linked component deleted elsewhere unlinks its entity and says so")
     REQUIRE(f.destroyed.size() == 1);
     CHECK(f.destroyed[0].entity == e);
     CHECK(f.destroyed[0].component == house);
-}
-
-TEST_CASE("spawn handlers run for their own attachment type, and unknown keys are left alone") {
-    Fixture f;
-    projv::World& w = f.app.world;
-    struct Spawner { std::string kind; };
-    int gravityCalls = 0;
-    runtime::registerSpawnHandler<SpawnKind>(w, [](projv::World& world, Entity e, const SpawnKind& s) {
-        world.emplace<Spawner>(e, s.kind);
-    });
-    runtime::registerSpawnHandler<Gravity>(w, [&gravityCalls](projv::World&, Entity, const Gravity&) { gravityCalls++; });
-
-    ComponentHandle door = f.asset("Door");
-    ComponentHandle rock = f.asset("Rock");
-    utils::setAttachment(f.scene, door, SpawnKind{"door"});
-    utils::attachRaw(f.scene, rock, projv::AttachmentScope::Component, {{"someone.else", R"({"v":1})"}});
-
-    Entity doorEntity = runtime::spawnComponent(w, door);
-    Entity rockEntity = runtime::spawnComponent(w, rock);
-    REQUIRE(doorEntity != projv::NullEntity);
-    REQUIRE(rockEntity != projv::NullEntity);
-    REQUIRE(w.all_of<Spawner>(doorEntity));
-    CHECK(w.get<Spawner>(doorEntity).kind == "door");
-    CHECK_FALSE(w.all_of<Spawner>(rockEntity));
-    CHECK(gravityCalls == 0);
-    CHECK(utils::hasAttachment(f.scene, rock, "someone.else"));   // still there, still saved
-}
-
-TEST_CASE("spawnFromCompose spawns every live root and runs document handlers on the document") {
-    Fixture f;
-    projv::World& w = f.app.world;
-    float gravitySeen = 0.0f;
-    Entity gravityEntity = projv::NullEntity;
-    runtime::registerDocumentSpawnHandler<Gravity>(w, [&](projv::World&, Entity e, const Gravity& g) {
-        gravitySeen = g.y;
-        gravityEntity = e;
-    });
-
-    ComponentHandle a = f.asset("A");
-    ComponentHandle b = f.asset("B");
-    f.asset("Inside", a);                     // not a root
-    ComponentHandle gone = f.asset("Gone");
-    utils::deleteComponent(f.scene, gone);
-    utils::setAttachment(f.scene, INVALID_COMPONENT_HANDLE, Gravity{-9.8f}, projv::AttachmentScope::Document);
-
-    runtime::SpawnedDocument spawned = runtime::spawnFromCompose(w);
-    REQUIRE(spawned.document != projv::NullEntity);
-    CHECK(w.all_of<projv::SceneDocument>(spawned.document));
-    CHECK(gravitySeen == doctest::Approx(-9.8f));
-    CHECK(gravityEntity == spawned.document);
-    REQUIRE(spawned.roots.size() == 2);
-    CHECK(w.get<projv::VoxelComponent>(spawned.roots[0]).handle == a);
-    CHECK(w.get<projv::VoxelComponent>(spawned.roots[1]).handle == b);
-}
-
-TEST_CASE("an Asset root's own folder block reaches document handlers when it is spawned") {
-    Fixture f;
-    projv::World& w = f.app.world;
-    std::vector<Entity> seenOn;
-    runtime::registerDocumentSpawnHandler<Gravity>(w, [&seenOn](projv::World&, Entity e, const Gravity&) { seenOn.push_back(e); });
-    ComponentHandle level = f.asset("Level");
-    utils::setAttachment(f.scene, level, Gravity{-1.0f}, projv::AttachmentScope::Document);
-    Entity e = runtime::spawnComponent(w, level);
-    CHECK(seenOn == std::vector<Entity>{e});
 }
 
 TEST_CASE("EntityLinked is sent for every link") {

@@ -147,7 +147,7 @@ hand-ordered link lists are gone.
 | **Utils** | `#include "utils/voxel_math.h"` | Voxel data: scene composition and I/O, materials, editing, picking, animation, scene queries. See [utils.md](/include/utils/utils.md) |
 | **Graphics** | `#include "graphics/render_instance.h"` | Window and bgfx setup, renderer specifications, GPU upload, the render loop. See [graphics.md](/include/graphics/graphics.md) |
 | **Data structures** | `#include "data_structures/scene.h"` | The plain types the three above operate on — `Scene`, `Chunk`, `GPUData`, `RendererSpecification` |
-| **Runtime** | `#include "runtime/scene_bridge.h"` | Entities linked to voxel components: `Transform`, `VoxelComponent`, spawning from attachments. The one layer that sees both EnTT and the Scene |
+| **Runtime** | `#include "runtime/scene_bridge.h"`, `runtime/entities.h` | Entities linked to voxel components (`Transform`, `VoxelComponent`), and authored entities: ECS components saved as themselves in an `entities.json` beside each `compose.json`, and prefabs. The one layer that sees both EnTT and the Scene |
 
 Everything lives under the `projv` namespace, with `projv::core`, `projv::utils`,
 `projv::graphics` and `projv::runtime` for the functional groups. The voxel layer (`utils`,

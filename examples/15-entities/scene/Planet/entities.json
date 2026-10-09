@@ -1,0 +1,16 @@
+{
+  "entities": [
+    {
+      "components": {
+        "example.orbit": {
+          "radius": 12.0,
+          "speed": 1.4,
+          "v": 1
+        }
+      },
+      "link": 2,
+      "name": "Moon"
+    }
+  ],
+  "version": 1
+}

@@ -77,8 +77,13 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   `events.h` or `runtime/`. The `layering` ctest enforces it. `runtime/` is the one layer that sees both.
 - Component deletion is `utils::deleteComponent` (tombstone; handles are never reused).
   `utils::isComponentAlive` is the liveness check.
-- Program data on components goes in attachments (`utils/attachments.h`), not new
-  `ComponentRecord` fields, unless engine code needs to read it.
+- **Where data goes.** Engine-read data: a `ComponentRecord` field. Data *about the voxel structure*
+  written by tools (editor boolean ops, primitive parameters): an attachment (`utils/attachments.h`),
+  saved in compose.json. What a running program *does* (physics, spawners, gameplay): ECS components
+  on authored entities, saved as themselves in `entities.json` beside compose.json
+  (`runtime/entities.h`, `docs/data_structures/entities_data_structure.md`).
+- Components have a persistent `localId` (the entry's `"id"`), unique among siblings. Entity files
+  link by it; never persist a `ComponentHandle`.
 - Chunk handle = index into `Scene.chunks` (stable).
 - Component handle = index into `Scene.components` (stable).
 - Geometry pool blobs are refcounted; `chunk.geometryPoolIndex < 0` = unpooled.
@@ -95,7 +100,7 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 | `examples/` | Nine examples, numbered in reading order. See `examples/README.md`. |
 | `tests/unit/` | The automated suite (doctest, ctest). CPU only. |
 | `tests/manual/` | Harnesses that need a display. Not examples. See `tests/README.md`. |
-| `docs/data_structures/` | Format references: the `.data` container, compose scenes, tree64, renderers. |
+| `docs/data_structures/` | Format references: the `.data` container, compose scenes, entities, tree64, renderers. |
 | `docs/plans/` | Design notes, delivery logs, and `known-latent-issues.md` / `test-suite-notes.md`. |
 
 Two documents worth reading before changing engine behaviour:

@@ -1,6 +1,7 @@
 {
   "components": [
     {
+      "id": 1,
       "mutability": "locked",
       "name": "Moon ball",
       "palette": [

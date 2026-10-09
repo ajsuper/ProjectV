@@ -224,6 +224,7 @@ add_library(projectV STATIC
     src/graphics/render_instance.cpp
     src/graphics/type_mapping.cpp
 
+    src/runtime/entities.cpp
     src/runtime/scene_bridge.cpp
 
     src/utils/animation.cpp

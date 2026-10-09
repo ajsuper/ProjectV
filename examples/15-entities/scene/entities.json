@@ -1,0 +1,26 @@
+{
+  "entities": [
+    {
+      "components": {
+        "example.spin": {
+          "speed": 0.4,
+          "v": 1
+        }
+      },
+      "link": 1,
+      "name": "Sun"
+    },
+    {
+      "components": {
+        "example.orbit": {
+          "radius": 45.0,
+          "speed": 0.35,
+          "v": 1
+        }
+      },
+      "link": 2,
+      "name": "Planet"
+    }
+  ],
+  "version": 1
+}

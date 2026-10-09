@@ -133,6 +133,11 @@ it.
 The API is `utils/attachments.h`. The test for what belongs here rather than in a first-class field:
 if engine code would ever branch on it, it is engine data and gets a field.
 
+**Attachments are for data about the voxel structure, written by tools.** Examples are the scene
+editor's boolean ops, a primitive's parameters, or a bake hint. What a running program *does* with an
+asset (physics, spawners, gameplay) lives in [`entities.json`](entities_data_structure.md) beside this
+file, as ECS components saved as themselves.
+
 **Boolean ops are an attachment.** Earlier versions of this format had a top-level `op` field on each
 entry (`none` / `union` / `subtract` / `intersect`), describing a constructive-solid stack that only
 the scene editor ever evaluated. It is now the editor's `projv.editor.csg` attachment; what it means

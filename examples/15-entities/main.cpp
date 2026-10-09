@@ -4,25 +4,25 @@
 // that links them to voxel components. Hello Voxel's window and renderer, with things that move.
 //
 // What is on screen is a compose folder (`scene/`, staged beside the binary): a sun, and a planet
-// with a moon inside it. None of the motion is in this file's data. It is in the
-// compose.json, as an attachment on each entry -- open scene/compose.json and look for
-// "example.motion". This program says what that attachment *means*: a spawn handler turns it into
-// ECS components, and two systems move those every frame.
+// with a moon inside it. The voxels are in compose.json. The *entities* are in entities.json beside
+// it -- open scene/entities.json and scene/Planet/entities.json. Each entity names the component it
+// links to by its id and carries its ECS components as they are: "example.spin", "example.orbit".
+// What the file says is what runs.
 //
 //   1. Startup    window, platform (Input + close events), load the compose folder into a Scene
-//   2.            install the Scene bridge; register the "example.motion" spawn handler
-//   3.            spawnFromCompose: one entity per root component, each Root-linked
-//   4.            Part-link the components *inside* assets that carry motion (the moon)
-//   5. Update     Spin and Orbit systems write each entity's Transform, scaled by Time::delta
-//   6. PostUpdate the bridge writes changed Transforms into the Scene (and rebakes the subtree)
-//   7. Render     flush the moved chunk headers to the GPU and draw
+//   2.            install the Scene bridge; register Spin and Orbit as saveable components
+//   3.            spawnEntities: every entities.json in the scene, inner folders first
+//   4. Update     Spin and Orbit systems write each entity's Transform, scaled by Time::delta
+//   5. PostUpdate the bridge writes changed Transforms into the Scene (and rebakes the subtree)
+//   6. Render     flush the moved chunk headers to the GPU and draw
 //
 // The planet is Root-linked and orbits the sun; the moon moves with it for free, because it is a
-// child of the planet in the Scene hierarchy. The moon is also Part-linked, and orbits inside the
-// planet -- in the planet's space, which is what a Part link's Transform is measured in.
+// child of the planet in the Scene hierarchy. The moon's entity is declared in the planet's own
+// entities.json, so it is linked as a Part, and orbits inside the planet -- in the planet's space,
+// which is what a Part link's Transform is measured in.
 //
 //   ./entities                       run
-//   ./entities --write-scene <dir>   regenerate the compose folder this example ships
+//   ./entities --write-scene <dir>   regenerate the folder this example ships
 //
 // Controls: W/S/A/D move, R/F up/down, mouse looks (Esc releases the cursor, left-click recaptures),
 // Space pauses time (Time::scale), close the window to quit.
@@ -45,8 +45,8 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
+#include "runtime/entities.h"
 #include "runtime/scene_bridge.h"
-#include "utils/attachments.h"
 #include "utils/compose_io.h"
 #include "utils/editing.h"
 #include "utils/scene_query.h"
@@ -55,49 +55,39 @@ using projv::core::vec3;
 using projv::core::quat;
 
 // -----------------------------------------------------------------------------------------
-// The attachment: what the asset says
+// The components: what the file says, and what runs
 // -----------------------------------------------------------------------------------------
 //
-// { "example.motion": { "v": 1, "kind": "spin", "speed": 0.6 } }
-// { "example.motion": { "v": 1, "kind": "orbit", "speed": 0.3, "radius": 40 } }
-struct Motion {
-    std::string kind;          // "spin" or "orbit"
-    float speed = 1.0f;        // radians per second
-    float radius = 0.0f;       // orbit only
-};
+// { "example.spin":  { "v": 1, "speed": 0.4 } }
+// { "example.orbit": { "v": 1, "speed": 0.35, "radius": 45 } }
 
-template<> struct projv::utils::AttachmentTraits<Motion> {
-    static constexpr const char* key = "example.motion";
+struct Spin  { float speed = 1.0f; };                              // radians per second
+struct Orbit { float speed = 1.0f; float radius = 0.0f; float angle = 0.0f; };
+
+double tidy(float v) { return std::round(double(v) * 1e4) / 1e4; }   // 0.4, not 0.4000000059604645
+
+template<> struct projv::runtime::ComponentTraits<Spin> {
+    static constexpr const char* key = "example.spin";
     static constexpr uint32_t version = 1;
-    static constexpr projv::OnDuplicate onDuplicate = projv::OnDuplicate::Copy;
-    static nlohmann::json save(const Motion& m) {
-        // Rounded so the file says 0.4 rather than the float's 0.4000000059604645.
-        auto tidy = [](float v) { return std::round(double(v) * 1e4) / 1e4; };
-        nlohmann::json json{{"kind", m.kind}, {"speed", tidy(m.speed)}};
-        if (m.kind == "orbit") json["radius"] = tidy(m.radius);
-        return json;
-    }
-    static std::optional<Motion> load(const nlohmann::json& json, uint32_t) {
-        Motion m{json.at("kind").get<std::string>(), json.value("speed", 1.0f), json.value("radius", 0.0f)};
-        if (m.kind != "spin" && m.kind != "orbit") return std::nullopt;   // kept as written, ignored
-        return m;
+    static nlohmann::json save(const Spin& s) { return nlohmann::json{{"speed", tidy(s.speed)}}; }
+    static std::optional<Spin> load(const nlohmann::json& j, uint32_t) { return Spin{j.value("speed", 1.0f)}; }
+};
+
+// The angle is where the orbit is now, not something the asset says, so it is not saved.
+template<> struct projv::runtime::ComponentTraits<Orbit> {
+    static constexpr const char* key = "example.orbit";
+    static constexpr uint32_t version = 1;
+    static nlohmann::json save(const Orbit& o) { return nlohmann::json{{"speed", tidy(o.speed)}, {"radius", tidy(o.radius)}}; }
+    static std::optional<Orbit> load(const nlohmann::json& j, uint32_t) {
+        return Orbit{j.value("speed", 1.0f), j.value("radius", 0.0f), 0.0f};
     }
 };
 
-// -----------------------------------------------------------------------------------------
-// The ECS components: what the running program is doing
-// -----------------------------------------------------------------------------------------
-
-struct Spin  { float speed; };
-struct Orbit { float speed; float radius; float angle; };
-
-void spawnMotion(projv::World& world, projv::Entity entity, const Motion& motion) {
-    if (motion.kind == "spin") {
-        world.emplace<Spin>(entity, motion.speed);
-    } else {
-        // Start where the asset put it, so spawning moves nothing.
-        const vec3 p = world.get<projv::Transform>(entity).position;
-        world.emplace<Orbit>(entity, motion.speed, motion.radius, std::atan2(p.z, p.x));
+// Setup an orbit needs from its entity: start where the asset put it, so spawning moves nothing.
+// on_construct runs after the link has seeded the Transform.
+void startOrbit(projv::World& world, projv::Entity entity) {
+    if (const auto* t = world.try_get<projv::Transform>(entity)) {
+        world.get<Orbit>(entity).angle = std::atan2(t->position.z, t->position.x);
     }
 }
 
@@ -155,23 +145,44 @@ projv::ComponentHandle body(projv::Scene& scene, const char* name, projv::Compon
 
 int writeScene(const std::string& folder) {
     using namespace projv;
-    Scene scene;
+    {
+        Scene scene;
+        body(scene, "Sun", INVALID_COMPONENT_HANDLE, vec3(0), 40,
+             packRGB10(1.0f, 0.75f, 0.2f), packRGB10(0.95f, 0.45f, 0.1f));
+        ComponentHandle planet = body(scene, "Planet", INVALID_COMPONENT_HANDLE, vec3(45, 0, 0), 16,
+                                      packRGB10(0.25f, 0.45f, 0.95f), packRGB10(0.2f, 0.75f, 0.35f));
+        // Inside the planet, so it goes wherever the planet goes; its orbit is in the planet's space.
+        body(scene, "Moon", planet, vec3(12, 0, 0), 6,
+             packRGB10(0.85f, 0.85f, 0.85f), packRGB10(0.55f, 0.55f, 0.6f));
+        utils::updateScene(scene);
+        if (!utils::saveComposeToDisk(scene, INVALID_COMPONENT_HANDLE, folder)) return 1;
+    }
 
-    ComponentHandle sun = body(scene, "Sun", INVALID_COMPONENT_HANDLE, vec3(0), 40,
-                               packRGB10(1.0f, 0.75f, 0.2f), packRGB10(0.95f, 0.45f, 0.1f));
-    utils::setAttachment(scene, sun, Motion{"spin", 0.4f, 0.0f});
+    // The entities, made the way a game would and saved: load the folder back (so every component
+    // has its id and the planet its folder), link, add components, saveEntities per folder.
+    Application app;
+    Scene& scene = app.world.ctx().emplace<Scene>(utils::loadComposeFromDisk(folder));
+    runtime::installSceneBridge(app);
+    runtime::registerComponent<Spin>(app.world);
+    runtime::registerComponent<Orbit>(app.world);
+    auto find = [&](const char* name) {
+        for (ComponentHandle h = 0; h < scene.components.size(); h++) if (scene.components[h].name == name) return h;
+        return INVALID_COMPONENT_HANDLE;
+    };
+    ComponentHandle planet = find("Planet");
+    // Authored says which file each entity belongs in, and gives it a name there.
+    auto make = [&](const char* name, ComponentHandle document, LinkMode mode) {
+        Entity e = runtime::spawnComponent(app.world, find(name), mode);
+        app.world.emplace<runtime::Authored>(e, runtime::Authored{document, name});
+        return e;
+    };
+    app.world.emplace<Spin>(make("Sun", INVALID_COMPONENT_HANDLE, LinkMode::Root), 0.4f);
+    app.world.emplace<Orbit>(make("Planet", INVALID_COMPONENT_HANDLE, LinkMode::Root), 0.35f, 45.0f);
+    // The moon's entity is the planet folder's: it is about something inside it.
+    app.world.emplace<Orbit>(make("Moon", planet, LinkMode::Part), 1.4f, 12.0f);
 
-    ComponentHandle planet = body(scene, "Planet", INVALID_COMPONENT_HANDLE, vec3(45, 0, 0), 16,
-                                  packRGB10(0.25f, 0.45f, 0.95f), packRGB10(0.2f, 0.75f, 0.35f));
-    utils::setAttachment(scene, planet, Motion{"orbit", 0.35f, 45.0f});
-
-    // Inside the planet, so it goes wherever the planet goes; its orbit is in the planet's space.
-    ComponentHandle moon = body(scene, "Moon", planet, vec3(12, 0, 0), 6,
-                                packRGB10(0.85f, 0.85f, 0.85f), packRGB10(0.55f, 0.55f, 0.6f));
-    utils::setAttachment(scene, moon, Motion{"orbit", 1.4f, 12.0f});
-
-    utils::updateScene(scene);
-    bool ok = utils::saveComposeToDisk(scene, INVALID_COMPONENT_HANDLE, folder);
+    bool ok = runtime::saveEntities(app.world, INVALID_COMPONENT_HANDLE, folder) &&
+              runtime::saveEntities(app.world, planet, (std::filesystem::path(folder) / "Planet").string());
     core::info("Wrote the entities scene to {}{}", folder, ok ? "" : " (with errors)");
     return ok ? 0 : 1;
 }
@@ -230,17 +241,10 @@ void startup(projv::Application& app) {
     auto& scene = app.world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk((here / "scene").string()));
 
     projv::runtime::installSceneBridge(app);
-    projv::runtime::registerSpawnHandler<Motion>(app.world, spawnMotion);
-    projv::runtime::spawnFromCompose(app.world);
-    // spawnFromCompose links roots. A component inside an asset gets an entity only if something
-    // asks for one: here, anything that carries motion. Linked as a Part, its Transform is in its
-    // parent's space -- the moon orbits the planet, wherever the planet is.
-    for (projv::ComponentHandle h = 0; h < scene.components.size(); h++) {
-        if (scene.components[h].parent != projv::INVALID_COMPONENT_HANDLE &&
-            projv::utils::getAttachment<Motion>(scene, h)) {
-            projv::runtime::spawnComponent(app.world, h, projv::LinkMode::Part);
-        }
-    }
+    projv::runtime::registerComponent<Spin>(app.world);
+    projv::runtime::registerComponent<Orbit>(app.world);
+    app.world.on_construct<Orbit>().connect<&startOrbit>();
+    projv::runtime::spawnEntities(app.world);
 
     projv::RendererSpecification specification =
         projv::graphics::loadRendererSpecification((here / "entitiesRenderer").string() + "/");

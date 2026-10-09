@@ -1,0 +1,17 @@
+{
+  "entities": [
+    {
+      "components": {
+        "sandbox.body": {
+          "mass": 1.0,
+          "radius": 1.5,
+          "restitution": 0.8,
+          "v": 1
+        }
+      },
+      "link": "document",
+      "name": "ball"
+    }
+  ],
+  "version": 1
+}

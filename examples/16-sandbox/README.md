@@ -31,31 +31,35 @@ Try this: press **3** and throw a few bombs into a crowd, then right-click one.
 Everything here is a system the engine has had since the runtime spine landed, and each is doing
 real work.
 
-**Prefabs are compose folders.** `prefabs/ball`, `prefabs/crate` and `prefabs/bomb` each hold their
-voxels and, as a *folder-level attachment*, their physics. Open `prefabs/bomb/compose.json`:
+**Prefabs are folders.** `prefabs/ball`, `prefabs/crate` and `prefabs/bomb` each hold their
+voxels in `compose.json`, and an entity in `entities.json` that links to the prefab itself and
+carries its physics. Open `prefabs/bomb/entities.json`:
 
 ```json
-"attachments": {
-  "sandbox.body": { "explosive": 9.0, "mass": 1.5, "radius": 1.2, "restitution": 0.4, "v": 1 }
-}
+{ "name": "bomb", "link": "document",
+  "components": { "sandbox.body": { "explosive": 9.0, "mass": 1.5, "radius": 1.2, "restitution": 0.4, "v": 1 } } }
 ```
 
-**Spawning is the Scene bridge.** A throw is two calls:
+`"document"` is the node the folder becomes once it is grafted into a scene. `sandbox.body` is the
+`Body` component itself, not a description to be translated into one. Setup the file cannot say
+(where the body starts, its inverse mass) is done by an `on_construct` signal when the component is
+made.
+
+**Spawning is one call.**
 
 ```cpp
-ComponentHandle root = utils::instantiateComposeInto(scene, prefabs / kind, INVALID_COMPONENT_HANDLE, position);
-Entity entity = runtime::spawnComponent(world, root, LinkMode::Root, OnUnlink::Destroy);
+Entity entity = runtime::instantiatePrefab(world, prefabs / kind, position);
 ```
 
-`instantiateComposeInto` grafts the folder into the live Scene, and the folder's own attachment
-lands on the new node. `spawnComponent` links an entity to it and runs the spawn handlers. The
-document-scope handler for `sandbox.body` turns the attachment into a `Body` component. With
-`OnUnlink::Destroy`, destroying the entity later deletes its voxels too.
+`instantiatePrefab` grafts the folder into the live Scene and spawns its `entities.json`. It
+returns the entity linked to the prefab, which owns the voxels: destroying it later deletes them.
+Throw the same prefab twice and each copy resolves its links against its own node, so the two
+never interfere.
 
 **The arena is data too.** `scene/compose.json` is the arena (floor and walls: one component, one
-grid) and two pylons. The pylons
-carry a `sandbox.spawner` attachment, and `spawnFromCompose` brings them to life. No line of code
-names a pylon. Edit the interval or the prefab in that file and the arena behaves differently.
+grid) and two pylons. `scene/entities.json` gives each pylon an entity with a `sandbox.spawner`
+component. No line of code names a pylon. Edit the interval or the prefab in that file and the
+arena behaves differently.
 
 **Physics is `FixedUpdate`.** It runs 60 steps a second whatever the frame rate: gravity, the floor
 and walls, ball-to-ball collisions and rolling. `Update` then draws each body between its last two
@@ -124,4 +128,5 @@ is logged as `SANDBOXTEST: ... | PASS` or `FAIL`.
 ./sandbox --write-assets ../../../examples/16-sandbox
 ```
 
-writes `scene/` and `prefabs/` from code.
+writes `scene/` and `prefabs/` from code: the voxels with `saveComposeToDisk`, and the entities
+with `saveEntities`, the same path a game's save would take.

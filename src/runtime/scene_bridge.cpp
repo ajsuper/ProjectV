@@ -11,8 +11,6 @@ namespace projv::runtime {
         // The bridge's own state, in world.ctx().
         struct BridgeState {
             uint64_t seenDeletions = 0;
-            std::vector<detail::RawSpawnHandler> componentHandlers;
-            std::vector<detail::RawSpawnHandler> documentHandlers;
         };
 
         Scene* sceneOf(World& world) {
@@ -182,68 +180,12 @@ namespace projv::runtime {
         }
     }
 
-    namespace detail {
-        void addSpawnHandler(World& world, AttachmentScope scope, RawSpawnHandler handler) {
-            BridgeState* state = world.ctx().find<BridgeState>();
-            if (!state) {
-                core::error("registerSpawnHandler: the scene bridge is not installed");
-                return;
-            }
-            (scope == AttachmentScope::Document ? state->documentHandlers : state->componentHandlers)
-                .push_back(std::move(handler));
-        }
-    }
-
-    namespace {
-        void runHandlers(World& world, const std::vector<detail::RawSpawnHandler>& handlers, Entity entity,
-                         const Scene& scene, ComponentHandle handle) {
-            // A copy: a handler may register another.
-            std::vector<detail::RawSpawnHandler> snapshot = handlers;
-            for (const detail::RawSpawnHandler& handler : snapshot) handler(world, entity, scene, handle);
-        }
-    }
-
     Entity spawnComponent(World& world, ComponentHandle component, LinkMode mode, OnUnlink onUnlink) {
         Entity entity = world.create();
         if (!linkComponent(world, entity, component, mode, onUnlink)) {
             world.destroy(entity);
             return NullEntity;
         }
-        Scene& scene = *sceneOf(world);
-        BridgeState& state = world.ctx().get<BridgeState>();
-        runHandlers(world, state.componentHandlers, entity, scene, component);
-        // An Asset stands for a folder, and the folder's own block is attached to it.
-        if (scene.components[component].kind == ComponentKind::Asset) {
-            runHandlers(world, state.documentHandlers, entity, scene, component);
-        }
         return entity;
-    }
-
-    SpawnedDocument spawnFromCompose(World& world) {
-        SpawnedDocument spawned;
-        Scene* scene = sceneOf(world);
-        if (!scene || !world.ctx().contains<BridgeState>()) {
-            core::error("spawnFromCompose: needs a projv::Scene in world.ctx() and the scene bridge installed");
-            return spawned;
-        }
-
-        spawned.document = world.create();
-        world.emplace<SceneDocument>(spawned.document);
-        runHandlers(world, world.ctx().get<BridgeState>().documentHandlers, spawned.document, *scene,
-                    INVALID_COMPONENT_HANDLE);
-
-        // Handles first: spawning can add components (a handler may), and those are not roots of
-        // the document being spawned.
-        std::vector<ComponentHandle> roots;
-        for (ComponentHandle h = 0; h < scene->components.size(); h++) {
-            if (scene->components[h].parent == INVALID_COMPONENT_HANDLE && utils::isComponentAlive(*scene, h)) {
-                roots.push_back(h);
-            }
-        }
-        for (ComponentHandle h : roots) {
-            Entity entity = spawnComponent(world, h, LinkMode::Root);
-            if (entity != NullEntity) spawned.roots.push_back(entity);
-        }
-        return spawned;
     }
 }

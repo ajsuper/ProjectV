@@ -20,6 +20,7 @@ add_executable(projv_unit_tests
     main.cpp
     test_application.cpp
     test_attachments.cpp
+    test_entities.cpp
     test_events.cpp
     test_input.cpp
     test_local_ids.cpp
