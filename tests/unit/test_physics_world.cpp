@@ -245,3 +245,185 @@ TEST_CASE("a small fast body with continuous collision does not pass through a t
     // collision is still what the plan prescribes for small fast bodies -- it is the guarantee,
     // where speculative contacts are a margin -- but this wall alone cannot tell the two apart.
 }
+
+// ---- Voxel shapes ---------------------------------------------------------------------------------
+
+#include <set>
+
+#include "utils/editing.h"
+#include "utils/scene_query.h"
+
+namespace {
+    using projv::ComponentHandle;
+    using projv::core::ivec3;
+
+    ComponentHandle voxelChunk(projv::Scene& scene, const std::vector<ivec3>& voxels, uint32_t resolution = 16) {
+        ComponentHandle h = projv::utils::addComponent(scene, projv::ComponentKind::Chunk, "c",
+                                                       projv::INVALID_COMPONENT_HANDLE, resolution, 1.0f);
+        std::vector<projv::PendingVoxelOp> ops;
+        for (ivec3 v : voxels) ops.push_back({true, v, 0x3FFFFFFFu});
+        projv::utils::queueVoxelAdd(scene, h, ops);
+        projv::utils::updateScene(scene);
+        return h;
+    }
+    const projv::GeometryBlob& blobOf(const projv::Scene& scene, ComponentHandle h) {
+        return scene.geometryPool[scene.chunks[scene.components[h].chunkHandle].geometryPoolIndex];
+    }
+    std::vector<ivec3> solidBox(ivec3 low, ivec3 high) {
+        std::vector<ivec3> out;
+        for (int z = low.z; z <= high.z; z++)
+            for (int y = low.y; y <= high.y; y++)
+                for (int x = low.x; x <= high.x; x++) out.push_back({x, y, z});
+        return out;
+    }
+}
+
+TEST_CASE("a voxel body falls and rests on the floor at its true height") {
+    projv::Scene scene;
+    // A 4x2x4 slab of voxels sitting 3 voxels up inside its chunk, at half a metre per voxel.
+    ComponentHandle h = voxelChunk(scene, solidBox({0, 3, 0}, {3, 4, 3}));
+    PhysicsWorld physics;
+    addFloor(physics);
+    CollisionShapeRef shape = physics.voxelShape(blobOf(scene, h), 16);
+    REQUIRE(shape);
+    CHECK(shape->pieces == 1);
+    CHECK(shape->volume == doctest::Approx(32.0f));
+
+    BodyDesc d;
+    d.shape = PhysicsShape::fromVoxels(shape, 0.5f);
+    d.position = {0, 6, 0};
+    d.density = 100.0f;
+    BodyId body = physics.createBody(d);
+    REQUIRE(body.valid());
+    CHECK(physics.bodyMass(body) == doctest::Approx(32.0f * 0.125f * 100.0f));
+    for (int i = 0; i < 5 * 60; i++) physics.step(DT);
+
+    // The voxels start 3 voxels (1.5 m) above the body's origin, so resting on y = 0 puts the
+    // origin 1.5 m below the floor's top.
+    BodyState s = physics.bodyState(body);
+    CHECK(s.position.y == doctest::Approx(-1.5f).epsilon(0.02));
+    CHECK_FALSE(s.awake);
+}
+
+TEST_CASE("a voxel cup holds a ball: voxel shapes are not convex hulls") {
+    projv::Scene scene;
+    // A 6x4x6 cup: a floor and four walls, open at the top, hollow inside.
+    std::vector<ivec3> cup;
+    for (ivec3 v : solidBox({0, 0, 0}, {5, 3, 5}))
+        if (v.y == 0 || v.x == 0 || v.x == 5 || v.z == 0 || v.z == 5) cup.push_back(v);
+    ComponentHandle h = voxelChunk(scene, cup);
+    PhysicsWorld physics;
+    CollisionShapeRef shape = physics.voxelShape(blobOf(scene, h), 16);
+    REQUIRE(shape);
+    CHECK(shape->pieces > 1);
+
+    BodyDesc cupBody;
+    cupBody.shape = PhysicsShape::fromVoxels(shape, 1.0f);
+    cupBody.motion = MotionType::Static;
+    cupBody.layer = PhysicsLayer::Static;
+    physics.createBody(cupBody);
+
+    BodyDesc ball;
+    ball.shape = PhysicsShape::sphere(0.8f);
+    ball.position = {3.0f, 8.0f, 3.0f};
+    BodyId id = physics.createBody(ball);
+    for (int i = 0; i < 4 * 60; i++) physics.step(DT);
+    BodyState s = physics.bodyState(id);
+    // Resting on the cup's floor (top at y = 1), inside the walls: a hull would have held it at
+    // the rim, y = 4.8.
+    CHECK(s.position.y == doctest::Approx(1.8f).epsilon(0.03));
+    CHECK(s.position.x > 1.0f);
+    CHECK(s.position.x < 5.0f);
+}
+
+TEST_CASE("voxel shapes are shared by content and rebuilt after an edit") {
+    projv::Scene scene;
+    ComponentHandle h = voxelChunk(scene, solidBox({0, 0, 0}, {2, 2, 2}));
+    PhysicsWorld physics;
+    CollisionShapeRef first = physics.voxelShape(blobOf(scene, h), 16);
+    CollisionShapeRef again = physics.voxelShape(blobOf(scene, h), 16);
+    CHECK(first == again);
+    projv::GeometryBlob copy = blobOf(scene, h);
+    CHECK(physics.voxelShape(copy, 16) == first);   // an instance's copy of the same voxels
+    CHECK(physics.cachedShapeCount() == 1);
+
+    projv::utils::queueVoxelAdd(scene, h, {{true, ivec3(8, 8, 8), 0x3FFFFFFFu}});
+    projv::utils::updateScene(scene);
+    CollisionShapeRef edited = physics.voxelShape(blobOf(scene, h), 16);
+    REQUIRE(edited);
+    CHECK(edited != first);
+    CHECK(edited->pieces == 2);
+
+    // Different parameters are a different shape.
+    projv::utils::CollisionParams params;
+    params.pieceBudget = 1;
+    CollisionShapeRef budgeted = physics.voxelShape(blobOf(scene, h), 16, params);
+    REQUIRE(budgeted);
+    CHECK(budgeted->fallback == projv::utils::CollisionFallback::OverBudget);
+    CHECK(physics.cachedShapeCount() == 3);
+}
+
+TEST_CASE("unused voxel shapes are pruned; shapes a body uses are kept") {
+    projv::Scene scene;
+    ComponentHandle a = voxelChunk(scene, solidBox({0, 0, 0}, {1, 1, 1}));
+    ComponentHandle b = voxelChunk(scene, solidBox({0, 0, 0}, {3, 0, 0}));
+    PhysicsWorld physics;
+    BodyId body;
+    {
+        CollisionShapeRef used = physics.voxelShape(blobOf(scene, a), 16);
+        physics.voxelShape(blobOf(scene, b), 16);   // asked for, then dropped
+        BodyDesc d;
+        d.shape = PhysicsShape::fromVoxels(used, 0.25f);   // scaled: the body holds a wrapper
+        body = physics.createBody(d);
+        REQUIRE(body.valid());
+    }
+    CHECK(physics.cachedShapeCount() == 2);
+    physics.pruneShapeCache();
+    CHECK(physics.cachedShapeCount() == 1);       // b went; a's body still uses its shape
+    physics.destroyBody(body);
+    physics.pruneShapeCache();
+    CHECK(physics.cachedShapeCount() == 0);
+
+    // An empty blob has no shape, and a body cannot be made from none.
+    projv::GeometryBlob empty;
+    CHECK_FALSE(physics.voxelShape(empty, 16));
+    BodyDesc none;
+    none.shape = PhysicsShape::fromVoxels(nullptr, 1.0f);
+    CHECK_FALSE(physics.createBody(none).valid());
+}
+
+TEST_CASE("a simulation with voxel bodies is deterministic and restorable") {
+    projv::Scene scene;
+    std::vector<ivec3> ell = solidBox({0, 0, 0}, {3, 0, 0});
+    for (ivec3 v : solidBox({0, 1, 0}, {0, 3, 0})) ell.push_back(v);
+    ComponentHandle h = voxelChunk(scene, ell);
+    auto build = [&](PhysicsWorld& physics) {
+        addFloor(physics);
+        CollisionShapeRef shape = physics.voxelShape(blobOf(scene, h), 16);
+        for (int i = 0; i < 20; i++) {
+            BodyDesc d;
+            d.shape = PhysicsShape::fromVoxels(shape, 0.5f);
+            d.position = {float(i % 4) * 2.5f - 4.0f, 1.0f + float(i / 4) * 2.2f, float(i % 3) * 0.4f};
+            d.angularVelocity = {0.4f * float(i % 3), 0.2f, -0.3f * float(i % 2)};
+            physics.createBody(d);
+        }
+    };
+    PhysicsWorld a, b;
+    build(a);
+    build(b);
+    for (int i = 0; i < 120; i++) { a.step(DT); b.step(DT); }
+    REQUIRE(a.stateHash() == b.stateHash());
+    std::vector<uint8_t> snapshot = a.saveState();
+    std::vector<uint64_t> hashes;
+    for (int i = 0; i < 120; i++) {
+        a.step(DT);
+        b.step(DT);
+        REQUIRE(a.stateHash() == b.stateHash());
+        hashes.push_back(a.stateHash());
+    }
+    REQUIRE(a.restoreState(snapshot));
+    for (int i = 0; i < 120; i++) {
+        a.step(DT);
+        REQUIRE(a.stateHash() == hashes[size_t(i)]);
+    }
+}

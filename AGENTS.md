@@ -101,6 +101,10 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 - `chunkQueue` on Chunk is the legacy edit staging area (to be removed after P1 verification).
 - `editQueue` on ComponentRecord is the new per-component edit queue (P1+).
 - `forkBlob` creates a COW copy without decrementing the original's refCount.
+- A blob's `contentStamp` names its voxel content (physics shapes are cached by it). Code that
+  replaces `blob.geometry` in place calls `markBlobContentChanged(blob)`, never just clears
+  `contentBoundsValid`. What voxels collide as is `utils::buildCollisionPieces`
+  (`utils/collision_geometry.h`), and nothing else.
 
 ## Where things are
 

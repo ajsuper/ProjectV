@@ -272,6 +272,7 @@ add_library(projectV STATIC
 
     src/utils/animation.cpp
     src/utils/attachments.cpp
+    src/utils/collision_geometry.cpp
     src/utils/compose_io.cpp
     src/utils/editing.cpp
     src/utils/loose_bvh.cpp
@@ -356,7 +357,7 @@ target_compile_options(projv_physics PRIVATE
     ${PROJV_OPTIMISED_BUILD_FLAGS}
 )
 target_link_libraries(projv_physics PRIVATE
-    Jolt::Jolt bgfx::bx ${PROJV_GLM_TARGET} ${PROJV_SPDLOG_TARGET} nlohmann_json::nlohmann_json EnTT::EnTT)
+    Jolt::Jolt bgfx::bgfx bgfx::bx ${PROJV_GLM_TARGET} ${PROJV_SPDLOG_TARGET} nlohmann_json::nlohmann_json EnTT::EnTT)
 target_sources(projectV PRIVATE $<TARGET_OBJECTS:projv_physics>)
 # Link only: Jolt's compile flags and defines stay on projv_physics.
 target_link_libraries(projectV PRIVATE $<LINK_ONLY:Jolt::Jolt>)

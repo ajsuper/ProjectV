@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "core/math.h"
+#include "utils/collision_geometry.h"
 
 // The physics core: a Jolt simulation behind an interface that names no Jolt type.
 //
@@ -58,17 +59,36 @@ namespace projv::runtime {
     };
     bool layersCollide(PhysicsLayer a, PhysicsLayer b);
 
+    // A shape built from voxels (PhysicsWorld::voxelShape): the blob's collision pieces as one Jolt
+    // shape, in the blob's voxel space. Shared: every body made from the same blob content uses the
+    // same one, and holding a ref keeps it alive. Opaque; the fields are for diagnostics and tests.
+    struct CollisionShape {
+        uint32_t                 pieces = 0;
+        float                    volume = 0.0f;   // in voxels (cubic voxel units)
+        utils::CollisionFallback fallback = utils::CollisionFallback::None;
+        struct Native;                            // the Jolt shape; defined where Jolt is
+        std::shared_ptr<Native>  native;
+    };
+    using CollisionShapeRef = std::shared_ptr<const CollisionShape>;
+
     struct PhysicsShape {
-        enum class Kind : uint8_t { Box, Sphere, Capsule };
+        enum class Kind : uint8_t { Box, Sphere, Capsule, Voxels };
         Kind       kind = Kind::Box;
         core::vec3 halfExtents{0.5f};   // Box
         float      radius = 0.5f;       // Sphere, Capsule
         float      halfHeight = 0.5f;   // Capsule: half the length of the cylinder part, along Y
+        // Voxels: the shape, and the world size of one voxel (the chunk's voxel size times its
+        // uniform scale). The body's position is the voxel space origin -- the chunk's corner.
+        CollisionShapeRef voxels;
+        float             voxelSize = 1.0f;
 
-        static PhysicsShape box(core::vec3 halfExtents) { return {Kind::Box, halfExtents, 0.0f, 0.0f}; }
-        static PhysicsShape sphere(float radius) { return {Kind::Sphere, core::vec3(0.0f), radius, 0.0f}; }
+        static PhysicsShape box(core::vec3 halfExtents) { return {Kind::Box, halfExtents, 0.0f, 0.0f, {}, 1.0f}; }
+        static PhysicsShape sphere(float radius) { return {Kind::Sphere, core::vec3(0.0f), radius, 0.0f, {}, 1.0f}; }
         static PhysicsShape capsule(float halfHeight, float radius) {
-            return {Kind::Capsule, core::vec3(0.0f), radius, halfHeight};
+            return {Kind::Capsule, core::vec3(0.0f), radius, halfHeight, {}, 1.0f};
+        }
+        static PhysicsShape fromVoxels(CollisionShapeRef shape, float voxelSize) {
+            return {Kind::Voxels, core::vec3(0.0f), 0.0f, 0.0f, std::move(shape), voxelSize};
         }
     };
 
@@ -145,6 +165,22 @@ namespace projv::runtime {
 
         // Default state for an id that is not alive.
         BodyState bodyState(BodyId id) const;
+        // The body's mass, 0 for a static body or an id that is not alive.
+        float bodyMass(BodyId id) const;
+
+        // ---- Voxel shapes ------------------------------------------------------------------------
+        // The shape a blob collides as (utils::buildCollisionPieces), built once per blob content and
+        // parameters and shared after that: two calls for the same content return the same shape,
+        // and an edit -- which gives the blob a new content stamp -- gets a new one. Null when the
+        // blob has no voxels (nothing to collide with) or its pieces could not be made into a shape.
+        CollisionShapeRef voxelShape(const GeometryBlob& blob, uint32_t resolution,
+                                     const utils::CollisionParams& params = {});
+        // The same, from pieces already built, and not cached.
+        CollisionShapeRef shapeFromPieces(const utils::CollisionPieces& pieces);
+        // Drops cached shapes nothing uses any more: no ref held outside the cache, no body built
+        // from it. step() does this once a second of ticks; call it to release memory sooner.
+        void pruneShapeCache();
+        size_t cachedShapeCount() const;
 
         // Advances the simulation by `dt` seconds, in one collision step. Callers step at a fixed
         // rate (FixedUpdate); a varying dt is allowed but gives up determinism across runs that

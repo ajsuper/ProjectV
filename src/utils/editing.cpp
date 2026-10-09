@@ -126,7 +126,7 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
             bakeMaterialsFromBrickMap(chunk.geometryData, blob.materialIDs, *blob.brickMap);
 
             blob.geometry = std::move(chunk.geometryData);
-            blob.contentBoundsValid = false;
+            markBlobContentChanged(blob);
 
             core::edit(" applyEditsToChunk: done res={} geomNodes={} materialIDs={}",
                        chunk.header.resolution,

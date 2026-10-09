@@ -7,6 +7,7 @@
 #include <map>
 #include <unordered_map>
 #include <any>
+#include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <stdint.h>
@@ -432,8 +433,16 @@ namespace projv{
         float nativeScale = 0.0f;
     };
 
+    // A process-wide counter for GeometryBlob::contentStamp: every value is handed out once, so a
+    // stamp names one particular content, whichever pool slot holds it and however often slots are
+    // reused.
+    inline uint64_t nextBlobContentStamp() {
+        static std::atomic<uint64_t> counter{0};
+        return ++counter;
+    }
+
     // One unique geometry blob shared across chunk instances. See Scene.geometryPool.
-struct GeometryBlob {
+    struct GeometryBlob {
         std::vector<uint32_t> geometry;
         // One byte per solid voxel, addressed through each leaf's material offset in `geometry` and
         // naming a slot in the owning component's palette. This is what the .data stores and what the
@@ -482,6 +491,12 @@ struct GeometryBlob {
         mutable core::ivec3 contentMin{0};
         mutable core::ivec3 contentMax{-1};
         mutable bool contentBoundsValid = false;
+        // Names this blob's voxel content: equal stamps, equal `geometry`. A new blob gets a fresh
+        // one, a copy keeps its source's (same voxels), and every write that replaces `geometry` in
+        // place takes a fresh one -- through markBlobContentChanged, which also clears
+        // contentBoundsValid, so the two cannot drift apart. What caches derived from the voxels
+        // (physics collision shapes) are keyed by. Local to this process: never persist or send it.
+        uint64_t contentStamp = nextBlobContentStamp();
         // P5: true when the blob's GPU content is stale (newly forked, interned, or content changed).
         // Cleared by flushSceneUpdates after the incremental upload.
         bool dirty = false;
@@ -692,6 +707,13 @@ struct GeometryBlob {
         if (--blob.refCount == 0) scene.blobFreeList.push_back(static_cast<uint32_t>(poolIdx));
     }
 
+    // Call after replacing a blob's `geometry` in place: drops the cached content bounds and takes a
+    // fresh content stamp, so nothing derived from the old voxels is mistaken for the new.
+    inline void markBlobContentChanged(GeometryBlob& blob) {
+        blob.contentBoundsValid = false;
+        blob.contentStamp = nextBlobContentStamp();
+    }
+
     // Moves an unpooled chunk's owned geometry (geometryPoolIndex < 0) into a fresh refcount-1 pool blob
     // and points the chunk at it, so every chunk flows through the single pooled path. No-op (returns
     // the existing index) if the chunk is already pooled. Used by the voxelizer and defensively by
@@ -833,7 +855,7 @@ struct GeometryBlob {
 
         GeometryBlob& blob = scene.geometryPool[targetIdx];
         blob.geometry = std::move(newGeometry);
-        blob.contentBoundsValid = false;
+        markBlobContentChanged(blob);
         blob.materialIDs = std::move(newMaterialIDs);
         if (newBrickMap) blob.brickMap = std::move(newBrickMap);
         blob.renderLOD = 0;

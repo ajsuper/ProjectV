@@ -14,6 +14,7 @@ namespace projv {
         , sourceBlockCoord(rhs.sourceBlockCoord)
         , ownsSourceFile(rhs.ownsSourceFile)
         , refCount(rhs.refCount)
+        , contentStamp(rhs.contentStamp)   // same voxels, same stamp
         , dirty(rhs.dirty)
         , renderLOD(rhs.renderLOD)
     {}
@@ -31,6 +32,8 @@ namespace projv {
         refCount       = rhs.refCount;
         dirty          = rhs.dirty;
         renderLOD      = rhs.renderLOD;
+        contentStamp   = rhs.contentStamp;
+        contentBoundsValid = false;
         return *this;
     }
 } // namespace projv

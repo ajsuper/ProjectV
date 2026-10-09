@@ -9,6 +9,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <string>
 
@@ -21,6 +22,9 @@
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
+#include <Jolt/Physics/Collision/Shape/ScaledShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -30,6 +34,10 @@
 #include "core/log.h"
 
 namespace projv::runtime {
+    struct CollisionShape::Native {
+        JPH::RefConst<JPH::Shape> shape;
+    };
+
     namespace {
         // ---- Jolt's process-wide setup ----------------------------------------------------------
         // Jolt keeps a type factory and an allocator hook per process. Every PhysicsWorld holds a
@@ -162,6 +170,20 @@ namespace projv::runtime {
                     result = settings.Create();
                     break;
                 }
+                case PhysicsShape::Kind::Voxels: {
+                    if (!shape.voxels || !shape.voxels->native || !shape.voxels->native->shape) {
+                        core::warn("physics: refused a voxel shape that is empty");
+                        return nullptr;
+                    }
+                    if (!std::isfinite(shape.voxelSize) || shape.voxelSize <= 0.0f) {
+                        core::warn("physics: refused a voxel shape with voxel size {}", shape.voxelSize);
+                        return nullptr;
+                    }
+                    const JPH::Shape* unit = shape.voxels->native->shape.GetPtr();
+                    if (shape.voxelSize == 1.0f) return unit;
+                    // Scaled, not rebuilt: the unit shape stays shared by every body of any size.
+                    return new JPH::ScaledShape(unit, JPH::Vec3::sReplicate(shape.voxelSize));
+                }
                 case PhysicsShape::Kind::Capsule: {
                     if (!std::isfinite(shape.radius) || !std::isfinite(shape.halfHeight) ||
                         shape.radius <= 0.0f || shape.halfHeight <= 0.0f) {
@@ -252,6 +274,9 @@ namespace projv::runtime {
         JPH::PhysicsSystem system;
         PhysicsStats       stats;
         uint64_t           tick = 0;
+        // Voxel shapes by (content stamp, parameters). Ordered, so nothing about it can make two
+        // runs differ (it does not feed the simulation, but it costs nothing to rule out).
+        std::map<std::pair<uint64_t, uint64_t>, std::shared_ptr<const CollisionShape>> shapeCache;
 
         // Every live body id, ascending. What the hash and the snapshot iterate, so neither
         // depends on Jolt's internal storage order.
@@ -317,6 +342,17 @@ namespace projv::runtime {
         if (desc.mass > 0.0f) {
             settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
             settings.mMassPropertiesOverride.mMass = desc.mass;
+        } else if (desc.shape.kind == PhysicsShape::Kind::Voxels) {
+            // A voxel shape is built once and shared, so it carries no density of its own: the mass
+            // is its volume at this body's scale and density, with the inertia the shape implies.
+            float scale = desc.shape.voxelSize;
+            settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+            settings.mMassPropertiesOverride.mMass = desc.shape.voxels->volume * scale * scale * scale * desc.density;
+        }
+        if (desc.shape.kind == PhysicsShape::Kind::Voxels) {
+            // Voxel shapes are many boxes side by side; without this a body sliding across them
+            // catches on the seams between neighbours.
+            settings.mEnhancedInternalEdgeRemoval = true;
         }
 
         JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
@@ -361,6 +397,7 @@ namespace projv::runtime {
             impl->system.Update(dt, 1, impl->tempAllocator.get(), impl->jobSystem.get());
         impl->tick++;
         impl->stats.steps++;
+        if (impl->tick % 60 == 0) pruneShapeCache();
         impl->stats.bodies = impl->system.GetNumBodies();
         impl->stats.awakeBodies = impl->system.GetNumActiveBodies(JPH::EBodyType::RigidBody);
         if (errors != JPH::EPhysicsUpdateError::None) {
@@ -378,6 +415,86 @@ namespace projv::runtime {
     }
 
     uint64_t PhysicsWorld::tick() const { return impl->tick; }
+
+    float PhysicsWorld::bodyMass(BodyId id) const {
+        if (!id.valid()) return 0.0f;
+        JPH::BodyLockRead lock(impl->system.GetBodyLockInterface(), JPH::BodyID(id.value));
+        if (!lock.Succeeded() || !lock.GetBody().IsDynamic()) return 0.0f;
+        float inverse = lock.GetBody().GetMotionProperties()->GetInverseMass();
+        return inverse > 0.0f ? 1.0f / inverse : 0.0f;
+    }
+
+    CollisionShapeRef PhysicsWorld::shapeFromPieces(const utils::CollisionPieces& pieces) {
+        if (pieces.pieces.empty()) return nullptr;
+        auto boxFor = [](const utils::CollisionPiece& piece) -> JPH::RefConst<JPH::Shape> {
+            core::vec3 half = 0.5f * (piece.max - piece.min);
+            if (!finite(half) || half.x <= 0.0f || half.y <= 0.0f || half.z <= 0.0f) return nullptr;
+            float convexRadius = std::min(JPH::cDefaultConvexRadius, 0.5f * std::min({half.x, half.y, half.z}));
+            return new JPH::BoxShape(toJolt(half), convexRadius);
+        };
+        float volume = 0.0f;
+        JPH::RefConst<JPH::Shape> shape;
+        if (pieces.pieces.size() == 1) {
+            const utils::CollisionPiece& piece = pieces.pieces[0];
+            JPH::RefConst<JPH::Shape> box = boxFor(piece);
+            if (!box) return nullptr;
+            core::vec3 size = piece.max - piece.min;
+            volume = size.x * size.y * size.z;
+            shape = new JPH::RotatedTranslatedShape(toJolt(0.5f * (piece.min + piece.max)), JPH::Quat::sIdentity(), box);
+        } else {
+            JPH::StaticCompoundShapeSettings compound;
+            for (uint32_t i = 0; i < pieces.pieces.size(); i++) {
+                const utils::CollisionPiece& piece = pieces.pieces[i];
+                JPH::RefConst<JPH::Shape> box = boxFor(piece);
+                if (!box) {
+                    core::warn("physics: voxel piece {} has no size; the shape is refused", i);
+                    return nullptr;
+                }
+                core::vec3 size = piece.max - piece.min;
+                volume += size.x * size.y * size.z;
+                // The piece index rides along as user data, so a hit sub-shape leads back to voxels.
+                compound.AddShape(toJolt(0.5f * (piece.min + piece.max)), JPH::Quat::sIdentity(), box, i);
+            }
+            JPH::Shape::ShapeResult result = compound.Create(*impl->tempAllocator);
+            if (result.HasError()) {
+                core::warn("physics: voxel compound shape failed: {}", result.GetError().c_str());
+                return nullptr;
+            }
+            shape = result.Get();
+        }
+        auto out = std::make_shared<CollisionShape>();
+        out->pieces = uint32_t(pieces.pieces.size());
+        out->volume = volume;
+        out->fallback = pieces.fallback;
+        out->native = std::make_shared<CollisionShape::Native>();
+        out->native->shape = shape;
+        return out;
+    }
+
+    CollisionShapeRef PhysicsWorld::voxelShape(const GeometryBlob& blob, uint32_t resolution,
+                                               const utils::CollisionParams& params) {
+        auto key = std::make_pair(blob.contentStamp, params.key());
+        auto found = impl->shapeCache.find(key);
+        if (found != impl->shapeCache.end()) return found->second;
+        utils::CollisionPieces pieces = utils::buildCollisionPieces(blob, resolution, params);
+        CollisionShapeRef shape = shapeFromPieces(pieces);
+        // An empty blob is cached as "no shape" too: asking again is as cheap as the first answer.
+        impl->shapeCache.emplace(key, shape);
+        return shape;
+    }
+
+    void PhysicsWorld::pruneShapeCache() {
+        for (auto it = impl->shapeCache.begin(); it != impl->shapeCache.end();) {
+            const auto& shape = it->second;
+            // Unused: only the cache holds our handle, and only that handle holds the Jolt shape (a
+            // body, or a scaled wrapper a body holds, adds a reference of its own).
+            bool unused = !shape || (shape.use_count() == 1 && shape->native.use_count() == 1 &&
+                                     shape->native->shape->GetRefCount() == 1);
+            it = unused ? impl->shapeCache.erase(it) : std::next(it);
+        }
+    }
+
+    size_t PhysicsWorld::cachedShapeCount() const { return impl->shapeCache.size(); }
 
     std::vector<uint8_t> PhysicsWorld::saveState() const {
         std::vector<uint8_t> out;
