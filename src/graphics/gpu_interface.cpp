@@ -1550,11 +1550,6 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             }
 
             writeHeaderTexel(gpuData.headerTexture, h, hdr);
-#if defined(PROJV_ENABLE_RENDER)
-            if (h < 64) // sample first 64 chunks each flush
-                core::info("HEADER h={} matStart={} palOff={}",
-                           h, hdr.geometryStartIndex, hdr.materialIDStartIndex, hdr.paletteOffset);
-#endif
             scene.chunks[h].headerDirty = false;   // P6: clear after sync
             updated++;
         }
