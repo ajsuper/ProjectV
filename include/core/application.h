@@ -32,6 +32,15 @@ namespace projv {
     // was stored inside `app` is what made the old Application unmovable (known-latent-issues #1).
     using System = std::function<void(Application&)>;
 
+    // Where a system goes within its stage, relative to others by name. Empty is no constraint.
+    // A constraint naming a system not added yet still holds when that system is added later: the
+    // engine's installers use this so the order they need does not depend on the order a program
+    // happens to install them in (physics writes poses before the Scene bridge reads them).
+    struct SystemOrder {
+        std::string before;
+        std::string after;
+    };
+
     // Owns the world, the stages and the frame loop.
     //
     //     projv::Application app;
@@ -66,9 +75,12 @@ namespace projv {
         // wants to ask first -- unsaved changes -- sets this false and handles CloseRequested itself.
         bool closeOnRequest = true;
 
-        // Appends a system to a stage. Within a stage, systems run in the order they were added.
-        // The name is what logs and profilers report.
-        void addSystem(Stage stage, std::string name, System system);
+        // Adds a system to a stage. Within a stage, systems run in the order they were added,
+        // except where a SystemOrder -- this system's, or one an earlier system gave relative to
+        // this one's name -- says otherwise: then it goes as late as the constraints allow.
+        // Constraints that cannot all hold are logged, and the system is appended. The name is what
+        // logs and profilers report.
+        void addSystem(Stage stage, std::string name, System system, SystemOrder order = {});
 
         // Startup, the loop until closeRequested, then Shutdown. Returns once Shutdown has run.
         void run();
@@ -95,6 +107,7 @@ namespace projv {
         struct NamedSystem {
             std::string name;
             System      run;
+            SystemOrder order;
         };
         void runStage(Stage stage);
 

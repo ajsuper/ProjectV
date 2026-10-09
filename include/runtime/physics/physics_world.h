@@ -71,26 +71,52 @@ namespace projv::runtime {
     };
     using CollisionShapeRef = std::shared_ptr<const CollisionShape>;
 
+    struct PhysicsShapePart;
+
     struct PhysicsShape {
-        enum class Kind : uint8_t { Box, Sphere, Capsule, Voxels };
+        enum class Kind : uint8_t { Box, Sphere, Capsule, Voxels, Compound };
         Kind       kind = Kind::Box;
         core::vec3 halfExtents{0.5f};   // Box
         float      radius = 0.5f;       // Sphere, Capsule
         float      halfHeight = 0.5f;   // Capsule: half the length of the cylinder part, along Y
         // Voxels: the shape, and the world size of one voxel (the chunk's voxel size times its
-        // uniform scale). The body's position is the voxel space origin -- the chunk's corner.
+        // uniform scale). The shape's origin is the voxel space origin -- the chunk's corner.
         CollisionShapeRef voxels;
         float             voxelSize = 1.0f;
+        // Compound: shapes placed in this one's space. Any kind may be a part, compounds included.
+        std::vector<PhysicsShapePart> parts;
 
-        static PhysicsShape box(core::vec3 halfExtents) { return {Kind::Box, halfExtents, 0.0f, 0.0f, {}, 1.0f}; }
-        static PhysicsShape sphere(float radius) { return {Kind::Sphere, core::vec3(0.0f), radius, 0.0f, {}, 1.0f}; }
-        static PhysicsShape capsule(float halfHeight, float radius) {
-            return {Kind::Capsule, core::vec3(0.0f), radius, halfHeight, {}, 1.0f};
-        }
-        static PhysicsShape fromVoxels(CollisionShapeRef shape, float voxelSize) {
-            return {Kind::Voxels, core::vec3(0.0f), 0.0f, 0.0f, std::move(shape), voxelSize};
-        }
+        static PhysicsShape box(core::vec3 halfExtents);
+        static PhysicsShape sphere(float radius);
+        static PhysicsShape capsule(float halfHeight, float radius);
+        static PhysicsShape fromVoxels(CollisionShapeRef shape, float voxelSize);
+        static PhysicsShape compound(std::vector<PhysicsShapePart> parts);
+
+        // Cubic metres. What a body's mass is computed from, with its density.
+        float volume() const;
     };
+
+    struct PhysicsShapePart {
+        PhysicsShape shape;
+        core::vec3   position{0.0f};
+        core::quat   rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    };
+
+    inline PhysicsShape PhysicsShape::box(core::vec3 h) {
+        PhysicsShape s; s.kind = Kind::Box; s.halfExtents = h; return s;
+    }
+    inline PhysicsShape PhysicsShape::sphere(float r) {
+        PhysicsShape s; s.kind = Kind::Sphere; s.radius = r; return s;
+    }
+    inline PhysicsShape PhysicsShape::capsule(float halfHeight, float r) {
+        PhysicsShape s; s.kind = Kind::Capsule; s.halfHeight = halfHeight; s.radius = r; return s;
+    }
+    inline PhysicsShape PhysicsShape::fromVoxels(CollisionShapeRef shape, float voxelSize) {
+        PhysicsShape s; s.kind = Kind::Voxels; s.voxels = std::move(shape); s.voxelSize = voxelSize; return s;
+    }
+    inline PhysicsShape PhysicsShape::compound(std::vector<PhysicsShapePart> parts) {
+        PhysicsShape s; s.kind = Kind::Compound; s.parts = std::move(parts); return s;
+    }
 
     struct BodyDesc {
         PhysicsShape shape;
@@ -100,8 +126,8 @@ namespace projv::runtime {
         core::quat   rotation{1.0f, 0.0f, 0.0f, 0.0f};
         core::vec3   linearVelocity{0.0f};
         core::vec3   angularVelocity{0.0f};
-        // Mass: from the shape's volume at `density`, unless `mass` is > 0, which sets it outright
-        // (the inertia keeps the shape's distribution, scaled to that mass).
+        // Mass: the shape's volume times `density`, unless `mass` is > 0, which sets it outright.
+        // Either way the inertia is the shape's, scaled to that mass.
         float        density = 1000.0f;
         float        mass = 0.0f;
         float        friction = 0.6f;
@@ -181,6 +207,20 @@ namespace projv::runtime {
         // from it. step() does this once a second of ticks; call it to release memory sooner.
         void pruneShapeCache();
         size_t cachedShapeCount() const;
+
+        // ---- Moving bodies -------------------------------------------------------------------------
+        // All of these wake the body, and ignore a body that is not alive or cannot move.
+        void addImpulse(BodyId id, core::vec3 impulse);              // at the centre of mass, N s
+        void addAngularImpulse(BodyId id, core::vec3 impulse);       // N m s
+        void addVelocity(BodyId id, core::vec3 linear);              // a velocity change, whatever the mass
+        void setVelocity(BodyId id, core::vec3 linear, core::vec3 angular);
+        // Places the body; velocities are kept. A teleport: nothing is swept along the way.
+        void setPose(BodyId id, core::vec3 position, core::quat rotation);
+        // A kinematic body: moves it to the pose over the next step, with the velocity that takes,
+        // so what it pushes is pushed with the right speed.
+        void moveKinematic(BodyId id, core::vec3 position, core::quat rotation, float dt);
+        void setGravity(core::vec3 gravity);
+        core::vec3 gravity() const;
 
         // Advances the simulation by `dt` seconds, in one collision step. Callers step at a fixed
         // rate (FixedUpdate); a varying dt is allowed but gives up determinism across runs that

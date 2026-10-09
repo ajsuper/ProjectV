@@ -142,7 +142,48 @@ namespace projv::runtime {
         }
 
         // The shape a description asks for, or null with the reason logged.
-        JPH::ShapeRefC makeShape(const PhysicsShape& shape, float density) {
+        JPH::ShapeRefC makeShape(const PhysicsShape& shape);
+
+        // Shapes are made at Jolt's default density and the body's mass set from PhysicsShape::volume
+        // instead (createBody): a voxel shape is shared by bodies of different densities, and one
+        // rule for every kind is simpler than two.
+        JPH::ShapeRefC makeCompound(const PhysicsShape& shape) {
+            if (shape.parts.empty()) {
+                core::warn("physics: refused a compound with no parts");
+                return nullptr;
+            }
+            std::vector<JPH::ShapeRefC> made;
+            made.reserve(shape.parts.size());
+            for (const PhysicsShapePart& part : shape.parts) {
+                if (!finite(part.position) || !finite(part.rotation)) {
+                    core::warn("physics: refused a compound part with a non-finite placement");
+                    return nullptr;
+                }
+                JPH::ShapeRefC child = makeShape(part.shape);
+                if (!child) return nullptr;
+                made.push_back(child);
+            }
+            auto rotationOf = [](const PhysicsShapePart& part) {
+                return toJolt(glm::normalize(part.rotation));
+            };
+            if (made.size() == 1) {
+                const PhysicsShapePart& part = shape.parts[0];
+                if (part.position == core::vec3(0.0f) && part.rotation == core::quat(1, 0, 0, 0)) return made[0];
+                return new JPH::RotatedTranslatedShape(toJolt(part.position), rotationOf(part), made[0]);
+            }
+            JPH::StaticCompoundShapeSettings compound;
+            for (size_t i = 0; i < made.size(); i++)
+                compound.AddShape(toJolt(shape.parts[i].position), rotationOf(shape.parts[i]), made[i], uint32_t(i));
+            JPH::Shape::ShapeResult result = compound.Create();
+            if (result.HasError()) {
+                core::warn("physics: compound shape failed: {}", result.GetError().c_str());
+                return nullptr;
+            }
+            return result.Get();
+        }
+
+        // The shape a description asks for, or null with the reason logged.
+        JPH::ShapeRefC makeShape(const PhysicsShape& shape) {
             JPH::Shape::ShapeResult result;
             switch (shape.kind) {
                 case PhysicsShape::Kind::Box: {
@@ -155,9 +196,7 @@ namespace projv::runtime {
                     // smallest half extent; a thin box gets a proportionally smaller one.
                     float smallest = std::min({h.x, h.y, h.z});
                     float convexRadius = std::min(JPH::cDefaultConvexRadius, 0.5f * smallest);
-                    JPH::BoxShapeSettings settings(toJolt(h), convexRadius);
-                    settings.SetDensity(density);
-                    result = settings.Create();
+                    result = JPH::BoxShapeSettings(toJolt(h), convexRadius).Create();
                     break;
                 }
                 case PhysicsShape::Kind::Sphere: {
@@ -165,9 +204,17 @@ namespace projv::runtime {
                         core::warn("physics: refused a sphere with radius {}", shape.radius);
                         return nullptr;
                     }
-                    JPH::SphereShapeSettings settings(shape.radius);
-                    settings.SetDensity(density);
-                    result = settings.Create();
+                    result = JPH::SphereShapeSettings(shape.radius).Create();
+                    break;
+                }
+                case PhysicsShape::Kind::Capsule: {
+                    if (!std::isfinite(shape.radius) || !std::isfinite(shape.halfHeight) ||
+                        shape.radius <= 0.0f || shape.halfHeight <= 0.0f) {
+                        core::warn("physics: refused a capsule with half height {} and radius {}",
+                                   shape.halfHeight, shape.radius);
+                        return nullptr;
+                    }
+                    result = JPH::CapsuleShapeSettings(shape.halfHeight, shape.radius).Create();
                     break;
                 }
                 case PhysicsShape::Kind::Voxels: {
@@ -184,24 +231,21 @@ namespace projv::runtime {
                     // Scaled, not rebuilt: the unit shape stays shared by every body of any size.
                     return new JPH::ScaledShape(unit, JPH::Vec3::sReplicate(shape.voxelSize));
                 }
-                case PhysicsShape::Kind::Capsule: {
-                    if (!std::isfinite(shape.radius) || !std::isfinite(shape.halfHeight) ||
-                        shape.radius <= 0.0f || shape.halfHeight <= 0.0f) {
-                        core::warn("physics: refused a capsule with half height {} and radius {}",
-                                   shape.halfHeight, shape.radius);
-                        return nullptr;
-                    }
-                    JPH::CapsuleShapeSettings settings(shape.halfHeight, shape.radius);
-                    settings.SetDensity(density);
-                    result = settings.Create();
-                    break;
-                }
+                case PhysicsShape::Kind::Compound:
+                    return makeCompound(shape);
             }
             if (result.HasError()) {
                 core::warn("physics: shape creation failed: {}", result.GetError().c_str());
                 return nullptr;
             }
             return result.Get();
+        }
+
+        bool containsVoxels(const PhysicsShape& shape) {
+            if (shape.kind == PhysicsShape::Kind::Voxels) return true;
+            for (const PhysicsShapePart& part : shape.parts)
+                if (containsVoxels(part.shape)) return true;
+            return false;
         }
 
         JPH::EMotionType toJolt(MotionType motion) {
@@ -256,6 +300,22 @@ namespace projv::runtime {
             case PhysicsLayer::Count:     break;
         }
         return false;
+    }
+
+    float PhysicsShape::volume() const {
+        constexpr float pi = 3.14159265358979f;
+        switch (kind) {
+            case Kind::Box:     return 8.0f * halfExtents.x * halfExtents.y * halfExtents.z;
+            case Kind::Sphere:  return 4.0f / 3.0f * pi * radius * radius * radius;
+            case Kind::Capsule: return pi * radius * radius * (2.0f * halfHeight + 4.0f / 3.0f * radius);
+            case Kind::Voxels:  return voxels ? voxels->volume * voxelSize * voxelSize * voxelSize : 0.0f;
+            case Kind::Compound: {
+                float total = 0.0f;
+                for (const PhysicsShapePart& part : parts) total += part.shape.volume();
+                return total;
+            }
+        }
+        return 0.0f;
     }
 
     struct PhysicsWorld::Impl {
@@ -322,7 +382,7 @@ namespace projv::runtime {
         if (!(desc.density > 0.0f) || !std::isfinite(desc.density) || !std::isfinite(desc.mass) || desc.mass < 0.0f)
             return refuse("a density that is not positive, or a negative mass");
 
-        JPH::ShapeRefC shape = makeShape(desc.shape, desc.density);
+        JPH::ShapeRefC shape = makeShape(desc.shape);
         if (!shape) return refuse("its shape");
 
         core::quat rotation = desc.rotation / qlen;
@@ -339,21 +399,15 @@ namespace projv::runtime {
             settings.mLinearVelocity = toJolt(desc.linearVelocity);
             settings.mAngularVelocity = toJolt(desc.angularVelocity);
         }
-        if (desc.mass > 0.0f) {
+        if (desc.motion == MotionType::Dynamic) {
+            float mass = desc.mass > 0.0f ? desc.mass : desc.shape.volume() * desc.density;
+            if (!(mass > 0.0f) || !std::isfinite(mass)) return refuse("a shape with no volume, so no mass");
             settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
-            settings.mMassPropertiesOverride.mMass = desc.mass;
-        } else if (desc.shape.kind == PhysicsShape::Kind::Voxels) {
-            // A voxel shape is built once and shared, so it carries no density of its own: the mass
-            // is its volume at this body's scale and density, with the inertia the shape implies.
-            float scale = desc.shape.voxelSize;
-            settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
-            settings.mMassPropertiesOverride.mMass = desc.shape.voxels->volume * scale * scale * scale * desc.density;
+            settings.mMassPropertiesOverride.mMass = mass;
         }
-        if (desc.shape.kind == PhysicsShape::Kind::Voxels) {
-            // Voxel shapes are many boxes side by side; without this a body sliding across them
-            // catches on the seams between neighbours.
-            settings.mEnhancedInternalEdgeRemoval = true;
-        }
+        // Voxel shapes are many boxes side by side; without this a body sliding across them catches
+        // on the seams between neighbours.
+        if (containsVoxels(desc.shape)) settings.mEnhancedInternalEdgeRemoval = true;
 
         JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
         JPH::Body* body = bodies.CreateBody(settings);
@@ -413,6 +467,58 @@ namespace projv::runtime {
                         impl->stats.bodies);
         }
     }
+
+    namespace {
+        bool canMove(const JPH::PhysicsSystem& system, BodyId id) {
+            if (!id.valid()) return false;
+            JPH::BodyLockRead lock(system.GetBodyLockInterface(), JPH::BodyID(id.value));
+            return lock.Succeeded() && !lock.GetBody().IsStatic();
+        }
+    }
+
+    void PhysicsWorld::addImpulse(BodyId id, core::vec3 impulse) {
+        if (!finite(impulse) || !canMove(impl->system, id)) return;
+        impl->system.GetBodyInterface().AddImpulse(JPH::BodyID(id.value), toJolt(impulse));
+    }
+
+    void PhysicsWorld::addAngularImpulse(BodyId id, core::vec3 impulse) {
+        if (!finite(impulse) || !canMove(impl->system, id)) return;
+        impl->system.GetBodyInterface().AddAngularImpulse(JPH::BodyID(id.value), toJolt(impulse));
+    }
+
+    void PhysicsWorld::addVelocity(BodyId id, core::vec3 linear) {
+        if (!finite(linear) || !canMove(impl->system, id)) return;
+        JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
+        bodies.AddLinearVelocity(JPH::BodyID(id.value), toJolt(linear));
+    }
+
+    void PhysicsWorld::setVelocity(BodyId id, core::vec3 linear, core::vec3 angular) {
+        if (!finite(linear) || !finite(angular) || !canMove(impl->system, id)) return;
+        impl->system.GetBodyInterface().SetLinearAndAngularVelocity(JPH::BodyID(id.value), toJolt(linear),
+                                                                    toJolt(angular));
+    }
+
+    void PhysicsWorld::setPose(BodyId id, core::vec3 position, core::quat rotation) {
+        if (!finite(position) || !finite(rotation) || !isAlive(id)) return;
+        float length = glm::length(glm::vec4(rotation.x, rotation.y, rotation.z, rotation.w));
+        if (length < 0.5f) return;
+        impl->system.GetBodyInterface().SetPositionAndRotation(JPH::BodyID(id.value), toJoltR(position),
+                                                               toJolt(rotation / length), JPH::EActivation::Activate);
+    }
+
+    void PhysicsWorld::moveKinematic(BodyId id, core::vec3 position, core::quat rotation, float dt) {
+        if (!finite(position) || !finite(rotation) || !(dt > 0.0f) || !canMove(impl->system, id)) return;
+        float length = glm::length(glm::vec4(rotation.x, rotation.y, rotation.z, rotation.w));
+        if (length < 0.5f) return;
+        impl->system.GetBodyInterface().MoveKinematic(JPH::BodyID(id.value), toJoltR(position),
+                                                      toJolt(rotation / length), dt);
+    }
+
+    void PhysicsWorld::setGravity(core::vec3 gravity) {
+        if (finite(gravity)) impl->system.SetGravity(toJolt(gravity));
+    }
+
+    core::vec3 PhysicsWorld::gravity() const { return fromJolt(impl->system.GetGravity()); }
 
     uint64_t PhysicsWorld::tick() const { return impl->tick; }
 

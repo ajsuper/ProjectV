@@ -1,5 +1,6 @@
 #include "core/application.h"
 
+#include <algorithm>
 #include <chrono>
 
 #include "core/log.h"
@@ -38,14 +39,34 @@ namespace projv {
     // into its resources -- are gone before the resources are.
     Application::~Application() = default;
 
-    void Application::addSystem(Stage stage, std::string name, System system) {
+    void Application::addSystem(Stage stage, std::string name, System system, SystemOrder order) {
         size_t index = static_cast<size_t>(stage);
         if (!system) {
             core::warn("addSystem: '{}' on {} is empty - ignored", name, stageName(stage));
             return;
         }
-        names[index].push_back(name);
-        stages[index].push_back({std::move(name), std::move(system)});
+        std::vector<NamedSystem>& systems = stages[index];
+
+        // The new system must come after every system it names in `after` or that names it in
+        // `before`, and before every system it names in `before` or that names it in `after`.
+        size_t earliest = 0, latest = systems.size();
+        for (size_t i = 0; i < systems.size(); i++) {
+            const NamedSystem& existing = systems[i];
+            bool mustFollow = (!order.after.empty() && existing.name == order.after) ||
+                              existing.order.before == name;
+            bool mustPrecede = (!order.before.empty() && existing.name == order.before) ||
+                               existing.order.after == name;
+            if (mustFollow) earliest = std::max(earliest, i + 1);
+            if (mustPrecede) latest = std::min(latest, i);
+        }
+        size_t at = latest;   // as late as allowed: unconstrained systems keep their added order
+        if (earliest > latest) {
+            core::warn("addSystem: '{}' on {} cannot be both before and after the systems its order "
+                       "names - appended", name, stageName(stage));
+            at = systems.size();
+        }
+        systems.insert(systems.begin() + static_cast<std::ptrdiff_t>(at), {name, std::move(system), std::move(order)});
+        names[index].insert(names[index].begin() + static_cast<std::ptrdiff_t>(at), std::move(name));
     }
 
     const std::vector<std::string>& Application::systemNames(Stage stage) const {

@@ -163,3 +163,39 @@ TEST_CASE("CloseRequested ends the application, unless the application has taken
         CHECK(app.frameCount == 3);
     }
 }
+
+TEST_CASE("a system can be ordered before or after another by name, whichever is added first") {
+    auto order = [](bool bridgeFirst) {
+        projv::Application app;
+        std::vector<std::string> log;
+        auto record = [&log](std::string name) {
+            return [&log, name](projv::Application&) { log.push_back(name); };
+        };
+        app.addSystem(projv::Stage::PostUpdate, "a", record("a"));
+        if (bridgeFirst) app.addSystem(projv::Stage::PostUpdate, "bridge", record("bridge"));
+        app.addSystem(projv::Stage::PostUpdate, "present", record("present"), {.before = "bridge"});
+        if (!bridgeFirst) app.addSystem(projv::Stage::PostUpdate, "bridge", record("bridge"));
+        app.addSystem(projv::Stage::PostUpdate, "z", record("z"));
+        app.runStartup();
+        app.runFrame();
+        CHECK(app.systemNames(projv::Stage::PostUpdate) == log);
+        return log;
+    };
+    CHECK(order(true) == std::vector<std::string>{"a", "present", "bridge", "z"});
+    CHECK(order(false) == std::vector<std::string>{"a", "present", "bridge", "z"});
+
+    // `after` likewise, including a system added before the one it names.
+    projv::Application app;
+    app.addSystem(projv::Stage::Update, "late", [](projv::Application&) {}, {.after = "early"});
+    app.addSystem(projv::Stage::Update, "other", [](projv::Application&) {});
+    app.addSystem(projv::Stage::Update, "early", [](projv::Application&) {});
+    CHECK(app.systemNames(projv::Stage::Update) == std::vector<std::string>{"early", "late", "other"});
+}
+
+TEST_CASE("an order that cannot hold is logged and the system appended") {
+    projv::Application app;
+    app.addSystem(projv::Stage::Update, "x", [](projv::Application&) {});
+    app.addSystem(projv::Stage::Update, "y", [](projv::Application&) {});
+    app.addSystem(projv::Stage::Update, "bad", [](projv::Application&) {}, {.before = "x", .after = "y"});
+    CHECK(app.systemNames(projv::Stage::Update) == std::vector<std::string>{"x", "y", "bad"});
+}
