@@ -458,6 +458,18 @@ void selfTestSystem(projv::Application& app) {
                         -45.0f + 90.0f * float(i / side) / float(std::max(side - 1, 1)));
                 spawn("ball", at, vec3(0));
             }
+            // A still scene: no spin, no time. Two runs then draw exactly the same image whatever
+            // their frame timings, so SANDBOX_CAPTURE images can be compared pixel for pixel.
+            // SANDBOX_MEASURE_MOVING=1 keeps the bodies spinning instead: every Transform changes
+            // every frame, so the bridge rewrites every header and the BVH is rebuilt each flush --
+            // what playing costs.
+            if (!std::getenv("SANDBOX_MEASURE_MOVING")) {
+                for (auto [entity, body] : world.view<Body>().each()) body.spin = vec3(0.0f);
+                app.time().scale = 0.0f;
+            }
+        }
+        if (frame == test->frames - 5) {
+            if (const char* capture = std::getenv("SANDBOX_CAPTURE")) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capture);
         }
         if (frame < 60) { test->frameSeconds = test->gpuSeconds = test->worstFrame = 0.0; test->timedFrames = 0; }
         if (frame < test->frames) return;

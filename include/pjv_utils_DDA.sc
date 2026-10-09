@@ -3571,24 +3571,30 @@ vec3 fetchVoxelColorFromHit(SceneIntersectData hit) {
     return fetchVoxelMaterialFromHit(hit).albedo;
 }
 
-// The lossy path, kept only because a dozen shaders across the other examples still call it.
+// The colour of the voxel a hit box names, recovered from the box itself.
 //
-// **Do not use it in new code, and prefer fetchVoxelColorAtCoord when porting one.** It recovers the
-// voxel coordinate from the hit's world-space box, which is a float32 round trip through the chunk's
-// translation and rotation: the recovered cell is off by one for a share of voxels that grows with
-// how far the chunk sits from the origin and whether it is rotated, and each of those is shaded with
-// a neighbour's colour. See fetchVoxelColorAtCoord above for the full account and the measurements.
+// Prefer fetchVoxelColorFromHit (or fetchVoxelColorAtCoord with the hit's voxelCoord) in new code:
+// a SceneIntersectData already carries the exact cell. This is kept for the shaders across the
+// examples that pass `foundBox` -- and made exact enough that they need not change.
 //
-// A caller with a SceneIntersectData already has the exact answer in its `voxelCoord` field; the
-// port is to pass that instead of `foundBox`.
+// **It looks the voxel up at the box's centre, not its corner.** The box's position is its minimum
+// corner, in the world: a float32 round trip through the chunk's translation and rotation. Flooring
+// that corner put it exactly on a voxel boundary, where the round trip's error -- which changes every
+// time the chunk moves -- decided which side it fell on: a share of voxels was shaded with a
+// neighbour's material, and on a moving body the whole voxel flickered between the two along every
+// material border. The centre is half a voxel from every boundary, so the error would have to reach
+// half a voxel to choose wrong, which float32 does not do at any distance a scene uses. For a
+// coarsened LOD node (size > one voxel) the centre is a voxel inside the node, which is as good as a
+// node with no single material can do.
 vec3 fetchVoxelColor(BoxAABB voxelBoundingBox, uint headerIndex) {
     chunkHeader h = headers(int(headerIndex));
     uint res = h.resolution;
     vec3 P = vec3(h.positionX, h.positionY, h.positionZ);
     mat3 Rinv = transpose(rotationFromQuat(h.rotation));
 
-    vec3 zeroed = Rinv * (voxelBoundingBox.position - P);
-    vec3 unitPos = clamp(zeroed / h.scale, 0.0, 1.0 - 1e-6);
+    // The box is axis-aligned in the chunk's own frame, so its centre there is corner + size / 2.
+    vec3 centre = Rinv * (voxelBoundingBox.position - P) + vec3(0.5 * voxelBoundingBox.size);
+    vec3 unitPos = clamp(centre / h.scale, 0.0, 1.0 - 1e-6);
     ivec3 voxelPos = ivec3(unitPos * float(res));
 
     return fetchVoxelColorAtCoord(voxelPos, headerIndex);
@@ -3609,6 +3615,9 @@ struct Grid {
 
 uint sceneGridCount()  { return texelFetch(gridInfo, ivec2(0, 0), 0).r; }
 uint sceneLooseCount() { return texelFetch(gridInfo, ivec2(0, 0), 0).g; }
+// Nodes in the loose-chunk BVH (utils/loose_bvh.h); 0 when the scene has none and the loose list
+// is walked linearly.
+uint sceneLooseBVHNodeCount() { return texelFetch(gridInfo, ivec2(0, 0), 0).a; }
 
 Grid getGrid(int i) {
     int base = 1 + i * 3;
@@ -3647,6 +3656,46 @@ uint looseListValue(uint index) {
     uvec4 pixel = texelFetch(looseList, ivec2(x, y), 0);
     return pixel[colorIndex];
 }
+
+// One texel of the looseList texture, by texel index.
+uvec4 looseListTexel(int pixelIndex) {
+    ivec2 texSize = textureSize(looseList, 0);
+    return texelFetch(looseList, ivec2(pixelIndex % texSize.x, pixelIndex / texSize.x), 0);
+}
+
+// A BVH node: two texels after the loose list, which starts at texel 0 and is padded to a texel.
+// Interior: a, b are the children. Leaf: a = 0x80000000 | first list index, b = count.
+struct LooseBVHNode {
+    vec3 boxMin;
+    vec3 boxMax;
+    uint a;
+    uint b;
+};
+LooseBVHNode looseBVHNode(int nodeIndex, int looseCount) {
+    int base = (looseCount + 3) / 4 + nodeIndex * 2;
+    uvec4 t0 = looseListTexel(base);
+    uvec4 t1 = looseListTexel(base + 1);
+    LooseBVHNode node;
+    node.boxMin = vec3(uintBitsToFloat(t0.r), uintBitsToFloat(t0.g), uintBitsToFloat(t0.b));
+    node.boxMax = vec3(uintBitsToFloat(t0.a), uintBitsToFloat(t1.r), uintBitsToFloat(t1.g));
+    node.a = t1.b;
+    node.b = t1.a;
+    return node;
+}
+
+// Where a ray enters an axis-aligned box, or -1 when it misses or the box is behind it.
+float looseBVHEntry(vec3 origin, vec3 inverseDirection, vec3 boxMin, vec3 boxMax) {
+    vec3 t0 = (boxMin - origin) * inverseDirection;
+    vec3 t1 = (boxMax - origin) * inverseDirection;
+    vec3 lo = min(t0, t1);
+    vec3 hi = max(t0, t1);
+    float entry = max(max(lo.x, lo.y), lo.z);
+    float exit = min(min(hi.x, hi.y), hi.z);
+    if (exit < max(entry, 0.0)) return -1.0;
+    return max(entry, 0.0);
+}
+
+#define PJV_LOOSE_BVH_STACK 32
 
 // Walks one grid volume with a uniform-grid DDA, front-to-back, and returns the nearest hit
 // closer than maxDistance (or a miss). The DDA runs in grid-local space (cells axis-aligned),
@@ -3847,11 +3896,48 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin,
     VoxelMaterial winnerMaterial = emptyVoxelMaterial();
     bool winnerMaterialValid = false;
 
-    // Loose (transform-placed) chunks: brute-force over the explicit loose-handle list (not a
-    // positional prefix), so add/remove needs no header reordering. Broadphase in each chunk's
-    // local frame so rotated boxes are tested correctly.
-    for(int i = 0; i < looseCount; i++){
+    // Loose (transform-placed) chunks. With a BVH (utils/loose_bvh.h) only the chunks in leaves the
+    // ray reaches before the nearest hit so far are visited, nearest leaves first; without one, the
+    // whole list is. Both feed ONE loop body with ONE castRayThroughTree64 call: the loop asks for
+    // the next list index -- the next in a leaf's range, or, when a range runs out, the next leaf the
+    // traversal finds -- rather than duplicating the march into a second loop. (A second inlined
+    // march call site was measured to cost every renderer about 2x, even where it never ran.)
+    int bvhNodes = int(sceneLooseBVHNodeCount());
+    vec3 inverseDirection = vec3(1.0) / ray.direction;
+    int bvhStack[PJV_LOOSE_BVH_STACK];
+    int stackTop = 0;
+    int rangeNext = 0;
+    int rangeEnd = bvhNodes > 0 ? 0 : looseCount;   // no tree: one range, the whole list
+    if (bvhNodes > 0) { bvhStack[0] = 0; stackTop = 1; }
+    for (int visit = 0; visit < 65536; visit++) {
         if (peel.stopped) break;
+        // Out of chunks in the current range: find the next leaf the ray reaches in time.
+        while (rangeNext >= rangeEnd && stackTop > 0) {
+            stackTop--;
+            LooseBVHNode node = looseBVHNode(bvhStack[stackTop], looseCount);
+            float entry = looseBVHEntry(ray.origin, inverseDirection, node.boxMin, node.boxMax);
+            if (entry < 0.0 || entry >= closestDistance) continue;
+            if ((node.a & 0x80000000u) != 0u) {
+                rangeNext = int(node.a & 0x7FFFFFFFu);
+                rangeEnd = rangeNext + int(node.b);
+                continue;
+            }
+            // Near child last, so it is popped first.
+            LooseBVHNode left = looseBVHNode(int(node.a), looseCount);
+            LooseBVHNode right = looseBVHNode(int(node.b), looseCount);
+            float leftEntry = looseBVHEntry(ray.origin, inverseDirection, left.boxMin, left.boxMax);
+            float rightEntry = looseBVHEntry(ray.origin, inverseDirection, right.boxMin, right.boxMax);
+            bool rightFirst = rightEntry >= 0.0 && (leftEntry < 0.0 || rightEntry < leftEntry);
+            int nearChild = rightFirst ? int(node.b) : int(node.a);
+            int farChild  = rightFirst ? int(node.a) : int(node.b);
+            float nearEntry = rightFirst ? rightEntry : leftEntry;
+            float farEntry  = rightFirst ? leftEntry : rightEntry;
+            if (farEntry >= 0.0 && farEntry < closestDistance && stackTop < PJV_LOOSE_BVH_STACK) bvhStack[stackTop++] = farChild;
+            if (nearEntry >= 0.0 && nearEntry < closestDistance && stackTop < PJV_LOOSE_BVH_STACK) bvhStack[stackTop++] = nearChild;
+        }
+        if (rangeNext >= rangeEnd) break;
+        int i = rangeNext++;
+
         uint headerIndex = looseListValue(uint(i));
         chunkHeader h = headers(int(headerIndex));
         // A freed/dead slot carries a degenerate header (scale <= 0); skip it.

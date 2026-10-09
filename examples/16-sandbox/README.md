@@ -88,18 +88,23 @@ Render       flushSceneUpdates (new prefabs, moved headers, deleted voxels), the
 
 ## Limits worth knowing
 
-- **Every body costs GPU time on every pixel.** Bodies are loose chunks, and the shader visits every
-  loose chunk for every pixel; there is no acceleration structure for them yet. Measured on an
-  integrated Radeon 840M/860M at 1600×900:
+- **Bodies are found through a BVH.** Bodies are loose chunks, and the engine builds a BVH over
+  their content boxes on every flush (`utils/loose_bvh.h`); a ray visits only the bodies whose
+  boxes it reaches before its nearest hit. Nothing authors it and nothing is cached on disk.
+  `PROJV_LOOSE_BVH=0` turns it off, for comparison. Measured in one batch on an integrated
+  Radeon 840M/860M, 840×1072 window:
 
-  | | GPU / frame |
-  |---|---|
-  | the arena alone | 34 ms |
-  | the arena + 150 resting balls | 210 ms |
+  | | GPU / frame, BVH off | BVH on |
+  |---|---|---|
+  | the arena alone | 3.3 ms | 3.3 ms |
+  | + 150 resting balls | 24.5 ms | 4.4 ms |
+  | + 300 resting balls | 45.8 ms | 5.2 ms |
+  | + 150 spinning balls (every header and the tree rebuilt each frame) | 24.2 ms | 4.7 ms |
 
-  That is about 1.2 ms per body. A BVH over loose chunks is the planned fix. Measure it with
-  `SANDBOX_MEASURE=<bodies> ./sandbox`, which lays out that many balls, waits, and reports frame
-  and GPU time.
+  Without it a body cost ~0.14 ms here; with it, a few microseconds. The two render the same
+  image pixel for pixel. Measure with `SANDBOX_MEASURE=<bodies> ./sandbox`, which lays out that
+  many balls, holds them still, and reports frame and GPU time. `SANDBOX_MEASURE_MOVING=1` keeps
+  them spinning. `SANDBOX_CAPTURE=<path>` writes `<path>.tga` near the end, for image comparisons.
 - The arena is one component, which is one grid: continuous geometry on one lattice. Built as a
   floor chunk and four wall chunks instead, it cost 65 ms a frame on its own, because each chunk's
   cubic bounds filled the arena's whole airspace and every ray marched through them.

@@ -231,6 +231,7 @@ add_library(projectV STATIC
     src/utils/attachments.cpp
     src/utils/compose_io.cpp
     src/utils/editing.cpp
+    src/utils/loose_bvh.cpp
     src/utils/material.cpp
     src/utils/picking.cpp
     src/utils/scene_query.cpp

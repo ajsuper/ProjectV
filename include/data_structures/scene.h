@@ -456,6 +456,15 @@ struct GeometryBlob {
         // decremented on chunk removal / COW fork-away. At 0 the blob's GPU range is freed and its pool
         // slot is recycled via Scene.blobFreeList. Bounds pool growth over a long dynamic session.
         uint32_t refCount = 0;
+
+        // The box the voxels in `geometry` actually occupy, in chunk voxel coordinates, inclusive --
+        // as distinct from the chunk's whole cube. Cached here by utils::blobContentBounds, which
+        // fills it on first use; **every write that replaces `geometry` clears contentBoundsValid**
+        // (internChunkGeometry, replaceChunkGeometry and the edit path do). The loose-chunk BVH's
+        // leaves are built from it, so a stale box would cull geometry that is really there.
+        mutable core::ivec3 contentMin{0};
+        mutable core::ivec3 contentMax{-1};
+        mutable bool contentBoundsValid = false;
         // P5: true when the blob's GPU content is stale (newly forked, interned, or content changed).
         // Cleared by flushSceneUpdates after the incremental upload.
         bool dirty = false;
@@ -774,6 +783,7 @@ struct GeometryBlob {
 
         GeometryBlob& blob = scene.geometryPool[targetIdx];
         blob.geometry = std::move(newGeometry);
+        blob.contentBoundsValid = false;
         blob.materialIDs = std::move(newMaterialIDs);
         if (newBrickMap) blob.brickMap = std::move(newBrickMap);
         blob.renderLOD = 0;

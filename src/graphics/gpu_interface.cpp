@@ -1,4 +1,5 @@
 #include "graphics/gpu_interface.h"
+#include "utils/loose_bvh.h"
 #include "utils/material.h"
 #include "utils/voxel_management.h"
 
@@ -323,11 +324,6 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         comp = chunk.componentHandle;
     g.paletteOffset = (comp < gpuData.componentPaletteOffsets.size())
         ? gpuData.componentPaletteOffsets[comp] : 0u;
-#if defined(PROJV_ENABLE_RENDER)
-    if (g.paletteOffset != 0)
-        core::info("MAKE-HDR h={} comp={} compOffSz={} compOff={}",
-                   chunk.header.chunkID, comp, gpuData.componentPaletteOffsets.size(), g.paletteOffset);
-#endif
 
     g.rotationX = chunk.header.rotation.x;
     g.rotationY = chunk.header.rotation.y;
@@ -533,14 +529,19 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         bool upToDate = totalVersion == gpuData.componentPaletteVersion && !globalPalette.empty() &&
                         haveTexture;
 
-        core::info("PAL-CPU: compOffsets[0]={} totalVer={} storedVer={} haveTexture={} rebuilt={}",
+        core::trace("PAL-CPU: compOffsets[0]={} totalVer={} storedVer={} haveTexture={} rebuilt={}",
                    gpuData.componentPaletteOffsets.empty() ? 0xFFFF : gpuData.componentPaletteOffsets[0],
                    totalVersion, gpuData.componentPaletteVersion, haveTexture, !upToDate);
 
         if (upToDate) return false;
         gpuData.componentPaletteVersion = totalVersion;
 
-        if (globalPalette.empty()) return false;
+        // **No palette at all still gets a texture.** Returning here instead left the sampler with no
+        // texture behind it, and a voxel's palette slot then read whatever the driver had bound in
+        // that slot -- undefined, and different whenever any other texture's allocation moved: the
+        // same palette-less scene rendered orange with the loose-chunk BVH off and black with it on.
+        // One zeroed entry makes every such read the same (black), whatever else the frame allocates.
+        if (globalPalette.empty()) globalPalette.assign(4, 0u);
 
         // One RGBA32U texel per entry, so the texel count IS the entry count -- the palette used to
         // pack four entries into a texel and the shader picked one of the four components out of the
@@ -551,7 +552,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         // the texels per entry, a palette that once fit in one row of a 16384-wide texture would
         // reach the width limit at a quarter of the entries, and silently creating a texture
         // narrower than the data is the failure that renders a scene black.
-        const uint32_t entries = palOff;
+        const uint32_t entries = std::max(palOff, 1u);
         uint32_t maxSz = maxTexSize();
         uint32_t maxPot = (maxSz >= 0x80000000u) ? 0x80000000u : (nextPowerOfTwo(maxSz + 1u) >> 1u);
         uint32_t width = nextPowerOfTwo(entries);
@@ -946,9 +947,34 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
         // (Re)build the three small scene tables (gridInfo counts+descriptors, cellMap, looseList)
         // from current CPU state.
+        // Below this many loose chunks the shader's linear loop is cheaper than walking a tree.
+        constexpr size_t LOOSE_BVH_MIN_CHUNKS = 8;
+
         void syncSceneTables(projv::Scene& scene, GPUData& gpuData) {
             auto t0 = std::chrono::high_resolution_clock::now();
             std::vector<uint32_t> looseList = computeLooseList(scene);
+
+            // The loose-chunk BVH (utils/loose_bvh.h), rebuilt from the current headers on every
+            // flush -- moved bodies included. The list is rewritten in leaf order, so each leaf is a
+            // contiguous run of it, and the nodes follow it in the same texture, starting at the
+            // first texel boundary after the list: two texels a node, {min.xyz, max.x} and
+            // {max.yz, a, b}. gridInfo texel 0's fourth word carries the node count, 0 meaning "no
+            // tree, walk the list" -- which is what an older shader reads it as anyway.
+            uint32_t bvhNodeCount = 0;
+            std::vector<uint32_t> bvhNodes;
+            if (utils::looseBVHEnabled() && looseList.size() >= LOOSE_BVH_MIN_CHUNKS) {
+                std::vector<ChunkHandle> handles(looseList.begin(), looseList.end());
+                utils::LooseBVH bvh = utils::buildLooseBVH(scene, handles);
+                looseList.assign(bvh.chunks.begin(), bvh.chunks.end());
+                bvhNodeCount = static_cast<uint32_t>(bvh.nodes.size());
+                bvhNodes.reserve(bvh.nodes.size() * 8);
+                auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
+                for (const utils::LooseBVHNode& node : bvh.nodes) {
+                    bvhNodes.insert(bvhNodes.end(), {bits(node.minimum.x), bits(node.minimum.y), bits(node.minimum.z),
+                                                     bits(node.maximum.x), bits(node.maximum.y), bits(node.maximum.z),
+                                                     node.a, node.b});
+                }
+            }
             gpuData.looseCount = static_cast<uint32_t>(looseList.size());
 
             std::vector<uint32_t> gridInfoData, cellMapData;
@@ -957,7 +983,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             pushU(gridInfoData, static_cast<uint32_t>(scene.grids.size()));
             pushU(gridInfoData, gpuData.looseCount);
             pushU(gridInfoData, static_cast<uint32_t>(scene.chunks.size()));
-            pushU(gridInfoData, 0);
+            pushU(gridInfoData, bvhNodeCount);
             for (const projv::SceneGrid& g : scene.grids) {
                 uint32_t cellMapOffset = static_cast<uint32_t>(cellMapData.size());
                 pushF(gridInfoData, g.origin.x); pushF(gridInfoData, g.origin.y); pushF(gridInfoData, g.origin.z);
@@ -1036,8 +1062,12 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 }
             }
 
-            // --- LooseList (2D) ---
+            // --- LooseList (2D), with the BVH's nodes after it ---
             {
+                if (bvhNodeCount > 0) {
+                    while (looseList.size() % 4 != 0) looseList.push_back(0xFFFFFFFFu);
+                    looseList.insert(looseList.end(), bvhNodes.begin(), bvhNodes.end());
+                }
                 if (looseList.empty()) looseList.push_back(0xFFFFFFFFu);
                 int texH = 4096;
                 int maxSz = bgfx::getCaps()->limits.maxTextureSize;
@@ -1436,12 +1466,6 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             dirtyUploaded++;
         }
 
-#if defined(PROJV_ENABLE_RENDER)
-        core::info("FLUSH: blobs={} liveBlobs={} dirtyUploaded={} paletteW={} paletteVer={} chunks={} compPalettes={}",
-                   scene.geometryPool.size(), uploadedPools.size(), dirtyUploaded,
-                   gpuData.paletteWidth, gpuData.componentPaletteVersion,
-                   scene.chunks.size(), gpuData.componentPaletteOffsets.size());
-#endif
         validateBlobRanges(scene, gpuData, "uploadDirtyBlobs");
 
         auto t1 = std::chrono::high_resolution_clock::now();
