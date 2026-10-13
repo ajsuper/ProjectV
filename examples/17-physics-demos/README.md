@@ -1,6 +1,6 @@
 # 17 — Physics demos
 
-Four set pieces for the engine's physics (`runtime/physics.h`), built from voxels in code.
+Six set pieces for the engine's physics (`runtime/physics.h`), built from voxels in code.
 
 ```bash
 cd build/examples/physics_demos && ./physics_demos
@@ -12,6 +12,8 @@ cd build/examples/physics_demos && ./physics_demos
 | **2** | **Wall blast.** A running-bond wall of 120 voxel bricks. **Space** sets off a blast behind it. |
 | **3** | **Ball barrage.** Balls of five sizes, from 25 cm to a metre, fired at a wall of crates, one every 0.4 s. |
 | **4** | **Sweeper.** A 12 m beam spinning about its middle while its middle circles, through a field of crates and balls. |
+| **5** | **Titans.** A 14 m stone boulder (about 2,900 t) and a 20 m stone hammer (410 t) launched head-on across a field of 25 kg crates. **Space** launches them again. |
+| **6** | **Joints.** A plank bridge on ball joints, a motor-driven windmill, a swinging door, and a four-tonne wrecking ball on a rope that swings into a weight on a breakable chain. **Space** drops a crate on the bridge and fires a ball at the door. |
 | R | restart the demo |
 | mouse, W/A/S/D, Q/E | look, fly, down/up (Esc releases the cursor, a click recaptures it) |
 | V | walk (a character: W/A/S/D, Space to jump) or fly |
@@ -42,6 +44,23 @@ follows it (`MoveKinematic`), giving it exactly the velocity that takes, so what
 with the beam's speed. Nothing pushes it back: it stays on its path whatever it runs into. The beam
 is 48 voxels long, so a grid of cells -- a kinematic grid body.
 
+**Titans** -- big bodies, and the mass ratio that breaks solvers. Each giant is a grid of 16-voxel
+cells moving as one dynamic body (a compound of its cells' shapes), and each is about a hundred
+thousand times the mass of a crate. The self-test checks they met and that no crate was pressed
+into the floor under them.
+
+**Joints** -- `runtime::Joint`, on an entity of its own, joining two bodies (or a body and the world)
+by NetId:
+- The bridge: sixteen planks, each joined to the next by two ball joints (one at either side, so
+  it hangs without twisting), the ends to the world. It sags under what lands on it, and holds.
+- The windmill: a hinge with a motor at 1.2 rad/s. A crate it carries round is flung off. A running
+  motor keeps what it drives awake, so a jam that clears does not leave it asleep for good.
+- The door: a hinge with limits of 110 degrees either way and a little friction.
+- The chain: six links on ball joints with a break force of 9 kN, three times what the 300 kg weight
+  pulls at rest. The wrecking ball (a distance joint: a rope that can slacken but not stretch)
+  swings into the weight, the chain snaps, and the weight flies on -- a breaking joint gives back
+  what it could not hold, so it does not stop what broke it.
+
 Every crate, brick and ball is a `duplicateComponent` of one prototype, so all crates share one
 geometry blob on the GPU and one collision shape in the physics until a blast edits one.
 
@@ -51,8 +70,10 @@ geometry blob on the GPU and one collision shape in the physics until a blast ed
 DEMOS_SELFTEST=1 ./physics_demos
 ```
 
-Plays all four in turn, unattended, and checks each: the pyramid stands and sleeps, the ball brings
+Plays all six in turn, unattended, and checks each: the pyramid stands and sleeps, the ball brings
 it down; the blast makes at least ten fragments; the barrage knocks crates out of the wall; the
-sweeper moves most of the field and is not moved itself. Then, for the whole session: no step
+sweeper moves most of the field and is not moved itself; the titans meet and no crate is pressed
+into the floor; the bridge holds, the chain breaks, the rope never stretches, the windmill runs at
+its motor's speed and the door stays within its limits. Then, for the whole session: no step
 dropped contacts, no body went non-finite or fell through the floor, and the recording replays
 identically. `DEMOS_CAPTURE=<prefix>` saves a frame of each demo as `<prefix>-<n>.tga`.

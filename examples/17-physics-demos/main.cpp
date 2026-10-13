@@ -11,9 +11,14 @@
 //   4  Sweeper        a 12 m beam spinning about its middle while its middle circles, sweeping
 //                     through a field of crates and balls. It is kinematic: moved by its Transform,
 //                     pushing what it meets, pushed by nothing.
+//   5  Titans         a 14 m stone boulder and a 20 m stone hammer, thousands of tonnes each,
+//                     launched into each other across a field of 25 kg crates. Space: again.
+//   6  Joints         a plank bridge on ball joints, a wrecking ball on a rope swinging into a weight
+//                     on a breakable chain, a motor-driven windmill, a swinging door. Space: drop a
+//                     crate on the bridge and fire a ball at the door.
 //
 // Controls
-//   1-4        pick a demo (it is rebuilt from scratch)      R  restart the demo
+//   1-6        pick a demo (it is rebuilt from scratch)      R  restart the demo
 //   Space      the demo's action                             V  walk (a character) / fly
 //   mouse look, W/A/S/D fly, Q/E down/up                     T  slow motion   P  pause
 //   Esc        release the cursor (a click recaptures it)
@@ -140,13 +145,22 @@ struct Camera {
 struct Demos {
     int current = 0;                       // 1..4
     // Prototypes, made once at startup and never drawn: every crate, brick and ball is a copy.
-    ComponentHandle crate, brick, beamProto, balls[5];
+    ComponentHandle crate, brick, beamProto, balls[5], plank, link;
     // Demo state.
     float clock = 0.0f;                    // seconds of simulation since the demo began
     float fireTimer = 0.0f;
     Entity beam = projv::NullEntity;
     std::vector<Entity> fired;             // demo 3's balls, oldest first
     std::vector<Entity> watched;           // what a demo's self-test looks at
+    std::vector<Entity> owned;             // the demo's other entities: static scenery, joints
+    // Demo 5.
+    Entity boulder = projv::NullEntity, hammer = projv::NullEntity;
+    // Demo 6.
+    std::vector<Entity> bridgeJoints, chainJoints;
+    Entity windmill = projv::NullEntity, door = projv::NullEntity, doorHinge = projv::NullEntity;
+    Entity wreckingBall = projv::NullEntity, rope = projv::NullEntity, weight = projv::NullEntity;
+    std::vector<Entity> brokenJoints;      // JointBroke, as they arrive
+    float dropTimer = 0.0f;
     vec3 blastAt{0.0f};
     int blastKickIn = 0;                   // fixed steps until a detonation's kick (see detonate)
     int pieces = 0;                        // bodies cut off by blasts (BodySplit)
@@ -163,6 +177,8 @@ const char* demoName(int n) {
         case 2: return "Wall blast  (Space: detonate)";
         case 3: return "Ball barrage";
         case 4: return "Sweeper";
+        case 5: return "Titans  (Space: again)";
+        case 6: return "Joints  (Space: a crate on the bridge, a ball at the door)";
     }
     return "";
 }
@@ -175,6 +191,14 @@ void clearDemo(World& world) {
     auto& demos = world.ctx().get<Demos>();
     std::vector<Entity> bodies(world.view<projv::RigidBody>().begin(), world.view<projv::RigidBody>().end());
     for (Entity e : bodies) world.destroy(e);
+    for (Entity e : demos.owned) if (world.valid(e)) world.destroy(e);
+    demos.owned.clear();
+    demos.bridgeJoints.clear();
+    demos.chainJoints.clear();
+    demos.brokenJoints.clear();
+    demos.boulder = demos.hammer = demos.windmill = demos.door = demos.doorHinge = projv::NullEntity;
+    demos.wreckingBall = demos.rope = demos.weight = projv::NullEntity;
+    demos.dropTimer = 0.0f;
     auto& camera = world.ctx().get<Camera>();
     if (camera.walker != projv::NullEntity) { world.destroy(camera.walker); camera.walker = projv::NullEntity; }
     demos.beam = projv::NullEntity;
@@ -251,6 +275,180 @@ void buildSweeper(World& world, Demos& demos, Camera& camera) {
     camera.pitch = -0.65f;
 }
 
+// A big thing, built in place rather than copied: an asset node at its centre with its voxels
+// inside, offset by minus half their size -- more than 16 voxels across, so a grid of cells.
+template <typename ColourAt>
+Entity big(World& world, const char* name, ivec3 size, float voxel, vec3 centre, quat rotation, ColourAt colourAt,
+           const projv::RigidBody& rigid) {
+    auto& scene = world.ctx().get<projv::Scene>();
+    ComponentHandle node = utils::addComponent(scene, projv::ComponentKind::Asset, name, projv::INVALID_COMPONENT_HANDLE, 4, 1.0f);
+    voxels(scene, name, size, voxel, -0.5f * vec3(size) * voxel, colourAt, node);
+    utils::setComponentTransform(scene, node, centre, rotation, 1.0f);
+    Entity e = runtime::spawnComponent(world, node, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+    world.emplace<projv::RigidBody>(e, rigid);
+    runtime::assignNetId(world, e);
+    return e;
+}
+
+// Static scenery: voxels whose corner is at `corner`, solid, owned by the demo.
+template <typename ColourAt>
+void scenery(World& world, Demos& demos, ivec3 size, float voxel, vec3 corner, ColourAt colourAt) {
+    auto& scene = world.ctx().get<projv::Scene>();
+    ComponentHandle h = voxels(scene, "scenery", size, voxel, corner, colourAt);
+    Entity e = runtime::spawnComponent(world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+    world.emplace<projv::StaticCollider>(e);
+    demos.owned.push_back(e);
+}
+
+Entity joint(World& world, Demos& demos, Entity a, Entity b, projv::Joint j) {
+    Entity e = runtime::connectBodies(world, a, b, j);
+    demos.owned.push_back(e);
+    return e;
+}
+
+uint32_t stone(int x, int y, int z) {
+    float shade = 0.75f + 0.25f * float((x * 13 + y * 7 + z * 11) % 5) / 4.0f;
+    return rgb(0.52f * shade, 0.5f * shade, 0.47f * shade);
+}
+
+void launchTitans(World& world, Demos& demos) {
+    runtime::setVelocity(world, demos.boulder, vec3(13, 1, 0), vec3(0, 0, -1.2f));
+    runtime::setVelocity(world, demos.hammer, vec3(-13, 1, 0), vec3(0, 0.15f, 0.2f));
+}
+
+void buildTitans(World& world, Demos& demos, Camera& camera) {
+    // A field of crates for scale, where the two will meet.
+    for (int i = 0; i < 60; i++) {
+        vec3 at(uniform(demos, -12, 12), 0.5f, uniform(demos, -7, 7));
+        Thing t = place(world, demos.crate, at, glm::angleAxis(uniform(demos, 0, 6.28f), vec3(0, 1, 0)), body(25.0f));
+        demos.watched.push_back(t.entity);
+    }
+    projv::RigidBody rock;
+    rock.density = 2500.0f;   // stone
+    rock.friction = 0.8f;
+    // The boulder: a lumpy ball 14 m across, in half-metre voxels.
+    demos.boulder = big(world, "boulder", ivec3(28), 0.5f, vec3(-26, 7.3f, 0), quat(1, 0, 0, 0), [](int x, int y, int z) -> uint32_t {
+        vec3 d = vec3(x, y, z) + vec3(0.5f) - vec3(14.0f);
+        float bumps = 1.2f * std::sin(float(x) * 0.7f) * std::cos(float(z) * 0.6f) + 0.8f * std::sin(float(y) * 0.9f);
+        return glm::length(d) <= 13.0f + bumps ? stone(x, y, z) : 0u;
+    }, rock);
+    // The hammer: a 16 m shaft, 2 m square, with a 4 m x 5 m x 5 m head on the end facing the boulder.
+    demos.hammer = big(world, "hammer", ivec3(40, 10, 10), 0.5f, vec3(24, 2.6f, 0), quat(1, 0, 0, 0), [](int x, int y, int z) -> uint32_t {
+        bool head = x < 8;
+        bool shaft = y >= 3 && y < 7 && z >= 3 && z < 7;
+        if (!head && !shaft) return 0u;
+        return head ? rgb(0.38f, 0.4f, 0.45f) : rgb(0.55f, 0.36f, 0.2f);
+    }, rock);
+    launchTitans(world, demos);
+    camera.position = vec3(0, 16, -44);
+    camera.yaw = 1.5708f;
+    camera.pitch = -0.28f;
+}
+
+void buildJoints(World& world, Demos& demos, Camera& camera) {
+    // 1. A plank bridge between two posts: sixteen planks, each joined to the next by a ball joint at
+    //    either side (two per seam, so the bridge hangs but does not twist), the ends to the world.
+    const float bridgeX = -12.0f, bridgeY = 3.0f, pitch = 0.52f;
+    const int planks = 16;
+    const float z0 = -float(planks - 1) * pitch * 0.5f;
+    Entity previous = projv::NullEntity;
+    auto seam = [&](Entity a, Entity b, float z) {
+        for (float side : {-0.55f, 0.55f}) {
+            projv::Joint j;
+            j.type = runtime::JointType::Point;
+            j.anchor = vec3(bridgeX + side, bridgeY, z);
+            demos.bridgeJoints.push_back(joint(world, demos, a, b, j));
+        }
+    };
+    for (int i = 0; i < planks; i++) {
+        float z = z0 + float(i) * pitch;
+        Thing p = place(world, demos.plank, vec3(bridgeX, bridgeY, z), quat(1, 0, 0, 0), body(8.0f));
+        seam(p.entity, previous, z - pitch * 0.5f);   // the first plank's back seam: to the world
+        previous = p.entity;
+        demos.watched.push_back(p.entity);
+    }
+    seam(previous, projv::NullEntity, z0 + float(planks - 1) * pitch + pitch * 0.5f);
+    for (float z : {z0 - pitch * 0.5f - 1.0f, -z0 + pitch * 0.5f}) {
+        scenery(world, demos, ivec3(12, 26, 8), 0.125f, vec3(bridgeX - 0.75f, 0.0f, z), [](int, int y, int) {
+            return y > 22 ? rgb(0.3f, 0.8f, 0.5f) : rgb(0.3f, 0.3f, 0.34f);
+        });
+    }
+
+    // 2. A windmill: a 6 m cross on a motor-driven hinge, its blades just clearing the floor.
+    projv::RigidBody blades;
+    blades.density = 400.0f;
+    demos.windmill = big(world, "windmill", ivec3(24, 24, 2), 0.25f, vec3(0, 3.6f, 8), quat(1, 0, 0, 0), [](int x, int y, int) -> uint32_t {
+        bool arm = (x >= 10 && x < 14) || (y >= 10 && y < 14);
+        if (!arm) return 0u;
+        return (x / 3 + y / 3) % 2 ? rgb(0.92f, 0.92f, 0.95f) : rgb(0.85f, 0.2f, 0.18f);
+    }, blades);
+    projv::Joint axle;
+    axle.type = runtime::JointType::Hinge;
+    axle.anchor = vec3(0, 3.6f, 8);
+    axle.axis = vec3(0, 0, 1);
+    axle.motor = true;
+    axle.motorVelocity = 1.2f;
+    axle.motorLimit = 60000.0f;
+    joint(world, demos, demos.windmill, projv::NullEntity, axle);
+    // Its post stands well behind the blades, so nothing they carry round can be pinned against it.
+    scenery(world, demos, ivec3(4, 15, 4), 0.25f, vec3(-0.5f, 0, 9.0f), [](int, int, int) { return rgb(0.3f, 0.3f, 0.34f); });
+
+    // 3. A door: 2 m x 2.5 m, hinged on its left edge, swinging up to 110 degrees either way.
+    projv::RigidBody slab;
+    slab.density = 600.0f;
+    demos.door = big(world, "door", ivec3(16, 20, 1), 0.125f, vec3(9, 1.27f, 0), quat(1, 0, 0, 0), [](int x, int y, int) -> uint32_t {
+        bool frame = x < 1 || x > 14 || y < 1 || y > 18;
+        return frame ? rgb(0.35f, 0.22f, 0.1f) : rgb(0.6f, 0.42f, 0.22f);
+    }, slab);
+    projv::Joint hinge;
+    hinge.type = runtime::JointType::Hinge;
+    hinge.anchor = vec3(8, 1.27f, 0);
+    hinge.axis = vec3(0, 1, 0);
+    hinge.limitMin = -1.9f;
+    hinge.limitMax = 1.9f;
+    hinge.friction = 15.0f;
+    demos.doorHinge = joint(world, demos, demos.door, projv::NullEntity, hinge);
+    scenery(world, demos, ivec3(2, 23, 2), 0.125f, vec3(7.75f, 0, -0.125f), [](int, int, int) { return rgb(0.3f, 0.3f, 0.34f); });
+
+    // 4. A weight on a breakable chain, and a wrecking ball on a rope pulled back to swing into it.
+    const vec3 chainTop(18, 9, 2.6f);
+    previous = projv::NullEntity;
+    for (int i = 0; i < 6; i++) {
+        vec3 centre = chainTop - vec3(0, 0.375f + 0.75f * float(i), 0);
+        Thing l = place(world, demos.link, centre, quat(1, 0, 0, 0), body(4.0f));
+        projv::Joint j;
+        j.type = runtime::JointType::Point;
+        j.anchor = centre + vec3(0, 0.375f, 0);
+        j.breakForce = 9000.0f;   // three times the weight's pull at rest
+        demos.chainJoints.push_back(joint(world, demos, l.entity, previous, j));
+        previous = l.entity;
+    }
+    Thing weight = place(world, demos.crate, chainTop - vec3(0, 4.5f + 0.5f, 0), quat(1, 0, 0, 0), body(300.0f));
+    demos.weight = weight.entity;
+    projv::Joint hook;
+    hook.type = runtime::JointType::Point;
+    hook.anchor = chainTop - vec3(0, 4.5f, 0);
+    hook.breakForce = 9000.0f;
+    demos.chainJoints.push_back(joint(world, demos, weight.entity, previous, hook));
+
+    const vec3 pivot(18, 11.5f, 1.6f);
+    const float ropeLength = 7.5f, pulledBack = 80.0f * 3.14159f / 180.0f;
+    vec3 start = pivot + ropeLength * vec3(0, -std::cos(pulledBack), -std::sin(pulledBack));
+    Thing ball = place(world, demos.balls[4], start, quat(1, 0, 0, 0), ballBody(7800.0f, 0.1f));   // a tonne of iron... four
+    demos.wreckingBall = ball.entity;
+    projv::Joint rope;
+    rope.type = runtime::JointType::Distance;
+    rope.anchor = start;
+    rope.anchorB = pivot;
+    rope.limitMin = 0.0f;
+    rope.limitMax = ropeLength;
+    demos.rope = joint(world, demos, ball.entity, projv::NullEntity, rope);
+
+    camera.position = vec3(3, 12, -27);   // the whole row: bridge, windmill, door, chain and ball
+    camera.yaw = 1.5708f;
+    camera.pitch = -0.3f;
+}
+
 void startDemo(World& world, int n) {
     auto& demos = world.ctx().get<Demos>();
     auto& camera = world.ctx().get<Camera>();
@@ -261,6 +459,8 @@ void startDemo(World& world, int n) {
         case 2: buildWall(world, demos, camera); break;
         case 3: buildBarrage(world, demos, camera); break;
         case 4: buildSweeper(world, demos, camera); break;
+        case 5: buildTitans(world, demos, camera); break;
+        case 6: buildJoints(world, demos, camera); break;
     }
     projv::core::info("Demo {}: {}", n, demoName(n));
 }
@@ -309,6 +509,11 @@ void act(World& world, Demos& demos, const Camera& camera) {
         case 1: fireBall(world, demos, 4, camera.position + camera.forward() * 2.0f, camera.forward() * 32.0f, 7800.0f); break;
         case 2: detonate(world, demos); break;
         case 3: fireBall(world, demos, 4, vec3(0, 3, -6), vec3(0, 2, 28)); break;
+        case 5: startDemo(world, 5); break;
+        case 6:
+            place(world, demos.crate, vec3(-12, 7, uniform(demos, -2, 2)), quat(1, 0, 0, 0), body(60.0f));
+            fireBall(world, demos, 3, vec3(uniform(demos, 8.5f, 9.5f), 1.5f, -9), vec3(0, 1.5f, 22), 2000.0f);
+            break;
         default: break;
     }
 }
@@ -325,6 +530,19 @@ void demoTick(projv::Application& app) {
     demos.clock += dt;
     if (demos.blastKickIn > 0 && --demos.blastKickIn == 0) blastKick(world, demos);
 
+    if (demos.current == 6) {
+        // A crate dropped onto the windmill's blades every 1.5 s, a ball at the door every 2.5 s.
+        demos.dropTimer -= dt;
+        if (demos.dropTimer <= 0.0f) {
+            demos.dropTimer += 1.5f;
+            place(world, demos.crate, vec3(uniform(demos, -2.5f, 2.5f), 9, 7.6f), quat(1, 0, 0, 0), body(15.0f));
+        }
+        demos.fireTimer -= dt;
+        if (demos.fireTimer <= 0.0f) {
+            demos.fireTimer += 2.5f;
+            fireBall(world, demos, 3, vec3(uniform(demos, 8.4f, 9.6f), 1.4f, -9), vec3(0, 1.5f, 20), 1500.0f);
+        }
+    }
     if (demos.current == 3) {
         // A ball every 0.4 s, of a size taken in turn, from a launcher in front of the wall. The
         // oldest are retired past forty.
@@ -377,7 +595,7 @@ void controls(projv::Application& app) {
         camera.pitch = std::clamp(camera.pitch - input.cursorDelta.y * 0.0025f, -1.5f, 1.5f);
     }
 
-    for (int n = 1; n <= 4; n++)
+    for (int n = 1; n <= 6; n++)
         if (input.pressed(projv::Key(int(projv::Key::Num0) + n))) startDemo(world, n);
     if (input.pressed(projv::Key::R)) startDemo(world, demos.current);
     if (input.pressed(projv::Key::Space) && camera.walker == projv::NullEntity) act(world, demos, camera);
@@ -471,8 +689,8 @@ void selfTest(projv::Application& app) {
     static bool acted = false;
     // DEMOS_CAPTURE=<prefix>: a frame of each demo, mid-action, as <prefix>-<demo>.tga.
     static int captured = 0;
-    const float captureAt[5] = {0, 5.5f, 2.6f, 5.0f, 9.0f};
-    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= 4 && captured < stage &&
+    const float captureAt[7] = {0, 5.5f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f};
+    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= 6 && captured < stage &&
         t > captureAt[stage]) {
         bgfx::requestScreenShot(BGFX_INVALID_HANDLE, (std::string(prefix) + "-" + std::to_string(stage)).c_str());
         captured = stage;
@@ -514,9 +732,57 @@ void selfTest(projv::Application& app) {
         vec3 beam = runtime::bodyPose(world, demos.beam).position;
         check(*test, swept >= 25, fmt::format("the sweeper moved {} of 70 objects", swept));
         check(*test, std::abs(beam.y - 0.6f) < 0.01f, "the beam stayed at its height (kinematic: pushed by nothing)");
-        stage = 5;
+        startDemo(world, 5); stage = 5;
+        test->start = watchedPositions();
+        return;
     }
-    if (stage == 5) {
+    if (stage == 5 && t > 6.0f) {
+        const auto& sim = runtime::physicsWorld(world);
+        runtime::BodyState boulder = runtime::bodyPose(world, demos.boulder), hammer = runtime::bodyPose(world, demos.hammer);
+        float boulderMass = sim.bodyMass(world.get<projv::PhysicsBody>(demos.boulder).id);
+        float hammerMass = sim.bodyMass(world.get<projv::PhysicsBody>(demos.hammer).id);
+        check(*test, boulderMass > 1e6f && hammerMass > 3e5f,
+              fmt::format("titans: boulder {:.0f} t, hammer {:.0f} t", boulderMass / 1000.0f, hammerMass / 1000.0f));
+        // They met: neither is still heading on at 13 m/s.
+        check(*test, boulder.linearVelocity.x < 8.0f && hammer.linearVelocity.x > -8.0f,
+              fmt::format("they collided: boulder now {:.1f} m/s, hammer {:.1f} m/s along x", boulder.linearVelocity.x,
+                          hammer.linearVelocity.x));
+        // Nothing pressed into the floor: thousands of tonnes on 25 kg crates is the hard case.
+        int under = 0;
+        for (Entity e : demos.watched) if (world.valid(e) && runtime::bodyPose(world, e).position.y < 0.2f) under++;
+        check(*test, under == 0 && boulder.position.y > 5.0f,
+              fmt::format("no crate pushed into the floor ({}), the boulder on it at {:.1f} m", under, boulder.position.y));
+        check(*test, moved(1.0f) >= 10, fmt::format("the impact scattered {} crates", moved(1.0f)));
+        startDemo(world, 6); stage = 6;
+        return;
+    }
+    if (stage == 6 && t > 4.0f && !acted) { act(world, demos, camera); act(world, demos, camera); acted = true; }
+    if (stage == 6 && t > 14.0f) {
+        auto isBroken = [&](Entity j) {
+            return std::find(demos.brokenJoints.begin(), demos.brokenJoints.end(), j) != demos.brokenJoints.end();
+        };
+        int bridgeBroken = 0, chainBroken = 0;
+        for (Entity j : demos.bridgeJoints) bridgeBroken += isBroken(j);
+        for (Entity j : demos.chainJoints) chainBroken += isBroken(j);
+        float lowest = 1e9f, highest = -1e9f;
+        for (Entity e : demos.watched) {
+            float y = runtime::bodyPose(world, e).position.y;
+            lowest = std::min(lowest, y);
+            highest = std::max(highest, y);
+        }
+        check(*test, bridgeBroken == 0 && lowest > 0.5f && highest < 3.2f,
+              fmt::format("the bridge holds and hangs: {} joints broken, planks from {:.2f} to {:.2f} m", bridgeBroken, lowest, highest));
+        check(*test, chainBroken >= 1, fmt::format("the wrecking ball broke the chain: {} of its joints went", chainBroken));
+        runtime::JointState rope = runtime::jointState(world, demos.rope);
+        check(*test, rope.alive && rope.position < 7.5f * 1.02f, fmt::format("the rope is never longer than 7.5 m: {:.2f} m", rope.position));
+        float spin = runtime::bodyPose(world, demos.windmill).angularVelocity.z;
+        check(*test, std::abs(spin - 1.2f) < 0.25f, fmt::format("the windmill turns at its motor's 1.2 rad/s: {:.2f}", spin));
+        runtime::JointState hinge = runtime::jointState(world, demos.doorHinge);
+        check(*test, hinge.alive && std::abs(hinge.position) < 1.9f + 0.06f,
+              fmt::format("the door swings within its 1.9 rad limits: at {:.2f}", hinge.position));
+        stage = 7;
+    }
+    if (stage == 7) {
         const auto& stats = runtime::physicsWorld(world).stats();
         check(*test, stats.stepsWithDroppedContacts == 0 && stats.nonFiniteRecoveries == 0,
               fmt::format("{} steps, {} with dropped contacts, {} non-finite recoveries", stats.steps,
@@ -573,6 +839,12 @@ void startup(projv::Application& app) {
     demos.beamProto = prototype(scene, "beam", ivec3(48, 4, 3), 0.25f, [](int x, int, int) {
         return (x / 4) % 2 ? rgb(0.95f, 0.75f, 0.1f) : rgb(0.15f, 0.15f, 0.17f);
     });
+    demos.plank = prototype(scene, "plank", ivec3(10, 1, 4), 0.125f, [](int x, int, int z) {
+        return (x + z) % 3 ? rgb(0.66f, 0.46f, 0.26f) : rgb(0.58f, 0.39f, 0.21f);
+    });
+    demos.link = prototype(scene, "link", ivec3(2, 6, 2), 0.125f, [](int, int y, int) {
+        return y % 2 ? rgb(0.5f, 0.52f, 0.56f) : rgb(0.36f, 0.38f, 0.42f);
+    });
     const int diameters[5] = {2, 3, 4, 6, 8};   // 0.25 m to 1 m, in 12.5 cm voxels
     for (int i = 0; i < 5; i++) {
         int n = diameters[i];
@@ -585,13 +857,16 @@ void startup(projv::Application& app) {
         });
     }
     for (ComponentHandle p : {demos.crate, demos.brick, demos.beamProto, demos.balls[0], demos.balls[1], demos.balls[2],
-                              demos.balls[3], demos.balls[4]})
+                              demos.balls[3], demos.balls[4], demos.plank, demos.link})
         utils::setComponentTransform(scene, p, vec3(0, -1000, 0), quat(1, 0, 0, 0), 1.0f);
 
     // A blast cuts bricks in pieces; each piece is counted. Something that leaves the world from
     // above the floor went through it, which must never happen.
     app.events().on<projv::BodySplit>([&world](const projv::BodySplit& e) {
         world.ctx().get<Demos>().pieces += int(e.pieces.size());
+    });
+    app.events().on<projv::JointBroke>([&world](const projv::JointBroke& e) {
+        world.ctx().get<Demos>().brokenJoints.push_back(e.entity);
     });
     app.events().on<projv::BodyEmptied>([&world](const projv::BodyEmptied& e) {
         if (world.valid(e.entity)) world.destroy(e.entity);

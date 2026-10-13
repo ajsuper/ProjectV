@@ -379,3 +379,29 @@ TEST_CASE("runtime joints: made when both bodies exist, broken and reported, mot
     CHECK(back->motorVelocity == doctest::Approx(2.0f));
     CHECK(back->breakTorque == doctest::Approx(300.0f));
 }
+
+TEST_CASE("a motor jammed for a while starts again when the jam clears") {
+    // Jolt lets a body sleep once it stops moving; a motor that stalls would then sleep for good.
+    PhysicsWorld physics;
+    physics.setGravity(vec3(0));
+    BodyId arm = box(physics, vec3(1, 0, 0), vec3(1, 0.1f, 0.1f));
+    JointDesc m;
+    m.type = JointType::Hinge;
+    m.a = arm;
+    m.anchor = vec3(0);
+    m.axis = vec3(0, 0, 1);
+    m.motor = true;
+    m.motorVelocity = 2.0f;
+    m.motorLimit = 50.0f;   // weak: a wall stops it
+    physics.createJoint(m);
+    BodyDesc wall;
+    wall.shape = PhysicsShape::box(vec3(0.2f, 0.2f, 1));
+    wall.motion = MotionType::Kinematic;      // so it can be moved away without waking anything
+    wall.position = vec3(1.5f, 0.45f, 0);   // in the arm's path, just past where it starts
+    BodyId stop = physics.createBody(wall);
+    for (int i = 0; i < 4 * 60; i++) physics.step(DT);   // long enough to have slept
+    CHECK(std::abs(physics.bodyState(arm).angularVelocity.z) < 0.1f);
+    physics.setPose(stop, vec3(50, 0, 0), quat(1, 0, 0, 0));   // the jam clears; nothing else is touched
+    for (int i = 0; i < 60; i++) physics.step(DT);
+    CHECK(physics.bodyState(arm).angularVelocity.z == doctest::Approx(2.0f).epsilon(0.03));
+}

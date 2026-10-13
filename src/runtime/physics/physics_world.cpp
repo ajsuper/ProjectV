@@ -1160,6 +1160,12 @@ namespace projv::runtime {
     void PhysicsWorld::step(float dt) {
         auto started = std::chrono::steady_clock::now();
         updateCharacters(dt);
+        // A running motor keeps what it drives awake. Jolt lets a body sleep once it stops moving,
+        // and a motor stalled for a moment -- a windmill jammed by a crate -- would otherwise sleep
+        // for good once the jam cleared, its motor still on and nothing to wake it.
+        for (const Impl::Joint& j : impl->joints)
+            if (j.constraint && j.desc.motor && j.desc.motorVelocity != 0.0f)
+                impl->system.GetBodyInterface().ActivateConstraint(j.constraint);
         JPH::EPhysicsUpdateError errors =
             impl->system.Update(dt, 1, impl->tempAllocator.get(), impl->jobSystem.get());
         checkJoints(dt);
