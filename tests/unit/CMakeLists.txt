@@ -37,6 +37,7 @@ add_executable(projv_unit_tests
     test_scene_bridge.cpp
     test_scene_delete.cpp
     test_time.cpp
+    test_voxel_edits.cpp
 )
 target_link_libraries(projv_unit_tests PRIVATE projectV doctest::doctest)
 target_compile_options(projv_unit_tests PRIVATE

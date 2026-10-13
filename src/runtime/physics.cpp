@@ -845,8 +845,15 @@ namespace projv::runtime {
             high = core::ivec3(int(chunk.header.resolution) - 1);
         } else if (record.gridIndex >= 0) {
             const SceneGrid& grid = scene->grids[size_t(record.gridIndex)];
+            int cellResolution = 0;
             for (int32_t cell : grid.cellToChunk)
-                if (cell >= 0) { voxel = grid.nativeCellSize / float(std::max(scene->chunks[size_t(cell)].header.resolution, 1u)); break; }
+                if (cell >= 0) { cellResolution = int(std::max(scene->chunks[size_t(cell)].header.resolution, 1u)); break; }
+            if (cellResolution > 0) {
+                voxel = grid.nativeCellSize / float(cellResolution);
+                // Only where the grid has cells: there is nothing to carve beyond them.
+                low = grid.originCellCoord * cellResolution;
+                high = (grid.originCellCoord + grid.dims) * cellResolution - core::ivec3(1);
+            }
         }
         if (!(voxel > 0.0f)) return ops;
         core::mat4 toLocal = glm::inverse(utils::getComponentWorldMatrix(*scene, h));

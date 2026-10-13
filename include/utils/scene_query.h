@@ -135,6 +135,12 @@ namespace projv::utils {
     // False for a handle out of range or one deleteComponent has removed.
     bool isComponentAlive(const Scene& scene, ComponentHandle handle);
 
+    // Whether a chunk has geometry to draw: alive, pooled, and its blob holds a tree. An edit can
+    // carve a chunk down to nothing, and a chunk with nothing must be uploaded as empty -- the
+    // shader reads a tree from wherever a chunk's range starts, so an empty range would read some
+    // other blob's.
+    bool chunkHasGeometry(const Scene& scene, ChunkHandle chunk);
+
     // ---- Holding a component across frames (see ComponentRef) ----
 
     // A ref to `handle` as it is now; an empty ref if it is not alive.

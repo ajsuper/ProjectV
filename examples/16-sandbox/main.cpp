@@ -501,6 +501,9 @@ void selfTestSystem(projv::Application& app) {
         }
     }
     if (frame == test->frames - 60) app.time().scale = 0.2f;   // slow motion, for the interpolation
+    if (frame == test->frames - 5) {
+        if (const char* capture = std::getenv("SANDBOX_CAPTURE")) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capture);
+    }
     if (frame < test->frames) return;
 
     const auto& scene = world.ctx().get<projv::Scene>();

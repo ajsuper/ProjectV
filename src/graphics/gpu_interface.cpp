@@ -1,4 +1,5 @@
 #include "graphics/gpu_interface.h"
+#include "utils/scene_query.h"
 #include "utils/loose_bvh.h"
 #include "utils/material.h"
 #include "utils/voxel_management.h"
@@ -288,6 +289,9 @@ namespace projv::graphics {
 // Build the GPU header for a live chunk from its pool blob's current GPU range.
 GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                               const Scene& scene, const GPUData& gpuData) {
+    // No geometry, nothing to draw: a header the shader's broadphase rejects, rather than a range of
+    // length zero whose start the traversal would read as a tree root anyway.
+    if (r.geomTexelLen == 0) return degenerateHeader();
     GPUChunkHeader g{};
     g.chunkID = chunk.header.chunkID;
     g.geometryStartIndex = r.geomTexelOffset;
@@ -1003,8 +1007,11 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 // descriptor list: descriptors are indexed by position, so removing one would
                 // renumber every grid after it. The CPU-side map is left exactly as it is -- see
                 // SceneGrid::rendered, and note that everything reading geometry reads through it.
+                // A cell whose chunk has no geometry (carved to nothing) is uploaded as empty: the
+                // shader would read a tree from the start of its empty range, which is someone else's.
                 for (size_t i = 0; i < g.cellToChunk.size(); i++) {
                     int32_t c = g.rendered ? g.cellToChunk[i] : -1;
+                    if (c >= 0 && !utils::chunkHasGeometry(scene, ChunkHandle(c))) c = -1;
                     cellMapData[base + i] = c < 0 ? 0xFFFFFFFFu : static_cast<uint32_t>(c);
                 }
             }

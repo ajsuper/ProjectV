@@ -767,6 +767,13 @@ namespace projv::utils {
         if (clash) scene.components[handle].localId = nextLocalId(scene, scene.components[handle].parent);
     }
 
+    bool chunkHasGeometry(const Scene& scene, ChunkHandle chunk) {
+        if (chunk >= scene.chunks.size()) return false;
+        const Chunk& c = scene.chunks[chunk];
+        if (!c.alive || c.geometryPoolIndex < 0 || size_t(c.geometryPoolIndex) >= scene.geometryPool.size()) return false;
+        return scene.geometryPool[size_t(c.geometryPoolIndex)].geometry.size() >= 3;
+    }
+
     bool isComponentAlive(const Scene& scene, ComponentHandle handle) {
         return handle < scene.components.size() && scene.components[handle].name != DELETED_NAME;
     }

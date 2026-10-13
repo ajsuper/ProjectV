@@ -148,6 +148,26 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
             ensureDataReference(scene, comp);
             uint32_t res = scene.dataReferences[comp.dataRefID].resolution;
 
+            // Removing a voxel where there is no geometry removes nothing, so such ops are dropped
+            // here, before anything acts on where they point: outside a chunk's cube they would
+            // convert it to a grid, and outside a grid's cells (or in a cell with no chunk) they would
+            // grow the grid and create empty cells -- cells with no geometry, which is not a state
+            // anything downstream expects. Adds are untouched: placing a voxel is what grows things.
+            std::erase_if(comp.editQueue.ops, [&](const PendingVoxelOp& op) {
+                if (op.isAdd) return false;
+                if (comp.kind == ComponentKind::Chunk)
+                    return glm::any(glm::lessThan(op.position, core::ivec3(0))) ||
+                           glm::any(glm::greaterThanEqual(op.position, core::ivec3(int32_t(res))));
+                if (comp.kind != ComponentKind::Grid || comp.gridIndex < 0) return false;
+                const SceneGrid& g = scene.grids[size_t(comp.gridIndex)];
+                core::ivec3 cell(floorDiv(op.position.x, int32_t(res)), floorDiv(op.position.y, int32_t(res)),
+                                 floorDiv(op.position.z, int32_t(res)));
+                core::ivec3 local = cell - g.originCellCoord;
+                if (glm::any(glm::lessThan(local, core::ivec3(0))) || glm::any(glm::greaterThanEqual(local, g.dims))) return true;
+                return g.cellToChunk[size_t(local.x + g.dims.x * (local.y + g.dims.y * local.z))] < 0;
+            });
+            if (comp.editQueue.ops.empty()) return true;
+
             if (comp.kind == ComponentKind::Chunk) {
                 Chunk& chunk = scene.chunks[comp.chunkHandle];
 
