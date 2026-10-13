@@ -26,6 +26,11 @@
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
+#include <Jolt/Physics/Constraints/DistanceConstraint.h>
+#include <Jolt/Physics/Constraints/FixedConstraint.h>
+#include <Jolt/Physics/Constraints/HingeConstraint.h>
+#include <Jolt/Physics/Constraints/PointConstraint.h>
+#include <Jolt/Physics/Constraints/SliderConstraint.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
@@ -289,7 +294,7 @@ namespace projv::runtime {
         // Snapshot layout: a header that lets restoreState check, before touching anything, that the
         // snapshot is one and fits this world; then Jolt's own bytes.
         constexpr uint32_t SNAPSHOT_MAGIC = 0x50564a50u;   // "PJVP"
-        constexpr uint32_t SNAPSHOT_VERSION = 3;   // 2: rest damping state per body; 3: characters
+        constexpr uint32_t SNAPSHOT_VERSION = 4;   // 2: rest damping state per body; 3: characters; 4: joints
 
         template <typename T> void put(std::vector<uint8_t>& out, const T& v) {
             const auto* p = reinterpret_cast<const uint8_t*>(&v);
@@ -341,7 +346,8 @@ namespace projv::runtime {
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
-            Gravity, Step, Restore, CreateCharacter, DestroyCharacter, CharacterInput, CharacterPosition
+            Gravity, Step, Restore, CreateCharacter, DestroyCharacter, CharacterInput, CharacterPosition,
+            CreateJoint, DestroyJoint, JointMotor
         };
 
         void writeSettings(std::vector<uint8_t>& out, const PhysicsSettings& s) {
@@ -506,6 +512,24 @@ namespace projv::runtime {
             return c.controller && c.generation == uint16_t(id.value >> 16) ? &c : nullptr;
         }
         const Character* character(CharacterId id) const { return const_cast<Impl*>(this)->character(id); }
+
+        // ---- Joints ----
+        struct Joint {
+            JPH::Ref<JPH::TwoBodyConstraint> constraint;
+            JointDesc  desc;
+            core::vec3 localA{0.0f}, localB{0.0f};   // the anchors in each body's frame (b: world if none)
+            float      force = 0.0f, torque = 0.0f;   // held in the last step
+            uint16_t   generation = 0;
+        };
+        std::vector<Joint>   joints;
+        std::vector<PhysicsWorld::BrokenJoint> brokenJoints;
+        Joint* joint(JointId id) {
+            uint32_t slot = id.value & 0xffffu;
+            if (!id.valid() || slot >= joints.size()) return nullptr;
+            Joint& j = joints[slot];
+            return j.constraint && j.generation == uint16_t(id.value >> 16) ? &j : nullptr;
+        }
+        const Joint* joint(JointId id) const { return const_cast<Impl*>(this)->joint(id); }
 
         // ---- Recording (PhysicsSettings::record) ----
         bool                  recording = false;
@@ -673,6 +697,7 @@ namespace projv::runtime {
         if (impl->recording) { impl->op(Op::Destroy); put(impl->log, id.value); }
         if (!isAlive(id)) return;
         wakeBodiesAround(id);
+        removeJointsOf(id);
         JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
         JPH::BodyID jid(id.value);
         bodies.RemoveBody(jid);
@@ -847,11 +872,297 @@ namespace projv::runtime {
         }
     }
 
+    // ---- Joints ----------------------------------------------------------------------------------
+
+    namespace {
+        void writeJointDesc(std::vector<uint8_t>& out, const JointDesc& d) {
+            put(out, uint8_t(d.type)); put(out, d.a.value); put(out, d.b.value); put(out, d.anchor); put(out, d.anchorB);
+            put(out, d.axis); put(out, d.limitMin); put(out, d.limitMax); put(out, d.springFrequency); put(out, d.springDamping);
+            put(out, d.friction); put(out, uint8_t(d.motor)); put(out, d.motorVelocity); put(out, d.motorLimit);
+            put(out, d.breakForce); put(out, d.breakTorque);
+        }
+        bool readJointDesc(const std::vector<uint8_t>& in, size_t& at, JointDesc& d) {
+            uint8_t type = 0, motor = 0;
+            bool ok = get(in, at, type) && get(in, at, d.a.value) && get(in, at, d.b.value) && get(in, at, d.anchor) &&
+                      get(in, at, d.anchorB) && get(in, at, d.axis) && get(in, at, d.limitMin) && get(in, at, d.limitMax) &&
+                      get(in, at, d.springFrequency) && get(in, at, d.springDamping) && get(in, at, d.friction) &&
+                      get(in, at, motor) && get(in, at, d.motorVelocity) && get(in, at, d.motorLimit) &&
+                      get(in, at, d.breakForce) && get(in, at, d.breakTorque);
+            d.type = JointType(type);
+            d.motor = motor != 0;
+            return ok;
+        }
+    }
+
+    JointId PhysicsWorld::createJoint(const JointDesc& desc) {
+        JointId id;
+        auto record = [&] {
+            if (!impl->recording) return;
+            impl->op(Op::CreateJoint);
+            writeJointDesc(impl->log, desc);
+            put(impl->log, id.value);
+        };
+        float axisLength = glm::length(desc.axis);
+        bool usable = isAlive(desc.a) && (!desc.b.valid() || isAlive(desc.b)) && !(desc.a == desc.b) &&
+                      finite(desc.anchor) && finite(desc.anchorB) && finite(desc.axis) && axisLength > 1e-6f &&
+                      std::isfinite(desc.limitMin) && std::isfinite(desc.limitMax) && desc.type <= JointType::Distance &&
+                      (desc.type != JointType::Hinge || (desc.limitMin <= 0.0f && desc.limitMax >= 0.0f)) &&
+                      (desc.type != JointType::Slider || desc.limitMin <= desc.limitMax);
+        size_t slot = 0;
+        while (slot < impl->joints.size() && impl->joints[slot].constraint) slot++;
+        if (!usable || slot >= 0xffffu) {
+            core::warn("physics: refused a joint (type {}): a body is not alive, or its placement is unusable", int(desc.type));
+            record();
+            return id;
+        }
+        const JPH::Vec3 axis = toJolt(desc.axis / axisLength);
+        const JPH::Vec3 normal = axis.GetNormalizedPerpendicular();
+        const JPH::RVec3 anchor = toJoltR(desc.anchor);
+        JPH::Ref<JPH::TwoBodyConstraintSettings> settings;
+        switch (desc.type) {
+            case JointType::Fixed: {
+                auto* f = new JPH::FixedConstraintSettings;
+                f->mPoint1 = f->mPoint2 = anchor;   // world space, axes left equal: hold the bodies as they are
+                settings = f;
+                break;
+            }
+            case JointType::Point: {
+                auto* p = new JPH::PointConstraintSettings;
+                p->mPoint1 = p->mPoint2 = anchor;
+                settings = p;
+                break;
+            }
+            case JointType::Hinge: {
+                auto* h = new JPH::HingeConstraintSettings;
+                h->mPoint1 = h->mPoint2 = anchor;
+                h->mHingeAxis1 = h->mHingeAxis2 = axis;
+                h->mNormalAxis1 = h->mNormalAxis2 = normal;
+                if (desc.limitMin != 0.0f || desc.limitMax != 0.0f) {
+                    h->mLimitsMin = std::max(desc.limitMin, -JPH::JPH_PI);
+                    h->mLimitsMax = std::min(desc.limitMax, JPH::JPH_PI);
+                }
+                h->mMaxFrictionTorque = std::max(desc.friction, 0.0f);
+                if (desc.motorLimit > 0.0f) h->mMotorSettings.SetTorqueLimit(desc.motorLimit);
+                settings = h;
+                break;
+            }
+            case JointType::Slider: {
+                auto* sl = new JPH::SliderConstraintSettings;
+                sl->mPoint1 = sl->mPoint2 = anchor;
+                sl->mSliderAxis1 = sl->mSliderAxis2 = axis;
+                sl->mNormalAxis1 = sl->mNormalAxis2 = normal;
+                if (desc.limitMin != 0.0f || desc.limitMax != 0.0f) {
+                    sl->mLimitsMin = desc.limitMin;
+                    sl->mLimitsMax = desc.limitMax;
+                }
+                sl->mMaxFrictionForce = std::max(desc.friction, 0.0f);
+                if (desc.motorLimit > 0.0f) sl->mMotorSettings.SetForceLimit(desc.motorLimit);
+                settings = sl;
+                break;
+            }
+            case JointType::Distance: {
+                auto* d = new JPH::DistanceConstraintSettings;
+                d->mPoint1 = toJoltR(desc.anchorB);   // Jolt's body 1 is b (see below)
+                d->mPoint2 = anchor;
+                // Both 0: held at the distance the anchors are apart now. Negative: likewise, Jolt's way.
+                bool asMade = desc.limitMin == 0.0f && desc.limitMax == 0.0f;
+                d->mMinDistance = asMade ? -1.0f : desc.limitMin;
+                d->mMaxDistance = asMade ? -1.0f : desc.limitMax;
+                if (desc.limitMin >= 0.0f && desc.limitMax >= 0.0f && desc.limitMin > desc.limitMax) d->mMaxDistance = desc.limitMin;
+                d->mLimitsSpringSettings.mFrequency = std::max(desc.springFrequency, 0.0f);
+                d->mLimitsSpringSettings.mDamping = std::clamp(desc.springDamping, 0.0f, 1.0f);
+                settings = d;
+                break;
+            }
+        }
+        JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
+        JPH::BodyID a(desc.a.value), b = desc.b.valid() ? JPH::BodyID(desc.b.value) : JPH::BodyID();
+        // Jolt measures body 2 relative to body 1 -- a hinge's angle, a slider's offset, a motor's
+        // velocity -- and the description speaks of `a` relative to `b`: so b is Jolt's body 1.
+        JPH::TwoBodyConstraint* constraint = bodies.CreateConstraint(settings.GetPtr(), b, a);
+        if (!constraint) {
+            core::warn("physics: refused a joint: Jolt could not make it");
+            record();
+            return id;
+        }
+        if (desc.motor) {
+            if (desc.type == JointType::Hinge) {
+                auto* h = static_cast<JPH::HingeConstraint*>(constraint);
+                h->SetMotorState(JPH::EMotorState::Velocity);
+                h->SetTargetAngularVelocity(desc.motorVelocity);
+            } else if (desc.type == JointType::Slider) {
+                auto* sl = static_cast<JPH::SliderConstraint*>(constraint);
+                sl->SetMotorState(JPH::EMotorState::Velocity);
+                sl->SetTargetVelocity(desc.motorVelocity);
+            }
+        }
+        // Joints get more solver iterations than contacts: chains and ragdolls are where a stretch
+        // shows, and they are few enough that it costs little.
+        constraint->SetNumVelocityStepsOverride(uint32_t(std::max(impl->settings.jointVelocitySteps, 1)));
+        constraint->SetNumPositionStepsOverride(uint32_t(std::max(impl->settings.jointPositionSteps, 1)));
+        impl->system.AddConstraint(constraint);
+        bodies.ActivateConstraint(constraint);
+
+        if (slot == impl->joints.size()) impl->joints.emplace_back();
+        Impl::Joint& j = impl->joints[slot];
+        j.constraint = constraint;
+        j.desc = desc;
+        j.force = j.torque = 0.0f;
+        j.generation = uint16_t(j.generation + 1);
+        // The anchors in each body's own frame, for measuring a distance joint's length later.
+        auto local = [&](BodyId body, core::vec3 world) {
+            if (!body.valid()) return world;
+            BodyState s = bodyState(body);
+            return glm::conjugate(s.rotation) * (world - s.position);
+        };
+        j.localA = local(desc.a, desc.anchor);
+        j.localB = local(desc.b, desc.type == JointType::Distance ? desc.anchorB : desc.anchor);
+        id.value = uint32_t(slot) | (uint32_t(j.generation) << 16);
+        record();
+        return id;
+    }
+
+    void PhysicsWorld::destroyJoint(JointId id) {
+        if (impl->recording) { impl->op(Op::DestroyJoint); put(impl->log, id.value); }
+        Impl::Joint* j = impl->joint(id);
+        if (!j) return;
+        impl->system.GetBodyInterface().ActivateConstraint(j->constraint);   // what it held lets go now
+        impl->system.RemoveConstraint(j->constraint);
+        j->constraint = nullptr;
+    }
+
+    bool PhysicsWorld::isAlive(JointId id) const { return impl->joint(id) != nullptr; }
+
+    void PhysicsWorld::setJointMotor(JointId id, bool on, float velocity) {
+        if (impl->recording) { impl->op(Op::JointMotor); put(impl->log, id.value); put(impl->log, uint8_t(on)); put(impl->log, velocity); }
+        Impl::Joint* j = impl->joint(id);
+        if (!j || !std::isfinite(velocity)) return;
+        JPH::EMotorState state = on ? JPH::EMotorState::Velocity : JPH::EMotorState::Off;
+        if (j->desc.type == JointType::Hinge) {
+            auto* h = static_cast<JPH::HingeConstraint*>(j->constraint.GetPtr());
+            h->SetMotorState(state);
+            h->SetTargetAngularVelocity(velocity);
+        } else if (j->desc.type == JointType::Slider) {
+            auto* sl = static_cast<JPH::SliderConstraint*>(j->constraint.GetPtr());
+            sl->SetMotorState(state);
+            sl->SetTargetVelocity(velocity);
+        } else {
+            return;
+        }
+        j->desc.motor = on;
+        j->desc.motorVelocity = velocity;
+        impl->system.GetBodyInterface().ActivateConstraint(j->constraint);
+    }
+
+    JointState PhysicsWorld::jointState(JointId id) const {
+        JointState state;
+        const Impl::Joint* j = impl->joint(id);
+        if (!j) return state;
+        state.alive = true;
+        state.force = j->force;
+        state.torque = j->torque;
+        switch (j->desc.type) {
+            case JointType::Hinge: state.position = static_cast<const JPH::HingeConstraint*>(j->constraint.GetPtr())->GetCurrentAngle(); break;
+            case JointType::Slider: state.position = static_cast<const JPH::SliderConstraint*>(j->constraint.GetPtr())->GetCurrentPosition(); break;
+            case JointType::Distance: {
+                auto world = [&](BodyId body, core::vec3 local) {
+                    if (!body.valid()) return local;
+                    BodyState s = bodyState(body);
+                    return s.position + s.rotation * local;
+                };
+                state.position = glm::length(world(j->desc.a, j->localA) - world(j->desc.b, j->localB));
+                break;
+            }
+            default: break;
+        }
+        return state;
+    }
+
+    std::vector<PhysicsWorld::BrokenJoint> PhysicsWorld::takeBrokenJoints() {
+        std::vector<BrokenJoint> out;
+        out.swap(impl->brokenJoints);
+        return out;
+    }
+
+    // After every step, in slot order: what each joint held with -- its constraint's accumulated
+    // impulse over the step -- and those that held with more than they can take, broken.
+    void PhysicsWorld::checkJoints(float dt) {
+        const float inverseDt = dt > 0.0f ? 1.0f / dt : 0.0f;
+        for (size_t slot = 0; slot < impl->joints.size(); slot++) {
+            Impl::Joint& j = impl->joints[slot];
+            if (!j.constraint) continue;
+            float force = 0.0f, torque = 0.0f;
+            JPH::TwoBodyConstraint* c = j.constraint.GetPtr();
+            switch (j.desc.type) {
+                case JointType::Fixed: {
+                    auto* f = static_cast<JPH::FixedConstraint*>(c);
+                    force = f->GetTotalLambdaPosition().Length();
+                    torque = f->GetTotalLambdaRotation().Length();
+                    break;
+                }
+                case JointType::Point: force = static_cast<JPH::PointConstraint*>(c)->GetTotalLambdaPosition().Length(); break;
+                case JointType::Hinge: {
+                    auto* h = static_cast<JPH::HingeConstraint*>(c);
+                    force = h->GetTotalLambdaPosition().Length();
+                    JPH::Vector<2> r = h->GetTotalLambdaRotation();
+                    torque = std::sqrt(r[0] * r[0] + r[1] * r[1]) + std::abs(h->GetTotalLambdaRotationLimits());
+                    break;
+                }
+                case JointType::Slider: {
+                    auto* sl = static_cast<JPH::SliderConstraint*>(c);
+                    JPH::Vector<2> p = sl->GetTotalLambdaPosition();
+                    force = std::sqrt(p[0] * p[0] + p[1] * p[1]) + std::abs(sl->GetTotalLambdaPositionLimits());
+                    torque = sl->GetTotalLambdaRotation().Length();
+                    break;
+                }
+                case JointType::Distance: force = std::abs(static_cast<JPH::DistanceConstraint*>(c)->GetTotalLambdaPosition()); break;
+            }
+            j.force = force * inverseDt;
+            j.torque = torque * inverseDt;
+            bool broke = (j.desc.breakForce > 0.0f && j.force > j.desc.breakForce) ||
+                         (j.desc.breakTorque > 0.0f && j.torque > j.desc.breakTorque);
+            if (!broke) continue;
+            // Jolt solved the step with the joint whole, so the impulse that broke it was spent holding
+            // the bodies together -- a rope that snaps under a yank would have stopped the yank. What it
+            // took beyond what it could hold is given back, so what broke it carries on.
+            if (j.desc.breakForce > 0.0f && j.force > j.desc.breakForce &&
+                (j.desc.type == JointType::Point || j.desc.type == JointType::Fixed || j.desc.type == JointType::Hinge)) {
+                JPH::Vec3 lambda = j.desc.type == JointType::Point ? static_cast<JPH::PointConstraint*>(c)->GetTotalLambdaPosition()
+                                 : j.desc.type == JointType::Fixed ? static_cast<JPH::FixedConstraint*>(c)->GetTotalLambdaPosition()
+                                                                   : static_cast<JPH::HingeConstraint*>(c)->GetTotalLambdaPosition();
+                float held = j.desc.breakForce * dt;
+                float length = lambda.Length();
+                if (length > held) {
+                    JPH::Vec3 excess = lambda * ((length - held) / length);
+                    BodyState sa = bodyState(j.desc.a);
+                    JPH::RVec3 at = toJoltR(sa.position + sa.rotation * j.localA);
+                    JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
+                    // Jolt gave body 2 (a) +lambda and body 1 (b) -lambda.
+                    bodies.AddImpulse(JPH::BodyID(j.desc.a.value), -excess, at);
+                    if (j.desc.b.valid()) bodies.AddImpulse(JPH::BodyID(j.desc.b.value), excess, at);
+                }
+            }
+            impl->system.GetBodyInterface().ActivateConstraint(c);
+            impl->system.RemoveConstraint(c);
+            j.constraint = nullptr;
+            impl->brokenJoints.push_back({JointId{uint32_t(slot) | (uint32_t(j.generation) << 16)}, j.force, j.torque});
+        }
+    }
+
+    void PhysicsWorld::removeJointsOf(BodyId body) {
+        for (Impl::Joint& j : impl->joints) {
+            if (!j.constraint || !(j.desc.a == body || j.desc.b == body)) continue;
+            impl->system.RemoveConstraint(j.constraint);
+            j.constraint = nullptr;
+        }
+    }
+
     void PhysicsWorld::step(float dt) {
         auto started = std::chrono::steady_clock::now();
         updateCharacters(dt);
         JPH::EPhysicsUpdateError errors =
             impl->system.Update(dt, 1, impl->tempAllocator.get(), impl->jobSystem.get());
+        checkJoints(dt);
         sanityPass(dt);
         impl->stats.lastStepMilliseconds =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
@@ -1132,6 +1443,17 @@ namespace projv::runtime {
             put(out, static_cast<uint64_t>(bytes.size()));
             out.insert(out.end(), bytes.begin(), bytes.end());
         }
+
+        // Joints: which exist (their state is in Jolt's own bytes above), and what each held with.
+        uint32_t liveJoints = 0;
+        for (const Impl::Joint& j : impl->joints) liveJoints += j.constraint ? 1 : 0;
+        put(out, liveJoints);
+        for (size_t slot = 0; slot < impl->joints.size(); slot++) {
+            const Impl::Joint& j = impl->joints[slot];
+            if (!j.constraint) continue;
+            put(out, uint32_t(slot) | (uint32_t(j.generation) << 16));
+            put(out, uint8_t(j.desc.motor)); put(out, j.desc.motorVelocity); put(out, j.force); put(out, j.torque);
+        }
         return out;
     }
 
@@ -1182,6 +1504,31 @@ namespace projv::runtime {
         for (size_t slot = 0; slot < impl->characters.size(); slot++)
             if (impl->characters[slot].controller)
                 liveCharacters.push_back(uint32_t(slot) | (uint32_t(impl->characters[slot].generation) << 16));
+        struct SavedJoint { uint32_t id; uint8_t motor; float velocity, force, torque; };
+        std::vector<SavedJoint> savedJoints;
+        uint32_t jointCount = 0;
+        if (!get(snapshot, at, jointCount)) {
+            core::warn("physics: restoreState refused: the snapshot is truncated");
+            return false;
+        }
+        for (uint32_t i = 0; i < jointCount; i++) {
+            SavedJoint j{};
+            if (!get(snapshot, at, j.id) || !get(snapshot, at, j.motor) || !get(snapshot, at, j.velocity) ||
+                !get(snapshot, at, j.force) || !get(snapshot, at, j.torque)) {
+                core::warn("physics: restoreState refused: the snapshot is truncated");
+                return false;
+            }
+            savedJoints.push_back(j);
+        }
+        std::vector<uint32_t> liveJoints;
+        for (size_t slot = 0; slot < impl->joints.size(); slot++)
+            if (impl->joints[slot].constraint) liveJoints.push_back(uint32_t(slot) | (uint32_t(impl->joints[slot].generation) << 16));
+        bool sameJoints = liveJoints.size() == savedJoints.size();
+        for (size_t i = 0; sameJoints && i < liveJoints.size(); i++) sameJoints = liveJoints[i] == savedJoints[i].id;
+        if (!sameJoints) {
+            core::warn("physics: restoreState refused: the snapshot's joints are not this world's");
+            return false;
+        }
         bool sameCharacters = liveCharacters.size() == savedCharacters.size();
         for (size_t i = 0; sameCharacters && i < liveCharacters.size(); i++) sameCharacters = liveCharacters[i] == savedCharacters[i].id;
         if (!sameCharacters) {
@@ -1224,6 +1571,13 @@ namespace projv::runtime {
             state.Rewind();
             c.controller->RestoreState(state);
         }
+        for (const SavedJoint& saved : savedJoints) {
+            Impl::Joint& j = *impl->joint(JointId{saved.id});
+            j.desc.motor = saved.motor != 0;
+            j.desc.motorVelocity = saved.velocity;
+            j.force = saved.force;
+            j.torque = saved.torque;
+        }
         return true;
     }
 
@@ -1250,6 +1604,8 @@ namespace projv::runtime {
             h.add(c.controller->GetLinearVelocity());
             h.add(uint8_t(c.controller->GetGroundState()));
         }
+        for (size_t slot = 0; slot < impl->joints.size(); slot++)
+            if (impl->joints[slot].constraint) h.add(uint32_t(slot) | (uint32_t(impl->joints[slot].generation) << 16));
         return h.value;
     }
 
@@ -1508,6 +1864,27 @@ namespace projv::runtime {
                     if (!get(in, at, id) || !get(in, at, a)) return truncated();
                     world.setCharacterPosition(CharacterId{id}, a);
                     break;
+                case Op::CreateJoint: {
+                    JointDesc d;
+                    uint32_t expected = 0;
+                    if (!readJointDesc(in, at, d) || !get(in, at, expected)) return truncated();
+                    if (world.createJoint(d).value != expected) {
+                        result.firstDivergentStep = result.stepsReplayed + 1;
+                        result.problem = "a joint was given a different id than when recorded";
+                        return result;
+                    }
+                    break;
+                }
+                case Op::DestroyJoint:
+                    if (!get(in, at, id)) return truncated();
+                    world.destroyJoint(JointId{id});
+                    break;
+                case Op::JointMotor: {
+                    uint8_t on = 0;
+                    if (!get(in, at, id) || !get(in, at, on) || !get(in, at, dt)) return truncated();
+                    world.setJointMotor(JointId{id}, on != 0, dt);
+                    break;
+                }
                 case Op::Restore: {
                     uint64_t size = 0;
                     if (!get(in, at, size) || in.size() - at < size) return truncated();

@@ -130,6 +130,30 @@ namespace projv {
         bool       presented = false;
     };
 
+    // A joint (runtime::JointDesc) between two bodies, named by NetId (0 for `b`: the world), on an
+    // entity of its own. Made at the first fixed step at which both bodies exist, placed in world
+    // space as they are then. Saved in entities.json like any component, by NetId -- so the bodies it
+    // joins need NetIds; runtime::connectBodies gives them one.
+    struct Joint {
+        runtime::JointType type = runtime::JointType::Point;
+        NetId      a, b;
+        core::vec3 anchor{0.0f}, anchorB{0.0f};
+        core::vec3 axis{0.0f, 1.0f, 0.0f};
+        float      limitMin = 0.0f, limitMax = 0.0f;
+        float      springFrequency = 0.0f, springDamping = 0.0f;
+        float      friction = 0.0f;
+        bool       motor = false;
+        float      motorVelocity = 0.0f, motorLimit = 0.0f;
+        float      breakForce = 0.0f, breakTorque = 0.0f;
+    };
+
+    // The simulation's side of a Joint. `broken` once it has broken or lost a body: it is not made
+    // again (remove and re-add the Joint for a new one).
+    struct PhysicsJoint {
+        runtime::JointId id;
+        bool broken = false;
+    };
+
     // ---- Events ---------------------------------------------------------------------------------
 
     // An entity asked for a body and could not have one; the reason is in the message and the log.
@@ -150,6 +174,10 @@ namespace projv {
     // An edit took away every voxel a body was made from: it has no body any more, and nothing is
     // drawn for it. The entity stays; whether it goes (it usually should) is the game's call.
     struct BodyEmptied { Entity entity; };
+
+    // A joint is gone: it broke under more force than its breakForce or breakTorque, or a body it
+    // joined was destroyed. The entity and its Joint stay; `force` and `torque` are what it held last.
+    struct JointBroke { Entity entity; bool bodyGone; float force; float torque; };
 
     // Time dropped fixed steps (Time::maxFixedStepsPerFrame) because the frames could not keep up:
     // the simulation is running slower than real time. `droppedSteps` is the total so far.
@@ -190,6 +218,14 @@ namespace projv::runtime {
     // only), and jump once at `jumpSpeed` the next time it is standing if `jump`. An input is a
     // command like any other -- stamped, ordered, and sent by NetId when it comes from elsewhere.
     void setCharacterInput(World& world, Entity entity, core::vec3 velocity, bool jump = false, float jumpSpeed = 5.0f);
+    // A joint entity between `a` and `b` (NullEntity: the world), giving each a NetId if it has none.
+    // `joint`'s a and b are filled in from them.
+    Entity connectBodies(World& world, Entity a, Entity b, Joint joint);
+    // Turns a hinge's or slider's motor on or off, at `velocity`, from the next step.
+    void setJointMotor(World& world, Entity joint, bool on, float velocity);
+    // What the joint is doing, as of the last step (alive false if not made yet, or gone).
+    JointState jointState(const World& world, Entity joint);
+
     // Where the character is, as of the last step: feet, velocity, and what it stands on (groundBody
     // an id the queries' entities resolve). Default for an entity with no character.
     CharacterState characterState(const World& world, Entity entity);
@@ -216,7 +252,8 @@ namespace projv::runtime {
     // and is counted (lateCommands): a networked game that sees them is falling behind.
     struct PhysicsCommand {
         // CharacterInput: `a` is the walking velocity, `jump` asks for a jump at `b.x` m/s.
-        enum class Kind : uint8_t { Impulse, AngularImpulse, AddVelocity, SetVelocity, Teleport, Gravity, CharacterInput };
+        // JointMotor: `jump` turns it on or off, `a.x` is the velocity; `target` names the joint's entity.
+        enum class Kind : uint8_t { Impulse, AngularImpulse, AddVelocity, SetVelocity, Teleport, Gravity, CharacterInput, JointMotor };
         Kind       kind = Kind::Impulse;
         NetId      target;                  // ignored for Gravity
         core::vec3 a{0.0f}, b{0.0f};        // impulse / velocity / position; b: angular velocity
@@ -289,6 +326,13 @@ template<> struct projv::runtime::ComponentTraits<projv::CharacterController> {
     static constexpr uint32_t version = 1;
     static nlohmann::json save(const projv::CharacterController& c);
     static std::optional<projv::CharacterController> load(const nlohmann::json& json, uint32_t fileVersion);
+};
+
+template<> struct projv::runtime::ComponentTraits<projv::Joint> {
+    static constexpr const char* key = "physics.joint";
+    static constexpr uint32_t version = 1;
+    static nlohmann::json save(const projv::Joint& j);
+    static std::optional<projv::Joint> load(const nlohmann::json& json, uint32_t fileVersion);
 };
 
 template<> struct projv::runtime::ComponentTraits<projv::StaticCollider> {

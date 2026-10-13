@@ -54,7 +54,9 @@ namespace projv::runtime {
             std::map<Entity, uint64_t>    requestedAt;
             std::map<uint32_t, Entity>    byBody;       // body id -> entity, for queries
             std::vector<Entity>           pendingCharacters;
+            std::vector<Entity>           pendingJoints;
             std::vector<CharacterId>      doomedCharacters;
+            std::vector<JointId>          doomedJoints;
             struct Edit { Entity entity; std::vector<PendingVoxelOp> ops; };
             std::vector<Edit>             edits;
         };
@@ -81,6 +83,10 @@ namespace projv::runtime {
         }
 
         void wantCharacter(World& world, Entity entity) { runtimeOf(world).pendingCharacters.push_back(entity); }
+        void wantJoint(World& world, Entity entity) { runtimeOf(world).pendingJoints.push_back(entity); }
+        void jointGone(World& world, Entity entity) {
+            if (const PhysicsJoint* j = world.try_get<PhysicsJoint>(entity)) runtimeOf(world).doomedJoints.push_back(j->id);
+        }
         void characterGone(World& world, Entity entity) {
             if (const PhysicsCharacter* c = world.try_get<PhysicsCharacter>(entity)) {
                 PhysicsRuntime& physics = runtimeOf(world);
@@ -561,6 +567,68 @@ namespace projv::runtime {
                 }
             }
 
+            // 3c. Joints: gone ones removed; new ones made once both their bodies exist (they wait
+            //     until then), in NetId-then-entity order.
+            for (JointId id : physics.doomedJoints) sim.destroyJoint(id);
+            physics.doomedJoints.clear();
+            {
+                std::vector<Entity> orphanJoints;
+                for (auto [entity, j] : world.view<PhysicsJoint>().each())
+                    if (!world.all_of<Joint>(entity)) orphanJoints.push_back(entity);
+                for (Entity entity : orphanJoints) {
+                    sim.destroyJoint(world.get<PhysicsJoint>(entity).id);
+                    world.remove<PhysicsJoint>(entity);
+                }
+                std::vector<Entity> wanted;
+                wanted.swap(physics.pendingJoints);
+                std::sort(wanted.begin(), wanted.end(), [&](Entity a, Entity b) { return order(a) < order(b); });
+                wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
+                for (Entity e : wanted) {
+                    if (!world.valid(e) || !world.all_of<Joint>(e) || world.all_of<PhysicsJoint>(e)) continue;
+                    const Joint& joint = world.get<Joint>(e);
+                    auto bodyOf = [&](NetId id) -> std::optional<BodyId> {
+                        if (id.value == 0) return BodyId{};
+                        Entity other = entityForNetId(world, id);
+                        const PhysicsBody* b = world.valid(other) ? world.try_get<PhysicsBody>(other) : nullptr;
+                        if (!b) return std::nullopt;
+                        return b->id;
+                    };
+                    std::optional<BodyId> a = bodyOf(joint.a), b = bodyOf(joint.b);
+                    if (!a || !b || !a->valid()) {
+                        // A body not made yet: try again next step. One that never will be is the
+                        // game's to notice (its entity has no body).
+                        if (joint.a.value != 0 && world.valid(entityForNetId(world, joint.a)) &&
+                            (joint.b.value == 0 || world.valid(entityForNetId(world, joint.b))))
+                            physics.pendingJoints.push_back(e);
+                        continue;
+                    }
+                    JointDesc d;
+                    d.type = joint.type;
+                    d.a = *a;
+                    d.b = *b;
+                    d.anchor = joint.anchor;
+                    d.anchorB = joint.anchorB;
+                    d.axis = joint.axis;
+                    d.limitMin = joint.limitMin;
+                    d.limitMax = joint.limitMax;
+                    d.springFrequency = joint.springFrequency;
+                    d.springDamping = joint.springDamping;
+                    d.friction = joint.friction;
+                    d.motor = joint.motor;
+                    d.motorVelocity = joint.motorVelocity;
+                    d.motorLimit = joint.motorLimit;
+                    d.breakForce = joint.breakForce;
+                    d.breakTorque = joint.breakTorque;
+                    JointId id = sim.createJoint(d);
+                    if (!id.valid()) {
+                        send(world, PhysicsBodyRefused{e, "the joint could not be made (see the log)"});
+                        world.emplace<PhysicsJoint>(e, PhysicsJoint{id, true});
+                        continue;
+                    }
+                    world.emplace<PhysicsJoint>(e, PhysicsJoint{id, false});
+                }
+            }
+
             // 4. Commands due at this step, in (tick, issuer, sequence) order. Later ones wait.
             const uint64_t thisTick = sim.tick() + 1;
             std::vector<Command> due, later;
@@ -575,6 +643,11 @@ namespace projv::runtime {
                 if (c.tick < thisTick) physics.late++;
                 if (c.kind == Kind::Gravity) { sim.setGravity(c.a); continue; }
                 Entity target = command.entity != NullEntity ? command.entity : entityForNetId(world, c.target);
+                if (c.kind == Kind::JointMotor) {
+                    if (const PhysicsJoint* j = world.valid(target) ? world.try_get<PhysicsJoint>(target) : nullptr)
+                        sim.setJointMotor(j->id, c.jump, c.a.x);
+                    continue;
+                }
                 if (c.kind == Kind::CharacterInput) {
                     if (const PhysicsCharacter* ch = world.valid(target) ? world.try_get<PhysicsCharacter>(target) : nullptr)
                         sim.setCharacterInput(ch->id, c.a, c.jump, c.b.x);
@@ -596,6 +669,7 @@ namespace projv::runtime {
                         break;
                     case Kind::Gravity: break;
                     case Kind::CharacterInput: break;
+                    case Kind::JointMotor: break;
                 }
             }
 
@@ -629,6 +703,24 @@ namespace projv::runtime {
             for (auto [entity, c] : world.view<PhysicsCharacter>().each()) {
                 c.previousPosition = c.position;
                 c.position = sim.characterState(c.id).position;
+            }
+
+            // 7b. Joints that broke, or lost a body.
+            {
+                std::vector<PhysicsWorld::BrokenJoint> broken = sim.takeBrokenJoints();
+                struct Gone { Entity entity; bool bodyGone; float force, torque; };
+                std::vector<Gone> gone;
+                for (auto [entity, j] : world.view<PhysicsJoint>().each()) {
+                    if (j.broken) continue;
+                    auto it = std::find_if(broken.begin(), broken.end(), [&](const auto& b) { return b.id == j.id; });
+                    if (it != broken.end()) gone.push_back({entity, false, it->force, it->torque});
+                    else if (!sim.isAlive(j.id)) gone.push_back({entity, true, 0.0f, 0.0f});
+                }
+                std::sort(gone.begin(), gone.end(), [](const Gone& x, const Gone& y) { return x.entity < y.entity; });
+                for (const Gone& g : gone) {
+                    world.get<PhysicsJoint>(g.entity).broken = true;
+                    send(world, JointBroke{g.entity, g.bodyGone, g.force, g.torque});
+                }
             }
 
             // 8. Bodies that left the world: reported, and by default retired.
@@ -782,6 +874,10 @@ namespace projv::runtime {
         registerComponent<RigidBody>(world);
         registerComponent<StaticCollider>(world);
         registerComponent<CharacterController>(world);
+        registerComponent<Joint>(world);
+        world.on_construct<Joint>().connect<&wantJoint>();
+        world.on_destroy<Joint>().connect<&jointGone>();
+        world.on_destroy<PhysicsJoint>().connect<&jointGone>();
         world.on_construct<CharacterController>().connect<&wantCharacter>();
         world.on_destroy<CharacterController>().connect<&characterGone>();
         world.on_destroy<PhysicsCharacter>().connect<&characterGone>();
@@ -884,6 +980,35 @@ namespace projv::runtime {
             if (const NetId* id = world.try_get<NetId>(entity)) command.c.target = *id;
         }
         physics.commands.push_back(command);
+    }
+
+    Entity connectBodies(World& world, Entity a, Entity b, Joint joint) {
+        joint.a = assignNetId(world, a);
+        joint.b = b == NullEntity ? NetId{} : assignNetId(world, b);
+        Entity e = world.create();
+        assignNetId(world, e);
+        world.emplace<Joint>(e, joint);
+        return e;
+    }
+
+    void setJointMotor(World& world, Entity joint, bool on, float velocity) {
+        PhysicsRuntime& physics = runtimeOf(world);
+        Command command;
+        command.c.kind = Kind::JointMotor;
+        command.c.a = core::vec3(velocity, 0.0f, 0.0f);
+        command.c.jump = on;
+        command.c.tick = physics.world->tick() + 1;
+        command.c.sequence = physics.sequence++;
+        if (world.valid(joint)) {
+            command.entity = joint;
+            if (const NetId* id = world.try_get<NetId>(joint)) command.c.target = *id;
+        }
+        physics.commands.push_back(command);
+    }
+
+    JointState jointState(const World& world, Entity joint) {
+        const PhysicsJoint* j = world.valid(joint) ? world.try_get<PhysicsJoint>(joint) : nullptr;
+        return j && !j->broken ? physicsWorld(world).jointState(j->id) : JointState{};
     }
 
     CharacterState characterState(const World& world, Entity entity) {
@@ -1225,4 +1350,52 @@ std::optional<projv::CharacterController> projv::runtime::ComponentTraits<projv:
         c.layer = *layer;
     }
     return c;
+}
+
+nlohmann::json projv::runtime::ComponentTraits<projv::Joint>::save(const projv::Joint& j) {
+    static constexpr const char* types[] = {"fixed", "point", "hinge", "slider", "distance"};
+    auto v3 = [](projv::core::vec3 v) { return nlohmann::json{tidy(v.x), tidy(v.y), tidy(v.z)}; };
+    nlohmann::json out{{"type", types[size_t(j.type)]}, {"a", j.a.value}, {"anchor", v3(j.anchor)}};
+    if (j.b.value) out["b"] = j.b.value;
+    if (j.type == projv::runtime::JointType::Distance) out["anchorB"] = v3(j.anchorB);
+    if (j.type == projv::runtime::JointType::Hinge || j.type == projv::runtime::JointType::Slider) out["axis"] = v3(j.axis);
+    if (j.limitMin != 0.0f || j.limitMax != 0.0f) out["limits"] = {tidy(j.limitMin), tidy(j.limitMax)};
+    if (j.springFrequency > 0.0f) out["spring"] = {tidy(j.springFrequency), tidy(j.springDamping)};
+    if (j.friction > 0.0f) out["friction"] = tidy(j.friction);
+    if (j.motor || j.motorVelocity != 0.0f || j.motorLimit > 0.0f)
+        out["motor"] = {{"on", j.motor}, {"velocity", tidy(j.motorVelocity)}, {"limit", tidy(j.motorLimit)}};
+    if (j.breakForce > 0.0f) out["breakForce"] = tidy(j.breakForce);
+    if (j.breakTorque > 0.0f) out["breakTorque"] = tidy(j.breakTorque);
+    return out;
+}
+
+std::optional<projv::Joint> projv::runtime::ComponentTraits<projv::Joint>::load(const nlohmann::json& j, uint32_t) {
+    using projv::runtime::JointType;
+    projv::Joint out;
+    std::string type = j.value("type", "point");
+    if (type == "fixed") out.type = JointType::Fixed;
+    else if (type == "point") out.type = JointType::Point;
+    else if (type == "hinge") out.type = JointType::Hinge;
+    else if (type == "slider") out.type = JointType::Slider;
+    else if (type == "distance") out.type = JointType::Distance;
+    else return std::nullopt;
+    auto v3 = [](const nlohmann::json& a) { return projv::core::vec3(a.at(0).get<float>(), a.at(1).get<float>(), a.at(2).get<float>()); };
+    out.a = projv::NetId{j.at("a").get<uint32_t>()};
+    if (out.a.value == 0) return std::nullopt;
+    out.b = projv::NetId{j.value("b", 0u)};
+    out.anchor = v3(j.at("anchor"));
+    if (j.contains("anchorB")) out.anchorB = v3(j.at("anchorB"));
+    if (j.contains("axis")) out.axis = v3(j.at("axis"));
+    if (j.contains("limits")) { out.limitMin = j["limits"].at(0).get<float>(); out.limitMax = j["limits"].at(1).get<float>(); }
+    if (j.contains("spring")) { out.springFrequency = j["spring"].at(0).get<float>(); out.springDamping = j["spring"].at(1).get<float>(); }
+    out.friction = j.value("friction", 0.0f);
+    if (j.contains("motor")) {
+        const auto& m = j.at("motor");
+        out.motor = m.value("on", false);
+        out.motorVelocity = m.value("velocity", 0.0f);
+        out.motorLimit = m.value("limit", 0.0f);
+    }
+    out.breakForce = j.value("breakForce", 0.0f);
+    out.breakTorque = j.value("breakTorque", 0.0f);
+    return out;
 }

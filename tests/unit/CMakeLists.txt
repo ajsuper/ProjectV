@@ -28,6 +28,7 @@ add_executable(projv_unit_tests
     test_loose_bvh.cpp
     test_physics_character.cpp
     test_physics_edits.cpp
+    test_physics_joints.cpp
     test_physics_net.cpp
     test_physics_queries.cpp
     test_physics_reliability.cpp

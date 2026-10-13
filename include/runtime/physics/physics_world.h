@@ -202,6 +202,10 @@ namespace projv::runtime {
         // more solver time.
         int        velocitySteps = 15;
         int        positionSteps = 2;
+        // The same for joints, which take more: a ten-link chain dropped from level stretched 3% at
+        // its worst with the contact counts (tests/unit/test_physics_joints.cpp, the chain).
+        int        jointVelocitySteps = 30;
+        int        jointPositionSteps = 6;
 
         // Record every call that changes the simulation, from construction on, with the state hash
         // after each step: PhysicsWorld::recording() returns it, and PhysicsWorld::replay plays it
@@ -261,6 +265,56 @@ namespace projv::runtime {
         bool       onSteepGround = false;         // touching ground too steep to stand on
         core::vec3 groundNormal{0.0f};
         BodyId     groundBody;
+    };
+
+    // ---- Joints -----------------------------------------------------------------------------------
+    // A constraint between two bodies, or a body and the world. Placed in world space as the bodies
+    // are when it is made: it holds them in that relation from then on (within its freedoms).
+    enum class JointType : uint8_t {
+        Fixed,      // welded: no relative motion at all
+        Point,      // ball and socket: turns any way about `anchor`
+        Hinge,      // turns about `axis` through `anchor`; limits are angles (radians)
+        Slider,     // slides along `axis`; limits are distances (metres)
+        Distance    // keeps `anchor` (on a) and `anchorB` (on b) between limitMin and limitMax apart: a rope,
+                    // a rod, or with a spring, a spring
+    };
+
+    struct JointDesc {
+        JointType  type = JointType::Point;
+        BodyId     a;
+        BodyId     b;                          // invalid: attached to the world
+        core::vec3 anchor{0.0f};               // world space
+        core::vec3 anchorB{0.0f};              // Distance only: the point on b
+        core::vec3 axis{0.0f, 1.0f, 0.0f};     // Hinge, Slider
+        // Hinge/Slider: limits, none when both are 0. Distance: the range; both 0 (or negative): the
+        // distance the anchors are apart when it is made.
+        float      limitMin = 0.0f, limitMax = 0.0f;
+        float      springFrequency = 0.0f;     // Distance: Hz; 0 is rigid
+        float      springDamping = 0.0f;       // 0..1
+        float      friction = 0.0f;            // Hinge: N m, Slider: N -- what turning it takes
+        // Hinge/Slider: a motor driving it at motorVelocity (rad/s or m/s), with at most motorLimit
+        // (N m or N; 0: unlimited).
+        bool       motor = false;
+        float      motorVelocity = 0.0f;
+        float      motorLimit = 0.0f;
+        // It breaks -- is removed, and reported (takeBrokenJoints) -- when holding the bodies together
+        // takes more than this force (N) or torque (N m). 0: never. What broke it carries on: the
+        // impulse beyond what it could hold in its last step is given back to the bodies.
+        float      breakForce = 0.0f;
+        float      breakTorque = 0.0f;
+    };
+
+    struct JointId {
+        uint32_t value = 0xffffffffu;
+        bool valid() const { return value != 0xffffffffu; }
+        bool operator==(const JointId&) const = default;
+    };
+
+    struct JointState {
+        bool  alive = false;
+        float position = 0.0f;   // Hinge: angle (rad); Slider: offset (m); Distance: length (m)
+        float force = 0.0f;      // what it held with in the last step (N)
+        float torque = 0.0f;     // (N m)
     };
 
     // ---- Queries ----------------------------------------------------------------------------------
@@ -387,6 +441,19 @@ namespace projv::runtime {
         // The inner body other bodies collide with, so queries and filters can name it.
         BodyId characterBody(CharacterId id) const;
 
+        // ---- Joints --------------------------------------------------------------------------------
+        // An invalid id, logged, when a body is not alive or the description is unusable. Joints go
+        // with their bodies: destroying either body removes every joint on it.
+        JointId createJoint(const JointDesc& desc);
+        void destroyJoint(JointId id);
+        bool isAlive(JointId id) const;
+        void setJointMotor(JointId id, bool on, float velocity);
+        JointState jointState(JointId id) const;
+        // Joints that broke (breakForce, breakTorque) since the last call, in slot order, with what
+        // they were holding when they did. Each is gone already; its id is no longer alive.
+        struct BrokenJoint { JointId id; float force = 0.0f, torque = 0.0f; };
+        std::vector<BrokenJoint> takeBrokenJoints();
+
         // ---- Queries, against the state at the end of the last step ------------------------------
         // The nearest body a ray from `origin` along the unit `direction` meets within maxDistance.
         // A ray starting inside a body hits it at distance 0.
@@ -420,6 +487,8 @@ namespace projv::runtime {
     private:
         void sanityPass(float dt);
         void updateCharacters(float dt);
+        void checkJoints(float dt);
+        void removeJointsOf(BodyId body);
         BodyId createBodyUnrecorded(const BodyDesc& desc);
         struct Impl;
         std::unique_ptr<Impl> impl;
