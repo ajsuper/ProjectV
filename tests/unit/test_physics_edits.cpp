@@ -333,3 +333,27 @@ TEST_CASE("a body carved to nothing before its first step is emptied too, not re
     CHECK(refused.size() == 1);
     CHECK(emptied.size() == 1);
 }
+
+TEST_CASE("a copy of a prefab-shaped prototype, cracked through, splits") {
+    // How examples/17-physics-demos builds its bricks: one prototype asset with a chunk inside, and
+    // every brick a duplicateComponent of it, sharing its geometry until edited.
+    Fixture f;
+    f.floor();
+    ComponentHandle proto = utils::addComponent(f.scene, projv::ComponentKind::Asset, "brick", INVALID_COMPONENT_HANDLE, 4, 1.0f);
+    chunkOf(f.scene, fill({0, 0, 0}, {7, 3, 3}), vec3(-0.5f, -0.25f, -0.25f), 0.125f, proto);
+    utils::setComponentTransform(f.scene, proto, vec3(0, -1000, 0), quat(1, 0, 0, 0), 1.0f);
+    ComponentHandle copy = utils::duplicateComponent(f.scene, proto);
+    utils::setComponentTransform(f.scene, copy, vec3(0, 0.3f, 0), quat(1, 0, 0, 0), 1.0f);
+    Entity brick = runtime::spawnComponent(f.app.world, copy, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+    f.app.world.emplace<projv::RigidBody>(brick, projv::RigidBody{.mass = 30.0f});
+    f.frames(30);
+    std::vector<projv::PendingVoxelOp> cracks;
+    for (int z = 0; z < 4; z++)
+        for (int y = 0; y < 4; y++)
+            for (int x = 0; x < 8; x++)
+                if (x == 2 || x == 5 || y == 2) cracks.push_back({false, ivec3(x, y, z), 0});
+    runtime::editVoxels(f.app.world, brick, cracks);
+    f.frames(3);
+    REQUIRE(f.splits.size() == 1);
+    CHECK(f.splits[0].pieces.size() == 5);   // six pieces: the parent keeps one
+}
