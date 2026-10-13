@@ -15,7 +15,7 @@ cd build/examples/physics_demos && ./physics_demos
 | **5** | **Titans.** A 14 m stone boulder (about 2,900 t) and a 20 m stone hammer (410 t) launched head-on across a field of 25 kg crates. **Space** launches them again. |
 | **6** | **Joints.** A plank bridge on ball joints, a motor-driven windmill, a swinging door, and a four-tonne wrecking ball on a rope that swings into a weight on a breakable chain. **Space** drops a crate on the bridge and fires a ball at the door. |
 | **7** | **Car.** A car made of joints, to drive: **W/S** throttle and reverse, **A/D** steer, **Space** brake, with a chase camera. A 40 m run-up to a ramp and jump, a gentler ramp, a crate wall and balls. |
-| **8** | **Gear winch.** A four-peg gear on a motor turns an eight-peg gear by its pegs alone; the big gear's drum winds up a chain lifting a 20 kg weight. **Space** reverses it. |
+| **8** | **Gear winch.** A four-peg gear on a motor turns an eight-peg gear by its pegs alone; the big gear's drum winds up a chain lifting a 40 kg weight. Hold **Up** to raise it; let go and it holds; hold **Down** and the motor lets go, so the weight unwinds it. |
 | R | restart the demo |
 | mouse, W/A/S/D, Q/E | look, fly, down/up (Esc releases the cursor, a click recaptures it) |
 | V | walk (a character: W/A/S/D, Space to jump) or fly |
@@ -77,6 +77,9 @@ through its middle, four pegs, laid along the voxel grid's own axes so their fac
 they collide as exact boxes. The winch gear is two crosses 45 degrees apart in one body (eight
 pegs), each drawn in its own grid, plus a drum. Only the driver has a motor; the winch gear turns
 because pegs push pegs, at half the driver's speed, and the chain's load comes back through them.
+The motor has three states: driving (Up), a servo locked at the angle it stopped at (nothing held:
+a motor merely held at zero speed lets a load creep down), and off (Down), when the falling weight
+spins both gears backwards.
 Gears with teeth or radial pegs drawn in voxels jammed -- their stair-stepped edges caught at every
 handover -- which is what smooth surfaces (contours) will fix; straight crosses sidestep it.
 
@@ -95,6 +98,6 @@ sweeper moves most of the field and is not moved itself; the titans meet and no 
 into the floor; the bridge holds, the chain breaks, the rope never stretches, the windmill runs at
 its motor's speed and the door stays within its limits; the car reaches speed upright, turns, stops
 under its brakes, and keeps its wheels on their mounts; the winch gear turns at half the driver's
-speed and lifts the weight. `DEMOS_ONLY=8` (or `DEMOS_ONLY=2,8`) runs just those demos. Then, for the whole session: no step
+speed and lifts the weight, holds it when let go, and lets it unwind on Down. `DEMOS_ONLY=8` (or `DEMOS_ONLY=2,8`) runs just those demos. Then, for the whole session: no step
 dropped contacts, no body went non-finite or fell through the floor, and the recording replays
 identically. `DEMOS_CAPTURE=<prefix>` saves a frame of each demo as `<prefix>-<n>.tga`.

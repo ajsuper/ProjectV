@@ -19,9 +19,9 @@
 //   7  Car            a car made of joints you drive: W/S throttle and reverse, A/D steer, Space
 //                     brake. Rear wheels on driven hinges, front wheels on knuckles steered by servo
 //                     hinges. Ramps, a jump, crates and balls to drive into.
-//   8  Gear winch     three voxel gears turning each other by their teeth -- only the first has a
-//                     motor -- the last with a drum that winds up a chain lifting a weight.
-//                     Space: reverse.
+//   8  Gear winch     a four-peg gear on a motor turning an eight-peg gear by its pegs, whose drum
+//                     winds up a chain lifting a weight. Up (held): raise. Let go: it holds.
+//                     Down (held): the motor lets go and the weight unwinds it.
 //
 // Controls
 //   1-8        pick a demo (it is rebuilt from scratch)      R  restart the demo
@@ -184,7 +184,9 @@ struct Demos {
         Entity hinges[2]{};
         Entity weight = projv::NullEntity;
         std::vector<Entity> chain;         // the links' joints, drum to weight
-        float speed = -1.0f;               // the driver's motor, rad/s: clockwise winds the weight up
+        // What the driver's motor is doing: winding up, holding still (at zero speed), or let go.
+        enum class Mode { Hold, Raise, Release } mode = Mode::Hold;
+        float raiseSpeed = -1.0f;          // rad/s at the driver: clockwise winds the weight up
         float turned[2]{};                 // each gear's rotation so far, rad
     } winch;
     vec3 blastAt{0.0f};
@@ -207,7 +209,7 @@ const char* demoName(int n) {
         case 5: return "Titans  (Space: again)";
         case 6: return "Joints  (Space: a crate on the bridge, a ball at the door)";
         case 7: return "Car  (W/S drive, A/D steer, Space brake)";
-        case 8: return "Gear winch  (Space: reverse)";
+        case 8: return "Gear winch  (Up: raise, Down: let it unwind)";
     }
     return "";
 }
@@ -628,7 +630,9 @@ Entity crossGear(World& world, vec3 centre, float reach, std::vector<float> angl
     utils::setComponentTransform(scene, node, centre, quat(1, 0, 0, 0), 1.0f);
     Entity e = runtime::spawnComponent(world, node, projv::LinkMode::Root, projv::OnUnlink::Destroy);
     projv::RigidBody wheel;
-    wheel.density = 300.0f;   // wood
+    // Light wood (balsa-ish): heavy gears are slow to spin up, and a released winch should run
+    // back down at a pace worth watching.
+    wheel.density = 150.0f;
     wheel.friction = 0.2f;
     world.emplace<projv::RigidBody>(e, wheel);
     runtime::assignNetId(world, e);
@@ -652,7 +656,8 @@ void buildWinch(World& world, Demos& demos, Camera& camera) {
         axle.axis = vec3(0, 0, 1);
         if (i == 0) {
             axle.motor = true;
-            axle.motorVelocity = w.speed;
+            axle.motorMode = runtime::MotorMode::Position;   // holding where it starts until told otherwise
+            axle.motorFrequency = 10.0f;                     // a stiff servo: the weight barely sags
             axle.motorLimit = 3000.0f;
         }
         w.hinges[i] = joint(world, demos, w.gears[i], projv::NullEntity, axle);
@@ -662,7 +667,7 @@ void buildWinch(World& world, Demos& demos, Camera& camera) {
         return (x / 8 + yy / 8) % 2 ? rgb(0.24f, 0.25f, 0.28f) : rgb(0.21f, 0.22f, 0.25f);
     });
 
-    // The chain: 24 links of 0.2 m from the right of the drum, down to a 20 kg weight. Each link to
+    // The chain: 24 links of 0.2 m from the right of the drum, down to a 40 kg weight. Each link to
     // the next by a ball joint; the first to the drum's rim. As the drum turns the links wrap onto it.
     const float drumZ = GEAR_THICKNESS * 0.5f + 0.3f + 0.05f;   // the middle of the drum's length
     const vec3 top(winchX + drumRadius + 0.06f, y, drumZ);
@@ -676,7 +681,7 @@ void buildWinch(World& world, Demos& demos, Camera& camera) {
         w.chain.push_back(joint(world, demos, link.entity, previous, j));
         previous = link.entity;
     }
-    Thing weight = place(world, demos.crate, top - vec3(0, 4.8f + 0.5f, 0), quat(1, 0, 0, 0), body(20.0f));
+    Thing weight = place(world, demos.crate, top - vec3(0, 4.8f + 0.5f, 0), quat(1, 0, 0, 0), body(40.0f));
     w.weight = weight.entity;
     projv::Joint hook;
     hook.type = runtime::JointType::Point;
@@ -686,6 +691,25 @@ void buildWinch(World& world, Demos& demos, Camera& camera) {
     camera.position = vec3(0.9f, 4.5f, -7.5f);
     camera.yaw = 1.5708f;
     camera.pitch = 0.0f;
+}
+
+// The winch's control: the driver's motor winding at raiseSpeed; holding -- a servo locked at the
+// angle it had when told to hold, since a motor merely held at zero speed corrects no drift and the
+// weight creeps down; or switched off, so the weight's pull runs the gears backwards. Commands only
+// when the mode changes.
+void setWinch(World& world, Demos& demos, Demos::Winch::Mode mode) {
+    Demos::Winch& w = demos.winch;
+    if (mode == w.mode || !world.valid(w.hinges[0])) return;
+    w.mode = mode;
+    using Mode = Demos::Winch::Mode;
+    switch (mode) {
+        case Mode::Raise:   runtime::setJointMotor(world, w.hinges[0], true, w.raiseSpeed); break;
+        case Mode::Release: runtime::setJointMotor(world, w.hinges[0], false, 0.0f); break;
+        case Mode::Hold:
+            runtime::setJointMotor(world, w.hinges[0], true, runtime::jointState(world, w.hinges[0]).position,
+                                   runtime::MotorMode::Position);
+            break;
+    }
 }
 
 void startDemo(World& world, int n) {
@@ -751,10 +775,6 @@ void act(World& world, Demos& demos, const Camera& camera) {
         case 2: detonate(world, demos); break;
         case 3: fireBall(world, demos, 4, vec3(0, 3, -6), vec3(0, 2, 28)); break;
         case 5: startDemo(world, 5); break;
-        case 8:
-            demos.winch.speed = -demos.winch.speed;
-            runtime::setJointMotor(world, demos.winch.hinges[0], true, demos.winch.speed);
-            break;
         case 6:
             place(world, demos.crate, vec3(-12, 7, uniform(demos, -2, 2)), quat(1, 0, 0, 0), body(60.0f));
             fireBall(world, demos, 3, vec3(uniform(demos, 8.5f, 9.5f), 1.5f, -9), vec3(0, 1.5f, 22), 2000.0f);
@@ -861,6 +881,10 @@ void controls(projv::Application& app) {
             world.destroy(camera.walker);
             camera.walker = projv::NullEntity;
         }
+    }
+    if (demos.current == 8 && !demos.unattended) {
+        using Mode = Demos::Winch::Mode;
+        setWinch(world, demos, input.down(projv::Key::Up) ? Mode::Raise : input.down(projv::Key::Down) ? Mode::Release : Mode::Hold);
     }
     if (demos.current == 7 && camera.walker == projv::NullEntity) {
         // Driving: the chase camera follows in PostUpdate (followCamera). The self-test drives on its own.
@@ -1123,12 +1147,30 @@ void selfTest(projv::Application& app) {
         }
     }
     if (stage == 8) {
-        static float startHeight = 0.0f;
+        // Up held for 12 s, then let go for 2 s, then Down for 2 s.
+        using Mode = Demos::Winch::Mode;
+        static float startHeight = 0.0f, heldAt = 0.0f, releasedAt = 0.0f;
+        static bool raised = false, held = false;
+        auto height = [&] { return runtime::bodyPose(world, demos.winch.weight).position.y; };
+        setWinch(world, demos, t < 1.0f ? Mode::Hold : t < 13.0f ? Mode::Raise : t < 15.0f ? Mode::Hold : Mode::Release);
         if (t > 1.0f && startHeight == 0.0f) {
-            startHeight = runtime::bodyPose(world, demos.winch.weight).position.y;
+            startHeight = height();
             for (float& a : demos.winch.turned) a = 0.0f;
         }
-        if (t > 13.0f) {
+        if (t > 13.5f && heldAt == 0.0f) heldAt = height();   // let it settle half a second first
+        if (t > 15.0f && !held) {
+            held = true;
+            releasedAt = height();
+            check(*test, std::abs(releasedAt - heldAt) < 0.05f,
+                  fmt::format("let go of Up, it holds: the weight moved {:.3f} m in 1.5 s", releasedAt - heldAt));
+        }
+        if (t > 17.0f) {
+            float dropped = releasedAt - height();
+            check(*test, dropped > 0.5f, fmt::format("Down releases the motor: the weight unwound {:.2f} m in 2 s", dropped));
+            stage = 9;
+        }
+        if (t > 13.0f && !raised) {
+            raised = true;
             const float* turned = demos.winch.turned;
             // Turned by its pegs alone: the winch gear the other way, at half the driver's speed.
             float ratio = -turned[1] / turned[0];
@@ -1141,7 +1183,6 @@ void selfTest(projv::Application& app) {
             int alive = 0;
             for (Entity j : demos.winch.chain) alive += runtime::jointState(world, j).alive;
             check(*test, alive == int(demos.winch.chain.size()), fmt::format("the chain holds: {} of {} joints", alive, demos.winch.chain.size()));
-            stage = 9;
         }
     }
     if (stage == 9) {
