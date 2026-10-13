@@ -26,6 +26,7 @@ add_executable(projv_unit_tests
     test_input.cpp
     test_local_ids.cpp
     test_loose_bvh.cpp
+    test_physics_character.cpp
     test_physics_edits.cpp
     test_physics_net.cpp
     test_physics_queries.cpp

@@ -396,3 +396,19 @@ TEST_CASE("rest damping leaves alone what is really moving: a rolling ball, a sp
     CHECK(t.awake);
     CHECK(glm::length(t.angularVelocity) == doctest::Approx(1.0f).epsilon(0.02));
 }
+
+TEST_CASE("a body made faster than its speed limits is capped, not refused or asserted on") {
+    PhysicsWorld physics;
+    BodyDesc d;
+    d.shape = PhysicsShape::sphere(0.5f);
+    d.gravityFactor = 0.0f;
+    d.linearVelocity = vec3(0, 0, 10000);
+    d.angularVelocity = vec3(0, 47.2f, 0);   // a hair over the 47.1 rad/s limit
+    BodyId id = physics.createBody(d);
+    REQUIRE(id.valid());
+    BodyState s = physics.bodyState(id);
+    CHECK(glm::length(s.linearVelocity) <= 500.0f);
+    CHECK(glm::length(s.angularVelocity) <= 47.1f);
+    physics.step(DT);
+    CHECK(std::isfinite(physics.bodyState(id).position.z));
+}

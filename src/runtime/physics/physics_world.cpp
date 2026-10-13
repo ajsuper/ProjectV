@@ -25,6 +25,7 @@
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyFilter.h>
+#include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
@@ -288,7 +289,7 @@ namespace projv::runtime {
         // Snapshot layout: a header that lets restoreState check, before touching anything, that the
         // snapshot is one and fits this world; then Jolt's own bytes.
         constexpr uint32_t SNAPSHOT_MAGIC = 0x50564a50u;   // "PJVP"
-        constexpr uint32_t SNAPSHOT_VERSION = 2;   // 2: rest damping state per body
+        constexpr uint32_t SNAPSHOT_VERSION = 3;   // 2: rest damping state per body; 3: characters
 
         template <typename T> void put(std::vector<uint8_t>& out, const T& v) {
             const auto* p = reinterpret_cast<const uint8_t*>(&v);
@@ -340,7 +341,7 @@ namespace projv::runtime {
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
-            Gravity, Step, Restore
+            Gravity, Step, Restore, CreateCharacter, DestroyCharacter, CharacterInput, CharacterPosition
         };
 
         void writeSettings(std::vector<uint8_t>& out, const PhysicsSettings& s) {
@@ -487,6 +488,25 @@ namespace projv::runtime {
         std::set<uint32_t>    faultInjected;      // corruptBodyForTesting
         bool                  warnedCapacity = false;
 
+        // ---- Characters ----
+        // Slots, reused lowest first; an id is the slot and its generation, so a stale one fails.
+        struct Character {
+            JPH::Ref<JPH::CharacterVirtual> controller;
+            CharacterDesc desc;
+            core::vec3    input{0.0f};
+            bool          jump = false;
+            float         jumpSpeed = 5.0f;
+            uint16_t      generation = 0;
+        };
+        std::vector<Character> characters;
+        Character* character(CharacterId id) {
+            uint32_t slot = id.value & 0xffffu;
+            if (!id.valid() || slot >= characters.size()) return nullptr;
+            Character& c = characters[slot];
+            return c.controller && c.generation == uint16_t(id.value >> 16) ? &c : nullptr;
+        }
+        const Character* character(CharacterId id) const { return const_cast<Impl*>(this)->character(id); }
+
         // ---- Recording (PhysicsSettings::record) ----
         bool                  recording = false;
         std::vector<uint8_t>  log;
@@ -583,8 +603,14 @@ namespace projv::runtime {
         settings.mMotionQuality = desc.continuous ? JPH::EMotionQuality::LinearCast
                                                   : JPH::EMotionQuality::Discrete;
         if (desc.motion != MotionType::Static) {
-            settings.mLinearVelocity = toJolt(desc.linearVelocity);
-            settings.mAngularVelocity = toJolt(desc.angularVelocity);
+            // Within the body's speed limits, which Jolt asserts on at creation: a velocity carried
+            // over from a body at its limit (a rebuild, a piece cut off) can come back a hair over.
+            auto capped = [](core::vec3 v, float limit) {
+                float length = glm::length(v);
+                return length > limit ? v * (limit * 0.999f / length) : v;
+            };
+            settings.mLinearVelocity = toJolt(capped(desc.linearVelocity, impl->settings.maxLinearSpeed));
+            settings.mAngularVelocity = toJolt(capped(desc.angularVelocity, impl->settings.maxAngularSpeed));
         }
         settings.mMaxLinearVelocity = impl->settings.maxLinearSpeed;
         settings.mMaxAngularVelocity = impl->settings.maxAngularSpeed;
@@ -675,8 +701,155 @@ namespace projv::runtime {
         return state;
     }
 
+    // ---- Characters ------------------------------------------------------------------------------
+
+    namespace {
+        // What a character collides with: its layer's row of the matrix, never its own inner body.
+        class CharacterLayers final : public JPH::ObjectLayerFilter {
+        public:
+            explicit CharacterLayers(PhysicsLayer layer) : layer(layer) {}
+            bool ShouldCollide(JPH::ObjectLayer other) const override { return layersCollide(layer, PhysicsLayer(other)); }
+        private:
+            PhysicsLayer layer;
+        };
+
+        // An upright capsule whose origin is at its feet.
+        JPH::RefConst<JPH::Shape> characterCapsule(float radius, float height) {
+            float halfCylinder = std::max(0.5f * height - radius, 0.01f);
+            return new JPH::RotatedTranslatedShape(JPH::Vec3(0, halfCylinder + radius, 0), JPH::Quat::sIdentity(),
+                                                   new JPH::CapsuleShape(halfCylinder, radius));
+        }
+    }
+
+    CharacterId PhysicsWorld::createCharacter(const CharacterDesc& desc) {
+        CharacterId id;
+        bool usable = finite(desc.position) && desc.radius > 0.0f && std::isfinite(desc.radius) &&
+                      std::isfinite(desc.height) && desc.height >= 2.0f * desc.radius && desc.mass > 0.0f &&
+                      desc.layer < PhysicsLayer::Count;
+        if (!usable) {
+            core::warn("physics: refused a character (radius {}, height {}, mass {})", desc.radius, desc.height, desc.mass);
+            impl->stats.refusedBodies++;
+        } else {
+            size_t slot = 0;
+            while (slot < impl->characters.size() && impl->characters[slot].controller) slot++;
+            if (slot >= 0xffffu) {
+                core::warn("physics: refused a character: too many");
+            } else {
+                if (slot == impl->characters.size()) impl->characters.emplace_back();
+                Impl::Character& c = impl->characters[slot];
+                JPH::CharacterVirtualSettings settings;
+                settings.mShape = characterCapsule(desc.radius, desc.height);
+                // A little inside the controller's own shape, so the controller's sweeps never meet it.
+                settings.mInnerBodyShape = characterCapsule(desc.radius * 0.9f, desc.height * 0.95f);
+                settings.mInnerBodyLayer = JPH::ObjectLayer(desc.layer);
+                settings.mMaxSlopeAngle = desc.maxSlope;
+                settings.mMass = desc.mass;
+                settings.mMaxStrength = desc.maxStrength;
+                settings.mEnhancedInternalEdgeRemoval = true;   // voxel floors are many boxes side by side
+                c.controller = new JPH::CharacterVirtual(&settings, toJoltR(desc.position), JPH::Quat::sIdentity(), &impl->system);
+                c.desc = desc;
+                c.input = core::vec3(0.0f);
+                c.jump = false;
+                c.generation = uint16_t(c.generation + 1);
+                id.value = uint32_t(slot) | (uint32_t(c.generation) << 16);
+            }
+        }
+        if (impl->recording) {
+            impl->op(Op::CreateCharacter);
+            put(impl->log, desc.radius); put(impl->log, desc.height); put(impl->log, desc.position);
+            put(impl->log, desc.maxSlope); put(impl->log, desc.mass); put(impl->log, desc.maxStrength);
+            put(impl->log, desc.stepUp); put(impl->log, desc.stickDown); put(impl->log, uint8_t(desc.layer));
+            put(impl->log, id.value);
+        }
+        return id;
+    }
+
+    void PhysicsWorld::destroyCharacter(CharacterId id) {
+        if (impl->recording) { impl->op(Op::DestroyCharacter); put(impl->log, id.value); }
+        Impl::Character* c = impl->character(id);
+        if (!c) return;
+        wakeBodiesAround(BodyId{c->controller->GetInnerBodyID().GetIndexAndSequenceNumber()});
+        c->controller = nullptr;   // removes its inner body
+    }
+
+    bool PhysicsWorld::isAlive(CharacterId id) const { return impl->character(id) != nullptr; }
+
+    void PhysicsWorld::setCharacterInput(CharacterId id, core::vec3 horizontal, bool jump, float jumpSpeed) {
+        if (impl->recording) {
+            impl->op(Op::CharacterInput);
+            put(impl->log, id.value); put(impl->log, horizontal); put(impl->log, uint8_t(jump)); put(impl->log, jumpSpeed);
+        }
+        Impl::Character* c = impl->character(id);
+        if (!c || !finite(horizontal) || !std::isfinite(jumpSpeed)) return;
+        c->input = core::vec3(horizontal.x, 0.0f, horizontal.z);
+        c->jump = c->jump || jump;
+        c->jumpSpeed = jumpSpeed;
+    }
+
+    void PhysicsWorld::setCharacterPosition(CharacterId id, core::vec3 feet) {
+        if (impl->recording) { impl->op(Op::CharacterPosition); put(impl->log, id.value); put(impl->log, feet); }
+        Impl::Character* c = impl->character(id);
+        if (!c || !finite(feet)) return;
+        c->controller->SetPosition(toJoltR(feet));
+    }
+
+    CharacterState PhysicsWorld::characterState(CharacterId id) const {
+        CharacterState state;
+        const Impl::Character* c = impl->character(id);
+        if (!c) return state;
+        const JPH::CharacterVirtual& ch = *c->controller;
+        state.position = fromJolt(ch.GetPosition());
+        state.velocity = fromJolt(ch.GetLinearVelocity());
+        state.onGround = ch.GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+        state.onSteepGround = ch.GetGroundState() == JPH::CharacterBase::EGroundState::OnSteepGround;
+        state.groundNormal = fromJolt(ch.GetGroundNormal());
+        if (!ch.GetGroundBodyID().IsInvalid()) state.groundBody = BodyId{ch.GetGroundBodyID().GetIndexAndSequenceNumber()};
+        return state;
+    }
+
+    BodyId PhysicsWorld::characterBody(CharacterId id) const {
+        const Impl::Character* c = impl->character(id);
+        return c ? BodyId{c->controller->GetInnerBodyID().GetIndexAndSequenceNumber()} : BodyId{};
+    }
+
+    // Each character, in slot order, before the bodies step: the velocity Jolt's own controller
+    // sample builds -- carried by the ground while standing, falling otherwise, plus what it walks
+    // at -- then the move, with stair stepping and floor sticking.
+    void PhysicsWorld::updateCharacters(float dt) {
+        const JPH::Vec3 gravity = impl->system.GetGravity();
+        const JPH::Vec3 up = JPH::Vec3::sAxisY();
+        for (Impl::Character& c : impl->characters) {
+            if (!c.controller) continue;
+            JPH::CharacterVirtual& ch = *c.controller;
+            ch.UpdateGroundVelocity();
+            JPH::Vec3 current = ch.GetLinearVelocity();
+            JPH::Vec3 vertical = up * current.Dot(up);
+            JPH::Vec3 ground = ch.GetGroundVelocity();
+            JPH::Vec3 velocity;
+            if (ch.GetGroundState() == JPH::CharacterBase::EGroundState::OnGround && (vertical.GetY() - ground.GetY()) < 0.1f) {
+                velocity = ground;
+                if (c.jump) {
+                    velocity += up * c.jumpSpeed;
+                    c.jump = false;
+                }
+            } else {
+                velocity = vertical;
+            }
+            velocity += gravity * dt + toJolt(c.input);
+            ch.SetLinearVelocity(velocity);
+            JPH::CharacterVirtual::ExtendedUpdateSettings settings;
+            settings.mWalkStairsStepUp = up * c.desc.stepUp;
+            settings.mStickToFloorStepDown = -up * c.desc.stickDown;
+            CharacterLayers layers(c.desc.layer);
+            JPH::IgnoreSingleBodyFilter self(ch.GetInnerBodyID());
+            ch.ExtendedUpdate(dt, gravity, settings, JPH::BroadPhaseLayerFilter(), layers, self, JPH::ShapeFilter(),
+                              *impl->tempAllocator);
+        }
+    }
+
     void PhysicsWorld::step(float dt) {
         auto started = std::chrono::steady_clock::now();
+        updateCharacters(dt);
         JPH::EPhysicsUpdateError errors =
             impl->system.Update(dt, 1, impl->tempAllocator.get(), impl->jobSystem.get());
         sanityPass(dt);
@@ -942,6 +1115,23 @@ namespace projv::runtime {
         std::string data = recorder.GetData();
         put(out, static_cast<uint64_t>(data.size()));
         out.insert(out.end(), data.begin(), data.end());
+
+        // Characters: Jolt's own state for each (the system's snapshot does not include them), and
+        // the input they are acting on.
+        uint32_t live = 0;
+        for (const Impl::Character& c : impl->characters) live += c.controller ? 1 : 0;
+        put(out, live);
+        for (size_t slot = 0; slot < impl->characters.size(); slot++) {
+            const Impl::Character& c = impl->characters[slot];
+            if (!c.controller) continue;
+            put(out, uint32_t(slot) | (uint32_t(c.generation) << 16));
+            put(out, c.input); put(out, uint8_t(c.jump)); put(out, c.jumpSpeed);
+            JPH::StateRecorderImpl state;
+            c.controller->SaveState(state);
+            std::string bytes = state.GetData();
+            put(out, static_cast<uint64_t>(bytes.size()));
+            out.insert(out.end(), bytes.begin(), bytes.end());
+        }
         return out;
     }
 
@@ -963,8 +1153,39 @@ namespace projv::runtime {
                 core::warn("physics: restoreState refused: the snapshot is truncated");
                 return false;
             }
-        if (!get(snapshot, at, joltSize) || snapshot.size() - at != joltSize) {
+        if (!get(snapshot, at, joltSize) || snapshot.size() - at < joltSize) {
             core::warn("physics: restoreState refused: the snapshot is truncated");
+            return false;
+        }
+        const size_t joltAt = at;
+        at += joltSize;
+        struct SavedCharacter { uint32_t id; core::vec3 input; uint8_t jump; float jumpSpeed; std::vector<uint8_t> state; };
+        std::vector<SavedCharacter> savedCharacters;
+        uint32_t characterCount = 0;
+        if (!get(snapshot, at, characterCount)) {
+            core::warn("physics: restoreState refused: the snapshot is truncated");
+            return false;
+        }
+        for (uint32_t i = 0; i < characterCount; i++) {
+            SavedCharacter c;
+            uint64_t size = 0;
+            if (!get(snapshot, at, c.id) || !get(snapshot, at, c.input) || !get(snapshot, at, c.jump) ||
+                !get(snapshot, at, c.jumpSpeed) || !get(snapshot, at, size) || snapshot.size() - at < size) {
+                core::warn("physics: restoreState refused: the snapshot is truncated");
+                return false;
+            }
+            c.state.assign(snapshot.begin() + long(at), snapshot.begin() + long(at + size));
+            at += size;
+            savedCharacters.push_back(std::move(c));
+        }
+        std::vector<uint32_t> liveCharacters;
+        for (size_t slot = 0; slot < impl->characters.size(); slot++)
+            if (impl->characters[slot].controller)
+                liveCharacters.push_back(uint32_t(slot) | (uint32_t(impl->characters[slot].generation) << 16));
+        bool sameCharacters = liveCharacters.size() == savedCharacters.size();
+        for (size_t i = 0; sameCharacters && i < liveCharacters.size(); i++) sameCharacters = liveCharacters[i] == savedCharacters[i].id;
+        if (!sameCharacters) {
+            core::warn("physics: restoreState refused: the snapshot's characters are not this world's");
             return false;
         }
         // Jolt restores body state into the bodies that exist and does not create or destroy any,
@@ -983,7 +1204,7 @@ namespace projv::runtime {
         impl->system.SaveState(backup, JPH::EStateRecorderState::All);
 
         JPH::StateRecorderImpl recorder;
-        recorder.WriteBytes(snapshot.data() + at, joltSize);
+        recorder.WriteBytes(snapshot.data() + joltAt, joltSize);
         recorder.Rewind();
         if (!impl->system.RestoreState(recorder)) {
             core::error("physics: restoreState: Jolt rejected the snapshot; the previous state is kept");
@@ -993,6 +1214,16 @@ namespace projv::runtime {
         }
         impl->tick = tick;
         for (uint32_t i = 0; i < count; i++) impl->rest[JPH::BodyID(saved[i]).GetIndex()] = savedRest[i];
+        for (const SavedCharacter& saved : savedCharacters) {
+            Impl::Character& c = *impl->character(CharacterId{saved.id});
+            c.input = saved.input;
+            c.jump = saved.jump != 0;
+            c.jumpSpeed = saved.jumpSpeed;
+            JPH::StateRecorderImpl state;
+            state.WriteBytes(saved.state.data(), saved.state.size());
+            state.Rewind();
+            c.controller->RestoreState(state);
+        }
         return true;
     }
 
@@ -1010,6 +1241,14 @@ namespace projv::runtime {
             h.add(body.GetLinearVelocity());
             h.add(body.GetAngularVelocity());
             h.add(static_cast<uint8_t>(body.IsActive()));
+        }
+        for (size_t slot = 0; slot < impl->characters.size(); slot++) {
+            const Impl::Character& c = impl->characters[slot];
+            if (!c.controller) continue;
+            h.add(uint32_t(slot));
+            h.add(JPH::Vec3(c.controller->GetPosition()));
+            h.add(c.controller->GetLinearVelocity());
+            h.add(uint8_t(c.controller->GetGroundState()));
         }
         return h.value;
     }
@@ -1239,6 +1478,36 @@ namespace projv::runtime {
                     }
                     break;
                 }
+                case Op::CreateCharacter: {
+                    CharacterDesc d;
+                    uint8_t layer = 0;
+                    uint32_t expected = 0;
+                    if (!get(in, at, d.radius) || !get(in, at, d.height) || !get(in, at, d.position) ||
+                        !get(in, at, d.maxSlope) || !get(in, at, d.mass) || !get(in, at, d.maxStrength) ||
+                        !get(in, at, d.stepUp) || !get(in, at, d.stickDown) || !get(in, at, layer) || !get(in, at, expected))
+                        return truncated();
+                    d.layer = PhysicsLayer(layer);
+                    if (world.createCharacter(d).value != expected) {
+                        result.firstDivergentStep = result.stepsReplayed + 1;
+                        result.problem = "a character was given a different id than when recorded";
+                        return result;
+                    }
+                    break;
+                }
+                case Op::DestroyCharacter:
+                    if (!get(in, at, id)) return truncated();
+                    world.destroyCharacter(CharacterId{id});
+                    break;
+                case Op::CharacterInput: {
+                    uint8_t jump = 0;
+                    if (!get(in, at, id) || !get(in, at, a) || !get(in, at, jump) || !get(in, at, dt)) return truncated();
+                    world.setCharacterInput(CharacterId{id}, a, jump != 0, dt);
+                    break;
+                }
+                case Op::CharacterPosition:
+                    if (!get(in, at, id) || !get(in, at, a)) return truncated();
+                    world.setCharacterPosition(CharacterId{id}, a);
+                    break;
                 case Op::Restore: {
                     uint64_t size = 0;
                     if (!get(in, at, size) || in.size() - at < size) return truncated();

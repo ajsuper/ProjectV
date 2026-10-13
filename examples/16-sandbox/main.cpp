@@ -152,6 +152,7 @@ struct Sandbox {
     int lost = 0;             // left the arena (over a wall) and fell past the kill plane
     int pieces = 0;           // bodies made by a blast cutting a crate in pieces
     int carvedAway = 0;       // bodies a blast carved down to nothing
+    int made = 0, gone = 0;   // Body components constructed and destroyed, by anything
     int fellThrough = 0;      // ...from *inside* the walls: through the floor. Must stay 0.
     bool lowGravity = false;
     bool spawners = true;
@@ -159,8 +160,13 @@ struct Sandbox {
     std::mt19937 random{1234};
 };
 
+constexpr float EYE_HEIGHT = 1.6f;
+constexpr float WALK_SPEED = 7.0f;
+
 struct Camera {
     vec3 position{0.0f, 32.0f, -95.0f};
+    // Walking (V): the character whose eyes the camera is. NullEntity while flying.
+    Entity walker = projv::NullEntity;
     float yaw = 1.5708f;     // looking down +z, into the arena
     float pitch = -0.32f;
     vec3 forward() const {
@@ -220,16 +226,41 @@ void controls(projv::Application& app) {
         camera.pitch = std::clamp(camera.pitch, -1.5f, 1.5f);
     }
 
-    // Flying runs on the unscaled clock: pausing the world does not freeze you.
-    const float speed = 45.0f * time.unscaledDelta;
     const vec3 flat{std::cos(camera.yaw), 0.0f, std::sin(camera.yaw)};
     const vec3 right{std::cos(camera.yaw - 1.5708f), 0.0f, std::sin(camera.yaw - 1.5708f)};
-    if (input.down(projv::Key::W)) camera.position += flat * speed;
-    if (input.down(projv::Key::S)) camera.position -= flat * speed;
-    if (input.down(projv::Key::D)) camera.position += right * speed;
-    if (input.down(projv::Key::A)) camera.position -= right * speed;
-    if (input.down(projv::Key::R)) camera.position.y += speed;
-    if (input.down(projv::Key::F)) camera.position.y -= speed;
+    // V: walk (a character, standing where the camera's feet would be) or fly.
+    if (input.pressed(projv::Key::V)) {
+        if (camera.walker == projv::NullEntity) {
+            camera.walker = world.create();
+            world.emplace<projv::Transform>(camera.walker, projv::Transform{camera.position - vec3(0, EYE_HEIGHT, 0)});
+            world.emplace<projv::CharacterController>(camera.walker);
+            projv::runtime::assignNetId(world, camera.walker);
+        } else {
+            world.destroy(camera.walker);
+            camera.walker = projv::NullEntity;
+        }
+    }
+    if (camera.walker != projv::NullEntity) {
+        // Walking: WASD and Space are the character's input, a command like any other; the camera is
+        // its eyes, where the drawn (interpolated) character is.
+        vec3 walk(0.0f);
+        if (input.down(projv::Key::W)) walk += flat;
+        if (input.down(projv::Key::S)) walk -= flat;
+        if (input.down(projv::Key::D)) walk += right;
+        if (input.down(projv::Key::A)) walk -= right;
+        if (glm::length(walk) > 0.0f) walk = glm::normalize(walk) * WALK_SPEED;
+        projv::runtime::setCharacterInput(world, camera.walker, walk, input.pressed(projv::Key::Space), 9.0f);
+        camera.position = world.get<projv::Transform>(camera.walker).position + vec3(0, EYE_HEIGHT, 0);
+    } else {
+        // Flying runs on the unscaled clock: pausing the world does not freeze you.
+        const float speed = 45.0f * time.unscaledDelta;
+        if (input.down(projv::Key::W)) camera.position += flat * speed;
+        if (input.down(projv::Key::S)) camera.position -= flat * speed;
+        if (input.down(projv::Key::D)) camera.position += right * speed;
+        if (input.down(projv::Key::A)) camera.position -= right * speed;
+        if (input.down(projv::Key::R)) camera.position.y += speed;
+        if (input.down(projv::Key::F)) camera.position.y -= speed;
+    }
 
     if (input.pressed(projv::Key::Num1)) sandbox.selected = 0;
     if (input.pressed(projv::Key::Num2)) sandbox.selected = 1;
@@ -350,6 +381,9 @@ struct SelfTest {
     int timedFrames = 0;
     int measureBodies = -1;   // SANDBOX_MEASURE: a fixed crowd, no actions, just timing
     int churn = 0;            // SANDBOX_CHURN: bodies destroyed and respawned every frame
+    Entity walker = projv::NullEntity;
+    float walkerLowest = 1e9f, walkerTravel = 0.0f;
+    vec3 walkerLast{0.0f, -1e6f, 0.0f};
 };
 
 void selfTestSystem(projv::Application& app) {
@@ -435,6 +469,23 @@ void selfTestSystem(projv::Application& app) {
               vec3(uniform(sandbox, -10, 10), 0, uniform(sandbox, -10, 10)));
     }
     if (frame == 60) for (int i = 0; i < 20; i++) spawn("bomb", vec3(uniform(sandbox, -8, 8), 20 + i, uniform(sandbox, -8, 8)), vec3(0));
+    // A character walks a circle round the arena through everything going on, and must stay on its
+    // feet on the floor (or on what it climbed), never under it.
+    if (frame == 20) {
+        test->walker = world.create();
+        world.emplace<projv::Transform>(test->walker, projv::Transform{vec3(30, 2, 0)});
+        world.emplace<projv::CharacterController>(test->walker);
+        projv::runtime::assignNetId(world, test->walker);
+    }
+    if (test->walker != projv::NullEntity && frame % 10 == 0) {
+        float angle = float(frame) * 0.01f;
+        projv::runtime::setCharacterInput(world, test->walker, vec3(-std::sin(angle), 0, std::cos(angle)) * WALK_SPEED,
+                                          frame % 120 == 0, 9.0f);
+        projv::runtime::CharacterState walked = projv::runtime::characterState(world, test->walker);
+        test->walkerLowest = std::min(test->walkerLowest, walked.position.y);
+        test->walkerTravel += glm::length(walked.position - test->walkerLast) * (test->walkerLast.y > -1e5f ? 1.0f : 0.0f);
+        test->walkerLast = walked.position;
+    }
     // Pop a random body now and then, and the first bomb found once the crowd has landed.
     if (frame % 9 == 0 || frame == 200) {
         std::vector<Entity> candidates;
@@ -459,8 +510,16 @@ void selfTestSystem(projv::Application& app) {
         if (scene.components[h].parent == projv::INVALID_COMPONENT_HANDLE && projv::utils::isComponentAlive(scene, h)) liveRoots++;
     }
     size_t arenaRoots = 3;   // the arena and two pylons
-    bool books = int(alive) + sandbox.popped + sandbox.lost + sandbox.carvedAway ==
-                 test->spawned + sandbox.spawnerLaunches + sandbox.pieces;
+    // Three ledgers that must agree: what was made is what was spawned, launched or cut off; what
+    // went is what was popped, lost or carved away; and the difference is what is alive.
+    bool madeRight = sandbox.made == test->spawned + sandbox.spawnerLaunches + sandbox.pieces;
+    bool goneRight = sandbox.gone == sandbox.popped + sandbox.lost + sandbox.carvedAway;
+    bool aliveRight = sandbox.made - sandbox.gone == int(alive);
+    bool books = madeRight && goneRight && aliveRight;
+    if (!books)
+        projv::core::error("SANDBOXTEST: books: made {} (spawned {} + launched {} + pieces {}), gone {} (popped {} + lost {} + "
+                           "carved {}), alive {}", sandbox.made, test->spawned, sandbox.spawnerLaunches, sandbox.pieces,
+                           sandbox.gone, sandbox.popped, sandbox.lost, sandbox.carvedAway, alive);
     bool voxels = liveRoots == arenaRoots + alive;
     // Physics: every body alive has its simulation body (none were refused), no step dropped
     // contacts, and nothing went through the floor.
@@ -477,7 +536,12 @@ void selfTestSystem(projv::Application& app) {
     }
     projv::core::info("SANDBOXTEST: replay of {} steps ({} KB recorded): {}{}", replay.stepsReplayed,
                       log.bytes.size() / 1024, replay.matched ? "identical" : "DIVERGED: ", replay.problem);
-    bool pass = books && voxels && physics && replay.matched;
+    // The walker: it went a long way and never sank through the floor (whose top is y = 0; a crater
+    // dents it by half a metre at most).
+    bool walked = test->walkerTravel > 20.0f && test->walkerLowest > -0.6f;
+    projv::core::info("SANDBOXTEST: the walker went {:.0f} m, lowest {:.2f} m | {}", test->walkerTravel,
+                      test->walkerLowest, walked ? "ok" : "WRONG");
+    bool pass = books && voxels && physics && replay.matched && walked;
     projv::core::info("SANDBOXTEST: spawned {} (+{} by spawners, +{} pieces blasted off), popped {}, lost over the "
                       "walls {}, carved away {}, alive {}, live root components {} (expected {}) | books {} | voxels {}", test->spawned,
                       sandbox.spawnerLaunches, sandbox.pieces, sandbox.popped, sandbox.lost, sandbox.carvedAway, alive, liveRoots, arenaRoots + alive,
@@ -583,6 +647,10 @@ void startup(projv::Application& app) {
     world.on_construct<Spawner>().connect<&setUpSpawner>();
     projv::runtime::spawnEntities(world);   // the arena: its spawners come to life here
     connectPopHandlers(app);
+    // Every sandbox body made and destroyed, whatever made or destroyed it: what the self-test's
+    // books are checked against.
+    world.on_construct<Body>().connect<[](World& w, Entity) { w.ctx().get<Sandbox>().made++; }>();
+    world.on_destroy<Body>().connect<[](World& w, Entity) { w.ctx().get<Sandbox>().gone++; }>();
     // Carved down to nothing: retired.
     app.events().on<projv::BodyEmptied>([&world](const projv::BodyEmptied& e) {
         if (!world.valid(e.entity) || !world.all_of<Body>(e.entity)) return;
@@ -594,9 +662,11 @@ void startup(projv::Application& app) {
         auto& sandbox = world.ctx().get<Sandbox>();
         const Body* parent = world.valid(e.parent) ? world.try_get<Body>(e.parent) : nullptr;
         for (Entity piece : e.pieces) {
-            if (!world.valid(piece)) continue;
-            world.emplace_or_replace<Body>(piece, parent ? *parent : Body{});
+            // Counted whether or not it is still here: one retired before this event arrived (it
+            // fell out of the world) was counted as that, and never got a Body.
             sandbox.pieces++;
+            if (world.valid(piece)) world.emplace_or_replace<Body>(piece, parent ? *parent : Body{});
+            else { sandbox.made++; sandbox.gone++; }   // the Body it would have had: made, and gone with it
         }
     });
     // Counted as lost. One that left from *inside* the walls went through the floor, which must

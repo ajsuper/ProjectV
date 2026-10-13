@@ -99,6 +99,9 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   id. Physics makes a step's new bodies in NetId order and applies commands in
   (tick, issuer, sequence) order, so nothing that feeds a step may depend on registry or arrival
   order. `PhysicsSettings::record` + `PhysicsWorld::replay` check a whole session for determinism.
+- **Physics input is checked, never asserted on.** Jolt asserts (and so stops a dev build) on input
+  it cannot take -- a velocity over a body's limit, a degenerate shape. Everything that reaches Jolt
+  goes through `PhysicsWorld`, which refuses, clamps or logs first; keep it that way when adding calls.
 - **Where data goes.** Engine-read data: a `ComponentRecord` field. Data *about the voxel structure*
   written by tools (editor boolean ops, primitive parameters): an attachment (`utils/attachments.h`),
   saved in compose.json. What a running program *does* (physics, spawners, gameplay): ECS components

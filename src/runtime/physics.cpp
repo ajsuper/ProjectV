@@ -50,6 +50,8 @@ namespace projv::runtime {
             std::map<Entity, Motion>      carried;
             std::set<Entity>              reshaped;     // rebuilt this step because their voxels changed
             std::map<uint32_t, Entity>    byBody;       // body id -> entity, for queries
+            std::vector<Entity>           pendingCharacters;
+            std::vector<CharacterId>      doomedCharacters;
             struct Edit { Entity entity; std::vector<PendingVoxelOp> ops; };
             std::vector<Edit>             edits;
         };
@@ -67,6 +69,15 @@ namespace projv::runtime {
 
         void bodyGone(World& world, Entity entity) {
             if (const PhysicsBody* body = world.try_get<PhysicsBody>(entity)) runtimeOf(world).doomed.push_back(body->id);
+        }
+
+        void wantCharacter(World& world, Entity entity) { runtimeOf(world).pendingCharacters.push_back(entity); }
+        void characterGone(World& world, Entity entity) {
+            if (const PhysicsCharacter* c = world.try_get<PhysicsCharacter>(entity)) {
+                PhysicsRuntime& physics = runtimeOf(world);
+                physics.doomedCharacters.push_back(c->id);
+                physics.byBody.erase(physics.world->characterBody(c->id).value);
+            }
         }
 
         void bodyComponentGone(World& world, Entity entity) {
@@ -495,6 +506,46 @@ namespace projv::runtime {
 
             physics.reshaped.clear();
 
+            // 3b. Characters: gone ones removed, new ones made, in NetId-then-entity order.
+            for (CharacterId id : physics.doomedCharacters) sim.destroyCharacter(id);
+            physics.doomedCharacters.clear();
+            {
+                std::vector<Entity> orphanCharacters;
+                for (auto [entity, c] : world.view<PhysicsCharacter>().each())
+                    if (!world.all_of<CharacterController>(entity)) orphanCharacters.push_back(entity);
+                for (Entity entity : orphanCharacters) {
+                    sim.destroyCharacter(world.get<PhysicsCharacter>(entity).id);
+                    world.remove<PhysicsCharacter>(entity);
+                }
+                std::vector<Entity> wanted;
+                wanted.swap(physics.pendingCharacters);
+                std::sort(wanted.begin(), wanted.end(), [&](Entity a, Entity b) { return order(a) < order(b); });
+                wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
+                for (Entity e : wanted) {
+                    if (!world.valid(e) || !world.all_of<CharacterController>(e) || world.all_of<PhysicsCharacter>(e)) continue;
+                    const CharacterController& controller = world.get<CharacterController>(e);
+                    CharacterDesc desc;
+                    desc.radius = controller.radius;
+                    desc.height = controller.height;
+                    desc.maxSlope = controller.maxSlopeDegrees * 3.14159265f / 180.0f;
+                    desc.mass = controller.mass;
+                    desc.maxStrength = controller.strength;
+                    desc.stepUp = controller.stepHeight;
+                    desc.layer = controller.layer;
+                    if (const Transform* t = world.try_get<Transform>(e)) desc.position = t->position;
+                    CharacterId id = sim.createCharacter(desc);
+                    if (!id.valid()) {
+                        send(world, PhysicsBodyRefused{e, "the character's shape is unusable (see the log)"});
+                        continue;
+                    }
+                    PhysicsCharacter c;
+                    c.id = id;
+                    c.previousPosition = c.position = desc.position;
+                    physics.byBody[sim.characterBody(id).value] = e;
+                    world.emplace<PhysicsCharacter>(e, c);
+                }
+            }
+
             // 4. Commands due at this step, in (tick, issuer, sequence) order. Later ones wait.
             const uint64_t thisTick = sim.tick() + 1;
             std::vector<Command> due, later;
@@ -509,6 +560,11 @@ namespace projv::runtime {
                 if (c.tick < thisTick) physics.late++;
                 if (c.kind == Kind::Gravity) { sim.setGravity(c.a); continue; }
                 Entity target = command.entity != NullEntity ? command.entity : entityForNetId(world, c.target);
+                if (c.kind == Kind::CharacterInput) {
+                    if (const PhysicsCharacter* ch = world.valid(target) ? world.try_get<PhysicsCharacter>(target) : nullptr)
+                        sim.setCharacterInput(ch->id, c.a, c.jump, c.b.x);
+                    continue;
+                }
                 PhysicsBody* body = world.valid(target) ? world.try_get<PhysicsBody>(target) : nullptr;
                 if (!body) continue;
                 switch (c.kind) {
@@ -524,6 +580,7 @@ namespace projv::runtime {
                         body->presented = false;
                         break;
                     case Kind::Gravity: break;
+                    case Kind::CharacterInput: break;
                 }
             }
 
@@ -552,6 +609,11 @@ namespace projv::runtime {
                 body.previousRotation = body.rotation;
                 body.position = state.position;
                 body.rotation = state.rotation;
+            }
+
+            for (auto [entity, c] : world.view<PhysicsCharacter>().each()) {
+                c.previousPosition = c.position;
+                c.position = sim.characterState(c.id).position;
             }
 
             // 8. Bodies that left the world: reported, and by default retired.
@@ -604,7 +666,18 @@ namespace projv::runtime {
                 body.presentedRotation = rotation;
                 writes.push_back({entity, position, rotation});
             }
+            std::vector<std::pair<Entity, core::vec3>> characters;
+            for (auto [entity, c] : world.view<PhysicsCharacter>().each()) {
+                if (!world.all_of<Transform>(entity)) continue;
+                core::vec3 position = glm::mix(c.previousPosition, c.position, alpha);
+                if (c.presented && position == c.presentedPosition) continue;
+                c.presented = true;
+                c.presentedPosition = position;
+                characters.push_back({entity, position});
+            }
             physics.writingTransforms = true;
+            for (auto [entity, position] : characters)
+                world.patch<Transform>(entity, [&](Transform& t) { t.position = position; });
             for (const Write& w : writes) {
                 world.patch<Transform>(w.entity, [&](Transform& t) {
                     t.position = w.position;
@@ -693,6 +766,10 @@ namespace projv::runtime {
         installNetIds(world);
         registerComponent<RigidBody>(world);
         registerComponent<StaticCollider>(world);
+        registerComponent<CharacterController>(world);
+        world.on_construct<CharacterController>().connect<&wantCharacter>();
+        world.on_destroy<CharacterController>().connect<&characterGone>();
+        world.on_destroy<PhysicsCharacter>().connect<&characterGone>();
 
         world.on_construct<RigidBody>().connect<&wantBody>();
         world.on_construct<StaticCollider>().connect<&wantBody>();
@@ -769,6 +846,27 @@ namespace projv::runtime {
                     if (glm::dot(d, d) <= r * r) ops.push_back({false, core::ivec3(x, y, z), 0});
                 }
         return ops;
+    }
+
+    void setCharacterInput(World& world, Entity entity, core::vec3 velocity, bool jump, float jumpSpeed) {
+        PhysicsRuntime& physics = runtimeOf(world);
+        Command command;
+        command.c.kind = Kind::CharacterInput;
+        command.c.a = velocity;
+        command.c.b = core::vec3(jumpSpeed, 0.0f, 0.0f);
+        command.c.jump = jump;
+        command.c.tick = physics.world->tick() + 1;
+        command.c.sequence = physics.sequence++;
+        if (world.valid(entity)) {
+            command.entity = entity;
+            if (const NetId* id = world.try_get<NetId>(entity)) command.c.target = *id;
+        }
+        physics.commands.push_back(command);
+    }
+
+    CharacterState characterState(const World& world, Entity entity) {
+        const PhysicsCharacter* c = world.valid(entity) ? world.try_get<PhysicsCharacter>(entity) : nullptr;
+        return c ? physicsWorld(world).characterState(c->id) : CharacterState{};
     }
 
     void submitCommand(World& world, const PhysicsCommand& command) {
@@ -1074,5 +1172,35 @@ std::optional<projv::StaticCollider> projv::runtime::ComponentTraits<projv::Stat
         c.layer = *layer;
     }
     c.splits = j.value("splits", false);
+    return c;
+}
+
+nlohmann::json projv::runtime::ComponentTraits<projv::CharacterController>::save(const projv::CharacterController& c) {
+    const projv::CharacterController defaults;
+    nlohmann::json j = nlohmann::json::object();
+    if (c.radius != defaults.radius) j["radius"] = tidy(c.radius);
+    if (c.height != defaults.height) j["height"] = tidy(c.height);
+    if (c.maxSlopeDegrees != defaults.maxSlopeDegrees) j["maxSlopeDegrees"] = tidy(c.maxSlopeDegrees);
+    if (c.mass != defaults.mass) j["mass"] = tidy(c.mass);
+    if (c.strength != defaults.strength) j["strength"] = tidy(c.strength);
+    if (c.stepHeight != defaults.stepHeight) j["stepHeight"] = tidy(c.stepHeight);
+    if (c.layer != defaults.layer) j["layer"] = layerName(c.layer);
+    return j;
+}
+
+std::optional<projv::CharacterController> projv::runtime::ComponentTraits<projv::CharacterController>::load(
+    const nlohmann::json& j, uint32_t) {
+    projv::CharacterController c;
+    c.radius = j.value("radius", c.radius);
+    c.height = j.value("height", c.height);
+    c.maxSlopeDegrees = j.value("maxSlopeDegrees", c.maxSlopeDegrees);
+    c.mass = j.value("mass", c.mass);
+    c.strength = j.value("strength", c.strength);
+    c.stepHeight = j.value("stepHeight", c.stepHeight);
+    if (j.contains("layer")) {
+        auto layer = layerFrom(j.at("layer").get<std::string>());
+        if (!layer) return std::nullopt;
+        c.layer = *layer;
+    }
     return c;
 }

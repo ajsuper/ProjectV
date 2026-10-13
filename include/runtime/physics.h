@@ -109,6 +109,27 @@ namespace projv {
         std::vector<PhysicsVoxelPart> voxelParts;
     };
 
+    // A walking character (runtime::CharacterDesc): an upright capsule, its Transform's position at
+    // its feet, moved by input (runtime::setCharacterInput) rather than by forces. Physics writes the
+    // Transform's position; its rotation (where the character faces) is the game's.
+    struct CharacterController {
+        float                 radius = 0.3f;
+        float                 height = 1.8f;
+        float                 maxSlopeDegrees = 50.0f;
+        float                 mass = 70.0f;
+        float                 strength = 300.0f;     // N: how hard it pushes what it walks into
+        float                 stepHeight = 0.4f;
+        runtime::PhysicsLayer layer = runtime::PhysicsLayer::Character;
+    };
+
+    // The simulation's side of a CharacterController. Made and removed by physics; never saved.
+    struct PhysicsCharacter {
+        runtime::CharacterId id;
+        core::vec3 previousPosition{0.0f}, position{0.0f};
+        core::vec3 presentedPosition{0.0f};
+        bool       presented = false;
+    };
+
     // ---- Events ---------------------------------------------------------------------------------
 
     // An entity asked for a body and could not have one; the reason is in the message and the log.
@@ -165,6 +186,13 @@ namespace projv::runtime {
     // Moves a body without sweeping it; velocity kept. Its Transform follows, uninterpolated.
     void teleport(World& world, Entity entity, core::vec3 position, core::quat rotation);
     void setGravity(World& world, core::vec3 gravity);
+    // What a character does from the next step on, until changed: walk at `velocity` (horizontal
+    // only), and jump once at `jumpSpeed` the next time it is standing if `jump`. An input is a
+    // command like any other -- stamped, ordered, and sent by NetId when it comes from elsewhere.
+    void setCharacterInput(World& world, Entity entity, core::vec3 velocity, bool jump = false, float jumpSpeed = 5.0f);
+    // Where the character is, as of the last step: feet, velocity, and what it stands on (groundBody
+    // an id the queries' entities resolve). Default for an entity with no character.
+    CharacterState characterState(const World& world, Entity entity);
     // Voxel edits to the component `entity` links (see voxelComponentOf), applied at the start of the next fixed step
     // (utils::queueVoxelAdd/Remove + updateScene), in the order issued -- so every peer edits on
     // the same step. Edits made directly through utils work too; the physics notices them at the
@@ -187,7 +215,8 @@ namespace projv::runtime {
     // issuer 0 and a running sequence. One stamped for a step already run applies at the next one,
     // and is counted (lateCommands): a networked game that sees them is falling behind.
     struct PhysicsCommand {
-        enum class Kind : uint8_t { Impulse, AngularImpulse, AddVelocity, SetVelocity, Teleport, Gravity };
+        // CharacterInput: `a` is the walking velocity, `jump` asks for a jump at `b.x` m/s.
+        enum class Kind : uint8_t { Impulse, AngularImpulse, AddVelocity, SetVelocity, Teleport, Gravity, CharacterInput };
         Kind       kind = Kind::Impulse;
         NetId      target;                  // ignored for Gravity
         core::vec3 a{0.0f}, b{0.0f};        // impulse / velocity / position; b: angular velocity
@@ -195,6 +224,7 @@ namespace projv::runtime {
         uint64_t   tick = 0;
         uint16_t   issuer = 0;
         uint32_t   sequence = 0;
+        bool       jump = false;
     };
     void submitCommand(World& world, const PhysicsCommand& command);
     // The step a command issued now lands on.
@@ -252,6 +282,13 @@ template<> struct projv::runtime::ComponentTraits<projv::RigidBody> {
     static constexpr uint32_t version = 1;
     static nlohmann::json save(const projv::RigidBody& body);
     static std::optional<projv::RigidBody> load(const nlohmann::json& json, uint32_t fileVersion);
+};
+
+template<> struct projv::runtime::ComponentTraits<projv::CharacterController> {
+    static constexpr const char* key = "physics.character";
+    static constexpr uint32_t version = 1;
+    static nlohmann::json save(const projv::CharacterController& c);
+    static std::optional<projv::CharacterController> load(const nlohmann::json& json, uint32_t fileVersion);
 };
 
 template<> struct projv::runtime::ComponentTraits<projv::StaticCollider> {

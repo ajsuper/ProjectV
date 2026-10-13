@@ -231,6 +231,38 @@ namespace projv::runtime {
         int      threads = 0;           // worker threads the step uses (0: the calling thread)
     };
 
+    // ---- Characters -------------------------------------------------------------------------------
+    // A walking character: an upright capsule moved by its own controller (Jolt's CharacterVirtual)
+    // rather than by the solver -- it walks up steps and slopes up to maxSlope, sticks to the floor
+    // going down them, stands on moving bodies, and pushes dynamic bodies with at most maxStrength.
+    // An inner body of the same shape is what other bodies collide with.
+    struct CharacterDesc {
+        float        radius = 0.3f;
+        float        height = 1.8f;               // total, feet to top
+        core::vec3   position{0.0f};              // the feet
+        float        maxSlope = 0.87f;            // radians (50 degrees)
+        float        mass = 70.0f;
+        float        maxStrength = 300.0f;        // N: how hard it can push
+        float        stepUp = 0.4f;               // m: the highest step it walks up
+        float        stickDown = 0.5f;            // m: how far down it follows the floor
+        PhysicsLayer layer = PhysicsLayer::Character;
+    };
+
+    struct CharacterId {
+        uint32_t value = 0xffffffffu;
+        bool valid() const { return value != 0xffffffffu; }
+        bool operator==(const CharacterId&) const = default;
+    };
+
+    struct CharacterState {
+        core::vec3 position{0.0f};                // the feet
+        core::vec3 velocity{0.0f};
+        bool       onGround = false;              // standing on walkable ground
+        bool       onSteepGround = false;         // touching ground too steep to stand on
+        core::vec3 groundNormal{0.0f};
+        BodyId     groundBody;
+    };
+
     // ---- Queries ----------------------------------------------------------------------------------
     // Which bodies a query sees: a bit per PhysicsLayer (all by default), and one body to skip (the
     // caster's own, typically).
@@ -341,6 +373,20 @@ namespace projv::runtime {
         // order, plus the tick. Equal hashes: the same simulation state, for every practical purpose.
         uint64_t stateHash() const;
 
+        // ---- Characters ----------------------------------------------------------------------------
+        CharacterId createCharacter(const CharacterDesc& desc);
+        void destroyCharacter(CharacterId id);
+        bool isAlive(CharacterId id) const;
+        // What the character tries to do from the next step on, until changed: walk at
+        // `horizontal` (its vertical part is ignored), and jump at `jumpSpeed` if `jump` -- a jump
+        // happens once, on the next step it is standing.
+        void setCharacterInput(CharacterId id, core::vec3 horizontal, bool jump, float jumpSpeed = 5.0f);
+        // Places it; velocity kept.
+        void setCharacterPosition(CharacterId id, core::vec3 feet);
+        CharacterState characterState(CharacterId id) const;
+        // The inner body other bodies collide with, so queries and filters can name it.
+        BodyId characterBody(CharacterId id) const;
+
         // ---- Queries, against the state at the end of the last step ------------------------------
         // The nearest body a ray from `origin` along the unit `direction` meets within maxDistance.
         // A ray starting inside a body hits it at distance 0.
@@ -373,6 +419,7 @@ namespace projv::runtime {
 
     private:
         void sanityPass(float dt);
+        void updateCharacters(float dt);
         BodyId createBodyUnrecorded(const BodyDesc& desc);
         struct Impl;
         std::unique_ptr<Impl> impl;

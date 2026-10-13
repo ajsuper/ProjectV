@@ -10,6 +10,7 @@ cd build/examples/sandbox && ./sandbox
 | | |
 |---|---|
 | mouse, W/A/S/D, R/F | look, fly, up/down (Esc releases the cursor, a click recaptures it) |
+| **V** | walk instead of fly: you become a character (W/A/S/D to walk, **Space** to jump), who climbs steps, stands on and pushes what is there |
 | **left click** | throw the selected prefab |
 | **1 / 2 / 3** | select ball / crate / bomb |
 | **right click** | pop whatever is under the crosshair (a physics ray: `runtime::castRay`) |
@@ -152,8 +153,10 @@ SANDBOX_SELFTEST=600 ./sandbox
 ```
 
 Plays by itself for 600 frames: it throws every kind, rains bombs into a crowd, pops at random and
-sets off chain reactions, and finishes in slow motion. It then checks that every body spawned is
-alive, popped or lost over a wall; that every popped body's voxels are gone from the Scene; and that
+sets off chain reactions, and finishes in slow motion, while a character walks a wide circle through
+all of it. It then checks the books -- every body made was spawned, launched or blasted off a crate,
+every body gone was popped, lost over a wall or carved away, and the rest are alive --; that the
+walker went a long way and never sank through the floor; that every popped body's voxels are gone from the Scene; and that
 the physics held: every live body simulated, no step dropped contacts, no body refused, nothing
 through the floor. It records every physics input as it plays and, at the end, replays the
 recording in a fresh simulation: every step must come out bit-identical
