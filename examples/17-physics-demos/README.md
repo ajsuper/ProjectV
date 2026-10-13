@@ -1,6 +1,6 @@
 # 17 — Physics demos
 
-Eight set pieces for the engine's physics (`runtime/physics.h`), built from voxels in code.
+Nine set pieces for the engine's physics (`runtime/physics.h`), built from voxels in code.
 
 ```bash
 cd build/examples/physics_demos && ./physics_demos
@@ -8,7 +8,7 @@ cd build/examples/physics_demos && ./physics_demos
 
 | | |
 |---|---|
-| **1** | **Pyramid.** 55 crates, ten on the bottom row. **Space** throws a wrecking ball (a metre across, as dense as iron) where you are looking. |
+| **1** | **Pyramid.** A stepped 3D pyramid of 1496 crates (16x16 base, sixteen high), and beside it two towers side by side, thirty crates high, stepping in from 5x5 bases. **Space** throws a heavy ball where you look. **F** launches a 4 m ball where you look: kinematic, at a constant 30 m/s, shoving aside whatever it hits. |
 | **2** | **Wall blast.** A running-bond wall of 120 voxel bricks. **Space** sets off a blast behind it. |
 | **3** | **Ball barrage.** Balls of five sizes, from 25 cm to a metre, fired at a wall of crates, one every 0.4 s. |
 | **4** | **Sweeper.** A 12 m beam spinning about its middle while its middle circles, through a field of crates and balls. |
@@ -16,6 +16,7 @@ cd build/examples/physics_demos && ./physics_demos
 | **6** | **Joints.** A plank bridge on ball joints, a motor-driven windmill, a swinging door, and a four-tonne wrecking ball on a rope that swings into a weight on a breakable chain. **Space** drops a crate on the bridge and fires a ball at the door. |
 | **7** | **Car.** A car made of joints, to drive: **W/S** throttle and reverse, **A/D** steer, **Space** brake, with a chase camera. A 40 m run-up to a ramp and jump, a gentler ramp, a crate wall and balls. |
 | **8** | **Gear winch.** A four-peg gear on a motor turns an eight-peg gear by its pegs alone; the big gear's drum winds up a chain lifting a 40 kg weight. Hold **Up** to raise it; let go and it holds; hold **Down** and the motor lets go, so the weight unwinds it. |
+| **9** | **Trebuchet.** A 36 t counterweight swings a 10.5 m arm on a motorised turntable; a 6 m sling whips a 2 t boulder round and lets it go at four seamless 32 x 24 m stone walls. Where it strikes, the stone shatters into Voronoi shards. **Space** fires (again: a new boulder, fired); **Left/Right** turn the turntable, mid-throw too; **Up/Down** set the release angle. |
 | R | restart the demo |
 | mouse, W/A/S/D, Q/E | look, fly, down/up (Esc releases the cursor, a click recaptures it) |
 | V | walk (a character: W/A/S/D, Space to jump) or fly |
@@ -72,6 +73,14 @@ the bodies a joint joins do not collide with each other (`collideConnected`), so
 fight the body it hangs from. A front wheel is joined to its knuckle, not to the body, so the
 wheels are set out far enough that their spheres clear it.
 
+**Trebuchet** -- joints under real load, and fracture. The frame turns on a hinge whose motor the
+arrows drive, and the arm's axle is on the frame, so turning mid-throw carries through. The latch
+is a stiff servo; the sling a Distance joint, let go by the demo at the release angle. Each wall
+is one static grid. A strike scatters Voronoi seeds round it, with a ring of seeds that stay whole
+so the break's edge is jagged; each broken cell is cut out of the wall and spawned as a dynamic
+shard of exactly those voxels, then kicked on. Shards are at most one chunk (16 voxels) across,
+since grids don't split; a wall cut away at its base doesn't fall (nothing checks support yet).
+
 **Gear winch** -- bodies pushing bodies through contact. Each gear is crosses: two straight bars
 through its middle, four pegs, laid along the voxel grid's own axes so their faces are flat and
 they collide as exact boxes. The winch gear is two crosses 45 degrees apart in one body (eight
@@ -92,12 +101,12 @@ geometry blob on the GPU and one collision shape in the physics until a blast ed
 DEMOS_SELFTEST=1 ./physics_demos
 ```
 
-Plays all eight in turn, unattended, and checks each: the pyramid stands and sleeps, the ball brings
+Plays all nine in turn, unattended, and checks each: the pyramid stands and sleeps, the ball brings
 it down; the blast makes at least ten fragments; the barrage knocks crates out of the wall; the
 sweeper moves most of the field and is not moved itself; the titans meet and no crate is pressed
 into the floor; the bridge holds, the chain breaks, the rope never stretches, the windmill runs at
 its motor's speed and the door stays within its limits; the car reaches speed upright, turns, stops
 under its brakes, and keeps its wheels on their mounts; the winch gear turns at half the driver's
-speed and lifts the weight, holds it when let go, and lets it unwind on Down. `DEMOS_ONLY=8` (or `DEMOS_ONLY=2,8`) runs just those demos. Then, for the whole session: no step
+speed and lifts the weight, holds it when let go, and lets it unwind on Down. `DEMOS_ONLY=9` (or `DEMOS_ONLY=2,9`) runs just those demos. Then, for the whole session: no step
 dropped contacts, no body went non-finite or fell through the floor, and the recording replays
 identically. `DEMOS_CAPTURE=<prefix>` saves a frame of each demo as `<prefix>-<n>.tga`.

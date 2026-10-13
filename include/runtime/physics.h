@@ -70,6 +70,15 @@ namespace projv {
         Quality               quality = Quality::Auto;
     };
 
+    // A kinematic body that flies on by itself: each physics step moves it `velocity` (m/s) and turns
+    // it `spin` (rad/s, about world axes) from where the simulation has it. No gravity, no drag, and
+    // nothing pushes it back -- it shoves whatever it meets aside. Needs a kinematic RigidBody that
+    // isn't a Part; its Transform follows, as any moving body's does.
+    struct ConstantVelocity {
+        core::vec3 velocity{0.0f};
+        core::vec3 spin{0.0f};
+    };
+
     // Solid, immovable geometry: the linked component's voxels.
     struct StaticCollider {
         float                 friction = 0.6f;

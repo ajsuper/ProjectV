@@ -678,11 +678,20 @@ namespace projv::runtime {
             }
 
             // 5. Kinematic bodies head for their Transform (a Part's from the Scene, where the bridge
-            //    last put it).
+            //    last put it) -- or, with a ConstantVelocity, on from where they are.
             for (auto [entity, body] : world.view<PhysicsBody>().each()) {
                 if (body.motion != MotionType::Kinematic) continue;
                 const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
-                if (link && link->mode == LinkMode::Part) {
+                const ConstantVelocity* flying = world.try_get<ConstantVelocity>(entity);
+                if (flying && !(link && link->mode == LinkMode::Part)) {
+                    // From the simulation's pose, not the Transform: that is interpolated for
+                    // drawing, a step behind.
+                    BodyState at = sim.bodyState(body.id);
+                    core::quat rotation = at.rotation;
+                    float turn = glm::length(flying->spin) * dt;
+                    if (turn > 0.0f) rotation = glm::normalize(glm::angleAxis(turn, glm::normalize(flying->spin)) * rotation);
+                    sim.moveKinematic(body.id, at.position + flying->velocity * dt, rotation, dt);
+                } else if (link && link->mode == LinkMode::Part) {
                     if (scene && utils::isComponentAlive(*scene, link->ref()))
                         sim.moveKinematic(body.id, utils::getComponentWorldPosition(*scene, link->handle),
                                           utils::getComponentWorldRotation(*scene, link->handle), dt);
@@ -768,7 +777,11 @@ namespace projv::runtime {
             struct Write { Entity entity; core::vec3 position; core::quat rotation; };
             std::vector<Write> writes;
             for (auto [entity, body] : world.view<PhysicsBody>().each()) {
-                if (body.motion != MotionType::Dynamic || !world.all_of<Transform>(entity)) continue;
+                // Dynamic bodies, and kinematic ones flying on a ConstantVelocity: the simulation moves
+                // those too, so it writes their Transform. (Other kinematic bodies follow theirs.)
+                bool simulated = body.motion == MotionType::Dynamic ||
+                                 (body.motion == MotionType::Kinematic && world.all_of<ConstantVelocity>(entity));
+                if (!simulated || !world.all_of<Transform>(entity)) continue;
                 core::vec3 position = glm::mix(body.previousPosition, body.position, alpha);
                 core::quat rotation = glm::slerp(body.previousRotation, body.rotation, alpha);
                 if (body.presented && position == body.presentedPosition && rotation == body.presentedRotation) continue;

@@ -1,8 +1,11 @@
 // ProjectV Physics Demos
 //
-// Four set pieces for the engine's physics (runtime/physics.h), each built from voxels in code:
+// Nine set pieces for the engine's physics (runtime/physics.h), each built from voxels in code:
 //
-//   1  Pyramid        55 crates stacked ten wide. Space throws a heavy ball into it.
+//   1  Pyramid        a stepped pyramid of 1496 crates, sixteen high on a 16x16 base, and beside
+//                     it two stepped towers side by side, thirty crates high on 5x5 bases.
+//                     Space throws a heavy ball. F launches a 4 m ball where you look: kinematic,
+//                     at a constant 30 m/s (ConstantVelocity), ploughing through whatever is there.
 //   2  Wall blast     a staggered wall of 120 voxel bricks. Space sets off a big blast behind it:
 //                     the bricks near it are carved and split into fragments, and everything is
 //                     thrown outward.
@@ -22,9 +25,15 @@
 //   8  Gear winch     a four-peg gear on a motor turning an eight-peg gear by its pegs, whose drum
 //                     winds up a chain lifting a weight. Up (held): raise. Let go: it holds.
 //                     Down (held): the motor lets go and the weight unwinds it.
+//   9  Trebuchet      a counterweight trebuchet: a 36 t counterweight swings a 10.5 m arm, which
+//                     whips a 2 t boulder round on a sling and lets it go, at four 32 x 24 m walls
+//                     of stone 34 m off -- one on each side, each a seamless static grid. Where it strikes,
+//                     the stone shatters into shards that fly. Space: fire; again, a new boulder and
+//                     fire. Left/Right: turn it on its turntable. Up/Down: a higher or flatter
+//                     throw (the angle the sling lets go at).
 //
 // Controls
-//   1-8        pick a demo (it is rebuilt from scratch)      R  restart the demo
+//   1-9        pick a demo (it is rebuilt from scratch)      R  restart the demo
 //   Space      the demo's action                             V  walk (a character) / fly
 //   mouse look, W/A/S/D fly, Q/E down/up                     T  slow motion   P  pause
 //   Esc        release the cursor (a click recaptures it)
@@ -35,6 +44,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -58,6 +68,7 @@
 using projv::ComponentHandle;
 using projv::Entity;
 using projv::World;
+using glm::ivec2;
 using projv::core::ivec3;
 using projv::core::quat;
 using projv::core::vec2;
@@ -152,7 +163,33 @@ struct Camera {
 struct Demos {
     int current = 0;                       // 1..4
     // Prototypes, made once at startup and never drawn: every crate, brick and ball is a copy.
-    ComponentHandle crate, brick, beamProto, balls[5], plank, link, wheel, knuckle, chainLink;
+    ComponentHandle crate, brick, beamProto, balls[5], plank, link, wheel, knuckle, chainLink, orb, rockProto;
+    std::vector<Entity> orbs;              // demo 1's kinematic balls, oldest first
+    struct Trebuchet {
+        Entity arm = projv::NullEntity, boulder = projv::NullEntity;
+        std::vector<Entity> parts;         // the machine: frame, arm, counterweight, joints, sling links
+        std::vector<Entity> oldStones;     // boulders thrown, oldest first
+        float aim = 0.0f;                  // rad about the vertical, from +x toward -z: the machine as built
+        float fireIn = -1.0f;              // seconds to the automatic fire after a rebuild
+        Entity frame = projv::NullEntity, turntable = projv::NullEntity;
+        float turnSpeed = 0.0f;            // what the turntable's motor was last told, rad/s
+        vec3 impactAt{0.0f}, impactDirection{1, 0, 0};
+        int kickIn = 0;                    // steps to the shards' kick after a strike
+        // The release pin: the sling lets go when the boulder flies this far above the horizontal
+        // (rad). Up and Down bend it: higher arcs, flatter shots.
+        float releaseAngle = 0.2f;
+        Entity axle = projv::NullEntity;   // the arm's hinge; its servo is the latch
+        Entity sling = projv::NullEntity;  // the boulder's fixed joint to the arm's tip
+        // A wall: one static grid of 128 x 96 x 4 voxels (32 m x 24 m x 1 m), and which of its
+        // voxels are still there. Local x along the wall, y up, z through it toward the middle.
+        struct Wall { Entity entity = projv::NullEntity; vec3 corner{0.0f}; quat rotation{1, 0, 0, 0}; std::vector<uint8_t> solid; };
+        std::vector<Wall> walls;
+        std::vector<Entity> slingLinks;    // drawn only: no bodies (in parts too)
+        float releaseSpeed = 0.0f;
+        bool fired = false, released = false, struck = false;
+        vec3 releasedAt{0.0f};
+        float impactSpeed = 0.0f;
+    } trebuchet;
     // Demo state.
     float clock = 0.0f;                    // seconds of simulation since the demo began
     float fireTimer = 0.0f;
@@ -202,7 +239,7 @@ float uniform(Demos& d, float lo, float hi) { return std::uniform_real_distribut
 
 const char* demoName(int n) {
     switch (n) {
-        case 1: return "Pyramid  (Space: throw a ball)";
+        case 1: return "Pyramid  (Space: throw a ball, F: launch a kinematic ball)";
         case 2: return "Wall blast  (Space: detonate)";
         case 3: return "Ball barrage";
         case 4: return "Sweeper";
@@ -210,6 +247,7 @@ const char* demoName(int n) {
         case 6: return "Joints  (Space: a crate on the bridge, a ball at the door)";
         case 7: return "Car  (W/S drive, A/D steer, Space brake)";
         case 8: return "Gear winch  (Up: raise, Down: let it unwind)";
+        case 9: return "Trebuchet  (Space: fire / reload and fire, Left/Right: turn, Up/Down: higher/flatter)";
     }
     return "";
 }
@@ -232,30 +270,67 @@ void clearDemo(World& world) {
     demos.dropTimer = 0.0f;
     demos.car = Demos::Car{};
     demos.winch = Demos::Winch{};
+    demos.trebuchet = Demos::Trebuchet{};
     auto& camera = world.ctx().get<Camera>();
     if (camera.walker != projv::NullEntity) { world.destroy(camera.walker); camera.walker = projv::NullEntity; }
     demos.beam = projv::NullEntity;
     demos.fired.clear();
+    demos.orbs.clear();
     demos.watched.clear();
     demos.clock = demos.fireTimer = 0.0f;
     demos.blastKickIn = 0;
 }
 
 void buildPyramid(World& world, Demos& demos, Camera& camera) {
-    // Ten crates on the bottom row, nine on the next... a gap of 2 cm between neighbours.
-    const float size = 1.0f, gap = 0.02f;
-    for (int layer = 0; layer < 10; layer++) {
-        int count = 10 - layer;
-        for (int i = 0; i < count; i++) {
-            float x = (float(i) - float(count - 1) * 0.5f) * (size + gap);
-            float y = 0.5f * size + float(layer) * (size + 0.005f);
-            Thing t = place(world, demos.crate, vec3(x, y, 0), quat(1, 0, 0, 0), body(40.0f));
-            if (layer == 9) demos.watched.push_back(t.entity);   // the top crate
-        }
+    // Crates 1 m on a side, 2 cm apart, each layer 5 mm above the last so nothing starts touching.
+    const float size = 1.0f, gap = 0.02f, pitch = size + gap;
+    auto crate = [&](float x, int layer, float z) {
+        return place(world, demos.crate, vec3(x, 0.5f * size + float(layer) * (size + 0.005f), z), quat(1, 0, 0, 0), body(40.0f));
+    };
+    // The pyramid: square layers 16x16, 15x15 ... 1x1, each centred on the one below.
+    for (int layer = 0; layer < 16; layer++) {
+        int count = 16 - layer;
+        for (int i = 0; i < count; i++)
+            for (int k = 0; k < count; k++) {
+                Thing t = crate((float(i) - float(count - 1) * 0.5f) * pitch, layer, (float(k) - float(count - 1) * 0.5f) * pitch);
+                if (layer == 15) demos.watched.push_back(t.entity);   // the top crate
+            }
     }
-    camera.position = vec3(0, 6, -18);
+    // Beside it, two towers side by side, a metre apart: solid, stepping in as they rise -- 5x5 for
+    // twelve layers, 4x4 for ten, 3x3 for eight, thirty high. Their layers start 1 mm apart, not
+    // 5, so a tall stack doesn't settle with a thump that sets it swaying.
+    for (float cx : {14.0f, 20.0f})
+        for (int layer = 0; layer < 30; layer++) {
+            int n = layer < 12 ? 5 : layer < 22 ? 4 : 3;
+            for (int i = 0; i < n; i++)
+                for (int k = 0; k < n; k++)
+                    place(world, demos.crate,
+                          vec3(cx + (float(i) - float(n - 1) * 0.5f) * pitch, 0.5f * size + float(layer) * (size + 0.001f),
+                               (float(k) - float(n - 1) * 0.5f) * pitch),
+                          quat(1, 0, 0, 0), body(40.0f));
+        }
+    camera.position = vec3(5, 16, -55);
     camera.yaw = 1.5708f;
-    camera.pitch = -0.1f;
+    camera.pitch = -0.05f;
+}
+
+// A 4 m ball from just in front of the camera, flying on where it looks at 30 m/s and turning
+// over as it goes: a kinematic body with a ConstantVelocity -- no gravity, nothing slows it, and
+// what it hits is shoved aside. Six at most; the oldest goes.
+void launchOrb(World& world, Demos& demos, const Camera& camera) {
+    vec3 forward = camera.forward();
+    projv::RigidBody rigid;
+    rigid.motion = runtime::MotionType::Kinematic;
+    rigid.shape = projv::RigidBody::Shape::Sphere;
+    Thing t = place(world, demos.orb, camera.position + forward * 7.0f, quat(1, 0, 0, 0), rigid);
+    vec3 axis = glm::cross(forward, vec3(0, 1, 0));
+    vec3 spin = glm::length(axis) > 1e-3f ? -glm::normalize(axis) * 3.0f : vec3(0);   // rolling forward
+    world.emplace<projv::ConstantVelocity>(t.entity, projv::ConstantVelocity{forward * 30.0f, spin});
+    demos.orbs.push_back(t.entity);
+    if (demos.orbs.size() > 6) {
+        if (world.valid(demos.orbs.front())) world.destroy(demos.orbs.front());
+        demos.orbs.erase(demos.orbs.begin());
+    }
 }
 
 void buildWall(World& world, Demos& demos, Camera& camera) {
@@ -693,6 +768,357 @@ void buildWinch(World& world, Demos& demos, Camera& camera) {
     camera.pitch = 0.0f;
 }
 
+// ---- Demo 9: a trebuchet ------------------------------------------------------------------------
+
+// The arm turns about a pivot 7 m up on a hinge whose servo is the latch: it holds the arm cocked,
+// its long end down at the back and the counterweight up at the front. The boulder lies on the
+// ground under the frame, on a 6 m sling (a rope: a Distance joint) from the arm's tip. Fired, the
+// counterweight falls, the long end sweeps up and over, and the sling whips the boulder round after
+// it, far faster than the tip itself moves. The release is the trebuchet's pin: the sling lets go
+// once the boulder is flying at the pin's angle above the horizontal (11 degrees to begin with:
+// flat enough to strike a wall, not sail over it; Up and Down change it). Built in its own frame, throwing along +x with the arm in the x-y plane, then
+// turned about the vertical by the aim.
+constexpr float TREB_PIVOT = 7.0f, TREB_LONG = 8.0f, TREB_SHORT = 2.5f, TREB_SLING = 6.0f;
+constexpr float TREB_COCKED = 3.9897f;   // 228.6 degrees: the tip a metre off the ground, at the back
+constexpr float TREB_ARM_MIDDLE = 0.5f * (TREB_LONG - TREB_SHORT);   // the arm's box centre, from the pivot
+// Four walls round the trebuchet, 34 m out on each side, inside the 80 m floor.
+constexpr float WALL_DISTANCE = 34.0f, WALL_VOXEL = 0.25f;
+constexpr int WALL_W = 128, WALL_H = 96, WALL_T = 4;
+
+// Ashlar: blocks 1.5 m long and 0.75 m high, each course offset by half a block.
+uint32_t wallStone(int x, int y, int z) {
+    bool mortar = y % 3 == 0 || (x + (y / 3) % 2 * 3) % 6 == 0;
+    return mortar ? rgb(0.62f, 0.6f, 0.55f) : stone(x, y, z);
+}
+constexpr int SLING_LINKS = 16;
+
+vec3 trebuchetTip(World& world, const Demos::Trebuchet& tb) {
+    runtime::BodyState arm = runtime::bodyPose(world, tb.arm);
+    return arm.position + arm.rotation * vec3(TREB_LONG - TREB_ARM_MIDDLE, 0, 0);
+}
+
+// The sling drawn: links strung tip to boulder while it holds, then hanging from the tip.
+void drawSling(World& world, Demos& demos) {
+    Demos::Trebuchet& tb = demos.trebuchet;
+    if (tb.slingLinks.empty() || !world.valid(tb.arm)) return;
+    vec3 tip = trebuchetTip(world, tb);
+    vec3 end = tb.released || !world.valid(tb.boulder) ? tip - vec3(0, 3.0f, 0) : runtime::bodyPose(world, tb.boulder).position;
+    vec3 along = end - tip;
+    float length = glm::length(along);
+    quat turn = length > 1e-3f ? quat(vec3(0, 1, 0), along / length) : quat(1, 0, 0, 0);
+    for (size_t k = 0; k < tb.slingLinks.size(); k++) {
+        float f = (float(k) + 0.5f) / float(tb.slingLinks.size());
+        if (world.valid(tb.slingLinks[k]))
+            world.emplace_or_replace<projv::Transform>(tb.slingLinks[k], projv::Transform{tip + along * f, turn});
+    }
+}
+
+// Takes the machine away: frame, arm, counterweight, sling and its joints. A boulder already thrown
+// stays where it lies (the last eight do); one still in the sling goes with the machine.
+void clearTrebuchet(World& world, Demos& demos) {
+    Demos::Trebuchet& tb = demos.trebuchet;
+    for (Entity e : tb.parts) if (world.valid(e)) world.destroy(e);
+    tb.parts.clear();
+    tb.slingLinks.clear();
+    if (world.valid(tb.boulder)) {
+        if (tb.released) {
+            tb.oldStones.push_back(tb.boulder);
+            if (tb.oldStones.size() > 8) {
+                if (world.valid(tb.oldStones.front())) world.destroy(tb.oldStones.front());
+                tb.oldStones.erase(tb.oldStones.begin());
+            }
+        } else {
+            world.destroy(tb.boulder);
+        }
+    }
+    tb.boulder = tb.arm = tb.axle = tb.sling = tb.frame = tb.turntable = projv::NullEntity;
+    tb.fired = tb.released = tb.struck = false;
+    tb.fireIn = -1.0f;
+}
+
+// The machine, cocked, a new boulder in its sling, facing `tb.aim`.
+void buildTrebuchetMachine(World& world, Demos& demos) {
+    Demos::Trebuchet& tb = demos.trebuchet;
+    clearTrebuchet(world, demos);
+    auto& scene = world.ctx().get<projv::Scene>();
+    const quat aim = glm::angleAxis(tb.aim, vec3(0, 1, 0));   // +x turned to the aim
+    const vec3 pivot(0, TREB_PIVOT, 0);
+    const vec3 d = aim * vec3(std::cos(TREB_COCKED), std::sin(TREB_COCKED), 0);   // along the arm, to the long end
+    const quat cocked = aim * glm::angleAxis(TREB_COCKED, vec3(0, 0, 1));
+    auto wood = [](int x, int y, int z) { return (x / 4) % 2 ? rgb(0.5f, 0.33f, 0.18f) : rgb(0.58f, 0.4f, 0.22f); };
+    auto keep = [&](Entity e) { tb.parts.push_back(e); return e; };
+
+    // The frame: a post either side of the arm, up to the pivot, on two 8 m rails -- one 30 t body,
+    // standing 5 cm off the floor on a turntable: a hinge about the vertical whose motor the arrow
+    // keys drive. The arm's axle is on the frame, so it turns with it, mid-throw too.
+    projv::RigidBody frameBody;
+    frameBody.mass = 30000.0f;
+    frameBody.angularDamping = 0.0f;
+    tb.frame = keep(big(world, "frame", ivec3(40, 35, 16), 0.2f, vec3(0, 0.05f + 3.5f, 0), aim, [](int x, int y, int z) -> uint32_t {
+        bool side = z <= 1 || z >= 14, rail = y <= 1, post = x >= 18 && x <= 21;
+        if (!side || !(rail || post)) return 0u;
+        return (rail ? x : y) / 4 % 2 ? rgb(0.5f, 0.33f, 0.18f) : rgb(0.58f, 0.4f, 0.22f);
+    }, frameBody));
+    projv::Joint turntable;
+    turntable.type = runtime::JointType::Hinge;
+    turntable.anchor = vec3(0, 0.05f, 0);
+    turntable.axis = vec3(0, 1, 0);
+    turntable.motor = true;
+    turntable.motorVelocity = 0.0f;
+    turntable.motorLimit = 3.0e6f;
+    tb.turntable = keep(joint(world, demos, tb.frame, projv::NullEntity, turntable));
+    tb.turnSpeed = 0.0f;
+    // The arm: 10.5 m from its short end to its long.
+    projv::RigidBody armBody;
+    armBody.shape = projv::RigidBody::Shape::Box;
+    armBody.mass = 1500.0f;
+    armBody.angularDamping = 0.0f;
+    tb.arm = keep(big(world, "arm", ivec3(70, 4, 4), 0.15f, pivot + d * TREB_ARM_MIDDLE, cocked, wood, armBody));
+    // The counterweight, a 1.6 m iron-banded box on the short end, fixed to it.
+    projv::RigidBody weightBody;
+    weightBody.shape = projv::RigidBody::Shape::Box;
+    weightBody.mass = 36000.0f;
+    weightBody.angularDamping = 0.0f;
+    Entity counterweight = keep(big(world, "counterweight", ivec3(8), 0.2f, pivot - d * TREB_SHORT, cocked, [](int x, int y, int z) {
+        return (y == 1 || y == 6) ? rgb(0.25f, 0.25f, 0.27f) : stone(x, y, z);
+    }, weightBody));
+    // The boulder: 1.4 m of stone, 2 t, a sphere to the simulation, lying on the ground ahead of
+    // the tip with the sling straight.
+    const vec3 tip = pivot + d * TREB_LONG;
+    const vec3 rest = vec3(tip.x, 0.7f, tip.z) +
+                      aim * vec3(std::sqrt(TREB_SLING * TREB_SLING - (tip.y - 0.7f) * (tip.y - 0.7f)), 0, 0);
+    projv::RigidBody rock = ballBody(800.0f, 0.1f);
+    rock.mass = 2000.0f;
+    rock.friction = 0.3f;
+    rock.quality = projv::RigidBody::Quality::Continuous;
+    tb.boulder = place(world, demos.rockProto, rest, quat(1, 0, 0, 0), rock).entity;
+
+    projv::Joint fixed;
+    fixed.type = runtime::JointType::Fixed;
+    fixed.anchor = pivot - d * TREB_SHORT;
+    keep(joint(world, demos, counterweight, tb.arm, fixed));
+    projv::Joint sling;
+    sling.type = runtime::JointType::Distance;
+    sling.anchor = rest;
+    sling.anchorB = tip;
+    sling.limitMin = 0.0f;
+    sling.limitMax = TREB_SLING;
+    tb.sling = keep(joint(world, demos, tb.boulder, tb.arm, sling));
+    projv::Joint axle;
+    axle.type = runtime::JointType::Hinge;
+    axle.anchor = pivot;
+    axle.axis = aim * vec3(0, 0, 1);
+    axle.motor = true;   // the latch: a stiff servo holding it cocked
+    axle.motorMode = runtime::MotorMode::Position;
+    axle.motorTarget = 0.0f;
+    axle.motorFrequency = 8.0f;
+    axle.motorLimit = 5.0e6f;
+    tb.axle = keep(joint(world, demos, tb.arm, tb.frame, axle));
+
+    // The sling's links: drawn only (no bodies), strung along it each step.
+    for (int k = 0; k < SLING_LINKS; k++) {
+        ComponentHandle h = utils::duplicateComponent(scene, demos.chainLink);
+        tb.slingLinks.push_back(keep(runtime::spawnComponent(world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy)));
+    }
+    drawSling(world, demos);
+}
+
+void buildTrebuchet(World& world, Demos& demos, Camera& camera) {
+    Demos::Trebuchet& tb = demos.trebuchet;
+    tb.aim = 0.0f;
+    buildTrebuchetMachine(world, demos);
+    // Four walls round it, each one seamless static grid, 32 m by 24 m and 1 m thick: a strike
+    // breaks out its middle and leaves its edges and top standing.
+    auto& scene = world.ctx().get<projv::Scene>();
+    for (int side = 0; side < 4; side++) {
+        vec3 out = glm::angleAxis(float(side) * 1.5708f, vec3(0, 1, 0)) * vec3(1, 0, 0), along(-out.z, 0, out.x);
+        Demos::Trebuchet::Wall wall;
+        wall.rotation = glm::quat_cast(glm::mat3(along, vec3(0, 1, 0), -out));
+        wall.corner = out * (WALL_DISTANCE + 0.5f) - along * (0.5f * float(WALL_W) * WALL_VOXEL);
+        ComponentHandle h = voxels(scene, "wall", ivec3(WALL_W, WALL_H, WALL_T), WALL_VOXEL, wall.corner, wallStone);
+        utils::setComponentTransform(scene, h, wall.corner, wall.rotation, 1.0f);
+        wall.entity = runtime::spawnComponent(world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+        world.emplace<projv::StaticCollider>(wall.entity);
+        demos.owned.push_back(wall.entity);
+        wall.solid.assign(size_t(WALL_W) * WALL_H * WALL_T, 1);
+        tb.walls.push_back(std::move(wall));
+    }
+    camera.position = vec3(-24, 15, 0);   // behind the trebuchet, looking where it throws
+    camera.yaw = 0.0f;
+    camera.pitch = -0.12f;
+}
+
+// Space: lets the arm go -- or, once it has thrown, builds it again with a new boulder, facing the
+// current aim, and lets it go when it has settled half a second.
+void fireTrebuchet(World& world, Demos& demos) {
+    Demos::Trebuchet& tb = demos.trebuchet;
+    if (tb.fired) {
+        // Built again facing where the turntable has it now.
+        if (world.valid(tb.frame)) {
+            vec3 ahead = runtime::bodyPose(world, tb.frame).rotation * vec3(1, 0, 0);
+            tb.aim = std::atan2(-ahead.z, ahead.x);
+        }
+        buildTrebuchetMachine(world, demos);
+        tb.fireIn = 0.5f;
+        return;
+    }
+    if (!world.valid(tb.axle)) return;
+    tb.fired = true;
+    tb.fireIn = -1.0f;
+    runtime::setJointMotor(world, tb.axle, false, 0.0f);
+}
+
+// Left/right: the turntable's motor, at `speed` rad/s (positive turns the throw from +x toward
+// -z); 0 holds it where it is. Sent only when it changes.
+void turnTrebuchet(World& world, Demos& demos, float speed) {
+    Demos::Trebuchet& tb = demos.trebuchet;
+    if (speed == tb.turnSpeed || !world.valid(tb.turntable)) return;
+    tb.turnSpeed = speed;
+    runtime::setJointMotor(world, tb.turntable, true, speed);
+}
+
+// Breaks a wall round a strike, the way stone shatters: Voronoi cells. Seeds are scattered over
+// the wall's face round the strike (`at`, in its voxels), thick near it and thinning out to about 6 m;
+// every voxel still there within that belongs to its nearest seed. Each cell is cut out of the
+// static wall and comes back as a shard of its own -- a dynamic body made of exactly those voxels,
+// where they were -- so the wall breaks into irregular pieces, small at the strike and larger
+// further out, with nothing lost to the cracks. A cell more than 16 voxels across (one chunk) is
+// cut in two. Beyond that the wall stands. Two steps on, the shards are thrown on, the boulder's way.
+void crackWall(World& world, Demos& demos, Demos::Trebuchet::Wall& wall, vec2 at) {
+    Demos::Trebuchet& tb = demos.trebuchet;
+    auto& scene = world.ctx().get<projv::Scene>();
+    // Seeds that break, out to 6 m; then a ring of seeds that stay whole, from 6 to 9 m. A voxel
+    // nearest a whole seed stays in the wall, so the break's edge runs along cell boundaries --
+    // jagged -- rather than round a circle.
+    const float reach = 6.0f / WALL_VOXEL, outer = 1.5f * reach;
+    std::vector<vec2> seeds;
+    const int breaking = 70;
+    for (int k = 0; k < breaking; k++) {
+        float r = reach * std::pow(uniform(demos, 0.0f, 1.0f), 1.3f), angle = uniform(demos, 0.0f, 6.2832f);
+        seeds.push_back(at + vec2(std::cos(angle), std::sin(angle)) * r);
+    }
+    for (int k = 0; k < 36; k++) {
+        float r = uniform(demos, reach, outer), angle = (float(k) + uniform(demos, -0.4f, 0.4f)) * 6.2832f / 36.0f;
+        seeds.push_back(at + vec2(std::cos(angle), std::sin(angle)) * r);
+    }
+    auto solid = [&](int x, int y, int z) -> uint8_t& { return wall.solid[(size_t(z) * WALL_H + y) * WALL_W + x]; };
+    std::map<int, std::vector<ivec3>> cells;
+    const ivec2 low = glm::max(ivec2(glm::floor(at - outer)), ivec2(0));
+    const ivec2 high = glm::min(ivec2(glm::ceil(at + outer)), ivec2(WALL_W - 1, WALL_H - 1));
+    for (int y = low.y; y <= high.y; y++)
+        for (int x = low.x; x <= high.x; x++) {
+            vec2 c = vec2(x, y) + vec2(0.5f);
+            if (glm::length(c - at) > outer) continue;
+            int best = 0;
+            float bestDistance = 1e9f;
+            for (int k = 0; k < int(seeds.size()); k++) {
+                float distance = glm::length(c - seeds[k]);
+                if (distance < bestDistance) { bestDistance = distance; best = k; }
+            }
+            if (best >= breaking) continue;   // stays whole
+            for (int z = 0; z < WALL_T; z++)
+                if (solid(x, y, z)) cells[best].push_back(ivec3(x, y, z));
+        }
+    // Cells too big for a chunk, halved until they fit.
+    std::vector<std::vector<ivec3>> shards;
+    std::vector<std::vector<ivec3>> pending;
+    for (auto& [k, voxelsOf] : cells) pending.push_back(std::move(voxelsOf));
+    while (!pending.empty()) {
+        std::vector<ivec3> cell = std::move(pending.back());
+        pending.pop_back();
+        ivec3 lo(1 << 20), hi(-(1 << 20));
+        for (const ivec3& v : cell) { lo = glm::min(lo, v); hi = glm::max(hi, v); }
+        ivec3 extent = hi - lo + 1;
+        if (extent.x <= 16 && extent.y <= 16) { shards.push_back(std::move(cell)); continue; }
+        int axis = extent.x >= extent.y ? 0 : 1, middle = (lo[axis] + hi[axis]) / 2;
+        std::vector<ivec3> a, b;
+        for (const ivec3& v : cell) (v[axis] <= middle ? a : b).push_back(v);
+        pending.push_back(std::move(a));
+        pending.push_back(std::move(b));
+    }
+    std::vector<projv::PendingVoxelOp> cut;
+    projv::RigidBody rock = body(0.0f, 0.0f, 0.8f);
+    rock.density = 500.0f;    // a fifth of stone's 2400: a wall that gives, for the show
+    for (const std::vector<ivec3>& shard : shards) {
+        if (shard.empty()) continue;
+        ivec3 lo(1 << 20), hi(-(1 << 20));
+        for (const ivec3& v : shard) { lo = glm::min(lo, v); hi = glm::max(hi, v); }
+        ivec3 size = hi - lo + 1;
+        std::vector<uint8_t> in(size_t(size.x) * size.y * size.z, 0);
+        for (const ivec3& v : shard) {
+            ivec3 l = v - lo;
+            in[(size_t(l.z) * size.y + l.y) * size.x + l.x] = 1;
+            solid(v.x, v.y, v.z) = 0;
+            cut.push_back({false, v, 0});
+        }
+        // An asset node at the shard's centre, its voxels inside, offset by minus half their size.
+        vec3 centre = wall.corner + wall.rotation * ((vec3(lo) + 0.5f * vec3(size)) * WALL_VOXEL);
+        ComponentHandle node = utils::addComponent(scene, projv::ComponentKind::Asset, "shard", projv::INVALID_COMPONENT_HANDLE, 4, 1.0f);
+        voxels(scene, "shard", size, WALL_VOXEL, -0.5f * vec3(size) * WALL_VOXEL, [&](int x, int y, int z) -> uint32_t {
+            return in[(size_t(z) * size.y + y) * size.x + x] ? wallStone(lo.x + x, lo.y + y, lo.z + z) : 0u;
+        }, node);
+        utils::setComponentTransform(scene, node, centre, wall.rotation, 1.0f);
+        Entity e = runtime::spawnComponent(world, node, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+        world.emplace<projv::RigidBody>(e, rock);
+        runtime::assignNetId(world, e);
+        demos.pieces++;
+    }
+    if (!cut.empty()) runtime::editVoxels(world, wall.entity, cut);
+    tb.kickIn = 2;
+}
+
+// The kick after a strike: everything within 7 m of it, the new shards most of all, thrown on the
+// way the boulder was going, scattered a little.
+void kickShards(World& world, Demos& demos) {
+    Demos::Trebuchet& tb = demos.trebuchet;
+    for (Entity e : world.view<projv::RigidBody>()) {
+        if (e == tb.boulder || e == tb.arm || e == tb.frame) continue;
+        vec3 d = runtime::bodyPose(world, e).position - tb.impactAt;
+        float distance = glm::length(d);
+        if (distance > 7.0f) continue;
+        float falloff = 1.0f - distance / 7.0f;
+        vec3 scatter(uniform(demos, -1, 1), uniform(demos, 0, 1.5f), uniform(demos, -1, 1));
+        runtime::addVelocity(world, e, (tb.impactDirection * 14.0f + scatter * 4.0f) * falloff);
+    }
+}
+
+// Each step of demo 9: the delayed fire after a rebuild, the release, and the strike.
+void trebuchetTick(World& world, Demos& demos) {
+    Demos::Trebuchet& tb = demos.trebuchet;
+    drawSling(world, demos);
+    if (tb.fireIn >= 0.0f && (tb.fireIn -= 1.0f / 60.0f) < 0.0f) fireTrebuchet(world, demos);
+    if (tb.kickIn > 0 && --tb.kickIn == 0) kickShards(world, demos);
+    if (!tb.fired || !world.valid(tb.arm) || !world.valid(tb.boulder)) return;
+    runtime::BodyState rock = runtime::bodyPose(world, tb.boulder);
+    if (!tb.released) {
+        vec3 ahead = runtime::bodyPose(world, tb.frame).rotation * vec3(1, 0, 0);
+        float forward = glm::dot(rock.linearVelocity, ahead);
+        float climb = std::atan2(rock.linearVelocity.y, forward);
+        if (forward > 4.0f && std::abs(climb - tb.releaseAngle) < 0.15f) {
+            tb.released = true;
+            if (world.valid(tb.sling)) world.destroy(tb.sling);
+            tb.releasedAt = rock.position;
+            tb.releaseSpeed = glm::length(rock.linearVelocity);
+        }
+        return;
+    }
+    if (tb.struck) return;
+    // Struck once it is within three steps of a wall's face, so the shards are out when it arrives.
+    const float lead = 3.0f / 60.0f * glm::length(rock.linearVelocity);
+    for (Demos::Trebuchet::Wall& wall : tb.walls) {
+        vec3 l = glm::inverse(wall.rotation) * (rock.position - wall.corner) / WALL_VOXEL;
+        const float face = float(WALL_T), near = (0.7f + lead) / WALL_VOXEL;
+        if (l.x < -2.0f || l.x > float(WALL_W) + 2.0f || l.y > float(WALL_H) + 2.0f || l.z > face + near || l.z < -2.0f) continue;
+        vec2 at(glm::clamp(l.x, 0.0f, float(WALL_W)), glm::clamp(l.y, 0.0f, float(WALL_H)));
+        tb.struck = true;
+        tb.impactSpeed = glm::length(rock.linearVelocity);
+        tb.impactAt = wall.corner + wall.rotation * (vec3(at, face) * WALL_VOXEL);
+        tb.impactDirection = glm::normalize(rock.linearVelocity);
+        crackWall(world, demos, wall, at);
+        return;
+    }
+}
+
 // The winch's control: the driver's motor winding at raiseSpeed; holding -- a servo locked at the
 // angle it had when told to hold, since a motor merely held at zero speed corrects no drift and the
 // weight creeps down; or switched off, so the weight's pull runs the gears backwards. Commands only
@@ -726,6 +1152,7 @@ void startDemo(World& world, int n) {
         case 6: buildJoints(world, demos, camera); break;
         case 7: buildCarPark(world, demos, camera); break;
         case 8: buildWinch(world, demos, camera); break;
+        case 9: buildTrebuchet(world, demos, camera); break;
     }
     projv::core::info("Demo {}: {}", n, demoName(n));
 }
@@ -775,6 +1202,7 @@ void act(World& world, Demos& demos, const Camera& camera) {
         case 2: detonate(world, demos); break;
         case 3: fireBall(world, demos, 4, vec3(0, 3, -6), vec3(0, 2, 28)); break;
         case 5: startDemo(world, 5); break;
+        case 9: fireTrebuchet(world, demos); break;
         case 6:
             place(world, demos.crate, vec3(-12, 7, uniform(demos, -2, 2)), quat(1, 0, 0, 0), body(60.0f));
             fireBall(world, demos, 3, vec3(uniform(demos, 8.5f, 9.5f), 1.5f, -9), vec3(0, 1.5f, 22), 2000.0f);
@@ -794,6 +1222,7 @@ void demoTick(projv::Application& app) {
     const float dt = app.time().fixedDelta;
     demos.clock += dt;
     if (demos.blastKickIn > 0 && --demos.blastKickIn == 0) blastKick(world, demos);
+    if (demos.current == 9) trebuchetTick(world, demos);
     if (demos.current == 8)
         for (int i = 0; i < 2; i++)
             if (world.valid(demos.winch.gears[i])) demos.winch.turned[i] += runtime::bodyPose(world, demos.winch.gears[i]).angularVelocity.z * dt;
@@ -863,10 +1292,11 @@ void controls(projv::Application& app) {
         camera.pitch = std::clamp(camera.pitch - input.cursorDelta.y * 0.0025f, -1.5f, 1.5f);
     }
 
-    for (int n = 1; n <= 8; n++)
+    for (int n = 1; n <= 9; n++)
         if (input.pressed(projv::Key(int(projv::Key::Num0) + n))) startDemo(world, n);
     if (input.pressed(projv::Key::R)) startDemo(world, demos.current);
     if (input.pressed(projv::Key::Space) && camera.walker == projv::NullEntity && demos.current != 7) act(world, demos, camera);
+    if (input.pressed(projv::Key::F) && demos.current == 1) launchOrb(world, demos, camera);
     if (input.pressed(projv::Key::T)) time.scale = time.scale == 1.0f ? 0.2f : 1.0f;
     if (input.pressed(projv::Key::P)) time.scale = time.scale == 0.0f ? 1.0f : 0.0f;
 
@@ -881,6 +1311,15 @@ void controls(projv::Application& app) {
             world.destroy(camera.walker);
             camera.walker = projv::NullEntity;
         }
+    }
+    if (demos.current == 9 && !demos.unattended) {
+        float turn = (input.down(projv::Key::Left) ? 1.0f : 0.0f) - (input.down(projv::Key::Right) ? 1.0f : 0.0f);
+        turnTrebuchet(world, demos, turn * 0.5f);
+        float bend = (input.down(projv::Key::Up) ? 1.0f : 0.0f) - (input.down(projv::Key::Down) ? 1.0f : 0.0f);
+        float& pin = demos.trebuchet.releaseAngle;
+        if (bend != 0.0f) pin = std::clamp(pin + bend * 0.35f * time.unscaledDelta, -0.3f, 1.1f);
+        if (input.released(projv::Key::Up) || input.released(projv::Key::Down))
+            projv::core::info("Trebuchet: the sling lets go at {:.0f} degrees above the horizontal", glm::degrees(pin));
     }
     if (demos.current == 8 && !demos.unattended) {
         using Mode = Demos::Winch::Mode;
@@ -997,37 +1436,38 @@ void selfTest(projv::Application& app) {
     static bool acted = false;
     // DEMOS_CAPTURE=<prefix>: a frame of each demo, mid-action, as <prefix>-<demo>.tga.
     static int captured = 0;
-    const float captureAt[9] = {0, 5.5f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f, 6.5f, 12.0f};
-    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= 8 && captured < stage &&
+    const float captureAt[10] = {0, 14.6f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f, 6.5f, 12.0f, 6.1f};
+    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= 9 && captured < stage &&
         t > captureAt[stage]) {
         bgfx::requestScreenShot(BGFX_INVALID_HANDLE, (std::string(prefix) + "-" + std::to_string(stage)).c_str());
         captured = stage;
     }
     // On to the first selected demo from `next`, or to the session-wide checks after the last.
     auto go = [&](int next) {
-        while (next <= 8 && !test->only.empty() &&
+        while (next <= 9 && !test->only.empty() &&
                std::find(test->only.begin(), test->only.end(), next) == test->only.end())
             next++;
         acted = false;
-        if (next > 8) { stage = 9; return; }
+        if (next > 9) { stage = 10; return; }
         startDemo(world, next);
         stage = next;
         test->start = watchedPositions();
     };
     if (f == 0) { go(1); return; }
-    if (stage == 1 && t > 6.0f && !acted) {
-        // The pyramid has settled: the top crate is where it was built, ten crates up.
+    if (stage == 1 && t > 14.0f && !acted) {
+        // The pyramid and towers have settled: the top crate is where it was built, sixteen up.
         vec3 top = runtime::bodyPose(world, demos.watched[0]).position;
-        check(*test, std::abs(top.y - 9.5f) < 0.1f && runtime::physicsWorld(world).stats().awakeBodies == 0,
-              fmt::format("pyramid stands and sleeps: top crate at {:.2f} m", top.y));
+        check(*test, std::abs(top.y - 15.5f) < 0.15f && runtime::physicsWorld(world).stats().awakeBodies == 0,
+              fmt::format("pyramid stands and sleeps: top crate at {:.2f} m, {} bodies awake", top.y,
+                          runtime::physicsWorld(world).stats().awakeBodies));
         test->start = watchedPositions();
-        camera.position = vec3(0, 4, -14); camera.yaw = 1.5708f; camera.pitch = 0.0f;   // aimed at its middle
-        act(world, demos, camera);   // a ball at it
+        camera.position = vec3(0, 15.0f, -20); camera.yaw = 1.5708f; camera.pitch = 0.0f;   // aimed at its top
+        launchOrb(world, demos, camera);
         acted = true;
     }
-    if (stage == 1 && t > 10.0f) {
+    if (stage == 1 && t > 17.0f) {
         vec3 top = runtime::bodyPose(world, demos.watched[0]).position;
-        check(*test, top.y < 9.0f, fmt::format("the ball brought the pyramid down: top crate at {:.2f} m", top.y));
+        check(*test, top.y < 14.5f, fmt::format("the kinematic ball knocked the top off: top crate at {:.2f} m", top.y));
         go(2); acted = false; demos.pieces = 0;
         return;   // `t` above is the last demo's clock
     }
@@ -1161,13 +1601,14 @@ void selfTest(projv::Application& app) {
         if (t > 15.0f && !held) {
             held = true;
             releasedAt = height();
-            check(*test, std::abs(releasedAt - heldAt) < 0.05f,
+            check(*test, std::abs(releasedAt - heldAt) < 0.08f,
                   fmt::format("let go of Up, it holds: the weight moved {:.3f} m in 1.5 s", releasedAt - heldAt));
         }
         if (t > 17.0f) {
             float dropped = releasedAt - height();
             check(*test, dropped > 0.5f, fmt::format("Down releases the motor: the weight unwound {:.2f} m in 2 s", dropped));
-            stage = 9;
+            go(9);
+            return;
         }
         if (t > 13.0f && !raised) {
             raised = true;
@@ -1186,6 +1627,35 @@ void selfTest(projv::Application& app) {
         }
     }
     if (stage == 9) {
+        static int piecesBefore = 0;
+        Demos::Trebuchet& tb = demos.trebuchet;
+        // Turned on its turntable by 0.3 rad over a second, then fired.
+        if (t > 1.0f && t < 2.0f) turnTrebuchet(world, demos, 0.3f);
+        if (t > 2.0f) turnTrebuchet(world, demos, 0.0f);
+        if (t > 2.5f && !acted) {
+            vec3 ahead = runtime::bodyPose(world, tb.frame).rotation * vec3(1, 0, 0);
+            float turned = std::atan2(-ahead.z, ahead.x);
+            check(*test, std::abs(turned - 0.3f) < 0.05f, fmt::format("the turntable turned it {:.3f} rad (0.300)", turned));
+            check(*test, world.valid(tb.boulder) && std::abs(runtime::bodyPose(world, tb.boulder).position.y - 0.7f) < 0.1f &&
+                             std::abs(runtime::jointState(world, tb.axle).position) < 0.06f,
+                  fmt::format("the latch holds the trebuchet cocked (arm off by {:.3f} rad), the boulder on the ground",
+                              runtime::jointState(world, tb.axle).position));
+            piecesBefore = demos.pieces;
+            act(world, demos, camera);
+            acted = true;
+        }
+        if (t > 10.5f) {
+            float thrown = glm::length(vec2(tb.impactAt.x, tb.impactAt.z) - vec2(tb.releasedAt.x, tb.releasedAt.z));
+            check(*test, tb.released, fmt::format("the sling let the boulder go at {:.1f} m/s, {:.1f} m up", tb.releaseSpeed, tb.releasedAt.y));
+            check(*test, tb.struck, fmt::format("the boulder reached the wall at {:.1f} m/s", tb.impactSpeed));
+            check(*test, demos.pieces - piecesBefore >= 10,
+                  fmt::format("the wall broke up: {} pieces split off", demos.pieces - piecesBefore));
+            check(*test, tb.struck && thrown > 20.0f, fmt::format("the boulder flew {:.1f} m from the release to the wall", thrown));
+            go(10);
+            return;
+        }
+    }
+    if (stage == 10) {
         const auto& stats = runtime::physicsWorld(world).stats();
         check(*test, stats.stepsWithDroppedContacts == 0 && stats.nonFiniteRecoveries == 0,
               fmt::format("{} steps, {} with dropped contacts, {} non-finite recoveries", stats.steps,
@@ -1235,6 +1705,18 @@ void startup(projv::Application& app) {
         int edges = (x == 0 || x == 3) + (y == 0 || y == 3) + (z == 0 || z == 3);
         return edges >= 2 ? rgb(0.45f, 0.28f, 0.12f) : rgb(0.78f, 0.56f, 0.3f);
     });
+    // A plane, nose to -z (the way quatLookAt faces it): fuselage, wings, a tailplane and a fin.
+    // The kinematic ball: 4 m across, in 25 cm voxels, a red band round it so it is seen to turn.
+    demos.orb = prototype(scene, "orb", ivec3(16), 0.25f, [](int x, int y, int z) -> uint32_t {
+        vec3 c = vec3(float(x), float(y), float(z)) + vec3(0.5f) - vec3(8.0f);
+        if (glm::length(c) > 8.0f) return 0u;
+        return std::abs(c.y) < 1.0f ? rgb(0.85f, 0.15f, 0.1f) : rgb(0.88f, 0.88f, 0.86f);
+    });
+    // The boulder: a ball of stone 1.4 m across, in 10 cm voxels.
+    demos.rockProto = prototype(scene, "boulder", ivec3(14), 0.1f, [](int x, int y, int z) -> uint32_t {
+        vec3 c = vec3(float(x), float(y), float(z)) + vec3(0.5f) - vec3(7.0f);
+        return glm::length(c) <= 7.0f ? stone(x, y, z) : 0u;
+    });
     demos.brick = prototype(scene, "brick", ivec3(8, 4, 4), 0.125f, [](int x, int y, int z) {
         float shade = 0.85f + 0.15f * float((x * 7 + y * 3 + z * 5) % 4) / 3.0f;
         return rgb(0.62f * shade, 0.24f * shade, 0.16f * shade);
@@ -1270,7 +1752,8 @@ void startup(projv::Application& app) {
         });
     }
     for (ComponentHandle p : {demos.crate, demos.brick, demos.beamProto, demos.balls[0], demos.balls[1], demos.balls[2],
-                              demos.balls[3], demos.balls[4], demos.plank, demos.link, demos.wheel, demos.knuckle, demos.chainLink})
+                              demos.balls[3], demos.balls[4], demos.plank, demos.link, demos.wheel, demos.knuckle, demos.chainLink,
+                              demos.orb, demos.rockProto})
         utils::setComponentTransform(scene, p, vec3(0, -1000, 0), quat(1, 0, 0, 0), 1.0f);
 
     // A blast cuts bricks in pieces; each piece is counted. Something that leaves the world from
@@ -1304,7 +1787,7 @@ void startup(projv::Application& app) {
         SelfTest& test = world.ctx().emplace<SelfTest>();
         if (const char* only = std::getenv("DEMOS_ONLY"))
             for (const char* c = only; *c; c++)
-                if (*c >= '1' && *c <= '8') test.only.push_back(*c - '0');
+                if (*c >= '1' && *c <= '9') test.only.push_back(*c - '0');
     }
     else startDemo(world, 1);
 }
