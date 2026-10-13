@@ -80,6 +80,16 @@ namespace projv {
         bool                  splits = false;
     };
 
+    // One chunk's part of a voxel body: which chunk, the shared shape built from it, and where it
+    // sits in the body's frame. What a query hit is traced back to a voxel through.
+    struct PhysicsVoxelPart {
+        ChunkHandle                chunk = 0;
+        runtime::CollisionShapeRef shape;
+        core::vec3                 position{0.0f};
+        core::quat                 rotation{1.0f, 0.0f, 0.0f, 0.0f};
+        float                      voxelSize = 1.0f;
+    };
+
     // The simulation's side of a RigidBody or StaticCollider. Made and removed by physics; never
     // saved, never written by anything else.
     struct PhysicsBody {
@@ -95,6 +105,8 @@ namespace projv {
         // The voxels the shape was built from: each chunk and its blob's content stamp. When they
         // differ from what the Scene holds now, the shape is rebuilt at the next step.
         std::vector<std::pair<ChunkHandle, uint64_t>> sources;
+        // The shape's voxel parts, in the order the shape holds them; empty for a primitive.
+        std::vector<PhysicsVoxelPart> voxelParts;
     };
 
     // ---- Events ---------------------------------------------------------------------------------
@@ -199,6 +211,33 @@ namespace projv::runtime {
     // (by NetId, or entity for those without), and changes nothing when it refuses.
     std::vector<uint8_t> savePhysics(const World& world);
     bool restorePhysics(World& world, const std::vector<uint8_t>& snapshot);
+
+    // ---- Queries: against the simulation as of the last fixed step ----------------------------------
+    // What a query struck. `normal` is the collision shape's (see PhysicsHit). For a voxel body the
+    // hit is traced to the voxel: `chunk` and `voxel` (in that chunk's own voxel space; a grid's
+    // cells are chunks of their own), the `component` that chunk belongs to, and its palette slot.
+    struct QueryHit {
+        Entity          entity = NullEntity;
+        NetId           netId;
+        core::vec3      position{0.0f};
+        core::vec3      normal{0.0f};
+        float           distance = 0.0f;
+        bool            onVoxel = false;
+        ComponentHandle component = INVALID_COMPONENT_HANDLE;
+        ChunkHandle     chunk = 0;
+        core::ivec3     voxel{0};
+        uint8_t         materialSlot = 0;
+    };
+    // `layers`: a bit per PhysicsLayer (QueryFilter::only). `ignore`: an entity whose body to skip.
+    std::optional<QueryHit> castRay(const World& world, core::vec3 origin, core::vec3 direction, float maxDistance,
+                                    uint32_t layers = 0xffffffffu, Entity ignore = NullEntity);
+    std::optional<QueryHit> castSphere(const World& world, core::vec3 origin, float radius, core::vec3 direction,
+                                       float maxDistance, uint32_t layers = 0xffffffffu, Entity ignore = NullEntity);
+    // Entities whose bodies overlap the shape: NetId order, then entity order for the rest.
+    std::vector<Entity> overlapSphere(const World& world, core::vec3 centre, float radius,
+                                      uint32_t layers = 0xffffffffu, Entity ignore = NullEntity);
+    std::vector<Entity> overlapBox(const World& world, core::vec3 centre, core::vec3 halfExtents, core::quat rotation,
+                                   uint32_t layers = 0xffffffffu, Entity ignore = NullEntity);
 
     // Where the simulation has the body: the end of the last fixed step, not the interpolated pose
     // that is drawn. Default (and `awake` false) for an entity with no body.

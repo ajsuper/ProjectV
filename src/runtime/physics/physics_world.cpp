@@ -24,7 +24,15 @@
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Body/BodyLock.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/ShapeCast.h>
+#include <Jolt/Physics/Collision/Shape/CompoundShape.h>
+#include <Jolt/Physics/Collision/Shape/DecoratedShape.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
@@ -1007,6 +1015,139 @@ namespace projv::runtime {
     }
 
     const PhysicsStats& PhysicsWorld::stats() const { return impl->stats; }
+
+    namespace {
+        class LayerMask final : public JPH::ObjectLayerFilter {
+        public:
+            explicit LayerMask(uint32_t mask) : mask(mask) {}
+            bool ShouldCollide(JPH::ObjectLayer layer) const override { return layer < 32 && ((mask >> layer) & 1u); }
+        private:
+            uint32_t mask;
+        };
+
+        class SkipOne final : public JPH::BodyFilter {
+        public:
+            explicit SkipOne(BodyId skip) : skip(skip) {}
+            bool ShouldCollide(const JPH::BodyID& id) const override {
+                return !skip.valid() || id.GetIndexAndSequenceNumber() != skip.value;
+            }
+        private:
+            BodyId skip;
+        };
+
+        // The compound indices from a body's shape down to the sub-shape `id` names. Decorators
+        // (rotated, translated, scaled) take no bits of the id, so they are passed through.
+        std::vector<uint32_t> pathTo(const JPH::Shape* shape, JPH::SubShapeID id) {
+            std::vector<uint32_t> path;
+            while (shape) {
+                JPH::EShapeSubType type = shape->GetSubType();
+                if (type == JPH::EShapeSubType::StaticCompound || type == JPH::EShapeSubType::MutableCompound) {
+                    const auto* compound = static_cast<const JPH::CompoundShape*>(shape);
+                    JPH::SubShapeID rest;
+                    uint32_t index = compound->GetSubShapeIndexFromID(id, rest);
+                    if (index >= compound->GetNumSubShapes()) break;
+                    path.push_back(compound->GetCompoundUserData(index));
+                    shape = compound->GetSubShape(index).mShape;
+                    id = rest;
+                } else if (type == JPH::EShapeSubType::RotatedTranslated || type == JPH::EShapeSubType::Scaled ||
+                           type == JPH::EShapeSubType::OffsetCenterOfMass) {
+                    shape = static_cast<const JPH::DecoratedShape*>(shape)->GetInnerShape();
+                } else {
+                    break;
+                }
+            }
+            return path;
+        }
+    }
+
+    std::optional<PhysicsHit> PhysicsWorld::castRay(core::vec3 origin, core::vec3 direction, float maxDistance,
+                                                    const QueryFilter& filter) const {
+        if (!finite(origin) || !finite(direction) || !(maxDistance > 0.0f)) return std::nullopt;
+        float length = glm::length(direction);
+        if (length < 1e-6f) return std::nullopt;
+        direction /= length;
+        JPH::RRayCast ray(toJoltR(origin), toJolt(direction * maxDistance));
+        JPH::RayCastResult result;
+        LayerMask layers(filter.layers);
+        SkipOne skip(filter.ignore);
+        if (!impl->system.GetNarrowPhaseQuery().CastRay(ray, result, JPH::BroadPhaseLayerFilter(), layers, skip))
+            return std::nullopt;
+        PhysicsHit hit;
+        hit.body = BodyId{result.mBodyID.GetIndexAndSequenceNumber()};
+        hit.distance = result.mFraction * maxDistance;
+        hit.position = origin + direction * hit.distance;
+        JPH::BodyLockRead lock(impl->system.GetBodyLockInterface(), result.mBodyID);
+        if (lock.Succeeded()) {
+            const JPH::Body& body = lock.GetBody();
+            hit.normal = fromJolt(body.GetWorldSpaceSurfaceNormal(result.mSubShapeID2, toJoltR(hit.position)));
+            hit.path = pathTo(body.GetShape(), result.mSubShapeID2);
+        }
+        return hit;
+    }
+
+    std::optional<PhysicsHit> PhysicsWorld::castSphere(core::vec3 origin, float radius, core::vec3 direction,
+                                                       float maxDistance, const QueryFilter& filter) const {
+        if (!finite(origin) || !finite(direction) || !(radius > 0.0f) || !(maxDistance > 0.0f)) return std::nullopt;
+        float length = glm::length(direction);
+        if (length < 1e-6f) return std::nullopt;
+        direction /= length;
+        JPH::SphereShape sphere(radius);
+        sphere.SetEmbedded();
+        JPH::RShapeCast cast(&sphere, JPH::Vec3::sOne(), JPH::RMat44::sTranslation(toJoltR(origin)),
+                             toJolt(direction * maxDistance));
+        JPH::ShapeCastSettings settings;
+        settings.mReturnDeepestPoint = true;
+        JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+        LayerMask layers(filter.layers);
+        SkipOne skip(filter.ignore);
+        impl->system.GetNarrowPhaseQuery().CastShape(cast, settings, JPH::RVec3::sZero(), collector,
+                                                    JPH::BroadPhaseLayerFilter(), layers, skip);
+        if (!collector.HadHit()) return std::nullopt;
+        const JPH::ShapeCastResult& result = collector.mHit;
+        PhysicsHit hit;
+        hit.body = BodyId{result.mBodyID2.GetIndexAndSequenceNumber()};
+        hit.distance = result.mFraction * maxDistance;
+        hit.position = fromJolt(JPH::Vec3(result.mContactPointOn2));
+        // The penetration axis points from the sphere into what it hit; the surface faces back.
+        JPH::Vec3 axis = result.mPenetrationAxis;
+        hit.normal = axis.LengthSq() > 1e-12f ? fromJolt(-axis.Normalized()) : -direction;
+        JPH::BodyLockRead lock(impl->system.GetBodyLockInterface(), result.mBodyID2);
+        if (lock.Succeeded()) hit.path = pathTo(lock.GetBody().GetShape(), result.mSubShapeID2);
+        return hit;
+    }
+
+    namespace {
+        std::vector<BodyId> overlap(const JPH::PhysicsSystem& system, const JPH::Shape& shape, JPH::RMat44Arg transform,
+                                    const QueryFilter& filter) {
+            JPH::CollideShapeSettings settings;
+            JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
+            LayerMask layers(filter.layers);
+            SkipOne skip(filter.ignore);
+            system.GetNarrowPhaseQuery().CollideShape(&shape, JPH::Vec3::sOne(), transform, settings, JPH::RVec3::sZero(),
+                                                       collector, JPH::BroadPhaseLayerFilter(), layers, skip);
+            std::vector<BodyId> out;
+            for (const JPH::CollideShapeResult& r : collector.mHits) out.push_back(BodyId{r.mBodyID2.GetIndexAndSequenceNumber()});
+            std::sort(out.begin(), out.end(), [](BodyId a, BodyId b) { return a.value < b.value; });
+            out.erase(std::unique(out.begin(), out.end()), out.end());
+            return out;
+        }
+    }
+
+    std::vector<BodyId> PhysicsWorld::overlapSphere(core::vec3 centre, float radius, const QueryFilter& filter) const {
+        if (!finite(centre) || !(radius > 0.0f)) return {};
+        JPH::SphereShape sphere(radius);
+        sphere.SetEmbedded();
+        return overlap(impl->system, sphere, JPH::RMat44::sTranslation(toJoltR(centre)), filter);
+    }
+
+    std::vector<BodyId> PhysicsWorld::overlapBox(core::vec3 centre, core::vec3 halfExtents, core::quat rotation,
+                                                 const QueryFilter& filter) const {
+        if (!finite(centre) || !finite(halfExtents) || halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
+            return {};
+        JPH::BoxShape box(toJolt(halfExtents), std::min(JPH::cDefaultConvexRadius, 0.5f * std::min({halfExtents.x, halfExtents.y, halfExtents.z})));
+        box.SetEmbedded();
+        return overlap(impl->system, box, JPH::RMat44::sRotationTranslation(toJolt(glm::normalize(rotation)), toJoltR(centre)), filter);
+    }
 
     PhysicsLog PhysicsWorld::recording() const {
         PhysicsLog log;

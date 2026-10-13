@@ -63,7 +63,6 @@
 #include "runtime/scene_bridge.h"
 #include "utils/compose_io.h"
 #include "utils/editing.h"
-#include "utils/picking.h"
 #include "utils/scene_query.h"
 
 using projv::core::vec3;
@@ -255,18 +254,11 @@ void controls(projv::Application& app) {
         }
     }
 
-    // Pop: ray from the crosshair to the first voxel, up to the component an entity links, and
-    // from there to the entity. The pop itself is an event; this system does not know what a pop
-    // does.
+    // Pop: a physics ray from the crosshair to the first body, which names its entity. The pop
+    // itself is an event; this system does not know what a pop does.
     if (input.cursorCaptured && input.pressed(projv::MouseButton::Right)) {
-        const auto& scene = world.ctx().get<projv::Scene>();
-        projv::utils::VoxelPick pick = projv::utils::pickVoxel(scene, camera.position, camera.forward(), 500.0f);
-        projv::ComponentHandle h = pick.hit ? pick.component : projv::INVALID_COMPONENT_HANDLE;
-        Entity target = projv::NullEntity;
-        while (h != projv::INVALID_COMPONENT_HANDLE && target == projv::NullEntity) {
-            target = projv::runtime::entityFor(world, h);
-            h = scene.components[h].parent;
-        }
+        auto hit = projv::runtime::castRay(world, camera.position, camera.forward(), 500.0f);
+        Entity target = hit ? hit->entity : projv::NullEntity;
         if (target != projv::NullEntity && world.all_of<Body>(target) && !world.all_of<Popping>(target)) {
             world.emplace<Popping>(target);
             app.events().send(Popped{target, projv::runtime::bodyPose(world, target).position, world.get<Body>(target).explosive});

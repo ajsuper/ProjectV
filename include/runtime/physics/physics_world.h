@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -230,6 +231,27 @@ namespace projv::runtime {
         int      threads = 0;           // worker threads the step uses (0: the calling thread)
     };
 
+    // ---- Queries ----------------------------------------------------------------------------------
+    // Which bodies a query sees: a bit per PhysicsLayer (all by default), and one body to skip (the
+    // caster's own, typically).
+    struct QueryFilter {
+        uint32_t layers = 0xffffffffu;
+        BodyId   ignore;
+        static uint32_t only(PhysicsLayer layer) { return 1u << uint32_t(layer); }
+    };
+
+    // Where a query struck a body. `normal` is the collision shape's, pointing out of the body --
+    // never one derived from voxel coordinates, so a different collision representation changes it
+    // everywhere at once. `path` names the sub-shape: the index taken at each compound on the way
+    // down from the body's shape to the one struck (see runtime::castRay for what it means).
+    struct PhysicsHit {
+        BodyId                body;
+        core::vec3            position{0.0f};
+        core::vec3            normal{0.0f};
+        float                 distance = 0.0f;
+        std::vector<uint32_t> path;
+    };
+
     // Everything a simulation was given, in order: what replay needs to run it again.
     struct PhysicsLog {
         std::vector<uint8_t> bytes;
@@ -318,6 +340,19 @@ namespace projv::runtime {
         // A hash of every body's position, rotation and velocities (their exact bits), in body id
         // order, plus the tick. Equal hashes: the same simulation state, for every practical purpose.
         uint64_t stateHash() const;
+
+        // ---- Queries, against the state at the end of the last step ------------------------------
+        // The nearest body a ray from `origin` along the unit `direction` meets within maxDistance.
+        // A ray starting inside a body hits it at distance 0.
+        std::optional<PhysicsHit> castRay(core::vec3 origin, core::vec3 direction, float maxDistance,
+                                          const QueryFilter& filter = {}) const;
+        // The first body a sphere swept from `origin` along `direction` touches.
+        std::optional<PhysicsHit> castSphere(core::vec3 origin, float radius, core::vec3 direction, float maxDistance,
+                                             const QueryFilter& filter = {}) const;
+        // Every body overlapping the shape, in body id order.
+        std::vector<BodyId> overlapSphere(core::vec3 centre, float radius, const QueryFilter& filter = {}) const;
+        std::vector<BodyId> overlapBox(core::vec3 centre, core::vec3 halfExtents, core::quat rotation,
+                                       const QueryFilter& filter = {}) const;
 
         // What has been recorded so far (PhysicsSettings::record), or an empty log.
         PhysicsLog recording() const;

@@ -15,6 +15,7 @@
 #include "core/log.h"
 #include "utils/loose_bvh.h"
 #include "utils/scene_query.h"
+#include "utils/picking.h"
 #include "utils/editing.h"
 #include "utils/voxel_islands.h"
 
@@ -48,6 +49,7 @@ namespace projv::runtime {
             struct Motion { core::vec3 linear, angular; };
             std::map<Entity, Motion>      carried;
             std::set<Entity>              reshaped;     // rebuilt this step because their voxels changed
+            std::map<uint32_t, Entity>    byBody;       // body id -> entity, for queries
             struct Edit { Entity entity; std::vector<PendingVoxelOp> ops; };
             std::vector<Edit>             edits;
         };
@@ -65,6 +67,13 @@ namespace projv::runtime {
 
         void bodyGone(World& world, Entity entity) {
             if (const PhysicsBody* body = world.try_get<PhysicsBody>(entity)) runtimeOf(world).doomed.push_back(body->id);
+        }
+
+        void bodyComponentGone(World& world, Entity entity) {
+            PhysicsRuntime& physics = runtimeOf(world);
+            const PhysicsBody& body = world.get<PhysicsBody>(entity);
+            physics.doomed.push_back(body.id);
+            physics.byBody.erase(body.id.value);
         }
 
         // A dynamic body's Transform is the simulation's to write. A change from anywhere else is a
@@ -126,7 +135,8 @@ namespace projv::runtime {
 
         std::vector<PhysicsShapePart> voxelParts(PhysicsWorld& physics, const utils::CollisionParams& params,
                                                  const Scene& scene, ComponentHandle h, core::vec3 position,
-                                                 core::quat rotation, Box3& bounds) {
+                                                 core::quat rotation, Box3& bounds,
+                                                 std::vector<PhysicsVoxelPart>& voxelOut) {
             std::vector<ChunkHandle> chunks;
             collectChunks(scene, h, chunks);
             const core::quat inverse = glm::conjugate(rotation);
@@ -153,6 +163,7 @@ namespace projv::runtime {
                         bounds.add(part.position + part.rotation * (local * voxelSize));
                     }
                 }
+                voxelOut.push_back({c, shape, part.position, part.rotation, voxelSize});
                 parts.push_back(std::move(part));
             }
             return parts;
@@ -162,6 +173,7 @@ namespace projv::runtime {
             BodyDesc   desc;
             const char* refusal = nullptr;
             bool        noVoxels = false;   // refused because there are no voxels (left) to build from
+            std::vector<PhysicsVoxelPart> voxelParts;
             Sources    sources;
         };
 
@@ -197,7 +209,8 @@ namespace projv::runtime {
             Box3 bounds;
             std::vector<PhysicsShapePart> parts;
             if (linked) {
-                parts = voxelParts(*physics.world, physics.collision, *scene, link->handle, d.position, d.rotation, bounds);
+                parts = voxelParts(*physics.world, physics.collision, *scene, link->handle, d.position, d.rotation, bounds,
+                                   out.voxelParts);
                 out.sources = sourcesOf(*scene, link->handle);
             }
 
@@ -217,6 +230,7 @@ namespace projv::runtime {
                               ? parts[0].shape
                               : PhysicsShape::compound(std::move(parts));
             } else {
+                out.voxelParts.clear();   // a primitive's hits are not on voxels
                 // A primitive: sized by the file, or fitted to the voxels' box and centred on it.
                 core::vec3 centre(0.0f), half(0.0f);
                 if (!bounds.empty()) {
@@ -474,6 +488,8 @@ namespace projv::runtime {
                 body.previousPosition = body.position = described.desc.position;
                 body.previousRotation = body.rotation = glm::normalize(described.desc.rotation);
                 body.sources = std::move(described.sources);
+                body.voxelParts = std::move(described.voxelParts);
+                physics.byBody[id.value] = e;
                 world.emplace<PhysicsBody>(e, body);
             }
 
@@ -684,7 +700,7 @@ namespace projv::runtime {
         world.on_update<StaticCollider>().connect<&wantRebuild>();
         world.on_destroy<RigidBody>().connect<&bodyGone>();
         world.on_destroy<StaticCollider>().connect<&bodyGone>();
-        world.on_destroy<PhysicsBody>().connect<&bodyGone>();
+        world.on_destroy<PhysicsBody>().connect<&bodyComponentGone>();
         world.on_construct<VoxelComponent>().connect<&wantRebuild>();
         world.on_destroy<VoxelComponent>().connect<&wantRebuild>();
         world.on_update<Transform>().connect<&transformChanged>();
@@ -852,6 +868,109 @@ namespace projv::runtime {
         physics.commands = std::move(commands);
         physics.sequence = sequence;
         return true;
+    }
+
+    namespace {
+        // A hit on a body, traced to its entity and, for a voxel body, the voxel. The path names one
+        // compound index per level: the part (when the body has more than one), then the piece (when
+        // the part's shape has more than one). The point is stepped half a voxel into the surface,
+        // into the body's frame by its simulation pose, and into the part's voxels.
+        std::optional<QueryHit> resolve(const World& world, const std::optional<PhysicsHit>& hit) {
+            if (!hit) return std::nullopt;
+            const PhysicsRuntime& physics = world.ctx().get<PhysicsRuntime>();
+            auto found = physics.byBody.find(hit->body.value);
+            if (found == physics.byBody.end() || !world.valid(found->second)) return std::nullopt;
+            QueryHit out;
+            out.entity = found->second;
+            out.position = hit->position;
+            out.normal = hit->normal;
+            out.distance = hit->distance;
+            if (const NetId* id = world.try_get<NetId>(out.entity)) out.netId = *id;
+            const PhysicsBody* body = world.try_get<PhysicsBody>(out.entity);
+            const Scene* scene = world.ctx().find<Scene>();
+            if (!body || body->voxelParts.empty() || !scene) return out;
+
+            size_t level = 0;
+            size_t partIndex = 0;
+            if (body->voxelParts.size() > 1) {
+                if (level >= hit->path.size()) return out;
+                partIndex = hit->path[level++];
+            }
+            if (partIndex >= body->voxelParts.size()) return out;
+            const PhysicsVoxelPart& part = body->voxelParts[partIndex];
+            const utils::CollisionPieces* pieces = part.shape ? part.shape->source.get() : nullptr;
+            if (!pieces || pieces->pieces.empty()) return out;
+            size_t pieceIndex = 0;
+            if (pieces->pieces.size() > 1) {
+                if (level >= hit->path.size()) return out;
+                pieceIndex = hit->path[level];
+            }
+            if (pieceIndex >= pieces->pieces.size()) return out;
+            const utils::CollisionPiece& piece = pieces->pieces[pieceIndex];
+
+            BodyState pose = physicsWorld(world).bodyState(body->id);
+            core::vec3 inside = hit->position - hit->normal * (0.5f * part.voxelSize);
+            core::vec3 local = glm::conjugate(pose.rotation) * (inside - pose.position);
+            core::vec3 voxel = glm::conjugate(part.rotation) * (local - part.position) / part.voxelSize;
+            out.voxel = glm::clamp(core::ivec3(glm::floor(voxel)), piece.voxelMin, piece.voxelMax);
+            out.chunk = part.chunk;
+            out.onVoxel = true;
+            if (part.chunk < scene->chunks.size()) {
+                const Chunk& chunk = scene->chunks[part.chunk];
+                out.component = chunk.gridIndex >= 0 && size_t(chunk.gridIndex) < scene->grids.size()
+                                    ? scene->grids[size_t(chunk.gridIndex)].componentHandle
+                                    : chunk.componentHandle;
+                if (chunk.geometryPoolIndex >= 0 && size_t(chunk.geometryPoolIndex) < scene->geometryPool.size())
+                    utils::queryVoxelMaterial(scene->geometryPool[size_t(chunk.geometryPoolIndex)], chunk.header.resolution,
+                                              out.voxel, out.materialSlot);
+            }
+            return out;
+        }
+
+        QueryFilter filterFor(const World& world, uint32_t layers, Entity ignore) {
+            QueryFilter f;
+            f.layers = layers;
+            if (ignore != NullEntity && world.valid(ignore))
+                if (const PhysicsBody* b = world.try_get<PhysicsBody>(ignore)) f.ignore = b->id;
+            return f;
+        }
+
+        std::vector<Entity> entitiesOf(const World& world, const std::vector<BodyId>& ids) {
+            const PhysicsRuntime& physics = world.ctx().get<PhysicsRuntime>();
+            std::vector<std::pair<Entity, uint32_t>> found;
+            for (BodyId id : ids) {
+                auto it = physics.byBody.find(id.value);
+                if (it == physics.byBody.end() || !world.valid(it->second)) continue;
+                const NetId* net = world.try_get<NetId>(it->second);
+                found.push_back({it->second, net ? net->value : 0});
+            }
+            std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) {
+                return std::make_tuple(a.second == 0, a.second, a.first) < std::make_tuple(b.second == 0, b.second, b.first);
+            });
+            std::vector<Entity> out;
+            for (auto [e, net] : found) out.push_back(e);
+            return out;
+        }
+    }
+
+    std::optional<QueryHit> castRay(const World& world, core::vec3 origin, core::vec3 direction, float maxDistance,
+                                    uint32_t layers, Entity ignore) {
+        return resolve(world, physicsWorld(world).castRay(origin, direction, maxDistance, filterFor(world, layers, ignore)));
+    }
+
+    std::optional<QueryHit> castSphere(const World& world, core::vec3 origin, float radius, core::vec3 direction,
+                                       float maxDistance, uint32_t layers, Entity ignore) {
+        return resolve(world, physicsWorld(world).castSphere(origin, radius, direction, maxDistance,
+                                                             filterFor(world, layers, ignore)));
+    }
+
+    std::vector<Entity> overlapSphere(const World& world, core::vec3 centre, float radius, uint32_t layers, Entity ignore) {
+        return entitiesOf(world, physicsWorld(world).overlapSphere(centre, radius, filterFor(world, layers, ignore)));
+    }
+
+    std::vector<Entity> overlapBox(const World& world, core::vec3 centre, core::vec3 halfExtents, core::quat rotation,
+                                   uint32_t layers, Entity ignore) {
+        return entitiesOf(world, physicsWorld(world).overlapBox(centre, halfExtents, rotation, filterFor(world, layers, ignore)));
     }
 
     BodyState bodyPose(const World& world, Entity entity) {

@@ -12,7 +12,7 @@ cd build/examples/sandbox && ./sandbox
 | mouse, W/A/S/D, R/F | look, fly, up/down (Esc releases the cursor, a click recaptures it) |
 | **left click** | throw the selected prefab |
 | **1 / 2 / 3** | select ball / crate / bomb |
-| **right click** | pop whatever is under the crosshair |
+| **right click** | pop whatever is under the crosshair (a physics ray: `runtime::castRay`) |
 | **E** (hold) | tractor beam: pull every body toward a point in front of you |
 | **B** | rain twenty of the selected prefab from the sky |
 | **T** | slow motion |
