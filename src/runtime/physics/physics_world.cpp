@@ -294,7 +294,7 @@ namespace projv::runtime {
         // Snapshot layout: a header that lets restoreState check, before touching anything, that the
         // snapshot is one and fits this world; then Jolt's own bytes.
         constexpr uint32_t SNAPSHOT_MAGIC = 0x50564a50u;   // "PJVP"
-        constexpr uint32_t SNAPSHOT_VERSION = 4;   // 2: rest damping state per body; 3: characters; 4: joints
+        constexpr uint32_t SNAPSHOT_VERSION = 5;   // 2: rest damping state per body; 3: characters; 4: joints; 5: motor modes
 
         template <typename T> void put(std::vector<uint8_t>& out, const T& v) {
             const auto* p = reinterpret_cast<const uint8_t*>(&v);
@@ -342,7 +342,7 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 1;
+        constexpr uint32_t LOG_VERSION = 2;   // 2: joint motor modes
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
@@ -875,21 +875,41 @@ namespace projv::runtime {
     // ---- Joints ----------------------------------------------------------------------------------
 
     namespace {
+        // A hinge's or slider's motor: off, driving at a velocity, or holding a target (an angle or an
+        // offset) the way a servo does.
+        void applyMotor(JPH::TwoBodyConstraint* c, JointType type, MotorMode mode, float velocity, float target, bool on = true) {
+            JPH::EMotorState state = !on ? JPH::EMotorState::Off
+                                   : mode == MotorMode::Position ? JPH::EMotorState::Position : JPH::EMotorState::Velocity;
+            if (type == JointType::Hinge) {
+                auto* h = static_cast<JPH::HingeConstraint*>(c);
+                h->SetMotorState(state);
+                h->SetTargetAngularVelocity(velocity);
+                h->SetTargetAngle(target);
+            } else if (type == JointType::Slider) {
+                auto* sl = static_cast<JPH::SliderConstraint*>(c);
+                sl->SetMotorState(state);
+                sl->SetTargetVelocity(velocity);
+                sl->SetTargetPosition(target);
+            }
+        }
         void writeJointDesc(std::vector<uint8_t>& out, const JointDesc& d) {
             put(out, uint8_t(d.type)); put(out, d.a.value); put(out, d.b.value); put(out, d.anchor); put(out, d.anchorB);
             put(out, d.axis); put(out, d.limitMin); put(out, d.limitMax); put(out, d.springFrequency); put(out, d.springDamping);
             put(out, d.friction); put(out, uint8_t(d.motor)); put(out, d.motorVelocity); put(out, d.motorLimit);
+            put(out, uint8_t(d.motorMode)); put(out, d.motorTarget); put(out, d.motorFrequency);
             put(out, d.breakForce); put(out, d.breakTorque);
         }
         bool readJointDesc(const std::vector<uint8_t>& in, size_t& at, JointDesc& d) {
-            uint8_t type = 0, motor = 0;
+            uint8_t type = 0, motor = 0, mode = 0;
             bool ok = get(in, at, type) && get(in, at, d.a.value) && get(in, at, d.b.value) && get(in, at, d.anchor) &&
                       get(in, at, d.anchorB) && get(in, at, d.axis) && get(in, at, d.limitMin) && get(in, at, d.limitMax) &&
                       get(in, at, d.springFrequency) && get(in, at, d.springDamping) && get(in, at, d.friction) &&
                       get(in, at, motor) && get(in, at, d.motorVelocity) && get(in, at, d.motorLimit) &&
+                      get(in, at, mode) && get(in, at, d.motorTarget) && get(in, at, d.motorFrequency) &&
                       get(in, at, d.breakForce) && get(in, at, d.breakTorque);
             d.type = JointType(type);
             d.motor = motor != 0;
+            d.motorMode = MotorMode(mode);
             return ok;
         }
     }
@@ -943,6 +963,7 @@ namespace projv::runtime {
                 }
                 h->mMaxFrictionTorque = std::max(desc.friction, 0.0f);
                 if (desc.motorLimit > 0.0f) h->mMotorSettings.SetTorqueLimit(desc.motorLimit);
+                if (desc.motorFrequency > 0.0f) h->mMotorSettings.mSpringSettings.mFrequency = desc.motorFrequency;
                 settings = h;
                 break;
             }
@@ -957,6 +978,7 @@ namespace projv::runtime {
                 }
                 sl->mMaxFrictionForce = std::max(desc.friction, 0.0f);
                 if (desc.motorLimit > 0.0f) sl->mMotorSettings.SetForceLimit(desc.motorLimit);
+                if (desc.motorFrequency > 0.0f) sl->mMotorSettings.mSpringSettings.mFrequency = desc.motorFrequency;
                 settings = sl;
                 break;
             }
@@ -985,17 +1007,7 @@ namespace projv::runtime {
             record();
             return id;
         }
-        if (desc.motor) {
-            if (desc.type == JointType::Hinge) {
-                auto* h = static_cast<JPH::HingeConstraint*>(constraint);
-                h->SetMotorState(JPH::EMotorState::Velocity);
-                h->SetTargetAngularVelocity(desc.motorVelocity);
-            } else if (desc.type == JointType::Slider) {
-                auto* sl = static_cast<JPH::SliderConstraint*>(constraint);
-                sl->SetMotorState(JPH::EMotorState::Velocity);
-                sl->SetTargetVelocity(desc.motorVelocity);
-            }
-        }
+        if (desc.motor) applyMotor(constraint, desc.type, desc.motorMode, desc.motorVelocity, desc.motorTarget);
         // Joints get more solver iterations than contacts: chains and ragdolls are where a stretch
         // shows, and they are few enough that it costs little.
         constraint->SetNumVelocityStepsOverride(uint32_t(std::max(impl->settings.jointVelocitySteps, 1)));
@@ -1034,23 +1046,21 @@ namespace projv::runtime {
     bool PhysicsWorld::isAlive(JointId id) const { return impl->joint(id) != nullptr; }
 
     void PhysicsWorld::setJointMotor(JointId id, bool on, float velocity) {
-        if (impl->recording) { impl->op(Op::JointMotor); put(impl->log, id.value); put(impl->log, uint8_t(on)); put(impl->log, velocity); }
-        Impl::Joint* j = impl->joint(id);
-        if (!j || !std::isfinite(velocity)) return;
-        JPH::EMotorState state = on ? JPH::EMotorState::Velocity : JPH::EMotorState::Off;
-        if (j->desc.type == JointType::Hinge) {
-            auto* h = static_cast<JPH::HingeConstraint*>(j->constraint.GetPtr());
-            h->SetMotorState(state);
-            h->SetTargetAngularVelocity(velocity);
-        } else if (j->desc.type == JointType::Slider) {
-            auto* sl = static_cast<JPH::SliderConstraint*>(j->constraint.GetPtr());
-            sl->SetMotorState(state);
-            sl->SetTargetVelocity(velocity);
-        } else {
-            return;
+        setJointMotor(id, on, MotorMode::Velocity, velocity);
+    }
+
+    void PhysicsWorld::setJointMotor(JointId id, bool on, MotorMode mode, float value) {
+        if (impl->recording) {
+            impl->op(Op::JointMotor);
+            put(impl->log, id.value); put(impl->log, uint8_t(on)); put(impl->log, uint8_t(mode)); put(impl->log, value);
         }
+        Impl::Joint* j = impl->joint(id);
+        if (!j || !std::isfinite(value) || (j->desc.type != JointType::Hinge && j->desc.type != JointType::Slider)) return;
         j->desc.motor = on;
-        j->desc.motorVelocity = velocity;
+        j->desc.motorMode = mode;
+        if (mode == MotorMode::Position) j->desc.motorTarget = value;
+        else j->desc.motorVelocity = value;
+        applyMotor(j->constraint.GetPtr(), j->desc.type, mode, j->desc.motorVelocity, j->desc.motorTarget, on);
         impl->system.GetBodyInterface().ActivateConstraint(j->constraint);
     }
 
@@ -1459,6 +1469,7 @@ namespace projv::runtime {
             if (!j.constraint) continue;
             put(out, uint32_t(slot) | (uint32_t(j.generation) << 16));
             put(out, uint8_t(j.desc.motor)); put(out, j.desc.motorVelocity); put(out, j.force); put(out, j.torque);
+            put(out, uint8_t(j.desc.motorMode)); put(out, j.desc.motorTarget);
         }
         return out;
     }
@@ -1510,7 +1521,7 @@ namespace projv::runtime {
         for (size_t slot = 0; slot < impl->characters.size(); slot++)
             if (impl->characters[slot].controller)
                 liveCharacters.push_back(uint32_t(slot) | (uint32_t(impl->characters[slot].generation) << 16));
-        struct SavedJoint { uint32_t id; uint8_t motor; float velocity, force, torque; };
+        struct SavedJoint { uint32_t id; uint8_t motor; float velocity, force, torque; uint8_t mode; float target; };
         std::vector<SavedJoint> savedJoints;
         uint32_t jointCount = 0;
         if (!get(snapshot, at, jointCount)) {
@@ -1520,7 +1531,8 @@ namespace projv::runtime {
         for (uint32_t i = 0; i < jointCount; i++) {
             SavedJoint j{};
             if (!get(snapshot, at, j.id) || !get(snapshot, at, j.motor) || !get(snapshot, at, j.velocity) ||
-                !get(snapshot, at, j.force) || !get(snapshot, at, j.torque)) {
+                !get(snapshot, at, j.force) || !get(snapshot, at, j.torque) || !get(snapshot, at, j.mode) ||
+                !get(snapshot, at, j.target)) {
                 core::warn("physics: restoreState refused: the snapshot is truncated");
                 return false;
             }
@@ -1583,6 +1595,8 @@ namespace projv::runtime {
             j.desc.motorVelocity = saved.velocity;
             j.force = saved.force;
             j.torque = saved.torque;
+            j.desc.motorMode = MotorMode(saved.mode);
+            j.desc.motorTarget = saved.target;
         }
         return true;
     }
@@ -1886,9 +1900,9 @@ namespace projv::runtime {
                     world.destroyJoint(JointId{id});
                     break;
                 case Op::JointMotor: {
-                    uint8_t on = 0;
-                    if (!get(in, at, id) || !get(in, at, on) || !get(in, at, dt)) return truncated();
-                    world.setJointMotor(JointId{id}, on != 0, dt);
+                    uint8_t on = 0, mode = 0;
+                    if (!get(in, at, id) || !get(in, at, on) || !get(in, at, mode) || !get(in, at, dt)) return truncated();
+                    world.setJointMotor(JointId{id}, on != 0, MotorMode(mode), dt);
                     break;
                 }
                 case Op::Restore: {

@@ -405,3 +405,31 @@ TEST_CASE("a motor jammed for a while starts again when the jam clears") {
     for (int i = 0; i < 60; i++) physics.step(DT);
     CHECK(physics.bodyState(arm).angularVelocity.z == doctest::Approx(2.0f).epsilon(0.03));
 }
+
+TEST_CASE("a position motor is a servo: it holds its angle under load and goes where it is told") {
+    PhysicsWorld physics;
+    // A 1 m arm, 10 kg, on a horizontal hinge: gravity tries to swing it down.
+    BodyId arm = box(physics, vec3(0.5f, 0, 0), vec3(0.5f, 0.05f, 0.05f), 10.0f);
+    JointDesc d;
+    d.type = JointType::Hinge;
+    d.a = arm;
+    d.anchor = vec3(0);
+    d.axis = vec3(0, 0, 1);
+    d.motor = true;
+    d.motorMode = MotorMode::Position;
+    d.motorTarget = 0.0f;
+    d.motorFrequency = 8.0f;
+    JointId servo = physics.createJoint(d);
+    for (int i = 0; i < 120; i++) physics.step(DT);
+    CHECK(std::abs(physics.jointState(servo).position) < 0.05f);   // held level against ~49 N m
+    physics.setJointMotor(servo, true, MotorMode::Position, 0.6f);
+    for (int i = 0; i < 120; i++) physics.step(DT);
+    CHECK(physics.jointState(servo).position == doctest::Approx(0.6f).epsilon(0.08));
+    physics.setJointMotor(servo, false, MotorMode::Position, 0.6f);   // off: it swings down
+    float lowest = 0.0f;
+    for (int i = 0; i < 60; i++) {
+        physics.step(DT);
+        lowest = std::min(lowest, physics.jointState(servo).position);
+    }
+    CHECK(lowest < -1.2f);
+}

@@ -268,3 +268,4 @@ TEST_CASE("CharacterController round-trips through entities.json") {
     CHECK(Traits::save(projv::CharacterController{}).empty());
 }
 
+

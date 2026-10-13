@@ -615,8 +615,11 @@ namespace projv::runtime {
                     d.springDamping = joint.springDamping;
                     d.friction = joint.friction;
                     d.motor = joint.motor;
+                    d.motorMode = joint.motorMode;
                     d.motorVelocity = joint.motorVelocity;
+                    d.motorTarget = joint.motorTarget;
                     d.motorLimit = joint.motorLimit;
+                    d.motorFrequency = joint.motorFrequency;
                     d.breakForce = joint.breakForce;
                     d.breakTorque = joint.breakTorque;
                     JointId id = sim.createJoint(d);
@@ -645,7 +648,7 @@ namespace projv::runtime {
                 Entity target = command.entity != NullEntity ? command.entity : entityForNetId(world, c.target);
                 if (c.kind == Kind::JointMotor) {
                     if (const PhysicsJoint* j = world.valid(target) ? world.try_get<PhysicsJoint>(target) : nullptr)
-                        sim.setJointMotor(j->id, c.jump, c.a.x);
+                        sim.setJointMotor(j->id, c.jump, c.b.x > 0.5f ? MotorMode::Position : MotorMode::Velocity, c.a.x);
                     continue;
                 }
                 if (c.kind == Kind::CharacterInput) {
@@ -991,11 +994,12 @@ namespace projv::runtime {
         return e;
     }
 
-    void setJointMotor(World& world, Entity joint, bool on, float velocity) {
+    void setJointMotor(World& world, Entity joint, bool on, float value, MotorMode mode) {
         PhysicsRuntime& physics = runtimeOf(world);
         Command command;
         command.c.kind = Kind::JointMotor;
-        command.c.a = core::vec3(velocity, 0.0f, 0.0f);
+        command.c.a = core::vec3(value, 0.0f, 0.0f);
+        command.c.b = core::vec3(mode == MotorMode::Position ? 1.0f : 0.0f, 0.0f, 0.0f);
         command.c.jump = on;
         command.c.tick = physics.world->tick() + 1;
         command.c.sequence = physics.sequence++;
@@ -1362,8 +1366,14 @@ nlohmann::json projv::runtime::ComponentTraits<projv::Joint>::save(const projv::
     if (j.limitMin != 0.0f || j.limitMax != 0.0f) out["limits"] = {tidy(j.limitMin), tidy(j.limitMax)};
     if (j.springFrequency > 0.0f) out["spring"] = {tidy(j.springFrequency), tidy(j.springDamping)};
     if (j.friction > 0.0f) out["friction"] = tidy(j.friction);
-    if (j.motor || j.motorVelocity != 0.0f || j.motorLimit > 0.0f)
+    if (j.motor || j.motorVelocity != 0.0f || j.motorLimit > 0.0f) {
         out["motor"] = {{"on", j.motor}, {"velocity", tidy(j.motorVelocity)}, {"limit", tidy(j.motorLimit)}};
+        if (j.motorMode == projv::runtime::MotorMode::Position) {
+            out["motor"]["mode"] = "position";
+            out["motor"]["target"] = tidy(j.motorTarget);
+        }
+        if (j.motorFrequency > 0.0f) out["motor"]["frequency"] = tidy(j.motorFrequency);
+    }
     if (j.breakForce > 0.0f) out["breakForce"] = tidy(j.breakForce);
     if (j.breakTorque > 0.0f) out["breakTorque"] = tidy(j.breakTorque);
     return out;
@@ -1394,6 +1404,11 @@ std::optional<projv::Joint> projv::runtime::ComponentTraits<projv::Joint>::load(
         out.motor = m.value("on", false);
         out.motorVelocity = m.value("velocity", 0.0f);
         out.motorLimit = m.value("limit", 0.0f);
+        std::string mode = m.value("mode", "velocity");
+        if (mode == "position") out.motorMode = projv::runtime::MotorMode::Position;
+        else if (mode != "velocity") return std::nullopt;
+        out.motorTarget = m.value("target", 0.0f);
+        out.motorFrequency = m.value("frequency", 0.0f);
     }
     out.breakForce = j.value("breakForce", 0.0f);
     out.breakTorque = j.value("breakTorque", 0.0f);

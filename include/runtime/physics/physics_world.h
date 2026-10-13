@@ -279,6 +279,11 @@ namespace projv::runtime {
                     // a rod, or with a spring, a spring
     };
 
+    enum class MotorMode : uint8_t {
+        Velocity,   // drive at motorVelocity (rad/s or m/s)
+        Position    // hold motorTarget (an angle in rad, or an offset in m), like a servo
+    };
+
     struct JointDesc {
         JointType  type = JointType::Point;
         BodyId     a;
@@ -292,11 +297,15 @@ namespace projv::runtime {
         float      springFrequency = 0.0f;     // Distance: Hz; 0 is rigid
         float      springDamping = 0.0f;       // 0..1
         float      friction = 0.0f;            // Hinge: N m, Slider: N -- what turning it takes
-        // Hinge/Slider: a motor driving it at motorVelocity (rad/s or m/s), with at most motorLimit
-        // (N m or N; 0: unlimited).
+        // Hinge/Slider: a motor driving it at motorVelocity (rad/s or m/s), or holding motorTarget
+        // (rad or m) in Position mode, with at most motorLimit (N m or N; 0: unlimited). A position
+        // motor is a spring of motorFrequency Hz (0: Jolt's default, 2 Hz), critically damped.
         bool       motor = false;
+        MotorMode  motorMode = MotorMode::Velocity;
         float      motorVelocity = 0.0f;
+        float      motorTarget = 0.0f;
         float      motorLimit = 0.0f;
+        float      motorFrequency = 0.0f;
         // It breaks -- is removed, and reported (takeBrokenJoints) -- when holding the bodies together
         // takes more than this force (N) or torque (N m). 0: never. What broke it carries on: the
         // impulse beyond what it could hold in its last step is given back to the bodies.
@@ -447,7 +456,8 @@ namespace projv::runtime {
         JointId createJoint(const JointDesc& desc);
         void destroyJoint(JointId id);
         bool isAlive(JointId id) const;
-        void setJointMotor(JointId id, bool on, float velocity);
+        void setJointMotor(JointId id, bool on, float velocity);   // velocity mode
+        void setJointMotor(JointId id, bool on, MotorMode mode, float value);
         JointState jointState(JointId id) const;
         // Joints that broke (breakForce, breakTorque) since the last call, in slot order, with what
         // they were holding when they did. Each is gone already; its id is no longer alive.

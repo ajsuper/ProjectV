@@ -143,7 +143,8 @@ namespace projv {
         float      springFrequency = 0.0f, springDamping = 0.0f;
         float      friction = 0.0f;
         bool       motor = false;
-        float      motorVelocity = 0.0f, motorLimit = 0.0f;
+        runtime::MotorMode motorMode = runtime::MotorMode::Velocity;
+        float      motorVelocity = 0.0f, motorTarget = 0.0f, motorLimit = 0.0f, motorFrequency = 0.0f;
         float      breakForce = 0.0f, breakTorque = 0.0f;
     };
 
@@ -221,8 +222,10 @@ namespace projv::runtime {
     // A joint entity between `a` and `b` (NullEntity: the world), giving each a NetId if it has none.
     // `joint`'s a and b are filled in from them.
     Entity connectBodies(World& world, Entity a, Entity b, Joint joint);
-    // Turns a hinge's or slider's motor on or off, at `velocity`, from the next step.
-    void setJointMotor(World& world, Entity joint, bool on, float velocity);
+    // Turns a hinge's or slider's motor on or off from the next step: driving at `value` (rad/s or
+    // m/s), or in Position mode holding `value` (rad or m) -- steering a wheel, say.
+    void setJointMotor(World& world, Entity joint, bool on, float value,
+                       runtime::MotorMode mode = runtime::MotorMode::Velocity);
     // What the joint is doing, as of the last step (alive false if not made yet, or gone).
     JointState jointState(const World& world, Entity joint);
 
@@ -252,7 +255,8 @@ namespace projv::runtime {
     // and is counted (lateCommands): a networked game that sees them is falling behind.
     struct PhysicsCommand {
         // CharacterInput: `a` is the walking velocity, `jump` asks for a jump at `b.x` m/s.
-        // JointMotor: `jump` turns it on or off, `a.x` is the velocity; `target` names the joint's entity.
+        // JointMotor: `jump` turns it on or off, `a.x` is the velocity or target, `b.x` the MotorMode;
+        // `target` names the joint's entity.
         enum class Kind : uint8_t { Impulse, AngularImpulse, AddVelocity, SetVelocity, Teleport, Gravity, CharacterInput, JointMotor };
         Kind       kind = Kind::Impulse;
         NetId      target;                  // ignored for Gravity
