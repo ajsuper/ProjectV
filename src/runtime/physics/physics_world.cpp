@@ -623,9 +623,22 @@ namespace projv::runtime {
         return BodyId{body->GetID().GetIndexAndSequenceNumber()};
     }
 
+    void PhysicsWorld::wakeBodiesAround(BodyId id) {
+        if (!id.valid()) return;
+        JPH::AABox bounds;
+        {
+            JPH::BodyLockRead lock(impl->system.GetBodyLockInterface(), JPH::BodyID(id.value));
+            if (!lock.Succeeded()) return;
+            bounds = lock.GetBody().GetWorldSpaceBounds();
+        }
+        bounds.ExpandBy(JPH::Vec3::sReplicate(0.05f));   // and what rests exactly on its faces
+        impl->system.GetBodyInterface().ActivateBodiesInAABox(bounds, JPH::BroadPhaseLayerFilter(), JPH::ObjectLayerFilter());
+    }
+
     void PhysicsWorld::destroyBody(BodyId id) {
         if (impl->recording) { impl->op(Op::Destroy); put(impl->log, id.value); }
         if (!isAlive(id)) return;
+        wakeBodiesAround(id);
         JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
         JPH::BodyID jid(id.value);
         bodies.RemoveBody(jid);
@@ -645,6 +658,7 @@ namespace projv::runtime {
         JPH::BodyLockRead lock(impl->system.GetBodyLockInterface(), JPH::BodyID(id.value));
         if (!lock.Succeeded()) return state;
         const JPH::Body& body = lock.GetBody();
+        state.centerOfMass = fromJolt(body.GetCenterOfMassPosition());
         state.position = fromJolt(body.GetPosition());
         state.rotation = fromJolt(body.GetRotation());
         state.linearVelocity = fromJolt(body.GetLinearVelocity());

@@ -436,10 +436,10 @@ namespace projv{
     // A process-wide counter for GeometryBlob::contentStamp: every value is handed out once, so a
     // stamp names one particular content, whichever pool slot holds it and however often slots are
     // reused.
-    inline uint64_t nextBlobContentStamp() {
-        static std::atomic<uint64_t> counter{0};
-        return ++counter;
-    }
+    inline std::atomic<uint64_t> blobContentStampCounter{0};
+    inline uint64_t nextBlobContentStamp() { return ++blobContentStampCounter; }
+    // The newest stamp handed out: when it has not moved, no blob's voxels have changed anywhere.
+    inline uint64_t latestBlobContentStamp() { return blobContentStampCounter.load(); }
 
     // One unique geometry blob shared across chunk instances. See Scene.geometryPool.
     struct GeometryBlob {

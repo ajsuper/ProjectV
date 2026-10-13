@@ -24,7 +24,9 @@ cd build/examples/sandbox && ./sandbox
 The window title shows the selection, how many bodies exist, how many you have popped, the time
 scale, and what the last physics step cost.
 
-Try this: press **3** and throw a few bombs into a crowd, then right-click one.
+Try this: press **3** and throw a few bombs into a crowd, then right-click one. A bomb pops what is
+close, bites chunks out of the crates around it -- a crate bitten in two is two crates, and the blast
+throws the pieces -- and leaves a crater in the floor.
 
 ## What it is made of
 
@@ -70,6 +72,13 @@ fixed step only every few frames, and every frame between them is interpolated. 
 integrates or collides anything. It throws (a velocity on spawn), shoves (a shockwave is an impulse
 per neighbour), pulls (the tractor beam adds velocity each step) and changes gravity (**G**), all as
 commands that land at the next step.
+
+**Voxels are destructible.** A bomb's handler asks for the voxels in a sphere around it
+(`runtime::voxelsInSphere`) and removes them with `runtime::editVoxels`, which lands at the next
+physics step. The engine notices the changed voxels, rebuilds each shape, and splits a body cut in
+pieces into bodies of their own (`BodySplit`; the sandbox copies its `Body` onto them). A body carved
+down to nothing is `BodyEmptied`, and retired. The floor's bottom layer of voxels is never carved, so
+"nothing falls through the floor" stays a check the self-test can make.
 
 **A pop is an event.** Right-click sends `Popped`, and three handlers answer it, none of which knows
 about the others: a shockwave that pushes neighbours away, the score, and removal. A bomb's

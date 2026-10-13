@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <map>
 #include <cstring>
 #include <tuple>
 
@@ -14,6 +15,8 @@
 #include "core/log.h"
 #include "utils/loose_bvh.h"
 #include "utils/scene_query.h"
+#include "utils/editing.h"
+#include "utils/voxel_islands.h"
 
 namespace projv::runtime {
     namespace {
@@ -40,6 +43,13 @@ namespace projv::runtime {
             std::vector<Entity>           rebuild;      // want their body destroyed, then remade
             bool                          writingTransforms = false;
             std::set<Entity>              warnedAboutTransform;
+            uint64_t                      seenStamp = 0;    // latestBlobContentStamp at the last check
+            // Motion a remade body keeps (a shape rebuilt under it, a piece cut from it).
+            struct Motion { core::vec3 linear, angular; };
+            std::map<Entity, Motion>      carried;
+            std::set<Entity>              reshaped;     // rebuilt this step because their voxels changed
+            struct Edit { Entity entity; std::vector<PendingVoxelOp> ops; };
+            std::vector<Edit>             edits;
         };
 
         PhysicsRuntime& runtimeOf(World& world) { return world.ctx().get<PhysicsRuntime>(); }
@@ -96,6 +106,24 @@ namespace projv::runtime {
         // The voxels under a component, as shape parts placed in the frame of the body at
         // (position, rotation): each chunk's shared voxel shape at its voxel size, where its header
         // puts it. Also the voxels' bounds in that frame, for fitting primitives.
+        using Sources = std::vector<std::pair<ChunkHandle, uint64_t>>;
+
+        // What a body made from `h` now would be built from: each live chunk with geometry, and its
+        // blob's content stamp.
+        Sources sourcesOf(const Scene& scene, ComponentHandle h) {
+            std::vector<ChunkHandle> chunks;
+            collectChunks(scene, h, chunks);
+            Sources out;
+            for (ChunkHandle c : chunks) {
+                if (c >= scene.chunks.size()) continue;
+                const Chunk& chunk = scene.chunks[c];
+                if (!chunk.alive || chunk.geometryPoolIndex < 0 || size_t(chunk.geometryPoolIndex) >= scene.geometryPool.size())
+                    continue;
+                out.push_back({c, scene.geometryPool[size_t(chunk.geometryPoolIndex)].contentStamp});
+            }
+            return out;
+        }
+
         std::vector<PhysicsShapePart> voxelParts(PhysicsWorld& physics, const utils::CollisionParams& params,
                                                  const Scene& scene, ComponentHandle h, core::vec3 position,
                                                  core::quat rotation, Box3& bounds) {
@@ -133,6 +161,8 @@ namespace projv::runtime {
         struct Description {
             BodyDesc   desc;
             const char* refusal = nullptr;
+            bool        noVoxels = false;   // refused because there are no voxels (left) to build from
+            Sources    sources;
         };
 
         Description describe(World& world, PhysicsRuntime& physics, Entity entity) {
@@ -166,8 +196,10 @@ namespace projv::runtime {
 
             Box3 bounds;
             std::vector<PhysicsShapePart> parts;
-            if (linked) parts = voxelParts(*physics.world, physics.collision, *scene, link->handle, d.position,
-                                           d.rotation, bounds);
+            if (linked) {
+                parts = voxelParts(*physics.world, physics.collision, *scene, link->handle, d.position, d.rotation, bounds);
+                out.sources = sourcesOf(*scene, link->handle);
+            }
 
             RigidBody::Shape kind = rigid ? rigid->shape : RigidBody::Shape::Voxels;
             if (kind == RigidBody::Shape::Voxels) {
@@ -177,6 +209,7 @@ namespace projv::runtime {
                 }
                 if (parts.empty()) {
                     out.refusal = "its component has no voxels to collide with";
+                    out.noVoxels = true;
                     return out;
                 }
                 d.shape = parts.size() == 1 && parts[0].position == core::vec3(0.0f) &&
@@ -213,6 +246,7 @@ namespace projv::runtime {
                            : rigid->radius > 0.0f;
                 if (bounds.empty() && !sized) {
                     out.refusal = "its primitive shape has no size, and there are no voxels to fit it to";
+                    out.noVoxels = true;
                     return out;
                 }
                 d.shape = centre == core::vec3(0.0f) ? primitive
@@ -261,6 +295,81 @@ namespace projv::runtime {
             }
         }
 
+        // The voxel chunk a body's islands are counted in: the linked component itself when it is a
+        // chunk, or the one chunk inside an asset (a prefab). Anything else -- a grid, an asset of
+        // several chunks -- is not split.
+        ComponentHandle splittableChunk(const Scene& scene, ComponentHandle h) {
+            const ComponentRecord& record = scene.components[h];
+            if (record.kind == ComponentKind::Chunk) return h;
+            if (record.kind != ComponentKind::Asset) return INVALID_COMPONENT_HANDLE;
+            ComponentHandle found = INVALID_COMPONENT_HANDLE;
+            std::vector<ComponentHandle> stack(record.children.begin(), record.children.end());
+            while (!stack.empty()) {
+                ComponentHandle c = stack.back();
+                stack.pop_back();
+                const ComponentRecord& child = scene.components[c];
+                if (child.kind == ComponentKind::Grid) return INVALID_COMPONENT_HANDLE;
+                if (child.kind == ComponentKind::Chunk) {
+                    if (found != INVALID_COMPONENT_HANDLE) return INVALID_COMPONENT_HANDLE;
+                    found = c;
+                }
+                stack.insert(stack.end(), child.children.begin(), child.children.end());
+            }
+            return found;
+        }
+
+        // A dynamic voxel body cut in pieces: each piece cut loose becomes a body of its own, moving
+        // as that part of the parent was (its velocity at the piece's centre).
+        void splitCutPieces(World& world, PhysicsRuntime& physics, Scene& scene, Entity parent, const BodyState& state) {
+            const RigidBody* rigid = world.try_get<RigidBody>(parent);
+            const VoxelComponent* link = world.try_get<VoxelComponent>(parent);
+            if (!rigid || rigid->shape != RigidBody::Shape::Voxels || !link || link->mode != LinkMode::Root) return;
+            ComponentHandle chunk = splittableChunk(scene, link->handle);
+            if (chunk == INVALID_COMPONENT_HANDLE) return;
+            utils::IslandSplit split = utils::splitVoxelIslands(scene, chunk, true);
+            if (split.pieces.empty()) return;
+
+            uint64_t total = 0;
+            for (uint64_t n : split.voxels) total += n;
+            RigidBody pieceRigid = *rigid;
+            const OnUnlink onUnlink = link->onUnlink;
+            const bool networked = world.all_of<NetId>(parent);
+            BodySplit event{parent, {}};
+            for (size_t i = 0; i < split.pieces.size(); i++) {
+                ComponentHandle piece = split.pieces[i];
+                Entity e = world.create();
+                if (!linkComponent(world, e, piece, LinkMode::Root, onUnlink)) {
+                    world.destroy(e);
+                    continue;
+                }
+                RigidBody r = pieceRigid;
+                if (r.mass > 0.0f) r.mass = pieceRigid.mass * float(split.voxels[i + 1]) / float(total);
+                // Its motion: the parent's, at the piece's centre.
+                core::vec3 centre = state.centerOfMass;
+                const ComponentRecord& record = scene.components[piece];
+                if (record.kind == ComponentKind::Chunk) {
+                    const Chunk& c = scene.chunks[record.chunkHandle];
+                    core::ivec3 low, high;
+                    if (c.geometryPoolIndex >= 0 && utils::blobContentBounds(scene.geometryPool[size_t(c.geometryPoolIndex)], low, high)) {
+                        float voxel = c.header.scale / float(std::max(c.header.resolution, 1u));
+                        core::vec3 local = 0.5f * core::vec3(low + high + core::ivec3(1)) * voxel;
+                        centre = c.header.position + c.header.rotation * local;
+                    }
+                }
+                physics.carried[e] = {state.linearVelocity + glm::cross(state.angularVelocity, centre - state.centerOfMass),
+                                      state.angularVelocity};
+                if (networked) assignNetId(world, e);
+                world.emplace<RigidBody>(e, r);
+                event.pieces.push_back(e);
+            }
+            if (rigid->mass > 0.0f) {
+                float kept = rigid->mass * float(split.voxels[0]) / float(total);
+                world.patch<RigidBody>(parent, [kept](RigidBody& r) { r.mass = kept; });
+            }
+            core::trace("physics: entity {} split into {} pieces", static_cast<uint32_t>(parent), event.pieces.size() + 1);
+            send(world, std::move(event));
+        }
+
         void step(Application& app) {
             World& world = app.world;
             PhysicsRuntime& physics = runtimeOf(world);
@@ -275,7 +384,50 @@ namespace projv::runtime {
                 if (!world.any_of<RigidBody, StaticCollider>(entity)) orphans.push_back(entity);
             for (Entity e : orphans) dropBody(world, physics, e);
 
-            // 2. Rebuilds: a changed RigidBody, a new or lost link.
+            // 2a. Voxel edits issued as commands, in issue order.
+            Scene* scene = world.ctx().find<Scene>();
+            if (scene && !physics.edits.empty()) {
+                std::vector<PhysicsRuntime::Edit> edits;
+                edits.swap(physics.edits);
+                for (const auto& edit : edits) {
+                    ComponentHandle target = voxelComponentOf(world, edit.entity);
+                    if (target == INVALID_COMPONENT_HANDLE) continue;
+                    std::vector<PendingVoxelOp> adds, removes;
+                    for (const PendingVoxelOp& op : edit.ops) (op.isAdd ? adds : removes).push_back(op);
+                    if (!adds.empty()) utils::queueVoxelAdd(*scene, target, adds);
+                    if (!removes.empty()) utils::queueVoxelRemove(*scene, target, removes);
+                }
+                utils::updateScene(*scene);
+            }
+
+            // 2b. Bodies whose voxels changed: split what an edit cut loose, then rebuild. Only looked
+            //     for when some blob's content changed since the last step, anywhere.
+            if (scene && latestBlobContentStamp() != physics.seenStamp) {
+                std::vector<std::pair<Entity, uint32_t>> changed;
+                for (auto [entity, body] : world.view<PhysicsBody>().each()) {
+                    const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
+                    if (!link || !utils::isComponentAlive(*scene, link->ref())) continue;
+                    if (sourcesOf(*scene, link->handle) == body.sources) continue;
+                    const NetId* id = world.try_get<NetId>(entity);
+                    changed.push_back({entity, id ? id->value : 0});
+                }
+                std::sort(changed.begin(), changed.end(), [](const auto& a, const auto& b) {
+                    return std::make_tuple(a.second == 0, a.second, a.first) < std::make_tuple(b.second == 0, b.second, b.first);
+                });
+                for (auto [entity, net] : changed) {
+                    const PhysicsBody& body = world.get<PhysicsBody>(entity);
+                    if (body.motion == MotionType::Dynamic) {
+                        BodyState state = sim.bodyState(body.id);
+                        physics.carried[entity] = {state.linearVelocity, state.angularVelocity};
+                        splitCutPieces(world, physics, *scene, entity, state);
+                    }
+                    physics.rebuild.push_back(entity);
+                    physics.reshaped.insert(entity);
+                }
+                physics.seenStamp = latestBlobContentStamp();
+            }
+
+            // 2. Rebuilds: a changed RigidBody, a new or lost link, changed voxels.
             for (Entity e : physics.rebuild) {
                 if (!world.valid(e)) continue;
                 dropBody(world, physics, e);
@@ -297,8 +449,19 @@ namespace projv::runtime {
             for (Entity e : pending) {
                 if (!wantsBody(world, e) || world.all_of<PhysicsBody>(e)) continue;
                 Description described = describe(world, physics, e);
+                if (auto carried = physics.carried.find(e); carried != physics.carried.end()) {
+                    described.desc.linearVelocity = carried->second.linear;
+                    described.desc.angularVelocity = carried->second.angular;
+                    physics.carried.erase(carried);
+                }
                 BodyId id;
                 if (!described.refusal) id = sim.createBody(described.desc);
+                if (!id.valid() && described.noVoxels && physics.reshaped.count(e)) {
+                    // Edited down to nothing: not a mistake to report, an outcome for the game.
+                    core::trace("physics: entity {}'s voxels are all gone; it has no body now", static_cast<uint32_t>(e));
+                    send(world, BodyEmptied{e});
+                    continue;
+                }
                 if (!id.valid()) {
                     std::string reason = described.refusal ? described.refusal : "the simulation refused it (see the log)";
                     core::warn("physics: entity {} gets no body: {}", static_cast<uint32_t>(e), reason);
@@ -310,8 +473,11 @@ namespace projv::runtime {
                 body.motion = described.desc.motion;
                 body.previousPosition = body.position = described.desc.position;
                 body.previousRotation = body.rotation = glm::normalize(described.desc.rotation);
+                body.sources = std::move(described.sources);
                 world.emplace<PhysicsBody>(e, body);
             }
+
+            physics.reshaped.clear();
 
             // 4. Commands due at this step, in (tick, issuer, sequence) order. Later ones wait.
             const uint64_t thisTick = sim.tick() + 1;
@@ -347,7 +513,6 @@ namespace projv::runtime {
 
             // 5. Kinematic bodies head for their Transform (a Part's from the Scene, where the bridge
             //    last put it).
-            const Scene* scene = world.ctx().find<Scene>();
             for (auto [entity, body] : world.view<PhysicsBody>().each()) {
                 if (body.motion != MotionType::Kinematic) continue;
                 const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
@@ -507,6 +672,7 @@ namespace projv::runtime {
         physics.world = std::make_unique<PhysicsWorld>(config.settings);
         physics.collision = config.collision;
         physics.destroyLeavers = config.destroyBodiesThatLeaveTheWorld;
+        physics.seenStamp = latestBlobContentStamp();
 
         installNetIds(world);
         registerComponent<RigidBody>(world);
@@ -541,6 +707,53 @@ namespace projv::runtime {
         queue(world, Kind::Teleport, e, position, core::vec3(0.0f), rotation);
     }
     void setGravity(World& world, core::vec3 gravity) { queue(world, Kind::Gravity, NullEntity, gravity); }
+
+    void editVoxels(World& world, Entity entity, const std::vector<PendingVoxelOp>& ops) {
+        runtimeOf(world).edits.push_back({entity, ops});
+    }
+
+    ComponentHandle voxelComponentOf(const World& world, Entity entity) {
+        const Scene* scene = world.ctx().find<Scene>();
+        const VoxelComponent* link = world.valid(entity) ? world.try_get<VoxelComponent>(entity) : nullptr;
+        if (!scene || !link || !utils::isComponentAlive(*scene, link->ref())) return INVALID_COMPONENT_HANDLE;
+        ComponentKind kind = scene->components[link->handle].kind;
+        if (kind == ComponentKind::Grid) return link->handle;
+        return splittableChunk(*scene, link->handle);
+    }
+
+    std::vector<PendingVoxelOp> voxelsInSphere(const World& world, Entity entity, core::vec3 centre, float radius) {
+        std::vector<PendingVoxelOp> ops;
+        const Scene* scene = world.ctx().find<Scene>();
+        ComponentHandle h = voxelComponentOf(world, entity);
+        if (h == INVALID_COMPONENT_HANDLE || !(radius > 0.0f)) return ops;
+        const ComponentRecord& record = scene->components[h];
+        // The component's voxel size in its own (unscaled) space, and its bounds in voxels.
+        float voxel = 0.0f;
+        core::ivec3 low(std::numeric_limits<int>::min()), high(std::numeric_limits<int>::max());
+        if (record.kind == ComponentKind::Chunk) {
+            const Chunk& chunk = scene->chunks[record.chunkHandle];
+            voxel = chunk.nativeScale / float(std::max(chunk.header.resolution, 1u));
+            low = core::ivec3(0);
+            high = core::ivec3(int(chunk.header.resolution) - 1);
+        } else if (record.gridIndex >= 0) {
+            const SceneGrid& grid = scene->grids[size_t(record.gridIndex)];
+            for (int32_t cell : grid.cellToChunk)
+                if (cell >= 0) { voxel = grid.nativeCellSize / float(std::max(scene->chunks[size_t(cell)].header.resolution, 1u)); break; }
+        }
+        if (!(voxel > 0.0f)) return ops;
+        core::mat4 toLocal = glm::inverse(utils::getComponentWorldMatrix(*scene, h));
+        float scale = glm::length(core::vec3(utils::getComponentWorldMatrix(*scene, h)[0]));
+        core::vec3 at = core::vec3(toLocal * core::vec4(centre, 1.0f)) / voxel;   // in voxels
+        float r = radius / std::max(scale, 1e-6f) / voxel;
+        core::ivec3 from = glm::max(core::ivec3(glm::floor(at - r)), low), to = glm::min(core::ivec3(glm::ceil(at + r)), high);
+        for (int z = from.z; z <= to.z; z++)
+            for (int y = from.y; y <= to.y; y++)
+                for (int x = from.x; x <= to.x; x++) {
+                    core::vec3 d = core::vec3(x, y, z) + core::vec3(0.5f) - at;
+                    if (glm::dot(d, d) <= r * r) ops.push_back({false, core::ivec3(x, y, z), 0});
+                }
+        return ops;
+    }
 
     void submitCommand(World& world, const PhysicsCommand& command) {
         runtimeOf(world).commands.push_back(Command{command, NullEntity});

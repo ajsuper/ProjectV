@@ -92,6 +92,9 @@ namespace projv {
         core::vec3 presentedPosition{0.0f};
         core::quat presentedRotation{1.0f, 0.0f, 0.0f, 0.0f};
         bool       presented = false;
+        // The voxels the shape was built from: each chunk and its blob's content stamp. When they
+        // differ from what the Scene holds now, the shape is rebuilt at the next step.
+        std::vector<std::pair<ChunkHandle, uint64_t>> sources;
     };
 
     // ---- Events ---------------------------------------------------------------------------------
@@ -103,6 +106,17 @@ namespace projv {
     // With PhysicsConfig::destroyBodiesThatLeaveTheWorld (the default) its entity is destroyed in
     // the same step, so `entity` is no longer valid when this arrives; `position` is where it was.
     struct BodyLeftWorld { Entity entity; core::vec3 position; };
+
+    // A dynamic body's voxels were cut into separate pieces by an edit, and each piece cut loose is
+    // now a body of its own: a new entity, linked to a new top-level component, with the parent's
+    // RigidBody (its mass shared out by voxel count, if it named one), a NetId if the parent had one,
+    // and the parent's motion at that point. The parent keeps the largest piece. Gameplay copies what
+    // else the pieces should carry.
+    struct BodySplit { Entity parent; std::vector<Entity> pieces; };
+
+    // An edit took away every voxel a body was made from: it has no body any more, and nothing is
+    // drawn for it. The entity stays; whether it goes (it usually should) is the game's call.
+    struct BodyEmptied { Entity entity; };
 
     // Time dropped fixed steps (Time::maxFixedStepsPerFrame) because the frames could not keep up:
     // the simulation is running slower than real time. `droppedSteps` is the total so far.
@@ -139,6 +153,19 @@ namespace projv::runtime {
     // Moves a body without sweeping it; velocity kept. Its Transform follows, uninterpolated.
     void teleport(World& world, Entity entity, core::vec3 position, core::quat rotation);
     void setGravity(World& world, core::vec3 gravity);
+    // Voxel edits to the component `entity` links (see voxelComponentOf), applied at the start of the next fixed step
+    // (utils::queueVoxelAdd/Remove + updateScene), in the order issued -- so every peer edits on
+    // the same step. Edits made directly through utils work too; the physics notices them at the
+    // next step either way, rebuilding shapes and splitting what was cut loose.
+    void editVoxels(World& world, Entity entity, const std::vector<PendingVoxelOp>& ops);
+
+    // The component voxel edits to `entity` go to: the one it links when that is a chunk or a grid,
+    // or the single chunk inside the asset it links (a prefab). INVALID for anything else.
+    ComponentHandle voxelComponentOf(const World& world, Entity entity);
+    // Removal ops for every voxel of that component whose centre lies within `radius` of the world
+    // point `centre` -- what a blast carves. Coordinates in the component's own voxel space, ready
+    // for editVoxels. Empty if the entity has no voxel component.
+    std::vector<PendingVoxelOp> voxelsInSphere(const World& world, Entity entity, core::vec3 centre, float radius);
 
     // ---- Commands from elsewhere: a server, a peer, a replay --------------------------------------
     // The same commands, named by NetId rather than Entity, and stamped with the fixed step they

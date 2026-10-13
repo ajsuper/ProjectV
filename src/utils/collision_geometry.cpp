@@ -8,25 +8,18 @@
 
 namespace projv::utils {
     namespace {
-        // The solid voxels of a blob, decoded into a dense box over its content bounds: one byte per
-        // cell, so the greedy merge below can test and claim cells in O(1).
-        struct Occupancy {
-            core::ivec3 origin{0}, dims{0};
-            std::vector<uint8_t> cells;     // bit 0: solid; bit 1: claimed by a piece already
-
-            size_t index(core::ivec3 p) const {
-                return (size_t(p.z) * size_t(dims.y) + size_t(p.y)) * size_t(dims.x) + size_t(p.x);
-            }
+        // The merge's working copy: bit 0 solid, bit 1 claimed by a piece already.
+        struct Occupancy : VoxelOccupancy {
             bool free(core::ivec3 p) const { return cells[index(p)] == 1; }   // solid and unclaimed
         };
 
-        constexpr uint8_t SOLID = 1, CLAIMED = 2;
+        constexpr uint8_t CLAIMED = 2;
 
         // Walks the tree the way blobContentBounds does -- positions are recovered from the descent
         // path, a child's Z-order within its parent being its bit index in the parent's mask -- and
         // marks every solid voxel. False if the tree points outside itself or outside the bounds it
         // was measured to have.
-        bool decode(const std::vector<uint32_t>& geometry, Occupancy& occupancy, uint64_t& solid) {
+        bool decode(const std::vector<uint32_t>& geometry, VoxelOccupancy& occupancy, uint64_t& solid) {
             const size_t nodeCount = geometry.size() / 3;
             struct Pending { size_t node; uint64_t cellZOrder; };
             std::vector<Pending> stack;
@@ -46,7 +39,7 @@ namespace projv::utils {
                         if (glm::any(glm::lessThan(p, occupancy.origin)) || glm::any(glm::greaterThan(p, high)))
                             return false;
                         uint8_t& cell = occupancy.cells[occupancy.index(p - occupancy.origin)];
-                        if (!cell) { cell = SOLID; solid++; }
+                        if (!cell) { cell = 1; solid++; }
                     }
                     continue;
                 }
@@ -119,6 +112,25 @@ namespace projv::utils {
         }
     }
 
+    DecodeResult decodeOccupancy(const GeometryBlob& blob, uint32_t resolution, uint64_t maxCells, VoxelOccupancy& out) {
+        core::ivec3 low, high;
+        out = VoxelOccupancy{};
+        if (!blobContentBounds(blob, low, high)) return DecodeResult::Empty;
+        if (resolution > 0) {
+            core::ivec3 cube(int(resolution) - 1);
+            if (glm::any(glm::lessThan(low, core::ivec3(0))) || glm::any(glm::greaterThan(high, cube)))
+                return DecodeResult::Malformed;
+        }
+        core::ivec3 dims = high - low + core::ivec3(1);
+        uint64_t cellCount = uint64_t(dims.x) * uint64_t(dims.y) * uint64_t(dims.z);
+        out.origin = low;
+        out.dims = dims;
+        if (cellCount > maxCells) return DecodeResult::TooLarge;
+        out.cells.assign(size_t(cellCount), 0);
+        if (!decode(blob.geometry, out, out.solid)) return DecodeResult::Malformed;
+        return DecodeResult::Ok;
+    }
+
     uint64_t CollisionParams::key() const {
         // Not a hash that must resist anything; it only has to change when a parameter does.
         uint64_t k = uint64_t(representation);
@@ -134,34 +146,27 @@ namespace projv::utils {
         result.contentMin = low;
         result.contentMax = high;
 
-        // A tree that claims voxels outside its own cube is corrupt; collide as the cube's part of it
-        // rather than trust it.
-        if (resolution > 0) {
-            core::ivec3 cube(int(resolution) - 1);
-            if (glm::any(glm::lessThan(low, core::ivec3(0))) || glm::any(glm::greaterThan(high, cube))) {
-                core::warn("collision: blob claims voxels outside its {}^3 cube; colliding as its clamped bounds",
-                           resolution);
+        Occupancy occupancy;
+        switch (decodeOccupancy(blob, resolution, params.maxDecodedCells, occupancy)) {
+            case DecodeResult::Empty: return result;
+            case DecodeResult::Ok: break;
+            case DecodeResult::TooLarge: {
+                core::ivec3 dims = high - low + core::ivec3(1);
+                core::warn("collision: content box {}x{}x{} exceeds maxDecodedCells; colliding as the box",
+                           dims.x, dims.y, dims.z);
+                return contentBox(low, high, CollisionFallback::TooLarge);
+            }
+            case DecodeResult::Malformed: {
+                // A tree that claims voxels outside its own cube, or points outside itself, is
+                // corrupt: collide as the part of its bounds inside the cube rather than trust it.
+                core::ivec3 cube(int(std::max(resolution, 1u)) - 1);
+                core::warn("collision: blob geometry is malformed; colliding as its (clamped) content box");
                 return contentBox(glm::clamp(low, core::ivec3(0), cube), glm::clamp(high, core::ivec3(0), cube),
                                   CollisionFallback::Malformed);
             }
         }
-
-        core::ivec3 dims = high - low + core::ivec3(1);
-        uint64_t cellCount = uint64_t(dims.x) * uint64_t(dims.y) * uint64_t(dims.z);
-        if (cellCount > params.maxDecodedCells) {
-            core::warn("collision: content box {}x{}x{} exceeds maxDecodedCells; colliding as the box",
-                       dims.x, dims.y, dims.z);
-            return contentBox(low, high, CollisionFallback::TooLarge);
-        }
-
-        Occupancy occupancy;
-        occupancy.origin = low;
-        occupancy.dims = dims;
-        occupancy.cells.assign(size_t(cellCount), 0);
-        if (!decode(blob.geometry, occupancy, result.solidVoxels)) {
-            core::warn("collision: blob geometry is malformed; colliding as its content box");
-            return contentBox(low, high, CollisionFallback::Malformed);
-        }
+        result.solidVoxels = occupancy.solid;
+        core::ivec3 dims = occupancy.dims;
 
         if (!mergeBoxes(occupancy, params.pieceBudget, result.pieces)) {
             core::warn("collision: {} solid voxels need more than {} boxes; colliding as the content box "

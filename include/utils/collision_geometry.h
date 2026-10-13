@@ -66,6 +66,19 @@ namespace projv::utils {
         uint64_t          solidVoxels = 0;      // 0 for a fallback that never decoded the tree
     };
 
+    // A blob's solid voxels as a dense box over its content bounds: one byte per cell (1 solid, 0
+    // empty), x fastest. What collision pieces and voxel islands are both computed from.
+    struct VoxelOccupancy {
+        core::ivec3 origin{0}, dims{0};
+        std::vector<uint8_t> cells;
+        uint64_t solid = 0;
+        size_t index(core::ivec3 p) const {   // p relative to origin
+            return (size_t(p.z) * size_t(dims.y) + size_t(p.y)) * size_t(dims.x) + size_t(p.x);
+        }
+    };
+    enum class DecodeResult : uint8_t { Ok, Empty, TooLarge, Malformed };
+    DecodeResult decodeOccupancy(const GeometryBlob& blob, uint32_t resolution, uint64_t maxCells, VoxelOccupancy& out);
+
     // The pieces `blob` collides as. `resolution` is the chunk's native resolution (a power of
     // four), which fixes the tree's depth.
     CollisionPieces buildCollisionPieces(const GeometryBlob& blob, uint32_t resolution,

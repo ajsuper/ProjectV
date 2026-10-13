@@ -151,6 +151,8 @@ struct Sandbox {
     int popped = 0;
     int spawnerLaunches = 0;
     int lost = 0;             // left the arena (over a wall) and fell past the kill plane
+    int pieces = 0;           // bodies made by a blast cutting a crate in pieces
+    int carvedAway = 0;       // bodies a blast carved down to nothing
     int fellThrough = 0;      // ...from *inside* the walls: through the floor. Must stay 0.
     bool lowGravity = false;
     bool spawners = true;
@@ -465,7 +467,8 @@ void selfTestSystem(projv::Application& app) {
         if (scene.components[h].parent == projv::INVALID_COMPONENT_HANDLE && projv::utils::isComponentAlive(scene, h)) liveRoots++;
     }
     size_t arenaRoots = 3;   // the arena and two pylons
-    bool books = int(alive) + sandbox.popped + sandbox.lost == test->spawned + sandbox.spawnerLaunches;
+    bool books = int(alive) + sandbox.popped + sandbox.lost + sandbox.carvedAway ==
+                 test->spawned + sandbox.spawnerLaunches + sandbox.pieces;
     bool voxels = liveRoots == arenaRoots + alive;
     // Physics: every body alive has its simulation body (none were refused), no step dropped
     // contacts, and nothing went through the floor.
@@ -483,9 +486,9 @@ void selfTestSystem(projv::Application& app) {
     projv::core::info("SANDBOXTEST: replay of {} steps ({} KB recorded): {}{}", replay.stepsReplayed,
                       log.bytes.size() / 1024, replay.matched ? "identical" : "DIVERGED: ", replay.problem);
     bool pass = books && voxels && physics && replay.matched;
-    projv::core::info("SANDBOXTEST: spawned {} (+{} by spawners), popped {}, lost over the walls {}, alive {}, "
-                      "live root components {} (expected {}) | books {} | voxels {}", test->spawned,
-                      sandbox.spawnerLaunches, sandbox.popped, sandbox.lost, alive, liveRoots, arenaRoots + alive,
+    projv::core::info("SANDBOXTEST: spawned {} (+{} by spawners, +{} pieces blasted off), popped {}, lost over the "
+                      "walls {}, carved away {}, alive {}, live root components {} (expected {}) | books {} | voxels {}", test->spawned,
+                      sandbox.spawnerLaunches, sandbox.pieces, sandbox.popped, sandbox.lost, sandbox.carvedAway, alive, liveRoots, arenaRoots + alive,
                       books ? "ok" : "WRONG", voxels ? "ok" : "WRONG");
     projv::core::info("SANDBOXTEST: physics: {} of {} bodies simulated, {} steps, {} with dropped contacts, {} refused, "
                       "{} fell through the floor | {} | {}", simulated, alive, stats.steps,
@@ -513,6 +516,23 @@ void connectPopHandlers(projv::Application& app) {
     events.on<Popped>([&world, &events](const Popped& p) {
         float reach = p.explosive > 0.0f ? p.explosive * 1.6f : 7.0f;
         float strength = p.explosive > 0.0f ? 55.0f : 18.0f;
+        // A bomb also carves: a crater in whatever is solid (never its bottom layer of voxels, so
+        // the floor is dented, not holed), and bites out of the crates around it. A crate bitten in
+        // two becomes two bodies (BodySplit, below), and the shockwave throws the pieces.
+        if (p.explosive > 0.0f) {
+            for (Entity solid : world.view<projv::StaticCollider>()) {
+                std::vector<projv::PendingVoxelOp> crater =
+                    projv::runtime::voxelsInSphere(world, solid, p.position, p.explosive * 0.3f);
+                std::erase_if(crater, [](const projv::PendingVoxelOp& op) { return op.position.y < 1; });
+                if (!crater.empty()) projv::runtime::editVoxels(world, solid, crater);
+            }
+            for (auto [entity, b] : world.view<Body>().each()) {
+                if (entity == p.entity || world.all_of<Popping>(entity)) continue;
+                std::vector<projv::PendingVoxelOp> bite =
+                    projv::runtime::voxelsInSphere(world, entity, p.position, p.explosive * 0.75f);
+                if (!bite.empty()) projv::runtime::editVoxels(world, entity, bite);
+            }
+        }
         for (auto [entity, b] : world.view<Body>().each()) {
             if (entity == p.entity) continue;
             vec3 at = projv::runtime::bodyPose(world, entity).position;
@@ -522,7 +542,7 @@ void connectPopHandlers(projv::Application& app) {
             float falloff = 1.0f - distance / reach;
             // An impulse, so a heavy crate is shoved less than a light ball.
             projv::runtime::addImpulse(world, entity, (d / distance * strength + vec3(0, strength * 0.5f, 0)) * falloff);
-            if (p.explosive > 0.0f && distance < p.explosive && !world.all_of<Popping>(entity)) {
+            if (p.explosive > 0.0f && distance < p.explosive * 0.5f && !world.all_of<Popping>(entity)) {
                 world.emplace<Popping>(entity);
                 events.send(Popped{entity, at, b.explosive});
             }
@@ -530,7 +550,9 @@ void connectPopHandlers(projv::Application& app) {
     });
 
     // 2. The score.
-    events.on<Popped>([&world](const Popped&) { world.ctx().get<Sandbox>().popped++; });
+    //    Counted only if it is still there: a body carved away or lost over a wall while its pop was
+    //    on the way was counted as that, by whatever removed it.
+    events.on<Popped>([&world](const Popped& p) { if (world.valid(p.entity)) world.ctx().get<Sandbox>().popped++; });
 
     // 3. Removal, last. Destroying the entity unlinks it, and OnUnlink::Destroy deletes its voxels.
     events.on<Popped>([&world](const Popped& p) {
@@ -569,6 +591,22 @@ void startup(projv::Application& app) {
     world.on_construct<Spawner>().connect<&setUpSpawner>();
     projv::runtime::spawnEntities(world);   // the arena: its spawners come to life here
     connectPopHandlers(app);
+    // Carved down to nothing: retired.
+    app.events().on<projv::BodyEmptied>([&world](const projv::BodyEmptied& e) {
+        if (!world.valid(e.entity) || !world.all_of<Body>(e.entity)) return;
+        world.ctx().get<Sandbox>().carvedAway++;
+        world.destroy(e.entity);
+    });
+    // A crate cut in pieces: each piece is a sandbox body too, and does what its parent did.
+    app.events().on<projv::BodySplit>([&world](const projv::BodySplit& e) {
+        auto& sandbox = world.ctx().get<Sandbox>();
+        const Body* parent = world.valid(e.parent) ? world.try_get<Body>(e.parent) : nullptr;
+        for (Entity piece : e.pieces) {
+            if (!world.valid(piece)) continue;
+            world.emplace_or_replace<Body>(piece, parent ? *parent : Body{});
+            sandbox.pieces++;
+        }
+    });
     // Counted as lost. One that left from *inside* the walls went through the floor, which must
     // never happen: the self-test fails on it.
     app.events().on<projv::BodyLeftWorld>([&world](const projv::BodyLeftWorld& e) {

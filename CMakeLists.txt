@@ -281,6 +281,7 @@ add_library(projectV STATIC
     src/utils/material.cpp
     src/utils/picking.cpp
     src/utils/scene_query.cpp
+    src/utils/voxel_islands.cpp
     src/utils/voxel_management.cpp
     src/utils/voxel_math.cpp
 )

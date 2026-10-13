@@ -152,6 +152,7 @@ namespace projv::runtime {
     };
 
     struct BodyState {
+        core::vec3 centerOfMass{0.0f};   // world space
         core::vec3 position{0.0f};
         core::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
         core::vec3 linearVelocity{0.0f};
@@ -256,7 +257,8 @@ namespace projv::runtime {
         // Creates and adds a body. An invalid id, logged, when the description is unusable or the
         // body table is full. A dynamic or kinematic body starts awake.
         BodyId createBody(const BodyDesc& desc);
-        // Removes and destroys a body. A stale or invalid id is ignored.
+        // Removes and destroys a body, first waking every body its bounds touch -- so what rested on
+        // it falls, rather than sleeping in mid-air. A stale or invalid id is ignored.
         void destroyBody(BodyId id);
         bool isAlive(BodyId id) const;
 
@@ -264,6 +266,10 @@ namespace projv::runtime {
         BodyState bodyState(BodyId id) const;
         // The body's mass, 0 for a static body or an id that is not alive.
         float bodyMass(BodyId id) const;
+
+        // Wakes every body whose bounds touch this one's: what an edit to its shape must do, so
+        // bodies resting on (or now inside) the old shape notice the new one.
+        void wakeBodiesAround(BodyId id);
 
         // ---- Voxel shapes ------------------------------------------------------------------------
         // The shape a blob collides as (utils::buildCollisionPieces), built once per blob content and
