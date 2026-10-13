@@ -49,6 +49,9 @@ namespace projv::runtime {
             struct Motion { core::vec3 linear, angular; };
             std::map<Entity, Motion>      carried;
             std::set<Entity>              reshaped;     // rebuilt this step because their voxels changed
+            // The newest blob content stamp when each entity asked for a body: voxels stamped after
+            // it were edited since, so an empty result is an outcome (BodyEmptied), not a mistake.
+            std::map<Entity, uint64_t>    requestedAt;
             std::map<uint32_t, Entity>    byBody;       // body id -> entity, for queries
             std::vector<Entity>           pendingCharacters;
             std::vector<CharacterId>      doomedCharacters;
@@ -64,11 +67,17 @@ namespace projv::runtime {
 
         // ---- Signals: noted here, acted on at the next tick ----------------------------------------
 
-        void wantBody(World& world, Entity entity) { runtimeOf(world).pending.push_back(entity); }
+        void wantBody(World& world, Entity entity) {
+            PhysicsRuntime& physics = runtimeOf(world);
+            physics.pending.push_back(entity);
+            physics.requestedAt[entity] = latestBlobContentStamp();
+        }
         void wantRebuild(World& world, Entity entity) { runtimeOf(world).rebuild.push_back(entity); }
 
         void bodyGone(World& world, Entity entity) {
-            if (const PhysicsBody* body = world.try_get<PhysicsBody>(entity)) runtimeOf(world).doomed.push_back(body->id);
+            PhysicsRuntime& physics = runtimeOf(world);
+            if (const PhysicsBody* body = world.try_get<PhysicsBody>(entity)) physics.doomed.push_back(body->id);
+            physics.requestedAt.erase(entity);
         }
 
         void wantCharacter(World& world, Entity entity) { runtimeOf(world).pendingCharacters.push_back(entity); }
@@ -481,8 +490,14 @@ namespace projv::runtime {
                 }
                 BodyId id;
                 if (!described.refusal) id = sim.createBody(described.desc);
-                if (!id.valid() && described.noVoxels && physics.reshaped.count(e)) {
-                    // Edited down to nothing: not a mistake to report, an outcome for the game.
+                // Edited down to nothing -- under an existing body, or since the entity asked for one
+                // -- is not a mistake to report but an outcome for the game. A component that was
+                // simply never filled is still a refusal.
+                bool editedSince = false;
+                if (auto asked = physics.requestedAt.find(e); asked != physics.requestedAt.end())
+                    for (const auto& [chunk, stamp] : described.sources) editedSince = editedSince || stamp > asked->second;
+                physics.requestedAt.erase(e);
+                if (!id.valid() && described.noVoxels && (physics.reshaped.count(e) || editedSince)) {
                     core::trace("physics: entity {}'s voxels are all gone; it has no body now", static_cast<uint32_t>(e));
                     send(world, BodyEmptied{e});
                     continue;

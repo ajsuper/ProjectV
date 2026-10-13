@@ -307,3 +307,29 @@ TEST_CASE("a body carved down to nothing is reported as emptied, not refused") {
     CHECK_FALSE(runtime::hasBody(f.app.world, crate));
     CHECK(f.app.world.valid(crate));   // the game's to destroy
 }
+
+TEST_CASE("a body carved to nothing before its first step is emptied too, not refused") {
+    Fixture f;
+    f.floor();
+    std::vector<projv::BodyEmptied> emptied;
+    std::vector<projv::PhysicsBodyRefused> refused;
+    f.app.events().on<projv::BodyEmptied>([&](const projv::BodyEmptied& e) { emptied.push_back(e); });
+    f.app.events().on<projv::PhysicsBodyRefused>([&](const projv::PhysicsBodyRefused& e) { refused.push_back(e); });
+    // Spawned and blasted away in the same frame: its body was never made.
+    Entity crate = f.body(fill({0, 0, 0}, {1, 1, 1}), vec3(0, 3, 0));
+    std::vector<projv::PendingVoxelOp> all;
+    for (auto op : fill({0, 0, 0}, {1, 1, 1})) all.push_back({false, op.position, 0});
+    runtime::editVoxels(f.app.world, crate, all);
+    f.frames(2);
+    REQUIRE(emptied.size() == 1);
+    CHECK(emptied[0].entity == crate);
+    CHECK(refused.empty());
+
+    // An entity linked to a component that never had any geometry is still a refusal: a mistake.
+    ComponentHandle never = utils::addComponent(f.scene, projv::ComponentKind::Chunk, "never", INVALID_COMPONENT_HANDLE, 16, 0.5f);
+    Entity mistake = runtime::spawnComponent(f.app.world, never);
+    f.app.world.emplace<projv::RigidBody>(mistake);
+    f.frames(2);
+    CHECK(refused.size() == 1);
+    CHECK(emptied.size() == 1);
+}
