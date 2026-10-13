@@ -146,6 +146,7 @@ namespace projv {
         runtime::MotorMode motorMode = runtime::MotorMode::Velocity;
         float      motorVelocity = 0.0f, motorTarget = 0.0f, motorLimit = 0.0f, motorFrequency = 0.0f;
         float      breakForce = 0.0f, breakTorque = 0.0f;
+        bool       collideConnected = false;   // see runtime::JointDesc
     };
 
     // The simulation's side of a Joint. `broken` once it has broken or lost a body: it is not made

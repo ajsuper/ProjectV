@@ -33,6 +33,7 @@
 #include <Jolt/Physics/Constraints/SliderConstraint.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/GroupFilter.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/RayCast.h>
@@ -337,12 +338,32 @@ namespace projv::runtime {
         return 0.0f;
     }
 
+    // Bodies joined by a joint that does not let them collide (JointDesc::collideConnected false, the
+    // default): every body's collision group is its own body index, and this refuses the pairs that
+    // such joints join -- a car's wheels and its chassis, the links of a chain. Counted, as two joints
+    // can join the same pair. Read from the solver's threads during a step, changed only between steps.
+    class JointedPairs final : public JPH::GroupFilter {
+    public:
+        static uint64_t key(uint32_t a, uint32_t b) { return a < b ? (uint64_t(a) << 32) | b : (uint64_t(b) << 32) | a; }
+        void add(uint32_t a, uint32_t b) { pairs[key(a, b)]++; }
+        void remove(uint32_t a, uint32_t b) {
+            auto it = pairs.find(key(a, b));
+            if (it != pairs.end() && --it->second == 0) pairs.erase(it);
+        }
+        bool CanCollide(const JPH::CollisionGroup& one, const JPH::CollisionGroup& two) const override {
+            if (pairs.empty()) return true;
+            return pairs.find(key(one.GetGroupID(), two.GetGroupID())) == pairs.end();
+        }
+    private:
+        std::map<uint64_t, int> pairs;
+    };
+
     // ---- Recording ---------------------------------------------------------------------------------
     // A log is a header (magic, version, the settings) and then one record per call that changes the
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 2;   // 2: joint motor modes
+        constexpr uint32_t LOG_VERSION = 3;   // 2: joint motor modes; 3: collideConnected
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
@@ -523,6 +544,14 @@ namespace projv::runtime {
         };
         std::vector<Joint>   joints;
         std::vector<PhysicsWorld::BrokenJoint> brokenJoints;
+        JPH::Ref<JointedPairs> jointedPairs = new JointedPairs;
+        // The pair a joint keeps from colliding, if any.
+        void separate(const Joint& j, bool on) {
+            if (j.desc.collideConnected || !j.desc.b.valid()) return;
+            uint32_t a = JPH::BodyID(j.desc.a.value).GetIndex(), b = JPH::BodyID(j.desc.b.value).GetIndex();
+            if (on) jointedPairs->add(a, b);
+            else jointedPairs->remove(a, b);
+        }
         Joint* joint(JointId id) {
             uint32_t slot = id.value & 0xffffu;
             if (!id.valid() || slot >= joints.size()) return nullptr;
@@ -666,6 +695,7 @@ namespace projv::runtime {
         JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
         JPH::Body* body = bodies.CreateBody(settings);
         if (!body) return refuse("the body table is full (PhysicsSettings::maxBodies)");
+        body->SetCollisionGroup(JPH::CollisionGroup(impl->jointedPairs, body->GetID().GetIndex(), 0));
         bodies.AddBody(body->GetID(), desc.motion == MotionType::Static ? JPH::EActivation::DontActivate
                                                                         : JPH::EActivation::Activate);
         uint32_t index = body->GetID().GetIndex();
@@ -897,19 +927,22 @@ namespace projv::runtime {
             put(out, d.axis); put(out, d.limitMin); put(out, d.limitMax); put(out, d.springFrequency); put(out, d.springDamping);
             put(out, d.friction); put(out, uint8_t(d.motor)); put(out, d.motorVelocity); put(out, d.motorLimit);
             put(out, uint8_t(d.motorMode)); put(out, d.motorTarget); put(out, d.motorFrequency);
+            put(out, uint8_t(d.collideConnected));
             put(out, d.breakForce); put(out, d.breakTorque);
         }
         bool readJointDesc(const std::vector<uint8_t>& in, size_t& at, JointDesc& d) {
-            uint8_t type = 0, motor = 0, mode = 0;
+            uint8_t type = 0, motor = 0, mode = 0, collide = 0;
             bool ok = get(in, at, type) && get(in, at, d.a.value) && get(in, at, d.b.value) && get(in, at, d.anchor) &&
                       get(in, at, d.anchorB) && get(in, at, d.axis) && get(in, at, d.limitMin) && get(in, at, d.limitMax) &&
                       get(in, at, d.springFrequency) && get(in, at, d.springDamping) && get(in, at, d.friction) &&
                       get(in, at, motor) && get(in, at, d.motorVelocity) && get(in, at, d.motorLimit) &&
                       get(in, at, mode) && get(in, at, d.motorTarget) && get(in, at, d.motorFrequency) &&
+                      get(in, at, collide) &&
                       get(in, at, d.breakForce) && get(in, at, d.breakTorque);
             d.type = JointType(type);
             d.motor = motor != 0;
             d.motorMode = MotorMode(mode);
+            d.collideConnected = collide != 0;
             return ok;
         }
     }
@@ -1021,6 +1054,7 @@ namespace projv::runtime {
         j.desc = desc;
         j.force = j.torque = 0.0f;
         j.generation = uint16_t(j.generation + 1);
+        impl->separate(j, true);
         // The anchors in each body's own frame, for measuring a distance joint's length later.
         auto local = [&](BodyId body, core::vec3 world) {
             if (!body.valid()) return world;
@@ -1040,6 +1074,7 @@ namespace projv::runtime {
         if (!j) return;
         impl->system.GetBodyInterface().ActivateConstraint(j->constraint);   // what it held lets go now
         impl->system.RemoveConstraint(j->constraint);
+        impl->separate(*j, false);
         j->constraint = nullptr;
     }
 
@@ -1154,6 +1189,7 @@ namespace projv::runtime {
             }
             impl->system.GetBodyInterface().ActivateConstraint(c);
             impl->system.RemoveConstraint(c);
+            impl->separate(j, false);   // broken apart, they collide again
             j.constraint = nullptr;
             impl->brokenJoints.push_back({JointId{uint32_t(slot) | (uint32_t(j.generation) << 16)}, j.force, j.torque});
         }
@@ -1163,6 +1199,7 @@ namespace projv::runtime {
         for (Impl::Joint& j : impl->joints) {
             if (!j.constraint || !(j.desc.a == body || j.desc.b == body)) continue;
             impl->system.RemoveConstraint(j.constraint);
+            impl->separate(j, false);
             j.constraint = nullptr;
         }
     }

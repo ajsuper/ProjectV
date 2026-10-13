@@ -1,6 +1,6 @@
 # 17 — Physics demos
 
-Six set pieces for the engine's physics (`runtime/physics.h`), built from voxels in code.
+Seven set pieces for the engine's physics (`runtime/physics.h`), built from voxels in code.
 
 ```bash
 cd build/examples/physics_demos && ./physics_demos
@@ -14,6 +14,7 @@ cd build/examples/physics_demos && ./physics_demos
 | **4** | **Sweeper.** A 12 m beam spinning about its middle while its middle circles, through a field of crates and balls. |
 | **5** | **Titans.** A 14 m stone boulder (about 2,900 t) and a 20 m stone hammer (410 t) launched head-on across a field of 25 kg crates. **Space** launches them again. |
 | **6** | **Joints.** A plank bridge on ball joints, a motor-driven windmill, a swinging door, and a four-tonne wrecking ball on a rope that swings into a weight on a breakable chain. **Space** drops a crate on the bridge and fires a ball at the door. |
+| **7** | **Car.** A car made of joints, to drive: **W/S** throttle and reverse, **A/D** steer, **Space** brake, with a chase camera. A 40 m run-up to a ramp and jump, a gentler ramp, a crate wall and balls. |
 | R | restart the demo |
 | mouse, W/A/S/D, Q/E | look, fly, down/up (Esc releases the cursor, a click recaptures it) |
 | V | walk (a character: W/A/S/D, Space to jump) or fly |
@@ -61,6 +62,15 @@ by NetId:
   swings into the weight, the chain snaps, and the weight flies on -- a breaking joint gives back
   what it could not hold, so it does not stop what broke it.
 
+**Car** -- joints as a machine. A 900 kg voxel body and four wheels. The rear wheels are on hinges
+to the body with motors: driving is a motor's velocity (the throttle), braking is all four motors
+held at zero. Each front wheel is on a free hinge to a small knuckle, and each knuckle is on a
+vertical hinge to the body whose motor is in Position mode -- a servo -- holding the steering
+angle. The wheels collide as spheres, which roll smoothly where a disc of voxels would bump, and
+the bodies a joint joins do not collide with each other (`collideConnected`), so a wheel does not
+fight the body it hangs from. A front wheel is joined to its knuckle, not to the body, so the
+wheels are set out far enough that their spheres clear it.
+
 Every crate, brick and ball is a `duplicateComponent` of one prototype, so all crates share one
 geometry blob on the GPU and one collision shape in the physics until a blast edits one.
 
@@ -70,10 +80,11 @@ geometry blob on the GPU and one collision shape in the physics until a blast ed
 DEMOS_SELFTEST=1 ./physics_demos
 ```
 
-Plays all six in turn, unattended, and checks each: the pyramid stands and sleeps, the ball brings
+Plays all seven in turn, unattended, and checks each: the pyramid stands and sleeps, the ball brings
 it down; the blast makes at least ten fragments; the barrage knocks crates out of the wall; the
 sweeper moves most of the field and is not moved itself; the titans meet and no crate is pressed
 into the floor; the bridge holds, the chain breaks, the rope never stretches, the windmill runs at
-its motor's speed and the door stays within its limits. Then, for the whole session: no step
+its motor's speed and the door stays within its limits; the car reaches speed upright, turns, stops
+under its brakes, and keeps its wheels on their mounts. Then, for the whole session: no step
 dropped contacts, no body went non-finite or fell through the floor, and the recording replays
 identically. `DEMOS_CAPTURE=<prefix>` saves a frame of each demo as `<prefix>-<n>.tga`.

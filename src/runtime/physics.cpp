@@ -622,6 +622,7 @@ namespace projv::runtime {
                     d.motorFrequency = joint.motorFrequency;
                     d.breakForce = joint.breakForce;
                     d.breakTorque = joint.breakTorque;
+                    d.collideConnected = joint.collideConnected;
                     JointId id = sim.createJoint(d);
                     if (!id.valid()) {
                         send(world, PhysicsBodyRefused{e, "the joint could not be made (see the log)"});
@@ -1376,6 +1377,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::Joint>::save(const projv::
     }
     if (j.breakForce > 0.0f) out["breakForce"] = tidy(j.breakForce);
     if (j.breakTorque > 0.0f) out["breakTorque"] = tidy(j.breakTorque);
+    if (j.collideConnected) out["collideConnected"] = true;
     return out;
 }
 
@@ -1412,5 +1414,6 @@ std::optional<projv::Joint> projv::runtime::ComponentTraits<projv::Joint>::load(
     }
     out.breakForce = j.value("breakForce", 0.0f);
     out.breakTorque = j.value("breakTorque", 0.0f);
+    out.collideConnected = j.value("collideConnected", false);
     return out;
 }

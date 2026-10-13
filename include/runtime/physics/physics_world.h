@@ -311,6 +311,10 @@ namespace projv::runtime {
         // impulse beyond what it could hold in its last step is given back to the bodies.
         float      breakForce = 0.0f;
         float      breakTorque = 0.0f;
+        // Whether the two bodies it joins collide with each other. Off by default, as in most
+        // engines: a wheel and the chassis it hangs from, the links of a chain, are meant to overlap
+        // or touch, and colliding they fight their own joint. Once it breaks, they collide again.
+        bool       collideConnected = false;
     };
 
     struct JointId {

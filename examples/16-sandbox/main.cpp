@@ -250,7 +250,8 @@ void controls(projv::Application& app) {
         if (input.down(projv::Key::A)) walk -= right;
         if (glm::length(walk) > 0.0f) walk = glm::normalize(walk) * WALK_SPEED;
         projv::runtime::setCharacterInput(world, camera.walker, walk, input.pressed(projv::Key::Space), 9.0f);
-        camera.position = world.get<projv::Transform>(camera.walker).position + vec3(0, EYE_HEIGHT, 0);
+        // The camera follows in PostUpdate (followWalker), once physics has placed the character for
+        // this frame.
     } else {
         // Flying runs on the unscaled clock: pausing the world does not freeze you.
         const float speed = 45.0f * time.unscaledDelta;
@@ -346,6 +347,16 @@ void tractorBeam(projv::Application& app) {
         if (distance > 0.01f) change += pull / distance * std::min(distance, 30.0f) * 6.0f * dt;
         projv::runtime::addVelocity(world, e, change);
     }
+}
+
+// PostUpdate, after physics has written this frame's interpolated pose: the camera is the walker's
+// eyes. Read in Update instead, it would be last frame's pose, a frame behind the world it is
+// drawn with -- the lag that made walking feel loose.
+void followWalker(projv::Application& app) {
+    World& world = app.world;
+    auto& camera = world.ctx().get<Camera>();
+    if (camera.walker == projv::NullEntity || !world.valid(camera.walker)) return;
+    camera.position = world.get<projv::Transform>(camera.walker).position + vec3(0, EYE_HEIGHT, 0);
 }
 
 void titleBar(projv::Application& app) {
@@ -876,6 +887,7 @@ int main(int argc, char** argv) {
     app.addSystem(projv::Stage::FixedUpdate, "spawners",  spawners);
     app.addSystem(projv::Stage::FixedUpdate, "tractor beam", tractorBeam);
     app.addSystem(projv::Stage::Update,      "title bar", titleBar);
+    app.addSystem(projv::Stage::PostUpdate,  "follow walker", followWalker, {.after = "physics: present"});
     app.addSystem(projv::Stage::Update,      "self-test", selfTestSystem);
     app.addSystem(projv::Stage::Render,      "render",    render);
     app.addSystem(projv::Stage::Shutdown,    "shutdown",  shutdown);

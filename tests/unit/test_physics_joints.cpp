@@ -433,3 +433,39 @@ TEST_CASE("a position motor is a servo: it holds its angle under load and goes w
     }
     CHECK(lowest < -1.2f);
 }
+
+TEST_CASE("bodies a joint joins do not collide with each other, unless asked to, and do once it goes") {
+    // A box thrown at a wall it is tied to by a slack rope: the rope never pulls (it is far from taut),
+    // so all it changes is whether the two may collide.
+    auto run = [](bool collide, bool cutFirst) {
+        PhysicsWorld physics;
+        physics.setGravity(vec3(0));
+        BodyDesc wall;
+        wall.shape = PhysicsShape::box(vec3(0.5f));
+        wall.motion = MotionType::Static;
+        wall.layer = PhysicsLayer::Static;
+        BodyId a = physics.createBody(wall);
+        BodyId b = box(physics, vec3(2, 0, 0), vec3(0.5f), 10.0f);
+        JointDesc rope;
+        rope.type = JointType::Distance;
+        rope.a = b;
+        rope.b = a;
+        rope.anchor = vec3(2, 0, 0);
+        rope.anchorB = vec3(0);
+        rope.limitMin = 0.0f;
+        rope.limitMax = 10.0f;
+        rope.collideConnected = collide;
+        JointId j = physics.createJoint(rope);
+        if (cutFirst) physics.destroyJoint(j);
+        physics.setVelocity(b, vec3(-3, 0, 0), vec3(0));
+        float least = 10.0f;
+        for (int i = 0; i < 90; i++) {
+            physics.step(DT);
+            least = std::min(least, physics.bodyState(b).position.x);
+        }
+        return least;
+    };
+    CHECK(run(false, false) < -1.0f);   // joined, not colliding: straight through the wall
+    CHECK(run(true, false) > 0.95f);    // collideConnected: it hits the wall's face at x = 1
+    CHECK(run(false, true) > 0.95f);    // the joint gone: they collide again
+}

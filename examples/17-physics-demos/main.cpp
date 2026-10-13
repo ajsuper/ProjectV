@@ -16,9 +16,12 @@
 //   6  Joints         a plank bridge on ball joints, a wrecking ball on a rope swinging into a weight
 //                     on a breakable chain, a motor-driven windmill, a swinging door. Space: drop a
 //                     crate on the bridge and fire a ball at the door.
+//   7  Car            a car made of joints you drive: W/S throttle and reverse, A/D steer, Space
+//                     brake. Rear wheels on driven hinges, front wheels on knuckles steered by servo
+//                     hinges. Ramps, a jump, crates and balls to drive into.
 //
 // Controls
-//   1-6        pick a demo (it is rebuilt from scratch)      R  restart the demo
+//   1-7        pick a demo (it is rebuilt from scratch)      R  restart the demo
 //   Space      the demo's action                             V  walk (a character) / fly
 //   mouse look, W/A/S/D fly, Q/E down/up                     T  slow motion   P  pause
 //   Esc        release the cursor (a click recaptures it)
@@ -54,6 +57,7 @@ using projv::Entity;
 using projv::World;
 using projv::core::ivec3;
 using projv::core::quat;
+using projv::core::vec2;
 using projv::core::vec3;
 namespace fs = std::filesystem;
 namespace runtime = projv::runtime;
@@ -145,7 +149,7 @@ struct Camera {
 struct Demos {
     int current = 0;                       // 1..4
     // Prototypes, made once at startup and never drawn: every crate, brick and ball is a copy.
-    ComponentHandle crate, brick, beamProto, balls[5], plank, link;
+    ComponentHandle crate, brick, beamProto, balls[5], plank, link, wheel, knuckle;
     // Demo state.
     float clock = 0.0f;                    // seconds of simulation since the demo began
     float fireTimer = 0.0f;
@@ -161,12 +165,23 @@ struct Demos {
     Entity wreckingBall = projv::NullEntity, rope = projv::NullEntity, weight = projv::NullEntity;
     std::vector<Entity> brokenJoints;      // JointBroke, as they arrive
     float dropTimer = 0.0f;
+    // Demo 7: the car.
+    struct Car {
+        Entity chassis = projv::NullEntity;
+        Entity wheels[4]{};                // front left, front right, rear left, rear right
+        Entity axles[4]{};                 // each wheel's hinge (front: to its knuckle; rear: to the chassis)
+        Entity steering[2]{};              // the front knuckles' servo hinges
+        vec3 mounts[4]{};                  // where each wheel sits, in the chassis's frame
+        float throttle = 0.0f, steer = 0.0f;
+        bool brake = false, driven = false;
+    } car;
     vec3 blastAt{0.0f};
     int blastKickIn = 0;                   // fixed steps until a detonation's kick (see detonate)
     int pieces = 0;                        // bodies cut off by blasts (BodySplit)
     int fellThrough = 0;                   // left the world from above the floor: must stay 0
     std::mt19937 random{7};
     float titleTimer = 0.0f;
+    bool unattended = false;               // the self-test is driving
 };
 
 float uniform(Demos& d, float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(d.random); }
@@ -179,6 +194,7 @@ const char* demoName(int n) {
         case 4: return "Sweeper";
         case 5: return "Titans  (Space: again)";
         case 6: return "Joints  (Space: a crate on the bridge, a ball at the door)";
+        case 7: return "Car  (W/S drive, A/D steer, Space brake)";
     }
     return "";
 }
@@ -199,6 +215,7 @@ void clearDemo(World& world) {
     demos.boulder = demos.hammer = demos.windmill = demos.door = demos.doorHinge = projv::NullEntity;
     demos.wreckingBall = demos.rope = demos.weight = projv::NullEntity;
     demos.dropTimer = 0.0f;
+    demos.car = Demos::Car{};
     auto& camera = world.ctx().get<Camera>();
     if (camera.walker != projv::NullEntity) { world.destroy(camera.walker); camera.walker = projv::NullEntity; }
     demos.beam = projv::NullEntity;
@@ -449,6 +466,107 @@ void buildJoints(World& world, Demos& demos, Camera& camera) {
     camera.pitch = -0.3f;
 }
 
+// ---- Demo 7: a car made of joints --------------------------------------------------------------
+
+constexpr float WHEEL_RADIUS = 0.4375f;      // 3.5 voxels of 12.5 cm
+constexpr float WHEEL_TOP_SPEED = 45.0f;     // rad/s at the wheel: about 20 m/s
+constexpr float STEER_LOCK = 0.5f;           // rad
+
+void buildCar(World& world, Demos& demos, vec3 at) {
+    Demos::Car& car = demos.car;
+    // The body: a 2 m x 4 m tub of 12.5 cm voxels with a cabin on it, 900 kg.
+    projv::RigidBody shell;
+    shell.mass = 900.0f;
+    car.chassis = big(world, "car", ivec3(16, 10, 32), 0.125f, at + vec3(0, 0.95f, 0), quat(1, 0, 0, 0), [](int x, int y, int z) -> uint32_t {
+        bool tub = y < 4;
+        bool cabin = y >= 4 && z >= 8 && z < 22 && x >= 1 && x < 15;
+        if (!tub && !cabin) return 0u;
+        if (cabin) return (y >= 6 && (x == 1 || x == 14 || z == 8 || z == 21)) ? rgb(0.5f, 0.7f, 0.85f) : rgb(0.85f, 0.15f, 0.1f);
+        return (z < 2 || z > 29) ? rgb(0.9f, 0.85f, 0.3f) : rgb(0.85f, 0.15f, 0.1f);
+    }, shell);
+    // The wheels collide as spheres (see below), wider than they look: set out far enough that a
+    // sphere clears the 2 m body. A front wheel is joined to its knuckle, not to the chassis, so the
+    // two would collide -- and jam the steering -- if they met.
+    const float track = 1.5f, base = 1.4f;
+    const vec3 corners[4] = {vec3(-track, 0, base), vec3(track, 0, base), vec3(-track, 0, -base), vec3(track, 0, -base)};
+    const vec3 chassisCentre = at + vec3(0, 0.95f, 0);
+    projv::RigidBody tyre = ballBody(1200.0f, 0.0f);   // a sphere: rolls smoothly where a voxel disc would bump
+    tyre.mass = 25.0f;
+    tyre.friction = 1.4f;
+    for (int i = 0; i < 4; i++) {
+        vec3 centre = at + corners[i] + vec3(0, WHEEL_RADIUS, 0);
+        car.mounts[i] = centre - chassisCentre;
+        car.wheels[i] = place(world, demos.wheel, centre, quat(1, 0, 0, 0), tyre).entity;
+        projv::Joint axle;
+        axle.type = runtime::JointType::Hinge;
+        axle.anchor = centre;
+        axle.axis = vec3(1, 0, 0);
+        axle.motorLimit = i < 2 ? 500.0f : 900.0f;   // front: brakes only; rear: brakes and drive
+        if (i < 2) {
+            // A knuckle between chassis and wheel, turned about the vertical by a servo: steering.
+            projv::RigidBody k = body(15.0f);
+            Entity knuckle = place(world, demos.knuckle, centre, quat(1, 0, 0, 0), k).entity;
+            projv::Joint steer;
+            steer.type = runtime::JointType::Hinge;
+            steer.anchor = centre;
+            steer.axis = vec3(0, 1, 0);
+            steer.limitMin = -STEER_LOCK - 0.05f;
+            steer.limitMax = STEER_LOCK + 0.05f;
+            steer.motor = true;
+            steer.motorMode = runtime::MotorMode::Position;
+            steer.motorLimit = 4000.0f;
+            steer.motorFrequency = 12.0f;
+            car.steering[i] = joint(world, demos, knuckle, car.chassis, steer);
+            car.axles[i] = joint(world, demos, car.wheels[i], knuckle, axle);
+        } else {
+            car.axles[i] = joint(world, demos, car.wheels[i], car.chassis, axle);
+        }
+    }
+}
+
+// What the driver asks for, as joint motor commands: the rear axles driven, all four braked (held
+// at zero speed), or left to roll; the front knuckles' servos turned. Sent only when it changes.
+void driveCar(World& world, Demos& demos, float throttle, float steer, bool brake) {
+    Demos::Car& car = demos.car;
+    if (!world.valid(car.chassis)) return;
+    if (car.driven && throttle == car.throttle && steer == car.steer && brake == car.brake) return;
+    car.driven = true;
+    car.throttle = throttle;
+    car.steer = steer;
+    car.brake = brake;
+    for (int i = 0; i < 4; i++) {
+        bool rear = i >= 2;
+        if (brake) runtime::setJointMotor(world, car.axles[i], true, 0.0f);
+        else if (rear && throttle != 0.0f) runtime::setJointMotor(world, car.axles[i], true, throttle * WHEEL_TOP_SPEED);
+        else runtime::setJointMotor(world, car.axles[i], false, 0.0f);
+    }
+    for (int i = 0; i < 2; i++)
+        runtime::setJointMotor(world, car.steering[i], true, steer * STEER_LOCK, runtime::MotorMode::Position);
+}
+
+vec3 carForward(World& world, const Demos& demos) {
+    return runtime::bodyPose(world, demos.car.chassis).rotation * vec3(0, 0, 1);
+}
+
+void buildCarPark(World& world, Demos& demos, Camera& camera) {
+    // A ramp up to a 1.5 m lip, and the drop beyond it: a jump. 12.5 cm voxels keep its slope fine.
+    scenery(world, demos, ivec3(48, 12, 64), 0.125f, vec3(-3, 0, 12), [](int, int y, int z) -> uint32_t {
+        return y <= z * 12 / 64 ? (z % 8 < 4 ? rgb(0.5f, 0.5f, 0.55f) : rgb(0.42f, 0.42f, 0.47f)) : 0u;
+    });
+    // A gentler, longer ramp off to the side, and a wall of crates and a few balls to drive into.
+    scenery(world, demos, ivec3(40, 6, 96), 0.125f, vec3(-14, 0, 0), [](int, int y, int z) -> uint32_t {
+        return y <= z * 6 / 96 ? rgb(0.45f, 0.5f, 0.45f) : 0u;
+    });
+    for (int row = 0; row < 3; row++)
+        for (int i = 0; i < 6; i++)
+            place(world, demos.crate, vec3(10 + float(i) * 1.02f, 0.5f + float(row) * 1.005f, 14), quat(1, 0, 0, 0), body(30.0f));
+    for (int i = 0; i < 12; i++)
+        place(world, demos.balls[i % 5], vec3(uniform(demos, 6, 18), 1, uniform(demos, 20, 30)), quat(1, 0, 0, 0), ballBody(400.0f, 0.4f));
+    // A 40 m run-up to the ramp.
+    buildCar(world, demos, vec3(0, 0, -30));
+    camera.position = vec3(0, 4, -40);
+}
+
 void startDemo(World& world, int n) {
     auto& demos = world.ctx().get<Demos>();
     auto& camera = world.ctx().get<Camera>();
@@ -461,6 +579,7 @@ void startDemo(World& world, int n) {
         case 4: buildSweeper(world, demos, camera); break;
         case 5: buildTitans(world, demos, camera); break;
         case 6: buildJoints(world, demos, camera); break;
+        case 7: buildCarPark(world, demos, camera); break;
     }
     projv::core::info("Demo {}: {}", n, demoName(n));
 }
@@ -595,10 +714,10 @@ void controls(projv::Application& app) {
         camera.pitch = std::clamp(camera.pitch - input.cursorDelta.y * 0.0025f, -1.5f, 1.5f);
     }
 
-    for (int n = 1; n <= 6; n++)
+    for (int n = 1; n <= 7; n++)
         if (input.pressed(projv::Key(int(projv::Key::Num0) + n))) startDemo(world, n);
     if (input.pressed(projv::Key::R)) startDemo(world, demos.current);
-    if (input.pressed(projv::Key::Space) && camera.walker == projv::NullEntity) act(world, demos, camera);
+    if (input.pressed(projv::Key::Space) && camera.walker == projv::NullEntity && demos.current != 7) act(world, demos, camera);
     if (input.pressed(projv::Key::T)) time.scale = time.scale == 1.0f ? 0.2f : 1.0f;
     if (input.pressed(projv::Key::P)) time.scale = time.scale == 0.0f ? 1.0f : 0.0f;
 
@@ -614,7 +733,14 @@ void controls(projv::Application& app) {
             camera.walker = projv::NullEntity;
         }
     }
-    if (camera.walker != projv::NullEntity) {
+    if (demos.current == 7 && camera.walker == projv::NullEntity) {
+        // Driving: the chase camera follows in PostUpdate (followCamera). The self-test drives on its own.
+        if (!demos.unattended) {
+            float throttle = (input.down(projv::Key::W) ? 1.0f : 0.0f) - (input.down(projv::Key::S) ? 0.6f : 0.0f);
+            float steer = (input.down(projv::Key::D) ? 1.0f : 0.0f) - (input.down(projv::Key::A) ? 1.0f : 0.0f);
+            driveCar(world, demos, throttle, steer, input.down(projv::Key::Space));
+        }
+    } else if (camera.walker != projv::NullEntity) {
         vec3 walk(0.0f);
         if (input.down(projv::Key::W)) walk += flat;
         if (input.down(projv::Key::S)) walk -= flat;
@@ -622,7 +748,8 @@ void controls(projv::Application& app) {
         if (input.down(projv::Key::A)) walk -= right;
         if (glm::length(walk) > 0.0f) walk = glm::normalize(walk) * WALK_SPEED;
         runtime::setCharacterInput(world, camera.walker, walk, input.pressed(projv::Key::Space), 6.0f);
-        camera.position = world.get<projv::Transform>(camera.walker).position + vec3(0, EYE_HEIGHT, 0);
+        // The camera follows in PostUpdate (followWalker), once physics has placed the character for
+        // this frame.
     } else {
         const float speed = 20.0f * time.unscaledDelta;
         if (input.down(projv::Key::W)) camera.position += flat * speed;
@@ -632,6 +759,32 @@ void controls(projv::Application& app) {
         if (input.down(projv::Key::E)) camera.position.y += speed;
         if (input.down(projv::Key::Q)) camera.position.y -= speed;
     }
+}
+
+// PostUpdate, after physics has written this frame's interpolated pose: the camera is the walker's
+// eyes. Read in Update instead, it would be last frame's pose, a frame behind the world it is
+// drawn with -- the lag that made walking feel loose.
+// In demo 7 the same goes for the chase camera: behind the car and above it, looking at it, eased
+// so it swings round behind rather than snapping.
+void followCamera(projv::Application& app) {
+    World& world = app.world;
+    auto& camera = world.ctx().get<Camera>();
+    auto& demos = world.ctx().get<Demos>();
+    if (camera.walker != projv::NullEntity && world.valid(camera.walker)) {
+        camera.position = world.get<projv::Transform>(camera.walker).position + vec3(0, EYE_HEIGHT, 0);
+        return;
+    }
+    if (demos.current != 7 || !world.valid(demos.car.chassis) || !world.all_of<projv::Transform>(demos.car.chassis)) return;
+    const projv::Transform& t = world.get<projv::Transform>(demos.car.chassis);
+    vec3 heading = t.rotation * vec3(0, 0, 1);
+    heading.y = 0.0f;
+    heading = glm::length(heading) > 1e-3f ? glm::normalize(heading) : vec3(0, 0, 1);
+    vec3 wanted = t.position - heading * 9.0f + vec3(0, 3.5f, 0);
+    float ease = 1.0f - std::exp(-6.0f * app.time().unscaledDelta);
+    camera.position = glm::mix(camera.position, wanted, ease);
+    vec3 look = glm::normalize(t.position + vec3(0, 1, 0) - camera.position);
+    camera.yaw = std::atan2(look.z, look.x);
+    camera.pitch = std::asin(std::clamp(look.y, -1.0f, 1.0f));
 }
 
 void titleBar(projv::Application& app) {
@@ -689,8 +842,8 @@ void selfTest(projv::Application& app) {
     static bool acted = false;
     // DEMOS_CAPTURE=<prefix>: a frame of each demo, mid-action, as <prefix>-<demo>.tga.
     static int captured = 0;
-    const float captureAt[7] = {0, 5.5f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f};
-    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= 6 && captured < stage &&
+    const float captureAt[8] = {0, 5.5f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f, 6.5f};
+    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= 7 && captured < stage &&
         t > captureAt[stage]) {
         bgfx::requestScreenShot(BGFX_INVALID_HANDLE, (std::string(prefix) + "-" + std::to_string(stage)).c_str());
         captured = stage;
@@ -780,9 +933,52 @@ void selfTest(projv::Application& app) {
         runtime::JointState hinge = runtime::jointState(world, demos.doorHinge);
         check(*test, hinge.alive && std::abs(hinge.position) < 1.9f + 0.06f,
               fmt::format("the door swings within its 1.9 rad limits: at {:.2f}", hinge.position));
-        stage = 7;
+        startDemo(world, 7); stage = 7;
+        return;
     }
     if (stage == 7) {
+        // Drive: full throttle for four seconds, then a right turn, then the brakes.
+        static float heading0 = 0.0f, speedAtFive = 0.0f;
+        static bool steered = false;
+        auto speed = [&] { return glm::length(runtime::bodyPose(world, demos.car.chassis).linearVelocity); };
+        auto heading = [&] { vec3 f = carForward(world, demos); return std::atan2(f.x, f.z); };
+        if (t < 1.0f) driveCar(world, demos, 0, 0, false);
+        else if (t < 5.0f) driveCar(world, demos, 1, 0, false);
+        else if (t < 8.0f) driveCar(world, demos, 0.5f, 1, false);
+        else driveCar(world, demos, 0, 0, true);
+        if (t > 1.0f && t < 1.1f) heading0 = heading();
+        if (t > 4.9f && speedAtFive == 0.0f) {
+            speedAtFive = speed();
+            vec3 up = runtime::bodyPose(world, demos.car.chassis).rotation * vec3(0, 1, 0);
+            vec3 at = runtime::bodyPose(world, demos.car.chassis).position;
+            check(*test, speedAtFive > 8.0f && up.y > 0.9f && at.z > -10.0f,
+                  fmt::format("the car drives: {:.1f} m/s after 4 s, {:.0f} m on, upright ({:.2f})", speedAtFive, at.z + 30.0f, up.y));
+        }
+        if (t > 8.0f && !steered) {
+            steered = true;
+            float turned = heading() - heading0;
+            while (turned > 3.14159f) turned -= 6.28318f;
+            while (turned < -3.14159f) turned += 6.28318f;
+            check(*test, turned > 0.8f, fmt::format("it steers: turned {:.0f} degrees right in 3 s", turned * 57.3f));
+        }
+        if (t > 11.0f) {
+            check(*test, speed() < 1.0f, fmt::format("it brakes: {:.2f} m/s after 3 s of braking", speed()));
+            // Every wheel still where it belongs on the chassis, and no joint gone.
+            runtime::BodyState c = runtime::bodyPose(world, demos.car.chassis);
+            float worst = 0.0f;
+            for (int i = 0; i < 4; i++) {
+                vec3 local = glm::conjugate(c.rotation) * (runtime::bodyPose(world, demos.car.wheels[i]).position - c.position);
+                worst = std::max(worst, glm::length(local - demos.car.mounts[i]));
+            }
+            int alive = 0;
+            for (int i = 0; i < 4; i++) alive += runtime::jointState(world, demos.car.axles[i]).alive;
+            for (int i = 0; i < 2; i++) alive += runtime::jointState(world, demos.car.steering[i]).alive;
+            check(*test, alive == 6 && worst < 0.1f,
+                  fmt::format("the wheels stayed on: {} of 6 joints, worst {:.3f} m from its mount", alive, worst));
+            stage = 8;
+        }
+    }
+    if (stage == 8) {
         const auto& stats = runtime::physicsWorld(world).stats();
         check(*test, stats.stepsWithDroppedContacts == 0 && stats.nonFiniteRecoveries == 0,
               fmt::format("{} steps, {} with dropped contacts, {} non-finite recoveries", stats.steps,
@@ -845,6 +1041,13 @@ void startup(projv::Application& app) {
     demos.link = prototype(scene, "link", ivec3(2, 6, 2), 0.125f, [](int, int y, int) {
         return y % 2 ? rgb(0.5f, 0.52f, 0.56f) : rgb(0.36f, 0.38f, 0.42f);
     });
+    demos.wheel = prototype(scene, "wheel", ivec3(3, 7, 7), 0.125f, [](int x, int y, int z) -> uint32_t {
+        vec2 d(float(y) + 0.5f - 3.5f, float(z) + 0.5f - 3.5f);
+        float r = glm::length(d);
+        if (r > 3.5f) return 0u;
+        return r < 1.6f ? rgb(0.75f, 0.75f, 0.78f) : (x == 1 ? rgb(0.12f, 0.12f, 0.13f) : rgb(0.18f, 0.18f, 0.2f));
+    });
+    demos.knuckle = prototype(scene, "knuckle", ivec3(2), 0.125f, [](int, int, int) { return rgb(0.3f, 0.3f, 0.32f); });
     const int diameters[5] = {2, 3, 4, 6, 8};   // 0.25 m to 1 m, in 12.5 cm voxels
     for (int i = 0; i < 5; i++) {
         int n = diameters[i];
@@ -857,7 +1060,7 @@ void startup(projv::Application& app) {
         });
     }
     for (ComponentHandle p : {demos.crate, demos.brick, demos.beamProto, demos.balls[0], demos.balls[1], demos.balls[2],
-                              demos.balls[3], demos.balls[4], demos.plank, demos.link})
+                              demos.balls[3], demos.balls[4], demos.plank, demos.link, demos.wheel, demos.knuckle})
         utils::setComponentTransform(scene, p, vec3(0, -1000, 0), quat(1, 0, 0, 0), 1.0f);
 
     // A blast cuts bricks in pieces; each piece is counted. Something that leaves the world from
@@ -886,6 +1089,7 @@ void startup(projv::Application& app) {
         projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader));
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
+    demos.unattended = unattended;
     if (unattended) world.ctx().emplace<SelfTest>();
     else startDemo(world, 1);
 }
@@ -918,6 +1122,7 @@ int main() {
     app.addSystem(projv::Stage::Update,      "beam",      moveBeam);
     app.addSystem(projv::Stage::Update,      "self-test", selfTest);
     app.addSystem(projv::Stage::Update,      "title bar", titleBar);
+    app.addSystem(projv::Stage::PostUpdate,  "follow camera", followCamera, {.after = "physics: present"});
     app.addSystem(projv::Stage::Render,      "render",    render);
     app.addSystem(projv::Stage::Shutdown,    "shutdown",  shutdown);
     app.run();
