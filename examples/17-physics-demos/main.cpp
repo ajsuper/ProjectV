@@ -19,9 +19,12 @@
 //   7  Car            a car made of joints you drive: W/S throttle and reverse, A/D steer, Space
 //                     brake. Rear wheels on driven hinges, front wheels on knuckles steered by servo
 //                     hinges. Ramps, a jump, crates and balls to drive into.
+//   8  Gear winch     three voxel gears turning each other by their teeth -- only the first has a
+//                     motor -- the last with a drum that winds up a chain lifting a weight.
+//                     Space: reverse.
 //
 // Controls
-//   1-7        pick a demo (it is rebuilt from scratch)      R  restart the demo
+//   1-8        pick a demo (it is rebuilt from scratch)      R  restart the demo
 //   Space      the demo's action                             V  walk (a character) / fly
 //   mouse look, W/A/S/D fly, Q/E down/up                     T  slow motion   P  pause
 //   Esc        release the cursor (a click recaptures it)
@@ -149,7 +152,7 @@ struct Camera {
 struct Demos {
     int current = 0;                       // 1..4
     // Prototypes, made once at startup and never drawn: every crate, brick and ball is a copy.
-    ComponentHandle crate, brick, beamProto, balls[5], plank, link, wheel, knuckle;
+    ComponentHandle crate, brick, beamProto, balls[5], plank, link, wheel, knuckle, chainLink;
     // Demo state.
     float clock = 0.0f;                    // seconds of simulation since the demo began
     float fireTimer = 0.0f;
@@ -175,6 +178,15 @@ struct Demos {
         float throttle = 0.0f, steer = 0.0f;
         bool brake = false, driven = false;
     } car;
+    // Demo 8: the gear winch.
+    struct Winch {
+        Entity gears[2]{};                 // the driver, and the winch gear with its drum
+        Entity hinges[2]{};
+        Entity weight = projv::NullEntity;
+        std::vector<Entity> chain;         // the links' joints, drum to weight
+        float speed = -1.0f;               // the driver's motor, rad/s: clockwise winds the weight up
+        float turned[2]{};                 // each gear's rotation so far, rad
+    } winch;
     vec3 blastAt{0.0f};
     int blastKickIn = 0;                   // fixed steps until a detonation's kick (see detonate)
     int pieces = 0;                        // bodies cut off by blasts (BodySplit)
@@ -195,6 +207,7 @@ const char* demoName(int n) {
         case 5: return "Titans  (Space: again)";
         case 6: return "Joints  (Space: a crate on the bridge, a ball at the door)";
         case 7: return "Car  (W/S drive, A/D steer, Space brake)";
+        case 8: return "Gear winch  (Space: reverse)";
     }
     return "";
 }
@@ -216,6 +229,7 @@ void clearDemo(World& world) {
     demos.wreckingBall = demos.rope = demos.weight = projv::NullEntity;
     demos.dropTimer = 0.0f;
     demos.car = Demos::Car{};
+    demos.winch = Demos::Winch{};
     auto& camera = world.ctx().get<Camera>();
     if (camera.walker != projv::NullEntity) { world.destroy(camera.walker); camera.walker = projv::NullEntity; }
     demos.beam = projv::NullEntity;
@@ -567,6 +581,113 @@ void buildCarPark(World& world, Demos& demos, Camera& camera) {
     camera.position = vec3(0, 4, -40);
 }
 
+// ---- Demo 8: a gear train winding a winch --------------------------------------------------------
+
+// Cross gears. A gear here is one or more crosses -- two straight bars through its middle, four
+// pegs -- each laid along the voxel grid's own axes, so its faces are flat: it collides as two exact
+// boxes, with no stair-steps for another gear to catch on. (Gears with slanted teeth or radial pegs
+// drawn in voxels jammed: their stair-stepped edges caught at every handover, at any resolution we
+// tried.) More pegs come from more crosses in the same body, each turned and drawn in its own grid:
+// two crosses 45 degrees apart are eight straight pegs.
+constexpr float GEAR_VOXEL = 0.05f;
+constexpr float GEAR_THICKNESS = 0.2f;
+constexpr float PEG_WIDTH = 0.2f;
+
+// One cross, inside the gear's asset node: bars `reach` from the centre each way, turned `angle`
+// about the axle.
+void addCross(projv::Scene& scene, ComponentHandle node, float reach, float angle, uint32_t colour) {
+    const int n = 2 * int(std::round(reach / GEAR_VOXEL));
+    const int w = int(std::round(PEG_WIDTH / GEAR_VOXEL));
+    const int t = int(std::round(GEAR_THICKNESS / GEAR_VOXEL));
+    const int low = n / 2 - w / 2, high = low + w;   // the bars' voxels across the middle
+    ComponentHandle h = voxels(scene, "cross", ivec3(n, n, t), GEAR_VOXEL, vec3(0), [=](int x, int y, int) -> uint32_t {
+        bool across = y >= low && y < high, up = x >= low && x < high;
+        if (!across && !up) return 0u;
+        bool tip = std::abs(x - n / 2) > n / 2 - 3 || std::abs(y - n / 2) > n / 2 - 3;
+        return tip ? rgb(0.95f, 0.93f, 0.88f) : colour;
+    }, node);
+    quat turn = glm::angleAxis(angle, vec3(0, 0, 1));
+    utils::setComponentTransform(scene, h, turn * vec3(-reach, -reach, -0.5f * GEAR_THICKNESS), turn, 1.0f);
+}
+
+// A gear: an asset node at `centre`, its crosses, and optionally a drum behind them (from the back of
+// the gear 0.6 m along the axle) for a chain to wind onto.
+Entity crossGear(World& world, vec3 centre, float reach, std::vector<float> angles, uint32_t colour, float drum) {
+    auto& scene = world.ctx().get<projv::Scene>();
+    ComponentHandle node = utils::addComponent(scene, projv::ComponentKind::Asset, "gear", projv::INVALID_COMPONENT_HANDLE, 4, 1.0f);
+    for (float a : angles) addCross(scene, node, reach, a, colour);
+    if (drum > 0.0f) {
+        int n = 2 * int(std::ceil(drum / GEAR_VOXEL)), length = int(std::round(0.6f / GEAR_VOXEL));
+        voxels(scene, "drum", ivec3(n, n, length), GEAR_VOXEL, vec3(-0.5f * float(n) * GEAR_VOXEL, -0.5f * float(n) * GEAR_VOXEL, 0.5f * GEAR_THICKNESS),
+               [n, drum](int x, int y, int z) -> uint32_t {
+                   vec2 d = (vec2(float(x), float(y)) + vec2(0.5f) - vec2(float(n) * 0.5f)) * GEAR_VOXEL;
+                   if (glm::length(d) > drum) return 0u;
+                   return (z / 2) % 2 ? rgb(0.45f, 0.3f, 0.15f) : rgb(0.55f, 0.38f, 0.2f);
+               }, node);
+    }
+    utils::setComponentTransform(scene, node, centre, quat(1, 0, 0, 0), 1.0f);
+    Entity e = runtime::spawnComponent(world, node, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+    projv::RigidBody wheel;
+    wheel.density = 300.0f;   // wood
+    wheel.friction = 0.2f;
+    world.emplace<projv::RigidBody>(e, wheel);
+    runtime::assignNetId(world, e);
+    return e;
+}
+
+void buildWinch(World& world, Demos& demos, Camera& camera) {
+    Demos::Winch& w = demos.winch;
+    const float y = 6.0f;
+    // The driver: one cross, four pegs, on a motor. The winch gear: two crosses 45 degrees apart,
+    // eight pegs, twice the pitch radius (0.6 m and 1.2 m), so it turns at half the driver's speed.
+    // Pegs reach 0.25 m past the pitch circle. The winch gear starts turned 22.5 degrees, so the
+    // driver's peg pointing at it sits between two of its pegs, with 17 cm to spare either side.
+    const float driverX = 0.0f, winchX = 1.8f, drumRadius = 0.35f;
+    w.gears[0] = crossGear(world, vec3(driverX, y, 0), 0.85f, {0.0f}, rgb(0.85f, 0.65f, 0.15f), 0.0f);
+    w.gears[1] = crossGear(world, vec3(winchX, y, 0), 1.45f, {0.3927f, 1.1781f}, rgb(0.75f, 0.35f, 0.2f), drumRadius);
+    for (int i = 0; i < 2; i++) {
+        projv::Joint axle;
+        axle.type = runtime::JointType::Hinge;
+        axle.anchor = vec3(i == 0 ? driverX : winchX, y, 0);
+        axle.axis = vec3(0, 0, 1);
+        if (i == 0) {
+            axle.motor = true;
+            axle.motorVelocity = w.speed;
+            axle.motorLimit = 3000.0f;
+        }
+        w.hinges[i] = joint(world, demos, w.gears[i], projv::NullEntity, axle);
+    }
+    // A wall behind the whole works (behind the drum, which is behind the gears), to see them against.
+    scenery(world, demos, ivec3(80, 40, 2), 0.125f, vec3(-1.5f, 3.5f, 1.3f), [](int x, int yy, int) {
+        return (x / 8 + yy / 8) % 2 ? rgb(0.24f, 0.25f, 0.28f) : rgb(0.21f, 0.22f, 0.25f);
+    });
+
+    // The chain: 24 links of 0.2 m from the right of the drum, down to a 20 kg weight. Each link to
+    // the next by a ball joint; the first to the drum's rim. As the drum turns the links wrap onto it.
+    const float drumZ = GEAR_THICKNESS * 0.5f + 0.3f + 0.05f;   // the middle of the drum's length
+    const vec3 top(winchX + drumRadius + 0.06f, y, drumZ);
+    Entity previous = w.gears[1];
+    for (int i = 0; i < 24; i++) {
+        vec3 centre = top - vec3(0, 0.1f + 0.2f * float(i), 0);
+        Thing link = place(world, demos.chainLink, centre, quat(1, 0, 0, 0), body(0.8f));
+        projv::Joint j;
+        j.type = runtime::JointType::Point;
+        j.anchor = centre + vec3(0, 0.1f, 0);
+        w.chain.push_back(joint(world, demos, link.entity, previous, j));
+        previous = link.entity;
+    }
+    Thing weight = place(world, demos.crate, top - vec3(0, 4.8f + 0.5f, 0), quat(1, 0, 0, 0), body(20.0f));
+    w.weight = weight.entity;
+    projv::Joint hook;
+    hook.type = runtime::JointType::Point;
+    hook.anchor = top - vec3(0, 4.8f, 0);
+    w.chain.push_back(joint(world, demos, weight.entity, previous, hook));
+
+    camera.position = vec3(0.9f, 4.5f, -7.5f);
+    camera.yaw = 1.5708f;
+    camera.pitch = 0.0f;
+}
+
 void startDemo(World& world, int n) {
     auto& demos = world.ctx().get<Demos>();
     auto& camera = world.ctx().get<Camera>();
@@ -580,6 +701,7 @@ void startDemo(World& world, int n) {
         case 5: buildTitans(world, demos, camera); break;
         case 6: buildJoints(world, demos, camera); break;
         case 7: buildCarPark(world, demos, camera); break;
+        case 8: buildWinch(world, demos, camera); break;
     }
     projv::core::info("Demo {}: {}", n, demoName(n));
 }
@@ -629,6 +751,10 @@ void act(World& world, Demos& demos, const Camera& camera) {
         case 2: detonate(world, demos); break;
         case 3: fireBall(world, demos, 4, vec3(0, 3, -6), vec3(0, 2, 28)); break;
         case 5: startDemo(world, 5); break;
+        case 8:
+            demos.winch.speed = -demos.winch.speed;
+            runtime::setJointMotor(world, demos.winch.hinges[0], true, demos.winch.speed);
+            break;
         case 6:
             place(world, demos.crate, vec3(-12, 7, uniform(demos, -2, 2)), quat(1, 0, 0, 0), body(60.0f));
             fireBall(world, demos, 3, vec3(uniform(demos, 8.5f, 9.5f), 1.5f, -9), vec3(0, 1.5f, 22), 2000.0f);
@@ -648,6 +774,9 @@ void demoTick(projv::Application& app) {
     const float dt = app.time().fixedDelta;
     demos.clock += dt;
     if (demos.blastKickIn > 0 && --demos.blastKickIn == 0) blastKick(world, demos);
+    if (demos.current == 8)
+        for (int i = 0; i < 2; i++)
+            if (world.valid(demos.winch.gears[i])) demos.winch.turned[i] += runtime::bodyPose(world, demos.winch.gears[i]).angularVelocity.z * dt;
 
     if (demos.current == 6) {
         // A crate dropped onto the windmill's blades every 1.5 s, a ball at the door every 2.5 s.
@@ -714,7 +843,7 @@ void controls(projv::Application& app) {
         camera.pitch = std::clamp(camera.pitch - input.cursorDelta.y * 0.0025f, -1.5f, 1.5f);
     }
 
-    for (int n = 1; n <= 7; n++)
+    for (int n = 1; n <= 8; n++)
         if (input.pressed(projv::Key(int(projv::Key::Num0) + n))) startDemo(world, n);
     if (input.pressed(projv::Key::R)) startDemo(world, demos.current);
     if (input.pressed(projv::Key::Space) && camera.walker == projv::NullEntity && demos.current != 7) act(world, demos, camera);
@@ -807,6 +936,8 @@ void titleBar(projv::Application& app) {
 
 struct SelfTest {
     int frame = 0;
+    // DEMOS_ONLY=8 or DEMOS_ONLY=2,8: the demos to run; all of them when empty.
+    std::vector<int> only;
     bool pass = true;
     std::vector<vec3> start;     // where the watched bodies began
 };
@@ -842,13 +973,24 @@ void selfTest(projv::Application& app) {
     static bool acted = false;
     // DEMOS_CAPTURE=<prefix>: a frame of each demo, mid-action, as <prefix>-<demo>.tga.
     static int captured = 0;
-    const float captureAt[8] = {0, 5.5f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f, 6.5f};
-    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= 7 && captured < stage &&
+    const float captureAt[9] = {0, 5.5f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f, 6.5f, 12.0f};
+    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= 8 && captured < stage &&
         t > captureAt[stage]) {
         bgfx::requestScreenShot(BGFX_INVALID_HANDLE, (std::string(prefix) + "-" + std::to_string(stage)).c_str());
         captured = stage;
     }
-    if (f == 0) { startDemo(world, 1); stage = 1; acted = false; return; }
+    // On to the first selected demo from `next`, or to the session-wide checks after the last.
+    auto go = [&](int next) {
+        while (next <= 8 && !test->only.empty() &&
+               std::find(test->only.begin(), test->only.end(), next) == test->only.end())
+            next++;
+        acted = false;
+        if (next > 8) { stage = 9; return; }
+        startDemo(world, next);
+        stage = next;
+        test->start = watchedPositions();
+    };
+    if (f == 0) { go(1); return; }
     if (stage == 1 && t > 6.0f && !acted) {
         // The pyramid has settled: the top crate is where it was built, ten crates up.
         vec3 top = runtime::bodyPose(world, demos.watched[0]).position;
@@ -862,21 +1004,21 @@ void selfTest(projv::Application& app) {
     if (stage == 1 && t > 10.0f) {
         vec3 top = runtime::bodyPose(world, demos.watched[0]).position;
         check(*test, top.y < 9.0f, fmt::format("the ball brought the pyramid down: top crate at {:.2f} m", top.y));
-        startDemo(world, 2); stage = 2; acted = false; demos.pieces = 0;
+        go(2); acted = false; demos.pieces = 0;
         return;   // `t` above is the last demo's clock
     }
     if (stage == 2 && t > 2.0f && !acted) { act(world, demos, camera); acted = true; }
     if (stage == 2 && t > 7.0f) {
         size_t bodies = world.view<projv::RigidBody>().size();
         check(*test, demos.pieces >= 10, fmt::format("the blast split bricks: {} fragments, {} bodies", demos.pieces, bodies));
-        startDemo(world, 3); stage = 3;
+        go(3);
         test->start = watchedPositions();
         return;
     }
     if (stage == 3 && t > 12.0f) {
         int knocked = moved(0.5f);
         check(*test, knocked >= 10, fmt::format("the barrage knocked {} of 48 crates out of the wall", knocked));
-        startDemo(world, 4); stage = 4;
+        go(4);
         test->start = watchedPositions();
         return;
     }
@@ -885,7 +1027,7 @@ void selfTest(projv::Application& app) {
         vec3 beam = runtime::bodyPose(world, demos.beam).position;
         check(*test, swept >= 25, fmt::format("the sweeper moved {} of 70 objects", swept));
         check(*test, std::abs(beam.y - 0.6f) < 0.01f, "the beam stayed at its height (kinematic: pushed by nothing)");
-        startDemo(world, 5); stage = 5;
+        go(5);
         test->start = watchedPositions();
         return;
     }
@@ -906,7 +1048,7 @@ void selfTest(projv::Application& app) {
         check(*test, under == 0 && boulder.position.y > 5.0f,
               fmt::format("no crate pushed into the floor ({}), the boulder on it at {:.1f} m", under, boulder.position.y));
         check(*test, moved(1.0f) >= 10, fmt::format("the impact scattered {} crates", moved(1.0f)));
-        startDemo(world, 6); stage = 6;
+        go(6);
         return;
     }
     if (stage == 6 && t > 4.0f && !acted) { act(world, demos, camera); act(world, demos, camera); acted = true; }
@@ -933,7 +1075,7 @@ void selfTest(projv::Application& app) {
         runtime::JointState hinge = runtime::jointState(world, demos.doorHinge);
         check(*test, hinge.alive && std::abs(hinge.position) < 1.9f + 0.06f,
               fmt::format("the door swings within its 1.9 rad limits: at {:.2f}", hinge.position));
-        startDemo(world, 7); stage = 7;
+        go(7);
         return;
     }
     if (stage == 7) {
@@ -975,10 +1117,34 @@ void selfTest(projv::Application& app) {
             for (int i = 0; i < 2; i++) alive += runtime::jointState(world, demos.car.steering[i]).alive;
             check(*test, alive == 6 && worst < 0.1f,
                   fmt::format("the wheels stayed on: {} of 6 joints, worst {:.3f} m from its mount", alive, worst));
-            stage = 8;
+            go(8);
+            test->start.clear();
+            return;
         }
     }
     if (stage == 8) {
+        static float startHeight = 0.0f;
+        if (t > 1.0f && startHeight == 0.0f) {
+            startHeight = runtime::bodyPose(world, demos.winch.weight).position.y;
+            for (float& a : demos.winch.turned) a = 0.0f;
+        }
+        if (t > 13.0f) {
+            const float* turned = demos.winch.turned;
+            // Turned by its pegs alone: the winch gear the other way, at half the driver's speed.
+            float ratio = -turned[1] / turned[0];
+            check(*test, -turned[0] > 9.0f, fmt::format("the motor turned the driver {:.1f} rad in 12 s", -turned[0]));
+            check(*test, std::abs(ratio - 0.5f) < 0.04f,
+                  fmt::format("the driver turns the winch gear at their peg ratio: {:.3f} (0.500)", ratio));
+            float risen = runtime::bodyPose(world, demos.winch.weight).position.y - startHeight;
+            check(*test, risen > 1.0f, fmt::format("the winch lifted the weight {:.2f} m", risen));
+            projv::core::info("DEMOTEST: winch physics step {:.2f} ms", runtime::physicsWorld(world).stats().lastStepMilliseconds);
+            int alive = 0;
+            for (Entity j : demos.winch.chain) alive += runtime::jointState(world, j).alive;
+            check(*test, alive == int(demos.winch.chain.size()), fmt::format("the chain holds: {} of {} joints", alive, demos.winch.chain.size()));
+            stage = 9;
+        }
+    }
+    if (stage == 9) {
         const auto& stats = runtime::physicsWorld(world).stats();
         check(*test, stats.stepsWithDroppedContacts == 0 && stats.nonFiniteRecoveries == 0,
               fmt::format("{} steps, {} with dropped contacts, {} non-finite recoveries", stats.steps,
@@ -1048,6 +1214,9 @@ void startup(projv::Application& app) {
         return r < 1.6f ? rgb(0.75f, 0.75f, 0.78f) : (x == 1 ? rgb(0.12f, 0.12f, 0.13f) : rgb(0.18f, 0.18f, 0.2f));
     });
     demos.knuckle = prototype(scene, "knuckle", ivec3(2), 0.125f, [](int, int, int) { return rgb(0.3f, 0.3f, 0.32f); });
+    demos.chainLink = prototype(scene, "chain link", ivec3(2, 4, 2), 0.05f, [](int, int y, int) {
+        return y % 2 ? rgb(0.62f, 0.64f, 0.68f) : rgb(0.42f, 0.44f, 0.48f);
+    });
     const int diameters[5] = {2, 3, 4, 6, 8};   // 0.25 m to 1 m, in 12.5 cm voxels
     for (int i = 0; i < 5; i++) {
         int n = diameters[i];
@@ -1060,7 +1229,7 @@ void startup(projv::Application& app) {
         });
     }
     for (ComponentHandle p : {demos.crate, demos.brick, demos.beamProto, demos.balls[0], demos.balls[1], demos.balls[2],
-                              demos.balls[3], demos.balls[4], demos.plank, demos.link, demos.wheel, demos.knuckle})
+                              demos.balls[3], demos.balls[4], demos.plank, demos.link, demos.wheel, demos.knuckle, demos.chainLink})
         utils::setComponentTransform(scene, p, vec3(0, -1000, 0), quat(1, 0, 0, 0), 1.0f);
 
     // A blast cuts bricks in pieces; each piece is counted. Something that leaves the world from
@@ -1090,7 +1259,12 @@ void startup(projv::Application& app) {
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
     demos.unattended = unattended;
-    if (unattended) world.ctx().emplace<SelfTest>();
+    if (unattended) {
+        SelfTest& test = world.ctx().emplace<SelfTest>();
+        if (const char* only = std::getenv("DEMOS_ONLY"))
+            for (const char* c = only; *c; c++)
+                if (*c >= '1' && *c <= '8') test.only.push_back(*c - '0');
+    }
     else startDemo(world, 1);
 }
 
