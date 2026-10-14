@@ -43,8 +43,16 @@
 //   Space      the demo's action                             V  walk (a character) / fly
 //   mouse look, W/A/S/D fly, Q/E down/up                     T  slow motion   P  pause
 //   Esc        release the cursor (a click recaptures it)
+//   H  sun shadows on/off   O  ambient occlusion on/off   U  upscaler off (the raw quarter-res frame)
+//   G  where the upscaler rebuilt the pixel (green) or fell back to filtering (red)
+//
+// The renderer (demoRenderer/) traces a quarter of the window's pixels -- half its width and height
+// -- with a sun shadow ray each, adds screen-space AO, and rebuilds the frame at full resolution voxel
+// by voxel, antialiased (reconstruct.frag).
 //
 //   DEMOS_SELFTEST=1 ./physics_demos    runs every demo unattended and checks it
+//   DEMOS_BENCH=10 ./physics_demos      times the GPU on demo 10 with the shadow ray on and off, interleaved
+//   DEMOS_LOOK=ho                        shadows (h) and AO (o) off; u: upscaler off; g: its debug view
 //   (DEMOS_ONLY=9 or DEMOS_ONLY=2,10: just those)
 
 #include <algorithm>
@@ -160,6 +168,11 @@ projv::RigidBody ballBody(float density, float restitution) {
 // =========================================================================================
 // State
 // =========================================================================================
+
+// What the renderer draws (renderParams): sun shadows, AO, the upscaler, its debug view.
+struct Look {
+    bool shadows = true, ambientOcclusion = true, upscale = true, upscaleDebug = false;
+};
 
 struct Camera {
     vec3 position{0.0f, 6.0f, -22.0f};
@@ -295,6 +308,8 @@ void clearDemo(World& world) {
     demos.dropTimer = 0.0f;
     demos.car = Demos::Car{};
     demos.winch = Demos::Winch{};
+    // The sling's links are drawn only -- no RigidBody -- so the sweep above misses them.
+    for (Entity e : demos.trebuchet.parts) if (world.valid(e)) world.destroy(e);
     demos.trebuchet = Demos::Trebuchet{};
     demos.slide = Demos::Slide{};
     auto& camera = world.ctx().get<Camera>();
@@ -1450,6 +1465,11 @@ void controls(projv::Application& app) {
     if (input.pressed(projv::Key::Space) && camera.walker == projv::NullEntity && demos.current != 7) act(world, demos, camera);
     if (input.pressed(projv::Key::F) && demos.current == 1) launchOrb(world, demos, camera);
     if (input.pressed(projv::Key::T)) time.scale = time.scale == 1.0f ? 0.2f : 1.0f;
+    Look& look = world.ctx().get<Look>();
+    if (input.pressed(projv::Key::H)) look.shadows = !look.shadows;
+    if (input.pressed(projv::Key::O)) look.ambientOcclusion = !look.ambientOcclusion;
+    if (input.pressed(projv::Key::U)) look.upscale = !look.upscale;
+    if (input.pressed(projv::Key::G)) look.upscaleDebug = !look.upscaleDebug;
     if (input.pressed(projv::Key::P)) time.scale = time.scale == 0.0f ? 1.0f : 0.0f;
 
     const vec3 flat{std::cos(camera.yaw), 0.0f, std::sin(camera.yaw)};
@@ -1548,6 +1568,58 @@ void titleBar(projv::Application& app) {
 // =========================================================================================
 // Self-test: DEMOS_SELFTEST=1 runs each demo for a while and checks what it should have done
 // =========================================================================================
+
+// =========================================================================================
+// Bench: DEMOS_BENCH=<demo> times the GPU with the shadow ray on and off, interleaved
+// =========================================================================================
+
+// Alternates the shadow ray every PHASE frames after a warm-up, skipping the first few frames after
+// each switch, so both configurations see the same moments of the demo and the same clocks. Reports
+// the mean GPU frame and each pass (bgfx views, in render.json order), then quits.
+struct Bench {
+    static constexpr int WARMUP = 120, PHASE = 60, SETTLE = 6, PHASES = 16;
+    int frame = 0;
+    double frameMs[2] = {}, passMs[2][8] = {};
+    int samples[2] = {};
+};
+
+void bench(projv::Application& app) {
+    World& world = app.world;
+    Bench* b = world.ctx().find<Bench>();
+    if (!b) return;
+    Look& look = world.ctx().get<Look>();
+    const int f = b->frame++;
+    if (f < Bench::WARMUP) return;
+    const int at = f - Bench::WARMUP, phase = at / Bench::PHASE;
+    if (phase >= Bench::PHASES) {
+        projv::core::vec2 size = world.ctx().get<projv::graphics::RenderInstance>().getWindowResolution();
+        projv::core::info("BENCH demo {} resolution={}x{} (rendered at {}x{}), {} frames each", world.ctx().get<Demos>().current,
+                          int(size.x), int(size.y), int(size.x / 2), int(size.y / 2), b->samples[0]);
+        const char* passes[5] = {"gbuffer", "ssao", "shade", "reconstruct", "display"};
+        for (int on = 1; on >= 0; on--) {
+            double n = std::max(b->samples[on], 1);
+            std::string line = fmt::format("BENCH   shadow ray {}: gpu frame {:.3f} ms |", on ? "on " : "off", b->frameMs[on] / n);
+            for (int v = 0; v < 5; v++) line += fmt::format(" {} {:.3f}", passes[v], b->passMs[on][v] / n);
+            projv::core::info("{}", line);
+        }
+        projv::core::info("BENCH   the shadow ray costs {:.3f} ms",
+                          b->frameMs[1] / std::max(b->samples[1], 1) - b->frameMs[0] / std::max(b->samples[0], 1));
+        app.closeRequested = true;
+        return;
+    }
+    const int on = phase % 2 == 0 ? 1 : 0;
+    look.shadows = on;
+    // bgfx's stats are the frame before this one's: only count frames well inside a phase.
+    if (at % Bench::PHASE < Bench::SETTLE) return;
+    const bgfx::Stats* stats = bgfx::getStats();
+    if (!stats || stats->gpuTimerFreq <= 0) return;
+    const double toMs = 1000.0 / double(stats->gpuTimerFreq);
+    b->frameMs[on] += double(stats->gpuTimeEnd - stats->gpuTimeBegin) * toMs;
+    for (uint16_t v = 0; v < stats->numViews; v++)
+        if (stats->viewStats[v].view < 8)
+            b->passMs[on][stats->viewStats[v].view] += double(stats->viewStats[v].gpuTimeEnd - stats->viewStats[v].gpuTimeBegin) * toMs;
+    b->samples[on]++;
+}
 
 struct SelfTest {
     int frame = 0;
@@ -1865,7 +1937,8 @@ void selfTest(projv::Application& app) {
 void startup(projv::Application& app) {
     World& world = app.world;
     const fs::path here = projv::core::executableDirectory();
-    const bool unattended = std::getenv("DEMOS_SELFTEST") != nullptr;
+    const char* benchDemo = std::getenv("DEMOS_BENCH");
+    const bool unattended = std::getenv("DEMOS_SELFTEST") != nullptr || benchDemo;
 
     auto& renderInstance = world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1600, 900, "ProjectV Physics Demos");
@@ -1873,13 +1946,23 @@ void startup(projv::Application& app) {
     projv::graphics::setCursorCaptured(app, renderInstance, !unattended);
 
     world.ctx().emplace<Camera>();
+    Look& look = world.ctx().emplace<Look>();
+    // DEMOS_LOOK: the same switches as the keys, for unattended runs -- h, o and u turn shadows, AO
+    // and the upscaler off; g turns the upscaler's debug view on.
+    if (const char* switches = std::getenv("DEMOS_LOOK")) {
+        std::string s = switches;
+        look.shadows = s.find('h') == std::string::npos;
+        look.ambientOcclusion = s.find('o') == std::string::npos;
+        look.upscale = s.find('u') == std::string::npos;
+        look.upscaleDebug = s.find('g') != std::string::npos;
+    }
     auto& scene = world.ctx().emplace<projv::Scene>();
     auto& demos = world.ctx().emplace<Demos>();
 
     runtime::installSceneBridge(app);
     runtime::PhysicsConfig physics;
     physics.settings.worldMin = vec3(-1e4f, -30.0f, -1e4f);
-    physics.settings.record = unattended;   // the self-test replays the whole session at the end
+    physics.settings.record = unattended && !benchDemo;   // the self-test replays the whole session at the end
     runtime::installPhysics(app, physics);
     // The physics materials the demos' voxels name (demo 10's ramps and walls).
     if (!runtime::loadPhysicsMaterials(world, (here / "physics_materials.json").string()))
@@ -1967,15 +2050,19 @@ void startup(projv::Application& app) {
     });
 
     projv::RendererSpecification specification =
-        projv::graphics::loadRendererSpecification((here / "sandboxRenderer").string() + "/");
+        projv::graphics::loadRendererSpecification((here / "demoRenderer").string() + "/");
     renderInstance.addRendererSpecification(1, specification);
-    bgfx::ShaderHandle vertexShader = projv::graphics::loadShader((here / "sandboxRenderer/sandboxShaders/vs_quad.bin").string());
+    bgfx::ShaderHandle vertexShader = projv::graphics::loadShader((here / "demoRenderer/shaders/vs_quad.bin").string());
     renderInstance.setActiveRenderer(
         projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader));
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
     demos.unattended = unattended;
-    if (unattended) {
+    if (benchDemo) {
+        world.ctx().emplace<Bench>();
+        bgfx::setDebug(BGFX_DEBUG_PROFILER);
+        startDemo(world, std::clamp(std::atoi(benchDemo), 1, 10));
+    } else if (unattended) {
         SelfTest& test = world.ctx().emplace<SelfTest>();
         if (const char* only = std::getenv("DEMOS_ONLY"))
             for (const char* c = only; *c;) {
@@ -2002,6 +2089,11 @@ void render(projv::Application& app) {
     projv::graphics::setUniformToValue(renderer, "cameraPos", position);
     projv::graphics::setUniformToValue(renderer, "cameraDir", direction);
     projv::graphics::setUniformToValue(renderer, "windowRes", resolution);
+    const Look& look = world.ctx().get<Look>();
+    projv::core::vec4 sun(glm::normalize(vec3(0.35f, 0.85f, 0.4f)), 0.0f);
+    projv::core::vec4 params(look.shadows, look.ambientOcclusion, !look.upscale, look.upscaleDebug);
+    projv::graphics::setUniformToValue(renderer, "sunDir", sun);
+    projv::graphics::setUniformToValue(renderer, "renderParams", params);
     projv::graphics::renderConstructedRenderer(renderInstance, renderer, &gpuData);
 }
 
@@ -2016,6 +2108,7 @@ int main() {
     app.addSystem(projv::Stage::Update,      "controls",  controls);
     app.addSystem(projv::Stage::Update,      "beam",      moveBeam);
     app.addSystem(projv::Stage::Update,      "self-test", selfTest);
+    app.addSystem(projv::Stage::Update,      "bench",     bench);
     app.addSystem(projv::Stage::Update,      "title bar", titleBar);
     app.addSystem(projv::Stage::PostUpdate,  "follow camera", followCamera, {.after = "physics: present"});
     app.addSystem(projv::Stage::Render,      "render",    render);
