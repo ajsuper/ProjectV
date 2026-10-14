@@ -1,6 +1,6 @@
 // ProjectV Physics Demos
 //
-// Nine set pieces for the engine's physics (runtime/physics.h), each built from voxels in code:
+// Ten set pieces for the engine's physics (runtime/physics.h), each built from voxels in code:
 //
 //   1  Pyramid        a stepped pyramid of 1496 crates, sixteen high on a 16x16 base, and beside
 //                     it two stepped towers side by side, thirty crates high on 5x5 bases.
@@ -31,14 +31,21 @@
 //                     the stone shatters into shards that fly. Space: fire; again, a new boulder and
 //                     fire. Left/Right: turn it on its turntable. Up/Down: a higher or flatter
 //                     throw (the angle the sling lets go at).
+//  10  Slide          physics materials (physics_materials.json, beside the binary): three 14 m
+//                     ramps of ice, polished wood and slate, the same crate on each, sliding down
+//                     into walls of rubber, oak and clay. Each ramp is striped in three colours that
+//                     all name one material, so it still collides as one box per grid cell; the
+//                     crates hit their walls at the speeds their ramps allow and bounce back as far
+//                     as their walls allow. Space: again.
 //
 // Controls
-//   1-9        pick a demo (it is rebuilt from scratch)      R  restart the demo
+//   1-9, 0     pick a demo (0 is 10; it is rebuilt)          R  restart the demo
 //   Space      the demo's action                             V  walk (a character) / fly
 //   mouse look, W/A/S/D fly, Q/E down/up                     T  slow motion   P  pause
 //   Esc        release the cursor (a click recaptures it)
 //
 //   DEMOS_SELFTEST=1 ./physics_demos    runs every demo unattended and checks it
+//   (DEMOS_ONLY=9 or DEMOS_ONLY=2,10: just those)
 
 #include <algorithm>
 #include <cmath>
@@ -63,6 +70,7 @@
 #include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
 #include "utils/editing.h"
+#include "utils/material.h"
 #include "utils/scene_query.h"
 
 using projv::ComponentHandle;
@@ -226,6 +234,22 @@ struct Demos {
         float raiseSpeed = -1.0f;          // rad/s at the driver: clockwise winds the weight up
         float turned[2]{};                 // each gear's rotation so far, rad
     } winch;
+    // Demo 10: three ramps of different materials, a crate on each, a wall at each foot.
+    struct Slide {
+        struct Track {
+            const char* ramp = "";         // the ramp's and the wall's physics materials
+            const char* wall = "";
+            Entity rampEntity = projv::NullEntity, wallEntity = projv::NullEntity, crate = projv::NullEntity;
+            vec3 corner{0.0f};             // the ramp's top corner; its local x runs down the slope
+            // Measured along the slope, of the crate's centre: the fastest it went before the wall,
+            // where it struck, and the furthest back up it came after.
+            float fastest = 0.0f, impactSpeed = 0.0f, struckAt = 0.0f, backTo = 0.0f;
+            bool struck = false, reported = false;
+            float struckClock = 0.0f;
+        };
+        Track tracks[3];
+        quat rotation{1, 0, 0, 0};
+    } slide;
     vec3 blastAt{0.0f};
     int blastKickIn = 0;                   // fixed steps until a detonation's kick (see detonate)
     int pieces = 0;                        // bodies cut off by blasts (BodySplit)
@@ -248,6 +272,7 @@ const char* demoName(int n) {
         case 7: return "Car  (W/S drive, A/D steer, Space brake)";
         case 8: return "Gear winch  (Up: raise, Down: let it unwind)";
         case 9: return "Trebuchet  (Space: fire / reload and fire, Left/Right: turn, Up/Down: higher/flatter)";
+        case 10: return "Slide  (ice, polished wood, slate into rubber, oak, clay -- Space: again)";
     }
     return "";
 }
@@ -271,6 +296,7 @@ void clearDemo(World& world) {
     demos.car = Demos::Car{};
     demos.winch = Demos::Winch{};
     demos.trebuchet = Demos::Trebuchet{};
+    demos.slide = Demos::Slide{};
     auto& camera = world.ctx().get<Camera>();
     if (camera.walker != projv::NullEntity) { world.destroy(camera.walker); camera.walker = projv::NullEntity; }
     demos.beam = projv::NullEntity;
@@ -1123,6 +1149,128 @@ void trebuchetTick(World& world, Demos& demos) {
 // angle it had when told to hold, since a motor merely held at zero speed corrects no drift and the
 // weight creeps down; or switched off, so the weight's pull runs the gears backwards. Commands only
 // when the mode changes.
+// ---- Demo 10: the slide ----
+
+constexpr float SLIDE_ANGLE = 0.349f;      // 20 degrees: steeper than ice, wood or slate can hold a crate on
+constexpr int SLIDE_LENGTH = 56;           // the ramps: 56 x 2 x 8 voxels of 25 cm, 14 m x 0.5 m x 2 m
+constexpr int SLIDE_WIDTH = 8;
+constexpr float SLIDE_VOXEL = 0.25f;
+constexpr float SLIDE_CRATE_START = 1.0f;  // the crate's centre, metres down the slope from the top
+// Where the crate's centre is when it touches the wall: the wall's face, 0.5 m short of the
+// ramp's end, less half the crate.
+constexpr float SLIDE_CRATE_AT_WALL = SLIDE_LENGTH * SLIDE_VOXEL - 0.5f - 0.5f;
+
+// The crate's friction is 1.0, so the friction under it is sqrt(1 x the ramp's): 0.1 on ice, 0.24
+// on polished wood, 0.32 on slate -- all under tan 20 degrees (0.36), so each slides, at its own
+// pace. Its restitution is 0, so each bounce is its wall's.
+projv::RigidBody slideCrate() {
+    projv::RigidBody r = body(40.0f, 0.0f, 1.0f);
+    r.linearDamping = 0.0f;   // so it slides as the friction says, and the self-test can check it
+    return r;
+}
+
+// Static voxels turned by `rotation` about their corner at `corner`, every palette entry naming
+// `material`.
+template <typename ColourAt>
+Entity materialScenery(World& world, Demos& demos, ivec3 size, vec3 corner, quat rotation, const char* material,
+                       ColourAt colourAt) {
+    auto& scene = world.ctx().get<projv::Scene>();
+    ComponentHandle h = voxels(scene, material, size, SLIDE_VOXEL, corner, colourAt);
+    utils::setComponentTransform(scene, h, corner, rotation, 1.0f);
+    for (size_t slot = 0; slot < scene.components[h].materialPalette.size(); slot++)
+        utils::setMaterialPhysics(scene, h, uint8_t(slot), material);
+    Entity e = runtime::spawnComponent(world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+    world.emplace<projv::StaticCollider>(e);
+    demos.owned.push_back(e);
+    return e;
+}
+
+void placeSlideCrates(World& world, Demos& demos) {
+    Demos::Slide& slide = demos.slide;
+    for (Demos::Slide::Track& t : slide.tracks) {
+        if (world.valid(t.crate)) world.destroy(t.crate);
+        vec3 centre = t.corner + slide.rotation * vec3(SLIDE_CRATE_START, 0.5f + 0.5f + 0.01f, 0.5f * SLIDE_WIDTH * SLIDE_VOXEL);
+        t.crate = place(world, demos.crate, centre, slide.rotation, slideCrate()).entity;
+        t.fastest = t.impactSpeed = t.struckAt = t.backTo = 0.0f;
+        t.struck = t.reported = false;
+    }
+}
+
+void buildSlide(World& world, Demos& demos, Camera& camera) {
+    Demos::Slide& slide = demos.slide;
+    slide.rotation = glm::angleAxis(-SLIDE_ANGLE, vec3(0, 0, 1));   // local +x runs down the slope
+    const float length = SLIDE_LENGTH * SLIDE_VOXEL;
+    // Each ramp's lowest edge on the floor, its top 4.8 m up on a pillar.
+    const float top = length * std::sin(SLIDE_ANGLE);
+    struct Look { const char* ramp; const char* wall; vec3 a, b, c; vec3 wallColour; };
+    const Look looks[3] = {
+        {"ice", "rubber", {0.78f, 0.9f, 0.98f}, {0.62f, 0.8f, 0.95f}, {0.9f, 0.96f, 1.0f}, {0.85f, 0.2f, 0.15f}},
+        {"polished wood", "oak", {0.72f, 0.5f, 0.28f}, {0.62f, 0.42f, 0.22f}, {0.8f, 0.6f, 0.36f}, {0.5f, 0.33f, 0.16f}},
+        {"slate", "clay", {0.3f, 0.32f, 0.36f}, {0.38f, 0.4f, 0.45f}, {0.24f, 0.26f, 0.3f}, {0.72f, 0.45f, 0.3f}},
+    };
+    for (int i = 0; i < 3; i++) {
+        Demos::Slide::Track& t = slide.tracks[i];
+        const Look& look = looks[i];
+        t.ramp = look.ramp;
+        t.wall = look.wall;
+        t.corner = vec3(-8.0f, top, -5.0f + 4.0f * float(i));
+        // Striped across in three colours -- three palette entries -- all one material: physics sees
+        // one surface, and merges it as one.
+        t.rampEntity = materialScenery(world, demos, ivec3(SLIDE_LENGTH, 2, SLIDE_WIDTH), t.corner, slide.rotation, look.ramp,
+                                       [&look](int x, int, int) {
+                                           int band = (x / 3) % 3;
+                                           vec3 c = band == 0 ? look.a : band == 1 ? look.b : look.c;
+                                           return rgb(c.r, c.g, c.b);
+                                       });
+        // The wall: on the ramp's surface at its foot, square to it, 2 m high and wider than the
+        // ramp.
+        vec3 wallCorner = t.corner + slide.rotation * vec3(length - 0.5f, 0.5f, -0.25f);
+        t.wallEntity = materialScenery(world, demos, ivec3(2, 8, SLIDE_WIDTH + 2), wallCorner, slide.rotation, look.wall,
+                                       [&look](int, int y, int) {
+                                           float shade = y % 2 ? 1.0f : 0.85f;
+                                           return rgb(look.wallColour.r * shade, look.wallColour.g * shade, look.wallColour.b * shade);
+                                       });
+        // A pillar under the top.
+        scenery(world, demos, ivec3(4, int(top / SLIDE_VOXEL) - 2, SLIDE_WIDTH), SLIDE_VOXEL, vec3(-8.0f, 0.0f, t.corner.z),
+                [](int, int y, int) { return y % 4 ? rgb(0.45f, 0.45f, 0.47f) : rgb(0.38f, 0.38f, 0.4f); });
+    }
+    placeSlideCrates(world, demos);
+    // From beyond the walls, raised, looking back up the three ramps.
+    camera.position = vec3(13.0f, 7.5f, -13.0f);
+    camera.yaw = 2.36f;
+    camera.pitch = -0.3f;
+}
+
+// Each crate's progress along its slope: the fastest it went before its wall, and how far back up
+// it came after. Logged once it has settled.
+void slideTick(World& world, Demos& demos) {
+    Demos::Slide& slide = demos.slide;
+    const vec3 down = slide.rotation * vec3(1, 0, 0);
+    for (Demos::Slide::Track& t : slide.tracks) {
+        if (!world.valid(t.crate) || !runtime::hasBody(world, t.crate)) continue;
+        runtime::BodyState s = runtime::bodyPose(world, t.crate);
+        float along = glm::dot(s.position - t.corner, down);
+        float speed = glm::dot(s.linearVelocity, down);
+        if (!t.struck) {
+            t.fastest = std::max(t.fastest, speed);
+            // Struck: moving back up, or near the wall and suddenly much slower.
+            if (speed < -0.05f || (along > SLIDE_CRATE_AT_WALL - 0.3f && speed < 0.5f * t.fastest)) {
+                t.struck = true;
+                t.impactSpeed = t.fastest;
+                t.struckAt = t.backTo = along;
+                t.struckClock = demos.clock;
+            }
+        } else {
+            t.backTo = std::min(t.backTo, along);
+            if (!t.reported && demos.clock - t.struckClock > 2.5f) {
+                t.reported = true;
+                projv::core::info("Slide: on {}, into {}: struck at {:.2f} m/s, came {:.2f} m back up", t.ramp, t.wall,
+                                  t.impactSpeed, t.struckAt - t.backTo);
+            }
+        }
+    }
+}
+
 void setWinch(World& world, Demos& demos, Demos::Winch::Mode mode) {
     Demos::Winch& w = demos.winch;
     if (mode == w.mode || !world.valid(w.hinges[0])) return;
@@ -1153,6 +1301,7 @@ void startDemo(World& world, int n) {
         case 7: buildCarPark(world, demos, camera); break;
         case 8: buildWinch(world, demos, camera); break;
         case 9: buildTrebuchet(world, demos, camera); break;
+        case 10: buildSlide(world, demos, camera); break;
     }
     projv::core::info("Demo {}: {}", n, demoName(n));
 }
@@ -1203,6 +1352,7 @@ void act(World& world, Demos& demos, const Camera& camera) {
         case 3: fireBall(world, demos, 4, vec3(0, 3, -6), vec3(0, 2, 28)); break;
         case 5: startDemo(world, 5); break;
         case 9: fireTrebuchet(world, demos); break;
+        case 10: placeSlideCrates(world, demos); break;
         case 6:
             place(world, demos.crate, vec3(-12, 7, uniform(demos, -2, 2)), quat(1, 0, 0, 0), body(60.0f));
             fireBall(world, demos, 3, vec3(uniform(demos, 8.5f, 9.5f), 1.5f, -9), vec3(0, 1.5f, 22), 2000.0f);
@@ -1223,6 +1373,7 @@ void demoTick(projv::Application& app) {
     demos.clock += dt;
     if (demos.blastKickIn > 0 && --demos.blastKickIn == 0) blastKick(world, demos);
     if (demos.current == 9) trebuchetTick(world, demos);
+    if (demos.current == 10) slideTick(world, demos);
     if (demos.current == 8)
         for (int i = 0; i < 2; i++)
             if (world.valid(demos.winch.gears[i])) demos.winch.turned[i] += runtime::bodyPose(world, demos.winch.gears[i]).angularVelocity.z * dt;
@@ -1294,6 +1445,7 @@ void controls(projv::Application& app) {
 
     for (int n = 1; n <= 9; n++)
         if (input.pressed(projv::Key(int(projv::Key::Num0) + n))) startDemo(world, n);
+    if (input.pressed(projv::Key::Num0)) startDemo(world, 10);
     if (input.pressed(projv::Key::R)) startDemo(world, demos.current);
     if (input.pressed(projv::Key::Space) && camera.walker == projv::NullEntity && demos.current != 7) act(world, demos, camera);
     if (input.pressed(projv::Key::F) && demos.current == 1) launchOrb(world, demos, camera);
@@ -1436,19 +1588,19 @@ void selfTest(projv::Application& app) {
     static bool acted = false;
     // DEMOS_CAPTURE=<prefix>: a frame of each demo, mid-action, as <prefix>-<demo>.tga.
     static int captured = 0;
-    const float captureAt[10] = {0, 14.6f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f, 6.5f, 12.0f, 6.1f};
-    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= 9 && captured < stage &&
+    const float captureAt[11] = {0, 14.6f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f, 6.5f, 12.0f, 6.1f, 3.4f};
+    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= 10 && captured < stage &&
         t > captureAt[stage]) {
         bgfx::requestScreenShot(BGFX_INVALID_HANDLE, (std::string(prefix) + "-" + std::to_string(stage)).c_str());
         captured = stage;
     }
     // On to the first selected demo from `next`, or to the session-wide checks after the last.
     auto go = [&](int next) {
-        while (next <= 9 && !test->only.empty() &&
+        while (next <= 10 && !test->only.empty() &&
                std::find(test->only.begin(), test->only.end(), next) == test->only.end())
             next++;
         acted = false;
-        if (next > 9) { stage = 10; return; }
+        if (next > 10) { stage = 11; return; }
         startDemo(world, next);
         stage = next;
         test->start = watchedPositions();
@@ -1651,11 +1803,48 @@ void selfTest(projv::Application& app) {
             check(*test, demos.pieces - piecesBefore >= 10,
                   fmt::format("the wall broke up: {} pieces split off", demos.pieces - piecesBefore));
             check(*test, tb.struck && thrown > 20.0f, fmt::format("the boulder flew {:.1f} m from the release to the wall", thrown));
-            go(10);
+            go(10);   // the slide
             return;
         }
     }
-    if (stage == 10) {
+    if (stage == 10 && t > 1.0f && !acted) {
+        // Three colours, one material: each ramp collides as one box per grid cell, as a plain one would.
+        for (const Demos::Slide::Track& tr : demos.slide.tracks) {
+            const auto& parts = world.get<projv::PhysicsBody>(tr.rampEntity).voxelParts;
+            uint32_t pieces = 0;
+            bool materials = true;
+            for (const auto& part : parts) { pieces += part.shape->pieces; materials = materials && part.shape->hasMaterials; }
+            check(*test, !parts.empty() && pieces == parts.size() && materials,
+                  fmt::format("the {} ramp, three colours of one material, is {} boxes in {} cells", tr.ramp, pieces, parts.size()));
+        }
+        acted = true;
+    }
+    if (stage == 10 && t > 12.0f) {
+        // Each crate reached its wall as fast as its ramp's friction allows -- v^2 = 2 g (sin a - mu
+        // cos a) d -- and came back up as far as its wall's restitution sends it: (e v)^2 / (2 g (sin
+        // a + mu cos a)).
+        const float g = 9.81f, d = SLIDE_CRATE_AT_WALL - SLIDE_CRATE_START, sa = std::sin(SLIDE_ANGLE), ca = std::cos(SLIDE_ANGLE);
+        float speeds[3], backs[3];
+        for (int i = 0; i < 3; i++) {
+            const Demos::Slide::Track& tr = demos.slide.tracks[i];
+            float mu = std::sqrt(runtime::physicsMaterial(world, tr.ramp)->friction * 1.0f);
+            float e = runtime::physicsMaterial(world, tr.wall)->restitution;
+            float expected = std::sqrt(2.0f * g * (sa - mu * ca) * d);
+            float expectedBack = (e * expected) * (e * expected) / (2.0f * g * (sa + mu * ca));
+            speeds[i] = tr.impactSpeed;
+            backs[i] = tr.struckAt - tr.backTo;
+            check(*test, tr.struck && std::abs(tr.impactSpeed - expected) < 0.1f * expected,
+                  fmt::format("the crate on {} struck its wall at {:.2f} m/s ({:.2f} predicted)", tr.ramp, tr.impactSpeed, expected));
+            bool bounced = e == 0.0f ? backs[i] < 0.1f : backs[i] > 0.6f * expectedBack && backs[i] < 1.3f * expectedBack;
+            check(*test, tr.struck && bounced,
+                  fmt::format("{} sent it {:.2f} m back up ({:.2f} predicted)", tr.wall, backs[i], expectedBack));
+        }
+        check(*test, speeds[0] > speeds[1] && speeds[1] > speeds[2] && backs[0] > backs[1] && backs[1] > backs[2],
+              "slicker ramps are faster, bouncier walls send crates further back");
+        go(11);
+        return;
+    }
+    if (stage == 11) {
         const auto& stats = runtime::physicsWorld(world).stats();
         check(*test, stats.stepsWithDroppedContacts == 0 && stats.nonFiniteRecoveries == 0,
               fmt::format("{} steps, {} with dropped contacts, {} non-finite recoveries", stats.steps,
@@ -1692,6 +1881,9 @@ void startup(projv::Application& app) {
     physics.settings.worldMin = vec3(-1e4f, -30.0f, -1e4f);
     physics.settings.record = unattended;   // the self-test replays the whole session at the end
     runtime::installPhysics(app, physics);
+    // The physics materials the demos' voxels name (demo 10's ramps and walls).
+    if (!runtime::loadPhysicsMaterials(world, (here / "physics_materials.json").string()))
+        projv::core::error("demos: physics_materials.json did not load; the slide's ramps will all behave alike");
 
     // The floor: 80 m square, half-metre voxels, checkered, two voxels thick with its top at y = 0.
     // One component, so one grid; solid because of its StaticCollider.
@@ -1786,8 +1978,13 @@ void startup(projv::Application& app) {
     if (unattended) {
         SelfTest& test = world.ctx().emplace<SelfTest>();
         if (const char* only = std::getenv("DEMOS_ONLY"))
-            for (const char* c = only; *c; c++)
-                if (*c >= '1' && *c <= '9') test.only.push_back(*c - '0');
+            for (const char* c = only; *c;) {
+                char* end = nullptr;
+                long n = std::strtol(c, &end, 10);
+                if (end == c) { c++; continue; }   // a separator
+                if (n >= 1 && n <= 10) test.only.push_back(int(n));
+                c = end;
+            }
     }
     else startDemo(world, 1);
 }

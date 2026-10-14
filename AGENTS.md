@@ -25,7 +25,7 @@ directory, and renderer folders name their shaders relative to it in `resources.
 cd build/examples/hello_voxel      && ./hello_voxel
 cd build/examples/entities         && ./entities
 cd build/examples/sandbox          && ./sandbox            # SANDBOX_SELFTEST=600 plays itself
-cd build/examples/physics_demos    && ./physics_demos      # DEMOS_SELFTEST=1 checks all nine (DEMOS_ONLY=9: one)
+cd build/examples/physics_demos    && ./physics_demos      # DEMOS_SELFTEST=1 checks all ten (DEMOS_ONLY=9 or 2,10: some)
 cd build/examples/scene_previewer  && ./scene_previewer scenes/SmallVox
 cd build/examples/renderer_gallery && ./renderer_gallery --renderer fast
 cd build/examples/scene_editor     && ./scene_editor

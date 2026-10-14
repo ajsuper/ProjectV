@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "materials": [
+    { "name": "ice",           "density": 917,  "friction": 0.01, "restitution": 0.0 },
+    { "name": "polished wood", "density": 650,  "friction": 0.06, "restitution": 0.0 },
+    { "name": "slate",         "density": 2700, "friction": 0.1,  "restitution": 0.0 },
+    { "name": "rubber",        "density": 1100, "friction": 1.0,  "restitution": 0.9 },
+    { "name": "oak",           "density": 750,  "friction": 0.6,  "restitution": 0.45 },
+    { "name": "clay",          "density": 1800, "friction": 0.9,  "restitution": 0.0 }
+  ]
+}
