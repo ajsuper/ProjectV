@@ -9,8 +9,13 @@
 namespace projv::utils {
     namespace {
         // The merge's working copy: bit 0 solid, bit 1 claimed by a piece already.
+        // With materials, `material` holds each cell's physics material (SlotMaterials), and a box
+        // only takes cells of its seed's.
         struct Occupancy : VoxelOccupancy {
+            std::vector<uint16_t> material;
             bool free(core::ivec3 p) const { return cells[index(p)] == 1; }   // solid and unclaimed
+            uint16_t materialAt(core::ivec3 p) const { return material.empty() ? 0 : material[index(p)]; }
+            bool free(core::ivec3 p, uint16_t of) const { return free(p) && materialAt(p) == of; }
         };
 
         constexpr uint8_t CLAIMED = 2;
@@ -19,7 +24,13 @@ namespace projv::utils {
         // path, a child's Z-order within its parent being its bit index in the parent's mask -- and
         // marks every solid voxel. False if the tree points outside itself or outside the bounds it
         // was measured to have.
-        bool decode(const std::vector<uint32_t>& geometry, VoxelOccupancy& occupancy, uint64_t& solid) {
+        //
+        // With `materials`, each voxel's palette slot is also read (a uniform leaf stores one byte for
+        // all its voxels, any other one per voxel in mask order) and its material written to
+        // `material`. A slot byte the blob does not have is material 0.
+        bool decode(const std::vector<uint32_t>& geometry, VoxelOccupancy& occupancy, uint64_t& solid,
+                    const std::vector<uint8_t>* materialIDs = nullptr, const SlotMaterials* materials = nullptr,
+                    std::vector<uint16_t>* material = nullptr) {
             const size_t nodeCount = geometry.size() / 3;
             struct Pending { size_t node; uint64_t cellZOrder; };
             std::vector<Pending> stack;
@@ -33,13 +44,22 @@ namespace projv::utils {
                 uint32_t data3 = geometry[current.node * 3 + 2];
                 if (mask == 0) continue;
                 if (tree64IsLeaf(data3)) {
+                    const size_t offset = tree64LeafMatOffset(data3);
+                    const bool uniform = tree64LeafIsUniform(data3);
+                    uint32_t rank = 0;
                     for (uint32_t child = 0; child < 64; child++) {
                         if ((mask & (1ull << (63 - child))) == 0) continue;   // bit 63 is Z-order 0
                         core::ivec3 p = reverseZOrderIndex(current.cellZOrder * 64 + child);
                         if (glm::any(glm::lessThan(p, occupancy.origin)) || glm::any(glm::greaterThan(p, high)))
                             return false;
-                        uint8_t& cell = occupancy.cells[occupancy.index(p - occupancy.origin)];
+                        size_t at = occupancy.index(p - occupancy.origin);
+                        uint8_t& cell = occupancy.cells[at];
                         if (!cell) { cell = 1; solid++; }
+                        if (material) {
+                            size_t byte = offset + (uniform ? 0 : rank);
+                            (*material)[at] = byte < materialIDs->size() ? (*materials)[(*materialIDs)[byte]] : 0;
+                        }
+                        rank++;
                     }
                     continue;
                 }
@@ -65,11 +85,12 @@ namespace projv::utils {
                 for (int y = 0; y < d.y; y++)
                     for (int x = 0; x < d.x; x++) {
                         if (!o.free({x, y, z})) continue;
+                        const uint16_t material = o.materialAt({x, y, z});
                         int x1 = x;
-                        while (x1 + 1 < d.x && o.free({x1 + 1, y, z})) x1++;
+                        while (x1 + 1 < d.x && o.free({x1 + 1, y, z}, material)) x1++;
                         auto rowFree = [&](int yy, int zz) {
                             for (int xx = x; xx <= x1; xx++)
-                                if (!o.free({xx, yy, zz})) return false;
+                                if (!o.free({xx, yy, zz}, material)) return false;
                             return true;
                         };
                         int y1 = y;
@@ -92,6 +113,7 @@ namespace projv::utils {
                         piece.voxelMax = o.origin + core::ivec3(x1, y1, z1);
                         piece.min = core::vec3(piece.voxelMin);
                         piece.max = core::vec3(piece.voxelMax + core::ivec3(1));
+                        piece.material = material;
                         out.push_back(piece);
                     }
             return true;
@@ -112,7 +134,18 @@ namespace projv::utils {
         }
     }
 
+    namespace {
+        DecodeResult decodeInto(const GeometryBlob& blob, uint32_t resolution, uint64_t maxCells, VoxelOccupancy& out,
+                                const SlotMaterials* materials, std::vector<uint16_t>* material);
+    }
+
     DecodeResult decodeOccupancy(const GeometryBlob& blob, uint32_t resolution, uint64_t maxCells, VoxelOccupancy& out) {
+        return decodeInto(blob, resolution, maxCells, out, nullptr, nullptr);
+    }
+
+    namespace {
+    DecodeResult decodeInto(const GeometryBlob& blob, uint32_t resolution, uint64_t maxCells, VoxelOccupancy& out,
+                            const SlotMaterials* materials, std::vector<uint16_t>* material) {
         core::ivec3 low, high;
         out = VoxelOccupancy{};
         if (!blobContentBounds(blob, low, high)) return DecodeResult::Empty;
@@ -127,8 +160,11 @@ namespace projv::utils {
         out.dims = dims;
         if (cellCount > maxCells) return DecodeResult::TooLarge;
         out.cells.assign(size_t(cellCount), 0);
-        if (!decode(blob.geometry, out, out.solid)) return DecodeResult::Malformed;
+        if (materials) material->assign(size_t(cellCount), 0);
+        if (!decode(blob.geometry, out, out.solid, &blob.materialIDs, materials, materials ? material : nullptr))
+            return DecodeResult::Malformed;
         return DecodeResult::Ok;
+    }
     }
 
     uint64_t CollisionParams::key() const {
@@ -139,7 +175,8 @@ namespace projv::utils {
         return k;
     }
 
-    CollisionPieces buildCollisionPieces(const GeometryBlob& blob, uint32_t resolution, const CollisionParams& params) {
+    CollisionPieces buildCollisionPieces(const GeometryBlob& blob, uint32_t resolution, const CollisionParams& params,
+                                         const SlotMaterials* materials) {
         CollisionPieces result;
         core::ivec3 low, high;
         if (!blobContentBounds(blob, low, high)) return result;   // no voxels: nothing collides
@@ -147,7 +184,11 @@ namespace projv::utils {
         result.contentMax = high;
 
         Occupancy occupancy;
-        switch (decodeOccupancy(blob, resolution, params.maxDecodedCells, occupancy)) {
+        bool anyMaterial = false;
+        if (materials)
+            for (uint16_t m : *materials) anyMaterial = anyMaterial || m != 0;
+        switch (decodeInto(blob, resolution, params.maxDecodedCells, occupancy, anyMaterial ? materials : nullptr,
+                           &occupancy.material)) {
             case DecodeResult::Empty: return result;
             case DecodeResult::Ok: break;
             case DecodeResult::TooLarge: {

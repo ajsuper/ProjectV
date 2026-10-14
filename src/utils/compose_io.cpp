@@ -542,6 +542,9 @@ namespace projv::utils {
                     float transmission     = jm.value("transmission", 0.0f);
                     uint32_t flags         = jm.value("flags", 0u);
                     material.packedExtra = packExtraWord(emissiveStrength, transmission, flags);
+                    if (jm.contains("physics") && jm["physics"].is_string()) {
+                        material.physics = jm["physics"].get<std::string>();
+                    }
                     if (c.palette.size() >= MAX_MATERIALS_PER_COMPONENT) {
                         core::warn("parseComposeJson: '{}' has more than {} materials in {} - "
                                    "the rest are dropped", c.source, MAX_MATERIALS_PER_COMPONENT,
@@ -1175,6 +1178,7 @@ namespace projv::utils {
                     if (materialEmissiveStrength(material) != 0.0f) materialJson["emissiveStrength"] = materialEmissiveStrength(material);
                     if (materialTransmission(material) != 0.0f) materialJson["transmission"] = materialTransmission(material);
                     if (materialFlags(material) != 0u)          materialJson["flags"] = materialFlags(material);
+                    if (!material.physics.empty())              materialJson["physics"] = material.physics;
                     palette.push_back(std::move(materialJson));
                 }
                 entry["palette"] = std::move(palette);

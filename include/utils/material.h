@@ -17,9 +17,13 @@ namespace projv::utils {
 // directly instead of needing a thread-local-dedup-then-merge workaround. Safe to call
 // concurrently, but not free -- callers doing high-frequency interning (e.g. per-voxel) should
 // still dedupe locally first for performance; the lock buys correctness, not throughput.
-uint8_t internMaterial(Scene& scene, ComponentRecord& comp, const std::string& name, uint32_t packedColor);
+//
+// An entry matches only if its physics material (Material::physics) is `physics` too, so two
+// entries alike in look but made of different stuff stay two.
+uint8_t internMaterial(Scene& scene, ComponentRecord& comp, const std::string& name, uint32_t packedColor,
+                       const std::string& physics = {});
 uint8_t findMaterialByName(const ComponentRecord& comp, const std::string& name);
-uint8_t findMaterialByColor(const ComponentRecord& comp, uint32_t packedColor);
+uint8_t findMaterialByColor(const ComponentRecord& comp, uint32_t packedColor, const std::string& physics = {});
 
 // --- Palette editing -------------------------------------------------------------------------
 //
@@ -77,6 +81,14 @@ bool setMaterialProperties(Scene& scene, ComponentHandle componentHandle, uint8_
  * @return False if the handle or slot is out of range.
  */
 bool setMaterialName(Scene& scene, ComponentHandle componentHandle, uint8_t slot, const std::string& name);
+
+/**
+ * Sets the physics material a slot's voxels are made of (Material::physics): a name in the physics
+ * material library, empty for none. The look is untouched; bodies made from the component rebuild
+ * their collision at the next physics step.
+ * @return False if the handle or slot is out of range.
+ */
+bool setMaterialPhysics(Scene& scene, ComponentHandle componentHandle, uint8_t slot, const std::string& physics);
 
 /**
  * Counts how many voxels in the scene reference each of a component's palette slots.

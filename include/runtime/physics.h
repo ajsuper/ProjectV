@@ -68,6 +68,11 @@ namespace projv {
         float                 gravityFactor = 1.0f;
         runtime::PhysicsLayer layer = runtime::PhysicsLayer::Moving;
         Quality               quality = Quality::Auto;
+        // A name in the physics material library (runtime::definePhysicsMaterial). When set, its
+        // density, friction and restitution are the body's instead of the three fields above
+        // (`mass` still overrides): the material of a primitive, and of every voxel whose palette
+        // entry names none. A palette entry that names one wins for its voxels.
+        std::string           material;
     };
 
     // A kinematic body that flies on by itself: each physics step moves it `velocity` (m/s) and turns
@@ -87,6 +92,8 @@ namespace projv {
         // Whether pieces cut loose by an edit fall away as bodies of their own (destruction, M5 of
         // the physics plan). Saved, not acted on yet.
         bool                  splits = false;
+        // As RigidBody::material: friction and restitution from the library when set.
+        std::string           material;
     };
 
     // One chunk's part of a voxel body: which chunk, the shared shape built from it, and where it
@@ -116,6 +123,9 @@ namespace projv {
         std::vector<std::pair<ChunkHandle, uint64_t>> sources;
         // The shape's voxel parts, in the order the shape holds them; empty for a primitive.
         std::vector<PhysicsVoxelPart> voxelParts;
+        // The physics materials the body was built with (its own, its palettes' and the library's
+        // version), 0 for none. When it differs from what they say now, the body is rebuilt.
+        uint64_t materialKey = 0;
     };
 
     // A walking character (runtime::CharacterDesc): an upright capsule, its Transform's position at
@@ -215,6 +225,27 @@ namespace projv::runtime {
     // at a tick boundary, and a replay will not see it.
     PhysicsWorld&       physicsWorld(World& world);
     const PhysicsWorld& physicsWorld(const World& world);
+
+    // ---- Physics materials ---------------------------------------------------------------------------
+    // The project's library: named materials (stone, wood, ice) that palette entries
+    // (Material::physics) and bodies (RigidBody::material) name. Many palette entries can name one
+    // material -- three colours of granite are one stone to physics, and merge into the same boxes --
+    // and two entries that look alike can name two. A body whose voxels mix materials weighs what
+    // each part is made of, and each contact uses the material of the voxels touched.
+    //
+    // Indices follow definition order, so peers that load the same library agree on them; the
+    // library is part of the physics state hash. Defining a name again changes it in place, and every
+    // body using it is rebuilt at the next step.
+    // The index (1..), or 0 when refused (logged): a bad name, unusable values, the library full.
+    uint16_t definePhysicsMaterial(World& world, const std::string& name, const PhysicsMaterial& material);
+    // 0 when there is none of that name.
+    uint16_t physicsMaterialIndex(const World& world, const std::string& name);
+    std::optional<PhysicsMaterial> physicsMaterial(const World& world, const std::string& name);
+    // A library file, defined in file order:
+    //     { "v": 1, "materials": [ { "name": "stone", "density": 2400, "friction": 0.8, "restitution": 0.1 }, ... ] }
+    // Missing values are PhysicsMaterial's defaults. False (logged) if the file cannot be read or
+    // parsed; materials before a bad entry stay defined.
+    bool loadPhysicsMaterials(World& world, const std::string& path);
 
     // ---- Commands: applied at the start of the next fixed step, in the order issued -------------
     // An entity with no body by then (not physical, refused, destroyed) is skipped.

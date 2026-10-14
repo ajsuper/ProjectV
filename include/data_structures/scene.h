@@ -52,6 +52,12 @@ namespace projv{
         // word3: emissiveStrength | transmission | flags | reserved, one byte each, high byte first.
         uint32_t packedExtra = 0;
         std::string name;
+        // The physics material this entry's voxels are made of: a name in the project's physics
+        // material library (runtime/physics.h), saved as "physics" in compose.json. Empty: none,
+        // so the voxels collide with their body's own values. Not part of the four GPU words --
+        // the renderer never sees it -- so entries that look alike can still differ here, and
+        // entries that differ in look can share one material and merge as one in collision.
+        std::string physics;
     };
 
     // ---- Field accessors -------------------------------------------------------------------

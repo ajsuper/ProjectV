@@ -13,6 +13,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <tuple>
 #include <set>
 #include <mutex>
 #include <string>
@@ -40,6 +41,7 @@
 #include <Jolt/Physics/Collision/ShapeCast.h>
 #include <Jolt/Physics/Collision/Shape/CompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/DecoratedShape.h>
+#include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
@@ -162,12 +164,13 @@ namespace projv::runtime {
         }
 
         // The shape a description asks for, or null with the reason logged.
-        JPH::ShapeRefC makeShape(const PhysicsShape& shape);
+        JPH::ShapeRefC makeShape(const PhysicsShape& shape, float density = 1000.0f);
 
         // Shapes are made at Jolt's default density and the body's mass set from PhysicsShape::volume
         // instead (createBody): a voxel shape is shared by bodies of different densities, and one
-        // rule for every kind is simpler than two.
-        JPH::ShapeRefC makeCompound(const PhysicsShape& shape) {
+        // rule for every kind is simpler than two. The exception is a body with voxel materials,
+        // whose mass is the shape's own: its primitives are made at `density`, the body's.
+        JPH::ShapeRefC makeCompound(const PhysicsShape& shape, float density) {
             if (shape.parts.empty()) {
                 core::warn("physics: refused a compound with no parts");
                 return nullptr;
@@ -179,7 +182,7 @@ namespace projv::runtime {
                     core::warn("physics: refused a compound part with a non-finite placement");
                     return nullptr;
                 }
-                JPH::ShapeRefC child = makeShape(part.shape);
+                JPH::ShapeRefC child = makeShape(part.shape, density);
                 if (!child) return nullptr;
                 made.push_back(child);
             }
@@ -203,7 +206,7 @@ namespace projv::runtime {
         }
 
         // The shape a description asks for, or null with the reason logged.
-        JPH::ShapeRefC makeShape(const PhysicsShape& shape) {
+        JPH::ShapeRefC makeShape(const PhysicsShape& shape, float density) {
             JPH::Shape::ShapeResult result;
             switch (shape.kind) {
                 case PhysicsShape::Kind::Box: {
@@ -216,7 +219,9 @@ namespace projv::runtime {
                     // smallest half extent; a thin box gets a proportionally smaller one.
                     float smallest = std::min({h.x, h.y, h.z});
                     float convexRadius = std::min(JPH::cDefaultConvexRadius, 0.5f * smallest);
-                    result = JPH::BoxShapeSettings(toJolt(h), convexRadius).Create();
+                    JPH::BoxShapeSettings box(toJolt(h), convexRadius);
+                    box.SetDensity(density);
+                    result = box.Create();
                     break;
                 }
                 case PhysicsShape::Kind::Sphere: {
@@ -224,7 +229,9 @@ namespace projv::runtime {
                         core::warn("physics: refused a sphere with radius {}", shape.radius);
                         return nullptr;
                     }
-                    result = JPH::SphereShapeSettings(shape.radius).Create();
+                    JPH::SphereShapeSettings sphere(shape.radius);
+                    sphere.SetDensity(density);
+                    result = sphere.Create();
                     break;
                 }
                 case PhysicsShape::Kind::Capsule: {
@@ -234,7 +241,9 @@ namespace projv::runtime {
                                    shape.halfHeight, shape.radius);
                         return nullptr;
                     }
-                    result = JPH::CapsuleShapeSettings(shape.halfHeight, shape.radius).Create();
+                    JPH::CapsuleShapeSettings capsule(shape.halfHeight, shape.radius);
+                    capsule.SetDensity(density);
+                    result = capsule.Create();
                     break;
                 }
                 case PhysicsShape::Kind::Voxels: {
@@ -252,7 +261,7 @@ namespace projv::runtime {
                     return new JPH::ScaledShape(unit, JPH::Vec3::sReplicate(shape.voxelSize));
                 }
                 case PhysicsShape::Kind::Compound:
-                    return makeCompound(shape);
+                    return makeCompound(shape, density);
             }
             if (result.HasError()) {
                 core::warn("physics: shape creation failed: {}", result.GetError().c_str());
@@ -267,6 +276,58 @@ namespace projv::runtime {
                 if (containsVoxels(part.shape)) return true;
             return false;
         }
+
+        bool containsMaterials(const PhysicsShape& shape) {
+            if (shape.kind == PhysicsShape::Kind::Voxels) return shape.voxels && shape.voxels->hasMaterials;
+            for (const PhysicsShapePart& part : shape.parts)
+                if (containsMaterials(part.shape)) return true;
+            return false;
+        }
+
+        // ---- Materials ----------------------------------------------------------------------------
+        // A voxel piece's Jolt material: only which entry of the table it is. The values are read
+        // from the table at each contact, so redefining a material changes every contact at once.
+        class VoxelMaterial final : public JPH::PhysicsMaterial {
+        public:
+            explicit VoxelMaterial(uint16_t index) : index(index) {}
+            const uint16_t index;
+        };
+
+        // Each side of a contact is the material of the piece touched, or the body's own values where
+        // the piece has none; combined as Jolt combines bodies (friction the geometric mean,
+        // restitution the larger), so a world without materials behaves exactly as before. Called
+        // from the solver's threads; it only reads the table, which changes only between steps.
+        class MaterialContacts final : public JPH::ContactListener {
+        public:
+            const std::vector<PhysicsMaterial>* table = nullptr;
+            bool any = false;   // a material is defined: there is something to look up
+            void OnContactAdded(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold,
+                                JPH::ContactSettings& settings) override {
+                combine(a, b, manifold, settings);
+            }
+            void OnContactPersisted(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold,
+                                    JPH::ContactSettings& settings) override {
+                combine(a, b, manifold, settings);
+            }
+        private:
+            static const VoxelMaterial* ours(const JPH::PhysicsMaterial* m) {
+                // Every material other than Jolt's default is one of ours: nothing else makes one.
+                return m && m != JPH::PhysicsMaterial::sDefault.GetPtr() ? static_cast<const VoxelMaterial*>(m) : nullptr;
+            }
+            void combine(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold,
+                         JPH::ContactSettings& settings) const {
+                if (!any) return;
+                const VoxelMaterial* ma = ours(a.GetShape()->GetMaterial(manifold.mSubShapeID1));
+                const VoxelMaterial* mb = ours(b.GetShape()->GetMaterial(manifold.mSubShapeID2));
+                if (!ma && !mb) return;
+                float fa = ma ? (*table)[ma->index].friction : a.GetFriction();
+                float fb = mb ? (*table)[mb->index].friction : b.GetFriction();
+                float ra = ma ? (*table)[ma->index].restitution : a.GetRestitution();
+                float rb = mb ? (*table)[mb->index].restitution : b.GetRestitution();
+                settings.mCombinedFriction = std::sqrt(fa * fb);
+                settings.mCombinedRestitution = std::max(ra, rb);
+            }
+        };
 
         JPH::EMotionType toJolt(MotionType motion) {
             switch (motion) {
@@ -363,12 +424,12 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 3;   // 2: joint motor modes; 3: collideConnected
+        constexpr uint32_t LOG_VERSION = 4;   // 2: joint motor modes; 3: collideConnected; 4: materials
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
             Gravity, Step, Restore, CreateCharacter, DestroyCharacter, CharacterInput, CharacterPosition,
-            CreateJoint, DestroyJoint, JointMotor
+            CreateJoint, DestroyJoint, JointMotor, SetMaterial
         };
 
         void writeSettings(std::vector<uint8_t>& out, const PhysicsSettings& s) {
@@ -402,10 +463,11 @@ namespace projv::runtime {
                     const utils::CollisionPieces* pieces = shape.voxels ? shape.voxels->source.get() : nullptr;
                     put(out, uint8_t(pieces != nullptr));
                     if (!pieces) break;
+                    put(out, shape.voxels->otherDensity);
                     put(out, uint8_t(pieces->fallback));
                     put(out, uint32_t(pieces->pieces.size()));
                     for (const utils::CollisionPiece& p : pieces->pieces) {
-                        put(out, p.min); put(out, p.max); put(out, p.voxelMin); put(out, p.voxelMax);
+                        put(out, p.min); put(out, p.max); put(out, p.voxelMin); put(out, p.voxelMax); put(out, p.material);
                     }
                     break;
                 }
@@ -436,13 +498,16 @@ namespace projv::runtime {
                     utils::CollisionPieces pieces;
                     uint8_t fallback = 0;
                     uint32_t count = 0;
-                    if (!get(in, at, fallback) || !get(in, at, count) || count > (1u << 24)) return false;
+                    float otherDensity = 0.0f;
+                    if (!get(in, at, otherDensity) || !get(in, at, fallback) || !get(in, at, count) || count > (1u << 24))
+                        return false;
                     pieces.fallback = utils::CollisionFallback(fallback);
                     pieces.pieces.resize(count);
                     for (utils::CollisionPiece& p : pieces.pieces)
-                        if (!get(in, at, p.min) || !get(in, at, p.max) || !get(in, at, p.voxelMin) || !get(in, at, p.voxelMax))
+                        if (!get(in, at, p.min) || !get(in, at, p.max) || !get(in, at, p.voxelMin) || !get(in, at, p.voxelMax) ||
+                            !get(in, at, p.material))
                             return false;
-                    shape.voxels = build(pieces);
+                    shape.voxels = build(pieces, otherDensity);
                     return true;
                 }
                 case PhysicsShape::Kind::Compound: {
@@ -565,9 +630,20 @@ namespace projv::runtime {
         std::vector<uint8_t>  log;
         uint64_t              loggedSteps = 0;
         void op(Op o) { log.push_back(uint8_t(o)); }
-        // Voxel shapes by (content stamp, parameters). Ordered, so nothing about it can make two
-        // runs differ (it does not feed the simulation, but it costs nothing to rule out).
-        std::map<std::pair<uint64_t, uint64_t>, std::shared_ptr<const CollisionShape>> shapeCache;
+        // Voxel shapes by (content stamp, parameters, materials). Ordered, so nothing about it can
+        // make two runs differ (it does not feed the simulation, but it costs nothing to rule out).
+        std::map<std::tuple<uint64_t, uint64_t, uint64_t>, std::shared_ptr<const CollisionShape>> shapeCache;
+
+        // ---- Materials ----
+        std::vector<PhysicsMaterial>          materials = std::vector<PhysicsMaterial>(MAX_PHYSICS_MATERIALS);
+        std::vector<uint8_t>                  materialDefined = std::vector<uint8_t>(MAX_PHYSICS_MATERIALS, 0);
+        std::vector<JPH::Ref<VoxelMaterial>>  joltMaterials = std::vector<JPH::Ref<VoxelMaterial>>(MAX_PHYSICS_MATERIALS);
+        uint64_t                              materialsVersion = 0;   // bumped by every setMaterial
+        MaterialContacts                      contacts;
+        const VoxelMaterial* joltMaterial(uint16_t index) {
+            if (!joltMaterials[index]) joltMaterials[index] = new VoxelMaterial(index);
+            return joltMaterials[index].GetPtr();
+        }
 
         // Every live body id, ascending. What the hash and the snapshot iterate, so neither
         // depends on Jolt's internal storage order.
@@ -599,6 +675,8 @@ namespace projv::runtime {
         impl->system.Init(settings.maxBodies, 0, settings.maxBodyPairs, settings.maxContactConstraints,
                           impl->broadPhaseLayers, impl->objectVsBroadPhase, impl->objectPairs);
         impl->system.SetGravity(toJolt(settings.gravity));
+        impl->contacts.table = &impl->materials;
+        impl->system.SetContactListener(&impl->contacts);
         // Solver iterations: see PhysicsSettings::velocitySteps for why not Jolt's default.
         JPH::PhysicsSettings solver = impl->system.GetPhysicsSettings();
         solver.mNumVelocitySteps = uint32_t(std::max(settings.velocitySteps, 1));
@@ -642,7 +720,9 @@ namespace projv::runtime {
         if (!(desc.density > 0.0f) || !std::isfinite(desc.density) || !std::isfinite(desc.mass) || desc.mass < 0.0f)
             return refuse("a density that is not positive, or a negative mass");
 
-        JPH::ShapeRefC shape = makeShape(desc.shape);
+        // Voxel materials: the shape is built with each piece's density, and weighs what it says.
+        const bool materials = containsMaterials(desc.shape);
+        JPH::ShapeRefC shape = materials ? makeShape(desc.shape, desc.density) : makeShape(desc.shape);
         if (!shape) return refuse("its shape");
 
         core::quat rotation = desc.rotation / qlen;
@@ -668,12 +748,12 @@ namespace projv::runtime {
         settings.mMaxLinearVelocity = impl->settings.maxLinearSpeed;
         settings.mMaxAngularVelocity = impl->settings.maxAngularSpeed;
         if (desc.motion == MotionType::Dynamic) {
-            float mass = desc.mass > 0.0f ? desc.mass : desc.shape.volume() * desc.density;
+            JPH::MassProperties properties = shape->GetMassProperties();
+            float mass = desc.mass > 0.0f ? desc.mass : materials ? properties.mMass : desc.shape.volume() * desc.density;
             if (!(mass > 0.0f) || !std::isfinite(mass)) return refuse("a shape with no volume, so no mass");
             mass = std::max(mass, impl->settings.minMass);
             // The shape's own distribution, scaled to the mass -- and then floored about every axis,
             // so no body is light enough to turn for the solver to spin it up without limit.
-            JPH::MassProperties properties = shape->GetMassProperties();
             properties.ScaleToMass(mass);
             JPH::Mat44 axes;
             JPH::Vec3 moments;
@@ -1386,13 +1466,31 @@ namespace projv::runtime {
         return inverse > 0.0f ? 1.0f / inverse : 0.0f;
     }
 
-    CollisionShapeRef PhysicsWorld::shapeFromPieces(const utils::CollisionPieces& pieces) {
+    CollisionShapeRef PhysicsWorld::shapeFromPieces(const utils::CollisionPieces& pieces, float otherDensity) {
         if (pieces.pieces.empty()) return nullptr;
-        auto boxFor = [](const utils::CollisionPiece& piece) -> JPH::RefConst<JPH::Shape> {
+        if (!(otherDensity > 0.0f) || !std::isfinite(otherDensity)) {
+            core::warn("physics: voxel shape density {} is not usable; using 1000", otherDensity);
+            otherDensity = 1000.0f;
+        }
+        bool hasMaterials = false;
+        for (const utils::CollisionPiece& piece : pieces.pieces) {
+            if (piece.material >= MAX_PHYSICS_MATERIALS) {
+                core::warn("physics: voxel piece material {} is out of range; the shape is refused", piece.material);
+                return nullptr;
+            }
+            hasMaterials = hasMaterials || piece.material != 0;
+        }
+        // Without materials, exactly the shape there always was: Jolt's default density and
+        // material, the body's mass set from its volume.
+        auto boxFor = [&](const utils::CollisionPiece& piece) -> JPH::RefConst<JPH::Shape> {
             core::vec3 half = 0.5f * (piece.max - piece.min);
             if (!finite(half) || half.x <= 0.0f || half.y <= 0.0f || half.z <= 0.0f) return nullptr;
             float convexRadius = std::min(JPH::cDefaultConvexRadius, 0.5f * std::min({half.x, half.y, half.z}));
-            return new JPH::BoxShape(toJolt(half), convexRadius);
+            if (!hasMaterials) return new JPH::BoxShape(toJolt(half), convexRadius);
+            uint16_t m = piece.material;
+            auto* box = new JPH::BoxShape(toJolt(half), convexRadius, m ? impl->joltMaterial(m) : nullptr);
+            box->SetDensity(m && impl->materialDefined[m] ? impl->materials[m].density : otherDensity);
+            return box;
         };
         float volume = 0.0f;
         JPH::RefConst<JPH::Shape> shape;
@@ -1428,6 +1526,8 @@ namespace projv::runtime {
         out->pieces = uint32_t(pieces.pieces.size());
         out->volume = volume;
         out->fallback = pieces.fallback;
+        out->hasMaterials = hasMaterials;
+        out->otherDensity = otherDensity;
         out->source = std::make_shared<const utils::CollisionPieces>(pieces);
         out->native = std::make_shared<CollisionShape::Native>();
         out->native->shape = shape;
@@ -1435,15 +1535,57 @@ namespace projv::runtime {
     }
 
     CollisionShapeRef PhysicsWorld::voxelShape(const GeometryBlob& blob, uint32_t resolution,
-                                               const utils::CollisionParams& params) {
-        auto key = std::make_pair(blob.contentStamp, params.key());
+                                               const utils::CollisionParams& params,
+                                               const utils::SlotMaterials* materials, float otherDensity) {
+        // The materials' part of the key: 0 without any, so those shapes are shared as they always
+        // were; otherwise the slots, the material-0 density and the table's version (densities are
+        // baked into the shape).
+        uint64_t materialKey = 0;
+        if (materials && std::any_of(materials->begin(), materials->end(), [](uint16_t m) { return m != 0; })) {
+            Hasher h;
+            h.bytes(materials->data(), sizeof(uint16_t) * materials->size());
+            h.add(otherDensity);
+            h.add(impl->materialsVersion);
+            materialKey = h.value | 1u;
+        } else {
+            materials = nullptr;
+        }
+        auto key = std::make_tuple(blob.contentStamp, params.key(), materialKey);
         auto found = impl->shapeCache.find(key);
         if (found != impl->shapeCache.end()) return found->second;
-        utils::CollisionPieces pieces = utils::buildCollisionPieces(blob, resolution, params);
-        CollisionShapeRef shape = shapeFromPieces(pieces);
+        utils::CollisionPieces pieces = utils::buildCollisionPieces(blob, resolution, params, materials);
+        CollisionShapeRef shape = shapeFromPieces(pieces, otherDensity);
         // An empty blob is cached as "no shape" too: asking again is as cheap as the first answer.
         impl->shapeCache.emplace(key, shape);
         return shape;
+    }
+
+    bool PhysicsWorld::setMaterial(uint16_t index, const PhysicsMaterial& material) {
+        if (index == 0 || index >= MAX_PHYSICS_MATERIALS) {
+            core::warn("physics: refused material {}: indices are 1..{}", index, MAX_PHYSICS_MATERIALS - 1);
+            return false;
+        }
+        if (!(material.density > 0.0f) || !std::isfinite(material.density) || !(material.friction >= 0.0f) ||
+            !std::isfinite(material.friction) || !std::isfinite(material.restitution)) {
+            core::warn("physics: refused material {}: density {}, friction {}, restitution {}", index, material.density,
+                       material.friction, material.restitution);
+            return false;
+        }
+        PhysicsMaterial m = material;
+        m.restitution = std::clamp(m.restitution, 0.0f, 1.0f);
+        if (impl->recording) {
+            impl->op(Op::SetMaterial);
+            put(impl->log, index); put(impl->log, m.density); put(impl->log, m.friction); put(impl->log, m.restitution);
+        }
+        impl->materials[index] = m;
+        impl->materialDefined[index] = 1;
+        impl->materialsVersion++;
+        impl->contacts.any = true;
+        return true;
+    }
+
+    PhysicsMaterial PhysicsWorld::material(uint16_t index) const {
+        return index < MAX_PHYSICS_MATERIALS && impl->materialDefined[index] ? impl->materials[index] : PhysicsMaterial{};
     }
 
     void PhysicsWorld::pruneShapeCache() {
@@ -1663,6 +1805,12 @@ namespace projv::runtime {
         }
         for (size_t slot = 0; slot < impl->joints.size(); slot++)
             if (impl->joints[slot].constraint) h.add(uint32_t(slot) | (uint32_t(impl->joints[slot].generation) << 16));
+        // The material table: two peers with a different stone are a mismatch, not a slow drift.
+        for (uint16_t i = 1; i < MAX_PHYSICS_MATERIALS; i++)
+            if (impl->materialDefined[i]) {
+                const PhysicsMaterial& m = impl->materials[i];
+                h.add(i); h.add(m.density); h.add(m.friction); h.add(m.restitution);
+            }
         return h.value;
     }
 
@@ -1822,7 +1970,9 @@ namespace projv::runtime {
         }
         settings.record = false;
         PhysicsWorld world(settings);
-        auto build = [&](const utils::CollisionPieces& pieces) { return world.shapeFromPieces(pieces); };
+        auto build = [&](const utils::CollisionPieces& pieces, float otherDensity) {
+            return world.shapeFromPieces(pieces, otherDensity);
+        };
         auto truncated = [&] {
             result.problem = "the recording is truncated after step " + std::to_string(result.stepsReplayed);
             return result;
@@ -1940,6 +2090,15 @@ namespace projv::runtime {
                     uint8_t on = 0, mode = 0;
                     if (!get(in, at, id) || !get(in, at, on) || !get(in, at, mode) || !get(in, at, dt)) return truncated();
                     world.setJointMotor(JointId{id}, on != 0, MotorMode(mode), dt);
+                    break;
+                }
+                case Op::SetMaterial: {
+                    uint16_t index = 0;
+                    PhysicsMaterial m;
+                    if (!get(in, at, index) || !get(in, at, m.density) || !get(in, at, m.friction) ||
+                        !get(in, at, m.restitution))
+                        return truncated();
+                    world.setMaterial(index, m);
                     break;
                 }
                 case Op::Restore: {

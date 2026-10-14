@@ -68,6 +68,10 @@ namespace projv::runtime {
         uint32_t                 pieces = 0;
         float                    volume = 0.0f;   // in voxels (cubic voxel units)
         utils::CollisionFallback fallback = utils::CollisionFallback::None;
+        // Some piece names a physics material: the shape carries each piece's density (its
+        // material's, or otherDensity for material 0) and a body's mass comes from it.
+        bool                     hasMaterials = false;
+        float                    otherDensity = 1000.0f;
         // What it was built from, kept so a recording can carry the shape as data.
         std::shared_ptr<const utils::CollisionPieces> source;
         struct Native;                            // the Jolt shape; defined where Jolt is
@@ -122,6 +126,20 @@ namespace projv::runtime {
         PhysicsShape s; s.kind = Kind::Compound; s.parts = std::move(parts); return s;
     }
 
+    // ---- Materials ------------------------------------------------------------------------------
+    // What a voxel is made of, as physics sees it: how heavy, how grippy, how bouncy. A table of
+    // them, indexed from 1 (0 is "none": the body's own BodyDesc values). Voxel shapes name one per
+    // piece (utils::SlotMaterials); a contact uses each side's -- the material of the piece touched,
+    // or the body's values where it has none -- combined as Jolt combines bodies: friction the
+    // geometric mean, restitution the larger.
+    struct PhysicsMaterial {
+        float density = 1000.0f;    // kg/m^3
+        float friction = 0.6f;
+        float restitution = 0.0f;   // 0..1
+        bool operator==(const PhysicsMaterial&) const = default;
+    };
+    constexpr uint16_t MAX_PHYSICS_MATERIALS = 1024;   // indices 1..1023
+
     struct BodyDesc {
         PhysicsShape shape;
         MotionType   motion = MotionType::Dynamic;
@@ -131,7 +149,10 @@ namespace projv::runtime {
         core::vec3   linearVelocity{0.0f};
         core::vec3   angularVelocity{0.0f};
         // Mass: the shape's volume times `density`, unless `mass` is > 0, which sets it outright.
-        // Either way the inertia is the shape's, scaled to that mass.
+        // Either way the inertia is the shape's, scaled to that mass. A voxel shape with materials
+        // weighs what its pieces' densities say instead, and its centre of mass is theirs (material-0
+        // pieces at the otherDensity it was built with; a primitive beside it at `density`). `mass`
+        // still scales the whole.
         float        density = 1000.0f;
         float        mass = 0.0f;
         float        friction = 0.6f;
@@ -392,15 +413,29 @@ namespace projv::runtime {
         // bodies resting on (or now inside) the old shape notice the new one.
         void wakeBodiesAround(BodyId id);
 
+        // ---- Materials ---------------------------------------------------------------------------
+        // Defines (or redefines) material `index`, 1..MAX_PHYSICS_MATERIALS-1. False, logged, for an
+        // index out of range or values that are not usable (density not positive, friction
+        // negative, anything non-finite); restitution is clamped to 0..1. Friction and restitution
+        // apply from the next step to every contact; a density is baked into voxel shapes, so it
+        // reaches bodies made after the change.
+        bool setMaterial(uint16_t index, const PhysicsMaterial& material);
+        // Default values for an index never defined.
+        PhysicsMaterial material(uint16_t index) const;
+
         // ---- Voxel shapes ------------------------------------------------------------------------
         // The shape a blob collides as (utils::buildCollisionPieces), built once per blob content and
         // parameters and shared after that: two calls for the same content return the same shape,
         // and an edit -- which gives the blob a new content stamp -- gets a new one. Null when the
         // blob has no voxels (nothing to collide with) or its pieces could not be made into a shape.
+        // `materials` gives each palette slot's physics material; pieces of material 0 weigh
+        // `otherDensity`. Shapes with different materials, densities or table versions are cached
+        // apart.
         CollisionShapeRef voxelShape(const GeometryBlob& blob, uint32_t resolution,
-                                     const utils::CollisionParams& params = {});
+                                     const utils::CollisionParams& params = {},
+                                     const utils::SlotMaterials* materials = nullptr, float otherDensity = 1000.0f);
         // The same, from pieces already built, and not cached.
-        CollisionShapeRef shapeFromPieces(const utils::CollisionPieces& pieces);
+        CollisionShapeRef shapeFromPieces(const utils::CollisionPieces& pieces, float otherDensity = 1000.0f);
         // Drops cached shapes nothing uses any more: no ref held outside the cache, no body built
         // from it. step() does this once a second of ticks; call it to release memory sooner.
         void pruneShapeCache();

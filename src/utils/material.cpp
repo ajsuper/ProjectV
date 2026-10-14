@@ -4,17 +4,20 @@
 
 namespace projv::utils {
 
-uint8_t internMaterial(Scene& scene, ComponentRecord& comp, const std::string& name, uint32_t packedColor) {
+uint8_t internMaterial(Scene& scene, ComponentRecord& comp, const std::string& name, uint32_t packedColor,
+                       const std::string& physics) {
     std::lock_guard<std::mutex> lock(scene.materialPaletteMutex);
+    // An entry is only the one asked for if its physics material matches too: a red voxel of wood
+    // and a red voxel of stone look alike but are not the same entry.
     if (!name.empty()) {
         for (size_t i = 0; i < comp.materialPalette.size(); ++i) {
-            if (comp.materialPalette[i].name == name) {
+            if (comp.materialPalette[i].name == name && comp.materialPalette[i].physics == physics) {
                 return static_cast<uint8_t>(i);
             }
         }
     }
     for (size_t i = 0; i < comp.materialPalette.size(); ++i) {
-        if (comp.materialPalette[i].packedColor == packedColor) {
+        if (comp.materialPalette[i].packedColor == packedColor && comp.materialPalette[i].physics == physics) {
             return static_cast<uint8_t>(i);
         }
     }
@@ -31,6 +34,7 @@ uint8_t internMaterial(Scene& scene, ComponentRecord& comp, const std::string& n
     Material mat;
     mat.name = name;
     mat.packedColor = packedColor;
+    mat.physics = physics;
     comp.materialPalette.push_back(mat);
     comp.paletteVersion++;
     return static_cast<uint8_t>(comp.materialPalette.size() - 1);
@@ -45,9 +49,9 @@ uint8_t findMaterialByName(const ComponentRecord& comp, const std::string& name)
     return INVALID_MATERIAL;
 }
 
-uint8_t findMaterialByColor(const ComponentRecord& comp, uint32_t packedColor) {
+uint8_t findMaterialByColor(const ComponentRecord& comp, uint32_t packedColor, const std::string& physics) {
     for (size_t i = 0; i < comp.materialPalette.size(); ++i) {
-        if (comp.materialPalette[i].packedColor == packedColor) {
+        if (comp.materialPalette[i].packedColor == packedColor && comp.materialPalette[i].physics == physics) {
             return static_cast<uint8_t>(i);
         }
     }
@@ -195,6 +199,20 @@ bool setMaterialName(Scene& scene, ComponentHandle componentHandle, uint8_t slot
     comp.materialPalette[slot].name = name;
     // A name change moves no colour, but the version is what every consumer watches, and a stale
     // name is still a stale palette.
+    comp.paletteVersion++;
+    return true;
+}
+
+bool setMaterialPhysics(Scene& scene, ComponentHandle componentHandle, uint8_t slot, const std::string& physics) {
+    if (componentHandle >= scene.components.size()) return false;
+    std::lock_guard<std::mutex> lock(scene.materialPaletteMutex);
+    ComponentRecord& comp = scene.components[componentHandle];
+    if (slot >= comp.materialPalette.size()) return false;
+
+    if (comp.materialPalette[slot].physics == physics) return true;
+    comp.materialPalette[slot].physics = physics;
+    // The GPU's words are unchanged, but the version is what every consumer watches -- physics
+    // rebuilds the shapes of bodies made from this component when it moves.
     comp.paletteVersion++;
     return true;
 }

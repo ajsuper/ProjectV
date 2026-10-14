@@ -8,6 +8,7 @@
 #include <set>
 #include <map>
 #include <cstring>
+#include <fstream>
 #include <tuple>
 
 #include <glm/gtc/quaternion.hpp>
@@ -59,6 +60,14 @@ namespace projv::runtime {
             std::vector<JointId>          doomedJoints;
             struct Edit { Entity entity; std::vector<PendingVoxelOp> ops; };
             std::vector<Edit>             edits;
+            // The physics material library: names in definition order (index = position + 1).
+            struct Library {
+                std::vector<std::string>        names;
+                std::map<std::string, uint16_t> index;
+                uint64_t                        version = 0;   // bumped by every definition
+                std::set<std::string>           warned;        // unknown names, logged once each
+            } library;
+            uint64_t                      seenPalettes = 0;  // palette versions and library at the last check
         };
 
         PhysicsRuntime& runtimeOf(World& world) { return world.ctx().get<PhysicsRuntime>(); }
@@ -138,6 +147,82 @@ namespace projv::runtime {
                 if (child < scene.components.size()) collectChunks(scene, child, out);
         }
 
+        // ---- Materials ---------------------------------------------------------------------------
+
+        struct Fnv {
+            uint64_t value = 1469598103934665603ull;
+            template <typename T> void add(const T& v) {
+                const auto* p = reinterpret_cast<const uint8_t*>(&v);
+                for (size_t i = 0; i < sizeof(T); i++) { value ^= p[i]; value *= 1099511628211ull; }
+            }
+        };
+
+        // A library index by name: 0 for none, and for a name the library does not have (logged once).
+        uint16_t materialNamed(PhysicsRuntime& physics, const std::string& name) {
+            if (name.empty()) return 0;
+            auto found = physics.library.index.find(name);
+            if (found != physics.library.index.end()) return found->second;
+            if (physics.library.warned.insert(name).second)
+                core::warn("physics: no physics material '{}' in the library; using the body's own values", name);
+            return 0;
+        }
+
+        // The component whose palette a chunk's voxels index: a grid's for its cells, the chunk's own
+        // otherwise.
+        ComponentHandle paletteOwner(const Scene& scene, const Chunk& chunk) {
+            if (chunk.gridIndex >= 0 && size_t(chunk.gridIndex) < scene.grids.size())
+                return scene.grids[size_t(chunk.gridIndex)].componentHandle;
+            return chunk.componentHandle;
+        }
+
+        // Each palette slot's physics material. False -- and no map -- when no entry names one, so
+        // the voxels collide as they always have.
+        bool slotMaterialsOf(PhysicsRuntime& physics, const Scene& scene, ComponentHandle owner, utils::SlotMaterials& out) {
+            if (owner >= scene.components.size()) return false;
+            const std::vector<Material>& palette = scene.components[owner].materialPalette;
+            out.fill(0);
+            bool any = false;
+            for (size_t slot = 0; slot < palette.size() && slot < out.size(); slot++) {
+                out[slot] = materialNamed(physics, palette[slot].physics);
+                any = any || out[slot] != 0;
+            }
+            return any;
+        }
+
+        // The material a body's own component names (RigidBody::material, StaticCollider::material).
+        uint16_t ownMaterial(World& world, PhysicsRuntime& physics, Entity entity) {
+            if (const RigidBody* rigid = world.try_get<RigidBody>(entity)) return materialNamed(physics, rigid->material);
+            if (const StaticCollider* fixed = world.try_get<StaticCollider>(entity)) return materialNamed(physics, fixed->material);
+            return 0;
+        }
+
+        // What a body's materials are, as one number: 0 when it uses none; otherwise its own, every
+        // palette under its voxels (when it is made of them) and the library's version.
+        uint64_t materialKeyOf(PhysicsRuntime& physics, const Scene* scene, ComponentHandle h, bool voxels, uint16_t own) {
+            Fnv key;
+            bool any = own != 0;
+            key.add(own);
+            if (voxels && scene) {
+                std::vector<ChunkHandle> chunks;
+                collectChunks(*scene, h, chunks);
+                ComponentHandle last = INVALID_COMPONENT_HANDLE;
+                utils::SlotMaterials slots;
+                for (ChunkHandle c : chunks) {
+                    if (c >= scene->chunks.size() || !scene->chunks[c].alive) continue;
+                    ComponentHandle owner = paletteOwner(*scene, scene->chunks[c]);
+                    if (owner == last) continue;   // a grid's cells: one palette
+                    last = owner;
+                    if (!slotMaterialsOf(physics, *scene, owner, slots)) continue;
+                    any = true;
+                    key.add(owner);
+                    key.add(slots);
+                }
+            }
+            if (!any) return 0;
+            key.add(physics.library.version);
+            return key.value | 1u;
+        }
+
         // The voxels under a component, as shape parts placed in the frame of the body at
         // (position, rotation): each chunk's shared voxel shape at its voxel size, where its header
         // puts it. Also the voxels' bounds in that frame, for fitting primitives.
@@ -159,14 +244,20 @@ namespace projv::runtime {
             return out;
         }
 
-        std::vector<PhysicsShapePart> voxelParts(PhysicsWorld& physics, const utils::CollisionParams& params,
-                                                 const Scene& scene, ComponentHandle h, core::vec3 position,
-                                                 core::quat rotation, Box3& bounds,
-                                                 std::vector<PhysicsVoxelPart>& voxelOut) {
+        // Voxels whose palette entry names a physics material are built with it; the rest weigh
+        // `otherDensity`.
+        std::vector<PhysicsShapePart> voxelParts(PhysicsRuntime& runtime, const Scene& scene, ComponentHandle h,
+                                                 core::vec3 position, core::quat rotation, float otherDensity,
+                                                 Box3& bounds, std::vector<PhysicsVoxelPart>& voxelOut) {
+            PhysicsWorld& physics = *runtime.world;
+            const utils::CollisionParams& params = runtime.collision;
             std::vector<ChunkHandle> chunks;
             collectChunks(scene, h, chunks);
             const core::quat inverse = glm::conjugate(rotation);
             std::vector<PhysicsShapePart> parts;
+            ComponentHandle lastOwner = INVALID_COMPONENT_HANDLE;
+            utils::SlotMaterials slots;
+            bool hasSlots = false;
             for (ChunkHandle c : chunks) {
                 if (c >= scene.chunks.size()) continue;
                 const Chunk& chunk = scene.chunks[c];
@@ -174,7 +265,13 @@ namespace projv::runtime {
                     size_t(chunk.geometryPoolIndex) >= scene.geometryPool.size() || chunk.header.resolution == 0)
                     continue;
                 const GeometryBlob& blob = scene.geometryPool[size_t(chunk.geometryPoolIndex)];
-                CollisionShapeRef shape = physics.voxelShape(blob, chunk.header.resolution, params);
+                ComponentHandle owner = paletteOwner(scene, chunk);
+                if (owner != lastOwner || lastOwner == INVALID_COMPONENT_HANDLE) {
+                    lastOwner = owner;
+                    hasSlots = slotMaterialsOf(runtime, scene, owner, slots);
+                }
+                CollisionShapeRef shape = physics.voxelShape(blob, chunk.header.resolution, params,
+                                                             hasSlots ? &slots : nullptr, otherDensity);
                 if (!shape) continue;   // an empty chunk: nothing there to collide with
                 float voxelSize = chunk.header.scale / float(chunk.header.resolution);
                 PhysicsShapePart part;
@@ -201,6 +298,7 @@ namespace projv::runtime {
             bool        noVoxels = false;   // refused because there are no voxels (left) to build from
             std::vector<PhysicsVoxelPart> voxelParts;
             Sources    sources;
+            uint64_t   materialKey = 0;
         };
 
         Description describe(World& world, PhysicsRuntime& physics, Entity entity) {
@@ -232,15 +330,23 @@ namespace projv::runtime {
                 d.rotation = t->rotation;
             }
 
+            // The body's own values: its material's when it names one, its fields' otherwise.
+            const uint16_t own = ownMaterial(world, physics, entity);
+            const PhysicsMaterial ownValues = physics.world->material(own);
+            d.density = own ? ownValues.density : rigid ? rigid->density : d.density;
+            d.friction = own ? ownValues.friction : rigid ? rigid->friction : fixed->friction;
+            d.restitution = own ? ownValues.restitution : rigid ? rigid->restitution : fixed->restitution;
+
+            RigidBody::Shape kind = rigid ? rigid->shape : RigidBody::Shape::Voxels;
             Box3 bounds;
             std::vector<PhysicsShapePart> parts;
             if (linked) {
-                parts = voxelParts(*physics.world, physics.collision, *scene, link->handle, d.position, d.rotation, bounds,
-                                   out.voxelParts);
+                parts = voxelParts(physics, *scene, link->handle, d.position, d.rotation, d.density, bounds, out.voxelParts);
                 out.sources = sourcesOf(*scene, link->handle);
             }
+            out.materialKey = materialKeyOf(physics, scene, linked ? link->handle : INVALID_COMPONENT_HANDLE,
+                                            linked && kind == RigidBody::Shape::Voxels, own);
 
-            RigidBody::Shape kind = rigid ? rigid->shape : RigidBody::Shape::Voxels;
             if (kind == RigidBody::Shape::Voxels) {
                 if (!linked) {
                     out.refusal = "a voxel shape needs the entity linked to a component";
@@ -295,10 +401,7 @@ namespace projv::runtime {
 
             if (rigid) {
                 d.layer = rigid->layer;
-                d.density = rigid->density;
                 d.mass = rigid->mass;
-                d.friction = rigid->friction;
-                d.restitution = rigid->restitution;
                 d.linearDamping = rigid->linearDamping;
                 d.angularDamping = rigid->angularDamping;
                 d.gravityFactor = rigid->gravityFactor;
@@ -316,8 +419,6 @@ namespace projv::runtime {
                 }
             } else {
                 d.layer = fixed->layer;
-                d.friction = fixed->friction;
-                d.restitution = fixed->restitution;
             }
             return out;
         }
@@ -467,6 +568,40 @@ namespace projv::runtime {
                 physics.seenStamp = latestBlobContentStamp();
             }
 
+            // 2c. Bodies whose materials changed: a palette entry named another, the library redefined
+            //     one. Only looked for when some palette or the library changed since the last step.
+            if (scene) {
+                Fnv palettes;
+                palettes.add(physics.library.version);
+                for (const ComponentRecord& record : scene->components) palettes.add(record.paletteVersion);
+                if (palettes.value != physics.seenPalettes) {
+                    physics.seenPalettes = palettes.value;
+                    std::vector<std::pair<Entity, uint32_t>> changed;
+                    for (auto [entity, body] : world.view<PhysicsBody>().each()) {
+                        const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
+                        bool linked = link && utils::isComponentAlive(*scene, link->ref());
+                        const RigidBody* rigid = world.try_get<RigidBody>(entity);
+                        bool voxels = linked && (!rigid || rigid->shape == RigidBody::Shape::Voxels);
+                        uint64_t key = materialKeyOf(physics, scene, linked ? link->handle : INVALID_COMPONENT_HANDLE,
+                                                     voxels, ownMaterial(world, physics, entity));
+                        if (key == body.materialKey) continue;
+                        const NetId* id = world.try_get<NetId>(entity);
+                        changed.push_back({entity, id ? id->value : 0});
+                    }
+                    std::sort(changed.begin(), changed.end(), [](const auto& a, const auto& b) {
+                        return std::make_tuple(a.second == 0, a.second, a.first) < std::make_tuple(b.second == 0, b.second, b.first);
+                    });
+                    for (auto [entity, net] : changed) {
+                        const PhysicsBody& body = world.get<PhysicsBody>(entity);
+                        if (body.motion == MotionType::Dynamic && !physics.carried.count(entity)) {
+                            BodyState state = sim.bodyState(body.id);
+                            physics.carried[entity] = {state.linearVelocity, state.angularVelocity};
+                        }
+                        physics.rebuild.push_back(entity);
+                    }
+                }
+            }
+
             // 2. Rebuilds: a changed RigidBody, a new or lost link, changed voxels.
             for (Entity e : physics.rebuild) {
                 if (!world.valid(e)) continue;
@@ -521,6 +656,7 @@ namespace projv::runtime {
                 body.previousRotation = body.rotation = glm::normalize(described.desc.rotation);
                 body.sources = std::move(described.sources);
                 body.voxelParts = std::move(described.voxelParts);
+                body.materialKey = described.materialKey;
                 physics.byBody[id.value] = e;
                 world.emplace<PhysicsBody>(e, body);
             }
@@ -1040,10 +1176,86 @@ namespace projv::runtime {
     uint64_t nextPhysicsTick(const World& world) { return physicsWorld(world).tick() + 1; }
     uint64_t lateCommands(const World& world) { return world.ctx().get<PhysicsRuntime>().late; }
 
+    uint16_t definePhysicsMaterial(World& world, const std::string& name, const PhysicsMaterial& material) {
+        PhysicsRuntime& physics = runtimeOf(world);
+        if (name.empty() || name.size() > 64) {
+            core::warn("physics: refused a physics material named '{}': names are 1 to 64 characters", name);
+            return 0;
+        }
+        auto found = physics.library.index.find(name);
+        uint16_t index = found != physics.library.index.end() ? found->second : uint16_t(physics.library.names.size() + 1);
+        if (index >= MAX_PHYSICS_MATERIALS) {
+            core::warn("physics: refused physics material '{}': the library is full ({})", name, MAX_PHYSICS_MATERIALS - 1);
+            return 0;
+        }
+        if (!physics.world->setMaterial(index, material)) return 0;
+        if (found == physics.library.index.end()) {
+            physics.library.names.push_back(name);
+            physics.library.index[name] = index;
+            physics.library.warned.erase(name);
+        }
+        physics.library.version++;
+        return index;
+    }
+
+    uint16_t physicsMaterialIndex(const World& world, const std::string& name) {
+        const PhysicsRuntime& physics = world.ctx().get<PhysicsRuntime>();
+        auto found = physics.library.index.find(name);
+        return found != physics.library.index.end() ? found->second : 0;
+    }
+
+    std::optional<PhysicsMaterial> physicsMaterial(const World& world, const std::string& name) {
+        uint16_t index = physicsMaterialIndex(world, name);
+        if (!index) return std::nullopt;
+        return physicsWorld(world).material(index);
+    }
+
+    bool loadPhysicsMaterials(World& world, const std::string& path) {
+        std::ifstream file(path);
+        if (!file) {
+            core::warn("physics: cannot open physics material library '{}'", path);
+            return false;
+        }
+        nlohmann::json json = nlohmann::json::parse(file, nullptr, false);
+        if (json.is_discarded() || !json.is_object() || !json.contains("materials") || !json["materials"].is_array()) {
+            core::warn("physics: '{}' is not a physics material library (an object with a \"materials\" array)", path);
+            return false;
+        }
+        if (json.value("v", 1) != 1) {
+            core::warn("physics: '{}' is library version {}; this build reads version 1", path, json.value("v", 1));
+            return false;
+        }
+        for (const nlohmann::json& entry : json["materials"]) {
+            if (!entry.is_object() || !entry.contains("name") || !entry["name"].is_string()) {
+                core::warn("physics: '{}' has a material with no name; the rest are not loaded", path);
+                return false;
+            }
+            PhysicsMaterial m;
+            try {
+                m.density = entry.value("density", m.density);
+                m.friction = entry.value("friction", m.friction);
+                m.restitution = entry.value("restitution", m.restitution);
+            } catch (const nlohmann::json::exception&) {
+                core::warn("physics: '{}': material '{}' has a value that is not a number; the rest are not loaded", path,
+                           entry["name"].get<std::string>());
+                return false;
+            }
+            if (!definePhysicsMaterial(world, entry["name"].get<std::string>(), m)) return false;
+        }
+        return true;
+    }
+
     uint64_t physicsStateHash(const World& world) {
         const PhysicsWorld& sim = physicsWorld(world);
         Hash h;
         h.add(sim.tick());
+        // The library: peers with a different stone are a mismatch, found at once.
+        const PhysicsRuntime& physics = world.ctx().get<PhysicsRuntime>();
+        for (size_t i = 0; i < physics.library.names.size(); i++) {
+            PhysicsMaterial m = sim.material(uint16_t(i + 1));
+            for (char c : physics.library.names[i]) h.add(c);
+            h.add(m.density); h.add(m.friction); h.add(m.restitution);
+        }
         for (auto [entity, net] : bodiesInOrder(world)) {
             BodyState s = sim.bodyState(world.get<PhysicsBody>(entity).id);
             h.add(net);
@@ -1271,6 +1483,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::RigidBody>::save(const pro
     if (b.gravityFactor != defaults.gravityFactor) j["gravityFactor"] = tidy(b.gravityFactor);
     if (b.layer != defaults.layer) j["layer"] = layerName(b.layer);
     if (b.quality != defaults.quality) j["quality"] = qualities[size_t(b.quality)];
+    if (!b.material.empty()) j["material"] = b.material;
     return j;
 }
 
@@ -1313,6 +1526,7 @@ std::optional<projv::RigidBody> projv::runtime::ComponentTraits<projv::RigidBody
     b.linearDamping = j.value("linearDamping", b.linearDamping);
     b.angularDamping = j.value("angularDamping", b.angularDamping);
     b.gravityFactor = j.value("gravityFactor", b.gravityFactor);
+    b.material = j.value("material", std::string());
     return b;
 }
 
@@ -1323,6 +1537,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::StaticCollider>::save(cons
     if (c.restitution != defaults.restitution) j["restitution"] = tidy(c.restitution);
     if (c.layer != defaults.layer) j["layer"] = layerName(c.layer);
     if (c.splits) j["splits"] = true;
+    if (!c.material.empty()) j["material"] = c.material;
     return j;
 }
 
@@ -1337,6 +1552,7 @@ std::optional<projv::StaticCollider> projv::runtime::ComponentTraits<projv::Stat
         c.layer = *layer;
     }
     c.splits = j.value("splits", false);
+    c.material = j.value("material", std::string());
     return c;
 }
 

@@ -1,6 +1,7 @@
 #ifndef PROJECTV_COLLISION_GEOMETRY_H
 #define PROJECTV_COLLISION_GEOMETRY_H
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -49,7 +50,16 @@ namespace projv::utils {
         // The voxels the piece stands for, inclusive. How a contact or a ray hit on this piece is
         // traced back to voxels: for materials, damage, per-voxel friction.
         core::ivec3 voxelMin{0}, voxelMax{-1};
+        // The physics material every voxel of the piece has (SlotMaterials): 0 for none, which is
+        // the body's own values.
+        uint16_t    material = 0;
     };
+
+    // Which physics material each palette slot of a component names: an index into the physics
+    // material library (runtime/physics.h), 0 for none. Pieces never span two materials, so slots
+    // that differ only in look (three colours of one stone) merge as if they were one, and slots
+    // that look alike but name different materials do not.
+    using SlotMaterials = std::array<uint16_t, 256>;
 
     enum class CollisionFallback : uint8_t {
         None,
@@ -80,9 +90,11 @@ namespace projv::utils {
     DecodeResult decodeOccupancy(const GeometryBlob& blob, uint32_t resolution, uint64_t maxCells, VoxelOccupancy& out);
 
     // The pieces `blob` collides as. `resolution` is the chunk's native resolution (a power of
-    // four), which fixes the tree's depth.
+    // four), which fixes the tree's depth. With `materials`, each voxel's palette slot is looked up
+    // in it and boxes stop where the material changes; without, every piece is material 0.
     CollisionPieces buildCollisionPieces(const GeometryBlob& blob, uint32_t resolution,
-                                         const CollisionParams& params = {});
+                                         const CollisionParams& params = {},
+                                         const SlotMaterials* materials = nullptr);
 }
 
 #endif
