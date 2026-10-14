@@ -67,13 +67,13 @@ uniform vec4 reconstructParams;     // x = debug view, y = TRUST_SPACINGS overri
 
 #define TRUST_SPACINGS_DEFAULT 1.5
 
-// A chunk's rotation, from the one header texel that holds it. headers() would fetch all five, and this
+// A chunk's rotation, from the one header texel that holds it. headers() would fetch all six, and this
 // runs for up to nine candidates per pixel; consecutive candidates almost always share a chunk, which
 // the caller exploits too.
 mat3 chunkRotation(int headerIndex) {
-    int headersPerRow = textureSize(headerData, 0).x / 5;
+    int headersPerRow = textureSize(headerData, 0).x / PJV_HEADER_TEXELS;
     int row = headerIndex / headersPerRow;
-    int column = (headerIndex - row * headersPerRow) * 5;
+    int column = (headerIndex - row * headersPerRow) * PJV_HEADER_TEXELS;
     uvec4 q = texelFetch(headerData, ivec2(column + 3, row), 0);
     return rotationFromQuat(vec4(uintBitsToFloat(q.r), uintBitsToFloat(q.g),
                                  uintBitsToFloat(q.b), uintBitsToFloat(q.a)));

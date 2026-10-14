@@ -172,6 +172,7 @@ projv::RigidBody ballBody(float density, float restitution) {
 // What the renderer draws (renderParams): sun shadows, AO, the upscaler, its debug view.
 struct Look {
     bool shadows = true, ambientOcclusion = true, upscale = true, upscaleDebug = false;
+    bool marchHeat = false;   // the G-buffer's march statistics, as a heat map
 };
 
 struct Camera {
@@ -1577,7 +1578,8 @@ void titleBar(projv::Application& app) {
 // each switch, so both configurations see the same moments of the demo and the same clocks. Reports
 // the mean GPU frame and each pass (bgfx views, in render.json order), then quits.
 struct Bench {
-    static constexpr int WARMUP = 120, PHASE = 60, SETTLE = 6, PHASES = 16;
+    static constexpr int WARMUP = 120, PHASE = 60, SETTLE = 6;
+    int phases = 16;   // DEMOS_BENCH_PHASES: fewer for a quick look
     int frame = 0;
     double frameMs[2] = {}, passMs[2][8] = {};
     int samples[2] = {};
@@ -1591,7 +1593,7 @@ void bench(projv::Application& app) {
     const int f = b->frame++;
     if (f < Bench::WARMUP) return;
     const int at = f - Bench::WARMUP, phase = at / Bench::PHASE;
-    if (phase >= Bench::PHASES) {
+    if (phase >= b->phases) {
         projv::core::vec2 size = world.ctx().get<projv::graphics::RenderInstance>().getWindowResolution();
         projv::core::info("BENCH demo {} resolution={}x{} (rendered at {}x{}), {} frames each", world.ctx().get<Demos>().current,
                           int(size.x), int(size.y), int(size.x / 2), int(size.y / 2), b->samples[0]);
@@ -1955,6 +1957,7 @@ void startup(projv::Application& app) {
         look.ambientOcclusion = s.find('o') == std::string::npos;
         look.upscale = s.find('u') == std::string::npos;
         look.upscaleDebug = s.find('g') != std::string::npos;
+        look.marchHeat = s.find('s') != std::string::npos;
     }
     auto& scene = world.ctx().emplace<projv::Scene>();
     auto& demos = world.ctx().emplace<Demos>();
@@ -2059,7 +2062,8 @@ void startup(projv::Application& app) {
 
     demos.unattended = unattended;
     if (benchDemo) {
-        world.ctx().emplace<Bench>();
+        Bench& b = world.ctx().emplace<Bench>();
+        if (const char* phases = std::getenv("DEMOS_BENCH_PHASES")) b.phases = std::max(2, std::atoi(phases));
         bgfx::setDebug(BGFX_DEBUG_PROFILER);
         startDemo(world, std::clamp(std::atoi(benchDemo), 1, 10));
     } else if (unattended) {
@@ -2091,7 +2095,8 @@ void render(projv::Application& app) {
     projv::graphics::setUniformToValue(renderer, "windowRes", resolution);
     const Look& look = world.ctx().get<Look>();
     projv::core::vec4 sun(glm::normalize(vec3(0.35f, 0.85f, 0.4f)), 0.0f);
-    projv::core::vec4 params(look.shadows, look.ambientOcclusion, !look.upscale, look.upscaleDebug);
+    projv::core::vec4 params(look.shadows, look.ambientOcclusion, !look.upscale,
+                             look.upscaleDebug ? 1.0f : look.marchHeat ? 2.0f : 0.0f);
     projv::graphics::setUniformToValue(renderer, "sunDir", sun);
     projv::graphics::setUniformToValue(renderer, "renderParams", params);
     projv::graphics::renderConstructedRenderer(renderInstance, renderer, &gpuData);

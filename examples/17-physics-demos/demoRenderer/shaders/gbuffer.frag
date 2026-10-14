@@ -24,6 +24,12 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+// Nothing here animates: leave the animated-voxel march out of the shader (see pjv_utils_DDA.sc --
+// its size alone made this pass nearly three times slower).
+#define PJV_NO_ANIMATION
+// Uncomment for the march heat map (DEMOS_LOOK=s): red tree steps, green chunk marches, blue scene
+// visits. It costs a little, so it is off.
+// #define PJV_MARCH_STATS
 #include <pjv_utils_DDA.sc>
 
 uniform vec4 windowRes;
@@ -71,6 +77,20 @@ void main() {
             visibility = found.foundBox.size >= 0.0 ? 0.0 : 1.0;
         }
     }
+
+    // Heat map (renderParams.w == 2): red = tree steps / 400, green = chunk marches / 16, blue =
+    // scene visits (BVH nodes, grid cells) / 64, over both rays. Written as sky, so it passes through.
+#ifdef PJV_MARCH_STATS
+    if (renderParams.w > 1.5) {
+        gl_FragData[0] = vec4(0.0, 0.0, 0.0, -1.0);
+        gl_FragData[1] = vec4(0.0);
+        gl_FragData[2] = vec4(float(pjvStatSteps) / 400.0, float(pjvStatMarches) / 16.0, float(pjvStatVisits) / 64.0, 1.0);
+        gl_FragData[3] = vec4(1.0, 0.0, 0.0, 0.0);
+        gl_FragData[4] = vec4(0.0);
+        gl_FragData[5] = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+#endif
 
     if (hit.foundBox.size < 0.0 || hit.rayT <= 0.0 || dot(hit.normal, hit.normal) < 0.5) {
         gl_FragData[0] = vec4(0.0, 0.0, 0.0, -1.0);

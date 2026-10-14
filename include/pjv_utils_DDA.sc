@@ -506,6 +506,11 @@ struct chunkHeader {
     uint envelopeStartIndex;
     uint envelopeNodeCount;
     uint envelopeMotionStartIndex;   // BYTE offset into materialIDs, as materialIDStartIndex is
+    // ---- Where the voxels are (the 6th texel; see GPUChunkHeader) -----------------------------
+    // The content box in the tree's own voxel units, max exclusive. hasContentBox false: use the cube.
+    vec3 contentMin;
+    vec3 contentMax;
+    bool hasContentBox;
 };
 
 // Does this chunk carry an animation envelope at all? Almost never, and the traversal is written so
@@ -517,6 +522,25 @@ struct Voxel {
     vec3 color;
     vec3 normal;
 };
+
+// ---- March statistics (off unless a shader defines PJV_MARCH_STATS before including this) ----
+// Counters a debug view can paint as a heat map: tree marches started (one per chunk a ray reaches),
+// the DDA steps they took, and the scene-level visits (BVH nodes popped, grid cells walked). Per
+// invocation, since a fragment shader's globals are. Without the define they are not declared and
+// the hooks are not compiled.
+#ifdef PJV_MARCH_STATS
+// `static` where the shader language makes a bare global a uniform (HLSL, and SPIR-V built from it).
+#if BGFX_SHADER_LANGUAGE_GLSL
+#define PJV_STAT_STORAGE
+#else
+#define PJV_STAT_STORAGE static
+#endif
+PJV_STAT_STORAGE uint pjvStatMarches = 0u;
+PJV_STAT_STORAGE uint pjvStatSteps = 0u;
+PJV_STAT_STORAGE uint pjvStatVisits = 0u;
+void pjvStatMarch(uint steps) { pjvStatMarches += 1u; pjvStatSteps += steps; }
+void pjvStatVisit() { pjvStatVisits += 1u; }
+#endif
 
 struct SceneIntersectData {
     uint steps;
@@ -562,7 +586,7 @@ struct SceneIntersectData {
     // why they are here: they turn a material lookup into two texelFetches.
     //
     // Carried for the same reason voxelCoord and exitT are, and with more to gain than either. The
-    // alternative -- fetchVoxelMaterialAtCoord -- re-fetches the chunk header (5 texels) and then
+    // alternative -- fetchVoxelMaterialAtCoord -- re-fetches the chunk header (PJV_HEADER_TEXELS texels) and then
     // re-descends the tree from the root, one texel and one popcount per level, to reach the leaf the
     // march was standing on when it returned. The march already had that leaf's occupancy mask and
     // material offset in hand, and the voxel's index within it on the top of the stack; the whole
@@ -1398,23 +1422,26 @@ int pjvPeelConsume(inout PeelAccum peel, VoxelMaterial m,
     return PJV_PEEL_CONTINUE;
 }
 
+// Texels per header: GPUChunkHeader's size in RGBA32U texels (scene.h, GPU_HEADER_TEXELS).
+#define PJV_HEADER_TEXELS 6
+
 chunkHeader headers(int headerIndex) {
-    // One header is 5 consecutive texels (grown from 4 to fit the added traversalLOD + reserved
-    // words -- a texel is atomic, so one new field forces a whole new texel). The texture is 2D
-    // (it used to be a single row, which capped the scene at maxTextureSize/N chunks), and its
-    // width is always a multiple of 5, so a header never straddles a row -- one divide resolves
-    // the row, and the 5 fetches share it. The CPU builds the same layout in createHeaderTexture
-    // (gpu_interface.cpp); the "width is a multiple of 5" invariant is what keeps the two in sync
-    // without a uniform.
-    int headersPerRow = textureSize(headerData, 0).x / 5;
+    // One header is PJV_HEADER_TEXELS consecutive texels (5 grew to 6 for the content box -- a texel
+    // is atomic, so one new field forces a whole new texel). The texture is 2D (it used to be a
+    // single row, which capped the scene at maxTextureSize/N chunks), and its width is always a
+    // multiple of PJV_HEADER_TEXELS, so a header never straddles a row -- one divide resolves the
+    // row, and the fetches share it. The CPU builds the same layout in createHeaderTexture
+    // (gpu_interface.cpp); that invariant is what keeps the two in sync without a uniform.
+    int headersPerRow = textureSize(headerData, 0).x / PJV_HEADER_TEXELS;
     int row = headerIndex / headersPerRow;
-    int index = (headerIndex % headersPerRow) * 5;
+    int index = (headerIndex % headersPerRow) * PJV_HEADER_TEXELS;
 
     uvec4 pixel0 = texelFetch(headerData, ivec2(index + 0, row), 0);
     uvec4 pixel1 = texelFetch(headerData, ivec2(index + 1, row), 0);
     uvec4 pixel2 = texelFetch(headerData, ivec2(index + 2, row), 0);
     uvec4 pixel3 = texelFetch(headerData, ivec2(index + 3, row), 0);
     uvec4 pixel4 = texelFetch(headerData, ivec2(index + 4, row), 0);
+    uvec4 pixel5 = texelFetch(headerData, ivec2(index + 5, row), 0);
 
     chunkHeader header;
     header.chunkID = pixel0.r;
@@ -1435,6 +1462,9 @@ chunkHeader headers(int headerIndex) {
     header.envelopeStartIndex = pixel4.g;
     header.envelopeNodeCount = pixel4.b;
     header.envelopeMotionStartIndex = pixel4.a;
+    header.hasContentBox = (pixel5.a & 1u) != 0u;
+    header.contentMin = vec3(float(pixel5.r & 0xFFFFu), float(pixel5.r >> 16), float(pixel5.g & 0xFFFFu));
+    header.contentMax = vec3(float(pixel5.g >> 16), float(pixel5.b & 0xFFFFu), float(pixel5.b >> 16));
 
     return header;
 }
@@ -1442,7 +1472,7 @@ chunkHeader headers(int headerIndex) {
 // Total addressable header slots. The texture is 2D, so this is headers-per-row * rows.
 int headersLength() {
     ivec2 texSize = textureSize(headerData, 0);
-    return int(texSize.x / 5) * int(texSize.y);
+    return int(texSize.x / PJV_HEADER_TEXELS) * int(texSize.y);
 }
 
 // Builds the rotation matrix R (R * v rotates v by q) from a quaternion [x, y, z, w].
@@ -3291,6 +3321,25 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
     // a degradation with a visible cause rather than a hole with none.
     bool animate = (rayQuery.flags & PJV_Q_ANIMATION) != 0u && chunkHasEnvelope(header);
 
+    // ---- Does the ray reach the voxels at all? ---------------------------------------------------
+    // The chunk's cube is mostly air in a typical scene -- a crate's 1 m of voxels in a 4 m chunk, a
+    // floor's metre in an 8 m grid cell -- and a ray that crosses the cube but not the content box
+    // cannot hit anything here. Answered before any of the march is set up, which is the whole saving:
+    // most rays reach many chunks and hit at most one. Skipped for a chunk with an animation envelope,
+    // whose animated voxels may be drawn outside the static content.
+    tree64Intersect.steps = 0u;
+    if (header.hasContentBox && !chunkHasEnvelope(header)) {
+        vec3 inverse = 1.0 / transformedRay.direction;
+        vec3 t0 = (header.contentMin - transformedRay.origin) * inverse;
+        vec3 t1 = (header.contentMax - transformedRay.origin) * inverse;
+        vec3 near3 = min(t0, t1), far3 = max(t0, t1);
+        float contentEnter = max(max(max(near3.x, near3.y), near3.z), 0.0);
+        float contentExit = min(min(far3.x, far3.y), far3.z);
+        // Missed, wholly behind tMin, or no nearer than what the scene already holds.
+        if (contentExit < contentEnter || contentExit < localTMin || contentEnter * localToWorld >= nearestSoFar)
+            return tree64Intersect;
+    }
+
     if(rootIntersect.distance >= 0){
         // The bounds that apply to the animated march however it is ordered below.
         //
@@ -3334,6 +3383,12 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
         SceneIntersectData animHit;
         animHit.foundBox.size = -1.0;
         animHit.rayT = -1.0;
+        // PJV_NO_ANIMATION (defined before including this file) leaves the animated march out of the
+        // shader. It is a whole second tree march inlined into every copy of this function, and the
+        // shader pays for its size whether or not a ray ever animates: measured in the physics demos'
+        // G-buffer, 9.3 ms -> 3.4 ms for the same frame. A renderer that never sets
+        // pjvQueryAnimation should define it.
+#ifndef PJV_NO_ANIMATION
         if (animate) {
             // Bounded by whatever the geometry already found. An animated voxel behind an opaque
             // surface cannot be seen, and searching for it is the single largest avoidable cost here.
@@ -3347,6 +3402,7 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
             animHit = pjvAnimatedMarch(transformedRay, rayQuery, header, R, Rinv, P,
                                        header.scale / tree64BoundingBox.size, animLimit, localTMin);
         }
+#endif
 
         // Merged in the SAME frame and units as the geometry hit so the nearer of the two wins on a
         // straight comparison. Merging after the world lift-back below would compare two numbers that
@@ -3755,6 +3811,9 @@ SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float ma
     for (int i = 0; i < maxSteps; i++) {
         // No cell entered beyond the closest hit so far can improve on it.
         if (tCurrent >= maxDistance) break;
+        #ifdef PJV_MARCH_STATS
+        pjvStatVisit();
+        #endif
         // The peel gave up (budget spent, or fully absorbed). Nothing further along this ray can
         // contribute, and marching the remaining cells would be a full descent each for an answer
         // already known.
@@ -3766,6 +3825,9 @@ SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float ma
             uint chunkIdx = cellMapValue(g.cellMapOffset + lin);
             if (chunkIdx != 0xFFFFFFFFu) {
                 SceneIntersectData hit = castRayThroughTree64(ray, rayQuery, tMin, int(chunkIdx), limitT, maxDistance, peel);
+                #ifdef PJV_MARCH_STATS
+                pjvStatMarch(hit.steps);
+                #endif
                 if (hit.foundBox.size > 0 && hit.rayT >= 0.0 && hit.rayT < maxDistance) {
                     hit.headerIndex = chunkIdx;
                     // Front-to-back: the first occupied cell with a hit holds this grid's nearest hit.
@@ -3914,6 +3976,9 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin,
         // Out of chunks in the current range: find the next leaf the ray reaches in time.
         while (rangeNext >= rangeEnd && stackTop > 0) {
             stackTop--;
+            #ifdef PJV_MARCH_STATS
+            pjvStatVisit();
+            #endif
             LooseBVHNode node = looseBVHNode(bvhStack[stackTop], looseCount);
             float entry = looseBVHEntry(ray.origin, inverseDirection, node.boxMin, node.boxMax);
             if (entry < 0.0 || entry >= closestDistance) continue;
@@ -3955,6 +4020,9 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin,
 
         float limitT = (soloKind == 0 && soloIndex == i) ? soloLimit : -1.0;
         SceneIntersectData tree64Intersect = castRayThroughTree64(ray, rayQuery, tMin, int(headerIndex), limitT, closestDistance, peel);
+        #ifdef PJV_MARCH_STATS
+        pjvStatMarch(tree64Intersect.steps);
+        #endif
         // Rank by the march's own rayT (re-intersecting foundBox analytically flips
         // boundary-exact hits into misses by ULPs). rayT == 0 is a real hit.
         if(tree64Intersect.foundBox.size > 0 && tree64Intersect.rayT >= 0 && tree64Intersect.rayT < closestDistance){

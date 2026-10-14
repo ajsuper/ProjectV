@@ -13,11 +13,18 @@ $input v_texcoord0
 //   and -- new here -- the chunk's rotation (gRot) give the cube exactly. So for each output pixel,
 //   the voxels its 3x3 neighbourhood of render texels saw are tested against the OUTPUT pixel's own
 //   ray.
-// - Each is tested for how much of the pixel its silhouette COVERS (the overlap of the pixel's
-//   footprint on each visible face with that face, summed over the at most three faces a cube shows).
-//   Coverage is the antialiasing: a pixel inside a face is 1 and stays crisp; along an edge it is the
-//   true fraction, so edges come out smooth at output resolution even though the source never had
-//   them. That holds at any scale, 1:1 included.
+// - Each is tested for how much of the pixel it COVERS: the overlap of the pixel's footprint with each
+//   face of the voxel that some texel actually recorded, summed. Coverage is the antialiasing: a pixel
+//   inside a face is 1 and stays crisp; along an edge it is the true fraction, so edges come out
+//   smooth at output resolution even though the source never had them. That holds at any scale, 1:1
+//   included.
+// - RECORDED faces only, not the cube's whole silhouette (which the gallery version sums). A face a
+//   texel saw is at least partly visible; one no texel saw is usually buried -- against the next voxel
+//   of the same surface. Counting buried faces is what left colour edges hard: at the boundary
+//   between two coplanar voxels of different colours, each claimed the band of the pixel its buried
+//   side would cover, so whichever sorted first took nearly the whole pixel and the edge came out
+//   binary. With recorded faces the two tops split the pixel by area, as they should. (A face too thin
+//   for any texel to see is left to the fallback filter, which is the cheaper failure.)
 // - Up to three voxels, nearest first, are composited by coverage -- partitioning the pixel where
 //   they are adjacent, occluding where one is a silhouette over another -- over the sky (when the
 //   window saw any) or a plain bilinear of the source for whatever no voxel claimed.
@@ -37,7 +44,6 @@ $input v_texcoord0
 #include <bgfx_shader.sh>
 
 SAMPLER2D(composedHDR, 0);
-SAMPLER2D(gPos,        1);   // xyz world hit, w = distance (w < 0: sky)
 SAMPLER2D(gNormal,     2);   // xyz face normal
 SAMPLER2D(gFace,       5);   // xyz face centre, w = voxel edge
 SAMPLER2D(gRot,        6);   // the chunk's rotation, xyzw
@@ -108,29 +114,14 @@ float faceCoverage(vec3 centre, vec3 n, vec3 u, vec3 v, float halfSide, vec3 ray
     return slabOverlap(abs(dot(d, u)), halfSide, wu) * slabOverlap(abs(dot(d, v)), halfSide, wv);
 }
 
-// The cube's whole silhouette: the faces turned toward the ray, one per axis, are disjoint, so
-// their coverages add.
-float voxelCoverage(vec3 centre, float halfSide, mat3 R, vec3 rayDir, vec3 camRight, vec3 camUp,
-                    float theta, out float outT) {
-    outT = 1e30;
-    float total = 0.0;
-    for (int axis = 0; axis < 3; axis++) {
-        vec3 a = R[axis], u = R[(axis + 1) % 3], v = R[(axis + 2) % 3];
-        vec3 n = dot(rayDir, a) > 0.0 ? -a : a;
-        float t;
-        float c = faceCoverage(centre + n * halfSide, n, u, v, halfSide, rayDir, camRight, camUp, theta, t);
-        if (c > 0.0) { total += c; outT = min(outT, t); }
-    }
-    return min(total, 1.0);
-}
-
-// What one source texel says about the voxel it saw.
-bool voxelSample(vec2 uv, vec3 rayDir, vec3 camRight, vec3 camUp, float theta,
-                 out float outT, out float outCoverage, out vec3 outCentre, out float outRecorded,
-                 out float outSize, out vec4 outRotation) {
-    outT = 1e30; outCoverage = 0.0; outCentre = vec3(0.0); outRecorded = 0.0; outSize = 0.0;
+// What one source texel says about the voxel it saw: the voxel (centre, size, rotation), and the
+// face it recorded -- which one (an id per axis and side), how much of this output pixel it covers,
+// and at what depth.
+bool voxelSample(vec2 uv, vec4 face, vec3 rayDir, vec3 camRight, vec3 camUp, float theta,
+                 out float outT, out float outCoverage, out vec3 outCentre, out float outSize,
+                 out vec4 outRotation, out int outFace) {
+    outT = 1e30; outCoverage = 0.0; outCentre = vec3(0.0); outSize = 0.0; outFace = 0;
     outRotation = vec4(0.0, 0.0, 0.0, 1.0);
-    vec4 face = texture2D(gFace, uv);
     float halfSide = face.w * 0.5;
     if (halfSide <= 0.0) return false;
     vec3 n = texture2D(gNormal, uv).xyz;
@@ -138,13 +129,14 @@ bool voxelSample(vec2 uv, vec3 rayDir, vec3 camRight, vec3 camUp, float theta,
     mat3 R = rotationOf(outRotation);
     outCentre = face.xyz - n * halfSide;
     outSize = face.w;
-    // The recorded face's own axes: the two of the voxel's axes that lie in it.
-    vec3 k = abs(n * R);
-    int along = k.x >= k.y && k.x >= k.z ? 0 : (k.y >= k.z ? 1 : 2);
-    float tRecorded;
-    outRecorded = faceCoverage(face.xyz, n, R[(along + 1) % 3], R[(along + 2) % 3], halfSide, rayDir,
-                               camRight, camUp, theta, tRecorded);
-    outCoverage = voxelCoverage(outCentre, halfSide, R, rayDir, camRight, camUp, theta, outT);
+    // The face's axis among the voxel's own, its side, and the two axes that lie in it.
+    vec3 k = n * R;
+    vec3 ak = abs(k);
+    int along = ak.x >= ak.y && ak.x >= ak.z ? 0 : (ak.y >= ak.z ? 1 : 2);
+    float side = along == 0 ? k.x : (along == 1 ? k.y : k.z);
+    outFace = along * 2 + (side > 0.0 ? 1 : 0);
+    outCoverage = faceCoverage(face.xyz, n, R[(along + 1) % 3], R[(along + 2) % 3], halfSide, rayDir,
+                               camRight, camUp, theta, outT);
     return outCoverage > 0.0;
 }
 
@@ -171,10 +163,10 @@ void main() {
     float theta = (2.0 * tan(radians(FOV * 0.5))) / passTargetRes.y;   // one output pixel, in radians
 
     // Three layers, nearest first: depth t, coverage a, colour sum c and its weight w, the voxel's
-    // centre v, size s and rotation q.
-    float t1 = 1e30, a1 = 0.0, w1c = 0.0, s1 = 0.0; vec3 c1 = vec3(0.0), v1 = vec3(0.0); vec4 q1 = vec4(0, 0, 0, 1);
-    float t2 = 1e30, a2 = 0.0, w2c = 0.0, s2 = 0.0; vec3 c2 = vec3(0.0), v2 = vec3(0.0); vec4 q2 = vec4(0, 0, 0, 1);
-    float t3 = 1e30, a3 = 0.0, w3c = 0.0, s3 = 0.0; vec3 c3 = vec3(0.0), v3 = vec3(0.0); vec4 q3 = vec4(0, 0, 0, 1);
+    // centre v, size s and rotation q, and which of its faces f (a bit each) are counted in a.
+    float t1 = 1e30, a1 = 0.0, w1c = 0.0, s1 = 0.0; vec3 c1 = vec3(0.0), v1 = vec3(0.0); vec4 q1 = vec4(0, 0, 0, 1); int f1 = 0;
+    float t2 = 1e30, a2 = 0.0, w2c = 0.0, s2 = 0.0; vec3 c2 = vec3(0.0), v2 = vec3(0.0); vec4 q2 = vec4(0, 0, 0, 1); int f2 = 0;
+    float t3 = 1e30, a3 = 0.0, w3c = 0.0, s3 = 0.0; vec3 c3 = vec3(0.0), v3 = vec3(0.0); vec4 q3 = vec4(0, 0, 0, 1); int f3 = 0;
     vec3 skySum = vec3(0.0);
     float skyWeight = 0.0;
 
@@ -182,42 +174,47 @@ void main() {
     for (int i = -SEARCH_RADIUS; i <= SEARCH_RADIUS; i++) {
         vec2 tap = centreTexel + vec2(float(i), float(j)) + 0.5;
         vec2 uv = clamp(tap * srcTexel, srcTexel * 0.5, 1.0 - srcTexel * 0.5);
-        if (texture2D(gPos, uv).w < 0.0) {
+        // gFace's w, the voxel's size, is 0 for the sky: one fetch tells both.
+        vec4 face = texture2D(gFace, uv);
+        if (face.w <= 0.0) {
             float w = max(texelTent(tap, srcPos), 1e-6);
             skySum += texture2D(composedHDR, uv).rgb * w;
             skyWeight += w;
             continue;
         }
-        float t, coverage, recorded, size; vec3 centre; vec4 q;
-        if (!voxelSample(uv, rayDir, camRight, camUp, theta, t, coverage, centre, recorded, size, q)) continue;
+        float t, coverage, size; vec3 centre; vec4 q;
+        int faceId;
+        if (!voxelSample(uv, face, rayDir, camRight, camUp, theta, t, coverage, centre, size, q, faceId)) continue;
         vec3 colour = texture2D(composedHDR, uv).rgb;
-        float cw = max(max(recorded, 1e-4) * texelTent(tap, srcPos), 1e-6);
+        float cw = max(coverage * texelTent(tap, srcPos), 1e-6);
+        int bit = 1 << faceId;
 
-        // A voxel already held takes this texel's colour, and its better geometry if this has it.
+        // A voxel already held takes this texel's colour, and this face's coverage if it is one not
+        // counted yet (several texels record the same face; it counts once).
         if (a1 > 0.0 && sameVoxel(centre, size, v1, s1, rotationOf(q1))) {
             c1 += colour * cw; w1c += cw;
-            if (coverage > a1) { a1 = coverage; t1 = t; v1 = centre; s1 = size; q1 = q; }
+            if ((f1 & bit) == 0) { f1 |= bit; a1 = min(a1 + coverage, 1.0); t1 = min(t1, t); }
             continue;
         }
         if (a2 > 0.0 && sameVoxel(centre, size, v2, s2, rotationOf(q2))) {
             c2 += colour * cw; w2c += cw;
-            if (coverage > a2) { a2 = coverage; t2 = t; v2 = centre; s2 = size; q2 = q; }
+            if ((f2 & bit) == 0) { f2 |= bit; a2 = min(a2 + coverage, 1.0); t2 = min(t2, t); }
             continue;
         }
         if (a3 > 0.0 && sameVoxel(centre, size, v3, s3, rotationOf(q3))) {
             c3 += colour * cw; w3c += cw;
-            if (coverage > a3) { a3 = coverage; t3 = t; v3 = centre; s3 = size; q3 = q; }
+            if ((f3 & bit) == 0) { f3 |= bit; a3 = min(a3 + coverage, 1.0); t3 = min(t3, t); }
             continue;
         }
         if (t < t1) {
-            t3 = t2; a3 = a2; c3 = c2; w3c = w2c; v3 = v2; s3 = s2; q3 = q2;
-            t2 = t1; a2 = a1; c2 = c1; w2c = w1c; v2 = v1; s2 = s1; q2 = q1;
-            t1 = t; a1 = coverage; c1 = colour * cw; w1c = cw; v1 = centre; s1 = size; q1 = q;
+            t3 = t2; a3 = a2; c3 = c2; w3c = w2c; v3 = v2; s3 = s2; q3 = q2; f3 = f2;
+            t2 = t1; a2 = a1; c2 = c1; w2c = w1c; v2 = v1; s2 = s1; q2 = q1; f2 = f1;
+            t1 = t; a1 = coverage; c1 = colour * cw; w1c = cw; v1 = centre; s1 = size; q1 = q; f1 = bit;
         } else if (t < t2) {
-            t3 = t2; a3 = a2; c3 = c2; w3c = w2c; v3 = v2; s3 = s2; q3 = q2;
-            t2 = t; a2 = coverage; c2 = colour * cw; w2c = cw; v2 = centre; s2 = size; q2 = q;
+            t3 = t2; a3 = a2; c3 = c2; w3c = w2c; v3 = v2; s3 = s2; q3 = q2; f3 = f2;
+            t2 = t; a2 = coverage; c2 = colour * cw; w2c = cw; v2 = centre; s2 = size; q2 = q; f2 = bit;
         } else if (t < t3) {
-            t3 = t; a3 = coverage; c3 = colour * cw; w3c = cw; v3 = centre; s3 = size; q3 = q;
+            t3 = t; a3 = coverage; c3 = colour * cw; w3c = cw; v3 = centre; s3 = size; q3 = q; f3 = bit;
         }
     }
 
@@ -241,7 +238,7 @@ void main() {
 
     // Debug: green where voxels claimed the pixel, red where it fell back to filtering, dark blue for
     // the sky (nothing there to rebuild).
-    if (renderParams.w > 0.5)
+    if (renderParams.w > 0.5 && renderParams.w < 1.5)
         colour = a1 == 0.0 && skyWeight > 0.0 ? vec3(0.05, 0.05, 0.3)
                                              : mix(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), 1.0 - wRest);
     gl_FragColor = vec4(colour, 1.0);

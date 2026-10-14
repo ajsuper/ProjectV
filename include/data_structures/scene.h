@@ -392,7 +392,24 @@ namespace projv{
         uint32_t envelopeStartIndex;        // texel offset into the tree64 texture
         uint32_t envelopeNodeCount;         // nodes; 0 = no envelope on this chunk
         uint32_t envelopeMotionStartIndex;  // BYTE offset into the materialID texture, as materialIDStartIndex is
+        // ---- The 6th texel: where the voxels are -------------------------------------------------
+        //
+        // The chunk's content box, in its uploaded tree's own voxel units (0..resolution), min
+        // inclusive, max exclusive, 16 bits each. A ray that misses it cannot hit anything in the
+        // chunk, and the traversal skips the march -- which is most of what a scene costs: a crate's
+        // chunk is a 4 m cube around 1 m of voxels, a floor cell an 8 m cube around 1 m of floor, and
+        // a ray crossing such a cube used to pay a whole march to find it empty.
+        //
+        // contentFlags bit 0 says the box is there; without it (an empty chunk, a resolution past
+        // 16 bits) the whole cube is the box, as before.
+        uint32_t contentMinXY;              // x | y << 16
+        uint32_t contentMinZMaxX;           // min z | max x << 16
+        uint32_t contentMaxYZ;              // max y | max z << 16
+        uint32_t contentFlags;
     };
+    // RGBA32U texels per header in the header texture; pjv_utils_DDA.sc's PJV_HEADER_TEXELS.
+    constexpr uint32_t GPU_HEADER_TEXELS = sizeof(GPUChunkHeader) / 16;
+    static_assert(sizeof(GPUChunkHeader) % 16 == 0, "a header is whole RGBA32U texels");
     #pragma pack(pop)
     
     struct Chunk { // Only exists during runtime. Contains all of the header data and our geometry and color data, along with any extra runtime data not used in rendering.

@@ -344,6 +344,25 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
     // unsigned subtraction here would underflow.
     g.traversalLOD = (chunk.requestedLOD > r.uploadedLOD) ? (chunk.requestedLOD - r.uploadedLOD) : 0u;
 
+    // The content box, in the uploaded tree's voxels: the blob's bounds at full resolution, scaled
+    // down by the levels dropped (each a factor of 4) and rounded outward, so it never shrinks below
+    // what is drawn.
+    if (chunk.geometryPoolIndex >= 0 && static_cast<size_t>(chunk.geometryPoolIndex) < scene.geometryPool.size()) {
+        core::ivec3 low, high;
+        if (utils::blobContentBounds(scene.geometryPool[chunk.geometryPoolIndex], low, high)) {
+            const uint32_t shift = 2u * clampRenderLOD(chunk.header.resolution, r.uploadedLOD);
+            core::ivec3 lo = glm::max(low, core::ivec3(0)) >> int(shift);
+            core::ivec3 hi = ((high >> int(shift)) + core::ivec3(1));
+            hi = glm::min(hi, core::ivec3(int(g.resolution)));
+            if (g.resolution <= 0xFFFFu && glm::all(glm::lessThan(lo, hi))) {
+                g.contentMinXY = uint32_t(lo.x) | (uint32_t(lo.y) << 16);
+                g.contentMinZMaxX = uint32_t(lo.z) | (uint32_t(hi.x) << 16);
+                g.contentMaxYZ = uint32_t(hi.y) | (uint32_t(hi.z) << 16);
+                g.contentFlags = 1u;
+            }
+        }
+    }
+
     return g;
 }
 
@@ -838,23 +857,23 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
     // ---- Header texture layout ----
     //
-    // One header is 5 consecutive RGBA32U texels (grown from 4 to fit the added traversalLOD +
-    // reserved words -- a texel is atomic, so one new field forces a whole new texel). The texture
-    // used to be a single row, which capped the scene at maxTextureSize/N chunks on a 32768-wide
-    // GPU -- and past that cap chunks silently got no header row (invisible) while
-    // updateDirtyHeaders re-entered growHeaderTexture every frame, rebuilding the whole texture. It
-    // is now 2D: a fixed row width, growing in rows.
+    // One header is GPU_HEADER_TEXELS consecutive RGBA32U texels (scene.h; 6 since the content box
+    // joined -- a texel is atomic, so one new field forces a whole new texel). The texture used to be
+    // a single row, which capped the scene at maxTextureSize/N chunks on a 32768-wide GPU -- and past
+    // that cap chunks silently got no header row (invisible) while updateDirtyHeaders re-entered
+    // growHeaderTexture every frame, rebuilding the whole texture. It is now 2D: a fixed row width,
+    // growing in rows.
     //
-    // The width is held to a multiple of 5 so a header never straddles a row boundary. That keeps a
-    // single-header update one updateTexture2D of 5x1, and lets the shader resolve a header with one
-    // divide instead of five. The shader derives the same layout from textureSize() -- see headers()
-    // in pjv_utils_DDA.sc -- so there is no uniform to keep in sync, but the "width is a multiple of
-    // 5" invariant is load-bearing on both sides.
+    // The width is held to a multiple of GPU_HEADER_TEXELS so a header never straddles a row
+    // boundary. That keeps a single-header update one updateTexture2D of a few texels, and lets the
+    // shader resolve a header with one divide. The shader derives the same layout from textureSize()
+    // -- see headers() and PJV_HEADER_TEXELS in pjv_utils_DDA.sc -- so there is no uniform to keep in
+    // sync, but the invariant is load-bearing on both sides.
     uint32_t headerTexWidth() {
         uint32_t w = maxTexSize();
-        return w - (w % 5u);   // maxTextureSize is a power of two in practice; be safe anyway
+        return w - (w % GPU_HEADER_TEXELS);   // maxTextureSize is a power of two in practice; be safe anyway
     }
-    uint32_t headersPerRow() { return headerTexWidth() / 5u; }
+    uint32_t headersPerRow() { return headerTexWidth() / GPU_HEADER_TEXELS; }
 
     // Largest number of chunk slots the header texture can address.
     uint32_t maxHeaderSlots() {
@@ -890,10 +909,10 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
     // Blit one header row in place. Single point of truth for header->(x,y) addressing.
     void writeHeaderTexel(bgfx::TextureHandle tex, uint32_t slot, const projv::GPUChunkHeader& hdr) {
         const uint32_t hpr = headersPerRow();
-        uint16_t x = static_cast<uint16_t>((slot % hpr) * 5u);
+        uint16_t x = static_cast<uint16_t>((slot % hpr) * GPU_HEADER_TEXELS);
         uint16_t y = static_cast<uint16_t>(slot / hpr);
         const bgfx::Memory* mem = bgfx::copy(&hdr, sizeof(hdr));
-        bgfx::updateTexture2D(tex, 0, 0, x, y, 5, 1, mem);
+        bgfx::updateTexture2D(tex, 0, 0, x, y, uint16_t(GPU_HEADER_TEXELS), 1, mem);
     }
 
     // Builds a 1-row RGBA32U texture from a raw uint list (4 uints per texel). Used for the
