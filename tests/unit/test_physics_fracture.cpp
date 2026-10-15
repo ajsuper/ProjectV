@@ -854,6 +854,27 @@ TEST_CASE("support: what a cut leaves standing on nothing falls, made of what it
     CHECK(runtime::bodyPose(f.app.world, top).centerOfMass.y == doctest::Approx(before - 0.25f).epsilon(0.02));
 }
 
+TEST_CASE("support: cut away the whole base and all of it falls") {
+    Fixture f;
+    Entity wall = f.wall();
+    f.app.world.patch<projv::StaticCollider>(wall, [](projv::StaticCollider& c) {
+        c.splits = true;
+        c.anchorBase = true;
+    });
+    f.frames(2);
+    // The bottom course, y = 0, right across: nothing is left at the base to stand on.
+    runtime::editVoxels(f.app.world, wall, slot({0, 0, 0}, {31, 0, 1}));
+    f.frames(1);
+    REQUIRE(f.splits.size() == 1);
+    REQUIRE(f.splits[0].pieces.size() == 1);
+    Entity rest = f.splits[0].pieces[0];
+    CHECK(countOf(f.scene, f.app.world.get<projv::VoxelComponent>(rest).handle).voxels == uint64_t(32 * 23 * 2));
+    CHECK(countOf(f.scene, f.wallComponent).voxels == 0);
+    const float before = runtime::bodyPose(f.app.world, rest).centerOfMass.y;
+    f.frames(30);
+    CHECK(runtime::bodyPose(f.app.world, rest).centerOfMass.y < before - 0.1f);   // it dropped
+}
+
 TEST_CASE("support: a collider that does not split keeps standing on nothing") {
     Fixture f;
     Entity wall = f.wall();

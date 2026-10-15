@@ -928,9 +928,12 @@ namespace projv::runtime {
             slotMaterialsOf(physics, scene, owner, slotMaterials);
             const uint16_t own = ownMaterial(world, physics, entity);
             std::array<uint8_t, 256> anchorSlot{};
+            bool anchorRule = fixed->anchorBase;   // whether anything could hold it up: a rule, not a voxel
+            const size_t entries = std::min<size_t>(scene.components[owner].materialPalette.size(), 256);
             for (size_t slot = 0; slot < 256; slot++) {
                 uint16_t m = slotMaterials[slot] ? slotMaterials[slot] : own;
                 anchorSlot[slot] = m != 0 && physics.world->material(m).anchor;
+                if (slot < entries && anchorSlot[slot]) anchorRule = true;
             }
             std::vector<uint8_t> held(voxels.size(), 0);
             std::vector<size_t> stack;
@@ -939,8 +942,9 @@ namespace projv::runtime {
                     held[i] = 1;
                     stack.push_back(i);
                 }
-            if (stack.empty()) {
-                // Nothing holds it up, so everything would fall: a collider set up wrong, not a collapse.
+            if (stack.empty() && !anchorRule) {
+                // Nothing could ever hold it up, so everything would fall at its first edit: a collider
+                // set up wrong, not a collapse. (One with a rule whose anchors are all cut away falls.)
                 if (physics.warnedUnanchored.insert(entity).second)
                     core::warn("physics: entity {} splits but has nothing to stand on (no anchor material, and anchorBase "
                                "off); nothing falls", static_cast<uint32_t>(entity));
