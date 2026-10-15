@@ -518,6 +518,14 @@ To do, in order:
    games want for sounds and damage (item 3). Its config, today's values as defaults: the minimum
    break (shardSize), whether the striker gets back unused energy, how shards take the striker's
    motion, whether shards break on impact.
+   *Done 2026-10-15:* `src/runtime/impact_fracture.cpp`, "physics: impact fracture" in FixedUpdate
+   after "physics", on public calls only: `runtime::impacts(world)` (`BodyImpact`, entities), a
+   public `canBreak`, and `runtime::Strike` -- the options a strike takes (energy or `reach` in m,
+   push, `bodyVelocity`, `minimumBreak` in shard sizes, `striker`, `returnUnusedEnergy`,
+   `shardsBreakOnImpact`). `ImpactFractureConfig` holds today's values as defaults. Without the
+   system nothing breaks on impact; step 7a is gone. Shards copy the body (a static collider's: its
+   breaksOnImpact too) unless the strike says; demo 2's blast and demo 11's chips say no. Item 5's
+   reach overload is `fractureWithin` (the energy overload has the same signature).
 3. **Debris event.** `DebrisCleared {entities}`, sent before they are destroyed, so a game can keep
    or replace them. The budget stays on by default (3000): debris exists only where a game asked
    for fracture, and unbounded debris is a reliability failure, not only slowness -- thirty blasts

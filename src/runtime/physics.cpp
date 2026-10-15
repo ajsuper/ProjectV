@@ -65,11 +65,7 @@ namespace projv::runtime {
                 Entity entity;
                 std::vector<PendingVoxelOp> ops;
                 bool       strike = false;
-                core::vec3 at{0.0f}, push{0.0f};
-                float      energy = 0.0f;
-                // An impact's strike: what struck, and how fast each was going before it did.
-                Entity     striker = NullEntity;
-                core::vec3 strikerVelocity{0.0f}, struckVelocity{0.0f};
+                Strike     s;
             };
             std::vector<Edit>             edits;
             // The physics material library: names in definition order (index = position + 1).
@@ -698,7 +694,7 @@ namespace projv::runtime {
             const float scale = glm::length(core::vec3(toWorld[0]));
             const float metres = source.voxel * scale;   // one voxel, in the world
             if (!(metres > 0.0f)) return false;
-            const core::vec3 at = core::vec3(glm::inverse(toWorld) * core::vec4(strike.at, 1.0f)) / source.voxel;
+            const core::vec3 at = core::vec3(glm::inverse(toWorld) * core::vec4(strike.s.at, 1.0f)) / source.voxel;
 
             // Materials: each palette slot's, the body's own where a slot names none.
             const ComponentHandle owner = paletteOwner(scene, scene.chunks[source.parts.front().chunk]);
@@ -727,16 +723,17 @@ namespace projv::runtime {
                 return false;
             }
             const PhysicsMaterial material = sim.material(struckMaterial);
-            if (!(strike.energy > 0.0f) || !std::isfinite(strike.energy)) return false;
-            float reach = std::cbrt(3.0f * strike.energy / (4.0f * 3.14159265f * material.strength)) / metres;
+            float reach = 0.0f;
+            if (strike.s.reach > 0.0f) reach = strike.s.reach / metres;
+            else if (strike.s.energy > 0.0f) reach = std::cbrt(3.0f * strike.s.energy / (4.0f * 3.14159265f * material.strength)) / metres;
+            else return false;
             if (reach > MAX_FRACTURE_REACH) {
                 core::trace("physics: fracture of entity {}: reach {} voxels capped at {}", static_cast<uint32_t>(entity), reach,
                             MAX_FRACTURE_REACH);
                 reach = MAX_FRACTURE_REACH;
             }
             if (reach < 0.5f) return false;   // not enough to break a voxel
-            const bool impact = strike.striker != NullEntity;
-            if (impact && reach < material.shardSize / metres) return false;   // a knock, not a break
+            if (strike.s.minimumBreak > 0.0f && reach < strike.s.minimumBreak * material.shardSize / metres) return false;   // a knock
             const float outer = 1.5f * reach;
 
             std::vector<FractureVoxel> voxels = voxelsNear(scene, source, at, outer, maxCells, decoded);
@@ -755,8 +752,9 @@ namespace projv::runtime {
             Fnv seed;
             seed.add(net ? net->value : 0u);
             seed.add(sim.tick());
-            seed.add(strike.at);
-            seed.add(strike.energy);
+            seed.add(strike.s.at);
+            seed.add(strike.s.energy);
+            if (strike.s.reach > 0.0f) seed.add(strike.s.reach);
             FractureRandom random(seed.value);
             const FractureInput input{voxels, at, reach, outer, material.shardSize / metres, material.grain, material};
             std::vector<int32_t> shardOf = (*pattern)(input, random);
@@ -797,8 +795,9 @@ namespace projv::runtime {
                 p.shardRigid.friction = fixed->friction;
                 p.shardRigid.restitution = fixed->restitution;
                 p.shardRigid.material = fixed->material;
+                p.shardRigid.breaksOnImpact = fixed->breaksOnImpact;
             }
-            p.shardRigid.breaksOnImpact = false;   // debris does not shatter again on landing
+            if (strike.s.shardsBreakOnImpact) p.shardRigid.breaksOnImpact = *strike.s.shardsBreakOnImpact;
             p.struckMoves = body->motion == MotionType::Dynamic;
             if (rigid && rigid->mass > 0.0f) {
                 for (const VoxelSource::Part& part : source.parts) {
@@ -825,9 +824,8 @@ namespace projv::runtime {
         // A strike's second half, once its edits are applied: the shards made bodies, the event sent,
         // the striker given back what the break did not use.
         void finishBreak(World& world, PhysicsRuntime& physics, const PendingBreak& p) {
-            const PhysicsRuntime::Edit& strike = p.strike;
-            const Entity entity = strike.entity;
-            const bool impact = strike.striker != NullEntity;
+            const Strike& strike = p.strike.s;
+            const Entity entity = p.strike.entity;
             const uint64_t total = std::max<uint64_t>(p.total, 1);
             BodyFractured event{entity, {}, strike.at, strike.striker, strike.energy};
             for (const PendingBreak::Made& m : p.made) {
@@ -839,9 +837,9 @@ namespace projv::runtime {
                 RigidBody r = p.shardRigid;
                 if (p.originalMass > 0.0f) r.mass = p.originalMass * float(m.voxels) / float(total);
                 float falloff = std::max(0.0f, 1.0f - glm::distance(m.centre, strike.at) / std::max(p.edge, 1e-6f));
-                // An impact's pieces start from the motion the body had before the hit (the contact has
-                // since stopped it); a call's, from the motion it has.
-                const core::vec3 base = impact ? strike.struckVelocity : p.state.linearVelocity;
+                // From the motion the strike says (an impact's: the body's before the hit, which the
+                // contact has since stopped), or the motion it has.
+                const core::vec3 base = strike.bodyVelocity.value_or(p.state.linearVelocity);
                 core::vec3 velocity = base + glm::cross(p.state.angularVelocity, m.centre - p.state.centerOfMass) + strike.push * falloff;
                 physics.carried[e] = {velocity, p.state.angularVelocity};
                 if (p.networked) assignNetId(world, e);
@@ -855,7 +853,7 @@ namespace projv::runtime {
             }
             // What struck something that does not move carries on with the energy the break did not
             // use: breaking a voxel costs the struck material's strength times its volume.
-            if (impact && !p.struckMoves && world.valid(strike.striker)) {
+            if (strike.returnUnusedEnergy && strike.energy > 0.0f && !p.struckMoves && world.valid(strike.striker)) {
                 if (const PhysicsBody* striker = world.try_get<PhysicsBody>(strike.striker);
                     striker && striker->motion == MotionType::Dynamic) {
                     const float used = p.strength * float(p.broken) * p.metres * p.metres * p.metres;
@@ -1379,38 +1377,6 @@ namespace projv::runtime {
                 c.position = sim.characterState(c.id).position;
             }
 
-            // 7a. Impacts: each voxel body that can break on impact is struck, at the next step (see
-            //     runtime::fracture). In the order the impacts come, which every peer agrees on.
-            for (const Impact& hit : sim.impacts()) {
-                auto entityOf = [&](BodyId id) {
-                    auto it = physics.byBody.find(id.value);
-                    return it != physics.byBody.end() ? it->second : NullEntity;
-                };
-                const Entity sides[2] = {entityOf(hit.a), entityOf(hit.b)};
-                const core::vec3 velocities[2] = {hit.velocityA, hit.velocityB};
-                for (int k = 0; k < 2; k++) {
-                    const Entity struck = sides[k], striker = sides[1 - k];
-                    if (struck == NullEntity || striker == NullEntity || !world.valid(struck)) continue;
-                    const RigidBody* rigid = world.try_get<RigidBody>(struck);
-                    const StaticCollider* fixed = world.try_get<StaticCollider>(struck);
-                    bool breaks = rigid ? rigid->breaksOnImpact && rigid->shape == RigidBody::Shape::Voxels
-                                        : fixed && fixed->breaksOnImpact;
-                    if (!breaks || !scene || !canBreak(world, physics, *scene, struck)) continue;
-                    PhysicsRuntime::Edit strike{struck, {}};
-                    strike.strike = true;
-                    strike.at = hit.point;
-                    strike.energy = hit.energy;
-                    strike.striker = striker;
-                    strike.strikerVelocity = velocities[1 - k];
-                    strike.struckVelocity = velocities[k];
-                    // Its pieces take on the striker's motion where it struck, fading to their own at
-                    // the edge of the break: what is in a boulder's way goes on ahead of it; a brick
-                    // that lands on a floor stops where it landed and falls on further out.
-                    strike.push = velocities[1 - k] - velocities[k];
-                    physics.edits.push_back(std::move(strike));
-                }
-            }
-
             // 7b. Joints that broke, or lost a body.
             {
                 std::vector<PhysicsWorld::BrokenJoint> broken = sim.takeBrokenJoints();
@@ -1631,17 +1597,63 @@ namespace projv::runtime {
         runtimeOf(world).edits.push_back({entity, ops});
     }
 
-    void fracture(World& world, Entity entity, core::vec3 at, float energy, core::vec3 push) {
-        if (!std::isfinite(energy) || !std::isfinite(glm::dot(at, at)) || !std::isfinite(glm::dot(push, push))) {
+    void fracture(World& world, Entity entity, const Strike& strike) {
+        auto finiteVec = [](core::vec3 v) { return std::isfinite(glm::dot(v, v)); };
+        if (!finiteVec(strike.at) || !finiteVec(strike.push) || !finiteVec(strike.strikerVelocity) ||
+            (strike.bodyVelocity && !finiteVec(*strike.bodyVelocity)) || !std::isfinite(strike.energy) ||
+            !std::isfinite(strike.reach) || !std::isfinite(strike.minimumBreak)) {
             core::warn("physics: refused a fracture with a value that is not finite");
             return;
         }
-        PhysicsRuntime::Edit strike{entity, {}};
-        strike.strike = true;
+        if (strike.energy < 0.0f || strike.reach < 0.0f) {
+            core::warn("physics: refused a fracture with a negative energy or reach");
+            return;
+        }
+        PhysicsRuntime::Edit edit{entity, {}};
+        edit.strike = true;
+        edit.s = strike;
+        runtimeOf(world).edits.push_back(std::move(edit));
+    }
+
+    void fracture(World& world, Entity entity, core::vec3 at, float energy, core::vec3 push) {
+        Strike strike;
         strike.at = at;
-        strike.push = push;
         strike.energy = energy;
-        runtimeOf(world).edits.push_back(std::move(strike));
+        strike.push = push;
+        fracture(world, entity, strike);
+    }
+
+    void fractureWithin(World& world, Entity entity, core::vec3 at, float radius, core::vec3 push) {
+        if (!(radius > 0.0f)) {
+            core::warn("physics: refused a fracture within a radius that is not positive");
+            return;
+        }
+        Strike strike;
+        strike.at = at;
+        strike.reach = radius;
+        strike.push = push;
+        fracture(world, entity, strike);
+    }
+
+    bool canBreak(World& world, Entity entity) {
+        const Scene* scene = world.ctx().find<Scene>();
+        return scene && world.valid(entity) && world.ctx().contains<PhysicsRuntime>() &&
+               canBreak(world, runtimeOf(world), *scene, entity);
+    }
+
+    std::vector<BodyImpact> impacts(const World& world) {
+        std::vector<BodyImpact> out;
+        const PhysicsRuntime* physics = world.ctx().find<PhysicsRuntime>();
+        if (!physics) return out;
+        auto entityOf = [&](BodyId id) {
+            auto it = physics->byBody.find(id.value);
+            return it != physics->byBody.end() && world.valid(it->second) ? it->second : NullEntity;
+        };
+        for (const Impact& hit : physics->world->impacts()) {
+            BodyImpact e{entityOf(hit.a), entityOf(hit.b), hit.point, hit.normal, hit.speed, hit.energy, hit.velocityA, hit.velocityB};
+            if (e.a != NullEntity && e.b != NullEntity) out.push_back(e);
+        }
+        return out;
     }
 
     ComponentHandle voxelComponentOf(const World& world, Entity entity) {

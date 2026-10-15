@@ -1417,7 +1417,12 @@ void buildOverhangs(World& world, Demos& demos, Camera& camera) {
 void chip(World& world, const Camera& camera, float energy) {
     auto hit = runtime::castRay(world, camera.position, camera.forward(), 80.0f, 0xffffffffu, camera.walker);
     if (!hit || hit->entity == projv::NullEntity) return;
-    runtime::fracture(world, hit->entity, hit->position + camera.forward() * 0.05f, energy, camera.forward() * 3.0f);
+    runtime::Strike strike;
+    strike.at = hit->position + camera.forward() * 0.05f;
+    strike.energy = energy;
+    strike.push = camera.forward() * 3.0f;
+    strike.shardsBreakOnImpact = false;   // chips do not shatter again where they land
+    runtime::fracture(world, hit->entity, strike);
 }
 
 void startDemo(World& world, int n) {
@@ -1464,7 +1469,11 @@ void detonate(World& world, Demos& demos) {
     for (Entity e : near) {
         vec3 middle = runtime::bodyPose(world, e).centerOfMass;
         float falloff = 1.0f - glm::length(middle - at) / BLAST_REACH;
-        runtime::fracture(world, e, middle, BLAST_ENERGY * falloff * falloff);
+        runtime::Strike strike;
+        strike.at = middle;
+        strike.energy = BLAST_ENERGY * falloff * falloff;
+        strike.shardsBreakOnImpact = false;   // a brick's shards do not shatter again on landing
+        runtime::fracture(world, e, strike);
     }
     demos.blastKickIn = 2;
     demos.stepSum = demos.stepWorst = 0.0;
@@ -2207,8 +2216,14 @@ void selfTest(projv::Application& app) {
     };
     if (stage == 11 && t > 1.0f && !acted) {
         const vec3 trunk(-6.5f + 2.5f, 1.5f, 5.0f + 2.5f);
-        for (vec3 side : {vec3(-1, 0, 0), vec3(1, 0, 0), vec3(0, 0, -1), vec3(0, 0, 1)})
-            runtime::fracture(world, demos.overhangs.tree, trunk + side * 0.55f, BLOW_ENERGY, -side * 2.0f);
+        for (vec3 side : {vec3(-1, 0, 0), vec3(1, 0, 0), vec3(0, 0, -1), vec3(0, 0, 1)}) {
+            runtime::Strike strike;
+            strike.at = trunk + side * 0.55f;
+            strike.energy = BLOW_ENERGY;
+            strike.push = -side * 2.0f;
+            strike.shardsBreakOnImpact = false;
+            runtime::fracture(world, demos.overhangs.tree, strike);
+        }
         acted = true;
     }
     static bool nudged = false;
@@ -2279,6 +2294,7 @@ void startup(projv::Application& app) {
     // DEMOS_PHYSICS_THREADS: the physics step's worker threads, for measuring (default: the engine's).
     if (const char* threads = std::getenv("DEMOS_PHYSICS_THREADS")) physics.settings.threads = std::atoi(threads);
     runtime::installPhysics(app, physics);
+    runtime::installImpactFracture(app);   // what is struck hard enough breaks (demos 2, 9, 11)
     // The physics materials the demos' voxels name (demo 10's ramps and walls).
     if (!runtime::loadPhysicsMaterials(world, (here / "physics_materials.json").string()))
         projv::core::error("demos: physics_materials.json did not load; the slide's ramps will all behave alike");

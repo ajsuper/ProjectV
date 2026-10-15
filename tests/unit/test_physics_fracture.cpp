@@ -7,6 +7,7 @@
 #include "doctest/doctest.h"
 
 #include <cmath>
+#include <optional>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -84,13 +85,16 @@ namespace {
         double now = 0.0;
         std::vector<projv::BodyFractured> fractures;
         std::vector<projv::BodySplit> splits;
-        explicit Fixture(int threads = -1, uint32_t maxDebris = 3000) : scene(app.world.ctx().emplace<projv::Scene>()) {
+        explicit Fixture(int threads = -1, uint32_t maxDebris = 3000,
+                         std::optional<runtime::ImpactFractureConfig> impactFracture = runtime::ImpactFractureConfig{})
+            : scene(app.world.ctx().emplace<projv::Scene>()) {
             app.clock = [this] { return now; };
             runtime::installSceneBridge(app);
             runtime::PhysicsConfig config;
             config.settings.threads = threads;
             config.maxDebris = maxDebris;
             runtime::installPhysics(app, config);
+            if (impactFracture) runtime::installImpactFracture(app, *impactFracture);
             app.events().on<projv::BodyFractured>([this](const projv::BodyFractured& e) { fractures.push_back(e); });
             app.events().on<projv::BodySplit>([this](const projv::BodySplit& e) { splits.push_back(e); });
             app.runStartup();
@@ -596,6 +600,108 @@ TEST_CASE("on impact: what breaks does not depend on the number of threads") {
     CHECK(single.first.size() >= 3);
     CHECK(single == four);
     CHECK(single == many);
+}
+
+TEST_CASE("on impact: nothing breaks without the system, and its config decides what the shards do") {
+    // A tonne at 30 m/s into a chalk wall that asked to break; what the ball is going at afterwards.
+    auto throwAt = [](std::optional<runtime::ImpactFractureConfig> config, std::vector<projv::BodyFractured>* fractures) {
+        Fixture f(-1, 3000, config);
+        runtime::PhysicsMaterial chalk{300.0f, 0.6f, 0.0f};
+        chalk.strength = 1e5f;
+        runtime::definePhysicsMaterial(f.app.world, "chalk", chalk);
+        f.wall("chalk", true);
+        f.frames(2);
+        Entity rock = ball(f, vec3(0, 3, -6), vec3(0, 0, 30), 1000.0f);
+        for (int i = 0; i < 30 && f.fractures.empty(); i++) f.frames(1);
+        f.frames(1);
+        if (fractures) *fractures = f.fractures;
+        if (config)
+            for (const projv::BodyFractured& e : f.fractures)
+                for (Entity shard : e.shards)
+                    if (f.app.world.valid(shard))
+                        CHECK(f.app.world.get<projv::RigidBody>(shard).breaksOnImpact == config->shardsBreakOnImpact);
+        return runtime::bodyPose(f.app.world, rock).linearVelocity.z;
+    };
+    std::vector<projv::BodyFractured> fractures;
+    // No system: the ball stops at the wall, which stays whole.
+    CHECK(throwAt(std::nullopt, &fractures) < 1.0f);
+    CHECK(fractures.empty());
+    // The defaults: it breaks through and carries on.
+    const float through = throwAt(runtime::ImpactFractureConfig{}, &fractures);
+    CHECK(fractures.size() >= 1);
+    CHECK(through > 15.0f);
+    // Given nothing back, and with shards that break again.
+    runtime::ImpactFractureConfig keep;
+    keep.returnUnusedEnergy = false;
+    keep.shardsBreakOnImpact = true;
+    const float stopped = throwAt(keep, &fractures);
+    CHECK(fractures.size() >= 1);
+    CHECK(stopped < through - 5.0f);
+}
+
+TEST_CASE("impacts name the entities that met, after each step") {
+    Fixture f(-1, 3000, std::nullopt);
+    Entity wall = f.wall();
+    f.frames(2);
+    Entity rock = ball(f, vec3(0, 3, -3), vec3(0, 0, 20), 400.0f);
+    std::vector<runtime::BodyImpact> seen;
+    f.app.addSystem(projv::Stage::FixedUpdate, "test: impacts", [&seen](projv::Application& app) {
+        for (const runtime::BodyImpact& hit : runtime::impacts(app.world)) seen.push_back(hit);
+    }, {.after = "physics"});
+    f.frames(30);
+    REQUIRE(seen.size() >= 1);
+    const runtime::BodyImpact& hit = seen.front();
+    CHECK(((hit.a == rock && hit.b == wall) || (hit.a == wall && hit.b == rock)));
+    CHECK(hit.speed > 15.0f);
+    CHECK(hit.energy == doctest::Approx(0.5f * 400.0f * hit.speed * hit.speed).epsilon(0.02));
+}
+
+TEST_CASE("a strike by reach breaks out to its radius whatever the strength, and a strike can ask for a least break") {
+    auto broken = [](float strength, bool byReach) {
+        Fixture f;
+        runtime::PhysicsMaterial rock{2400.0f, 0.7f, 0.0f};
+        rock.strength = strength;
+        rock.shardSize = 0.5f;
+        runtime::definePhysicsMaterial(f.app.world, "rock", rock);
+        Entity wall = f.wall("rock");
+        f.frames(2);
+        if (byReach) runtime::fractureWithin(f.app.world, wall, vec3(0, 3, 0), 1.0f);
+        else runtime::fracture(f.app.world, wall, vec3(0, 3, 0), Fixture::energyFor(1.0f));
+        f.frames(1);
+        REQUIRE(f.fractures.size() == 1);
+        return f.shardVoxels(f.fractures[0]);
+    };
+    // Energy for a metre in stone (1e5 J/m^3): in rock ten times stronger it breaks much less; by
+    // reach, the same either way.
+    CHECK(float(broken(1e6f, false)) < 0.5f * float(broken(1e5f, false)));
+    const float soft = float(broken(1e5f, true)), hard = float(broken(1e6f, true));
+    CHECK(hard > 0.7f * soft);
+    CHECK(hard < 1.4f * soft);
+
+    Fixture f;
+    Entity wall = f.wall("stone", true);
+    f.frames(2);
+    // 0.2 m is less than stone's half-metre shard: asked for at least one shard, nothing breaks.
+    runtime::Strike knock;
+    knock.at = vec3(0, 3, 0);
+    knock.energy = Fixture::energyFor(0.2f);
+    knock.minimumBreak = 1.0f;
+    runtime::fracture(f.app.world, wall, knock);
+    f.frames(2);
+    CHECK(f.fractures.empty());
+    // A static collider's shards take its breaksOnImpact, unless the strike says otherwise.
+    runtime::fracture(f.app.world, wall, vec3(-2, 3, 0), Fixture::energyFor(0.8f));
+    f.frames(1);
+    REQUIRE(f.fractures.size() == 1);
+    for (Entity e : f.fractures[0].shards) CHECK(f.app.world.get<projv::RigidBody>(e).breaksOnImpact);
+    runtime::Strike calm;
+    calm.at = vec3(2, 3, 0);
+    calm.energy = Fixture::energyFor(0.8f);
+    calm.shardsBreakOnImpact = false;
+    runtime::fracture(f.app.world, wall, calm);
+    f.frames(1);
+    REQUIRE(f.fractures.size() == 2);
+    for (Entity e : f.fractures[1].shards) CHECK_FALSE(f.app.world.get<projv::RigidBody>(e).breaksOnImpact);
 }
 
 TEST_CASE("the debris budget clears the oldest shards first, and only shards") {

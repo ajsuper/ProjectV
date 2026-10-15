@@ -215,8 +215,8 @@ namespace projv {
     // a shard to keep that shard for good. Not saved.
     struct Debris { uint64_t madeAt = 0; };
 
-    // `striker`: what hit it, when an impact broke it; NullEntity for a runtime::fracture call.
-    // `energy`: the strike's, J.
+    // `striker`: what hit it (Strike::striker: an impact's other body); NullEntity for none.
+    // `energy`: the strike's, J (0 for a strike by reach).
     struct BodyFractured {
         Entity entity;
         std::vector<Entity> shards;
@@ -319,30 +319,94 @@ namespace projv::runtime {
     // next step either way, rebuilding shapes and splitting what was cut loose.
     void editVoxels(World& world, Entity entity, const std::vector<PendingVoxelOp>& ops);
 
-    // Breaks the voxel body `entity` where it is struck at the world point `at` with `energy` joules,
-    // at the start of the next fixed step, in order with editVoxels. The voxel nearest `at` (within
-    // three voxels) is what was struck: its physics material's strength sets the reach -- the
-    // radius whose sphere holds energy / strength cubic metres -- and its fracture pattern sets
-    // which voxels go together (runtime/fracture.h). Voxels whose material has no strength never
-    // break; neither does anything when the struck one's has none. Each shard is a body of its own
-    // (BodyFractured), thrown with `push` (m/s) at the strike, falling off to nothing at the edge
-    // of the break. Static colliders break too; their shards are dynamic.
+    // A strike (runtime::fracture): where, how hard, and what becomes of the pieces. Every field but
+    // `at` and one of `energy` / `reach` has a default that leaves it out.
+    struct Strike {
+        core::vec3 at{0.0f};   // world point
+        // Joules: the reach is the radius whose sphere holds energy / strength cubic metres, of the
+        // struck voxel's material.
+        float energy = 0.0f;
+        // Metres: when > 0, the reach itself, whatever the energy (runtime::fractureWithin) -- for a
+        // game with its own model of how far a blow breaks.
+        float reach = 0.0f;
+        // m/s, at the strike, falling off to nothing at the edge of the break.
+        core::vec3 push{0.0f};
+        // The motion the shards start from, before `push`; unset, the body's own as it is now.
+        std::optional<core::vec3> bodyVelocity;
+        // In shard sizes of the struck material: a smaller break breaks nothing (a knock, not a break).
+        float minimumBreak = 0.0f;
+        // What struck, reported in BodyFractured; NullEntity for none.
+        Entity striker = NullEntity;
+        // When the struck body does not move and the striker is a dynamic body: the striker's velocity
+        // is set to `strikerVelocity` times the share of the energy the break did not use (breaking a
+        // voxel costs its material's strength times its volume), square-rooted -- it carries on through.
+        bool returnUnusedEnergy = false;
+        core::vec3 strikerVelocity{0.0f};
+        // Whether the shards break on impact themselves; unset, as the body: a dynamic body's shards
+        // copy its whole RigidBody (damping, gravity factor, layer and this too), a static collider's
+        // take its friction, restitution, material and breaksOnImpact.
+        std::optional<bool> shardsBreakOnImpact;
+    };
+
+    // Breaks the voxel body `entity` at the start of the next fixed step, in order with editVoxels.
+    // The voxel nearest `strike.at` (within three voxels) is what was struck; its physics material's
+    // strength turns the energy into a reach, and its fracture pattern sets which voxels go together
+    // (runtime/fracture.h). Voxels whose material has no strength never break; neither does anything
+    // when the struck one's has none. Each shard is a body of its own (BodyFractured) and debris
+    // (Debris). Static colliders break too; their shards are dynamic.
     //
     // Works on what voxelComponentOf finds: a chunk, a grid, or a prefab of one chunk. The reach
     // is capped at 64 voxels.
     //
-    // **On impact** the engine calls this itself. When two bodies meet closing faster than
-    // PhysicsSettings::minImpactSpeed (PhysicsWorld::impacts), each that is a voxel body with
-    // breaksOnImpact is struck at the contact with the collision's energy -- half the pair's reduced
-    // mass times the closing speed squared. Its shards take on the striker's motion at the contact,
-    // fading to the body's own (from before the hit) at the edge of the break: what is in a boulder's
-    // way goes on ahead of it, and a brick that lands hard stops where it hit and falls on further
-    // out. An
-    // impact must break out at least the struck material's shardSize, or nothing breaks: a crate set
-    // down on a stone floor does not chip it. When what was struck does not move (a static or
-    // kinematic body), the striker gets back the energy the break did not use, along the way it was
-    // going: a boulder that breaks a hole in a wall carries on through it.
+    // Nothing calls this on impact by itself: installImpactFracture adds the system that does.
+    void fracture(World& world, Entity entity, const Strike& strike);
+    // The same, with `energy` joules and `push`.
     void fracture(World& world, Entity entity, core::vec3 at, float energy, core::vec3 push = core::vec3(0.0f));
+    // The same, breaking out to `radius` metres whatever the material's strength.
+    void fractureWithin(World& world, Entity entity, core::vec3 at, float radius, core::vec3 push = core::vec3(0.0f));
+    // Whether anything in the voxel body `entity` can break: its own material, or one its palette
+    // names, has a strength. Cheap: no voxels are read.
+    bool canBreak(World& world, Entity entity);
+
+    // A collision of the last physics step, between two entities: one per pair, the fastest of its
+    // contacts, closing faster than PhysicsSettings::minImpactSpeed.
+    struct BodyImpact {
+        Entity     a = NullEntity, b = NullEntity;
+        core::vec3 point{0.0f};               // world space, between the two surfaces
+        core::vec3 normal{0.0f, 1.0f, 0.0f};  // from a towards b
+        float      speed = 0.0f;              // closing speed along the normal, m/s
+        // What the collision can take out of the motion: half the pair's reduced mass times the
+        // closing speed squared (the whole of the striker's when it strikes something static), J.
+        float      energy = 0.0f;
+        core::vec3 velocityA{0.0f}, velocityB{0.0f};   // each body's linear velocity, before
+    };
+    // The last step's impacts, in the order every peer agrees on. Read it from a FixedUpdate system
+    // ordered after "physics": it is replaced at every step. What breaking on impact, sounds and
+    // damage are built on.
+    std::vector<BodyImpact> impacts(const World& world);
+
+    // Breaking on impact: what installImpactFracture does with each impact. The defaults are what the
+    // demos and tests were built with.
+    struct ImpactFractureConfig {
+        // In shard sizes of the struck material: an impact that would break less breaks nothing, so a
+        // crate set down on a stone floor does not chip it.
+        float minimumBreak = 1.0f;
+        // When what was struck does not move, the striker gets back the energy the break did not use,
+        // along the way it was going: a boulder that breaks a hole in a wall carries on through it.
+        bool  returnUnusedEnergy = true;
+        // The shards take on the striker's motion at the contact, fading to the struck body's own
+        // (from before the hit) at the edge of the break: what is in a boulder's way goes on ahead of
+        // it, and a brick that lands hard stops where it hit and falls on further out. Off, they start
+        // with the struck body's motion from before the hit.
+        bool  shardsTakeStrikerMotion = true;
+        // Whether shards break again where they land: off, debris does not shatter on landing.
+        bool  shardsBreakOnImpact = false;
+    };
+    // Adds "physics: impact fracture" to FixedUpdate, after "physics": every impact on a voxel body
+    // with breaksOnImpact (RigidBody, StaticCollider) and a material that can break strikes it at the
+    // contact, at the next step, with the collision's energy. Built only on impacts() and fracture(),
+    // so a game can leave it out and write its own. Needs installPhysics first. Idempotent.
+    void installImpactFracture(Application& app, const ImpactFractureConfig& config = {});
 
     // The component voxel edits to `entity` go to: the one it links when that is a chunk or a grid,
     // or the single chunk inside the asset it links (a prefab). INVALID for anything else.
