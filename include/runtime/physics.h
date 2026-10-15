@@ -97,7 +97,7 @@ namespace projv {
         runtime::PhysicsLayer layer = runtime::PhysicsLayer::Static;
         // Whether what an edit or a fracture leaves unsupported falls. After its voxels change, every
         // face-connected island of them with nothing to hold it up becomes a dynamic body of its own
-        // (BodySplit), of this collider's friction, restitution, material and breaksOnImpact. What
+        // (BodyBroken), of this collider's friction, restitution, material and breaksOnImpact. What
         // holds up is data: voxels of an anchor material (PhysicsMaterial::anchor), and with
         // anchorBase the component's own y = 0 and below. Off by default (the physics plan, D4):
         // floating terrain falling is a choice. Checked only after a change. A collider with no
@@ -201,42 +201,49 @@ namespace projv {
     // the same step, so `entity` is no longer valid when this arrives; `position` is where it was.
     struct BodyLeftWorld { Entity entity; core::vec3 position; };
 
-    // A dynamic body's voxels were cut into separate pieces by an edit, and each piece cut loose is
-    // now a body of its own: a new entity, linked to a new top-level component, with the parent's
-    // RigidBody (its mass shared out by voxel count, if it named one), a NetId if the parent had one,
-    // and the parent's motion at that point. The parent keeps the largest piece. Gameplay copies what
-    // else the pieces should carry. Also sent when a static collider that splits loses support
-    // (StaticCollider::splits): its pieces start at rest, made of what it was.
-    struct BodySplit { Entity parent; std::vector<Entity> pieces; };
+    // Why a body came apart (BodyBroken): an edit cut a moving body in pieces, a static collider
+    // lost the support of what fell (StaticCollider::splits), or a strike broke it -- one a game
+    // made (runtime::fracture), or an impact's (installImpactFracture).
+    enum class BreakCause : uint8_t { Edit, Support, Strike, Impact };
 
-    // A strike broke a body (runtime::fracture): `shards` are the pieces it threw off, each a new
-    // entity linked to a new top-level component holding exactly those voxels, with their palette
-    // entries, given a RigidBody and moving as that part of the body was, plus the strike's push.
-    // A dynamic body's RigidBody is theirs too (its mass shared out by voxel count, if it named one);
-    // a static collider's shards take its friction, restitution and material. What is left of the
-    // body is rebuilt, and pieces of it that the strike cut loose split as any edit's do (BodySplit).
-    // A shard a fracture threw off: debris. Physics puts it on each shard (with the step it was made)
-    // and clears the oldest debris when there is more than PhysicsConfig::maxDebris. Remove it from
-    // a shard to keep that shard for good. Not saved.
-    struct Debris { uint64_t madeAt = 0; };
-
-    // The debris budget is about to clear `entities`, the oldest shards, in the order it chose them
-    // (PhysicsConfig::maxDebris). Delivered at once -- not queued to the end of PostUpdate like the
-    // other events -- so a handler sees them whole: it can take Debris off one to keep it, or put
-    // something in its place. Every entity still with Debris after the handlers is destroyed.
-    // Handlers run inside the physics step: like everything that feeds a step, what they do must be
-    // the same on every peer.
-    struct DebrisCleared { std::vector<Entity> entities; };
-
-    // `striker`: what hit it (Strike::striker: an impact's other body); NullEntity for none.
-    // `energy`: the strike's, J (0 for a strike by reach).
-    struct BodyFractured {
-        Entity entity;
-        std::vector<Entity> shards;
-        core::vec3 at;
-        Entity striker = NullEntity;
-        float energy = 0.0f;
+    // A voxel body came apart, and `pieces` came away from it. Whatever the cause, it is one pass,
+    // run after a body's voxels change: its face-connected islands are found across all its chunks,
+    // and each stays or comes away -- a moving body keeps its largest; a static collider that splits
+    // keeps what an anchor holds up; a struck body's shards (the groups its material's fracture
+    // pattern made) always come away. Each piece is a new entity linked to a new top-level component
+    // holding exactly those voxels, with their palette entries, a NetId if the body had one, a
+    // Piece, and a RigidBody that takes after the body: a moving body's own (its mass shared out by
+    // voxel count, if it named one), or one of a static collider's friction, restitution, material
+    // and breaksOnImpact. A piece moves as that part of the body was, plus a strike's push.
+    // `entity` keeps the rest; it is rebuilt.
+    //
+    // Delivered at once, inside the physics step, before the pieces' bodies are made: a handler can
+    // shape them in the step that made them -- change a piece's RigidBody (its layer, damping,
+    // breaksOnImpact), set the velocity it starts with (setVelocity), or destroy it. Like everything
+    // that feeds a step, what a handler does must be the same on every peer.
+    struct BodyBroken {
+        Entity              entity;
+        // A strike's shards first (the first `shards` of them), then the islands that came away.
+        std::vector<Entity> pieces;
+        size_t              shards = 0;
+        BreakCause          cause = BreakCause::Edit;
+        // A strike's: where, what struck (Strike::striker; NullEntity for none), and its energy, J
+        // (0 for a strike by reach). Zero for an edit or support.
+        core::vec3          at{0.0f};
+        Entity              striker = NullEntity;
+        float               energy = 0.0f;
     };
+
+    // What a break made (BodyBroken): a shard, or an island that came away. Physics puts it on every
+    // piece, with the step it was made, and clears the oldest when there are more than
+    // PhysicsConfig::maxPieces. Remove it from a piece to keep that piece for good. Not saved.
+    struct Piece { uint64_t madeAt = 0; };
+
+    // The piece budget is about to clear `entities`, the oldest pieces, in the order it chose them
+    // (PhysicsConfig::maxPieces). Delivered at once, as BodyBroken is, so a handler sees them whole:
+    // it can take Piece off one to keep it, or put something in its place. Every entity still with
+    // Piece after the handlers is destroyed. Handlers run inside the physics step.
+    struct PiecesCleared { std::vector<Entity> entities; };
 
     // An edit took away every voxel a body was made from: it has no body any more, and nothing is
     // drawn for it. The entity stays; whether it goes (it usually should) is the game's call.
@@ -258,11 +265,14 @@ namespace projv::runtime {
         // A body that leaves the world bounds is falling forever or flung away; by default its
         // entity goes (after BodyLeftWorld is sent). False leaves the decision to the game.
         bool                   destroyBodiesThatLeaveTheWorld = true;
-        // The most shards (Debris) there may be at once. Past it, the oldest go -- their entities
+        // The most pieces (Piece) there may be at once. Past it, the oldest go -- their entities
         // destroyed, at the step that made the newest -- in (madeAt, NetId, entity) order, so peers
-        // clear the same ones; DebrisCleared names them first. Thousands of shards are thousands of bodies: what they cost is the
-        // step's. 0: no limit.
-        uint32_t               maxDebris = 3000;
+        // clear the same ones; PiecesCleared names them first. Thousands of pieces are thousands of
+        // bodies: what they cost is the step's. 0: no limit.
+        uint32_t               maxPieces = 3000;
+        // The smallest piece: an island of this many voxels or fewer that would come away is removed
+        // instead, as dust -- no body, no entity. The same for shards and fallen pieces. 0: none.
+        uint32_t               dustVoxels = 0;
         // Guards on a strike (runtime::fracture), like maxLinearSpeed on motion: what a game may
         // change, never what it may turn off. Out of range, installPhysics clamps them and says so.
         struct FractureLimits {
@@ -273,6 +283,12 @@ namespace projv::runtime {
             float    maxReachVoxels = 64.0f;
             // The most shards one strike makes (1 .. 4096); the rest of what would break stays.
             uint32_t maxShards = 512;
+            // The least an impact breaks (Strike::cause Impact), in shard sizes of the struck
+            // material (0.5 .. 16): a hit that would break less breaks nothing, and a body that fits
+            // in a cube of this many shard sizes is not broken by a hit at all. What keeps pieces
+            // that break on impact from cascading: every break makes smaller pieces, and one below
+            // the least break cannot be broken by a hit.
+            float    minImpactBreak = 1.0f;
         } fracture;
     };
 
@@ -359,17 +375,19 @@ namespace projv::runtime {
         std::optional<core::vec3> bodyVelocity;
         // In shard sizes of the struck material: a smaller break breaks nothing (a knock, not a break).
         float minimumBreak = 0.0f;
-        // What struck, reported in BodyFractured; NullEntity for none.
+        // Metres: the size this strike breaks to, instead of the struck material's shardSize -- so a
+        // game can break a small thing finer than a big one. 0: the material's.
+        float shardSize = 0.0f;
+        // Reported in BodyBroken. Impact (what installImpactFracture strikes with) is also held to
+        // PhysicsConfig::fracture.minImpactBreak.
+        BreakCause cause = BreakCause::Strike;
+        // What struck, reported in BodyBroken; NullEntity for none.
         Entity striker = NullEntity;
         // When the struck body does not move and the striker is a dynamic body: the striker's velocity
         // is set to `strikerVelocity` times the share of the energy the break did not use (breaking a
         // voxel costs its material's strength times its volume), square-rooted -- it carries on through.
         bool returnUnusedEnergy = false;
         core::vec3 strikerVelocity{0.0f};
-        // Whether the shards break on impact themselves; unset, as the body: a dynamic body's shards
-        // copy its whole RigidBody (damping, gravity factor, layer and this too), a static collider's
-        // take its friction, restitution, material and breaksOnImpact.
-        std::optional<bool> shardsBreakOnImpact;
     };
 
     // Breaks the voxel body `entity` at the start of the next fixed step, in order with editVoxels.
@@ -377,8 +395,11 @@ namespace projv::runtime {
     // what was struck; its physics material's
     // strength turns the energy into a reach, and its fracture pattern sets which voxels go together
     // (runtime/fracture.h). Voxels whose material has no strength never break; neither does anything
-    // when the struck one's has none. Each shard is a body of its own (BodyFractured) and debris
-    // (Debris). Static colliders break too; their shards are dynamic.
+    // when the struck one's has none. The shards come away through the same pass as any island
+    // (BodyBroken), taking after the body as every piece does: a dynamic body's shards copy its whole
+    // RigidBody (damping, gravity factor, layer, breaksOnImpact), a static collider's take its
+    // friction, restitution, material and breaksOnImpact. Static colliders break too; their shards
+    // are dynamic.
     //
     // Works on what voxelComponentOf finds: a chunk, a grid, or a prefab of one chunk. The reach
     // is capped (PhysicsConfig::fracture.maxReachVoxels, 64 by default), and so is the number of
@@ -414,9 +435,6 @@ namespace projv::runtime {
     // Breaking on impact: what installImpactFracture does with each impact. The defaults are what the
     // demos and tests were built with.
     struct ImpactFractureConfig {
-        // In shard sizes of the struck material: an impact that would break less breaks nothing, so a
-        // crate set down on a stone floor does not chip it.
-        float minimumBreak = 1.0f;
         // When what was struck does not move, the striker gets back the energy the break did not use,
         // along the way it was going: a boulder that breaks a hole in a wall carries on through it.
         bool  returnUnusedEnergy = true;
@@ -425,12 +443,11 @@ namespace projv::runtime {
         // it, and a brick that lands hard stops where it hit and falls on further out. Off, they start
         // with the struck body's motion from before the hit.
         bool  shardsTakeStrikerMotion = true;
-        // Whether shards break again where they land: off, debris does not shatter on landing.
-        bool  shardsBreakOnImpact = false;
     };
     // Adds "physics: impact fracture" to FixedUpdate, after "physics": every impact on a voxel body
     // with breaksOnImpact (RigidBody, StaticCollider) and a material that can break strikes it at the
-    // contact, at the next step, with the collision's energy. Built only on impacts() and fracture(),
+    // contact, at the next step, with the collision's energy (BreakCause::Impact, so held to
+    // PhysicsConfig::fracture.minImpactBreak: a crate set down on a stone floor does not chip it). Built only on impacts() and fracture(),
     // so a game can leave it out and write its own. Needs installPhysics first. Idempotent.
     void installImpactFracture(Application& app, const ImpactFractureConfig& config = {});
 

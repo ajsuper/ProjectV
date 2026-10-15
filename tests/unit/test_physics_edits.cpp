@@ -53,14 +53,14 @@ namespace {
         projv::Application app;
         projv::Scene& scene;
         double now = 0.0;
-        std::vector<projv::BodySplit> splits;
+        std::vector<projv::BodyBroken> splits;
         explicit Fixture(bool record = false) : scene(app.world.ctx().emplace<projv::Scene>()) {
             app.clock = [this] { return now; };
             runtime::installSceneBridge(app);
             runtime::PhysicsConfig config;
             config.settings.record = record;
             runtime::installPhysics(app, config);
-            app.events().on<projv::BodySplit>([this](const projv::BodySplit& e) { splits.push_back(e); });
+            app.events().on<projv::BodyBroken>([this](const projv::BodyBroken& e) { splits.push_back(e); });
             app.runStartup();
             app.runFrame();
         }
@@ -194,7 +194,7 @@ TEST_CASE("destruction: a crate cut in two becomes two bodies, sharing its mass 
     runtime::editVoxels(f.app.world, crate, cut);
     f.frames(2);
     REQUIRE(f.splits.size() == 1);
-    CHECK(f.splits[0].parent == crate);
+    CHECK(f.splits[0].entity == crate);
     REQUIRE(f.splits[0].pieces.size() == 1);
     Entity piece = f.splits[0].pieces[0];
     REQUIRE(runtime::hasBody(f.app.world, piece));

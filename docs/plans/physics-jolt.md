@@ -3,8 +3,7 @@
 Status: **approved**, 2026-10-09. **M0-M6 done** (2026-10-13); joints (2026-10-13), physics materials
 (2026-10-14), fracture, the debris budget and support (2026-10-14/15) built, and fracture policy moved out
 of the engine (2026-10-15, "Mechanism in the engine, policy in systems"). M7 (contours) waits on the
-contour work. **Next: "One rule set for voxel bodies" below** (decided 2026-10-15; item 1, the one
-island pass, done for edits and support -- item 2, a strike as an edit, is next), then the rest of
+contour work. "One rule set for voxel bodies" below is done (2026-10-15). **Next: the rest of
 "Roadmap", revised 2026-10-15 from a review of which games the system serves and where it gets in
 their way.
 
@@ -566,7 +565,7 @@ Demos 2 and 9 opt in explicitly; tests follow. *Done:* Strike::shardsBreakOnImpa
 Found while doing it: a click's chip in demo 11 breaks the wall but its shards stay in the hole
 (Roadmap R1).
 
-## One rule set for voxel bodies (decided 2026-10-15, next)
+## One rule set for voxel bodies (decided and built 2026-10-15)
 
 Playing demo 11 showed the breaking rules had grown a case per kind of body: shards (fracture's,
 with rules of their own), pieces that fall when support goes, debris (a tag and a budget), anchors,
@@ -592,18 +591,34 @@ They are all one thing: voxels that were part of one body and now are a body of 
    top-level chunk cornered at its lowest voxel (growing into a grid when it outgrows 16), with the
    palette but not the attachments; at most 512 pieces a pass, as support had. Still not split: an
    asset of several chunks (no shared voxel lattice), and a kinematic body. Fracture still makes its
-   own shards: item 2.
+   own shards: item 2. *Item 2 done the same day:* fracture's piece-making is gone too.
 2. **A strike is an edit.** A fracture only decides which voxels go together -- the pattern's job,
    still pluggable -- and cuts them apart; the groups become bodies through the same pass, the way
    islands do. No shard-only rules.
+   *Done 2026-10-15:* a strike (breakBody) only runs the pattern and fractureShards, and leaves the
+   groups on `PhysicsRuntime::breaking`; the pass cuts them with the body's other islands, so the
+   top a strike cuts loose comes away in the strike's own event. Voxels of two groups do not join.
+   A second strike on a body in one step runs the pass for the first before it is worked out (it
+   sees the cut), as a plain edit before a strike is applied first. A body too big to look over
+   whole (2^24 cells), or one whose rest always stays (a static collider that does not split, a
+   kinematic body), reads only the shards. The push, `bodyVelocity` and the striker's unused energy
+   happen in the pass, for shards only.
 3. **Every piece takes after its parent.** A piece of a moving body copies its RigidBody; a piece
    of a static collider gets one from the collider's friction, restitution, material and
    breaksOnImpact. Debris breaks on impact if what it came from did (user's call: it should).
    `Strike::shardsBreakOnImpact` and `ImpactFractureConfig::shardsBreakOnImpact` go.
+   *Done 2026-10-15:* both gone; a kinematic body's pieces copy its RigidBody as dynamic. Demos 2,
+   9 and 11 no longer turn it off. A handler of the event can (test: "a strike by reach...").
 4. **One kind of piece, one event.** `Debris` becomes `Piece {madeAt}`, on everything a break made:
    shards and fallen pieces alike. `BodyFractured` and `BodySplit` become one event -- what broke,
    its pieces, and why (strike, impact, edit, support) -- delivered at once, before the pieces'
    bodies are made, so a game can shape them in the step that made them (was R5).
+   *Done 2026-10-15:* `Piece {madeAt}`, `PiecesCleared`, and `BodyBroken {entity, pieces, shards,
+   cause, at, striker, energy}` with `BreakCause` Edit, Support, Strike or Impact (`Strike::cause`;
+   installImpactFracture sets Impact). Delivered with `Events::trigger` in the step; a piece has its
+   entity, link, RigidBody and NetId but no body yet, so a RigidBody patch costs nothing and
+   setVelocity (stamped for this step, applied after bodies are made) sets how it starts. A strike's
+   shards come first in `pieces`, `shards` of them, so a game can tell them from what fell.
 5. **Guards, the same for every piece, as settings** (PhysicsConfig):
    - the piece budget (today's debris budget, over all pieces);
    - the smallest piece: an island of fewer voxels than this is removed as dust (what demo 11 does
@@ -612,6 +627,15 @@ They are all one thing: voxels that were part of one body and now are a body of 
      least a shard's worth). With the smallest piece, this is what keeps debris that breaks on
      impact from cascading: every break makes smaller pieces, and one below a shard's size cannot
      be broken by a hit.
+   *Done 2026-10-15:* `PhysicsConfig::maxPieces` (3000), `PhysicsConfig::dustVoxels` (0: no dust;
+   an island of that many voxels or fewer is cut and nothing made of it), and
+   `FractureLimits::minImpactBreak` (1 shard size, clamped 0.5..16), applied to strikes whose cause
+   is Impact: the reach must be at least that, and a body that fits in a cube of it is not broken by
+   a hit at all -- which is what actually stops the cascade (the reach test alone does not: a piece
+   smaller than the reach is broken whole). `ImpactFractureConfig::minimumBreak` is gone into it;
+   `Strike::minimumBreak` stays, for a game's own knocks. `Strike::shardSize` built too.
+   Tests: one event for a struck moving body (shards and the end it left), pieces taking after a
+   moving body, dust, Strike::shardSize, the least impact break.
 
 What stays: RigidBody and StaticCollider stay two components (Jolt's static and moving, and D3);
 anchors stay data (anchor materials, anchorBase) and only matter to static colliders; static
@@ -626,6 +650,17 @@ renamed or merged, with the tests and demos.
 Order: grid and multi-chunk splitting; the one pass; pieces and the one event; the guards; then
 demo 11's pickaxe on top -- a shard size scaled to what it hits, crumbs as dust, and a moment
 without friction for thrown pieces (their friction otherwise holds them flush in their sockets).
+*Done 2026-10-15:* the click breaks to 0.35 m (`Strike::shardSize`); the demos set dustVoxels 5
+(was the demo's own rule); a click's shards are made frictionless in the BodyBroken handler, before
+their bodies exist, and thrown once they do. F became a 3 MJ demolition blow, and demo 11 gained a
+composite wall (concrete frame with rebar, brick in mortar, pine, glass; README), which the
+self-test blasts: thousands of voxels out, every rebar voxel stays.
+
+Found on the way: demo 9's "nothing fell through the floor" check counted a piece that went over the
+floor's edge, struck the floor's side and drifted back under it as it fell (about one run in five,
+now that pieces break again in the air). Diagnosed by recording where each leaver first went below
+the floor's top: beyond the edge, every time. The demo now ignores bodies seen below the top past
+the edge; a real fall-through still counts.
 
 ## Roadmap (revised 2026-10-15)
 
@@ -661,7 +696,7 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
   it ignores; saved with RigidBody/StaticCollider, compared by NetId order so peers agree. Layers
   stay the coarse cut. A strike can put its shards in a group of their own. Default: no groups,
   nothing changes. Replaces the need for blanket rules like "debris ignores debris".
-- **R5. Shaping what a step made, in that step.** *Folded into "One rule set", item 4.* `BodyFractured` and `BodySplit` delivered at
+- **R5. Shaping what a step made, in that step.** *Folded into "One rule set", item 4; done.* `BodyFractured` and `BodySplit` delivered at
   once, as DebrisCleared is, before the new bodies are made, so a handler can change their
   RigidBody (layer, group, damping) and set the velocity they start with (setVelocity on a body
   not yet made sets its starting velocity). A Strike also takes how the push spreads (fading to the
@@ -773,9 +808,10 @@ Physics adds one module, `runtime/physics`, and one engine change: system orderi
 **I7. Events.** (As built 2026-10-15; the original list named ContactBegan/Ended, not built yet:
 Roadmap R6.)
 - Physics sends events through `Events`, delivered in the normal pump after PostUpdate:
-  `BodyLeftWorld`, `BodySplit`, `BodyFractured`, `BodyEmptied`, `JointBroke`, `PhysicsBodyRefused`,
-  `SimulationSlow`. `DebrisCleared` is delivered at once (`Events::trigger`), inside the step, since
-  its handlers must see the entities before they go.
+  `BodyLeftWorld`, `BodyEmptied`, `JointBroke`, `PhysicsBodyRefused`, `SimulationSlow`.
+  `BodyBroken` and `PiecesCleared` are delivered at once (`Events::trigger`), inside the step: the
+  first before the pieces' bodies are made, so its handlers can shape them; the second before the
+  entities it names go. (Was `BodySplit`, `BodyFractured` and `DebrisCleared`, 2026-10-15.)
 - A queued event reaches a game after the step that caused it, so it cannot shape what that step
   made (a shard's layer or starting velocity) without lagging a step -- which also has to come out
   the same on every peer. Events whose handlers are meant to shape what was made move into the

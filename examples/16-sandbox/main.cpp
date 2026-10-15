@@ -588,7 +588,7 @@ void connectPopHandlers(projv::Application& app) {
         float strength = p.explosive > 0.0f ? 55.0f : 18.0f;
         // A bomb also carves: a crater in whatever is solid (never its bottom layer of voxels, so
         // the floor is dented, not holed), and bites out of the crates around it. A crate bitten in
-        // two becomes two bodies (BodySplit, below), and the shockwave throws the pieces.
+        // two becomes two bodies (BodyBroken, below), and the shockwave throws the pieces.
         if (p.explosive > 0.0f) {
             for (Entity solid : world.view<projv::StaticCollider>()) {
                 std::vector<projv::PendingVoxelOp> crater =
@@ -672,9 +672,9 @@ void startup(projv::Application& app) {
         world.destroy(e.entity);
     });
     // A crate cut in pieces: each piece is a sandbox body too, and does what its parent did.
-    app.events().on<projv::BodySplit>([&world](const projv::BodySplit& e) {
+    app.events().on<projv::BodyBroken>([&world](const projv::BodyBroken& e) {
         auto& sandbox = world.ctx().get<Sandbox>();
-        const Body* parent = world.valid(e.parent) ? world.try_get<Body>(e.parent) : nullptr;
+        const Body* parent = world.valid(e.entity) ? world.try_get<Body>(e.entity) : nullptr;
         for (Entity piece : e.pieces) {
             // Counted whether or not it is still here: one retired before this event arrived (it
             // fell out of the world) was counted as that, and never got a Body.

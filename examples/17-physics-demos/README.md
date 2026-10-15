@@ -102,8 +102,11 @@ mortar round them has crumbled, the top of a wall cut right through -- falls. Th
 boulder's speed, fading to the edge of the break, and the boulder gets back
 the energy the break did not use. Whether it then gets through depends on the rubble packed in front
 of it: through plaster's crumbs it always rolls on, off the floor's edge; in the stone, brick and
-planks it sometimes ploughs on and sometimes stops. Shards are debris, and the
-engine keeps at most 3000 of them (`PhysicsConfig::maxDebris`), clearing the oldest.
+planks it sometimes ploughs on and sometimes stops. Shards take after the wall, so they break again
+where they land hard, until they are too small for a hit to break (`fracture.minImpactBreak`).
+Every piece a break makes is a `Piece`, and the engine keeps at most 3000 of them
+(`PhysicsConfig::maxPieces`), clearing the oldest; crumbs of five voxels or fewer are dust
+(`PhysicsConfig::dustVoxels`), never bodies.
 
 **Gear winch** -- bodies pushing bodies through contact. Each gear is crosses: two straight bars
 through its middle, four pegs, laid along the voxel grid's own axes so their faces are flat and
@@ -125,11 +128,12 @@ back. The self-test checks both against the textbook: the impact speed against
 v^2 = 2 g (sin a - mu cos a) d, the rebound against (e v)^2 / (2 g (sin a + mu cos a)).
 
 **Overhangs** -- support, with fracture as the tool. Each structure is a static collider that splits
-(`StaticCollider::splits`): after every chip, the engine looks for the parts of it that no longer
-reach its ground (the component's own y = 0) and drops each as a dynamic body of exactly those voxels
-and palette entries (`BodySplit`). A chip is `runtime::fracture` at what the crosshair hits, 30 kJ
-(F: 120 kJ); how far that reaches and what shape the break takes is the struck material's
-(`physics_materials.json`):
+(`StaticCollider::splits`): after every chip, one pass finds the parts of it that no longer reach its
+ground (the component's own y = 0) and drops each as a dynamic body of exactly those voxels and
+palette entries, with the chip's shards, in one `BodyBroken`. A click is `runtime::fracture` at what
+the crosshair hits, 90 kJ, breaking finer than the material would on its own (`Strike::shardSize`,
+0.35 m) like a pickaxe; F is a demolition blow, 3 MJ, breaking to the material's own size. How far
+each reaches and what shape the break takes is the struck material's (`physics_materials.json`):
 
 | Structure | Material | Breaks |
 |---|---|---|
@@ -137,6 +141,16 @@ and palette entries (`BodySplit`). A chip is `runtime::fracture` at what the cro
 | Tree | timber, 40 kJ/m^3, `splinter`, grain upright | Long upright splinters. Cut the trunk through and the crown comes loose |
 | Cliff | chalk, 30 kJ/m^3, `crumble` | Round bites. Undercut the shelf, the stalactite, the cornice |
 | Tower | tower brick, 50 kJ/m^3, `seams` | The mortar crumbles where you chip; bricks left held by nothing drop out whole |
+| Composite wall | concrete, rebar, wall brick, mortar, pine, glass | Each part its own way, in one body (below) |
+
+The composite wall, beside the tower, is 12 m by 8 m of eighth-metre voxels, every colour naming
+its material: a concrete frame of three columns and two beams (80 kJ/m^3, `shatter`) with steel bars
+running through it, and four bays -- brick in mortar (`seams`; mortar 12 kJ/m^3, `crumble`), pine
+boards with a window (25 kJ/m^3, `splinter` along the boards), a glass curtain on pine mullions, and
+brick with a small window. Glass is the weakest (2.5 kJ/m^3, small shards) and goes furthest. The
+rebar has no strength, so it never breaks: blast a beam and the concrete shatters off the bars, which
+stay, holding up whatever they still run through. The self-test hits the middle beam with F's blow
+and checks that thousands of voxels came away and not one voxel of rebar did.
 
 What falls breaks again where it lands hard. Something cut level -- the crown on a trunk cut evenly
 all round -- settles on what is left, as it would: chip a notch first, or right-drag it off. The

@@ -84,22 +84,26 @@ namespace {
         projv::Application app;
         projv::Scene& scene;
         double now = 0.0;
-        std::vector<projv::BodyFractured> fractures;
-        std::vector<projv::BodySplit> splits;
-        explicit Fixture(int threads = -1, uint32_t maxDebris = 3000,
+        // Breaks by a strike, and the rest (edits, support), from the one event.
+        std::vector<projv::BodyBroken> fractures;
+        std::vector<projv::BodyBroken> splits;
+        explicit Fixture(int threads = -1, uint32_t maxPieces = 3000,
                          std::optional<runtime::ImpactFractureConfig> impactFracture = runtime::ImpactFractureConfig{},
-                         runtime::PhysicsConfig::FractureLimits limits = {})
+                         runtime::PhysicsConfig::FractureLimits limits = {}, uint32_t dustVoxels = 0)
             : scene(app.world.ctx().emplace<projv::Scene>()) {
             app.clock = [this] { return now; };
             runtime::installSceneBridge(app);
             runtime::PhysicsConfig config;
             config.settings.threads = threads;
-            config.maxDebris = maxDebris;
+            config.maxPieces = maxPieces;
             config.fracture = limits;
+            config.dustVoxels = dustVoxels;
             runtime::installPhysics(app, config);
             if (impactFracture) runtime::installImpactFracture(app, *impactFracture);
-            app.events().on<projv::BodyFractured>([this](const projv::BodyFractured& e) { fractures.push_back(e); });
-            app.events().on<projv::BodySplit>([this](const projv::BodySplit& e) { splits.push_back(e); });
+            app.events().on<projv::BodyBroken>([this](const projv::BodyBroken& e) {
+                bool struck = e.cause == projv::BreakCause::Strike || e.cause == projv::BreakCause::Impact;
+                (struck ? fractures : splits).push_back(e);
+            });
             app.runStartup();
             app.runFrame();
             runtime::PhysicsMaterial stone{2400.0f, 0.7f, 0.0f};
@@ -129,9 +133,9 @@ namespace {
         // The energy that breaks out to `radius` metres in stone.
         static float energyFor(float radius) { return 1e5f * 4.0f / 3.0f * PI * radius * radius * radius; }
 
-        uint64_t shardVoxels(const projv::BodyFractured& f) {
+        uint64_t shardVoxels(const projv::BodyBroken& f) {
             uint64_t n = 0;
-            for (Entity e : f.shards) n += countOf(scene, app.world.get<projv::VoxelComponent>(e).handle).voxels;
+            for (Entity e : f.pieces) n += countOf(scene, app.world.get<projv::VoxelComponent>(e).handle).voxels;
             return n;
         }
     };
@@ -162,9 +166,9 @@ TEST_CASE("a strike breaks a static wall into dynamic shards, losing no voxel an
     runtime::fracture(f.app.world, wall, vec3(0, 3, 0), Fixture::energyFor(1.5f), vec3(0, 0, 6));
     f.frames(1);
     REQUIRE(f.fractures.size() == 1);
-    const projv::BodyFractured& broke = f.fractures[0];
+    const projv::BodyBroken& broke = f.fractures[0];
     CHECK(broke.entity == wall);
-    CHECK(broke.shards.size() >= 3);
+    CHECK(broke.pieces.size() >= 3);
 
     const uint64_t after = countOf(f.scene, f.wallComponent).voxels, inShards = f.shardVoxels(broke);
     CHECK(inShards > 0);
@@ -174,7 +178,7 @@ TEST_CASE("a strike breaks a static wall into dynamic shards, losing no voxel an
     CHECK(float(inShards) > 0.4f * expected);
     CHECK(float(inShards) < 2.5f * expected);
 
-    for (Entity e : broke.shards) {
+    for (Entity e : broke.pieces) {
         REQUIRE(f.app.world.valid(e));
         CHECK(f.app.world.get<projv::RigidBody>(e).motion == runtime::MotionType::Dynamic);
         CHECK(f.app.world.all_of<projv::PhysicsBody>(e));
@@ -185,9 +189,9 @@ TEST_CASE("a strike breaks a static wall into dynamic shards, losing no voxel an
     // Thrown the strike's way: out of the wall (which is z 0 to 0.5), the push fading to the edge.
     f.frames(20);
     int forward = 0;
-    for (Entity e : broke.shards)
+    for (Entity e : broke.pieces)
         if (f.app.world.valid(e) && runtime::bodyPose(f.app.world, e).centerOfMass.z > 0.35f) forward++;
-    CHECK(forward > int(broke.shards.size()) / 3);
+    CHECK(forward > int(broke.pieces.size()) / 3);
 }
 
 TEST_CASE("the reach follows the energy, and what has no strength does not break") {
@@ -242,8 +246,8 @@ TEST_CASE("only what breaks comes away: steel in a stone wall stays") {
     runtime::fracture(f.app.world, wall, vec3(0, 3.6f, 0), Fixture::energyFor(1.5f));
     f.frames(1);
     REQUIRE(f.fractures.size() == 1);
-    CHECK(!f.fractures[0].shards.empty());
-    for (Entity e : f.fractures[0].shards)
+    CHECK(!f.fractures[0].pieces.empty());
+    for (Entity e : f.fractures[0].pieces)
         CHECK(countOf(f.scene, f.app.world.get<projv::VoxelComponent>(e).handle).materials == std::set<std::string>{"stone"});
     CHECK(countOf(f.scene, f.wallComponent).voxels >= 32 * 2 * 2);   // the bar, all of it
     CHECK(countOf(f.scene, f.wallComponent).materials.count("steel") == 1);
@@ -262,7 +266,7 @@ TEST_CASE("the same strike breaks the same way") {
         runtime::fracture(f.app.world, wall, vec3(0.3f, 2.7f, 0), Fixture::energyFor(1.5f), vec3(0, 2, 5));
         f.frames(1);
         REQUIRE(f.fractures.size() == 1);
-        for (Entity e : f.fractures[0].shards)
+        for (Entity e : f.fractures[0].pieces)
             sizes.push_back(countOf(f.scene, f.app.world.get<projv::VoxelComponent>(e).handle).voxels);
         f.frames(60);
         return runtime::physicsStateHash(f.app.world);
@@ -291,8 +295,8 @@ TEST_CASE("a dynamic body breaks into shards that move as it did") {
     runtime::fracture(f.app.world, slab, runtime::bodyPose(f.app.world, slab).centerOfMass, Fixture::energyFor(0.8f));
     f.frames(1);
     REQUIRE(f.fractures.size() == 1);
-    REQUIRE(!f.fractures[0].shards.empty());
-    for (Entity e : f.fractures[0].shards) {
+    REQUIRE(!f.fractures[0].pieces.empty());
+    for (Entity e : f.fractures[0].pieces) {
         CHECK(f.app.world.get<projv::RigidBody>(e).gravityFactor == 0.0f);   // the body's own RigidBody
         CHECK(runtime::bodyPose(f.app.world, e).linearVelocity.x == doctest::Approx(3.0f).epsilon(0.05));
     }
@@ -319,8 +323,8 @@ TEST_CASE("a registered pattern decides the shards, and the engine's rules hold 
     runtime::fracture(f.app.world, wall, vec3(0, 3, 0), Fixture::energyFor(1.5f));
     f.frames(1);
     REQUIRE(f.fractures.size() == 1);
-    REQUIRE(f.fractures[0].shards.size() == 2);
-    for (Entity e : f.fractures[0].shards)
+    REQUIRE(f.fractures[0].pieces.size() == 2);
+    for (Entity e : f.fractures[0].pieces)
         CHECK(countOf(f.scene, f.app.world.get<projv::VoxelComponent>(e).handle).voxels == 6 * 4 * 2);   // 1.5 m = 6 voxels a side
 
     // A pattern that answers for the wrong number of voxels breaks nothing.
@@ -515,13 +519,14 @@ TEST_CASE("on impact: what is struck hard enough breaks, and what struck it carr
     REQUIRE(f.fractures.size() >= 1);
     CHECK(f.fractures[0].entity == wall);
     CHECK(f.fractures[0].striker == rock);
-    CHECK(f.fractures[0].shards.size() >= 2);
+    CHECK(f.fractures[0].pieces.size() >= 2);
     CHECK(f.fractures[0].energy == doctest::Approx(0.5f * 1000.0f * 30.0f * 30.0f).epsilon(0.02));
-    for (Entity e : f.fractures[0].shards) CHECK_FALSE(f.app.world.get<projv::RigidBody>(e).breaksOnImpact);
+    // Its pieces take after the wall: they break on impact too.
+    for (Entity e : f.fractures[0].pieces) CHECK(f.app.world.get<projv::RigidBody>(e).breaksOnImpact);
     // Its pieces go the way it was going.
     vec3 shardVelocity(0.0f);
-    for (Entity e : f.fractures[0].shards) shardVelocity += runtime::bodyPose(f.app.world, e).linearVelocity;
-    CHECK(shardVelocity.z / float(f.fractures[0].shards.size()) > 3.0f);
+    for (Entity e : f.fractures[0].pieces) shardVelocity += runtime::bodyPose(f.app.world, e).linearVelocity;
+    CHECK(shardVelocity.z / float(f.fractures[0].pieces.size()) > 3.0f);
     // The wall stopped it; the break gave back what it did not use (less what it lost to the rubble).
     CHECK(runtime::bodyPose(f.app.world, rock).linearVelocity.z > 15.0f);
     // Through the half-metre wall, and still going.
@@ -599,7 +604,7 @@ TEST_CASE("on impact: what breaks does not depend on the number of threads") {
         ball(f, vec3(2.5f, 2, -5), vec3(-0.2f, 3, 26), 1200.0f, 1.0f);
         f.frames(120);
         std::vector<size_t> shards;
-        for (const projv::BodyFractured& e : f.fractures) shards.push_back(e.shards.size());
+        for (const projv::BodyBroken& e : f.fractures) shards.push_back(e.pieces.size());
         return std::make_pair(shards, runtime::physicsStateHash(f.app.world));
     };
     auto single = run(0), four = run(4), many = run(12);
@@ -610,7 +615,7 @@ TEST_CASE("on impact: what breaks does not depend on the number of threads") {
 
 TEST_CASE("on impact: nothing breaks without the system, and its config decides what the shards do") {
     // A tonne at 30 m/s into a chalk wall that asked to break; what the ball is going at afterwards.
-    auto throwAt = [](std::optional<runtime::ImpactFractureConfig> config, std::vector<projv::BodyFractured>* fractures) {
+    auto throwAt = [](std::optional<runtime::ImpactFractureConfig> config, std::vector<projv::BodyBroken>* fractures) {
         Fixture f(-1, 3000, config);
         runtime::PhysicsMaterial chalk{300.0f, 0.6f, 0.0f};
         chalk.strength = 1e5f;
@@ -621,14 +626,15 @@ TEST_CASE("on impact: nothing breaks without the system, and its config decides 
         for (int i = 0; i < 30 && f.fractures.empty(); i++) f.frames(1);
         f.frames(1);
         if (fractures) *fractures = f.fractures;
-        if (config)
-            for (const projv::BodyFractured& e : f.fractures)
-                for (Entity shard : e.shards)
-                    if (f.app.world.valid(shard))
-                        CHECK(f.app.world.get<projv::RigidBody>(shard).breaksOnImpact == config->shardsBreakOnImpact);
+        // Shards take after the wall, which breaks on impact: so do they.
+        for (const projv::BodyBroken& e : f.fractures) {
+            CHECK(e.cause == projv::BreakCause::Impact);
+            for (Entity shard : e.pieces)
+                if (f.app.world.valid(shard)) CHECK(f.app.world.get<projv::RigidBody>(shard).breaksOnImpact);
+        }
         return runtime::bodyPose(f.app.world, rock).linearVelocity.z;
     };
-    std::vector<projv::BodyFractured> fractures;
+    std::vector<projv::BodyBroken> fractures;
     // No system: the ball stops at the wall, which stays whole.
     CHECK(throwAt(std::nullopt, &fractures) < 1.0f);
     CHECK(fractures.empty());
@@ -636,10 +642,9 @@ TEST_CASE("on impact: nothing breaks without the system, and its config decides 
     const float through = throwAt(runtime::ImpactFractureConfig{}, &fractures);
     CHECK(fractures.size() >= 1);
     CHECK(through > 15.0f);
-    // Given nothing back, and with shards that break again.
+    // Given nothing back.
     runtime::ImpactFractureConfig keep;
     keep.returnUnusedEnergy = false;
-    keep.shardsBreakOnImpact = true;
     const float stopped = throwAt(keep, &fractures);
     CHECK(fractures.size() >= 1);
     CHECK(stopped < through - 5.0f);
@@ -695,19 +700,27 @@ TEST_CASE("a strike by reach breaks out to its radius whatever the strength, and
     runtime::fracture(f.app.world, wall, knock);
     f.frames(2);
     CHECK(f.fractures.empty());
-    // A static collider's shards take its breaksOnImpact, unless the strike says otherwise.
+    // A static collider's shards take its breaksOnImpact; a handler of the event, which comes before
+    // their bodies are made, can say otherwise.
     runtime::fracture(f.app.world, wall, vec3(-2, 3, 0), Fixture::energyFor(0.8f));
     f.frames(1);
     REQUIRE(f.fractures.size() == 1);
-    for (Entity e : f.fractures[0].shards) CHECK(f.app.world.get<projv::RigidBody>(e).breaksOnImpact);
-    runtime::Strike calm;
-    calm.at = vec3(2, 3, 0);
-    calm.energy = Fixture::energyFor(0.8f);
-    calm.shardsBreakOnImpact = false;
-    runtime::fracture(f.app.world, wall, calm);
+    for (Entity e : f.fractures[0].pieces) CHECK(f.app.world.get<projv::RigidBody>(e).breaksOnImpact);
+    bool hadBodies = false;
+    f.app.events().on<projv::BodyBroken>([&](const projv::BodyBroken& e) {
+        for (Entity piece : e.pieces) {
+            hadBodies = hadBodies || runtime::hasBody(f.app.world, piece);
+            f.app.world.patch<projv::RigidBody>(piece, [](projv::RigidBody& r) { r.breaksOnImpact = false; });
+        }
+    });
+    runtime::fracture(f.app.world, wall, vec3(2, 3, 0), Fixture::energyFor(0.8f));
     f.frames(1);
     REQUIRE(f.fractures.size() == 2);
-    for (Entity e : f.fractures[1].shards) CHECK_FALSE(f.app.world.get<projv::RigidBody>(e).breaksOnImpact);
+    CHECK_FALSE(hadBodies);
+    for (Entity e : f.fractures[1].pieces) {
+        CHECK_FALSE(f.app.world.get<projv::RigidBody>(e).breaksOnImpact);
+        CHECK(runtime::hasBody(f.app.world, e));
+    }
 }
 
 TEST_CASE("fracture's guards are the game's to set, and stay guards") {
@@ -718,7 +731,7 @@ TEST_CASE("fracture's guards are the game's to set, and stay guards") {
         runtime::fracture(f.app.world, wall, at, Fixture::energyFor(radius));
         f.frames(1);
         return f.fractures.empty() ? std::make_pair(size_t(0), uint64_t(0))
-                                   : std::make_pair(f.fractures[0].shards.size(), f.shardVoxels(f.fractures[0]));
+                                   : std::make_pair(f.fractures[0].pieces.size(), f.shardVoxels(f.fractures[0]));
     };
     const runtime::PhysicsConfig::FractureLimits defaults;
     const auto plain = strike(defaults, vec3(0, 3, 0), 1.5f);
@@ -748,7 +761,7 @@ TEST_CASE("fracture's guards are the game's to set, and stay guards") {
     CHECK(strike(none, vec3(0, 3, 0), 1.5f).first == 1);
 }
 
-TEST_CASE("the debris budget clears the oldest shards first, and only shards") {
+TEST_CASE("the piece budget clears the oldest pieces first, and only pieces") {
     Fixture f(-1, 20);
     Entity wall = f.wall();
     f.frames(2);
@@ -756,20 +769,20 @@ TEST_CASE("the debris budget clears the oldest shards first, and only shards") {
     runtime::fracture(f.app.world, wall, vec3(-2, 3, 0), Fixture::energyFor(0.6f));
     f.frames(1);
     REQUIRE(f.fractures.size() == 1);
-    const std::vector<Entity> first = f.fractures[0].shards;
+    const std::vector<Entity> first = f.fractures[0].pieces;
     REQUIRE(first.size() >= 2);
     REQUIRE(first.size() <= 20);
-    for (Entity e : first) CHECK(f.app.world.all_of<projv::Debris>(e));
-    // A shard kept for good: no longer debris.
-    f.app.world.remove<projv::Debris>(first.front());
+    for (Entity e : first) CHECK(f.app.world.all_of<projv::Piece>(e));
+    // A shard kept for good: no longer a piece.
+    f.app.world.remove<projv::Piece>(first.front());
     f.frames(5);
     // A big one, past it: the newest twenty stay, every older shard goes but the one kept.
     runtime::fracture(f.app.world, wall, vec3(2, 3, 0), Fixture::energyFor(1.5f));
     f.frames(1);
     REQUIRE(f.fractures.size() == 2);
-    const std::vector<Entity>& second = f.fractures[1].shards;
+    const std::vector<Entity>& second = f.fractures[1].pieces;
     REQUIRE(second.size() > 20);
-    CHECK(f.app.world.view<projv::Debris>().size() == 20);
+    CHECK(f.app.world.view<projv::Piece>().size() == 20);
     CHECK(f.app.world.valid(first.front()));
     for (size_t i = 1; i < first.size(); i++) CHECK_FALSE(f.app.world.valid(first[i]));
     CHECK(f.app.world.valid(wall));
@@ -788,25 +801,25 @@ namespace {
     }
 }
 
-TEST_CASE("the debris budget names what it clears first, and a handler can keep one") {
+TEST_CASE("the piece budget names what it clears first, and a handler can keep one") {
     Fixture f(-1, 20);
     Entity wall = f.wall();
     f.frames(2);
     runtime::fracture(f.app.world, wall, vec3(-2, 3, 0), Fixture::energyFor(0.6f));
     f.frames(1);
     REQUIRE(f.fractures.size() == 1);
-    const std::vector<Entity> first = f.fractures[0].shards;
+    const std::vector<Entity> first = f.fractures[0].pieces;
     REQUIRE(first.size() >= 2);
     // Whole when named, and the oldest first; the handler keeps the last it is told of.
     std::vector<Entity> named;
     bool alive = true;
-    f.app.events().on<projv::DebrisCleared>([&](const projv::DebrisCleared& e) {
+    f.app.events().on<projv::PiecesCleared>([&](const projv::PiecesCleared& e) {
         for (Entity x : e.entities) {
             // (The newest may not have bodies yet: the budget is kept in the step that made them.)
-            alive = alive && f.app.world.valid(x) && f.app.world.all_of<projv::Debris>(x);
+            alive = alive && f.app.world.valid(x) && f.app.world.all_of<projv::Piece>(x);
             named.push_back(x);
         }
-        if (!e.entities.empty()) f.app.world.remove<projv::Debris>(e.entities.back());
+        if (!e.entities.empty()) f.app.world.remove<projv::Piece>(e.entities.back());
     });
     f.frames(5);
     runtime::fracture(f.app.world, wall, vec3(2, 3, 0), Fixture::energyFor(1.5f));
@@ -817,7 +830,7 @@ TEST_CASE("the debris budget names what it clears first, and a handler can keep 
     for (size_t i = 0; i < first.size(); i++) CHECK(named[i] == first[i]);
     const Entity kept = named.back();
     CHECK(f.app.world.valid(kept));
-    CHECK_FALSE(f.app.world.all_of<projv::Debris>(kept));
+    CHECK_FALSE(f.app.world.all_of<projv::Piece>(kept));
     f.frames(1);
     CHECK(runtime::hasBody(f.app.world, kept));
     for (size_t i = 0; i + 1 < named.size(); i++) CHECK_FALSE(f.app.world.valid(named[i]));
@@ -839,7 +852,7 @@ TEST_CASE("support: what a cut leaves standing on nothing falls, made of what it
     runtime::editVoxels(f.app.world, wall, slot({0, 4, 0}, {31, 4, 1}));
     f.frames(1);
     REQUIRE(f.splits.size() == 1);
-    CHECK(f.splits[0].parent == wall);
+    CHECK(f.splits[0].entity == wall);
     REQUIRE(f.splits[0].pieces.size() == 1);
     Entity top = f.splits[0].pieces[0];
     Count fallen = countOf(f.scene, f.app.world.get<projv::VoxelComponent>(top).handle);
@@ -933,12 +946,152 @@ TEST_CASE("support: a strike that breaks a pillar through brings the top down") 
     f.frames(2);
     runtime::fracture(f.app.world, pillar, vec3(0, 2.5f, -0.5f), Fixture::energyFor(1.2f));
     f.frames(2);
+    // One pass: the shards and the top they leave unsupported come away together, in one event.
     REQUIRE(f.fractures.size() == 1);
-    REQUIRE(!f.splits.empty());
-    CHECK(f.splits[0].parent == pillar);
+    CHECK(f.splits.empty());
+    CHECK(f.fractures[0].entity == pillar);
     // The top fell; the foot stands.
     float highest = 0.0f;
-    for (Entity e : f.splits[0].pieces) highest = std::max(highest, runtime::bodyPose(f.app.world, e).centerOfMass.y);
+    for (Entity e : f.fractures[0].pieces) highest = std::max(highest, runtime::bodyPose(f.app.world, e).centerOfMass.y);
     CHECK(highest > 3.0f);
     CHECK(countOf(f.scene, h).voxels > 0);
+}
+
+namespace {
+    // A free-floating stone bar, 4 m x 0.5 m x 0.5 m of quarter-metre voxels, at (0, 50, 0), moving
+    // at `velocity` with no gravity.
+    Entity bar(Fixture& f, vec3 velocity) {
+        ComponentHandle h = utils::addComponent(f.scene, projv::ComponentKind::Chunk, "bar", INVALID_COMPONENT_HANDLE, 16, 0.25f);
+        utils::setComponentTransform(f.scene, h, vec3(0, 50, 0), quat(1, 0, 0, 0), 1.0f);
+        utils::queueVoxelAdd(f.scene, h, fill({0, 0, 0}, {15, 1, 1}, GREY));
+        utils::updateScene(f.scene);
+        REQUIRE(utils::setMaterialPhysics(f.scene, h, slotOf(f.scene, h, GREY), "stone"));
+        Entity e = runtime::spawnComponent(f.app.world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+        projv::RigidBody rigid;
+        rigid.gravityFactor = 0.0f;
+        rigid.linearDamping = 0.0f;
+        rigid.mass = 40.0f;
+        f.app.world.emplace<projv::RigidBody>(e, rigid);
+        f.frames(1);
+        runtime::setVelocity(f.app.world, e, velocity);
+        f.frames(2);
+        return e;
+    }
+}
+
+TEST_CASE("one pass: a moving body struck through comes apart in one event, shards and the end the cut left") {
+    Fixture f;
+    Entity e = bar(f, vec3(0, 0, 2));
+    const ComponentHandle h = f.app.world.get<projv::VoxelComponent>(e).handle;
+    // A strike a metre from the end, wide enough to cut right through: the short end loses its
+    // connection to the rest, and comes away with the shards.
+    runtime::fractureWithin(f.app.world, e, vec3(1.0f, 50.25f, 0.25f), 0.6f);
+    f.frames(1);
+    REQUIRE(f.fractures.size() == 1);
+    CHECK(f.splits.empty());
+    const projv::BodyBroken& broke = f.fractures[0];
+    CHECK(broke.cause == projv::BreakCause::Strike);
+    uint64_t inPieces = 0, largest = 0;
+    float mass = 0.0f;
+    const runtime::PhysicsWorld& sim = runtime::physicsWorld(f.app.world);
+    for (Entity piece : broke.pieces) {
+        REQUIRE(runtime::hasBody(f.app.world, piece));
+        CHECK(f.app.world.all_of<projv::Piece>(piece));
+        uint64_t n = countOf(f.scene, f.app.world.get<projv::VoxelComponent>(piece).handle).voxels;
+        inPieces += n;
+        largest = std::max(largest, n);
+        mass += sim.bodyMass(f.app.world.get<projv::PhysicsBody>(piece).id);
+        CHECK(runtime::bodyPose(f.app.world, piece).linearVelocity.z == doctest::Approx(2.0f).epsilon(0.05));
+    }
+    const uint64_t kept = countOf(f.scene, h).voxels;
+    CHECK(kept + inPieces == 16 * 2 * 2);
+    CHECK(largest >= 4);   // the end, x 0..1 at least, is one piece
+    CHECK(kept > largest);  // the body kept the long side
+    mass += sim.bodyMass(f.app.world.get<projv::PhysicsBody>(e).id);
+    CHECK(mass == doctest::Approx(40.0f).epsilon(0.02));   // shared out by voxel count
+}
+
+TEST_CASE("pieces take after what they came from: a moving body's shards break on impact if it did") {
+    Fixture f;
+    Entity e = bar(f, vec3(0));
+    f.app.world.patch<projv::RigidBody>(e, [](projv::RigidBody& r) { r.breaksOnImpact = true; r.linearDamping = 0.3f; });
+    f.frames(2);
+    runtime::fracture(f.app.world, e, vec3(2.0f, 50.25f, 0.25f), Fixture::energyFor(0.5f));
+    f.frames(1);
+    REQUIRE(f.fractures.size() == 1);
+    REQUIRE(!f.fractures[0].pieces.empty());
+    for (Entity piece : f.fractures[0].pieces) {
+        CHECK(f.app.world.get<projv::RigidBody>(piece).breaksOnImpact);
+        CHECK(f.app.world.get<projv::RigidBody>(piece).linearDamping == 0.3f);
+    }
+}
+
+TEST_CASE("dust: an island of PhysicsConfig::dustVoxels or fewer is removed, not made a body") {
+    auto strike = [](uint32_t dust) {
+        Fixture f(-1, 3000, runtime::ImpactFractureConfig{}, {}, dust);
+        Entity wall = f.wall();
+        f.frames(2);
+        runtime::fracture(f.app.world, wall, vec3(0, 3, 0), Fixture::energyFor(1.2f));
+        f.frames(1);
+        REQUIRE(f.fractures.size() == 1);
+        uint64_t smallest = std::numeric_limits<uint64_t>::max(), inPieces = 0;
+        for (Entity e : f.fractures[0].pieces) {
+            uint64_t n = countOf(f.scene, f.app.world.get<projv::VoxelComponent>(e).handle).voxels;
+            smallest = std::min(smallest, n);
+            inPieces += n;
+        }
+        const uint64_t left = countOf(f.scene, f.wallComponent).voxels;
+        return std::make_tuple(f.fractures[0].pieces.size(), smallest, left + inPieces);
+    };
+    auto [allPieces, allSmallest, allVoxels] = strike(0);
+    CHECK(allVoxels == 32 * 24 * 2);   // none lost
+    REQUIRE(allSmallest <= 4);         // a strike makes small shards at its middle...
+    auto [fewer, dustSmallest, dustVoxels] = strike(4);
+    CHECK(dustSmallest > 4);           // ...which, as dust, are gone
+    CHECK(fewer < allPieces);
+    CHECK(dustVoxels < allVoxels);
+}
+
+TEST_CASE("a strike can break finer than its material: Strike::shardSize") {
+    auto pieces = [](float shardSize) {
+        Fixture f;
+        Entity wall = f.wall();
+        f.frames(2);
+        runtime::Strike strike;
+        strike.at = vec3(0, 3, 0);
+        strike.energy = Fixture::energyFor(1.2f);
+        strike.shardSize = shardSize;
+        runtime::fracture(f.app.world, wall, strike);
+        f.frames(1);
+        REQUIRE(f.fractures.size() == 1);
+        return f.fractures[0].pieces.size();
+    };
+    CHECK(pieces(0.25f) > pieces(0.0f) * 3 / 2);   // stone's is 0.5 m
+}
+
+TEST_CASE("the least impact break: a piece that fits in it is not broken by a hit, whatever the energy") {
+    Fixture f;
+    // Two voxels across (0.5 m): stone's shard size, so a cube of the least break by default.
+    ComponentHandle h = utils::addComponent(f.scene, projv::ComponentKind::Chunk, "pebble", INVALID_COMPONENT_HANDLE, 16, 0.25f);
+    utils::setComponentTransform(f.scene, h, vec3(0, 50, 0), quat(1, 0, 0, 0), 1.0f);
+    utils::queueVoxelAdd(f.scene, h, fill({0, 0, 0}, {1, 1, 1}, GREY));
+    utils::updateScene(f.scene);
+    REQUIRE(utils::setMaterialPhysics(f.scene, h, slotOf(f.scene, h, GREY), "stone"));
+    Entity pebble = runtime::spawnComponent(f.app.world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+    projv::RigidBody rigid;
+    rigid.gravityFactor = 0.0f;
+    f.app.world.emplace<projv::RigidBody>(pebble, rigid);
+    f.frames(2);
+    runtime::Strike hit;
+    hit.at = vec3(0.25f, 50.25f, 0.25f);
+    hit.energy = 1e9f;
+    hit.cause = projv::BreakCause::Impact;
+    runtime::fracture(f.app.world, pebble, hit);
+    f.frames(1);
+    CHECK(f.fractures.empty());
+    // The same blow, not an impact: it breaks.
+    hit.cause = projv::BreakCause::Strike;
+    runtime::fracture(f.app.world, pebble, hit);
+    f.frames(1);
+    CHECK(f.fractures.size() == 1);
 }

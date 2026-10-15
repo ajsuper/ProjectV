@@ -24,6 +24,17 @@
     { "name": "tower brick",   "density": 1800, "friction": 0.8,  "restitution": 0.0,
       "strength": 50000, "fracture": "seams",    "shardSize": 0.75 },
     { "name": "plaster",       "density": 600,  "friction": 0.9,  "restitution": 0.0,
-      "strength": 700,  "fracture": "crumble",  "shardSize": 0.5 }
+      "strength": 700,  "fracture": "crumble",  "shardSize": 0.5 },
+    { "name": "concrete",      "density": 2400, "friction": 0.8,  "restitution": 0.0,
+      "strength": 80000, "fracture": "shatter", "shardSize": 0.45 },
+    { "name": "rebar",         "density": 7850, "friction": 0.5,  "restitution": 0.1 },
+    { "name": "wall brick",    "density": 1900, "friction": 0.8,  "restitution": 0.0,
+      "strength": 45000, "fracture": "seams",   "shardSize": 0.5 },
+    { "name": "mortar",        "density": 1700, "friction": 0.8,  "restitution": 0.0,
+      "strength": 12000, "fracture": "crumble", "shardSize": 0.25 },
+    { "name": "pine",          "density": 550,  "friction": 0.6,  "restitution": 0.1,
+      "strength": 25000, "fracture": "splinter", "shardSize": 0.6, "grain": [1, 0, 0] },
+    { "name": "glass",         "density": 2500, "friction": 0.4,  "restitution": 0.05,
+      "strength": 2500,  "fracture": "shatter", "shardSize": 0.2 }
   ]
 }

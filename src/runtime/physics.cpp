@@ -35,7 +35,8 @@ namespace projv::runtime {
             std::unique_ptr<PhysicsWorld> world;
             utils::CollisionParams        collision;
             bool                          destroyLeavers = true;
-            uint32_t                      maxDebris = 3000;
+            uint32_t                      maxPieces = 3000;
+            uint32_t                      dustVoxels = 0;
             PhysicsConfig::FractureLimits fractureLimits;
             uint64_t                      seenDroppedSteps = 0;
             uint64_t                      lastSlowWarningTick = 0;
@@ -68,6 +69,14 @@ namespace projv::runtime {
                 Strike     s;
             };
             std::vector<Edit>             edits;
+            // A strike applied but not yet cut: which voxels go together, waiting for the island pass
+            // (splitIslands) to cut them and make them bodies, with the body's other islands.
+            struct Break {
+                Strike s;
+                std::vector<std::vector<FractureVoxel>> shards;   // in the struck component's voxels
+                float edge = 0.0f, strength = 0.0f, metres = 0.0f;
+            };
+            std::map<Entity, Break>       breaking;
             // The physics material library: names in definition order (index = position + 1).
             struct Library {
                 std::vector<std::string>        names;
@@ -602,25 +611,12 @@ namespace projv::runtime {
             return false;
         }
 
-        // A strike half applied: its shards' components are made and the edits that fill them and cut
-        // them from the body are queued. What is left (finishBreak) waits for those edits: a step's
-        // strikes share one updateScene.
-        struct PendingBreak {
-            PhysicsRuntime::Edit strike;
-            struct Made { ComponentHandle component; core::vec3 centre; size_t voxels; };
-            std::vector<Made> made;
-            RigidBody shardRigid;
-            OnUnlink onUnlink = OnUnlink::Destroy;
-            bool networked = false, struckMoves = false;
-            BodyState state;
-            float originalMass = 0.0f, edge = 0.0f, strength = 0.0f, metres = 0.0f, reach = 0.0f;
-            uint64_t total = 0, broken = 0;
-        };
-
-        // A strike, applied: see runtime::fracture. Its first half: false when nothing breaks.
-        bool breakBody(World& world, PhysicsRuntime& physics, Scene& scene, const PhysicsRuntime::Edit& strike,
-                       PendingBreak& out) {
-            const Entity entity = strike.entity;
+        // A strike, applied: see runtime::fracture. It cuts nothing itself. It works out which voxels
+        // go together -- the struck material's pattern, held to the engine's rules -- and leaves them
+        // for the island pass (splitIslands), which cuts them away with whatever else comes loose.
+        // False when nothing breaks.
+        bool breakBody(World& world, PhysicsRuntime& physics, Scene& scene, Entity entity, const Strike& strike,
+                       PhysicsRuntime::Break& out) {
             if (!world.valid(entity)) return false;
             const PhysicsBody* body = world.try_get<PhysicsBody>(entity);
             const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
@@ -642,7 +638,7 @@ namespace projv::runtime {
             const float scale = glm::length(core::vec3(toWorld[0]));
             const float metres = source.voxel * scale;   // one voxel, in the world
             if (!(metres > 0.0f)) return false;
-            const core::vec3 at = core::vec3(glm::inverse(toWorld) * core::vec4(strike.s.at, 1.0f)) / source.voxel;
+            const core::vec3 at = core::vec3(glm::inverse(toWorld) * core::vec4(strike.at, 1.0f)) / source.voxel;
 
             // Materials: each palette slot's, the body's own where a slot names none.
             const ComponentHandle owner = paletteOwner(scene, scene.chunks[source.parts.front().chunk]);
@@ -673,9 +669,10 @@ namespace projv::runtime {
                 return false;
             }
             const PhysicsMaterial material = sim.material(struckMaterial);
+            const float shardMetres = strike.shardSize > 0.0f ? strike.shardSize : material.shardSize;
             float reach = 0.0f;
-            if (strike.s.reach > 0.0f) reach = strike.s.reach / metres;
-            else if (strike.s.energy > 0.0f) reach = std::cbrt(3.0f * strike.s.energy / (4.0f * 3.14159265f * material.strength)) / metres;
+            if (strike.reach > 0.0f) reach = strike.reach / metres;
+            else if (strike.energy > 0.0f) reach = std::cbrt(3.0f * strike.energy / (4.0f * 3.14159265f * material.strength)) / metres;
             else return false;
             if (reach > limits.maxReachVoxels) {
                 core::trace("physics: fracture of entity {}: reach {} voxels capped at {}", static_cast<uint32_t>(entity), reach,
@@ -683,7 +680,23 @@ namespace projv::runtime {
                 reach = limits.maxReachVoxels;
             }
             if (reach < 0.5f) return false;   // not enough to break a voxel
-            if (strike.s.minimumBreak > 0.0f && reach < strike.s.minimumBreak * material.shardSize / metres) return false;   // a knock
+            if (strike.minimumBreak > 0.0f && reach < strike.minimumBreak * shardMetres / metres) return false;   // a knock
+            if (strike.cause == BreakCause::Impact) {
+                // The least an impact breaks; and a body that fits in a cube of it is too small for a
+                // hit to break at all -- what keeps pieces that break on impact from cascading.
+                const float least = limits.minImpactBreak * shardMetres / metres;
+                if (reach < least) return false;
+                core::ivec3 lo(std::numeric_limits<int>::max()), hi(std::numeric_limits<int>::min());
+                for (const VoxelSource::Part& part : source.parts) {
+                    const Chunk& chunk = scene.chunks[part.chunk];
+                    core::ivec3 l, u;
+                    if (chunk.geometryPoolIndex >= 0 && utils::blobContentBounds(scene.geometryPool[size_t(chunk.geometryPoolIndex)], l, u)) {
+                        lo = glm::min(lo, part.offset + l);
+                        hi = glm::max(hi, part.offset + u);
+                    }
+                }
+                if (lo.x <= hi.x && glm::all(glm::lessThanEqual(core::vec3(hi - lo + core::ivec3(1)), core::vec3(least)))) return false;
+            }
             const float outer = 1.5f * reach;
 
             std::vector<FractureVoxel> voxels = voxelsNear(scene, source, at, outer, maxCells, decoded);
@@ -702,11 +715,12 @@ namespace projv::runtime {
             Fnv seed;
             seed.add(net ? net->value : 0u);
             seed.add(sim.tick());
-            seed.add(strike.s.at);
-            seed.add(strike.s.energy);
-            if (strike.s.reach > 0.0f) seed.add(strike.s.reach);
+            seed.add(strike.at);
+            seed.add(strike.energy);
+            if (strike.reach > 0.0f) seed.add(strike.reach);
+            if (strike.shardSize > 0.0f) seed.add(strike.shardSize);
             FractureRandom random(seed.value);
-            const FractureInput input{voxels, at, reach, outer, material.shardSize / metres, material.grain, material};
+            const FractureInput input{voxels, at, reach, outer, shardMetres / metres, material.grain, material};
             std::vector<int32_t> shardOf = (*pattern)(input, random);
             if (shardOf.size() != voxels.size()) {
                 core::warn("physics: fracture pattern '{}' answered for {} voxels of {}; nothing breaks", material.fracture,
@@ -716,138 +730,101 @@ namespace projv::runtime {
             std::vector<std::vector<size_t>> shards = fractureShards(input, shardOf, 64, limits.maxShards);
             if (shards.empty()) return false;
 
-            // The shards: each a new top-level chunk holding its voxels, with the body's palette,
-            // placed where they were.
-            const std::vector<Material> palette = scene.components[owner].materialPalette;
-            const core::quat rotation = utils::getComponentWorldRotation(scene, h);
-            const std::string name = scene.components[h].name;
-            const BodyState state = sim.bodyState(body->id);
-            std::vector<PendingBreak::Made> made;
-            std::vector<PendingVoxelOp> cut;
+            out.s = strike;
+            out.shards.clear();
+            out.shards.reserve(shards.size());
             for (const std::vector<size_t>& shard : shards) {
-                core::vec3 centre;
-                ComponentHandle piece = pieceOf(scene, palette, voxels, shard, toWorld, rotation, scale, source.voxel,
-                                                name + " shard", true, centre);
-                if (piece == INVALID_COMPONENT_HANDLE) continue;
-                for (size_t i : shard) cut.push_back({false, voxels[i].position, 0});
-                made.push_back({piece, centre, shard.size()});
+                std::vector<FractureVoxel> members;
+                members.reserve(shard.size());
+                for (size_t i : shard) members.push_back(voxels[i]);
+                out.shards.push_back(std::move(members));
             }
-            utils::queueVoxelRemove(scene, h, cut);
-
-            // What the shards are: a dynamic body's own RigidBody, or one from the static collider.
-            PendingBreak& p = out;
-            p.strike = strike;
-            p.made = std::move(made);
-            if (rigid) {
-                p.shardRigid = *rigid;
-                p.shardRigid.motion = MotionType::Dynamic;
-            } else {
-                p.shardRigid.friction = fixed->friction;
-                p.shardRigid.restitution = fixed->restitution;
-                p.shardRigid.material = fixed->material;
-                p.shardRigid.breaksOnImpact = fixed->breaksOnImpact;
-            }
-            if (strike.s.shardsBreakOnImpact) p.shardRigid.breaksOnImpact = *strike.s.shardsBreakOnImpact;
-            p.struckMoves = body->motion == MotionType::Dynamic;
-            if (rigid && rigid->mass > 0.0f) {
-                for (const VoxelSource::Part& part : source.parts) {
-                    utils::VoxelOccupancy o;
-                    const Chunk& chunk = scene.chunks[part.chunk];
-                    if (chunk.geometryPoolIndex >= 0 &&
-                        utils::decodeOccupancy(scene.geometryPool[size_t(chunk.geometryPoolIndex)], part.resolution, maxCells, o) ==
-                            utils::DecodeResult::Ok)
-                        p.total += o.solid;   // before the cut, which is only queued
-                }
-            }
-            for (const PendingBreak::Made& m : p.made) p.broken += m.voxels;
-            p.onUnlink = link->onUnlink;
-            p.networked = net != nullptr;
-            p.state = state;
-            p.originalMass = rigid ? rigid->mass : 0.0f;
-            p.edge = outer * metres;
-            p.strength = material.strength;
-            p.metres = metres;
-            p.reach = reach;
+            out.edge = outer * metres;
+            out.strength = material.strength;
+            out.metres = metres;
+            core::trace("physics: entity {} struck: {} shards, reach {:.1f} voxels", static_cast<uint32_t>(entity), shards.size(),
+                        reach);
             return true;
-        }
-
-        // A strike's second half, once its edits are applied: the shards made bodies, the event sent,
-        // the striker given back what the break did not use.
-        void finishBreak(World& world, PhysicsRuntime& physics, const PendingBreak& p) {
-            const Strike& strike = p.strike.s;
-            const Entity entity = p.strike.entity;
-            const uint64_t total = std::max<uint64_t>(p.total, 1);
-            BodyFractured event{entity, {}, strike.at, strike.striker, strike.energy};
-            for (const PendingBreak::Made& m : p.made) {
-                Entity e = world.create();
-                if (!linkComponent(world, e, m.component, LinkMode::Root, p.onUnlink)) {
-                    world.destroy(e);
-                    continue;
-                }
-                RigidBody r = p.shardRigid;
-                if (p.originalMass > 0.0f) r.mass = p.originalMass * float(m.voxels) / float(total);
-                float falloff = std::max(0.0f, 1.0f - glm::distance(m.centre, strike.at) / std::max(p.edge, 1e-6f));
-                // From the motion the strike says (an impact's: the body's before the hit, which the
-                // contact has since stopped), or the motion it has.
-                const core::vec3 base = strike.bodyVelocity.value_or(p.state.linearVelocity);
-                core::vec3 velocity = base + glm::cross(p.state.angularVelocity, m.centre - p.state.centerOfMass) + strike.push * falloff;
-                physics.carried[e] = {velocity, p.state.angularVelocity};
-                if (p.networked) assignNetId(world, e);
-                world.emplace<Debris>(e, Debris{physics.world->tick()});
-                world.emplace<RigidBody>(e, r);
-                event.shards.push_back(e);
-            }
-            if (p.originalMass > 0.0f && world.valid(entity) && world.all_of<RigidBody>(entity)) {
-                float kept = p.originalMass * float(total - std::min(p.broken, total)) / float(total);
-                world.patch<RigidBody>(entity, [kept](RigidBody& rb) { rb.mass = std::max(kept, 1e-3f); });
-            }
-            // What struck something that does not move carries on with the energy the break did not
-            // use: breaking a voxel costs the struck material's strength times its volume.
-            if (strike.returnUnusedEnergy && strike.energy > 0.0f && !p.struckMoves && world.valid(strike.striker)) {
-                if (const PhysicsBody* striker = world.try_get<PhysicsBody>(strike.striker);
-                    striker && striker->motion == MotionType::Dynamic) {
-                    const float used = p.strength * float(p.broken) * p.metres * p.metres * p.metres;
-                    const float kept = std::sqrt(std::clamp(1.0f - used / strike.energy, 0.0f, 1.0f));
-                    BodyState now = physics.world->bodyState(striker->id);
-                    physics.world->setVelocity(striker->id, strike.strikerVelocity * kept, now.angularVelocity);
-                }
-            }
-            core::trace("physics: entity {} broke into {} shards ({} voxels, reach {:.1f})", static_cast<uint32_t>(entity),
-                        event.shards.size(), p.broken, p.reach);
-            send(world, std::move(event));
         }
 
         // ---- Islands ----------------------------------------------------------------------------
 
         constexpr uint64_t MAX_ISLAND_CELLS = 1ull << 24;   // the box islands are worked out in, at most
-        constexpr size_t   MAX_PIECES = 512;
+        constexpr size_t   MAX_PIECES = 512;                // islands of the rest that come away in one pass
 
-        // After a voxel body's voxels changed, for whatever reason: its face-connected islands, across
-        // all its chunks (a grid's cells too), each stay or become a body of their own (BodySplit).
-        // - A moving body (`moving`, its state before the change) keeps its largest island, the first
-        //   in voxel order of equals; every other becomes a copy of its RigidBody with its share of the
-        //   mass, moving as that part of it was (its velocity at the island's centre).
-        // - A static collider that splits (StaticCollider::splits) keeps the islands held up: voxels of
+        // Every voxel under a source, counted.
+        uint64_t voxelCount(const Scene& scene, const VoxelSource& source, uint64_t maxCells) {
+            uint64_t total = 0;
+            for (const VoxelSource::Part& part : source.parts) {
+                utils::VoxelOccupancy o;
+                const Chunk& chunk = scene.chunks[part.chunk];
+                if (chunk.geometryPoolIndex >= 0 &&
+                    utils::decodeOccupancy(scene.geometryPool[size_t(chunk.geometryPoolIndex)], part.resolution, maxCells, o) ==
+                        utils::DecodeResult::Ok)
+                    total += o.solid;
+            }
+            return total;
+        }
+
+        // The one pass, run after a voxel body's voxels changed for whatever reason -- an edit, a strike
+        // (`strike`, its shards not yet cut), support lost: its face-connected islands, across all its
+        // chunks (a grid's cells too), each stay or come away as a body of their own (BodyBroken). A
+        // strike's shards are islands of their own (voxels of two shards do not join), and always come
+        // away. Of the rest:
+        // - a moving body keeps its largest island, the first in voxel order of equals;
+        // - a static collider that splits (StaticCollider::splits) keeps the islands held up: voxels of
         //   an anchor material (PhysicsMaterial::anchor), and with StaticCollider::anchorBase the
-        //   component's own y = 0 and below. The rest fall, of the collider's friction, restitution,
-        //   material and breaksOnImpact. A collider with nothing that could hold it drops nothing (and
-        //   says so, once).
-        // Applied (updateScene) before returning.
-        void splitIslands(World& world, PhysicsRuntime& physics, Scene& scene, Entity entity, const BodyState* moving) {
+        //   component's own y = 0 and below. A collider with nothing that could hold it drops nothing
+        //   (and says so, once);
+        // - anything else (a static collider that does not split, a kinematic body) keeps it all.
+        // Every piece takes after the body (see BodyBroken), is a Piece, and moves as that part of the
+        // body was (`state`, from before the change) -- a shard plus the strike's push, fading to
+        // nothing at the edge of the break. An island of PhysicsConfig::dustVoxels or fewer is dust:
+        // cut, and nothing made of it. Applied (updateScene) before returning.
+        void splitIslands(World& world, PhysicsRuntime& physics, Scene& scene, Entity entity, const BodyState& state,
+                          const PhysicsRuntime::Break* strike) {
             const RigidBody* rigid = world.try_get<RigidBody>(entity);
             const StaticCollider* fixed = rigid ? nullptr : world.try_get<StaticCollider>(entity);
             const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
-            if (!link) return;
-            if (moving ? !rigid || rigid->shape != RigidBody::Shape::Voxels || link->mode != LinkMode::Root
-                       : !fixed || !fixed->splits)
-                return;
+            const PhysicsBody* body = world.try_get<PhysicsBody>(entity);
+            if (!link || !body || (!rigid && !fixed)) return;
+            if (rigid && rigid->shape != RigidBody::Shape::Voxels) return;
+            enum class Rest { Kept, Largest, Anchored } rest = Rest::Kept;
+            if (rigid && body->motion == MotionType::Dynamic && link->mode == LinkMode::Root) rest = Rest::Largest;
+            else if (fixed && fixed->splits) rest = Rest::Anchored;
+            if (rest == Rest::Kept && !strike) return;
             const ComponentHandle h = voxelComponentOf(world, entity);
             if (h == INVALID_COMPONENT_HANDLE) return;
             const VoxelSource source = voxelSourceOf(scene, h);
             if (source.parts.empty() || !(source.voxel > 0.0f)) return;
+            const ComponentHandle owner = paletteOwner(scene, scene.chunks[source.parts.front().chunk]);
 
-            // Every voxel, and a box over them to look neighbours up in.
-            std::map<size_t, Decoded> decoded;
+            // Everything about the body that is needed after new entities are made (which may move it).
+            const bool moves = body->motion == MotionType::Dynamic;
+            const float parentMass = rigid ? rigid->mass : 0.0f;
+            RigidBody pieceRigid;
+            if (rigid) {
+                pieceRigid = *rigid;
+                pieceRigid.motion = MotionType::Dynamic;
+            } else {
+                pieceRigid.friction = fixed->friction;
+                pieceRigid.restitution = fixed->restitution;
+                pieceRigid.material = fixed->material;
+                pieceRigid.breaksOnImpact = fixed->breaksOnImpact;
+            }
+            const bool anchorBase = fixed && fixed->anchorBase;
+            const OnUnlink onUnlink = link->onUnlink;
+            const bool networked = world.all_of<NetId>(entity);
+
+            // The voxels, each with its group: 0 the rest, k + 1 the strike's shard k. When the rest
+            // stays whatever happens, or the body is too big to look over whole, only the shards are
+            // read -- each already one face-connected island.
+            std::vector<FractureVoxel> voxels;
+            std::vector<uint32_t> group;
+            struct Island { std::vector<size_t> members; uint32_t group; };
+            std::vector<Island> islands;
+            uint64_t total = 0;   // voxels in the body before the cut
+            bool whole = rest != Rest::Kept;
             core::ivec3 low(std::numeric_limits<int>::max()), high(std::numeric_limits<int>::min());
             for (const VoxelSource::Part& part : source.parts) {
                 low = glm::min(low, part.offset);
@@ -855,129 +832,164 @@ namespace projv::runtime {
             }
             const core::ivec3 dims = high - low + core::ivec3(1);
             const uint64_t cells = uint64_t(dims.x) * uint64_t(dims.y) * uint64_t(dims.z);
-            if (cells > MAX_ISLAND_CELLS) {
-                core::warn("physics: entity {} is too big ({} cells) to find its islands; nothing comes away",
-                           static_cast<uint32_t>(entity), cells);
-                return;
-            }
-            const core::vec3 middle = 0.5f * core::vec3(low + high + core::ivec3(1));
-            const float radius = glm::length(core::vec3(dims)) * 0.5f + 1.0f;
-            std::vector<FractureVoxel> voxels = voxelsNear(scene, source, middle, radius, physics.collision.maxDecodedCells, decoded);
-            if (voxels.empty()) return;
-            auto at = [&](core::ivec3 p) {
-                p -= low;
-                return (size_t(p.z) * size_t(dims.y) + size_t(p.y)) * size_t(dims.x) + size_t(p.x);
-            };
-            std::vector<int32_t> index(size_t(cells), -1);
-            for (size_t i = 0; i < voxels.size(); i++) index[at(voxels[i].position)] = int32_t(i);
-            static const core::ivec3 faces[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-            auto neighbours = [&](size_t i, auto visit) {
-                for (core::ivec3 f : faces) {
-                    core::ivec3 n = voxels[i].position + f;
-                    if (glm::any(glm::lessThan(n, low)) || glm::any(glm::greaterThan(n, high))) continue;
-                    if (int32_t j = index[at(n)]; j >= 0) visit(size_t(j));
-                }
-            };
-            std::vector<uint8_t> held(voxels.size(), 0);
-            std::vector<size_t> stack;
-            auto flood = [&] {
-                std::vector<size_t> reached;
-                while (!stack.empty()) {
-                    size_t k = stack.back();
-                    stack.pop_back();
-                    reached.push_back(k);
-                    neighbours(k, [&](size_t j) { if (!held[j]) { held[j] = 1; stack.push_back(j); } });
-                }
-                return reached;
-            };
-
-            // A static collider: what holds it up, anchor materials and its base when asked.
-            const ComponentHandle owner = paletteOwner(scene, scene.chunks[source.parts.front().chunk]);
-            if (fixed) {
-                utils::SlotMaterials slotMaterials;
-                slotMaterialsOf(physics, scene, owner, slotMaterials);
-                const uint16_t own = ownMaterial(world, physics, entity);
-                std::array<uint8_t, 256> anchorSlot{};
-                bool anchorRule = fixed->anchorBase;   // whether anything could hold it up: a rule, not a voxel
-                const size_t entries = std::min<size_t>(scene.components[owner].materialPalette.size(), 256);
-                for (size_t slot = 0; slot < 256; slot++) {
-                    uint16_t m = slotMaterials[slot] ? slotMaterials[slot] : own;
-                    anchorSlot[slot] = m != 0 && physics.world->material(m).anchor;
-                    if (slot < entries && anchorSlot[slot]) anchorRule = true;
-                }
-                for (size_t i = 0; i < voxels.size(); i++)
-                    if ((fixed->anchorBase && voxels[i].position.y <= 0) || anchorSlot[voxels[i].slot]) {
-                        held[i] = 1;
-                        stack.push_back(i);
-                    }
-                if (stack.empty() && !anchorRule) {
-                    // Nothing could ever hold it up, so everything would fall at its first edit: a collider
-                    // set up wrong, not a collapse. (One with a rule whose anchors are all cut away falls.)
-                    if (physics.warnedUnanchored.insert(entity).second)
-                        core::warn("physics: entity {} splits but has nothing to stand on (no anchor material, and anchorBase "
-                                   "off); nothing falls", static_cast<uint32_t>(entity));
+            if (whole && cells > MAX_ISLAND_CELLS) {
+                if (!strike) {
+                    core::warn("physics: entity {} is too big ({} cells) to find its islands; nothing comes away",
+                               static_cast<uint32_t>(entity), cells);
                     return;
                 }
-                flood();
+                core::trace("physics: entity {} is too big ({} cells) to find its islands; only the strike's shards come away",
+                            static_cast<uint32_t>(entity), cells);
+                whole = false;
             }
+            if (!whole) {
+                for (size_t k = 0; k < strike->shards.size(); k++) {
+                    Island island{{}, uint32_t(k + 1)};
+                    for (const FractureVoxel& v : strike->shards[k]) {
+                        island.members.push_back(voxels.size());
+                        voxels.push_back(v);
+                        group.push_back(uint32_t(k + 1));
+                    }
+                    islands.push_back(std::move(island));
+                }
+                if (parentMass > 0.0f) total = voxelCount(scene, source, physics.collision.maxDecodedCells);
+            } else {
+                std::map<size_t, Decoded> decoded;
+                const core::vec3 middle = 0.5f * core::vec3(low + high + core::ivec3(1));
+                const float radius = glm::length(core::vec3(dims)) * 0.5f + 1.0f;
+                voxels = voxelsNear(scene, source, middle, radius, physics.collision.maxDecodedCells, decoded);
+                if (voxels.empty()) return;
+                total = voxels.size();
+                group.assign(voxels.size(), 0);
+                auto at = [&](core::ivec3 p) {
+                    p -= low;
+                    return (size_t(p.z) * size_t(dims.y) + size_t(p.y)) * size_t(dims.x) + size_t(p.x);
+                };
+                auto inside = [&](core::ivec3 p) { return !glm::any(glm::lessThan(p, low)) && !glm::any(glm::greaterThan(p, high)); };
+                std::vector<int32_t> index(size_t(cells), -1);
+                for (size_t i = 0; i < voxels.size(); i++) index[at(voxels[i].position)] = int32_t(i);
+                if (strike)
+                    for (size_t k = 0; k < strike->shards.size(); k++)
+                        for (const FractureVoxel& v : strike->shards[k])
+                            if (inside(v.position))
+                                if (int32_t j = index[at(v.position)]; j >= 0) group[size_t(j)] = uint32_t(k + 1);
+                static const core::ivec3 faces[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+                std::vector<uint8_t> held(voxels.size(), 0);
+                std::vector<size_t> stack;
+                auto flood = [&] {
+                    std::vector<size_t> reached;
+                    while (!stack.empty()) {
+                        size_t k = stack.back();
+                        stack.pop_back();
+                        reached.push_back(k);
+                        for (core::ivec3 f : faces) {
+                            core::ivec3 n = voxels[k].position + f;
+                            if (!inside(n)) continue;
+                            int32_t j = index[at(n)];
+                            if (j < 0 || held[size_t(j)] || group[size_t(j)] != group[k]) continue;
+                            held[size_t(j)] = 1;
+                            stack.push_back(size_t(j));
+                        }
+                    }
+                    return reached;
+                };
 
-            // The islands not held, in voxel order. A moving body keeps the largest.
-            std::vector<std::vector<size_t>> islands;
-            for (size_t i = 0; i < voxels.size(); i++) {
-                if (held[i]) continue;
-                held[i] = 1;
-                stack.push_back(i);
-                std::vector<size_t> island = flood();
-                std::sort(island.begin(), island.end());
-                islands.push_back(std::move(island));
-            }
-            if (moving && !islands.empty()) {
-                size_t largest = 0;
-                for (size_t i = 1; i < islands.size(); i++)
-                    if (islands[i].size() > islands[largest].size()) largest = i;
-                islands.erase(islands.begin() + std::ptrdiff_t(largest));
+                // A static collider: what holds it up, anchor materials and its base when asked.
+                if (rest == Rest::Anchored) {
+                    utils::SlotMaterials slotMaterials;
+                    slotMaterialsOf(physics, scene, owner, slotMaterials);
+                    const uint16_t own = ownMaterial(world, physics, entity);
+                    std::array<uint8_t, 256> anchorSlot{};
+                    bool anchorRule = anchorBase;   // whether anything could hold it up: a rule, not a voxel
+                    const size_t entries = std::min<size_t>(scene.components[owner].materialPalette.size(), 256);
+                    for (size_t slot = 0; slot < 256; slot++) {
+                        uint16_t m = slotMaterials[slot] ? slotMaterials[slot] : own;
+                        anchorSlot[slot] = m != 0 && physics.world->material(m).anchor;
+                        if (slot < entries && anchorSlot[slot]) anchorRule = true;
+                    }
+                    for (size_t i = 0; i < voxels.size(); i++)
+                        if (group[i] == 0 && ((anchorBase && voxels[i].position.y <= 0) || anchorSlot[voxels[i].slot])) {
+                            held[i] = 1;
+                            stack.push_back(i);
+                        }
+                    if (stack.empty() && !anchorRule) {
+                        // Nothing could ever hold it up, so everything would fall at its first edit: a
+                        // collider set up wrong, not a collapse. (One with a rule whose anchors are all cut
+                        // away falls.) A strike's shards still come away.
+                        if (physics.warnedUnanchored.insert(entity).second)
+                            core::warn("physics: entity {} splits but has nothing to stand on (no anchor material, and "
+                                       "anchorBase off); nothing falls", static_cast<uint32_t>(entity));
+                        for (size_t i = 0; i < voxels.size(); i++) held[i] = group[i] == 0;
+                    }
+                    flood();
+                }
+
+                // The islands not held, in voxel order. A moving body keeps the largest of the rest.
+                for (size_t i = 0; i < voxels.size(); i++) {
+                    if (held[i]) continue;
+                    held[i] = 1;
+                    stack.push_back(i);
+                    std::vector<size_t> members = flood();
+                    std::sort(members.begin(), members.end());
+                    islands.push_back({std::move(members), group[i]});
+                }
+                if (rest == Rest::Largest) {
+                    std::optional<size_t> largest;
+                    for (size_t i = 0; i < islands.size(); i++)
+                        if (islands[i].group == 0 && (!largest || islands[i].members.size() > islands[*largest].members.size()))
+                            largest = i;
+                    if (largest) islands.erase(islands.begin() + std::ptrdiff_t(*largest));
+                }
+                size_t rests = 0;
+                std::vector<Island> capped;
+                for (Island& island : islands)
+                    if (island.group != 0 || rests++ < MAX_PIECES) capped.push_back(std::move(island));
+                if (rests > MAX_PIECES)
+                    core::trace("physics: entity {} came apart in {} islands; the first {} come away", static_cast<uint32_t>(entity),
+                                rests, MAX_PIECES);
+                islands.swap(capped);
             }
             if (islands.empty()) return;
-            if (islands.size() > MAX_PIECES) {
-                core::trace("physics: entity {} came apart in {} islands; the first {} come away", static_cast<uint32_t>(entity),
-                            islands.size(), MAX_PIECES);
-                islands.resize(MAX_PIECES);
-            }
+            // A strike's shards first, then the rest's islands, each in voxel order.
+            std::stable_partition(islands.begin(), islands.end(), [](const Island& i) { return i.group != 0; });
 
+            // Cut every island out; each but the dust becomes a component of its own.
             const core::mat4 toWorld = utils::getComponentWorldMatrix(scene, h);
             const float scale = glm::length(core::vec3(toWorld[0]));
             const core::quat rotation = utils::getComponentWorldRotation(scene, h);
             const std::vector<Material> palette = scene.components[owner].materialPalette;
             const std::string name = scene.components[h].name;
-            struct Made { ComponentHandle component; core::vec3 centre; size_t voxels; };
+            struct Made { ComponentHandle component; core::vec3 centre; size_t voxels; bool shard; };
             std::vector<Made> made;
             std::vector<PendingVoxelOp> cut;
-            for (const std::vector<size_t>& island : islands) {
+            uint64_t gone = 0, broken = 0, dust = 0;
+            for (const Island& island : islands) {
+                for (size_t i : island.members) cut.push_back({false, voxels[i].position, 0});
+                gone += island.members.size();
+                if (island.group != 0) broken += island.members.size();
+                if (island.members.size() <= physics.dustVoxels) {
+                    dust++;
+                    continue;
+                }
                 core::vec3 centre;
-                ComponentHandle piece = pieceOf(scene, palette, voxels, island, toWorld, rotation, scale, source.voxel,
-                                                name + " piece", false, centre);
+                ComponentHandle piece = pieceOf(scene, palette, voxels, island.members, toWorld, rotation, scale, source.voxel,
+                                                name + (island.group ? " shard" : " piece"), island.group != 0, centre);
                 if (piece == INVALID_COMPONENT_HANDLE) continue;
-                for (size_t i : island) cut.push_back({false, voxels[i].position, 0});
-                made.push_back({piece, centre, island.size()});
+                made.push_back({piece, centre, island.members.size(), island.group != 0});
             }
             utils::queueVoxelRemove(scene, h, cut);
             utils::updateScene(scene);
 
-            // What each piece is: a copy of a moving body's RigidBody, or one from the collider.
-            RigidBody pieceRigid;
-            if (rigid) {
-                pieceRigid = *rigid;
-            } else {
-                pieceRigid.friction = fixed->friction;
-                pieceRigid.restitution = fixed->restitution;
-                pieceRigid.material = fixed->material;
-                pieceRigid.breaksOnImpact = fixed->breaksOnImpact;
+            BodyBroken event;
+            event.entity = entity;
+            event.cause = strike ? strike->s.cause : fixed ? BreakCause::Support : BreakCause::Edit;
+            if (strike) {
+                event.at = strike->s.at;
+                event.striker = strike->s.striker;
+                event.energy = strike->s.energy;
             }
-            const float total = float(voxels.size());
-            const OnUnlink onUnlink = link->onUnlink;
-            const bool networked = world.all_of<NetId>(entity);
-            BodySplit event{entity, {}};
-            size_t gone = 0;
+            const uint64_t tick = physics.world->tick();
+            const float share = total > 0 ? 1.0f / float(total) : 0.0f;
             for (const Made& m : made) {
                 Entity e = world.create();
                 if (!linkComponent(world, e, m.component, LinkMode::Root, onUnlink)) {
@@ -985,53 +997,73 @@ namespace projv::runtime {
                     continue;
                 }
                 RigidBody r = pieceRigid;
-                if (rigid && rigid->mass > 0.0f) r.mass = rigid->mass * float(m.voxels) / total;
-                if (moving)
-                    physics.carried[e] = {moving->linearVelocity + glm::cross(moving->angularVelocity, m.centre - moving->centerOfMass),
-                                          moving->angularVelocity};
+                if (parentMass > 0.0f) r.mass = std::max(parentMass * float(m.voxels) * share, 1e-3f);
+                // Its motion: the body's at its centre -- a shard's from the motion the strike says (an
+                // impact's: the body's before the hit, which the contact has since stopped), plus the push.
+                core::vec3 velocity = state.linearVelocity;
+                if (m.shard && strike->s.bodyVelocity) velocity = *strike->s.bodyVelocity;
+                velocity += glm::cross(state.angularVelocity, m.centre - state.centerOfMass);
+                if (m.shard) {
+                    float falloff = std::max(0.0f, 1.0f - glm::distance(m.centre, strike->s.at) / std::max(strike->edge, 1e-6f));
+                    velocity += strike->s.push * falloff;
+                }
+                physics.carried[e] = {velocity, state.angularVelocity};
                 if (networked) assignNetId(world, e);
+                world.emplace<Piece>(e, Piece{tick});
                 world.emplace<RigidBody>(e, r);
                 event.pieces.push_back(e);
-                gone += m.voxels;
+                if (m.shard) event.shards++;
             }
-            if (rigid && rigid->mass > 0.0f) {
-                float kept = rigid->mass * (total - float(gone)) / total;
-                world.patch<RigidBody>(entity, [kept](RigidBody& r) { r.mass = std::max(kept, 1e-3f); });
+            if (parentMass > 0.0f) {
+                float kept = parentMass * float(total - std::min(gone, total)) * share;
+                world.patch<RigidBody>(entity, [kept](RigidBody& rb) { rb.mass = std::max(kept, 1e-3f); });
             }
-            core::trace("physics: {} pieces came away from entity {}", event.pieces.size(), static_cast<uint32_t>(entity));
-            send(world, std::move(event));
+            // What struck something that does not move carries on with the energy the break did not
+            // use: breaking a voxel costs the struck material's strength times its volume.
+            if (strike && strike->s.returnUnusedEnergy && strike->s.energy > 0.0f && !moves && world.valid(strike->s.striker)) {
+                if (const PhysicsBody* striker = world.try_get<PhysicsBody>(strike->s.striker);
+                    striker && striker->motion == MotionType::Dynamic) {
+                    const float used = strike->strength * float(broken) * strike->metres * strike->metres * strike->metres;
+                    const float kept = std::sqrt(std::clamp(1.0f - used / strike->s.energy, 0.0f, 1.0f));
+                    BodyState now = physics.world->bodyState(striker->id);
+                    physics.world->setVelocity(striker->id, strike->s.strikerVelocity * kept, now.angularVelocity);
+                }
+            }
+            core::trace("physics: {} pieces came away from entity {} ({} voxels, {} of them dust islands)", event.pieces.size(),
+                        static_cast<uint32_t>(entity), gone, dust);
+            // Delivered now: a handler shapes the pieces before their bodies are made.
+            if (Events* events = world.ctx().find<Events>()) events->trigger(event);
         }
 
-        // The debris budget: past PhysicsConfig::maxDebris shards, the oldest go, their bodies at once.
-        void clearDebris(World& world, PhysicsRuntime& physics) {
-            if (physics.maxDebris == 0) return;
-            auto debris = world.view<Debris>();
-            const size_t count = debris.size();
-            if (count <= physics.maxDebris) return;
+        // The piece budget: past PhysicsConfig::maxPieces pieces, the oldest go, their bodies at once.
+        void clearPieces(World& world, PhysicsRuntime& physics) {
+            if (physics.maxPieces == 0) return;
+            auto pieces = world.view<Piece>();
+            const size_t count = pieces.size();
+            if (count <= physics.maxPieces) return;
             std::vector<std::tuple<uint64_t, uint32_t, Entity>> order;
             order.reserve(count);
-            for (auto [entity, d] : debris.each()) {
+            for (auto [entity, p] : pieces.each()) {
                 const NetId* id = world.try_get<NetId>(entity);
-                order.push_back({d.madeAt, id ? id->value : 0u, entity});
+                order.push_back({p.madeAt, id ? id->value : 0u, entity});
             }
             std::sort(order.begin(), order.end());
-            const size_t excess = count - physics.maxDebris;
-            DebrisCleared event;
+            const size_t excess = count - physics.maxPieces;
+            PiecesCleared event;
             event.entities.reserve(excess);
             for (size_t i = 0; i < excess; i++) event.entities.push_back(std::get<2>(order[i]));
             // Delivered now, not at the next pump: a handler has to see them before they go, to keep
-            // one (by taking its Debris off) or put something in its place.
+            // one (by taking its Piece off) or put something in its place.
             if (Events* events = world.ctx().find<Events>()) events->trigger(event);
             size_t cleared = 0;
             for (Entity e : event.entities)
-                if (world.valid(e) && world.all_of<Debris>(e)) {
+                if (world.valid(e) && world.all_of<Piece>(e)) {
                     world.destroy(e);
                     cleared++;
                 }
             for (BodyId id : physics.doomed) physics.world->destroyBody(id);
             physics.doomed.clear();
-            core::trace("physics: cleared {} shards of debris, the oldest (budget {}); {} kept", cleared, physics.maxDebris,
-                        excess - cleared);
+            core::trace("physics: cleared {} pieces, the oldest (budget {}); {} kept", cleared, physics.maxPieces, excess - cleared);
         }
 
         void step(Application& app) {
@@ -1048,31 +1080,35 @@ namespace projv::runtime {
                 if (!world.any_of<RigidBody, StaticCollider>(entity)) orphans.push_back(entity);
             for (Entity e : orphans) dropBody(world, physics, e);
 
-            // 2a. Voxel edits issued as commands, in issue order.
+            // 2a. Voxel edits issued as commands, in issue order. A strike only works out which voxels
+            //     go together; the island pass below cuts them. A strike sees what was edited before it
+            //     (a plain edit is applied first), and a second strike on a body struck already this step
+            //     sees the first one's cut (that body's pass runs first).
             Scene* scene = world.ctx().find<Scene>();
+            auto broke = [&](Entity entity, const PhysicsRuntime::Break* strike) {
+                const PhysicsBody& body = world.get<PhysicsBody>(entity);
+                BodyState state = sim.bodyState(body.id);
+                if (body.motion == MotionType::Dynamic && !physics.carried.count(entity))
+                    physics.carried[entity] = {state.linearVelocity, state.angularVelocity};
+                splitIslands(world, physics, *scene, entity, state, strike);
+                physics.rebuild.push_back(entity);
+                physics.reshaped.insert(entity);
+            };
             if (scene && !physics.edits.empty()) {
                 std::vector<PhysicsRuntime::Edit> edits;
                 edits.swap(physics.edits);
-                // Strikes are applied in halves around one updateScene for the lot. A strike sees what
-                // was edited before it: a plain edit, or a strike on the same body, flushes first.
-                std::vector<PendingBreak> breaks;
-                std::set<Entity> struck;
                 bool queued = false;
-                auto flush = [&] {
-                    utils::updateScene(*scene);
-                    for (const PendingBreak& b : breaks) finishBreak(world, physics, b);
-                    breaks.clear();
-                    struck.clear();
-                    queued = false;
-                };
                 for (const auto& edit : edits) {
                     if (edit.strike) {
-                        if (queued || struck.count(edit.entity)) flush();
-                        PendingBreak b;
-                        if (breakBody(world, physics, *scene, edit, b)) {
-                            breaks.push_back(std::move(b));
-                            struck.insert(edit.entity);
+                        if (queued) utils::updateScene(*scene);
+                        queued = false;
+                        if (auto earlier = physics.breaking.find(edit.entity); earlier != physics.breaking.end()) {
+                            PhysicsRuntime::Break first = std::move(earlier->second);
+                            physics.breaking.erase(earlier);
+                            if (world.valid(edit.entity) && world.all_of<PhysicsBody>(edit.entity)) broke(edit.entity, &first);
                         }
+                        PhysicsRuntime::Break b;
+                        if (breakBody(world, physics, *scene, edit.entity, edit.s, b)) physics.breaking[edit.entity] = std::move(b);
                         continue;
                     }
                     queued = true;
@@ -1083,37 +1119,33 @@ namespace projv::runtime {
                     if (!adds.empty()) utils::queueVoxelAdd(*scene, target, adds);
                     if (!removes.empty()) utils::queueVoxelRemove(*scene, target, removes);
                 }
-                flush();
-                clearDebris(world, physics);
+                if (queued) utils::updateScene(*scene);
             }
 
-            // 2b. Bodies whose voxels changed: split what an edit cut loose, then rebuild. Only looked
-            //     for when some blob's content changed since the last step, anywhere.
-            if (scene && latestBlobContentStamp() != physics.seenStamp) {
+            // 2b. Bodies whose voxels changed or that were struck: the island pass (what came away
+            //     becomes bodies), then a rebuild. Only looked for when some blob's content changed
+            //     since the last step, anywhere, or something was struck. In NetId-then-entity order.
+            if (scene && (latestBlobContentStamp() != physics.seenStamp || !physics.breaking.empty())) {
                 std::vector<std::pair<Entity, uint32_t>> changed;
                 for (auto [entity, body] : world.view<PhysicsBody>().each()) {
                     const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
                     if (!link || !utils::isComponentAlive(*scene, link->ref())) continue;
-                    if (sourcesOf(*scene, link->handle) == body.sources) continue;
+                    if (!physics.breaking.count(entity) && sourcesOf(*scene, link->handle) == body.sources) continue;
                     const NetId* id = world.try_get<NetId>(entity);
                     changed.push_back({entity, id ? id->value : 0});
                 }
                 std::sort(changed.begin(), changed.end(), [](const auto& a, const auto& b) {
                     return std::make_tuple(a.second == 0, a.second, a.first) < std::make_tuple(b.second == 0, b.second, b.first);
                 });
+                std::map<Entity, PhysicsRuntime::Break> breaking;
+                breaking.swap(physics.breaking);
                 for (auto [entity, net] : changed) {
-                    const PhysicsBody& body = world.get<PhysicsBody>(entity);
-                    if (body.motion == MotionType::Dynamic) {
-                        BodyState state = sim.bodyState(body.id);
-                        physics.carried[entity] = {state.linearVelocity, state.angularVelocity};
-                        splitIslands(world, physics, *scene, entity, &state);
-                    } else {
-                        splitIslands(world, physics, *scene, entity, nullptr);
-                    }
-                    physics.rebuild.push_back(entity);
-                    physics.reshaped.insert(entity);
+                    if (!world.valid(entity) || !world.all_of<PhysicsBody>(entity)) continue;   // a handler destroyed it
+                    auto strike = breaking.find(entity);
+                    broke(entity, strike != breaking.end() ? &strike->second : nullptr);
                 }
                 physics.seenStamp = latestBlobContentStamp();
+                clearPieces(world, physics);
             }
 
             // 2c. Bodies whose materials changed: a palette entry named another, the library redefined
@@ -1576,7 +1608,8 @@ namespace projv::runtime {
         physics.world = std::make_unique<PhysicsWorld>(config.settings);
         physics.collision = config.collision;
         physics.destroyLeavers = config.destroyBodiesThatLeaveTheWorld;
-        physics.maxDebris = config.maxDebris;
+        physics.maxPieces = config.maxPieces;
+        physics.dustVoxels = config.dustVoxels;
         {
             // Guards, clamped rather than refused: a bad value must not leave fracture unguarded.
             PhysicsConfig::FractureLimits want = config.fracture, &got = physics.fractureLimits;
@@ -1584,10 +1617,12 @@ namespace projv::runtime {
             got.searchVoxels = std::clamp(finiteOr(want.searchVoxels, 3.0f), 0.5f, 16.0f);
             got.maxReachVoxels = std::clamp(finiteOr(want.maxReachVoxels, 64.0f), 1.0f, 256.0f);
             got.maxShards = std::clamp<uint32_t>(want.maxShards, 1, 4096);
+            got.minImpactBreak = std::clamp(finiteOr(want.minImpactBreak, 1.0f), 0.5f, 16.0f);
             if (got.searchVoxels != want.searchVoxels || got.maxReachVoxels != want.maxReachVoxels ||
-                got.maxShards != want.maxShards)
-                core::warn("physics: fracture limits out of range, clamped to search {} voxels, reach {} voxels, {} shards",
-                           got.searchVoxels, got.maxReachVoxels, got.maxShards);
+                got.maxShards != want.maxShards || got.minImpactBreak != want.minImpactBreak)
+                core::warn("physics: fracture limits out of range, clamped to search {} voxels, reach {} voxels, {} shards, "
+                           "least impact break {} shard sizes",
+                           got.searchVoxels, got.maxReachVoxels, got.maxShards, got.minImpactBreak);
         }
         physics.seenStamp = latestBlobContentStamp();
 
@@ -1645,12 +1680,12 @@ namespace projv::runtime {
         auto finiteVec = [](core::vec3 v) { return std::isfinite(glm::dot(v, v)); };
         if (!finiteVec(strike.at) || !finiteVec(strike.push) || !finiteVec(strike.strikerVelocity) ||
             (strike.bodyVelocity && !finiteVec(*strike.bodyVelocity)) || !std::isfinite(strike.energy) ||
-            !std::isfinite(strike.reach) || !std::isfinite(strike.minimumBreak)) {
+            !std::isfinite(strike.reach) || !std::isfinite(strike.minimumBreak) || !std::isfinite(strike.shardSize)) {
             core::warn("physics: refused a fracture with a value that is not finite");
             return;
         }
-        if (strike.energy < 0.0f || strike.reach < 0.0f) {
-            core::warn("physics: refused a fracture with a negative energy or reach");
+        if (strike.energy < 0.0f || strike.reach < 0.0f || strike.shardSize < 0.0f) {
+            core::warn("physics: refused a fracture with a negative energy, reach or shard size");
             return;
         }
         PhysicsRuntime::Edit edit{entity, {}};

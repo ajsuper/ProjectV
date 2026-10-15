@@ -33,13 +33,12 @@ namespace projv::runtime {
                     strike.at = hit.point;
                     strike.energy = hit.energy;
                     strike.striker = striker;
-                    strike.minimumBreak = config.minimumBreak;
+                    strike.cause = BreakCause::Impact;
                     // The body's motion from before the hit: the contact has since stopped it.
                     strike.bodyVelocity = velocities[k];
                     if (config.shardsTakeStrikerMotion) strike.push = velocities[1 - k] - velocities[k];
                     strike.returnUnusedEnergy = config.returnUnusedEnergy;
                     strike.strikerVelocity = velocities[1 - k];
-                    strike.shardsBreakOnImpact = config.shardsBreakOnImpact;
                     fracture(world, struck, strike);
                 }
             }

@@ -77,7 +77,8 @@ commands that land at the next step.
 **Voxels are destructible.** A bomb's handler asks for the voxels in a sphere around it
 (`runtime::voxelsInSphere`) and removes them with `runtime::editVoxels`, which lands at the next
 physics step. The engine notices the changed voxels, rebuilds each shape, and splits a body cut in
-pieces into bodies of their own (`BodySplit`; the sandbox copies its `Body` onto them). A body carved
+pieces into bodies of their own (`BodyBroken`, delivered before their bodies are made; the sandbox
+copies its `Body` onto them). A body carved
 down to nothing is `BodyEmptied`, and retired. The floor's bottom layer of voxels is never carved, so
 "nothing falls through the floor" stays a check the self-test can make.
 
