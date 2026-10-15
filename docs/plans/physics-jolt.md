@@ -3,7 +3,8 @@
 Status: **approved**, 2026-10-09. **M0-M6 done** (2026-10-13); joints (2026-10-13), physics materials
 (2026-10-14), fracture, the debris budget and support (2026-10-14/15) built, and fracture policy moved out
 of the engine (2026-10-15, "Mechanism in the engine, policy in systems"). M7 (contours) waits on the
-contour work. **Next: "One rule set for voxel bodies" below** (decided 2026-10-15), then the rest of
+contour work. **Next: "One rule set for voxel bodies" below** (decided 2026-10-15; item 1, the one
+island pass, done for edits and support -- item 2, a strike as an edit, is next), then the rest of
 "Roadmap", revised 2026-10-15 from a review of which games the system serves and where it gets in
 their way.
 
@@ -584,6 +585,14 @@ They are all one thing: voxels that were part of one body and now are a body of 
    - a static collider that splits: islands with an anchor stay; the rest fall.
    This replaces support (dropUnsupported), the moving split (splitCutPieces, single chunks only)
    and fracture's own piece-making. It needs grids and multi-chunk bodies to split (was R10).
+   *Done 2026-10-15, for edits and support:* `splitIslands` (physics.cpp) is the one pass, run on
+   every voxel body whose voxels changed; splitCutPieces and dropUnsupported are gone. It works on
+   the voxels of all a body's chunks (a chunk, a grid's cells, a one-chunk prefab), so a moving grid
+   splits across its cells (test: "a moving grid body splits across its cells"). A piece is a new
+   top-level chunk cornered at its lowest voxel (growing into a grid when it outgrows 16), with the
+   palette but not the attachments; at most 512 pieces a pass, as support had. Still not split: an
+   asset of several chunks (no shared voxel lattice), and a kinematic body. Fracture still makes its
+   own shards: item 2.
 2. **A strike is an edit.** A fracture only decides which voxels go together -- the pattern's job,
    still pluggable -- and cuts them apart; the groups become bodies through the same pass, the way
    islands do. No shard-only rules.
@@ -671,7 +680,7 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
 - **R9. Support across colliders.** A collider standing on another's anchor material is held up
   by it. Data, as anchors are.
 - **R10. Dynamic grids and multi-chunk bodies split and break.** *Promoted: the first step of "One
-  rule set".* A mechanism gap: today shards of
+  rule set"; grids split (2026-10-15), assets of several chunks do not.* A mechanism gap: today shards of
   dynamic bodies are capped at one chunk.
 - **R11. Joints.** A true lock, a gear joint (two hinges at a ratio), a mass-ratio warning; ropes as
   a system over Distance joints rather than an engine primitive. ("What the demos showed" 6.)

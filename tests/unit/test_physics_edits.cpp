@@ -205,12 +205,48 @@ TEST_CASE("destruction: a crate cut in two becomes two bodies, sharing its mass 
     CHECK(smaller == doctest::Approx(32.0f * 32.0f / 112.0f).epsilon(0.01));  // 2 of 7
     CHECK(f.pose(crate).linearVelocity.x == doctest::Approx(2.0f).epsilon(0.02));
     CHECK(f.pose(piece).linearVelocity.x == doctest::Approx(2.0f).epsilon(0.02));
-    // The piece is where its voxels were, and moves on with them.
+    // The piece is where its voxels were, and moves on with them: its corner is the parent's x = 6.
     float gap = f.pose(piece).position.x - f.pose(crate).position.x;
-    CHECK(std::abs(gap) < 0.01f);   // both components have the same origin; the voxels differ
+    CHECK(gap == doctest::Approx(6 * 0.25f).epsilon(0.01));
     float start = f.pose(piece).position.x;
     f.frames(30);
     CHECK(f.pose(piece).position.x - start == doctest::Approx(1.0f).epsilon(0.03));   // 2 m/s for half a second
+}
+
+TEST_CASE("destruction: a moving grid body splits across its cells") {
+    Fixture f;
+    runtime::setGravity(f.app.world, vec3(0));
+    // 40 x 4 x 4 voxels: more than a 16-voxel chunk holds, so a grid of three cells along x.
+    Entity bar = f.body(fill({0, 0, 0}, {39, 3, 3}), vec3(0, 10, 0), 64.0f);
+    REQUIRE(f.scene.components[f.componentOf(bar)].kind == projv::ComponentKind::Grid);
+    f.frames(2);
+    runtime::setVelocity(f.app.world, bar, vec3(0, 1, 0));
+    f.frames(2);
+    // Two slots: at x = 10 (inside the first cell) and x = 30 (inside the second, past its
+    // boundary at 16): three islands of 10, 19 and 9 slabs. The middle stays; each end goes.
+    std::vector<projv::PendingVoxelOp> cut;
+    for (int x : {10, 30})
+        for (auto op : fill({x, 0, 0}, {x, 3, 3})) cut.push_back({false, op.position, 0});
+    runtime::editVoxels(f.app.world, bar, cut);
+    f.frames(2);
+    REQUIRE(f.splits.size() == 1);
+    REQUIRE(f.splits[0].pieces.size() == 2);
+    const runtime::PhysicsWorld& sim = runtime::physicsWorld(f.app.world);
+    CHECK(sim.bodyMass(f.app.world.get<projv::PhysicsBody>(bar).id) == doctest::Approx(64.0f * 19.0f / 38.0f).epsilon(0.01));
+    float pieces = 0.0f;
+    for (Entity piece : f.splits[0].pieces) {
+        REQUIRE(runtime::hasBody(f.app.world, piece));
+        pieces += sim.bodyMass(f.app.world.get<projv::PhysicsBody>(piece).id);
+        CHECK(f.pose(piece).linearVelocity.y == doctest::Approx(1.0f).epsilon(0.02));
+    }
+    CHECK(pieces == doctest::Approx(64.0f * 19.0f / 38.0f).epsilon(0.01));
+    // Cut again, the kept middle in two: it splits again, as a grid.
+    std::vector<projv::PendingVoxelOp> again;
+    for (auto op : fill({20, 0, 0}, {20, 3, 3})) again.push_back({false, op.position, 0});
+    runtime::editVoxels(f.app.world, bar, again);
+    f.frames(2);
+    REQUIRE(f.splits.size() == 2);
+    CHECK(f.splits[1].pieces.size() == 1);
 }
 
 TEST_CASE("destruction works on prefab-shaped bodies: an asset node with one chunk inside") {

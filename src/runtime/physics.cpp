@@ -19,7 +19,6 @@
 #include "utils/scene_query.h"
 #include "utils/picking.h"
 #include "utils/editing.h"
-#include "utils/voxel_islands.h"
 
 namespace projv::runtime {
     namespace {
@@ -447,9 +446,9 @@ namespace projv::runtime {
             }
         }
 
-        // The voxel chunk a body's islands are counted in: the linked component itself when it is a
-        // chunk, or the one chunk inside an asset (a prefab). Anything else -- a grid, an asset of
-        // several chunks -- is not split.
+        // The voxel chunk a body is edited and broken through: the linked component itself when it is
+        // a chunk, or the one chunk inside an asset (a prefab). An asset of several chunks has none
+        // (voxelComponentOf takes grids as they are).
         ComponentHandle splittableChunk(const Scene& scene, ComponentHandle h) {
             const ComponentRecord& record = scene.components[h];
             if (record.kind == ComponentKind::Chunk) return h;
@@ -468,58 +467,6 @@ namespace projv::runtime {
                 stack.insert(stack.end(), child.children.begin(), child.children.end());
             }
             return found;
-        }
-
-        // A dynamic voxel body cut in pieces: each piece cut loose becomes a body of its own, moving
-        // as that part of the parent was (its velocity at the piece's centre).
-        void splitCutPieces(World& world, PhysicsRuntime& physics, Scene& scene, Entity parent, const BodyState& state) {
-            const RigidBody* rigid = world.try_get<RigidBody>(parent);
-            const VoxelComponent* link = world.try_get<VoxelComponent>(parent);
-            if (!rigid || rigid->shape != RigidBody::Shape::Voxels || !link || link->mode != LinkMode::Root) return;
-            ComponentHandle chunk = splittableChunk(scene, link->handle);
-            if (chunk == INVALID_COMPONENT_HANDLE) return;
-            utils::IslandSplit split = utils::splitVoxelIslands(scene, chunk, true);
-            if (split.pieces.empty()) return;
-
-            uint64_t total = 0;
-            for (uint64_t n : split.voxels) total += n;
-            RigidBody pieceRigid = *rigid;
-            const OnUnlink onUnlink = link->onUnlink;
-            const bool networked = world.all_of<NetId>(parent);
-            BodySplit event{parent, {}};
-            for (size_t i = 0; i < split.pieces.size(); i++) {
-                ComponentHandle piece = split.pieces[i];
-                Entity e = world.create();
-                if (!linkComponent(world, e, piece, LinkMode::Root, onUnlink)) {
-                    world.destroy(e);
-                    continue;
-                }
-                RigidBody r = pieceRigid;
-                if (r.mass > 0.0f) r.mass = pieceRigid.mass * float(split.voxels[i + 1]) / float(total);
-                // Its motion: the parent's, at the piece's centre.
-                core::vec3 centre = state.centerOfMass;
-                const ComponentRecord& record = scene.components[piece];
-                if (record.kind == ComponentKind::Chunk) {
-                    const Chunk& c = scene.chunks[record.chunkHandle];
-                    core::ivec3 low, high;
-                    if (c.geometryPoolIndex >= 0 && utils::blobContentBounds(scene.geometryPool[size_t(c.geometryPoolIndex)], low, high)) {
-                        float voxel = c.header.scale / float(std::max(c.header.resolution, 1u));
-                        core::vec3 local = 0.5f * core::vec3(low + high + core::ivec3(1)) * voxel;
-                        centre = c.header.position + c.header.rotation * local;
-                    }
-                }
-                physics.carried[e] = {state.linearVelocity + glm::cross(state.angularVelocity, centre - state.centerOfMass),
-                                      state.angularVelocity};
-                if (networked) assignNetId(world, e);
-                world.emplace<RigidBody>(e, r);
-                event.pieces.push_back(e);
-            }
-            if (rigid->mass > 0.0f) {
-                float kept = rigid->mass * float(split.voxels[0]) / float(total);
-                world.patch<RigidBody>(parent, [kept](RigidBody& r) { r.mass = kept; });
-            }
-            core::trace("physics: entity {} split into {} pieces", static_cast<uint32_t>(parent), event.pieces.size() + 1);
-            send(world, std::move(event));
         }
 
         // ---- Fracture -------------------------------------------------------------------------
@@ -870,20 +817,30 @@ namespace projv::runtime {
             send(world, std::move(event));
         }
 
-        // ---- Support ----------------------------------------------------------------------------
+        // ---- Islands ----------------------------------------------------------------------------
 
-        constexpr uint64_t MAX_SUPPORT_CELLS = 1ull << 24;   // the box support is worked out in, at most
-        constexpr size_t   MAX_FALLING_PIECES = 512;
+        constexpr uint64_t MAX_ISLAND_CELLS = 1ull << 24;   // the box islands are worked out in, at most
+        constexpr size_t   MAX_PIECES = 512;
 
-        // A static collider that splits (StaticCollider::splits), after its voxels changed: every
-        // face-connected island of them with nothing to hold it up falls, as a dynamic body of its
-        // own (BodySplit). What holds up: voxels of an anchor material (PhysicsMaterial::anchor), and
-        // with StaticCollider::anchorBase the component's own y = 0 and below. A collider with
-        // neither drops nothing (and says so, once). Applied (updateScene) before returning.
-        void dropUnsupported(World& world, PhysicsRuntime& physics, Scene& scene, Entity entity) {
-            const StaticCollider* fixed = world.try_get<StaticCollider>(entity);
+        // After a voxel body's voxels changed, for whatever reason: its face-connected islands, across
+        // all its chunks (a grid's cells too), each stay or become a body of their own (BodySplit).
+        // - A moving body (`moving`, its state before the change) keeps its largest island, the first
+        //   in voxel order of equals; every other becomes a copy of its RigidBody with its share of the
+        //   mass, moving as that part of it was (its velocity at the island's centre).
+        // - A static collider that splits (StaticCollider::splits) keeps the islands held up: voxels of
+        //   an anchor material (PhysicsMaterial::anchor), and with StaticCollider::anchorBase the
+        //   component's own y = 0 and below. The rest fall, of the collider's friction, restitution,
+        //   material and breaksOnImpact. A collider with nothing that could hold it drops nothing (and
+        //   says so, once).
+        // Applied (updateScene) before returning.
+        void splitIslands(World& world, PhysicsRuntime& physics, Scene& scene, Entity entity, const BodyState* moving) {
+            const RigidBody* rigid = world.try_get<RigidBody>(entity);
+            const StaticCollider* fixed = rigid ? nullptr : world.try_get<StaticCollider>(entity);
             const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
-            if (!fixed || !fixed->splits || !link) return;
+            if (!link) return;
+            if (moving ? !rigid || rigid->shape != RigidBody::Shape::Voxels || link->mode != LinkMode::Root
+                       : !fixed || !fixed->splits)
+                return;
             const ComponentHandle h = voxelComponentOf(world, entity);
             if (h == INVALID_COMPONENT_HANDLE) return;
             const VoxelSource source = voxelSourceOf(scene, h);
@@ -898,8 +855,8 @@ namespace projv::runtime {
             }
             const core::ivec3 dims = high - low + core::ivec3(1);
             const uint64_t cells = uint64_t(dims.x) * uint64_t(dims.y) * uint64_t(dims.z);
-            if (cells > MAX_SUPPORT_CELLS) {
-                core::warn("physics: entity {} is too big ({} cells) to work out what holds it up; nothing falls",
+            if (cells > MAX_ISLAND_CELLS) {
+                core::warn("physics: entity {} is too big ({} cells) to find its islands; nothing comes away",
                            static_cast<uint32_t>(entity), cells);
                 return;
             }
@@ -921,64 +878,79 @@ namespace projv::runtime {
                     if (int32_t j = index[at(n)]; j >= 0) visit(size_t(j));
                 }
             };
-
-            // What holds it up: anchor materials, and its base when asked.
-            const ComponentHandle owner = paletteOwner(scene, scene.chunks[source.parts.front().chunk]);
-            utils::SlotMaterials slotMaterials;
-            slotMaterialsOf(physics, scene, owner, slotMaterials);
-            const uint16_t own = ownMaterial(world, physics, entity);
-            std::array<uint8_t, 256> anchorSlot{};
-            bool anchorRule = fixed->anchorBase;   // whether anything could hold it up: a rule, not a voxel
-            const size_t entries = std::min<size_t>(scene.components[owner].materialPalette.size(), 256);
-            for (size_t slot = 0; slot < 256; slot++) {
-                uint16_t m = slotMaterials[slot] ? slotMaterials[slot] : own;
-                anchorSlot[slot] = m != 0 && physics.world->material(m).anchor;
-                if (slot < entries && anchorSlot[slot]) anchorRule = true;
-            }
             std::vector<uint8_t> held(voxels.size(), 0);
             std::vector<size_t> stack;
-            for (size_t i = 0; i < voxels.size(); i++)
-                if ((fixed->anchorBase && voxels[i].position.y <= 0) || anchorSlot[voxels[i].slot]) {
-                    held[i] = 1;
-                    stack.push_back(i);
-                }
-            if (stack.empty() && !anchorRule) {
-                // Nothing could ever hold it up, so everything would fall at its first edit: a collider
-                // set up wrong, not a collapse. (One with a rule whose anchors are all cut away falls.)
-                if (physics.warnedUnanchored.insert(entity).second)
-                    core::warn("physics: entity {} splits but has nothing to stand on (no anchor material, and anchorBase "
-                               "off); nothing falls", static_cast<uint32_t>(entity));
-                return;
-            }
-            while (!stack.empty()) {
-                size_t i = stack.back();
-                stack.pop_back();
-                neighbours(i, [&](size_t j) { if (!held[j]) { held[j] = 1; stack.push_back(j); } });
-            }
-            // The rest, island by island, in voxel order.
-            std::vector<std::vector<size_t>> islands;
-            for (size_t i = 0; i < voxels.size() && islands.size() < MAX_FALLING_PIECES; i++) {
-                if (held[i]) continue;
-                std::vector<size_t> island;
-                held[i] = 1;
-                stack.push_back(i);
+            auto flood = [&] {
+                std::vector<size_t> reached;
                 while (!stack.empty()) {
                     size_t k = stack.back();
                     stack.pop_back();
-                    island.push_back(k);
+                    reached.push_back(k);
                     neighbours(k, [&](size_t j) { if (!held[j]) { held[j] = 1; stack.push_back(j); } });
                 }
+                return reached;
+            };
+
+            // A static collider: what holds it up, anchor materials and its base when asked.
+            const ComponentHandle owner = paletteOwner(scene, scene.chunks[source.parts.front().chunk]);
+            if (fixed) {
+                utils::SlotMaterials slotMaterials;
+                slotMaterialsOf(physics, scene, owner, slotMaterials);
+                const uint16_t own = ownMaterial(world, physics, entity);
+                std::array<uint8_t, 256> anchorSlot{};
+                bool anchorRule = fixed->anchorBase;   // whether anything could hold it up: a rule, not a voxel
+                const size_t entries = std::min<size_t>(scene.components[owner].materialPalette.size(), 256);
+                for (size_t slot = 0; slot < 256; slot++) {
+                    uint16_t m = slotMaterials[slot] ? slotMaterials[slot] : own;
+                    anchorSlot[slot] = m != 0 && physics.world->material(m).anchor;
+                    if (slot < entries && anchorSlot[slot]) anchorRule = true;
+                }
+                for (size_t i = 0; i < voxels.size(); i++)
+                    if ((fixed->anchorBase && voxels[i].position.y <= 0) || anchorSlot[voxels[i].slot]) {
+                        held[i] = 1;
+                        stack.push_back(i);
+                    }
+                if (stack.empty() && !anchorRule) {
+                    // Nothing could ever hold it up, so everything would fall at its first edit: a collider
+                    // set up wrong, not a collapse. (One with a rule whose anchors are all cut away falls.)
+                    if (physics.warnedUnanchored.insert(entity).second)
+                        core::warn("physics: entity {} splits but has nothing to stand on (no anchor material, and anchorBase "
+                                   "off); nothing falls", static_cast<uint32_t>(entity));
+                    return;
+                }
+                flood();
+            }
+
+            // The islands not held, in voxel order. A moving body keeps the largest.
+            std::vector<std::vector<size_t>> islands;
+            for (size_t i = 0; i < voxels.size(); i++) {
+                if (held[i]) continue;
+                held[i] = 1;
+                stack.push_back(i);
+                std::vector<size_t> island = flood();
                 std::sort(island.begin(), island.end());
                 islands.push_back(std::move(island));
             }
+            if (moving && !islands.empty()) {
+                size_t largest = 0;
+                for (size_t i = 1; i < islands.size(); i++)
+                    if (islands[i].size() > islands[largest].size()) largest = i;
+                islands.erase(islands.begin() + std::ptrdiff_t(largest));
+            }
             if (islands.empty()) return;
+            if (islands.size() > MAX_PIECES) {
+                core::trace("physics: entity {} came apart in {} islands; the first {} come away", static_cast<uint32_t>(entity),
+                            islands.size(), MAX_PIECES);
+                islands.resize(MAX_PIECES);
+            }
 
             const core::mat4 toWorld = utils::getComponentWorldMatrix(scene, h);
             const float scale = glm::length(core::vec3(toWorld[0]));
             const core::quat rotation = utils::getComponentWorldRotation(scene, h);
             const std::vector<Material> palette = scene.components[owner].materialPalette;
             const std::string name = scene.components[h].name;
-            std::vector<ComponentHandle> pieces;
+            struct Made { ComponentHandle component; core::vec3 centre; size_t voxels; };
+            std::vector<Made> made;
             std::vector<PendingVoxelOp> cut;
             for (const std::vector<size_t>& island : islands) {
                 core::vec3 centre;
@@ -986,32 +958,47 @@ namespace projv::runtime {
                                                 name + " piece", false, centre);
                 if (piece == INVALID_COMPONENT_HANDLE) continue;
                 for (size_t i : island) cut.push_back({false, voxels[i].position, 0});
-                pieces.push_back(piece);
+                made.push_back({piece, centre, island.size()});
             }
             utils::queueVoxelRemove(scene, h, cut);
             utils::updateScene(scene);
 
-            // Each falls as what the wall was made of.
-            RigidBody fall;
-            fall.friction = fixed->friction;
-            fall.restitution = fixed->restitution;
-            fall.material = fixed->material;
-            fall.breaksOnImpact = fixed->breaksOnImpact;
+            // What each piece is: a copy of a moving body's RigidBody, or one from the collider.
+            RigidBody pieceRigid;
+            if (rigid) {
+                pieceRigid = *rigid;
+            } else {
+                pieceRigid.friction = fixed->friction;
+                pieceRigid.restitution = fixed->restitution;
+                pieceRigid.material = fixed->material;
+                pieceRigid.breaksOnImpact = fixed->breaksOnImpact;
+            }
+            const float total = float(voxels.size());
             const OnUnlink onUnlink = link->onUnlink;
             const bool networked = world.all_of<NetId>(entity);
             BodySplit event{entity, {}};
-            for (ComponentHandle piece : pieces) {
+            size_t gone = 0;
+            for (const Made& m : made) {
                 Entity e = world.create();
-                if (!linkComponent(world, e, piece, LinkMode::Root, onUnlink)) {
+                if (!linkComponent(world, e, m.component, LinkMode::Root, onUnlink)) {
                     world.destroy(e);
                     continue;
                 }
+                RigidBody r = pieceRigid;
+                if (rigid && rigid->mass > 0.0f) r.mass = rigid->mass * float(m.voxels) / total;
+                if (moving)
+                    physics.carried[e] = {moving->linearVelocity + glm::cross(moving->angularVelocity, m.centre - moving->centerOfMass),
+                                          moving->angularVelocity};
                 if (networked) assignNetId(world, e);
-                world.emplace<RigidBody>(e, fall);
+                world.emplace<RigidBody>(e, r);
                 event.pieces.push_back(e);
+                gone += m.voxels;
             }
-            core::trace("physics: {} pieces of entity {} lost their support and fall", event.pieces.size(),
-                        static_cast<uint32_t>(entity));
+            if (rigid && rigid->mass > 0.0f) {
+                float kept = rigid->mass * (total - float(gone)) / total;
+                world.patch<RigidBody>(entity, [kept](RigidBody& r) { r.mass = std::max(kept, 1e-3f); });
+            }
+            core::trace("physics: {} pieces came away from entity {}", event.pieces.size(), static_cast<uint32_t>(entity));
             send(world, std::move(event));
         }
 
@@ -1119,9 +1106,9 @@ namespace projv::runtime {
                     if (body.motion == MotionType::Dynamic) {
                         BodyState state = sim.bodyState(body.id);
                         physics.carried[entity] = {state.linearVelocity, state.angularVelocity};
-                        splitCutPieces(world, physics, *scene, entity, state);
+                        splitIslands(world, physics, *scene, entity, &state);
                     } else {
-                        dropUnsupported(world, physics, *scene, entity);
+                        splitIslands(world, physics, *scene, entity, nullptr);
                     }
                     physics.rebuild.push_back(entity);
                     physics.reshaped.insert(entity);
