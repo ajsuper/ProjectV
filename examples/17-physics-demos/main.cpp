@@ -7,9 +7,9 @@
 //                     Click throws a heavy ball. F launches a 4 m ball where you look: kinematic,
 //                     at a constant 30 m/s (ConstantVelocity), ploughing through whatever is there.
 //   2  Wall blast     a staggered wall of 120 voxel bricks, a tower, a house, columns and a long low wall,
-//                     all brick. Click sets off a big blast where the crosshair is:
-//                     the bricks near it are carved and split into fragments, and everything is
-//                     thrown outward.
+//                     all fired brick. Click sets off a big blast where the crosshair is: the
+//                     bricks near it shatter (runtime::fracture), everything is thrown outward, and
+//                     bricks thrown hard enough break again where they land.
 //   3  Ball barrage   balls of five sizes -- the same density, so very different masses -- fired
 //                     at a wall of crates, one after another.
 //   4  Sweeper        a 12 m beam spinning about its middle while its middle circles, sweeping
@@ -28,9 +28,12 @@
 //                     Down (held): the motor lets go and the weight unwinds it.
 //   9  Trebuchet      a counterweight trebuchet: a 36 t counterweight swings a 10.5 m arm, which
 //                     whips a 2 t boulder round on a sling and lets it go, at four 32 x 24 m walls
-//                     of stone 34 m off -- one on each side, each a seamless static grid. Where it strikes,
-//                     the stone shatters into shards that fly. Click: fire; again, a new boulder and
-//                     fire. Left/Right: turn it on its turntable. Up/Down: a higher or flatter
+//                     34 m off -- one on each side, each a seamless static grid, each built of
+//                     something else: ashlar that shatters, brick that parts at its mortar, planks
+//                     that splinter along the grain, plaster that crumbles. The boulder breaks them
+//                     itself: the engine breaks what is hit hard enough for its material's strength,
+//                     and the boulder carries on with what the break did not use. Click: fire; again,
+//                     a new boulder and fire. Left/Right: turn it on its turntable. Up/Down: a higher or flatter
 //                     throw (the angle the sling lets go at).
 //  10  Slide          physics materials (physics_materials.json, beside the binary): three 14 m
 //                     ramps of ice, polished wood and slate, the same crate on each, sliding down
@@ -203,16 +206,16 @@ struct Demos {
         float fireIn = -1.0f;              // seconds to the automatic fire after a rebuild
         Entity frame = projv::NullEntity, turntable = projv::NullEntity;
         float turnSpeed = 0.0f;            // what the turntable's motor was last told, rad/s
-        vec3 impactAt{0.0f}, impactDirection{1, 0, 0};
-        int kickIn = 0;                    // steps to the shards' kick after a strike
+        vec3 impactAt{0.0f};
+        int struckWall = -1;               // which of `walls` the boulder broke
         // The release pin: the sling lets go when the boulder flies this far above the horizontal
         // (rad). Up and Down bend it: higher arcs, flatter shots.
         float releaseAngle = 0.2f;
         Entity axle = projv::NullEntity;   // the arm's hinge; its servo is the latch
         Entity sling = projv::NullEntity;  // the boulder's fixed joint to the arm's tip
-        // A wall: one static grid of 128 x 96 x 4 voxels (32 m x 24 m x 1 m), and which of its
-        // voxels are still there. Local x along the wall, y up, z through it toward the middle.
-        struct Wall { Entity entity = projv::NullEntity; vec3 corner{0.0f}; quat rotation{1, 0, 0, 0}; std::vector<uint8_t> solid; };
+        // A wall: one static grid of 128 x 96 x 4 voxels (32 m x 24 m x 1 m). Local x along the
+        // wall, y up, z through it toward the middle.
+        struct Wall { Entity entity = projv::NullEntity; vec3 corner{0.0f}; quat rotation{1, 0, 0, 0}; };
         std::vector<Wall> walls;
         std::vector<Entity> slingLinks;    // drawn only: no bodies (in parts too)
         float releaseSpeed = 0.0f;
@@ -281,6 +284,9 @@ struct Demos {
     } grab;
     vec3 blastAt{0.0f};
     int blastKickIn = 0;                   // fixed steps until a detonation's kick (see detonate)
+    // The physics step's cost since the last blast: what the self-test reports.
+    double stepSum = 0.0, stepWorst = 0.0;
+    int stepCount = 0;
     int pieces = 0;                        // bodies cut off by blasts (BodySplit)
     int fellThrough = 0;                   // left the world from above the floor: must stay 0
     std::mt19937 random{7};
@@ -393,10 +399,19 @@ void launchOrb(World& world, Demos& demos, const Camera& camera) {
 
 // Bricks for demo 2's buildings: 1 m x 0.5 m x 0.5 m, along x, or along z turned a quarter about y.
 // Horizontal positions are spread 0.6% from `corner` so no two bricks start touching.
+// A brick's body: 30 kg of fired brick (physics_materials.json), which a blast shatters and which
+// breaks on impact when thrown hard enough -- at about 15 m/s into something that does not move,
+// not when a tower's top course falls the 8 m to the ground.
+projv::RigidBody brickBody() {
+    projv::RigidBody r = body(30.0f);
+    r.material = "fired brick";
+    return r;
+}
+
 void brick(World& world, Demos& demos, vec3 corner, vec3 centre, bool alongZ) {
     const quat turned(std::cos(0.7854f), 0.0f, std::sin(0.7854f), 0.0f);
     place(world, demos.brick, corner + vec3(centre.x * 1.006f, centre.y, centre.z * 1.006f),
-          alongZ ? turned : quat(1, 0, 0, 0), body(30.0f));
+          alongZ ? turned : quat(1, 0, 0, 0), brickBody());
 }
 
 // A rectangle of brick walls, `w` x `d` metres outside, half a metre thick, `courses` high. The
@@ -442,7 +457,7 @@ void brickColumn(World& world, Demos& demos, vec3 corner, int courses) {
 
 void buildWall(World& world, Demos& demos, Camera& camera) {
     // Running bond: 12 bricks a course, every other course shifted by half a brick. Each brick is
-    // 1 m x 0.5 m x 0.5 m, in 12.5 cm voxels, so a blast can carve it and split it.
+    // 1 m x 0.5 m x 0.5 m, in 12.5 cm voxels, so a blast can shatter it.
     const vec3 brick(1.0f, 0.5f, 0.5f);
     for (int course = 0; course < 10; course++) {
         float shift = (course % 2) ? 0.5f : 0.0f;
@@ -450,7 +465,7 @@ void buildWall(World& world, Demos& demos, Camera& camera) {
         for (int i = 0; i < count; i++) {
             float x = (float(i) - 5.5f + shift) * (brick.x + 0.005f);
             float y = 0.5f * brick.y + float(course) * (brick.y + 0.003f);
-            place(world, demos.brick, vec3(x, y, 0), quat(1, 0, 0, 0), body(30.0f));
+            place(world, demos.brick, vec3(x, y, 0), quat(1, 0, 0, 0), brickBody());
         }
     }
     demos.blastAt = vec3(0.3f, 2.2f, 0.9f);   // behind the wall, a little off-centre (the self-test's blast)
@@ -899,10 +914,41 @@ constexpr float TREB_ARM_MIDDLE = 0.5f * (TREB_LONG - TREB_SHORT);   // the arm'
 constexpr float WALL_DISTANCE = 34.0f, WALL_VOXEL = 0.25f;
 constexpr int WALL_W = 128, WALL_H = 96, WALL_T = 4;
 
-// Ashlar: blocks 1.5 m long and 0.75 m high, each course offset by half a block.
+// The four walls, each built of its own material (physics_materials.json), so each breaks its own
+// way. The patterns read only what the materials say -- except "seams", which reads the palette:
+// a brick is a run of one entry, so neighbouring bricks are different shades.
+//
+// Ashlar: blocks 1.5 m long and 0.75 m high, each course offset by half a block. It shatters, and
+// the joints do not matter: Voronoi cells run straight through blocks and mortar alike.
 uint32_t wallStone(int x, int y, int z) {
     bool mortar = y % 3 == 0 || (x + (y / 3) % 2 * 3) % 6 == 0;
     return mortar ? rgb(0.62f, 0.6f, 0.55f) : stone(x, y, z);
+}
+
+// Brick: 1.25 m x 0.5 m, a quarter-metre of mortar between, in running bond; three shades of brick,
+// chosen per brick (the mortar between keeps bricks apart, so any two may match).
+// It parts at its seams: each brick the blast reaches comes away whole, the mortar crumbles.
+uint32_t wallBrick(int x, int y, int) {
+    int course = y / 3, shifted = x + course % 2 * 3;
+    if (y % 3 == 2 || shifted % 6 == 5) return rgb(0.74f, 0.71f, 0.65f);   // mortar
+    int which = (course * 7 + shifted / 6 * 3) % 3;
+    static const float reds[3][3] = {{0.55f, 0.22f, 0.15f}, {0.63f, 0.28f, 0.18f}, {0.47f, 0.19f, 0.14f}};
+    return rgb(reds[which][0], reds[which][1], reds[which][2]);
+}
+
+// Planks: boards 0.75 m high running the wall's length, a dark seam under each. It splinters along
+// the grain -- the material's grain is the wall's own x -- into long shards.
+uint32_t wallPlanks(int x, int y, int) {
+    if (y % 3 == 0) return rgb(0.3f, 0.2f, 0.12f);   // the seam between boards
+    int board = y / 3;
+    float shade = 0.85f + 0.15f * float((board * 5 + (x / 9 + board) % 3) % 4) / 3.0f;
+    return board % 2 ? rgb(0.58f * shade, 0.4f * shade, 0.23f * shade) : rgb(0.5f * shade, 0.34f * shade, 0.19f * shade);
+}
+
+// Plaster over rubble: off-white, blotched. It crumbles: small even pieces, the hole round.
+uint32_t wallPlaster(int x, int y, int) {
+    int blotch = ((x / 5) * 73 + (y / 4) * 151 + (x / 11) * 17) % 7;
+    return blotch < 2 ? rgb(0.8f, 0.77f, 0.7f) : rgb(0.87f, 0.85f, 0.79f);
 }
 constexpr int SLING_LINKS = 16;
 
@@ -947,6 +993,7 @@ void clearTrebuchet(World& world, Demos& demos) {
     }
     tb.boulder = tb.arm = tb.axle = tb.sling = tb.frame = tb.turntable = projv::NullEntity;
     tb.fired = tb.released = tb.struck = false;
+    tb.struckWall = -1;
     tb.fireIn = -1.0f;
 }
 
@@ -1041,20 +1088,25 @@ void buildTrebuchet(World& world, Demos& demos, Camera& camera) {
     Demos::Trebuchet& tb = demos.trebuchet;
     tb.aim = 0.0f;
     buildTrebuchetMachine(world, demos);
-    // Four walls round it, each one seamless static grid, 32 m by 24 m and 1 m thick: a strike
-    // breaks out its middle and leaves its edges and top standing.
+    // Four walls round it, each one seamless static grid, 32 m by 24 m and 1 m thick, each of its
+    // own material: ahead (+x) ashlar, then turning left (towards -z) brick, planks behind, plaster.
+    // A strike breaks out its middle and leaves its edges and top standing.
     auto& scene = world.ctx().get<projv::Scene>();
+    using Colour = uint32_t (*)(int, int, int);
+    static const Colour colours[4] = {wallStone, wallBrick, wallPlanks, wallPlaster};
+    static const char* const materials[4] = {"ashlar", "brick", "planks", "plaster"};
     for (int side = 0; side < 4; side++) {
         vec3 out = glm::angleAxis(float(side) * 1.5708f, vec3(0, 1, 0)) * vec3(1, 0, 0), along(-out.z, 0, out.x);
         Demos::Trebuchet::Wall wall;
         wall.rotation = glm::quat_cast(glm::mat3(along, vec3(0, 1, 0), -out));
         wall.corner = out * (WALL_DISTANCE + 0.5f) - along * (0.5f * float(WALL_W) * WALL_VOXEL);
-        ComponentHandle h = voxels(scene, "wall", ivec3(WALL_W, WALL_H, WALL_T), WALL_VOXEL, wall.corner, wallStone);
+        ComponentHandle h = voxels(scene, materials[side], ivec3(WALL_W, WALL_H, WALL_T), WALL_VOXEL, wall.corner, colours[side]);
         utils::setComponentTransform(scene, h, wall.corner, wall.rotation, 1.0f);
         wall.entity = runtime::spawnComponent(world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy);
-        world.emplace<projv::StaticCollider>(wall.entity);
+        projv::StaticCollider made;
+        made.material = materials[side];   // how it breaks: physics_materials.json
+        world.emplace<projv::StaticCollider>(wall.entity, made);
         demos.owned.push_back(wall.entity);
-        wall.solid.assign(size_t(WALL_W) * WALL_H * WALL_T, 1);
         tb.walls.push_back(std::move(wall));
     }
     camera.position = vec3(-24, 15, 0);   // behind the trebuchet, looking where it throws
@@ -1091,117 +1143,11 @@ void turnTrebuchet(World& world, Demos& demos, float speed) {
     runtime::setJointMotor(world, tb.turntable, true, speed);
 }
 
-// Breaks a wall round a strike, the way stone shatters: Voronoi cells. Seeds are scattered over
-// the wall's face round the strike (`at`, in its voxels), thick near it and thinning out to about 6 m;
-// every voxel still there within that belongs to its nearest seed. Each cell is cut out of the
-// static wall and comes back as a shard of its own -- a dynamic body made of exactly those voxels,
-// where they were -- so the wall breaks into irregular pieces, small at the strike and larger
-// further out, with nothing lost to the cracks. A cell more than 16 voxels across (one chunk) is
-// cut in two. Beyond that the wall stands. Two steps on, the shards are thrown on, the boulder's way.
-void crackWall(World& world, Demos& demos, Demos::Trebuchet::Wall& wall, vec2 at) {
-    Demos::Trebuchet& tb = demos.trebuchet;
-    auto& scene = world.ctx().get<projv::Scene>();
-    // Seeds that break, out to 6 m; then a ring of seeds that stay whole, from 6 to 9 m. A voxel
-    // nearest a whole seed stays in the wall, so the break's edge runs along cell boundaries --
-    // jagged -- rather than round a circle.
-    const float reach = 6.0f / WALL_VOXEL, outer = 1.5f * reach;
-    std::vector<vec2> seeds;
-    const int breaking = 70;
-    for (int k = 0; k < breaking; k++) {
-        float r = reach * std::pow(uniform(demos, 0.0f, 1.0f), 1.3f), angle = uniform(demos, 0.0f, 6.2832f);
-        seeds.push_back(at + vec2(std::cos(angle), std::sin(angle)) * r);
-    }
-    for (int k = 0; k < 36; k++) {
-        float r = uniform(demos, reach, outer), angle = (float(k) + uniform(demos, -0.4f, 0.4f)) * 6.2832f / 36.0f;
-        seeds.push_back(at + vec2(std::cos(angle), std::sin(angle)) * r);
-    }
-    auto solid = [&](int x, int y, int z) -> uint8_t& { return wall.solid[(size_t(z) * WALL_H + y) * WALL_W + x]; };
-    std::map<int, std::vector<ivec3>> cells;
-    const ivec2 low = glm::max(ivec2(glm::floor(at - outer)), ivec2(0));
-    const ivec2 high = glm::min(ivec2(glm::ceil(at + outer)), ivec2(WALL_W - 1, WALL_H - 1));
-    for (int y = low.y; y <= high.y; y++)
-        for (int x = low.x; x <= high.x; x++) {
-            vec2 c = vec2(x, y) + vec2(0.5f);
-            if (glm::length(c - at) > outer) continue;
-            int best = 0;
-            float bestDistance = 1e9f;
-            for (int k = 0; k < int(seeds.size()); k++) {
-                float distance = glm::length(c - seeds[k]);
-                if (distance < bestDistance) { bestDistance = distance; best = k; }
-            }
-            if (best >= breaking) continue;   // stays whole
-            for (int z = 0; z < WALL_T; z++)
-                if (solid(x, y, z)) cells[best].push_back(ivec3(x, y, z));
-        }
-    // Cells too big for a chunk, halved until they fit.
-    std::vector<std::vector<ivec3>> shards;
-    std::vector<std::vector<ivec3>> pending;
-    for (auto& [k, voxelsOf] : cells) pending.push_back(std::move(voxelsOf));
-    while (!pending.empty()) {
-        std::vector<ivec3> cell = std::move(pending.back());
-        pending.pop_back();
-        ivec3 lo(1 << 20), hi(-(1 << 20));
-        for (const ivec3& v : cell) { lo = glm::min(lo, v); hi = glm::max(hi, v); }
-        ivec3 extent = hi - lo + 1;
-        if (extent.x <= 16 && extent.y <= 16) { shards.push_back(std::move(cell)); continue; }
-        int axis = extent.x >= extent.y ? 0 : 1, middle = (lo[axis] + hi[axis]) / 2;
-        std::vector<ivec3> a, b;
-        for (const ivec3& v : cell) (v[axis] <= middle ? a : b).push_back(v);
-        pending.push_back(std::move(a));
-        pending.push_back(std::move(b));
-    }
-    std::vector<projv::PendingVoxelOp> cut;
-    projv::RigidBody rock = body(0.0f, 0.0f, 0.8f);
-    rock.density = 500.0f;    // a fifth of stone's 2400: a wall that gives, for the show
-    for (const std::vector<ivec3>& shard : shards) {
-        if (shard.empty()) continue;
-        ivec3 lo(1 << 20), hi(-(1 << 20));
-        for (const ivec3& v : shard) { lo = glm::min(lo, v); hi = glm::max(hi, v); }
-        ivec3 size = hi - lo + 1;
-        std::vector<uint8_t> in(size_t(size.x) * size.y * size.z, 0);
-        for (const ivec3& v : shard) {
-            ivec3 l = v - lo;
-            in[(size_t(l.z) * size.y + l.y) * size.x + l.x] = 1;
-            solid(v.x, v.y, v.z) = 0;
-            cut.push_back({false, v, 0});
-        }
-        // An asset node at the shard's centre, its voxels inside, offset by minus half their size.
-        vec3 centre = wall.corner + wall.rotation * ((vec3(lo) + 0.5f * vec3(size)) * WALL_VOXEL);
-        ComponentHandle node = utils::addComponent(scene, projv::ComponentKind::Asset, "shard", projv::INVALID_COMPONENT_HANDLE, 4, 1.0f);
-        voxels(scene, "shard", size, WALL_VOXEL, -0.5f * vec3(size) * WALL_VOXEL, [&](int x, int y, int z) -> uint32_t {
-            return in[(size_t(z) * size.y + y) * size.x + x] ? wallStone(lo.x + x, lo.y + y, lo.z + z) : 0u;
-        }, node);
-        utils::setComponentTransform(scene, node, centre, wall.rotation, 1.0f);
-        Entity e = runtime::spawnComponent(world, node, projv::LinkMode::Root, projv::OnUnlink::Destroy);
-        world.emplace<projv::RigidBody>(e, rock);
-        runtime::assignNetId(world, e);
-        demos.pieces++;
-    }
-    if (!cut.empty()) runtime::editVoxels(world, wall.entity, cut);
-    tb.kickIn = 2;
-}
-
-// The kick after a strike: everything within 7 m of it, the new shards most of all, thrown on the
-// way the boulder was going, scattered a little.
-void kickShards(World& world, Demos& demos) {
-    Demos::Trebuchet& tb = demos.trebuchet;
-    for (Entity e : world.view<projv::RigidBody>()) {
-        if (e == tb.boulder || e == tb.arm || e == tb.frame) continue;
-        vec3 d = runtime::bodyPose(world, e).position - tb.impactAt;
-        float distance = glm::length(d);
-        if (distance > 7.0f) continue;
-        float falloff = 1.0f - distance / 7.0f;
-        vec3 scatter(uniform(demos, -1, 1), uniform(demos, 0, 1.5f), uniform(demos, -1, 1));
-        runtime::addVelocity(world, e, (tb.impactDirection * 14.0f + scatter * 4.0f) * falloff);
-    }
-}
-
 // Each step of demo 9: the delayed fire after a rebuild, the release, and the strike.
 void trebuchetTick(World& world, Demos& demos) {
     Demos::Trebuchet& tb = demos.trebuchet;
     drawSling(world, demos);
     if (tb.fireIn >= 0.0f && (tb.fireIn -= 1.0f / 60.0f) < 0.0f) fireTrebuchet(world, demos);
-    if (tb.kickIn > 0 && --tb.kickIn == 0) kickShards(world, demos);
     if (!tb.fired || !world.valid(tb.arm) || !world.valid(tb.boulder)) return;
     runtime::BodyState rock = runtime::bodyPose(world, tb.boulder);
     if (!tb.released) {
@@ -1216,21 +1162,8 @@ void trebuchetTick(World& world, Demos& demos) {
         }
         return;
     }
-    if (tb.struck) return;
-    // Struck once it is within three steps of a wall's face, so the shards are out when it arrives.
-    const float lead = 3.0f / 60.0f * glm::length(rock.linearVelocity);
-    for (Demos::Trebuchet::Wall& wall : tb.walls) {
-        vec3 l = glm::inverse(wall.rotation) * (rock.position - wall.corner) / WALL_VOXEL;
-        const float face = float(WALL_T), near = (0.7f + lead) / WALL_VOXEL;
-        if (l.x < -2.0f || l.x > float(WALL_W) + 2.0f || l.y > float(WALL_H) + 2.0f || l.z > face + near || l.z < -2.0f) continue;
-        vec2 at(glm::clamp(l.x, 0.0f, float(WALL_W)), glm::clamp(l.y, 0.0f, float(WALL_H)));
-        tb.struck = true;
-        tb.impactSpeed = glm::length(rock.linearVelocity);
-        tb.impactAt = wall.corner + wall.rotation * (vec3(at, face) * WALL_VOXEL);
-        tb.impactDirection = glm::normalize(rock.linearVelocity);
-        crackWall(world, demos, wall, at);
-        return;
-    }
+    // The strike itself is the engine's: it breaks the wall the step after the boulder hits it
+    // (BodyFractured, handled in main).
 }
 
 // The winch's control: the driver's motor winding at raiseSpeed; holding -- a servo locked at the
@@ -1401,24 +1334,27 @@ Entity fireBall(World& world, Demos& demos, int size, vec3 from, vec3 velocity, 
     return t.entity;
 }
 
-// The blast in demo 2, in two parts. First, voxels: a ball of space carved out of every brick it
-// reaches, and the bricks near it cracked -- slots cut through them (a brick is 8 x 4 x 4 voxels;
-// cutting at x = 2 and 5 and at y = 2 leaves six pieces) -- so they break into fragments, each a body
-// of its own (BodySplit). Second, a step later, the kick: everything near, fragments included, thrown
-// outward. Kicking in the same step as the edit would throw only the bricks whole: the fragments are
-// made from the edit at the next step, with the motion their brick had then.
+// The blast in demo 2, in two parts. First, the engine's fracture (runtime::fracture): every brick
+// within 3.5 m is struck at its middle with the blast's energy, falling off with the square of the
+// distance -- the bricks beside it shatter into small pieces, those further out lose a corner or
+// crack in two, by the brick's own material (strength 40 kJ/m^3, shattering). Second, two steps
+// later, the kick: everything near, the shards included, thrown outward. The thrown bricks break
+// again where they hit something hard enough (the engine does that on impact); the shards do not.
+constexpr float BLAST_ENERGY = 80000.0f, BLAST_REACH = 3.5f;   // J at the centre, m
+
 void detonate(World& world, Demos& demos) {
     const vec3 at = demos.blastAt;
-    for (Entity e : world.view<projv::RigidBody>()) {
-        std::vector<projv::PendingVoxelOp> ops = runtime::voxelsInSphere(world, e, at, 1.3f);
-        if (glm::length(runtime::bodyPose(world, e).position - at) < 3.2f)
-            for (int z = 0; z < 4; z++)
-                for (int y = 0; y < 4; y++)
-                    for (int x = 0; x < 8; x++)
-                        if (x == 2 || x == 5 || y == 2) ops.push_back({false, ivec3(x, y, z), 0});
-        if (!ops.empty()) runtime::editVoxels(world, e, ops);
+    std::vector<Entity> near;
+    for (Entity e : world.view<projv::RigidBody>())
+        if (glm::length(runtime::bodyPose(world, e).position - at) < BLAST_REACH) near.push_back(e);
+    for (Entity e : near) {
+        vec3 middle = runtime::bodyPose(world, e).centerOfMass;
+        float falloff = 1.0f - glm::length(middle - at) / BLAST_REACH;
+        runtime::fracture(world, e, middle, BLAST_ENERGY * falloff * falloff);
     }
     demos.blastKickIn = 2;
+    demos.stepSum = demos.stepWorst = 0.0;
+    demos.stepCount = 0;
 }
 
 void blastKick(World& world, Demos& demos) {
@@ -1496,6 +1432,12 @@ void demoTick(projv::Application& app) {
     const float dt = app.time().fixedDelta;
     demos.clock += dt;
     dragTick(world, demos, dt);
+    if (demos.current == 2) {
+        double ms = runtime::physicsWorld(world).stats().lastStepMilliseconds;
+        demos.stepSum += ms;
+        demos.stepWorst = std::max(demos.stepWorst, ms);
+        demos.stepCount++;
+    }
     if (demos.blastKickIn > 0 && --demos.blastKickIn == 0) blastKick(world, demos);
     // Demo 1's kinematic balls level off a crate's height above the floor. Nothing stops a kinematic
     // body, so one driven down onto crates would press them through the floor; this way it ploughs
@@ -1839,6 +1781,9 @@ void selfTest(projv::Application& app) {
     if (stage == 2 && t > 7.0f) {
         size_t bodies = world.view<projv::RigidBody>().size();
         check(*test, demos.pieces >= 10, fmt::format("the blast split bricks: {} fragments, {} bodies", demos.pieces, bodies));
+        projv::core::info("DEMOTEST: blast physics step: {:.2f} ms on average, {:.2f} ms at worst, {} threads",
+                          demos.stepSum / std::max(demos.stepCount, 1), demos.stepWorst,
+                          runtime::physicsWorld(world).stats().threads);
         go(3);
         test->start = watchedPositions();
         return;
@@ -2008,15 +1953,44 @@ void selfTest(projv::Application& app) {
             act(world, demos, camera);
             acted = true;
         }
-        if (t > 10.5f) {
+        // Four shots, one at each wall: the first as fired above, the rest from a machine rebuilt
+        // facing the next wall. Each is checked 8 s after it is fired.
+        static const char* const walls[4] = {"ashlar", "brick", "planks", "plaster"};
+        static const float aims[4] = {0.3f, 1.5708f + 0.2f, 3.1416f - 0.25f, -1.5708f + 0.15f};
+        static bool rebuilt[4] = {}, checked[4] = {};
+        for (int shot = 0; shot < 4; shot++) {
+            const float firedAt = 2.5f + 9.0f * float(shot), checkAt = firedAt + 8.0f;
+            if (shot > 0 && t > firedAt - 0.5f && !rebuilt[shot]) {
+                rebuilt[shot] = true;
+                piecesBefore = demos.pieces;
+                tb.aim = aims[shot];
+                buildTrebuchetMachine(world, demos);
+                tb.fireIn = 0.5f;
+            }
+            if (!(t > checkAt) || checked[shot]) continue;
+            checked[shot] = true;
             float thrown = glm::length(vec2(tb.impactAt.x, tb.impactAt.z) - vec2(tb.releasedAt.x, tb.releasedAt.z));
-            check(*test, tb.released, fmt::format("the sling let the boulder go at {:.1f} m/s, {:.1f} m up", tb.releaseSpeed, tb.releasedAt.y));
-            check(*test, tb.struck, fmt::format("the boulder reached the wall at {:.1f} m/s", tb.impactSpeed));
+            check(*test, tb.released, fmt::format("{}: the sling let the boulder go at {:.1f} m/s, {:.1f} m up", walls[shot],
+                                                  tb.releaseSpeed, tb.releasedAt.y));
+            check(*test, tb.struck && tb.struckWall == shot,
+                  fmt::format("{}: the boulder broke the {} wall, striking at {:.1f} m/s", walls[shot],
+                              tb.struckWall >= 0 ? walls[tb.struckWall] : "no", tb.impactSpeed));
             check(*test, demos.pieces - piecesBefore >= 10,
-                  fmt::format("the wall broke up: {} pieces split off", demos.pieces - piecesBefore));
-            check(*test, tb.struck && thrown > 20.0f, fmt::format("the boulder flew {:.1f} m from the release to the wall", thrown));
-            go(10);   // the slide
-            return;
+                  fmt::format("{}: the wall broke up: {} pieces", walls[shot], demos.pieces - piecesBefore));
+            check(*test, tb.struck && thrown > 20.0f, fmt::format("{}: the boulder flew {:.1f} m from the release to the wall",
+                                                                  walls[shot], thrown));
+            // Where it ended up: in the rubble, or on through the wall (off the floor's edge, even).
+            if (world.valid(tb.boulder)) {
+                vec3 at = runtime::bodyPose(world, tb.boulder).position;
+                projv::core::info("DEMOTEST: {}: the boulder came to {:.1f} m from the middle (the wall is at {:.0f} m)", walls[shot],
+                                  glm::length(vec2(at.x, at.z)), WALL_DISTANCE);
+            } else {
+                projv::core::info("DEMOTEST: {}: the boulder went on through the wall and off the edge of the floor", walls[shot]);
+            }
+            if (shot == 3) {
+                go(10);   // the slide
+                return;
+            }
         }
     }
     if (stage == 10 && t > 1.0f && !acted) {
@@ -2104,6 +2078,8 @@ void startup(projv::Application& app) {
     runtime::PhysicsConfig physics;
     physics.settings.worldMin = vec3(-1e4f, -30.0f, -1e4f);
     physics.settings.record = unattended && !benchDemo;   // the self-test replays the whole session at the end
+    // DEMOS_PHYSICS_THREADS: the physics step's worker threads, for measuring (default: the engine's).
+    if (const char* threads = std::getenv("DEMOS_PHYSICS_THREADS")) physics.settings.threads = std::atoi(threads);
     runtime::installPhysics(app, physics);
     // The physics materials the demos' voxels name (demo 10's ramps and walls).
     if (!runtime::loadPhysicsMaterials(world, (here / "physics_materials.json").string()))
@@ -2176,6 +2152,24 @@ void startup(projv::Application& app) {
     // above the floor went through it, which must never happen.
     app.events().on<projv::BodySplit>([&world](const projv::BodySplit& e) {
         world.ctx().get<Demos>().pieces += int(e.pieces.size());
+    });
+    app.events().on<projv::BodyFractured>([&world](const projv::BodyFractured& e) {
+        Demos& demos = world.ctx().get<Demos>();
+        demos.pieces += int(e.shards.size());
+        // Demo 9: the boulder broke a wall.
+        Demos::Trebuchet& tb = demos.trebuchet;
+        if (e.striker != projv::NullEntity && e.striker == tb.boulder && !tb.struck) {
+            tb.struck = true;
+            // The speed it struck at, from the strike's energy (all of it the boulder's: the wall
+            // does not move).
+            float mass = world.valid(tb.boulder) && world.all_of<projv::PhysicsBody>(tb.boulder)
+                             ? runtime::physicsWorld(world).bodyMass(world.get<projv::PhysicsBody>(tb.boulder).id)
+                             : 0.0f;
+            tb.impactSpeed = mass > 0.0f ? std::sqrt(2.0f * e.energy / mass) : 0.0f;
+            tb.impactAt = e.at;
+            for (size_t k = 0; k < tb.walls.size(); k++)
+                if (tb.walls[k].entity == e.entity) tb.struckWall = int(k);
+        }
     });
     app.events().on<projv::JointBroke>([&world](const projv::JointBroke& e) {
         world.ctx().get<Demos>().brokenJoints.push_back(e.entity);

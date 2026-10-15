@@ -6,6 +6,16 @@
     { "name": "slate",         "density": 2700, "friction": 0.1,  "restitution": 0.0 },
     { "name": "rubber",        "density": 1100, "friction": 1.0,  "restitution": 0.9 },
     { "name": "oak",           "density": 750,  "friction": 0.6,  "restitution": 0.45 },
-    { "name": "clay",          "density": 1800, "friction": 0.9,  "restitution": 0.0 }
+    { "name": "clay",          "density": 1800, "friction": 0.9,  "restitution": 0.0 },
+    { "name": "ashlar",        "density": 800,  "friction": 0.8,  "restitution": 0.0,
+      "strength": 1000, "fracture": "shatter",  "shardSize": 1.2 },
+    { "name": "brick",         "density": 700,  "friction": 0.8,  "restitution": 0.0,
+      "strength": 1000, "fracture": "seams",    "shardSize": 0.8 },
+    { "name": "planks",        "density": 500,  "friction": 0.6,  "restitution": 0.1,
+      "strength": 1500, "fracture": "splinter", "shardSize": 0.8, "grain": [1, 0, 0] },
+    { "name": "fired brick",   "density": 1900, "friction": 0.7,  "restitution": 0.0,
+      "strength": 40000, "fracture": "shatter", "shardSize": 0.25 },
+    { "name": "plaster",       "density": 600,  "friction": 0.9,  "restitution": 0.0,
+      "strength": 700,  "fracture": "crumble",  "shardSize": 0.5 }
   ]
 }

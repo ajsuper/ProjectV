@@ -9,14 +9,14 @@ cd build/examples/physics_demos && ./physics_demos
 | | |
 |---|---|
 | **1** | **Pyramid.** A stepped 3D pyramid of 1496 crates (16x16 base, sixteen high), and beside it two towers side by side, thirty crates high, stepping in from 5x5 bases. **Click** throws a heavy ball where you look. **F** launches a 4 m ball where you look: kinematic, at a constant 30 m/s, shoving aside whatever it hits. |
-| **2** | **Wall blast.** A running-bond wall of 120 voxel bricks, and round it a brick tower, a house with a doorway, a row of columns and a long low wall. **Click** sets off a blast where the crosshair is. |
+| **2** | **Wall blast.** A running-bond wall of 120 voxel bricks, and round it a brick tower, a house with a doorway, a row of columns and a long low wall, all of fired brick. **Click** sets off a blast where the crosshair is: bricks beside it shatter, those thrown hard enough break where they land. |
 | **3** | **Ball barrage.** Balls of five sizes, from 25 cm to a metre, fired at a wall of crates, one every 0.4 s. |
 | **4** | **Sweeper.** A 12 m beam spinning about its middle while its middle circles, through a field of crates and balls. |
 | **5** | **Titans.** A 14 m stone boulder (about 2,900 t) and a 20 m stone hammer (410 t) launched head-on across a field of 25 kg crates. **Click** launches them again. |
 | **6** | **Joints.** A plank bridge on ball joints, a motor-driven windmill, a swinging door, and a four-tonne wrecking ball on a rope that swings into a weight on a breakable chain. **Click** drops a crate on the bridge and fires a ball at the door. |
 | **7** | **Car.** A car made of joints, to drive: **W/S** throttle and reverse, **A/D** steer, **Space** brake, with a chase camera. A 40 m run-up to a ramp and jump, a gentler ramp, a crate wall and balls. |
 | **8** | **Gear winch.** A four-peg gear on a motor turns an eight-peg gear by its pegs alone; the big gear's drum winds up a chain lifting a 40 kg weight. Hold **Up** to raise it; let go and it holds; hold **Down** and the motor lets go, so the weight unwinds it. |
-| **9** | **Trebuchet.** A 36 t counterweight swings a 10.5 m arm on a motorised turntable; a 6 m sling whips a 2 t boulder round and lets it go at four seamless 32 x 24 m stone walls. Where it strikes, the stone shatters into Voronoi shards. **Click** fires (again: a new boulder, fired); **Left/Right** turn the turntable, mid-throw too; **Up/Down** set the release angle. |
+| **9** | **Trebuchet.** A 36 t counterweight swings a 10.5 m arm on a motorised turntable; a 6 m sling whips a 2 t boulder round and lets it go at four seamless 32 x 24 m walls, each built differently and breaking its own way: ashlar shatters, brick parts at its mortar, planks splinter along the grain, plaster crumbles. The boulder breaks them itself, by their strength. **Click** fires (again: a new boulder, fired); **Left/Right** turn the turntable, mid-throw too; **Up/Down** set the release angle. |
 | **10** (key **0**) | **Slide.** Three 14 m ramps -- ice, polished wood, slate -- the same crate on each, sliding into walls of rubber, oak and clay at their feet. **Click** starts the crates again. |
 | R | restart the demo |
 | mouse, W/A/S/D, Space/Shift | look, fly, up/down (Esc releases the cursor, a click recaptures it) |
@@ -36,13 +36,14 @@ step cost.
 and stay exactly where they were built (the self-test checks the top crate is at 9.5 m). The
 wrecking ball shows mass mattering: 4 tonnes at 32 m/s goes through 2.2 tonnes of crates.
 
-**Wall blast** -- destruction. The blast is two things. First the voxels: a ball of space is carved
-out of every brick it reaches, and the bricks near it are cracked through (`runtime::voxelsInSphere`
-and `runtime::editVoxels`). The engine notices the bricks' voxels changed, rebuilds their shapes,
-and splits every brick cut in pieces into bodies of its own (`BodySplit`); a few hundred fragments.
-Then, one step later, the kick: everything near is thrown outward, fragments included. (Kicked in
-the same step, only the whole bricks would fly: the fragments are made from the edit at the next
-step, with the motion their brick had then.)
+**Wall blast** -- destruction, by material. Every brick is 30 kg of "fired brick"
+(`physics_materials.json`: strength 40 kJ/m^3, `shatter`, 25 cm shards). The blast is two things.
+First, `runtime::fracture` on every brick within 3.5 m, struck at its middle with the blast's energy
+falling off with the square of the distance: the bricks beside it shatter into small shards, those
+further out lose a corner or crack in two. Then, two steps later, the kick: everything near is thrown
+outward, shards included. A brick thrown hard enough into something breaks there too -- the engine
+breaks voxel bodies on impact by their material's strength -- while one falling from the top of the
+tower does not; shards never break again.
 
 **Ball barrage** -- mass and momentum. Every ball has the same density, so a metre-wide one weighs
 64 times what a 25 cm one does, and knocks crates over where the small ones bounce off.
@@ -80,11 +81,25 @@ wheels are set out far enough that their spheres clear it.
 
 **Trebuchet** -- joints under real load, and fracture. The frame turns on a hinge whose motor the
 arrows drive, and the arm's axle is on the frame, so turning mid-throw carries through. The latch
-is a stiff servo; the sling a Distance joint, let go by the demo at the release angle. Each wall
-is one static grid. A strike scatters Voronoi seeds round it, with a ring of seeds that stay whole
-so the break's edge is jagged; each broken cell is cut out of the wall and spawned as a dynamic
-shard of exactly those voxels, then kicked on. Shards are at most one chunk (16 voxels) across,
-since grids don't split; a wall cut away at its base doesn't fall (nothing checks support yet).
+is a stiff servo; the sling a Distance joint, let go by the demo at the release angle.
+
+Each wall is one static grid of its own material (`physics_materials.json`), and nothing in the
+demo breaks it: the engine does, when the boulder hits it. The impact's energy (half the boulder's
+mass times its speed squared) against the material's strength sets how far the break reaches; the
+material's fracture pattern sets its shape:
+
+| Wall (facing) | Material | Breaks |
+|---|---|---|
+| Ashlar (+x, ahead) | 1000 J/m^3, `shatter`, 1.2 m | Voronoi shards through blocks and mortar alike, small at the strike, the edge jagged |
+| Brick (-z, left) | 1000 J/m^3, `seams`, 0.8 m | Each brick comes away whole; the mortar between crumbles |
+| Planks (-x, behind) | 1500 J/m^3, `splinter`, 0.8 m, grain along the wall | Long splinters along the boards |
+| Plaster (+z, right) | 700 J/m^3, `crumble`, 0.5 m | Small even pieces, a round hole |
+
+The shards go on at the boulder's speed, fading to the edge of the break, and the boulder gets back
+the energy the break did not use. Whether it then gets through depends on the rubble packed in front
+of it: through plaster's crumbs it always rolls on, off the floor's edge; in the stone, brick and
+planks it sometimes ploughs on and sometimes stops. A wall cut away at
+its base doesn't fall (nothing checks support yet).
 
 **Gear winch** -- bodies pushing bodies through contact. Each gear is crosses: two straight bars
 through its middle, four pegs, laid along the voxel grid's own axes so their faces are flat and
