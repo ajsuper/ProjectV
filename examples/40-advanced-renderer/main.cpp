@@ -1458,8 +1458,7 @@ static bool updateMovement(projv::graphics::RenderInstance& renderInstance, Fram
     if (glfwGetKey(renderInstance.window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) speed *= 5.0f;
 
     projv::core::vec3 forward = {std::cos(state.yaw), 0.0f, std::sin(state.yaw)};
-    projv::core::vec3 right = {std::cos(state.yaw - 1.5707963f), 0.0f,
-                               std::sin(state.yaw - 1.5707963f)};
+    projv::core::vec3 right = {-std::sin(state.yaw), 0.0f, std::cos(state.yaw)};
 
     bool moved = false;
     if (glfwGetKey(renderInstance.window, GLFW_KEY_W)) { state.cameraPosition += forward * speed; moved = true; }

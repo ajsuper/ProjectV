@@ -4,9 +4,10 @@
 //
 //   1  Pyramid        a stepped pyramid of 1496 crates, sixteen high on a 16x16 base, and beside
 //                     it two stepped towers side by side, thirty crates high on 5x5 bases.
-//                     Space throws a heavy ball. F launches a 4 m ball where you look: kinematic,
+//                     Click throws a heavy ball. F launches a 4 m ball where you look: kinematic,
 //                     at a constant 30 m/s (ConstantVelocity), ploughing through whatever is there.
-//   2  Wall blast     a staggered wall of 120 voxel bricks. Space sets off a big blast behind it:
+//   2  Wall blast     a staggered wall of 120 voxel bricks, a tower, a house, columns and a long low wall,
+//                     all brick. Click sets off a big blast where the crosshair is:
 //                     the bricks near it are carved and split into fragments, and everything is
 //                     thrown outward.
 //   3  Ball barrage   balls of five sizes -- the same density, so very different masses -- fired
@@ -15,9 +16,9 @@
 //                     through a field of crates and balls. It is kinematic: moved by its Transform,
 //                     pushing what it meets, pushed by nothing.
 //   5  Titans         a 14 m stone boulder and a 20 m stone hammer, thousands of tonnes each,
-//                     launched into each other across a field of 25 kg crates. Space: again.
+//                     launched into each other across a field of 25 kg crates. Click: again.
 //   6  Joints         a plank bridge on ball joints, a wrecking ball on a rope swinging into a weight
-//                     on a breakable chain, a motor-driven windmill, a swinging door. Space: drop a
+//                     on a breakable chain, a motor-driven windmill, a swinging door. Click: drop a
 //                     crate on the bridge and fire a ball at the door.
 //   7  Car            a car made of joints you drive: W/S throttle and reverse, A/D steer, Space
 //                     brake. Rear wheels on driven hinges, front wheels on knuckles steered by servo
@@ -28,7 +29,7 @@
 //   9  Trebuchet      a counterweight trebuchet: a 36 t counterweight swings a 10.5 m arm, which
 //                     whips a 2 t boulder round on a sling and lets it go, at four 32 x 24 m walls
 //                     of stone 34 m off -- one on each side, each a seamless static grid. Where it strikes,
-//                     the stone shatters into shards that fly. Space: fire; again, a new boulder and
+//                     the stone shatters into shards that fly. Click: fire; again, a new boulder and
 //                     fire. Left/Right: turn it on its turntable. Up/Down: a higher or flatter
 //                     throw (the angle the sling lets go at).
 //  10  Slide          physics materials (physics_materials.json, beside the binary): three 14 m
@@ -36,12 +37,13 @@
 //                     into walls of rubber, oak and clay. Each ramp is striped in three colours that
 //                     all name one material, so it still collides as one box per grid cell; the
 //                     crates hit their walls at the speeds their ramps allow and bounce back as far
-//                     as their walls allow. Space: again.
+//                     as their walls allow. Click: again.
 //
 // Controls
 //   1-9, 0     pick a demo (0 is 10; it is rebuilt)          R  restart the demo
-//   Space      the demo's action                             V  walk (a character) / fly
-//   mouse look, W/A/S/D fly, Q/E down/up                     T  slow motion   P  pause
+//   click      the demo's action                             V  walk (a character) / fly
+//   mouse look, W/A/S/D fly, Space/Shift up/down             T  slow motion   P  pause
+//   right-drag hold and drag the body under the crosshair (the wheel: nearer / farther)
 //   Esc        release the cursor (a click recaptures it)
 //   H  sun shadows on/off   O  ambient occlusion on/off   U  upscaler off (the raw quarter-res frame)
 //   G  where the upscaler rebuilt the pixel (green) or fell back to filtering (red)
@@ -98,6 +100,11 @@ namespace {
 constexpr float FLOOR_HALF = 40.0f;   // the floor is 80 m square, its top at y = 0
 constexpr float EYE_HEIGHT = 1.6f;
 constexpr float WALK_SPEED = 7.0f;
+constexpr float FLY_SPEED = 20.0f;
+constexpr float ORB_RADIUS = 2.0f;   // demo 1's kinematic ball
+// How quickly the walker's and the fly camera's velocity closes on what the keys ask for (1/s): the
+// walker gets ~95% of the way in a quarter second on the ground, and steers only a little in the air.
+constexpr float WALK_GRIP = 12.0f, AIR_GRIP = 1.5f, FLY_GRIP = 5.0f;
 
 uint32_t rgb(float r, float g, float b) { return projv::packRGB10(r, g, b); }
 
@@ -179,6 +186,7 @@ struct Camera {
     vec3 position{0.0f, 6.0f, -22.0f};
     float yaw = 1.5708f, pitch = -0.12f;
     Entity walker = projv::NullEntity;
+    vec3 velocity{0.0f};   // flying, or the walker's horizontal walk: eased toward what the keys ask for
     vec3 forward() const { return {std::cos(pitch) * std::cos(yaw), std::sin(pitch), std::cos(pitch) * std::sin(yaw)}; }
 };
 
@@ -264,6 +272,13 @@ struct Demos {
         Track tracks[3];
         quat rotation{1, 0, 0, 0};
     } slide;
+    // What right-click holds: a body, the point on it that was grabbed (in the body's frame), and how
+    // far in front of the camera that point is pulled.
+    struct Grab {
+        Entity body = projv::NullEntity;
+        vec3 local{0.0f};
+        float distance = 0.0f;
+    } grab;
     vec3 blastAt{0.0f};
     int blastKickIn = 0;                   // fixed steps until a detonation's kick (see detonate)
     int pieces = 0;                        // bodies cut off by blasts (BodySplit)
@@ -277,16 +292,16 @@ float uniform(Demos& d, float lo, float hi) { return std::uniform_real_distribut
 
 const char* demoName(int n) {
     switch (n) {
-        case 1: return "Pyramid  (Space: throw a ball, F: launch a kinematic ball)";
-        case 2: return "Wall blast  (Space: detonate)";
+        case 1: return "Pyramid  (Click: throw a ball, F: launch a kinematic ball)";
+        case 2: return "Wall blast  (Click: a blast where you aim)";
         case 3: return "Ball barrage";
         case 4: return "Sweeper";
-        case 5: return "Titans  (Space: again)";
-        case 6: return "Joints  (Space: a crate on the bridge, a ball at the door)";
+        case 5: return "Titans  (Click: again)";
+        case 6: return "Joints  (Click: a crate on the bridge, a ball at the door)";
         case 7: return "Car  (W/S drive, A/D steer, Space brake)";
         case 8: return "Gear winch  (Up: raise, Down: let it unwind)";
-        case 9: return "Trebuchet  (Space: fire / reload and fire, Left/Right: turn, Up/Down: higher/flatter)";
-        case 10: return "Slide  (ice, polished wood, slate into rubber, oak, clay -- Space: again)";
+        case 9: return "Trebuchet  (Click: fire / reload and fire, Left/Right: turn, Up/Down: higher/flatter)";
+        case 10: return "Slide  (ice, polished wood, slate into rubber, oak, clay -- Click: again)";
     }
     return "";
 }
@@ -321,6 +336,7 @@ void clearDemo(World& world) {
     demos.watched.clear();
     demos.clock = demos.fireTimer = 0.0f;
     demos.blastKickIn = 0;
+    demos.grab = Demos::Grab{};
 }
 
 void buildPyramid(World& world, Demos& demos, Camera& camera) {
@@ -375,6 +391,55 @@ void launchOrb(World& world, Demos& demos, const Camera& camera) {
     }
 }
 
+// Bricks for demo 2's buildings: 1 m x 0.5 m x 0.5 m, along x, or along z turned a quarter about y.
+// Horizontal positions are spread 0.6% from `corner` so no two bricks start touching.
+void brick(World& world, Demos& demos, vec3 corner, vec3 centre, bool alongZ) {
+    const quat turned(std::cos(0.7854f), 0.0f, std::sin(0.7854f), 0.0f);
+    place(world, demos.brick, corner + vec3(centre.x * 1.006f, centre.y, centre.z * 1.006f),
+          alongZ ? turned : quat(1, 0, 0, 0), body(30.0f));
+}
+
+// A rectangle of brick walls, `w` x `d` metres outside, half a metre thick, `courses` high. The
+// corners interlock: even courses run the front and back walls through, odd ones the sides. A
+// doorway `doorWidth` bricks wide, `doorCourses` high, starts `doorAt` metres along the front wall
+// (z = 0, the side facing the camera). `d` of 1 is a single straight wall along x.
+void brickBox(World& world, Demos& demos, vec3 corner, int w, int d, int courses, int doorAt = -1, int doorWidth = 0,
+              int doorCourses = 0) {
+    for (int c = 0; c < courses; c++) {
+        const float y = 0.25f + float(c) * 0.503f;
+        const bool through = d == 1 || c % 2 == 0;
+        // Front and back: through, w bricks from the corner; otherwise w - 1, inset half a brick.
+        int n = through ? w : w - 1;
+        float start = through ? 0.5f : 1.0f;
+        for (int i = 0; i < n; i++) {
+            float x = start + float(i);
+            bool door = c < doorCourses && x > float(doorAt) && x < float(doorAt + doorWidth) + 0.5f;
+            if (!door) brick(world, demos, corner, vec3(x, y, 0.25f), false);
+            if (d > 1) brick(world, demos, corner, vec3(x, y, float(d) - 0.25f), false);
+        }
+        if (d == 1) continue;
+        // The sides, the other way round.
+        n = through ? d - 1 : d;
+        start = through ? 1.0f : 0.5f;
+        for (int i = 0; i < n; i++) {
+            brick(world, demos, corner, vec3(0.25f, y, start + float(i)), true);
+            brick(world, demos, corner, vec3(float(w) - 0.25f, y, start + float(i)), true);
+        }
+    }
+}
+
+// A 1 m square column: two bricks a course, side by side, crossing the course below.
+void brickColumn(World& world, Demos& demos, vec3 corner, int courses) {
+    for (int c = 0; c < courses; c++) {
+        const float y = 0.25f + float(c) * 0.503f;
+        bool alongZ = c % 2 == 1;
+        for (int i = 0; i < 2; i++) {
+            float across = 0.25f + float(i) * 0.5f;
+            brick(world, demos, corner, alongZ ? vec3(across, y, 0.5f) : vec3(0.5f, y, across), alongZ);
+        }
+    }
+}
+
 void buildWall(World& world, Demos& demos, Camera& camera) {
     // Running bond: 12 bricks a course, every other course shifted by half a brick. Each brick is
     // 1 m x 0.5 m x 0.5 m, in 12.5 cm voxels, so a blast can carve it and split it.
@@ -388,10 +453,17 @@ void buildWall(World& world, Demos& demos, Camera& camera) {
             place(world, demos.brick, vec3(x, y, 0), quat(1, 0, 0, 0), body(30.0f));
         }
     }
-    demos.blastAt = vec3(0.3f, 2.2f, 0.9f);   // behind the wall, a little off-centre
-    camera.position = vec3(0, 3.5f, -14);
+    demos.blastAt = vec3(0.3f, 2.2f, 0.9f);   // behind the wall, a little off-centre (the self-test's blast)
+
+    // Round it, more to blow up: a tower, a house with a doorway, a row of columns, and a long low
+    // wall at the back.
+    brickBox(world, demos, vec3(-17, 0, 4), 4, 4, 16);
+    brickBox(world, demos, vec3(9, 0, 4), 7, 5, 9, 3, 2, 5);
+    for (int i = 0; i < 5; i++) brickColumn(world, demos, vec3(-8.0f + float(i) * 4.0f, 0, 12), 14);
+    brickBox(world, demos, vec3(-12, 0, 20), 24, 1, 5);
+    camera.position = vec3(0, 7.0f, -22);
     camera.yaw = 1.5708f;
-    camera.pitch = -0.08f;
+    camera.pitch = -0.18f;
 }
 
 void buildBarrage(World& world, Demos& demos, Camera& camera) {
@@ -990,7 +1062,7 @@ void buildTrebuchet(World& world, Demos& demos, Camera& camera) {
     camera.pitch = -0.12f;
 }
 
-// Space: lets the arm go -- or, once it has thrown, builds it again with a new boulder, facing the
+// Click: lets the arm go -- or, once it has thrown, builds it again with a new boulder, facing the
 // current aim, and lets it go when it has settled half a second.
 void fireTrebuchet(World& world, Demos& demos) {
     Demos::Trebuchet& tb = demos.trebuchet;
@@ -1307,6 +1379,7 @@ void startDemo(World& world, int n) {
     auto& camera = world.ctx().get<Camera>();
     clearDemo(world);
     demos.current = n;
+    camera.velocity = vec3(0.0f);
     switch (n) {
         case 1: buildPyramid(world, demos, camera); break;
         case 2: buildWall(world, demos, camera); break;
@@ -1359,12 +1432,20 @@ void blastKick(World& world, Demos& demos) {
     }
 }
 
-// The action for Space.
+// The action for a click.
 void act(World& world, Demos& demos, const Camera& camera) {
     switch (demos.current) {
         // A wrecking ball: a metre across, as dense as iron, thrown where you are looking.
         case 1: fireBall(world, demos, 4, camera.position + camera.forward() * 2.0f, camera.forward() * 32.0f, 7800.0f); break;
-        case 2: detonate(world, demos); break;
+        // Where the crosshair is; the self-test blasts its scripted spot behind the first wall.
+        case 2:
+            if (!demos.unattended) {
+                auto hit = runtime::castRay(world, camera.position, camera.forward(), 150.0f, 0xffffffffu, camera.walker);
+                if (!hit) break;
+                demos.blastAt = hit->position + camera.forward() * 0.3f;   // just inside what it hit
+            }
+            detonate(world, demos);
+            break;
         case 3: fireBall(world, demos, 4, vec3(0, 3, -6), vec3(0, 2, 28)); break;
         case 5: startDemo(world, 5); break;
         case 9: fireTrebuchet(world, demos); break;
@@ -1382,12 +1463,48 @@ void act(World& world, Demos& demos, const Camera& camera) {
 // =========================================================================================
 
 // FixedUpdate: what the demos do over time, in fixed steps, so it plays the same at any frame rate.
+// Right-click's hold, each fixed step: an impulse at the grabbed point, toward its spot in front of
+// the camera -- a spring that closes the gap in about a tenth of a second, damped by the point's own
+// velocity. It is a force, not a set velocity, and capped at GRAB_FORCE, so joints and contacts
+// still win: a chained block strains at its chain rather than tearing it apart, and what weighs
+// more than about 2.5 t will not lift. At the point rather than the centre of mass, so a body held
+// by a corner hangs and swings from it. A third of the impulse a point mass would need, because
+// a body turns as well as moves when pushed off-centre, and the whole of it would overshoot.
+constexpr float GRAB_FORCE = 25000.0f;   // N
+void dragTick(World& world, Demos& demos, float dt) {
+    Demos::Grab& grab = demos.grab;
+    if (grab.body == projv::NullEntity) return;
+    if (!world.valid(grab.body) || !runtime::hasBody(world, grab.body)) { grab.body = projv::NullEntity; return; }
+    const Camera& camera = world.ctx().get<Camera>();
+    runtime::BodyState pose = runtime::bodyPose(world, grab.body);
+    float mass = runtime::physicsWorld(world).bodyMass(world.get<projv::PhysicsBody>(grab.body).id);
+    if (mass <= 0.0f) return;
+    vec3 point = pose.position + pose.rotation * grab.local;
+    vec3 r = point - pose.centerOfMass;
+    vec3 pointVelocity = pose.linearVelocity + glm::cross(pose.angularVelocity, r);
+    vec3 want = (camera.position + camera.forward() * grab.distance - point) * 10.0f;
+    if (glm::length(want) > 25.0f) want = glm::normalize(want) * 25.0f;
+    vec3 impulse = (want - pointVelocity) * mass * 0.3f;
+    if (glm::length(impulse) > GRAB_FORCE * dt) impulse = glm::normalize(impulse) * GRAB_FORCE * dt;
+    runtime::addImpulse(world, grab.body, impulse);
+    runtime::addAngularImpulse(world, grab.body, glm::cross(r, impulse));
+}
+
 void demoTick(projv::Application& app) {
     World& world = app.world;
     auto& demos = world.ctx().get<Demos>();
     const float dt = app.time().fixedDelta;
     demos.clock += dt;
+    dragTick(world, demos, dt);
     if (demos.blastKickIn > 0 && --demos.blastKickIn == 0) blastKick(world, demos);
+    // Demo 1's kinematic balls level off a crate's height above the floor. Nothing stops a kinematic
+    // body, so one driven down onto crates would press them through the floor; this way it ploughs
+    // into the pyramid and rolls over whatever lies flat.
+    for (Entity orb : demos.orbs) {
+        if (!world.valid(orb) || !world.all_of<projv::ConstantVelocity>(orb)) continue;
+        auto& motion = world.get<projv::ConstantVelocity>(orb);
+        if (motion.velocity.y < 0.0f && runtime::bodyPose(world, orb).position.y < ORB_RADIUS + 1.05f) motion.velocity.y = 0.0f;
+    }
     if (demos.current == 9) trebuchetTick(world, demos);
     if (demos.current == 10) slideTick(world, demos);
     if (demos.current == 8)
@@ -1449,6 +1566,7 @@ void controls(projv::Application& app) {
     auto& demos = world.ctx().get<Demos>();
     projv::Time& time = app.time();
 
+    const bool captured = input.cursorCaptured;   // the click that recaptures the cursor is not an action
     if (input.cursorCaptured && input.pressed(projv::Key::Escape)) {
         projv::graphics::setCursorCaptured(app, renderInstance, false);
     } else if (!input.cursorCaptured && input.pressed(projv::MouseButton::Left)) {
@@ -1463,7 +1581,20 @@ void controls(projv::Application& app) {
         if (input.pressed(projv::Key(int(projv::Key::Num0) + n))) startDemo(world, n);
     if (input.pressed(projv::Key::Num0)) startDemo(world, 10);
     if (input.pressed(projv::Key::R)) startDemo(world, demos.current);
-    if (input.pressed(projv::Key::Space) && camera.walker == projv::NullEntity && demos.current != 7) act(world, demos, camera);
+    if (captured && input.pressed(projv::MouseButton::Left) && demos.current != 7) act(world, demos, camera);
+    // Right-click holds the dynamic body under the crosshair until it is let go; the wheel pulls it
+    // nearer or pushes it away.
+    if (captured && input.pressed(projv::MouseButton::Right)) {
+        auto hit = runtime::castRay(world, camera.position, camera.forward(), 80.0f, 0xffffffffu, camera.walker);
+        if (hit && world.valid(hit->entity) && world.all_of<projv::RigidBody>(hit->entity) &&
+            world.get<projv::RigidBody>(hit->entity).motion == runtime::MotionType::Dynamic) {
+            runtime::BodyState pose = runtime::bodyPose(world, hit->entity);
+            demos.grab = {hit->entity, glm::inverse(pose.rotation) * (hit->position - pose.position), hit->distance};
+        }
+    }
+    if (input.released(projv::MouseButton::Right)) demos.grab.body = projv::NullEntity;
+    if (demos.grab.body != projv::NullEntity)
+        demos.grab.distance = std::clamp(demos.grab.distance + input.scroll.y, 1.5f, 60.0f);
     if (input.pressed(projv::Key::F) && demos.current == 1) launchOrb(world, demos, camera);
     if (input.pressed(projv::Key::T)) time.scale = time.scale == 1.0f ? 0.2f : 1.0f;
     Look& look = world.ctx().get<Look>();
@@ -1474,12 +1605,13 @@ void controls(projv::Application& app) {
     if (input.pressed(projv::Key::P)) time.scale = time.scale == 0.0f ? 1.0f : 0.0f;
 
     const vec3 flat{std::cos(camera.yaw), 0.0f, std::sin(camera.yaw)};
-    const vec3 right{std::cos(camera.yaw - 1.5708f), 0.0f, std::sin(camera.yaw - 1.5708f)};
+    const vec3 right{-std::sin(camera.yaw), 0.0f, std::cos(camera.yaw)};   // cross(flat, up), as the renderer has it
     if (input.pressed(projv::Key::V)) {
         if (camera.walker == projv::NullEntity) {
             camera.walker = world.create();
             world.emplace<projv::Transform>(camera.walker, projv::Transform{camera.position - vec3(0, EYE_HEIGHT, 0)});
             world.emplace<projv::CharacterController>(camera.walker);
+            camera.velocity.y = 0.0f;   // keeps its horizontal speed: steps out of flight walking
         } else {
             world.destroy(camera.walker);
             camera.walker = projv::NullEntity;
@@ -1512,17 +1644,23 @@ void controls(projv::Application& app) {
         if (input.down(projv::Key::D)) walk += right;
         if (input.down(projv::Key::A)) walk -= right;
         if (glm::length(walk) > 0.0f) walk = glm::normalize(walk) * WALK_SPEED;
-        runtime::setCharacterInput(world, camera.walker, walk, input.pressed(projv::Key::Space), 6.0f);
+        bool grounded = runtime::characterState(world, camera.walker).onGround;
+        float ease = 1.0f - std::exp(-(grounded ? WALK_GRIP : AIR_GRIP) * time.unscaledDelta);
+        camera.velocity += (walk - camera.velocity) * ease;
+        runtime::setCharacterInput(world, camera.walker, camera.velocity, input.pressed(projv::Key::Space), 6.0f);
         // The camera follows in PostUpdate (followWalker), once physics has placed the character for
         // this frame.
     } else {
-        const float speed = 20.0f * time.unscaledDelta;
-        if (input.down(projv::Key::W)) camera.position += flat * speed;
-        if (input.down(projv::Key::S)) camera.position -= flat * speed;
-        if (input.down(projv::Key::D)) camera.position += right * speed;
-        if (input.down(projv::Key::A)) camera.position -= right * speed;
-        if (input.down(projv::Key::E)) camera.position.y += speed;
-        if (input.down(projv::Key::Q)) camera.position.y -= speed;
+        vec3 fly(0.0f);
+        if (input.down(projv::Key::W)) fly += flat;
+        if (input.down(projv::Key::S)) fly -= flat;
+        if (input.down(projv::Key::D)) fly += right;
+        if (input.down(projv::Key::A)) fly -= right;
+        if (input.down(projv::Key::Space)) fly.y += 1.0f;
+        if (input.down(projv::Key::LeftShift)) fly.y -= 1.0f;
+        if (glm::length(fly) > 0.0f) fly = glm::normalize(fly) * FLY_SPEED;
+        camera.velocity += (fly - camera.velocity) * (1.0f - std::exp(-FLY_GRIP * time.unscaledDelta));
+        camera.position += camera.velocity * time.unscaledDelta;
     }
 }
 

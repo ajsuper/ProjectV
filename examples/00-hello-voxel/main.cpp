@@ -199,7 +199,7 @@ void moveCamera(projv::Application& app) {
 
     // Forward from yaw only, so W/S flies level regardless of where you are looking.
     const projv::core::vec3 forward{std::cos(camera.yaw), 0.0f, std::sin(camera.yaw)};
-    const projv::core::vec3 right{std::cos(camera.yaw - 1.5708f), 0.0f, std::sin(camera.yaw - 1.5708f)};
+    const projv::core::vec3 right{-std::sin(camera.yaw), 0.0f, std::cos(camera.yaw)};
     const float speed = 24.0f * app.time().delta;   // world units per second
 
     if (input.down(projv::Key::W)) camera.position += forward * speed;

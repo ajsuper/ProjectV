@@ -227,7 +227,7 @@ void controls(projv::Application& app) {
     }
 
     const vec3 flat{std::cos(camera.yaw), 0.0f, std::sin(camera.yaw)};
-    const vec3 right{std::cos(camera.yaw - 1.5708f), 0.0f, std::sin(camera.yaw - 1.5708f)};
+    const vec3 right{-std::sin(camera.yaw), 0.0f, std::cos(camera.yaw)};
     // V: walk (a character, standing where the camera's feet would be) or fly.
     if (input.pressed(projv::Key::V)) {
         if (camera.walker == projv::NullEntity) {

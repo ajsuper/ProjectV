@@ -8,18 +8,20 @@ cd build/examples/physics_demos && ./physics_demos
 
 | | |
 |---|---|
-| **1** | **Pyramid.** A stepped 3D pyramid of 1496 crates (16x16 base, sixteen high), and beside it two towers side by side, thirty crates high, stepping in from 5x5 bases. **Space** throws a heavy ball where you look. **F** launches a 4 m ball where you look: kinematic, at a constant 30 m/s, shoving aside whatever it hits. |
-| **2** | **Wall blast.** A running-bond wall of 120 voxel bricks. **Space** sets off a blast behind it. |
+| **1** | **Pyramid.** A stepped 3D pyramid of 1496 crates (16x16 base, sixteen high), and beside it two towers side by side, thirty crates high, stepping in from 5x5 bases. **Click** throws a heavy ball where you look. **F** launches a 4 m ball where you look: kinematic, at a constant 30 m/s, shoving aside whatever it hits. |
+| **2** | **Wall blast.** A running-bond wall of 120 voxel bricks, and round it a brick tower, a house with a doorway, a row of columns and a long low wall. **Click** sets off a blast where the crosshair is. |
 | **3** | **Ball barrage.** Balls of five sizes, from 25 cm to a metre, fired at a wall of crates, one every 0.4 s. |
 | **4** | **Sweeper.** A 12 m beam spinning about its middle while its middle circles, through a field of crates and balls. |
-| **5** | **Titans.** A 14 m stone boulder (about 2,900 t) and a 20 m stone hammer (410 t) launched head-on across a field of 25 kg crates. **Space** launches them again. |
-| **6** | **Joints.** A plank bridge on ball joints, a motor-driven windmill, a swinging door, and a four-tonne wrecking ball on a rope that swings into a weight on a breakable chain. **Space** drops a crate on the bridge and fires a ball at the door. |
+| **5** | **Titans.** A 14 m stone boulder (about 2,900 t) and a 20 m stone hammer (410 t) launched head-on across a field of 25 kg crates. **Click** launches them again. |
+| **6** | **Joints.** A plank bridge on ball joints, a motor-driven windmill, a swinging door, and a four-tonne wrecking ball on a rope that swings into a weight on a breakable chain. **Click** drops a crate on the bridge and fires a ball at the door. |
 | **7** | **Car.** A car made of joints, to drive: **W/S** throttle and reverse, **A/D** steer, **Space** brake, with a chase camera. A 40 m run-up to a ramp and jump, a gentler ramp, a crate wall and balls. |
 | **8** | **Gear winch.** A four-peg gear on a motor turns an eight-peg gear by its pegs alone; the big gear's drum winds up a chain lifting a 40 kg weight. Hold **Up** to raise it; let go and it holds; hold **Down** and the motor lets go, so the weight unwinds it. |
-| **9** | **Trebuchet.** A 36 t counterweight swings a 10.5 m arm on a motorised turntable; a 6 m sling whips a 2 t boulder round and lets it go at four seamless 32 x 24 m stone walls. Where it strikes, the stone shatters into Voronoi shards. **Space** fires (again: a new boulder, fired); **Left/Right** turn the turntable, mid-throw too; **Up/Down** set the release angle. |
-| **10** (key **0**) | **Slide.** Three 14 m ramps -- ice, polished wood, slate -- the same crate on each, sliding into walls of rubber, oak and clay at their feet. **Space** starts the crates again. |
+| **9** | **Trebuchet.** A 36 t counterweight swings a 10.5 m arm on a motorised turntable; a 6 m sling whips a 2 t boulder round and lets it go at four seamless 32 x 24 m stone walls. Where it strikes, the stone shatters into Voronoi shards. **Click** fires (again: a new boulder, fired); **Left/Right** turn the turntable, mid-throw too; **Up/Down** set the release angle. |
+| **10** (key **0**) | **Slide.** Three 14 m ramps -- ice, polished wood, slate -- the same crate on each, sliding into walls of rubber, oak and clay at their feet. **Click** starts the crates again. |
 | R | restart the demo |
-| mouse, W/A/S/D, Q/E | look, fly, down/up (Esc releases the cursor, a click recaptures it) |
+| mouse, W/A/S/D, Space/Shift | look, fly, up/down (Esc releases the cursor, a click recaptures it) |
+| click | the demo's action |
+| right-drag | hold and drag the body under the crosshair; the wheel pulls it nearer or pushes it away |
 | V | walk (a character: W/A/S/D, Space to jump) or fly |
 | T / P | slow motion / pause |
 | H / O | sun shadows / ambient occlusion on and off |
