@@ -253,6 +253,10 @@ namespace projv{
         bool         isAdd;
         core::ivec3  position;
         uint32_t     packedColor;
+        // An add that names a palette slot stores it as it is, and packedColor is ignored: the
+        // caller has set the palette up (voxels copied with their entries, as fracture does).
+        // INVALID_MATERIAL: the colour is interned, as usual.
+        uint8_t      slot = INVALID_MATERIAL;
     };
 
     // Per-component edit queue. P1: drained by updateScene; cleared after drain.

@@ -88,6 +88,9 @@ namespace projv::utils {
     };
     enum class DecodeResult : uint8_t { Ok, Empty, TooLarge, Malformed };
     DecodeResult decodeOccupancy(const GeometryBlob& blob, uint32_t resolution, uint64_t maxCells, VoxelOccupancy& out);
+    // The same, and each solid cell's palette slot in `slots` (one per cell, 0 where empty).
+    DecodeResult decodeVoxelSlots(const GeometryBlob& blob, uint32_t resolution, uint64_t maxCells, VoxelOccupancy& out,
+                                  std::vector<uint8_t>& slots);
 
     // The pieces `blob` collides as. `resolution` is the chunk's native resolution (a power of
     // four), which fixes the tree's depth. With `materials`, each voxel's palette slot is looked up

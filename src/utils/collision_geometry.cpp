@@ -30,7 +30,7 @@ namespace projv::utils {
         // `material`. A slot byte the blob does not have is material 0.
         bool decode(const std::vector<uint32_t>& geometry, VoxelOccupancy& occupancy, uint64_t& solid,
                     const std::vector<uint8_t>* materialIDs = nullptr, const SlotMaterials* materials = nullptr,
-                    std::vector<uint16_t>* material = nullptr) {
+                    std::vector<uint16_t>* material = nullptr, std::vector<uint8_t>* slots = nullptr) {
             const size_t nodeCount = geometry.size() / 3;
             struct Pending { size_t node; uint64_t cellZOrder; };
             std::vector<Pending> stack;
@@ -55,9 +55,11 @@ namespace projv::utils {
                         size_t at = occupancy.index(p - occupancy.origin);
                         uint8_t& cell = occupancy.cells[at];
                         if (!cell) { cell = 1; solid++; }
-                        if (material) {
+                        if (material || slots) {
                             size_t byte = offset + (uniform ? 0 : rank);
-                            (*material)[at] = byte < materialIDs->size() ? (*materials)[(*materialIDs)[byte]] : 0;
+                            uint8_t slot = byte < materialIDs->size() ? (*materialIDs)[byte] : 0;
+                            if (material) (*material)[at] = byte < materialIDs->size() ? (*materials)[slot] : 0;
+                            if (slots) (*slots)[at] = slot;
                         }
                         rank++;
                     }
@@ -141,6 +143,28 @@ namespace projv::utils {
 
     DecodeResult decodeOccupancy(const GeometryBlob& blob, uint32_t resolution, uint64_t maxCells, VoxelOccupancy& out) {
         return decodeInto(blob, resolution, maxCells, out, nullptr, nullptr);
+    }
+
+    DecodeResult decodeVoxelSlots(const GeometryBlob& blob, uint32_t resolution, uint64_t maxCells, VoxelOccupancy& out,
+                                  std::vector<uint8_t>& slots) {
+        core::ivec3 low, high;
+        out = VoxelOccupancy{};
+        slots.clear();
+        if (!blobContentBounds(blob, low, high)) return DecodeResult::Empty;
+        if (resolution > 0) {
+            core::ivec3 cube(int(resolution) - 1);
+            if (glm::any(glm::lessThan(low, core::ivec3(0))) || glm::any(glm::greaterThan(high, cube)))
+                return DecodeResult::Malformed;
+        }
+        core::ivec3 dims = high - low + core::ivec3(1);
+        uint64_t cellCount = uint64_t(dims.x) * uint64_t(dims.y) * uint64_t(dims.z);
+        out.origin = low;
+        out.dims = dims;
+        if (cellCount > maxCells) return DecodeResult::TooLarge;
+        out.cells.assign(size_t(cellCount), 0);
+        slots.assign(size_t(cellCount), 0);
+        if (!decode(blob.geometry, out, out.solid, &blob.materialIDs, nullptr, nullptr, &slots)) return DecodeResult::Malformed;
+        return DecodeResult::Ok;
     }
 
     namespace {

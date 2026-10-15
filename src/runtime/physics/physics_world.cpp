@@ -77,8 +77,11 @@ namespace projv::runtime {
 
 #ifdef JPH_ENABLE_ASSERTS
         // A failed Jolt assert is a misuse of Jolt by this file, so it is fatal in the builds that
-        // have them: logged with its location, then the breakpoint Jolt raises.
+        // have them: logged with its location, then the breakpoint Jolt raises. All but one: Update
+        // asserts when a step ran out of room for contacts, which is not a misuse but a scene bigger
+        // than the capacities -- step() says so loudly and carries on, as a release build would.
         bool joltAssertFailed(const char* expression, const char* message, const char* file, JPH::uint line) {
+            if (std::strcmp(expression, "errors == EPhysicsUpdateError::None") == 0) return false;
             core::error("jolt assert failed: {} ({}) at {}:{}", expression, message ? message : "", file, line);
             return true;
         }
@@ -297,19 +300,55 @@ namespace projv::runtime {
         // the piece has none; combined as Jolt combines bodies (friction the geometric mean,
         // restitution the larger), so a world without materials behaves exactly as before. Called
         // from the solver's threads; it only reads the table, which changes only between steps.
+        //
+        // It also notes impacts: contacts that begin in the step. They come in from the solver's
+        // threads in no fixed order, so they are collected under a lock and ordered after the step
+        // (PhysicsWorld::impacts). Only what does not change during a step is read here -- which
+        // bodies, where, the normal, their masses. Not velocities: Jolt applies gravity on other
+        // threads while contacts are found, so a velocity read here would depend on timing; how fast
+        // the bodies closed is worked out after the step from velocities taken before it.
+        struct NewContact {
+            uint32_t   a, b;
+            JPH::RVec3 point;
+            JPH::Vec3  normal;
+            float      inverseMassA, inverseMassB;
+        };
         class MaterialContacts final : public JPH::ContactListener {
         public:
             const std::vector<PhysicsMaterial>* table = nullptr;
             bool any = false;   // a material is defined: there is something to look up
+            std::mutex impactsLock;
+            std::vector<NewContact> added;
             void OnContactAdded(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold,
                                 JPH::ContactSettings& settings) override {
                 combine(a, b, manifold, settings);
+                noteImpact(a, b, manifold);
             }
             void OnContactPersisted(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold,
                                     JPH::ContactSettings& settings) override {
                 combine(a, b, manifold, settings);
             }
         private:
+            void noteImpact(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold) {
+                if (a.IsSensor() || b.IsSensor() || manifold.mRelativeContactPointsOn1.empty()) return;
+                auto inverseMass = [](const JPH::Body& body) {
+                    return body.IsDynamic() ? body.GetMotionProperties()->GetInverseMass() : 0.0f;
+                };
+                NewContact c;
+                c.inverseMassA = inverseMass(a);
+                c.inverseMassB = inverseMass(b);
+                if (!(c.inverseMassA + c.inverseMassB > 0.0f)) return;
+                c.point = JPH::RVec3::sZero();
+                const JPH::uint n = manifold.mRelativeContactPointsOn1.size();
+                for (JPH::uint i = 0; i < n; i++)
+                    c.point += 0.5f * (manifold.GetWorldSpaceContactPointOn1(i) + manifold.GetWorldSpaceContactPointOn2(i));
+                c.point /= float(n);
+                c.normal = manifold.mWorldSpaceNormal;   // moves b out of a: from a towards b
+                c.a = a.GetID().GetIndexAndSequenceNumber();
+                c.b = b.GetID().GetIndexAndSequenceNumber();
+                std::lock_guard guard(impactsLock);
+                added.push_back(c);
+            }
             static const VoxelMaterial* ours(const JPH::PhysicsMaterial* m) {
                 // Every material other than Jolt's default is one of ours: nothing else makes one.
                 return m && m != JPH::PhysicsMaterial::sDefault.GetPtr() ? static_cast<const VoxelMaterial*>(m) : nullptr;
@@ -640,6 +679,12 @@ namespace projv::runtime {
         std::vector<JPH::Ref<VoxelMaterial>>  joltMaterials = std::vector<JPH::Ref<VoxelMaterial>>(MAX_PHYSICS_MATERIALS);
         uint64_t                              materialsVersion = 0;   // bumped by every setMaterial
         MaterialContacts                      contacts;
+        std::vector<Impact>                   impacts;   // the last step's, ordered
+        float                                 minImpactSpeed = 1.0f;
+        // Each awake body's motion as the step began, by body index (snapshotVelocities).
+        struct Motion { bool awake = false; JPH::Vec3 linear, angular; JPH::RVec3 centre; };
+        std::vector<Motion>                   before;
+        std::vector<uint32_t>                 snapshotted;
         const VoxelMaterial* joltMaterial(uint16_t index) {
             if (!joltMaterials[index]) joltMaterials[index] = new VoxelMaterial(index);
             return joltMaterials[index].GetPtr();
@@ -676,6 +721,7 @@ namespace projv::runtime {
                           impl->broadPhaseLayers, impl->objectVsBroadPhase, impl->objectPairs);
         impl->system.SetGravity(toJolt(settings.gravity));
         impl->contacts.table = &impl->materials;
+        impl->minImpactSpeed = std::isfinite(settings.minImpactSpeed) ? std::max(settings.minImpactSpeed, 0.0f) : 1.0f;
         impl->system.SetContactListener(&impl->contacts);
         // Solver iterations: see PhysicsSettings::velocitySteps for why not Jolt's default.
         JPH::PhysicsSettings solver = impl->system.GetPhysicsSettings();
@@ -1293,8 +1339,11 @@ namespace projv::runtime {
         for (const Impl::Joint& j : impl->joints)
             if (j.constraint && j.desc.motor && j.desc.motorVelocity != 0.0f)
                 impl->system.GetBodyInterface().ActivateConstraint(j.constraint);
+        snapshotVelocities();
+        impl->contacts.added.clear();
         JPH::EPhysicsUpdateError errors =
             impl->system.Update(dt, 1, impl->tempAllocator.get(), impl->jobSystem.get());
+        orderImpacts();
         checkJoints(dt);
         sanityPass(dt);
         impl->stats.lastStepMilliseconds =
@@ -1571,8 +1620,17 @@ namespace projv::runtime {
                        material.friction, material.restitution);
             return false;
         }
+        if (!(material.strength >= 0.0f) || !std::isfinite(material.strength) || !(material.shardSize > 0.0f) ||
+            !std::isfinite(material.shardSize) || !std::isfinite(glm::dot(material.grain, material.grain)) ||
+            !(glm::dot(material.grain, material.grain) > 1e-12f) || material.fracture.empty() || material.fracture.size() > 64) {
+            core::warn("physics: refused material {}: strength {}, shard size {}, grain ({}, {}, {}), fracture '{}'", index,
+                       material.strength, material.shardSize, material.grain.x, material.grain.y, material.grain.z,
+                       material.fracture);
+            return false;
+        }
         PhysicsMaterial m = material;
         m.restitution = std::clamp(m.restitution, 0.0f, 1.0f);
+        m.grain = glm::normalize(m.grain);
         if (impl->recording) {
             impl->op(Op::SetMaterial);
             put(impl->log, index); put(impl->log, m.density); put(impl->log, m.friction); put(impl->log, m.restitution);
@@ -1815,6 +1873,75 @@ namespace projv::runtime {
     }
 
     const PhysicsStats& PhysicsWorld::stats() const { return impl->stats; }
+
+    const std::vector<Impact>& PhysicsWorld::impacts() const { return impl->impacts; }
+
+    // Every awake body's motion as the step begins (a body asleep is still). What impacts are
+    // measured against: see MaterialContacts.
+    void PhysicsWorld::snapshotVelocities() {
+        for (uint32_t index : impl->snapshotted) impl->before[index].awake = false;
+        impl->snapshotted.clear();
+        const JPH::BodyLockInterfaceNoLock& bodies = impl->system.GetBodyLockInterfaceNoLock();
+        const JPH::uint count = impl->system.GetNumActiveBodies(JPH::EBodyType::RigidBody);
+        const JPH::BodyID* active = impl->system.GetActiveBodiesUnsafe(JPH::EBodyType::RigidBody);
+        for (JPH::uint i = 0; i < count; i++) {
+            const JPH::Body* body = bodies.TryGetBody(active[i]);
+            if (!body) continue;
+            uint32_t index = active[i].GetIndex();
+            if (index >= impl->before.size()) impl->before.resize(index + 1);
+            Impl::Motion& m = impl->before[index];
+            m.awake = true;
+            m.linear = body->GetLinearVelocity();
+            m.angular = body->GetAngularVelocity();
+            m.centre = body->GetCenterOfMassPosition();
+            impl->snapshotted.push_back(index);
+        }
+    }
+
+    // The step's impacts, in an order that does not depend on threads: one per pair of bodies,
+    // `a` the lower id, the fastest contact of the pair (ties broken by where it was).
+    void PhysicsWorld::orderImpacts() {
+        std::vector<Impact> raw;
+        raw.reserve(impl->contacts.added.size());
+        const float minSpeed = impl->minImpactSpeed;
+        auto motion = [&](uint32_t id, JPH::RVec3Arg at, JPH::Vec3& linear) {
+            uint32_t index = JPH::BodyID(id).GetIndex();
+            if (index >= impl->before.size() || !impl->before[index].awake) { linear = JPH::Vec3::sZero(); return JPH::Vec3::sZero(); }
+            const Impl::Motion& m = impl->before[index];
+            linear = m.linear;
+            return m.linear + m.angular.Cross(JPH::Vec3(at - m.centre));
+        };
+        for (const NewContact& c : impl->contacts.added) {
+            JPH::Vec3 la, lb;
+            const JPH::Vec3 va = motion(c.a, c.point, la), vb = motion(c.b, c.point, lb);
+            const float speed = (va - vb).Dot(c.normal);
+            if (!(speed >= minSpeed)) continue;
+            Impact i;
+            i.a = BodyId{c.a};
+            i.b = BodyId{c.b};
+            i.point = core::vec3(float(c.point.GetX()), float(c.point.GetY()), float(c.point.GetZ()));
+            i.normal = core::vec3(c.normal.GetX(), c.normal.GetY(), c.normal.GetZ());
+            i.speed = speed;
+            i.energy = 0.5f * speed * speed / (c.inverseMassA + c.inverseMassB);
+            i.velocityA = core::vec3(la.GetX(), la.GetY(), la.GetZ());
+            i.velocityB = core::vec3(lb.GetX(), lb.GetY(), lb.GetZ());
+            raw.push_back(i);
+        }
+        for (Impact& i : raw)
+            if (i.b.value < i.a.value) {
+                std::swap(i.a, i.b);
+                std::swap(i.velocityA, i.velocityB);
+                i.normal = -i.normal;
+            }
+        auto key = [](const Impact& i) {
+            return std::make_tuple(i.a.value, i.b.value, -i.speed, i.point.x, i.point.y, i.point.z);
+        };
+        std::sort(raw.begin(), raw.end(), [&](const Impact& x, const Impact& y) { return key(x) < key(y); });
+        impl->impacts.clear();
+        for (const Impact& i : raw)
+            if (impl->impacts.empty() || impl->impacts.back().a != i.a || impl->impacts.back().b != i.b)
+                impl->impacts.push_back(i);
+    }
 
     namespace {
         class LayerMask final : public JPH::ObjectLayerFilter {

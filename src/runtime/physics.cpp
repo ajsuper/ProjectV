@@ -58,7 +58,17 @@ namespace projv::runtime {
             std::vector<Entity>           pendingJoints;
             std::vector<CharacterId>      doomedCharacters;
             std::vector<JointId>          doomedJoints;
-            struct Edit { Entity entity; std::vector<PendingVoxelOp> ops; };
+            // A voxel edit, or a strike (runtime::fracture): one queue, so they apply in the order issued.
+            struct Edit {
+                Entity entity;
+                std::vector<PendingVoxelOp> ops;
+                bool       strike = false;
+                core::vec3 at{0.0f}, push{0.0f};
+                float      energy = 0.0f;
+                // An impact's strike: what struck, and how fast it was going before it did.
+                Entity     striker = NullEntity;
+                core::vec3 strikerVelocity{0.0f};
+            };
             std::vector<Edit>             edits;
             // The physics material library: names in definition order (index = position + 1).
             struct Library {
@@ -68,6 +78,7 @@ namespace projv::runtime {
                 std::set<std::string>           warned;        // unknown names, logged once each
             } library;
             uint64_t                      seenPalettes = 0;  // palette versions and library at the last check
+            std::set<std::string>         warnedPatterns;    // fracture patterns named but not registered
         };
 
         PhysicsRuntime& runtimeOf(World& world) { return world.ctx().get<PhysicsRuntime>(); }
@@ -511,6 +522,306 @@ namespace projv::runtime {
             send(world, std::move(event));
         }
 
+        // ---- Fracture -------------------------------------------------------------------------
+
+        // The chunks under a voxel component (a chunk, or a grid's cells), each with where its voxels
+        // start in the component's voxel coordinates, and the component's voxel size.
+        struct VoxelSource {
+            struct Part { size_t chunk; core::ivec3 offset; uint32_t resolution; };
+            std::vector<Part> parts;
+            float voxel = 0.0f;
+        };
+        VoxelSource voxelSourceOf(const Scene& scene, ComponentHandle h) {
+            VoxelSource source;
+            const ComponentRecord& record = scene.components[h];
+            if (record.kind == ComponentKind::Chunk) {
+                if (record.chunkHandle >= scene.chunks.size()) return source;
+                const Chunk& chunk = scene.chunks[record.chunkHandle];
+                uint32_t resolution = std::max(chunk.header.resolution, 1u);
+                source.voxel = chunk.nativeScale / float(resolution);
+                source.parts.push_back({size_t(record.chunkHandle), core::ivec3(0), resolution});
+            } else if (record.gridIndex >= 0 && size_t(record.gridIndex) < scene.grids.size()) {
+                const SceneGrid& grid = scene.grids[size_t(record.gridIndex)];
+                for (size_t lin = 0; lin < grid.cellToChunk.size(); lin++) {
+                    int32_t c = grid.cellToChunk[lin];
+                    if (c < 0 || size_t(c) >= scene.chunks.size() || !scene.chunks[size_t(c)].alive) continue;
+                    uint32_t resolution = std::max(scene.chunks[size_t(c)].header.resolution, 1u);
+                    int x = int(lin % size_t(grid.dims.x)), y = int((lin / size_t(grid.dims.x)) % size_t(grid.dims.y));
+                    int z = int(lin / (size_t(grid.dims.x) * size_t(grid.dims.y)));
+                    core::ivec3 cell = grid.originCellCoord + core::ivec3(x, y, z);
+                    source.parts.push_back({size_t(c), cell * int(resolution), resolution});
+                    source.voxel = grid.nativeCellSize / float(resolution);
+                }
+            }
+            return source;
+        }
+
+        // The voxels of `source` whose centres lie within `radius` of `at` (both in voxels), with their
+        // palette slots, in z, y, x order. Chunks are decoded once and kept in `decoded`.
+        struct Decoded { utils::VoxelOccupancy occupancy; std::vector<uint8_t> slots; bool ok = false; };
+        std::vector<FractureVoxel> voxelsNear(const Scene& scene, const VoxelSource& source, core::vec3 at, float radius,
+                                              uint64_t maxCells, std::map<size_t, Decoded>& decoded) {
+            std::vector<FractureVoxel> out;
+            const core::ivec3 low(glm::floor(at - radius)), high(glm::ceil(at + radius));
+            for (const VoxelSource::Part& part : source.parts) {
+                core::ivec3 partHigh = part.offset + core::ivec3(int(part.resolution) - 1);
+                if (glm::any(glm::lessThan(partHigh, low)) || glm::any(glm::greaterThan(part.offset, high))) continue;
+                auto [it, fresh] = decoded.try_emplace(part.chunk);
+                Decoded& d = it->second;
+                if (fresh) {
+                    const Chunk& chunk = scene.chunks[part.chunk];
+                    if (chunk.geometryPoolIndex >= 0 && size_t(chunk.geometryPoolIndex) < scene.geometryPool.size())
+                        d.ok = utils::decodeVoxelSlots(scene.geometryPool[size_t(chunk.geometryPoolIndex)], part.resolution,
+                                                       maxCells, d.occupancy, d.slots) == utils::DecodeResult::Ok;
+                }
+                if (!d.ok) continue;
+                const utils::VoxelOccupancy& o = d.occupancy;
+                core::ivec3 from = glm::max(low - part.offset - o.origin, core::ivec3(0));
+                core::ivec3 to = glm::min(high - part.offset - o.origin, o.dims - core::ivec3(1));
+                for (int z = from.z; z <= to.z; z++)
+                    for (int y = from.y; y <= to.y; y++)
+                        for (int x = from.x; x <= to.x; x++) {
+                            size_t i = o.index({x, y, z});
+                            if (!o.cells[i]) continue;
+                            core::ivec3 p = part.offset + o.origin + core::ivec3(x, y, z);
+                            if (glm::distance(core::vec3(p) + core::vec3(0.5f), at) > radius) continue;
+                            FractureVoxel v;
+                            v.position = p;
+                            v.slot = d.slots[i];
+                            out.push_back(v);
+                        }
+            }
+            std::sort(out.begin(), out.end(), [](const FractureVoxel& a, const FractureVoxel& b) {
+                return std::make_tuple(a.position.z, a.position.y, a.position.x) < std::make_tuple(b.position.z, b.position.y, b.position.x);
+            });
+            return out;
+        }
+
+        constexpr float MAX_FRACTURE_REACH = 64.0f;   // voxels
+
+        // Whether anything in a voxel body can break: its own material, or one its palette names, has
+        // a strength. What keeps every landing on a floor from looking at the floor's voxels.
+        bool canBreak(World& world, PhysicsRuntime& physics, const Scene& scene, Entity entity) {
+            const PhysicsWorld& sim = *physics.world;
+            if (uint16_t own = ownMaterial(world, physics, entity); own && sim.material(own).strength > 0.0f) return true;
+            ComponentHandle h = voxelComponentOf(world, entity);
+            if (h == INVALID_COMPONENT_HANDLE) return false;
+            const ComponentRecord& record = scene.components[h];
+            ComponentHandle owner = record.kind == ComponentKind::Chunk && record.chunkHandle < scene.chunks.size()
+                                        ? paletteOwner(scene, scene.chunks[record.chunkHandle])
+                                        : h;
+            if (owner >= scene.components.size()) return false;
+            for (const Material& entry : scene.components[owner].materialPalette)
+                if (!entry.physics.empty()) {
+                    auto found = physics.library.index.find(entry.physics);
+                    if (found != physics.library.index.end() && sim.material(found->second).strength > 0.0f) return true;
+                }
+            return false;
+        }
+
+        // A strike, applied: see runtime::fracture.
+        void breakBody(World& world, PhysicsRuntime& physics, Scene& scene, const PhysicsRuntime::Edit& strike) {
+            const Entity entity = strike.entity;
+            if (!world.valid(entity)) return;
+            const PhysicsBody* body = world.try_get<PhysicsBody>(entity);
+            const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
+            const RigidBody* rigid = world.try_get<RigidBody>(entity);
+            const StaticCollider* fixed = world.try_get<StaticCollider>(entity);
+            if (!body || !link || (!rigid && !fixed) || (rigid && rigid->shape != RigidBody::Shape::Voxels)) {
+                core::trace("physics: fracture of entity {} skipped: not a voxel body", static_cast<uint32_t>(entity));
+                return;
+            }
+            const ComponentHandle h = voxelComponentOf(world, entity);
+            if (h == INVALID_COMPONENT_HANDLE) {
+                core::trace("physics: fracture of entity {} skipped: not a chunk, a grid or a one-chunk prefab",
+                            static_cast<uint32_t>(entity));
+                return;
+            }
+            const VoxelSource source = voxelSourceOf(scene, h);
+            if (source.parts.empty() || !(source.voxel > 0.0f)) return;
+            const core::mat4 toWorld = utils::getComponentWorldMatrix(scene, h);
+            const float scale = glm::length(core::vec3(toWorld[0]));
+            const float metres = source.voxel * scale;   // one voxel, in the world
+            if (!(metres > 0.0f)) return;
+            const core::vec3 at = core::vec3(glm::inverse(toWorld) * core::vec4(strike.at, 1.0f)) / source.voxel;
+
+            // Materials: each palette slot's, the body's own where a slot names none.
+            const ComponentHandle owner = paletteOwner(scene, scene.chunks[source.parts.front().chunk]);
+            utils::SlotMaterials slotMaterials;
+            slotMaterialsOf(physics, scene, owner, slotMaterials);
+            const uint16_t own = ownMaterial(world, physics, entity);
+            const PhysicsWorld& sim = *physics.world;
+            auto materialOf = [&](uint8_t slot) { return slotMaterials[slot] ? slotMaterials[slot] : own; };
+            auto breakable = [&](uint16_t m) { return m != 0 && sim.material(m).strength > 0.0f; };
+
+            // What was struck: the voxel nearest the point.
+            std::map<size_t, Decoded> decoded;
+            const uint64_t maxCells = physics.collision.maxDecodedCells;
+            std::vector<FractureVoxel> near = voxelsNear(scene, source, at, 3.0f, maxCells, decoded);
+            if (near.empty()) {
+                core::trace("physics: fracture of entity {}: no voxel within three of the strike", static_cast<uint32_t>(entity));
+                return;
+            }
+            const FractureVoxel* struck = &near.front();
+            for (const FractureVoxel& v : near)
+                if (glm::distance(core::vec3(v.position) + 0.5f, at) < glm::distance(core::vec3(struck->position) + 0.5f, at))
+                    struck = &v;
+            const uint16_t struckMaterial = materialOf(struck->slot);
+            if (!breakable(struckMaterial)) {
+                core::trace("physics: fracture of entity {}: what was struck does not break", static_cast<uint32_t>(entity));
+                return;
+            }
+            const PhysicsMaterial material = sim.material(struckMaterial);
+            if (!(strike.energy > 0.0f) || !std::isfinite(strike.energy)) return;
+            float reach = std::cbrt(3.0f * strike.energy / (4.0f * 3.14159265f * material.strength)) / metres;
+            if (reach > MAX_FRACTURE_REACH) {
+                core::trace("physics: fracture of entity {}: reach {} voxels capped at {}", static_cast<uint32_t>(entity), reach,
+                            MAX_FRACTURE_REACH);
+                reach = MAX_FRACTURE_REACH;
+            }
+            if (reach < 0.5f) return;   // not enough to break a voxel
+            const bool impact = strike.striker != NullEntity;
+            if (impact && reach < material.shardSize / metres) return;   // a knock, not a break
+            const float outer = 1.5f * reach;
+
+            std::vector<FractureVoxel> voxels = voxelsNear(scene, source, at, outer, maxCells, decoded);
+            for (FractureVoxel& v : voxels) {
+                v.material = materialOf(v.slot);
+                v.breakable = breakable(v.material);
+            }
+            const FracturePattern* pattern = fracturePattern(world, material.fracture);
+            if (!pattern) {
+                if (physics.warnedPatterns.insert(material.fracture).second)
+                    core::warn("physics: no fracture pattern '{}' is registered; breaking as \"shatter\"", material.fracture);
+                pattern = fracturePattern(world, "shatter");
+                if (!pattern) return;
+            }
+            const NetId* net = world.try_get<NetId>(entity);
+            Fnv seed;
+            seed.add(net ? net->value : 0u);
+            seed.add(sim.tick());
+            seed.add(strike.at);
+            seed.add(strike.energy);
+            FractureRandom random(seed.value);
+            const FractureInput input{voxels, at, reach, outer, material.shardSize / metres, material.grain, material};
+            std::vector<int32_t> shardOf = (*pattern)(input, random);
+            if (shardOf.size() != voxels.size()) {
+                core::warn("physics: fracture pattern '{}' answered for {} voxels of {}; nothing breaks", material.fracture,
+                           shardOf.size(), voxels.size());
+                return;
+            }
+            std::vector<std::vector<size_t>> shards = fractureShards(input, shardOf);
+            if (shards.empty()) return;
+
+            // The shards: each a new top-level chunk holding its voxels, with the body's palette,
+            // placed where they were.
+            const std::vector<Material> palette = scene.components[owner].materialPalette;
+            const core::quat rotation = utils::getComponentWorldRotation(scene, h);
+            const std::string name = scene.components[h].name;
+            const BodyState state = sim.bodyState(body->id);
+            struct Made { ComponentHandle component; core::vec3 centre; size_t voxels; };
+            std::vector<Made> made;
+            std::vector<PendingVoxelOp> cut;
+            for (const std::vector<size_t>& shard : shards) {
+                core::ivec3 lo(std::numeric_limits<int>::max()), hi(std::numeric_limits<int>::min());
+                core::vec3 sum(0.0f);
+                for (size_t i : shard) {
+                    lo = glm::min(lo, voxels[i].position);
+                    hi = glm::max(hi, voxels[i].position);
+                    sum += core::vec3(voxels[i].position) + 0.5f;
+                }
+                const core::ivec3 size = hi - lo + core::ivec3(1);
+                const int extent = std::max(size.x, std::max(size.y, size.z));
+                uint32_t resolution = 4;
+                while (int(resolution) < extent) resolution *= 4;
+                ComponentHandle piece = utils::addComponent(scene, ComponentKind::Chunk, name + " shard", INVALID_COMPONENT_HANDLE,
+                                                            resolution, source.voxel);
+                if (piece == INVALID_COMPONENT_HANDLE) continue;
+                scene.components[piece].materialPalette = palette;
+                scene.components[piece].paletteVersion++;
+                core::vec3 corner = core::vec3(toWorld * core::vec4(core::vec3(lo) * source.voxel, 1.0f));
+                utils::setComponentTransform(scene, piece, corner, rotation, scale);
+                std::vector<PendingVoxelOp> adds;
+                adds.reserve(shard.size());
+                for (size_t i : shard) {
+                    const FractureVoxel& v = voxels[i];
+                    uint32_t colour = v.slot < palette.size() ? palette[v.slot].packedColor : 0u;
+                    adds.push_back({true, v.position - lo, colour, v.slot});
+                    cut.push_back({false, v.position, 0});
+                }
+                utils::queueVoxelAdd(scene, piece, adds);
+                core::vec3 centre = core::vec3(toWorld * core::vec4(sum / float(shard.size()) * source.voxel, 1.0f));
+                made.push_back({piece, centre, shard.size()});
+            }
+            utils::queueVoxelRemove(scene, h, cut);
+            utils::updateScene(scene);
+
+            // What the shards are: a dynamic body's own RigidBody, or one from the static collider.
+            RigidBody shardRigid;
+            if (rigid) {
+                shardRigid = *rigid;
+                shardRigid.motion = MotionType::Dynamic;
+            } else {
+                shardRigid.friction = fixed->friction;
+                shardRigid.restitution = fixed->restitution;
+                shardRigid.material = fixed->material;
+            }
+            shardRigid.breaksOnImpact = false;   // debris does not shatter again on landing
+            const bool struckMoves = body->motion == MotionType::Dynamic;
+            uint64_t total = 0;
+            if (rigid && rigid->mass > 0.0f) {
+                for (const VoxelSource::Part& part : source.parts) {
+                    utils::VoxelOccupancy o;
+                    const Chunk& chunk = scene.chunks[part.chunk];
+                    if (chunk.geometryPoolIndex >= 0 &&
+                        utils::decodeOccupancy(scene.geometryPool[size_t(chunk.geometryPoolIndex)], part.resolution, maxCells, o) ==
+                            utils::DecodeResult::Ok)
+                        total += o.solid;
+                }
+            }
+            uint64_t broken = 0;
+            for (const Made& m : made) broken += m.voxels;
+            total += broken;   // counted after the cut
+            const OnUnlink onUnlink = link->onUnlink;
+            const float originalMass = rigid ? rigid->mass : 0.0f;
+            const float edge = outer * metres;
+            BodyFractured event{entity, {}, strike.at, strike.striker, strike.energy};
+            for (const Made& m : made) {
+                Entity e = world.create();
+                if (!linkComponent(world, e, m.component, LinkMode::Root, onUnlink)) {
+                    world.destroy(e);
+                    continue;
+                }
+                RigidBody r = shardRigid;
+                if (originalMass > 0.0f) r.mass = originalMass * float(m.voxels) / float(std::max<uint64_t>(total, 1));
+                float falloff = std::max(0.0f, 1.0f - glm::distance(m.centre, strike.at) / std::max(edge, 1e-6f));
+                core::vec3 velocity = state.linearVelocity + glm::cross(state.angularVelocity, m.centre - state.centerOfMass) +
+                                      strike.push * falloff;
+                physics.carried[e] = {velocity, state.angularVelocity};
+                if (net) assignNetId(world, e);
+                world.emplace<RigidBody>(e, r);
+                event.shards.push_back(e);
+            }
+            if (originalMass > 0.0f && world.valid(entity)) {
+                float kept = originalMass * float(total - broken) / float(std::max<uint64_t>(total, 1));
+                world.patch<RigidBody>(entity, [kept](RigidBody& rb) { rb.mass = std::max(kept, 1e-3f); });
+            }
+            // What struck something that does not move carries on with the energy the break did not
+            // use: breaking a voxel costs the struck material's strength times its volume.
+            if (impact && !struckMoves && world.valid(strike.striker)) {
+                if (const PhysicsBody* striker = world.try_get<PhysicsBody>(strike.striker);
+                    striker && striker->motion == MotionType::Dynamic) {
+                    const float used = material.strength * float(broken) * metres * metres * metres;
+                    const float kept = std::sqrt(std::clamp(1.0f - used / strike.energy, 0.0f, 1.0f));
+                    BodyState now = physics.world->bodyState(striker->id);
+                    physics.world->setVelocity(striker->id, strike.strikerVelocity * kept, now.angularVelocity);
+                }
+            }
+            core::trace("physics: entity {} broke into {} shards ({} voxels, reach {:.1f})", static_cast<uint32_t>(entity),
+                        event.shards.size(), broken, reach);
+            send(world, std::move(event));
+        }
+
         void step(Application& app) {
             World& world = app.world;
             PhysicsRuntime& physics = runtimeOf(world);
@@ -531,6 +842,11 @@ namespace projv::runtime {
                 std::vector<PhysicsRuntime::Edit> edits;
                 edits.swap(physics.edits);
                 for (const auto& edit : edits) {
+                    if (edit.strike) {
+                        utils::updateScene(*scene);   // what was edited before it, it sees
+                        breakBody(world, physics, *scene, edit);
+                        continue;
+                    }
                     ComponentHandle target = voxelComponentOf(world, edit.entity);
                     if (target == INVALID_COMPONENT_HANDLE) continue;
                     std::vector<PendingVoxelOp> adds, removes;
@@ -854,6 +1170,37 @@ namespace projv::runtime {
                 c.position = sim.characterState(c.id).position;
             }
 
+            // 7a. Impacts: each voxel body that can break on impact is struck, at the next step (see
+            //     runtime::fracture). In the order the impacts come, which every peer agrees on.
+            for (const Impact& hit : sim.impacts()) {
+                auto entityOf = [&](BodyId id) {
+                    auto it = physics.byBody.find(id.value);
+                    return it != physics.byBody.end() ? it->second : NullEntity;
+                };
+                const Entity sides[2] = {entityOf(hit.a), entityOf(hit.b)};
+                const core::vec3 velocities[2] = {hit.velocityA, hit.velocityB};
+                for (int k = 0; k < 2; k++) {
+                    const Entity struck = sides[k], striker = sides[1 - k];
+                    if (struck == NullEntity || striker == NullEntity || !world.valid(struck)) continue;
+                    const RigidBody* rigid = world.try_get<RigidBody>(struck);
+                    const StaticCollider* fixed = world.try_get<StaticCollider>(struck);
+                    bool breaks = rigid ? rigid->breaksOnImpact && rigid->shape == RigidBody::Shape::Voxels
+                                        : fixed && fixed->breaksOnImpact;
+                    if (!breaks || !scene || !canBreak(world, physics, *scene, struck)) continue;
+                    PhysicsRuntime::Edit strike{struck, {}};
+                    strike.strike = true;
+                    strike.at = hit.point;
+                    strike.energy = hit.energy;
+                    strike.striker = striker;
+                    strike.strikerVelocity = velocities[1 - k];
+                    // Its pieces go the striker's way at its closing speed (fading to the edge), so what
+                    // is in its way goes ahead of it rather than stopping it.
+                    const core::vec3 towards = k == 0 ? -hit.normal : hit.normal;   // from the striker (b, then a) into the struck
+                    strike.push = towards * hit.speed;
+                    physics.edits.push_back(std::move(strike));
+                }
+            }
+
             // 7b. Joints that broke, or lost a body.
             {
                 std::vector<PhysicsWorld::BrokenJoint> broken = sim.takeBrokenJoints();
@@ -1024,6 +1371,10 @@ namespace projv::runtime {
         physics.seenStamp = latestBlobContentStamp();
 
         installNetIds(world);
+        registerFracturePattern(world, "shatter", fracture_patterns::shatter);
+        registerFracturePattern(world, "splinter", fracture_patterns::splinter);
+        registerFracturePattern(world, "crumble", fracture_patterns::crumble);
+        registerFracturePattern(world, "seams", fracture_patterns::seams);
         registerComponent<RigidBody>(world);
         registerComponent<StaticCollider>(world);
         registerComponent<CharacterController>(world);
@@ -1067,6 +1418,19 @@ namespace projv::runtime {
 
     void editVoxels(World& world, Entity entity, const std::vector<PendingVoxelOp>& ops) {
         runtimeOf(world).edits.push_back({entity, ops});
+    }
+
+    void fracture(World& world, Entity entity, core::vec3 at, float energy, core::vec3 push) {
+        if (!std::isfinite(energy) || !std::isfinite(glm::dot(at, at)) || !std::isfinite(glm::dot(push, push))) {
+            core::warn("physics: refused a fracture with a value that is not finite");
+            return;
+        }
+        PhysicsRuntime::Edit strike{entity, {}};
+        strike.strike = true;
+        strike.at = at;
+        strike.push = push;
+        strike.energy = energy;
+        runtimeOf(world).edits.push_back(std::move(strike));
     }
 
     ComponentHandle voxelComponentOf(const World& world, Entity entity) {
@@ -1189,6 +1553,9 @@ namespace projv::runtime {
             return 0;
         }
         if (!physics.world->setMaterial(index, material)) return 0;
+        if (material.strength > 0.0f && !fracturePattern(world, material.fracture))
+            core::warn("physics: physics material '{}' breaks as '{}', which no fracture pattern is registered as (yet)", name,
+                       material.fracture);
         if (found == physics.library.index.end()) {
             physics.library.names.push_back(name);
             physics.library.index[name] = index;
@@ -1235,8 +1602,16 @@ namespace projv::runtime {
                 m.density = entry.value("density", m.density);
                 m.friction = entry.value("friction", m.friction);
                 m.restitution = entry.value("restitution", m.restitution);
+                m.strength = entry.value("strength", m.strength);
+                m.fracture = entry.value("fracture", m.fracture);
+                m.shardSize = entry.value("shardSize", m.shardSize);
+                if (entry.contains("grain")) {
+                    const nlohmann::json& g = entry["grain"];
+                    if (!g.is_array() || g.size() != 3) throw nlohmann::json::type_error::create(302, "grain is three numbers", &g);
+                    m.grain = core::vec3(g[0].get<float>(), g[1].get<float>(), g[2].get<float>());
+                }
             } catch (const nlohmann::json::exception&) {
-                core::warn("physics: '{}': material '{}' has a value that is not a number; the rest are not loaded", path,
+                core::warn("physics: '{}': material '{}' has a value of the wrong type; the rest are not loaded", path,
                            entry["name"].get<std::string>());
                 return false;
             }
@@ -1255,6 +1630,8 @@ namespace projv::runtime {
             PhysicsMaterial m = sim.material(uint16_t(i + 1));
             for (char c : physics.library.names[i]) h.add(c);
             h.add(m.density); h.add(m.friction); h.add(m.restitution);
+            h.add(m.strength); h.add(m.shardSize); h.add(m.grain);
+            for (char c : m.fracture) h.add(c);
         }
         for (auto [entity, net] : bodiesInOrder(world)) {
             BodyState s = sim.bodyState(world.get<PhysicsBody>(entity).id);
@@ -1484,6 +1861,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::RigidBody>::save(const pro
     if (b.layer != defaults.layer) j["layer"] = layerName(b.layer);
     if (b.quality != defaults.quality) j["quality"] = qualities[size_t(b.quality)];
     if (!b.material.empty()) j["material"] = b.material;
+    if (!b.breaksOnImpact) j["breaksOnImpact"] = false;
     return j;
 }
 
@@ -1527,6 +1905,7 @@ std::optional<projv::RigidBody> projv::runtime::ComponentTraits<projv::RigidBody
     b.angularDamping = j.value("angularDamping", b.angularDamping);
     b.gravityFactor = j.value("gravityFactor", b.gravityFactor);
     b.material = j.value("material", std::string());
+    b.breaksOnImpact = j.value("breaksOnImpact", true);
     return b;
 }
 
@@ -1538,6 +1917,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::StaticCollider>::save(cons
     if (c.layer != defaults.layer) j["layer"] = layerName(c.layer);
     if (c.splits) j["splits"] = true;
     if (!c.material.empty()) j["material"] = c.material;
+    if (!c.breaksOnImpact) j["breaksOnImpact"] = false;
     return j;
 }
 
@@ -1553,6 +1933,7 @@ std::optional<projv::StaticCollider> projv::runtime::ComponentTraits<projv::Stat
     }
     c.splits = j.value("splits", false);
     c.material = j.value("material", std::string());
+    c.breaksOnImpact = j.value("breaksOnImpact", true);
     return c;
 }
 

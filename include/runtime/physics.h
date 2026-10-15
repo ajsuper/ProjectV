@@ -8,6 +8,7 @@
 #include "core/application.h"
 #include "core/world.h"
 #include "runtime/entities.h"
+#include "runtime/fracture.h"
 #include "runtime/net.h"
 #include "runtime/physics/physics_world.h"
 #include "runtime/scene_bridge.h"
@@ -73,6 +74,10 @@ namespace projv {
         // (`mass` still overrides): the material of a primitive, and of every voxel whose palette
         // entry names none. A palette entry that names one wins for its voxels.
         std::string           material;
+        // Whether a hit can break its voxels (see runtime::fracture: "On impact"). Only voxels whose
+        // material has a strength break at all; shards a fracture throws off have this off, so
+        // debris does not shatter again on landing.
+        bool                  breaksOnImpact = true;
     };
 
     // A kinematic body that flies on by itself: each physics step moves it `velocity` (m/s) and turns
@@ -94,6 +99,7 @@ namespace projv {
         bool                  splits = false;
         // As RigidBody::material: friction and restitution from the library when set.
         std::string           material;
+        bool                  breaksOnImpact = true;   // as RigidBody::breaksOnImpact
     };
 
     // One chunk's part of a voxel body: which chunk, the shared shape built from it, and where it
@@ -192,6 +198,22 @@ namespace projv {
     // else the pieces should carry.
     struct BodySplit { Entity parent; std::vector<Entity> pieces; };
 
+    // A strike broke a body (runtime::fracture): `shards` are the pieces it threw off, each a new
+    // entity linked to a new top-level component holding exactly those voxels, with their palette
+    // entries, given a RigidBody and moving as that part of the body was, plus the strike's push.
+    // A dynamic body's RigidBody is theirs too (its mass shared out by voxel count, if it named one);
+    // a static collider's shards take its friction, restitution and material. What is left of the
+    // body is rebuilt, and pieces of it that the strike cut loose split as any edit's do (BodySplit).
+    // `striker`: what hit it, when an impact broke it; NullEntity for a runtime::fracture call.
+    // `energy`: the strike's, J.
+    struct BodyFractured {
+        Entity entity;
+        std::vector<Entity> shards;
+        core::vec3 at;
+        Entity striker = NullEntity;
+        float energy = 0.0f;
+    };
+
     // An edit took away every voxel a body was made from: it has no body any more, and nothing is
     // drawn for it. The entity stays; whether it goes (it usually should) is the game's call.
     struct BodyEmptied { Entity entity; };
@@ -242,7 +264,9 @@ namespace projv::runtime {
     uint16_t physicsMaterialIndex(const World& world, const std::string& name);
     std::optional<PhysicsMaterial> physicsMaterial(const World& world, const std::string& name);
     // A library file, defined in file order:
-    //     { "v": 1, "materials": [ { "name": "stone", "density": 2400, "friction": 0.8, "restitution": 0.1 }, ... ] }
+    //     { "v": 1, "materials": [ { "name": "stone", "density": 2400, "friction": 0.8, "restitution": 0.1,
+    //                                "strength": 2e5, "fracture": "shatter", "shardSize": 0.5 }, ... ] }
+    // ("grain": [0, 1, 0] too, for "splinter").
     // Missing values are PhysicsMaterial's defaults. False (logged) if the file cannot be read or
     // parsed; materials before a bad entry stay defined.
     bool loadPhysicsMaterials(World& world, const std::string& path);
@@ -278,6 +302,29 @@ namespace projv::runtime {
     // the same step. Edits made directly through utils work too; the physics notices them at the
     // next step either way, rebuilding shapes and splitting what was cut loose.
     void editVoxels(World& world, Entity entity, const std::vector<PendingVoxelOp>& ops);
+
+    // Breaks the voxel body `entity` where it is struck at the world point `at` with `energy` joules,
+    // at the start of the next fixed step, in order with editVoxels. The voxel nearest `at` (within
+    // three voxels) is what was struck: its physics material's strength sets the reach -- the
+    // radius whose sphere holds energy / strength cubic metres -- and its fracture pattern sets
+    // which voxels go together (runtime/fracture.h). Voxels whose material has no strength never
+    // break; neither does anything when the struck one's has none. Each shard is a body of its own
+    // (BodyFractured), thrown with `push` (m/s) at the strike, falling off to nothing at the edge
+    // of the break. Static colliders break too; their shards are dynamic.
+    //
+    // Works on what voxelComponentOf finds: a chunk, a grid, or a prefab of one chunk. The reach
+    // is capped at 64 voxels.
+    //
+    // **On impact** the engine calls this itself. When two bodies meet closing faster than
+    // PhysicsSettings::minImpactSpeed (PhysicsWorld::impacts), each that is a voxel body with
+    // breaksOnImpact is struck at the contact with the collision's energy -- half the pair's reduced
+    // mass times the closing speed squared -- and its shards pushed on at the closing speed, so what
+    // is in the striker's way goes ahead of it. An
+    // impact must break out at least the struck material's shardSize, or nothing breaks: a crate set
+    // down on a stone floor does not chip it. When what was struck does not move (a static or
+    // kinematic body), the striker gets back the energy the break did not use, along the way it was
+    // going: a boulder that breaks a hole in a wall carries on through it.
+    void fracture(World& world, Entity entity, core::vec3 at, float energy, core::vec3 push = core::vec3(0.0f));
 
     // The component voxel edits to `entity` go to: the one it links when that is a chunk or a grid,
     // or the single chunk inside the asset it links (a prefab). INVALID for anything else.

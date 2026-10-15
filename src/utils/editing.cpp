@@ -83,7 +83,7 @@ namespace projv::utils {
                     continue;
                 }
                 if (op.isAdd) {
-                    uint8_t slot = internMaterial(scene, comp, "", op.packedColor);
+                    uint8_t slot = op.slot != INVALID_MATERIAL ? op.slot : internMaterial(scene, comp, "", op.packedColor);
                     brickMapSetVoxel(map, x, y, z, slot);
                 } else {
                     brickMapClearVoxel(map, x, y, z);
@@ -304,7 +304,7 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
                             int32_t lx = static_cast<int32_t>(floorMod(op.position.x, static_cast<int32_t>(res)));
                             int32_t ly = static_cast<int32_t>(floorMod(op.position.y, static_cast<int32_t>(res)));
                             int32_t lz = static_cast<int32_t>(floorMod(op.position.z, static_cast<int32_t>(res)));
-                            uint8_t slot = internMaterial(scene, comp, "", op.packedColor);
+                            uint8_t slot = op.slot != INVALID_MATERIAL ? op.slot : internMaterial(scene, comp, "", op.packedColor);
                             brickMapSetVoxel(*brickMap, lx, ly, lz, slot);
                         }
                     }

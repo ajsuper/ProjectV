@@ -132,10 +132,24 @@ namespace projv::runtime {
     // piece (utils::SlotMaterials); a contact uses each side's -- the material of the piece touched,
     // or the body's values where it has none -- combined as Jolt combines bodies: friction the
     // geometric mean, restitution the larger.
+    //
+    // How it breaks (runtime::fracture) is part of it too, though the simulation itself never reads
+    // it: a strike breaks the voxels within a reach set by its energy and the struck material's
+    // strength, into shards laid out by the material's fracture pattern.
     struct PhysicsMaterial {
         float density = 1000.0f;    // kg/m^3
         float friction = 0.6f;
         float restitution = 0.0f;   // 0..1
+        // Joules to break a cubic metre: a strike of energy E breaks out to the radius whose sphere
+        // holds E / strength. 0: it does not break.
+        float strength = 0.0f;
+        // How it breaks: a pattern registered by name (runtime::registerFracturePattern). Built in:
+        // "shatter" (stone, glass), "splinter" (wood, along `grain`), "crumble" (plaster, earth),
+        // "seams" (brick: apart at palette-entry boundaries first).
+        std::string fracture = "shatter";
+        float shardSize = 0.5f;     // m: about how big a shard is
+        // The direction splinters run along, in the voxels' own frame (a component's local axes).
+        core::vec3 grain{0.0f, 1.0f, 0.0f};
         bool operator==(const PhysicsMaterial&) const = default;
     };
     constexpr uint16_t MAX_PHYSICS_MATERIALS = 1024;   // indices 1..1023
@@ -228,6 +242,10 @@ namespace projv::runtime {
         int        jointVelocitySteps = 30;
         int        jointPositionSteps = 6;
 
+        // Contacts that begin closing faster than this are impacts (PhysicsWorld::impacts): what
+        // breaks voxels on impact, and what a game hangs sounds and damage on.
+        float      minImpactSpeed = 1.0f;     // m/s
+
         // Record every call that changes the simulation, from construction on, with the state hash
         // after each step: PhysicsWorld::recording() returns it, and PhysicsWorld::replay plays it
         // into a fresh world and says whether every step came out the same. A determinism check
@@ -238,6 +256,21 @@ namespace projv::runtime {
         // machine (one fewer than it has cores, at most 7). Results do not depend on the count --
         // a test holds that -- so this is a speed setting only.
         int        threads = -1;
+    };
+
+    // Two bodies that began touching in a step, closing at `speed` or more (PhysicsSettings::
+    // minImpactSpeed): one per pair of bodies -- the fastest of their contacts -- with `a` the
+    // lower id. Speeds and velocities are the bodies' as the step began, before the solver met the
+    // contact, so what the collision took out can be given back (a boulder through a wall).
+    struct Impact {
+        BodyId     a, b;
+        core::vec3 point{0.0f};               // world space, between the two surfaces
+        core::vec3 normal{0.0f, 1.0f, 0.0f};  // from a towards b
+        float      speed = 0.0f;              // closing speed along the normal, m/s
+        // What the collision can take out of the motion: half the pair's reduced mass times the
+        // closing speed squared (the whole of the striker's when it strikes something static), J.
+        float      energy = 0.0f;
+        core::vec3 velocityA{0.0f}, velocityB{0.0f};   // each body's linear velocity, before
     };
 
     struct PhysicsStats {
@@ -416,7 +449,8 @@ namespace projv::runtime {
         // ---- Materials ---------------------------------------------------------------------------
         // Defines (or redefines) material `index`, 1..MAX_PHYSICS_MATERIALS-1. False, logged, for an
         // index out of range or values that are not usable (density not positive, friction
-        // negative, anything non-finite); restitution is clamped to 0..1. Friction and restitution
+        // negative, strength negative, shard size not positive, a zero grain, anything non-finite);
+        // restitution is clamped to 0..1 and the grain normalized. Friction and restitution
         // apply from the next step to every contact; a density is baked into voxel shapes, so it
         // reaches bodies made after the change.
         bool setMaterial(uint16_t index, const PhysicsMaterial& material);
@@ -532,8 +566,13 @@ namespace projv::runtime {
         void corruptBodyForTesting(BodyId id);
 
         const PhysicsStats& stats() const;
+        // The impacts of the last step, ordered by (a, b): the same on every machine, whatever
+        // thread the solver met each contact on.
+        const std::vector<Impact>& impacts() const;
 
     private:
+        void snapshotVelocities();
+        void orderImpacts();
         void sanityPass(float dt);
         void updateCharacters(float dt);
         void checkJoints(float dt);

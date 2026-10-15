@@ -1,7 +1,8 @@
 # Physics: Jolt, voxel collision, ready for networking
 
 Status: **approved**, 2026-10-09. **M0-M6 done** (2026-10-13); joints (2026-10-13) and physics materials (2026-10-14) built;
-M7 (contours) waits on the contour work. Next: strength and fracture on the material.
+M7 (contours) waits on the contour work. Fracture on the material built (2026-10-14). Next: support (what a cut leaves
+unsupported falls) and a debris budget.
 
 ## Decisions made
 
@@ -395,8 +396,67 @@ As built (86067ba, demo in 6bcd893):
   mass and inertia; a contact listener combines each side's friction (geometric mean) and
   restitution (max), so a world with no materials is unchanged bit for bit.
 - Bodies rebuild when an entry's material or a library entry changes. Log version 4.
-- Not yet: strength and fracture pattern on the material (next, for fracture); a second per-voxel
-  byte if components ever need many looks times many materials.
+- Not yet: a second per-voxel byte if components ever need many looks times many materials.
+
+## Fracture (decided and built 2026-10-14)
+
+A strike -- `runtime::fracture(world, entity, at, energy, push)`, applied at the next step in order
+with voxel edits -- breaks a voxel body round a point. The voxel nearest the point (within three) is
+what was struck; its material's `strength` (J per m^3 broken) sets the reach, the radius whose sphere
+holds energy / strength. Which voxels go together is the material's `fracture` pattern; everything
+else is the engine's. Decided (user's call): not one fixed pattern, and not free-form either --
+patterns are code, registered by name, all through one interface.
+
+- **The interface** (`runtime/fracture.h`): a pattern gets the voxels within 1.5 x reach (position,
+  palette slot, material, breakable), the strike, reach, shard size and grain in voxels, and a
+  seeded `FractureRandom`; it returns a shard number or -1 (stays) per voxel. It is simulation code:
+  same input, same answer, on every machine (no clocks, rand() or unordered iteration). The seed is
+  the body's NetId, the tick and the strike.
+- **Built in**, registered by installPhysics: `shatter` (Voronoi, small at the strike growing to
+  `shardSize`, a ring of stay seeds beyond the reach for a jagged edge), `splinter` (the same, cells
+  three times longer along `grain`), `crumble` (even cells, round edge at the reach), `seams` (runs
+  of one palette entry come away whole -- a brick, a plank -- crumbled further only when much bigger
+  than a shard).
+- **The engine's rules, whatever a pattern says**: a voxel whose material has no strength stays; a
+  shard is cut into its face-connected parts and halved until it fits a 64-voxel chunk; at most 512
+  shards. Each shard is a new top-level chunk with the body's palette (voxels keep their entries:
+  `PendingVoxelOp::slot`), placed where its voxels were, a dynamic body moving as that part of the body
+  did plus `push` fading to nothing at the edge; a NetId if the body had one. Static colliders break
+  too. `BodyFractured {entity, shards, at}`. What is left rebuilds, and splits as any edit's does.
+- Material fields `strength` (0: never breaks), `fracture` (default "shatter"), `shardSize` (m),
+  `grain`; in the library file and the state hash. Reach capped at 64 voxels.
+- Tests (`test_physics_fracture.cpp`): voxels conserved and materials kept, reach against energy,
+  steel in a stone wall stays, a strike on steel breaks nothing, determinism (shard sizes and state
+  hash), a dynamic body's shards keep its motion, a registered pattern decides, a wrong-sized answer
+  breaks nothing, fractureShards' cuts, every built-in within its reach and repeatable, splinters
+  along the grain, the library fields.
+- **On impact** (user's call, 2026-10-14: the engine breaks things, not the demos). `PhysicsWorld::
+  impacts()`: contacts that began in the step closing faster than `minImpactSpeed` (1 m/s), noted by
+  the contact listener on the solver's threads and ordered after the step -- one per pair, the
+  fastest, by (a, b) -- with the closing speed, the energy the collision can take out (half the
+  reduced mass times speed^2) and both velocities from before. The runtime strikes each voxel body
+  with `breaksOnImpact` (RigidBody, StaticCollider; saved when off) that has a breakable material,
+  at the next step, with that energy. Rules: an impact must break out at least the struck
+  material's shardSize (a crate set down on stone does not chip it); shards come with
+  `breaksOnImpact` off (debris does not shatter again on landing); the shards go on at the closing
+  speed, fading to the edge; and when the struck body does not move, the striker gets back the energy
+  the break did not use (strength x volume broken), along its old velocity. `BodyFractured` gained
+  `striker` and `energy`.
+  - Impact speeds come from every awake body's velocity snapshotted before the step, not read in
+    the contact callback: Jolt applies gravity on other threads while it finds contacts, so a
+    velocity read there depends on timing. Test: the same impact fractures at 0, 4 and 12 threads.
+  - Found: thirty blasts in demo 2 (~50k shards) filled a contact buffer; Jolt's dev-build assert on
+    that stopped the program. It is now let through (step() reports it loudly and carries on, as a
+    release build does); every other Jolt assert stays fatal. The real fix is a debris budget.
+  - Found: the shards spawn tiled, touching, so a big break is one jammed mass of rubble. A 2 t boulder
+    always gets through a plaster wall's crumbs; in stone, brick and planks it sometimes stops in
+    the plug and sometimes ploughs on, depending on how the rubble lies.
+- Demo 9: four walls, four materials and patterns (ashlar shatter, brick seams, planks splinter,
+  plaster crumble), broken by the boulder hitting them; the demo has no fracture code, and its
+  self-test fires at all four. Demo 2: bricks of "fired brick", the blast is `runtime::fracture` on
+  each brick near it, and thrown bricks break where they land hard.
+- Not yet: support, a debris budget (demo 2's blast makes ~1600 shards), patterns that read
+  authored crack lines (an attachment), sounds on impacts.
 ## How it fits the rest of the engine
 
 Physics adds one module, `runtime/physics`, and one engine change: system ordering within a stage
@@ -738,18 +798,18 @@ Findings from building the nine physics demos (a tenth, Slide, came with materia
 (user's call): fracture strength, friction and restitution all hang off a voxel's material, so the
 fracture work below is built on them, not before them.
 
-1. **Materials** (built 2026-10-14, see above; strength / fracture pattern still to do): palette entry -> physics material (density, friction,
-   restitution, and now *strength / fracture pattern* too). Box merging stops at material
+1. **Materials** (built 2026-10-14, see above, strength and fracture pattern included): palette entry -> physics material (density, friction,
+   restitution, strength, fracture pattern). Box merging stops at material
    boundaries; per-contact friction/restitution via a contact listener.
 2. **Fracture and support.** Nothing checks structural support: a static wall cut at its base
    leaves the rest floating. After an edit, islands no longer connected to an anchor (ground, or
    voxels marked as anchors) should become dynamic. Grids / multi-chunk bodies can't split, so
-   demo shards are capped at one chunk (16 voxels). Voronoi shatter, cut-and-respawn and the kick
-   live in demo code (demo 9 `crackWall`, demo 2 `detonate`); they want an engine call
-   (fracture body at point, by the material's pattern). Debris has no budget (cap, permanent
-   sleep, merge back to static).
-3. **Contact events.** No "A hit B at P with impulse J" callback; demo 9 predicts the strike
-   geometrically three steps ahead. Needed for impact-driven fracture, sounds, damage and
+   demo shards are capped at one chunk (16 voxels). (Done 2026-10-14: `runtime::fracture`, by the
+   material's pattern -- see "Fracture"; demo 9 uses it, demo 2's blast still cuts slots itself.)
+   Debris has no budget (cap, permanent sleep, merge back to static).
+3. **Contact events.** (Impacts done 2026-10-14: `PhysicsWorld::impacts`, ordered, used for impact
+   fracture; no per-entity event for games yet.) No "A hit B at P with impulse J" callback; demo 9
+   predicted the strike geometrically three steps ahead. Needed for impact-driven fracture, sounds, damage and
    materials -- reported in deterministic order.
 4. **Sleeping too eagerly.** Shards resting against the static wall freeze mid-fall until the
    boulder comes near again. Revisit sleep thresholds / rest damping for bodies in contact only
