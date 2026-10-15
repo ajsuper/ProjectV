@@ -14,7 +14,7 @@
     { "name": "planks",        "density": 500,  "friction": 0.6,  "restitution": 0.1,
       "strength": 1500, "fracture": "splinter", "shardSize": 0.8, "grain": [1, 0, 0] },
     { "name": "fired brick",   "density": 1900, "friction": 0.7,  "restitution": 0.0,
-      "strength": 40000, "fracture": "shatter", "shardSize": 0.25 },
+      "strength": 40000, "fracture": "shatter", "shardSize": 0.35 },
     { "name": "plaster",       "density": 600,  "friction": 0.9,  "restitution": 0.0,
       "strength": 700,  "fracture": "crumble",  "shardSize": 0.5 }
   ]

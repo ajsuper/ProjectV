@@ -61,6 +61,7 @@
 //   (DEMOS_ONLY=9 or DEMOS_ONLY=2,10: just those)
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -1105,6 +1106,7 @@ void buildTrebuchet(World& world, Demos& demos, Camera& camera) {
         wall.entity = runtime::spawnComponent(world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy);
         projv::StaticCollider made;
         made.material = materials[side];   // how it breaks: physics_materials.json
+        made.splits = true;                // and what a break leaves hanging falls
         world.emplace<projv::StaticCollider>(wall.entity, made);
         demos.owned.push_back(wall.entity);
         tb.walls.push_back(std::move(wall));
@@ -1776,6 +1778,49 @@ void selfTest(projv::Application& app) {
         check(*test, top.y < 14.5f, fmt::format("the kinematic ball knocked the top off: top crate at {:.2f} m", top.y));
         go(2); acted = false; demos.pieces = 0;
         return;   // `t` above is the last demo's clock
+    }
+    // DEMOS_BLASTS=n: n blasts a second apart round the structures -- the wall, the tower, the house,
+    // the columns, the long wall -- then the frames' and steps' cost while they last.
+    static const int blasts = std::max(1, std::getenv("DEMOS_BLASTS") ? std::atoi(std::getenv("DEMOS_BLASTS")) : 1);
+    static int blasted = 0;
+    static double frameSum = 0.0, frameWorst = 0.0;
+    static int frames = 0;
+    static uint64_t droppedBefore = 0;
+    static auto lastFrame = std::chrono::steady_clock::now();
+    if (stage == 2 && blasts > 1) {
+        auto now = std::chrono::steady_clock::now();
+        if (blasted > 0) {
+            double ms = std::chrono::duration<double, std::milli>(now - lastFrame).count();
+            frameSum += ms;
+            frameWorst = std::max(frameWorst, ms);
+            frames++;
+        }
+        lastFrame = now;
+        if (blasted < blasts && t > 2.0f + float(blasted)) {
+            static const vec3 spots[6] = {{0.3f, 2.2f, 0.9f},  {-15.0f, 3.0f, 6.0f}, {12.5f, 2.0f, 6.5f},
+                                          {-6.0f, 3.0f, 12.5f}, {0.0f, 1.2f, 20.8f}, {6.0f, 4.5f, 12.5f}};
+            if (blasted == 0) {
+                droppedBefore = app.time().droppedFixedSteps;
+                demos.stepSum = demos.stepWorst = 0.0;
+                demos.stepCount = 0;
+            }
+            demos.blastAt = spots[blasted % 6] + vec3(0.4f * float(blasted / 6), 0.3f * float(blasted / 6 % 3), 0.0f);
+            double sum = demos.stepSum, worst = demos.stepWorst;
+            int count = demos.stepCount;
+            detonate(world, demos);
+            demos.stepSum = sum; demos.stepWorst = worst; demos.stepCount = count;   // over all the blasts
+            blasted++;
+        }
+        if (t > 2.0f + float(blasts) + 5.0f) {
+            projv::core::info("DEMOTEST: {} blasts: frames {:.1f} ms on average, {:.1f} ms at worst; physics step {:.2f} ms on "
+                              "average, {:.2f} ms at worst; {} steps dropped; {} bodies, {} pieces",
+                              blasts, frameSum / std::max(frames, 1), frameWorst, demos.stepSum / std::max(demos.stepCount, 1),
+                              demos.stepWorst, app.time().droppedFixedSteps - droppedBefore,
+                              world.view<projv::RigidBody>().size(), demos.pieces);
+            go(3);
+            test->start = watchedPositions();
+        }
+        return;
     }
     if (stage == 2 && t > 2.0f && !acted) { act(world, demos, camera); acted = true; }
     if (stage == 2 && t > 7.0f) {

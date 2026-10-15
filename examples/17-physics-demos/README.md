@@ -37,13 +37,14 @@ and stay exactly where they were built (the self-test checks the top crate is at
 wrecking ball shows mass mattering: 4 tonnes at 32 m/s goes through 2.2 tonnes of crates.
 
 **Wall blast** -- destruction, by material. Every brick is 30 kg of "fired brick"
-(`physics_materials.json`: strength 40 kJ/m^3, `shatter`, 25 cm shards). The blast is two things.
+(`physics_materials.json`: strength 40 kJ/m^3, `shatter`, 35 cm shards). The blast is two things.
 First, `runtime::fracture` on every brick within 3.5 m, struck at its middle with the blast's energy
 falling off with the square of the distance: the bricks beside it shatter into small shards, those
 further out lose a corner or crack in two. Then, two steps later, the kick: everything near is thrown
 outward, shards included. A brick thrown hard enough into something breaks there too -- the engine
 breaks voxel bodies on impact by their material's strength -- while one falling from the top of the
-tower does not; shards never break again.
+tower does not; shards never break again. `DEMOS_BLASTS=30 DEMOS_SELFTEST=1 DEMOS_ONLY=2` sets off
+thirty blasts round the yard and reports the frames' and steps' cost.
 
 **Ball barrage** -- mass and momentum. Every ball has the same density, so a metre-wide one weighs
 64 times what a 25 cm one does, and knocks crates over where the small ones bounce off.
@@ -95,11 +96,13 @@ material's fracture pattern sets its shape:
 | Planks (-x, behind) | 1500 J/m^3, `splinter`, 0.8 m, grain along the wall | Long splinters along the boards |
 | Plaster (+z, right) | 700 J/m^3, `crumble`, 0.5 m | Small even pieces, a round hole |
 
-The shards go on at the boulder's speed, fading to the edge of the break, and the boulder gets back
+The walls split (`StaticCollider::splits`): what a break leaves hanging -- whole bricks once the
+mortar round them has crumbled, the top of a wall cut right through -- falls. The shards go on at the
+boulder's speed, fading to the edge of the break, and the boulder gets back
 the energy the break did not use. Whether it then gets through depends on the rubble packed in front
 of it: through plaster's crumbs it always rolls on, off the floor's edge; in the stone, brick and
-planks it sometimes ploughs on and sometimes stops. A wall cut away at
-its base doesn't fall (nothing checks support yet).
+planks it sometimes ploughs on and sometimes stops. Shards are debris, and the
+engine keeps at most 3000 of them (`PhysicsConfig::maxDebris`), clearing the oldest.
 
 **Gear winch** -- bodies pushing bodies through contact. Each gear is crosses: two straight bars
 through its middle, four pegs, laid along the voxel grid's own axes so their faces are flat and
