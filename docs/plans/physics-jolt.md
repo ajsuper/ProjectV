@@ -578,6 +578,9 @@ Planned:
   steps send `SimulationSlow` (warned at most every 300 ticks). `lastStepMilliseconds`.
 - Jolt's thread pool is on (`threads = -1`: cores - 1, at most 7). A test holds results identical
   across 0, 4 and 7 threads.
+- (2026-10-14, 1b5ee6e) Jolt's `JobSystemThreadPool` is replaced by our own `JobPool`
+  (`src/runtime/physics/job_pool.h`): one queue, one mutex, a condition variable. Jolt's pool lost
+  wake-ups on a hybrid CPU and stalled steps by 50-700 ms. Thread count still feeds nothing.
 - **Found: tall stacks rock forever.** The 200-crate pile left 8-high columns swaying in a slow
   circle (0.2 m/s at the top, 1.1 s period) that never damped, so they never slept. Not convex
   radius, not edge removal, not inertia handling (all bit-identical), not Baumgarte or position
@@ -724,7 +727,7 @@ CPU surface function, and the render-vs-collision normal test (A6.4).
 
 ## Open questions (none block M0 to M2)
 
-- Jolt's job system: start single-threaded for simplicity and determinism ease, and switch to
+- (Settled: threaded since M3, on our own `JobPool` since 2026-10-14.) Jolt's job system: start single-threaded for simplicity and determinism ease, and switch to
   `JobSystemThreadPool` in M3 once the determinism tests exist to prove it changes nothing.
   Jolt is deterministic with threads; the tests are what make that a fact here rather than a
   belief.
@@ -764,5 +767,7 @@ fracture work below is built on them, not before them.
    tall stacks fell with 5 mm starting gaps. Want start-asleep for authored stacks, and a profile.
 9. **Debug view** of shapes, contacts, joints and sleep state -- everything here was diagnosed
    from logs and framebuffer captures.
+   (2026-10-14, 5be549a: the demos gained right-drag grab with a force-limited pull and click
+   actions; a grab-style mouse spring may belong in the engine.)
 10. (Engine, not physics) Prototypes are hidden by parking them 1 km down; missing that drew
     stray models at the origin. Want a not-drawn/template flag.
