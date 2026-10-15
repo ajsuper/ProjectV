@@ -1,0 +1,768 @@
+# Physics: Jolt, voxel collision, ready for networking
+
+Status: **approved**, 2026-10-09. **M0-M6 done** (2026-10-13); joints (2026-10-13) and physics materials (2026-10-14) built;
+M7 (contours) waits on the contour work. Next: strength and fracture on the material.
+
+## Decisions made
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | Jolt, pinned at a tagged release | Determinism, save/restore, CCD, internal-edge removal, compounds, character controller |
+| D2 | Reliability over accuracy | A reliable, slightly wrong system can be built on; an unreliable one cannot |
+| D3 | Static collision is **opt-in** (`physics.static`) | Installing physics changes nothing until a file asks for it; a forgotten floor is caught at once in development |
+| D4 | Static grids do **not** split into islands unless the component opts in | Floating terrain falling off is a design choice, not a default |
+| D5 | Collision geometry comes from one replaceable builder, and every gameplay normal comes from the shape | Contours and other voxel-modified geometry can replace boxes without gameplay changes |
+| D6 | Server-authoritative networking is the target; the sim is deterministic and restorable anyway | Lockstep turns every determinism bug into a permanent split; determinism still buys small corrections, replays and rollback |
+| D7 | Voxel geometry collides as volumes (boxes), never as triangle meshes | A body inside a volume is pushed out; inside a mesh it falls through |
+
+
+## Priorities, in order
+
+1. **Reliable.** A body never falls through the world, never explodes, never goes NaN, never
+   silently vanishes, never jitters forever. When something goes wrong, the system recovers and
+   says so. A slightly wrong answer every time beats a right answer most of the time: games can
+   be built on the first and not on the second.
+2. **Ready for networking.** The simulation is a pure function of (state, tick inputs), it can be
+   saved and restored, and nothing in it is named by a handle that only means something on one
+   machine. No transport is built here; nothing built here has to be undone for one.
+3. **Geometry can change.** Voxel contours (and other geometry that departs slightly from cubes)
+   are coming. Collision shapes and surface normals come from one replaceable step. Swapping it
+   changes how everything collides and what normal every query returns, with no gameplay changes.
+4. Accuracy and speed, in that order, after the three above.
+
+## Why Jolt
+
+Jolt (github.com/jrouwe/JoltPhysics, MIT, used in Horizon Forbidden West and Death Stranding 2):
+
+- **Determinism.** Built with `CROSS_PLATFORM_DETERMINISTIC` it gives the same results on every
+  platform and compiler it supports, as long as API calls happen in the same order. Without that
+  flag it is still deterministic on one binary.
+- **`SaveState` / `RestoreState`** (`StateRecorder`): rollback, replays and desync checks come
+  with it.
+- **Continuous collision** (`EMotionQuality::LinearCast`) against tunnelling.
+- **Enhanced internal-edge removal**, so things slide over seams between adjacent boxes without
+  snagging. A box-built voxel world needs this.
+- **Compound shapes, custom shapes, and a character controller** (`CharacterVirtual`).
+- A multithreaded broadphase and solver, and sleeping.
+
+Pin the newest tagged release at submodule time (v5.x as of writing), the way EnTT is pinned.
+
+## Architecture
+
+### A1. Three layers, one direction
+
+```
+utils/collision_geometry   voxels -> list of convex pieces    (no Jolt, no EnTT; pure, testable)
+runtime/physics            pieces -> Jolt shapes; bodies; the step; commands; state   (Jolt + EnTT)
+gameplay                   RigidBody components, commands, queries
+```
+
+**The decomposition lives in `utils/` and knows nothing about Jolt.** It turns a blob into
+`CollisionPiece`s (a box, or later a convex polyhedron), each tagged with the voxel region it came
+from. That is the seam the future geometry work replaces (A6). It is also the only part that reads
+voxels, so it is tested exactly against the voxels (V1).
+
+Jolt types stay inside `src/runtime/physics/`. The public API is a thin, opinionated wrapper:
+commands in, poses and query results out. For advanced use it offers one escape hatch,
+`physicsSystem()`, documented as bypassing the command queue's ordering guarantees.
+
+### A2. The PhysicsWorld is the authority on dynamic bodies
+
+`runtime::PhysicsWorld` lives in `world.ctx()`. It owns the `JPH::PhysicsSystem`, the shape cache,
+the command queue and the tick counter.
+
+Every body has exactly one writer of its pose, the same rule the Scene bridge already applies to
+Transforms:
+
+| motion | who moves it | how gameplay moves it |
+|---|---|---|
+| **Static** | nobody; the voxels it was built from | edit the voxels (A5) |
+| **Kinematic** | gameplay, through Transform | patch Transform; physics follows with `MoveKinematic` the next tick, so contacts get the right velocity |
+| **Dynamic** | the simulation | commands: impulse, force, set velocity, **teleport** (explicit, logged at trace) |
+
+A patch to a dynamic body's Transform does **not** move it. In dev builds it logs a warning that
+names the command to use instead. Silently letting two writers fight is how bodies end up
+jittering, so the conflict is reported rather than resolved by guesswork.
+
+### A3. Sim pose and presentation pose are different things
+
+- The **sim pose** is the pose at the end of the last tick. Gameplay reads it with
+  `runtime::bodyPose(world, e)`, and queries (raycasts, overlaps) run against it.
+- The **presentation pose** is the sim pose blended between the last two ticks by
+  `Time::fixedAlpha`. Physics writes it into `Transform` in PostUpdate, before the bridge syncs.
+  This moves the sandbox's interpolation into the engine.
+
+Later, a networked client also puts its error smoothing (easing a predicted body toward a server
+correction) in this layer. The sim pose then snaps, and only the presentation glides.
+
+### A4. Shapes
+
+**Default representation (M1): merged boxes.**
+
+- Each blob is decomposed by greedy box merging into a `JPH::StaticCompoundShape` of boxes, built
+  in unit voxel space.
+- Each body applies its scale with a `ScaledShape`. Shapes are therefore shared by every instance
+  of a blob, just as geometry is (the prefab cache already guarantees the sharing), and a scale
+  change swaps only the wrapper.
+- Boxes have volume, so a body that ends up inside one is pushed back out. A triangle mesh would
+  let it fall through, which is why there is no `MeshShape` for voxel geometry.
+- Box convex radius is a fixed fraction of a voxel, so corners round off the same way at every
+  scale.
+- Enhanced internal-edge removal is on for every dynamic body.
+
+**Grids:**
+
+- Only for components that opt in (`physics.static`; see Components). Then one static body per
+  grid component, its shape a `MutableCompoundShape` with one sub-shape per
+  cell.
+- An edit to a cell replaces that one sub-shape.
+- If measurements show `MutableCompoundShape` updates are slow with thousands of cells, fall back
+  to one static body per cell. Static bodies are cheap in Jolt's broadphase.
+
+**Multi-chunk components** (a component subtree with several loose chunks): one compound whose
+children are the chunks' shapes at their local transforms.
+
+**Authored primitives:**
+
+- `RigidBody.shape` can be `"voxels"` (the default), `"sphere"`, `"box"` or `"capsule"`, with a
+  size fitted to the content bounds or set explicitly.
+- A ball should collide as a sphere and a character as a capsule. Primitives are cheaper and
+  steadier than any voxel approximation, and the sandbox's balls use one.
+
+**Fallbacks, so every body always has a shape:**
+
+- A decomposition that fails, or that exceeds the piece budget (configurable; default 1024 pieces
+  per blob), falls back to the content-bounds box, with a warning.
+- An empty blob has no shape. Its body is removed, not left as an invisible shapeless object.
+
+**Shape cache:**
+
+- Keyed by (blob `contentStamp`, representation params key).
+- Blobs carry a `contentStamp` (see M1, as built). Every in-place geometry write goes through
+  `markBlobContentChanged`, which also clears `contentBoundsValid`, so the two cannot drift apart.
+- Shapes are refcounted (Jolt `Ref<Shape>`) and dropped when no body uses them.
+
+**Mass:**
+
+- Computed from the shape at a density (`RigidBody.density`, or `mass`, which sets density).
+- Clamped to a minimum mass and a minimum inertia per axis, so a one-voxel sliver cannot become
+  a near-zero-inertia body that the solver spins up.
+- Mass ratios above 100:1 in one contact are logged once in dev builds. They are the classic
+  stacking-instability source.
+
+### A5. Edits take effect at tick boundaries
+
+A voxel edit to something with a body:
+
+- marks the body's shape stale;
+- is rebuilt **at the start of the next tick**, never mid-step;
+- the old shape stays in use until the new one is ready, so the body never has a missing or
+  half-built shape.
+
+M1 builds synchronously on the main thread, which is simple and deterministic. Moving the build to
+a job is allowed later only if it keeps that guarantee: the swap still happens at a tick boundary,
+on a tick chosen deterministically.
+
+**Destruction (M5):**
+
+- After an edit to a dynamic body, the edit runs a connectivity pass over the body's voxels
+  (6-connected, on the brick map).
+- Each disconnected island becomes its own component (`reserveComponentSlot` / `placeComponent`
+  — row reuse makes this cheap now) with its own body.
+- Each island inherits the parent's linear velocity plus the angular velocity's contribution at
+  its centre of mass.
+- Islands are ordered by their lowest voxel coordinate, so the split is deterministic.
+- Static grids do not split (D4). A component opts in with `"splits": true` on its
+  `physics.static`; the islands that come loose become dynamic bodies.
+
+### A6. Collision geometry is replaceable, and normals come with it
+
+`utils::CollisionRepresentation` is an id plus a builder:
+
+```cpp
+// The pieces a blob collides as, in unit voxel space, in a deterministic order.
+std::vector<CollisionPiece> buildCollisionPieces(const GeometryBlob&, uint32_t resolution,
+                                                 const CollisionParams&);
+struct CollisionPiece {
+    enum Kind { Box, ConvexHull } kind;
+    core::vec3 min, max;              // Box
+    std::vector<core::vec3> points;   // ConvexHull
+    core::ivec3 voxelMin, voxelMax;   // the voxels it stands for: SubShapeID -> voxel, for
+                                      // materials, damage and per-voxel friction
+};
+```
+
+- **M1 ships `Boxes`.**
+- **Contours become `ClippedVoxels`:** interior voxels stay merged boxes, and each surface voxel
+  becomes a convex hull, its cube clipped by its contour planes (the up to three planes the
+  surface-voxel prototype already fits).
+- **Other "slightly voxel-modified" geometry** is another builder behind the same id.
+
+Rules every representation keeps:
+
+1. **Stays inside the voxels, never bigger:** collision ⊆ the union of solid voxel cubes. It may
+   cut corners off; it may not add volume. Switching representation can therefore only let things
+   settle a little lower; it cannot embed things that rested on the old shape. Tested (V1).
+2. **Deterministic:** the same voxels and params give the same pieces in the same order, on every
+   machine. Networked peers build shapes locally from replicated voxels and must agree.
+3. **Normals come from the shape.**
+   - Gameplay never derives a surface normal from voxel coordinates. Physics contacts, raycasts
+     and shape casts all return the normal of the active representation.
+   - `utils::pickVoxel` stays exact-voxel with face normals, because editing needs that, and is
+     documented as the editor's tool, not gameplay's.
+4. **One surface definition for render and collision:**
+   - When contours land, the CPU function that evaluates a voxel's planes is what both the shape
+     builder and the GPU upload read, so the drawn surface and the collided surface cannot drift
+     apart.
+   - A test samples points and compares the CPU's surface normal with the shader's
+     (the render-vs-CPU pattern the colour lookup fix already used).
+5. **Versioned:** the representation id and its params are in the shape cache key and in the
+   network state hash. Two peers on different representations is a detected mismatch, not a
+   mystery desync.
+
+Choosing the representation:
+
+- one project-wide default;
+- a per-component override, in `physics.rigidbody` or `physics.static`;
+- a per-body primitive (A4).
+
+A custom Jolt shape that collides against the voxel tree directly is kept as a later option for
+very large dynamic bodies. It is a performance lever only, and it plugs in behind the same seam.
+
+### A7. Ready for networking
+
+What the simulation guarantees from M0 on, whether or not anything is networked:
+
+- **Ticks are the clock.** Physics advances only in FixedUpdate, one `Step` per tick at
+  `fixedDelta`, numbered by `Time::fixedStep`. Nothing reads `delta`, the wall clock, the frame
+  rate or render state.
+- **All mutation is a tick-stamped command:** create body, destroy body, impulse, teleport, set
+  kinematic target, voxel edit.
+  - Commands are queued during Update and applied at the start of the tick, sorted by
+    (tick, issuer, sequence).
+  - Never in EnTT view order, which depends on the history of inserts and removes and differs
+    between machines.
+  - The command log is what a server receives from clients, and what a replay file contains.
+- **Stable identity:**
+  - Every networked body has a `NetId` (u32, assigned by the authority, carried in
+    entities.json for authored bodies).
+  - `Entity`, `ComponentHandle`, `ComponentRef` and `JPH::BodyID` are local and never leave the
+    machine.
+  - Bodies are created in NetId order within a tick, so Jolt's internal body order matches across
+    peers.
+- **Save / restore.**
+  - `PhysicsWorld::saveState(StateRecorder&)` / `restoreState` wrap Jolt's, plus our side: the
+    tick, pending commands, NetId map, shape-cache keys.
+  - Restoring then re-simulating N ticks must give a bit-identical state to never having
+    restored. That property is what rollback, replays and late-join snapshots all rest on.
+- **State hash per tick** (dev builds, or on demand): a hash of positions, rotations and
+  velocities in NetId order. Two runs or two peers compare hashes to find the first diverging tick.
+- **Build:**
+  - Jolt with `CROSS_PLATFORM_DETERMINISTIC=ON`.
+  - No `-ffast-math` anywhere physics code is compiled.
+  - Double precision off for now, but our wrapper uses `JPH::RVec3` for world positions, so
+    turning on `JPH_DOUBLE_PRECISION` for large worlds is a rebuild, not a rewrite.
+
+**The network model this prepares for** (a recommendation, not built here):
+
+- **Server-authoritative.** Clients predict their own character and the bodies they touch; the
+  server sends quantized snapshots of awake bodies, prioritized by relevance.
+- **Other clients' bodies** are shown by snapshot interpolation.
+- **Not lockstep.** In a physics-heavy voxel game with destruction, lockstep makes every
+  determinism bug a permanent split. Server authority treats a determinism bug as a correction.
+- **Determinism is still worth having:** it makes prediction corrections small, makes replays and
+  desync tests possible, and keeps rollback open.
+
+### A8. Reliability guards
+
+Each guard is cheap, always on (not just debug), and counted in `PhysicsStats`, which the sandbox
+shows and tests assert on:
+
+- **Sanity pass after every step:**
+  - Any body with a NaN or infinite pose or velocity, or speed above a hard cap, is restored to
+    its pose from the previous tick with zero velocity, put to sleep, and logged once with its
+    NetId.
+  - Any body below the kill plane or outside world bounds is reported with an event
+    (`BodyLeftWorld`), not deleted silently. What happens to it is the game's call; the default
+    handler destroys it.
+- **Tunnelling:**
+  - Bodies smaller than a few voxels, or faster than a size-relative threshold, get
+    `LinearCast` automatically.
+  - Static geometry has volume (A4).
+  - A test fires small, fast objects at one-voxel walls (V3).
+- **Capacity:**
+  - Max bodies, body pairs and contact constraints are configured with 2x headroom over the
+    expected load.
+  - Jolt drops contacts silently when full, so every step checks the counts. Crossing 80% warns
+    once; a drop is an error with the counts in the message.
+- **Spiral of death:** Time already caps fixed steps per frame at 8 and counts the dropped ones.
+  Physics reports dropped steps as "simulation running slow", so slow motion is visible rather
+  than mysterious.
+- **Sleeping** is on, with Jolt's defaults first. A stacking test (V3) says whether they are
+  right for voxel-sized bodies.
+- **Solver settings** stay at Jolt's defaults (10 velocity, 2 position iterations) until a test
+  shows otherwise. Changes are recorded with the test that motivated them.
+- **Asserts:** Jolt asserts on in the `dev` preset, off in `release`. The `release` build still
+  runs the sanity pass.
+- **No surprises from the bridge:**
+  - A body whose component is deleted (`ComponentDestroyed`) is destroyed at the next tick
+    boundary.
+  - A component whose body is gone keeps rendering where it was.
+  - The `ComponentRef` in the link means a reused row is never driven by a stale body.
+
+## Components (authored in entities.json)
+
+```json
+"physics.rigidbody": { "v": 1, "motion": "dynamic", "shape": "voxels", "density": 1.0,
+                       "friction": 0.6, "restitution": 0.2, "linearDamping": 0.05,
+                       "angularDamping": 0.05, "gravityFactor": 1.0, "layer": "moving",
+                       "quality": "auto", "netId": 0 }
+```
+
+- `RigidBody` is the authored component. On construct, physics queues a create command; the body
+  appears at the next tick.
+- `PhysicsBody` (runtime-only) holds the `BodyID`, the shape-cache key and the previous and
+  current sim poses for interpolation. It is never saved.
+- **Static collision is opt-in** (D3): a `physics.static` component on an entity linked to the
+  grid (or any component) makes it solid. Nothing collides that was not asked to, so installing
+  physics changes nothing in an existing scene until a file says so, and a floor that was
+  forgotten is obvious the first time something falls through it.
+
+  ```json
+  "physics.static": { "v": 1, "shape": "voxels", "friction": 0.8, "restitution": 0.1,
+                      "layer": "static", "splits": false }
+  ```
+- **Layers:** a short fixed list to start (`static`, `moving`, `debris`, `sensor`, `character`)
+  with a collision matrix in code; debris ignores debris. Authored by name.
+
+## Queries
+
+`runtime::castRay`, `castShape`, `overlap`:
+
+- They run against the sim pose.
+- Each returns entity, component, `NetId`, the voxel the hit sub-shape stands for, its material
+  slot, position, distance, and **the representation's normal** (A6.3).
+- Every query is a Jolt query, so it uses Jolt's broadphase. The loose BVH stays the renderer's
+  and the editor picker's.
+
+## Joints (added 2026-10-13, built)
+
+- `PhysicsWorld::createJoint` over Jolt constraints: Fixed, Point, Hinge (limits, friction, motor),
+  Slider (limits, friction, motor), Distance (range or as made, optional spring). A joint joins two
+  bodies or a body and the world, placed in world space as they are. Jolt's body 1 is `b`, so a
+  hinge angle, slider offset and motor velocity are `a` relative to `b`.
+- Breakable by force and torque, checked after each step from the constraint's impulse. The
+  impulse beyond what it could hold in the breaking step is given back, so what broke it carries
+  on (a rope snapped by a yank does not stop the yank). `takeBrokenJoints`.
+- Joints go with their bodies (destroyBody removes them). Joints get their own solver iteration
+  counts (30 velocity, 6 position): a ten-link chain stretched 3% with the contact counts, under 1%
+  with these.
+- Recorded, snapshotted (version 4: the live set must match), hashed.
+- Runtime: `Joint` (`physics.joint`, bodies by NetId, 0 for the world) on its own entity, made once
+  both bodies exist; `PhysicsJoint`; `JointBroke` (broke, or a body went); `setJointMotor` as a
+  stamped command; `connectBodies`, `jointState`.
+- Tests: a pendulum's period against 2 pi sqrt(L/g), a hinge's limits and axis, motors, a slider's
+  stop, a weld, a rope and a spring's stretch against mg/k, breaking at the right force, joints going
+  with bodies, a chain's determinism, rewind and replay, the runtime path and entities.json.
+
+- Added the same day: motors in Position mode (servos: `motorMode`, `motorTarget`,
+  `motorFrequency`), and `collideConnected` (default off, as in most engines): bodies a joint joins
+  do not collide, through a Jolt group filter keyed by body index; pairs return to colliding when
+  the joint goes or breaks. A running motor keeps its bodies awake (a jammed windmill slept for
+  good otherwise). Demo 7 is a car built from these.
+
+## Physics materials (decided 2026-10-13, built 2026-10-14)
+
+Linked through the palette: every voxel's material slot already names a palette entry, so a
+palette entry names a physics material from a project-wide library (density, friction, restitution;
+later strength and sound). Box merging stops at material boundaries, so each piece has one material:
+mass, centre of mass and inertia from per-piece density, and friction/restitution per contact from
+the two sub-shapes' materials through a contact listener. Voxels with none fall back to the body's
+RigidBody values. Material interning must include the physics material (not colour alone); shape
+cache keys include the material assignment; the library joins the network compatibility check.
+
+
+As built (86067ba, demo in 6bcd893):
+- The library: `runtime::definePhysicsMaterial` / `loadPhysicsMaterials` (`{"v":1,"materials":[{name,
+  density, friction, restitution}]}`), indices in definition order, in both state hashes.
+- A palette entry names one by `Material::physics` ("physics" in compose.json), outside the four GPU
+  words. Several entries can name one (three colours of granite merge into the same boxes); entries
+  alike in colour can name different ones (interning matches on the physics name too). The slot
+  limit stays 255 per component: one slot per (look, material) pair a component actually uses.
+- `RigidBody::material` / `StaticCollider::material` is the component default: primitives and
+  voxels whose entry names none. Empty: the fields, as before.
+- Boxes stop at material changes; pieces carry the material; per-piece density gives mass, centre of
+  mass and inertia; a contact listener combines each side's friction (geometric mean) and
+  restitution (max), so a world with no materials is unchanged bit for bit.
+- Bodies rebuild when an entry's material or a library entry changes. Log version 4.
+- Not yet: strength and fracture pattern on the material (next, for fracture); a second per-voxel
+  byte if components ever need many looks times many materials.
+## How it fits the rest of the engine
+
+Physics adds one module, `runtime/physics`, and one engine change: system ordering within a stage
+(I1). Everything else plugs into what exists.
+
+**I1. Application and Time.**
+- `runtime::installPhysics(app)` adds two systems, the way `installSceneBridge` adds one:
+  - "physics: step" in FixedUpdate, which applies this tick's commands, rebuilds stale shapes,
+    runs `Step` and the sanity pass.
+  - "physics: present" in PostUpdate, which writes interpolated poses into `Transform`.
+- **The rule for gameplay:** anything issued during tick N, from Update or from a FixedUpdate
+  system, applies at tick N+1. That holds whatever order systems were added in.
+- "physics: present" must run before the bridge's PostUpdate system (`"scene bridge"`). Today a stage runs systems in the
+  order they were added, so the order would depend on install order. The engine change:
+  `addSystem` takes an optional `before` / `after` system name, and `installPhysics` asks for
+  `before = "scene bridge"`. A small, general addition, with a unit test.
+- `Time::scale = 0` runs no FixedUpdate, so pause and slow motion apply to physics with no extra
+  code. Dropped fixed steps are reported (A8).
+
+**I2. The Scene bridge.** Physics never touches the Scene directly; it goes through the bridge:
+- It writes `Transform` with `patch`.
+- The bridge then calls `setComponentTransform`, which rebakes the headers, which the renderer
+  draws.
+- Only awake bodies are written, so a sleeping pile costs nothing per frame.
+- A body needs its entity linked to a component (`VoxelComponent`):
+  - Dynamic bodies need a Root link, because their pose is a world pose.
+  - Part links (a door in a house) can be kinematic.
+  - A `RigidBody` that breaks these rules is refused with a log, the way `linkComponent` refuses
+    bad links.
+- `ComponentDestroyed` destroys the body at the next tick.
+- `Transform::scale` (uniform) becomes the `ScaledShape`'s scale.
+
+**I3. Authored entities and prefabs.**
+- `physics.rigidbody` and `physics.static` are ordinary `ComponentTraits` components. They are
+  saved in entities.json, built by their `on_construct` signals, and round-trip through
+  `saveEntities`.
+- A prefab whose entities.json carries `physics.rigidbody` spawns with a body from
+  `instantiatePrefab`, with no extra call.
+- The sandbox's crate becomes: compose.json (voxels), plus entities.json saying "dynamic,
+  voxels, density 1".
+
+**I4. Geometry pool, prefab cache and slot reuse.**
+- The shape cache is keyed by blob, and the prefab cache makes instances share blobs. So 300
+  crates are one Jolt shape.
+- Editing one crate forks its blob (copy-on-write), which gives it a new key and its own shape.
+  The other 299 are untouched. Physics adds no sharing logic; it follows the pool's.
+- `PhysicsBody` holds a `ComponentRef`, so a reused row is never driven by an old body.
+- Destruction makes new components through `reserveComponentSlot` / `placeComponent`, which row
+  reuse made cheap under churn.
+
+**I5. Voxel edits.**
+- They stay what they are: `queueVoxelAdd` / `queueVoxelRemove` and then `updateScene`.
+  - Physics notices changed blobs at the start of the next tick, by `contentVersion`.
+  - Grid edits change only the touched cells' sub-shapes.
+  - An edit that overflows a chunk and converts its component into a grid (`updateScene` does
+    this) is handled: the builder treats a grid component as a compound of cells whether it is
+    static or dynamic.
+- **For networked games**, edits go through a physics edit command instead. It queues and runs
+  `updateScene` at the start of the tick it is stamped with, so every peer edits on the same tick.
+  Direct edits keep working and are simply not replicated.
+
+**I6. Rendering.**
+- **No renderer changes.** Bodies are loose chunks, and their headers and the loose BVH are
+  rebuilt as they are now.
+- (2026-10-14) The demos have their own renderer, `examples/17-physics-demos/demoRenderer/`:
+  quarter-resolution G-buffer with a sun shadow ray, SSAO, and rotation-aware voxel
+  reconstruction (cd5956b). Engine-side speedups it brought: `PJV_NO_ANIMATION` compiles the
+  animated march out, and chunk headers carry a content box (6 texels) that rays skip on a miss.
+- Render LOD (`renderLOD`) coarsens only the GPU copy. Collision always reads the full-resolution
+  CPU geometry, so LOD can never change what collides.
+- The animation envelope collides as its rest pose (`geometry`). Animated voxel parts that need to
+  collide where they are drawn become kinematic parts later.
+- A debug view of collision pieces needs a line or box drawing pass, which the renderer does not
+  have yet. That is optional M3 work.
+
+**I7. Events.**
+- Physics sends events through `Events`, delivered in the normal pump after PostUpdate:
+  - `ContactBegan` / `ContactEnded`, only for bodies that ask for them;
+  - `BodyLeftWorld`;
+  - `BodySplit` (parent and its islands);
+  - `SimulationSlow`.
+- Jolt's contact callbacks run on its worker threads and never touch the registry. They only
+  record into a buffer that is sorted by NetId after the step, so delivery order is deterministic.
+- The sandbox's `Popped` → shockwave → removal chain works as now. The shockwave becomes impulse
+  commands.
+
+**I8. Picking and queries.**
+- `utils::pickVoxel` stays the editor's exact-voxel tool.
+- Gameplay uses `runtime::castRay` and friends. The sandbox's right-click pop moves to `castRay`.
+
+**I9. Materials.**
+- Superseded: built through the palette instead of an attachment. See "Physics materials" above.
+
+**I10. Layering.** `utils/collision_geometry` includes neither Jolt nor EnTT, and Jolt headers are
+reachable only from `src/runtime/physics/`. The `layering` ctest enforces both.
+
+**I11. The editor.**
+- It loads and saves the physics components like any other entity data.
+- It does not simulate until play mode, which waits on its `ComponentRef` conversion (slot-reuse
+  step 4).
+
+## Milestones
+
+Each milestone ends with a commit, its tests passing, the sandbox self-test passing and the
+README tables updated.
+
+**M0. Jolt builds.** Done 2026-10-09.
+- As built: Jolt v5.6.0 at `external/JoltPhysics`; `runtime::PhysicsWorld` (Jolt behind a pimpl:
+  primitive bodies, five layers, step, save/restore, state hash, stats) in
+  `include/runtime/physics/physics_world.h`; 10 tests in `tests/unit/test_physics_world.cpp`.
+- Physics sources build as the `projv_physics` object library, so Jolt's `-mavx2` and its defines
+  reach only them (CMP0131 makes `$<LINK_ONLY>` work for the engine's link). `-ffp-contract=off`
+  on our physics code too. Jolt is built with RTTI, because our code subclasses its interfaces.
+- `restoreState` checks the body set before touching Jolt, and keeps a backup to undo a restore
+  Jolt rejects partway: Jolt restores into whatever bodies exist and can fail midway.
+- Found: a 5 cm sphere at 300 m/s (5 m a step) does not tunnel through a 10 cm wall even without
+  continuous collision: Jolt's speculative contacts reach as far as a body moves in a step.
+  Continuous collision stays the rule for small fast bodies (A8); it is the guarantee, speculative
+  contacts a margin.
+
+Planned:
+- Submodule at a pinned tag; CMake options set (A7 build).
+- Unit tests: a box falls onto a plane and comes to rest; the same run twice gives identical
+  state hashes; `saveState` at tick 100, run to 200, restore, run to 200 again gives the same hash.
+- The `layering` test is extended: Jolt is only reachable from `runtime/`.
+
+**M1. Voxels to pieces to shapes.** Done 2026-10-09.
+- As built: `utils::buildCollisionPieces` (`utils/collision_geometry.h`): the tree decoded into a
+  dense box over the content bounds, merged greedily in z, y, x order. `GeometryBlob::contentStamp`
+  (named a stamp, not a version: a process-wide counter, so a value names one content whichever
+  pool slot holds it; a copy keeps it; `markBlobContentChanged` takes a fresh one).
+  `PhysicsWorld::voxelShape` caches by (stamp, params key); one piece is a translated box, more a
+  `StaticCompoundShape` with the piece index as sub-shape user data. Bodies scale it with a
+  `ScaledShape`; their mass is volume x scale^3 x density with the shape's inertia; enhanced
+  internal-edge removal is on for them. Unused shapes are pruned once a second of ticks.
+- Tests: 6 for the pieces (exact cover, no overlap, deterministic, budget and size fallbacks,
+  stamps), 5 for voxel bodies (rest height, a cup holds a ball, sharing and rebuild, pruning,
+  determinism and restore).
+
+Planned:
+- `utils::buildCollisionPieces` (`Boxes`), blob `contentVersion`, and the shape cache.
+- Tests (V1). No bodies yet.
+
+**M2. Bodies.** Done 2026-10-09.
+- As built: `Application::addSystem` takes a `SystemOrder` (before/after by name, honoured for
+  systems added later). `runtime/physics.h`: `installPhysics`, `RigidBody` / `StaticCollider`
+  (`physics.rigidbody` / `physics.static`), runtime-only `PhysicsBody`, commands (impulse,
+  angular impulse, add/set velocity, teleport, gravity), `bodyPose`, `PhysicsBodyRefused` event.
+- A body's shape is every chunk under its linked component (grid cells too), placed from the
+  baked chunk headers relative to the component's world pose; primitives are fitted to the
+  voxels' bounds in that frame. So a prefab (asset node at the centre, chunk offset by -half) and
+  the arena grid take the same path. One compound per body around the shared unit shapes.
+- Tick order inside "physics": doomed bodies, orphans, rebuilds (changed RigidBody, link made or
+  lost), new bodies in entity order, commands in issue order, kinematic targets, step, readback.
+  Entity order stands in for NetId order until M4.
+- The sandbox: its integrator, sphere collisions and present system are gone; balls are spheres,
+  crates and bombs their voxels; arena and pylons physics.static; shockwave = impulses, tractor =
+  addVelocity, G = setGravity; a kill plane retires bodies thrown over the walls and the
+  self-test fails if one falls from inside them. 3000-frame self-test: 740 spawns, 0 dropped
+  contacts, 0 refused, 0 through the floor.
+- Not done here (left for M5): moving a static collider, and grid edits rebuilding only the
+  touched cells (today any change rebuilds the body via a RigidBody/StaticCollider patch).
+
+Planned:
+- System ordering (`before` / `after`, I1).
+- `RigidBody`, `physics.static`, `PhysicsWorld` in FixedUpdate, the command queue, writeback and
+  interpolation (A3), static grid bodies, and layers.
+- The sandbox arena's entities.json gains `physics.static` (D3: nothing collides unasked).
+- The sandbox's `physics()` replaced with this: balls as spheres, crates as voxels, bombs as
+  voxels.
+- The sandbox's own Body loses its integrator and keeps only game data (explosive).
+
+**M3. Reliability harness.** Done 2026-10-09.
+- As built: after every step, awake bodies are checked: non-finite ones go back to their last
+  finite pose, at rest (`nonFiniteRecoveries`); ones outside `worldMin/worldMax` are reported
+  once per excursion, and the runtime sends `BodyLeftWorld` and by default destroys the entity.
+  Jolt clamps speeds (`maxLinearSpeed`, `maxAngularSpeed`). Mass floored at `minMass`, inertia at
+  mass x `minGyrationRadius`^2 per principal axis. 80% of `maxBodies` warns once. Dropped fixed
+  steps send `SimulationSlow` (warned at most every 300 ticks). `lastStepMilliseconds`.
+- Jolt's thread pool is on (`threads = -1`: cores - 1, at most 7). A test holds results identical
+  across 0, 4 and 7 threads.
+- **Found: tall stacks rock forever.** The 200-crate pile left 8-high columns swaying in a slow
+  circle (0.2 m/s at the top, 1.1 s period) that never damped, so they never slept. Not convex
+  radius, not edge removal, not inertia handling (all bit-identical), not Baumgarte or position
+  steps. Restitution 0 and more velocity steps helped one layout and not others. Fixes, all three
+  kept: restitution defaults to 0 (Jolt's default; bounce is asked for); 15 velocity steps; and
+  **rest damping**: a dynamic body awake but within 5 cm and 0.1 rad of one pose for 1 s has its
+  velocities x0.9 per step until it sleeps (in the snapshot, so restore stays exact). Rolling and
+  spinning bodies are untouched (tested). Five pile layouts, with and without bounce, sleep
+  within 8 s and stay put.
+- Tests: threads, tunnel (1000 balls), tower, five piles, delete-during-contact, non-finite
+  recovery, left-world (engine and runtime), mass floor, rest-damping guard rails; the soak
+  (`ctest --preset soak`: 2000 bodies, 600 s, churn and explosions in a closed box) passes in
+  26 s with no escapes, recoveries or dropped contacts.
+- Not done: the mass-ratio warning (needs a contact listener, M6 brings one), a debug view of
+  collision pieces, the edit-under-load test (M5: needs shape rebuild on edit).
+
+Planned:
+- The A8 guards, `PhysicsStats`, the V3 tests, and a sandbox stats line.
+- The sandbox's measure mode reports physics time per tick next to frame and GPU time.
+
+**M4. Network foundations.** Done 2026-10-09.
+- As built: `PhysicsSettings::record` logs every simulation-changing call (body descs with their
+  voxel pieces as data, destroys, impulses, velocities, poses, kinematic moves, gravity,
+  restores) and each step's state hash; `PhysicsWorld::replay` reruns it in a fresh world and
+  names the first step that differs. Logs save to and load from files (a bug-report format).
+- `runtime/net.h`: `NetId` component (`projv.netid` in entities.json), an allocator that never
+  reuses or collides with authored ids, `entityForNetId`.
+- Bodies made in a step: NetId order, then the rest by entity. Commands: `PhysicsCommand` stamped
+  (tick, issuer, sequence), targeted by NetId, `submitCommand`; local calls stamp the next tick,
+  issuer 0. Due commands sorted by stamp; future ones wait; late ones apply next step and count.
+- `physicsStateHash` (by NetId), `savePhysics` / `restorePhysics` (simulation, presentation
+  poses, waiting commands; refuses a different body set without changing anything).
+- Tests: exact replay of a busy scene (voxels, primitives, all commands, mid-run create/destroy,
+  gravity change, a restore), tamper detection at the right step, truncation, file round trip,
+  the runtime pipeline replaying exactly, two peers with reversed creation order agreeing every
+  tick, stamp-not-arrival order, late and future commands, runtime rewind, NetId allocation.
+- The sandbox self-test records and replays its whole session (3000 frames: 1065 steps, 243 KB,
+  identical); spawned bodies get NetIds.
+
+Planned:
+- `NetId`, tick-stamped command log, and full save/restore including our side.
+- The per-tick state hash and a record-and-replay test (V4).
+- No transport.
+
+**M5. Edits and destruction.** Done 2026-10-13.
+- As built: each `PhysicsBody` keeps the (chunk, content stamp) list it was built from; a step
+  checks bodies only when `latestBlobContentStamp()` moved, and rebuilds those whose list differs
+  (NetId order). A dynamic body keeps its velocities across a rebuild. Destroying any body first
+  wakes everything its bounds touch (`wakeBodiesAround`), so carving or deleting a floor drops
+  what slept on it, and voxels added inside a body push it out.
+- `utils/voxel_islands.h`: 6-connected islands in scan order; `splitVoxelIslands` keeps the
+  largest, and makes each other island a duplicate of the component carved down to it (palette
+  and materials kept), optionally as a root placed in the world. Occupancy decoding is shared
+  with collision (`decodeOccupancy`).
+- Runtime: a dynamic voxel body (a chunk, or a prefab: an asset with one chunk) whose voxels
+  split becomes several bodies: new entities linked Root, the parent's RigidBody with an explicit
+  mass shared by voxel count, NetIds if the parent had one, the parent's velocity at each piece's
+  centre; `BodySplit`. Edited to nothing: `BodyEmptied` (not a refusal). `editVoxels` applies edits
+  at the next step in issue order; `voxelComponentOf`, `voxelsInSphere`.
+- Sandbox: bombs crater the arena (never its bottom layer) and bite crates, which split.
+  3000-frame self-tests: 15-25 pieces blasted off, all simulated, books balanced, replays identical.
+- Tests: islands, the split (materials, placement), carving under a sleeping crate, voxels added
+  inside a resting one, deleting a floor, splitting with mass and motion, a prefab-shaped split,
+  edit-command timing, a session with edits and splits replaying exactly, emptied bodies.
+- Not done: static grids splitting (`physics.static` `splits`), grids or multi-chunk assets as
+  dynamic bodies that split, and MutableCompoundShape for big grids (rebuilds are whole-body today;
+  unchanged cells reuse their cached shapes, so only the compound is redone).
+
+Planned:
+- Shape rebuild at tick boundaries (A5).
+- Island splitting.
+- The sandbox's bombs carve voxels out of crates and the arena, and fragments fly.
+
+**M6. Queries and character.** Done 2026-10-13.
+- As built (queries): `PhysicsWorld::castRay` / `castSphere` / `overlapSphere` / `overlapBox` with a
+  `QueryFilter` (layer mask, one body to skip). A hit carries the shape's normal and the path of
+  compound indices to the sub-shape struck. Runtime `castRay` / `castSphere` / `overlap*` resolve that
+  to entity, NetId and, for voxel bodies, chunk, voxel, component and material slot -- through each
+  body's `PhysicsVoxelPart` list (recorded at build) and its *simulation* pose, not the drawn one.
+- Tests: distances, normals, filters, sweeps, overlap order; and rays from all around random
+  shapes -- one chunk, a two-chunk prefab offset in its asset, a grid -- name exactly the voxel,
+  material slot and distance utils::pickVoxel does (normals match the face away from rounded edges).
+- The sandbox pops with castRay.
+- As built (character): `PhysicsWorld::createCharacter` etc. over Jolt's `CharacterVirtual`: a feet-
+  origin capsule, an inner body (so rigid bodies collide with it), ground velocity + gravity +
+  input + jump as in Jolt's sample, stair stepping and floor sticking, pushing at `maxStrength`.
+  Characters update before the body step, in slot order; they are in the recording, the snapshot
+  (version 3) and the state hash. Runtime: `CharacterController` (`physics.character`),
+  `PhysicsCharacter`, `setCharacterInput` as a stamped command (`PhysicsCommand::CharacterInput`, by
+  NetId from elsewhere), `characterState`; physics writes the Transform's position, interpolated.
+- Tests: standing and walking speed, stairs and a wall, a voxel slope (a staircase: the step height
+  limits it, not only the angle), jumping height and landing, pushing a crate, a ball not passing
+  through, riding a kinematic platform, NetId input + rewind + replay, entities.json.
+- Sandbox: V walks; the self-test walks a character through everything and checks it.
+- Found and fixed on the way: a velocity carried over from a body at its speed cap (a rebuild, a
+  cut piece) could come back a hair over and trip Jolt's creation assert -- `createBody` now caps
+  velocities. And the sandbox's books could miss a piece retired before its BodySplit arrived; the
+  books are now checked against actual Body construction and destruction counts.
+- Release preset verified (Jolt asserts off, minimal logging): unit tests pass, and its 3000-frame
+  self-test runs with no warnings or errors. It found one more edge: a body carved to nothing
+  before its first step was refused with a warning instead of emptied; now an entity whose voxels
+  changed after it asked for a body is `BodyEmptied` too (tested).
+
+Planned:
+- `castRay` / `castShape` / `overlap`, and a `CharacterVirtual` wrapper with a first-person
+  controller in the sandbox.
+
+**M7. Contours** (when the contour work is ready): the `ClippedVoxels` representation, the shared
+CPU surface function, and the render-vs-collision normal test (A6.4).
+
+**Separately:** editor play mode, after the editor's `ComponentRef` conversion (slot-reuse step 4).
+
+## Verification
+
+**V1. Geometry (unit, CPU).**
+- For random blobs and every sculpt-test shape, the union of `Boxes` pieces equals the voxel set
+  exactly, with no overlaps between pieces.
+- The same blob decomposes to the same pieces in the same order (run twice, and on a copy).
+- For every representation, every piece lies inside the voxel union (A6.1).
+- The piece-budget fallback produces the content-bounds box.
+
+**V2. Determinism (unit).**
+- Run 1,000 ticks of a seeded scene twice: identical hash every tick.
+- Save/restore at random ticks: identical continuation.
+- Create the same bodies in a different ECS insertion order with the same NetIds: identical
+  hashes (proves commands, not view order, decide).
+
+**V3. Reliability (unit, headless, also the soak in CI).**
+- **Tunnel:** 1,000 one-voxel balls at 200 m/s at a one-voxel-thick grid wall. Zero pass through.
+- **Stack:** a 10-crate tower, and a 200-crate pile. Every body asleep within 5 s, no body
+  drifting more than half a voxel after that.
+- **Soak:** 2,000 bodies, 10 minutes of sim time with spawn, destroy and explode churn. Zero NaN
+  events, zero escapes through the arena, constant memory, no contact drops.
+- **Edit under load:** carve the floor out from under a pile; add voxels inside a resting body.
+  Bodies fall or get pushed out, and none is left stuck or exploded.
+- **Delete during contact:** destroy bodies mid-collision, every tick for 1,000 ticks. No dangling
+  contacts, no crash.
+
+**V4. Replay.**
+- Record the sandbox self-test's command log; replay it headless; the final state hash matches.
+
+**V5. Unchanged.**
+- 78+ unit tests, sandbox self-test, 15-entities, editor self-tests.
+
+## Open questions (none block M0 to M2)
+
+- Jolt's job system: start single-threaded for simplicity and determinism ease, and switch to
+  `JobSystemThreadPool` in M3 once the determinism tests exist to prove it changes nothing.
+  Jolt is deterministic with threads; the tests are what make that a fact here rather than a
+  belief.
+
+## What the demos showed (2026-10-13)
+
+Findings from building the nine physics demos (a tenth, Slide, came with materials), in rough priority. **Physics materials come first**
+(user's call): fracture strength, friction and restitution all hang off a voxel's material, so the
+fracture work below is built on them, not before them.
+
+1. **Materials** (built 2026-10-14, see above; strength / fracture pattern still to do): palette entry -> physics material (density, friction,
+   restitution, and now *strength / fracture pattern* too). Box merging stops at material
+   boundaries; per-contact friction/restitution via a contact listener.
+2. **Fracture and support.** Nothing checks structural support: a static wall cut at its base
+   leaves the rest floating. After an edit, islands no longer connected to an anchor (ground, or
+   voxels marked as anchors) should become dynamic. Grids / multi-chunk bodies can't split, so
+   demo shards are capped at one chunk (16 voxels). Voronoi shatter, cut-and-respawn and the kick
+   live in demo code (demo 9 `crackWall`, demo 2 `detonate`); they want an engine call
+   (fracture body at point, by the material's pattern). Debris has no budget (cap, permanent
+   sleep, merge back to static).
+3. **Contact events.** No "A hit B at P with impulse J" callback; demo 9 predicts the strike
+   geometrically three steps ahead. Needed for impact-driven fracture, sounds, damage and
+   materials -- reported in deterministic order.
+4. **Sleeping too eagerly.** Shards resting against the static wall freeze mid-fall until the
+   boulder comes near again. Revisit sleep thresholds / rest damping for bodies in contact only
+   with static geometry.
+5. **Voxel collision fidelity.** Voxel gears jam on stair-steps at every handover (any resolution
+   tried); only grid-aligned crosses work. Waits on contours; a ratio GearConstraint between two
+   hinges is the reliable fallback.
+6. **Joints.** No true lock (the trebuchet latch is a servo and sags 0.07 rad under 36 t); no
+   mass-ratio warning; ropes/chains aren't a primitive (sling drawn by the demo, winch chain is 24
+   bodies); Distance joints should probably collide by default.
+7. **Kinematic.** ConstantVelocity added (kinematic bodies flying on their own; drawn from the
+   simulation). Kinematic vs static don't collide (a launched ball passes through the floor):
+   should be a per-body option.
+8. **Scale.** The 2,700-crate pyramid scene drops steps while settling and takes ~14 s to sleep;
+   tall stacks fell with 5 mm starting gaps. Want start-asleep for authored stacks, and a profile.
+9. **Debug view** of shapes, contacts, joints and sleep state -- everything here was diagnosed
+   from logs and framebuffer captures.
+10. (Engine, not physics) Prototypes are hidden by parking them 1 km down; missing that drew
+    stray models at the origin. Want a not-drawn/template flag.

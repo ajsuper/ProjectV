@@ -95,7 +95,7 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   no public header names a Jolt type. `runtime::PhysicsWorld` (`runtime/physics/physics_world.h`)
   is the core. It must stay deterministic and restorable: no clocks, thread counts or unordered
   iteration in anything that feeds a step, and a Jolt upgrade is deliberate, with the physics
-  tests run. Plan: `~/Documents/ProjectVPlans/physics-jolt.md`.
+  tests run. Plan: `docs/plans/physics-jolt.md`.
 - **What crosses machines is a `NetId`** (`runtime/net.h`), never an Entity, handle, ref or body
   id. Physics makes a step's new bodies in NetId order and applies commands in
   (tick, issuer, sequence) order, so nothing that feeds a step may depend on registry or arrival
@@ -131,7 +131,7 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 | `tests/unit/` | The automated suite (doctest, ctest). CPU only. |
 | `tests/manual/` | Harnesses that need a display. Not examples. See `tests/README.md`. |
 | `docs/data_structures/` | Format references: the `.data` container, compose scenes, entities, tree64, renderers. |
-| `docs/plans/` | Design notes, delivery logs, and `known-latent-issues.md` / `test-suite-notes.md`. |
+| `docs/plans/` | Design notes, delivery logs, and `known-latent-issues.md` / `test-suite-notes.md`. Plans live here, in the repo -- never outside it -- and are kept current as work lands. |
 
 Two documents worth reading before changing engine behaviour:
 

@@ -2607,7 +2607,7 @@ static void dropResolveResults(projv::Scene& scene, EditorState& editor);
 // deleted row that the scene then reused would make every one of them name some other component, so
 // the editor's scenes keep deleted rows as tombstones (Scene::slots). Applied wherever the editor's
 // scene is replaced, because a fresh Scene recycles by default. Converting those holders to
-// ComponentRef is what would let this go; see ~/Documents/ProjectVPlans/slot-reuse.md.
+// ComponentRef is what would let this go; see docs/plans/slot-reuse.md.
 static void applyEditorScenePolicy(projv::Scene& scene) {
     scene.slots.enabled = false;
 }
