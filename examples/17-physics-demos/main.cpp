@@ -87,6 +87,7 @@
 #include "graphics/render_instance.h"
 #include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
+#include "utils/collision_geometry.h"
 #include "utils/editing.h"
 #include "utils/material.h"
 #include "utils/scene_query.h"
@@ -284,6 +285,14 @@ struct Demos {
     struct Overhangs {
         Entity tree = projv::NullEntity;
         std::vector<projv::BodySplit> fell;
+        // A click's chip, until its pieces come back (see chip): where it was struck, which way is
+        // out of the face, and how fast the pieces leave.
+        bool chipped = false;
+        vec3 chipAt{0.0f}, chipOut{0.0f};
+        float chipSpeed = 0.0f;
+        // Thrown pieces, frictionless for a moment (see throwChip): what to give back, and when.
+        struct Slippery { Entity piece; float friction; std::string material; int steps; };
+        std::vector<Slippery> slippery;
     } overhangs;
     // What right-click holds: a body, the point on it that was grabbed (in the body's frame), and how
     // far in front of the camera that point is pulled.
@@ -1339,8 +1348,9 @@ void setWinch(World& world, Demos& demos, Demos::Winch::Mode mode) {
 //   crumbles where you chip, and bricks with nothing left holding them drop out whole
 
 constexpr float OVERHANG_VOXEL = 0.25f;
-constexpr float CHIP_ENERGY = 30000.0f;    // J: about half a metre of these materials
-constexpr float BLOW_ENERGY = 120000.0f;   // J: about twice as far
+constexpr float CHIP_ENERGY = 90000.0f;    // J: about 0.7 m of these materials
+constexpr float BLOW_ENERGY = 120000.0f;   // J: a little farther again
+constexpr float CHIP_SPEED = 6.0f, BLOW_SPEED = 8.0f;   // m/s: how fast each throws its pieces out
 
 // A static thing of `material` that splits, its corner at `corner`, standing on its own y = 0 (what
 // support takes for the ground).
@@ -1414,17 +1424,75 @@ void buildOverhangs(World& world, Demos& demos, Camera& camera) {
     camera.pitch = -0.12f;
 }
 
-// A blow where the crosshair is: the engine's fracture, with `energy`, at what the ray hits. What it
-// breaks off is pushed on a little, the way the blow went.
-void chip(World& world, const Camera& camera, float energy) {
+// A blow where the crosshair is, like a pickaxe's: the engine's fracture, with `energy`, just inside
+// what the ray hits; then, when its pieces come back (BodyFractured, in main), throwChip sends them
+// flying out of the face. Left alone they would not move: they are cut from one solid, so they mesh
+// perfectly and friction holds each in its socket.
+void chip(World& world, const Camera& camera, float energy, float speed) {
     auto hit = runtime::castRay(world, camera.position, camera.forward(), 80.0f, 0xffffffffu, camera.walker);
     if (!hit || hit->entity == projv::NullEntity) return;
+    Demos& demos = world.ctx().get<Demos>();
     runtime::Strike strike;
-    strike.at = hit->position + camera.forward() * 0.05f;
+    strike.at = hit->position + camera.forward() * 0.1f;
     strike.energy = energy;
-    strike.push = camera.forward() * 3.0f;
     strike.shardsBreakOnImpact = false;   // chips do not shatter again where they land
     runtime::fracture(world, hit->entity, strike);
+    demos.overhangs.chipped = true;
+    demos.overhangs.chipAt = strike.at;
+    demos.overhangs.chipOut = glm::dot(hit->normal, camera.forward()) < 0.0f ? hit->normal : -hit->normal;
+    demos.overhangs.chipSpeed = speed;
+}
+
+uint64_t voxelsIn(const projv::Scene& scene, ComponentHandle h) {
+    const projv::ComponentRecord& record = scene.components[h];
+    if (record.kind != projv::ComponentKind::Chunk) return ~uint64_t(0);
+    const projv::Chunk& chunk = scene.chunks[record.chunkHandle];
+    projv::utils::VoxelOccupancy occupancy;
+    if (chunk.geometryPoolIndex < 0 ||
+        projv::utils::decodeOccupancy(scene.geometryPool[size_t(chunk.geometryPoolIndex)], chunk.header.resolution, 1u << 20,
+                                      occupancy) != projv::utils::DecodeResult::Ok)
+        return ~uint64_t(0);
+    return occupancy.solid;
+}
+
+// A chip's pieces: crumbs go as dust, and the rest are thrown out of the face, spreading from where
+// it was struck and tumbling. Cut from one solid, each sits flush in its socket, and friction against
+// the faces round it holds it there whatever speed it is given (measured: set to 6 m/s, none moved
+// more than 2 cm; frictionless, nearly all flew). So each is frictionless for a moment, while it
+// leaves, then gets its own friction back (restoreChips) before it lands.
+constexpr uint64_t DUST_VOXELS = 6;
+constexpr int SLIPPERY_STEPS = 30;   // fixed steps: half a second
+void throwChip(World& world, Demos::Overhangs& o, const std::vector<Entity>& shards) {
+    const auto& scene = world.ctx().get<projv::Scene>();
+    for (Entity shard : shards) {
+        if (!world.valid(shard) || !world.all_of<projv::VoxelComponent>(shard)) continue;
+        if (voxelsIn(scene, world.get<projv::VoxelComponent>(shard).handle) < DUST_VOXELS) {
+            world.destroy(shard);
+            continue;
+        }
+        vec3 from = runtime::bodyPose(world, shard).centerOfMass - o.chipAt;
+        float distance = glm::length(from);
+        vec3 spread = distance > 1e-3f ? from / distance : o.chipOut;
+        vec3 velocity = glm::normalize(o.chipOut + 0.5f * spread) * o.chipSpeed + vec3(0, 1.5f, 0);
+        const projv::RigidBody& rigid = world.get<projv::RigidBody>(shard);
+        o.slippery.push_back({shard, rigid.friction, rigid.material, SLIPPERY_STEPS});
+        world.patch<projv::RigidBody>(shard, [](projv::RigidBody& r) {
+            r.friction = 0.0f;
+            r.material.clear();   // a material's friction would override the field
+        });
+        runtime::setVelocity(world, shard, velocity, glm::cross(o.chipOut, spread) * 4.0f);
+    }
+}
+
+// Thrown pieces whose moment is up get their friction and material back.
+void restoreChips(World& world, Demos::Overhangs& o) {
+    for (auto& s : o.slippery)
+        if (--s.steps == 0 && world.valid(s.piece) && world.all_of<projv::RigidBody>(s.piece))
+            world.patch<projv::RigidBody>(s.piece, [&s](projv::RigidBody& r) {
+                r.friction = s.friction;
+                r.material = s.material;
+            });
+    std::erase_if(o.slippery, [](const Demos::Overhangs::Slippery& s) { return s.steps <= 0; });
 }
 
 void startDemo(World& world, int n) {
@@ -1511,7 +1579,7 @@ void act(World& world, Demos& demos, const Camera& camera) {
         case 5: startDemo(world, 5); break;
         case 9: fireTrebuchet(world, demos); break;
         case 10: placeSlideCrates(world, demos); break;
-        case 11: chip(world, camera, CHIP_ENERGY); break;
+        case 11: chip(world, camera, CHIP_ENERGY, CHIP_SPEED); break;
         case 6:
             place(world, demos.crate, vec3(-12, 7, uniform(demos, -2, 2)), quat(1, 0, 0, 0), body(60.0f));
             fireBall(world, demos, 3, vec3(uniform(demos, 8.5f, 9.5f), 1.5f, -9), vec3(0, 1.5f, 22), 2000.0f);
@@ -1565,6 +1633,7 @@ void demoTick(projv::Application& app) {
         demos.stepCount++;
     }
     if (demos.blastKickIn > 0 && --demos.blastKickIn == 0) blastKick(world, demos);
+    if (!demos.overhangs.slippery.empty()) restoreChips(world, demos.overhangs);
     // Demo 1's kinematic balls level off a crate's height above the floor. Nothing stops a kinematic
     // body, so one driven down onto crates would press them through the floor; this way it ploughs
     // into the pyramid and rolls over whatever lies flat.
@@ -1665,7 +1734,7 @@ void controls(projv::Application& app) {
     if (demos.grab.body != projv::NullEntity)
         demos.grab.distance = std::clamp(demos.grab.distance + input.scroll.y, 1.5f, 60.0f);
     if (input.pressed(projv::Key::F) && demos.current == 1) launchOrb(world, demos, camera);
-    if (input.pressed(projv::Key::F) && demos.current == 11 && captured) chip(world, camera, BLOW_ENERGY);
+    if (input.pressed(projv::Key::F) && demos.current == 11 && captured) chip(world, camera, BLOW_ENERGY, BLOW_SPEED);
     if (input.pressed(projv::Key::T)) time.scale = time.scale == 1.0f ? 0.2f : 1.0f;
     Look& look = world.ctx().get<Look>();
     if (input.pressed(projv::Key::H)) look.shadows = !look.shadows;
@@ -2374,6 +2443,11 @@ void startup(projv::Application& app) {
     app.events().on<projv::BodyFractured>([&world](const projv::BodyFractured& e) {
         Demos& demos = world.ctx().get<Demos>();
         demos.pieces += int(e.shards.size());
+        // Demo 11: a click's pieces, thrown out of the face.
+        if (demos.current == 11 && demos.overhangs.chipped && e.striker == projv::NullEntity) {
+            demos.overhangs.chipped = false;
+            throwChip(world, demos.overhangs, e.shards);
+        }
         // Demo 9: the boulder broke a wall.
         Demos::Trebuchet& tb = demos.trebuchet;
         if (e.striker != projv::NullEntity && e.striker == tb.boulder && !tb.struck) {
