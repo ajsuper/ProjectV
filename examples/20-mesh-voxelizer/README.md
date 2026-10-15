@@ -303,7 +303,7 @@ Minecraft worlds take the same path from step 2 onward, fed the blocks that were
 
 ## Output Format
 
-`model.data` is a PVDT container, currently version 2 (see [compose_data_structure.md](/docs/data_structures/compose_data_structure.md)). It holds geometry and nothing else — neither the placement nor the palette is in there. Each block carries:
+`model.data` is a PVDT container, currently version 2 (see [the .data format](/docs/reference/formats/data-file.md)). It holds geometry and nothing else — neither the placement nor the palette is in there. Each block carries:
 
 - **`geometry`** — the tree64, built from the brick map by `updateChunkFromBrickMap`.
 - **`materialIDs`** — one byte per solid voxel, with uniform leaves collapsed to a single entry.

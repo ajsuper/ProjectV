@@ -14,7 +14,7 @@ The original ProjectV path tracer. It accumulates samples across frames while th
 It is the simplest thing here and the baseline the others are measured against: a still camera
 converges to a reference image, so this is what to compare a faster renderer's output *to*. The
 hard reset on camera movement is the whole trade — you get correctness while parked and noise the
-moment you move, which is exactly the problem [reprojection](../reprojection/) exists to solve.
+moment you move, which is exactly the problem [taa](../taa/) exists to solve.
 
 ## Files
 

@@ -1,6 +1,6 @@
 # 30 — Renderers
 
-Seven renderers, one scene, one camera. The comparison is the point: each answers "how should this
+Four renderers, one scene, one camera. The comparison is the point: each answers "how should this
 scene be lit" differently, and the only way to judge that is to put them side by side under
 identical conditions.
 
@@ -20,30 +20,23 @@ renderers/<name>/
 ```
 
 `main.cpp` supplies the window, the camera, the scene and the per-frame uniforms. Everything that
-makes one renderer differ from another lives in its folder. Adding an eighth is dropping in a
+makes one renderer differ from another lives in its folder. Adding a fifth is dropping in a
 directory and adding one entry to `buildRendererRegistry()`.
 
-That is also why this example is the right place to learn the renderer format: there are seven
-worked examples of it, at every scale from four passes to ten.
+That is also why this example is the right place to learn the renderer format: there are four
+worked examples of it.
 
-## The seven
+## The four
 
-| Renderer | GI | Noise strategy | Notes |
+| Renderer | Lighting | Noise strategy | Notes |
 |---|---|---|---|
 | [tree64](renderers/tree64/) | full path trace | accumulate; hard reset on camera move | The baseline. Converges to a reference image while parked. |
-| [reprojection](renderers/reprojection/) | full path trace | temporal reprojection + à-trous denoise | Stays converged *while moving*. The machinery the others reuse. |
-| [fast](renderers/fast/) | none — direct + RTAO | deterministic; TAA for AA only | Cheapest. Nothing to converge because nothing is random. |
-| [face](renderers/face/) | full, per voxel face | none needed; exact-key history gate | Zero spatial noise by construction. Blocky by design. |
-| [radiance-cascade](renderers/radiance-cascade/) | screen-space cascades | temporal mean | Kept for the comparison. Screen space cannot see off-screen. |
-| [world-cascade](renderers/world-cascade/) | world-space cascades | temporal mean on indirect only | The gather traces real voxel rays. Best-looking here. |
-| [world-face-cascade](renderers/world-face-cascade/) | world-space cascades, per face | exact-key history gate | Fewest gather rays of the three cascade renderers. |
+| [taa](renderers/taa/) | full path trace | temporal reprojection + denoise | Stays converged *while moving*. Teaches the reprojection machinery every temporal filter uses. |
+| [fast](renderers/fast/) | none — direct sun + RTAO | deterministic; TAA for AA only | Cheapest. Nothing to converge because nothing is random. |
+| [reconstruction](renderers/reconstruction/) | direct sun + ambient, spatially softened shadow | half-resolution trace, rebuilt to full from voxel face identity | The most effective trick for a weak GPU: a quarter of the pixels traced. `Q` toggles the reconstruction off (point-sampled) for the A/B. No README; the comments in `main.cpp` and its shaders are the description. |
 
-Read them in that order and the argument is visible: accumulation, then reprojection to survive
-motion, then dropping GI entirely for speed, then changing the *unit of work* to kill noise at the
-source, then cascades, then fixing what screen space cannot do, then combining the last two ideas.
-
-Per pixel, cost runs roughly `fast` < `face` < `world-face-cascade` < `radiance-cascade` <
-`world-cascade` < `reprojection` < `tree64`.
+Read them in that order: accumulation, then reprojection to survive motion, then dropping GI
+entirely for speed, then tracing fewer pixels and reconstructing the rest.
 
 ## How to build
 
@@ -52,7 +45,7 @@ cmake --preset dev
 cmake --build --preset dev --target renderer_gallery
 ```
 
-That builds every renderer's shaders too. All seven share the engine's voxel DDA
+That builds every renderer's shaders too. All four share the engine's voxel DDA
 (`pjv_utils_DDA.sc`, on the shader include path automatically) and this example's own
 `sharedShaders/` — the sun/sky model and the cascade maths — so they stay in step with each other
 and with the engine.
@@ -61,7 +54,7 @@ and with the engine.
 
 ```bash
 cd build/examples/renderer_gallery
-./renderer_gallery --renderer world-cascade
+./renderer_gallery --renderer fast
 ```
 
 ```
@@ -71,7 +64,7 @@ cd build/examples/renderer_gallery
 ```
 
 Selection is a flag rather than a prompt so the gallery can be scripted. A screenshot matrix or a
-benchmark across all seven is a shell loop:
+benchmark across all four is a shell loop:
 
 ```bash
 for r in $(./renderer_gallery --list | grep -oE '^  [a-z-]+'); do
@@ -103,7 +96,7 @@ frame, and says so at startup:
 Until it is re-voxelized, point `--scene` at something that loads:
 
 ```bash
-./renderer_gallery --renderer world-cascade --scene ../scene_previewer/scenes/SmallVox
+./renderer_gallery --renderer fast --scene ../scene_previewer/scenes/SmallVox
 ```
 
 See [docs/plans/known-latent-issues.md](../../docs/plans/known-latent-issues.md) for the full list

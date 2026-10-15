@@ -13,19 +13,32 @@ ProjectV is under very early development, data structures and functionalities wi
 
 # Contents
 
-- [Goals of ProjectV](#Goals-of-ProjectV)
+- [Documentation](#documentation)
+- [Goals of ProjectV](#goals-of-projectv)
 - [Installation](#installation)
 - [Uninstallation](#uninstallation)
-    - [Entire library](#entire-library)
-    - [Only build files](#only-build-files)
+    - [Entire library](#entire-library-completely-deletes-the-library)
+    - [Only build files](#only-build-files-keeps-the-source-code-and-file-structure)
 - [Dependencies](#dependencies)
-    - [Install Dependencies](#install-dependencies)
 - [Modules](#modules)
-    - [Utils](#utils)
-    - [Core](#core)
-    - [Graphics](#graphics)
 - [Usage](#usage)
 - [Contributing](#contributing)
+
+### Documentation
+
+---
+
+Everything is in [docs/](/docs/README.md): plain Markdown, readable with `cat` and `grep`.
+
+| | |
+|---|---|
+| [Getting started](/docs/getting-started/README.md) | Build, run the examples, write a first program |
+| [Concepts](/docs/concepts/README.md) | How the engine works |
+| [Guides](/docs/guides/README.md) | One task each |
+| [Reference](/docs/reference/README.md) | Per-module API map, file formats, glossary |
+
+The same files build a searchable web site with the API reference:
+`cmake --build build --target docs`, then open `build/docs/site/index.html`.
 
 ### Goals of ProjectV
 
@@ -86,7 +99,7 @@ Presets: `dev` (submodule dependencies, examples on), `release` (optimised, mini
 `vcpkg` (dependencies via `find_package`).
 
 For everything else — platform notes, the shader rule, troubleshooting — see
-[docs/BUILDING.md](/docs/BUILDING.md).
+[docs/getting-started/build.md](/docs/getting-started/build.md).
 
 **On installing.** `cmake --install build --prefix <dir>` produces a config package a consumer
 finds with `find_package(ProjectV CONFIG REQUIRED)`. A submodule build installs the vendored
@@ -143,9 +156,9 @@ hand-ordered link lists are gone.
 
 | Group | Header example | What it provides |
 |---|---|---|
-| **Core** | `#include "core/application.h"` | `projv::Application`: the stages, the game loop, `Time` and `Events`. The world is an [EnTT](https://github.com/skypjack/entt) registry. Also maths, logging, `executableDirectory()`. See [core.md](/include/core/core.md) |
-| **Utils** | `#include "utils/voxel_math.h"` | Voxel data: scene composition and I/O, materials, editing, picking, animation, scene queries. See [utils.md](/include/utils/utils.md) |
-| **Graphics** | `#include "graphics/render_instance.h"` | Window and bgfx setup, renderer specifications, GPU upload, the render loop. See [graphics.md](/include/graphics/graphics.md) |
+| **Core** | `#include "core/application.h"` | `projv::Application`: the stages, the game loop, `Time` and `Events`. The world is an [EnTT](https://github.com/skypjack/entt) registry. Also maths, logging, `executableDirectory()`. See [docs/reference/core.md](/docs/reference/core.md) |
+| **Utils** | `#include "utils/voxel_math.h"` | Voxel data: scene composition and I/O, materials, editing, picking, animation, scene queries. See [docs/reference/utils.md](/docs/reference/utils.md) |
+| **Graphics** | `#include "graphics/render_instance.h"` | Window and bgfx setup, renderer specifications, GPU upload, the render loop. See [docs/reference/graphics.md](/docs/reference/graphics.md) |
 | **Data structures** | `#include "data_structures/scene.h"` | The plain types the three above operate on — `Scene`, `Chunk`, `GPUData`, `RendererSpecification` |
 | **Runtime** | `#include "runtime/scene_bridge.h"`, `runtime/entities.h` | Entities linked to voxel components (`Transform`, `VoxelComponent`), and authored entities: ECS components saved as themselves in an `entities.json` beside each `compose.json`, and prefabs. The one layer that sees both EnTT and the Scene |
 
@@ -216,7 +229,7 @@ const auto assets = projv::core::executableDirectory() / "assets";
 scene = projv::utils::loadComposeFromDisk((assets / "scenes/Castle").string());
 ```
 
-For worked examples, see [examples/README.md](/examples/README.md) — nine programs ordered so
+For worked examples, see [examples/README.md](/examples/README.md) — ten programs ordered so
 that reading them in sequence teaches the engine.
 
 ### Contributing

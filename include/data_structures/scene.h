@@ -345,7 +345,7 @@ namespace projv{
     };
 
     // Governs what happens when a `data` component's voxel data is modified and persisted.
-    // (Runtime home; ComposeComponent in compose.h references it.) See compose_data_structure.md.
+    // (Runtime home; ComposeComponent in compose.h references it.) See docs/reference/formats/compose-json.md.
     enum class Mutability {
         Locked, // Never written back; instances of the same source share one buffer.
         Direct, // Edits are written in place to the source .data; same-policy instances still share.
@@ -537,7 +537,7 @@ namespace projv{
     };
     
     // A uniform grid of equal, grid-aligned chunks (one .data grid volume). Enables a
-    // top-level DDA over cells instead of brute-forcing every chunk. See compose_data_structure.md.
+    // top-level DDA over cells instead of brute-forcing every chunk. See docs/reference/formats/compose-json.md.
     struct SceneGrid {
         core::vec3 origin;                  // World position of the grid's local (0,0,0) corner.
         float cellSize;                     // World size of one cell (one block).

@@ -391,6 +391,9 @@ if(PROJV_BUILD_MANUAL_TESTS)
     add_subdirectory(tests/manual)
 endif()
 
+# Documentation: the `docs` target (web site + API reference) and the `docs` link-check test.
+include(ProjectVDocs)
+
 # =====================================================================================
 # Install / export
 # =====================================================================================

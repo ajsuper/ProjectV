@@ -7,8 +7,8 @@ stamp is a part of a persistent assembly now, and the merge is a fold. Read this
 mechanisms are the way they are; read that one for what the tool does.
 
 **Implemented.** This is the design it was built from; the built version is documented in
-[`docs/examples/SceneEditor/README.md`](../examples/SceneEditor/README.md) under *Stamps: the Shape
-and Region tools*, and lives in that example's `main.cpp`. Where the two differ, the README is what
+[`examples/60-scene-editor/README.md`](../../examples/60-scene-editor/README.md) (formerly under *Stamps: the Shape
+and Region tools*; now part of the asset tools), and lives in that example's `main.cpp`. Where the two differ, the README is what
 the code does.
 
 Three deliberate departures from what is written below:

@@ -1,0 +1,134 @@
+# Shader library
+
+[`include/pjv_utils_DDA.sc`](../../include/pjv_utils_DDA.sc): the engine's GLSL (bgfx shaderc) for
+marching rays through the voxel scene. Its comments are the full reference; this is the map.
+
+```glsl
+#include <bgfx_shader.sh>
+#include <pjv_utils_DDA.sc>        // on shaderc's include path via projv_compile_shaders
+```
+
+## A complete primary ray
+
+```glsl
+Ray ray;
+ray.origin    = cameraPos.xyz;
+ray.direction = rayStartDirection(v_texcoord0, windowRes.xy, cameraPos.xyz, normalize(cameraDir.xyz), 60.0);
+
+RayQuery q = pjvPrimaryQuery(256u);          // max steps
+pjvQueryWantMaterial(q);                     // have the march resolve the material
+
+SceneHit sh = raySceneIntersect(ray, q);
+if (sh.hit.rayT < 0.0 || sh.hit.foundBox.size < 0.0) { /* miss: sky */ }
+VoxelMaterial m = sh.materialValid ? sh.material : fetchVoxelMaterialFromHit(sh.hit);
+vec3 position   = ray.origin + ray.direction * sh.hit.rayT;   // only valid without refraction
+```
+
+## Rules
+
+- **One march call site per shader.** A second inlined `raySceneIntersect` / `raySceneIntersectFrom`
+  call made every mode of a renderer about 2× slower. Choose the ray first, branch inside one call.
+- **LOD is not a performance lever.** `startLOD`/`finishLOD`/`distanceToFinishLOD` tune VRAM and
+  anti-aliasing, not frame time. A slow renderer is the wrong GPU/driver, target count or size, or
+  CPU work. A ray that runs out of `maxRaySteps` reports a miss, so a fast black screen means
+  too few steps.
+- **Use the hit's own data.** `rayT`, `normal`, `voxelCoord`, `exitT` come straight from the march.
+  Re-intersecting `foundBox` disagrees by ULPs and misclassifies boundary hits; recovering the voxel
+  from the world position shades voxels with their neighbour's colour on moved chunks.
+- **Build queries with a constructor.** A hand-made `RayQuery` fails the `magic` check, gets its
+  newer fields clamped, and stops with `PJV_STOP_BAD_QUERY`.
+
+## Bindings
+
+| Stage | Sampler | Holds |
+|---|---|---|
+| 9 | `materialIDs` | Material bytes |
+| 10 | `materialPalette` | Palettes, one entry per texel |
+| 11 | `looseList` | Loose chunks + their BVH |
+| 12 | `gridInfo` | Grids |
+| 13 | `cellMap` | Grid cell → chunk |
+| 14 | `tree64Data` | Every tree64 (and envelopes) |
+| 15 | `headerData` | One header row per chunk |
+
+All `USAMPLER2D`, read with `texelFetch`. Stages 0–8 are the pass's own inputs.
+
+| Uniform | Set by | Holds |
+|---|---|---|
+| `tree64Dims`, `voxelTypeDims`, `paletteDims` | engine | Scene texture sizes |
+| `pjvMotionSets[48]` | engine (`GPUData::animation`) | 16 motion sets × 3 vec4 |
+| `pjvAnimTime` | engine | `(seconds, 0, 0, 0)` |
+
+## Entry points
+
+| Function | Returns | Use |
+|---|---|---|
+| `rayStartDirection(uv, res, camPos, camDir, fovDeg)` | `vec3` | A camera ray for a pixel (matches `utils::rayDirectionThroughImage`) |
+| `raySceneIntersect(ray, query)` | `SceneHit` | **The** scene query: transparency, refraction, animation per the query |
+| `raySceneIntersectFrom(ray, query, tMin)` | `SceneIntersectData` | Nearest solid voxel beyond `tMin`, geometry only (probes) |
+| `fetchVoxelMaterialFromHit(hit)` | `VoxelMaterial` | Material of a hit: two fetches, no descent |
+| `fetchVoxelColorFromHit(hit)` | `vec3` | Albedo only |
+| `fetchVoxelMaterialAtCoord(voxelCoord, headerIndex)`, `fetchVoxelColorAtCoord` | | By coordinate (re-descends) |
+| `fetchVoxelColor(foundBox, headerIndex)` | `vec3` | Older form by box; prefer the `FromHit` ones |
+| `pjvMotionSet(i)`, `pjvAnimSeconds()` | | The animation table |
+
+## `RayQuery`
+
+Constructors (one of these, always):
+
+| Constructor | For |
+|---|---|
+| `pjvPrimaryQuery(maxSteps)` | Camera and reflection rays: nearest surface, whole ray |
+| `pjvBounceQuery(maxSteps)` | Bounce rays (same today; named apart) |
+| `pjvShadowQuery(maxSteps, maxDistance)` | Shadow rays: bounded, `PJV_Q_OCCLUSION_ONLY` |
+| `pjvRayQueryRaw(maxSteps)` | All defaults |
+
+Options (each sets its flag **and** its budget):
+
+| Option | Flag | Effect |
+|---|---|---|
+| `pjvQueryWantMaterial(q)` | `PJV_Q_WANT_MATERIAL` | Fill `SceneHit::material` |
+| `pjvQueryTransparency(q, maxLayers, seed)` | `PJV_Q_TRANSPARENCY` | See through `transparency > 0`; accumulate `transmittance`, `emission` |
+| `pjvQueryRefraction(q, maxSegments)` | `PJV_Q_REFRACTION` | Bend at interfaces with `ior != 1` |
+| `pjvQueryAnimation(q, resolveDistance)` | `PJV_Q_ANIMATION` | Resolve animated voxels within that distance |
+| `pjvQueryAnimationDebugSolid(q)` | `PJV_Q_ANIM_DEBUG_SOLID` | Draw envelopes solid (diagnostic) |
+| `pjvQueryLinearLOD(q, finishLOD, rampVoxels)` | | Coarsen linearly with distance |
+| `pjvQueryLODFootprint(q, crossoverVoxels, coarsest)` | | Coarsen by pixel footprint |
+
+Fields: `flags`, `startLOD`, `finishLOD`, `distanceToFinishLOD`, `maxRaySteps`,
+`maxTransparentLayers`, `maxRefractionSegments`, `maxDistance`, `animResolveDistance`, `seed`,
+`minTransmittance` (default 0.002).
+
+## Results
+
+`SceneIntersectData` (the geometry of one hit):
+
+| Field | Meaning |
+|---|---|
+| `rayT` | Distance along the ray; −1 on a miss |
+| `normal` | Outward normal of the entered face; zero if the ray started inside |
+| `voxelCoord` | The cell, in the chunk's voxel space. Use this for lookups. |
+| `exitT` | Where the ray leaves the cell |
+| `headerIndex` | The chunk (its header row) |
+| `foundBox` | The voxel's world box; `size < 0` on a miss |
+| `steps` | March steps taken |
+
+`SceneHit` (what `raySceneIntersect` returns): `hit`, `material` + `materialValid`, `transmittance`
+(multiply what is behind by it), `emission` (add it), `layers`, `segments`, `finalRay` +
+`pathLength` (the bent ray and the total distance under refraction), `stopReason` (`PJV_STOP_*`),
+and diagnostics `diagBendFlags`, `diagBendIor`, `diagResolveMiss`.
+
+| `stopReason` | |
+|---|---|
+| `PJV_STOP_OPAQUE` | Reached an opaque surface |
+| `PJV_STOP_NO_GEOMETRY` | Nothing more along the ray |
+| `PJV_STOP_LAYER_BUDGET`, `PJV_STOP_SEGMENTS`, `PJV_STOP_ITERATIONS`, `PJV_STOP_STEPS` | A budget ran out |
+| `PJV_STOP_ABSORBED` | Transmittance under `minTransmittance` |
+| `PJV_STOP_TMIN_STALL` | The resume floor did not advance |
+| `PJV_STOP_BAD_QUERY` | Not built by a constructor |
+
+## `VoxelMaterial`
+
+The decoded palette entry ([Materials](../concepts/materials.md)): `albedo`, `emission` (already
+× strength: radiance), `glossiness` (0 rough, 1 mirror), `metallic`, `transparency` (0 opaque), `ior`
+(1 = none), `transmission`, `flags`. `pjvMaterialIsAnimated(m)` and `pjvMaterialIsAdvected(m)` read
+the flags.

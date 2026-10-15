@@ -1,6 +1,6 @@
 # ProjectV Examples
 
-Nine programs, ordered so that reading them in sequence teaches the engine. Each one is a
+Ten programs, ordered so that reading them in sequence teaches the engine. Each one is a
 complete application, not a snippet, and each has its own README explaining not just how to run it
 but why it exists and what it decided differently from its neighbours.
 
@@ -29,7 +29,7 @@ cd build/examples/hello_voxel && ./hello_voxel
 | **16** | [sandbox](16-sandbox/) | Everything at once, as a toy: prefabs (voxels plus their entity) spawned at runtime, physics in FixedUpdate with interpolated rendering, popping as an event with chain reactions, and an arena whose spawners are entities in its `entities.json`. Interactive. | — |
 | **17** | [physics_demos](17-physics-demos/) | Ten physics set pieces built from voxels in code: a crate pyramid and a wrecking ball, a brick wall blown into fragments, a barrage of balls of five sizes, a spinning kinematic beam sweeping a field, two giants colliding, and joints (a plank bridge, a windmill, a door, a breakable chain), a car made of joints that you drive, gears turning a winch, a trebuchet shattering stone walls, and crates sliding down ramps of ice, wood and slate into walls of rubber, oak and clay (physics materials). Interactive; `DEMOS_SELFTEST=1` checks them. | — |
 | **20** | [mesh-voxelizer](20-mesh-voxelizer/) | Getting your own data in: meshes and Minecraft worlds to Compose scenes. Headless command-line tool. | Assimp submodule |
-| **30** | [renderers](30-renderers/) | Seven renderers over one scene and one camera — the comparison is the point. Accumulation, reprojection, per-face GI, and four cascade variants. | — |
+| **30** | [renderers](30-renderers/) | Four renderers over one scene and one camera — the comparison is the point. Accumulation, TAA reprojection, fast direct light, and half-resolution reconstruction. | — |
 | **40** | [advanced-renderer](40-advanced-renderer/) | The good renderer, brought up to the engine as it is today: fourteen passes, world-space probe GI, animation, transparency and refraction. | — |
 | **50** | [terrain-generator](50-terrain-generator/) | Procedural generation and streaming: chunks built on worker threads and uploaded while you fly. | — |
 | **60** | [scene-editor](60-scene-editor/) | A complete tool. ImGui docking, the scene living inside a panel, tools, undo, and Lua-scripted brushes. | ImGui + Lua submodules |

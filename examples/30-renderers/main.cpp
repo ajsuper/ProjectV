@@ -1,25 +1,22 @@
 // ProjectV Renderer Gallery
 //
-// One host application, seven renderers, the same scene and the same camera. The point is the
+// One host application, four renderers, the same scene and the same camera. The point is the
 // comparison: each renderer answers "how should this scene be lit" differently, and the only way
 // to judge that is to put them side by side under identical conditions.
 //
 // A renderer here is *data*, not code -- a folder holding render.json (the pass order),
 // resources.json (the shaders, render targets and framebuffers) and the shaders themselves. This
 // file supplies the window, the camera, the scene and the per-frame uniforms; everything that
-// makes one renderer differ from another lives in its folder. Adding an eighth is dropping in a
+// makes one renderer differ from another lives in its folder. Adding a fifth is dropping in a
 // directory and adding one entry to buildRendererRegistry() below.
 //
-// Each renderer has its own README in renderers/<name>/, and renderers/README.md compares them.
+// Each renderer has its own folder in renderers/<name>/ (most with a README), and README.md compares them.
 //
-//   tree64              accumulation path tracer; resets whenever the camera moves
-//   reprojection        path traced, temporally reprojected, so it stays converged while moving
-//   fast                direct sun + screen-space AO, anti-aliased by TAA. Cheapest.
-//   face                per-face flat shading with full GI, accumulated by exact face identity
-//   radiance-cascade    screen-space radiance cascades
-//   world-cascade       world-space radiance cascades: the gather traces real voxel rays, so
-//                       occlusion and sky visibility are correct off-screen too
-//   world-face-cascade  world-space cascades anchored to voxel face centres, accumulated per face
+//   tree64          accumulation path tracer; resets whenever the camera moves
+//   taa             path traced, temporally reprojected, so it stays converged while moving
+//   fast            direct sun + screen-space AO, anti-aliased by TAA. Cheapest.
+//   reconstruction  traces at half resolution and rebuilds full resolution from voxel face
+//                   identity; Q bypasses the reconstruction for an A/B
 //
 // Usage:
 //   ./renderer_gallery [--renderer <name>] [--scene <directory>] [--list]
@@ -29,7 +26,7 @@
 //   --list       print the available renderers and exit
 //
 // Selection is a flag rather than a prompt so the gallery can be scripted: a benchmark or a
-// screenshot matrix across all seven is a shell loop.
+// screenshot matrix across all four is a shell loop.
 //
 // Controls:
 //   W/S          — move forward / backward
@@ -147,7 +144,7 @@ static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRendere
     projv::graphics::setUniformToValue(renderer, "prevCameraDir", prevCameraDirection);
 }
 
-// The registry. One entry per folder under renderers/; adding an eighth renderer means adding a
+// The registry. One entry per folder under renderers/; adding a fifth renderer means adding a
 // directory and one push_back here.
 //
 // The `id` must match the directory name: --renderer takes it, and it is what the per-renderer
@@ -200,7 +197,7 @@ static std::vector<RendererModule> buildRendererRegistry() {
 }
 
 // Command line. Selection is a flag rather than a prompt so the gallery can be driven by a
-// script -- a benchmark across all seven renderers should not need someone at the keyboard.
+// script -- a benchmark across all four renderers should not need someone at the keyboard.
 struct Options {
     std::string rendererId = "tree64";
     std::string scenePath;                // Empty: use the bundled scene beside the binary.
@@ -246,7 +243,7 @@ static bool parseCommandLine(int argc, char** argv, const std::vector<RendererMo
 }
 
 // Index of the named renderer, or -1. Names a wrong id loudly rather than silently falling back:
-// a benchmark that quietly measured the default renderer seven times would be worse than an error.
+// a benchmark that quietly measured the default renderer four times would be worse than an error.
 static int findRenderer(const std::vector<RendererModule>& registry, const std::string& id) {
     for (size_t i = 0; i < registry.size(); ++i) {
         if (registry[i].id == id) return static_cast<int>(i);

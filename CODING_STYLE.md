@@ -1,423 +1,118 @@
-# ProjectV Coding Style and Formatting Guide
+# Coding style
 
-This document defines the coding style and formatting conventions for the ProjectV repository. All contributors should follow these guidelines to maintain consistency across the codebase.
+How the C++ in this repository is actually written. When this page and the code disagree, match the
+surrounding code and fix this page.
 
-## Table of Contents
+## The language
 
-1. [Naming Conventions](#naming-conventions)
-2. [Formatting and Indentation](#formatting-and-indentation)
-3. [Brace Placement](#brace-placement)
-4. [Comments and Documentation](#comments-and-documentation)
-5. [Include File Organization](#include-file-organization)
-6. [Code Organization Patterns](#code-organization-patterns)
-7. [Error Handling](#error-handling)
-8. [Memory Management](#memory-management)
-9. [Template Usage](#template-usage)
-10. [Configuration Files](#configuration-files)
+- **C++20.** Designated initializers, `= default` comparisons, `if constexpr`, `std::optional` are
+  all in use.
+- **`-Wall -Wextra`** on the engine. Keep it warning-free.
+- **One library**, `projectV`, plus the `projv_physics` object library (the only code that includes
+  Jolt). See [Architecture](docs/concepts/architecture.md) for what each module may include; the
+  `layering` ctest enforces it.
 
-## Naming Conventions
+## Names
 
-### Variables and Functions
-- **camelCase** for local variables and member variables
-  ```cpp
-  int entityCount;
-  glm::vec3 cameraPosition;
-  ```
+| Thing | Style | Example |
+|---|---|---|
+| Types, enums, enum values | PascalCase | `ComponentRecord`, `LinkMode::Root` |
+| Functions, variables, members | camelCase, no prefixes | `queueVoxelAdd`, `geometryPoolIndex` |
+| Constants | UPPER_SNAKE `constexpr` | `BRICK_SIZE`, `INVALID_COMPONENT_HANDLE` |
+| Macros | `PROJV_` + UPPER_SNAKE | `PROJV_ENABLE_PERF`, `PROJV_MAX_PASS_SAMPLERS` |
+| Files | snake_case | `scene_query.h`, `physics_world.cpp` |
+| Namespaces | `projv`, `projv::core` / `utils` / `graphics` / `runtime` | `namespace projv::utils {` |
+| Header guards | `PROJECTV_<NAME>_H` or `PROJV_<MODULE>_<NAME>_H` | `PROJECTV_SCENE_QUERY_H` |
+| Saved keys (JSON) | namespaced, dotted | `physics.rigidbody`, `projv.editor.csg` |
 
-- **camelCase** for functions
-  ```cpp
-  void createWorld();
-  Voxel getVoxelAt(int x, int y, int z);
-  ```
+Name things for what they are, in words: `materialPalette`, not `matPal`; `findComponentByLocalId`,
+not `lookup`.
 
-### Types and Classes
-- **PascalCase** for structs, classes, and types
-  ```cpp
-  struct World {
-      uint32_t nextEntityID;
-  };
-  
-  class Application {
-      // implementation
-  };
-  ```
+## Layout
 
-### Constants and Macros
-- **UPPER_SNAKE_CASE** for constants and macros
-  ```cpp
-  const int MAX_VOXELS_PER_CHUNK = 32;
-  #define PROJECTV_VERSION_MAJOR 1
-  ```
-
-### Namespaces
-- All code organized under `projv::` namespace with sub-namespaces
-  ```cpp
-  namespace projv {
-  namespace core {
-      // core functionality
-  }
-  namespace graphics {
-      // graphics-related code
-  }
-  namespace utils {
-      // utility functions
-  }
-  }
-  ```
-
-### Files
-- **snake_case.cpp** and **snake_case.h** for source files
-- Header guards use `PROJECTV_FILENAME_H` or `PROJV_MODULE_FILENAME_H` format
-  ```cpp
-  #ifndef PROJECTV_ECS_H
-  #define PROJECTV_ECS_H
-  
-  // code
-  
-  #endif // PROJECTV_ECS_H
-  ```
-
-## Formatting and Indentation
-
-### Indentation
-- **4 spaces** for indentation (never tabs)
-- Consistent indentation throughout all files
-
-### Spacing
-- Space after control flow keywords
-  ```cpp
-  if (condition) {
-      // code
-  }
-  
-  for (int i = 0; i < count; ++i) {
-      // code
-  }
-  ```
-
-- Space after commas in function calls and parameter lists
-  ```cpp
-  function(arg1, arg2, arg3);
-  ```
-
-- Spaces around binary operators
-  ```cpp
-  int result = a + b * c;
-  bool isEqual = (x == y);
-  ```
-
-- No space before opening parentheses in function definitions
-  ```cpp
-  void functionName() {
-      // code
-  }
-  ```
-
-## Brace Placement
-
-Use K&R style (same line) for all braces:
 ```cpp
-void function() {
-    if (condition) {
-        // code
-    } else {
-        // code
-    }
-    
-    for (int i = 0; i < count; ++i) {
-        // code
-    }
+namespace projv::utils {
+    // What the function does, what it refuses, and the rule a caller must keep.
+    ComponentHandle addComponent(Scene& scene, ComponentKind kind, const std::string& name,
+                                 ComponentHandle parent, uint32_t resolution, float voxelScale);
 }
-
-struct StructName {
-    int member1;
-    float member2;
-};
 ```
 
-## Comments and Documentation
+- **4 spaces**, no tabs. Namespace bodies are indented.
+- **Braces on the same line** (K&R). A one-line `if (...) return false;` needs none.
+- **About 100 columns.** Wrap comments there too.
+- **Includes**: standard headers, then third-party, then the engine's own, each block separated.
+  Engine headers by module path in quotes: `#include "utils/compose_io.h"`.
+- [`.clang-format`](.clang-format) describes this layout, but isn't run over the tree. Don't
+  reformat a file you aren't otherwise changing.
 
-### Inline Comments
-- Use `//` for inline comments
-- Place comments on the right side for closely related code
-- Add blank lines between unrelated code blocks
-  ```cpp
-  // Initialize the world with default values
-  world.nextEntityID = 0;
-  world.entities.reserve(1000);
-  
-  // Create the main camera
-  Camera mainCamera;
-  ```
+## Data and functions
 
-### Documentation Comments
-- Use Doxygen style in header files with `/** ... */`
-- Include `@param` and `@return` tags for functions
-- Document all public interfaces in headers
-  ```cpp
-  /**
-   * Creates a Voxel with the specified color and position.
-   * @param color The color to assign to the voxel.
-   * @param position The 3D integer coordinates where the voxel will be placed.
-   * @return Voxel The newly created voxel with the specified attributes.
-   */
-  Voxel createVoxel(const glm::vec3& color, const glm::ivec3& position);
-  ```
+- **Plain structs with default member initializers**, and free functions that take them:
+  `utils::setComponentTransform(scene, handle, ...)`, not `scene.setTransform(...)`. Most of the
+  engine is this shape: `Scene`, `Chunk`, `RigidBody`, `PhysicsMaterial`.
+- **Classes where something owns resources or guards an invariant**: `Application`, `Events`,
+  `PhysicsWorld`, `RenderInstance`. Delete the copies and moves that would be unsafe and say why.
+- **Small inline helpers and static factories on a struct are fine** (`PhysicsShape::box`,
+  `Input::down`, `ComponentRef::operator==`).
+- **Traits for extension points**: a program teaches the engine its types by specialising
+  `ComponentTraits<T>` or `AttachmentTraits<T>`, not by subclassing.
+- **No globals.** State lives in a `Scene`, a `World`, or `world.ctx()`. The old
+  `inline Camera cam` is the pattern not to repeat.
 
-## Include File Organization
+## Errors
 
-### Order of Includes
-1. System headers (`<iostream>`, `<vector>`, `<memory>`, etc.)
-2. External dependencies (`"spdlog/spdlog.h"`, `"bgfx/bgfx.h"`, `"glm/glm.hpp"`, etc.)
-3. Project headers (local includes), using relative paths
+The engine **refuses bad input, logs why, and carries on**. It doesn't assert and rarely throws.
 
-### Include Style
-- Use angle brackets for system and external headers
-- Use quotes for local project includes
-  ```cpp
-  #include <iostream>
-  #include <vector>
-  #include <memory>
-  
-  #include "spdlog/spdlog.h"
-  #include "bgfx/bgfx.h"
-  #include "glm/glm.hpp"
-  
-  #include "core/application.h"
-  #include "graphics/gpu_interface.h"
-  #include "utils/voxel_management.h"
-  ```
+| Situation | Do |
+|---|---|
+| Bad argument, dead handle, impossible request | Log (`core::warn` / `core::error`) and return `false`, `INVALID_*`, an empty result or `std::nullopt` |
+| A result the caller must check | Say so in the comment (`**Check it.**`), or mark it `[[nodiscard]]` |
+| Input that would reach Jolt | Refuse, clamp or log in `PhysicsWorld` first; never let Jolt assert on it |
+| A file the program can't run without (a malformed `resources.json`) | Throw `std::runtime_error` with a message saying how to fix it |
+| Repeated per-frame problems | Log once (`core_warn_every`, or a one-time flag), not every frame |
 
-## Code Organization Patterns
+## Comments
 
-### Functional Programming Approach
-- Follow functional programming principles with minimal OOP features
-- **Separation of concerns**: Structs store data, functions provide functionality
-- **No constructors** in structs - use factory functions instead
-- **No methods** inside structs - all functionality as separate functions
-
-### Module Structure
-- Each module (core, graphics, utils) has its own header and source directories
-- Clear separation between interface (headers) and implementation
-- Factory function pattern for object creation
-
-### Example Structure
-```cpp
-// In header file (.h)
-namespace projv {
-namespace core {
-
-struct World {
-    uint32_t nextEntityID;
-    std::vector<Entity> entities;
-};
-
-/**
- * Creates a new world with default parameters.
- * @return World A newly initialized world.
- */
-World createWorld();
-
-/**
- * Adds an entity to the specified world.
- * @param world The world to add the entity to.
- * @param entity The entity to add.
- * @return uint32_t The ID assigned to the new entity.
- */
-uint32_t addEntity(World& world, const Entity& entity);
-
-} // namespace core
-} // namespace projv
-
-// In source file (.cpp)
-namespace projv {
-namespace core {
-
-World createWorld() {
-    World world;
-    world.nextEntityID = 0;
-    world.entities.reserve(1000);
-    return world;
-}
-
-uint32_t addEntity(World& world, const Entity& entity) {
-    uint32_t id = world.nextEntityID++;
-    world.entities.push_back(entity);
-    return id;
-}
-
-} // namespace core
-} // namespace projv
-```
-
-## Error Handling
-
-### Exceptions
-- Use standard exceptions for error handling
-- Prefer `std::invalid_argument` for invalid parameters
-- Use `std::runtime_error` for runtime failures
-  ```cpp
-  if (position.x < 0 || position.y < 0 || position.z < 0) {
-      throw std::invalid_argument("Voxel position cannot be negative");
-  }
-  
-  if (!gpuInterface->isInitialized()) {
-      throw std::runtime_error("GPU interface not initialized");
-  }
-  ```
-
-### Logging
-
-Use the category functions in `projv::core` (declared in `include/core/log.h`):
-
-| Function | Tag  | Use for |
-|----------|------|---------|
-| `core::trace`  | `[TRC]` | Extremely detailed step-by-step tracing. Off in release. |
-| `core::perf`   | `[PRF]` | Performance measurements and timing. |
-| `core::edit`   | `[EDT]` | Editing pathway (voxel add/remove, chunk/grid ops). |
-| `core::render` | `[RND]` | Rendering pathway (render passes, GPU state). |
-| `core::info`   | `[INF]` | General informational messages. |
-| `core::warn`   | `[WRN]` | Warnings — something unusual but recoverable. |
-| `core::error`  | `[ERR]` | Errors — something failed. |
-
-Tags are prepended automatically by the function. **Do not add them manually**
-in format strings.
-
-Do not print per-frame information unconditionally. Gate per-frame logging
-with caller-side logic:
+The headers are the API reference: Doxygen reads them as they are
+([`tools/docs/doxygen_filter.py`](tools/docs/doxygen_filter.py)), so there is no `///` markup to add.
 
 ```cpp
-#if defined(PROJV_ENABLE_RENDER)
-    if (stateChanged) {
-        core::render("Render graph: {} passes", passCount);
-    }
-#endif
+// Moves `child` from its current parent to `newParent`. Pass INVALID_COMPONENT_HANDLE to make it a
+// root. Re-bakes the subtree's world transforms. `newParent` must not be a descendant of `child`
+// (checked; returns false on a cycle).
+bool setComponentParent(Scene& scene, ComponentHandle child, ComponentHandle newParent);
 ```
 
-For periodic perf summaries (every N frames), accumulate stats and emit on
-a counter. Wrap the **entire block** (including stats) in `#if defined(...)` so
-there is zero overhead when the category is disabled.
+- **A `//` block directly above the declaration** documents it. Trailing `//` on a member
+  documents that member. Older headers use `/** ... @param */` blocks; both are fine, don't convert.
+- **Say what it does, what it refuses, and what the caller must keep true.** The rule a reader would
+  otherwise learn by breaking it goes in **bold**.
+- **Explain why when the obvious alternative is wrong**: "`glossiness` rather than roughness,
+  because 0 has to mean fully rough". Not a history of how the code got here; that is the commit
+  message's job.
+- **Usage examples** are indented four spaces inside the comment.
+- **Name the test or plan** that holds the reasoning when it is long (`see the physics plan, D4`).
+- In `.cpp` files, comment the non-obvious step, not every line.
 
-For simple call-site throttling without manual counter arrays, use the
-`_every(N, ...)` macros. Each macro expansion gets its own call-site-local
-counter, so `core_perf_every(60, "stats: {}", x)` prints at most once per
-second at 60fps, with zero per-call overhead when the category is compiled out.
+## Determinism
 
-```cpp
-core_perf_every(60, "uploadDirtyBlobs: {} dirty: {:.2f}ms", count, ms);
-core_warn_every(120, "Repeated warning: {}", detail);
-core_info_every(60, "Pos: ({:.2f}, {:.2f}, {:.2f})", x, y, z);
-```
+Anything that feeds a physics step, or is sent between machines:
 
-Macros available: `core_trace_every`, `core_perf_every`, `core_edit_every`,
-`core_render_every`, `core_info_every`, `core_warn_every`, `core_error_every`.
+- **No clocks, thread counts, `rand()` or unordered iteration.** Order by `NetId`, then by entity.
+- **Never persist or send** an `Entity`, a handle, a `ComponentRef` or a body id. Files use
+  `localId`; networks use `NetId`.
+- Fracture patterns and anything else run inside a step take their randomness from what they are
+  handed (`FractureRandom`).
 
-For time-based throttling (frame-rate independent), use the `_every_ms`
-variants. The first parameter is milliseconds between prints:
+## Logging
 
-```cpp
-core_perf_every_ms(2000, "flushSceneUpdates: {} pools: {:.2f}ms", n, ms);
-core_info_every_ms(5000, "Status: {} active", count);
-```
+`core::trace` / `perf` / `edit` / `render` / `info` / `warn` / `error`, from
+[`core/log.h`](include/core/log.h). Don't add the `[TAG]` yourself; throttle per-frame output with
+the `core_<category>_every(N, ...)` / `_every_ms(ms, ...)` macros. Use these, not `std::cout`
+(one stray remains in `voxel_management.cpp`). Details: [Logging](docs/guides/logging.md).
 
-```cpp
-#include "core/log.h"
+## Tests
 
-core::info("Successfully created voxel at position ({}, {}, {})", x, y, z);
-core::warn("Texture file not found, using default texture");
-core::error("Failed to initialize GPU interface");
-```
-
-Categories are toggled at compile time via CMake:
-```bash
-cmake -DPROJV_LOG_TRACE=OFF -DPROJV_LOG_MINIMAL=ON ..
-```
-
-## Memory Management
-
-### Smart Pointers
-- Use `std::shared_ptr` for shared resource management
-- Use `std::unique_ptr` for exclusive ownership
-- Follow RAII principles
-  ```cpp
-  auto renderer = std::make_shared<Renderer>(gpuInterface);
-  auto textureData = std::make_unique<uint8_t[]>(textureSize);
-  ```
-
-### Move Semantics
-- Use move semantics for performance where appropriate
-  ```cpp
-  Voxel createVoxel(glm::vec3 color, glm::ivec3 position) {
-      Voxel voxel;
-      voxel.color = std::move(color);
-      voxel.position = std::move(position);
-      return voxel;  // NRVO/move semantics
-  }
-  ```
-
-## Template Usage
-
-### Generic Programming
-- Use templates for generic functionality
-- Use `if constexpr` for compile-time type checking
-- Provide template specializations for different data types
-  ```cpp
-  template<typename T>
-  constexpr bool isVoxelType() {
-      if constexpr (std::is_same_v<T, uint8_t>) {
-          return true;
-      } else if constexpr (std::is_same_v<T, uint16_t>) {
-          return true;
-      }
-      return false;
-  }
-  ```
-
-## Configuration Files
-
-### .clang-format
-The project recommends the following `.clang-format` configuration:
-```yaml
----
-Language: Cpp
-BasedOnStyle: Google
-Standard: c++17
-IndentWidth: 4
-UseTab: Never
-ColumnLimit: 100
-AccessModifierOffset: -2
-AllowShortFunctionsOnASingleLine: Empty
-AllowShortIfStatementsOnASingleLine: false
-AllowShortLoopsOnASingleLine: false
-BreakBeforeBraces: Attach
-SpaceAfterCStyleCast: false
-SpaceBeforeParens: ControlStatements
-SpacesInParentheses: false
-SpacesInSquareBrackets: false
-```
-
-### CMake Configuration
-- Use **C++17** standard
-- Enable all warnings: `-Wall -Wextra`
-- Debug symbols and optimization: `-g -O3`
-- Consistent library naming: `projectV-moduleName`
-
-## Best Practices
-
-1. **Keep functions small and focused** - Each function should do one thing well
-2. **Use meaningful names** - Variable and function names should clearly indicate purpose
-3. **Document public interfaces** - All public functions and structs should have proper documentation
-4. **Be consistent** - Follow these conventions consistently across all files
-5. **Write testable code** - Structure code to make it easy to unit test
-6. **Use the logging system** - Prefer logging over printf/stdout for debugging
-7. **Handle errors gracefully** - Use exceptions and proper error handling throughout
-
-## Tools and Automation
-
-- **Formatting**: Use `clang-format` with the provided configuration
-- **Static Analysis**: Enable compiler warnings and consider using clang-tidy
-- **Build**: Use the provided CMake configuration for consistent builds
-
----
-
-This style guide should be followed by all contributors to maintain code consistency and readability across the ProjectV project. When in doubt, look at existing code for examples and prefer consistency over personal preference.
+A behaviour change comes with a doctest case in `tests/unit/`; a fix comes with the test that
+would have caught it. See [tests/README.md](tests/README.md).

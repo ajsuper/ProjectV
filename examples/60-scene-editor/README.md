@@ -589,7 +589,7 @@ That replaced four separate mechanisms that all existed to answer *which contain
 
 #### Ops
 
-`BooleanOp` — a property of the part rather than of the act of committing, which is the difference between it and the "merge mode" it replaced. It is this editor's own: the engine carries it as the `projv.editor.csg` [attachment](../../docs/data_structures/compose_data_structure.md#attachments) and never interprets it, and every read and write in `main.cpp` goes through `opOf` / `setOp`.
+`BooleanOp` — a property of the part rather than of the act of committing, which is the difference between it and the "merge mode" it replaced. It is this editor's own: the engine carries it as the `projv.editor.csg` [attachment](../../docs/reference/formats/compose-json.md#attachments) and never interprets it, and every read and write in `main.cpp` goes through `opOf` / `setOp`.
 
 | Op | | Does |
 |----|---|------|

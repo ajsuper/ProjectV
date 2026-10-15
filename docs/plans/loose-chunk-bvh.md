@@ -1,6 +1,8 @@
 # A BVH over loose chunks: one spatial structure for rendering, picking and physics
 
-Status: **proposal.** Nothing here is implemented.
+Status: **H1, H3 and H5 built** (`1f23fd6`): `utils::LooseBVH` ([`include/utils/loose_bvh.h`](../../include/utils/loose_bvh.h)),
+built from content bounds on every `flushSceneUpdates` and walked by the shader. H2 (`pickVoxel`) and
+H4 (a sandbox broadphase) are not done.
 
 ## Why
 
