@@ -1,9 +1,10 @@
 # Physics: Jolt, voxel collision, ready for networking
 
-Status: **approved**, 2026-10-09. **M0-M6 done** (2026-10-13); joints (2026-10-13) and physics materials (2026-10-14) built;
-M7 (contours) waits on the contour work. Fracture on the material built (2026-10-14); a debris budget and support
-(2026-10-15). Next: fracture policy out of the engine (below, "Next: mechanism in the engine, policy in systems"),
-which brings contact events for games with it; then sleeping (item 4 of "What the demos showed").
+Status: **approved**, 2026-10-09. **M0-M6 done** (2026-10-13); joints (2026-10-13), physics materials
+(2026-10-14), fracture, the debris budget and support (2026-10-14/15) built, and fracture policy moved out
+of the engine (2026-10-15, "Mechanism in the engine, policy in systems"). M7 (contours) waits on the
+contour work. **What comes next is "Roadmap" below**, revised 2026-10-15 from a review of which games
+the system serves and where it gets in their way.
 
 ## Decisions made
 
@@ -16,6 +17,7 @@ which brings contact events for games with it; then sleeping (item 4 of "What th
 | D5 | Collision geometry comes from one replaceable builder, and every gameplay normal comes from the shape | Contours and other voxel-modified geometry can replace boxes without gameplay changes |
 | D6 | Server-authoritative networking is the target; the sim is deterministic and restorable anyway | Lockstep turns every determinism bug into a permanent split; determinism still buys small corrections, replays and rollback |
 | D7 | Voxel geometry collides as volumes (boxes), never as triangle meshes | A body inside a volume is pushed out; inside a mesh it falls through |
+| D8 | **Mechanism in the engine, policy in systems** (2026-10-15). The engine does what only it can (simulate, cut, report, guard) and asks for every choice a game would make differently; those choices are data on components and materials, or systems a game installs, leaves out or replaces -- built only on public calls. Behaviour is asked for, never assumed (D3, D4 are cases of it) | A game the engine's rules do not fit must still be buildable on it, without forking it. A rule written into the step is one every game inherits |
 
 
 ## Priorities, in order
@@ -334,8 +336,11 @@ shows and tests assert on:
   "physics.static": { "v": 1, "shape": "voxels", "friction": 0.8, "restitution": 0.1,
                       "layer": "static", "splits": false }
   ```
-- **Layers:** a short fixed list to start (`static`, `moving`, `debris`, `sensor`, `character`)
-  with a collision matrix in code; debris ignores debris. Authored by name.
+- **Layers:** a short fixed list (`static`, `moving`, `debris`, `sensor`, `character`) with a
+  collision matrix in code; debris ignores debris. Authored by name. The matrix is the coarse
+  broadphase cut, not a game's filtering: a fixed matrix is policy (it decided that shards could
+  not collide with each other, which a game may not want), so finer filtering is data -- collision
+  groups, Roadmap R4.
 
 ## Queries
 
@@ -556,10 +561,76 @@ Also: document that shards copy the parent's whole RigidBody (damping, gravity f
 Demos 2 and 9 opt in explicitly; tests follow. *Done:* Strike::shardsBreakOnImpact says so; demos
 2, 9 and 11 opt in.
 
-Found while doing it (open): a click's chip in demo 11 breaks the wall, but its shards stay in the
-hole. Pushed along the view they wedge back in; pushed out of the face, the packed shards still
-stop within a step or two and rest there, though one shard alone or the group moved clear flies.
-Not yet understood -- the next thing to look at in fracture.
+Found while doing it: a click's chip in demo 11 breaks the wall but its shards stay in the hole
+(Roadmap R1).
+
+## Roadmap (revised 2026-10-15)
+
+From a review of what games would use this for and where it serves or blocks them. **Status:** a
+game that wants no destruction gets none; one that wants its own rules can build them on public
+calls. What still gets in a game's way, rather than merely not being built: the fixed layer
+matrix, events that arrive a step after what they report, fracture choices still fixed in the
+engine, and rollback that cannot cross a break.
+
+Ordered by the priorities: what breaks reliability first, then networking, then what blocks a game
+(D8), then what is merely missing. Each item says what the engine provides (mechanism) and what
+it leaves to data or systems (policy); every default leaves behaviour as it is.
+
+**Reliability**
+
+- **R1. Shards that stay where they broke.** A chip's shards come loose but stop in their hole
+  within a step or two, whatever push they are given, while one shard alone, or the group moved
+  0.5 m clear, flies (measured 2026-10-15 with a temporary probe in demo 11; the demo's push into the
+  wall was a second, separate cause). Not an overlap with the wall or with each other (checked).
+  Find the cause first; the fix belongs wherever the cause is -- a shard starting in contacts it
+  should not have is the engine's to fix, not a demo's push to hide. Demo 11 then throws its
+  chips out of the face with a small velocity, demo side.
+- **R2. Sleep that freezes bodies mid-fall.** ("What the demos showed" 4.) Bodies touching only
+  static geometry sleep while still falling. A body never stops somewhere it could not rest.
+- **R3. Rollback across a break.** `savePhysics` needs the same bodies to exist at restore, and a
+  fracture, split or debris clearing changes them, so a rollback game with destruction cannot
+  rewind past one (D6). Mechanism: a snapshot that records body creation and removal since it was
+  taken, so restore can undo them -- or a documented alternative a game can use. And the
+  cross-machine determinism test (CROSS_PLATFORM_DETERMINISTIC, two builds, one recording).
+
+**What gets in a game's way** (D8)
+
+- **R4. Collision groups as data.** A body names groups (strings, like materials) and which groups
+  it ignores; saved with RigidBody/StaticCollider, compared by NetId order so peers agree. Layers
+  stay the coarse cut. A strike can put its shards in a group of their own. Default: no groups,
+  nothing changes. Replaces the need for blanket rules like "debris ignores debris".
+- **R5. Shaping what a step made, in that step.** `BodyFractured` and `BodySplit` delivered at
+  once, as DebrisCleared is, before the new bodies are made, so a handler can change their
+  RigidBody (layer, group, damping) and set the velocity they start with (setVelocity on a body
+  not yet made sets its starting velocity). A Strike also takes how the push spreads (fading to the
+  edge, as now, or the same for every shard). Default: as now.
+- **R6. Contact and sensor events, asked for per body.** `ContactBegan` / `ContactEnded` for bodies
+  that ask (a component, saved), and sensor bodies that report what enters and leaves, with the
+  layers they sense chosen in data. In NetId order after the step. `impacts()` stays for hard hits.
+- **R7. Kinematic bodies that collide with static geometry**, asked for per body. ("What the demos
+  showed" 7.)
+- **R8. The last constants a game might set:** the 512-piece cap on support splits, joining
+  maxShards in PhysicsConfig::fracture; minImpactSpeed per body (a glass cup and a boulder want
+  different thresholds), the world setting as its default.
+
+**Missing, buildable on the engine meanwhile**
+
+- **R9. Support across colliders.** A collider standing on another's anchor material is held up
+  by it. Data, as anchors are.
+- **R10. Dynamic grids and multi-chunk bodies split and break.** A mechanism gap: today shards of
+  dynamic bodies are capped at one chunk.
+- **R11. Joints.** A true lock, a gear joint (two hinges at a ratio), a mass-ratio warning; ropes as
+  a system over Distance joints rather than an engine primitive. ("What the demos showed" 6.)
+- **R12. Scale.** Start-asleep for authored stacks; a profile of a settling pyramid. (8.)
+- **R13. A debug view** of shapes, contacts, joints and sleep. (9.)
+- **R14. Settled debris merged back into static geometry**, as a system a game installs (policy:
+  when debris counts as settled, and whether it merges, are the game's).
+
+**Not the engine's** (D8): damage and hit points, impact sounds, a grab spring, what a click
+breaks. Games, or optional systems like installImpactFracture, built on public calls. A system
+the engine ships is an example and a default, never the only way.
+
+**Waiting:** M7, contours (the surface-voxels work); voxel gears wait on it too (5).
 
 ## How it fits the rest of the engine
 
@@ -636,12 +707,18 @@ Physics adds one module, `runtime/physics`, and one engine change: system orderi
 - A debug view of collision pieces needs a line or box drawing pass, which the renderer does not
   have yet. That is optional M3 work.
 
-**I7. Events.**
+**I7. Events.** (As built 2026-10-15; the original list named ContactBegan/Ended, not built yet:
+Roadmap R6.)
 - Physics sends events through `Events`, delivered in the normal pump after PostUpdate:
-  - `ContactBegan` / `ContactEnded`, only for bodies that ask for them;
-  - `BodyLeftWorld`;
-  - `BodySplit` (parent and its islands);
-  - `SimulationSlow`.
+  `BodyLeftWorld`, `BodySplit`, `BodyFractured`, `BodyEmptied`, `JointBroke`, `PhysicsBodyRefused`,
+  `SimulationSlow`. `DebrisCleared` is delivered at once (`Events::trigger`), inside the step, since
+  its handlers must see the entities before they go.
+- A queued event reaches a game after the step that caused it, so it cannot shape what that step
+  made (a shard's layer or starting velocity) without lagging a step -- which also has to come out
+  the same on every peer. Events whose handlers are meant to shape what was made move into the
+  step: Roadmap R5.
+- Contacts: `runtime::impacts(world)`, read by a FixedUpdate system after "physics" -- one per pair
+  per step, the fastest, above minImpactSpeed.
 - Jolt's contact callbacks run on its worker threads and never touch the registry. They only
   record into a buffer that is sorted by NetId after the step, so delivery order is deterministic.
 - The sandbox's `Popped` → shockwave → removal chain works as now. The shockwave becomes impulse
@@ -897,6 +974,9 @@ CPU surface function, and the render-vs-collision normal test (A6.4).
   belief.
 
 ## What the demos showed (2026-10-13)
+
+(History: what the demos found, with what has since been done. What is still open is carried into
+"Roadmap" above, which is the order to work in.)
 
 Findings from building the nine physics demos (a tenth, Slide, came with materials), in rough priority. **Physics materials come first**
 (user's call): fracture strength, friction and restitution all hang off a voxel's material, so the
