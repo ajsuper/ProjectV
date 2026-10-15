@@ -487,7 +487,7 @@ patterns are code, registered by name, all through one interface.
   a NetId; a collider that does not split; a strike through a pillar brings the top down).
 - Demo 9's walls split: the bricks the seams pattern leaves hanging in their mortar fall, and a
   wall cut through drops what is above.
-## Next: mechanism in the engine, policy in systems (decided 2026-10-15)
+## Mechanism in the engine, policy in systems (decided and built 2026-10-15)
 
 A review of fracture as built: the cutting, the rules it holds every pattern to, the patterns and
 impact reporting belong in the engine; several decisions a game should own were made there instead.
@@ -547,9 +547,19 @@ To do, in order:
    and the 512-shard cap are guards, like maxLinearSpeed: configurable (PhysicsConfig), still
    enforced. The sphere reach (energy / strength) is what `strength` means, not tuning; instead,
    `fracture(world, entity, at, reach)` takes a radius in metres for games with their own model.
+   *Done 2026-10-15:* `PhysicsConfig::fracture` (`FractureLimits`: searchVoxels 3, maxReachVoxels
+   64, maxShards 512), clamped by installPhysics to 0.5..16, 1..256 and 1..4096 and warned about,
+   never off. The reach overload is `fractureWithin(world, entity, at, radius, push)` and
+   `Strike::reach` (see item 2).
 
 Also: document that shards copy the parent's whole RigidBody (damping, gravity factor, layer).
-Demos 2 and 9 opt in explicitly; tests follow.
+Demos 2 and 9 opt in explicitly; tests follow. *Done:* Strike::shardsBreakOnImpact says so; demos
+2, 9 and 11 opt in.
+
+Found while doing it (open): a click's chip in demo 11 breaks the wall, but its shards stay in the
+hole. Pushed along the view they wedge back in; pushed out of the face, the packed shards still
+stop within a step or two and rest there, though one shard alone or the group moved clear flies.
+Not yet understood -- the next thing to look at in fracture.
 
 ## How it fits the rest of the engine
 

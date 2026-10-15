@@ -37,6 +37,7 @@ namespace projv::runtime {
             utils::CollisionParams        collision;
             bool                          destroyLeavers = true;
             uint32_t                      maxDebris = 3000;
+            PhysicsConfig::FractureLimits fractureLimits;
             uint64_t                      seenDroppedSteps = 0;
             uint64_t                      lastSlowWarningTick = 0;
             std::vector<Command>          commands;     // waiting; applied by stamp, not arrival
@@ -596,7 +597,6 @@ namespace projv::runtime {
             return out;
         }
 
-        constexpr float MAX_FRACTURE_REACH = 64.0f;   // voxels
 
         // A new top-level component holding `members` of `voxels` with their palette entries (the
         // body's palette, copied), placed where they were: its corner at the lowest of them, through
@@ -709,9 +709,11 @@ namespace projv::runtime {
             // What was struck: the voxel nearest the point.
             std::map<size_t, Decoded> decoded;
             const uint64_t maxCells = physics.collision.maxDecodedCells;
-            std::vector<FractureVoxel> near = voxelsNear(scene, source, at, 3.0f, maxCells, decoded);
+            const PhysicsConfig::FractureLimits& limits = physics.fractureLimits;
+            std::vector<FractureVoxel> near = voxelsNear(scene, source, at, limits.searchVoxels, maxCells, decoded);
             if (near.empty()) {
-                core::trace("physics: fracture of entity {}: no voxel within three of the strike", static_cast<uint32_t>(entity));
+                core::trace("physics: fracture of entity {}: no voxel within {} of the strike", static_cast<uint32_t>(entity),
+                            limits.searchVoxels);
                 return false;
             }
             const FractureVoxel* struck = &near.front();
@@ -728,10 +730,10 @@ namespace projv::runtime {
             if (strike.s.reach > 0.0f) reach = strike.s.reach / metres;
             else if (strike.s.energy > 0.0f) reach = std::cbrt(3.0f * strike.s.energy / (4.0f * 3.14159265f * material.strength)) / metres;
             else return false;
-            if (reach > MAX_FRACTURE_REACH) {
+            if (reach > limits.maxReachVoxels) {
                 core::trace("physics: fracture of entity {}: reach {} voxels capped at {}", static_cast<uint32_t>(entity), reach,
-                            MAX_FRACTURE_REACH);
-                reach = MAX_FRACTURE_REACH;
+                            limits.maxReachVoxels);
+                reach = limits.maxReachVoxels;
             }
             if (reach < 0.5f) return false;   // not enough to break a voxel
             if (strike.s.minimumBreak > 0.0f && reach < strike.s.minimumBreak * material.shardSize / metres) return false;   // a knock
@@ -764,7 +766,7 @@ namespace projv::runtime {
                            shardOf.size(), voxels.size());
                 return false;
             }
-            std::vector<std::vector<size_t>> shards = fractureShards(input, shardOf);
+            std::vector<std::vector<size_t>> shards = fractureShards(input, shardOf, 64, limits.maxShards);
             if (shards.empty()) return false;
 
             // The shards: each a new top-level chunk holding its voxels, with the body's palette,
@@ -1577,6 +1579,18 @@ namespace projv::runtime {
         physics.collision = config.collision;
         physics.destroyLeavers = config.destroyBodiesThatLeaveTheWorld;
         physics.maxDebris = config.maxDebris;
+        {
+            // Guards, clamped rather than refused: a bad value must not leave fracture unguarded.
+            PhysicsConfig::FractureLimits want = config.fracture, &got = physics.fractureLimits;
+            auto finiteOr = [](float v, float fallback) { return std::isfinite(v) ? v : fallback; };
+            got.searchVoxels = std::clamp(finiteOr(want.searchVoxels, 3.0f), 0.5f, 16.0f);
+            got.maxReachVoxels = std::clamp(finiteOr(want.maxReachVoxels, 64.0f), 1.0f, 256.0f);
+            got.maxShards = std::clamp<uint32_t>(want.maxShards, 1, 4096);
+            if (got.searchVoxels != want.searchVoxels || got.maxReachVoxels != want.maxReachVoxels ||
+                got.maxShards != want.maxShards)
+                core::warn("physics: fracture limits out of range, clamped to search {} voxels, reach {} voxels, {} shards",
+                           got.searchVoxels, got.maxReachVoxels, got.maxShards);
+        }
         physics.seenStamp = latestBlobContentStamp();
 
         installNetIds(world);

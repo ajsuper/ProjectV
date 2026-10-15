@@ -7,6 +7,7 @@
 #include "doctest/doctest.h"
 
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <filesystem>
 #include <fstream>
@@ -86,13 +87,15 @@ namespace {
         std::vector<projv::BodyFractured> fractures;
         std::vector<projv::BodySplit> splits;
         explicit Fixture(int threads = -1, uint32_t maxDebris = 3000,
-                         std::optional<runtime::ImpactFractureConfig> impactFracture = runtime::ImpactFractureConfig{})
+                         std::optional<runtime::ImpactFractureConfig> impactFracture = runtime::ImpactFractureConfig{},
+                         runtime::PhysicsConfig::FractureLimits limits = {})
             : scene(app.world.ctx().emplace<projv::Scene>()) {
             app.clock = [this] { return now; };
             runtime::installSceneBridge(app);
             runtime::PhysicsConfig config;
             config.settings.threads = threads;
             config.maxDebris = maxDebris;
+            config.fracture = limits;
             runtime::installPhysics(app, config);
             if (impactFracture) runtime::installImpactFracture(app, *impactFracture);
             app.events().on<projv::BodyFractured>([this](const projv::BodyFractured& e) { fractures.push_back(e); });
@@ -705,6 +708,44 @@ TEST_CASE("a strike by reach breaks out to its radius whatever the strength, and
     f.frames(1);
     REQUIRE(f.fractures.size() == 2);
     for (Entity e : f.fractures[1].shards) CHECK_FALSE(f.app.world.get<projv::RigidBody>(e).breaksOnImpact);
+}
+
+TEST_CASE("fracture's guards are the game's to set, and stay guards") {
+    auto strike = [](runtime::PhysicsConfig::FractureLimits limits, vec3 at, float radius) {
+        Fixture f(-1, 3000, runtime::ImpactFractureConfig{}, limits);
+        Entity wall = f.wall();
+        f.frames(2);
+        runtime::fracture(f.app.world, wall, at, Fixture::energyFor(radius));
+        f.frames(1);
+        return f.fractures.empty() ? std::make_pair(size_t(0), uint64_t(0))
+                                   : std::make_pair(f.fractures[0].shards.size(), f.shardVoxels(f.fractures[0]));
+    };
+    const runtime::PhysicsConfig::FractureLimits defaults;
+    const auto plain = strike(defaults, vec3(0, 3, 0), 1.5f);
+    REQUIRE(plain.first > 2);
+    // At most two shards: the rest of what would break stays.
+    runtime::PhysicsConfig::FractureLimits few;
+    few.maxShards = 2;
+    const auto capped = strike(few, vec3(0, 3, 0), 1.5f);
+    CHECK(capped.first == 2);
+    CHECK(capped.second < plain.second);
+    // A reach of at most two voxels, half a metre.
+    runtime::PhysicsConfig::FractureLimits near;
+    near.maxReachVoxels = 2.0f;
+    const auto small = strike(near, vec3(0, 3, 0), 1.5f);
+    CHECK(small.second > 0);
+    CHECK(small.second * 4 < plain.second);
+    // A metre off the wall (four voxels) misses at three, and strikes at ten -- the reach still
+    // measured from where the strike is.
+    CHECK(strike(defaults, vec3(0, 3, -1), 1.5f).first == 0);
+    runtime::PhysicsConfig::FractureLimits wide;
+    wide.searchVoxels = 10.0f;
+    CHECK(strike(wide, vec3(0, 3, -1), 1.5f).first > 0);
+    // Out of range is clamped, never off: no shards at all is one.
+    runtime::PhysicsConfig::FractureLimits none;
+    none.maxShards = 0;
+    none.maxReachVoxels = std::numeric_limits<float>::infinity();
+    CHECK(strike(none, vec3(0, 3, 0), 1.5f).first == 1);
 }
 
 TEST_CASE("the debris budget clears the oldest shards first, and only shards") {

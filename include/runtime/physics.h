@@ -263,6 +263,17 @@ namespace projv::runtime {
         // clear the same ones; DebrisCleared names them first. Thousands of shards are thousands of bodies: what they cost is the
         // step's. 0: no limit.
         uint32_t               maxDebris = 3000;
+        // Guards on a strike (runtime::fracture), like maxLinearSpeed on motion: what a game may
+        // change, never what it may turn off. Out of range, installPhysics clamps them and says so.
+        struct FractureLimits {
+            // How far from the strike point, in voxels, the voxel it struck may be (0.5 .. 16).
+            float    searchVoxels = 3.0f;
+            // The most a reach may be, in voxels of the struck body (1 .. 256): a bigger one is cut
+            // to this, and logged.
+            float    maxReachVoxels = 64.0f;
+            // The most shards one strike makes (1 .. 4096); the rest of what would break stays.
+            uint32_t maxShards = 512;
+        } fracture;
     };
 
     // Creates the physics world (in world.ctx()), registers RigidBody and StaticCollider with
@@ -362,14 +373,16 @@ namespace projv::runtime {
     };
 
     // Breaks the voxel body `entity` at the start of the next fixed step, in order with editVoxels.
-    // The voxel nearest `strike.at` (within three voxels) is what was struck; its physics material's
+    // The voxel nearest `strike.at` (within PhysicsConfig::fracture.searchVoxels, three by default) is
+    // what was struck; its physics material's
     // strength turns the energy into a reach, and its fracture pattern sets which voxels go together
     // (runtime/fracture.h). Voxels whose material has no strength never break; neither does anything
     // when the struck one's has none. Each shard is a body of its own (BodyFractured) and debris
     // (Debris). Static colliders break too; their shards are dynamic.
     //
     // Works on what voxelComponentOf finds: a chunk, a grid, or a prefab of one chunk. The reach
-    // is capped at 64 voxels.
+    // is capped (PhysicsConfig::fracture.maxReachVoxels, 64 by default), and so is the number of
+    // shards (maxShards, 512).
     //
     // Nothing calls this on impact by itself: installImpactFracture adds the system that does.
     void fracture(World& world, Entity entity, const Strike& strike);
