@@ -419,6 +419,7 @@ void launchOrb(World& world, Demos& demos, const Camera& camera) {
 projv::RigidBody brickBody() {
     projv::RigidBody r = body(30.0f);
     r.material = "fired brick";
+    r.breaksOnImpact = true;   // thrown bricks break where they land hard
     return r;
 }
 
@@ -1120,6 +1121,7 @@ void buildTrebuchet(World& world, Demos& demos, Camera& camera) {
         projv::StaticCollider made;
         made.material = materials[side];   // how it breaks: physics_materials.json
         made.splits = true;                // and what a break leaves hanging falls
+        made.breaksOnImpact = true;        // the boulder breaks it
         world.emplace<projv::StaticCollider>(wall.entity, made);
         demos.owned.push_back(wall.entity);
         tb.walls.push_back(std::move(wall));
@@ -1349,6 +1351,7 @@ Entity overhang(World& world, Demos& demos, const char* material, ivec3 size, ve
     projv::StaticCollider c;
     c.material = material;
     c.splits = true;
+    c.breaksOnImpact = true;   // and what falls breaks again where it lands hard
     world.emplace<projv::StaticCollider>(e, c);
     runtime::assignNetId(world, e);
     demos.owned.push_back(e);

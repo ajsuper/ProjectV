@@ -74,10 +74,11 @@ namespace projv {
         // (`mass` still overrides): the material of a primitive, and of every voxel whose palette
         // entry names none. A palette entry that names one wins for its voxels.
         std::string           material;
-        // Whether a hit can break its voxels (see runtime::fracture: "On impact"). Only voxels whose
-        // material has a strength break at all; shards a fracture throws off have this off, so
-        // debris does not shatter again on landing.
-        bool                  breaksOnImpact = true;
+        // Whether a hit can break its voxels (see runtime::fracture: "On impact"). Asked for, not
+        // assumed: a material with a strength breaks only where a strike is made, and this says an
+        // impact may make one. Only voxels whose material has a strength break at all; shards a
+        // fracture throws off have this off, so debris does not shatter again on landing.
+        bool                  breaksOnImpact = false;
     };
 
     // A kinematic body that flies on by itself: each physics step moves it `velocity` (m/s) and turns
@@ -102,7 +103,8 @@ namespace projv {
         bool                  splits = false;
         // As RigidBody::material: friction and restitution from the library when set.
         std::string           material;
-        bool                  breaksOnImpact = true;   // as RigidBody::breaksOnImpact
+        // As RigidBody::breaksOnImpact. The pieces that fall when support goes (splits) take it on.
+        bool                  breaksOnImpact = false;
     };
 
     // One chunk's part of a voxel body: which chunk, the shared shape built from it, and where it

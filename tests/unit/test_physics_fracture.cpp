@@ -106,14 +106,16 @@ namespace {
         // An 8 x 6 m wall of quarter-metre voxels, half a metre thick, standing on y = 0 with its
         // face at z = 0: a grid (it is bigger than a chunk), stone unless told otherwise.
         ComponentHandle wallComponent = INVALID_COMPONENT_HANDLE;
-        Entity wall(const std::string& material = "stone") {
+        Entity wall(const std::string& material = "stone", bool breaksOnImpact = false) {
             wallComponent = utils::addComponent(scene, projv::ComponentKind::Chunk, "wall", INVALID_COMPONENT_HANDLE, 16, 0.25f);
             utils::setComponentTransform(scene, wallComponent, vec3(-4, 0, 0), quat(1, 0, 0, 0), 1.0f);
             utils::queueVoxelAdd(scene, wallComponent, fill({0, 0, 0}, {31, 23, 1}, GREY));
             utils::updateScene(scene);
             REQUIRE(utils::setMaterialPhysics(scene, wallComponent, slotOf(scene, wallComponent, GREY), material));
             Entity e = runtime::spawnComponent(app.world, wallComponent);
-            app.world.emplace<projv::StaticCollider>(e);
+            projv::StaticCollider collider;
+            collider.breaksOnImpact = breaksOnImpact;
+            app.world.emplace<projv::StaticCollider>(e, collider);
             runtime::assignNetId(app.world, e);
             return e;
         }
@@ -495,7 +497,7 @@ TEST_CASE("on impact: what is struck hard enough breaks, and what struck it carr
     runtime::PhysicsMaterial chalk{300.0f, 0.6f, 0.0f};
     chalk.strength = 1e5f;
     runtime::definePhysicsMaterial(f.app.world, "chalk", chalk);
-    Entity wall = f.wall("chalk");
+    Entity wall = f.wall("chalk", true);
     f.frames(2);
     // A tonne at 30 m/s: 450 kJ, which breaks out to about a metre.
     Entity rock = ball(f, vec3(0, 3, -6), vec3(0, 0, 30), 1000.0f);
@@ -519,10 +521,10 @@ TEST_CASE("on impact: what is struck hard enough breaks, and what struck it carr
     CHECK(after.linearVelocity.z > 5.0f);
 }
 
-TEST_CASE("on impact: a knock breaks nothing, nor does a body that is told not to break") {
+TEST_CASE("on impact: a knock breaks nothing, nor does a body that did not ask to break") {
     {
         Fixture f;
-        f.wall();
+        f.wall("stone", true);
         f.frames(2);
         // 400 kg at 3 m/s: 1.8 kJ, a reach of 0.16 m -- less than a shard.
         Entity rock = ball(f, vec3(0, 3, -2), vec3(0, 0, 3), 400.0f);
@@ -530,10 +532,11 @@ TEST_CASE("on impact: a knock breaks nothing, nor does a body that is told not t
         CHECK(f.fractures.empty());
         CHECK(runtime::bodyPose(f.app.world, rock).position.z < 0.0f);   // stopped by the wall
     }
-    {
+    for (bool patched : {false, true}) {
+        // Off by default; and turned off after the body was made.
         Fixture f;
-        Entity wall = f.wall();
-        f.app.world.patch<projv::StaticCollider>(wall, [](projv::StaticCollider& c) { c.breaksOnImpact = false; });
+        Entity wall = f.wall("stone", patched);
+        if (patched) f.app.world.patch<projv::StaticCollider>(wall, [](projv::StaticCollider& c) { c.breaksOnImpact = false; });
         f.frames(2);
         ball(f, vec3(0, 3, -6), vec3(0, 0, 30), 400.0f);
         f.frames(30);
@@ -545,7 +548,7 @@ TEST_CASE("on impact: a knock breaks nothing, nor does a body that is told not t
 TEST_CASE("on impact: the same throw breaks the same wall the same way") {
     auto run = [] {
         Fixture f;
-        f.wall();
+        f.wall("stone", true);
         f.frames(2);
         ball(f, vec3(0.2f, 2.8f, -6), vec3(0.5f, 0.3f, 30), 400.0f);
         f.frames(90);
@@ -556,16 +559,19 @@ TEST_CASE("on impact: the same throw breaks the same wall the same way") {
     CHECK(a == b);
 }
 
-TEST_CASE("breaksOnImpact is saved, and only when it is off") {
+TEST_CASE("breaksOnImpact is off unless asked for, and saved only when on") {
     projv::RigidBody r;
+    CHECK_FALSE(r.breaksOnImpact);
     CHECK_FALSE(runtime::ComponentTraits<projv::RigidBody>::save(r).contains("breaksOnImpact"));
-    r.breaksOnImpact = false;
+    CHECK_FALSE(runtime::ComponentTraits<projv::RigidBody>::load(nlohmann::json::object(), 1)->breaksOnImpact);
+    r.breaksOnImpact = true;
     nlohmann::json j = runtime::ComponentTraits<projv::RigidBody>::save(r);
-    CHECK(j.at("breaksOnImpact") == false);
-    CHECK_FALSE(runtime::ComponentTraits<projv::RigidBody>::load(j, 1)->breaksOnImpact);
+    CHECK(j.at("breaksOnImpact") == true);
+    CHECK(runtime::ComponentTraits<projv::RigidBody>::load(j, 1)->breaksOnImpact);
     projv::StaticCollider c;
-    c.breaksOnImpact = false;
-    CHECK_FALSE(runtime::ComponentTraits<projv::StaticCollider>::load(runtime::ComponentTraits<projv::StaticCollider>::save(c), 1)->breaksOnImpact);
+    CHECK_FALSE(c.breaksOnImpact);
+    c.breaksOnImpact = true;
+    CHECK(runtime::ComponentTraits<projv::StaticCollider>::load(runtime::ComponentTraits<projv::StaticCollider>::save(c), 1)->breaksOnImpact);
 }
 
 TEST_CASE("on impact: what breaks does not depend on the number of threads") {
@@ -576,7 +582,7 @@ TEST_CASE("on impact: what breaks does not depend on the number of threads") {
         runtime::PhysicsMaterial chalk{300.0f, 0.6f, 0.0f};
         chalk.strength = 1e5f;
         runtime::definePhysicsMaterial(f.app.world, "chalk", chalk);
-        f.wall("chalk");
+        f.wall("chalk", true);
         f.frames(2);
         ball(f, vec3(-2, 4, -6), vec3(0, 2, 28), 1000.0f, 1.0f);
         ball(f, vec3(0.5f, 3, -7), vec3(0.3f, 1, 30), 800.0f, 1.0f);

@@ -509,6 +509,9 @@ What oversteps:
 To do, in order:
 1. **Opt-in.** `breaksOnImpact` defaults to false (RigidBody and StaticCollider), as `splits` does.
    Shards are new bodies, so "shards never break again" goes with it.
+   *Done 2026-10-15:* defaults false, saved only when on; pieces that fall when support goes take
+   the collider's. Demos 2 (bricks), 9 (walls) and 11 (overhangs) opt in. The shard rule moves with
+   item 2, into its config.
 2. **Impact fracture as a system.** Move the impact -> fracture glue out of the physics step into
    `installImpactFracture(app, config)`, built only on public calls: `runtime::fracture` and a new
    entity-level `runtime::impacts(world)` (entities, not body ids) -- which is also the contact event

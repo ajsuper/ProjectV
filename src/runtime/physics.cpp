@@ -972,6 +972,7 @@ namespace projv::runtime {
             fall.friction = fixed->friction;
             fall.restitution = fixed->restitution;
             fall.material = fixed->material;
+            fall.breaksOnImpact = fixed->breaksOnImpact;
             const OnUnlink onUnlink = link->onUnlink;
             const bool networked = world.all_of<NetId>(entity);
             BodySplit event{entity, {}};
@@ -2071,7 +2072,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::RigidBody>::save(const pro
     if (b.layer != defaults.layer) j["layer"] = layerName(b.layer);
     if (b.quality != defaults.quality) j["quality"] = qualities[size_t(b.quality)];
     if (!b.material.empty()) j["material"] = b.material;
-    if (!b.breaksOnImpact) j["breaksOnImpact"] = false;
+    if (b.breaksOnImpact) j["breaksOnImpact"] = true;
     return j;
 }
 
@@ -2115,7 +2116,7 @@ std::optional<projv::RigidBody> projv::runtime::ComponentTraits<projv::RigidBody
     b.angularDamping = j.value("angularDamping", b.angularDamping);
     b.gravityFactor = j.value("gravityFactor", b.gravityFactor);
     b.material = j.value("material", std::string());
-    b.breaksOnImpact = j.value("breaksOnImpact", true);
+    b.breaksOnImpact = j.value("breaksOnImpact", false);
     return b;
 }
 
@@ -2127,7 +2128,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::StaticCollider>::save(cons
     if (c.layer != defaults.layer) j["layer"] = layerName(c.layer);
     if (c.splits) j["splits"] = true;
     if (!c.material.empty()) j["material"] = c.material;
-    if (!c.breaksOnImpact) j["breaksOnImpact"] = false;
+    if (c.breaksOnImpact) j["breaksOnImpact"] = true;
     return j;
 }
 
@@ -2143,7 +2144,7 @@ std::optional<projv::StaticCollider> projv::runtime::ComponentTraits<projv::Stat
     }
     c.splits = j.value("splits", false);
     c.material = j.value("material", std::string());
-    c.breaksOnImpact = j.value("breaksOnImpact", true);
+    c.breaksOnImpact = j.value("breaksOnImpact", false);
     return c;
 }
 
