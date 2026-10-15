@@ -215,6 +215,14 @@ namespace projv {
     // a shard to keep that shard for good. Not saved.
     struct Debris { uint64_t madeAt = 0; };
 
+    // The debris budget is about to clear `entities`, the oldest shards, in the order it chose them
+    // (PhysicsConfig::maxDebris). Delivered at once -- not queued to the end of PostUpdate like the
+    // other events -- so a handler sees them whole: it can take Debris off one to keep it, or put
+    // something in its place. Every entity still with Debris after the handlers is destroyed.
+    // Handlers run inside the physics step: like everything that feeds a step, what they do must be
+    // the same on every peer.
+    struct DebrisCleared { std::vector<Entity> entities; };
+
     // `striker`: what hit it (Strike::striker: an impact's other body); NullEntity for none.
     // `energy`: the strike's, J (0 for a strike by reach).
     struct BodyFractured {
@@ -247,7 +255,7 @@ namespace projv::runtime {
         bool                   destroyBodiesThatLeaveTheWorld = true;
         // The most shards (Debris) there may be at once. Past it, the oldest go -- their entities
         // destroyed, at the step that made the newest -- in (madeAt, NetId, entity) order, so peers
-        // clear the same ones. Thousands of shards are thousands of bodies: what they cost is the
+        // clear the same ones; DebrisCleared names them first. Thousands of shards are thousands of bodies: what they cost is the
         // step's. 0: no limit.
         uint32_t               maxDebris = 3000;
     };

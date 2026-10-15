@@ -1003,10 +1003,22 @@ namespace projv::runtime {
             }
             std::sort(order.begin(), order.end());
             const size_t excess = count - physics.maxDebris;
-            for (size_t i = 0; i < excess; i++) world.destroy(std::get<2>(order[i]));
+            DebrisCleared event;
+            event.entities.reserve(excess);
+            for (size_t i = 0; i < excess; i++) event.entities.push_back(std::get<2>(order[i]));
+            // Delivered now, not at the next pump: a handler has to see them before they go, to keep
+            // one (by taking its Debris off) or put something in its place.
+            if (Events* events = world.ctx().find<Events>()) events->trigger(event);
+            size_t cleared = 0;
+            for (Entity e : event.entities)
+                if (world.valid(e) && world.all_of<Debris>(e)) {
+                    world.destroy(e);
+                    cleared++;
+                }
             for (BodyId id : physics.doomed) physics.world->destroyBody(id);
             physics.doomed.clear();
-            core::trace("physics: cleared {} shards of debris, the oldest (budget {})", excess, physics.maxDebris);
+            core::trace("physics: cleared {} shards of debris, the oldest (budget {}); {} kept", cleared, physics.maxDebris,
+                        excess - cleared);
         }
 
         void step(Application& app) {

@@ -744,6 +744,41 @@ namespace {
     }
 }
 
+TEST_CASE("the debris budget names what it clears first, and a handler can keep one") {
+    Fixture f(-1, 20);
+    Entity wall = f.wall();
+    f.frames(2);
+    runtime::fracture(f.app.world, wall, vec3(-2, 3, 0), Fixture::energyFor(0.6f));
+    f.frames(1);
+    REQUIRE(f.fractures.size() == 1);
+    const std::vector<Entity> first = f.fractures[0].shards;
+    REQUIRE(first.size() >= 2);
+    // Whole when named, and the oldest first; the handler keeps the last it is told of.
+    std::vector<Entity> named;
+    bool alive = true;
+    f.app.events().on<projv::DebrisCleared>([&](const projv::DebrisCleared& e) {
+        for (Entity x : e.entities) {
+            // (The newest may not have bodies yet: the budget is kept in the step that made them.)
+            alive = alive && f.app.world.valid(x) && f.app.world.all_of<projv::Debris>(x);
+            named.push_back(x);
+        }
+        if (!e.entities.empty()) f.app.world.remove<projv::Debris>(e.entities.back());
+    });
+    f.frames(5);
+    runtime::fracture(f.app.world, wall, vec3(2, 3, 0), Fixture::energyFor(1.5f));
+    f.frames(1);
+    REQUIRE(f.fractures.size() == 2);
+    REQUIRE(named.size() >= first.size());
+    CHECK(alive);
+    for (size_t i = 0; i < first.size(); i++) CHECK(named[i] == first[i]);
+    const Entity kept = named.back();
+    CHECK(f.app.world.valid(kept));
+    CHECK_FALSE(f.app.world.all_of<projv::Debris>(kept));
+    f.frames(1);
+    CHECK(runtime::hasBody(f.app.world, kept));
+    for (size_t i = 0; i + 1 < named.size(); i++) CHECK_FALSE(f.app.world.valid(named[i]));
+}
+
 TEST_CASE("support: what a cut leaves standing on nothing falls, made of what it was") {
     Fixture f;
     Entity wall = f.wall();

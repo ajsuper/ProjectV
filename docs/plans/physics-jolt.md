@@ -530,6 +530,10 @@ To do, in order:
    or replace them. The budget stays on by default (3000): debris exists only where a game asked
    for fracture, and unbounded debris is a reliability failure, not only slowness -- thirty blasts
    filled Jolt's contact buffers and the session no longer replayed.
+   *Done 2026-10-15:* `DebrisCleared {entities}`, oldest first, delivered with `Events::trigger`
+   (a queued event would arrive after they were gone). A handler that takes `Debris` off one keeps
+   it; every entity still with Debris afterwards is destroyed. The newest named may not have bodies
+   yet: the budget is kept in the step that made them.
 4. **Anchors as data.** An `anchor` field on the physics material: a bedrock or foundation material
    holds up what touches it. Data rather than a callback, since StaticCollider is saved and
    callbacks are neither saved nor the same on every peer. "y <= 0" stays only as an opt-in fallback
