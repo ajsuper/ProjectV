@@ -3,8 +3,9 @@
 Status: **approved**, 2026-10-09. **M0-M6 done** (2026-10-13); joints (2026-10-13), physics materials
 (2026-10-14), fracture, the debris budget and support (2026-10-14/15) built, and fracture policy moved out
 of the engine (2026-10-15, "Mechanism in the engine, policy in systems"). M7 (contours) waits on the
-contour work. **What comes next is "Roadmap" below**, revised 2026-10-15 from a review of which games
-the system serves and where it gets in their way.
+contour work. **Next: "One rule set for voxel bodies" below** (decided 2026-10-15), then the rest of
+"Roadmap", revised 2026-10-15 from a review of which games the system serves and where it gets in
+their way.
 
 ## Decisions made
 
@@ -564,6 +565,59 @@ Demos 2 and 9 opt in explicitly; tests follow. *Done:* Strike::shardsBreakOnImpa
 Found while doing it: a click's chip in demo 11 breaks the wall but its shards stay in the hole
 (Roadmap R1).
 
+## One rule set for voxel bodies (decided 2026-10-15, next)
+
+Playing demo 11 showed the breaking rules had grown a case per kind of body: shards (fracture's,
+with rules of their own), pieces that fall when support goes, debris (a tag and a budget), anchors,
+and bodies that move, each split by different code or not at all. The visible result: a fallen
+piece cut in two stays one body moving together, because it is a grid and only single chunks
+split; and debris could not break again. User's call: shards are too engine-incorporated, the kinds
+are too separate, and support-style rules should apply to everything.
+
+They are all one thing: voxels that were part of one body and now are a body of their own. So:
+
+1. **One pass after every change.** Whenever a voxel body's voxels change, for whatever reason (an
+   edit, a strike, an impact), its face-connected islands are found, across all its chunks, and
+   each stays or becomes a body of its own:
+   - a moving body: every island but the largest becomes its own body (nothing holds a moving
+     body together but being connected);
+   - a static collider that splits: islands with an anchor stay; the rest fall.
+   This replaces support (dropUnsupported), the moving split (splitCutPieces, single chunks only)
+   and fracture's own piece-making. It needs grids and multi-chunk bodies to split (was R10).
+2. **A strike is an edit.** A fracture only decides which voxels go together -- the pattern's job,
+   still pluggable -- and cuts them apart; the groups become bodies through the same pass, the way
+   islands do. No shard-only rules.
+3. **Every piece takes after its parent.** A piece of a moving body copies its RigidBody; a piece
+   of a static collider gets one from the collider's friction, restitution, material and
+   breaksOnImpact. Debris breaks on impact if what it came from did (user's call: it should).
+   `Strike::shardsBreakOnImpact` and `ImpactFractureConfig::shardsBreakOnImpact` go.
+4. **One kind of piece, one event.** `Debris` becomes `Piece {madeAt}`, on everything a break made:
+   shards and fallen pieces alike. `BodyFractured` and `BodySplit` become one event -- what broke,
+   its pieces, and why (strike, impact, edit, support) -- delivered at once, before the pieces'
+   bodies are made, so a game can shape them in the step that made them (was R5).
+5. **Guards, the same for every piece, as settings** (PhysicsConfig):
+   - the piece budget (today's debris budget, over all pieces);
+   - the smallest piece: an island of fewer voxels than this is removed as dust (what demo 11 does
+     by hand today);
+   - the least impact break (today's ImpactFractureConfig::minimumBreak: a hit must break out at
+     least a shard's worth). With the smallest piece, this is what keeps debris that breaks on
+     impact from cascading: every break makes smaller pieces, and one below a shard's size cannot
+     be broken by a hit.
+
+What stays: RigidBody and StaticCollider stay two components (Jolt's static and moving, and D3);
+anchors stay data (anchor materials, anchorBase) and only matter to static colliders; static
+splitting stays opt-in (D4); patterns stay pluggable. One addition: `Strike::shardSize`, the size
+pieces break to for this strike instead of the material's, so a game can break a small thing finer
+than a big one (a pickaxe that crumbles what it hits).
+
+Costs: grid splitting first; demos 2 and 9 make more pieces once debris breaks again (bounded by
+the guards; their self-test thresholds may move); `Debris`, `BodyFractured` and `BodySplit` are
+renamed or merged, with the tests and demos.
+
+Order: grid and multi-chunk splitting; the one pass; pieces and the one event; the guards; then
+demo 11's pickaxe on top -- a shard size scaled to what it hits, crumbs as dust, and a moment
+without friction for thrown pieces (their friction otherwise holds them flush in their sockets).
+
 ## Roadmap (revised 2026-10-15)
 
 From a review of what games would use this for and where it serves or blocks them. **Status:** a
@@ -578,13 +632,12 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
 
 **Reliability**
 
-- **R1. Shards that stay where they broke.** A chip's shards come loose but stop in their hole
-  within a step or two, whatever push they are given, while one shard alone, or the group moved
-  0.5 m clear, flies (measured 2026-10-15 with a temporary probe in demo 11; the demo's push into the
-  wall was a second, separate cause). Not an overlap with the wall or with each other (checked).
-  Find the cause first; the fix belongs wherever the cause is -- a shard starting in contacts it
-  should not have is the engine's to fix, not a demo's push to hide. Demo 11 then throws its
-  chips out of the face with a small velocity, demo side.
+- **R1. Shards that stay where they broke.** *Understood 2026-10-15:* not an engine fault. Cut from
+  one solid, the shards sit flush in their sockets and friction holds them (set to 6 m/s, none
+  moved more than 2 cm; with friction off, nearly all flew; a rebuild alone freed none). The demo
+  handles it: a click throws its pieces, frictionless for a moment. Found on the way and fixed: a
+  rebuild after a RigidBody change dropped the body's velocity (f3aeb09), and a collider whose
+  anchors were all cut away was left floating (5c1ed8c).
 - **R2. Sleep that freezes bodies mid-fall.** ("What the demos showed" 4.) Bodies touching only
   static geometry sleep while still falling. A body never stops somewhere it could not rest.
 - **R3. Rollback across a break.** `savePhysics` needs the same bodies to exist at restore, and a
@@ -599,7 +652,7 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
   it ignores; saved with RigidBody/StaticCollider, compared by NetId order so peers agree. Layers
   stay the coarse cut. A strike can put its shards in a group of their own. Default: no groups,
   nothing changes. Replaces the need for blanket rules like "debris ignores debris".
-- **R5. Shaping what a step made, in that step.** `BodyFractured` and `BodySplit` delivered at
+- **R5. Shaping what a step made, in that step.** *Folded into "One rule set", item 4.* `BodyFractured` and `BodySplit` delivered at
   once, as DebrisCleared is, before the new bodies are made, so a handler can change their
   RigidBody (layer, group, damping) and set the velocity they start with (setVelocity on a body
   not yet made sets its starting velocity). A Strike also takes how the push spreads (fading to the
@@ -617,7 +670,8 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
 
 - **R9. Support across colliders.** A collider standing on another's anchor material is held up
   by it. Data, as anchors are.
-- **R10. Dynamic grids and multi-chunk bodies split and break.** A mechanism gap: today shards of
+- **R10. Dynamic grids and multi-chunk bodies split and break.** *Promoted: the first step of "One
+  rule set".* A mechanism gap: today shards of
   dynamic bodies are capped at one chunk.
 - **R11. Joints.** A true lock, a gear joint (two hinges at a ratio), a mass-ratio warning; ropes as
   a system over Distance joints rather than an engine primitive. ("What the demos showed" 6.)
