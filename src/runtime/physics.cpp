@@ -1159,9 +1159,16 @@ namespace projv::runtime {
                 }
             }
 
-            // 2. Rebuilds: a changed RigidBody, a new or lost link, changed voxels.
+            // 2. Rebuilds: a changed RigidBody, a new or lost link, changed voxels. A moving body keeps
+            //    its motion through it: changing its friction must not stop it in mid-air. (Voxel and
+            //    material changes noted theirs already, before splitting moved the pieces.)
             for (Entity e : physics.rebuild) {
                 if (!world.valid(e)) continue;
+                if (const PhysicsBody* body = world.try_get<PhysicsBody>(e);
+                    body && body->motion == MotionType::Dynamic && !physics.carried.count(e)) {
+                    BodyState state = sim.bodyState(body->id);
+                    physics.carried[e] = {state.linearVelocity, state.angularVelocity};
+                }
                 dropBody(world, physics, e);
                 if (wantsBody(world, e)) physics.pending.push_back(e);
             }

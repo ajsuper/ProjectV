@@ -176,6 +176,51 @@ TEST_CASE("patching a dynamic body's Transform does not move it") {
     CHECK(runtime::bodyPose(f.app.world, crate).position.y == doctest::Approx(resting.y).epsilon(0.01));
 }
 
+TEST_CASE("changing a moving body's RigidBody keeps it moving") {
+    Fixture f;
+    Entity crate = f.crate(vec3(0, 20, 0));
+    f.frames(2);
+    runtime::setVelocity(f.app.world, crate, vec3(5, 0, 0), vec3(0, 1, 0));
+    f.frames(10);
+    const runtime::BodyState before = runtime::bodyPose(f.app.world, crate);
+    REQUIRE(before.linearVelocity.x > 4.5f);
+    REQUIRE(before.linearVelocity.y < -1.0f);   // falling
+    // Its friction changes in mid-air: a rebuild, which must not stop it.
+    f.app.world.patch<projv::RigidBody>(crate, [](projv::RigidBody& r) { r.friction = 0.1f; });
+    f.frames(1);
+    const runtime::BodyState after = runtime::bodyPose(f.app.world, crate);
+    CHECK(after.linearVelocity.x == doctest::Approx(before.linearVelocity.x).epsilon(0.05));
+    CHECK(after.linearVelocity.y < before.linearVelocity.y);   // still falling, faster
+    CHECK(after.angularVelocity.y == doctest::Approx(before.angularVelocity.y).epsilon(0.05));
+}
+
+TEST_CASE("bodies in contact moving together keep their momentum: friction acts only on sliding") {
+    Fixture f;
+    runtime::setGravity(f.app.world, vec3(0.0f));
+    // Two crates face to face, high friction, no damping, thrown together along their shared face.
+    Entity a = f.crate(vec3(0, 10, 0)), b = f.crate(vec3(2, 10, 0));
+    for (Entity e : {a, b})
+        f.app.world.patch<projv::RigidBody>(e, [](projv::RigidBody& r) {
+            r.friction = 1.0f;
+            r.linearDamping = 0.0f;
+            r.angularDamping = 0.0f;
+        });
+    f.frames(2);
+    for (Entity e : {a, b}) runtime::setVelocity(f.app.world, e, vec3(0, 0, 6));
+    f.frames(60);
+    for (Entity e : {a, b}) {
+        runtime::BodyState s = runtime::bodyPose(f.app.world, e);
+        CHECK(s.linearVelocity.z == doctest::Approx(6.0f).epsilon(0.01));
+        CHECK(glm::length(s.angularVelocity) < 0.01f);
+    }
+    // Sliding past each other, the same friction does slow them: driven into each other (once -- no
+    // gravity presses them together) and moving opposite ways along the face.
+    runtime::setVelocity(f.app.world, a, vec3(0.5f, 0, 6));
+    runtime::setVelocity(f.app.world, b, vec3(-0.5f, 0, -6));
+    f.frames(30);
+    CHECK(runtime::bodyPose(f.app.world, a).linearVelocity.z < 5.9f);
+}
+
 TEST_CASE("destroying the entity destroys its body; a deleted component takes the body with it") {
     Fixture f;
     f.solidFloor();
