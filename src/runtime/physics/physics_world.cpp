@@ -684,6 +684,7 @@ namespace projv::runtime {
         // Each awake body's motion as the step began, by body index (snapshotVelocities).
         struct Motion { bool awake = false; JPH::Vec3 linear, angular; JPH::RVec3 centre; };
         std::vector<Motion>                   before;
+        uint32_t                              addedSinceOptimize = 0;   // bodies, since OptimizeBroadPhase
         std::vector<uint32_t>                 snapshotted;
         const VoxelMaterial* joltMaterial(uint16_t index) {
             if (!joltMaterials[index]) joltMaterials[index] = new VoxelMaterial(index);
@@ -824,6 +825,7 @@ namespace projv::runtime {
         body->SetCollisionGroup(JPH::CollisionGroup(impl->jointedPairs, body->GetID().GetIndex(), 0));
         bodies.AddBody(body->GetID(), desc.motion == MotionType::Static ? JPH::EActivation::DontActivate
                                                                         : JPH::EActivation::Activate);
+        impl->addedSinceOptimize++;
         uint32_t index = body->GetID().GetIndex();
         impl->lastGood[index] = {body->GetPosition(), body->GetRotation()};
         impl->rest[index] = {body->GetPosition(), body->GetRotation(), 0.0f};
@@ -1339,6 +1341,14 @@ namespace projv::runtime {
         for (const Impl::Joint& j : impl->joints)
             if (j.constraint && j.desc.motor && j.desc.motorVelocity != 0.0f)
                 impl->system.GetBodyInterface().ActivateConstraint(j.constraint);
+        // Bodies added one at a time leave Jolt's broadphase tree lopsided, and every query through it
+        // slow, until it is rebuilt: after a fracture's thousand shards, the first step took 36 ms.
+        // Rebuilt when enough have come since the last time -- a count, so a replay rebuilds at the
+        // same steps.
+        if (impl->addedSinceOptimize >= 256) {
+            impl->system.OptimizeBroadPhase();
+            impl->addedSinceOptimize = 0;
+        }
         snapshotVelocities();
         impl->contacts.added.clear();
         JPH::EPhysicsUpdateError errors =

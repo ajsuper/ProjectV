@@ -83,13 +83,16 @@ namespace {
         projv::Scene& scene;
         double now = 0.0;
         std::vector<projv::BodyFractured> fractures;
-        explicit Fixture(int threads = -1) : scene(app.world.ctx().emplace<projv::Scene>()) {
+        std::vector<projv::BodySplit> splits;
+        explicit Fixture(int threads = -1, uint32_t maxDebris = 3000) : scene(app.world.ctx().emplace<projv::Scene>()) {
             app.clock = [this] { return now; };
             runtime::installSceneBridge(app);
             runtime::PhysicsConfig config;
             config.settings.threads = threads;
+            config.maxDebris = maxDebris;
             runtime::installPhysics(app, config);
             app.events().on<projv::BodyFractured>([this](const projv::BodyFractured& e) { fractures.push_back(e); });
+            app.events().on<projv::BodySplit>([this](const projv::BodySplit& e) { splits.push_back(e); });
             app.runStartup();
             app.runFrame();
             runtime::PhysicsMaterial stone{2400.0f, 0.7f, 0.0f};
@@ -587,4 +590,107 @@ TEST_CASE("on impact: what breaks does not depend on the number of threads") {
     CHECK(single.first.size() >= 3);
     CHECK(single == four);
     CHECK(single == many);
+}
+
+TEST_CASE("the debris budget clears the oldest shards first, and only shards") {
+    Fixture f(-1, 20);
+    Entity wall = f.wall();
+    f.frames(2);
+    // A small break, within the budget.
+    runtime::fracture(f.app.world, wall, vec3(-2, 3, 0), Fixture::energyFor(0.6f));
+    f.frames(1);
+    REQUIRE(f.fractures.size() == 1);
+    const std::vector<Entity> first = f.fractures[0].shards;
+    REQUIRE(first.size() >= 2);
+    REQUIRE(first.size() <= 20);
+    for (Entity e : first) CHECK(f.app.world.all_of<projv::Debris>(e));
+    // A shard kept for good: no longer debris.
+    f.app.world.remove<projv::Debris>(first.front());
+    f.frames(5);
+    // A big one, past it: the newest twenty stay, every older shard goes but the one kept.
+    runtime::fracture(f.app.world, wall, vec3(2, 3, 0), Fixture::energyFor(1.5f));
+    f.frames(1);
+    REQUIRE(f.fractures.size() == 2);
+    const std::vector<Entity>& second = f.fractures[1].shards;
+    REQUIRE(second.size() > 20);
+    CHECK(f.app.world.view<projv::Debris>().size() == 20);
+    CHECK(f.app.world.valid(first.front()));
+    for (size_t i = 1; i < first.size(); i++) CHECK_FALSE(f.app.world.valid(first[i]));
+    CHECK(f.app.world.valid(wall));
+    // Their bodies went with them, at once.
+    CHECK(runtime::physicsWorld(f.app.world).stats().bodies == f.app.world.view<projv::PhysicsBody>().size());
+}
+
+namespace {
+    // Removal ops for a slab of the wall, x and y in voxels, through its whole thickness.
+    std::vector<projv::PendingVoxelOp> slot(ivec3 low, ivec3 high) {
+        std::vector<projv::PendingVoxelOp> ops;
+        for (int z = low.z; z <= high.z; z++)
+            for (int y = low.y; y <= high.y; y++)
+                for (int x = low.x; x <= high.x; x++) ops.push_back({false, ivec3(x, y, z), 0});
+        return ops;
+    }
+}
+
+TEST_CASE("support: what a cut leaves standing on nothing falls, made of what it was") {
+    Fixture f;
+    Entity wall = f.wall();
+    f.app.world.patch<projv::StaticCollider>(wall, [](projv::StaticCollider& c) { c.splits = true; });
+    f.frames(2);
+    // A hole that cuts nothing loose: nothing falls.
+    runtime::editVoxels(f.app.world, wall, slot({10, 4, 0}, {20, 8, 1}));
+    f.frames(2);
+    CHECK(f.splits.empty());
+    // A slot right across, a metre up: the 5 m above it is held by nothing.
+    runtime::editVoxels(f.app.world, wall, slot({0, 4, 0}, {31, 4, 1}));
+    f.frames(1);
+    REQUIRE(f.splits.size() == 1);
+    CHECK(f.splits[0].parent == wall);
+    REQUIRE(f.splits[0].pieces.size() == 1);
+    Entity top = f.splits[0].pieces[0];
+    Count fallen = countOf(f.scene, f.app.world.get<projv::VoxelComponent>(top).handle);
+    CHECK(fallen.voxels == uint64_t(32 * 19 * 2 - 11 * 4 * 2));   // y 5..23, less the hole's part above the slot
+    CHECK(fallen.materials == std::set<std::string>{"stone"});
+    CHECK(countOf(f.scene, f.wallComponent).voxels == uint64_t(32 * 4 * 2));   // y 0..3 stays
+    CHECK(f.app.world.get<projv::RigidBody>(top).motion == runtime::MotionType::Dynamic);
+    CHECK(f.app.world.all_of<projv::NetId>(top));
+    const float before = runtime::bodyPose(f.app.world, top).centerOfMass.y;
+    // It drops the slot's height, a quarter-metre, onto what stands.
+    f.frames(30);
+    CHECK(runtime::bodyPose(f.app.world, top).centerOfMass.y == doctest::Approx(before - 0.25f).epsilon(0.02));
+}
+
+TEST_CASE("support: a collider that does not split keeps standing on nothing") {
+    Fixture f;
+    Entity wall = f.wall();
+    f.frames(2);
+    runtime::editVoxels(f.app.world, wall, slot({0, 4, 0}, {31, 4, 1}));
+    f.frames(2);
+    CHECK(f.splits.empty());
+    CHECK(countOf(f.scene, f.wallComponent).voxels == uint64_t(32 * 23 * 2));
+}
+
+TEST_CASE("support: a strike that breaks a pillar through brings the top down") {
+    Fixture f;
+    // A 1 m pillar 6 m high, of stone that splits.
+    ComponentHandle h = utils::addComponent(f.scene, projv::ComponentKind::Chunk, "pillar", INVALID_COMPONENT_HANDLE, 16, 0.25f);
+    utils::setComponentTransform(f.scene, h, vec3(-0.5f, 0, -0.5f), quat(1, 0, 0, 0), 1.0f);
+    utils::queueVoxelAdd(f.scene, h, fill({0, 0, 0}, {3, 23, 3}, GREY));
+    utils::updateScene(f.scene);
+    REQUIRE(utils::setMaterialPhysics(f.scene, h, slotOf(f.scene, h, GREY), "stone"));
+    Entity pillar = runtime::spawnComponent(f.app.world, h);
+    projv::StaticCollider c;
+    c.splits = true;
+    f.app.world.emplace<projv::StaticCollider>(pillar, c);
+    f.frames(2);
+    runtime::fracture(f.app.world, pillar, vec3(0, 2.5f, -0.5f), Fixture::energyFor(1.2f));
+    f.frames(2);
+    REQUIRE(f.fractures.size() == 1);
+    REQUIRE(!f.splits.empty());
+    CHECK(f.splits[0].parent == pillar);
+    // The top fell; the foot stands.
+    float highest = 0.0f;
+    for (Entity e : f.splits[0].pieces) highest = std::max(highest, runtime::bodyPose(f.app.world, e).centerOfMass.y);
+    CHECK(highest > 3.0f);
+    CHECK(countOf(f.scene, h).voxels > 0);
 }

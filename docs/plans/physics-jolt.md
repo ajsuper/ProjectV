@@ -1,8 +1,8 @@
 # Physics: Jolt, voxel collision, ready for networking
 
 Status: **approved**, 2026-10-09. **M0-M6 done** (2026-10-13); joints (2026-10-13) and physics materials (2026-10-14) built;
-M7 (contours) waits on the contour work. Fracture on the material built (2026-10-14). Next: support (what a cut leaves
-unsupported falls) and a debris budget.
+M7 (contours) waits on the contour work. Fracture on the material built (2026-10-14); a debris budget and support
+(2026-10-15). Next: contact events for games, then sleeping (item 4 of "What the demos showed").
 
 ## Decisions made
 
@@ -455,8 +455,37 @@ patterns are code, registered by name, all through one interface.
   plaster crumble), broken by the boulder hitting them; the demo has no fracture code, and its
   self-test fires at all four. Demo 2: bricks of "fired brick", the blast is `runtime::fracture` on
   each brick near it, and thrown bricks break where they land hard.
-- Not yet: support, a debris budget (demo 2's blast makes ~1600 shards), patterns that read
-  authored crack lines (an attachment), sounds on impacts.
+- Not yet: patterns that read authored crack lines (an attachment), sounds on impacts, merging
+  settled debris back into static geometry.
+
+## Debris and support (built 2026-10-15)
+
+- **Debris budget.** Every shard carries `Debris {madeAt}`; past `PhysicsConfig::maxDebris` (3000)
+  the oldest go at the step that made the newest, in (madeAt, NetId, entity) order, their bodies at
+  once. Remove `Debris` to keep a shard. Found with demo 2's `DEMOS_BLASTS=30`: 8,233 bodies, Jolt's
+  pair and contact buffers full (and so a session that no longer replayed), frames up to 194 ms.
+- **Capacities** for fracture: shards are made packed, each touching many others. maxBodyPairs
+  262,144 and maxContactConstraints 131,072 (were 65,536 and 32,768).
+- **Cost of a blast.** A step's strikes are applied in two halves around one updateScene (it was two
+  per strike, ~0.35 ms each whatever the edit). Jolt's broadphase is rebuilt (OptimizeBroadPhase)
+  once 256 bodies have come since the last time -- a count, so replays do the same -- since a
+  thousand shards added one by one left it lopsided: the step after a blast took 36 ms, now 17.
+  Thirty blasts now: frames 5.6 ms on average, 73 ms at worst, no step dropped, ~3,600 bodies.
+- **Impact pushes** blend velocities: a shard takes the striker's pre-impact motion at the contact,
+  fading to the struck body's own at the edge. (It was the striker's closing speed along the normal,
+  which threw a brick that landed on a floor upward at the speed it fell -- the floor counted as the
+  striker.)
+- **Support.** `StaticCollider::splits` (saved since M5, now acted on; D4 holds -- opt-in). After
+  its voxels change, every face-connected island, across all its chunks, that no longer reaches the
+  component's own y = 0 falls as a dynamic body of its voxels and palette entries (BodySplit), of the
+  collider's friction, restitution and material. Worked out in a box over the component (at most
+  2^24 cells, else logged and skipped); at most 512 pieces. Not yet: anchors other than y <= 0
+  (voxels marked as anchors, touching another static body).
+- Tests: the budget (oldest first, a kept shard stays, bodies go at once); support (a hole that cuts
+  nothing loose, a slot right across drops the top by the slot's height, made of what it was, with
+  a NetId; a collider that does not split; a strike through a pillar brings the top down).
+- Demo 9's walls split: the bricks the seams pattern leaves hanging in their mortar fall, and a
+  wall cut through drops what is above.
 ## How it fits the rest of the engine
 
 Physics adds one module, `runtime/physics`, and one engine change: system ordering within a stage
@@ -801,7 +830,8 @@ fracture work below is built on them, not before them.
 1. **Materials** (built 2026-10-14, see above, strength and fracture pattern included): palette entry -> physics material (density, friction,
    restitution, strength, fracture pattern). Box merging stops at material
    boundaries; per-contact friction/restitution via a contact listener.
-2. **Fracture and support.** Nothing checks structural support: a static wall cut at its base
+2. **Fracture and support.** (Support done 2026-10-15: `StaticCollider::splits`, below; dynamic
+   grids still do not split.) Nothing checked structural support: a static wall cut at its base
    leaves the rest floating. After an edit, islands no longer connected to an anchor (ground, or
    voxels marked as anchors) should become dynamic. Grids / multi-chunk bodies can't split, so
    demo shards are capped at one chunk (16 voxels). (Done 2026-10-14: `runtime::fracture`, by the

@@ -200,9 +200,12 @@ namespace projv::runtime {
         // Capacities. Jolt allocates these up front; a full body table refuses creation, and a full
         // pair or contact buffer drops contacts for that step, which step() reports (PhysicsStats).
         // Crossing 80% of maxBodies is warned about, once.
+        // The pairs and contacts are sized for fracture: shards are made packed face to face, each
+        // touching many others, and thirty blasts in the demos' brick yard (~6,000 shards) filled
+        // 65,536 pairs and 32,768 contacts.
         uint32_t   maxBodies = 65536;
-        uint32_t   maxBodyPairs = 65536;
-        uint32_t   maxContactConstraints = 32768;
+        uint32_t   maxBodyPairs = 262144;
+        uint32_t   maxContactConstraints = 131072;
         core::vec3 gravity{0.0f, -9.81f, 0.0f};
 
         // ---- Guards (the physics plan, A8) ----

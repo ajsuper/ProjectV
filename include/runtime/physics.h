@@ -94,8 +94,11 @@ namespace projv {
         float                 friction = 0.6f;
         float                 restitution = 0.0f;
         runtime::PhysicsLayer layer = runtime::PhysicsLayer::Static;
-        // Whether pieces cut loose by an edit fall away as bodies of their own (destruction, M5 of
-        // the physics plan). Saved, not acted on yet.
+        // Whether what an edit or a fracture leaves unsupported falls. After its voxels change, every
+        // face-connected island of them that no longer reaches the component's ground -- its own
+        // y = 0 and below, so build a wall standing on its y = 0 -- becomes a dynamic body of its
+        // own (BodySplit), of this collider's friction, restitution and material. Off by default
+        // (the physics plan, D4): floating terrain falling is a choice. Checked only after a change.
         bool                  splits = false;
         // As RigidBody::material: friction and restitution from the library when set.
         std::string           material;
@@ -195,7 +198,8 @@ namespace projv {
     // now a body of its own: a new entity, linked to a new top-level component, with the parent's
     // RigidBody (its mass shared out by voxel count, if it named one), a NetId if the parent had one,
     // and the parent's motion at that point. The parent keeps the largest piece. Gameplay copies what
-    // else the pieces should carry.
+    // else the pieces should carry. Also sent when a static collider that splits loses support
+    // (StaticCollider::splits): its pieces start at rest, made of what it was.
     struct BodySplit { Entity parent; std::vector<Entity> pieces; };
 
     // A strike broke a body (runtime::fracture): `shards` are the pieces it threw off, each a new
@@ -204,6 +208,11 @@ namespace projv {
     // A dynamic body's RigidBody is theirs too (its mass shared out by voxel count, if it named one);
     // a static collider's shards take its friction, restitution and material. What is left of the
     // body is rebuilt, and pieces of it that the strike cut loose split as any edit's do (BodySplit).
+    // A shard a fracture threw off: debris. Physics puts it on each shard (with the step it was made)
+    // and clears the oldest debris when there is more than PhysicsConfig::maxDebris. Remove it from
+    // a shard to keep that shard for good. Not saved.
+    struct Debris { uint64_t madeAt = 0; };
+
     // `striker`: what hit it, when an impact broke it; NullEntity for a runtime::fracture call.
     // `energy`: the strike's, J.
     struct BodyFractured {
@@ -234,6 +243,11 @@ namespace projv::runtime {
         // A body that leaves the world bounds is falling forever or flung away; by default its
         // entity goes (after BodyLeftWorld is sent). False leaves the decision to the game.
         bool                   destroyBodiesThatLeaveTheWorld = true;
+        // The most shards (Debris) there may be at once. Past it, the oldest go -- their entities
+        // destroyed, at the step that made the newest -- in (madeAt, NetId, entity) order, so peers
+        // clear the same ones. Thousands of shards are thousands of bodies: what they cost is the
+        // step's. 0: no limit.
+        uint32_t               maxDebris = 3000;
     };
 
     // Creates the physics world (in world.ctx()), registers RigidBody and StaticCollider with
@@ -318,8 +332,10 @@ namespace projv::runtime {
     // **On impact** the engine calls this itself. When two bodies meet closing faster than
     // PhysicsSettings::minImpactSpeed (PhysicsWorld::impacts), each that is a voxel body with
     // breaksOnImpact is struck at the contact with the collision's energy -- half the pair's reduced
-    // mass times the closing speed squared -- and its shards pushed on at the closing speed, so what
-    // is in the striker's way goes ahead of it. An
+    // mass times the closing speed squared. Its shards take on the striker's motion at the contact,
+    // fading to the body's own (from before the hit) at the edge of the break: what is in a boulder's
+    // way goes on ahead of it, and a brick that lands hard stops where it hit and falls on further
+    // out. An
     // impact must break out at least the struck material's shardSize, or nothing breaks: a crate set
     // down on a stone floor does not chip it. When what was struck does not move (a static or
     // kinematic body), the striker gets back the energy the break did not use, along the way it was
