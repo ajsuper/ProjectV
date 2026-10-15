@@ -22,7 +22,6 @@
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/JobSystemSingleThreaded.h>
-#include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyFilter.h>
@@ -54,6 +53,7 @@
 #include <Jolt/RegisterTypes.h>
 
 #include "core/log.h"
+#include "job_pool.h"
 
 namespace projv::runtime {
     struct CollisionShape::Native {
@@ -666,7 +666,7 @@ namespace projv::runtime {
         int threads = settings.threads;
         if (threads < 0) threads = std::clamp(int(std::thread::hardware_concurrency()) - 1, 0, 7);
         if (threads == 0) impl->jobSystem = std::make_unique<JPH::JobSystemSingleThreaded>(JPH::cMaxPhysicsJobs);
-        else impl->jobSystem = std::make_unique<JPH::JobSystemThreadPool>(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, threads);
+        else impl->jobSystem = std::make_unique<JobPool>(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, threads);   // see job_pool.h
         impl->stats.threads = threads;
         impl->lastGood.resize(settings.maxBodies);
         impl->rest.resize(settings.maxBodies);

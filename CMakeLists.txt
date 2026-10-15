@@ -349,6 +349,7 @@ target_link_libraries(projectV PUBLIC
 # includes a Jolt header and no other. -ffp-contract=off keeps the compiler from fusing our own
 # multiply-adds in code that feeds the simulation, the same rule Jolt's deterministic build follows.
 add_library(projv_physics OBJECT
+    src/runtime/physics/job_pool.cpp
     src/runtime/physics/physics_world.cpp
 )
 target_include_directories(projv_physics PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
