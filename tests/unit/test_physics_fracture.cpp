@@ -194,6 +194,34 @@ TEST_CASE("a strike breaks a static wall into dynamic shards, losing no voxel an
     CHECK(forward > int(broke.pieces.size()) / 3);
 }
 
+TEST_CASE("each voxel breaks within the reach the energy has in its own material: iron in stone, near the blow") {
+    auto ironLost = [](bool byReach) {
+        Fixture f;
+        runtime::PhysicsMaterial iron{7800.0f, 0.5f, 0.0f};
+        iron.strength = 1e6f;   // ten times stone's: the same energy reaches 0.46 as far in it
+        runtime::definePhysicsMaterial(f.app.world, "iron", iron);
+        Entity wall = f.wall();
+        // An iron bar across the wall, y 2.75..3.25 m, its top half a metre below the strike.
+        utils::queueVoxelAdd(f.scene, f.wallComponent, fill({0, 11, 0}, {31, 12, 1}, RED));
+        utils::updateScene(f.scene);
+        const uint8_t slot = slotOf(f.scene, f.wallComponent, RED);
+        REQUIRE(utils::setMaterialPhysics(f.scene, f.wallComponent, slot, "iron"));
+        f.frames(2);
+        if (byReach) runtime::fractureWithin(f.app.world, wall, vec3(0, 3.6f, 0), 1.5f);
+        else runtime::fracture(f.app.world, wall, vec3(0, 3.6f, 0), Fixture::energyFor(1.5f));
+        f.frames(1);
+        REQUIRE(f.fractures.size() == 1);
+        return 32 * 2 * 2 - int(utils::countMaterialUsage(f.scene, f.wallComponent)[slot]);
+    };
+    // 1.5 m of stone, but only 0.7 m of iron: a few voxels of the bar under the blow go, not the
+    // three metres of it the stone's reach crosses.
+    const int lost = ironLost(false);
+    CHECK(lost >= 1);
+    CHECK(lost <= 12);
+    // A strike by reach breaks whatever is breakable within it, whatever it is made of.
+    CHECK(ironLost(true) > 3 * lost);
+}
+
 TEST_CASE("the reach follows the energy, and what has no strength does not break") {
     uint64_t small = 0, large = 0;
     {

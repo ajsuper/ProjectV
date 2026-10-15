@@ -656,6 +656,35 @@ their bodies exist, and thrown once they do. F became a 3 MJ demolition blow, an
 composite wall (concrete frame with rebar, brick in mortar, pine, glass; README), which the
 self-test blasts: thousands of voxels out, every rebar voxel stays.
 
+**Each voxel breaks within its own material's reach** (2026-10-15, after the user found F could
+not cut demo 11's rebar). The reach used to be the struck voxel's material's for every voxel, so a
+bar 375 times stronger than the concrete round it broke all across the concrete's 2 m -- against
+what `strength` means (J per m^3 broken). Now, for a strike by energy, each voxel breaks only within
+the sphere the energy fills in its own material; the struck one still sets the outer reach and the
+pattern. It only restricts (a weaker material's own reach is already larger), so single-material
+bodies break as before; a strike by reach (`fractureWithin`) still breaks everything breakable in
+it, the escape for a game with its own model. Not fixed: striking the strong voxel itself still
+limits the weak ones round it to its small reach -- choosing the outer reach from the weakest
+material near the strike would fix it, a separate decision. Test: "each voxel breaks within the
+reach the energy has in its own material". Demo 11's rebar now has a strength (10 MJ/m^3).
+
+**Demo 11's throw, measured** (2026-10-15). The user found F inconsistent: sometimes a big section
+flew, sometimes the pieces broke but stayed. A probe firing F at ten spots showed it: on the chalk
+cliff and the tower every shard moved; on the composite wall 2 to 10% did. The wall's palette
+entries name materials, and a voxel's material overrides the RigidBody friction the demo zeroed, so
+those shards stayed locked flush in their sockets (R1). With the materials cleared, about 95% flew.
+The demo now swaps each shard's palette entries for frictionless twins of their materials for half
+a second (same density and strength), throws along the blow -- through the wall, which the user
+asked for, rather than back out of the face -- and keeps every crumb (dustVoxels 0: pieces vanishing
+as they were made looked wrong). Of F's shards on the beam, about three in four now go through; the
+rest are caught by the rebar left in the hole (without rebar, 161 of 172 go through). Still open
+(R1): *why* friction holds a piece given 14 m/s, when friction can only resist with what the normal
+force allows -- probably the flush pieces start in contact deep enough that Jolt pushes them apart
+hard, and that push is what friction works against. Worth finding in the engine, since every game
+that throws pieces meets it; the twin swap is a demo's workaround. Also found: an example's
+ASSET_FILES are staged POST_BUILD, so a change to physics_materials.json alone is not copied until
+the binary relinks.
+
 Found on the way: demo 9's "nothing fell through the floor" check counted a piece that went over the
 floor's edge, struck the floor's side and drifted back under it as it fell (about one run in five,
 now that pieces break again in the air). Diagnosed by recording where each leaver first went below

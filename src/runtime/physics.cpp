@@ -699,10 +699,22 @@ namespace projv::runtime {
             }
             const float outer = 1.5f * reach;
 
+            // Each voxel breaks only within the reach the energy has in its own material: steel in
+            // concrete snaps near the blow, where the concrete round it goes much further. (A strike
+            // by reach breaks everything breakable in it, whatever it is made of.)
+            std::map<uint16_t, float> ownReach;
+            auto reachIn = [&](uint16_t m) {
+                auto [it, fresh] = ownReach.try_emplace(m, reach);
+                if (fresh && strike.reach <= 0.0f)
+                    it->second = std::min(std::cbrt(3.0f * strike.energy / (4.0f * 3.14159265f * sim.material(m).strength)) / metres,
+                                          limits.maxReachVoxels);
+                return it->second;
+            };
             std::vector<FractureVoxel> voxels = voxelsNear(scene, source, at, outer, maxCells, decoded);
             for (FractureVoxel& v : voxels) {
                 v.material = materialOf(v.slot);
-                v.breakable = breakable(v.material);
+                v.breakable = breakable(v.material) &&
+                              glm::distance(core::vec3(v.position) + 0.5f, at) <= reachIn(v.material);
             }
             const FracturePattern* pattern = fracturePattern(world, material.fracture);
             if (!pattern) {

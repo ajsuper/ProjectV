@@ -395,11 +395,13 @@ namespace projv::runtime {
     // what was struck; its physics material's
     // strength turns the energy into a reach, and its fracture pattern sets which voxels go together
     // (runtime/fracture.h). Voxels whose material has no strength never break; neither does anything
-    // when the struck one's has none. The shards come away through the same pass as any island
-    // (BodyBroken), taking after the body as every piece does: a dynamic body's shards copy its whole
-    // RigidBody (damping, gravity factor, layer, breaksOnImpact), a static collider's take its
-    // friction, restitution, material and breaksOnImpact. Static colliders break too; their shards
-    // are dynamic.
+    // when the struck one's has none. Each voxel breaks only within the reach the energy has in its
+    // own material, so something stronger than what was struck -- a steel bar in concrete -- breaks
+    // only nearer the strike (a strike by reach breaks everything breakable within it). The shards
+    // come away through the same pass as any island (BodyBroken), taking after the body as every
+    // piece does: a dynamic body's shards copy its whole RigidBody (damping, gravity factor, layer,
+    // breaksOnImpact), a static collider's take its friction, restitution, material and
+    // breaksOnImpact. Static colliders break too; their shards are dynamic.
     //
     // Works on what voxelComponentOf finds: a chunk, a grid, or a prefab of one chunk. The reach
     // is capped (PhysicsConfig::fracture.maxReachVoxels, 64 by default), and so is the number of

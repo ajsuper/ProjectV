@@ -291,13 +291,21 @@ struct Demos {
         // A click's shards, made frictionless in the step that made them, waiting for their bodies to
         // be thrown (see throwChip).
         std::vector<Entity> toThrow;
-        // A click's chip, until its pieces come back (see chip): where it was struck, which way is
-        // out of the face, and how fast the pieces leave.
+        // A click's chip, until its pieces come back (see chip): where it was struck, which way the
+        // blow went, and how fast the pieces leave.
         bool chipped = false;
-        vec3 chipAt{0.0f}, chipOut{0.0f};
+        Entity chipTarget = projv::NullEntity;
+        vec3 chipAt{0.0f}, chipDirection{0.0f, 0.0f, 1.0f};
         float chipSpeed = 0.0f;
-        // Thrown pieces, frictionless for a moment (see throwChip): what to give back, and when.
-        struct Slippery { Entity piece; float friction; std::string material; int steps; };
+        // Thrown pieces, frictionless for a moment (see slipChip): what to give back, and when --
+        // the RigidBody's friction and material, and each palette entry's material.
+        struct Slippery {
+            Entity piece;
+            float friction;
+            std::string material;
+            std::vector<std::pair<uint8_t, std::string>> entries;
+            int steps;
+        };
         std::vector<Slippery> slippery;
     } overhangs;
     // What right-click holds: a body, the point on it that was grabbed (in the body's frame), and how
@@ -1403,10 +1411,11 @@ uint32_t towerBrick(int x, int y, int z) {
 // The composite wall: 12 m wide, 8 m high, half a metre thick, in eighth-metre voxels. A concrete
 // frame -- three columns and two beams -- with steel rebar running through it, and four bays: brick
 // laid in mortar, pine boards with a glass window, a glass curtain on pine mullions, and brick with a
-// small window. Each colour names its physics material, so a blow breaks each part its own way: the
-// concrete shatters off the rebar, which never breaks (it has no strength) and goes on holding up
-// what it runs through; the bricks come out of their mortar, the boards splinter along their grain,
-// and the glass, the weakest, goes furthest.
+// small window. Each colour names its physics material, so a blow breaks each part its own way, as
+// far as the blow reaches in that material: the concrete shatters off the rebar, which is 125 times
+// stronger -- a click leaves it bare, still holding up what it runs through, and only F's blow cuts it,
+// within about 0.4 m of where it lands; the bricks come out of their mortar, the boards splinter along their grain, and the
+// glass, the weakest, goes furthest.
 constexpr float COMPOSITE_VOXEL = 0.125f;
 constexpr ivec3 COMPOSITE_SIZE(96, 64, 4);
 const vec3 COMPOSITE_CORNER(20.0f, 0.0f, 5.0f);
@@ -1548,51 +1557,88 @@ void chip(World& world, const Camera& camera, float energy, float speed, float s
     strike.shardSize = shardSize;
     runtime::fracture(world, hit->entity, strike);
     demos.overhangs.chipped = true;
+    demos.overhangs.chipTarget = hit->entity;
     demos.overhangs.chipAt = strike.at;
-    demos.overhangs.chipOut = glm::dot(hit->normal, camera.forward()) < 0.0f ? hit->normal : -hit->normal;
+    demos.overhangs.chipDirection = camera.forward();
     demos.overhangs.chipSpeed = speed;
 }
 
-// A chip's shards are thrown out of the face, spreading from where it was struck and tumbling. Cut
-// from one solid, each sits flush in its socket, and friction against the faces round it holds it
-// there whatever speed it is given (measured: set to 6 m/s, none moved more than 2 cm; frictionless,
-// nearly all flew). So each is made frictionless for a moment, in the step that made it, before its
-// body exists (slipChip); thrown once it has one (throwChip); and given its own friction back
-// (restoreChips) before it lands. The crumbs are gone already: the engine's dust (dustVoxels).
+// A chip's shards are thrown the way the blow went -- on through what was struck -- spreading
+// from where it landed and tumbling. Cut from one solid, each sits flush in its socket, and friction
+// against the faces round it holds it there whatever speed it is given (measured: frictionless,
+// 95% of an F blow's pieces flew; with their materials' friction, 2 to 10% did). So for a moment
+// each is frictionless, from the step that made it, before its body exists (slipChip): the
+// RigidBody's friction, and every palette entry's material swapped for its frictionless twin (the
+// same density and strength; defined at startup, see THROWN). Thrown once it has a body
+// (throwChip); its own materials back (restoreChips) before it lands.
 constexpr int SLIPPERY_STEPS = 30;   // fixed steps: half a second
+constexpr const char* THROWN = " (thrown)";
+// Every material that breaks in the demos, so each has a twin.
+const char* const BREAKING_MATERIALS[] = {"ashlar", "brick", "planks", "fired brick", "sandstone", "timber", "chalk",
+                                          "tower brick", "plaster", "concrete", "rebar", "wall brick", "mortar", "pine",
+                                          "glass"};
+
+void defineThrownTwins(World& world) {
+    for (const char* name : BREAKING_MATERIALS)
+        if (std::optional<runtime::PhysicsMaterial> m = runtime::physicsMaterial(world, name)) {
+            m->friction = 0.0f;
+            runtime::definePhysicsMaterial(world, std::string(name) + THROWN, *m);
+        }
+}
+
 void slipChip(World& world, Demos::Overhangs& o, const projv::BodyBroken& e) {
+    auto& scene = world.ctx().get<projv::Scene>();
     for (size_t i = 0; i < e.shards; i++) {
         Entity shard = e.pieces[i];
         const projv::RigidBody& rigid = world.get<projv::RigidBody>(shard);
-        o.slippery.push_back({shard, rigid.friction, rigid.material, SLIPPERY_STEPS});
-        world.patch<projv::RigidBody>(shard, [](projv::RigidBody& r) {
+        Demos::Overhangs::Slippery slip{shard, rigid.friction, rigid.material, {}, SLIPPERY_STEPS};
+        // The piece's palette is its own copy: changing it changes nothing else.
+        const ComponentHandle h = world.get<projv::VoxelComponent>(shard).handle;
+        const auto& palette = scene.components[h].materialPalette;
+        for (size_t slot = 0; slot < palette.size(); slot++) {
+            const std::string name = palette[slot].physics;
+            if (name.empty() || !runtime::physicsMaterial(world, name + THROWN)) continue;
+            slip.entries.push_back({uint8_t(slot), name});
+            utils::setMaterialPhysics(scene, h, uint8_t(slot), name + THROWN);
+        }
+        std::string twin = rigid.material.empty() ? "" : rigid.material + THROWN;
+        if (!twin.empty() && !runtime::physicsMaterial(world, twin)) twin.clear();
+        o.slippery.push_back(std::move(slip));
+        world.patch<projv::RigidBody>(shard, [&twin](projv::RigidBody& r) {
             r.friction = 0.0f;
-            r.material.clear();   // a material's friction would override the field
+            r.material = twin;   // a material's friction would override the field
         });
         o.toThrow.push_back(shard);
     }
 }
 
 void throwChip(World& world, Demos::Overhangs& o) {
+    const vec3 ahead = glm::normalize(o.chipDirection);
     for (Entity shard : o.toThrow) {
         if (!world.valid(shard) || !runtime::hasBody(world, shard)) continue;
+        // Out from the blow's line, so the pieces fan out as they go through.
         vec3 from = runtime::bodyPose(world, shard).centerOfMass - o.chipAt;
-        float distance = glm::length(from);
-        vec3 spread = distance > 1e-3f ? from / distance : o.chipOut;
-        vec3 velocity = glm::normalize(o.chipOut + 0.5f * spread) * o.chipSpeed + vec3(0, 1.5f, 0);
-        runtime::setVelocity(world, shard, velocity, glm::cross(o.chipOut, spread) * 4.0f);
+        vec3 across = from - ahead * glm::dot(from, ahead);
+        float off = glm::length(across);
+        vec3 spread = off > 1e-3f ? across / off : vec3(0.0f);
+        vec3 velocity = glm::normalize(ahead + 0.4f * spread) * o.chipSpeed;
+        runtime::setVelocity(world, shard, velocity, glm::cross(ahead, spread) * 4.0f);
     }
     o.toThrow.clear();
 }
 
-// Thrown pieces whose moment is up get their friction and material back.
+// Thrown pieces whose moment is up get their friction and materials back.
 void restoreChips(World& world, Demos::Overhangs& o) {
-    for (auto& s : o.slippery)
-        if (--s.steps == 0 && world.valid(s.piece) && world.all_of<projv::RigidBody>(s.piece))
-            world.patch<projv::RigidBody>(s.piece, [&s](projv::RigidBody& r) {
-                r.friction = s.friction;
-                r.material = s.material;
-            });
+    auto& scene = world.ctx().get<projv::Scene>();
+    for (auto& s : o.slippery) {
+        if (--s.steps != 0 || !world.valid(s.piece) || !world.all_of<projv::RigidBody>(s.piece)) continue;
+        if (const auto* link = world.try_get<projv::VoxelComponent>(s.piece); link && utils::isComponentAlive(scene, link->ref()))
+            for (const auto& [slot, name] : s.entries) utils::setMaterialPhysics(scene, link->handle, slot, name);
+        world.patch<projv::RigidBody>(s.piece, [&s](projv::RigidBody& r) {
+            r.friction = s.friction;
+            r.material = s.material;
+        });
+    }
     std::erase_if(o.slippery, [](const Demos::Overhangs::Slippery& s) { return s.steps <= 0; });
 }
 
@@ -2405,22 +2451,41 @@ void selfTest(projv::Application& app) {
             strike.push = -side * 2.0f;
             runtime::fracture(world, demos.overhangs.tree, strike);
         }
-        // And F's blow, on the composite wall's middle beam above the brick bay.
+        // And F's blow, as a player gives it, on the composite wall's middle beam above the brick bay.
         wallBefore = wallVoxels(world, demos.overhangs.wall);
-        runtime::Strike blow;
-        blow.at = COMPOSITE_CORNER + vec3(26, 31, 0) * COMPOSITE_VOXEL + vec3(0, 0, 0.1f);
-        blow.energy = BLOW_ENERGY;
-        runtime::fracture(world, demos.overhangs.wall, blow);
+        Camera aim;
+        aim.position = COMPOSITE_CORNER + vec3(26.5f, 31.0f, 0.0f) * COMPOSITE_VOXEL - vec3(0, 0, 3.0f);
+        aim.yaw = 1.5708f;
+        aim.pitch = 0.0f;
+        aim.walker = world.ctx().get<Camera>().walker;
+        chip(world, aim, BLOW_ENERGY, BLOW_SPEED, 0.0f);
         acted = true;
     }
     if (stage == 11 && t > 3.0f && !wallChecked) {
         auto [rebar, all] = wallVoxels(world, demos.overhangs.wall);
-        size_t pieces = 0;
-        for (const projv::BodyBroken& e : demos.overhangs.fell)
-            if (e.entity == demos.overhangs.wall) pieces += e.pieces.size();
-        check(*test, all + 2000 < wallBefore.second && pieces > 20 && rebar == wallBefore.first && rebar > 0,
-              fmt::format("F broke {} voxels out of the composite wall in {} pieces; its {} voxels of rebar all stayed ({} now)",
-                          wallBefore.second - all, pieces, wallBefore.first, rebar));
+        size_t pieces = 0, shards = 0, through = 0;
+        const float back = COMPOSITE_CORNER.z + float(COMPOSITE_SIZE.z) * COMPOSITE_VOXEL;   // the wall's far face
+        for (const projv::BodyBroken& e : demos.overhangs.fell) {
+            if (e.entity != demos.overhangs.wall) continue;
+            pieces += e.pieces.size();
+            if (e.cause != projv::BreakCause::Strike) continue;
+            for (size_t i = 0; i < e.shards; i++) {
+                shards++;
+                if (world.valid(e.pieces[i]) && runtime::hasBody(world, e.pieces[i]) &&
+                    runtime::bodyPose(world, e.pieces[i]).centerOfMass.z > back + 0.5f)
+                    through++;
+            }
+        }
+        // Thrown on through the wall, the way the blow went. Not all of them: the bars the blow leaves
+        // standing in the hole catch what was in front of them (measured: without the rebar, 161 of
+        // 172 go through; with it, about three in four).
+        check(*test, shards > 20 && through * 10 > shards * 6,
+              fmt::format("F's shards went on through the wall: {} of {}", through, shards));
+        // The concrete goes 2 m out; the rebar, 125 times stronger, only where the blow landed.
+        const uint64_t cut = wallBefore.first - rebar;
+        check(*test, all + 2000 < wallBefore.second && pieces > 20 && cut > 0 && cut < 100,
+              fmt::format("F broke {} voxels out of the composite wall in {} pieces, cutting {} of its {} voxels of rebar "
+                          "where it struck", wallBefore.second - all, pieces, cut, wallBefore.first));
         wallChecked = true;
     }
     static bool nudged = false;
@@ -2490,12 +2555,12 @@ void startup(projv::Application& app) {
     physics.settings.record = unattended && !benchDemo;   // the self-test replays the whole session at the end
     // DEMOS_PHYSICS_THREADS: the physics step's worker threads, for measuring (default: the engine's).
     if (const char* threads = std::getenv("DEMOS_PHYSICS_THREADS")) physics.settings.threads = std::atoi(threads);
-    physics.dustVoxels = 5;   // what breaks into crumbs this small is gone, not a body
     runtime::installPhysics(app, physics);
     runtime::installImpactFracture(app);   // what is struck hard enough breaks (demos 2, 9, 11)
     // The physics materials the demos' voxels name (demo 10's ramps and walls).
     if (!runtime::loadPhysicsMaterials(world, (here / "physics_materials.json").string()))
         projv::core::error("demos: physics_materials.json did not load; the slide's ramps will all behave alike");
+    defineThrownTwins(world);   // before any body uses a material: defining one rebuilds them
 
     // The floor: 80 m square, half-metre voxels, checkered, two voxels thick with its top at y = 0.
     // One component, so one grid; solid because of its StaticCollider.
@@ -2567,9 +2632,19 @@ void startup(projv::Application& app) {
         Demos& demos = world.ctx().get<Demos>();
         demos.pieces += int(e.pieces.size());
         if (demos.current == 11) demos.overhangs.fell.push_back(e);
+        // A thrown piece that breaks again while it is frictionless passes that on: its pieces got
+        // its palette, twins and all, and are given their materials back when it is.
+        for (size_t k = 0; k < demos.overhangs.slippery.size(); k++)
+            if (demos.overhangs.slippery[k].piece == e.entity)
+                for (Entity piece : e.pieces) {
+                    Demos::Overhangs::Slippery copy = demos.overhangs.slippery[k];
+                    copy.piece = piece;
+                    copy.material = world.get<projv::RigidBody>(piece).material.empty() ? "" : copy.material;
+                    demos.overhangs.slippery.push_back(std::move(copy));
+                }
         // Demo 11: a click's shards, thrown out of the face.
         if (demos.current == 11 && demos.overhangs.chipped && e.cause == projv::BreakCause::Strike &&
-            e.striker == projv::NullEntity) {
+            e.entity == demos.overhangs.chipTarget) {
             demos.overhangs.chipped = false;
             slipChip(world, demos.overhangs, e);
         }
