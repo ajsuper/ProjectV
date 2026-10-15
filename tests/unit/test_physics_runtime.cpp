@@ -315,9 +315,12 @@ TEST_CASE("RigidBody and StaticCollider round-trip through entities.json") {
     using StaticTraits = runtime::ComponentTraits<projv::StaticCollider>;
     projv::StaticCollider c;
     c.splits = true;
+    c.anchorBase = true;
     c.restitution = 0.7f;
     auto cb = StaticTraits::load(StaticTraits::save(c), 1);
     REQUIRE(cb);
     CHECK(cb->splits);
+    CHECK(cb->anchorBase);
+    CHECK_FALSE(StaticTraits::save(projv::StaticCollider{}).contains("anchorBase"));
     CHECK(cb->restitution == doctest::Approx(0.7f));
 }

@@ -96,11 +96,16 @@ namespace projv {
         float                 restitution = 0.0f;
         runtime::PhysicsLayer layer = runtime::PhysicsLayer::Static;
         // Whether what an edit or a fracture leaves unsupported falls. After its voxels change, every
-        // face-connected island of them that no longer reaches the component's ground -- its own
-        // y = 0 and below, so build a wall standing on its y = 0 -- becomes a dynamic body of its
-        // own (BodySplit), of this collider's friction, restitution and material. Off by default
-        // (the physics plan, D4): floating terrain falling is a choice. Checked only after a change.
+        // face-connected island of them with nothing to hold it up becomes a dynamic body of its own
+        // (BodySplit), of this collider's friction, restitution, material and breaksOnImpact. What
+        // holds up is data: voxels of an anchor material (PhysicsMaterial::anchor), and with
+        // anchorBase the component's own y = 0 and below. Off by default (the physics plan, D4):
+        // floating terrain falling is a choice. Checked only after a change. A collider with no
+        // anchor of either kind drops nothing, and says so.
         bool                  splits = false;
+        // The component's own y = 0 and below holds it up (build a wall standing on its y = 0): for a
+        // collider with no anchor material under it.
+        bool                  anchorBase = false;
         // As RigidBody::material: friction and restitution from the library when set.
         std::string           material;
         // As RigidBody::breaksOnImpact. The pieces that fall when support goes (splits) take it on.

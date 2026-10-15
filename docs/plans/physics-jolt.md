@@ -538,6 +538,11 @@ To do, in order:
    holds up what touches it. Data rather than a callback, since StaticCollider is saved and
    callbacks are neither saved nor the same on every peer. "y <= 0" stays only as an opt-in fallback
    on the collider.
+   *Done 2026-10-15:* `PhysicsMaterial::anchor` ("anchor" in the library file, in the state hash):
+   an island with a voxel of an anchor material stands. `StaticCollider::anchorBase` (saved when on)
+   is the old y <= 0 rule, now asked for; demos 9 and 11 ask. A collider that splits with neither
+   drops nothing and warns once (everything falling is a setup mistake, not a collapse). Still
+   within one collider: touching another static body's anchor does not hold yet.
 5. **Limits and a reach overload.** The 3-voxel search for the struck voxel, the 64-voxel reach cap
    and the 512-shard cap are guards, like maxLinearSpeed: configurable (PhysicsConfig), still
    enforced. The sphere reach (energy / strength) is what `strength` means, not tuning; instead,

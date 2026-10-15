@@ -1121,6 +1121,7 @@ void buildTrebuchet(World& world, Demos& demos, Camera& camera) {
         projv::StaticCollider made;
         made.material = materials[side];   // how it breaks: physics_materials.json
         made.splits = true;                // and what a break leaves hanging falls
+        made.anchorBase = true;            // it stands on its own y = 0
         made.breaksOnImpact = true;        // the boulder breaks it
         world.emplace<projv::StaticCollider>(wall.entity, made);
         demos.owned.push_back(wall.entity);
@@ -1351,6 +1352,7 @@ Entity overhang(World& world, Demos& demos, const char* material, ivec3 size, ve
     projv::StaticCollider c;
     c.material = material;
     c.splits = true;
+    c.anchorBase = true;   // standing on its own y = 0
     c.breaksOnImpact = true;   // and what falls breaks again where it lands hard
     world.emplace<projv::StaticCollider>(e, c);
     runtime::assignNetId(world, e);

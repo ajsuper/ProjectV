@@ -77,6 +77,7 @@ namespace projv::runtime {
             } library;
             uint64_t                      seenPalettes = 0;  // palette versions and library at the last check
             std::set<std::string>         warnedPatterns;    // fracture patterns named but not registered
+            std::set<Entity>              warnedUnanchored;  // colliders that split with nothing to stand on
         };
 
         PhysicsRuntime& runtimeOf(World& world) { return world.ctx().get<PhysicsRuntime>(); }
@@ -873,9 +874,10 @@ namespace projv::runtime {
         constexpr size_t   MAX_FALLING_PIECES = 512;
 
         // A static collider that splits (StaticCollider::splits), after its voxels changed: every
-        // face-connected island of them that no longer reaches the component's ground -- its own
-        // y = 0 and below -- falls, as a dynamic body of its own (BodySplit). Applied (updateScene)
-        // before returning.
+        // face-connected island of them with nothing to hold it up falls, as a dynamic body of its
+        // own (BodySplit). What holds up: voxels of an anchor material (PhysicsMaterial::anchor), and
+        // with StaticCollider::anchorBase the component's own y = 0 and below. A collider with
+        // neither drops nothing (and says so, once). Applied (updateScene) before returning.
         void dropUnsupported(World& world, PhysicsRuntime& physics, Scene& scene, Entity entity) {
             const StaticCollider* fixed = world.try_get<StaticCollider>(entity);
             const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
@@ -918,11 +920,30 @@ namespace projv::runtime {
                 }
             };
 
-            // What the ground holds up.
+            // What holds it up: anchor materials, and its base when asked.
+            const ComponentHandle owner = paletteOwner(scene, scene.chunks[source.parts.front().chunk]);
+            utils::SlotMaterials slotMaterials;
+            slotMaterialsOf(physics, scene, owner, slotMaterials);
+            const uint16_t own = ownMaterial(world, physics, entity);
+            std::array<uint8_t, 256> anchorSlot{};
+            for (size_t slot = 0; slot < 256; slot++) {
+                uint16_t m = slotMaterials[slot] ? slotMaterials[slot] : own;
+                anchorSlot[slot] = m != 0 && physics.world->material(m).anchor;
+            }
             std::vector<uint8_t> held(voxels.size(), 0);
             std::vector<size_t> stack;
             for (size_t i = 0; i < voxels.size(); i++)
-                if (voxels[i].position.y <= 0) { held[i] = 1; stack.push_back(i); }
+                if ((fixed->anchorBase && voxels[i].position.y <= 0) || anchorSlot[voxels[i].slot]) {
+                    held[i] = 1;
+                    stack.push_back(i);
+                }
+            if (stack.empty()) {
+                // Nothing holds it up, so everything would fall: a collider set up wrong, not a collapse.
+                if (physics.warnedUnanchored.insert(entity).second)
+                    core::warn("physics: entity {} splits but has nothing to stand on (no anchor material, and anchorBase "
+                               "off); nothing falls", static_cast<uint32_t>(entity));
+                return;
+            }
             while (!stack.empty()) {
                 size_t i = stack.back();
                 stack.pop_back();
@@ -949,7 +970,6 @@ namespace projv::runtime {
             const core::mat4 toWorld = utils::getComponentWorldMatrix(scene, h);
             const float scale = glm::length(core::vec3(toWorld[0]));
             const core::quat rotation = utils::getComponentWorldRotation(scene, h);
-            const ComponentHandle owner = paletteOwner(scene, scene.chunks[source.parts.front().chunk]);
             const std::vector<Material> palette = scene.components[owner].materialPalette;
             const std::string name = scene.components[h].name;
             std::vector<ComponentHandle> pieces;
@@ -1840,6 +1860,7 @@ namespace projv::runtime {
                 m.strength = entry.value("strength", m.strength);
                 m.fracture = entry.value("fracture", m.fracture);
                 m.shardSize = entry.value("shardSize", m.shardSize);
+                m.anchor = entry.value("anchor", m.anchor);
                 if (entry.contains("grain")) {
                     const nlohmann::json& g = entry["grain"];
                     if (!g.is_array() || g.size() != 3) throw nlohmann::json::type_error::create(302, "grain is three numbers", &g);
@@ -1866,6 +1887,7 @@ namespace projv::runtime {
             for (char c : physics.library.names[i]) h.add(c);
             h.add(m.density); h.add(m.friction); h.add(m.restitution);
             h.add(m.strength); h.add(m.shardSize); h.add(m.grain);
+            h.add(uint8_t(m.anchor));
             for (char c : m.fracture) h.add(c);
         }
         for (auto [entity, net] : bodiesInOrder(world)) {
@@ -2151,6 +2173,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::StaticCollider>::save(cons
     if (c.restitution != defaults.restitution) j["restitution"] = tidy(c.restitution);
     if (c.layer != defaults.layer) j["layer"] = layerName(c.layer);
     if (c.splits) j["splits"] = true;
+    if (c.anchorBase) j["anchorBase"] = true;
     if (!c.material.empty()) j["material"] = c.material;
     if (c.breaksOnImpact) j["breaksOnImpact"] = true;
     return j;
@@ -2167,6 +2190,7 @@ std::optional<projv::StaticCollider> projv::runtime::ComponentTraits<projv::Stat
         c.layer = *layer;
     }
     c.splits = j.value("splits", false);
+    c.anchorBase = j.value("anchorBase", false);
     c.material = j.value("material", std::string());
     c.breaksOnImpact = j.value("breaksOnImpact", false);
     return c;

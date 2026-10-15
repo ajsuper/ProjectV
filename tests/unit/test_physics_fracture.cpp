@@ -410,7 +410,8 @@ TEST_CASE("a library file carries strength and how a material breaks") {
         std::ofstream out(path);
         out << R"({"v": 1, "materials": [
             {"name": "oak", "density": 750, "strength": 3e5, "fracture": "splinter", "shardSize": 0.3, "grain": [2, 0, 0]},
-            {"name": "plaster", "strength": 1e4, "fracture": "crumble"}]})";
+            {"name": "plaster", "strength": 1e4, "fracture": "crumble"},
+            {"name": "bedrock", "anchor": true}]})";
     }
     REQUIRE(runtime::loadPhysicsMaterials(f.app.world, path.string()));
     std::optional<runtime::PhysicsMaterial> oak = runtime::physicsMaterial(f.app.world, "oak");
@@ -420,6 +421,8 @@ TEST_CASE("a library file carries strength and how a material breaks") {
     CHECK(oak->shardSize == doctest::Approx(0.3f));
     CHECK(oak->grain == vec3(1, 0, 0));   // normalized
     CHECK(runtime::physicsMaterial(f.app.world, "plaster")->fracture == "crumble");
+    CHECK_FALSE(runtime::physicsMaterial(f.app.world, "plaster")->anchor);
+    CHECK(runtime::physicsMaterial(f.app.world, "bedrock")->anchor);
 
     runtime::PhysicsMaterial bad;
     bad.strength = -1.0f;
@@ -782,7 +785,10 @@ TEST_CASE("the debris budget names what it clears first, and a handler can keep 
 TEST_CASE("support: what a cut leaves standing on nothing falls, made of what it was") {
     Fixture f;
     Entity wall = f.wall();
-    f.app.world.patch<projv::StaticCollider>(wall, [](projv::StaticCollider& c) { c.splits = true; });
+    f.app.world.patch<projv::StaticCollider>(wall, [](projv::StaticCollider& c) {
+        c.splits = true;
+        c.anchorBase = true;
+    });
     f.frames(2);
     // A hole that cuts nothing loose: nothing falls.
     runtime::editVoxels(f.app.world, wall, slot({10, 4, 0}, {20, 8, 1}));
@@ -817,6 +823,38 @@ TEST_CASE("support: a collider that does not split keeps standing on nothing") {
     CHECK(countOf(f.scene, f.wallComponent).voxels == uint64_t(32 * 23 * 2));
 }
 
+TEST_CASE("support: anchors are data -- an anchor material holds up what it is part of, and the base only when asked") {
+    Fixture f;
+    runtime::PhysicsMaterial bedrock{2700.0f, 0.8f, 0.0f};
+    bedrock.anchor = true;
+    runtime::definePhysicsMaterial(f.app.world, "bedrock", bedrock);
+    // A band of bedrock through the wall, y 11..12; the rest stone. It splits, its base no anchor.
+    Entity wall = f.wall();
+    utils::queueVoxelAdd(f.scene, f.wallComponent, fill({0, 11, 0}, {31, 12, 1}, RED));
+    utils::updateScene(f.scene);
+    REQUIRE(utils::setMaterialPhysics(f.scene, f.wallComponent, slotOf(f.scene, f.wallComponent, RED), "bedrock"));
+    f.app.world.patch<projv::StaticCollider>(wall, [](projv::StaticCollider& c) { c.splits = true; });
+    f.frames(2);
+    // A slot right across a metre up: the top hangs from the bedrock; the foot, under it, falls.
+    runtime::editVoxels(f.app.world, wall, slot({0, 4, 0}, {31, 4, 1}));
+    f.frames(1);
+    REQUIRE(f.splits.size() == 1);
+    REQUIRE(f.splits[0].pieces.size() == 1);
+    Count fallen = countOf(f.scene, f.app.world.get<projv::VoxelComponent>(f.splits[0].pieces[0]).handle);
+    CHECK(fallen.voxels == uint64_t(32 * 4 * 2));   // y 0..3
+    CHECK(countOf(f.scene, f.wallComponent).voxels == uint64_t(32 * 19 * 2));   // y 5..23 stands
+
+    // Neither an anchor nor its base: it says so, and nothing falls.
+    Fixture g;
+    Entity bare = g.wall();
+    g.app.world.patch<projv::StaticCollider>(bare, [](projv::StaticCollider& c) { c.splits = true; });
+    g.frames(2);
+    runtime::editVoxels(g.app.world, bare, slot({0, 4, 0}, {31, 4, 1}));
+    g.frames(2);
+    CHECK(g.splits.empty());
+    CHECK(countOf(g.scene, g.wallComponent).voxels == uint64_t(32 * 23 * 2));
+}
+
 TEST_CASE("support: a strike that breaks a pillar through brings the top down") {
     Fixture f;
     // A 1 m pillar 6 m high, of stone that splits.
@@ -828,6 +866,7 @@ TEST_CASE("support: a strike that breaks a pillar through brings the top down") 
     Entity pillar = runtime::spawnComponent(f.app.world, h);
     projv::StaticCollider c;
     c.splits = true;
+    c.anchorBase = true;
     f.app.world.emplace<projv::StaticCollider>(pillar, c);
     f.frames(2);
     runtime::fracture(f.app.world, pillar, vec3(0, 2.5f, -0.5f), Fixture::energyFor(1.2f));

@@ -150,6 +150,9 @@ namespace projv::runtime {
         float shardSize = 0.5f;     // m: about how big a shard is
         // The direction splinters run along, in the voxels' own frame (a component's local axes).
         core::vec3 grain{0.0f, 1.0f, 0.0f};
+        // Holds up what it is part of: in a static collider that splits, a piece with a voxel of an
+        // anchor material in it stands, whatever is cut away under it (bedrock, a foundation).
+        bool anchor = false;
         bool operator==(const PhysicsMaterial&) const = default;
     };
     constexpr uint16_t MAX_PHYSICS_MATERIALS = 1024;   // indices 1..1023
