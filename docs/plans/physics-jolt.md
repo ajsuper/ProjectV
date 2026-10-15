@@ -2,7 +2,8 @@
 
 Status: **approved**, 2026-10-09. **M0-M6 done** (2026-10-13); joints (2026-10-13) and physics materials (2026-10-14) built;
 M7 (contours) waits on the contour work. Fracture on the material built (2026-10-14); a debris budget and support
-(2026-10-15). Next: contact events for games, then sleeping (item 4 of "What the demos showed").
+(2026-10-15). Next: fracture policy out of the engine (below, "Next: mechanism in the engine, policy in systems"),
+which brings contact events for games with it; then sleeping (item 4 of "What the demos showed").
 
 ## Decisions made
 
@@ -486,6 +487,50 @@ patterns are code, registered by name, all through one interface.
   a NetId; a collider that does not split; a strike through a pillar brings the top down).
 - Demo 9's walls split: the bricks the seams pattern leaves hanging in their mortar fall, and a
   wall cut through drops what is above.
+## Next: mechanism in the engine, policy in systems (decided 2026-10-15)
+
+A review of fracture as built: the cutting, the rules it holds every pattern to, the patterns and
+impact reporting belong in the engine; several decisions a game should own were made there instead.
+The engine's pattern is mechanism in the engine and policy in systems the game can replace
+(installPhysics adds systems; a joint's breakForce is the game's number, not a rule the engine
+picks).
+
+What oversteps:
+- Breaking on impact is on by default: `breaksOnImpact` defaults to true, so giving a material a
+  strength makes every body of it break when hit -- against "nothing collides that was not asked
+  to", D3 and D4.
+- Impact policy is hard-coded in the step: an impact must break at least shardSize; shards never
+  break again; shards blend the striker's motion; the striker gets back the energy a fixed body's
+  break did not use -- a velocity written on a body the game never asked the engine to touch.
+- Debris clearing destroys entities by default and says nothing (destroyBodiesThatLeaveTheWorld,
+  the precedent, sends BodyLeftWorld and has a flag).
+- Support hard-codes "ground is the component's y <= 0": a game's definition of anchored.
+
+To do, in order:
+1. **Opt-in.** `breaksOnImpact` defaults to false (RigidBody and StaticCollider), as `splits` does.
+   Shards are new bodies, so "shards never break again" goes with it.
+2. **Impact fracture as a system.** Move the impact -> fracture glue out of the physics step into
+   `installImpactFracture(app, config)`, built only on public calls: `runtime::fracture` and a new
+   entity-level `runtime::impacts(world)` (entities, not body ids) -- which is also the contact event
+   games want for sounds and damage (item 3). Its config, today's values as defaults: the minimum
+   break (shardSize), whether the striker gets back unused energy, how shards take the striker's
+   motion, whether shards break on impact.
+3. **Debris event.** `DebrisCleared {entities}`, sent before they are destroyed, so a game can keep
+   or replace them. The budget stays on by default (3000): debris exists only where a game asked
+   for fracture, and unbounded debris is a reliability failure, not only slowness -- thirty blasts
+   filled Jolt's contact buffers and the session no longer replayed.
+4. **Anchors as data.** An `anchor` field on the physics material: a bedrock or foundation material
+   holds up what touches it. Data rather than a callback, since StaticCollider is saved and
+   callbacks are neither saved nor the same on every peer. "y <= 0" stays only as an opt-in fallback
+   on the collider.
+5. **Limits and a reach overload.** The 3-voxel search for the struck voxel, the 64-voxel reach cap
+   and the 512-shard cap are guards, like maxLinearSpeed: configurable (PhysicsConfig), still
+   enforced. The sphere reach (energy / strength) is what `strength` means, not tuning; instead,
+   `fracture(world, entity, at, reach)` takes a radius in metres for games with their own model.
+
+Also: document that shards copy the parent's whole RigidBody (damping, gravity factor, layer).
+Demos 2 and 9 opt in explicitly; tests follow.
+
 ## How it fits the rest of the engine
 
 Physics adds one module, `runtime/physics`, and one engine change: system ordering within a stage

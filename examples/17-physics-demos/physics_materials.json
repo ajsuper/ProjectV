@@ -15,6 +15,14 @@
       "strength": 1500, "fracture": "splinter", "shardSize": 0.8, "grain": [1, 0, 0] },
     { "name": "fired brick",   "density": 1900, "friction": 0.7,  "restitution": 0.0,
       "strength": 40000, "fracture": "shatter", "shardSize": 0.35 },
+    { "name": "sandstone",     "density": 2000, "friction": 0.8,  "restitution": 0.0,
+      "strength": 60000, "fracture": "shatter",  "shardSize": 0.4 },
+    { "name": "timber",        "density": 600,  "friction": 0.6,  "restitution": 0.1,
+      "strength": 40000, "fracture": "splinter", "shardSize": 0.4, "grain": [0, 1, 0] },
+    { "name": "chalk",         "density": 1500, "friction": 0.8,  "restitution": 0.0,
+      "strength": 30000, "fracture": "crumble",  "shardSize": 0.3 },
+    { "name": "tower brick",   "density": 1800, "friction": 0.8,  "restitution": 0.0,
+      "strength": 50000, "fracture": "seams",    "shardSize": 0.75 },
     { "name": "plaster",       "density": 600,  "friction": 0.9,  "restitution": 0.0,
       "strength": 700,  "fracture": "crumble",  "shardSize": 0.5 }
   ]

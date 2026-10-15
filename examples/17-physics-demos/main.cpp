@@ -1,6 +1,6 @@
 // ProjectV Physics Demos
 //
-// Ten set pieces for the engine's physics (runtime/physics.h), each built from voxels in code:
+// Eleven set pieces for the engine's physics (runtime/physics.h), each built from voxels in code:
 //
 //   1  Pyramid        a stepped pyramid of 1496 crates, sixteen high on a 16x16 base, and beside
 //                     it two stepped towers side by side, thirty crates high on 5x5 bases.
@@ -41,9 +41,13 @@
 //                     all name one material, so it still collides as one box per grid cell; the
 //                     crates hit their walls at the speeds their ramps allow and bounce back as far
 //                     as their walls allow. Click: again.
+//  11  Overhangs      support: a sandstone arch, a timber tree, a chalk cliff with a shelf and a
+//                     stalactite, a brick tower with a balcony -- static colliders that split. Click
+//                     chips where you aim (F: a harder blow); cut away what holds an overhang up and
+//                     it falls, as a body of what it was made of.
 //
 // Controls
-//   1-9, 0     pick a demo (0 is 10; it is rebuilt)          R  restart the demo
+//   1-9, 0, -  pick a demo (0 is 10, - is 11; it is rebuilt)  R  restart the demo
 //   click      the demo's action                             V  walk (a character) / fly
 //   mouse look, W/A/S/D fly, Space/Shift up/down             T  slow motion   P  pause
 //   right-drag hold and drag the body under the crosshair (the wheel: nearer / farther)
@@ -276,6 +280,11 @@ struct Demos {
         Track tracks[3];
         quat rotation{1, 0, 0, 0};
     } slide;
+    // Demo 11: what the self-test chips at, and what support dropped.
+    struct Overhangs {
+        Entity tree = projv::NullEntity;
+        std::vector<projv::BodySplit> fell;
+    } overhangs;
     // What right-click holds: a body, the point on it that was grabbed (in the body's frame), and how
     // far in front of the camera that point is pulled.
     struct Grab {
@@ -297,6 +306,8 @@ struct Demos {
 
 float uniform(Demos& d, float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(d.random); }
 
+constexpr int LAST_DEMO = 11;
+
 const char* demoName(int n) {
     switch (n) {
         case 1: return "Pyramid  (Click: throw a ball, F: launch a kinematic ball)";
@@ -309,6 +320,7 @@ const char* demoName(int n) {
         case 8: return "Gear winch  (Up: raise, Down: let it unwind)";
         case 9: return "Trebuchet  (Click: fire / reload and fire, Left/Right: turn, Up/Down: higher/flatter)";
         case 10: return "Slide  (ice, polished wood, slate into rubber, oak, clay -- Click: again)";
+        case 11: return "Overhangs  (Click: chip where you aim, F: a harder blow)";
     }
     return "";
 }
@@ -335,6 +347,7 @@ void clearDemo(World& world) {
     for (Entity e : demos.trebuchet.parts) if (world.valid(e)) world.destroy(e);
     demos.trebuchet = Demos::Trebuchet{};
     demos.slide = Demos::Slide{};
+    demos.overhangs = Demos::Overhangs{};
     auto& camera = world.ctx().get<Camera>();
     if (camera.walker != projv::NullEntity) { world.destroy(camera.walker); camera.walker = projv::NullEntity; }
     demos.beam = projv::NullEntity;
@@ -1309,6 +1322,101 @@ void setWinch(World& world, Demos& demos, Demos::Winch::Mode mode) {
     }
 }
 
+// ---- Demo 11: overhangs ----
+//
+// Four static things standing on the floor, each of a material that breaks its own way, each built
+// with something hanging off it, and each a collider that splits (StaticCollider::splits): chip at
+// what holds the overhang up until nothing does, and it falls -- as a body of its own, of what it
+// was made of, breaking again where it lands hard.
+//
+//   an arch of sandstone (shatter): cut a pillar and the span still hangs from the other; cut both
+//   a tree of timber (splinter, the grain upright): cut the trunk and the crown comes down
+//   a chalk cliff (crumble) with a shelf, a stalactite under it and a cornice: undercut them
+//   a brick tower (seams, the bricks laid with mortar all round) with a balcony: the mortar
+//   crumbles where you chip, and bricks with nothing left holding them drop out whole
+
+constexpr float OVERHANG_VOXEL = 0.25f;
+constexpr float CHIP_ENERGY = 30000.0f;    // J: about half a metre of these materials
+constexpr float BLOW_ENERGY = 120000.0f;   // J: about twice as far
+
+// A static thing of `material` that splits, its corner at `corner`, standing on its own y = 0 (what
+// support takes for the ground).
+template <typename ColourAt>
+Entity overhang(World& world, Demos& demos, const char* material, ivec3 size, vec3 corner, ColourAt colourAt) {
+    auto& scene = world.ctx().get<projv::Scene>();
+    ComponentHandle h = voxels(scene, material, size, OVERHANG_VOXEL, corner, colourAt);
+    Entity e = runtime::spawnComponent(world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+    projv::StaticCollider c;
+    c.material = material;
+    c.splits = true;
+    world.emplace<projv::StaticCollider>(e, c);
+    runtime::assignNetId(world, e);
+    demos.owned.push_back(e);
+    return e;
+}
+
+uint32_t sandstone(int x, int y, int z) {
+    float shade = 0.85f + 0.15f * float((x * 7 + y * 13 + z * 5) % 4) / 3.0f;
+    return (y / 2) % 3 == 0 ? rgb(0.8f * shade, 0.66f * shade, 0.45f * shade) : rgb(0.86f * shade, 0.72f * shade, 0.5f * shade);
+}
+
+uint32_t chalk(int x, int y, int z) {
+    return (x * 3 + y * 5 + z * 7) % 6 == 0 ? rgb(0.82f, 0.82f, 0.78f) : rgb(0.92f, 0.92f, 0.88f);
+}
+
+// Bricks with mortar on every side, through the wall's depth too: so each brick is a run of one
+// palette entry, and "seams" can part it from its neighbours.
+uint32_t towerBrick(int x, int y, int z) {
+    int course = y / 3, shifted = x + course % 2 * 3, deep = z + course % 2 * 2;
+    if (y % 3 == 2 || shifted % 6 == 5 || deep % 4 == 3) return rgb(0.74f, 0.71f, 0.65f);   // mortar
+    int which = (course * 7 + shifted / 6 * 3 + deep / 4 * 5) % 3;
+    static const float reds[3][3] = {{0.55f, 0.22f, 0.15f}, {0.63f, 0.28f, 0.18f}, {0.47f, 0.19f, 0.14f}};
+    return rgb(reds[which][0], reds[which][1], reds[which][2]);
+}
+
+void buildOverhangs(World& world, Demos& demos, Camera& camera) {
+    // The arch: two 1 m pillars 6 m high, 5 m apart, and a span across them, overhanging each by 1 m.
+    overhang(world, demos, "sandstone", ivec3(32, 30, 4), vec3(-17, 0, 6), [](int x, int y, int z) -> uint32_t {
+        bool pillar = (x >= 4 && x <= 7) || (x >= 24 && x <= 27);
+        return (pillar && y < 24) || y >= 24 ? sandstone(x, y, z) : 0u;
+    });
+    // The tree: a 1 m trunk 5.5 m up, and a crown 5 m across and 1.5 m thick.
+    demos.overhangs.tree = overhang(world, demos, "timber", ivec3(20, 28, 20), vec3(-6.5f, 0, 5), [](int x, int y, int z) -> uint32_t {
+        bool trunk = x >= 8 && x <= 11 && z >= 8 && z <= 11 && y < 22;
+        float dx = float(x) - 9.5f, dz = float(z) - 9.5f;
+        bool crown = y >= 22 && dx * dx + dz * dz <= 9.5f * 9.5f;
+        if (trunk) return (y + x) % 3 ? rgb(0.45f, 0.3f, 0.17f) : rgb(0.4f, 0.26f, 0.15f);
+        if (crown) return (x + z + y) % 4 ? rgb(0.25f, 0.45f, 0.18f) : rgb(0.3f, 0.52f, 0.2f);
+        return 0u;
+    });
+    // The cliff: a 1.5 m-deep face 8 m high; a shelf jutting 2.5 m out at 4.5 m, a stalactite under
+    // its end, and a cornice along the top.
+    overhang(world, demos, "chalk", ivec3(16, 32, 12), vec3(2, 0, 5), [](int x, int y, int z) -> uint32_t {
+        bool face = x < 6;
+        bool shelf = y >= 18 && y <= 21 && x < 16;
+        bool stalactite = x >= 12 && x <= 13 && z >= 5 && z <= 6 && y >= 12 && y < 18;
+        bool cornice = y >= 29 && x < 10;
+        return face || shelf || stalactite || cornice ? chalk(x, y, z) : 0u;
+    });
+    // The tower: 2 m square, 10 m high, a balcony 3 m out and 2 m wide at 6 m.
+    overhang(world, demos, "tower brick", ivec3(20, 40, 8), vec3(12, 0, 5), [](int x, int y, int z) -> uint32_t {
+        bool tower = x < 8;
+        bool balcony = y >= 24 && y <= 26 && x < 20;
+        return tower || balcony ? towerBrick(x, y, z) : 0u;
+    });
+    camera.position = vec3(1, 6, -12);
+    camera.yaw = 1.5708f;
+    camera.pitch = -0.12f;
+}
+
+// A blow where the crosshair is: the engine's fracture, with `energy`, at what the ray hits. What it
+// breaks off is pushed on a little, the way the blow went.
+void chip(World& world, const Camera& camera, float energy) {
+    auto hit = runtime::castRay(world, camera.position, camera.forward(), 80.0f, 0xffffffffu, camera.walker);
+    if (!hit || hit->entity == projv::NullEntity) return;
+    runtime::fracture(world, hit->entity, hit->position + camera.forward() * 0.05f, energy, camera.forward() * 3.0f);
+}
+
 void startDemo(World& world, int n) {
     auto& demos = world.ctx().get<Demos>();
     auto& camera = world.ctx().get<Camera>();
@@ -1326,6 +1434,7 @@ void startDemo(World& world, int n) {
         case 8: buildWinch(world, demos, camera); break;
         case 9: buildTrebuchet(world, demos, camera); break;
         case 10: buildSlide(world, demos, camera); break;
+        case 11: buildOverhangs(world, demos, camera); break;
     }
     projv::core::info("Demo {}: {}", n, demoName(n));
 }
@@ -1388,6 +1497,7 @@ void act(World& world, Demos& demos, const Camera& camera) {
         case 5: startDemo(world, 5); break;
         case 9: fireTrebuchet(world, demos); break;
         case 10: placeSlideCrates(world, demos); break;
+        case 11: chip(world, camera, CHIP_ENERGY); break;
         case 6:
             place(world, demos.crate, vec3(-12, 7, uniform(demos, -2, 2)), quat(1, 0, 0, 0), body(60.0f));
             fireBall(world, demos, 3, vec3(uniform(demos, 8.5f, 9.5f), 1.5f, -9), vec3(0, 1.5f, 22), 2000.0f);
@@ -1524,6 +1634,7 @@ void controls(projv::Application& app) {
     for (int n = 1; n <= 9; n++)
         if (input.pressed(projv::Key(int(projv::Key::Num0) + n))) startDemo(world, n);
     if (input.pressed(projv::Key::Num0)) startDemo(world, 10);
+    if (input.pressed(projv::Key::Minus)) startDemo(world, 11);
     if (input.pressed(projv::Key::R)) startDemo(world, demos.current);
     if (captured && input.pressed(projv::MouseButton::Left) && demos.current != 7) act(world, demos, camera);
     // Right-click holds the dynamic body under the crosshair until it is let go; the wheel pulls it
@@ -1540,6 +1651,7 @@ void controls(projv::Application& app) {
     if (demos.grab.body != projv::NullEntity)
         demos.grab.distance = std::clamp(demos.grab.distance + input.scroll.y, 1.5f, 60.0f);
     if (input.pressed(projv::Key::F) && demos.current == 1) launchOrb(world, demos, camera);
+    if (input.pressed(projv::Key::F) && demos.current == 11 && captured) chip(world, camera, BLOW_ENERGY);
     if (input.pressed(projv::Key::T)) time.scale = time.scale == 1.0f ? 0.2f : 1.0f;
     Look& look = world.ctx().get<Look>();
     if (input.pressed(projv::Key::H)) look.shadows = !look.shadows;
@@ -1744,19 +1856,19 @@ void selfTest(projv::Application& app) {
     static bool acted = false;
     // DEMOS_CAPTURE=<prefix>: a frame of each demo, mid-action, as <prefix>-<demo>.tga.
     static int captured = 0;
-    const float captureAt[11] = {0, 14.6f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f, 6.5f, 12.0f, 6.1f, 3.4f};
-    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= 10 && captured < stage &&
+    const float captureAt[LAST_DEMO + 1] = {0, 14.6f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f, 6.5f, 12.0f, 6.1f, 3.4f, 4.0f};
+    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= LAST_DEMO && captured < stage &&
         t > captureAt[stage]) {
         bgfx::requestScreenShot(BGFX_INVALID_HANDLE, (std::string(prefix) + "-" + std::to_string(stage)).c_str());
         captured = stage;
     }
     // On to the first selected demo from `next`, or to the session-wide checks after the last.
     auto go = [&](int next) {
-        while (next <= 10 && !test->only.empty() &&
+        while (next <= LAST_DEMO && !test->only.empty() &&
                std::find(test->only.begin(), test->only.end(), next) == test->only.end())
             next++;
         acted = false;
-        if (next > 10) { stage = 11; return; }
+        if (next > LAST_DEMO) { stage = LAST_DEMO + 1; return; }
         startDemo(world, next);
         stage = next;
         test->start = watchedPositions();
@@ -2075,7 +2187,45 @@ void selfTest(projv::Application& app) {
         go(11);
         return;
     }
-    if (stage == 11) {
+    // The tree, its trunk cut through by four hard blows round it 1.5 m up: the crown, held up by
+    // nothing now, is a body of its own -- cut level, it settles on the stump, so it is nudged off
+    // (as right-drag would) and falls.
+    auto crown = [&] {
+        Entity found = projv::NullEntity;
+        float height = 0.0f;
+        for (const projv::BodySplit& split : demos.overhangs.fell)
+            if (split.parent == demos.overhangs.tree)
+                for (Entity piece : split.pieces)
+                    if (world.valid(piece) && runtime::hasBody(world, piece)) {
+                        float y = runtime::bodyPose(world, piece).centerOfMass.y;
+                        if (found == projv::NullEntity || y > height) { found = piece; height = y; }
+                    }
+        return std::make_pair(found, height);
+    };
+    if (stage == 11 && t > 1.0f && !acted) {
+        const vec3 trunk(-6.5f + 2.5f, 1.5f, 5.0f + 2.5f);
+        for (vec3 side : {vec3(-1, 0, 0), vec3(1, 0, 0), vec3(0, 0, -1), vec3(0, 0, 1)})
+            runtime::fracture(world, demos.overhangs.tree, trunk + side * 0.55f, BLOW_ENERGY, -side * 2.0f);
+        acted = true;
+    }
+    static bool nudged = false;
+    if (stage == 11 && t > 3.0f && !nudged) {
+        auto [piece, height] = crown();
+        check(*test, piece != projv::NullEntity && height > 5.0f,
+              fmt::format("the trunk cut through, the crown came loose: {} pieces fell, the crown's middle {:.1f} m up",
+                          demos.overhangs.fell.size(), height));
+        if (piece != projv::NullEntity) runtime::addVelocity(world, piece, vec3(3, 0, 0));
+        nudged = true;
+    }
+    if (stage == 11 && t > 8.0f) {
+        auto [piece, height] = crown();
+        // Off the stump it drops; where it comes to rest -- flat, or leaning on the stump -- varies.
+        check(*test, piece != projv::NullEntity && height < 5.5f,
+              fmt::format("nudged off its stump, the crown fell: its middle {:.1f} m up (it hung at 6 m)", height));
+        go(LAST_DEMO + 1);
+        return;
+    }
+    if (stage == LAST_DEMO + 1) {
         const auto& stats = runtime::physicsWorld(world).stats();
         check(*test, stats.stepsWithDroppedContacts == 0 && stats.nonFiniteRecoveries == 0,
               fmt::format("{} steps, {} with dropped contacts, {} non-finite recoveries", stats.steps,
@@ -2196,7 +2346,9 @@ void startup(projv::Application& app) {
     // A blast cuts bricks in pieces; each piece is counted. Something that leaves the world from
     // above the floor went through it, which must never happen.
     app.events().on<projv::BodySplit>([&world](const projv::BodySplit& e) {
-        world.ctx().get<Demos>().pieces += int(e.pieces.size());
+        Demos& demos = world.ctx().get<Demos>();
+        demos.pieces += int(e.pieces.size());
+        if (demos.current == 11) demos.overhangs.fell.push_back(e);
     });
     app.events().on<projv::BodyFractured>([&world](const projv::BodyFractured& e) {
         Demos& demos = world.ctx().get<Demos>();
@@ -2242,7 +2394,7 @@ void startup(projv::Application& app) {
         Bench& b = world.ctx().emplace<Bench>();
         if (const char* phases = std::getenv("DEMOS_BENCH_PHASES")) b.phases = std::max(2, std::atoi(phases));
         bgfx::setDebug(BGFX_DEBUG_PROFILER);
-        startDemo(world, std::clamp(std::atoi(benchDemo), 1, 10));
+        startDemo(world, std::clamp(std::atoi(benchDemo), 1, LAST_DEMO));
     } else if (unattended) {
         SelfTest& test = world.ctx().emplace<SelfTest>();
         if (const char* only = std::getenv("DEMOS_ONLY"))
@@ -2250,7 +2402,7 @@ void startup(projv::Application& app) {
                 char* end = nullptr;
                 long n = std::strtol(c, &end, 10);
                 if (end == c) { c++; continue; }   // a separator
-                if (n >= 1 && n <= 10) test.only.push_back(int(n));
+                if (n >= 1 && n <= LAST_DEMO) test.only.push_back(int(n));
                 c = end;
             }
     }

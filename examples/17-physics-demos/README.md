@@ -1,6 +1,6 @@
 # 17 — Physics demos
 
-Ten set pieces for the engine's physics (`runtime/physics.h`), built from voxels in code.
+Eleven set pieces for the engine's physics (`runtime/physics.h`), built from voxels in code.
 
 ```bash
 cd build/examples/physics_demos && ./physics_demos
@@ -18,6 +18,7 @@ cd build/examples/physics_demos && ./physics_demos
 | **8** | **Gear winch.** A four-peg gear on a motor turns an eight-peg gear by its pegs alone; the big gear's drum winds up a chain lifting a 40 kg weight. Hold **Up** to raise it; let go and it holds; hold **Down** and the motor lets go, so the weight unwinds it. |
 | **9** | **Trebuchet.** A 36 t counterweight swings a 10.5 m arm on a motorised turntable; a 6 m sling whips a 2 t boulder round and lets it go at four seamless 32 x 24 m walls, each built differently and breaking its own way: ashlar shatters, brick parts at its mortar, planks splinter along the grain, plaster crumbles. The boulder breaks them itself, by their strength. **Click** fires (again: a new boulder, fired); **Left/Right** turn the turntable, mid-throw too; **Up/Down** set the release angle. |
 | **10** (key **0**) | **Slide.** Three 14 m ramps -- ice, polished wood, slate -- the same crate on each, sliding into walls of rubber, oak and clay at their feet. **Click** starts the crates again. |
+| **11** (key **-**) | **Overhangs.** Four things to cut up, each of a material that breaks its own way and each with something hanging off it: a sandstone arch, a timber tree, a chalk cliff with a shelf, a stalactite and a cornice, and a brick tower with a balcony. **Click** chips where you aim (about half a metre); **F** is a harder blow. Cut away what holds an overhang up and it falls. |
 | R | restart the demo |
 | mouse, W/A/S/D, Space/Shift | look, fly, up/down (Esc releases the cursor, a click recaptures it) |
 | click | the demo's action |
@@ -122,6 +123,24 @@ merge into one box per grid cell. The crates are identical: friction 1, restitut
 decides how fast each slides (friction combines as the geometric mean) and the wall how far it bounces
 back. The self-test checks both against the textbook: the impact speed against
 v^2 = 2 g (sin a - mu cos a) d, the rebound against (e v)^2 / (2 g (sin a + mu cos a)).
+
+**Overhangs** -- support, with fracture as the tool. Each structure is a static collider that splits
+(`StaticCollider::splits`): after every chip, the engine looks for the parts of it that no longer
+reach its ground (the component's own y = 0) and drops each as a dynamic body of exactly those voxels
+and palette entries (`BodySplit`). A chip is `runtime::fracture` at what the crosshair hits, 30 kJ
+(F: 120 kJ); how far that reaches and what shape the break takes is the struck material's
+(`physics_materials.json`):
+
+| Structure | Material | Breaks |
+|---|---|---|
+| Arch | sandstone, 60 kJ/m^3, `shatter` | Voronoi chips. Cut one pillar and the span hangs from the other; cut both |
+| Tree | timber, 40 kJ/m^3, `splinter`, grain upright | Long upright splinters. Cut the trunk through and the crown comes loose |
+| Cliff | chalk, 30 kJ/m^3, `crumble` | Round bites. Undercut the shelf, the stalactite, the cornice |
+| Tower | tower brick, 50 kJ/m^3, `seams` | The mortar crumbles where you chip; bricks left held by nothing drop out whole |
+
+What falls breaks again where it lands hard. Something cut level -- the crown on a trunk cut evenly
+all round -- settles on what is left, as it would: chip a notch first, or right-drag it off. The
+self-test cuts the trunk, nudges the crown off the stump and checks it fell.
 
 Every crate, brick and ball is a `duplicateComponent` of one prototype, so all crates share one
 geometry blob on the GPU and one collision shape in the physics until a blast edits one.
