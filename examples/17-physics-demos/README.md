@@ -85,6 +85,14 @@ wheels are set out far enough that their spheres clear it.
 arrows drive, and the arm's axle is on the frame, so turning mid-throw carries through. The latch
 is a stiff servo; the sling a Distance joint, let go by the demo at the release angle.
 
+The camera shakes at every impact in the scene, by how hard -- the boulder on a wall, blocks of
+the wall landing, the boulder bouncing on: a FixedUpdate system after `physics` reads
+`runtime::impacts(world)` -- the step's collisions, with the energy each could take out of the
+motion -- and turns each into trauma, on a log scale (a tenth of full or less adds nothing) (300 kJ, about a 2 t
+boulder at 17 m/s, is full at 40 m or nearer) and less with distance. Trauma drains at 0.8 a
+second; the drawn camera, not the one aimed with, moves and turns by its square. Policy in the
+game, on an engine event: the engine only reports the hit.
+
 Each wall is one static grid of its own material (`physics_materials.json`), and nothing in the
 demo breaks it: the engine does, when the boulder hits it. The impact's energy (half the boulder's
 mass times its speed squared) against the material's strength sets how far the break reaches; the

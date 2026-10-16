@@ -224,6 +224,20 @@ struct Camera {
     vec3 forward() const { return {std::cos(pitch) * std::cos(yaw), std::sin(pitch), std::cos(pitch) * std::sin(yaw)}; }
 };
 
+// Demo 9's camera shake: trauma (0..1) that every impact adds to and time drains,
+// the camera moved and turned by its square -- a light knock barely shows, a full hit jolts.
+struct Shake {
+    float trauma = 0.0f;
+    float peak = 0.0f;     // the most since the last shot: for the self-test
+    float clock = 0.0f;    // seconds, driving the noise
+};
+// Impact energy (J) that, at SHAKE_NEAR metres or closer, gives full trauma; a tenth of it gives
+// none. Further off, it shakes less: SHAKE_NEAR / distance.
+constexpr float SHAKE_FULL = 3.0e5f, SHAKE_NEAR = 40.0f;
+constexpr float SHAKE_DECAY = 0.8f;           // trauma lost per second
+constexpr float SHAKE_MOVE = 0.6f;            // m, at full trauma
+constexpr float SHAKE_TURN = 0.05f;           // rad, at full trauma
+
 struct Demos {
     int current = 0;                       // 1..4
     // Prototypes, made once at startup and never drawn: every crate, brick and ball is a copy.
@@ -1983,6 +1997,24 @@ void controls(projv::Application& app) {
     }
 }
 
+// FixedUpdate, after "physics": every impact in the scene shakes the camera by its energy
+// (runtime::impacts: what the collision could take out of the motion -- the boulder on a wall, a
+// block of the wall landing, the counterweight swinging into its frame), on a log scale, less the
+// further off the camera is. Small knocks (a tenth of SHAKE_FULL or less) add nothing.
+void shakeOnImpact(projv::Application& app) {
+    World& world = app.world;
+    if (world.ctx().get<Demos>().current != 9) return;
+    Shake& shake = world.ctx().get<Shake>();
+    const vec3 eye = world.ctx().get<Camera>().position;
+    for (const runtime::BodyImpact& hit : runtime::impacts(world)) {
+        float strength = std::clamp(std::log10(hit.energy / SHAKE_FULL) + 1.0f, 0.0f, 1.0f);
+        float distance = glm::length(hit.point - eye);
+        strength *= std::min(1.0f, SHAKE_NEAR / std::max(distance, 1.0f));
+        shake.trauma = std::min(1.0f, shake.trauma + strength);
+        shake.peak = std::max(shake.peak, shake.trauma);
+    }
+}
+
 // PostUpdate, after physics has written this frame's interpolated pose: the camera is the walker's
 // eyes. Read in Update instead, it would be last frame's pose, a frame behind the world it is
 // drawn with -- the lag that made walking feel loose.
@@ -2384,6 +2416,7 @@ void selfTest(projv::Application& app) {
                   fmt::format("the latch holds the trebuchet cocked (arm off by {:.3f} rad), the boulder on the ground",
                               runtime::jointState(world, tb.axle).position));
             piecesBefore = demos.pieces;
+            world.ctx().get<Shake>().peak = 0.0f;
             act(world, demos, camera);
             acted = true;
         }
@@ -2397,6 +2430,7 @@ void selfTest(projv::Application& app) {
             if (shot > 0 && t > firedAt - 0.5f && !rebuilt[shot]) {
                 rebuilt[shot] = true;
                 piecesBefore = demos.pieces;
+                world.ctx().get<Shake>().peak = 0.0f;
                 tb.aim = aims[shot];
                 buildTrebuchetMachine(world, demos);
                 tb.fireIn = 0.5f;
@@ -2409,6 +2443,8 @@ void selfTest(projv::Application& app) {
             check(*test, tb.struck && tb.struckWall == shot,
                   fmt::format("{}: the boulder broke the {} wall, striking at {:.1f} m/s", walls[shot],
                               tb.struckWall >= 0 ? walls[tb.struckWall] : "no", tb.impactSpeed));
+            const float shook = world.ctx().get<Shake>().peak;
+            check(*test, shook > 0.5f, fmt::format("{}: the hit shook the camera (trauma {:.2f})", walls[shot], shook));
             check(*test, demos.pieces - piecesBefore >= 10,
                   fmt::format("{}: the wall broke up: {} pieces", walls[shot], demos.pieces - piecesBefore));
             check(*test, tb.struck && thrown > 20.0f, fmt::format("{}: the boulder flew {:.1f} m from the release to the wall",
@@ -2702,6 +2738,7 @@ void startup(projv::Application& app) {
     projv::graphics::setCursorCaptured(app, renderInstance, !unattended);
 
     world.ctx().emplace<Camera>();
+    world.ctx().emplace<Shake>();
     Look& look = world.ctx().emplace<Look>();
     // DEMOS_LOOK: the same switches as the keys, for unattended runs -- h, o and u turn shadows, AO
     // and the upscaler off; g turns the upscaler's debug view on.
@@ -2887,6 +2924,22 @@ void render(projv::Application& app) {
     projv::graphics::flushSceneUpdates(scene, gpuData);
     auto renderer = renderInstance.getActiveRenderer();
     vec3 position = camera.position, direction = camera.forward();
+    // Demo 9's shake: drawn only -- aiming, clicks and the walker use the steady camera. Sums of
+    // sines at unrelated frequencies, one set per axis: smooth, and never repeating visibly.
+    Shake& shake = world.ctx().get<Shake>();
+    shake.clock += app.time().unscaledDelta;
+    shake.trauma = std::max(0.0f, shake.trauma - SHAKE_DECAY * app.time().unscaledDelta);
+    if (shake.trauma > 0.0f) {
+        const float amount = shake.trauma * shake.trauma, t = shake.clock;
+        auto noise = [t](float seed) {
+            return 0.5f * std::sin(t * 37.0f + seed) + 0.3f * std::sin(t * 61.0f + 2.1f * seed) + 0.2f * std::sin(t * 97.0f + 3.7f * seed);
+        };
+        position += amount * SHAKE_MOVE * vec3(noise(1.0f), noise(2.0f), noise(3.0f));
+        Camera shaken = camera;
+        shaken.yaw += amount * SHAKE_TURN * noise(4.0f);
+        shaken.pitch += amount * SHAKE_TURN * noise(5.0f);
+        direction = shaken.forward();
+    }
     projv::core::vec2 resolution = renderInstance.getWindowResolution();
     projv::graphics::setUniformToValue(renderer, "cameraPos", position);
     projv::graphics::setUniformToValue(renderer, "cameraDir", direction);
@@ -2908,6 +2961,7 @@ int main() {
     projv::Application app;
     app.addSystem(projv::Stage::Startup,     "startup",   startup);
     app.addSystem(projv::Stage::FixedUpdate, "demos",     demoTick);
+    app.addSystem(projv::Stage::FixedUpdate, "camera shake", shakeOnImpact, {.after = "physics"});
     app.addSystem(projv::Stage::Update,      "controls",  controls);
     app.addSystem(projv::Stage::Update,      "beam",      moveBeam);
     app.addSystem(projv::Stage::Update,      "self-test", selfTest);
