@@ -71,6 +71,7 @@ namespace projv::utils {
             ComponentRecord& c = scene.components[h];
 
             if (c.kind == ComponentKind::Chunk) {
+                if (c.chunkHandle >= scene.chunks.size()) return;   // not loaded: placed when it is
                 WorldDecomposition d = decomposeWorld(world);
                 Chunk& chunk = scene.chunks[c.chunkHandle];
                 chunk.header.position = d.position;
@@ -776,6 +777,15 @@ namespace projv::utils {
 
     bool isComponentAlive(const Scene& scene, ComponentHandle handle) {
         return handle < scene.components.size() && scene.components[handle].name != DELETED_NAME;
+    }
+
+    bool hasUnloadedBlocks(const Scene& scene, ComponentHandle handle) {
+        if (!isComponentAlive(scene, handle)) return false;
+        const ComponentRecord& c = scene.components[handle];
+        if (c.kind == ComponentKind::Chunk) return c.chunkHandle >= scene.chunks.size();
+        if (c.kind != ComponentKind::Grid || c.gridIndex < 0 || size_t(c.gridIndex) >= scene.grids.size()) return false;
+        const std::vector<int32_t>& cells = scene.grids[size_t(c.gridIndex)].cellToChunk;
+        return std::find(cells.begin(), cells.end(), CELL_NOT_LOADED) != cells.end();
     }
 
     std::vector<ComponentHandle> deleteComponent(Scene& scene, ComponentHandle handle) {

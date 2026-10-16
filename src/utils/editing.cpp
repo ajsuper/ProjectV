@@ -145,8 +145,33 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
                 return true;
             }
 
+            // A block that is not loaded (utils/scene_loading.h) is not empty: an edit there would
+            // overwrite voxels this scene has not read. Its ops are dropped, and said so.
+            if (comp.kind == ComponentKind::Chunk && comp.chunkHandle >= scene.chunks.size()) {
+                core::warn("updateScene: {} edit(s) to '{}' dropped: its block is not loaded",
+                           comp.editQueue.ops.size(), comp.name);
+                comp.editQueue.ops.clear();
+                return true;
+            }
+
             ensureDataReference(scene, comp);
             uint32_t res = scene.dataReferences[comp.dataRefID].resolution;
+
+            if (comp.kind == ComponentKind::Grid && comp.gridIndex >= 0) {
+                const SceneGrid& g = scene.grids[size_t(comp.gridIndex)];
+                size_t before = comp.editQueue.ops.size();
+                std::erase_if(comp.editQueue.ops, [&](const PendingVoxelOp& op) {
+                    core::ivec3 cell(floorDiv(op.position.x, int32_t(res)), floorDiv(op.position.y, int32_t(res)),
+                                     floorDiv(op.position.z, int32_t(res)));
+                    core::ivec3 local = cell - g.originCellCoord;
+                    if (glm::any(glm::lessThan(local, core::ivec3(0))) || glm::any(glm::greaterThanEqual(local, g.dims))) return false;
+                    return g.cellToChunk[size_t(local.x + g.dims.x * (local.y + g.dims.y * local.z))] == CELL_NOT_LOADED;
+                });
+                if (comp.editQueue.ops.size() != before) {
+                    core::warn("updateScene: {} edit(s) to '{}' dropped: their cells are not loaded",
+                               before - comp.editQueue.ops.size(), comp.name);
+                }
+            }
 
             // Removing a voxel where there is no geometry removes nothing, so such ops are dropped
             // here, before anything acts on where they point: outside a chunk's cube they would

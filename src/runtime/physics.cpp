@@ -182,7 +182,7 @@ namespace projv::runtime {
         void collectChunks(const Scene& scene, ComponentHandle h, std::vector<ChunkHandle>& out) {
             const ComponentRecord& record = scene.components[h];
             if (record.kind == ComponentKind::Chunk) {
-                out.push_back(record.chunkHandle);
+                if (record.chunkHandle < scene.chunks.size()) out.push_back(record.chunkHandle);
             } else if (record.kind == ComponentKind::Grid && record.gridIndex >= 0 &&
                        size_t(record.gridIndex) < scene.grids.size()) {
                 for (int32_t cell : scene.grids[size_t(record.gridIndex)].cellToChunk)
@@ -2035,6 +2035,7 @@ namespace projv::runtime {
         float voxel = 0.0f;
         core::ivec3 low(std::numeric_limits<int>::min()), high(std::numeric_limits<int>::max());
         if (record.kind == ComponentKind::Chunk) {
+            if (record.chunkHandle >= scene->chunks.size()) return ops;
             const Chunk& chunk = scene->chunks[record.chunkHandle];
             voxel = chunk.nativeScale / float(std::max(chunk.header.resolution, 1u));
             low = core::ivec3(0);

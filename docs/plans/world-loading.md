@@ -1,7 +1,8 @@
 # World loading: one rule decides what is loaded
 
-Status: **draft**, 2026-10-16. Split out of the networking plan: loading works without networking,
-without physics, and without EnTT. The networking plan (`networking.md`) builds on it.
+Status: **approved**, 2026-10-16. **L0 done** (2026-10-16). Next: L1. Split out of the networking plan:
+loading works without networking, without physics, and without EnTT. The networking plan
+(`networking.md`) builds on it.
 
 ## Goals
 
@@ -78,10 +79,13 @@ The scene's own pieces, so nothing new is authored:
 
 ## Edits survive unloading
 
-| Mutability (compose.json) | An edited block unloads |
-|---|---|
-| `direct` | edits are written to the source `.data` already; reload reads them |
-| `copy`, `locked` | the edited blob moves to an **overlay**: in memory, spilled to a session file past a size limit; reload takes it from there |
+Every edited block, whatever its mutability, is kept when it unloads: a `direct` block's edits reach
+its `.data` only on save, so until then the file is the old voxels too.
+
+- An edited block's blob moves to an **overlay** (L0: in memory; L1: spilled to a session file past
+  a size limit). Reload takes it from there, and the block stays "edited" across further round trips.
+- "Edited" = the chunk's blob content stamp differs from the one it was read with, or it came back
+  from the overlay.
 
 - Blocks made at runtime (shards, pieces) have no source file; they live in the overlay when unloaded.
 - The overlay is what a networked server sends a client loading a block (the networking plan's
@@ -112,6 +116,29 @@ runtime/loading.h       entities as units, viewers from components, Presence -> 
 | W3 | physics | **freeze**: a body solid, asleep and not stepped until released, keeping its NetId and state. For Kept, and for the networking plan's proxies |
 | W4 | physics | support and island passes over a partly loaded component: they read only loaded blocks and must not drop pieces whose support is not loaded. Rule: a block next to an unloaded block counts as anchored |
 | W5 | renderer | blocks appearing and going: the GPU header rows and pool uploads already follow handles; check the cost of many per frame |
+
+## L0, done 2026-10-16
+
+- `utils::openComposeFromDisk(folder, blocks)`: the eager loader's walk with `lazy` set. Reads the
+  `.data` headers and block tables only; each data component gets its data reference at open (an
+  edit reads its resolution from it). Grids are laid out with every cell `CELL_NOT_LOADED` (-2); a
+  single-block component has `chunkHandle == INVALID_CHUNK_HANDLE`.
+- `utils::SceneBlocks` (`utils/scene_loading.h`): `open`, `load`, `unload`, `loadAll`, `bounds`
+  (the block's cube in world space, from the component's transform as it is now), `edited`, the
+  in-memory overlay (`keptBlocks`, `keptBytes`), `residentVoxelBytes`. Blocks of one source block
+  and mutability share a blob, as the eager loader shares them.
+- Unloaded is empty to every reader (`< 0`). Guards where a missing chunk would crash or lose data:
+  edits to an unloaded block or cell are dropped and logged; `saveComposeToDisk` refuses a scene with
+  unloaded blocks (`hasUnloadedBlocks`); rebake, physics' chunk lists and `voxelsInSphere`, and the
+  animation chunk list skip a component with no chunk.
+- Tests (`test_scene_loading.cpp`, headless): open reads no voxels; `loadAll` equals
+  `loadComposeFromDisk` chunk for chunk (transforms, scales, geometry, sharing); one cell loads,
+  unloads and reloads, memory back to zero and a hundred round trips leaving it where one did;
+  bounds known before load and equal to the loaded chunk's cube; an edited block survives unload
+  (twice) while its shared copy keeps the old voxels; edits to unloaded blocks dropped and save
+  refused until everything is loaded; a deleted component's blocks are forgotten.
+- Not yet (L1): cells an edit creates in a grid are not blocks, so they stay loaded; duplicating a
+  partly loaded grid copies only its loaded cells.
 
 ## Milestones
 

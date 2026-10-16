@@ -43,6 +43,7 @@ add_executable(projv_unit_tests
     test_slot_reuse.cpp
     test_scene_bridge.cpp
     test_scene_delete.cpp
+    test_scene_loading.cpp
     test_time.cpp
     test_voxel_edits.cpp
 )

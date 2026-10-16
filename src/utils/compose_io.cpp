@@ -562,11 +562,15 @@ namespace projv::utils {
         return doc;
     }
 
-    Scene loadComposeFromDisk(const std::string& folderPath) {
-        core::info("loadComposeFromDisk: Loading compose scene from folder: {}", folderPath);
+    namespace {
+    // loadComposeFromDisk, and with `lazy` openComposeFromDisk: the same walk, which reads only the
+    // .data headers and lists each block in *lazy instead of making its chunk.
+    Scene loadCompose(const std::string& folderPath, std::vector<SceneBlockSource>* lazy) {
+        core::info("loadComposeFromDisk: {} compose scene from folder: {}", lazy ? "Opening" : "Loading", folderPath);
         Scene scene;
 
         std::unordered_map<std::string, DataFile> dataCache;
+        std::unordered_map<std::string, DataFileHeader> headerCache;
         // Shared geometry pool: each unique (resolved .data path + block grid coords) is stored once
         // and referenced by every instance chunk via Chunk.geometryPoolIndex.
         std::vector<GeometryBlob> geometryPool;
@@ -686,13 +690,27 @@ namespace projv::utils {
                         std::filesystem::path(folder) / c.source).string();
                     rec.sourcePath = resolved;
 
-                    auto cacheIt = dataCache.find(resolved);
-                    if (cacheIt == dataCache.end()) {
-                        cacheIt = dataCache.emplace(resolved, readDataFile(resolved)).first;
+                    // Eager: the whole file. Lazy: its header and block table only.
+                    const DataFile* dataFile = nullptr;
+                    const DataFileHeader* header = nullptr;
+                    if (lazy) {
+                        auto it = headerCache.find(resolved);
+                        if (it == headerCache.end()) it = headerCache.emplace(resolved, readDataFileHeader(resolved)).first;
+                        header = &it->second;
+                    } else {
+                        auto it = dataCache.find(resolved);
+                        if (it == dataCache.end()) it = dataCache.emplace(resolved, readDataFile(resolved)).first;
+                        dataFile = &it->second;
                     }
-                    const DataFile& dataFile = cacheIt->second;
+                    const uint32_t fileResolution = lazy ? header->resolution : dataFile->resolution;
+                    const float    fileVoxelScale = lazy ? header->voxelScale : dataFile->voxelScale;
+                    const size_t   blockCount = lazy ? header->blocks.size() : dataFile->blocks.size();
+                    auto blockCoord = [&](size_t i) {
+                        return lazy ? core::ivec3(header->blocks[i].gridX, header->blocks[i].gridY, header->blocks[i].gridZ)
+                                    : core::ivec3(dataFile->blocks[i].gridX, dataFile->blocks[i].gridY, dataFile->blocks[i].gridZ);
+                    };
 
-                    if (dataFile.resolution == 0 || dataFile.blocks.empty()) {
+                    if (fileResolution == 0 || blockCount == 0) {
                         core::warn("loadComposeFromDisk: .data at {} is empty or invalid - skipping", resolved);
                         continue;
                     }
@@ -716,13 +734,33 @@ namespace projv::utils {
                     core::quat worldRotation = glm::quat_cast(rotMat);
 
                     float localBlockScale = createChunkScaleFromVoxelScaleAndResolution(
-                        dataFile.voxelScale, static_cast<int>(dataFile.resolution));
+                        fileVoxelScale, static_cast<int>(fileResolution));
+
+                    // Lazy: where each block is, and the component's data reference now -- an edit
+                    // reads the resolution from it, and there may be no loaded block to take it from.
+                    auto listBlock = [&](size_t i) {
+                        lazy->push_back({myHandle, resolved, header->blocks[i], fileResolution, fileVoxelScale, c.mutability});
+                    };
+                    if (lazy) {
+                        DataReference reference{resolved, fileResolution, fileVoxelScale * uniformScale};
+                        int32_t found = -1;
+                        for (size_t i = 0; i < scene.dataReferences.size() && found < 0; i++) {
+                            const DataReference& r = scene.dataReferences[i];
+                            if (r.sourceDataPath == reference.sourceDataPath && r.resolution == reference.resolution &&
+                                r.voxelScale == reference.voxelScale) found = int32_t(i);
+                        }
+                        if (found < 0) {
+                            found = int32_t(scene.dataReferences.size());
+                            scene.dataReferences.push_back(reference);
+                        }
+                        rec.dataRefID = found;
+                    }
 
                     auto makeChunk = [&](const DataBlock& block) {
                         Chunk chunk;
                         chunk.header.chunkID = nextChunkID++;
-                        chunk.header.resolution = dataFile.resolution;
-                        chunk.header.voxelScale = dataFile.voxelScale * uniformScale;
+                        chunk.header.resolution = fileResolution;
+                        chunk.header.voxelScale = fileVoxelScale * uniformScale;
                         chunk.header.scale = localBlockScale * uniformScale;
                         chunk.nativeScale = localBlockScale;
                         core::vec3 blockLocalCorner =
@@ -762,7 +800,7 @@ namespace projv::utils {
                     };
 
                     // P6.3c: Create chunks directly in scene.chunks (tree order).
-                    if (dataFile.blocks.size() > 1) {
+                    if (blockCount > 1) {
                         rec.kind = ComponentKind::Grid;
                         rec.gridIndex = static_cast<int32_t>(scene.grids.size());
 
@@ -772,24 +810,26 @@ namespace projv::utils {
                         grid.nativeCellSize = localBlockScale;
                         grid.rotation  = worldRotation;
                         core::ivec3 dims(0);
-                        for (const DataBlock& b : dataFile.blocks) {
-                            dims.x = std::max(dims.x, b.gridX + 1);
-                            dims.y = std::max(dims.y, b.gridY + 1);
-                            dims.z = std::max(dims.z, b.gridZ + 1);
-                        }
+                        for (size_t i = 0; i < blockCount; i++) dims = glm::max(dims, blockCoord(i) + 1);
                         grid.dims = dims;
                         grid.cellToChunk.assign(
                             static_cast<size_t>(dims.x) * dims.y * dims.z, -1);
                         grid.componentHandle = myHandle;
                         grid.originCellCoord = core::ivec3(0);
 
-                        for (const DataBlock& block : dataFile.blocks) {
-                            if (block.gridX < 0 || block.gridY < 0 || block.gridZ < 0) {
+                        for (size_t i = 0; i < blockCount; i++) {
+                            core::ivec3 coord = blockCoord(i);
+                            if (coord.x < 0 || coord.y < 0 || coord.z < 0) {
                                 core::warn("loadComposeFromDisk: negative grid coord in '{}' - skipping block", resolved);
                                 continue;
                             }
-                            int lin = block.gridX + dims.x * (block.gridY + dims.y * block.gridZ);
-                            Chunk chunk = makeChunk(block);
+                            int lin = coord.x + dims.x * (coord.y + dims.y * coord.z);
+                            if (lazy) {
+                                grid.cellToChunk[lin] = CELL_NOT_LOADED;
+                                listBlock(i);
+                                continue;
+                            }
+                            Chunk chunk = makeChunk(dataFile->blocks[i]);
                             chunk.gridIndex       = rec.gridIndex;
                             chunk.cellIndex       = lin;
                             chunk.componentHandle = myHandle;
@@ -799,7 +839,12 @@ namespace projv::utils {
                         scene.grids.push_back(std::move(grid));
                     } else {
                         rec.kind = ComponentKind::Chunk;
-                        for (const DataBlock& block : dataFile.blocks) {
+                        if (lazy) {
+                            rec.chunkHandle = INVALID_CHUNK_HANDLE;
+                            listBlock(0);
+                        }
+                        static const std::vector<DataBlock> none;
+                        for (const DataBlock& block : lazy ? none : dataFile->blocks) {
                             Chunk chunk = makeChunk(block);
                             chunk.componentHandle = myHandle;
                             rec.chunkHandle = static_cast<ChunkHandle>(scene.chunks.size());
@@ -881,6 +926,16 @@ namespace projv::utils {
                    scene.chunks.size(), scene.looseChunkCount, scene.grids.size(),
                    scene.geometryPool.size(), scene.components.size());
         return scene;
+    }
+    }
+
+    Scene loadComposeFromDisk(const std::string& folderPath) {
+        return loadCompose(folderPath, nullptr);
+    }
+
+    Scene openComposeFromDisk(const std::string& folderPath, std::vector<SceneBlockSource>& blocks) {
+        blocks.clear();
+        return loadCompose(folderPath, &blocks);
     }
 
     // --- Writing -------------------------------------------------------------------------------
@@ -1300,6 +1355,22 @@ namespace projv::utils {
         } else {
             core::error("saveComposeToDisk: root handle {} is out of range", root);
             return false;
+        }
+        // A block that is not loaded would be written as empty: the save would erase it.
+        {
+            std::vector<ComponentHandle> pending = members;
+            while (!pending.empty()) {
+                ComponentHandle h = pending.back();
+                pending.pop_back();
+                if (!isComponentAlive(scene, h)) continue;
+                const ComponentRecord& c = scene.components[h];
+                if (hasUnloadedBlocks(scene, h)) {
+                    core::error("saveComposeToDisk: '{}' has blocks that are not loaded; load them before saving "
+                                "(utils/scene_loading.h). Nothing written.", c.name);
+                    return false;
+                }
+                pending.insert(pending.end(), c.children.begin(), c.children.end());
+            }
         }
 
         std::error_code errorCode;

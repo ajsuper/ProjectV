@@ -135,6 +135,10 @@ namespace projv::utils {
     // False for a handle out of range or one deleteComponent has removed.
     bool isComponentAlive(const Scene& scene, ComponentHandle handle);
 
+    // Whether a data component has a block on disk that is not in memory (utils/scene_loading.h):
+    // a Chunk with no chunk row, or a grid cell marked CELL_NOT_LOADED. Not its children's.
+    bool hasUnloadedBlocks(const Scene& scene, ComponentHandle handle);
+
     // Whether a chunk has geometry to draw: alive, pooled, and its blob holds a tree. An edit can
     // carve a chunk down to nothing, and a chunk with nothing must be uploaded as empty -- the
     // shader reads a tree from wherever a chunk's range starts, so an empty range would read some

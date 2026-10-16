@@ -278,6 +278,7 @@ add_library(projectV STATIC
     src/utils/attachments.cpp
     src/utils/collision_geometry.cpp
     src/utils/compose_io.cpp
+    src/utils/scene_loading.cpp
     src/utils/editing.cpp
     src/utils/loose_bvh.cpp
     src/utils/material.cpp

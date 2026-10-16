@@ -276,7 +276,9 @@ namespace projv{
     // loadComposeFromDisk at the same two sites that create a loose Chunk or push a SceneGrid.
     struct ComponentRecord {
         ComponentKind kind;
-        ChunkHandle   chunkHandle = 0;  // valid when kind == ComponentKind::Chunk
+        // Valid when kind == ComponentKind::Chunk, unless its block is not loaded
+        // (utils/scene_loading.h): then INVALID_CHUNK_HANDLE.
+        ChunkHandle   chunkHandle = 0;
         int32_t       gridIndex = -1;   // valid when kind == ComponentKind::Grid
         std::string   sourcePath;       // provenance/debugging, mirrors GeometryBlob::sourceDataPath
 
@@ -536,6 +538,10 @@ namespace projv{
         uint32_t renderLOD = 0;
     };
     
+    // A grid cell whose block is on disk but not in memory (utils/scene_loading.h). Every reader
+    // treats it as an empty cell (< 0); edits refuse it, since what is there has not been read.
+    constexpr int32_t CELL_NOT_LOADED = -2;
+
     // A uniform grid of equal, grid-aligned chunks (one .data grid volume). Enables a
     // top-level DDA over cells instead of brute-forcing every chunk. See compose_data_structure.md.
     struct SceneGrid {
@@ -543,7 +549,7 @@ namespace projv{
         float cellSize;                     // World size of one cell (one block).
         core::ivec3 dims;                   // Per-axis cell count.
         core::quat rotation;                // World rotation of the grid.
-        std::vector<int32_t> cellToChunk;   // dims.x*dims.y*dims.z entries; index into Scene.chunks, or -1 if empty.
+        std::vector<int32_t> cellToChunk;   // dims.x*dims.y*dims.z entries; index into Scene.chunks, -1 if empty, CELL_NOT_LOADED.
         // The compose component that owns this grid (every cell shares one component identity).
         ComponentHandle componentHandle = INVALID_COMPONENT_HANDLE;
         // Phase 2: cell coordinate (in the original .data block space) that sits at grid.origin.

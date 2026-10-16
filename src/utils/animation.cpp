@@ -211,7 +211,7 @@ namespace projv::utils {
         void collectChunkHandles(const Scene& scene, const ComponentRecord& comp,
                                  std::vector<ChunkHandle>& out) {
             if (comp.kind == ComponentKind::Chunk) {
-                out.push_back(comp.chunkHandle);
+                if (comp.chunkHandle < scene.chunks.size()) out.push_back(comp.chunkHandle);
             } else if (comp.kind == ComponentKind::Grid && comp.gridIndex >= 0 &&
                        static_cast<size_t>(comp.gridIndex) < scene.grids.size()) {
                 for (int32_t idx : scene.grids[comp.gridIndex].cellToChunk) {

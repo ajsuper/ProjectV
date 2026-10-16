@@ -69,6 +69,22 @@ namespace projv::utils {
      */
     Scene loadComposeFromDisk(const std::string& folderPath);
 
+    // Where one block of a data component is on disk, as openComposeFromDisk lists it.
+    struct SceneBlockSource {
+        ComponentHandle component = INVALID_COMPONENT_HANDLE;
+        std::string     path;                 // the .data, canonical
+        BlockEntry      entry;                // its row in that file's block table: grid coords, offsets
+        uint32_t        resolution = 0;       // the file's
+        float           voxelScale = 0.0f;    // the file's, before any transform
+        Mutability      mutability = Mutability::Locked;
+    };
+
+    // loadComposeFromDisk without the voxels: every component, palette, attachment and transform,
+    // but each grid's cells CELL_NOT_LOADED and each single-block component's chunkHandle
+    // INVALID_CHUNK_HANDLE. Reads only the .data headers and block tables; `blocks` lists every
+    // block, in load order. utils/scene_loading.h loads them.
+    Scene openComposeFromDisk(const std::string& folderPath, std::vector<SceneBlockSource>& blocks);
+
     /**
      * Grafts a compose folder into a scene that is already open, as a subtree under `parent`.
      *
