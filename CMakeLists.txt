@@ -268,6 +268,7 @@ add_library(projectV STATIC
     src/graphics/type_mapping.cpp
 
     src/runtime/entities.cpp
+    src/runtime/loading.cpp
     src/runtime/fracture.cpp
     src/runtime/impact_fracture.cpp
     src/runtime/net.cpp

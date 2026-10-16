@@ -124,6 +124,15 @@ namespace projv::runtime {
     // Registered components are saved through their traits, unknown ones as they were read. A linked
     // entity's Transform is not written -- it lives in compose.json -- and an unlinked one's is.
     bool saveEntities(const World& world, ComponentHandle document, const std::string& folder);
+
+    // An entity's components as entities.json writes them: every registered one through its traits
+    // ("v" included) and every unknown one as it was read, by key. The Transform too, unless
+    // `withTransform` is false (saveEntities leaves a linked entity's out: compose.json has it).
+    nlohmann::json entityComponents(const World& world, Entity entity, bool withTransform = true);
+    // The inverse: each registered key loads through its traits; a key nothing registered, or a value
+    // its traits refuse, is kept in UnknownComponents. `where` names the source in warnings.
+    void applyEntityComponents(World& world, Entity entity, const nlohmann::json& components,
+                               const std::string& where = "entity data");
 }
 
 // ---- Transform is registered by the engine itself --------------------------------------------

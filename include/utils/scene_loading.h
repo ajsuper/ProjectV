@@ -142,6 +142,8 @@ namespace projv::utils {
         ComponentHandle component = INVALID_COMPONENT_HANDLE;
         core::ivec3     cell{0};                     // grid coordinate; (0,0,0) for a single block
         Presence        current = Presence::Absent;  // what the rule said last time: for hysteresis
+        uint32_t        entity = 0xFFFFFFFFu;        // an entity being judged (runtime/loading.h), as its
+                                                     // integer id; ~0u for a block
     };
     // Where the world is seen from: a camera, a player, a client. The program numbers them.
     struct Viewer {

@@ -157,6 +157,26 @@ namespace projv::runtime {
         }
     }
 
+    nlohmann::json entityComponents(const World& world, Entity entity, bool withTransform) {
+        nlohmann::json components = nlohmann::json::object();
+        if (const ComponentRegistry* registry = registryOf(world)) {
+            for (const auto& [key, codec] : registry->codecs) {
+                if (!withTransform && key == ComponentTraits<Transform>::key) continue;
+                if (std::optional<nlohmann::json> value = codec.save(world, entity)) components[key] = *value;
+            }
+        }
+        if (const UnknownComponents* unknown = world.try_get<UnknownComponents>(entity)) {
+            for (const auto& [key, text] : unknown->byKey) {
+                if (!components.contains(key)) components[key] = nlohmann::json::parse(text, nullptr, false);
+            }
+        }
+        return components;
+    }
+
+    void applyEntityComponents(World& world, Entity entity, const nlohmann::json& components, const std::string& where) {
+        applyComponents(world, entity, components, where);
+    }
+
     SpawnedEntities spawnEntities(World& world) {
         registerComponent<Transform>(world);
         Scene* scene = world.ctx().find<Scene>();
@@ -269,7 +289,6 @@ namespace projv::runtime {
             core::error("saveEntities: there is no projv::Scene in world.ctx()");
             return false;
         }
-        const ComponentRegistry* registry = registryOf(world);
 
         // Which entities belong to this folder -- each entity belongs to exactly one file. One that
         // came from a file belongs to that file. One made in code belongs to the file its component
@@ -315,19 +334,8 @@ namespace projv::runtime {
                 record["link"] = authored->linkId;   // unresolved, kept as written
             }
 
-            nlohmann::json components = nlohmann::json::object();
-            if (registry) {
-                for (const auto& [key, codec] : registry->codecs) {
-                    // A linked entity's transform is its component's, saved in compose.json.
-                    if (link && key == ComponentTraits<Transform>::key) continue;
-                    if (std::optional<nlohmann::json> value = codec.save(world, entity)) components[key] = *value;
-                }
-            }
-            if (const UnknownComponents* unknown = world.try_get<UnknownComponents>(entity)) {
-                for (const auto& [key, text] : unknown->byKey) {
-                    if (!components.contains(key)) components[key] = nlohmann::json::parse(text, nullptr, false);
-                }
-            }
+            // A linked entity's transform is its component's, saved in compose.json.
+            nlohmann::json components = entityComponents(world, entity, link == nullptr);
             if (!components.empty()) record["components"] = std::move(components);
             entities.push_back(std::move(record));
         }

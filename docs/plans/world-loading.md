@@ -1,6 +1,6 @@
 # World loading: one rule decides what is loaded
 
-Status: **approved**, 2026-10-16. **L0, L1 done** (2026-10-16). Next: L2. Split out of the networking plan:
+Status: **approved**, 2026-10-16. **L0, L1, L2 done** (2026-10-16). Next: L3. Split out of the networking plan:
 loading works without networking, without physics, and without EnTT. The networking plan
 (`networking.md`) builds on it.
 
@@ -167,6 +167,38 @@ runtime/loading.h       entities as units, viewers from components, Presence -> 
   adopted cell after the grid grew downward is kept and restored.
 - Known costs, for L2's measurements: `update` walks every block once (load/unload lists) -- fine to
   ~10^5 blocks; reading a spilled block back is synchronous on the main thread.
+
+## L2, done 2026-10-16
+
+- `runtime/loading.h`: `openWorld(app, folder, {loader, policy})` opens lazily into the Scene in
+  ctx, installs the bridge, adds "world loading" to PreUpdate. `setLoadRule`, `setViewers` (the
+  program's own), `updateWorldLoading` (the system), `settleWorld`, `worldLoader`,
+  `unloadedEntityCount`.
+- Components: `LoadViewer {id}` (saved; never unloaded; its position is a viewer), `LoadBounds
+  {halfExtents}` (saved), `LoadState {presence}` (not saved: the rule's answer for a present entity).
+- Which entities take part: Authored ones (from a file) and ones with LoadBounds. A linked one is
+  present while any block under its component is loaded (a component with no blocks: always); an
+  unlinked one with LoadBounds is judged by the rule (`LoadCandidate::entity` names it); the rest
+  never unload.
+- An absent entity is saved with `entityComponents` (new public helper, with
+  `applyEntityComponents`; saveEntities uses it), its link let go with OnUnlink::Keep, and destroyed;
+  it comes back as a new Entity with its Authored, link, components and NetId. `EntityUnloading` is
+  triggered before it goes, `EntityReloaded` sent after. Its component's transform lives on in the
+  Scene, so a moved entity comes back where it was moved to.
+- Renderer (W5): nothing new needed. Blocks are chunks made and freed; the program's own
+  `flushSceneUpdates` uploads them. Not measured on a GPU here (the windowed self-test is the place).
+- Example `18-world-loading` (`world_loading`): writes a 768 m terrain (849 blocks of 32 m) on first
+  run, flies over it with `loadNear(96, 192)`; keys switch rules. `--headless-check` flies the
+  course with the loader alone: peak resident 26% of the world, worst update 0.12 ms, every block
+  within 64 m loaded each second. `WORLD_LOADING_SELFTEST=1` flies it drawn.
+- Tests (`test_world_loading.cpp`, an Application stepped by hand, no window): far linked and bounded
+  entities unload and come back with their data, NetId and moved transform; events delivered;
+  Kept/Active bands; a viewer never unloads; an entity whose component was deleted while it was out
+  does not return; program viewers and a new rule apply at once.
+- For L3: an unloaded entity's body loses its velocity (it is made again); Kept should freeze it
+  instead. Threaded reads make *when* a block loads depend on timing, so a physics recording across
+  streaming does not replay unless `threaded` is off -- the networked client loads what the server
+  says, but single-player replays need a rule here.
 
 ## Milestones
 
