@@ -1,0 +1,233 @@
+# Networking: server-authoritative, on the deterministic simulation
+
+Status: **draft, revised** 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
+hundreds of players as the eventual target, and clients that load and simulate only what is near them,
+decided by one rule a game writes (`world-loading.md`). Builds on the physics plan (`physics-jolt.md`:
+D6, D8, D9, A3, A7) and on the world-loading plan.
+
+## Goals
+
+1. **The world stays the same on every machine that can see it.** Voxel edits, breaks and splits
+   reach every client that has that part of the world. A client that loads a part later gets it as it
+   is now.
+2. **A client loads and simulates only what is near its players.** The server has the whole world.
+3. **Your own character responds at once.** It is predicted locally and corrected by the server.
+4. **Everything else looks right, not exact.** Bodies drift a little between snapshots and are
+   corrected without visible pops (A3: the sim pose snaps, the presentation glides).
+5. **Scales toward hundreds of players.** A client's cost is set by what is near it, not by the map
+   or the player count. The server's cost is set by what is awake.
+6. **Mechanism in the engine, policy in systems (D8).** What a client loads and simulates is one
+   rule function a game writes (the world-loading plan), run by the server for each client. The
+   engine supplies the defaults, the loading, the transitions and the wire.
+7. **Testable without a network:** server and clients in one process, over a loopback transport with
+   seeded latency, loss, reordering and duplication.
+
+Not goals: lockstep, rolling the world back (D9), peer-to-peer, matchmaking, NAT traversal, voice,
+splitting one world across several server processes (kept possible, not built: see "Scale").
+
+## Decisions
+
+| # | Decision | Why |
+|---|---|---|
+| N1 | **Client-server, server-authoritative, dedicated server first.** A listen server (host plays) is a server plus a local client over loopback, later | D6. The demo is a server process and two separate client processes |
+| N2 | **The server owns everything but each client's input.** Clients send input and game requests, never edits, breaks or body states | One owner for cheating and conflicts; D8's policy systems run on the server |
+| N3 | **What a client has is the world-loading rule's answer, run by the server per client:** Active (simulated), Kept (a proxy following the server), Absent | One rule for single-player and online; clients do not simulate the rest of the map; the server decides, so a client cannot ask for what it should not see |
+| N4 | **World changes are sent as results, not causes.** A break goes out as which voxels went to which new body (run-length coded), not as a strike to re-run | A client may have only part of a component loaded, and support and island passes need all of it. Results need no determinism to be right, and a client applies only the chunks it has |
+| N5 | **Only the client's own character is predicted**, by re-running its input from the last acknowledged tick against the current world (character-only rewind) | D9: no world rollback. The character is `CharacterVirtual`, outside Jolt's body state, so it rewinds alone |
+| N6 | **ENet, behind a transport interface**; only `src/net/transport_enet.cpp` includes it (layering ctest) | User's call. Up to 4,095 peers per host, reliable and unreliable channels. Same isolation rule as Jolt |
+| N7 | **One clock: the physics tick.** Everything on the wire carries a tick; commands keep (tick, issuer, sequence) with issuer = client id | Already how PhysicsWorld orders commands (`PhysicsCommand`) |
+
+## Loading per client (N3)
+
+What a client has is decided by the world-loading rule (`world-loading.md`), the same rule a
+single-player game uses. Online, **the server runs it for each client**, with that client's players
+as the viewers:
+
+```cpp
+// On the server: one rule for every client, or one per client.
+setClientLoadRule(world, loadNear(32.0f, 128.0f), LoadHint{140.0f});
+setClientLoadRule(world, client, [](const LoadCandidate& c, std::span<const Viewer> v) { ... });
+```
+
+| The rule's answer for a client | The server sends | The client has |
+|---|---|---|
+| **Absent** | nothing; a despawn or block unload when it changes | nothing |
+| **Kept** | the block (files' version + overlay), entities, snapshots | a frozen body following interpolated snapshots: a proxy |
+| **Active** | the same, at higher snapshot priority | a simulated body, corrected by snapshots |
+
+- **The client does not choose.** A client that picked its own blocks could ask for the whole map and
+  see through walls. Its loader runs in "follow the server" mode: load what it is told, from its own
+  copy of the scene files, plus the overlay the server sends.
+- **The Kept ring is the boundary.** A simulated body near the edge hits proxies, which are where the
+  server says. It never meets an empty space where the server has a wall of crates.
+- **The server's own loading** is a separate rule, `loadEverything` by default. A server that unloads
+  empty parts of the world is a later choice (see Scale).
+- **Support and island passes run only on the server**, which has whole components. Clients get
+  their results (N4), so a partly loaded component on a client never decides what falls.
+- One rule replaces what the first draft had as three (zones, a relevance policy, region loading).
+  Visibility rules a game might want -- teams, an owner-only inventory, line of sight -- are written
+  in it, from tags and the game's own data.
+
+## Time
+
+```
+server tick S ─────────────────────────────────────────▶
+client world      S - buffer          (plays snapshots and world changes at their tick)
+client character  S + lead            (inputs stamped for when the server will run them)
+                  lead = RTT/2 + jitter margin, adapted from lateCommands / early-arrival counts
+```
+
+- **The client's world runs behind the server** by a jitter buffer (start at 3 ticks at 60 Hz, adapt
+  to measured jitter). Snapshots and world changes apply when the client's world reaches their tick.
+  Ones that arrive late apply at the next step and are counted.
+- **The character runs ahead** by `lead`. The server tells each client how early its commands arrive,
+  and the client speeds up or slows down its tick rate by up to 5% to stay in the window.
+- **The cost (accepted, D9):** the character touches a world slightly in the past. A box you push
+  responds when the server's answer comes back.
+
+## What crosses the wire
+
+| What | Channel | Client does |
+|---|---|---|
+| Handshake: protocol version, scene id and content hash | reliable | refuses to join on a mismatch |
+| Block load: the overlay for that block if it has one (compressed), then its entities | reliable ordered | loads the block from its own files, applies the overlay, creates the entities |
+| Entities: spawn, despawn, Presence change, component changes | reliable ordered | creates, updates or switches them by NetId, from component JSON (`ComponentTraits`) |
+| World changes: edits, breaks, splits (N4) | reliable ordered | applies them to the chunks it has, at their tick |
+| Body states | unreliable, latest wins | simulated: overwrites the sim state, the presentation eases; proxied: adds to the interpolation buffer |
+| Notices: impacts, fractures (for sound, particles, camera shake) | unreliable | the game's systems; nothing in the world depends on them |
+| Own character input | unreliable, redundant (last 8 ticks in every packet) | predicts; reconciles on each ack (N5) |
+| Game messages (fire, use, build) | the game's choice | the game's systems; server-side validation (D8) |
+
+### World changes as results (N4)
+
+```
+server: strike at tick 1200 on NetId 57 -> pieces 9000..9031, voxels removed from 57
+  -> change { tick 1200, target 57,
+              per changed chunk of 57: run-length labels (0 stays, k: went to piece k), or new content,
+              pieces: [ {NetId 9000, components...}, ... ] }
+client: at its tick 1200, for each chunk of 57 it has loaded:
+          moves the labelled voxels out, into the pieces; skips the chunks it has not loaded
+        pieces in its interest spawn; the rest are absent until they become relevant
+```
+
+- **The client runs no fracture patterns, support or island passes.** It has nothing to get wrong, and
+  partial loading cannot change the answer. Determinism still matters for the bodies' motion, replays
+  and tests.
+- **Size:** labels run-length code well. A break is mostly long runs of "stays", and each shard is
+  one run per row. It is sent only to clients with the chunks loaded. The plan measures demo 2's
+  thirty blasts (N3 milestone) before choosing any further compression.
+- **A plain edit** (`editVoxels`) goes as its ops, which are already results.
+- **A voxel hash per changed component** goes too, in dev builds. A client that has the whole
+  component checks it: a cheap desync test.
+- **The debris budget** runs on the server; what it removes reaches clients as despawns.
+- **Policy systems** (`ImpactFracture` and the like) run on the server only. Clients get notices for
+  effects.
+
+### Body snapshots
+
+- **Quantised state:** position (relative to a 64 m cell, ~1 mm), rotation (smallest three, ~30 bits),
+  linear and angular velocity. About 20 B per body.
+- **Priority accumulator, per client:** each body in a client's interest gains priority each tick
+  (simulated more than proxied, faster and nearer more, just hit most). Each packet takes the
+  highest until it is full, then resets theirs. A body that falls asleep is sent once, then not
+  again until it wakes.
+- **Budget per client:** start at 64 kB/s, 30 packets/s (~2 kB, ~100 bodies per packet).
+- **Delta against an acknowledged baseline:** after the first version works.
+- **Applying one** to a simulated body sets its pose and velocity through a new logged op (a replay
+  must see it), and the presentation eases toward the new sim pose over ~100 ms (A3). A proxied body
+  interpolates between the two snapshots around `now - buffer`.
+
+### Character prediction (N5)
+
+```
+client tick T: run input(T) on the character, keep (T, input, resulting state)
+server ack:    "character state at tick A was X"
+client:        if X differs from the kept state at A by more than ~1 mm:
+                 restore character to X at A, re-run input(A+1 .. T) against the current world
+```
+
+- Other players' characters are proxies.
+- What the predicted character pushed is the server's: re-running it must not push bodies again.
+
+## Scale: toward hundreds of players
+
+| Cost | Grows with | Kept down by |
+|---|---|---|
+| Client simulation | the client's Active bodies | the rule; a game shrinks its radius in a crowd |
+| Client bandwidth | the client's Active and Kept bodies | the per-client budget and priority |
+| Server simulation | awake bodies in the whole world | sleeping (Jolt does not step sleeping bodies); debris budget; a server load rule that keeps (freezes) what no player is near |
+| Server snapshot building | players x relevant bodies | spatial grid for interest; bodies serialised once per tick, shared by every client that takes them |
+| Server upload | players x budget | 300 players x 64 kB/s ~= 150 Mbit/s; tunable per game |
+
+- **One server process, one PhysicsWorld** is the limit this plan builds to. Hundreds of players
+  doing heavy destruction in one place will hit the server's step time first.
+- **Not precluded:** NetIds are global and blocks are addressable. A world split across server
+  processes by area would hand bodies between them as a client's Active and Kept sets already do.
+  Not designed here.
+- **ENet for hundreds:** one host, one socket, up to 4,095 peers. Fine for this scale; revisit only if
+  profiling says so.
+
+## Layering
+
+```
+include/net/transport.h        Connection, Channel {ReliableOrdered, Unreliable}, bytes in and out (no EnTT)
+include/net/wire.h             bit writer/reader, quantisation, run-length labels (no EnTT; tested alone)
+src/net/transport_enet.cpp     the only file that includes ENet
+src/net/transport_loopback.cpp in-process, seeded latency / loss / reorder / duplication
+runtime/replication.{h,cpp}    sessions, per-client load rules, snapshots, world changes, entities
+```
+
+- `net/` follows the `utils/` rule: no EnTT, no `runtime/`. The `layering` ctest gains it.
+- Replication uses the public calls of physics and world loading, plus P-items below. It does not reach into `PhysicsWorld`.
+- A server is an `Application` with no render systems. Nothing in the loop needs a window; to be
+  checked at N2.
+- ENet goes in `external/` as a submodule, pinned at a tagged release, like Jolt.
+
+## Physics work this needs
+
+Static colliders per block of cells, freezing, and support over partly loaded components are in the
+world-loading plan (W2-W4). On top of those:
+
+| # | What | Why |
+|---|---|---|
+| P0 | Golden recording on Clang (and ARM if available) | Clients simulate too; the same code must step the same on their compilers |
+| P1 | A logged "set body state" op; a frozen body (W3) that follows given poses as a proxy | Snapshots; Kept bodies on a client |
+| P2 | Character-only save, restore and update, without stepping the world | Prediction (N5). `saveState` saves characters today, but only with the whole world, and only `step()` updates them |
+| P3 | Apply a world change from labels: move given voxels of a body into new pieces with given NetIds, without running patterns or support | N4 on the client |
+
+## Milestones
+
+| # | What | Done when |
+|---|---|---|
+| N0 | **P0-P3.** The physics groundwork | Golden passes on two compilers; unit tests for each |
+| N1 | **Transport and wire.** The interface, loopback, ENet, framing, two channels, connect, disconnect, timeouts; bit packing, quantisation, run-length labels | Loopback at 20% loss and 150 ms delivers reliable messages in order; quantisation round-trips within its error |
+| N2 | **The demo, whole world.** A headless server process and two client processes (`examples/70-multiplayer`: `mp_server`, `mp_client --connect`). Handshake, client ids, time sync, entity spawn and despawn, both players walking (proxies for each other), no prediction yet | Both windows show both players; a self-test script starts the server and two clients and checks their logs |
+| N3 | **World changes.** Edits and breaks as results, the overlay on join, debris as despawns | Demo 9-style walls broken on the server match on both clients at 10% loss (dev hashes); a client joining after the break sees the rubble |
+| N4 | **Body snapshots, Active and Kept.** Priority, budget, jitter buffer, interpolation, presentation easing | A pyramid knocked over settles within 1 cm on clients; bytes per second within budget |
+| N5 | **Character prediction.** Input redundancy, lead, tick-rate adjustment, acks, reconciliation | Walking at 150 ms RTT, 5% loss: no visible correction on flat ground |
+| N6 | **Per-client loading.** Needs world-loading L3. `setClientLoadRule`, the client loader in follow mode, block loads with overlays, Presence changes on the wire | Two players 500 m apart: each client has only its own blocks and simulates only its own bodies; walking toward each other loads and switches without a pop |
+| N7 | **Scale.** Shared serialisation, per-client bandwidth stats, a debug overlay (with physics R13), a bot client | 100 headless bot clients on one machine, server tick within budget, stats shown |
+
+Order notes: N0-N5 load the whole world on every machine, so the demo exists early and every later
+milestone is seen in it. World loading L0-L3 can be built alongside N1-N5 (it touches none of the
+same code) and must be done by N6. Physics roadmap items this pulls in: R13 (debug view) at N7, R12
+(start-asleep stacks) if loading settled scenes is slow.
+
+## Tests
+
+- **Headless, one process:** a server `Application` and N client `Application`s over loopback,
+  stepped together under a fixed seed. No sockets in the unit suite.
+- **Network conditions as a parameter:** {0 ms, 0%}, {150 ms, 5%}, {300 ms, 20% with reordering
+  and duplication}.
+- **Measured divergence:** tests read each client's body error against the server (max and mean, in
+  m), voxel hash mismatches, and which blocks and bodies each client has, and assert bounds.
+- **Real sockets:** the demo's self-test (server plus two clients, as separate processes) and one
+  localhost test behind a ctest label, as the soak is.
+
+## Open questions
+
+1. **Default `loadNear` radii online** (Active 32 m, Kept 128 m proposed). Measured at N6; a game sets
+   its own.
+2. **Encryption and authentication.** ENet has neither. Needed before anything is public; not before N7.
+3. **Scenes the client does not have** (user-made levels): the server sending whole blocks, not only
+   overlays. Block loads make it possible later.

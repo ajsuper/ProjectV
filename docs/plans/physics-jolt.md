@@ -269,7 +269,8 @@ What the simulation guarantees from M0 on, whether or not anything is networked:
   - Double precision off for now, but our wrapper uses `JPH::RVec3` for world positions, so
     turning on `JPH_DOUBLE_PRECISION` for large worlds is a rebuild, not a rewrite.
 
-**The network model this prepares for** (a recommendation, not built here):
+**The network model this prepares for** (a recommendation, not built here; the plan for it is
+`networking.md`, drafted 2026-10-16):
 
 - **Server-authoritative.** Clients predict their own character and the bodies they touch; the
   server sends quantized snapshots of awake bodies, prioritized by relevance.
