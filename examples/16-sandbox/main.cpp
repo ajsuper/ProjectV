@@ -29,8 +29,8 @@
 // Controls
 //   mouse look, W/A/S/D fly, R/F up/down       Esc releases the cursor, left-click recaptures
 //   left click    throw the selected prefab    1 ball   2 crate   3 bomb
-//   right click   pop what is under the crosshair (it sees through small debris)
-//   V             walk (a character, which passes through debris) / fly
+//   right click   pop what is under the crosshair (it sees through crumbs of debris, 3 voxels or fewer)
+//   V             walk (a character, which passes through those crumbs) / fly
 //   E (hold)      tractor beam: pull bodies to a point in front of you
 //   B             rain: drop twenty of the selected prefab from the sky
 //   T  slow motion   P pause   G low gravity   X spawners on/off   C clear
@@ -79,38 +79,30 @@ constexpr float KILL_PLANE = -30.0f;   // the world's floor: a body below it has
 constexpr float GRAVITY = -28.0f, LOW_GRAVITY = -5.0f;
 constexpr size_t MAX_BODIES = 300;     // spawners hold off above this
 
-// Debris, as collision groups (defined in main): every piece a bomb cuts is "debris", which the
-// walking character passes through; a piece smaller than a cube this many metres across is "small
-// debris" too, which the crosshair's pop sees through to what is behind it.
-constexpr float SMALL_DEBRIS = 0.6f;
+// Small debris, as a collision group (runtime::definePhysicsGroup, in main): a piece a break makes
+// of at most this many voxels -- a crumb, not a block. The walking character passes through it and
+// the crosshair's pop sees through it to what is behind; every bigger piece stays solid to both.
+constexpr uint32_t SMALL_DEBRIS_VOXELS = 3;
 
-// A piece's volume, m^3: its voxels, times one voxel's size cubed. 0 for anything not one chunk.
-float pieceVolume(const World& world, Entity piece) {
+// Called from BodyBroken, before the piece's body is made, so it is made in its group. A piece that
+// breaks again is counted again, and so are its pieces.
+void markDebris(World& world, Entity piece) {
     const projv::Scene* scene = world.ctx().find<projv::Scene>();
     const projv::VoxelComponent* link = world.try_get<projv::VoxelComponent>(piece);
-    if (!scene || !link || link->handle >= scene->components.size()) return 0.0f;
-    const projv::ComponentRecord& record = scene->components[link->handle];
-    if (record.kind != projv::ComponentKind::Chunk || record.chunkHandle >= scene->chunks.size()) return 0.0f;
-    const projv::Chunk& chunk = scene->chunks[record.chunkHandle];
-    const float voxel = chunk.header.scale / float(chunk.header.resolution);
-    return float(projv::utils::getComponentVoxelCount(*scene, link->handle)) * voxel * voxel * voxel;
-}
-
-// Called from BodyBroken, before the piece's body is made, so it is made in its groups. A piece of
-// a piece is sized again.
-void markDebris(World& world, Entity piece) {
+    if (!scene || !link) return;
+    const bool small = projv::utils::getComponentVoxelCount(*scene, link->handle) <= SMALL_DEBRIS_VOXELS;
     projv::CollisionGroups groups = world.all_of<projv::CollisionGroups>(piece) ? world.get<projv::CollisionGroups>(piece)
                                                                                : projv::CollisionGroups{};
-    groups.groups = {"debris"};
-    if (pieceVolume(world, piece) < SMALL_DEBRIS * SMALL_DEBRIS * SMALL_DEBRIS) groups.groups.push_back("small debris");
+    groups.groups.clear();
+    if (small) groups.groups.push_back("small debris");
     world.emplace_or_replace<projv::CollisionGroups>(piece, std::move(groups));
 }
 
-// A walking character: passes through debris.
+// A walking character: passes through small debris.
 void makeWalker(World& world, Entity walker, vec3 feet) {
     world.emplace<projv::Transform>(walker, projv::Transform{feet});
     world.emplace<projv::CharacterController>(walker);
-    world.emplace<projv::CollisionGroups>(walker, projv::CollisionGroups{{"player"}, {"debris"}, 0});
+    world.emplace<projv::CollisionGroups>(walker, projv::CollisionGroups{{"player"}, {"small debris"}, 0});
     projv::runtime::assignNetId(world, walker);
 }
 
@@ -688,7 +680,7 @@ void startup(projv::Application& app) {
     // Unattended runs record every physics input, and replay it at the end (see the self-test).
     physics.settings.record = std::getenv("SANDBOX_SELFTEST") != nullptr;
     projv::runtime::installPhysics(app, physics);
-    for (const char* group : {"debris", "small debris", "player"}) projv::runtime::definePhysicsGroup(world, group);
+    for (const char* group : {"small debris", "player"}) projv::runtime::definePhysicsGroup(world, group);
     projv::runtime::setGravity(world, vec3(0, GRAVITY, 0));
     projv::runtime::registerComponent<Body>(world);
     projv::runtime::registerComponent<Spawner>(world);
@@ -716,9 +708,13 @@ void startup(projv::Application& app) {
             if (world.valid(piece)) {
                 world.emplace_or_replace<Body>(piece, parent ? *parent : Body{});
                 markDebris(world, piece);
+            } else {
+                sandbox.made++;   // the Body it would have had: made, and gone with it
+                sandbox.gone++;
             }
-            else { sandbox.made++; sandbox.gone++; }   // the Body it would have had: made, and gone with it
         }
+        // A piece that broke again keeps what is left of it: counted again too.
+        if (world.valid(e.entity) && world.all_of<projv::Piece>(e.entity)) markDebris(world, e.entity);
     });
     // Counted as lost. One that left from *inside* the walls went through the floor, which must
     // never happen: the self-test fails on it.

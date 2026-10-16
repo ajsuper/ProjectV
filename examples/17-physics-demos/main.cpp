@@ -50,7 +50,7 @@
 // Controls
 //   1-9, 0, -  pick a demo (0 is 10, - is 11; it is rebuilt)  R  restart the demo
 //   click      the demo's action                             V  walk (a character) / fly
-//              (walking, you pass through debris; aiming sees through small debris)
+//              (walking, you pass through crumbs of debris, 3 voxels or fewer; aiming sees through them)
 //   mouse look, W/A/S/D fly, Space/Shift up/down             T  slow motion   P  pause
 //   right-drag hold and drag the body under the crosshair (the wheel: nearer / farther)
 //   Esc        release the cursor (a click recaptures it)
@@ -118,30 +118,22 @@ constexpr float ORB_RADIUS = 2.0f;   // demo 1's kinematic ball
 // walker gets ~95% of the way in a quarter second on the ground, and steers only a little in the air.
 constexpr float WALK_GRIP = 12.0f, AIR_GRIP = 1.5f, FLY_GRIP = 5.0f;
 
-// Debris, as collision groups (runtime::definePhysicsGroup, in main): every piece a break makes is
-// "debris", which the walking character passes through; a piece smaller than a cube this many metres
-// across is "small debris" too, which the crosshair's aim sees through to what is behind it.
-constexpr float SMALL_DEBRIS = 0.6f;
+// Small debris, as a collision group (runtime::definePhysicsGroup, in main): a piece a break makes
+// of at most this many voxels -- a crumb, not a block. The walking character passes through it and
+// the crosshair's aim sees through it to what is behind; every bigger piece stays solid to both.
+constexpr uint32_t SMALL_DEBRIS_VOXELS = 3;
 
-// A piece's volume, m^3: its voxels, times one voxel's size cubed. 0 for anything not one chunk.
-float pieceVolume(const World& world, Entity piece) {
+// Called from BodyBroken, before the piece's body is made, so it is made in its group. A piece that
+// breaks again is counted again, and so are its pieces.
+void markDebris(World& world, Entity piece) {
     const projv::Scene* scene = world.ctx().find<projv::Scene>();
     const projv::VoxelComponent* link = world.try_get<projv::VoxelComponent>(piece);
-    if (!scene || !link || link->handle >= scene->components.size()) return 0.0f;
-    const projv::ComponentRecord& record = scene->components[link->handle];
-    if (record.kind != projv::ComponentKind::Chunk || record.chunkHandle >= scene->chunks.size()) return 0.0f;
-    const projv::Chunk& chunk = scene->chunks[record.chunkHandle];
-    const float voxel = chunk.header.scale / float(chunk.header.resolution);
-    return float(utils::getComponentVoxelCount(*scene, link->handle)) * voxel * voxel * voxel;
-}
-
-// Called from BodyBroken, before the piece's body is made, so it is made in its groups. A piece of
-// a piece is sized again.
-void markDebris(World& world, Entity piece) {
+    if (!scene || !link) return;
+    const bool small = utils::getComponentVoxelCount(*scene, link->handle) <= SMALL_DEBRIS_VOXELS;
     projv::CollisionGroups groups = world.all_of<projv::CollisionGroups>(piece) ? world.get<projv::CollisionGroups>(piece)
                                                                                : projv::CollisionGroups{};
-    groups.groups = {"debris"};
-    if (pieceVolume(world, piece) < SMALL_DEBRIS * SMALL_DEBRIS * SMALL_DEBRIS) groups.groups.push_back("small debris");
+    groups.groups.clear();
+    if (small) groups.groups.push_back("small debris");
     world.emplace_or_replace<projv::CollisionGroups>(piece, std::move(groups));
 }
 
@@ -1937,7 +1929,7 @@ void controls(projv::Application& app) {
             camera.walker = world.create();
             world.emplace<projv::Transform>(camera.walker, projv::Transform{camera.position - vec3(0, EYE_HEIGHT, 0)});
             world.emplace<projv::CharacterController>(camera.walker);
-            world.emplace<projv::CollisionGroups>(camera.walker, projv::CollisionGroups{{"player"}, {"debris"}, 0});
+            world.emplace<projv::CollisionGroups>(camera.walker, projv::CollisionGroups{{"player"}, {"small debris"}, 0});
             camera.velocity.y = 0.0f;   // keeps its horizontal speed: steps out of flight walking
         } else {
             world.destroy(camera.walker);
@@ -2127,10 +2119,10 @@ void selfTest(projv::Application& app) {
     static bool acted = false;
     static std::pair<uint64_t, uint64_t> wallBefore;   // demo 11: the composite wall's rebar and all its voxels
     static bool wallChecked = false;
-    // Demo 11: a character sent through the debris past the composite wall.
-    static Entity walkTester = projv::NullEntity;
-    static vec3 walkAt{0.0f};
-    static float walkStart = 0.0f, walkBiggest = 0.0f, walkHighest = -1e9f;
+    // Demo 11: characters sent at the pieces past the composite wall.
+    struct Walk { Entity walker = projv::NullEntity; vec3 at{0.0f}; uint32_t voxels = 0; float highest = -1e9f; };
+    static Walk walks[2];
+    static float walkStart = 0.0f;
     // DEMOS_CAPTURE=<prefix>: a frame of each demo, mid-action, as <prefix>-<demo>.tga.
     static int captured = 0;
     const float captureAt[LAST_DEMO + 1] = {0, 14.6f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f, 6.5f, 12.0f, 6.1f, 3.4f, 4.0f};
@@ -2525,74 +2517,93 @@ void selfTest(projv::Application& app) {
                           "where it struck", wallBefore.second - all, pieces, cut, wallBefore.first));
         wallChecked = true;
 
-        // Every piece is debris, the small ones small debris -- in its body, not only its component.
+        // Every piece of at most SMALL_DEBRIS_VOXELS voxels is small debris, and no other -- in its
+        // body, not only its component.
         const runtime::PhysicsWorld& sim = runtime::physicsWorld(world);
-        const uint32_t debris = runtime::physicsGroup(world, "debris"), small = aimSkips(world);
-        size_t marked = 0, smallOnes = 0, wrong = 0, seen = 0, hitSmall = 0, aimedThrough = 0;
+        const projv::Scene& scene = world.ctx().get<projv::Scene>();
+        const uint32_t small = aimSkips(world);
+        auto voxelsOf = [&](Entity piece) {
+            return utils::getComponentVoxelCount(scene, world.get<projv::VoxelComponent>(piece).handle);
+        };
+        auto isSmallDebris = [&](Entity e) {
+            return world.valid(e) && world.all_of<projv::PhysicsBody>(e) &&
+                   (sim.filter(world.get<projv::PhysicsBody>(e).id).groups & small) != 0;
+        };
+        size_t made = 0, smallOnes = 0, wrong = 0, hitSmall = 0, aimedThrough = 0;
         for (const projv::BodyBroken& e : demos.overhangs.fell)
             for (Entity piece : e.pieces) {
                 if (!world.valid(piece) || !world.all_of<projv::PhysicsBody>(piece)) continue;
-                const runtime::BodyId id = world.get<projv::PhysicsBody>(piece).id;
-                const runtime::CollisionFilter f = sim.filter(id);
-                const bool isSmall = pieceVolume(world, piece) < SMALL_DEBRIS * SMALL_DEBRIS * SMALL_DEBRIS;
-                marked += (f.groups & debris) != 0;
-                wrong += ((f.groups & small) != 0) != isSmall;
+                made++;
+                const bool isSmall = voxelsOf(piece) <= SMALL_DEBRIS_VOXELS;
+                wrong += isSmallDebris(piece) != isSmall;
                 if (!isSmall) continue;
                 smallOnes++;
-                // Aimed at from straight above: the plain ray stops on it (or on debris over it); the
-                // aim's ray goes through to what is under the small debris.
+                // Aimed at from straight above: the plain ray stops on it (or on something over it);
+                // the aim's ray never stops on small debris.
                 const vec3 over = runtime::bodyPose(world, piece).centerOfMass + vec3(0, 4, 0);
                 auto plain = runtime::castRay(world, over, vec3(0, -1, 0), 20.0f);
                 auto aimed = runtime::castRay(world, over, vec3(0, -1, 0), 20.0f, 0xffffffffu, projv::NullEntity, small);
-                seen++;
-                auto smallDebris = [&](const std::optional<runtime::QueryHit>& hit) {
-                    return hit && world.valid(hit->entity) && world.all_of<projv::PhysicsBody>(hit->entity) &&
-                           (sim.filter(world.get<projv::PhysicsBody>(hit->entity).id).groups & small);
-                };
-                hitSmall += smallDebris(plain);
-                aimedThrough += aimed && !smallDebris(aimed);
+                hitSmall += plain && isSmallDebris(plain->entity);
+                aimedThrough += !(aimed && isSmallDebris(aimed->entity));
             }
-        check(*test, marked > 100 && wrong == 0 && smallOnes > 20,
-              fmt::format("every piece is debris ({} of them), {} small, {} in the wrong size group", marked, smallOnes, wrong));
-        check(*test, seen > 0 && hitSmall * 10 > seen * 8 && aimedThrough == seen,
-              fmt::format("aiming sees through small debris: a plain ray stops on {} of {}, the aim's goes through all but {}",
-                          hitSmall, seen, seen - aimedThrough));
+        check(*test, smallOnes > 10 && smallOnes < made && wrong == 0,
+              fmt::format("small debris: {} of {} pieces are {} voxels or fewer, {} in the wrong group", smallOnes, made,
+                          SMALL_DEBRIS_VOXELS, wrong));
+        check(*test, hitSmall * 10 > smallOnes * 5 && aimedThrough == smallOnes,
+              fmt::format("aiming sees through small debris: a plain ray stops on {} of {}, the aim's on none of them "
+                          "({} did)", hitSmall, smallOnes, smallOnes - aimedThrough));
 
-        // A walker sent straight at the biggest piece lying on the floor past the wall walks through it.
-        float biggest = 0.0f;
-        for (const projv::BodyBroken& e : demos.overhangs.fell) {
-            if (e.entity != demos.overhangs.wall) continue;
-            for (Entity piece : e.pieces) {
-                if (!world.valid(piece) || !runtime::hasBody(world, piece)) continue;
-                const vec3 at = runtime::bodyPose(world, piece).centerOfMass;
-                const float volume = pieceVolume(world, piece);
-                if (at.z > back + 1.0f && at.y < 1.0f && volume > biggest) { biggest = volume; walkAt = at; }
+        // Two walkers past the wall, each sent along x at a piece lying on the floor: the biggest crumb,
+        // which it walks through, and the biggest piece, which stops it or is climbed.
+        for (int k = 0; k < 2; k++) {
+            const bool crumb = k == 0;
+            uint32_t best = 0;
+            for (const projv::BodyBroken& e : demos.overhangs.fell) {
+                if (e.entity != demos.overhangs.wall) continue;
+                for (Entity piece : e.pieces) {
+                    if (!world.valid(piece) || !runtime::hasBody(world, piece)) continue;
+                    const vec3 at = runtime::bodyPose(world, piece).centerOfMass;
+                    const uint32_t voxels = voxelsOf(piece);
+                    // A crumb's walk must be clear of everything else solid to the walker, or what it
+                    // meets on the way is what stops it.
+                    const bool clear = !crumb || runtime::overlapBox(world, vec3(at.x + 0.5f, 1.0f, at.z), vec3(3.8f, 0.9f, 0.6f),
+                                                                    quat(1, 0, 0, 0), 0xffffffffu, projv::NullEntity, small)
+                                                    .empty();
+                    if (at.z > back + 1.0f && at.y < 1.0f && (voxels <= SMALL_DEBRIS_VOXELS) == crumb && voxels > best && clear) {
+                        best = voxels;
+                        walks[k].at = at;
+                    }
+                }
             }
+            if (!best) {
+                check(*test, false, fmt::format("no {} came to rest past the wall to walk at", crumb ? "crumb" : "big piece"));
+                continue;
+            }
+            walks[k].voxels = best;
+            walks[k].walker = world.create();
+            world.emplace<projv::Transform>(walks[k].walker, projv::Transform{vec3(walks[k].at.x - 3.0f, 0.05f, walks[k].at.z)});
+            world.emplace<projv::CharacterController>(walks[k].walker);
+            world.emplace<projv::CollisionGroups>(walks[k].walker, projv::CollisionGroups{{"player"}, {"small debris"}, 0});
         }
-        if (biggest > 0.0f) {
-            walkTester = world.create();
-            world.emplace<projv::Transform>(walkTester, projv::Transform{vec3(walkAt.x - 3.0f, 0.05f, walkAt.z)});
-            world.emplace<projv::CharacterController>(walkTester);
-            world.emplace<projv::CollisionGroups>(walkTester, projv::CollisionGroups{{"player"}, {"debris"}, 0});
-            walkStart = t;
-            walkBiggest = biggest;
-        } else {
-            check(*test, false, "no piece came to rest past the wall to walk through");
-        }
+        walkStart = t;
     }
-    if (stage == 11 && walkTester != projv::NullEntity && world.valid(walkTester)) {
-        if (t < walkStart + 0.3f) runtime::setCharacterInput(world, walkTester, vec3(0));
-        else runtime::setCharacterInput(world, walkTester, vec3(4.0f, 0, 0));
-        const vec3 feet = world.get<projv::Transform>(walkTester).position;
-        walkHighest = std::max(walkHighest, feet.y);
-        if (t > walkStart + 2.0f) {
-            // 1.7 s at 4 m/s from 3 m short of it: about 3.8 m past it, on the floor all the way.
-            check(*test, feet.x > walkAt.x + 2.0f && walkHighest < 0.3f,
-                  fmt::format("the walker went through a {:.2f} m^3 piece of debris: {:.1f} m past it, never more than "
-                              "{:.2f} m off the floor", walkBiggest, feet.x - walkAt.x, walkHighest));
-            world.destroy(walkTester);
-            walkTester = projv::NullEntity;
-        }
+    for (int k = 0; k < 2 && stage == 11; k++) {
+        Walk& w = walks[k];
+        if (w.walker == projv::NullEntity || !world.valid(w.walker)) continue;
+        runtime::setCharacterInput(world, w.walker, t < walkStart + 0.3f ? vec3(0) : vec3(4.0f, 0, 0));
+        const vec3 feet = world.get<projv::Transform>(w.walker).position;
+        w.highest = std::max(w.highest, feet.y);
+        if (t <= walkStart + 2.0f) continue;
+        // 1.7 s at 4 m/s from 3 m short of it: about 3.8 m past it, if nothing stops it.
+        const bool through = feet.x > w.at.x + 2.0f && w.highest < 0.1f;
+        if (k == 0)
+            check(*test, through, fmt::format("the walker went through a {}-voxel crumb: {:.1f} m past it, at most {:.2f} m "
+                                              "off the floor", w.voxels, feet.x - w.at.x, w.highest));
+        else
+            check(*test, !through, fmt::format("a {}-voxel piece stayed solid to the walker: it got {:.1f} m past it, and "
+                                               "climbed {:.2f} m", w.voxels, feet.x - w.at.x, w.highest));
+        world.destroy(w.walker);
+        w.walker = projv::NullEntity;
     }
     static bool nudged = false;
     if (stage == 11 && t > 3.0f && !nudged) {
@@ -2667,7 +2678,7 @@ void startup(projv::Application& app) {
     if (!runtime::loadPhysicsMaterials(world, (here / "physics_materials.json").string()))
         projv::core::error("demos: physics_materials.json did not load; the slide's ramps will all behave alike");
     defineThrownTwins(world);   // before any body uses a material: defining one rebuilds them
-    for (const char* group : {"debris", "small debris", "player"}) runtime::definePhysicsGroup(world, group);
+    for (const char* group : {"small debris", "player"}) runtime::definePhysicsGroup(world, group);
 
     // The floor: 80 m square, half-metre voxels, checkered, two voxels thick with its top at y = 0.
     // One component, so one grid; solid because of its StaticCollider.
@@ -2740,6 +2751,8 @@ void startup(projv::Application& app) {
         demos.pieces += int(e.pieces.size());
         for (Entity piece : e.pieces)
             if (world.valid(piece)) markDebris(world, piece);
+        // A piece that broke again keeps what is left of it: counted again too.
+        if (world.valid(e.entity) && world.all_of<projv::Piece>(e.entity)) markDebris(world, e.entity);
         if (demos.current == 11) demos.overhangs.fell.push_back(e);
         // A thrown piece that breaks again while it is frictionless passes that on: its pieces got
         // its palette, twins and all, and are given their materials back when it is.
