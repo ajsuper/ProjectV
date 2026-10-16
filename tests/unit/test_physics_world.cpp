@@ -198,20 +198,8 @@ TEST_CASE("a full body table refuses creation instead of failing later") {
     physics.step(DT);   // still steps normally
 }
 
-TEST_CASE("layers: debris ignores debris but lands on the floor") {
-    PhysicsWorld physics;
-    addFloor(physics);
-    BodyDesc low = crateAt({0, 0.5f, 0});
-    low.layer = PhysicsLayer::Debris;
-    BodyDesc high = crateAt({0, 3.0f, 0});
-    high.layer = PhysicsLayer::Debris;
-    BodyId a = physics.createBody(low), b = physics.createBody(high);
-    for (int i = 0; i < 4 * 60; i++) physics.step(DT);
-    // Both rest on the floor, one inside the other, rather than stacked.
-    CHECK(physics.bodyState(a).position.y == doctest::Approx(0.5f).epsilon(0.02));
-    CHECK(physics.bodyState(b).position.y == doctest::Approx(0.5f).epsilon(0.02));
-
-    CHECK(layersCollide(PhysicsLayer::Moving, PhysicsLayer::Debris));
+TEST_CASE("layers: the matrix is symmetric, and static ignores static") {
+    CHECK(layersCollide(PhysicsLayer::Moving, PhysicsLayer::Moving));
     CHECK_FALSE(layersCollide(PhysicsLayer::Static, PhysicsLayer::Static));
     CHECK_FALSE(layersCollide(PhysicsLayer::Sensor, PhysicsLayer::Static));
     CHECK(layersCollide(PhysicsLayer::Character, PhysicsLayer::Sensor));

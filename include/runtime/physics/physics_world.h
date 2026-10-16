@@ -47,19 +47,33 @@ namespace projv::runtime {
         Dynamic     // moved by the simulation
     };
 
-    // What collides with what. A fixed list, so the collision matrix is a few lines of code rather
-    // than data: everything collides with everything except that static ignores static, debris
-    // ignores debris (piles of fragments are the expensive case and nobody watches them touch), and
-    // a sensor touches only things that move under their own power (moving bodies and characters).
+    // What collides with what, coarsely: a fixed list, so the collision matrix is a few lines of code
+    // rather than data. Everything collides with everything except that static ignores static, and a
+    // sensor touches only things that move under their own power (moving bodies and characters).
+    // Which bodies pass through which beyond that is data: CollisionFilter.
     enum class PhysicsLayer : uint8_t {
         Static,
         Moving,
-        Debris,
         Sensor,
         Character,
         Count
     };
     bool layersCollide(PhysicsLayer a, PhysicsLayer b);
+
+    // Which bodies pass through which, finer than layers (the physics plan, R4), checked for each pair
+    // the layers let meet. `groups` and `ignores` are bits, one per named group (a game names them:
+    // runtime::definePhysicsGroup); two bodies pass through each other when either ignores a group
+    // the other is in. And two bodies of the same nonzero `family` never collide: the shards of one
+    // break, a ragdoll's limbs, a vehicle's parts -- as many families as a game likes, where groups
+    // are 32. The default is in no group and no family, and collides as the layers say.
+    struct CollisionFilter {
+        uint32_t groups = 0;
+        uint32_t ignores = 0;
+        uint32_t family = 0;
+        bool operator==(const CollisionFilter&) const = default;
+    };
+    constexpr uint32_t MAX_COLLISION_GROUPS = 32;
+    bool filtersCollide(const CollisionFilter& a, const CollisionFilter& b);
 
     // A shape built from voxels (PhysicsWorld::voxelShape): the blob's collision pieces as one Jolt
     // shape, in the blob's voxel space. Shared: every body made from the same blob content uses the
@@ -182,6 +196,7 @@ namespace projv::runtime {
         // Continuous collision (a swept test each step) instead of discrete. For bodies small or
         // fast enough to pass through something in one step.
         bool         continuous = false;
+        CollisionFilter filter;
     };
 
     struct BodyId {
@@ -320,6 +335,8 @@ namespace projv::runtime {
         float        stepUp = 0.4f;               // m: the highest step it walks up
         float        stickDown = 0.5f;            // m: how far down it follows the floor
         PhysicsLayer layer = PhysicsLayer::Character;
+        // What it walks through, and what passes through it (its inner body has the same filter).
+        CollisionFilter filter;
     };
 
     struct CharacterId {
@@ -401,11 +418,12 @@ namespace projv::runtime {
     };
 
     // ---- Queries ----------------------------------------------------------------------------------
-    // Which bodies a query sees: a bit per PhysicsLayer (all by default), and one body to skip (the
-    // caster's own, typically).
+    // Which bodies a query sees: a bit per PhysicsLayer (all by default), one body to skip (the
+    // caster's own, typically), and the collision groups whose bodies it skips (CollisionFilter bits).
     struct QueryFilter {
         uint32_t layers = 0xffffffffu;
         BodyId   ignore;
+        uint32_t skipGroups = 0;
         static uint32_t only(PhysicsLayer layer) { return 1u << uint32_t(layer); }
     };
 
@@ -457,6 +475,13 @@ namespace projv::runtime {
         BodyState bodyState(BodyId id) const;
         // The body's mass, 0 for a static body or an id that is not alive.
         float bodyMass(BodyId id) const;
+
+        // Changes which bodies it passes through (BodyDesc::filter), from the next step, and wakes
+        // it and what touches it -- so a contact that should end does, and one that should begin
+        // does. A stale id is ignored.
+        void setFilter(BodyId id, const CollisionFilter& filter);
+        // Default for an id that is not alive.
+        CollisionFilter filter(BodyId id) const;
 
         // Wakes every body whose bounds touch this one's: what an edit to its shape must do, so
         // bodies resting on (or now inside) the old shape notice the new one.
@@ -535,6 +560,8 @@ namespace projv::runtime {
         void setCharacterInput(CharacterId id, core::vec3 horizontal, bool jump, float jumpSpeed = 5.0f);
         // Places it; velocity kept.
         void setCharacterPosition(CharacterId id, core::vec3 feet);
+        // CharacterDesc::filter, for it and its inner body, from the next step.
+        void setCharacterFilter(CharacterId id, const CollisionFilter& filter);
         CharacterState characterState(CharacterId id) const;
         // The inner body other bodies collide with, so queries and filters can name it.
         BodyId characterBody(CharacterId id) const;

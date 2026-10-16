@@ -395,7 +395,7 @@ namespace projv::runtime {
         // Snapshot layout: a header that lets restoreState check, before touching anything, that the
         // snapshot is one and fits this world; then Jolt's own bytes.
         constexpr uint32_t SNAPSHOT_MAGIC = 0x50564a50u;   // "PJVP"
-        constexpr uint32_t SNAPSHOT_VERSION = 6;   // 2: rest damping state per body; 3: characters; 4: joints; 5: motor modes; 6: rest peak speed
+        constexpr uint32_t SNAPSHOT_VERSION = 7;   // 2: rest damping state per body; 3: characters; 4: joints; 5: motor modes; 6: rest peak speed; 7: collision filters
 
         template <typename T> void put(std::vector<uint8_t>& out, const T& v) {
             const auto* p = reinterpret_cast<const uint8_t*>(&v);
@@ -414,12 +414,16 @@ namespace projv::runtime {
         switch (a) {
             case PhysicsLayer::Static:    return b != PhysicsLayer::Static && b != PhysicsLayer::Sensor;
             case PhysicsLayer::Moving:    return true;
-            case PhysicsLayer::Debris:    return b != PhysicsLayer::Debris && b != PhysicsLayer::Sensor;
             case PhysicsLayer::Sensor:    return b == PhysicsLayer::Character;
             case PhysicsLayer::Character: return b == PhysicsLayer::Character;
             case PhysicsLayer::Count:     break;
         }
         return false;
+    }
+
+    bool filtersCollide(const CollisionFilter& a, const CollisionFilter& b) {
+        if (a.family != 0 && a.family == b.family) return false;
+        return (a.ignores & b.groups) == 0 && (b.ignores & a.groups) == 0;
     }
 
     float PhysicsShape::volume() const {
@@ -438,24 +442,34 @@ namespace projv::runtime {
         return 0.0f;
     }
 
-    // Bodies joined by a joint that does not let them collide (JointDesc::collideConnected false, the
-    // default): every body's collision group is its own body index, and this refuses the pairs that
-    // such joints join -- a car's wheels and its chassis, the links of a chain. Counted, as two joints
-    // can join the same pair. Read from the solver's threads during a step, changed only between steps.
-    class JointedPairs final : public JPH::GroupFilter {
+    // Which pairs of bodies the layers let meet still pass through each other. Every body's collision
+    // group is its own body index, which this looks up:
+    // - its CollisionFilter (BodyDesc::filter, setFilter): groups, ignores and family;
+    // - the pairs a joint joins that does not let them collide (JointDesc::collideConnected false, the
+    //   default) -- a car's wheels and its chassis, the links of a chain. Counted, as two joints can
+    //   join the same pair.
+    // Read from the solver's threads during a step, changed only between steps.
+    class CollisionRules final : public JPH::GroupFilter {
     public:
+        explicit CollisionRules(uint32_t bodies) : filters(bodies) {}
         static uint64_t key(uint32_t a, uint32_t b) { return a < b ? (uint64_t(a) << 32) | b : (uint64_t(b) << 32) | a; }
-        void add(uint32_t a, uint32_t b) { pairs[key(a, b)]++; }
-        void remove(uint32_t a, uint32_t b) {
+        void join(uint32_t a, uint32_t b) { pairs[key(a, b)]++; }
+        void part(uint32_t a, uint32_t b) {
             auto it = pairs.find(key(a, b));
             if (it != pairs.end() && --it->second == 0) pairs.erase(it);
         }
+        // A body index's filter; the default for one past the table (a body with no group: none here).
+        const CollisionFilter& filter(uint32_t index) const { return index < filters.size() ? filters[index] : none; }
+        void setFilter(uint32_t index, const CollisionFilter& f) { if (index < filters.size()) filters[index] = f; }
         bool CanCollide(const JPH::CollisionGroup& one, const JPH::CollisionGroup& two) const override {
-            if (pairs.empty()) return true;
-            return pairs.find(key(one.GetGroupID(), two.GetGroupID())) == pairs.end();
+            const uint32_t a = one.GetGroupID(), b = two.GetGroupID();
+            if (!filtersCollide(filter(a), filter(b))) return false;
+            return pairs.empty() || pairs.find(key(a, b)) == pairs.end();
         }
     private:
-        std::map<uint64_t, int> pairs;
+        std::vector<CollisionFilter> filters;
+        CollisionFilter              none;
+        std::map<uint64_t, int>      pairs;
     };
 
     // ---- Recording ---------------------------------------------------------------------------------
@@ -463,12 +477,12 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 5;   // 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings
+        constexpr uint32_t LOG_VERSION = 6;   // 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
             Gravity, Step, Restore, CreateCharacter, DestroyCharacter, CharacterInput, CharacterPosition,
-            CreateJoint, DestroyJoint, JointMotor, SetMaterial
+            CreateJoint, DestroyJoint, JointMotor, SetMaterial, SetFilter, CharacterFilter
         };
 
         void writeSettings(std::vector<uint8_t>& out, const PhysicsSettings& s) {
@@ -564,6 +578,13 @@ namespace projv::runtime {
             return false;
         }
 
+        void writeFilter(std::vector<uint8_t>& out, const CollisionFilter& f) {
+            put(out, f.groups); put(out, f.ignores); put(out, f.family);
+        }
+        bool readFilter(const std::vector<uint8_t>& in, size_t& at, CollisionFilter& f) {
+            return get(in, at, f.groups) && get(in, at, f.ignores) && get(in, at, f.family);
+        }
+
         void writeDesc(std::vector<uint8_t>& out, const BodyDesc& d) {
             writeShape(out, d.shape);
             put(out, uint8_t(d.motion)); put(out, uint8_t(d.layer));
@@ -571,6 +592,7 @@ namespace projv::runtime {
             put(out, d.density); put(out, d.mass); put(out, d.friction); put(out, d.restitution);
             put(out, d.linearDamping); put(out, d.angularDamping); put(out, d.gravityFactor);
             put(out, uint8_t(d.continuous));
+            writeFilter(out, d.filter);
         }
 
         template <typename BuildVoxels>
@@ -580,7 +602,8 @@ namespace projv::runtime {
                       get(in, at, d.position) && get(in, at, d.rotation) && get(in, at, d.linearVelocity) &&
                       get(in, at, d.angularVelocity) && get(in, at, d.density) && get(in, at, d.mass) &&
                       get(in, at, d.friction) && get(in, at, d.restitution) && get(in, at, d.linearDamping) &&
-                      get(in, at, d.angularDamping) && get(in, at, d.gravityFactor) && get(in, at, continuous);
+                      get(in, at, d.angularDamping) && get(in, at, d.gravityFactor) && get(in, at, continuous) &&
+                      readFilter(in, at, d.filter);
             d.motion = MotionType(motion);
             d.layer = PhysicsLayer(layer);
             d.continuous = continuous != 0;
@@ -651,13 +674,13 @@ namespace projv::runtime {
         };
         std::vector<Joint>   joints;
         std::vector<PhysicsWorld::BrokenJoint> brokenJoints;
-        JPH::Ref<JointedPairs> jointedPairs = new JointedPairs;
+        JPH::Ref<CollisionRules> rules;   // made with the body table's size
         // The pair a joint keeps from colliding, if any.
         void separate(const Joint& j, bool on) {
             if (j.desc.collideConnected || !j.desc.b.valid()) return;
             uint32_t a = JPH::BodyID(j.desc.a.value).GetIndex(), b = JPH::BodyID(j.desc.b.value).GetIndex();
-            if (on) jointedPairs->add(a, b);
-            else jointedPairs->remove(a, b);
+            if (on) rules->join(a, b);
+            else rules->part(a, b);
         }
         Joint* joint(JointId id) {
             uint32_t slot = id.value & 0xffffu;
@@ -720,6 +743,7 @@ namespace projv::runtime {
         impl->lastGood.resize(settings.maxBodies);
         impl->rest.resize(settings.maxBodies);
         impl->outside.assign(settings.maxBodies, 0);
+        impl->rules = new CollisionRules(settings.maxBodies);
         // Body mutexes: 0 lets Jolt pick a default.
         impl->system.Init(settings.maxBodies, 0, settings.maxBodyPairs, settings.maxContactConstraints,
                           impl->broadPhaseLayers, impl->objectVsBroadPhase, impl->objectPairs);
@@ -828,7 +852,8 @@ namespace projv::runtime {
         JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
         JPH::Body* body = bodies.CreateBody(settings);
         if (!body) return refuse("the body table is full (PhysicsSettings::maxBodies)");
-        body->SetCollisionGroup(JPH::CollisionGroup(impl->jointedPairs, body->GetID().GetIndex(), 0));
+        body->SetCollisionGroup(JPH::CollisionGroup(impl->rules, body->GetID().GetIndex(), 0));
+        impl->rules->setFilter(body->GetID().GetIndex(), desc.filter);
         bodies.AddBody(body->GetID(), desc.motion == MotionType::Static ? JPH::EActivation::DontActivate
                                                                         : JPH::EActivation::Activate);
         impl->addedSinceOptimize++;
@@ -855,6 +880,17 @@ namespace projv::runtime {
         }
         bounds.ExpandBy(JPH::Vec3::sReplicate(0.05f));   // and what rests exactly on its faces
         impl->system.GetBodyInterface().ActivateBodiesInAABox(bounds, JPH::BroadPhaseLayerFilter(), JPH::ObjectLayerFilter());
+    }
+
+    void PhysicsWorld::setFilter(BodyId id, const CollisionFilter& filter) {
+        if (impl->recording) { impl->op(Op::SetFilter); put(impl->log, id.value); writeFilter(impl->log, filter); }
+        if (!isAlive(id)) return;
+        impl->rules->setFilter(JPH::BodyID(id.value).GetIndex(), filter);
+        wakeBodiesAround(id);
+    }
+
+    CollisionFilter PhysicsWorld::filter(BodyId id) const {
+        return isAlive(id) ? impl->rules->filter(JPH::BodyID(id.value).GetIndex()) : CollisionFilter{};
     }
 
     void PhysicsWorld::destroyBody(BodyId id) {
@@ -893,13 +929,26 @@ namespace projv::runtime {
     // ---- Characters ------------------------------------------------------------------------------
 
     namespace {
-        // What a character collides with: its layer's row of the matrix, never its own inner body.
+        // What a character collides with: its layer's row of the matrix, and the bodies its filter
+        // meets -- never its own inner body.
         class CharacterLayers final : public JPH::ObjectLayerFilter {
         public:
             explicit CharacterLayers(PhysicsLayer layer) : layer(layer) {}
             bool ShouldCollide(JPH::ObjectLayer other) const override { return layersCollide(layer, PhysicsLayer(other)); }
         private:
             PhysicsLayer layer;
+        };
+        class CharacterBodies final : public JPH::BodyFilter {
+        public:
+            CharacterBodies(const CollisionRules& rules, const CollisionFilter& filter, JPH::BodyID self)
+                : rules(rules), filter(filter), self(self) {}
+            bool ShouldCollide(const JPH::BodyID& id) const override {
+                return id != self && filtersCollide(filter, rules.filter(id.GetIndex()));
+            }
+        private:
+            const CollisionRules&  rules;
+            const CollisionFilter& filter;
+            JPH::BodyID            self;
         };
 
         // An upright capsule whose origin is at its feet.
@@ -936,6 +985,13 @@ namespace projv::runtime {
                 settings.mMaxStrength = desc.maxStrength;
                 settings.mEnhancedInternalEdgeRemoval = true;   // voxel floors are many boxes side by side
                 c.controller = new JPH::CharacterVirtual(&settings, toJoltR(desc.position), JPH::Quat::sIdentity(), &impl->system);
+                // Its inner body is in the rules as every body is, with the character's filter.
+                const JPH::BodyID inner = c.controller->GetInnerBodyID();
+                {
+                    JPH::BodyLockWrite lock(impl->system.GetBodyLockInterface(), inner);
+                    if (lock.Succeeded()) lock.GetBody().SetCollisionGroup(JPH::CollisionGroup(impl->rules, inner.GetIndex(), 0));
+                }
+                impl->rules->setFilter(inner.GetIndex(), desc.filter);
                 c.desc = desc;
                 c.input = core::vec3(0.0f);
                 c.jump = false;
@@ -948,6 +1004,7 @@ namespace projv::runtime {
             put(impl->log, desc.radius); put(impl->log, desc.height); put(impl->log, desc.position);
             put(impl->log, desc.maxSlope); put(impl->log, desc.mass); put(impl->log, desc.maxStrength);
             put(impl->log, desc.stepUp); put(impl->log, desc.stickDown); put(impl->log, uint8_t(desc.layer));
+            writeFilter(impl->log, desc.filter);
             put(impl->log, id.value);
         }
         return id;
@@ -980,6 +1037,16 @@ namespace projv::runtime {
         Impl::Character* c = impl->character(id);
         if (!c || !finite(feet)) return;
         c->controller->SetPosition(toJoltR(feet));
+    }
+
+    void PhysicsWorld::setCharacterFilter(CharacterId id, const CollisionFilter& filter) {
+        if (impl->recording) { impl->op(Op::CharacterFilter); put(impl->log, id.value); writeFilter(impl->log, filter); }
+        Impl::Character* c = impl->character(id);
+        if (!c) return;
+        c->desc.filter = filter;
+        const JPH::BodyID inner = c->controller->GetInnerBodyID();
+        impl->rules->setFilter(inner.GetIndex(), filter);
+        wakeBodiesAround(BodyId{inner.GetIndexAndSequenceNumber()});
     }
 
     CharacterState PhysicsWorld::characterState(CharacterId id) const {
@@ -1030,8 +1097,8 @@ namespace projv::runtime {
             settings.mWalkStairsStepUp = up * c.desc.stepUp;
             settings.mStickToFloorStepDown = -up * c.desc.stickDown;
             CharacterLayers layers(c.desc.layer);
-            JPH::IgnoreSingleBodyFilter self(ch.GetInnerBodyID());
-            ch.ExtendedUpdate(dt, gravity, settings, JPH::BroadPhaseLayerFilter(), layers, self, JPH::ShapeFilter(),
+            CharacterBodies bodies(*impl->rules, c.desc.filter, ch.GetInnerBodyID());
+            ch.ExtendedUpdate(dt, gravity, settings, JPH::BroadPhaseLayerFilter(), layers, bodies, JPH::ShapeFilter(),
                               *impl->tempAllocator);
         }
     }
@@ -1693,6 +1760,7 @@ namespace projv::runtime {
             put(out, r.rotation);
             put(out, r.seconds);
             put(out, r.peak);
+            writeFilter(out, impl->rules->filter(JPH::BodyID(b).GetIndex()));
         }
 
         JPH::StateRecorderImpl recorder;
@@ -1744,10 +1812,11 @@ namespace projv::runtime {
         }
         std::vector<uint32_t> saved(count);
         std::vector<Impl::Rest> savedRest(count);
+        std::vector<CollisionFilter> savedFilters(count);
         for (uint32_t i = 0; i < count; i++)
             if (!get(snapshot, at, saved[i]) || !get(snapshot, at, savedRest[i].position) ||
                 !get(snapshot, at, savedRest[i].rotation) || !get(snapshot, at, savedRest[i].seconds) ||
-                !get(snapshot, at, savedRest[i].peak)) {
+                !get(snapshot, at, savedRest[i].peak) || !readFilter(snapshot, at, savedFilters[i])) {
                 core::warn("physics: restoreState refused: the snapshot is truncated");
                 return false;
             }
@@ -1837,9 +1906,13 @@ namespace projv::runtime {
             return false;
         }
         impl->tick = tick;
-        for (uint32_t i = 0; i < count; i++) impl->rest[JPH::BodyID(saved[i]).GetIndex()] = savedRest[i];
+        for (uint32_t i = 0; i < count; i++) {
+            impl->rest[JPH::BodyID(saved[i]).GetIndex()] = savedRest[i];
+            impl->rules->setFilter(JPH::BodyID(saved[i]).GetIndex(), savedFilters[i]);
+        }
         for (const SavedCharacter& saved : savedCharacters) {
             Impl::Character& c = *impl->character(CharacterId{saved.id});
+            c.desc.filter = impl->rules->filter(c.controller->GetInnerBodyID().GetIndex());   // restored with the bodies
             c.input = saved.input;
             c.jump = saved.jump != 0;
             c.jumpSpeed = saved.jumpSpeed;
@@ -1974,14 +2047,18 @@ namespace projv::runtime {
             uint32_t mask;
         };
 
-        class SkipOne final : public JPH::BodyFilter {
+        // The body a query skips, and the bodies in the groups it skips.
+        class SkipBodies final : public JPH::BodyFilter {
         public:
-            explicit SkipOne(BodyId skip) : skip(skip) {}
+            SkipBodies(const QueryFilter& filter, const CollisionRules& rules) : skip(filter.ignore), groups(filter.skipGroups), rules(rules) {}
             bool ShouldCollide(const JPH::BodyID& id) const override {
-                return !skip.valid() || id.GetIndexAndSequenceNumber() != skip.value;
+                if (skip.valid() && id.GetIndexAndSequenceNumber() == skip.value) return false;
+                return (rules.filter(id.GetIndex()).groups & groups) == 0;
             }
         private:
-            BodyId skip;
+            BodyId                skip;
+            uint32_t              groups;
+            const CollisionRules& rules;
         };
 
         // The compound indices from a body's shape down to the sub-shape `id` names. Decorators
@@ -2018,7 +2095,7 @@ namespace projv::runtime {
         JPH::RRayCast ray(toJoltR(origin), toJolt(direction * maxDistance));
         JPH::RayCastResult result;
         LayerMask layers(filter.layers);
-        SkipOne skip(filter.ignore);
+        SkipBodies skip(filter, *impl->rules);
         if (!impl->system.GetNarrowPhaseQuery().CastRay(ray, result, JPH::BroadPhaseLayerFilter(), layers, skip))
             return std::nullopt;
         PhysicsHit hit;
@@ -2048,7 +2125,7 @@ namespace projv::runtime {
         settings.mReturnDeepestPoint = true;
         JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
         LayerMask layers(filter.layers);
-        SkipOne skip(filter.ignore);
+        SkipBodies skip(filter, *impl->rules);
         impl->system.GetNarrowPhaseQuery().CastShape(cast, settings, JPH::RVec3::sZero(), collector,
                                                     JPH::BroadPhaseLayerFilter(), layers, skip);
         if (!collector.HadHit()) return std::nullopt;
@@ -2066,12 +2143,12 @@ namespace projv::runtime {
     }
 
     namespace {
-        std::vector<BodyId> overlap(const JPH::PhysicsSystem& system, const JPH::Shape& shape, JPH::RMat44Arg transform,
-                                    const QueryFilter& filter) {
+        std::vector<BodyId> overlap(const JPH::PhysicsSystem& system, const CollisionRules& rules, const JPH::Shape& shape,
+                                    JPH::RMat44Arg transform, const QueryFilter& filter) {
             JPH::CollideShapeSettings settings;
             JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
             LayerMask layers(filter.layers);
-            SkipOne skip(filter.ignore);
+            SkipBodies skip(filter, rules);
             system.GetNarrowPhaseQuery().CollideShape(&shape, JPH::Vec3::sOne(), transform, settings, JPH::RVec3::sZero(),
                                                        collector, JPH::BroadPhaseLayerFilter(), layers, skip);
             std::vector<BodyId> out;
@@ -2086,7 +2163,7 @@ namespace projv::runtime {
         if (!finite(centre) || !(radius > 0.0f)) return {};
         JPH::SphereShape sphere(radius);
         sphere.SetEmbedded();
-        return overlap(impl->system, sphere, JPH::RMat44::sTranslation(toJoltR(centre)), filter);
+        return overlap(impl->system, *impl->rules, sphere, JPH::RMat44::sTranslation(toJoltR(centre)), filter);
     }
 
     std::vector<BodyId> PhysicsWorld::overlapBox(core::vec3 centre, core::vec3 halfExtents, core::quat rotation,
@@ -2095,7 +2172,7 @@ namespace projv::runtime {
             return {};
         JPH::BoxShape box(toJolt(halfExtents), std::min(JPH::cDefaultConvexRadius, 0.5f * std::min({halfExtents.x, halfExtents.y, halfExtents.z})));
         box.SetEmbedded();
-        return overlap(impl->system, box, JPH::RMat44::sRotationTranslation(toJolt(glm::normalize(rotation)), toJoltR(centre)), filter);
+        return overlap(impl->system, *impl->rules, box, JPH::RMat44::sRotationTranslation(toJolt(glm::normalize(rotation)), toJoltR(centre)), filter);
     }
 
     PhysicsLog PhysicsWorld::recording() const {
@@ -2196,7 +2273,8 @@ namespace projv::runtime {
                     uint32_t expected = 0;
                     if (!get(in, at, d.radius) || !get(in, at, d.height) || !get(in, at, d.position) ||
                         !get(in, at, d.maxSlope) || !get(in, at, d.mass) || !get(in, at, d.maxStrength) ||
-                        !get(in, at, d.stepUp) || !get(in, at, d.stickDown) || !get(in, at, layer) || !get(in, at, expected))
+                        !get(in, at, d.stepUp) || !get(in, at, d.stickDown) || !get(in, at, layer) ||
+                        !readFilter(in, at, d.filter) || !get(in, at, expected))
                         return truncated();
                     d.layer = PhysicsLayer(layer);
                     if (world.createCharacter(d).value != expected) {
@@ -2248,6 +2326,18 @@ namespace projv::runtime {
                         !get(in, at, m.restitution))
                         return truncated();
                     world.setMaterial(index, m);
+                    break;
+                }
+                case Op::SetFilter: {
+                    CollisionFilter f;
+                    if (!get(in, at, id) || !readFilter(in, at, f)) return truncated();
+                    world.setFilter(BodyId{id}, f);
+                    break;
+                }
+                case Op::CharacterFilter: {
+                    CollisionFilter f;
+                    if (!get(in, at, id) || !readFilter(in, at, f)) return truncated();
+                    world.setCharacterFilter(CharacterId{id}, f);
                     break;
                 }
                 case Op::Restore: {

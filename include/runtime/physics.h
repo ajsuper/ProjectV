@@ -3,6 +3,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "nlohmann/json.hpp"
 #include "core/application.h"
@@ -157,6 +158,19 @@ namespace projv {
         runtime::PhysicsLayer layer = runtime::PhysicsLayer::Character;
     };
 
+    // Which bodies this entity's body (RigidBody, StaticCollider or CharacterController) passes
+    // through, beyond what layers say (runtime::CollisionFilter): the named groups it is in, the
+    // named groups it passes through, and a family -- bodies of the same nonzero family never
+    // collide. Group names are defined by the game (runtime::definePhysicsGroup); a name not defined
+    // is left out, with a warning once. Changing it changes the body's filter at the next fixed step,
+    // without rebuilding the body; removing it puts the body back in no group. Pieces that come away
+    // from a body copy its CollisionGroups, as they copy its RigidBody.
+    struct CollisionGroups {
+        std::vector<std::string> groups;
+        std::vector<std::string> ignores;
+        uint32_t                 family = 0;
+    };
+
     // The simulation's side of a CharacterController. Made and removed by physics; never saved.
     struct PhysicsCharacter {
         runtime::CharacterId id;
@@ -219,7 +233,8 @@ namespace projv {
     //
     // Delivered at once, inside the physics step, before the pieces' bodies are made: a handler can
     // shape them in the step that made them -- change a piece's RigidBody (its layer, damping,
-    // breaksOnImpact), set the velocity it starts with (setVelocity), or destroy it. Like everything
+    // breaksOnImpact) or CollisionGroups (one family for a break's shards, so they pass through each
+    // other), set the velocity it starts with (setVelocity), or destroy it. Like everything
     // that feeds a step, what a handler does must be the same on every peer.
     struct BodyBroken {
         Entity              entity;
@@ -327,6 +342,16 @@ namespace projv::runtime {
     // parsed; materials before a bad entry stay defined.
     bool loadPhysicsMaterials(World& world, const std::string& path);
 
+    // ---- Collision groups ---------------------------------------------------------------------------
+    // Names for CollisionFilter's 32 group bits, which CollisionGroups and queries name. Bits follow
+    // definition order, so peers that define the same names in the same order agree on them (the
+    // names are part of the physics state hash). Defining a name again returns its bit. Entities that
+    // named a group before it was defined take it on at the next fixed step.
+    // The group's bit, or 0 when refused (logged): a bad name (1 to 64 characters), all 32 taken.
+    uint32_t definePhysicsGroup(World& world, const std::string& name);
+    // 0 when there is none of that name.
+    uint32_t physicsGroup(const World& world, const std::string& name);
+
     // ---- Commands: applied at the start of the next fixed step, in the order issued -------------
     // An entity with no body by then (not physical, refused, destroyed) is skipped.
     void addImpulse(World& world, Entity entity, core::vec3 impulse);
@@ -401,7 +426,8 @@ namespace projv::runtime {
     // come away through the same pass as any island (BodyBroken), taking after the body as every
     // piece does: a dynamic body's shards copy its whole RigidBody (damping, gravity factor, layer,
     // breaksOnImpact), a static collider's take its friction, restitution, material and
-    // breaksOnImpact. Static colliders break too; their shards are dynamic.
+    // breaksOnImpact; both copy its CollisionGroups. Static colliders break too; their shards are
+    // dynamic.
     //
     // Works on what voxelComponentOf finds: a chunk, a grid, or a prefab of one chunk. The reach
     // is capped (PhysicsConfig::fracture.maxReachVoxels, 64 by default), and so is the number of
@@ -518,15 +544,17 @@ namespace projv::runtime {
         uint8_t         materialSlot = 0;
     };
     // `layers`: a bit per PhysicsLayer (QueryFilter::only). `ignore`: an entity whose body to skip.
+    // `skipGroups`: group bits (physicsGroup) whose bodies to skip -- a bullet through shards.
     std::optional<QueryHit> castRay(const World& world, core::vec3 origin, core::vec3 direction, float maxDistance,
-                                    uint32_t layers = 0xffffffffu, Entity ignore = NullEntity);
+                                    uint32_t layers = 0xffffffffu, Entity ignore = NullEntity, uint32_t skipGroups = 0);
     std::optional<QueryHit> castSphere(const World& world, core::vec3 origin, float radius, core::vec3 direction,
-                                       float maxDistance, uint32_t layers = 0xffffffffu, Entity ignore = NullEntity);
+                                       float maxDistance, uint32_t layers = 0xffffffffu, Entity ignore = NullEntity,
+                                       uint32_t skipGroups = 0);
     // Entities whose bodies overlap the shape: NetId order, then entity order for the rest.
     std::vector<Entity> overlapSphere(const World& world, core::vec3 centre, float radius,
-                                      uint32_t layers = 0xffffffffu, Entity ignore = NullEntity);
+                                      uint32_t layers = 0xffffffffu, Entity ignore = NullEntity, uint32_t skipGroups = 0);
     std::vector<Entity> overlapBox(const World& world, core::vec3 centre, core::vec3 halfExtents, core::quat rotation,
-                                   uint32_t layers = 0xffffffffu, Entity ignore = NullEntity);
+                                   uint32_t layers = 0xffffffffu, Entity ignore = NullEntity, uint32_t skipGroups = 0);
 
     // Where the simulation has the body: the end of the last fixed step, not the interpolated pose
     // that is drawn. Default (and `awake` false) for an entity with no body.
@@ -555,6 +583,13 @@ template<> struct projv::runtime::ComponentTraits<projv::Joint> {
     static constexpr uint32_t version = 1;
     static nlohmann::json save(const projv::Joint& j);
     static std::optional<projv::Joint> load(const nlohmann::json& json, uint32_t fileVersion);
+};
+
+template<> struct projv::runtime::ComponentTraits<projv::CollisionGroups> {
+    static constexpr const char* key = "physics.groups";
+    static constexpr uint32_t version = 1;
+    static nlohmann::json save(const projv::CollisionGroups& g);
+    static std::optional<projv::CollisionGroups> load(const nlohmann::json& json, uint32_t fileVersion);
 };
 
 template<> struct projv::runtime::ComponentTraits<projv::StaticCollider> {

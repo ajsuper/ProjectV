@@ -84,6 +84,15 @@ namespace projv::runtime {
                 uint64_t                        version = 0;   // bumped by every definition
                 std::set<std::string>           warned;        // unknown names, logged once each
             } library;
+            // Collision group names (CollisionGroups, definePhysicsGroup): bit i is names[i].
+            struct Groups {
+                std::vector<std::string>        names;
+                std::map<std::string, uint32_t> bit;
+                uint64_t                        version = 0;   // bumped by every new name
+                uint64_t                        seen = 0;      // the version at the last regroup
+                std::set<std::string>           warned;        // unknown names, logged once each
+            } groups;
+            std::vector<Entity>           regroup;      // CollisionGroups added, changed or removed
             uint64_t                      seenPalettes = 0;  // palette versions and library at the last check
             std::set<std::string>         warnedPatterns;    // fracture patterns named but not registered
             std::set<Entity>              warnedUnanchored;  // colliders that split with nothing to stand on
@@ -103,6 +112,7 @@ namespace projv::runtime {
             physics.requestedAt[entity] = latestBlobContentStamp();
         }
         void wantRebuild(World& world, Entity entity) { runtimeOf(world).rebuild.push_back(entity); }
+        void wantRegroup(World& world, Entity entity) { runtimeOf(world).regroup.push_back(entity); }
 
         void bodyGone(World& world, Entity entity) {
             PhysicsRuntime& physics = runtimeOf(world);
@@ -206,6 +216,27 @@ namespace projv::runtime {
                 any = any || out[slot] != 0;
             }
             return any;
+        }
+
+        // The filter an entity's CollisionGroups says (none: the default, in no group).
+        CollisionFilter filterOf(const World& world, PhysicsRuntime& physics, Entity entity) {
+            CollisionFilter f;
+            const CollisionGroups* named = world.try_get<CollisionGroups>(entity);
+            if (!named) return f;
+            auto bits = [&](const std::vector<std::string>& names) {
+                uint32_t out = 0;
+                for (const std::string& name : names) {
+                    auto found = physics.groups.bit.find(name);
+                    if (found != physics.groups.bit.end()) out |= found->second;
+                    else if (physics.groups.warned.insert(name).second)
+                        core::warn("physics: collision group '{}' is not defined (definePhysicsGroup); left out", name);
+                }
+                return out;
+            };
+            f.groups = bits(named->groups);
+            f.ignores = bits(named->ignores);
+            f.family = named->family;
+            return f;
         }
 
         // The material a body's own component names (RigidBody::material, StaticCollider::material).
@@ -439,6 +470,7 @@ namespace projv::runtime {
             } else {
                 d.layer = fixed->layer;
             }
+            d.filter = filterOf(world, physics, entity);
             return out;
         }
 
@@ -1002,6 +1034,8 @@ namespace projv::runtime {
             }
             const uint64_t tick = physics.world->tick();
             const float share = total > 0 ? 1.0f / float(total) : 0.0f;
+            const CollisionGroups* parentGroups = world.try_get<CollisionGroups>(entity);
+            const std::optional<CollisionGroups> groups = parentGroups ? std::optional(*parentGroups) : std::nullopt;
             for (const Made& m : made) {
                 Entity e = world.create();
                 if (!linkComponent(world, e, m.component, LinkMode::Root, onUnlink)) {
@@ -1023,6 +1057,7 @@ namespace projv::runtime {
                 if (networked) assignNetId(world, e);
                 world.emplace<Piece>(e, Piece{tick});
                 world.emplace<RigidBody>(e, r);
+                if (groups) world.emplace<CollisionGroups>(e, *groups);
                 event.pieces.push_back(e);
                 if (m.shard) event.shards++;
             }
@@ -1288,6 +1323,7 @@ namespace projv::runtime {
                     desc.maxStrength = controller.strength;
                     desc.stepUp = controller.stepHeight;
                     desc.layer = controller.layer;
+                    desc.filter = filterOf(world, physics, e);
                     if (const Transform* t = world.try_get<Transform>(e)) desc.position = t->position;
                     CharacterId id = sim.createCharacter(desc);
                     if (!id.valid()) {
@@ -1299,6 +1335,28 @@ namespace projv::runtime {
                     c.previousPosition = c.position = desc.position;
                     physics.byBody[sim.characterBody(id).value] = e;
                     world.emplace<PhysicsCharacter>(e, c);
+                }
+            }
+
+            // 3b'. Collision groups changed, or a name defined that some named: each body's or
+            //      character's filter set again, in NetId-then-entity order, where it changed.
+            {
+                std::vector<Entity> regroup;
+                regroup.swap(physics.regroup);
+                if (physics.groups.version != physics.groups.seen) {
+                    physics.groups.seen = physics.groups.version;
+                    for (Entity e : world.view<CollisionGroups>()) regroup.push_back(e);
+                }
+                std::sort(regroup.begin(), regroup.end(), [&](Entity a, Entity b) { return order(a) < order(b); });
+                regroup.erase(std::unique(regroup.begin(), regroup.end()), regroup.end());
+                for (Entity e : regroup) {
+                    if (!world.valid(e)) continue;
+                    const CollisionFilter f = filterOf(world, physics, e);
+                    if (const PhysicsBody* body = world.try_get<PhysicsBody>(e); body && sim.filter(body->id) != f)
+                        sim.setFilter(body->id, f);
+                    if (const PhysicsCharacter* c = world.try_get<PhysicsCharacter>(e);
+                        c && sim.filter(sim.characterBody(c->id)) != f)
+                        sim.setCharacterFilter(c->id, f);
                 }
             }
 
@@ -1601,7 +1659,7 @@ namespace projv::runtime {
 
         double tidy(float v) { return std::round(double(v) * 1e4) / 1e4; }
 
-        constexpr std::array<const char*, 5> LAYER_NAMES{"static", "moving", "debris", "sensor", "character"};
+        constexpr std::array<const char*, 4> LAYER_NAMES{"static", "moving", "sensor", "character"};
         const char* layerName(PhysicsLayer layer) {
             size_t i = size_t(layer);
             return i < LAYER_NAMES.size() ? LAYER_NAMES[i] : "moving";
@@ -1647,6 +1705,10 @@ namespace projv::runtime {
         registerComponent<StaticCollider>(world);
         registerComponent<CharacterController>(world);
         registerComponent<Joint>(world);
+        registerComponent<CollisionGroups>(world);
+        world.on_construct<CollisionGroups>().connect<&wantRegroup>();
+        world.on_update<CollisionGroups>().connect<&wantRegroup>();
+        world.on_destroy<CollisionGroups>().connect<&wantRegroup>();
         world.on_construct<Joint>().connect<&wantJoint>();
         world.on_destroy<Joint>().connect<&jointGone>();
         world.on_destroy<PhysicsJoint>().connect<&jointGone>();
@@ -1879,6 +1941,31 @@ namespace projv::runtime {
         return index;
     }
 
+    uint32_t definePhysicsGroup(World& world, const std::string& name) {
+        PhysicsRuntime& physics = runtimeOf(world);
+        if (name.empty() || name.size() > 64) {
+            core::warn("physics: refused a collision group named '{}': names are 1 to 64 characters", name);
+            return 0;
+        }
+        if (auto found = physics.groups.bit.find(name); found != physics.groups.bit.end()) return found->second;
+        if (physics.groups.names.size() >= MAX_COLLISION_GROUPS) {
+            core::warn("physics: refused collision group '{}': all {} are taken", name, MAX_COLLISION_GROUPS);
+            return 0;
+        }
+        const uint32_t bit = 1u << physics.groups.names.size();
+        physics.groups.names.push_back(name);
+        physics.groups.bit[name] = bit;
+        physics.groups.version++;
+        physics.groups.warned.erase(name);
+        return bit;
+    }
+
+    uint32_t physicsGroup(const World& world, const std::string& name) {
+        const PhysicsRuntime& physics = world.ctx().get<PhysicsRuntime>();
+        auto found = physics.groups.bit.find(name);
+        return found != physics.groups.bit.end() ? found->second : 0;
+    }
+
     uint16_t physicsMaterialIndex(const World& world, const std::string& name) {
         const PhysicsRuntime& physics = world.ctx().get<PhysicsRuntime>();
         auto found = physics.library.index.find(name);
@@ -1949,12 +2036,20 @@ namespace projv::runtime {
             h.add(uint8_t(m.anchor));
             for (char c : m.fracture) h.add(c);
         }
+        // The group names, in bit order: peers must agree on what each bit means.
+        for (const std::string& name : physics.groups.names) {
+            for (char c : name) h.add(c);
+            h.add(uint8_t(0));
+        }
         for (auto [entity, net] : bodiesInOrder(world)) {
-            BodyState s = sim.bodyState(world.get<PhysicsBody>(entity).id);
+            const BodyId id = world.get<PhysicsBody>(entity).id;
+            BodyState s = sim.bodyState(id);
             h.add(net);
             if (net == 0) h.add(entity);
             h.add(s.position); h.add(s.rotation); h.add(s.linearVelocity); h.add(s.angularVelocity);
             h.add(uint8_t(s.awake));
+            const CollisionFilter f = sim.filter(id);
+            h.add(f.groups); h.add(f.ignores); h.add(f.family);
         }
         return h.value;
     }
@@ -2095,9 +2190,10 @@ namespace projv::runtime {
             return out;
         }
 
-        QueryFilter filterFor(const World& world, uint32_t layers, Entity ignore) {
+        QueryFilter filterFor(const World& world, uint32_t layers, Entity ignore, uint32_t skipGroups) {
             QueryFilter f;
             f.layers = layers;
+            f.skipGroups = skipGroups;
             if (ignore != NullEntity && world.valid(ignore))
                 if (const PhysicsBody* b = world.try_get<PhysicsBody>(ignore)) f.ignore = b->id;
             return f;
@@ -2122,23 +2218,23 @@ namespace projv::runtime {
     }
 
     std::optional<QueryHit> castRay(const World& world, core::vec3 origin, core::vec3 direction, float maxDistance,
-                                    uint32_t layers, Entity ignore) {
-        return resolve(world, physicsWorld(world).castRay(origin, direction, maxDistance, filterFor(world, layers, ignore)));
+                                    uint32_t layers, Entity ignore, uint32_t skipGroups) {
+        return resolve(world, physicsWorld(world).castRay(origin, direction, maxDistance, filterFor(world, layers, ignore, skipGroups)));
     }
 
     std::optional<QueryHit> castSphere(const World& world, core::vec3 origin, float radius, core::vec3 direction,
-                                       float maxDistance, uint32_t layers, Entity ignore) {
+                                       float maxDistance, uint32_t layers, Entity ignore, uint32_t skipGroups) {
         return resolve(world, physicsWorld(world).castSphere(origin, radius, direction, maxDistance,
-                                                             filterFor(world, layers, ignore)));
+                                                             filterFor(world, layers, ignore, skipGroups)));
     }
 
-    std::vector<Entity> overlapSphere(const World& world, core::vec3 centre, float radius, uint32_t layers, Entity ignore) {
-        return entitiesOf(world, physicsWorld(world).overlapSphere(centre, radius, filterFor(world, layers, ignore)));
+    std::vector<Entity> overlapSphere(const World& world, core::vec3 centre, float radius, uint32_t layers, Entity ignore, uint32_t skipGroups) {
+        return entitiesOf(world, physicsWorld(world).overlapSphere(centre, radius, filterFor(world, layers, ignore, skipGroups)));
     }
 
     std::vector<Entity> overlapBox(const World& world, core::vec3 centre, core::vec3 halfExtents, core::quat rotation,
-                                   uint32_t layers, Entity ignore) {
-        return entitiesOf(world, physicsWorld(world).overlapBox(centre, halfExtents, rotation, filterFor(world, layers, ignore)));
+                                   uint32_t layers, Entity ignore, uint32_t skipGroups) {
+        return entitiesOf(world, physicsWorld(world).overlapBox(centre, halfExtents, rotation, filterFor(world, layers, ignore, skipGroups)));
     }
 
     BodyState bodyPose(const World& world, Entity entity) {
@@ -2283,6 +2379,32 @@ std::optional<projv::CharacterController> projv::runtime::ComponentTraits<projv:
         c.layer = *layer;
     }
     return c;
+}
+
+nlohmann::json projv::runtime::ComponentTraits<projv::CollisionGroups>::save(const projv::CollisionGroups& g) {
+    nlohmann::json j = nlohmann::json::object();
+    if (!g.groups.empty()) j["groups"] = g.groups;
+    if (!g.ignores.empty()) j["ignores"] = g.ignores;
+    if (g.family) j["family"] = g.family;
+    return j;
+}
+
+std::optional<projv::CollisionGroups> projv::runtime::ComponentTraits<projv::CollisionGroups>::load(const nlohmann::json& j,
+                                                                                                  uint32_t) {
+    projv::CollisionGroups g;
+    auto names = [&](const char* key, std::vector<std::string>& out) {
+        if (!j.contains(key)) return true;
+        const nlohmann::json& list = j.at(key);
+        if (!list.is_array()) return false;
+        for (const nlohmann::json& name : list) {
+            if (!name.is_string()) return false;
+            out.push_back(name.get<std::string>());
+        }
+        return true;
+    };
+    if (!names("groups", g.groups) || !names("ignores", g.ignores)) return std::nullopt;
+    g.family = j.value("family", 0u);
+    return g;
 }
 
 nlohmann::json projv::runtime::ComponentTraits<projv::Joint>::save(const projv::Joint& j) {

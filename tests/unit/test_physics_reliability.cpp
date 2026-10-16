@@ -113,7 +113,7 @@ TEST_CASE("tunnel: a thousand one-voxel balls at 200 m/s do not pass a one-voxel
     for (int i = 0; i < 1000; i++) {
         BodyDesc ball;
         ball.shape = PhysicsShape::sphere(0.05f);   // one voxel across
-        ball.layer = PhysicsLayer::Debris;          // they pass through each other, not the wall
+        ball.filter.family = 1;                     // they pass through each other, not the wall
         ball.position = vec3(across(random), across(random), back(random));
         ball.linearVelocity = vec3(0, 0, 200);      // 3.3 m a step: 33 times its own size
         ball.gravityFactor = 0.0f;

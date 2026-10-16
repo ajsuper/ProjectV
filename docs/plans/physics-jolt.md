@@ -338,11 +338,19 @@ shows and tests assert on:
   "physics.static": { "v": 1, "shape": "voxels", "friction": 0.8, "restitution": 0.1,
                       "layer": "static", "splits": false }
   ```
-- **Layers:** a short fixed list (`static`, `moving`, `debris`, `sensor`, `character`) with a
-  collision matrix in code; debris ignores debris. Authored by name. The matrix is the coarse
-  broadphase cut, not a game's filtering: a fixed matrix is policy (it decided that shards could
-  not collide with each other, which a game may not want), so finer filtering is data -- collision
-  groups, Roadmap R4.
+- **Layers:** a short fixed list (`static`, `moving`, `sensor`, `character`) with a collision
+  matrix in code. Authored by name. The matrix is the coarse cut, not a game's filtering: a fixed
+  matrix is policy. It once had a `debris` layer that ignored itself, which decided that shards could
+  not collide with each other; that went with R4 (2026-10-15), and finer filtering is data:
+- **Collision groups** (R4): `physics.groups` on an entity with a body or character:
+
+  ```json
+  "physics.groups": { "v": 1, "groups": ["shards"], "ignores": ["player"], "family": 12 }
+  ```
+
+  Group names are a game's, defined in order (`definePhysicsGroup`, 32 at most), so peers that
+  define the same names agree on the bits. Two bodies pass through each other when either ignores a
+  group the other is in, or both have the same nonzero family (the shards of one break, a ragdoll).
 
 ## Queries
 
@@ -696,7 +704,9 @@ From a review of what games would use this for and where it serves or blocks the
 game that wants no destruction gets none; one that wants its own rules can build them on public
 calls. What still gets in a game's way, rather than merely not being built: the fixed layer
 matrix, events that arrive a step after what they report, fracture choices still fixed in the
-engine, and rollback that cannot cross a break.
+engine, and rollback that cannot cross a break. (2026-10-15: the matrix is now only the coarse cut
+-- collision groups, R4; events that shape what a step made arrive in it, R5; rollback across a
+break is not wanted, D9.)
 
 Ordered by the priorities: what breaks reliability first, then networking, then what blocks a game
 (D8), then what is merely missing. Each item says what the engine provides (mechanism) and what
@@ -755,10 +765,25 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
 
 **What gets in a game's way** (D8)
 
-- **R4. Collision groups as data.** A body names groups (strings, like materials) and which groups
-  it ignores; saved with RigidBody/StaticCollider, compared by NetId order so peers agree. Layers
-  stay the coarse cut. A strike can put its shards in a group of their own. Default: no groups,
-  nothing changes. Replaces the need for blanket rules like "debris ignores debris".
+- **R4. Collision groups as data.** *Done 2026-10-15.* `runtime::CollisionFilter {groups, ignores,
+  family}` on every body (`BodyDesc::filter`) and character (`CharacterDesc::filter`, its inner body
+  too), checked in the Jolt group filter that already kept jointed pairs apart (now
+  `CollisionRules`, by body index). Two bodies pass through each other when either ignores a group
+  the other is in, or they share a nonzero family. Families are what a game uses for one break's
+  shards, a ragdoll or a vehicle, since 32 named groups cannot give every break its own (the user's
+  call: groups and families both, 32 groups). `setFilter` / `setCharacterFilter` change one between
+  steps, waking it and what touches it, with no rebuild. Queries skip groups (`QueryFilter::skipGroups`,
+  the `skipGroups` argument of `runtime::castRay` and the rest). Filters are in the recording (log
+  version 6) and the snapshot (version 7); the golden recording's step hashes were the same before
+  and after, all 231 of them. ECS side: `CollisionGroups {groups, ignores, family}` (names),
+  `physics.groups` in entities.json, applies to RigidBody, StaticCollider and CharacterController
+  alike; changing or removing it sets the filter at the next step, in NetId order; names not defined
+  yet are left out (warned once) and taken on when defined. Pieces copy their body's
+  CollisionGroups, and a BodyBroken handler can change them before their bodies exist. Group names
+  and each body's filter are in `physicsStateHash`. The `debris` layer is gone (the user's call):
+  no example used it, and a file that names it is refused. Nothing in the engine sets a group or a
+  family by itself; demos and games that want them set them (the user's call). Tests:
+  `test_physics_groups.cpp`.
 - **R5. Shaping what a step made, in that step.** *Folded into "One rule set", item 4; done.* `BodyFractured` and `BodySplit` delivered at
   once, as DebrisCleared is, before the new bodies are made, so a handler can change their
   RigidBody (layer, group, damping) and set the velocity they start with (setVelocity on a body
