@@ -29,6 +29,7 @@ add_executable(projv_unit_tests
     test_physics_character.cpp
     test_physics_edits.cpp
     test_physics_fracture.cpp
+    test_physics_golden.cpp
     test_physics_joints.cpp
     test_physics_materials.cpp
     test_physics_net.cpp
@@ -43,6 +44,8 @@ add_executable(projv_unit_tests
     test_voxel_edits.cpp
 )
 target_link_libraries(projv_unit_tests PRIVATE projectV doctest::doctest)
+# Committed test data: the golden physics recording (test_physics_golden.cpp).
+target_compile_definitions(projv_unit_tests PRIVATE PROJV_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 target_compile_options(projv_unit_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra>
 )

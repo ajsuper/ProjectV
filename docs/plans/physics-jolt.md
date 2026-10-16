@@ -19,6 +19,7 @@ their way.
 | D6 | Server-authoritative networking is the target; the sim is deterministic and restorable anyway | Lockstep turns every determinism bug into a permanent split; determinism still buys small corrections, replays and rollback |
 | D7 | Voxel geometry collides as volumes (boxes), never as triangle meshes | A body inside a volume is pushed out; inside a mesh it falls through |
 | D8 | **Mechanism in the engine, policy in systems** (2026-10-15). The engine does what only it can (simulate, cut, report, guard) and asks for every choice a game would make differently; those choices are data on components and materials, or systems a game installs, leaves out or replaces -- built only on public calls. Behaviour is asked for, never assumed (D3, D4 are cases of it) | A game the engine's rules do not fit must still be buildable on it, without forking it. A rule written into the step is one every game inherits |
+| D9 | **No world rollback** (2026-10-15). Destruction is the server's; clients receive breaks and never predict them, and predict only what is theirs (a character). Determinism stays -- replays, desync checks, small corrections -- and is tested across builds | Rolling the world back across a break means undoing voxel edits, pieces and Jolt body ids: several sessions, then a tax on every feature that makes or removes things, for a netcode (GGPO-style) that destruction-heavy worlds cannot afford to re-simulate anyway. Server-authoritative is the target already (D6) |
 
 
 ## Priorities, in order
@@ -734,11 +735,23 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
   a thousand of demo 1's 2,700 crates awake at its check -- and the user's call is that oversleeping
   is the lesser fault. So a slow start still sleeps by default; a game that needs slow slides to
   finish lowers sleepSpeed, and rest damping no longer undoes that. Recording log version 5.
-- **R3. Rollback across a break.** `savePhysics` needs the same bodies to exist at restore, and a
-  fracture, split or debris clearing changes them, so a rollback game with destruction cannot
-  rewind past one (D6). Mechanism: a snapshot that records body creation and removal since it was
-  taken, so restore can undo them -- or a documented alternative a game can use. And the
-  cross-machine determinism test (CROSS_PLATFORM_DETERMINISTIC, two builds, one recording).
+- **R3. Rollback across a break.** *Decided 2026-10-15: not built (D9).* A proposal for it --
+  engine-chosen Jolt body ids (CreateBodyWithID), voxels kept by pinning their blobs, and a journal
+  of what physics made and destroyed -- was weighed against what rollback buys: GGPO-style netcode,
+  which a destruction-heavy world cannot afford to re-simulate, while prediction of a client's own
+  character needs none of it and replays already work from a recording. The user's call: too big
+  for its benefit; a future change if a game needs it. `savePhysics` says so in its comment.
+  *Built instead, the cross-build determinism test:* `tests/unit/test_physics_golden.cpp` and
+  `tests/unit/data/physics_golden.rec` (18 KB, 231 steps), one session -- a stack, a wall broken on
+  impact by a boulder and again by a strike, what support drops, a motored hinge, a walking
+  character -- recorded once and committed. Every build that runs the tests must replay it bit for
+  bit; a second case runs the script again and must make the same recording byte for byte. Checked
+  on three builds: dev (RelWithDebInfo, Jolt asserts on), release (asserts off), and a release build
+  of Jolt with no AVX, AVX2, SSE4, LZCNT, TZCNT or F16C. Only GCC 15 on x86-64 here: other
+  compilers, ARM and Windows are what CI should add. When the simulation is meant to change (a Jolt
+  upgrade, a new rule in the step), regenerate it: `PROJV_WRITE_GOLDEN=1 build/bin/projv_unit_tests
+  -tc="golden*"`, and commit the file. Found on the way: an unbounded `-j` build crashed GCC itself
+  (internal compiler errors, "likely a hardware or OS problem"); -j8 built cleanly.
 
 **What gets in a game's way** (D8)
 

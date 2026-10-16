@@ -494,7 +494,10 @@ namespace projv::runtime {
     uint64_t physicsStateHash(const World& world);
     // Everything the physics runtime would need to rewind to now: the simulation, each body's
     // presentation poses, and the commands waiting for later steps. Restore needs the same bodies
-    // (by NetId, or entity for those without), and changes nothing when it refuses.
+    // (by NetId, or entity for those without), and changes nothing when it refuses. So it does not
+    // rewind across a break, an edit that splits, or anything else that makes or removes bodies --
+    // by design (the physics plan, D9): the world is the server's, and a client predicts and
+    // rewinds only what is its own.
     std::vector<uint8_t> savePhysics(const World& world);
     bool restorePhysics(World& world, const std::vector<uint8_t>& snapshot);
 

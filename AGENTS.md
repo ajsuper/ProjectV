@@ -96,6 +96,13 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   is the core. It must stay deterministic and restorable: no clocks, thread counts or unordered
   iteration in anything that feeds a step, and a Jolt upgrade is deliberate, with the physics
   tests run. Plan: `docs/plans/physics-jolt.md`.
+- **The golden recording** (`tests/unit/data/physics_golden.rec`, `test_physics_golden.cpp`) is one
+  committed session every build must replay bit for bit. A change to what the simulation does --
+  a Jolt upgrade, a new rule in the step, a new log field -- fails it on purpose: find out why, and
+  when the change is meant, regenerate it with `PROJV_WRITE_GOLDEN=1 build/bin/projv_unit_tests
+  -tc="golden*"` and commit the file with the change.
+- **No world rollback** (plan, D9): `savePhysics` does not rewind across anything that makes or
+  removes bodies, by design. Don't build toward it without asking.
 - **What crosses machines is a `NetId`** (`runtime/net.h`), never an Entity, handle, ref or body
   id. Physics makes a step's new bodies in NetId order and applies commands in
   (tick, issuer, sequence) order, so nothing that feeds a step may depend on registry or arrival
