@@ -225,6 +225,7 @@ namespace projv::utils {
             scene.looseChunkCount = uint32_t(scene.looseChunks.size());
         }
         byChunk_[block.chunk] = id;
+        blockResidencyCounter++;
         return true;
     }
 
@@ -280,6 +281,7 @@ namespace projv::utils {
         chunk.componentHandle = INVALID_COMPONENT_HANDLE;
         chunk.headerDirty = true;
         if (scene.slots.enabled) scene.slots.chunks.push_back(handle);
+        blockResidencyCounter++;
     }
 
     void SceneBlocks::loadAll(Scene& scene) {

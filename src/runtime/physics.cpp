@@ -15,10 +15,12 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include "core/log.h"
+#include "runtime/loading.h"
 #include "utils/loose_bvh.h"
 #include "utils/scene_query.h"
 #include "utils/picking.h"
 #include "utils/editing.h"
+#include "utils/voxel_math.h"
 
 namespace projv::runtime {
     namespace {
@@ -49,6 +51,11 @@ namespace projv::runtime {
             bool                          writingTransforms = false;
             std::set<Entity>              warnedAboutTransform;
             uint64_t                      seenStamp = 0;    // latestBlobContentStamp at the last check
+            uint64_t                      seenResidency = 0;   // blockResidencyCounter at the last check
+            // Rebuilt because blocks came or went (world loading): with no voxels left loaded, such a
+            // body waits, without complaint, for them to come back (waitingForBlocks).
+            std::set<Entity>              streamed;
+            std::set<Entity>              waitingForBlocks;
             // Motion a remade body keeps (a shape rebuilt under it, a piece cut from it).
             struct Motion { core::vec3 linear, angular; };
             std::map<Entity, Motion>      carried;
@@ -524,6 +531,21 @@ namespace projv::runtime {
 
         // ---- The FixedUpdate system ----------------------------------------------------------------
 
+        // Whether the entity's linked component, or anything under it, has blocks not loaded.
+        bool unloadedUnder(const World& world, Entity entity) {
+            const Scene* scene = world.ctx().find<Scene>();
+            const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
+            if (!scene || !link || !utils::isComponentAlive(*scene, link->ref())) return false;
+            std::vector<ComponentHandle> stack{link->handle};
+            while (!stack.empty()) {
+                ComponentHandle h = stack.back();
+                stack.pop_back();
+                if (utils::hasUnloadedBlocks(*scene, h)) return true;
+                for (ComponentHandle child : scene->components[h].children) stack.push_back(child);
+            }
+            return false;
+        }
+
         bool wantsBody(const World& world, Entity entity) {
             return world.valid(entity) && world.any_of<RigidBody, StaticCollider>(entity);
         }
@@ -886,6 +908,11 @@ namespace projv::runtime {
             if (rest == Rest::Kept && !strike) return;
             const ComponentHandle h = voxelComponentOf(world, entity);
             if (h == INVALID_COMPONENT_HANDLE) return;
+            // Part of it not loaded (world loading): what is not here cannot be weighed, so a moving
+            // body keeps all it has, and a static one counts what is not loaded as holding it up.
+            const bool partlyLoaded = utils::hasUnloadedBlocks(scene, h);
+            if (partlyLoaded && rest == Rest::Largest) rest = Rest::Kept;
+            if (rest == Rest::Kept && !strike) return;
             const VoxelSource source = voxelSourceOf(scene, h);
             if (source.parts.empty() || !(source.voxel > 0.0f)) return;
             const ComponentHandle owner = paletteOwner(scene, scene.chunks[source.parts.front().chunk]);
@@ -1004,6 +1031,34 @@ namespace projv::runtime {
                             held[i] = 1;
                             stack.push_back(i);
                         }
+                    // A face against a cell that is not loaded: whatever is there may hold it, so it is held.
+                    if (partlyLoaded && scene.components[h].kind == ComponentKind::Grid) {
+                        const SceneGrid& grid = scene.grids[size_t(scene.components[h].gridIndex)];
+                        std::set<std::tuple<int, int, int>> unloaded;
+                        for (size_t lin = 0; lin < grid.cellToChunk.size(); lin++) {
+                            if (grid.cellToChunk[lin] != CELL_NOT_LOADED) continue;
+                            int x = int(lin % size_t(grid.dims.x)), y = int((lin / size_t(grid.dims.x)) % size_t(grid.dims.y));
+                            int z = int(lin / (size_t(grid.dims.x) * size_t(grid.dims.y)));
+                            core::ivec3 cell = grid.originCellCoord + core::ivec3(x, y, z);
+                            unloaded.insert({cell.x, cell.y, cell.z});
+                        }
+                        const int res = int(source.parts.front().resolution);
+                        auto cellOf = [res](core::ivec3 p) {
+                            return core::ivec3(utils::floorDiv(p.x, res), utils::floorDiv(p.y, res), utils::floorDiv(p.z, res));
+                        };
+                        for (size_t i = 0; i < voxels.size() && !unloaded.empty(); i++) {
+                            if (group[i] != 0 || held[i]) continue;
+                            const core::ivec3 own = cellOf(voxels[i].position);
+                            for (core::ivec3 f : faces) {
+                                core::ivec3 n = cellOf(voxels[i].position + f);
+                                if (n == own || !unloaded.count({n.x, n.y, n.z})) continue;
+                                held[i] = 1;
+                                stack.push_back(i);
+                                break;
+                            }
+                        }
+                        anchorRule = anchorRule || !unloaded.empty();
+                    }
                     if (stack.empty() && !anchorRule) {
                         // Nothing could ever hold it up, so everything would fall at its first edit: a
                         // collider set up wrong, not a collapse. (One with a rule whose anchors are all cut
@@ -1312,12 +1367,40 @@ namespace projv::runtime {
             // 2b. Bodies whose voxels changed or that were struck: the island pass (what came away
             //     becomes bodies), then a rebuild. Only looked for when some blob's content changed
             //     since the last step, anywhere, or something was struck. In NetId-then-entity order.
-            if (scene && (latestBlobContentStamp() != physics.seenStamp || !physics.breaking.empty())) {
+            if (scene && (latestBlobContentStamp() != physics.seenStamp || blockResidencyCounter != physics.seenResidency ||
+                          !physics.breaking.empty())) {
+                // Waiting for their blocks: back in line when some have loaded.
+                for (auto it = physics.waitingForBlocks.begin(); it != physics.waitingForBlocks.end();) {
+                    Entity e = *it;
+                    const VoxelComponent* link = world.valid(e) ? world.try_get<VoxelComponent>(e) : nullptr;
+                    if (!link || !wantsBody(world, e) || !utils::isComponentAlive(*scene, link->ref())) {
+                        it = physics.waitingForBlocks.erase(it);
+                        continue;
+                    }
+                    if (!sourcesOf(*scene, link->handle).empty()) {
+                        physics.pending.push_back(e);
+                        physics.streamed.insert(e);
+                        it = physics.waitingForBlocks.erase(it);
+                        continue;
+                    }
+                    ++it;
+                }
                 std::vector<std::pair<Entity, uint32_t>> changed;
+                std::set<Entity> loadedOnly;
                 for (auto [entity, body] : world.view<PhysicsBody>().each()) {
                     const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
                     if (!link || !utils::isComponentAlive(*scene, link->ref())) continue;
-                    if (!physics.breaking.count(entity) && sourcesOf(*scene, link->handle) == body.sources) continue;
+                    const bool struck = physics.breaking.count(entity) != 0;
+                    Sources now = sourcesOf(*scene, link->handle);
+                    if (!struck && now == body.sources) continue;
+                    // Chunks only came or went (world loading), none changed: a rebuild, not an edit.
+                    if (!struck) {
+                        std::map<ChunkHandle, uint64_t> before(body.sources.begin(), body.sources.end());
+                        bool edited = false;
+                        for (const auto& [chunk, stamp] : now)
+                            if (auto it = before.find(chunk); it != before.end() && it->second != stamp) edited = true;
+                        if (!edited) loadedOnly.insert(entity);
+                    }
                     const NetId* id = world.try_get<NetId>(entity);
                     changed.push_back({entity, id ? id->value : 0});
                 }
@@ -1328,10 +1411,21 @@ namespace projv::runtime {
                 breaking.swap(physics.breaking);
                 for (auto [entity, net] : changed) {
                     if (!world.valid(entity) || !world.all_of<PhysicsBody>(entity)) continue;   // a handler destroyed it
+                    if (loadedOnly.count(entity)) {
+                        const PhysicsBody& body = world.get<PhysicsBody>(entity);
+                        if (body.motion == MotionType::Dynamic && !physics.carried.count(entity)) {
+                            BodyState state = sim.bodyState(body.id);
+                            physics.carried[entity] = {state.linearVelocity, state.angularVelocity};
+                        }
+                        physics.rebuild.push_back(entity);
+                        physics.streamed.insert(entity);
+                        continue;
+                    }
                     auto strike = breaking.find(entity);
                     broke(entity, strike != breaking.end() ? &strike->second : nullptr);
                 }
                 physics.seenStamp = latestBlobContentStamp();
+                physics.seenResidency = blockResidencyCounter;
                 clearPieces(world, physics);
             }
 
@@ -1412,6 +1506,11 @@ namespace projv::runtime {
                 if (auto asked = physics.requestedAt.find(e); asked != physics.requestedAt.end())
                     for (const auto& [chunk, stamp] : described.sources) editedSince = editedSince || stamp > asked->second;
                 physics.requestedAt.erase(e);
+                if (!id.valid() && described.noVoxels && (physics.streamed.count(e) || unloadedUnder(world, e))) {
+                    core::trace("physics: entity {}'s voxels are not loaded; its body waits for them", static_cast<uint32_t>(e));
+                    physics.waitingForBlocks.insert(e);
+                    continue;
+                }
                 if (!id.valid() && described.noVoxels && (physics.reshaped.count(e) || editedSince)) {
                     core::trace("physics: entity {}'s voxels are all gone; it has no body now", static_cast<uint32_t>(e));
                     send(world, BodyEmptied{e});
@@ -1436,6 +1535,7 @@ namespace projv::runtime {
             }
 
             physics.reshaped.clear();
+            physics.streamed.clear();
 
             // 3b. Characters: gone ones removed, new ones made, in NetId-then-entity order.
             for (CharacterId id : physics.doomedCharacters) sim.destroyCharacter(id);
@@ -1513,6 +1613,35 @@ namespace projv::runtime {
                     if (const PhysicsBody* body = world.try_get<PhysicsBody>(e)) sim.setReportContacts(body->id, want);
                     if (const PhysicsCharacter* c = world.try_get<PhysicsCharacter>(e))
                         sim.setReportContacts(sim.characterBody(c->id), want);
+                }
+            }
+
+            // 3b'''. World loading: a dynamic body whose entity is Kept is frozen -- solid and still --
+            //       its motion kept in FrozenMotion; Active (or not taking part) thaws it and gives the
+            //       motion back. In NetId-then-entity order.
+            {
+                std::vector<Entity> moving;
+                for (auto [e, body] : world.view<PhysicsBody>().each())
+                    if (body.motion == MotionType::Dynamic) moving.push_back(e);
+                std::sort(moving.begin(), moving.end(), [&](Entity a, Entity b) { return order(a) < order(b); });
+                for (Entity e : moving) {
+                    const BodyId id = world.get<PhysicsBody>(e).id;
+                    const LoadState* load = world.try_get<LoadState>(e);
+                    const bool want = load && load->presence == utils::Presence::Kept;
+                    const bool is = sim.frozen(id);
+                    if (want && !is) {
+                        if (!world.all_of<FrozenMotion>(e)) {
+                            BodyState state = sim.bodyState(id);
+                            world.emplace<FrozenMotion>(e, FrozenMotion{state.linearVelocity, state.angularVelocity});
+                        }
+                        sim.setFrozen(id, true);
+                    } else if (!want) {
+                        if (is) sim.setFrozen(id, false);
+                        if (const FrozenMotion* motion = world.try_get<FrozenMotion>(e)) {
+                            sim.setVelocity(id, motion->linear, motion->angular);
+                            world.remove<FrozenMotion>(e);
+                        }
+                    }
                 }
             }
 
@@ -1879,6 +2008,7 @@ namespace projv::runtime {
                            "{} islands, least impact break {} shard sizes",
                            got.searchVoxels, got.maxReachVoxels, got.maxShards, got.maxIslands, got.minImpactBreak);
         }
+        physics.seenResidency = blockResidencyCounter;
         physics.seenStamp = latestBlobContentStamp();
 
         installNetIds(world);
@@ -1892,6 +2022,7 @@ namespace projv::runtime {
         registerComponent<Joint>(world);
         registerComponent<CollisionGroups>(world);
         registerComponent<ContactReports>(world);
+        registerComponent<FrozenMotion>(world);
         world.on_construct<ContactReports>().connect<&wantReport>();
         world.on_destroy<ContactReports>().connect<&wantReport>();
         world.on_construct<CollisionGroups>().connect<&wantRegroup>();

@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include "core/log.h"
+#include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
 #include "utils/scene_query.h"
 
@@ -96,6 +97,12 @@ namespace projv::runtime {
                 u.link = link->ref();
                 u.mode = link->mode;
                 u.onUnlink = link->onUnlink;
+            }
+            // A moving body keeps its motion: physics gives FrozenMotion back when it is Active.
+            if (hasBody(world, e) && !world.all_of<FrozenMotion>(e)) {
+                BodyState state = bodyPose(world, e);
+                if (const PhysicsBody* body = world.try_get<PhysicsBody>(e); body && body->motion == MotionType::Dynamic)
+                    world.emplace<FrozenMotion>(e, FrozenMotion{state.linearVelocity, state.angularVelocity});
             }
             u.components = entityComponents(world, e, link == nullptr);
 

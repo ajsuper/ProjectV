@@ -470,6 +470,11 @@ namespace projv{
     // The newest stamp handed out: when it has not moved, no blob's voxels have changed anywhere.
     inline uint64_t latestBlobContentStamp() { return blobContentStampCounter.load(); }
 
+    // Bumped whenever a block is loaded or unloaded (utils/scene_loading.h). A block can come and go
+    // without any blob's content changing -- it shares a blob that stays -- so this is what tells
+    // physics to look at which chunks its bodies are built from.
+    inline std::atomic<uint64_t> blockResidencyCounter{0};
+
     // One unique geometry blob shared across chunk instances. See Scene.geometryPool.
     struct GeometryBlob {
         std::vector<uint32_t> geometry;

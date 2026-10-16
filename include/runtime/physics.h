@@ -209,6 +209,14 @@ namespace projv {
         std::vector<std::string> only;
     };
 
+    // A dynamic body frozen by world loading (its entity's LoadState is Kept, runtime/loading.h): the
+    // motion it had, given back when it is Active again. Made and removed by physics; saved, so an
+    // entity unloaded while frozen -- or moving -- keeps its motion when it comes back.
+    struct FrozenMotion {
+        core::vec3 linear{0.0f};
+        core::vec3 angular{0.0f};
+    };
+
     // The simulation's side of a CharacterController. Made and removed by physics; never saved.
     struct PhysicsCharacter {
         runtime::CharacterId id;
@@ -674,6 +682,21 @@ template<> struct projv::runtime::ComponentTraits<projv::ContactReports> {
     static constexpr uint32_t version = 1;
     static nlohmann::json save(const projv::ContactReports& r);
     static std::optional<projv::ContactReports> load(const nlohmann::json& json, uint32_t fileVersion);
+};
+
+template<> struct projv::runtime::ComponentTraits<projv::FrozenMotion> {
+    static constexpr const char* key = "physics.frozen";
+    static constexpr uint32_t version = 1;
+    static nlohmann::json save(const projv::FrozenMotion& m) {
+        return nlohmann::json{{"linear", {m.linear.x, m.linear.y, m.linear.z}}, {"angular", {m.angular.x, m.angular.y, m.angular.z}}};
+    }
+    static std::optional<projv::FrozenMotion> load(const nlohmann::json& j, uint32_t) {
+        auto vec = [&](const char* key) {
+            const nlohmann::json& v = j.at(key);
+            return projv::core::vec3(v.at(0).get<float>(), v.at(1).get<float>(), v.at(2).get<float>());
+        };
+        return projv::FrozenMotion{vec("linear"), vec("angular")};
+    }
 };
 
 template<> struct projv::runtime::ComponentTraits<projv::StaticCollider> {

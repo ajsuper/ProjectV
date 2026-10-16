@@ -362,6 +362,10 @@ shows and tests assert on:
   "physics.static":   { "v": 1, "layer": "sensor", "senses": ["moving", "character"] }
   ```
 
+- `physics.frozen` (`FrozenMotion {linear, angular}`): made and removed by physics while world
+  loading holds a dynamic body Kept (`PhysicsWorld::setFrozen`); saved, so an unloaded body keeps
+  its motion. See world-loading.md, L3.
+
 ## Queries
 
 `runtime::castRay`, `castShape`, `overlap`:

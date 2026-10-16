@@ -42,6 +42,7 @@
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
 #include "runtime/loading.h"
+#include "runtime/physics.h"
 #include "utils/compose_io.h"
 #include "utils/material.h"
 #include "utils/voxel_management.h"
@@ -354,6 +355,39 @@ int headlessCheck() {
                 loader.blocks().size(), peak / 1048576.0, whole / 1048576.0, 100.0 * double(peak) / double(whole),
                 worstUpdateMs, seconds);
     if (double(peak) > 0.5 * double(whole)) failed = true;
+
+    // The same course with physics: the terrain one static collider, rebuilt as its blocks come and
+    // go. What a frame costs then -- loader, rebuilds and the step together.
+    {
+        projv::Application app;
+        double now = 0.0;
+        app.clock = [&] { return now; };
+        projv::runtime::WorldLoadingConfig config;
+        config.policy = projv::utils::loadNear(96.0f, 192.0f);
+        if (!projv::runtime::openWorld(app, folder.string(), config)) return 1;
+        projv::runtime::installPhysics(app);
+        projv::Entity ground = projv::runtime::spawnComponent(app.world, 0);
+        app.world.emplace<projv::StaticCollider>(ground);
+        app.runStartup();
+        app.runFrame();
+        double worst = 0.0, worstAfter = 0.0, total = 0.0;
+        int frames = 60 * 25;
+        for (int frame = 0; frame < frames; frame++) {
+            projv::runtime::setViewers(app.world, {{coursePoint(float(frame) / 60.0f), 0}});
+            now += 1.0 / 60.0;
+            auto t0 = std::chrono::steady_clock::now();
+            app.runFrame();
+            double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            worst = std::max(worst, ms);
+            if (frame >= 120) worstAfter = std::max(worstAfter, ms);   // after the first loads around the start
+            total += ms;
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+        std::printf("WORLDTEST: with physics: %.2f ms a frame on average, %.2f ms at worst (%.2f ms after the first "
+                    "two seconds); the terrain %s a body\n",
+                    total / frames, worst, worstAfter, projv::runtime::hasBody(app.world, ground) ? "has" : "has no");
+        if (!projv::runtime::hasBody(app.world, ground)) failed = true;
+    }
     std::printf("WORLDTEST: %s\n", failed ? "FAIL" : "PASS");
     return failed ? 1 : 0;
 }

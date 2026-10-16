@@ -437,7 +437,7 @@ namespace projv::runtime {
         // Snapshot layout: a header that lets restoreState check, before touching anything, that the
         // snapshot is one and fits this world; then Jolt's own bytes.
         constexpr uint32_t SNAPSHOT_MAGIC = 0x50564a50u;   // "PJVP"
-        constexpr uint32_t SNAPSHOT_VERSION = 8;   // 2: rest damping state per body; 3: characters; 4: joints; 5: motor modes; 6: rest peak speed; 7: collision filters; 8: contact reports
+        constexpr uint32_t SNAPSHOT_VERSION = 9;   // 2: rest damping state per body; 3: characters; 4: joints; 5: motor modes; 6: rest peak speed; 7: collision filters; 8: contact reports; 9: frozen bodies
 
         template <typename T> void put(std::vector<uint8_t>& out, const T& v) {
             const auto* p = reinterpret_cast<const uint8_t*>(&v);
@@ -530,12 +530,12 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 8;   // 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body
+        constexpr uint32_t LOG_VERSION = 10;   // 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body (written as 8 by mistake until 10); 10: frozen bodies
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
             Gravity, Step, Restore, CreateCharacter, DestroyCharacter, CharacterInput, CharacterPosition,
-            CreateJoint, DestroyJoint, JointMotor, SetMaterial, SetFilter, CharacterFilter, ReportContacts
+            CreateJoint, DestroyJoint, JointMotor, SetMaterial, SetFilter, CharacterFilter, ReportContacts, Freeze
         };
 
         void writeSettings(std::vector<uint8_t>& out, const PhysicsSettings& s) {
@@ -772,6 +772,7 @@ namespace projv::runtime {
         // `dormant` once a body of the pair has gone to sleep and Jolt has dropped their contact --
         // still touching, until a step that both are awake in does not find them touching.
         std::vector<uint8_t>                  reporting;
+        std::vector<uint8_t>                  frozen;       // per body index: setFrozen
         struct Touching { bool dormant = false; bool sensor = false; };
         std::map<uint64_t, Touching>          touching;
         std::vector<ContactChange>            contactChanges;   // the last step's, ordered
@@ -824,6 +825,7 @@ namespace projv::runtime {
         impl->contacts.table = &impl->materials;
         impl->reporting.assign(settings.maxBodies, 0);
         impl->blocking.assign(settings.maxBodies, 0);
+        impl->frozen.assign(settings.maxBodies, 0);
         impl->contacts.reporting = &impl->reporting;
         impl->minImpactSpeed = std::isfinite(settings.minImpactSpeed) ? std::max(settings.minImpactSpeed, 0.0f) : 1.0f;
         impl->impactSpeeds.assign(settings.maxBodies, -1.0f);
@@ -931,6 +933,8 @@ namespace projv::runtime {
         // Voxel shapes are many boxes side by side; without this a body sliding across them catches
         // on the seams between neighbours.
         if (containsVoxels(desc.shape)) settings.mEnhancedInternalEdgeRemoval = true;
+        // So it can be frozen (setFrozen): Jolt switches a body to kinematic only when told it may.
+        settings.mAllowDynamicOrKinematic = desc.motion == MotionType::Dynamic;
 
         JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
         JPH::Body* body = bodies.CreateBody(settings);
@@ -940,6 +944,7 @@ namespace projv::runtime {
         impl->rules->setBody(body->GetID().GetIndex(), desc.layer, sensor ? desc.senses : 0u);
         impl->reporting[body->GetID().GetIndex()] = uint8_t((desc.reportContacts ? REPORTS : 0) | (sensor ? SENSOR : 0));
         impl->blocking[body->GetID().GetIndex()] = uint8_t(blocked ? desc.blockedByStatic : KinematicBlocking::None);
+        impl->frozen[body->GetID().GetIndex()] = 0;
         impl->impactSpeeds[body->GetID().GetIndex()] =
             std::isfinite(desc.minImpactSpeed) && desc.minImpactSpeed >= 0.0f ? desc.minImpactSpeed : -1.0f;
         bodies.AddBody(body->GetID(), desc.motion == MotionType::Static ? JPH::EActivation::DontActivate
@@ -979,6 +984,28 @@ namespace projv::runtime {
 
     CollisionFilter PhysicsWorld::filter(BodyId id) const {
         return isAlive(id) ? impl->rules->filter(JPH::BodyID(id.value).GetIndex()) : CollisionFilter{};
+    }
+
+    void PhysicsWorld::setFrozen(BodyId id, bool on) {
+        if (impl->recording) { impl->op(Op::Freeze); put(impl->log, id.value); put(impl->log, uint8_t(on)); }
+        if (!isAlive(id)) return;
+        const JPH::BodyID jid(id.value);
+        uint8_t& flag = impl->frozen[jid.GetIndex()];
+        if (bool(flag) == on) return;
+        JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
+        if (on) {
+            if (bodies.GetMotionType(jid) != JPH::EMotionType::Dynamic) return;
+            bodies.SetLinearAndAngularVelocity(jid, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+            bodies.SetMotionType(jid, JPH::EMotionType::Kinematic, JPH::EActivation::DontActivate);
+            bodies.DeactivateBody(jid);
+        } else {
+            bodies.SetMotionType(jid, JPH::EMotionType::Dynamic, JPH::EActivation::Activate);
+        }
+        flag = on ? 1 : 0;
+    }
+
+    bool PhysicsWorld::frozen(BodyId id) const {
+        return isAlive(id) && impl->frozen[JPH::BodyID(id.value).GetIndex()] != 0;
     }
 
     void PhysicsWorld::setReportContacts(BodyId id, bool on) {
@@ -1029,6 +1056,7 @@ namespace projv::runtime {
         removeJointsOf(id);
         if (!impl->touching.empty()) endContactsOf(id, false);
         impl->reporting[JPH::BodyID(id.value).GetIndex()] = 0;
+        impl->frozen[JPH::BodyID(id.value).GetIndex()] = 0;
         JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
         JPH::BodyID jid(id.value);
         bodies.RemoveBody(jid);
@@ -2004,6 +2032,7 @@ namespace projv::runtime {
             put(out, r.peak);
             writeFilter(out, impl->rules->filter(JPH::BodyID(b).GetIndex()));
             put(out, impl->reporting[JPH::BodyID(b).GetIndex()]);
+            put(out, impl->frozen[JPH::BodyID(b).GetIndex()]);
         }
         put(out, static_cast<uint32_t>(impl->touching.size()));
         for (const auto& [key, t] : impl->touching) { put(out, key); put(out, uint8_t(t.dormant)); put(out, uint8_t(t.sensor)); }
@@ -2058,12 +2087,12 @@ namespace projv::runtime {
         std::vector<uint32_t> saved(count);
         std::vector<Impl::Rest> savedRest(count);
         std::vector<CollisionFilter> savedFilters(count);
-        std::vector<uint8_t> savedReporting(count);
+        std::vector<uint8_t> savedReporting(count), savedFrozen(count);
         for (uint32_t i = 0; i < count; i++)
             if (!get(snapshot, at, saved[i]) || !get(snapshot, at, savedRest[i].position) ||
                 !get(snapshot, at, savedRest[i].rotation) || !get(snapshot, at, savedRest[i].seconds) ||
                 !get(snapshot, at, savedRest[i].peak) || !readFilter(snapshot, at, savedFilters[i]) ||
-                !get(snapshot, at, savedReporting[i])) {
+                !get(snapshot, at, savedReporting[i]) || !get(snapshot, at, savedFrozen[i])) {
                 core::warn("physics: restoreState refused: the snapshot is truncated");
                 return false;
             }
@@ -2153,6 +2182,22 @@ namespace projv::runtime {
             return false;
         }
 
+        // Motion types first: Jolt's snapshot does not hold them, and frozen bodies are kinematic.
+        // Switched without activating, so Jolt's restore decides what is awake.
+        std::vector<uint8_t> frozenBefore(count);
+        auto setMotions = [&](const std::vector<uint8_t>& frozen) {
+            JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
+            for (uint32_t i = 0; i < count; i++) {
+                uint8_t& flag = impl->frozen[JPH::BodyID(saved[i]).GetIndex()];
+                if (flag == frozen[i]) continue;
+                bodies.SetMotionType(JPH::BodyID(saved[i]), frozen[i] ? JPH::EMotionType::Kinematic : JPH::EMotionType::Dynamic,
+                                     JPH::EActivation::DontActivate);
+                flag = frozen[i];
+            }
+        };
+        for (uint32_t i = 0; i < count; i++) frozenBefore[i] = impl->frozen[JPH::BodyID(saved[i]).GetIndex()];
+        setMotions(savedFrozen);
+
         // Keep the current state, so a failure inside Jolt can be undone rather than leaving a
         // half-restored world.
         JPH::StateRecorderImpl backup;
@@ -2163,6 +2208,7 @@ namespace projv::runtime {
         recorder.Rewind();
         if (!impl->system.RestoreState(recorder)) {
             core::error("physics: restoreState: Jolt rejected the snapshot; the previous state is kept");
+            setMotions(frozenBefore);
             backup.Rewind();
             impl->system.RestoreState(backup);
             return false;
@@ -2711,6 +2757,12 @@ namespace projv::runtime {
                     CollisionFilter f;
                     if (!get(in, at, id) || !readFilter(in, at, f)) return truncated();
                     world.setFilter(BodyId{id}, f);
+                    break;
+                }
+                case Op::Freeze: {
+                    uint8_t on = 0;
+                    if (!get(in, at, id) || !get(in, at, on)) return truncated();
+                    world.setFrozen(BodyId{id}, on != 0);
                     break;
                 }
                 case Op::ReportContacts: {

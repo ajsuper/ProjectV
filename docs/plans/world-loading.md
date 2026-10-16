@@ -1,6 +1,6 @@
 # World loading: one rule decides what is loaded
 
-Status: **approved**, 2026-10-16. **L0, L1, L2 done** (2026-10-16). Next: L3. Split out of the networking plan:
+Status: **approved**, 2026-10-16. **L0-L3 done** (2026-10-16): the plan is built. Open: W2 (measured, deferred), the items under L3. Split out of the networking plan:
 loading works without networking, without physics, and without EnTT. The networking plan
 (`networking.md`) builds on it.
 
@@ -199,6 +199,45 @@ runtime/loading.h       entities as units, viewers from components, Presence -> 
   instead. Threaded reads make *when* a block loads depend on timing, so a physics recording across
   streaming does not replay unless `threaded` is off -- the networked client loads what the server
   says, but single-player replays need a rule here.
+
+## L3, done 2026-10-16
+
+- **Kept freezes (W3).** `PhysicsWorld::setFrozen(id, on)` / `frozen(id)`: a dynamic body becomes
+  kinematic with no velocity -- solid, still, not stepped -- and dynamic again at rest. Logged
+  (Op::Freeze; LOG_VERSION 10), in the snapshot (SNAPSHOT_VERSION 9: Jolt's own state has no motion
+  types, so restore sets them first). Dynamic bodies are made with `mAllowDynamicOrKinematic`
+  (the golden session replays unchanged; regenerated for the version only).
+- The runtime (step 3b''') freezes a dynamic body whose entity's LoadState is Kept, keeping its motion
+  in `FrozenMotion` ("physics.frozen", saved); Active thaws it and gives the motion back. An entity
+  unloaded while moving gets a FrozenMotion first, so it comes back moving.
+- **Blocks coming and going rebuild, they do not edit.** A body whose chunks changed only by chunks
+  coming or going (no chunk it had changed stamp) is rebuilt without the island pass.
+  `blockResidencyCounter` (scene.h), bumped by every load and unload, makes the step look even when
+  no blob's content changed (a shared blob). A body with no blocks loaded waits silently and comes
+  back when one loads.
+- **Support over a partly loaded component (W4).** In a splitting static collider, a voxel with a face
+  against a CELL_NOT_LOADED cell is held up; a moving body with unloaded blocks does not split.
+- **W2 measured, deferred.** The example's terrain as one static collider, streamed along the
+  course (`--headless-check`): 1.2 ms a frame on average, 4.5-5.7 ms at worst once past the start
+  (the compound rebuilt over ~250 loaded cells, plus the new cells' shapes). Bodies per block of
+  cells would cut the spikes to the new cells' shapes; worth doing when a game's terrain is bigger
+  than this or the spikes show.
+- Tests (`test_physics_loading.cpp`, headless): a Kept crate frozen exactly in place for 120 steps
+  and sliding on at its speed when Active; a moving crate unloaded and back keeps its motion; a
+  character walks 9 s over a floor streaming under it and never drops below it; a notch in a beam
+  whose pillar is not loaded drops nothing (and does without the rule -- checked), while a cut with
+  everything loaded drops the far part; a frozen body through snapshot, restore and replay.
+
+Found:
+- **Detailed terrain collides as boxes.** The example's 64^3 cells (a 3-voxel shell under a height
+  field) need more than `CollisionParams::pieceBudget` (1024) boxes, so each collides as its content
+  box -- solid to the top of its highest column. Pre-existing (physics A6); terrain wants a bigger
+  budget, a height-field shape, or the contour work. Not changed here.
+- **Loading timing and replays.** With threaded reads, the tick a block (and its body) arrives on
+  depends on the disk. A physics recording made while streaming does not replay unless
+  `LoaderConfig::threaded` is off. Networked clients load what the server says (networking plan N6);
+  a deterministic single-player rule (loads stamped to ticks) is future work.
+- The R8 log format change (minImpactSpeed) shipped as LOG_VERSION 8; now 10.
 
 ## Milestones
 

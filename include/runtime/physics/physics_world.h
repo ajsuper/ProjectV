@@ -531,6 +531,13 @@ namespace projv::runtime {
         void setReportContacts(BodyId id, bool on);
         bool reportsContacts(BodyId id) const;
 
+        // A frozen dynamic body is solid and still: kinematic with no velocity, so nothing moves it
+        // and the solver does not step it (world loading's Kept). Unfrozen, it is dynamic again, at
+        // rest -- give it back its motion with setVelocity. Static and kinematic bodies, and stale
+        // ids, are ignored.
+        void setFrozen(BodyId id, bool frozen);
+        bool frozen(BodyId id) const;
+
         // Wakes every body whose bounds touch this one's: what an edit to its shape must do, so
         // bodies resting on (or now inside) the old shape notice the new one.
         void wakeBodiesAround(BodyId id);

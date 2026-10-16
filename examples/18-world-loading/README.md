@@ -45,7 +45,7 @@ linked to a component come and go with its blocks (`runtime/loading.h`).
 
 | Command | What |
 |---|---|
-| `./world_loading --headless-check` | no window: flies the course with the loader alone; peak memory and every block within 64 m loaded |
+| `./world_loading --headless-check` | no window: flies the course with the loader alone (peak memory, every block within 64 m loaded), then again with the terrain as a static collider (frame times) |
 | `WORLD_LOADING_SELFTEST=1 ./world_loading` | the same course, drawn; prints `WORLDTEST` lines and exits 0 or 1 |
 
 Design: `docs/plans/world-loading.md`.
