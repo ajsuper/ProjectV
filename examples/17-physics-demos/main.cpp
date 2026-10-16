@@ -2120,9 +2120,17 @@ void selfTest(projv::Application& app) {
     static std::pair<uint64_t, uint64_t> wallBefore;   // demo 11: the composite wall's rebar and all its voxels
     static bool wallChecked = false;
     // Demo 11: characters sent at the pieces past the composite wall.
-    struct Walk { Entity walker = projv::NullEntity; vec3 at{0.0f}; uint32_t voxels = 0; float highest = -1e9f; };
+    struct Walk {
+        Entity piece = projv::NullEntity, walker = projv::NullEntity;
+        vec3 at{0.0f};
+        uint32_t voxels = 0;
+        float highest = -1e9f;
+        bool done = false;
+    };
     static Walk walks[2];
     static float walkStart = 0.0f;
+    struct Clicker { Entity walker = projv::NullEntity; uint64_t before = 0; bool clicked = false, done = false; };
+    static Clicker clicker;
     // DEMOS_CAPTURE=<prefix>: a frame of each demo, mid-action, as <prefix>-<demo>.tga.
     static int captured = 0;
     const float captureAt[LAST_DEMO + 1] = {0, 14.6f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f, 6.5f, 12.0f, 6.1f, 3.4f, 4.0f};
@@ -2553,57 +2561,99 @@ void selfTest(projv::Application& app) {
               fmt::format("aiming sees through small debris: a plain ray stops on {} of {}, the aim's on none of them "
                           "({} did)", hitSmall, smallOnes, smallOnes - aimedThrough));
 
-        // Two walkers past the wall, each sent along x at a piece lying on the floor: the biggest crumb,
-        // which it walks through, and the biggest piece, which stops it or is climbed.
+        // Two walkers, each sent down a lane of empty floor at a piece moved there and left to settle
+        // -- debris F threw is still rolling now, and would wander into the way: the biggest crumb,
+        // which it walks through, and the biggest piece F threw past the wall, which stops it or is
+        // climbed.
         for (int k = 0; k < 2; k++) {
             const bool crumb = k == 0;
             uint32_t best = 0;
             for (const projv::BodyBroken& e : demos.overhangs.fell) {
-                if (e.entity != demos.overhangs.wall) continue;
+                if (!crumb && e.entity != demos.overhangs.wall) continue;
                 for (Entity piece : e.pieces) {
                     if (!world.valid(piece) || !runtime::hasBody(world, piece)) continue;
-                    const vec3 at = runtime::bodyPose(world, piece).centerOfMass;
                     const uint32_t voxels = voxelsOf(piece);
-                    // A crumb's walk must be clear of everything else solid to the walker, or what it
-                    // meets on the way is what stops it.
-                    const bool clear = !crumb || runtime::overlapBox(world, vec3(at.x + 0.5f, 1.0f, at.z), vec3(3.8f, 0.9f, 0.6f),
-                                                                    quat(1, 0, 0, 0), 0xffffffffu, projv::NullEntity, small)
-                                                    .empty();
-                    if (at.z > back + 1.0f && at.y < 1.0f && (voxels <= SMALL_DEBRIS_VOXELS) == crumb && voxels > best && clear) {
-                        best = voxels;
-                        walks[k].at = at;
-                    }
+                    if ((voxels <= SMALL_DEBRIS_VOXELS) != crumb || voxels <= best) continue;
+                    if (!crumb && runtime::bodyPose(world, piece).centerOfMass.z < back + 1.0f) continue;
+                    best = voxels;
+                    walks[k].piece = piece;
                 }
             }
             if (!best) {
-                check(*test, false, fmt::format("no {} came to rest past the wall to walk at", crumb ? "crumb" : "big piece"));
+                check(*test, false, fmt::format("no {} to walk at", crumb ? "crumb" : "big piece past the wall"));
                 continue;
             }
             walks[k].voxels = best;
-            walks[k].walker = world.create();
-            world.emplace<projv::Transform>(walks[k].walker, projv::Transform{vec3(walks[k].at.x - 3.0f, 0.05f, walks[k].at.z)});
-            world.emplace<projv::CharacterController>(walks[k].walker);
-            world.emplace<projv::CollisionGroups>(walks[k].walker, projv::CollisionGroups{{"player"}, {"small debris"}, 0});
+            // The lane: floor 10 m long and 2 m wide with nothing on it, the piece dropped in its
+            // middle from just above.
+            const vec3 middle(0.0f, 0.0f, k == 0 ? -14.0f : -18.0f);
+            const bool empty = runtime::overlapBox(world, middle + vec3(0, 1.0f, 0), vec3(5.0f, 0.9f, 1.0f), quat(1, 0, 0, 0)).empty();
+            check(*test, empty, fmt::format("the walkers' lane at z = {:.0f} is empty floor", middle.z));
+            const runtime::BodyState pose = runtime::bodyPose(world, walks[k].piece);
+            runtime::teleport(world, walks[k].piece, middle + vec3(0, 0.8f, 0) - (pose.centerOfMass - pose.position), pose.rotation);
+            runtime::setVelocity(world, walks[k].piece, vec3(0), vec3(0));
         }
-        walkStart = t;
+        walkStart = t + 1.0f;   // when the pieces have landed
     }
     for (int k = 0; k < 2 && stage == 11; k++) {
         Walk& w = walks[k];
-        if (w.walker == projv::NullEntity || !world.valid(w.walker)) continue;
+        if (w.piece == projv::NullEntity || w.done || t < walkStart) continue;
+        if (w.walker == projv::NullEntity) {
+            if (!world.valid(w.piece) || !runtime::hasBody(world, w.piece)) {
+                check(*test, false, "the piece to walk at is gone");
+                w.done = true;
+                continue;
+            }
+            w.at = runtime::bodyPose(world, w.piece).centerOfMass;
+            w.walker = world.create();
+            world.emplace<projv::Transform>(w.walker, projv::Transform{vec3(w.at.x - 3.0f, 0.05f, w.at.z)});
+            world.emplace<projv::CharacterController>(w.walker);
+            world.emplace<projv::CollisionGroups>(w.walker, projv::CollisionGroups{{"player"}, {"small debris"}, 0});
+            continue;
+        }
         runtime::setCharacterInput(world, w.walker, t < walkStart + 0.3f ? vec3(0) : vec3(4.0f, 0, 0));
         const vec3 feet = world.get<projv::Transform>(w.walker).position;
         w.highest = std::max(w.highest, feet.y);
         if (t <= walkStart + 2.0f) continue;
         // 1.7 s at 4 m/s from 3 m short of it: about 3.8 m past it, if nothing stops it.
-        const bool through = feet.x > w.at.x + 2.0f && w.highest < 0.1f;
+        const float past = feet.x - w.at.x;
+        const bool through = past > 2.0f && w.highest < 0.1f;
         if (k == 0)
             check(*test, through, fmt::format("the walker went through a {}-voxel crumb: {:.1f} m past it, at most {:.2f} m "
-                                              "off the floor", w.voxels, feet.x - w.at.x, w.highest));
+                                              "off the floor", w.voxels, past, w.highest));
         else
             check(*test, !through, fmt::format("a {}-voxel piece stayed solid to the walker: it got {:.1f} m past it, and "
-                                               "climbed {:.2f} m", w.voxels, feet.x - w.at.x, w.highest));
+                                               "climbed {:.2f} m", w.voxels, past, w.highest));
         world.destroy(w.walker);
         w.walker = projv::NullEntity;
+        w.done = true;
+    }
+    // A click given by a walking player: the crosshair's ray starts inside the character, which it
+    // must look past to the wall.
+    if (stage == 11 && t > 6.2f && clicker.walker == projv::NullEntity && !clicker.done) {
+        clicker.walker = world.create();
+        world.emplace<projv::Transform>(clicker.walker, projv::Transform{vec3(29.0f, 0.05f, COMPOSITE_CORNER.z - 3.0f)});
+        world.emplace<projv::CharacterController>(clicker.walker);
+        world.emplace<projv::CollisionGroups>(clicker.walker, projv::CollisionGroups{{"player"}, {"small debris"}, 0});
+    }
+    if (stage == 11 && t > 7.0f && !clicker.clicked && world.valid(clicker.walker)) {
+        clicker.before = wallVoxels(world, demos.overhangs.wall).second;
+        demos.overhangs.chipTarget = projv::NullEntity;
+        Camera eyes;
+        eyes.position = world.get<projv::Transform>(clicker.walker).position + vec3(0, EYE_HEIGHT, 0);
+        eyes.yaw = 1.5708f;   // facing the wall, +z
+        eyes.pitch = 0.0f;
+        eyes.walker = clicker.walker;
+        act(world, demos, eyes);
+        clicker.clicked = true;
+    }
+    if (stage == 11 && t > 7.5f && clicker.clicked && !clicker.done) {
+        const uint64_t after = wallVoxels(world, demos.overhangs.wall).second;
+        check(*test, demos.overhangs.chipTarget == demos.overhangs.wall && after < clicker.before,
+              fmt::format("a walking player's click chips the wall: {} voxels out", clicker.before - after));
+        world.destroy(clicker.walker);
+        clicker.walker = projv::NullEntity;
+        clicker.done = true;
     }
     static bool nudged = false;
     if (stage == 11 && t > 3.0f && !nudged) {

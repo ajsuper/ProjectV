@@ -269,3 +269,23 @@ TEST_CASE("CharacterController round-trips through entities.json") {
 }
 
 
+
+TEST_CASE("a query from a character's eyes skips the character when told to ignore it") {
+    // A player's crosshair: the ray starts inside the character's own capsule. Named as `ignore`, the
+    // character is skipped, and the ray goes on to what it is aimed at.
+    Fixture f;
+    f.ground(flat);
+    Entity c = f.character(vec3(0, 1, 0));
+    f.frames(30);
+    const vec3 eye = f.state(c).position + vec3(0, 1.6f, 0);
+    auto down = castRay(f.app.world, eye, vec3(0, -1, 0), 10.0f, 0xffffffffu, c);
+    REQUIRE(down);
+    CHECK(down->entity != c);
+    CHECK(down->distance == doctest::Approx(1.6f).epsilon(0.02));   // the ground under its feet
+    CHECK(castSphere(f.app.world, eye, 0.1f, vec3(0, -1, 0), 10.0f, 0xffffffffu, c)->entity != c);
+    for (Entity e : overlapSphere(f.app.world, eye, 0.2f, 0xffffffffu, c)) CHECK(e != c);
+    // Not told to: the ray starts inside it, and stops on it at once.
+    auto plain = castRay(f.app.world, eye, vec3(0, -1, 0), 10.0f);
+    REQUIRE(plain);
+    CHECK(plain->entity == c);
+}

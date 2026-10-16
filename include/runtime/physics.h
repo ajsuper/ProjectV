@@ -543,7 +543,8 @@ namespace projv::runtime {
         core::ivec3     voxel{0};
         uint8_t         materialSlot = 0;
     };
-    // `layers`: a bit per PhysicsLayer (QueryFilter::only). `ignore`: an entity whose body to skip.
+    // `layers`: a bit per PhysicsLayer (QueryFilter::only). `ignore`: an entity whose body to skip --
+    // a character's too, so a ray from its eyes does not stop inside it.
     // `skipGroups`: group bits (physicsGroup) whose bodies to skip -- a bullet through shards.
     std::optional<QueryHit> castRay(const World& world, core::vec3 origin, core::vec3 direction, float maxDistance,
                                     uint32_t layers = 0xffffffffu, Entity ignore = NullEntity, uint32_t skipGroups = 0);

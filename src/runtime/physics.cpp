@@ -2194,8 +2194,12 @@ namespace projv::runtime {
             QueryFilter f;
             f.layers = layers;
             f.skipGroups = skipGroups;
-            if (ignore != NullEntity && world.valid(ignore))
+            // The entity's body, or a character's inner body: a ray from a player's eyes starts inside it.
+            if (ignore != NullEntity && world.valid(ignore)) {
                 if (const PhysicsBody* b = world.try_get<PhysicsBody>(ignore)) f.ignore = b->id;
+                else if (const PhysicsCharacter* c = world.try_get<PhysicsCharacter>(ignore))
+                    f.ignore = physicsWorld(world).characterBody(c->id);
+            }
             return f;
         }
 
