@@ -677,11 +677,9 @@ The demo now swaps each shard's palette entries for frictionless twins of their 
 a second (same density and strength), throws along the blow -- through the wall, which the user
 asked for, rather than back out of the face -- and keeps every crumb (dustVoxels 0: pieces vanishing
 as they were made looked wrong). Of F's shards on the beam, about three in four now go through; the
-rest are caught by the rebar left in the hole (without rebar, 161 of 172 go through). Still open
-(R1): *why* friction holds a piece given 14 m/s, when friction can only resist with what the normal
-force allows -- probably the flush pieces start in contact deep enough that Jolt pushes them apart
-hard, and that push is what friction works against. Worth finding in the engine, since every game
-that throws pieces meets it; the twin swap is a demo's workaround. Also found: an example's
+rest are caught by the rebar left in the hole (without rebar, 161 of 172 go through). Why friction
+holds them was then measured (R1, below): weight, not an engine fault; the twin swap is the demo's
+choice to make, as it would be a game's. Also found: an example's
 ASSET_FILES are staged POST_BUILD, so a change to physics_materials.json alone is not copied until
 the binary relinks.
 
@@ -705,7 +703,16 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
 
 **Reliability**
 
-- **R1. Shards that stay where they broke.** *Understood 2026-10-15:* not an engine fault. Cut from
+- **R1. Shards that stay where they broke.** *Measured again 2026-10-15, after demo 11's throw:*
+  not phantom contact. Without gravity, shards thrown out of a stone wall at 6 m/s keep 5.99 m/s with
+  friction 0.7 (now a test: "shards are made flush, not overlapping"); with gravity, 60% stay. They
+  stack in the hole and bear on its bottom rim, and friction against the rim is the stack's weight.
+  Jolt is honest in total -- one block slides at 7.1 m/s^2 against mu g = 6.9, four side by side
+  the same, a stack of four at 7.0 on average -- but it loads the bottom of a stack hardest (17.8,
+  10.3, 3.0, -3.1 from the bottom; the top is tipped forward), and more velocity steps do not change
+  that (5, 15, 40, 100: the same split). So freeing thrown pieces -- less friction for a moment, or
+  a throw that lifts them apart -- is a game's call, as demo 11 makes it. *Earlier, 2026-10-15:*
+  not an engine fault. Cut from
   one solid, the shards sit flush in their sockets and friction holds them (set to 6 m/s, none
   moved more than 2 cm; with friction off, nearly all flew; a rebuild alone freed none). The demo
   handles it: a click throws its pieces, frictionless for a moment. Found on the way and fixed: a

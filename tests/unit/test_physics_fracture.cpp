@@ -1123,3 +1123,25 @@ TEST_CASE("the least impact break: a piece that fits in it is not broken by a hi
     f.frames(1);
     CHECK(f.fractures.size() == 1);
 }
+
+TEST_CASE("shards are made flush, not overlapping: without gravity, thrown out of the wall, they keep their speed") {
+    // Cut from one solid, the shards start touching each other and the wall on every side. If they
+    // started overlapping, the contacts would push them apart and friction would grind them to a stop
+    // (a hole's shards held by friction under gravity is the weight of the stack, not this).
+    Fixture f;
+    runtime::setGravity(f.app.world, vec3(0));
+    Entity wall = f.wall();
+    f.frames(2);
+    std::vector<Entity> shards;
+    f.app.events().on<projv::BodyBroken>([&](const projv::BodyBroken& e) {
+        for (size_t i = 0; i < e.shards; i++) {
+            shards.push_back(e.pieces[i]);
+            runtime::setVelocity(f.app.world, e.pieces[i], vec3(0, 0, -6), vec3(0));   // out of the face
+        }
+    });
+    runtime::fracture(f.app.world, wall, vec3(0, 3, 0), Fixture::energyFor(1.2f));
+    f.frames(4);
+    REQUIRE(shards.size() > 10);
+    for (Entity e : shards)
+        if (runtime::hasBody(f.app.world, e)) CHECK(runtime::bodyPose(f.app.world, e).linearVelocity.z < -5.9f);
+}
