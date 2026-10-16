@@ -720,6 +720,20 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
   anchors were all cut away was left floating (5c1ed8c).
 - **R2. Sleep that freezes bodies mid-fall.** ("What the demos showed" 4.) Bodies touching only
   static geometry sleep while still falling. A body never stops somewhere it could not rest.
+  *Measured 2026-10-15:* not bodies losing their support -- destroyBody wakes what is round it, so
+  a rebuild or a cleared piece does; a strike, a boulder and two boulders through a stone wall left
+  129 pieces asleep and none fell when woken. Demo 9 did: woken every 5 s, 3 to 38 bodies a run
+  fell, bricks round the brick wall's hole that had gone to sleep still creeping at 0.7 to 3 cm/s
+  (the user saw it too: they slid the moment anything woke them). Two causes, each shown alone on a
+  box let go on a slope just steeper than its friction (test: "sleep: a body that starts to slide
+  from rest..."): Jolt's sleep test, under 3 cm/s for half a second, and rest damping, inside 5 cm
+  for a second -- each stopped it after 1 cm of 1.5 m. Rest damping no longer touches a body at the
+  fastest it has been since it came to that spot (`Rest::peak`, in the snapshot, version 6): that
+  is a body gathering speed, not rocking. Jolt's speed is now `PhysicsSettings::sleepSpeed` /
+  `sleepSeconds`, at Jolt's defaults: 5 mm/s cut demo 9's frozen bricks to about 1 in 2,500, but kept
+  a thousand of demo 1's 2,700 crates awake at its check -- and the user's call is that oversleeping
+  is the lesser fault. So a slow start still sleeps by default; a game that needs slow slides to
+  finish lowers sleepSpeed, and rest damping no longer undoes that. Recording log version 5.
 - **R3. Rollback across a break.** `savePhysics` needs the same bodies to exist at restore, and a
   fracture, split or debris clearing changes them, so a rollback game with destruction cannot
   rewind past one (D6). Mechanism: a snapshot that records body creation and removal since it was

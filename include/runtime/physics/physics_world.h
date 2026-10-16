@@ -230,6 +230,16 @@ namespace projv::runtime {
         // pile tests: towers swaying for good at 0.2 m/s). Its velocities are multiplied by
         // restDamping every step after that, until it sleeps. A body rolling or spinning leaves
         // the radius or the angle quickly and is never touched. restSeconds 0 turns it off.
+        // Sleep: a body sleeps once every point of it has moved slower than sleepSpeed for
+        // sleepSeconds (Jolt's test, and Jolt's defaults). It errs towards sleeping: a body that
+        // starts to slide or tip from rest gathers speed slowly, and one still under 3 cm/s after
+        // half a second sleeps where it is -- a brick creeping off a ledge round a hole in demo 9,
+        // a box on a slope just steeper than its friction -- until something wakes it. A lower
+        // speed (5 mm/s) lets those go on, but keeps big piles awake far longer (demo 1's 2,700
+        // crates, a thousand still awake at the self-test's check). The project's call: over-
+        // sleeping is the lesser fault. Lower it for a game where slow slides must finish.
+        float      sleepSpeed = 0.03f;    // m/s
+        float      sleepSeconds = 0.5f;
         float      restRadius = 0.05f;    // m
         float      restAngle = 0.1f;      // rad
         float      restSeconds = 1.0f;

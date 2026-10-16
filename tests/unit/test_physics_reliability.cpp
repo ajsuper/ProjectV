@@ -126,6 +126,54 @@ TEST_CASE("tunnel: a thousand one-voxel balls at 200 m/s do not pass a one-voxel
     CHECK(through == 0);
 }
 
+namespace {
+    // A 1 m box let go at rest on a ramp of `degrees`, both of friction 0.5 (so they meet at 0.5, and
+    // it slides on anything steeper than 26.57 degrees): how far it went down the slope in `seconds`.
+    float slideDown(float degrees, float seconds, float sleepSpeed, float restSeconds = PhysicsSettings{}.restSeconds) {
+        PhysicsSettings settings;
+        settings.sleepSpeed = sleepSpeed;
+        settings.restSeconds = restSeconds;
+        PhysicsWorld physics(settings);
+        const float angle = degrees * 3.14159265f / 180.0f;
+        const quat tilt = glm::angleAxis(angle, vec3(0, 0, 1));
+        BodyDesc ramp;
+        ramp.shape = PhysicsShape::box(vec3(20.0f, 0.5f, 5.0f));
+        ramp.motion = MotionType::Static;
+        ramp.layer = PhysicsLayer::Static;
+        ramp.rotation = tilt;
+        ramp.friction = 0.5f;
+        physics.createBody(ramp);
+        BodyDesc box;
+        box.shape = PhysicsShape::box(vec3(0.5f));
+        box.rotation = tilt;
+        box.position = tilt * vec3(0.0f, 1.0f, 0.0f);   // resting on the ramp's top face
+        box.friction = 0.5f;
+        box.linearDamping = 0.0f;
+        BodyId id = physics.createBody(box);
+        const vec3 start = physics.bodyState(id).position;
+        for (int i = 0; i < int(seconds / DT); i++) physics.step(DT);
+        return glm::length(physics.bodyState(id).position - start);
+    }
+}
+
+TEST_CASE("sleep: a body that starts to slide from rest is never stopped by rest damping, and slides on below the sleep speed") {
+    // Just steeper than its friction (27 degrees against 26.57), it gathers speed slowly, 6.9 cm/s^2:
+    // under 3 cm/s for its first half second, and inside rest damping's 5 cm for its first second.
+    const float angle = 27.0f * 3.14159265f / 180.0f;
+    const float expected = 0.5f * 9.81f * (std::sin(angle) - 0.5f * std::cos(angle)) * 6.0f * 6.0f;
+    // The default errs towards sleeping (PhysicsSettings::sleepSpeed): it sleeps where it started.
+    CHECK(slideDown(27.0f, 6.0f, PhysicsSettings{}.sleepSpeed) < 0.05f * expected);
+    // With a lower sleep speed it slides all the way, and rest damping, which ends a stack rocking
+    // in place, leaves it alone: it is at the fastest it has been, every step, so it is gathering
+    // speed, not rocking (Rest::peak). Measured before that rule: 0.54 of 1.15 m at 26.9 degrees.
+    const float slid = slideDown(27.0f, 6.0f, 0.005f);
+    CHECK(slid > 0.9f * expected);
+    CHECK(slid < 1.1f * expected);
+    CHECK(slideDown(27.0f, 6.0f, 0.005f, 0.0f) == doctest::Approx(slid).epsilon(0.02));   // as if undamped
+    // On a slope its friction holds, it still comes to rest where it is.
+    CHECK(slideDown(20.0f, 6.0f, 0.005f) < 0.01f);
+}
+
 TEST_CASE("stack: a ten-crate tower settles, sleeps within 5 s, and then stays put") {
     PhysicsWorld physics;
     Yard yard(physics);

@@ -395,7 +395,7 @@ namespace projv::runtime {
         // Snapshot layout: a header that lets restoreState check, before touching anything, that the
         // snapshot is one and fits this world; then Jolt's own bytes.
         constexpr uint32_t SNAPSHOT_MAGIC = 0x50564a50u;   // "PJVP"
-        constexpr uint32_t SNAPSHOT_VERSION = 5;   // 2: rest damping state per body; 3: characters; 4: joints; 5: motor modes
+        constexpr uint32_t SNAPSHOT_VERSION = 6;   // 2: rest damping state per body; 3: characters; 4: joints; 5: motor modes; 6: rest peak speed
 
         template <typename T> void put(std::vector<uint8_t>& out, const T& v) {
             const auto* p = reinterpret_cast<const uint8_t*>(&v);
@@ -463,7 +463,7 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 4;   // 2: joint motor modes; 3: collideConnected; 4: materials
+        constexpr uint32_t LOG_VERSION = 5;   // 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
@@ -477,6 +477,7 @@ namespace projv::runtime {
             put(out, s.maxLinearSpeed); put(out, s.maxAngularSpeed); put(out, s.minMass); put(out, s.minGyrationRadius);
             put(out, s.restRadius); put(out, s.restAngle); put(out, s.restSeconds); put(out, s.restDamping);
             put(out, int32_t(s.velocitySteps)); put(out, int32_t(s.positionSteps));
+            put(out, s.sleepSpeed); put(out, s.sleepSeconds);
         }
         bool readSettings(const std::vector<uint8_t>& in, size_t& at, PhysicsSettings& s) {
             int32_t velocity = 0, position = 0;
@@ -485,7 +486,7 @@ namespace projv::runtime {
                       get(in, at, s.maxLinearSpeed) && get(in, at, s.maxAngularSpeed) && get(in, at, s.minMass) &&
                       get(in, at, s.minGyrationRadius) && get(in, at, s.restRadius) && get(in, at, s.restAngle) &&
                       get(in, at, s.restSeconds) && get(in, at, s.restDamping) && get(in, at, velocity) &&
-                      get(in, at, position);
+                      get(in, at, position) && get(in, at, s.sleepSpeed) && get(in, at, s.sleepSeconds);
             s.velocitySteps = velocity;
             s.positionSteps = position;
             return ok;
@@ -612,7 +613,9 @@ namespace projv::runtime {
         // Rest damping (PhysicsSettings::restSeconds): where each awake body was when it last
         // moved appreciably, and how long it has stayed there since. Part of the snapshot, since it
         // changes what the next steps do.
-        struct Rest { JPH::RVec3 position; JPH::Quat rotation; float seconds; };
+        // `peak`: the fastest it has gone since it came there. A body at its peak every step is
+        // gathering speed -- starting to slide or tip -- not rocking, and is never damped.
+        struct Rest { JPH::RVec3 position; JPH::Quat rotation; float seconds; float peak = 0.0f; };
         std::vector<Rest>     rest;
         std::vector<uint8_t>  outside;
         std::vector<BodyId>   leftWorld;
@@ -728,6 +731,9 @@ namespace projv::runtime {
         JPH::PhysicsSettings solver = impl->system.GetPhysicsSettings();
         solver.mNumVelocitySteps = uint32_t(std::max(settings.velocitySteps, 1));
         solver.mNumPositionSteps = uint32_t(std::max(settings.positionSteps, 1));
+        // Sleep: see PhysicsSettings::sleepSpeed for why not Jolt's default.
+        solver.mPointVelocitySleepThreshold = std::isfinite(settings.sleepSpeed) ? std::max(settings.sleepSpeed, 1e-4f) : 0.03f;
+        solver.mTimeBeforeSleep = std::isfinite(settings.sleepSeconds) ? std::max(settings.sleepSeconds, 0.05f) : 0.5f;
         impl->system.SetPhysicsSettings(solver);
         if (settings.record) {
             impl->recording = true;
@@ -828,7 +834,7 @@ namespace projv::runtime {
         impl->addedSinceOptimize++;
         uint32_t index = body->GetID().GetIndex();
         impl->lastGood[index] = {body->GetPosition(), body->GetRotation()};
-        impl->rest[index] = {body->GetPosition(), body->GetRotation(), 0.0f};
+        impl->rest[index] = {body->GetPosition(), body->GetRotation(), 0.0f, 0.0f};
         impl->outside[index] = 0;
         uint32_t count = impl->system.GetNumBodies();
         if (!impl->warnedCapacity && count * 5 > impl->settings.maxBodies * 4) {
@@ -1414,8 +1420,12 @@ namespace projv::runtime {
                     Impl::Rest& r = impl->rest[index];
                     bool moved = JPH::Vec3(body.GetPosition() - r.position).LengthSq() > restRadius * restRadius ||
                                  std::abs(r.rotation.Dot(rotation)) < restCos;
-                    if (moved) r = {body.GetPosition(), rotation, 0.0f};
-                    else if ((r.seconds += dt) >= impl->settings.restSeconds) resting.push_back(id);
+                    // How fast it is going, its turning counted at a 0.5 m lever.
+                    const float speed = body.GetLinearVelocity().Length() + 0.5f * body.GetAngularVelocity().Length();
+                    const bool gathering = speed > r.peak;
+                    if (gathering) r.peak = speed;
+                    if (moved) r = {body.GetPosition(), rotation, 0.0f, speed};
+                    else if ((r.seconds += dt) >= impl->settings.restSeconds && !gathering) resting.push_back(id);
                 }
                 bool out = JPH::Vec3::sLess(position, low).TestAnyXYZTrue() ||
                            JPH::Vec3::sGreater(position, high).TestAnyXYZTrue();
@@ -1682,6 +1692,7 @@ namespace projv::runtime {
             put(out, r.position);
             put(out, r.rotation);
             put(out, r.seconds);
+            put(out, r.peak);
         }
 
         JPH::StateRecorderImpl recorder;
@@ -1735,7 +1746,8 @@ namespace projv::runtime {
         std::vector<Impl::Rest> savedRest(count);
         for (uint32_t i = 0; i < count; i++)
             if (!get(snapshot, at, saved[i]) || !get(snapshot, at, savedRest[i].position) ||
-                !get(snapshot, at, savedRest[i].rotation) || !get(snapshot, at, savedRest[i].seconds)) {
+                !get(snapshot, at, savedRest[i].rotation) || !get(snapshot, at, savedRest[i].seconds) ||
+                !get(snapshot, at, savedRest[i].peak)) {
                 core::warn("physics: restoreState refused: the snapshot is truncated");
                 return false;
             }
