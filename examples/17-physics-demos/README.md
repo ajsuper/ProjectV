@@ -23,7 +23,7 @@ cd build/examples/physics_demos && ./physics_demos
 | mouse, W/A/S/D, Space/Shift | look, fly, up/down (Esc releases the cursor, a click recaptures it) |
 | click | the demo's action |
 | right-drag | hold and drag the body under the crosshair; the wheel pulls it nearer or pushes it away |
-| V | walk (a character: W/A/S/D, Space to jump) or fly |
+| V | walk (a character: W/A/S/D, Space to jump) or fly. Walking, you pass through debris -- every piece a break made -- and a click or F aims through small debris (pieces under a 0.6 m cube) at what is behind it: collision groups, `runtime::definePhysicsGroup` |
 | T / P | slow motion / pause |
 | H / O | sun shadows / ambient occlusion on and off |
 | U / G | the upscaler off (the raw quarter-resolution frame) / its debug view |
