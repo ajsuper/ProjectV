@@ -175,6 +175,13 @@ namespace projv::runtime {
     };
     constexpr uint16_t MAX_PHYSICS_MATERIALS = 1024;   // indices 1..1023
 
+    // What static geometry does to a kinematic body (BodyDesc::blockedByStatic). Nothing, by default:
+    // a kinematic body goes where it is moved, through floors and walls. Stop: a move that would take
+    // it into a static body ends where it touches. Slide: what is left of the move after the touch
+    // goes on along the surface (up to three surfaces a step) -- a ball rolling on along the floor it
+    // was driven into, a platform along a wall. Asked for, as everything is.
+    enum class KinematicBlocking : uint8_t { None, Stop, Slide };
+
     struct BodyDesc {
         PhysicsShape shape;
         MotionType   motion = MotionType::Dynamic;
@@ -208,6 +215,11 @@ namespace projv::runtime {
         // sensor senses only while it moves -- a sleeping body stays sensed, but is not found anew --
         // and a static sensor never senses static bodies; a kinematic one does, at a cost.
         uint32_t     senses = layerBit(PhysicsLayer::Moving) | layerBit(PhysicsLayer::Character);
+        // A kinematic body's: whether static bodies (not sensors, and only those its layer and filter
+        // collide with) stop it. It touches them too, so its contacts with them are reported
+        // (reportContacts). Swept along the move in the rotation it starts the step in; the turn is
+        // applied where it ends, unswept.
+        KinematicBlocking blockedByStatic = KinematicBlocking::None;
     };
 
     struct BodyId {
@@ -556,8 +568,10 @@ namespace projv::runtime {
         // Places the body; velocities are kept. A teleport: nothing is swept along the way.
         void setPose(BodyId id, core::vec3 position, core::quat rotation);
         // A kinematic body: moves it to the pose over the next step, with the velocity that takes,
-        // so what it pushes is pushed with the right speed.
-        void moveKinematic(BodyId id, core::vec3 position, core::quat rotation, float dt);
+        // so what it pushes is pushed with the right speed. One blocked by static bodies
+        // (BodyDesc::blockedByStatic) moves as far as they let it instead; the position it heads for
+        // is returned (the one asked for, unblocked; the body's own for one that cannot move).
+        core::vec3 moveKinematic(BodyId id, core::vec3 position, core::quat rotation, float dt);
         void setGravity(core::vec3 gravity);
         core::vec3 gravity() const;
 
@@ -654,6 +668,7 @@ namespace projv::runtime {
         void snapshotVelocities();
         void orderImpacts();
         void trackContacts();
+        core::vec3 sweepAgainstStatic(BodyId id, core::vec3 target, bool slide) const;
         void endContactsOf(BodyId body, bool unlessReported);
         void sanityPass(float dt);
         void updateCharacters(float dt);

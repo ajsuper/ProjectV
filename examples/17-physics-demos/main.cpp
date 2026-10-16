@@ -463,6 +463,8 @@ void launchOrb(World& world, Demos& demos, const Camera& camera) {
     projv::RigidBody rigid;
     rigid.motion = runtime::MotionType::Kinematic;
     rigid.shape = projv::RigidBody::Shape::Sphere;
+    // The floor stops it (nothing else does): fired at the ground, it rolls on along it.
+    rigid.blockedByStatic = runtime::KinematicBlocking::Slide;
     Thing t = place(world, demos.orb, camera.position + forward * 7.0f, quat(1, 0, 0, 0), rigid);
     vec3 axis = glm::cross(forward, vec3(0, 1, 0));
     vec3 spin = glm::length(axis) > 1e-3f ? -glm::normalize(axis) * 3.0f : vec3(0);   // rolling forward
@@ -1827,14 +1829,6 @@ void demoTick(projv::Application& app) {
     if (demos.blastKickIn > 0 && --demos.blastKickIn == 0) blastKick(world, demos);
     if (!demos.overhangs.toThrow.empty()) throwChip(world, demos.overhangs);
     if (!demos.overhangs.slippery.empty()) restoreChips(world, demos.overhangs);
-    // Demo 1's kinematic balls level off a crate's height above the floor. Nothing stops a kinematic
-    // body, so one driven down onto crates would press them through the floor; this way it ploughs
-    // into the pyramid and rolls over whatever lies flat.
-    for (Entity orb : demos.orbs) {
-        if (!world.valid(orb) || !world.all_of<projv::ConstantVelocity>(orb)) continue;
-        auto& motion = world.get<projv::ConstantVelocity>(orb);
-        if (motion.velocity.y < 0.0f && runtime::bodyPose(world, orb).position.y < ORB_RADIUS + 1.05f) motion.velocity.y = 0.0f;
-    }
     if (demos.current == 9) trebuchetTick(world, demos);
     if (demos.current == 10) slideTick(world, demos);
     if (demos.current == 8)
@@ -2194,9 +2188,20 @@ void selfTest(projv::Application& app) {
         launchOrb(world, demos, camera);
         acted = true;
     }
-    if (stage == 1 && t > 17.0f) {
+    static bool steep = false;
+    if (stage == 1 && t > 17.0f && !steep) {
         vec3 top = runtime::bodyPose(world, demos.watched[0]).position;
         check(*test, top.y < 14.5f, fmt::format("the kinematic ball knocked the top off: top crate at {:.2f} m", top.y));
+        // Another, fired steeply at the floor in front of the pyramid: the floor stops it
+        // (blockedByStatic), and it rolls on into the crates' base.
+        camera.position = vec3(-4, 9.0f, -30); camera.yaw = 1.5708f; camera.pitch = -0.6f;
+        launchOrb(world, demos, camera);
+        steep = true;
+    }
+    if (stage == 1 && t > 19.0f) {
+        vec3 orb = runtime::bodyPose(world, demos.orbs.back()).position;
+        check(*test, std::abs(orb.y - ORB_RADIUS) < 0.1f,
+              fmt::format("the ball fired at the floor rolled on along it: its centre {:.2f} m up", orb.y));
         go(2); acted = false; demos.pieces = 0;
         return;   // `t` above is the last demo's clock
     }

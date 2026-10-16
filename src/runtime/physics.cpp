@@ -257,6 +257,14 @@ namespace projv::runtime {
             return f;
         }
 
+        // A kinematic body static geometry stops (RigidBody::blockedByStatic), other than a Part.
+        bool blockedKinematic(const World& world, Entity entity) {
+            const RigidBody* rigid = world.try_get<RigidBody>(entity);
+            if (!rigid || rigid->motion != MotionType::Kinematic || rigid->blockedByStatic == KinematicBlocking::None) return false;
+            const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
+            return !(link && link->mode == LinkMode::Part);
+        }
+
         bool isSensor(const World& world, Entity entity) {
             const RigidBody* rigid = world.try_get<RigidBody>(entity);
             const StaticCollider* fixed = world.try_get<StaticCollider>(entity);
@@ -502,6 +510,8 @@ namespace projv::runtime {
                     }
                 }
                 d.senses = rigid->senses;
+                // A Part's pose is the Scene's: nothing may stop it short of where that puts it.
+                if (!(link && link->mode == LinkMode::Part)) d.blockedByStatic = rigid->blockedByStatic;
             } else {
                 d.layer = fixed->layer;
                 d.senses = fixed->senses;
@@ -1634,7 +1644,12 @@ namespace projv::runtime {
                         sim.moveKinematic(body.id, utils::getComponentWorldPosition(*scene, link->handle),
                                           utils::getComponentWorldRotation(*scene, link->handle), dt);
                 } else if (const Transform* t = world.try_get<Transform>(entity)) {
-                    sim.moveKinematic(body.id, t->position, t->rotation, dt);
+                    // A blocked body's Transform is physics' to write (present): left as written, it
+                    // says nothing, and the body holds where the simulation has it.
+                    const bool unmoved = body.presented && t->position == body.presentedPosition &&
+                                         t->rotation == body.presentedRotation && blockedKinematic(world, entity);
+                    if (unmoved) sim.moveKinematic(body.id, body.position, body.rotation, dt);
+                    else sim.moveKinematic(body.id, t->position, t->rotation, dt);
                 }
             }
 
@@ -1722,7 +1737,8 @@ namespace projv::runtime {
                 // Dynamic bodies, and kinematic ones flying on a ConstantVelocity: the simulation moves
                 // those too, so it writes their Transform. (Other kinematic bodies follow theirs.)
                 bool simulated = body.motion == MotionType::Dynamic ||
-                                 (body.motion == MotionType::Kinematic && world.all_of<ConstantVelocity>(entity));
+                                 (body.motion == MotionType::Kinematic &&
+                                  (world.all_of<ConstantVelocity>(entity) || blockedKinematic(world, entity)));
                 if (!simulated || !world.all_of<Transform>(entity)) continue;
                 core::vec3 position = glm::mix(body.previousPosition, body.position, alpha);
                 core::quat rotation = glm::slerp(body.previousRotation, body.rotation, alpha);
@@ -2469,6 +2485,8 @@ nlohmann::json projv::runtime::ComponentTraits<projv::RigidBody>::save(const pro
     if (!b.material.empty()) j["material"] = b.material;
     if (b.breaksOnImpact) j["breaksOnImpact"] = true;
     if (b.senses != defaults.senses) j["senses"] = layerNames(b.senses);
+    if (b.blockedByStatic == projv::runtime::KinematicBlocking::Stop) j["blockedByStatic"] = "stop";
+    if (b.blockedByStatic == projv::runtime::KinematicBlocking::Slide) j["blockedByStatic"] = "slide";
     return j;
 }
 
@@ -2518,6 +2536,10 @@ std::optional<projv::RigidBody> projv::runtime::ComponentTraits<projv::RigidBody
         if (!senses) return std::nullopt;
         b.senses = *senses;
     }
+    std::string blocked = j.value("blockedByStatic", "none");
+    if (blocked == "stop") b.blockedByStatic = projv::runtime::KinematicBlocking::Stop;
+    else if (blocked == "slide") b.blockedByStatic = projv::runtime::KinematicBlocking::Slide;
+    else if (blocked != "none") return std::nullopt;
     return b;
 }
 

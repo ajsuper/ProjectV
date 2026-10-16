@@ -32,6 +32,7 @@ add_executable(projv_unit_tests
     test_physics_golden.cpp
     test_physics_groups.cpp
     test_physics_contacts.cpp
+    test_physics_kinematic.cpp
     test_physics_joints.cpp
     test_physics_materials.cpp
     test_physics_net.cpp

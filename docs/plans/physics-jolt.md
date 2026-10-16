@@ -3,8 +3,8 @@
 Status: **approved**, 2026-10-09. **M0-M6 done** (2026-10-13); joints (2026-10-13), physics materials
 (2026-10-14), fracture, the debris budget and support (2026-10-14/15) built, and fracture policy moved out
 of the engine (2026-10-15, "Mechanism in the engine, policy in systems"). M7 (contours) waits on the
-contour work. "One rule set for voxel bodies" below is done (2026-10-15), and Roadmap R1-R6
-(2026-10-16). **Next: R7 onwards in "Roadmap", revised 2026-10-15 from a review of which games the
+contour work. "One rule set for voxel bodies" below is done (2026-10-15), and Roadmap R1-R7
+(2026-10-16). **Next: R8 onwards in "Roadmap", revised 2026-10-15 from a review of which games the
 system serves and where it gets in their way.
 
 ## Decisions made
@@ -835,6 +835,26 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
   Tests: `test_physics_contacts.cpp`.
 - **R7. Kinematic bodies that collide with static geometry**, asked for per body. ("What the demos
   showed" 7.)
+  *Done 2026-10-16.* Jolt has no response between a kinematic and a static body (both of infinite
+  mass), so "collide" here is the engine's: `BodyDesc::blockedByStatic` (`KinematicBlocking` None,
+  Stop, Slide; None by default). With it, `moveKinematic` (which now returns where it sent the body)
+  sweeps the body's shape toward the target against static, non-sensor bodies its layer and
+  filter meet, in the rotation it starts in (the turn is applied unswept). Each pass first finds the
+  surfaces it touches already -- `CollideShape` within 1 cm, as Jolt gives a cast's hit at its start
+  no usable normal (the axis comes back as the cast direction; found when a box in a corner went
+  into the floor) -- and a move into one stops (Stop) or loses the part going into it (Slide);
+  then the rest is cast and stops 5 mm short of what it meets, within Jolt's speculative distance,
+  so the body touches it and `mCollideKinematicVsNonDynamic` (set for blocked bodies) makes that a
+  contact R6 reports. Slide takes three passes (floor, wall, along). Moving bodies are still shoved,
+  never stop it. Log version 8; the golden recording's step hashes unchanged (old file replayed
+  first). ECS: `RigidBody::blockedByStatic` ("blockedByStatic": "stop" / "slide"); not for a Part,
+  whose pose the Scene owns. The simulation then writes a blocked body's Transform, as a dynamic
+  body's: a Transform the game changed is the target, one left as written holds the body where it
+  is -- so a game sets where it should go or uses ConstantVelocity, rather than adding to the drawn
+  (interpolated, a step behind) Transform. Demo 1's F ball slides along the floor in place of the
+  demo's own level-off; its self-test fires one steeply at the floor in front of the pyramid.
+  Not done: dynamic bodies caught between a kinematic body and a wall are still pressed into it
+  (a kinematic body is unstoppable by them, by definition). Tests: `test_physics_kinematic.cpp`.
 - **R8. The last constants a game might set:** the 512-piece cap on support splits, joining
   maxShards in PhysicsConfig::fracture; minImpactSpeed per body (a glass cup and a boulder want
   different thresholds), the world setting as its default.
@@ -1235,7 +1255,7 @@ fracture work below is built on them, not before them.
    bodies); Distance joints should probably collide by default.
 7. **Kinematic.** ConstantVelocity added (kinematic bodies flying on their own; drawn from the
    simulation). Kinematic vs static don't collide (a launched ball passes through the floor):
-   should be a per-body option.
+   should be a per-body option. (Done 2026-10-16: `blockedByStatic`, Roadmap R7.)
 8. **Scale.** The 2,700-crate pyramid scene drops steps while settling and takes ~14 s to sleep;
    tall stacks fell with 5 mm starting gaps. Want start-asleep for authored stacks, and a profile.
 9. **Debug view** of shapes, contacts, joints and sleep state -- everything here was diagnosed

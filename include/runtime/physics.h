@@ -85,6 +85,15 @@ namespace projv {
         // senses, runtime::layerBit()s; "senses" in the file, by name. Static: only a kinematic sensor.
         uint32_t              senses = runtime::layerBit(runtime::PhysicsLayer::Moving) |
                                        runtime::layerBit(runtime::PhysicsLayer::Character);
+        // A kinematic body's: whether static geometry stops it (runtime::KinematicBlocking) -- by
+        // default nothing does, and it goes through floors and walls. Stop ends a move where it
+        // touches; Slide carries the rest of the move on along the surface. "blockedByStatic":
+        // "stop" or "slide" in the file. The simulation then writes its Transform, as for a dynamic
+        // body: a Transform the game sets is where it heads for this step, and one left as physics
+        // wrote it holds it where it is -- so set where it should go, or fly it on a
+        // ConstantVelocity, rather than adding to the Transform drawn (that is a step behind). Not
+        // for a Part, whose pose the Scene owns.
+        runtime::KinematicBlocking blockedByStatic = runtime::KinematicBlocking::None;
     };
 
     // A kinematic body that flies on by itself: each physics step moves it `velocity` (m/s) and turns

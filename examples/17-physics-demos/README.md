@@ -8,7 +8,7 @@ cd build/examples/physics_demos && ./physics_demos
 
 | | |
 |---|---|
-| **1** | **Pyramid.** A stepped 3D pyramid of 1496 crates (16x16 base, sixteen high), and beside it two towers side by side, thirty crates high, stepping in from 5x5 bases. **Click** throws a heavy ball where you look. **F** launches a 4 m ball where you look: kinematic, at a constant 30 m/s, shoving aside whatever it hits. |
+| **1** | **Pyramid.** A stepped 3D pyramid of 1496 crates (16x16 base, sixteen high), and beside it two towers side by side, thirty crates high, stepping in from 5x5 bases. **Click** throws a heavy ball where you look. **F** launches a 4 m ball where you look: kinematic, at a constant 30 m/s, shoving aside whatever it hits; the floor stops it (`blockedByStatic: slide`), so fired at the ground it rolls on along it. |
 | **2** | **Wall blast.** A running-bond wall of 120 voxel bricks, and round it a brick tower, a house with a doorway, a row of columns and a long low wall, all of fired brick. **Click** sets off a blast where the crosshair is: bricks beside it shatter, those thrown hard enough break where they land. |
 | **3** | **Ball barrage.** Balls of five sizes, from 25 cm to a metre, fired at a wall of crates, one every 0.4 s. |
 | **4** | **Sweeper.** A 12 m beam spinning about its middle while its middle circles, through a field of crates and balls. |

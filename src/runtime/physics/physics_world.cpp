@@ -530,7 +530,7 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 7;   // 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses
+        constexpr uint32_t LOG_VERSION = 8;   // 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
@@ -647,21 +647,24 @@ namespace projv::runtime {
             put(out, uint8_t(d.continuous));
             writeFilter(out, d.filter);
             put(out, uint8_t(d.reportContacts)); put(out, d.senses);
+            put(out, uint8_t(d.blockedByStatic));
         }
 
         template <typename BuildVoxels>
         bool readDesc(const std::vector<uint8_t>& in, size_t& at, BodyDesc& d, BuildVoxels& build) {
-            uint8_t motion = 0, layer = 0, continuous = 0, reports = 0;
+            uint8_t motion = 0, layer = 0, continuous = 0, reports = 0, blocked = 0;
             bool ok = readShape(in, at, d.shape, build) && get(in, at, motion) && get(in, at, layer) &&
                       get(in, at, d.position) && get(in, at, d.rotation) && get(in, at, d.linearVelocity) &&
                       get(in, at, d.angularVelocity) && get(in, at, d.density) && get(in, at, d.mass) &&
                       get(in, at, d.friction) && get(in, at, d.restitution) && get(in, at, d.linearDamping) &&
                       get(in, at, d.angularDamping) && get(in, at, d.gravityFactor) && get(in, at, continuous) &&
-                      readFilter(in, at, d.filter) && get(in, at, reports) && get(in, at, d.senses);
+                      readFilter(in, at, d.filter) && get(in, at, reports) && get(in, at, d.senses) &&
+                      get(in, at, blocked) && blocked <= uint8_t(KinematicBlocking::Slide);
             d.motion = MotionType(motion);
             d.layer = PhysicsLayer(layer);
             d.continuous = continuous != 0;
             d.reportContacts = reports != 0;
+            d.blockedByStatic = KinematicBlocking(blocked);
             return ok;
         }
     }
@@ -772,6 +775,7 @@ namespace projv::runtime {
         std::vector<ContactChange>            contactChanges;   // the last step's, ordered
         std::vector<ContactChange>            endedBetween;     // by destroyBody, setReportContacts, since it
         std::vector<uint32_t>                 fresh;            // indices with FRESH set
+        std::vector<uint8_t>                  blocking;         // per body index: KinematicBlocking
         static uint64_t pairKey(uint32_t a, uint32_t b) { return a < b ? (uint64_t(a) << 32) | b : (uint64_t(b) << 32) | a; }
         // Each awake body's motion as the step began, by body index (snapshotVelocities).
         struct Motion { bool awake = false; JPH::Vec3 linear, angular; JPH::RVec3 centre; };
@@ -816,6 +820,7 @@ namespace projv::runtime {
         impl->system.SetGravity(toJolt(settings.gravity));
         impl->contacts.table = &impl->materials;
         impl->reporting.assign(settings.maxBodies, 0);
+        impl->blocking.assign(settings.maxBodies, 0);
         impl->contacts.reporting = &impl->reporting;
         impl->minImpactSpeed = std::isfinite(settings.minImpactSpeed) ? std::max(settings.minImpactSpeed, 0.0f) : 1.0f;
         impl->system.SetContactListener(&impl->contacts);
@@ -883,8 +888,9 @@ namespace projv::runtime {
         const bool sensor = desc.layer == PhysicsLayer::Sensor;
         settings.mIsSensor = sensor;
         // A moving sensor finds static bodies only when Jolt is told to look (a static one never does).
+        const bool blocked = desc.motion == MotionType::Kinematic && desc.blockedByStatic != KinematicBlocking::None;
         settings.mCollideKinematicVsNonDynamic =
-            sensor && desc.motion == MotionType::Kinematic && (desc.senses & layerBit(PhysicsLayer::Static));
+            (sensor && desc.motion == MotionType::Kinematic && (desc.senses & layerBit(PhysicsLayer::Static))) || blocked;
         if (desc.motion != MotionType::Static) {
             // Within the body's speed limits, which Jolt asserts on at creation: a velocity carried
             // over from a body at its limit (a rebuild, a piece cut off) can come back a hair over.
@@ -929,6 +935,7 @@ namespace projv::runtime {
         impl->rules->setFilter(body->GetID().GetIndex(), desc.filter);
         impl->rules->setBody(body->GetID().GetIndex(), desc.layer, sensor ? desc.senses : 0u);
         impl->reporting[body->GetID().GetIndex()] = uint8_t((desc.reportContacts ? REPORTS : 0) | (sensor ? SENSOR : 0));
+        impl->blocking[body->GetID().GetIndex()] = uint8_t(blocked ? desc.blockedByStatic : KinematicBlocking::None);
         bodies.AddBody(body->GetID(), desc.motion == MotionType::Static ? JPH::EActivation::DontActivate
                                                                         : JPH::EActivation::Activate);
         impl->addedSinceOptimize++;
@@ -1702,13 +1709,115 @@ namespace projv::runtime {
                                                                toJolt(rotation / length), JPH::EActivation::Activate);
     }
 
-    void PhysicsWorld::moveKinematic(BodyId id, core::vec3 position, core::quat rotation, float dt) {
+    core::vec3 PhysicsWorld::moveKinematic(BodyId id, core::vec3 position, core::quat rotation, float dt) {
         if (impl->recording) { impl->op(Op::MoveKinematic); put(impl->log, id.value); put(impl->log, position); put(impl->log, rotation); put(impl->log, dt); }
-        if (!finite(position) || !finite(rotation) || !(dt > 0.0f) || !canMove(impl->system, id)) return;
+        if (!finite(position) || !finite(rotation) || !(dt > 0.0f) || !canMove(impl->system, id)) return bodyState(id).position;
         float length = glm::length(glm::vec4(rotation.x, rotation.y, rotation.z, rotation.w));
-        if (length < 0.5f) return;
+        if (length < 0.5f) return bodyState(id).position;
+        const auto blocking = KinematicBlocking(impl->blocking[JPH::BodyID(id.value).GetIndex()]);
+        if (blocking != KinematicBlocking::None) position = sweepAgainstStatic(id, position, blocking == KinematicBlocking::Slide);
         impl->system.GetBodyInterface().MoveKinematic(JPH::BodyID(id.value), toJoltR(position),
                                                       toJolt(rotation / length), dt);
+        return position;
+    }
+
+    namespace {
+        // What stops a blocked kinematic body: static bodies that are not sensors, that its layer and
+        // filter collide with.
+        class StaticBlockers final : public JPH::BodyFilter {
+        public:
+            StaticBlockers(const CollisionRules& rules, JPH::BodyID self, PhysicsLayer layer)
+                : rules(rules), self(self), layer(layer) {}
+            bool ShouldCollide(const JPH::BodyID& id) const override {
+                return id != self && filtersCollide(rules.filter(self.GetIndex()), rules.filter(id.GetIndex()));
+            }
+            bool ShouldCollideLocked(const JPH::Body& body) const override {
+                return body.IsStatic() && !body.IsSensor() && layersCollide(layer, PhysicsLayer(body.GetObjectLayer()));
+            }
+        private:
+            const CollisionRules& rules;
+            JPH::BodyID           self;
+            PhysicsLayer          layer;
+        };
+    }
+
+    // How far a kinematic body gets toward `target` before static bodies stop it, in its present
+    // rotation. Each pass: the surfaces it touches already (within TOUCH) are found first, and a move
+    // into one stops there or, sliding, loses the part going into it -- a cast cannot be asked
+    // about those, as Jolt gives a hit at its start no usable normal; then what is left is swept, and
+    // stops SKIN short of the first surface it meets. Sliding takes three passes at most. Single-
+    // threaded and taken in (fraction, body, sub-shape) order, so the same everywhere.
+    core::vec3 PhysicsWorld::sweepAgainstStatic(BodyId id, core::vec3 target, bool slide) const {
+        constexpr float SKIN = 0.005f;    // m; within Jolt's speculative distance, so the touch is a contact
+        constexpr float TOUCH = 2.0f * SKIN;
+        const JPH::BodyID jid(id.value);
+        JPH::RefConst<JPH::Shape> held;
+        JPH::RMat44 start;
+        core::vec3 from;
+        PhysicsLayer layer;
+        {   // Copied out: the queries below take body locks of their own.
+            JPH::BodyLockRead lock(impl->system.GetBodyLockInterface(), jid);
+            if (!lock.Succeeded()) return target;
+            const JPH::Body& body = lock.GetBody();
+            held = body.GetShape();
+            start = body.GetWorldTransform();
+            from = fromJolt(body.GetPosition());
+            layer = PhysicsLayer(body.GetObjectLayer());
+        }
+        const JPH::Shape* shape = held.GetPtr();
+        const JPH::NarrowPhaseQuery& query = impl->system.GetNarrowPhaseQuery();
+        StaticBlockers blockers(*impl->rules, jid, layer);
+        JPH::Vec3 moved = JPH::Vec3::sZero(), remaining = toJolt(target - from);
+        for (int pass = 0; pass < (slide ? 3 : 1); pass++) {
+            const JPH::RMat44 now = start.PostTranslated(moved);
+            // Touching already: each surface's normal, facing the body.
+            JPH::CollideShapeSettings touch;
+            touch.mMaxSeparationDistance = TOUCH;
+            JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> touching;
+            query.CollideShape(shape, JPH::Vec3::sOne(), now.PreTranslated(shape->GetCenterOfMass()), touch,
+                               now.GetTranslation(), touching, JPH::BroadPhaseLayerFilter(), JPH::ObjectLayerFilter(), blockers);
+            std::vector<JPH::Vec3> normals;
+            for (const JPH::CollideShapeResult& c : touching.mHits)
+                if (c.mPenetrationAxis.LengthSq() > 1e-12f) normals.push_back(-c.mPenetrationAxis.Normalized());
+            std::sort(normals.begin(), normals.end(), [](JPH::Vec3 x, JPH::Vec3 y) {
+                return std::make_tuple(x.GetX(), x.GetY(), x.GetZ()) < std::make_tuple(y.GetX(), y.GetY(), y.GetZ());
+            });
+            for (int round = 0; round < 2; round++)
+                for (JPH::Vec3 n : normals) {
+                    const float into = remaining.Dot(n);
+                    if (into >= -1e-7f) continue;
+                    if (!slide) return from + fromJolt(moved);
+                    remaining -= n * into;
+                }
+            if (slide)   // two surfaces at an acute angle: what is still into one goes nowhere
+                for (JPH::Vec3 n : normals)
+                    if (remaining.Dot(n) < -1e-6f) remaining = JPH::Vec3::sZero();
+
+            const float length = remaining.Length();
+            if (length < 1e-5f) break;
+            const JPH::Vec3 direction = remaining / length;
+            JPH::RShapeCast cast = JPH::RShapeCast::sFromWorldTransform(shape, JPH::Vec3::sOne(), now, remaining);
+            JPH::ShapeCastSettings settings;
+            JPH::AllHitCollisionCollector<JPH::CastShapeCollector> collector;
+            query.CastShape(cast, settings, now.GetTranslation(), collector, JPH::BroadPhaseLayerFilter(),
+                            JPH::ObjectLayerFilter(), blockers);
+            const JPH::ShapeCastResult* first = nullptr;
+            auto key = [](const JPH::ShapeCastResult& h) {
+                return std::make_tuple(h.mFraction, h.mBodyID2.GetIndexAndSequenceNumber(), h.mSubShapeID2.GetValue());
+            };
+            for (const JPH::ShapeCastResult& hit : collector.mHits) {
+                // A hit at the start is a surface touched already, dealt with above.
+                if (!(hit.mFraction > 0.0f) || hit.mPenetrationAxis.LengthSq() < 1e-12f) continue;
+                if (direction.Dot(hit.mPenetrationAxis.Normalized()) <= 1e-3f) continue;   // not moving into it
+                if (!first || key(hit) < key(*first)) first = &hit;
+            }
+            if (!first) { moved += remaining; break; }
+            const float travel = std::max(first->mFraction * length - SKIN, 0.0f);
+            moved += direction * travel;
+            if (!slide) break;
+            remaining -= direction * travel;   // the next pass finds the surface touched, and slides on it
+        }
+        return from + fromJolt(moved);
     }
 
     void PhysicsWorld::setGravity(core::vec3 gravity) {
