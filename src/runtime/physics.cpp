@@ -516,6 +516,7 @@ namespace projv::runtime {
                 d.layer = fixed->layer;
                 d.senses = fixed->senses;
             }
+            d.minImpactSpeed = rigid ? rigid->minImpactSpeed : fixed->minImpactSpeed;
             d.filter = filterOf(world, physics, entity);
             d.reportContacts = world.all_of<ContactReports>(entity);
             return out;
@@ -841,7 +842,6 @@ namespace projv::runtime {
         // ---- Islands ----------------------------------------------------------------------------
 
         constexpr uint64_t MAX_ISLAND_CELLS = 1ull << 24;   // the box islands are worked out in, at most
-        constexpr size_t   MAX_PIECES = 512;                // islands of the rest that come away in one pass
 
         // Every voxel under a source, counted.
         uint64_t voxelCount(const Scene& scene, const VoxelSource& source, uint64_t maxCells) {
@@ -902,6 +902,7 @@ namespace projv::runtime {
                 pieceRigid.restitution = fixed->restitution;
                 pieceRigid.material = fixed->material;
                 pieceRigid.breaksOnImpact = fixed->breaksOnImpact;
+                pieceRigid.minImpactSpeed = fixed->minImpactSpeed;
             }
             const bool anchorBase = fixed && fixed->anchorBase;
             const OnUnlink onUnlink = link->onUnlink;
@@ -1034,10 +1035,10 @@ namespace projv::runtime {
                 size_t rests = 0;
                 std::vector<Island> capped;
                 for (Island& island : islands)
-                    if (island.group != 0 || rests++ < MAX_PIECES) capped.push_back(std::move(island));
-                if (rests > MAX_PIECES)
+                    if (island.group != 0 || rests++ < physics.fractureLimits.maxIslands) capped.push_back(std::move(island));
+                if (rests > physics.fractureLimits.maxIslands)
                     core::trace("physics: entity {} came apart in {} islands; the first {} come away", static_cast<uint32_t>(entity),
-                                rests, MAX_PIECES);
+                                rests, physics.fractureLimits.maxIslands);
                 islands.swap(capped);
             }
             if (islands.empty()) return;
@@ -1870,12 +1871,13 @@ namespace projv::runtime {
             got.searchVoxels = std::clamp(finiteOr(want.searchVoxels, 3.0f), 0.5f, 16.0f);
             got.maxReachVoxels = std::clamp(finiteOr(want.maxReachVoxels, 64.0f), 1.0f, 256.0f);
             got.maxShards = std::clamp<uint32_t>(want.maxShards, 1, 4096);
+            got.maxIslands = std::clamp<uint32_t>(want.maxIslands, 1, 4096);
             got.minImpactBreak = std::clamp(finiteOr(want.minImpactBreak, 1.0f), 0.5f, 16.0f);
             if (got.searchVoxels != want.searchVoxels || got.maxReachVoxels != want.maxReachVoxels ||
-                got.maxShards != want.maxShards || got.minImpactBreak != want.minImpactBreak)
+                got.maxShards != want.maxShards || got.maxIslands != want.maxIslands || got.minImpactBreak != want.minImpactBreak)
                 core::warn("physics: fracture limits out of range, clamped to search {} voxels, reach {} voxels, {} shards, "
-                           "least impact break {} shard sizes",
-                           got.searchVoxels, got.maxReachVoxels, got.maxShards, got.minImpactBreak);
+                           "{} islands, least impact break {} shard sizes",
+                           got.searchVoxels, got.maxReachVoxels, got.maxShards, got.maxIslands, got.minImpactBreak);
         }
         physics.seenStamp = latestBlobContentStamp();
 
@@ -2487,6 +2489,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::RigidBody>::save(const pro
     if (b.senses != defaults.senses) j["senses"] = layerNames(b.senses);
     if (b.blockedByStatic == projv::runtime::KinematicBlocking::Stop) j["blockedByStatic"] = "stop";
     if (b.blockedByStatic == projv::runtime::KinematicBlocking::Slide) j["blockedByStatic"] = "slide";
+    if (b.minImpactSpeed >= 0.0f) j["minImpactSpeed"] = tidy(b.minImpactSpeed);
     return j;
 }
 
@@ -2540,6 +2543,7 @@ std::optional<projv::RigidBody> projv::runtime::ComponentTraits<projv::RigidBody
     if (blocked == "stop") b.blockedByStatic = projv::runtime::KinematicBlocking::Stop;
     else if (blocked == "slide") b.blockedByStatic = projv::runtime::KinematicBlocking::Slide;
     else if (blocked != "none") return std::nullopt;
+    b.minImpactSpeed = j.value("minImpactSpeed", -1.0f);
     return b;
 }
 
@@ -2554,6 +2558,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::StaticCollider>::save(cons
     if (!c.material.empty()) j["material"] = c.material;
     if (c.breaksOnImpact) j["breaksOnImpact"] = true;
     if (c.senses != defaults.senses) j["senses"] = layerNames(c.senses);
+    if (c.minImpactSpeed >= 0.0f) j["minImpactSpeed"] = tidy(c.minImpactSpeed);
     return j;
 }
 
@@ -2576,6 +2581,7 @@ std::optional<projv::StaticCollider> projv::runtime::ComponentTraits<projv::Stat
         if (!senses) return std::nullopt;
         c.senses = *senses;
     }
+    c.minImpactSpeed = j.value("minImpactSpeed", -1.0f);
     return c;
 }
 

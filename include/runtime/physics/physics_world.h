@@ -220,6 +220,10 @@ namespace projv::runtime {
         // (reportContacts). Swept along the move in the rotation it starts the step in; the turn is
         // applied where it ends, unswept.
         KinematicBlocking blockedByStatic = KinematicBlocking::None;
+        // m/s: a contact with it closing this fast or faster is an impact (PhysicsWorld::impacts),
+        // whatever the world's (PhysicsSettings::minImpactSpeed) -- higher or lower. Of two bodies that
+        // set one, the lower counts. Negative: none of its own.
+        float        minImpactSpeed = -1.0f;
     };
 
     struct BodyId {
@@ -297,7 +301,8 @@ namespace projv::runtime {
         int        jointPositionSteps = 6;
 
         // Contacts that begin closing faster than this are impacts (PhysicsWorld::impacts): what
-        // breaks voxels on impact, and what a game hangs sounds and damage on.
+        // breaks voxels on impact, and what a game hangs sounds and damage on. The default for a
+        // body that does not set its own (BodyDesc::minImpactSpeed).
         float      minImpactSpeed = 1.0f;     // m/s
 
         // Record every call that changes the simulation, from construction on, with the state hash
@@ -312,8 +317,8 @@ namespace projv::runtime {
         int        threads = -1;
     };
 
-    // Two bodies that began touching in a step, closing at `speed` or more (PhysicsSettings::
-    // minImpactSpeed): one per pair of bodies -- the fastest of their contacts -- with `a` the
+    // Two bodies that began touching in a step, closing at `speed` or more (BodyDesc::minImpactSpeed:
+    // the lower of theirs, the one that has one, or the world's): one per pair of bodies -- the fastest of their contacts -- with `a` the
     // lower id. Speeds and velocities are the bodies' as the step began, before the solver met the
     // contact, so what the collision took out can be given back (a boulder through a wall).
     struct Impact {

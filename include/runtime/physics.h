@@ -80,6 +80,12 @@ namespace projv {
         // impact may make one. Only voxels whose material has a strength break at all; shards a
         // fracture throws off have this off, so debris does not shatter again on landing.
         bool                  breaksOnImpact = false;
+        // m/s: how fast a hit on it must close to be an impact (runtime::impacts: what breaks on
+        // impact, and what sounds and damage hang on) -- a glass cup's lower than a boulder's. It
+        // overrides the world's (PhysicsSettings::minImpactSpeed) for every contact the body is in;
+        // when both bodies set one, the lower counts. Negative: the world's. Pieces copy it with
+        // the rest of the RigidBody.
+        float                 minImpactSpeed = -1.0f;
         // On the sensor layer, the body is a sensor (a trigger volume that moves): it is collided with
         // by nothing, and reports what enters and leaves (ContactBegan). These are the layers it
         // senses, runtime::layerBit()s; "senses" in the file, by name. Static: only a kinematic sensor.
@@ -125,6 +131,8 @@ namespace projv {
         std::string           material;
         // As RigidBody::breaksOnImpact. The pieces that fall when support goes (splits) take it on.
         bool                  breaksOnImpact = false;
+        // As RigidBody::minImpactSpeed.
+        float                 minImpactSpeed = -1.0f;
         // As RigidBody::senses, on the sensor layer: a trigger volume that stays put. It senses a body
         // as it comes in moving; one that falls asleep inside stays sensed.
         uint32_t              senses = runtime::layerBit(runtime::PhysicsLayer::Moving) |
@@ -347,6 +355,10 @@ namespace projv::runtime {
             float    maxReachVoxels = 64.0f;
             // The most shards one strike makes (1 .. 4096); the rest of what would break stays.
             uint32_t maxShards = 512;
+            // The most islands that come away from one body in one pass (1 .. 4096): what an edit or
+            // a lost support cuts loose, beside a strike's shards. The rest stay with the body, and
+            // come away at its next change.
+            uint32_t maxIslands = 512;
             // The least an impact breaks (Strike::cause Impact), in shard sizes of the struck
             // material (0.5 .. 16): a hit that would break less breaks nothing, and a body that fits
             // in a cube of this many shard sizes is not broken by a hit at all. What keeps pieces
@@ -493,7 +505,8 @@ namespace projv::runtime {
     bool canBreak(World& world, Entity entity);
 
     // A collision of the last physics step, between two entities: one per pair, the fastest of its
-    // contacts, closing faster than PhysicsSettings::minImpactSpeed.
+    // contacts, closing faster than their minImpactSpeed (RigidBody, StaticCollider: the lower of
+    // theirs, the one that sets one, or PhysicsSettings::minImpactSpeed).
     struct BodyImpact {
         Entity     a = NullEntity, b = NullEntity;
         core::vec3 point{0.0f};               // world space, between the two surfaces

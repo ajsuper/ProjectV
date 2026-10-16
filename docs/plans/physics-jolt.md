@@ -3,8 +3,8 @@
 Status: **approved**, 2026-10-09. **M0-M6 done** (2026-10-13); joints (2026-10-13), physics materials
 (2026-10-14), fracture, the debris budget and support (2026-10-14/15) built, and fracture policy moved out
 of the engine (2026-10-15, "Mechanism in the engine, policy in systems"). M7 (contours) waits on the
-contour work. "One rule set for voxel bodies" below is done (2026-10-15), and Roadmap R1-R7
-(2026-10-16). **Next: R8 onwards in "Roadmap", revised 2026-10-15 from a review of which games the
+contour work. "One rule set for voxel bodies" below is done (2026-10-15), and Roadmap R1-R8
+(2026-10-16). **Next: R9 onwards in "Roadmap", revised 2026-10-15 from a review of which games the
 system serves and where it gets in their way.
 
 ## Decisions made
@@ -858,6 +858,17 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
 - **R8. The last constants a game might set:** the 512-piece cap on support splits, joining
   maxShards in PhysicsConfig::fracture; minImpactSpeed per body (a glass cup and a boulder want
   different thresholds), the world setting as its default.
+  *Done 2026-10-16.* `FractureLimits::maxIslands` (512, clamped 1..4096, never off): the islands of
+  the rest that come away from one body in one pass, for every cause, beside a strike's shards
+  (capped by maxShards); what is over it stays with the body and comes away at its next change
+  (test: "islands: at most maxIslands..."). `BodyDesc::minImpactSpeed`, and on RigidBody and
+  StaticCollider ("minImpactSpeed", saved only when set; pieces copy it, a static collider's
+  pieces too); negative is none of its own. The rule for a pair took a second try: "the lower of
+  the two" made a raised threshold useless, as the floor's world default always won -- a boulder
+  could never ignore light knocks. So a body's own threshold overrides the world's for its
+  contacts, either way; of two that set one, the lower (a cup hit by a boulder is the cup's
+  impact). Log version 9; the golden recording's step hashes unchanged (the v8 file replayed
+  first), regenerated.
 
 **Missing, buildable on the engine meanwhile**
 

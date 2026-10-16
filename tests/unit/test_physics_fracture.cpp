@@ -1145,3 +1145,77 @@ TEST_CASE("shards are made flush, not overlapping: without gravity, thrown out o
     for (Entity e : shards)
         if (runtime::hasBody(f.app.world, e)) CHECK(runtime::bodyPose(f.app.world, e).linearVelocity.z < -5.9f);
 }
+
+TEST_CASE("impacts: a body's own minImpactSpeed overrides the world's, higher or lower; of two, the lower") {
+    auto hits = [](float a, float b, float drop) {
+        runtime::PhysicsWorld sim;
+        runtime::BodyDesc floor{.shape = runtime::PhysicsShape::box({20, 1, 20}), .motion = runtime::MotionType::Static,
+                                .layer = runtime::PhysicsLayer::Static, .position = {0, -1, 0}};
+        floor.minImpactSpeed = b;
+        sim.createBody(floor);
+        runtime::BodyDesc box{.shape = runtime::PhysicsShape::box({0.5f, 0.5f, 0.5f}), .position = {0, 0.5f + drop, 0}};
+        box.minImpactSpeed = a;
+        sim.createBody(box);
+        int n = 0;
+        for (int i = 0; i < 90; i++) { sim.step(1.0f / 60.0f); n += int(sim.impacts().size()); }
+        return n;
+    };
+    // From 0.3 m it lands at about 2.4 m/s; the world's threshold is 1 m/s.
+    CHECK(hits(-1, -1, 0.3f) == 1);
+    CHECK(hits(5, -1, 0.3f) == 0);    // a boulder that does not count light knocks
+    CHECK(hits(-1, 5, 0.3f) == 0);    // the same, set on the floor
+    CHECK(hits(5, 0.5f, 0.3f) == 1);  // two set: the lower
+    // From 4 cm, about 0.6 m/s as the contact begins (2 cm out, Jolt's speculative distance): under
+    // the world's, over a glass cup's.
+    CHECK(hits(-1, -1, 0.04f) == 0);
+    CHECK(hits(0.2f, -1, 0.04f) == 1);
+}
+
+TEST_CASE("islands: at most maxIslands come away in one pass, and the rest at the next change") {
+    runtime::PhysicsConfig::FractureLimits limits;
+    limits.maxIslands = 3;
+    Fixture f(-1, 3000, runtime::ImpactFractureConfig{}, limits);
+    Entity wall = f.wall();
+    f.app.world.patch<projv::StaticCollider>(wall, [](projv::StaticCollider& c) {
+        c.splits = true;
+        c.anchorBase = true;
+    });
+    f.frames(2);
+    // A slot right across, a metre up, and seven up through the top: eight columns, held by nothing.
+    std::vector<projv::PendingVoxelOp> cuts = slot({0, 4, 0}, {31, 4, 1});
+    for (int x = 3; x < 31; x += 4) {
+        std::vector<projv::PendingVoxelOp> up = slot({x, 5, 0}, {x, 23, 1});
+        cuts.insert(cuts.end(), up.begin(), up.end());
+    }
+    runtime::editVoxels(f.app.world, wall, cuts);
+    f.frames(1);
+    REQUIRE(f.splits.size() == 1);
+    CHECK(f.splits[0].pieces.size() == 3);
+    // Any later change to the wall looks again: three more, then the last two.
+    runtime::editVoxels(f.app.world, wall, slot({0, 0, 0}, {0, 0, 0}));
+    f.frames(1);
+    REQUIRE(f.splits.size() == 2);
+    CHECK(f.splits[1].pieces.size() == 3);
+    runtime::editVoxels(f.app.world, wall, slot({31, 0, 0}, {31, 0, 0}));
+    f.frames(1);
+    REQUIRE(f.splits.size() == 3);
+    CHECK(f.splits[2].pieces.size() == 2);
+}
+
+TEST_CASE("minImpactSpeed saves on RigidBody and StaticCollider only when set") {
+    using projv::runtime::ComponentTraits;
+    projv::RigidBody cup;
+    cup.minImpactSpeed = 0.3f;
+    auto rigid = ComponentTraits<projv::RigidBody>::load(ComponentTraits<projv::RigidBody>::save(cup), 1);
+    REQUIRE(rigid);
+    CHECK(rigid->minImpactSpeed == doctest::Approx(0.3f));
+    CHECK_FALSE(ComponentTraits<projv::RigidBody>::save(projv::RigidBody{}).contains("minImpactSpeed"));
+    projv::StaticCollider floor;
+    floor.minImpactSpeed = 0.0f;   // every contact
+    nlohmann::json j = ComponentTraits<projv::StaticCollider>::save(floor);
+    CHECK(j["minImpactSpeed"] == 0.0);
+    auto fixed = ComponentTraits<projv::StaticCollider>::load(j, 1);
+    REQUIRE(fixed);
+    CHECK(fixed->minImpactSpeed == 0.0f);
+    CHECK(ComponentTraits<projv::StaticCollider>::load(nlohmann::json::object(), 1)->minImpactSpeed < 0.0f);
+}

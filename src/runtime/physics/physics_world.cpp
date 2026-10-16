@@ -530,7 +530,7 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 8;   // 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking
+        constexpr uint32_t LOG_VERSION = 8;   // 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
@@ -648,6 +648,7 @@ namespace projv::runtime {
             writeFilter(out, d.filter);
             put(out, uint8_t(d.reportContacts)); put(out, d.senses);
             put(out, uint8_t(d.blockedByStatic));
+            put(out, d.minImpactSpeed);
         }
 
         template <typename BuildVoxels>
@@ -659,7 +660,8 @@ namespace projv::runtime {
                       get(in, at, d.friction) && get(in, at, d.restitution) && get(in, at, d.linearDamping) &&
                       get(in, at, d.angularDamping) && get(in, at, d.gravityFactor) && get(in, at, continuous) &&
                       readFilter(in, at, d.filter) && get(in, at, reports) && get(in, at, d.senses) &&
-                      get(in, at, blocked) && blocked <= uint8_t(KinematicBlocking::Slide);
+                      get(in, at, blocked) && blocked <= uint8_t(KinematicBlocking::Slide) &&
+                      get(in, at, d.minImpactSpeed);
             d.motion = MotionType(motion);
             d.layer = PhysicsLayer(layer);
             d.continuous = continuous != 0;
@@ -776,6 +778,7 @@ namespace projv::runtime {
         std::vector<ContactChange>            endedBetween;     // by destroyBody, setReportContacts, since it
         std::vector<uint32_t>                 fresh;            // indices with FRESH set
         std::vector<uint8_t>                  blocking;         // per body index: KinematicBlocking
+        std::vector<float>                    impactSpeeds;     // per body index: its own minImpactSpeed, -1 for none
         static uint64_t pairKey(uint32_t a, uint32_t b) { return a < b ? (uint64_t(a) << 32) | b : (uint64_t(b) << 32) | a; }
         // Each awake body's motion as the step began, by body index (snapshotVelocities).
         struct Motion { bool awake = false; JPH::Vec3 linear, angular; JPH::RVec3 centre; };
@@ -823,6 +826,7 @@ namespace projv::runtime {
         impl->blocking.assign(settings.maxBodies, 0);
         impl->contacts.reporting = &impl->reporting;
         impl->minImpactSpeed = std::isfinite(settings.minImpactSpeed) ? std::max(settings.minImpactSpeed, 0.0f) : 1.0f;
+        impl->impactSpeeds.assign(settings.maxBodies, -1.0f);
         impl->system.SetContactListener(&impl->contacts);
         // Solver iterations: see PhysicsSettings::velocitySteps for why not Jolt's default.
         JPH::PhysicsSettings solver = impl->system.GetPhysicsSettings();
@@ -936,6 +940,8 @@ namespace projv::runtime {
         impl->rules->setBody(body->GetID().GetIndex(), desc.layer, sensor ? desc.senses : 0u);
         impl->reporting[body->GetID().GetIndex()] = uint8_t((desc.reportContacts ? REPORTS : 0) | (sensor ? SENSOR : 0));
         impl->blocking[body->GetID().GetIndex()] = uint8_t(blocked ? desc.blockedByStatic : KinematicBlocking::None);
+        impl->impactSpeeds[body->GetID().GetIndex()] =
+            std::isfinite(desc.minImpactSpeed) && desc.minImpactSpeed >= 0.0f ? desc.minImpactSpeed : -1.0f;
         bodies.AddBody(body->GetID(), desc.motion == MotionType::Static ? JPH::EActivation::DontActivate
                                                                         : JPH::EActivation::Activate);
         impl->addedSinceOptimize++;
@@ -1117,6 +1123,7 @@ namespace projv::runtime {
                     if (lock.Succeeded()) lock.GetBody().SetCollisionGroup(JPH::CollisionGroup(impl->rules, inner.GetIndex(), 0));
                 }
                 impl->rules->setFilter(inner.GetIndex(), desc.filter);
+                impl->impactSpeeds[inner.GetIndex()] = -1.0f;
                 impl->rules->setBody(inner.GetIndex(), desc.layer, 0);
                 impl->reporting[inner.GetIndex()] = 0;
                 c.desc = desc;
@@ -2365,7 +2372,7 @@ namespace projv::runtime {
     void PhysicsWorld::orderImpacts() {
         std::vector<Impact> raw;
         raw.reserve(impl->contacts.added.size());
-        const float minSpeed = impl->minImpactSpeed;
+
         auto motion = [&](uint32_t id, JPH::RVec3Arg at, JPH::Vec3& linear) {
             uint32_t index = JPH::BodyID(id).GetIndex();
             if (index >= impl->before.size() || !impl->before[index].awake) { linear = JPH::Vec3::sZero(); return JPH::Vec3::sZero(); }
@@ -2377,6 +2384,11 @@ namespace projv::runtime {
             JPH::Vec3 la, lb;
             const JPH::Vec3 va = motion(c.a, c.point, la), vb = motion(c.b, c.point, lb);
             const float speed = (va - vb).Dot(c.normal);
+            // A body's own threshold, where it has one, overrides the world's; two that have, the lower
+            // (a glass cup struck by a boulder is the cup's impact; a boulder on the floor, the boulder's).
+            const float ownA = impl->impactSpeeds[JPH::BodyID(c.a).GetIndex()], ownB = impl->impactSpeeds[JPH::BodyID(c.b).GetIndex()];
+            const float minSpeed = ownA < 0.0f && ownB < 0.0f ? impl->minImpactSpeed
+                                 : ownA < 0.0f ? ownB : ownB < 0.0f ? ownA : std::min(ownA, ownB);
             if (!(speed >= minSpeed)) continue;
             Impact i;
             i.a = BodyId{c.a};
