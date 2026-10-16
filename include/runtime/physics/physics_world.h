@@ -48,9 +48,12 @@ namespace projv::runtime {
     };
 
     // What collides with what, coarsely: a fixed list, so the collision matrix is a few lines of code
-    // rather than data. Everything collides with everything except that static ignores static, and a
-    // sensor touches only things that move under their own power (moving bodies and characters).
-    // Which bodies pass through which beyond that is data: CollisionFilter.
+    // rather than data. Everything collides with everything except that static ignores static, and
+    // sensors ignore sensors. Which bodies pass through which beyond that is data: CollisionFilter,
+    // and a sensor's BodyDesc::senses.
+    //
+    // A body on the Sensor layer is a sensor: nothing collides with it, and it reports what enters and
+    // leaves it (PhysicsWorld::contactChanges) -- a trigger volume.
     enum class PhysicsLayer : uint8_t {
         Static,
         Moving,
@@ -59,6 +62,7 @@ namespace projv::runtime {
         Count
     };
     bool layersCollide(PhysicsLayer a, PhysicsLayer b);
+    constexpr uint32_t layerBit(PhysicsLayer layer) { return 1u << uint32_t(layer); }
 
     // Which bodies pass through which, finer than layers (the physics plan, R4), checked for each pair
     // the layers let meet. `groups` and `ignores` are bits, one per named group (a game names them:
@@ -197,6 +201,13 @@ namespace projv::runtime {
         // fast enough to pass through something in one step.
         bool         continuous = false;
         CollisionFilter filter;
+        // Report when it begins and stops touching another body (PhysicsWorld::contactChanges). A
+        // sensor always does.
+        bool         reportContacts = false;
+        // A sensor's (layer Sensor): the layers of the bodies it senses, layerBit()s. What a static
+        // sensor senses only while it moves -- a sleeping body stays sensed, but is not found anew --
+        // and a static sensor never senses static bodies; a kinematic one does, at a cost.
+        uint32_t     senses = layerBit(PhysicsLayer::Moving) | layerBit(PhysicsLayer::Character);
     };
 
     struct BodyId {
@@ -302,6 +313,20 @@ namespace projv::runtime {
         // closing speed squared (the whole of the striker's when it strikes something static), J.
         float      energy = 0.0f;
         core::vec3 velocityA{0.0f}, velocityB{0.0f};   // each body's linear velocity, before
+    };
+
+    // Two bodies began or stopped touching in a step (PhysicsWorld::contactChanges), one of them a
+    // body that reports contacts (BodyDesc::reportContacts) or a sensor. One per pair of bodies,
+    // however many of their parts touch, with `a` the lower id. A pair that falls asleep touching is
+    // still touching: it ends when they part, or when either body is destroyed (or stops reporting,
+    // with the other not reporting either). Every begin has its end.
+    struct ContactChange {
+        BodyId     a, b;
+        bool       began = true;
+        bool       sensor = false;                // either is a sensor
+        // Began only: where they first touched (world space) and the normal there, from a towards b.
+        core::vec3 point{0.0f};
+        core::vec3 normal{0.0f, 1.0f, 0.0f};
     };
 
     struct PhysicsStats {
@@ -483,6 +508,12 @@ namespace projv::runtime {
         // Default for an id that is not alive.
         CollisionFilter filter(BodyId id) const;
 
+        // BodyDesc::reportContacts, from the next step: on, it wakes the body so what it is already
+        // touching is found and reported as begun; off, its pairs end (unless the other body reports).
+        // A sensor reports whatever this says. A stale id is ignored.
+        void setReportContacts(BodyId id, bool on);
+        bool reportsContacts(BodyId id) const;
+
         // Wakes every body whose bounds touch this one's: what an edit to its shape must do, so
         // bodies resting on (or now inside) the old shape notice the new one.
         void wakeBodiesAround(BodyId id);
@@ -612,10 +643,18 @@ namespace projv::runtime {
         // The impacts of the last step, ordered by (a, b): the same on every machine, whatever
         // thread the solver met each contact on.
         const std::vector<Impact>& impacts() const;
+        // The contacts that began and ended in the last step, ordered by (a, b), ends first; pairs
+        // a destroyBody (or setReportContacts off) ended since the step before are among them.
+        const std::vector<ContactChange>& contactChanges() const;
+        // Every pair touching now that a change was or would be reported for, ordered by (a, b):
+        // what a contactChanges reader rebuilds its view from after restoreState.
+        std::vector<ContactChange> contactPairs() const;
 
     private:
         void snapshotVelocities();
         void orderImpacts();
+        void trackContacts();
+        void endContactsOf(BodyId body, bool unlessReported);
         void sanityPass(float dt);
         void updateCharacters(float dt);
         void checkJoints(float dt);

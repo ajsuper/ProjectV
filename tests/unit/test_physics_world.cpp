@@ -201,7 +201,8 @@ TEST_CASE("a full body table refuses creation instead of failing later") {
 TEST_CASE("layers: the matrix is symmetric, and static ignores static") {
     CHECK(layersCollide(PhysicsLayer::Moving, PhysicsLayer::Moving));
     CHECK_FALSE(layersCollide(PhysicsLayer::Static, PhysicsLayer::Static));
-    CHECK_FALSE(layersCollide(PhysicsLayer::Sensor, PhysicsLayer::Static));
+    CHECK(layersCollide(PhysicsLayer::Sensor, PhysicsLayer::Static));   // a sensor's senses decide
+    CHECK_FALSE(layersCollide(PhysicsLayer::Sensor, PhysicsLayer::Sensor));
     CHECK(layersCollide(PhysicsLayer::Character, PhysicsLayer::Sensor));
     CHECK(layersCollide(PhysicsLayer::Sensor, PhysicsLayer::Moving));
     for (int i = 0; i < int(PhysicsLayer::Count); i++)

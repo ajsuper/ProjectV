@@ -313,22 +313,68 @@ namespace projv::runtime {
             JPH::Vec3  normal;
             float      inverseMassA, inverseMassB;
         };
+
+        // Contacts of bodies that report them (BodyDesc::reportContacts, sensors), as the solver's
+        // threads meet them: which pairs touch, and which stopped. Turned into begins and ends after
+        // the step (PhysicsWorld::trackContacts), in an order that does not depend on the threads.
+        // Per body index, in `reporting`: REPORTS, SENSOR (always reports), FRESH (began reporting
+        // since the last step: what it already touches is found from Jolt's persisted contacts).
+        constexpr uint8_t REPORTS = 1, FRESH = 2, SENSOR = 4;
+        struct Touch {
+            uint32_t   a, b;
+            JPH::RVec3 point;
+            JPH::Vec3  normal;
+            bool       sensor;
+        };
+
+        // Where a manifold's contact is: the middle of its points, between the two surfaces.
+        JPH::RVec3 middleOf(const JPH::ContactManifold& manifold) {
+            const JPH::uint n = manifold.mRelativeContactPointsOn1.size();
+            if (n == 0) return manifold.mBaseOffset;
+            JPH::RVec3 point = JPH::RVec3::sZero();
+            for (JPH::uint i = 0; i < n; i++)
+                point += 0.5f * (manifold.GetWorldSpaceContactPointOn1(i) + manifold.GetWorldSpaceContactPointOn2(i));
+            return point / float(n);
+        }
         class MaterialContacts final : public JPH::ContactListener {
         public:
             const std::vector<PhysicsMaterial>* table = nullptr;
             bool any = false;   // a material is defined: there is something to look up
             std::mutex impactsLock;
             std::vector<NewContact> added;
+            // Per body index (Impl::reporting); changed only between steps.
+            const std::vector<uint8_t>* reporting = nullptr;
+            std::mutex touchLock;
+            std::vector<Touch> touched;               // added, or persisted for a FRESH body
+            std::vector<std::pair<uint32_t, uint32_t>> parted;   // removed, by body id
             void OnContactAdded(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold,
                                 JPH::ContactSettings& settings) override {
                 combine(a, b, manifold, settings);
                 noteImpact(a, b, manifold);
+                noteTouch(a, b, manifold, REPORTS | SENSOR);
             }
             void OnContactPersisted(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold,
                                     JPH::ContactSettings& settings) override {
                 combine(a, b, manifold, settings);
+                noteTouch(a, b, manifold, FRESH);
+            }
+            void OnContactRemoved(const JPH::SubShapeIDPair& pair) override {
+                const JPH::BodyID a = pair.GetBody1ID(), b = pair.GetBody2ID();
+                if (!((flags(a.GetIndex()) | flags(b.GetIndex())) & (REPORTS | SENSOR))) return;
+                std::lock_guard guard(touchLock);
+                parted.push_back({a.GetIndexAndSequenceNumber(), b.GetIndexAndSequenceNumber()});
             }
         private:
+            uint8_t flags(uint32_t index) const {
+                return reporting && index < reporting->size() ? (*reporting)[index] : 0;
+            }
+            void noteTouch(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold, uint8_t want) {
+                if (!((flags(a.GetID().GetIndex()) | flags(b.GetID().GetIndex())) & want)) return;
+                Touch t{a.GetID().GetIndexAndSequenceNumber(), b.GetID().GetIndexAndSequenceNumber(), middleOf(manifold),
+                        manifold.mWorldSpaceNormal, a.IsSensor() || b.IsSensor()};
+                std::lock_guard guard(touchLock);
+                touched.push_back(t);
+            }
             void noteImpact(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold) {
                 if (a.IsSensor() || b.IsSensor() || manifold.mRelativeContactPointsOn1.empty()) return;
                 auto inverseMass = [](const JPH::Body& body) {
@@ -338,11 +384,7 @@ namespace projv::runtime {
                 c.inverseMassA = inverseMass(a);
                 c.inverseMassB = inverseMass(b);
                 if (!(c.inverseMassA + c.inverseMassB > 0.0f)) return;
-                c.point = JPH::RVec3::sZero();
-                const JPH::uint n = manifold.mRelativeContactPointsOn1.size();
-                for (JPH::uint i = 0; i < n; i++)
-                    c.point += 0.5f * (manifold.GetWorldSpaceContactPointOn1(i) + manifold.GetWorldSpaceContactPointOn2(i));
-                c.point /= float(n);
+                c.point = middleOf(manifold);
                 c.normal = manifold.mWorldSpaceNormal;   // moves b out of a: from a towards b
                 c.a = a.GetID().GetIndexAndSequenceNumber();
                 c.b = b.GetID().GetIndexAndSequenceNumber();
@@ -395,7 +437,7 @@ namespace projv::runtime {
         // Snapshot layout: a header that lets restoreState check, before touching anything, that the
         // snapshot is one and fits this world; then Jolt's own bytes.
         constexpr uint32_t SNAPSHOT_MAGIC = 0x50564a50u;   // "PJVP"
-        constexpr uint32_t SNAPSHOT_VERSION = 7;   // 2: rest damping state per body; 3: characters; 4: joints; 5: motor modes; 6: rest peak speed; 7: collision filters
+        constexpr uint32_t SNAPSHOT_VERSION = 8;   // 2: rest damping state per body; 3: characters; 4: joints; 5: motor modes; 6: rest peak speed; 7: collision filters; 8: contact reports
 
         template <typename T> void put(std::vector<uint8_t>& out, const T& v) {
             const auto* p = reinterpret_cast<const uint8_t*>(&v);
@@ -412,7 +454,7 @@ namespace projv::runtime {
     bool layersCollide(PhysicsLayer a, PhysicsLayer b) {
         if (a > b) std::swap(a, b);   // the matrix is symmetric; look up with a <= b
         switch (a) {
-            case PhysicsLayer::Static:    return b != PhysicsLayer::Static && b != PhysicsLayer::Sensor;
+            case PhysicsLayer::Static:    return b != PhysicsLayer::Static;
             case PhysicsLayer::Moving:    return true;
             case PhysicsLayer::Sensor:    return b == PhysicsLayer::Character;
             case PhysicsLayer::Character: return b == PhysicsLayer::Character;
@@ -447,11 +489,13 @@ namespace projv::runtime {
     // - its CollisionFilter (BodyDesc::filter, setFilter): groups, ignores and family;
     // - the pairs a joint joins that does not let them collide (JointDesc::collideConnected false, the
     //   default) -- a car's wheels and its chassis, the links of a chain. Counted, as two joints can
-    //   join the same pair.
+    //   join the same pair;
+    // - a sensor's senses (BodyDesc::senses): the layers whose bodies it meets, which the layer matrix
+    //   leaves open to it.
     // Read from the solver's threads during a step, changed only between steps.
     class CollisionRules final : public JPH::GroupFilter {
     public:
-        explicit CollisionRules(uint32_t bodies) : filters(bodies) {}
+        explicit CollisionRules(uint32_t bodies) : filters(bodies), layers(bodies, 0), senses(bodies, 0) {}
         static uint64_t key(uint32_t a, uint32_t b) { return a < b ? (uint64_t(a) << 32) | b : (uint64_t(b) << 32) | a; }
         void join(uint32_t a, uint32_t b) { pairs[key(a, b)]++; }
         void part(uint32_t a, uint32_t b) {
@@ -461,13 +505,22 @@ namespace projv::runtime {
         // A body index's filter; the default for one past the table (a body with no group: none here).
         const CollisionFilter& filter(uint32_t index) const { return index < filters.size() ? filters[index] : none; }
         void setFilter(uint32_t index, const CollisionFilter& f) { if (index < filters.size()) filters[index] = f; }
+        // A body's layer, and what it senses when it is a sensor (0 when it is not).
+        void setBody(uint32_t index, PhysicsLayer layer, uint32_t sensed) {
+            if (index < layers.size()) { layers[index] = uint8_t(layer); senses[index] = sensed; }
+        }
         bool CanCollide(const JPH::CollisionGroup& one, const JPH::CollisionGroup& two) const override {
             const uint32_t a = one.GetGroupID(), b = two.GetGroupID();
             if (!filtersCollide(filter(a), filter(b))) return false;
+            if (a < senses.size() && b < senses.size() &&
+                ((senses[a] && !(senses[a] >> layers[b] & 1u)) || (senses[b] && !(senses[b] >> layers[a] & 1u))))
+                return false;
             return pairs.empty() || pairs.find(key(a, b)) == pairs.end();
         }
     private:
         std::vector<CollisionFilter> filters;
+        std::vector<uint8_t>         layers;
+        std::vector<uint32_t>        senses;
         CollisionFilter              none;
         std::map<uint64_t, int>      pairs;
     };
@@ -477,12 +530,12 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 6;   // 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer
+        constexpr uint32_t LOG_VERSION = 7;   // 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
             Gravity, Step, Restore, CreateCharacter, DestroyCharacter, CharacterInput, CharacterPosition,
-            CreateJoint, DestroyJoint, JointMotor, SetMaterial, SetFilter, CharacterFilter
+            CreateJoint, DestroyJoint, JointMotor, SetMaterial, SetFilter, CharacterFilter, ReportContacts
         };
 
         void writeSettings(std::vector<uint8_t>& out, const PhysicsSettings& s) {
@@ -593,20 +646,22 @@ namespace projv::runtime {
             put(out, d.linearDamping); put(out, d.angularDamping); put(out, d.gravityFactor);
             put(out, uint8_t(d.continuous));
             writeFilter(out, d.filter);
+            put(out, uint8_t(d.reportContacts)); put(out, d.senses);
         }
 
         template <typename BuildVoxels>
         bool readDesc(const std::vector<uint8_t>& in, size_t& at, BodyDesc& d, BuildVoxels& build) {
-            uint8_t motion = 0, layer = 0, continuous = 0;
+            uint8_t motion = 0, layer = 0, continuous = 0, reports = 0;
             bool ok = readShape(in, at, d.shape, build) && get(in, at, motion) && get(in, at, layer) &&
                       get(in, at, d.position) && get(in, at, d.rotation) && get(in, at, d.linearVelocity) &&
                       get(in, at, d.angularVelocity) && get(in, at, d.density) && get(in, at, d.mass) &&
                       get(in, at, d.friction) && get(in, at, d.restitution) && get(in, at, d.linearDamping) &&
                       get(in, at, d.angularDamping) && get(in, at, d.gravityFactor) && get(in, at, continuous) &&
-                      readFilter(in, at, d.filter);
+                      readFilter(in, at, d.filter) && get(in, at, reports) && get(in, at, d.senses);
             d.motion = MotionType(motion);
             d.layer = PhysicsLayer(layer);
             d.continuous = continuous != 0;
+            d.reportContacts = reports != 0;
             return ok;
         }
     }
@@ -707,6 +762,17 @@ namespace projv::runtime {
         MaterialContacts                      contacts;
         std::vector<Impact>                   impacts;   // the last step's, ordered
         float                                 minImpactSpeed = 1.0f;
+        // ---- Contact reports (BodyDesc::reportContacts, sensors) ----
+        // Per body index: REPORTS, SENSOR, FRESH. The pairs touching now, by (a, b) ids with a < b;
+        // `dormant` once a body of the pair has gone to sleep and Jolt has dropped their contact --
+        // still touching, until a step that both are awake in does not find them touching.
+        std::vector<uint8_t>                  reporting;
+        struct Touching { bool dormant = false; bool sensor = false; };
+        std::map<uint64_t, Touching>          touching;
+        std::vector<ContactChange>            contactChanges;   // the last step's, ordered
+        std::vector<ContactChange>            endedBetween;     // by destroyBody, setReportContacts, since it
+        std::vector<uint32_t>                 fresh;            // indices with FRESH set
+        static uint64_t pairKey(uint32_t a, uint32_t b) { return a < b ? (uint64_t(a) << 32) | b : (uint64_t(b) << 32) | a; }
         // Each awake body's motion as the step began, by body index (snapshotVelocities).
         struct Motion { bool awake = false; JPH::Vec3 linear, angular; JPH::RVec3 centre; };
         std::vector<Motion>                   before;
@@ -749,6 +815,8 @@ namespace projv::runtime {
                           impl->broadPhaseLayers, impl->objectVsBroadPhase, impl->objectPairs);
         impl->system.SetGravity(toJolt(settings.gravity));
         impl->contacts.table = &impl->materials;
+        impl->reporting.assign(settings.maxBodies, 0);
+        impl->contacts.reporting = &impl->reporting;
         impl->minImpactSpeed = std::isfinite(settings.minImpactSpeed) ? std::max(settings.minImpactSpeed, 0.0f) : 1.0f;
         impl->system.SetContactListener(&impl->contacts);
         // Solver iterations: see PhysicsSettings::velocitySteps for why not Jolt's default.
@@ -812,6 +880,11 @@ namespace projv::runtime {
         settings.mGravityFactor = desc.gravityFactor;
         settings.mMotionQuality = desc.continuous ? JPH::EMotionQuality::LinearCast
                                                   : JPH::EMotionQuality::Discrete;
+        const bool sensor = desc.layer == PhysicsLayer::Sensor;
+        settings.mIsSensor = sensor;
+        // A moving sensor finds static bodies only when Jolt is told to look (a static one never does).
+        settings.mCollideKinematicVsNonDynamic =
+            sensor && desc.motion == MotionType::Kinematic && (desc.senses & layerBit(PhysicsLayer::Static));
         if (desc.motion != MotionType::Static) {
             // Within the body's speed limits, which Jolt asserts on at creation: a velocity carried
             // over from a body at its limit (a rebuild, a piece cut off) can come back a hair over.
@@ -854,6 +927,8 @@ namespace projv::runtime {
         if (!body) return refuse("the body table is full (PhysicsSettings::maxBodies)");
         body->SetCollisionGroup(JPH::CollisionGroup(impl->rules, body->GetID().GetIndex(), 0));
         impl->rules->setFilter(body->GetID().GetIndex(), desc.filter);
+        impl->rules->setBody(body->GetID().GetIndex(), desc.layer, sensor ? desc.senses : 0u);
+        impl->reporting[body->GetID().GetIndex()] = uint8_t((desc.reportContacts ? REPORTS : 0) | (sensor ? SENSOR : 0));
         bodies.AddBody(body->GetID(), desc.motion == MotionType::Static ? JPH::EActivation::DontActivate
                                                                         : JPH::EActivation::Activate);
         impl->addedSinceOptimize++;
@@ -893,11 +968,54 @@ namespace projv::runtime {
         return isAlive(id) ? impl->rules->filter(JPH::BodyID(id.value).GetIndex()) : CollisionFilter{};
     }
 
+    void PhysicsWorld::setReportContacts(BodyId id, bool on) {
+        if (impl->recording) { impl->op(Op::ReportContacts); put(impl->log, id.value); put(impl->log, uint8_t(on)); }
+        if (!isAlive(id)) return;
+        uint8_t& flags = impl->reporting[JPH::BodyID(id.value).GetIndex()];
+        if (bool(flags & REPORTS) == on) return;
+        if (on) {
+            flags |= REPORTS | FRESH;
+            impl->fresh.push_back(JPH::BodyID(id.value).GetIndex());
+            // Awake, it and what touches it have their contacts persist through the next step, where
+            // they are found.
+            JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
+            if (bodies.GetMotionType(JPH::BodyID(id.value)) != JPH::EMotionType::Static) bodies.ActivateBody(JPH::BodyID(id.value));
+            wakeBodiesAround(id);
+        } else {
+            flags &= uint8_t(~(REPORTS | FRESH));
+            if (!(flags & SENSOR)) endContactsOf(id, true);
+        }
+    }
+
+    bool PhysicsWorld::reportsContacts(BodyId id) const {
+        return isAlive(id) && (impl->reporting[JPH::BodyID(id.value).GetIndex()] & (REPORTS | SENSOR)) != 0;
+    }
+
+    // Ends every pair `body` is in -- or, with unlessReported, those whose other body does not report
+    // either -- at once, reported with the next step's changes.
+    void PhysicsWorld::endContactsOf(BodyId body, bool unlessReported) {
+        for (auto it = impl->touching.begin(); it != impl->touching.end();) {
+            const uint32_t a = uint32_t(it->first >> 32), b = uint32_t(it->first);
+            if (a != body.value && b != body.value) { ++it; continue; }
+            const uint32_t other = a == body.value ? b : a;
+            if (unlessReported && (impl->reporting[JPH::BodyID(other).GetIndex()] & (REPORTS | SENSOR))) { ++it; continue; }
+            ContactChange ended;
+            ended.a = BodyId{a};
+            ended.b = BodyId{b};
+            ended.began = false;
+            ended.sensor = it->second.sensor;
+            impl->endedBetween.push_back(ended);
+            it = impl->touching.erase(it);
+        }
+    }
+
     void PhysicsWorld::destroyBody(BodyId id) {
         if (impl->recording) { impl->op(Op::Destroy); put(impl->log, id.value); }
         if (!isAlive(id)) return;
         wakeBodiesAround(id);
         removeJointsOf(id);
+        if (!impl->touching.empty()) endContactsOf(id, false);
+        impl->reporting[JPH::BodyID(id.value).GetIndex()] = 0;
         JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
         JPH::BodyID jid(id.value);
         bodies.RemoveBody(jid);
@@ -992,6 +1110,8 @@ namespace projv::runtime {
                     if (lock.Succeeded()) lock.GetBody().SetCollisionGroup(JPH::CollisionGroup(impl->rules, inner.GetIndex(), 0));
                 }
                 impl->rules->setFilter(inner.GetIndex(), desc.filter);
+                impl->rules->setBody(inner.GetIndex(), desc.layer, 0);
+                impl->reporting[inner.GetIndex()] = 0;
                 c.desc = desc;
                 c.input = core::vec3(0.0f);
                 c.jump = false;
@@ -1014,7 +1134,10 @@ namespace projv::runtime {
         if (impl->recording) { impl->op(Op::DestroyCharacter); put(impl->log, id.value); }
         Impl::Character* c = impl->character(id);
         if (!c) return;
-        wakeBodiesAround(BodyId{c->controller->GetInnerBodyID().GetIndexAndSequenceNumber()});
+        const JPH::BodyID inner = c->controller->GetInnerBodyID();
+        wakeBodiesAround(BodyId{inner.GetIndexAndSequenceNumber()});
+        if (!impl->touching.empty()) endContactsOf(BodyId{inner.GetIndexAndSequenceNumber()}, false);
+        impl->reporting[inner.GetIndex()] = 0;
         c->controller = nullptr;   // removes its inner body
     }
 
@@ -1424,9 +1547,12 @@ namespace projv::runtime {
         }
         snapshotVelocities();
         impl->contacts.added.clear();
+        impl->contacts.touched.clear();
+        impl->contacts.parted.clear();
         JPH::EPhysicsUpdateError errors =
             impl->system.Update(dt, 1, impl->tempAllocator.get(), impl->jobSystem.get());
         orderImpacts();
+        trackContacts();
         checkJoints(dt);
         sanityPass(dt);
         impl->stats.lastStepMilliseconds =
@@ -1761,7 +1887,10 @@ namespace projv::runtime {
             put(out, r.seconds);
             put(out, r.peak);
             writeFilter(out, impl->rules->filter(JPH::BodyID(b).GetIndex()));
+            put(out, impl->reporting[JPH::BodyID(b).GetIndex()]);
         }
+        put(out, static_cast<uint32_t>(impl->touching.size()));
+        for (const auto& [key, t] : impl->touching) { put(out, key); put(out, uint8_t(t.dormant)); put(out, uint8_t(t.sensor)); }
 
         JPH::StateRecorderImpl recorder;
         impl->system.SaveState(recorder, JPH::EStateRecorderState::All);
@@ -1813,13 +1942,30 @@ namespace projv::runtime {
         std::vector<uint32_t> saved(count);
         std::vector<Impl::Rest> savedRest(count);
         std::vector<CollisionFilter> savedFilters(count);
+        std::vector<uint8_t> savedReporting(count);
         for (uint32_t i = 0; i < count; i++)
             if (!get(snapshot, at, saved[i]) || !get(snapshot, at, savedRest[i].position) ||
                 !get(snapshot, at, savedRest[i].rotation) || !get(snapshot, at, savedRest[i].seconds) ||
-                !get(snapshot, at, savedRest[i].peak) || !readFilter(snapshot, at, savedFilters[i])) {
+                !get(snapshot, at, savedRest[i].peak) || !readFilter(snapshot, at, savedFilters[i]) ||
+                !get(snapshot, at, savedReporting[i])) {
                 core::warn("physics: restoreState refused: the snapshot is truncated");
                 return false;
             }
+        uint32_t touchingCount = 0;
+        std::map<uint64_t, Impl::Touching> savedTouching;
+        if (!get(snapshot, at, touchingCount)) {
+            core::warn("physics: restoreState refused: the snapshot is truncated");
+            return false;
+        }
+        for (uint32_t i = 0; i < touchingCount; i++) {
+            uint64_t key = 0;
+            uint8_t dormant = 0, sensor = 0;
+            if (!get(snapshot, at, key) || !get(snapshot, at, dormant) || !get(snapshot, at, sensor)) {
+                core::warn("physics: restoreState refused: the snapshot is truncated");
+                return false;
+            }
+            savedTouching[key] = {dormant != 0, sensor != 0};
+        }
         if (!get(snapshot, at, joltSize) || snapshot.size() - at < joltSize) {
             core::warn("physics: restoreState refused: the snapshot is truncated");
             return false;
@@ -1909,7 +2055,11 @@ namespace projv::runtime {
         for (uint32_t i = 0; i < count; i++) {
             impl->rest[JPH::BodyID(saved[i]).GetIndex()] = savedRest[i];
             impl->rules->setFilter(JPH::BodyID(saved[i]).GetIndex(), savedFilters[i]);
+            impl->reporting[JPH::BodyID(saved[i]).GetIndex()] = savedReporting[i];
         }
+        impl->touching = std::move(savedTouching);
+        impl->endedBetween.clear();
+        impl->contactChanges.clear();
         for (const SavedCharacter& saved : savedCharacters) {
             Impl::Character& c = *impl->character(CharacterId{saved.id});
             c.desc.filter = impl->rules->filter(c.controller->GetInnerBodyID().GetIndex());   // restored with the bodies
@@ -1958,6 +2108,8 @@ namespace projv::runtime {
         }
         for (size_t slot = 0; slot < impl->joints.size(); slot++)
             if (impl->joints[slot].constraint) h.add(uint32_t(slot) | (uint32_t(impl->joints[slot].generation) << 16));
+        // Who touches whom, among bodies that report it: what the next contact events depend on.
+        for (const auto& [key, t] : impl->touching) { h.add(key); h.add(uint8_t(t.dormant)); }
         // The material table: two peers with a different stone are a mismatch, not a slow drift.
         for (uint16_t i = 1; i < MAX_PHYSICS_MATERIALS; i++)
             if (impl->materialDefined[i]) {
@@ -1970,6 +2122,112 @@ namespace projv::runtime {
     const PhysicsStats& PhysicsWorld::stats() const { return impl->stats; }
 
     const std::vector<Impact>& PhysicsWorld::impacts() const { return impl->impacts; }
+
+    const std::vector<ContactChange>& PhysicsWorld::contactChanges() const { return impl->contactChanges; }
+
+    std::vector<ContactChange> PhysicsWorld::contactPairs() const {
+        std::vector<ContactChange> out;
+        out.reserve(impl->touching.size());
+        for (const auto& [key, t] : impl->touching) {
+            ContactChange c;
+            c.a = BodyId{uint32_t(key >> 32)};
+            c.b = BodyId{uint32_t(key)};
+            c.sensor = t.sensor;
+            out.push_back(c);
+        }
+        return out;
+    }
+
+    // The step's begins and ends, from what the listener saw (MaterialContacts) -- a set of pairs, so
+    // the threads' order cannot matter -- and the bodies' sleep:
+    // - a pair seen touching that was not is begun, at the first of its contacts in (point, normal)
+    //   order;
+    // - a pair Jolt says parted has ended, unless some other part of them still touches, or one of
+    //   them fell asleep: Jolt drops a sleeping body's contacts, and a crate asleep on a pressure
+    //   plate has not left it. Such a pair is dormant;
+    // - a dormant pair whose bodies were both awake through a step that did not find them touching
+    //   has ended (a body asleep in a sensor, then moved out).
+    void PhysicsWorld::trackContacts() {
+        std::vector<ContactChange>& changes = impl->contactChanges;
+        changes.clear();
+        changes.swap(impl->endedBetween);
+        // A FRESH body has had its step of persisted contacts.
+        for (uint32_t index : impl->fresh) impl->reporting[index] &= uint8_t(~FRESH);
+        impl->fresh.clear();
+        if (impl->contacts.touched.empty() && impl->contacts.parted.empty() && impl->touching.empty()) {
+            std::sort(changes.begin(), changes.end(), [](const ContactChange& x, const ContactChange& y) {
+                return std::make_tuple(x.a.value, x.b.value, x.began) < std::make_tuple(y.a.value, y.b.value, y.began);
+            });
+            return;
+        }
+        const JPH::BodyLockInterfaceNoLock& locks = impl->system.GetBodyLockInterfaceNoLock();
+        auto asleep = [&](uint32_t id) {   // a body that moves, not moving now; false for one gone
+            const JPH::Body* body = locks.TryGetBody(JPH::BodyID(id));
+            return body && !body->IsStatic() && !body->IsActive();
+        };
+        auto alive = [&](uint32_t id) { return locks.TryGetBody(JPH::BodyID(id)) != nullptr; };
+        auto awakeAllStep = [&](uint32_t id) {   // moving (or static) from the step's start to its end
+            const JPH::Body* body = locks.TryGetBody(JPH::BodyID(id));
+            if (!body) return false;
+            if (body->IsStatic()) return true;
+            const uint32_t index = JPH::BodyID(id).GetIndex();
+            return body->IsActive() && index < impl->before.size() && impl->before[index].awake;
+        };
+
+        std::vector<Touch>& touched = impl->contacts.touched;
+        for (Touch& t : touched)
+            if (t.b < t.a) { std::swap(t.a, t.b); t.normal = -t.normal; }
+        auto touchKey = [](const Touch& t) {
+            return std::make_tuple(t.a, t.b, t.point.GetX(), t.point.GetY(), t.point.GetZ(),
+                                   t.normal.GetX(), t.normal.GetY(), t.normal.GetZ());
+        };
+        std::sort(touched.begin(), touched.end(), [&](const Touch& x, const Touch& y) { return touchKey(x) < touchKey(y); });
+        std::set<uint64_t> seen;
+        for (const Touch& t : touched) {
+            const uint64_t key = Impl::pairKey(t.a, t.b);
+            if (!seen.insert(key).second) continue;
+            auto [it, made] = impl->touching.try_emplace(key, Impl::Touching{false, t.sensor});
+            it->second.dormant = false;
+            if (!made) continue;
+            ContactChange began;
+            began.a = BodyId{t.a};
+            began.b = BodyId{t.b};
+            began.sensor = t.sensor;
+            began.point = core::vec3(float(t.point.GetX()), float(t.point.GetY()), float(t.point.GetZ()));
+            began.normal = fromJolt(t.normal);
+            changes.push_back(began);
+        }
+
+        auto end = [&](std::map<uint64_t, Impl::Touching>::iterator it) {
+            ContactChange ended;
+            ended.a = BodyId{uint32_t(it->first >> 32)};
+            ended.b = BodyId{uint32_t(it->first)};
+            ended.began = false;
+            ended.sensor = it->second.sensor;
+            changes.push_back(ended);
+            return impl->touching.erase(it);
+        };
+        std::set<uint64_t> parted;
+        for (auto [a, b] : impl->contacts.parted) parted.insert(Impl::pairKey(a, b));
+        for (uint64_t key : parted) {
+            if (seen.count(key)) continue;
+            auto it = impl->touching.find(key);
+            if (it == impl->touching.end() || it->second.dormant) continue;
+            const uint32_t a = uint32_t(key >> 32), b = uint32_t(key);
+            if (!alive(a) || !alive(b)) { end(it); continue; }
+            if (impl->system.WereBodiesInContact(JPH::BodyID(a), JPH::BodyID(b))) continue;
+            if (asleep(a) || asleep(b)) { it->second.dormant = true; seen.insert(key); continue; }
+            end(it);
+        }
+        for (auto it = impl->touching.begin(); it != impl->touching.end();) {
+            const uint32_t a = uint32_t(it->first >> 32), b = uint32_t(it->first);
+            if (it->second.dormant && !seen.count(it->first) && awakeAllStep(a) && awakeAllStep(b)) it = end(it);
+            else ++it;
+        }
+        std::sort(changes.begin(), changes.end(), [](const ContactChange& x, const ContactChange& y) {
+            return std::make_tuple(x.a.value, x.b.value, x.began) < std::make_tuple(y.a.value, y.b.value, y.began);
+        });
+    }
 
     // Every awake body's motion as the step begins (a body asleep is still). What impacts are
     // measured against: see MaterialContacts.
@@ -2332,6 +2590,12 @@ namespace projv::runtime {
                     CollisionFilter f;
                     if (!get(in, at, id) || !readFilter(in, at, f)) return truncated();
                     world.setFilter(BodyId{id}, f);
+                    break;
+                }
+                case Op::ReportContacts: {
+                    uint8_t on = 0;
+                    if (!get(in, at, id) || !get(in, at, on)) return truncated();
+                    world.setReportContacts(BodyId{id}, on != 0);
                     break;
                 }
                 case Op::CharacterFilter: {

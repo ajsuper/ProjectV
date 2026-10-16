@@ -3,9 +3,9 @@
 Status: **approved**, 2026-10-09. **M0-M6 done** (2026-10-13); joints (2026-10-13), physics materials
 (2026-10-14), fracture, the debris budget and support (2026-10-14/15) built, and fracture policy moved out
 of the engine (2026-10-15, "Mechanism in the engine, policy in systems"). M7 (contours) waits on the
-contour work. "One rule set for voxel bodies" below is done (2026-10-15). **Next: the rest of
-"Roadmap", revised 2026-10-15 from a review of which games the system serves and where it gets in
-their way.
+contour work. "One rule set for voxel bodies" below is done (2026-10-15), and Roadmap R1-R6
+(2026-10-16). **Next: R7 onwards in "Roadmap", revised 2026-10-15 from a review of which games the
+system serves and where it gets in their way.
 
 ## Decisions made
 
@@ -351,6 +351,15 @@ shows and tests assert on:
   Group names are a game's, defined in order (`definePhysicsGroup`, 32 at most), so peers that
   define the same names agree on the bits. Two bodies pass through each other when either ignores a
   group the other is in, or both have the same nonzero family (the shards of one break, a ragdoll).
+- **Contact reports** (R6): `physics.contacts` on an entity with a body or character asks for
+  `ContactBegan` / `ContactEnded`; `only` limits them to bodies in those groups. A body on the
+  `sensor` layer is a sensor and reports without asking; `senses` is the layers it senses (default
+  moving and character):
+
+  ```json
+  "physics.contacts": { "v": 1, "only": ["player"] }
+  "physics.static":   { "v": 1, "layer": "sensor", "senses": ["moving", "character"] }
+  ```
 
 ## Queries
 
@@ -792,6 +801,38 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
 - **R6. Contact and sensor events, asked for per body.** `ContactBegan` / `ContactEnded` for bodies
   that ask (a component, saved), and sensor bodies that report what enters and leaves, with the
   layers they sense chosen in data. In NetId order after the step. `impacts()` stays for hard hits.
+  *Done 2026-10-16.* Core: `BodyDesc::reportContacts` / `setReportContacts`, and
+  `PhysicsWorld::contactChanges()` -- one `ContactChange {a, b, began, sensor, point, normal}` per
+  body pair however many sub-shapes touch, ordered by (a, b) -- plus `contactPairs()` for what
+  touches now. The listener only collects, under a lock, which pairs were added, persisted (for a
+  body that just began reporting, so what it already touches is found) and removed; after the step
+  that set is turned into changes, so thread order cannot matter (a test runs 0 and 4 threads).
+  Sleep: Jolt drops a sleeping body's contacts (OnContactRemoved), so a removed pair with a body
+  asleep is kept, *dormant*, and ends only when a step that both were awake through does not find
+  it -- a crate settled on a pressure plate stays on it; moved out asleep, it ends. A removed pair
+  whose bodies still touch elsewhere (`WereBodiesInContact`) stays. `destroyBody` ends a body's pairs
+  at once (reported with the next step's changes); every begin has its end. The touching set and the
+  report flags are in the snapshot (version 8) and the state hash (nothing added when empty: the
+  golden recording's 231 step hashes were unchanged -- checked by replaying the old v6 file before
+  regenerating it for log version 7, which adds `reportContacts`, `senses` and a ReportContacts op).
+  Sensors: the `sensor` layer now makes a Jolt sensor (`mIsSensor`); before, it was a solid body
+  on its own layer. `BodyDesc::senses` (layer bits, default moving | character, what the layer did)
+  is checked in `CollisionRules` beside the filters, and the matrix opens sensor-static so that a
+  kinematic sensor told to sense static bodies can (`mCollideKinematicVsNonDynamic`); sensors still
+  ignore sensors. ECS: `ContactReports {only}` (`physics.contacts`; `only` is group names, empty for
+  all -- it needed a field, as EnTT gives an empty type no storage, and this is the one games want:
+  "players on this plate"); `RigidBody::senses` / `StaticCollider::senses` ("senses", by name);
+  `ContactBegan {a, b, point, normal, sensor}` / `ContactEnded {a, b, sensor}` queued, and
+  `runtime::contacts(world)` for a FixedUpdate system after "physics", as impacts are;
+  `runtime::touching(world, entity)`. Body pairs become entity pairs counted by how many body pairs
+  hold them, so a body rebuilt under a contact (one end, one begin in a step) says nothing; a
+  restore rebuilds the entity view without sending anything. Ordered by NetId, then entity, keys
+  kept from the begin so an end names a destroyed entity in the same place. Pieces do not copy
+  ContactReports (a reporting wall would make hundreds of reporters). A character reports through
+  its inner body: moving bodies and sensors, not the static ground (characterState says that).
+  Not changed: queries still see the sensor layer by default -- a ray from the crosshair stops at
+  a trigger unless its layers leave Sensor out; whether the default should is open.
+  Tests: `test_physics_contacts.cpp`.
 - **R7. Kinematic bodies that collide with static geometry**, asked for per body. ("What the demos
   showed" 7.)
 - **R8. The last constants a game might set:** the 512-piece cap on support splits, joining
@@ -893,8 +934,7 @@ Physics adds one module, `runtime/physics`, and one engine change: system orderi
 - A debug view of collision pieces needs a line or box drawing pass, which the renderer does not
   have yet. That is optional M3 work.
 
-**I7. Events.** (As built 2026-10-15; the original list named ContactBegan/Ended, not built yet:
-Roadmap R6.)
+**I7. Events.** (As built 2026-10-16.)
 - Physics sends events through `Events`, delivered in the normal pump after PostUpdate:
   `BodyLeftWorld`, `BodyEmptied`, `JointBroke`, `PhysicsBodyRefused`, `SimulationSlow`.
   `BodyBroken` and `PiecesCleared` are delivered at once (`Events::trigger`), inside the step: the
@@ -905,7 +945,8 @@ Roadmap R6.)
   the same on every peer. Events whose handlers are meant to shape what was made move into the
   step: Roadmap R5.
 - Contacts: `runtime::impacts(world)`, read by a FixedUpdate system after "physics" -- one per pair
-  per step, the fastest, above minImpactSpeed.
+  per step, the fastest, above minImpactSpeed. `ContactBegan` / `ContactEnded` (queued) and
+  `runtime::contacts(world)` for bodies that ask and sensors (R6).
 - Jolt's contact callbacks run on its worker threads and never touch the registry. They only
   record into a buffer that is sorted by NetId after the step, so delivery order is deterministic.
 - The sandbox's `Popped` → shockwave → removal chain works as now. The shockwave becomes impulse

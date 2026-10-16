@@ -80,6 +80,11 @@ namespace projv {
         // impact may make one. Only voxels whose material has a strength break at all; shards a
         // fracture throws off have this off, so debris does not shatter again on landing.
         bool                  breaksOnImpact = false;
+        // On the sensor layer, the body is a sensor (a trigger volume that moves): it is collided with
+        // by nothing, and reports what enters and leaves (ContactBegan). These are the layers it
+        // senses, runtime::layerBit()s; "senses" in the file, by name. Static: only a kinematic sensor.
+        uint32_t              senses = runtime::layerBit(runtime::PhysicsLayer::Moving) |
+                                       runtime::layerBit(runtime::PhysicsLayer::Character);
     };
 
     // A kinematic body that flies on by itself: each physics step moves it `velocity` (m/s) and turns
@@ -111,6 +116,10 @@ namespace projv {
         std::string           material;
         // As RigidBody::breaksOnImpact. The pieces that fall when support goes (splits) take it on.
         bool                  breaksOnImpact = false;
+        // As RigidBody::senses, on the sensor layer: a trigger volume that stays put. It senses a body
+        // as it comes in moving; one that falls asleep inside stays sensed.
+        uint32_t              senses = runtime::layerBit(runtime::PhysicsLayer::Moving) |
+                                       runtime::layerBit(runtime::PhysicsLayer::Character);
     };
 
     // One chunk's part of a voxel body: which chunk, the shared shape built from it, and where it
@@ -169,6 +178,18 @@ namespace projv {
         std::vector<std::string> groups;
         std::vector<std::string> ignores;
         uint32_t                 family = 0;
+    };
+
+    // Report when this entity's body (RigidBody, StaticCollider or CharacterController) begins and stops
+    // touching another (ContactBegan, ContactEnded). Asked for, as everything is: without it a body
+    // reports nothing -- except a sensor, which reports whatever touches it, and takes `only` from
+    // this when it has one. `only`: collision group names (definePhysicsGroup); when set, only
+    // contacts with a body in one of them are reported -- a pressure plate that counts players.
+    // Changing `only` applies to contacts that begin after. Pieces of a body do not copy it.
+    // A character's contacts are its inner body's: moving bodies and sensors, not the static ground
+    // it walks on (characterState says what it stands on).
+    struct ContactReports {
+        std::vector<std::string> only;
     };
 
     // The simulation's side of a CharacterController. Made and removed by physics; never saved.
@@ -259,6 +280,25 @@ namespace projv {
     // it can take Piece off one to keep it, or put something in its place. Every entity still with
     // Piece after the handlers is destroyed. Handlers run inside the physics step.
     struct PiecesCleared { std::vector<Entity> entities; };
+
+    // Two entities' bodies began touching (one per pair, however many parts touch), where one asked
+    // (ContactReports) or is a sensor. `a` and `b` in the order every peer agrees on (NetId, then
+    // entity); `point` where they first touched and `normal` there, from a towards b. Queued: it
+    // arrives after the step, like the events below; a FixedUpdate system after "physics" can read
+    // the step's own with runtime::contacts.
+    struct ContactBegan {
+        Entity     a = NullEntity, b = NullEntity;
+        core::vec3 point{0.0f};
+        core::vec3 normal{0.0f, 1.0f, 0.0f};
+        bool       sensor = false;   // either is a sensor
+    };
+    // They stopped: they parted, or one was destroyed (so `a` or `b` may no longer be valid), or the
+    // one that asked stopped asking. Every ContactBegan has its ContactEnded. Asleep touching is
+    // still touching: a crate that settles on a pressure plate stays on it.
+    struct ContactEnded {
+        Entity a = NullEntity, b = NullEntity;
+        bool   sensor = false;
+    };
 
     // An edit took away every voxel a body was made from: it has no body any more, and nothing is
     // drawn for it. The entity stays; whether it goes (it usually should) is the game's call.
@@ -460,6 +500,20 @@ namespace projv::runtime {
     // damage are built on.
     std::vector<BodyImpact> impacts(const World& world);
 
+    // A contact of the last physics step that began or ended (ContactBegan, ContactEnded), in the
+    // order every peer agrees on. Replaced at every step; for a FixedUpdate system after "physics".
+    struct BodyContact {
+        Entity     a = NullEntity, b = NullEntity;
+        bool       began = true;
+        bool       sensor = false;
+        core::vec3 point{0.0f};                   // began only
+        core::vec3 normal{0.0f, 1.0f, 0.0f};
+    };
+    std::vector<BodyContact> contacts(const World& world);
+    // The entities `entity` is touching now, among the contacts reported (ContactReports, sensors):
+    // what is on a pressure plate, in a trigger.
+    std::vector<Entity> touching(const World& world, Entity entity);
+
     // Breaking on impact: what installImpactFracture does with each impact. The defaults are what the
     // demos and tests were built with.
     struct ImpactFractureConfig {
@@ -591,6 +645,13 @@ template<> struct projv::runtime::ComponentTraits<projv::CollisionGroups> {
     static constexpr uint32_t version = 1;
     static nlohmann::json save(const projv::CollisionGroups& g);
     static std::optional<projv::CollisionGroups> load(const nlohmann::json& json, uint32_t fileVersion);
+};
+
+template<> struct projv::runtime::ComponentTraits<projv::ContactReports> {
+    static constexpr const char* key = "physics.contacts";
+    static constexpr uint32_t version = 1;
+    static nlohmann::json save(const projv::ContactReports& r);
+    static std::optional<projv::ContactReports> load(const nlohmann::json& json, uint32_t fileVersion);
 };
 
 template<> struct projv::runtime::ComponentTraits<projv::StaticCollider> {

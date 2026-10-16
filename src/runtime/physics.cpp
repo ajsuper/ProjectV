@@ -93,6 +93,21 @@ namespace projv::runtime {
                 std::set<std::string>           warned;        // unknown names, logged once each
             } groups;
             std::vector<Entity>           regroup;      // CollisionGroups added, changed or removed
+            std::vector<Entity>           rereport;     // ContactReports added or removed
+            // Contacts as entities see them (ContactBegan): each body pair the simulation reports
+            // touching, and the entity pair it stands for; each entity pair, with how many body pairs
+            // hold it (a body rebuilt under a contact is one ending and one beginning in a step) and
+            // whether it was reported when it began, so its end is too.
+            using OrderKey = std::tuple<bool, uint32_t, Entity>;
+            struct EntityPair {
+                int      bodies = 0;
+                bool     reported = false;
+                bool     sensor = false;
+                OrderKey orderA, orderB;   // as they were when it began: an ended entity may be gone
+            };
+            std::map<uint64_t, std::pair<Entity, Entity>>         contactBodies;
+            std::map<std::pair<Entity, Entity>, EntityPair>       contactEntities;
+            std::vector<BodyContact>                              contacts;   // the last step's
             uint64_t                      seenPalettes = 0;  // palette versions and library at the last check
             std::set<std::string>         warnedPatterns;    // fracture patterns named but not registered
             std::set<Entity>              warnedUnanchored;  // colliders that split with nothing to stand on
@@ -113,6 +128,7 @@ namespace projv::runtime {
         }
         void wantRebuild(World& world, Entity entity) { runtimeOf(world).rebuild.push_back(entity); }
         void wantRegroup(World& world, Entity entity) { runtimeOf(world).regroup.push_back(entity); }
+        void wantReport(World& world, Entity entity) { runtimeOf(world).rereport.push_back(entity); }
 
         void bodyGone(World& world, Entity entity) {
             PhysicsRuntime& physics = runtimeOf(world);
@@ -218,25 +234,43 @@ namespace projv::runtime {
             return any;
         }
 
+        // Group names as bits; a name not defined is left out, and said once.
+        uint32_t groupBits(PhysicsRuntime& physics, const std::vector<std::string>& names) {
+            uint32_t out = 0;
+            for (const std::string& name : names) {
+                auto found = physics.groups.bit.find(name);
+                if (found != physics.groups.bit.end()) out |= found->second;
+                else if (physics.groups.warned.insert(name).second)
+                    core::warn("physics: collision group '{}' is not defined (definePhysicsGroup); left out", name);
+            }
+            return out;
+        }
+
         // The filter an entity's CollisionGroups says (none: the default, in no group).
         CollisionFilter filterOf(const World& world, PhysicsRuntime& physics, Entity entity) {
             CollisionFilter f;
             const CollisionGroups* named = world.try_get<CollisionGroups>(entity);
             if (!named) return f;
-            auto bits = [&](const std::vector<std::string>& names) {
-                uint32_t out = 0;
-                for (const std::string& name : names) {
-                    auto found = physics.groups.bit.find(name);
-                    if (found != physics.groups.bit.end()) out |= found->second;
-                    else if (physics.groups.warned.insert(name).second)
-                        core::warn("physics: collision group '{}' is not defined (definePhysicsGroup); left out", name);
-                }
-                return out;
-            };
-            f.groups = bits(named->groups);
-            f.ignores = bits(named->ignores);
+            f.groups = groupBits(physics, named->groups);
+            f.ignores = groupBits(physics, named->ignores);
             f.family = named->family;
             return f;
+        }
+
+        bool isSensor(const World& world, Entity entity) {
+            const RigidBody* rigid = world.try_get<RigidBody>(entity);
+            const StaticCollider* fixed = world.try_get<StaticCollider>(entity);
+            return (rigid && rigid->layer == PhysicsLayer::Sensor) || (!rigid && fixed && fixed->layer == PhysicsLayer::Sensor);
+        }
+
+        // Whether `self` wants its contact with `other` reported: it asked (ContactReports), or is a
+        // sensor, and `other` is in a group it named in `only` (or it named none).
+        bool reportsContactWith(const World& world, PhysicsRuntime& physics, Entity self, Entity other) {
+            if (!world.valid(self)) return false;
+            const ContactReports* asked = world.try_get<ContactReports>(self);
+            if (!asked) return isSensor(world, self);
+            if (asked->only.empty()) return true;
+            return world.valid(other) && (filterOf(world, physics, other).groups & groupBits(physics, asked->only)) != 0;
         }
 
         // The material a body's own component names (RigidBody::material, StaticCollider::material).
@@ -467,10 +501,13 @@ namespace projv::runtime {
                         break;
                     }
                 }
+                d.senses = rigid->senses;
             } else {
                 d.layer = fixed->layer;
+                d.senses = fixed->senses;
             }
             d.filter = filterOf(world, physics, entity);
+            d.reportContacts = world.all_of<ContactReports>(entity);
             return out;
         }
 
@@ -1113,6 +1150,98 @@ namespace projv::runtime {
             core::trace("physics: cleared {} pieces, the oldest (budget {}); {} kept", cleared, physics.maxPieces, excess - cleared);
         }
 
+        // NetId order, then entity order for the rest: what every peer agrees on.
+        PhysicsRuntime::OrderKey orderKey(const World& world, Entity e) {
+            const NetId* id = world.valid(e) ? world.try_get<NetId>(e) : nullptr;
+            const uint32_t net = id ? id->value : 0;
+            return {net == 0, net, e};
+        }
+
+        // The simulation's contact changes, as entities: body pairs become entity pairs (a body
+        // rebuilt under a contact ends one pair and begins another in the same step, which nets out),
+        // and an entity pair begins when its first body pair does and ends with its last. Reported
+        // when one of the two asked (reportsContactWith); its end is reported when its begin was.
+        void gatherContacts(World& world, PhysicsRuntime& physics) {
+            physics.contacts.clear();
+            const std::vector<ContactChange>& changes = physics.world->contactChanges();
+            if (changes.empty()) return;
+            using Pair = std::pair<Entity, Entity>;
+            struct Delta { int bodies = 0; bool sensor = false; bool began = false; core::vec3 point{0.0f}, normal{0.0f}; };
+            std::map<Pair, Delta> deltas;
+            for (const ContactChange& c : changes) {
+                const uint64_t key = (uint64_t(c.a.value) << 32) | c.b.value;
+                if (c.began) {
+                    auto ea = physics.byBody.find(c.a.value), eb = physics.byBody.find(c.b.value);
+                    if (ea == physics.byBody.end() || eb == physics.byBody.end()) continue;   // not an entity's
+                    Entity a = ea->second, b = eb->second;
+                    if (a == b || !world.valid(a) || !world.valid(b)) continue;
+                    core::vec3 normal = c.normal;
+                    if (orderKey(world, b) < orderKey(world, a)) { std::swap(a, b); normal = -normal; }
+                    physics.contactBodies[key] = {a, b};
+                    Delta& d = deltas[{a, b}];
+                    d.bodies++;
+                    d.sensor = d.sensor || c.sensor;
+                    if (!d.began) { d.began = true; d.point = c.point; d.normal = normal; }
+                } else {
+                    auto it = physics.contactBodies.find(key);
+                    if (it == physics.contactBodies.end()) continue;
+                    deltas[it->second].bodies--;
+                    physics.contactBodies.erase(it);
+                }
+            }
+            std::vector<std::pair<std::pair<PhysicsRuntime::OrderKey, PhysicsRuntime::OrderKey>, BodyContact>> out;
+            for (const auto& [pair, d] : deltas) {
+                auto it = physics.contactEntities.find(pair);
+                const int before = it == physics.contactEntities.end() ? 0 : it->second.bodies;
+                const int after = before + d.bodies;
+                if (before <= 0 && after > 0) {
+                    PhysicsRuntime::EntityPair e;
+                    e.bodies = after;
+                    e.sensor = d.sensor;
+                    e.reported = reportsContactWith(world, physics, pair.first, pair.second) ||
+                                 reportsContactWith(world, physics, pair.second, pair.first);
+                    e.orderA = orderKey(world, pair.first);
+                    e.orderB = orderKey(world, pair.second);
+                    physics.contactEntities[pair] = e;
+                    if (e.reported) out.push_back({{e.orderA, e.orderB}, {pair.first, pair.second, true, e.sensor, d.point, d.normal}});
+                } else if (before > 0 && after <= 0) {
+                    const PhysicsRuntime::EntityPair& e = it->second;
+                    if (e.reported) out.push_back({{e.orderA, e.orderB}, {pair.first, pair.second, false, e.sensor}});
+                    physics.contactEntities.erase(it);
+                } else if (it != physics.contactEntities.end()) {
+                    it->second.bodies = after;
+                }
+            }
+            std::sort(out.begin(), out.end(), [](const auto& x, const auto& y) { return x.first < y.first; });
+            for (const auto& [key, c] : out) {
+                physics.contacts.push_back(c);
+                if (c.began) send(world, ContactBegan{c.a, c.b, c.point, c.normal, c.sensor});
+                else send(world, ContactEnded{c.a, c.b, c.sensor});
+            }
+        }
+
+        // After a restore: who touches whom, as the restored simulation has it, with nothing sent.
+        void rebuildContacts(World& world, PhysicsRuntime& physics) {
+            physics.contactBodies.clear();
+            physics.contactEntities.clear();
+            physics.contacts.clear();
+            for (const ContactChange& c : physics.world->contactPairs()) {
+                auto ea = physics.byBody.find(c.a.value), eb = physics.byBody.find(c.b.value);
+                if (ea == physics.byBody.end() || eb == physics.byBody.end()) continue;
+                Entity a = ea->second, b = eb->second;
+                if (a == b || !world.valid(a) || !world.valid(b)) continue;
+                if (orderKey(world, b) < orderKey(world, a)) std::swap(a, b);
+                physics.contactBodies[(uint64_t(c.a.value) << 32) | c.b.value] = {a, b};
+                PhysicsRuntime::EntityPair& e = physics.contactEntities[{a, b}];
+                if (e.bodies++ == 0) {
+                    e.sensor = c.sensor;
+                    e.reported = reportsContactWith(world, physics, a, b) || reportsContactWith(world, physics, b, a);
+                    e.orderA = orderKey(world, a);
+                    e.orderB = orderKey(world, b);
+                }
+            }
+        }
+
         void step(Application& app) {
             World& world = app.world;
             PhysicsRuntime& physics = runtimeOf(world);
@@ -1334,6 +1463,7 @@ namespace projv::runtime {
                     c.id = id;
                     c.previousPosition = c.position = desc.position;
                     physics.byBody[sim.characterBody(id).value] = e;
+                    if (world.all_of<ContactReports>(e)) sim.setReportContacts(sim.characterBody(id), true);
                     world.emplace<PhysicsCharacter>(e, c);
                 }
             }
@@ -1357,6 +1487,21 @@ namespace projv::runtime {
                     if (const PhysicsCharacter* c = world.try_get<PhysicsCharacter>(e);
                         c && sim.filter(sim.characterBody(c->id)) != f)
                         sim.setCharacterFilter(c->id, f);
+                }
+            }
+
+            // 3b''. ContactReports added or removed: the body or character reports from this step.
+            {
+                std::vector<Entity> rereport;
+                rereport.swap(physics.rereport);
+                std::sort(rereport.begin(), rereport.end(), [&](Entity a, Entity b) { return order(a) < order(b); });
+                rereport.erase(std::unique(rereport.begin(), rereport.end()), rereport.end());
+                for (Entity e : rereport) {
+                    if (!world.valid(e)) continue;
+                    const bool want = world.all_of<ContactReports>(e);
+                    if (const PhysicsBody* body = world.try_get<PhysicsBody>(e)) sim.setReportContacts(body->id, want);
+                    if (const PhysicsCharacter* c = world.try_get<PhysicsCharacter>(e))
+                        sim.setReportContacts(sim.characterBody(c->id), want);
                 }
             }
 
@@ -1510,6 +1655,10 @@ namespace projv::runtime {
                 c.previousPosition = c.position;
                 c.position = sim.characterState(c.id).position;
             }
+
+            // 7a. Contacts begun and ended, as entities: queued (ContactBegan, ContactEnded) and kept
+            //     for runtime::contacts.
+            gatherContacts(world, physics);
 
             // 7b. Joints that broke, or lost a body.
             {
@@ -1669,6 +1818,24 @@ namespace projv::runtime {
                 if (name == LAYER_NAMES[i]) return PhysicsLayer(i);
             return std::nullopt;
         }
+        // Layer bits as names, and back (an unknown name, or not a list of names: nullopt).
+        nlohmann::json layerNames(uint32_t bits) {
+            nlohmann::json out = nlohmann::json::array();
+            for (size_t i = 0; i < LAYER_NAMES.size(); i++)
+                if (bits & layerBit(PhysicsLayer(i))) out.push_back(LAYER_NAMES[i]);
+            return out;
+        }
+        std::optional<uint32_t> layersFrom(const nlohmann::json& list) {
+            if (!list.is_array()) return std::nullopt;
+            uint32_t bits = 0;
+            for (const nlohmann::json& name : list) {
+                if (!name.is_string()) return std::nullopt;
+                auto layer = layerFrom(name.get<std::string>());
+                if (!layer) return std::nullopt;
+                bits |= layerBit(*layer);
+            }
+            return bits;
+        }
     }
 
     void installPhysics(Application& app, const PhysicsConfig& config) {
@@ -1706,6 +1873,9 @@ namespace projv::runtime {
         registerComponent<CharacterController>(world);
         registerComponent<Joint>(world);
         registerComponent<CollisionGroups>(world);
+        registerComponent<ContactReports>(world);
+        world.on_construct<ContactReports>().connect<&wantReport>();
+        world.on_destroy<ContactReports>().connect<&wantReport>();
         world.on_construct<CollisionGroups>().connect<&wantRegroup>();
         world.on_update<CollisionGroups>().connect<&wantRegroup>();
         world.on_destroy<CollisionGroups>().connect<&wantRegroup>();
@@ -1806,6 +1976,25 @@ namespace projv::runtime {
             BodyImpact e{entityOf(hit.a), entityOf(hit.b), hit.point, hit.normal, hit.speed, hit.energy, hit.velocityA, hit.velocityB};
             if (e.a != NullEntity && e.b != NullEntity) out.push_back(e);
         }
+        return out;
+    }
+
+    std::vector<BodyContact> contacts(const World& world) {
+        const PhysicsRuntime* physics = world.ctx().find<PhysicsRuntime>();
+        return physics ? physics->contacts : std::vector<BodyContact>{};
+    }
+
+    std::vector<Entity> touching(const World& world, Entity entity) {
+        std::vector<std::pair<PhysicsRuntime::OrderKey, Entity>> found;
+        if (const PhysicsRuntime* physics = world.ctx().find<PhysicsRuntime>())
+            for (const auto& [pair, e] : physics->contactEntities) {
+                if (!e.reported) continue;
+                if (pair.first == entity) found.push_back({e.orderB, pair.second});
+                else if (pair.second == entity) found.push_back({e.orderA, pair.first});
+            }
+        std::sort(found.begin(), found.end());
+        std::vector<Entity> out;
+        for (const auto& [key, e] : found) out.push_back(e);
         return out;
     }
 
@@ -2130,6 +2319,7 @@ namespace projv::runtime {
         }
         physics.commands = std::move(commands);
         physics.sequence = sequence;
+        rebuildContacts(world, physics);
         return true;
     }
 
@@ -2278,6 +2468,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::RigidBody>::save(const pro
     if (b.quality != defaults.quality) j["quality"] = qualities[size_t(b.quality)];
     if (!b.material.empty()) j["material"] = b.material;
     if (b.breaksOnImpact) j["breaksOnImpact"] = true;
+    if (b.senses != defaults.senses) j["senses"] = layerNames(b.senses);
     return j;
 }
 
@@ -2322,6 +2513,11 @@ std::optional<projv::RigidBody> projv::runtime::ComponentTraits<projv::RigidBody
     b.gravityFactor = j.value("gravityFactor", b.gravityFactor);
     b.material = j.value("material", std::string());
     b.breaksOnImpact = j.value("breaksOnImpact", false);
+    if (j.contains("senses")) {
+        auto senses = layersFrom(j.at("senses"));
+        if (!senses) return std::nullopt;
+        b.senses = *senses;
+    }
     return b;
 }
 
@@ -2335,6 +2531,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::StaticCollider>::save(cons
     if (c.anchorBase) j["anchorBase"] = true;
     if (!c.material.empty()) j["material"] = c.material;
     if (c.breaksOnImpact) j["breaksOnImpact"] = true;
+    if (c.senses != defaults.senses) j["senses"] = layerNames(c.senses);
     return j;
 }
 
@@ -2352,7 +2549,31 @@ std::optional<projv::StaticCollider> projv::runtime::ComponentTraits<projv::Stat
     c.anchorBase = j.value("anchorBase", false);
     c.material = j.value("material", std::string());
     c.breaksOnImpact = j.value("breaksOnImpact", false);
+    if (j.contains("senses")) {
+        auto senses = layersFrom(j.at("senses"));
+        if (!senses) return std::nullopt;
+        c.senses = *senses;
+    }
     return c;
+}
+
+nlohmann::json projv::runtime::ComponentTraits<projv::ContactReports>::save(const projv::ContactReports& r) {
+    nlohmann::json j = nlohmann::json::object();
+    if (!r.only.empty()) j["only"] = r.only;
+    return j;
+}
+
+std::optional<projv::ContactReports> projv::runtime::ComponentTraits<projv::ContactReports>::load(const nlohmann::json& j,
+                                                                                                uint32_t) {
+    projv::ContactReports r;
+    if (!j.contains("only")) return r;
+    const nlohmann::json& list = j.at("only");
+    if (!list.is_array()) return std::nullopt;
+    for (const nlohmann::json& name : list) {
+        if (!name.is_string()) return std::nullopt;
+        r.only.push_back(name.get<std::string>());
+    }
+    return r;
 }
 
 nlohmann::json projv::runtime::ComponentTraits<projv::CharacterController>::save(const projv::CharacterController& c) {
