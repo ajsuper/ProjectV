@@ -4,6 +4,7 @@
 #include "doctest/doctest.h"
 
 #include <filesystem>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -309,4 +310,280 @@ TEST_CASE("scene loading: a deleted component's blocks are forgotten") {
     CHECK(utils::getComponentVoxelCount(scene, other) == 8);
     CHECK_FALSE(blocks.load(scene, id));
     CHECK(blocks.bounds(scene, id).min == blocks.bounds(scene, id).max);
+}
+
+TEST_CASE("scene loading: a partly loaded component is not duplicated") {
+    TempDir dir("scene_loading_duplicate");
+    writeScene(dir.path);
+    projv::Scene scene;
+    utils::SceneBlocks blocks;
+    REQUIRE(blocks.open(scene, dir.path.string()));
+    ComponentHandle ground = named(scene, "ground");
+    REQUIRE(blocks.load(scene, blockOf(blocks, ground, ivec3(1, 0, 1))));
+    CHECK(utils::duplicateComponent(scene, ground) == INVALID_COMPONENT_HANDLE);
+    CHECK(utils::duplicateComponent(scene, named(scene, "props")) == INVALID_COMPONENT_HANDLE);
+    blocks.loadAll(scene);
+    CHECK(utils::duplicateComponent(scene, ground) != INVALID_COMPONENT_HANDLE);
+}
+
+// ---- The loader: the rule, budgets, the worker, kept blocks spilled to files -------------------
+
+namespace {
+    // A flat floor of 8 x 1 x 8 cells, 8 m each, from the world origin: 64 blocks over 64 m.
+    void writeFloor(const std::filesystem::path& folder) {
+        projv::Scene scene;
+        ComponentHandle floor = utils::addComponent(scene, projv::ComponentKind::Chunk, "floor", INVALID_COMPONENT_HANDLE, 16, 0.5f);
+        utils::queueVoxelAdd(scene, floor, box({0, 0, 0}, {127, 0, 127}, true));
+        utils::updateScene(scene);
+        REQUIRE(scene.grids[size_t(scene.components[floor].gridIndex)].dims == ivec3(8, 1, 8));
+        REQUIRE(utils::saveComposeToDisk(scene, INVALID_COMPONENT_HANDLE, folder.string()));
+    }
+
+    // Every block loaded exactly when `expect` says it should be.
+    template <typename Expect>
+    void checkLoaded(const projv::Scene& scene, const utils::SceneLoader& loader, Expect expect) {
+        for (utils::BlockId id = 0; id < loader.blocks().size(); id++) {
+            utils::WorldBox b = loader.blocks().bounds(scene, id);
+            INFO("block " << id << " at " << b.min.x << ", " << b.min.z);
+            CHECK(loader.blocks().loaded(id) == expect(b));
+        }
+    }
+
+    utils::LoaderConfig unthreaded() {
+        utils::LoaderConfig config;
+        config.threaded = false;
+        return config;
+    }
+}
+
+TEST_CASE("loader: by default everything loads, a budget at a time, and matches the eager loader") {
+    TempDir dir("loader_default");
+    writeFloor(dir.path);
+    utils::LoaderConfig config = unthreaded();
+    config.maxLoadsPerUpdate = 5;
+    utils::SceneLoader loader(config);
+    projv::Scene scene;
+    REQUIRE(loader.open(scene, dir.path.string()));
+
+    loader.update(scene);
+    CHECK(loader.stats().loaded == 5);
+    CHECK(loader.stats().wanted == 64);
+    loader.settle(scene);
+    CHECK(loader.stats().loaded == 64);
+
+    projv::Scene eager = utils::loadComposeFromDisk(dir.path.string());
+    CHECK(utils::residentVoxelBytes(scene) == utils::residentVoxelBytes(eager));
+    CHECK(utils::getComponentVoxelCount(scene, named(scene, "floor")) == 128 * 128);
+}
+
+TEST_CASE("loader: loadNear loads what is near the viewer, nearest first, and follows it") {
+    TempDir dir("loader_near");
+    writeFloor(dir.path);
+    utils::LoaderConfig config = unthreaded();
+    config.maxLoadsPerUpdate = 3;
+    utils::SceneLoader loader(config);
+    projv::Scene scene;
+    REQUIRE(loader.open(scene, dir.path.string()));
+    loader.setRule(utils::loadNear(6.0f, 14.0f));
+
+    vec3 at(4.0f, 0.25f, 4.0f);   // over the middle of the corner cell
+    loader.setViewers({{at}});
+    loader.update(scene);
+    // The three nearest: the cell underneath first, then two of its neighbours.
+    REQUIRE(loader.stats().loaded == 3);
+    CHECK(loader.blocks().loaded(0));
+    loader.settle(scene);
+    checkLoaded(scene, loader, [&](const utils::WorldBox& b) { return utils::distanceToBox(b, at) <= 14.0f; });
+    for (utils::BlockId id = 0; id < loader.blocks().size(); id++) {
+        float d = utils::distanceToBox(loader.blocks().bounds(scene, id), at);
+        if (d <= 6.0f) CHECK(loader.presence(id) == utils::Presence::Active);
+        else if (d <= 14.0f) CHECK(loader.presence(id) == utils::Presence::Kept);
+    }
+    size_t nearCorner = loader.stats().loaded;
+    CHECK(nearCorner < 64);
+
+    at = vec3(60.0f, 0.25f, 60.0f);   // the far corner
+    loader.setViewers({{at}});
+    loader.settle(scene);
+    checkLoaded(scene, loader, [&](const utils::WorldBox& b) { return utils::distanceToBox(b, at) <= 14.0f; });
+    CHECK(loader.stats().loaded == nearCorner);
+    CHECK(utils::residentVoxelBytes(scene) > 0);
+
+    loader.setViewers({});   // no viewer: nothing is near anything
+    loader.settle(scene);
+    CHECK(loader.stats().loaded == 0);
+    CHECK(utils::residentVoxelBytes(scene) == 0);
+}
+
+TEST_CASE("loader: a block on the edge does not flicker") {
+    TempDir dir("loader_margin");
+    writeFloor(dir.path);
+    utils::LoaderConfig config = unthreaded();
+    config.viewerMoveRecheck = 0.1f;   // every step below is asked about at once
+    utils::SceneLoader loader(config);
+    projv::Scene scene;
+    REQUIRE(loader.open(scene, dir.path.string()));
+    loader.setRule(utils::loadNear(0.0f, 10.0f, 0.1f));
+
+    // Block 0 is the cell at the origin, x in [0, 8]. Walk away from it along -x.
+    REQUIRE(loader.blocks().source(0).entry.gridX == 0);
+    REQUIRE(loader.blocks().source(0).entry.gridZ == 0);
+    auto standAt = [&](float distance) {
+        loader.setViewers({{vec3(-distance, 0.25f, 4.0f)}});
+        loader.settle(scene);
+        return loader.blocks().loaded(0);
+    };
+    CHECK(standAt(9.5f));
+    CHECK(standAt(10.5f));    // past the radius, within the margin: stays
+    CHECK(standAt(9.9f));
+    CHECK(standAt(10.9f));
+    CHECK_FALSE(standAt(11.2f));
+    CHECK_FALSE(standAt(10.5f));   // coming back, the margin does not apply: not yet
+    CHECK(standAt(9.9f));
+}
+
+TEST_CASE("loader: with a hint the rule is never asked about blocks beyond it") {
+    TempDir dir("loader_hint");
+    writeFloor(dir.path);
+    utils::SceneLoader loader(unthreaded());
+    projv::Scene scene;
+    REQUIRE(loader.open(scene, dir.path.string()));
+    vec3 at(4.0f, 0.25f, 4.0f);
+    float farthest = 0.0f;
+    std::set<utils::BlockId> asked;
+    loader.setRule([&](const utils::LoadCandidate& c, std::span<const utils::Viewer> viewers) {
+        farthest = std::max(farthest, utils::distanceToBox(c.bounds, viewers[0].position));
+        asked.insert(c.id);
+        return utils::Presence::Active;
+    }, utils::LoadHint{12.0f});
+    loader.setViewers({{at}});
+    for (int i = 0; i < 100; i++) loader.update(scene);
+    CHECK(farthest <= 12.0f);
+    CHECK(asked.size() == loader.stats().loaded);
+    CHECK(asked.size() < 16);
+    // Asked again now and then, not every update: 100 updates, recheck every 30.
+    CHECK(loader.stats().ruleCalls < asked.size() * 8);
+}
+
+TEST_CASE("loader: without a hint each block is asked again within recheckUpdates") {
+    TempDir dir("loader_recheck");
+    writeFloor(dir.path);
+    utils::LoaderConfig config = unthreaded();
+    config.recheckUpdates = 10;
+    utils::SceneLoader loader(config);
+    projv::Scene scene;
+    REQUIRE(loader.open(scene, dir.path.string()));
+    bool wanted = true;
+    loader.setRule([&](const utils::LoadCandidate&, std::span<const utils::Viewer>) {
+        return wanted ? utils::Presence::Active : utils::Presence::Absent;
+    });
+    loader.settle(scene);
+    REQUIRE(loader.stats().loaded == 64);
+    uint64_t calls = loader.stats().ruleCalls;
+    wanted = false;
+    for (int i = 0; i < 10; i++) loader.update(scene);
+    CHECK(loader.stats().ruleCalls - calls == 70);   // a slice of 7 a time: every block, six twice
+    CHECK(loader.stats().loaded == 0);
+}
+
+TEST_CASE("loader: reads on the worker thread give what reads in update give") {
+    TempDir dir("loader_threaded");
+    writeFloor(dir.path);
+    projv::Scene eager = utils::loadComposeFromDisk(dir.path.string());
+
+    utils::SceneLoader loader;   // threaded by default
+    projv::Scene scene;
+    REQUIRE(loader.open(scene, dir.path.string()));
+    loader.settle(scene);
+    CHECK(loader.stats().loaded == 64);
+    CHECK(loader.stats().pendingReads == 0);
+    CHECK(utils::residentVoxelBytes(scene) == utils::residentVoxelBytes(eager));
+    const projv::SceneGrid& ge = eager.grids[0];
+    const projv::SceneGrid& gl = scene.grids[0];
+    for (size_t i = 0; i < ge.cellToChunk.size(); i++)
+        CHECK(blobOf(eager, ge.cellToChunk[i]).geometry == blobOf(scene, gl.cellToChunk[i]).geometry);
+
+    // Reads pending when the rule changes its mind land and are dropped.
+    utils::SceneLoader second;
+    projv::Scene other;
+    REQUIRE(second.open(other, dir.path.string()));
+    second.update(other);
+    CHECK(second.stats().pendingReads > 0);
+    second.setRule(utils::loadInside({vec3(1000.0f), vec3(1001.0f)}));
+    second.settle(other);
+    CHECK(second.stats().loaded == 0);
+    CHECK(second.stats().pendingReads == 0);
+    CHECK(utils::residentVoxelBytes(other) == 0);
+}
+
+TEST_CASE("loader: edited blocks spill to files past the limit, and come back") {
+    TempDir dir("loader_spill");
+    TempDir spill("loader_spill_files");
+    writeFloor(dir.path);
+    utils::LoaderConfig config = unthreaded();
+    config.keptMemoryBytes = 0;   // every kept block to a file
+    config.spillFolder = (spill.path / "kept").string();
+    projv::Scene scene;
+    {
+        utils::SceneLoader loader(config);
+        REQUIRE(loader.open(scene, dir.path.string()));
+        loader.setRule(utils::loadNear(4.0f, 4.0f));
+        loader.setViewers({{vec3(4.0f, 0.25f, 4.0f)}});
+        loader.settle(scene);
+        ComponentHandle floor = named(scene, "floor");
+        utils::queueVoxelAdd(scene, floor, box({2, 1, 2}, {5, 4, 5}, true));   // a post on the corner cell
+        utils::updateScene(scene);
+        CHECK(utils::getComponentVoxelCount(scene, floor) == 16 * 16 * loader.stats().loaded + 64);
+
+        loader.setViewers({{vec3(60.0f, 0.25f, 60.0f)}});
+        loader.settle(scene);
+        CHECK(loader.stats().kept == 1);
+        CHECK(loader.stats().spilled == 1);
+        CHECK(loader.blocks().keptBytes() == 0);
+        CHECK(std::distance(std::filesystem::directory_iterator(config.spillFolder), {}) == 1);
+
+        loader.setViewers({{vec3(4.0f, 0.25f, 4.0f)}});
+        loader.settle(scene);
+        CHECK(loader.stats().kept == 0);
+        CHECK(std::distance(std::filesystem::directory_iterator(config.spillFolder), {}) == 0);
+        CHECK(utils::getComponentVoxelCount(scene, floor) == 16 * 16 * loader.stats().loaded + 64);
+
+        loader.setViewers({{vec3(60.0f, 0.25f, 60.0f)}});
+        loader.settle(scene);
+        CHECK(loader.stats().spilled == 1);
+    }
+    // The loader is gone, and its files with it.
+    CHECK_FALSE(std::filesystem::exists(config.spillFolder));
+}
+
+TEST_CASE("loader: a cell an edit makes is a block, kept when it unloads") {
+    TempDir dir("loader_adopt");
+    writeFloor(dir.path);
+    utils::SceneLoader loader(unthreaded());
+    projv::Scene scene;
+    REQUIRE(loader.open(scene, dir.path.string()));
+    loader.settle(scene);
+    ComponentHandle floor = named(scene, "floor");
+
+    // Below the grid's low corner: the grid grows down, and every cell index moves.
+    utils::queueVoxelAdd(scene, floor, box({3, -6, 3}, {3, -3, 3}, true));
+    utils::updateScene(scene);
+    REQUIRE(scene.grids[0].originCellCoord.y == -1);
+    const uint32_t voxels = utils::getComponentVoxelCount(scene, floor);
+    CHECK(voxels == 128 * 128 + 4);
+
+    loader.update(scene);
+    CHECK(loader.stats().blocks == 65);
+    CHECK(loader.blocks().edited(scene, 64));
+
+    loader.setRule(utils::loadInside({vec3(1000.0f), vec3(1001.0f)}));
+    loader.settle(scene);
+    CHECK(loader.stats().loaded == 0);
+    CHECK(loader.stats().kept == 1);   // only the new cell: the rest are on disk as they were
+    CHECK(utils::getComponentVoxelCount(scene, floor) == 0);
+
+    loader.setRule(utils::loadEverything());
+    loader.settle(scene);
+    CHECK(utils::getComponentVoxelCount(scene, floor) == voxels);
+    CHECK(loader.stats().kept == 0);
 }

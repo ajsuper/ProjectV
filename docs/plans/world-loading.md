@@ -1,6 +1,6 @@
 # World loading: one rule decides what is loaded
 
-Status: **approved**, 2026-10-16. **L0 done** (2026-10-16). Next: L1. Split out of the networking plan:
+Status: **approved**, 2026-10-16. **L0, L1 done** (2026-10-16). Next: L2. Split out of the networking plan:
 loading works without networking, without physics, and without EnTT. The networking plan
 (`networking.md`) builds on it.
 
@@ -20,11 +20,12 @@ loading works without networking, without physics, and without EnTT. The network
 ```cpp
 enum class Presence : uint8_t { Absent, Kept, Active };
 
-struct LoadCandidate {           // one loadable unit (below)
-    core::aabb  bounds;          // world space
-    UnitId      id;              // stable: (component localId path, block grid coords)
-    UnitKind    kind;            // Block (a chunk or grid cell) or Entity
-    std::span<const std::string> tags;   // from compose.json / entities.json
+struct LoadCandidate {           // one block (L2 adds entities)
+    BlockId         id;
+    WorldBox        bounds;      // world space
+    ComponentHandle component;   // read its name, attachments, anything: the rule's business
+    core::ivec3     cell;        // grid coordinate
+    Presence        current;     // what the rule said last time: for hysteresis
 };
 struct Viewer {                  // where the world is seen from; the game sets them
     core::vec3 position;
@@ -60,8 +61,8 @@ LoadRule loadInside(core::aabb box, Presence inside = Presence::Active);
   new candidates (spawns, a viewer that moved further than the hint) at once.
 - Loads and unloads have a per-frame budget (bytes read, units made). Disk reads happen on a worker
   thread; units appear and go on the main thread, at a frame boundary.
-- **Edge flicker** is the rule's business: `loadNear` keeps a 10% margin, and `withMargin(rule,
-  0.1f)` wraps any rule that returns distances.
+- **Edge flicker** is the rule's business: the candidate carries what the rule said last time, and
+  `loadNear` keeps a 10% margin with it.
 
 ## Units: what loads
 
@@ -139,6 +140,33 @@ runtime/loading.h       entities as units, viewers from components, Presence -> 
   refused until everything is loaded; a deleted component's blocks are forgotten.
 - Not yet (L1): cells an edit creates in a grid are not blocks, so they stay loaded; duplicating a
   partly loaded grid copies only its loaded cells.
+
+## L1, done 2026-10-16
+
+- `utils::SceneLoader` over `SceneBlocks`: `open`, `setRule(LoadPolicy | rule, hint)`, `setViewers`,
+  `update` (once a frame), `settle` (until done: loading screens, tests), `presence`, `stats`,
+  `refreshBounds` (after moving components that have blocks). Policies: `loadEverything` (default),
+  `loadNear(active, kept, margin)` (sets its own hint), `loadInside(box, presence)`.
+- Who is asked: everything on a full pass (after open, setRule, refreshBounds, or a viewer coming,
+  going or moving `viewerMoveRecheck`, 2 m); otherwise a slice per update, so each block is asked
+  within `recheckUpdates` (30); with a hint, blocks just come in range at once, blocks gone out of
+  range Absent at once, and nothing beyond it ever (a spatial hash over block bounds, 64 m cells).
+- Budgets: `maxLoadsPerUpdate` 32, `maxUnloadsPerUpdate` 64, `maxPendingReads` 64. Loads go nearest
+  viewer first. A failed load is not retried until setRule.
+- Reads on a worker thread (`threaded`, default on): it touches files only; results are installed in
+  `update`, and a read for a block no longer wanted is dropped.
+- Kept blocks past `keptMemoryBytes` (256 MB) spill, oldest first, to one-block `.data` files in a
+  session folder removed with the loader. Kept blobs drop their brick map (rebuilt on the next edit).
+- Cells an edit makes in a lazily opened grid are adopted as blocks (scanned `adoptCellsPerUpdate`
+  cells a frame), edited from birth, so they unload into the kept set. `duplicateComponent` refuses a
+  subtree with unloaded blocks.
+- Tests (headless; the threaded ones run 50 times clean): budget and equality with the eager loader;
+  `loadNear` nearest first and following the viewer, Active/Kept bands; no flicker on the edge; the
+  rule never asked beyond the hint; recheck cadence without one; worker reads equal synchronous ones
+  and dropped reads leave nothing; spill to files and back, files removed with the loader; an
+  adopted cell after the grid grew downward is kept and restored.
+- Known costs, for L2's measurements: `update` walks every block once (load/unload lists) -- fine to
+  ~10^5 blocks; reading a spilled block back is synchronous on the main thread.
 
 ## Milestones
 

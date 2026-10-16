@@ -416,6 +416,18 @@ namespace projv::utils {
     ComponentHandle duplicateComponent(Scene& scene, ComponentHandle source,
                                         ComponentHandle parent) {
         if (source >= scene.components.size()) return INVALID_COMPONENT_HANDLE;
+        // A block that is not loaded would be copied as empty (utils/scene_loading.h).
+        for (std::vector<ComponentHandle> pending{source}; !pending.empty();) {
+            ComponentHandle h = pending.back();
+            pending.pop_back();
+            if (hasUnloadedBlocks(scene, h)) {
+                core::error("duplicateComponent: '{}' has blocks that are not loaded; load them first",
+                            scene.components[h].name);
+                return INVALID_COMPONENT_HANDLE;
+            }
+            if (isComponentAlive(scene, h))
+                pending.insert(pending.end(), scene.components[h].children.begin(), scene.components[h].children.end());
+        }
 
         // Reserved before the source is read below: reserving can append a row, which moves the
         // buffer every reference into `components` points at.
