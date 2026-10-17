@@ -1,7 +1,7 @@
 # Networking: server-authoritative, on the deterministic simulation
 
-Status: **approved**; **N0 done** (2026-10-17) except P0's second compiler (Clang not installed;
-`--preset clang` is ready). Next: N1. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
+Status: **approved**; **N0, N1 done** (2026-10-17); P0's second compiler waits on Clang being
+installed (`--preset clang` is ready). Next: N2. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
 hundreds of players as the eventual target, and clients that load and simulate only what is near them,
 decided by one rule a game writes (`world-loading.md`). Builds on the physics plan (`physics-jolt.md`:
 D6, D8, D9, A3, A7) and on the world-loading plan.
@@ -219,6 +219,29 @@ world-loading plan (W2-W4). On top of those:
   when the re-run pushes; exact on open ground); in `test_physics_fracture.cpp`, a server's strike
   applied to a client's wall makes the same wall and the same pieces by NetId, moving alike, and a
   split naming voxels the client lacks skips them.
+
+## N1, done 2026-10-17
+
+- `include/net/transport.h`: `Transport` (listen, connect, send on Reliable or Unreliable, disconnect,
+  poll, stats), `makeEnetTransport()`, and `LoopbackNetwork` -- endpoints in one process on a clock
+  the test advances, seeded, with `LinkConditions {latency, jitter, loss, duplicate, reorder}`. A
+  lost reliable message is delayed by a resend, never lost or reordered; unreliable ones may be lost,
+  duplicated or held back, and one older than the newest delivered is dropped (ENet's sequenced
+  unreliable does the same).
+- `include/net/wire.h`: `BitWriter`/`BitReader` (bits, varints, zigzag, f32, length-prefixed bytes,
+  quantised floats); a reader past the end or past a caller's limit sets `failed` and returns zeros,
+  never asserts. Positions as millimetre steps from a cell corner (signed varints), rotations smallest
+  three (2 + 3 x 9 bits, under 0.6 degrees), vectors quantised; a body's pose and velocities in
+  under 22 bytes near its corner. `writeLabels`/`readLabels`: runs, with cell and label limits.
+- ENet v1.3.18 is a submodule (`external/enet`), built by its own CMake, or vcpkg's
+  `unofficial-enet` first. Only `src/net/transport_enet.cpp` sees its headers (a source-file include
+  path) and includes it (`layering`); `net/` is under the utils rule (no EnTT, no runtime).
+- Tests (`test_net.cpp`): round trips field for field; 2,000 random buffers through every reader;
+  quantisation within half a step; poses to the millimetre; labels and their limits; loopback
+  handshake timing, 600 reliable messages each way in order through 20% loss at 150 ms, unreliable
+  newest-only with loss and duplicates, the same seed losing the same messages, disconnects, a full
+  server, nobody listening, an endpoint going away. ENet on localhost both ways: `ctest --preset net`
+  (`net_sockets`, excluded from the default run like the soak).
 
 ## Milestones
 

@@ -227,6 +227,27 @@ if(NOT TARGET Jolt::Jolt)
     set(PROJV_VENDORED_DEPS ON)
 endif()
 
+# ENet: UDP with reliable and unreliable channels (net/, docs/plans/networking.md). Pinned (v1.3.18).
+# Only src/net/transport_enet.cpp includes it (the `layering` test enforces it). vcpkg's port is
+# found first; otherwise the submodule is built, given the include path its own CMake leaves out.
+find_package(unofficial-enet CONFIG QUIET)
+if(TARGET unofficial::enet::enet)
+    set(PROJV_ENET_TARGET unofficial::enet::enet)
+else()
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/enet/CMakeLists.txt")
+        message(FATAL_ERROR "ENet was not found and external/enet is missing: run "
+                            "`git submodule update --init external/enet`, or install ENet.")
+    endif()
+    add_subdirectory(external/enet EXCLUDE_FROM_ALL)
+    target_include_directories(enet INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/enet/include)
+    set_target_properties(enet PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    if(WIN32)
+        target_link_libraries(enet INTERFACE ws2_32 winmm)
+    endif()
+    set(PROJV_ENET_TARGET enet)
+    set(PROJV_VENDORED_DEPS ON)
+endif()
+
 # GLFW has no submodule; it is a system package on every platform ProjectV supports.
 find_package(glfw3 CONFIG QUIET)
 if(glfw3_FOUND)
@@ -278,6 +299,8 @@ add_library(projectV STATIC
     src/utils/animation.cpp
     src/utils/attachments.cpp
     src/utils/collision_geometry.cpp
+    src/net/transport_loopback.cpp
+    src/net/wire.cpp
     src/utils/compose_io.cpp
     src/utils/scene_loading.cpp
     src/utils/editing.cpp
@@ -369,6 +392,12 @@ target_link_libraries(projv_physics PRIVATE
 target_sources(projectV PRIVATE $<TARGET_OBJECTS:projv_physics>)
 # Link only: Jolt's compile flags and defines stay on projv_physics.
 target_link_libraries(projectV PRIVATE $<LINK_ONLY:Jolt::Jolt>)
+
+# ENet, likewise reached from one file only.
+target_sources(projectV PRIVATE src/net/transport_enet.cpp)
+target_link_libraries(projectV PRIVATE $<LINK_ONLY:${PROJV_ENET_TARGET}>)
+set_source_files_properties(src/net/transport_enet.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "$<TARGET_PROPERTY:${PROJV_ENET_TARGET},INTERFACE_INCLUDE_DIRECTORIES>")
 
 if(APPLE)
     target_link_libraries(projectV PUBLIC

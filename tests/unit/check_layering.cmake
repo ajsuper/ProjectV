@@ -10,7 +10,7 @@ endif()
 
 file(GLOB_RECURSE files
     "${PROJV_ROOT}/include/utils/*" "${PROJV_ROOT}/include/data_structures/*"
-    "${PROJV_ROOT}/src/utils/*")
+    "${PROJV_ROOT}/src/utils/*" "${PROJV_ROOT}/include/net/*" "${PROJV_ROOT}/src/net/*")
 
 set(forbidden "#[ \t]*include[ \t]*[<\"](entt/|core/world\\.h|core/application\\.h|core/events\\.h|core/ecs\\.h|runtime/)")
 set(violations "")
@@ -25,7 +25,7 @@ endforeach()
 if(violations)
     message(FATAL_ERROR "The voxel layer includes the runtime or EnTT:${violations}")
 endif()
-message(STATUS "layering: utils and data_structures are free of EnTT and the runtime")
+message(STATUS "layering: utils, data_structures and net are free of EnTT and the runtime")
 
 # Jolt is reachable only from src/runtime/physics/. Those files are compiled apart, with Jolt's SIMD
 # flags and configuration defines (see projv_physics in the top-level CMakeLists); a Jolt header
@@ -50,3 +50,21 @@ if(jolt_violations)
     message(FATAL_ERROR "Jolt is included outside src/runtime/physics/:${jolt_violations}")
 endif()
 message(STATUS "layering: Jolt is included only by src/runtime/physics/")
+
+# ENet is reachable only from src/net/transport_enet.cpp: everything else talks to net::Transport.
+set(enet "#[ \t]*include[ \t]*[<\"]enet/")
+set(enet_violations "")
+foreach(file IN LISTS everything)
+    if(file MATCHES "^${PROJV_ROOT}/src/net/transport_enet\\.cpp$" OR file MATCHES "/external/")
+        continue()
+    endif()
+    file(STRINGS "${file}" hits REGEX "${enet}")
+    foreach(hit IN LISTS hits)
+        file(RELATIVE_PATH relative "${PROJV_ROOT}" "${file}")
+        string(APPEND enet_violations "\n  ${relative}: ${hit}")
+    endforeach()
+endforeach()
+if(enet_violations)
+    message(FATAL_ERROR "ENet is included outside src/net/transport_enet.cpp:${enet_violations}")
+endif()
+message(STATUS "layering: ENet is included only by src/net/transport_enet.cpp")

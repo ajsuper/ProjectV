@@ -57,9 +57,11 @@
     ],
     "testPresets": [
         { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true },
-          "filter": { "exclude": { "label": "soak" } } },
+          "filter": { "exclude": { "label": "soak|net" } } },
         { "name": "clang", "configurePreset": "clang", "output": { "outputOnFailure": true },
-          "filter": { "exclude": { "label": "soak" } } },
+          "filter": { "exclude": { "label": "soak|net" } } },
+        { "name": "net", "configurePreset": "dev", "output": { "outputOnFailure": true },
+          "filter": { "include": { "label": "net" } } },
         { "name": "soak", "configurePreset": "dev", "output": { "outputOnFailure": true, "verbosity": "verbose" },
           "filter": { "include": { "label": "soak" } } }
     ]

@@ -25,6 +25,7 @@ add_executable(projv_unit_tests
     test_events.cpp
     test_input.cpp
     test_local_ids.cpp
+    test_net.cpp
     test_loose_bvh.cpp
     test_physics_character.cpp
     test_physics_edits.cpp
@@ -63,6 +64,10 @@ add_test(NAME projv_unit_tests COMMAND projv_unit_tests)
 # (`ctest --preset dev` excludes the label); `ctest --preset soak`, or set PROJV_SOAK yourself.
 add_test(NAME physics_soak COMMAND projv_unit_tests -tc=soak*)
 set_tests_properties(physics_soak PROPERTIES ENVIRONMENT "PROJV_SOAK=1" LABELS soak TIMEOUT 3600)
+
+# Real sockets on localhost (ENet). Not in the default run either: `ctest --preset net`.
+add_test(NAME net_sockets COMMAND projv_unit_tests -tc=enet* --no-skip)
+set_tests_properties(net_sockets PROPERTIES LABELS net TIMEOUT 60)
 
 # Not a compile: a scan of the voxel layer's includes. See check_layering.cmake.
 add_test(NAME layering

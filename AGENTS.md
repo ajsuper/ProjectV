@@ -42,6 +42,9 @@ Unit tests (CPU only, no display) live in `tests/unit/` and build in the `dev` p
 ctest --preset dev
 ```
 
+Real sockets (ENet on localhost) are left out too: `ctest --preset net`. `--preset clang` builds the
+tests with Clang, to check the golden physics recording on a second compiler.
+
 The physics soak (2000 bodies, ten simulated minutes, ~30 s) is left out of that run; run it
 after changing physics:
 
@@ -104,6 +107,10 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   -tc="golden*"` and commit the file with the change.
 - **No world rollback** (plan, D9): `savePhysics` does not rewind across anything that makes or
   removes bodies, by design. Don't build toward it without asking.
+- **Networking** (plan: `docs/plans/networking.md`). `net/` (transport, wire format) follows the
+  utils rule: no EnTT, no runtime. Only `src/net/transport_enet.cpp` includes ENet (`layering`).
+  Tests use `net::LoopbackNetwork` (one process, a clock the test owns); real sockets only in
+  `ctest --preset net`. Anything read off the wire is checked (`BitReader::failed`), never asserted.
 - **What crosses machines is a `NetId`** (`runtime/net.h`), never an Entity, handle, ref or body
   id. Physics makes a step's new bodies in NetId order and applies commands in
   (tick, issuer, sequence) order, so nothing that feeds a step may depend on registry or arrival
