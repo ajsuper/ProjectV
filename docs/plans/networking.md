@@ -1,6 +1,7 @@
 # Networking: server-authoritative, on the deterministic simulation
 
-Status: **draft, revised** 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
+Status: **approved**; **N0 done** (2026-10-17) except P0's second compiler (Clang not installed;
+`--preset clang` is ready). Next: N1. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
 hundreds of players as the eventual target, and clients that load and simulate only what is near them,
 decided by one rule a game writes (`world-loading.md`). Builds on the physics plan (`physics-jolt.md`:
 D6, D8, D9, A3, A7) and on the world-loading plan.
@@ -194,6 +195,30 @@ world-loading plan (W2-W4). On top of those:
 | P1 | A logged "set body state" op; a frozen body (W3) that follows given poses as a proxy | Snapshots; Kept bodies on a client |
 | P2 | Character-only save, restore and update, without stepping the world | Prediction (N5). `saveState` saves characters today, but only with the whole world, and only `step()` updates them |
 | P3 | Apply a world change from labels: move given voxels of a body into new pieces with given NetIds, without running patterns or support | N4 on the client |
+
+## N0, done 2026-10-17
+
+- **P0.** The golden session replays bit for bit in the `release` build (-O3, Jolt asserts off,
+  minimal logging) as in `dev`. Clang: not installed on this machine; the `clang` preset
+  (`build-clang`, tests only) is the one command once it is. ARM: none available.
+- **P1.** `PhysicsWorld::setBodyState(id, position, rotation, linear, angular)`: one logged change
+  (Op::SetState), wakes the body; a frozen body takes the pose and stays still. A frozen body
+  (`setFrozen`, world-loading L3) follows `moveKinematic` poses and shoves what it meets: the proxy.
+- **P2.** `saveCharacter` / `restoreCharacter` (refuses another character's bytes) /
+  `stepCharacterAlone(id, dt)`: one character updated against the world as it is, pushing nothing --
+  no contact impulses (a contact listener) and no weight on its ground (mass 0 for the update). All
+  logged (LOG_VERSION 11). On open ground a re-run lands bit-exact where the first run did.
+- **P3.** `runtime::applyVoxelSplit(world, entity, VoxelSplit)`: at the next step, in order with edits
+  and strikes, the given voxels are cut into pieces with the given NetIds and motion, and the dust
+  removed; no pattern, island or support pass, and the body's sources are taken as they are (so the
+  step does not run one either). `voxelSplitOf(world, BodyBroken)` builds one on the server:
+  BodyBroken now carries `pieceVoxels`, `pieceMotion` and `dust`. BreakCause::Replicated. The cut is
+  `cutIslands`, shared with the island pass.
+- Tests: `test_physics_prediction.cpp` (state as one change, through replay; a frozen proxy shoving a
+  box; a character re-run near where it ended and the crate it pushed untouched -- checked to fail
+  when the re-run pushes; exact on open ground); in `test_physics_fracture.cpp`, a server's strike
+  applied to a client's wall makes the same wall and the same pieces by NetId, moving alike, and a
+  split naming voxels the client lacks skips them.
 
 ## Milestones
 

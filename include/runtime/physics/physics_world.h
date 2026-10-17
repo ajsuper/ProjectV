@@ -579,6 +579,9 @@ namespace projv::runtime {
         void setVelocity(BodyId id, core::vec3 linear, core::vec3 angular);
         // Places the body; velocities are kept. A teleport: nothing is swept along the way.
         void setPose(BodyId id, core::vec3 position, core::quat rotation);
+        // Pose and velocities at once, as one logged change: a server's correction of a body. Wakes it.
+        // A frozen body takes the pose and stays still.
+        void setBodyState(BodyId id, core::vec3 position, core::quat rotation, core::vec3 linear, core::vec3 angular);
         // A kinematic body: moves it to the pose over the next step, with the velocity that takes,
         // so what it pushes is pushed with the right speed. One blocked by static bodies
         // (BodyDesc::blockedByStatic) moves as far as they let it instead; the position it heads for
@@ -620,6 +623,13 @@ namespace projv::runtime {
         // CharacterDesc::filter, for it and its inner body, from the next step.
         void setCharacterFilter(CharacterId id, const CollisionFilter& filter);
         CharacterState characterState(CharacterId id) const;
+        // One character alone, for prediction (networking plan, N5): its state as bytes (the
+        // controller's and its input), put back on that same character, and one update of it against
+        // the world as it is -- nothing else steps, and it pushes nothing (what it pushed the first
+        // time was pushed). All logged. Restore refuses bytes from another character.
+        std::vector<uint8_t> saveCharacter(CharacterId id) const;
+        bool restoreCharacter(CharacterId id, const std::vector<uint8_t>& state);
+        void stepCharacterAlone(CharacterId id, float dt);
         // The inner body other bodies collide with, so queries and filters can name it.
         BodyId characterBody(CharacterId id) const;
 
@@ -684,6 +694,7 @@ namespace projv::runtime {
         void endContactsOf(BodyId body, bool unlessReported);
         void sanityPass(float dt);
         void updateCharacters(float dt);
+        void updateCharacter(size_t slot, float dt, bool pushes);
         void checkJoints(float dt);
         void removeJointsOf(BodyId body);
         BodyId createBodyUnrecorded(const BodyDesc& desc);

@@ -530,12 +530,13 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 10;   // 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body (written as 8 by mistake until 10); 10: frozen bodies
+        constexpr uint32_t LOG_VERSION = 11;   // 11: body states, characters alone; 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body (written as 8 by mistake until 10); 10: frozen bodies
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
             Gravity, Step, Restore, CreateCharacter, DestroyCharacter, CharacterInput, CharacterPosition,
-            CreateJoint, DestroyJoint, JointMotor, SetMaterial, SetFilter, CharacterFilter, ReportContacts, Freeze
+            CreateJoint, DestroyJoint, JointMotor, SetMaterial, SetFilter, CharacterFilter, ReportContacts, Freeze,
+            SetState, CharacterRestore, CharacterAlone
         };
 
         void writeSettings(std::vector<uint8_t>& out, const PhysicsSettings& s) {
@@ -1237,11 +1238,36 @@ namespace projv::runtime {
     // sample builds -- carried by the ground while standing, falling otherwise, plus what it walks
     // at -- then the move, with stair stepping and floor sticking.
     void PhysicsWorld::updateCharacters(float dt) {
+        for (size_t slot = 0; slot < impl->characters.size(); slot++)
+            if (impl->characters[slot].controller) updateCharacter(slot, dt, true);
+    }
+
+    namespace {
+        // What a character re-run for prediction is given: it collides, and pushes nothing.
+        struct NoPushes final : JPH::CharacterContactListener {
+            void OnContactAdded(const JPH::CharacterVirtual*, const JPH::CharacterContact&, JPH::CharacterContactSettings& s) override {
+                s.mCanReceiveImpulses = false;
+            }
+            void OnContactPersisted(const JPH::CharacterVirtual*, const JPH::CharacterContact&, JPH::CharacterContactSettings& s) override {
+                s.mCanReceiveImpulses = false;
+            }
+        };
+    }
+
+    void PhysicsWorld::updateCharacter(size_t slot, float dt, bool pushes) {
         const JPH::Vec3 gravity = impl->system.GetGravity();
         const JPH::Vec3 up = JPH::Vec3::sAxisY();
-        for (Impl::Character& c : impl->characters) {
-            if (!c.controller) continue;
+        {
+            Impl::Character& c = impl->characters[slot];
             JPH::CharacterVirtual& ch = *c.controller;
+            // Not pushing: no impulses into what it touches, and no weight on what it stands on (Jolt
+            // adds that only while it has mass).
+            NoPushes noPushes;
+            const float mass = ch.GetMass();
+            if (!pushes) {
+                ch.SetListener(&noPushes);
+                ch.SetMass(0.0f);
+            }
             ch.UpdateGroundVelocity();
             JPH::Vec3 current = ch.GetLinearVelocity();
             JPH::Vec3 vertical = up * current.Dot(up);
@@ -1265,7 +1291,61 @@ namespace projv::runtime {
             CharacterBodies bodies(*impl->rules, c.desc.filter, ch.GetInnerBodyID());
             ch.ExtendedUpdate(dt, gravity, settings, JPH::BroadPhaseLayerFilter(), layers, bodies, JPH::ShapeFilter(),
                               *impl->tempAllocator);
+            if (!pushes) {
+                ch.SetListener(nullptr);
+                ch.SetMass(mass);
+            }
         }
+    }
+
+    std::vector<uint8_t> PhysicsWorld::saveCharacter(CharacterId id) const {
+        std::vector<uint8_t> out;
+        const Impl::Character* c = impl->character(id);
+        if (!c) return out;
+        put(out, id.value);
+        put(out, c->input); put(out, uint8_t(c->jump)); put(out, c->jumpSpeed);
+        JPH::StateRecorderImpl state;
+        c->controller->SaveState(state);
+        std::string bytes = state.GetData();
+        out.insert(out.end(), bytes.begin(), bytes.end());
+        return out;
+    }
+
+    bool PhysicsWorld::restoreCharacter(CharacterId id, const std::vector<uint8_t>& state) {
+        if (impl->recording) {
+            impl->op(Op::CharacterRestore); put(impl->log, id.value); put(impl->log, uint64_t(state.size()));
+            impl->log.insert(impl->log.end(), state.begin(), state.end());
+        }
+        Impl::Character* c = impl->character(id);
+        size_t at = 0;
+        uint32_t saved = 0;
+        core::vec3 input;
+        uint8_t jump = 0;
+        float jumpSpeed = 0.0f;
+        if (!c || !get(state, at, saved) || saved != id.value || !get(state, at, input) || !get(state, at, jump) ||
+            !get(state, at, jumpSpeed)) {
+            core::warn("physics: restoreCharacter refused: not this character's state");
+            return false;
+        }
+        JPH::StateRecorderImpl recorder;
+        recorder.WriteBytes(state.data() + at, state.size() - at);
+        recorder.Rewind();
+        c->controller->RestoreState(recorder);
+        if (recorder.IsFailed()) {
+            core::warn("physics: restoreCharacter: Jolt could not read the state");
+            return false;
+        }
+        c->input = input;
+        c->jump = jump != 0;
+        c->jumpSpeed = jumpSpeed;
+        c->controller->SetPosition(c->controller->GetPosition());   // its inner body follows
+        return true;
+    }
+
+    void PhysicsWorld::stepCharacterAlone(CharacterId id, float dt) {
+        if (impl->recording) { impl->op(Op::CharacterAlone); put(impl->log, id.value); put(impl->log, dt); }
+        if (!impl->character(id) || !(dt > 0.0f)) return;
+        updateCharacter(id.value & 0xffffu, dt, false);
     }
 
     // ---- Joints ----------------------------------------------------------------------------------
@@ -1742,6 +1822,29 @@ namespace projv::runtime {
         if (length < 0.5f) return;
         impl->system.GetBodyInterface().SetPositionAndRotation(JPH::BodyID(id.value), toJoltR(position),
                                                                toJolt(rotation / length), JPH::EActivation::Activate);
+    }
+
+    void PhysicsWorld::setBodyState(BodyId id, core::vec3 position, core::quat rotation, core::vec3 linear, core::vec3 angular) {
+        if (impl->recording) {
+            impl->op(Op::SetState);
+            put(impl->log, id.value); put(impl->log, position); put(impl->log, rotation); put(impl->log, linear); put(impl->log, angular);
+        }
+        if (!finite(position) || !finite(rotation) || !finite(linear) || !finite(angular) || !isAlive(id)) return;
+        float length = glm::length(glm::vec4(rotation.x, rotation.y, rotation.z, rotation.w));
+        if (length < 0.5f) return;
+        JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
+        const JPH::BodyID jid(id.value);
+        bodies.SetPositionAndRotation(jid, toJoltR(position), toJolt(rotation / length), JPH::EActivation::Activate);
+        if (bodies.GetMotionType(jid) == JPH::EMotionType::Dynamic) {
+            auto capped = [](core::vec3 v, float limit) {
+                float l = glm::length(v);
+                return l > limit ? v * (limit * 0.999f / l) : v;
+            };
+            bodies.SetLinearAndAngularVelocity(jid, toJolt(capped(linear, impl->settings.maxLinearSpeed)),
+                                               toJolt(capped(angular, impl->settings.maxAngularSpeed)));
+        }
+        uint32_t index = jid.GetIndex();
+        impl->lastGood[index] = {toJoltR(position), toJolt(rotation / length)};
     }
 
     core::vec3 PhysicsWorld::moveKinematic(BodyId id, core::vec3 position, core::quat rotation, float dt) {
@@ -2759,6 +2862,25 @@ namespace projv::runtime {
                     world.setFilter(BodyId{id}, f);
                     break;
                 }
+                case Op::SetState: {
+                    core::vec3 linear, angular;
+                    if (!get(in, at, id) || !get(in, at, a) || !get(in, at, q) || !get(in, at, linear) || !get(in, at, angular))
+                        return truncated();
+                    world.setBodyState(BodyId{id}, a, q, linear, angular);
+                    break;
+                }
+                case Op::CharacterRestore: {
+                    uint64_t size = 0;
+                    if (!get(in, at, id) || !get(in, at, size) || in.size() - at < size) return truncated();
+                    std::vector<uint8_t> state(in.begin() + long(at), in.begin() + long(at + size));
+                    at += size;
+                    world.restoreCharacter(CharacterId{id}, state);
+                    break;
+                }
+                case Op::CharacterAlone:
+                    if (!get(in, at, id) || !get(in, at, dt)) return truncated();
+                    world.stepCharacterAlone(CharacterId{id}, dt);
+                    break;
                 case Op::Freeze: {
                     uint8_t on = 0;
                     if (!get(in, at, id) || !get(in, at, on)) return truncated();

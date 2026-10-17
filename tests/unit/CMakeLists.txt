@@ -37,6 +37,7 @@ add_executable(projv_unit_tests
     test_physics_joints.cpp
     test_physics_materials.cpp
     test_physics_net.cpp
+    test_physics_prediction.cpp
     test_physics_queries.cpp
     test_physics_reliability.cpp
     test_physics_runtime.cpp

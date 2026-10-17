@@ -44,3 +44,6 @@
 [submodule "external/JoltPhysics"]
 	path = external/JoltPhysics
 	url = https://github.com/jrouwe/JoltPhysics.git
+[submodule "external/enet"]
+	path = external/enet
+	url = https://github.com/lsalzman/enet.git

@@ -264,7 +264,7 @@ namespace projv {
     // Why a body came apart (BodyBroken): an edit cut a moving body in pieces, a static collider
     // lost the support of what fell (StaticCollider::splits), or a strike broke it -- one a game
     // made (runtime::fracture), or an impact's (installImpactFracture).
-    enum class BreakCause : uint8_t { Edit, Support, Strike, Impact };
+    enum class BreakCause : uint8_t { Edit, Support, Strike, Impact, Replicated };
 
     // A voxel body came apart, and `pieces` came away from it. Whatever the cause, it is one pass,
     // run after a body's voxels change: its face-connected islands are found across all its chunks,
@@ -293,6 +293,12 @@ namespace projv {
         core::vec3          at{0.0f};
         Entity              striker = NullEntity;
         float               energy = 0.0f;
+        // What a server sends so clients make the same pieces (runtime::applyVoxelSplit): each piece's
+        // voxels, in the broken component's voxel space, and the motion it was given; and the voxels
+        // cut as dust, with nothing made of them.
+        std::vector<std::vector<core::ivec3>>            pieceVoxels;
+        std::vector<std::pair<core::vec3, core::vec3>>   pieceMotion;   // linear, angular
+        std::vector<core::ivec3>                         dust;
     };
 
     // What a break made (BodyBroken): a shard, or an island that came away. Physics puts it on every
@@ -511,6 +517,27 @@ namespace projv::runtime {
     // Whether anything in the voxel body `entity` can break: its own material, or one its palette
     // names, has a strength. Cheap: no voxels are read.
     bool canBreak(World& world, Entity entity);
+
+    // A break worked out elsewhere -- a server's -- to apply here as it was made. Voxels are in the
+    // broken component's voxel space (as editVoxels takes them).
+    struct VoxelSplit {
+        struct Piece {
+            std::vector<core::ivec3> voxels;
+            NetId      netId;                  // the piece's, as the server gave it
+            bool       shard = false;
+            core::vec3 linear{0.0f}, angular{0.0f};
+        };
+        std::vector<Piece>       pieces;
+        std::vector<core::ivec3> dust;         // cut, nothing made of them
+    };
+    // What a BodyBroken made, as a VoxelSplit a client applies: on a server, from the event's handler.
+    VoxelSplit voxelSplitOf(const World& world, const BodyBroken& event);
+    // At the start of the next fixed step, in order with editVoxels and fracture: the pieces' voxels
+    // are cut from `entity`'s voxel component, each piece becomes a body of its own with the NetId and
+    // motion given, and the dust is removed. No fracture pattern, island or support pass runs -- what
+    // comes away is what the server said, whatever this machine has loaded. Sends BodyBroken (cause
+    // Replicated). Voxels it names that are not there are skipped, and logged.
+    void applyVoxelSplit(World& world, Entity entity, VoxelSplit split);
 
     // A collision of the last physics step, between two entities: one per pair, the fastest of its
     // contacts, closing faster than their minImpactSpeed (RigidBody, StaticCollider: the lower of

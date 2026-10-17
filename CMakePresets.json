@@ -26,6 +26,18 @@
             }
         },
         {
+            "name": "clang",
+            "inherits": "dev",
+            "displayName": "Clang (the golden recording on a second compiler)",
+            "description": "The dev build with Clang, tests only: what checks the physics replays bit for bit across compilers. ctest --preset clang -R projv_unit_tests, or build-clang/bin/projv_unit_tests -tc=\"golden*\".",
+            "binaryDir": "${sourceDir}/build-clang",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++",
+                "PROJV_BUILD_EXAMPLES": "OFF"
+            }
+        },
+        {
             "name": "vcpkg",
             "displayName": "vcpkg (installable)",
             "description": "Resolves every dependency through find_package from a vcpkg toolchain, which is the configuration that can actually be installed and exported. Requires VCPKG_ROOT to be set.",
@@ -40,10 +52,13 @@
     "buildPresets": [
         { "name": "dev",     "configurePreset": "dev" },
         { "name": "release", "configurePreset": "release" },
+        { "name": "clang",   "configurePreset": "clang" },
         { "name": "vcpkg",   "configurePreset": "vcpkg" }
     ],
     "testPresets": [
         { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true },
+          "filter": { "exclude": { "label": "soak" } } },
+        { "name": "clang", "configurePreset": "clang", "output": { "outputOnFailure": true },
           "filter": { "exclude": { "label": "soak" } } },
         { "name": "soak", "configurePreset": "dev", "output": { "outputOnFailure": true, "verbosity": "verbose" },
           "filter": { "include": { "label": "soak" } } }

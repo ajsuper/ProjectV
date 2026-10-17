@@ -1219,3 +1219,64 @@ TEST_CASE("minImpactSpeed saves on RigidBody and StaticCollider only when set") 
     CHECK(fixed->minImpactSpeed == 0.0f);
     CHECK(ComponentTraits<projv::StaticCollider>::load(nlohmann::json::object(), 1)->minImpactSpeed < 0.0f);
 }
+
+TEST_CASE("a split a server made, applied on a client, makes the same pieces with the same NetIds") {
+    // Two worlds from the same start: the server breaks its wall; the client is told what came away.
+    Fixture server, client;
+    Entity serverWall = server.wall();
+    Entity clientWall = client.wall();
+    REQUIRE(server.app.world.get<projv::NetId>(serverWall) == client.app.world.get<projv::NetId>(clientWall));
+    server.frames(2);
+    client.frames(2);
+
+    runtime::fracture(server.app.world, serverWall, vec3(0, 3, 0), Fixture::energyFor(1.2f), vec3(0, 0, 5));
+    server.frames(1);
+    REQUIRE(server.fractures.size() == 1);
+    const projv::BodyBroken& broke = server.fractures[0];
+    runtime::VoxelSplit split = runtime::voxelSplitOf(server.app.world, broke);
+    REQUIRE(split.pieces.size() == broke.pieces.size());
+    REQUIRE(split.pieces.size() > 3);
+
+    runtime::applyVoxelSplit(client.app.world, clientWall, split);
+    client.frames(1);
+    REQUIRE(client.splits.size() == 1);
+    CHECK(client.splits[0].cause == projv::BreakCause::Replicated);
+    CHECK(client.splits[0].shards == broke.shards);
+    // The wall that is left, voxel for voxel the same count; every piece there, by NetId, as big.
+    CHECK(countOf(client.scene, client.wallComponent).voxels == countOf(server.scene, server.wallComponent).voxels);
+    for (const runtime::VoxelSplit::Piece& piece : split.pieces) {
+        REQUIRE(piece.netId.value != 0);
+        Entity e = runtime::entityForNetId(client.app.world, piece.netId);
+        REQUIRE(e != projv::NullEntity);
+        CHECK(countOf(client.scene, client.app.world.get<projv::VoxelComponent>(e).handle).voxels == piece.voxels.size());
+        CHECK(client.app.world.all_of<projv::Piece>(e));
+    }
+    // And they move as the server's did when made.
+    client.frames(1);
+    server.frames(1);
+    for (size_t i = 0; i < split.pieces.size(); i++) {
+        Entity mine = runtime::entityForNetId(client.app.world, split.pieces[i].netId);
+        CHECK(runtime::hasBody(client.app.world, mine));
+        CHECK(glm::distance(runtime::bodyPose(client.app.world, mine).position,
+                            runtime::bodyPose(server.app.world, broke.pieces[i]).position) < 0.05f);
+    }
+}
+
+TEST_CASE("a split naming voxels the client does not have skips them and cuts the rest") {
+    Fixture f;
+    Entity wall = f.wall();
+    f.frames(2);
+    runtime::VoxelSplit split;
+    runtime::VoxelSplit::Piece piece;
+    for (int x = 0; x < 4; x++) piece.voxels.push_back(ivec3(x, 23, 0));   // the top corner of the face
+    piece.voxels.push_back(ivec3(100, 100, 100));                           // not in the wall
+    piece.netId = projv::NetId{900};
+    split.pieces.push_back(piece);
+    split.dust.push_back(ivec3(10, 23, 1));
+    runtime::applyVoxelSplit(f.app.world, wall, split);
+    f.frames(1);
+    CHECK(countOf(f.scene, f.wallComponent).voxels == 32 * 24 * 2 - 5);
+    Entity e = runtime::entityForNetId(f.app.world, projv::NetId{900});
+    REQUIRE(e != projv::NullEntity);
+    CHECK(countOf(f.scene, f.app.world.get<projv::VoxelComponent>(e).handle).voxels == 4);
+}
