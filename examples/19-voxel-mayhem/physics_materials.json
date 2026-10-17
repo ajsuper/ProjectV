@@ -1,0 +1,240 @@
+{
+  "v": 1,
+  "materials": [
+    {
+      "name": "ice",
+      "density": 917,
+      "friction": 0.01,
+      "restitution": 0.0
+    },
+    {
+      "name": "polished wood",
+      "density": 650,
+      "friction": 0.06,
+      "restitution": 0.0
+    },
+    {
+      "name": "slate",
+      "density": 2700,
+      "friction": 0.1,
+      "restitution": 0.0
+    },
+    {
+      "name": "rubber",
+      "density": 1100,
+      "friction": 1.0,
+      "restitution": 0.9
+    },
+    {
+      "name": "oak",
+      "density": 750,
+      "friction": 0.6,
+      "restitution": 0.45
+    },
+    {
+      "name": "clay",
+      "density": 1800,
+      "friction": 0.9,
+      "restitution": 0.0
+    },
+    {
+      "name": "ashlar",
+      "density": 800,
+      "friction": 0.8,
+      "restitution": 0.0,
+      "strength": 1000,
+      "fracture": "shatter",
+      "shardSize": 1.2
+    },
+    {
+      "name": "brick",
+      "density": 700,
+      "friction": 0.8,
+      "restitution": 0.0,
+      "strength": 1000,
+      "fracture": "seams",
+      "shardSize": 0.8
+    },
+    {
+      "name": "planks",
+      "density": 500,
+      "friction": 0.6,
+      "restitution": 0.1,
+      "strength": 1500,
+      "fracture": "splinter",
+      "shardSize": 0.8,
+      "grain": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "fired brick",
+      "density": 1900,
+      "friction": 0.7,
+      "restitution": 0.0,
+      "strength": 40000,
+      "fracture": "shatter",
+      "shardSize": 0.35
+    },
+    {
+      "name": "sandstone",
+      "density": 2000,
+      "friction": 0.8,
+      "restitution": 0.0,
+      "strength": 60000,
+      "fracture": "shatter",
+      "shardSize": 0.8
+    },
+    {
+      "name": "timber",
+      "density": 600,
+      "friction": 0.6,
+      "restitution": 0.1,
+      "strength": 40000,
+      "fracture": "splinter",
+      "shardSize": 0.8,
+      "grain": [
+        0,
+        1,
+        0
+      ]
+    },
+    {
+      "name": "chalk",
+      "density": 1500,
+      "friction": 0.8,
+      "restitution": 0.0,
+      "strength": 30000,
+      "fracture": "crumble",
+      "shardSize": 0.6
+    },
+    {
+      "name": "tower brick",
+      "density": 1800,
+      "friction": 0.8,
+      "restitution": 0.0,
+      "strength": 50000,
+      "fracture": "seams",
+      "shardSize": 0.75
+    },
+    {
+      "name": "plaster",
+      "density": 600,
+      "friction": 0.9,
+      "restitution": 0.0,
+      "strength": 700,
+      "fracture": "crumble",
+      "shardSize": 0.5
+    },
+    {
+      "name": "concrete",
+      "density": 2400,
+      "friction": 0.8,
+      "restitution": 0.0,
+      "strength": 80000,
+      "fracture": "shatter",
+      "shardSize": 0.45
+    },
+    {
+      "name": "rebar",
+      "density": 7850,
+      "friction": 0.5,
+      "restitution": 0.1,
+      "strength": 10000000.0,
+      "fracture": "shatter",
+      "shardSize": 0.25
+    },
+    {
+      "name": "wall brick",
+      "density": 1900,
+      "friction": 0.8,
+      "restitution": 0.0,
+      "strength": 45000,
+      "fracture": "seams",
+      "shardSize": 0.5
+    },
+    {
+      "name": "mortar",
+      "density": 1700,
+      "friction": 0.8,
+      "restitution": 0.0,
+      "strength": 12000,
+      "fracture": "crumble",
+      "shardSize": 0.25
+    },
+    {
+      "name": "pine",
+      "density": 550,
+      "friction": 0.6,
+      "restitution": 0.1,
+      "strength": 25000,
+      "fracture": "splinter",
+      "shardSize": 0.6,
+      "grain": [
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "glass",
+      "density": 2500,
+      "friction": 0.4,
+      "restitution": 0.05,
+      "strength": 2500,
+      "fracture": "shatter",
+      "shardSize": 0.2
+    },
+    {
+      "name": "iron",
+      "density": 7800,
+      "friction": 0.5,
+      "restitution": 0.1
+    },
+    {
+      "name": "bouncy",
+      "density": 300,
+      "friction": 0.9,
+      "restitution": 0.92
+    },
+    {
+      "name": "balloon",
+      "density": 40,
+      "friction": 0.4,
+      "restitution": 0.6
+    },
+    {
+      "name": "tnt",
+      "density": 700,
+      "friction": 0.7,
+      "restitution": 0.0
+    },
+    {
+      "name": "shale",
+      "density": 2300,
+      "friction": 0.8,
+      "restitution": 0.0,
+      "strength": 30000,
+      "fracture": "slabs",
+      "shardSize": 0.5
+    },
+    {
+      "name": "earth",
+      "density": 1600,
+      "friction": 0.9,
+      "restitution": 0.0,
+      "strength": 15000,
+      "fracture": "crumble",
+      "shardSize": 0.5
+    },
+    {
+      "name": "bedrock",
+      "density": 2800,
+      "friction": 0.9,
+      "restitution": 0.0,
+      "anchor": true
+    }
+  ]
+}

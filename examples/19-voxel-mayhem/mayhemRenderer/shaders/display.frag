@@ -1,0 +1,45 @@
+$input v_color0
+$input v_texcoord0
+
+// =============================================================================
+// display.frag -- pass 6, at output resolution: linear HDR to the screen. All the grading is here.
+//
+//   exposure (lightParams.z) -> vignette -> ACES -> gamma -> contrast, saturation -> dither
+//
+// The dither is not a look: the sky and the fog are smooth ramps over hundreds of pixels, and eight bits
+// band them without it. It is hashed from the pixel only, so a still frame stays still.
+// =============================================================================
+
+#include <bgfx_shader.sh>
+#include <grr_common.sc>
+
+SAMPLER2D(frame, 0);
+uniform vec4 renderParams;   // w = debug view: views 1 and 2 pass through ungraded
+
+#define CONTRAST   1.12
+#define SATURATION 1.25
+#define VIGNETTE   0.18
+
+vec3 aces(vec3 x) {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+
+void main() {
+    vec3 hdr = texture2D(frame, v_texcoord0).rgb;
+    if (renderParams.w > 0.5) {
+        gl_FragColor = vec4(clamp(hdr, 0.0, 1.0), 1.0);
+        return;
+    }
+    vec2 q = v_texcoord0 - 0.5;
+    float r2 = dot(q, q) * 2.0;
+    hdr *= lightParams.z * (1.0 - VIGNETTE * r2 * r2);
+
+    vec3 col = pow(aces(hdr), vec3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
+    col = (col - 0.5) * CONTRAST + 0.5;
+    float luma = dot(col, vec3(0.299, 0.587, 0.114));
+    col = mix(vec3(luma, luma, luma), col, SATURATION);
+
+    float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    col += (noise - 0.5) / 255.0;
+    gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+}
