@@ -33,6 +33,7 @@ cd build/examples/hello_voxel && ./hello_voxel
 | **20** | [mesh-voxelizer](20-mesh-voxelizer/) | Getting your own data in: meshes and Minecraft worlds to Compose scenes. Headless command-line tool. | Assimp submodule |
 | **30** | [renderers](30-renderers/) | Seven renderers over one scene and one camera — the comparison is the point. Accumulation, reprojection, per-face GI, and four cascade variants. | — |
 | **40** | [advanced-renderer](40-advanced-renderer/) | The good renderer, brought up to the engine as it is today: fourteen passes, world-space probe GI, animation, transparency and refraction. | — |
+| **45** | [game-ready-render](45-game-ready-render/) | A renderer to ship a game on: the physics demos' renderer plus TAA, a sun/sky rig, one-bounce ray-traced GI at a sixteenth of the pixels with screen-space AO and colour bounce for the near detail, and height fog. Well over 120 fps on a moderate scene at 16% of the pixels. | — |
 | **50** | [terrain-generator](50-terrain-generator/) | Procedural generation and streaming: chunks built on worker threads and uploaded while you fly. | — |
 | **60** | [scene-editor](60-scene-editor/) | A complete tool. ImGui docking, the scene living inside a panel, tools, undo, and Lua-scripted brushes. | ImGui + Lua submodules |
 
@@ -55,8 +56,9 @@ with.
 [10-scene-previewer](10-scene-previewer/) shows you what came out. That pairing is deliberate: the
 previewer applies no lighting at all, so anything that looks wrong there is wrong in the data.
 
-**Here about rendering** — [30-renderers](30-renderers/) is the survey and
-[40-advanced-renderer](40-advanced-renderer/) is the destination.
+**Here about rendering** — [30-renderers](30-renderers/) is the survey,
+[40-advanced-renderer](40-advanced-renderer/) is the best-looking, and
+[45-game-ready-render](45-game-ready-render/) is the one to put under a game.
 
 **Building a tool** — [60-scene-editor](60-scene-editor/) is the one that renders the scene into a
 panel rather than the window, which is the thing every editor-shaped application needs first.

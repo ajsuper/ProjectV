@@ -100,6 +100,13 @@ function(projv_compile_shaders)
             file(GLOB engineShaderSources "${engineShaderInclude}/*.sc")
             list(APPEND sharedIncludes ${engineShaderSources})
         endif()
+        # And the caller's own include directories (an example's sharedShaders/), for the same
+        # reason: an edit there changes every shader that includes it.
+        foreach(dir IN LISTS ARG_INCLUDE_DIRS)
+            get_filename_component(dir "${dir}" ABSOLUTE)
+            file(GLOB callerShaderSources "${dir}/*.sc")
+            list(APPEND sharedIncludes ${callerShaderSources})
+        endforeach()
 
         foreach(shader IN LISTS vertexShaders fragmentShaders)
             if(shader IN_LIST vertexShaders)

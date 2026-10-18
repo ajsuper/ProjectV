@@ -30,6 +30,7 @@ cd build/examples/world_loading    && ./world_loading      # --headless-check: t
 cd build/examples/voxel_mayhem     && ./voxel_mayhem       # MAYHEM_SELFTEST=1 checks it; MAYHEM_BENCH=cannon times a break
 cd build/examples/scene_previewer  && ./scene_previewer scenes/SmallVox
 cd build/examples/renderer_gallery && ./renderer_gallery --renderer fast
+cd build/examples/game_ready_render && ./game_ready_render     # GAME_BENCH=6 times it and exits
 cd build/examples/scene_editor     && ./scene_editor
 ```
 

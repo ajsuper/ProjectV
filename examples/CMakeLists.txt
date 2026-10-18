@@ -14,6 +14,7 @@ add_subdirectory(18-world-loading)
 add_subdirectory(19-voxel-mayhem)
 add_subdirectory(30-renderers)
 add_subdirectory(40-advanced-renderer)
+add_subdirectory(45-game-ready-render)
 add_subdirectory(50-terrain-generator)
 
 # Examples with third-party dependencies of their own. Each is skipped, with a reason, when its
