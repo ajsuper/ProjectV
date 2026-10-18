@@ -27,6 +27,7 @@ cd build/examples/entities         && ./entities
 cd build/examples/sandbox          && ./sandbox            # SANDBOX_SELFTEST=600 plays itself
 cd build/examples/physics_demos    && ./physics_demos      # DEMOS_SELFTEST=1 checks all eleven (DEMOS_ONLY=9 or 2,11: some)
 cd build/examples/world_loading    && ./world_loading      # --headless-check: the loader alone, no window
+cd build/examples/voxel_mayhem     && ./voxel_mayhem       # MAYHEM_SELFTEST=1 checks it; MAYHEM_BENCH=cannon times a break
 cd build/examples/mp_server        && ./mp_server          # then ./mp_client in build/examples/mp_client (selftest.sh: all headless)
 cd build/examples/scene_previewer  && ./scene_previewer scenes/SmallVox
 cd build/examples/renderer_gallery && ./renderer_gallery --renderer fast
@@ -144,7 +145,7 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 |---|---|
 | `include/` `src/` | The engine. `core/`, `graphics/`, `utils/`, `data_structures/`, `runtime/`. |
 | `cmake/` | `ProjectVConfig.cmake.in`, plus the `projv_compile_shaders()` and `projv_add_example()` helpers. |
-| `examples/` | Twelve examples, numbered in reading order. See `examples/README.md`. |
+| `examples/` | Thirteen examples, numbered in reading order. See `examples/README.md`. |
 | `tests/unit/` | The automated suite (doctest, ctest). CPU only. |
 | `tests/manual/` | Harnesses that need a display. Not examples. See `tests/README.md`. |
 | `docs/data_structures/` | Format references: the `.data` container, compose scenes, entities, tree64, renderers. |
