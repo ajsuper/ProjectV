@@ -66,6 +66,7 @@
 #include <bgfx/bgfx.h>
 #include <GLFW/glfw3.h>
 
+#include "voxel_renderer.h"
 #include "core/application.h"
 #include "core/log.h"
 #include "core/paths.h"
@@ -1834,56 +1835,13 @@ void followCamera(projv::Application& app) {
 }
 
 // =================================================================================================
-// The renderer (mayhemRenderer/): ten passes -- a G-buffer, screen-space AO and colour bounce, one-bounce
+// The renderer (examples/shared/voxelRenderer/, staged as voxelRenderer/): ten passes -- a G-buffer, screen-space AO and colour bounce, one-bounce
 // ray-traced GI at a sixteenth of the render pixels with its own history and blur, the shade, the voxel
 // reconstruction, TAA and the display. Its uniforms are set here, every frame.
 // =================================================================================================
 
-struct View {
-    bool shadows = true, ambientOcclusion = true, taa = true;
-    int bounce = 1;      // the colour bounce: off, normal, strong (J)
-    bool rayGI = true;   // the traced large-scale light (I)
-    int debugView = 0;   // 0 off, 2 AO only, 4 the bounce only, 7 the ray GI only (U)
-    float sun = 0.86f;   // the sun's angle up its arc
-    vec3 prevPosition{0.0f}, prevDirection{0.0f, 0.0f, 1.0f};
-    bool hasPrevious = false;
-    float renderScale = 0.5f;
-};
-
-void uploadUniforms(World& world, vec3 position, vec3 direction, bool moved, int frame) {
-    using projv::graphics::setUniformToValue;
-    auto& renderInstance = world.ctx().get<projv::graphics::RenderInstance>();
-    auto renderer = renderInstance.getActiveRenderer();
-    View& view = world.ctx().get<View>();
-    if (!view.hasPrevious) {
-        view.prevPosition = position;
-        view.prevDirection = direction;
-        view.hasPrevious = true;
-    }
-    vec3 prevPosition = view.prevPosition, prevDirection = view.prevDirection;
-    setUniformToValue(renderer, "cameraPos", position);
-    setUniformToValue(renderer, "cameraDir", direction);
-    setUniformToValue(renderer, "prevCameraPos", prevPosition);
-    setUniformToValue(renderer, "prevCameraDir", prevDirection);
-    vec4 sun(std::cos(view.sun) * -0.6402f, std::sin(view.sun), std::cos(view.sun) * 0.7682f, 0.0f);
-    setUniformToValue(renderer, "sunDir", sun);
-    // Sun, sky, exposure, the finest voxel's edge.
-    vec4 light(8.0f, 1.0f, 1.0f, 0.125f);
-    setUniformToValue(renderer, "lightParams", light);
-    // Haze: 8% lost over the park's 150 m radius, thinning over 50 m up.
-    const float radius = 150.0f;
-    vec4 fog(-std::log(0.92f) / radius, radius * 0.35f, 0.0f, 0.25f);
-    setUniformToValue(renderer, "fogParams", fog);
-    vec4 frameParams(float(frame), 0.0f, view.taa ? 1.0f : 0.0f, moved ? 1.0f : 0.0f);
-    setUniformToValue(renderer, "frameParams", frameParams);
-    vec4 renderParams(view.shadows ? 1.0f : 0.0f, view.ambientOcclusion ? 1.0f : 0.0f, 0.0f, float(view.debugView));
-    setUniformToValue(renderer, "renderParams", renderParams);
-    static const float bounceStrength[3] = {0.0f, 2.5f, 5.0f};
-    vec4 giParams(view.ambientOcclusion ? bounceStrength[view.bounce] : 0.0f, view.rayGI ? 1.0f : 0.0f, 0.0f, 0.0f);
-    setUniformToValue(renderer, "giParams", giParams);
-    view.prevPosition = position;
-    view.prevDirection = direction;
-}
+// The renderer and its settings are shared with other examples: examples/shared/voxel_renderer.h.
+using View = voxel_renderer::View;
 
 // =================================================================================================
 // Controls
@@ -2517,14 +2475,7 @@ void startup(projv::Application& app) {
 
     // The renderer, at half the window's width and height; the reconstruction and TAA
     // rebuild the full frame.
-    View& view = world.ctx().get<View>();
-    projv::RendererSpecification specification = projv::graphics::loadRendererSpecification((here / "mayhemRenderer").string() + "/");
-    for (projv::Texture& texture : specification.resources.textures)
-        if (texture.sizeMode == projv::TextureSizeMode::Relative && texture.name != "reconstructed" && texture.name != "taaColor")
-            texture.scale *= view.renderScale;
-    renderInstance.addRendererSpecification(1, specification);
-    bgfx::ShaderHandle vertexShader = projv::graphics::loadShader((here / "mayhemRenderer/shaders/vs_quad.bin").string());
-    renderInstance.setActiveRenderer(projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader));
+    voxel_renderer::install(world, renderInstance, here);
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
     buildWorld(world);
@@ -2565,9 +2516,7 @@ void render(projv::Application& app) {
         shaken.pitch += amount * SHAKE_TURN * noise(5.0f);
         direction = shaken.forward();
     }
-    const View& view = world.ctx().get<View>();
-    bool moved = glm::length(position - view.prevPosition) > 1e-5f || glm::length(direction - view.prevDirection) > 1e-6f;
-    uploadUniforms(world, position, direction, moved, app.frameCount);
+    voxel_renderer::upload(world, renderInstance, position, direction);
     projv::graphics::renderConstructedRenderer(renderInstance, renderInstance.getActiveRenderer(), &gpuData);
     if (bench) bench->renderMs += msSince(renderStart);
     // MAYHEM_GPU=1: each pass's GPU time, averaged over frames 120..360, printed once (needs the profiler).

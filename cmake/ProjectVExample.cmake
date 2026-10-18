@@ -13,7 +13,13 @@
 #       ASSET_FILES  LDR_RGBA_7.png                     # optional
 #       INCLUDE_DIRS include                            # optional
 #       LIBRARIES    ...                                # optional extra deps
+#       RENDERER     ../shared/voxelRenderer            # optional: a renderer folder several examples share
 #   )
+#
+# A shared RENDERER folder holds render.json, resources.json, shaders/ and include/ (its shader
+# includes). Its shaders are compiled once, by a target of its own that every example using it waits
+# on -- they are written beside their sources, so two examples compiling them would both claim the
+# same outputs -- and the folder is staged beside each binary under its own name.
 #
 # Assets are staged beside the binary because the engine's load functions resolve relative
 # paths against the working directory, and renderer folders name their shaders relative to
@@ -23,7 +29,7 @@
 function(projv_add_example name)
     set(multiValueArgs SOURCES SHADERS SHADER_INCLUDE_DIRS ASSET_DIRS ASSET_FILES
                        INCLUDE_DIRS LIBRARIES)
-    cmake_parse_arguments(ARG "" "" "${multiValueArgs}" ${ARGN})
+    cmake_parse_arguments(ARG "" "RENDERER" "${multiValueArgs}" ${ARGN})
 
     if(NOT ARG_SOURCES)
         message(FATAL_ERROR "projv_add_example(${name}): SOURCES is required")
@@ -94,6 +100,28 @@ function(projv_add_example name)
             VERBATIM
         )
     endforeach()
+
+    if(ARG_RENDERER)
+        get_filename_component(rendererDir "${CMAKE_CURRENT_SOURCE_DIR}/${ARG_RENDERER}" ABSOLUTE)
+        get_filename_component(rendererName "${rendererDir}" NAME)
+        set(rendererTarget projv_renderer_${rendererName})
+        if(NOT TARGET ${rendererTarget}_shaders)
+            add_custom_target(${rendererTarget})   # what projv_compile_shaders hangs its shaders off
+            projv_compile_shaders(
+                TARGET       ${rendererTarget}
+                SHADER_DIRS  "${rendererDir}/shaders"
+                INCLUDE_DIRS "${rendererDir}/include"
+            )
+        endif()
+        add_dependencies(${name} ${rendererTarget}_shaders)
+        set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
+                     $<TARGET_PROPERTY:${rendererTarget}_shaders,PROJV_SHADER_OUTPUTS>)
+        add_custom_command(TARGET ${name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${rendererDir}" "${exampleBinaryDir}/${rendererName}"
+            COMMENT "Staging ${rendererName} for ${name}"
+            VERBATIM
+        )
+    endif()
 
     foreach(assetFile IN LISTS ARG_ASSET_FILES)
         add_custom_command(TARGET ${name} POST_BUILD

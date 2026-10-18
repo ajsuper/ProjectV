@@ -1,8 +1,7 @@
 projv_add_example(voxel_mayhem
     SOURCES             main.cpp
-    SHADERS             mayhemRenderer/shaders
-    # grr_common.sc: the camera maths, light rig and fog every pass shares; grr_giblur.sc: the GI blur.
-    SHADER_INCLUDE_DIRS sharedShaders
-    ASSET_DIRS          mayhemRenderer
+    # The ten-pass renderer, shared with other examples (examples/shared/voxelRenderer).
+    RENDERER            ../shared/voxelRenderer
+    INCLUDE_DIRS        ../shared   # voxel_renderer.h
     ASSET_FILES         physics_materials.json
 )

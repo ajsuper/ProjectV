@@ -64,10 +64,12 @@ int main(int argc, char** argv) {
     projv::Application app;
     app.world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk(folder));
     projv::runtime::installSceneBridge(app);
-    // Fragments of a dozen voxels or fewer are dust: cut, and made into nothing -- no body to simulate
-    // or send. Clients throw out chips of their own where things break, for the look of it.
+    // Fragments of one or two voxels are dust: cut, and made into nothing -- no body to simulate or
+    // send. Clients throw out chips of their own where things break, for the look of it. Keep it below
+    // the materials' shards (stone breaks into 0.5 m shards: eight voxels of the tower's): at 12 every
+    // shard was dust, and the rubble vanished.
     projv::runtime::PhysicsConfig physics;
-    physics.dustVoxels = 12;
+    physics.dustVoxels = 2;
     projv::runtime::installPhysics(app, physics);
     projv::runtime::installImpactFracture(app);
     projv::runtime::registerComponent<arena::Thrower>(app.world);
@@ -184,10 +186,15 @@ int main(int argc, char** argv) {
             }
             const double kbps = double(sent > lastSent ? sent - lastSent : 0) / logClock / 1024.0;
             lastSent = sent;
+            size_t pieces = 0, pieceVoxels = 0;
+            for (auto [e, piece, link] : a.world.view<projv::Piece, projv::VoxelComponent>().each()) {
+                pieces++;
+                pieceVoxels += projv::utils::getComponentVoxelCount(a.world.ctx().get<projv::Scene>(), link.handle);
+            }
             projv::core::info("MPSERVER: {} client(s), frames {:.2f} ms average {:.2f} ms worst, steps {:.2f} ms average "
-                              "{:.2f} ms worst, {:.0f} KB/s out, worst round trip {:.0f} ms{}",
+                              "{:.2f} ms worst, {:.0f} KB/s out, worst round trip {:.0f} ms, {} pieces of {} voxels{}",
                               projv::runtime::sessionStats(a.world).clients, workFrames ? workTotal / workFrames : 0.0, workWorst,
-                              steps ? stepTotal / steps : 0.0, stepWorst, kbps, worstTrip, where);
+                              steps ? stepTotal / steps : 0.0, stepWorst, kbps, worstTrip, pieces, pieceVoxels, where);
             logClock = 0.0;
             workTotal = workWorst = stepTotal = stepWorst = 0.0;
             workFrames = steps = 0;

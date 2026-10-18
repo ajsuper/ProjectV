@@ -35,12 +35,16 @@ from corrections.
 Two things are this demo's own, not the engine's:
 - your ball shows at once as a stand-in, until the server's ball arrives a round trip later;
 - each client throws out cosmetic chips where things break, simulated only there and never sent. The
-  server makes no body at all of fragments of 12 voxels or fewer (`PhysicsConfig::dustVoxels`), so
-  the chips stand in for that dust. The materials are in `arena/physics_materials.json`, so a client with another library is
-refused with the rest of the scene files.
+  server makes no body at all of fragments of one or two voxels (`PhysicsConfig::dustVoxels`), so the
+  chips stand in for that dust. Keep it under the materials' shard sizes: at 12 every stone shard
+  (eight voxels) was dust, and the rubble vanished.
 
-The renderer draws sunlight with shadows: a second ray per pixel toward the sun, through the same
-single call to the march. It also draws a sky, distance fog and a crosshair.
+The materials are in `arena/physics_materials.json`, so a client with another library is refused with
+the rest of the scene files.
+
+It is drawn with the examples' shared renderer (`examples/shared/voxelRenderer`, first written for
+Voxel Mayhem): sun shadows, screen-space AO and a colour bounce, one-bounce ray-traced GI, voxel
+reconstruction and TAA, with a crosshair for aiming.
 
 Your own player moves the moment you press a key. The client walks it too, and the server puts it
 right when the two differ (prediction).

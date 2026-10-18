@@ -2,7 +2,8 @@ $input v_color0
 $input v_texcoord0
 
 // =============================================================================
-// display.frag -- pass 6, at output resolution: linear HDR to the screen. All the grading is here.
+// display.frag -- pass 6, at output resolution: linear HDR to the screen. All the grading is here, and
+// the crosshair when one is asked for.
 //
 //   exposure (lightParams.z) -> vignette -> ACES -> gamma -> contrast, saturation -> dither
 //
@@ -41,5 +42,14 @@ void main() {
 
     float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     col += (noise - 0.5) / 255.0;
+
+    // A crosshair, when asked for (sunDir.w): two short bars through the centre, inverted against
+    // what is behind them.
+    if (sunDir.w > 0.5) {
+        vec2 size = vec2(dFdx(v_texcoord0.x), dFdy(v_texcoord0.y));
+        vec2 offset = abs((v_texcoord0 - 0.5) / abs(size));
+        bool bar = (offset.x < 1.0 && offset.y < 9.0 && offset.y > 3.0) || (offset.y < 1.0 && offset.x < 9.0 && offset.x > 3.0);
+        if (bar) col = vec3(1.0, 1.0, 1.0) - col * 0.8;
+    }
     gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }

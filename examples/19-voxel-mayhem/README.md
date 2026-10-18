@@ -92,7 +92,7 @@ its corners swung into the wall beside it and the hinge's servo could not move i
 
 ## Rendering
 
-`mayhemRenderer/` is ten passes, built from the physics demos' renderer:
+`examples/shared/voxelRenderer/` (shared with the multiplayer client; `examples/shared/voxel_renderer.h` sets it up) is ten passes, built from the physics demos' renderer:
 
 | | Pass | What it does |
 |---|---|---|

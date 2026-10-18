@@ -438,7 +438,9 @@ tuning: with every client simulating every body and the server pulling them back
   demo (not the engine): a thrown ball shows at once as a local stand-in until the server's arrives
   (`mp.thrower` says whose it is), the server turns fragments of 12 voxels or fewer into dust
   (PhysicsConfig::dustVoxels: no body, nothing sent), and each client throws out cosmetic chips where
-  things break.
+  things break. Found when played: 12 voxels was above the materials' shard size (stone's 0.5 m
+  shards are 8 of the tower's voxels), so every shard was dust and the rubble vanished -- measured,
+  0 pieces left against 117; 2 keeps the volume (351 voxels in 75 pieces).
 - Tests: a pile the server settles is shown exactly so, and a local poke moves nothing; a sliding crate
   is shown never stepping back or lurching, a little behind the server; the pyramid, breaks, late
   joiners and loading pass on the new path.

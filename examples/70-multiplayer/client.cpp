@@ -31,6 +31,7 @@
 #include <thread>
 
 #include "arena.h"
+#include "voxel_renderer.h"
 #include "core/application.h"
 #include "core/log.h"
 #include "core/paths.h"
@@ -329,12 +330,14 @@ namespace {
 
         if (options.headless) return;
         auto& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
-        projv::RendererSpecification specification =
-            projv::graphics::loadRendererSpecification((here / "clientRenderer").string() + "/");
-        renderInstance.addRendererSpecification(1, specification);
-        bgfx::ShaderHandle vertexShader = projv::graphics::loadShader((here / "clientRenderer/clientShaders/vs_quad.bin").string());
-        renderInstance.setActiveRenderer(
-            projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader));
+        // The examples' shared renderer (examples/shared/voxelRenderer): sun shadows, AO, a colour bounce,
+        // ray-traced GI, voxel reconstruction and TAA. Scaled to this arena: 64 m across, its finest
+        // voxels an eighth of a metre.
+        voxel_renderer::View& view = app.world.ctx().emplace<voxel_renderer::View>();
+        view.finestVoxel = 0.125f;
+        view.hazeRadius = 90.0f;
+        view.crosshair = true;   // what a throw or a blast aims at
+        voxel_renderer::install(app.world, renderInstance, here);
         app.world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
     }
 
@@ -347,19 +350,12 @@ namespace {
         auto& scene = app.world.ctx().get<projv::Scene>();
         auto& gpuData = app.world.ctx().get<projv::GPUData>();
         const auto& camera = app.world.ctx().get<Camera>();
-        // Players come and go as chunks; this uploads them, and where they moved to.
-        projv::graphics::flushSceneUpdates(scene, gpuData);
-
-        // Behind and above your own player, looking where the camera faces.
+        // Behind and above your own player, looking where the camera faces. Players, crates and rubble
+        // come and go as chunks: draw uploads them, and where they moved to.
         vec3 direction{std::cos(camera.pitch) * std::cos(camera.yaw), std::sin(camera.pitch),
                        std::cos(camera.pitch) * std::sin(camera.yaw)};
         vec3 eye = ownPosition(app.world) + vec3(0.0f, 1.6f, 0.0f) - direction * 7.0f;
-        auto renderer = renderInstance.getActiveRenderer();
-        projv::core::vec2 resolution = renderInstance.getWindowResolution();
-        projv::graphics::setUniformToValue(renderer, "cameraPos", eye);
-        projv::graphics::setUniformToValue(renderer, "cameraDir", direction);
-        projv::graphics::setUniformToValue(renderer, "windowRes", resolution);
-        projv::graphics::renderConstructedRenderer(renderInstance, renderer, &gpuData);
+        voxel_renderer::draw(app.world, renderInstance, gpuData, scene, eye, direction);
     }
 
     void shutdown(projv::Application& app) {

@@ -44,43 +44,43 @@
     "shaders": [
         {
             "shaderID": 1,
-            "path": "./mayhemRenderer/shaders/gbuffer.bin"
+            "path": "./voxelRenderer/shaders/gbuffer.bin"
         },
         {
             "shaderID": 2,
-            "path": "./mayhemRenderer/shaders/ssao.bin"
+            "path": "./voxelRenderer/shaders/ssao.bin"
         },
         {
             "shaderID": 3,
-            "path": "./mayhemRenderer/shaders/shade.bin"
+            "path": "./voxelRenderer/shaders/shade.bin"
         },
         {
             "shaderID": 4,
-            "path": "./mayhemRenderer/shaders/reconstruct.bin"
+            "path": "./voxelRenderer/shaders/reconstruct.bin"
         },
         {
             "shaderID": 5,
-            "path": "./mayhemRenderer/shaders/taa.bin"
+            "path": "./voxelRenderer/shaders/taa.bin"
         },
         {
             "shaderID": 6,
-            "path": "./mayhemRenderer/shaders/display.bin"
+            "path": "./voxelRenderer/shaders/display.bin"
         },
         {
             "shaderID": 8,
-            "path": "./mayhemRenderer/shaders/raygi.bin"
+            "path": "./voxelRenderer/shaders/raygi.bin"
         },
         {
             "shaderID": 9,
-            "path": "./mayhemRenderer/shaders/giaccum.bin"
+            "path": "./voxelRenderer/shaders/giaccum.bin"
         },
         {
             "shaderID": 10,
-            "path": "./mayhemRenderer/shaders/giblur1.bin"
+            "path": "./voxelRenderer/shaders/giblur1.bin"
         },
         {
             "shaderID": 11,
-            "path": "./mayhemRenderer/shaders/giblur2.bin"
+            "path": "./voxelRenderer/shaders/giblur2.bin"
         }
     ],
     "textures": [

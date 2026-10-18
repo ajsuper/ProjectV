@@ -5,9 +5,10 @@ projv_add_example(mp_server
     ASSET_DIRS arena
 )
 projv_add_example(mp_client
-    SOURCES    client.cpp
-    SHADERS    clientRenderer/clientShaders
-    ASSET_DIRS clientRenderer arena
+    SOURCES      client.cpp
+    RENDERER     ../shared/voxelRenderer
+    INCLUDE_DIRS ../shared
+    ASSET_DIRS   arena
 )
 projv_add_example(mp_bots
     SOURCES    bots.cpp
