@@ -413,6 +413,29 @@ world-loading plan (W2-W4). On top of those:
 - Found, in the example: a hash helper multiplying signed ints overflowed, and the optimiser turned
   the loop calling it into one that never ended (then ran out of memory). Unsigned now.
 
+## Corrections that settle (2026-10-18, from playing the demo)
+
+Played: too many corrections were visible, and a piece could loop -- fall on a client but not on the
+server, be corrected, fall again -- before settling. Two causes, both reproduced in tests first:
+
+- **Rest was nobody's on the client.** A body the server has asleep was told so once and put to sleep
+  here, but the client's own physics could wake it (a neighbour a few centimetres off, a correction
+  to the piece under it arriving a packet later), and the server, having said "asleep", said
+  nothing more: the loop, or a permanent difference (a poked crate stayed 26 cm off). Now a body the
+  server reports asleep is held (`runtime::holdBody`: frozen as Kept is, solid; `PhysicsHold`)
+  until the server reports it moving, and a frozen body ignores impulses and velocities
+  (`PhysicsWorld`): nothing local moves what the server has at rest. A held body is set again only
+  if the server's pose differs by 1 mm or so.
+- **Snapshots were applied as if current.** A moving body's snapshot is half a round trip old, so it
+  always differed by its speed times that: a crate sliding at 4 m/s was set back on 20 of 30
+  snapshots a second. Now the snapshot is brought forward by half the transport's round trip
+  (velocity, angular velocity) and only acted on past 2 cm, about 2 degrees or 0.3 m/s; under 10
+  corrections a second for the same slide.
+
+Tests (`test_replication.cpp`, "corrections:"): after the server's pile settles, no client is
+corrected for 3 s, and a local poke moves nothing; a steady slide is corrected fewer than 10 times
+in a second at 150 ms.
+
 ## Milestones
 
 | # | What | Done when |

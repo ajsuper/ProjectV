@@ -1765,7 +1765,7 @@ namespace projv::runtime {
                 }
             }
 
-            // 3b'''. World loading: a dynamic body whose entity is Kept is frozen -- solid and still --
+            // 3b'''. World loading: a dynamic body whose entity is Kept, or held (holdBody), is frozen -- solid and still --
             //       its motion kept in FrozenMotion; Active (or not taking part) thaws it and gives the
             //       motion back. In NetId-then-entity order.
             {
@@ -1776,7 +1776,7 @@ namespace projv::runtime {
                 for (Entity e : moving) {
                     const BodyId id = world.get<PhysicsBody>(e).id;
                     const LoadState* load = world.try_get<LoadState>(e);
-                    const bool want = load && load->presence == utils::Presence::Kept;
+                    const bool want = (load && load->presence == utils::Presence::Kept) || world.all_of<PhysicsHold>(e);
                     const bool is = sim.frozen(id);
                     if (want && !is) {
                         if (!world.all_of<FrozenMotion>(e)) {
@@ -2235,6 +2235,14 @@ namespace projv::runtime {
     void setVelocity(World& world, Entity e, core::vec3 linear, core::vec3 angular) {
         queue(world, Kind::SetVelocity, e, linear, angular);
     }
+    void holdBody(World& world, Entity entity, bool held) {
+        if (!world.valid(entity)) return;
+        if (held) world.emplace_or_replace<PhysicsHold>(entity);
+        else world.remove<PhysicsHold>(entity);
+    }
+
+    bool isHeld(const World& world, Entity entity) { return world.valid(entity) && world.all_of<PhysicsHold>(entity); }
+
     void setBodyState(World& world, Entity e, core::vec3 position, core::quat rotation, core::vec3 linear, core::vec3 angular,
                       bool asleep) {
         if (!std::isfinite(glm::dot(position, position) + glm::dot(linear, linear) + glm::dot(angular, angular))) return;

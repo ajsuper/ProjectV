@@ -771,3 +771,45 @@ TEST_CASE("replication: a client's game messages reach the server's game, in ord
         CHECK(heard[i].second == std::vector<uint8_t>{i, uint8_t(i * 2)});
     }
 }
+
+// ---- Corrections that settle (after playing the demo) ---------------------------------------------
+
+TEST_CASE("corrections: once the server's pile is at rest, clients stop being corrected, and nothing local moves it") {
+    TempDir dir("replication_rest");
+    writeArena(dir.path, 4);
+    net::LoopbackNetwork network(17);
+    network.setConditions({0.075, 0.01, 0.05});
+    auto s = server(network, dir.path);
+    auto a = client(network, dir.path, "ann");
+    run(network, {s.get(), a.get()}, 2.0);
+    runtime::setVelocity(s->app.world, runtime::entityForNetId(s->app.world, projv::NetId{102}), vec3(0, 2, -9), vec3(4, 0, 0));
+    run(network, {s.get(), a.get()}, 8.0);
+    for (auto [id, state] : crates(*s)) REQUIRE_FALSE(state.awake);
+
+    const uint64_t settled = runtime::sessionStats(a->app.world).corrections;
+    run(network, {s.get(), a.get()}, 3.0);
+    CHECK(runtime::sessionStats(a->app.world).corrections == settled);   // no more: it is at rest
+    const auto truth = crates(*s);
+    // Something on Ann's side pokes a crate the server has at rest: it does not move here.
+    Entity poked = runtime::entityForNetId(a->app.world, projv::NetId{104});
+    runtime::addVelocity(a->app.world, poked, vec3(0, 6, 3));
+    run(network, {s.get(), a.get()}, 2.0);
+    for (auto [id, state] : crates(*a)) CHECK(glm::distance(state.position, truth.at(id).position) < 0.01f);
+}
+
+TEST_CASE("corrections: a body moving steadily is not corrected every snapshot") {
+    TempDir dir("replication_glide");
+    writeArena(dir.path, 1);   // one crate, NetId 102
+    net::LoopbackNetwork network(18);
+    network.setConditions({0.075});
+    auto s = server(network, dir.path);
+    auto a = client(network, dir.path, "ann");
+    run(network, {s.get(), a.get()}, 2.0);
+    // Slid along the floor on the server only; the client learns of it from snapshots.
+    runtime::setVelocity(s->app.world, runtime::entityForNetId(s->app.world, projv::NetId{102}), vec3(0, 0, -4));
+    run(network, {s.get(), a.get()}, 0.5);
+    const uint64_t before = runtime::sessionStats(a->app.world).corrections;
+    run(network, {s.get(), a.get()}, 1.0);
+    // Thirty snapshots a second came; with each snapshot brought up to now, few needed acting on.
+    CHECK(runtime::sessionStats(a->app.world).corrections - before < 10);
+}

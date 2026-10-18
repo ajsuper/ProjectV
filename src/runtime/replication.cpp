@@ -883,7 +883,35 @@ namespace projv::runtime {
                 uint64_t& last = c.corrected[id];
                 if (tick <= last) continue;
                 last = tick;
-                setBodyState(world, e, position, rotation, linear, angular, asleep);
+                // At rest on the server: held here, where the server has it, until the server says it
+                // moves again. Nothing local -- a neighbour a centimetre off, a stray hit -- moves it,
+                // so a pile the server has settled stays settled.
+                if (asleep) {
+                    const bool held = isHeld(world, e);
+                    holdBody(world, e, true);
+                    const BodyState now = bodyPose(world, e);
+                    if (!held || glm::distance(now.position, position) > 0.001f || std::abs(glm::dot(now.rotation, rotation)) < 0.999999f) {
+                        setBodyState(world, e, position, rotation, core::vec3(0.0f), core::vec3(0.0f), true);
+                        c.corrections++;
+                    }
+                    continue;
+                }
+                // Moving: the snapshot is half a round trip old. Brought up to now, it is compared with
+                // what this client has; a difference too small to see is left alone, so a body that is
+                // simulated well here is not pulled about thirty times a second.
+                const float age = 0.0005f * c.transport->stats(c.server).roundTripMs;
+                core::vec3 nowAt = position + linear * age;
+                core::quat nowAs = rotation;
+                if (const float turn = glm::length(angular) * age; turn > 1e-6f)
+                    nowAs = glm::normalize(glm::angleAxis(turn, glm::normalize(angular)) * rotation);
+                const bool held = isHeld(world, e);
+                if (held) holdBody(world, e, false);   // the server has it moving: so does this client
+                const BodyState mine = bodyPose(world, e);
+                const bool close = glm::distance(mine.position, nowAt) < 0.02f &&
+                                   std::abs(glm::dot(mine.rotation, nowAs)) > 0.99985f &&   // about 2 degrees
+                                   glm::distance(mine.linearVelocity, linear) < 0.3f;
+                if (close && !held) continue;
+                setBodyState(world, e, nowAt, nowAs, linear, angular, false);
                 c.corrections++;
             }
         }

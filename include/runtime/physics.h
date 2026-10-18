@@ -221,6 +221,9 @@ namespace projv {
         core::vec3 angular{0.0f};
     };
 
+    // On a body held still by holdBody. Not saved: who holds it is a session's business.
+    struct PhysicsHold {};
+
     // The simulation's side of a CharacterController. Made and removed by physics; never saved.
     struct PhysicsCharacter {
         runtime::CharacterId id;
@@ -644,6 +647,12 @@ namespace projv::runtime {
         bool       jump = false;
     };
     void submitCommand(World& world, const PhysicsCommand& command);
+    // Holds a dynamic body still -- frozen, as world loading's Kept does, solid to what hits it -- until
+    // released: for a body whose rest is someone else's to say (a server's). Its motion is kept in
+    // FrozenMotion meanwhile. From the next step.
+    void holdBody(World& world, Entity entity, bool held);
+    bool isHeld(const World& world, Entity entity);
+
     // A correction from elsewhere -- a server's snapshot: the body is put there, moving so (or asleep),
     // at the next step. What is drawn eases from where it was over about a tenth of a second.
     void setBodyState(World& world, Entity entity, core::vec3 position, core::quat rotation, core::vec3 linear,

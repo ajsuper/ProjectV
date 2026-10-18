@@ -1798,26 +1798,26 @@ namespace projv::runtime {
 
     void PhysicsWorld::addImpulse(BodyId id, core::vec3 impulse) {
         if (impl->recording) { impl->op(Op::Impulse); put(impl->log, id.value); put(impl->log, impulse); }
-        if (!finite(impulse) || !canMove(impl->system, id)) return;
+        if (!finite(impulse) || !canMove(impl->system, id) || frozen(id)) return;   // frozen: still, whatever pushes it
         impl->system.GetBodyInterface().AddImpulse(JPH::BodyID(id.value), toJolt(impulse));
     }
 
     void PhysicsWorld::addAngularImpulse(BodyId id, core::vec3 impulse) {
         if (impl->recording) { impl->op(Op::AngularImpulse); put(impl->log, id.value); put(impl->log, impulse); }
-        if (!finite(impulse) || !canMove(impl->system, id)) return;
+        if (!finite(impulse) || !canMove(impl->system, id) || frozen(id)) return;   // frozen: still, whatever pushes it
         impl->system.GetBodyInterface().AddAngularImpulse(JPH::BodyID(id.value), toJolt(impulse));
     }
 
     void PhysicsWorld::addVelocity(BodyId id, core::vec3 linear) {
         if (impl->recording) { impl->op(Op::AddVelocity); put(impl->log, id.value); put(impl->log, linear); }
-        if (!finite(linear) || !canMove(impl->system, id)) return;
+        if (!finite(linear) || !canMove(impl->system, id) || frozen(id)) return;   // frozen: still, whatever pushes it
         JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
         bodies.AddLinearVelocity(JPH::BodyID(id.value), toJolt(linear));
     }
 
     void PhysicsWorld::setVelocity(BodyId id, core::vec3 linear, core::vec3 angular) {
         if (impl->recording) { impl->op(Op::SetVelocity); put(impl->log, id.value); put(impl->log, linear); put(impl->log, angular); }
-        if (!finite(linear) || !finite(angular) || !canMove(impl->system, id)) return;
+        if (!finite(linear) || !finite(angular) || !canMove(impl->system, id) || frozen(id)) return;   // frozen: still, whatever pushes it
         impl->system.GetBodyInterface().SetLinearAndAngularVelocity(JPH::BodyID(id.value), toJolt(linear),
                                                                     toJolt(angular));
     }
