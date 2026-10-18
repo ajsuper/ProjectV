@@ -530,7 +530,7 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 11;   // 11: body states, characters alone; 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body (written as 8 by mistake until 10); 10: frozen bodies
+        constexpr uint32_t LOG_VERSION = 12;   // 12: body states asleep; 11: body states, characters alone; 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body (written as 8 by mistake until 10); 10: frozen bodies
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
@@ -1824,10 +1824,12 @@ namespace projv::runtime {
                                                                toJolt(rotation / length), JPH::EActivation::Activate);
     }
 
-    void PhysicsWorld::setBodyState(BodyId id, core::vec3 position, core::quat rotation, core::vec3 linear, core::vec3 angular) {
+    void PhysicsWorld::setBodyState(BodyId id, core::vec3 position, core::quat rotation, core::vec3 linear, core::vec3 angular,
+                                    bool asleep) {
         if (impl->recording) {
             impl->op(Op::SetState);
             put(impl->log, id.value); put(impl->log, position); put(impl->log, rotation); put(impl->log, linear); put(impl->log, angular);
+            put(impl->log, uint8_t(asleep));
         }
         if (!finite(position) || !finite(rotation) || !finite(linear) || !finite(angular) || !isAlive(id)) return;
         float length = glm::length(glm::vec4(rotation.x, rotation.y, rotation.z, rotation.w));
@@ -1845,6 +1847,10 @@ namespace projv::runtime {
         }
         uint32_t index = jid.GetIndex();
         impl->lastGood[index] = {toJoltR(position), toJolt(rotation / length)};
+        if (asleep && bodies.GetMotionType(jid) == JPH::EMotionType::Dynamic) {
+            bodies.SetLinearAndAngularVelocity(jid, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+            bodies.DeactivateBody(jid);
+        }
     }
 
     core::vec3 PhysicsWorld::moveKinematic(BodyId id, core::vec3 position, core::quat rotation, float dt) {
@@ -2864,9 +2870,11 @@ namespace projv::runtime {
                 }
                 case Op::SetState: {
                     core::vec3 linear, angular;
-                    if (!get(in, at, id) || !get(in, at, a) || !get(in, at, q) || !get(in, at, linear) || !get(in, at, angular))
+                    uint8_t asleep = 0;
+                    if (!get(in, at, id) || !get(in, at, a) || !get(in, at, q) || !get(in, at, linear) || !get(in, at, angular) ||
+                        !get(in, at, asleep))
                         return truncated();
-                    world.setBodyState(BodyId{id}, a, q, linear, angular);
+                    world.setBodyState(BodyId{id}, a, q, linear, angular, asleep != 0);
                     break;
                 }
                 case Op::CharacterRestore: {

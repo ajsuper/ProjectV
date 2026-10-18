@@ -369,3 +369,24 @@ TEST_CASE("RigidBody and StaticCollider round-trip through entities.json") {
     CHECK_FALSE(StaticTraits::save(projv::StaticCollider{}).contains("anchorBase"));
     CHECK(cb->restitution == doctest::Approx(0.7f));
 }
+
+TEST_CASE("a correction snaps the simulation and eases what is drawn") {
+    Fixture f;
+    f.solidFloor();
+    Entity crate = f.crate(vec3(0, 0, 0));
+    f.frames(120);
+    const vec3 rested = runtime::bodyPose(f.app.world, crate).position;
+    // A server says it is a metre along x, asleep.
+    runtime::setBodyState(f.app.world, crate, rested + vec3(1, 0, 0), runtime::bodyPose(f.app.world, crate).rotation, vec3(0), vec3(0), true);
+    f.frames(1);
+    CHECK(runtime::bodyPose(f.app.world, crate).position.x == doctest::Approx(rested.x + 1.0f));   // the simulation: there
+    CHECK_FALSE(runtime::bodyPose(f.app.world, crate).awake);
+    const float drawn = f.app.world.get<projv::Transform>(crate).position.x;
+    CHECK(drawn < rested.x + 0.5f);   // the drawing: still most of the way back
+    f.frames(6);
+    const float later = f.app.world.get<projv::Transform>(crate).position.x;
+    CHECK(later > drawn);
+    CHECK(later < rested.x + 1.0f);
+    f.frames(60);
+    CHECK(f.app.world.get<projv::Transform>(crate).position.x == doctest::Approx(rested.x + 1.0f).epsilon(0.001));
+}

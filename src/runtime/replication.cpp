@@ -168,6 +168,9 @@ namespace projv::runtime {
                 core::vec3  move{0.0f};
                 bool        jump = false;
                 uint64_t    lastInput = 0;
+                std::map<uint32_t, float> priority;   // by NetId: grows until sent
+                std::set<uint32_t>        toldAsleep; // bodies it was last told are asleep
+                uint64_t    snapshotBytes = 0;
             };
             std::map<net::PeerId, Client> clients;
             std::map<Entity, NetId>       sent;          // replicated entities clients have, and their ids
@@ -392,30 +395,77 @@ namespace projv::runtime {
                 sendAll(s, net::Channel::Reliable, w.data());
             }
 
-            // Snapshots, at the rate asked, in as many packets as it takes.
+            // Snapshots, at the rate asked: for each client, what matters most first, within its budget.
             const Time& time = world.ctx().get<Time>();
             const uint64_t every = std::max<uint64_t>(1, uint64_t(1.0f / (time.fixedDelta * std::max(s.config.snapshotRate, 0.1f)) + 0.5f));
-            if (time.fixedStep >= s.lastSnapshot + every && !s.sent.empty()) {
+            if (time.fixedStep >= s.lastSnapshot + every) {
                 s.lastSnapshot = time.fixedStep;
-                std::vector<std::pair<NetId, Entity>> all;
-                for (auto [e, id] : s.sent) if (world.valid(e)) all.push_back({id, e});
-                std::sort(all.begin(), all.end(), [](auto& a, auto& b) { return a.first.value < b.first.value; });
-                size_t next = 0;
-                while (next < all.size()) {
+                // Everything a snapshot can carry, this once: what was sent (players, pieces) and every
+                // moving body with a NetId (authored ones every client has from its files).
+                std::map<uint32_t, Entity> candidates;
+                for (auto [e, id] : s.sent) if (world.valid(e)) candidates[id.value] = e;
+                for (auto [e, body, id] : world.view<PhysicsBody, NetId>().each())
+                    if (body.motion == MotionType::Dynamic) candidates[id.value] = e;
+                struct Entry { uint32_t id; float weight; bool asleep; std::vector<uint8_t> bits; size_t bitCount; };
+                std::vector<Entry> entries;
+                for (auto [id, e] : candidates) {
+                    auto [position, rotation] = poseOf(world, e);
                     net::BitWriter w;
-                    w.varint(uint8_t(Message::Snapshot));
-                    w.varint(time.fixedStep);
-                    net::BitWriter body;
-                    uint32_t count = 0;
-                    for (; next < all.size() && body.data().size() < MAX_SNAPSHOT_BYTES - 64; next++, count++) {
-                        auto [position, rotation] = poseOf(world, all[next].second);
-                        body.varint(all[next].first.value);
-                        for (int i = 0; i < 3; i++) body.f32(position[i]);
-                        writeQuat(body, rotation);
+                    w.varint(id);
+                    const PhysicsBody* body = world.try_get<PhysicsBody>(e);
+                    // A moving body: every client simulates it too, and is sent its velocities to correct it.
+                    const bool moving = body && body->motion == MotionType::Dynamic;
+                    BodyState state = moving ? bodyPose(world, e) : BodyState{};
+                    w.boolean(moving);
+                    w.boolean(moving && !state.awake);
+                    net::writePosition(w, position, core::vec3(0.0f), 0.001f);
+                    net::writeRotation(w, rotation, 10);
+                    float weight = 10.0f;   // a player, or anything posed by snapshots alone
+                    if (moving) {
+                        net::writeVector(w, state.linearVelocity, 64.0f, 12);
+                        net::writeVector(w, state.angularVelocity, 32.0f, 12);
+                        weight = state.awake ? 1.0f + 0.5f * glm::length(state.linearVelocity) : 5.0f;
                     }
-                    w.varint(count);
-                    w.bytes(body.data());
-                    sendAll(s, net::Channel::Unreliable, w.data());
+                    entries.push_back({id, weight, moving && !state.awake, w.data(), w.bitCount()});
+                }
+                const size_t budget = std::max<size_t>(64, size_t(float(s.config.bytesPerSecond) / std::max(s.config.snapshotRate, 0.1f)));
+                for (auto& [peer, client] : s.clients) {
+                    if (!client.welcomed) continue;
+                    // Gather priority; a body asleep and told so already gathers none.
+                    std::vector<std::pair<float, const Entry*>> order;
+                    for (const Entry& entry : entries) {
+                        if (entry.asleep && client.toldAsleep.count(entry.id)) continue;
+                        float& p = client.priority[entry.id];
+                        p += entry.weight;
+                        order.push_back({p, &entry});
+                    }
+                    std::stable_sort(order.begin(), order.end(), [](auto& a, auto& b) { return a.first > b.first; });
+                    size_t spent = 0;
+                    size_t next = 0;
+                    while (next < order.size() && spent < budget) {
+                        net::BitWriter packet;
+                        packet.varint(uint8_t(Message::Snapshot));
+                        packet.varint(time.fixedStep);
+                        net::BitWriter body;
+                        uint32_t count = 0;
+                        for (; next < order.size(); next++) {
+                            const Entry& entry = *order[next].second;
+                            if (body.data().size() + entry.bits.size() > MAX_SNAPSHOT_BYTES - 32) break;
+                            if (spent + body.data().size() + entry.bits.size() > budget) break;
+                            for (size_t bit = 0; bit < entry.bitCount; bit++)
+                                body.bits((entry.bits[bit / 8] >> (bit % 8)) & 1u, 1);
+                            count++;
+                            client.priority[entry.id] = 0.0f;
+                            if (entry.asleep) client.toldAsleep.insert(entry.id);
+                            else client.toldAsleep.erase(entry.id);
+                        }
+                        if (count == 0) break;
+                        packet.varint(count);
+                        packet.bytes(body.data());
+                        spent += packet.data().size();
+                        s.transport->send(peer, net::Channel::Unreliable, packet.data());
+                    }
+                    client.snapshotBytes += spent;
                 }
             }
             s.transport->poll(s.early);   // flush; what arrived waits for the next receive
@@ -455,6 +505,8 @@ namespace projv::runtime {
             };
             std::vector<Change> changes;
             uint64_t applied = 0, mismatches = 0;
+            std::map<uint32_t, uint64_t> corrected;   // by NetId: the tick of the last correction
+            uint64_t corrections = 0;
         };
 
         ClientSession* clientOf(World& world) { return world.ctx().find<ClientSession>(); }
@@ -486,7 +538,10 @@ namespace projv::runtime {
                 applyEntityComponents(world, e, json, "the server");
             }
             world.emplace_or_replace<NetId>(e, NetId{id});
-            world.emplace_or_replace<NetProxy>(e, NetProxy{{{c.latestTick, position, rotation}}});
+            // A moving body is simulated here and corrected by snapshots; anything else is posed by them.
+            const RigidBody* rigid = world.try_get<RigidBody>(e);
+            if (!(rigid && rigid->motion == MotionType::Dynamic))
+                world.emplace_or_replace<NetProxy>(e, NetProxy{{{c.latestTick, position, rotation}}});
             c.proxies[id] = e;
         }
 
@@ -503,17 +558,32 @@ namespace projv::runtime {
             net::BitReader b(body);
             for (uint32_t i = 0; i < count; i++) {
                 const uint32_t id = uint32_t(b.varint());
-                core::vec3 position;
-                for (int k = 0; k < 3; k++) position[k] = b.f32();
-                const core::quat rotation = net::readRotation(b, 12);
+                const bool moving = b.boolean();
+                const bool asleep = b.boolean();
+                const core::vec3 position = net::readPosition(b, core::vec3(0.0f), 0.001f);
+                const core::quat rotation = net::readRotation(b, 10);
+                core::vec3 linear(0.0f), angular(0.0f);
+                if (moving) {
+                    linear = net::readVector(b, 64.0f, 12);
+                    angular = net::readVector(b, 32.0f, 12);
+                }
                 if (b.failed) return;
-                auto it = c.proxies.find(id);
-                if (it == c.proxies.end() || !world.valid(it->second)) continue;
-                NetProxy* proxy = world.try_get<NetProxy>(it->second);
-                if (!proxy || !std::isfinite(position.x + position.y + position.z)) continue;
-                if (!proxy->poses.empty() && proxy->poses.back().tick >= tick) continue;
-                proxy->poses.push_back({tick, position, rotation});
-                if (proxy->poses.size() > MAX_POSES) proxy->poses.erase(proxy->poses.begin());
+                if (!std::isfinite(position.x + position.y + position.z)) continue;
+                Entity e = entityForNetId(world, NetId{id});
+                if (e == NullEntity) continue;
+                if (NetProxy* proxy = world.try_get<NetProxy>(e)) {
+                    if (!proxy->poses.empty() && proxy->poses.back().tick >= tick) continue;
+                    proxy->poses.push_back({tick, position, rotation});
+                    if (proxy->poses.size() > MAX_POSES) proxy->poses.erase(proxy->poses.begin());
+                    continue;
+                }
+                // A body this client simulates: corrected to the server's, newest only.
+                if (!moving || !hasBody(world, e)) continue;
+                uint64_t& last = c.corrected[id];
+                if (tick <= last) continue;
+                last = tick;
+                setBodyState(world, e, position, rotation, linear, angular, asleep);
+                c.corrections++;
             }
         }
 
@@ -820,6 +890,7 @@ namespace projv::runtime {
             for (const auto& [peer, client] : s->clients) out.clients += client.welcomed;
             out.serverTick = world.ctx().get<Time>().fixedStep;
             out.messagesRefused = s->refused;
+            for (const auto& [peer, client] : s->clients) out.snapshotBytes = std::max(out.snapshotBytes, client.snapshotBytes);
         }
         if (const ClientSession* c = world.ctx().find<ClientSession>()) {
             out.connected = c->welcomed;
@@ -830,6 +901,7 @@ namespace projv::runtime {
             out.refusal = c->refusal;
             out.worldChanges = c->applied;
             out.worldMismatches = c->mismatches;
+            out.corrections = c->corrections;
         }
         return out;
     }

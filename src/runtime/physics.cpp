@@ -1898,6 +1898,18 @@ namespace projv::runtime {
                         body->previousRotation = body->rotation = glm::normalize(c.q);
                         body->presented = false;
                         break;
+                    case Kind::SetState: {
+                        // Drawn from where it was drawn, easing to the corrected pose.
+                        const core::vec3 shownAt = body->presented ? body->presentedPosition : body->position;
+                        const core::quat shownAs = body->presented ? body->presentedRotation : body->rotation;
+                        const core::quat to = glm::normalize(c.q);
+                        sim.setBodyState(body->id, c.a, to, c.b, c.c, c.jump);
+                        body->previousPosition = body->position = c.a;
+                        body->previousRotation = body->rotation = to;
+                        body->easePosition = shownAt - c.a;
+                        body->easeRotation = glm::normalize(shownAs * glm::conjugate(to));
+                        break;
+                    }
                     case Kind::Gravity: break;
                     case Kind::CharacterInput: break;
                     case Kind::JointMotor: break;
@@ -2021,6 +2033,18 @@ namespace projv::runtime {
                 if (!simulated || !world.all_of<Transform>(entity)) continue;
                 core::vec3 position = glm::mix(body.previousPosition, body.position, alpha);
                 core::quat rotation = glm::slerp(body.previousRotation, body.rotation, alpha);
+                // A correction's offset, fading with a tenth of a second's time constant.
+                if (body.easePosition != core::vec3(0.0f) || body.easeRotation != core::quat(1, 0, 0, 0)) {
+                    const float keep = std::exp(-app.time().delta / 0.1f);
+                    body.easePosition *= keep;
+                    body.easeRotation = glm::slerp(core::quat(1, 0, 0, 0), body.easeRotation, keep);
+                    if (glm::length(body.easePosition) < 1e-4f && std::abs(body.easeRotation.w) > 1.0f - 1e-8f) {
+                        body.easePosition = core::vec3(0.0f);
+                        body.easeRotation = core::quat(1, 0, 0, 0);
+                    }
+                    position += body.easePosition;
+                    rotation = glm::normalize(body.easeRotation * rotation);
+                }
                 if (body.presented && position == body.presentedPosition && rotation == body.presentedRotation) continue;
                 body.presented = true;
                 body.presentedPosition = position;
@@ -2209,6 +2233,15 @@ namespace projv::runtime {
     void setVelocity(World& world, Entity e, core::vec3 linear, core::vec3 angular) {
         queue(world, Kind::SetVelocity, e, linear, angular);
     }
+    void setBodyState(World& world, Entity e, core::vec3 position, core::quat rotation, core::vec3 linear, core::vec3 angular,
+                      bool asleep) {
+        if (!std::isfinite(glm::dot(position, position) + glm::dot(linear, linear) + glm::dot(angular, angular))) return;
+        queue(world, Kind::SetState, e, position, linear, rotation);
+        PhysicsCommand& c = runtimeOf(world).commands.back().c;
+        c.c = angular;
+        c.jump = asleep;
+    }
+
     void teleport(World& world, Entity e, core::vec3 position, core::quat rotation) {
         queue(world, Kind::Teleport, e, position, core::vec3(0.0f), rotation);
     }

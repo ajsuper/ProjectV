@@ -161,6 +161,10 @@ namespace projv {
         core::vec3 presentedPosition{0.0f};
         core::quat presentedRotation{1.0f, 0.0f, 0.0f, 0.0f};
         bool       presented = false;
+        // What is drawn is this far from the simulation after a correction (setBodyState), and eases
+        // to nothing: the sim pose snaps, the presentation glides (physics plan A3).
+        core::vec3 easePosition{0.0f};
+        core::quat easeRotation{1.0f, 0.0f, 0.0f, 0.0f};
         // The voxels the shape was built from: each chunk and its blob's content stamp. When they
         // differ from what the Scene holds now, the shape is rebuilt at the next step.
         std::vector<std::pair<ChunkHandle, uint64_t>> sources;
@@ -620,10 +624,13 @@ namespace projv::runtime {
         // CharacterInput: `a` is the walking velocity, `jump` asks for a jump at `b.x` m/s.
         // JointMotor: `jump` turns it on or off, `a.x` is the velocity or target, `b.x` the MotorMode;
         // `target` names the joint's entity.
-        enum class Kind : uint8_t { Impulse, AngularImpulse, AddVelocity, SetVelocity, Teleport, Gravity, CharacterInput, JointMotor };
+        // SetState: `a` the position, `q` the rotation, `b` and `c` the velocities, `jump` asleep.
+        enum class Kind : uint8_t { Impulse, AngularImpulse, AddVelocity, SetVelocity, Teleport, Gravity, CharacterInput, JointMotor,
+                                    SetState };
         Kind       kind = Kind::Impulse;
         NetId      target;                  // ignored for Gravity
         core::vec3 a{0.0f}, b{0.0f};        // impulse / velocity / position; b: angular velocity
+        core::vec3 c{0.0f};                 // SetState: angular velocity
         core::quat q{1.0f, 0.0f, 0.0f, 0.0f};   // Teleport
         uint64_t   tick = 0;
         uint16_t   issuer = 0;
@@ -631,6 +638,10 @@ namespace projv::runtime {
         bool       jump = false;
     };
     void submitCommand(World& world, const PhysicsCommand& command);
+    // A correction from elsewhere -- a server's snapshot: the body is put there, moving so (or asleep),
+    // at the next step. What is drawn eases from where it was over about a tenth of a second.
+    void setBodyState(World& world, Entity entity, core::vec3 position, core::quat rotation, core::vec3 linear,
+                      core::vec3 angular, bool asleep = false);
     // The step a command issued now lands on.
     uint64_t nextPhysicsTick(const World& world);
     uint64_t lateCommands(const World& world);

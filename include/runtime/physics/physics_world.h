@@ -579,9 +579,11 @@ namespace projv::runtime {
         void setVelocity(BodyId id, core::vec3 linear, core::vec3 angular);
         // Places the body; velocities are kept. A teleport: nothing is swept along the way.
         void setPose(BodyId id, core::vec3 position, core::quat rotation);
-        // Pose and velocities at once, as one logged change: a server's correction of a body. Wakes it.
-        // A frozen body takes the pose and stays still.
-        void setBodyState(BodyId id, core::vec3 position, core::quat rotation, core::vec3 linear, core::vec3 angular);
+        // Pose and velocities at once, as one logged change: a server's correction of a body. Wakes it,
+        // or with `asleep` puts it to sleep there (the server's has stopped). A frozen body takes the
+        // pose and stays still.
+        void setBodyState(BodyId id, core::vec3 position, core::quat rotation, core::vec3 linear, core::vec3 angular,
+                          bool asleep = false);
         // A kinematic body: moves it to the pose over the next step, with the velocity that takes,
         // so what it pushes is pushed with the right speed. One blocked by static bodies
         // (BodyDesc::blockedByStatic) moves as far as they let it instead; the position it heads for

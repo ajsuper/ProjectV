@@ -1,7 +1,7 @@
 # Networking: server-authoritative, on the deterministic simulation
 
-Status: **approved**; **N0-N3 done** (2026-10-17); P0's second compiler waits on Clang being
-installed (`--preset clang` is ready). Next: N4. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
+Status: **approved**; **N0-N4 done** (2026-10-17); P0's second compiler waits on Clang being
+installed (`--preset clang` is ready). Next: N5. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
 hundreds of players as the eventual target, and clients that load and simulate only what is near them,
 decided by one rule a game writes (`world-loading.md`). Builds on the physics plan (`physics-jolt.md`:
 D6, D8, D9, A3, A7) and on the world-loading plan.
@@ -296,6 +296,30 @@ world-loading plan (W2-W4). On top of those:
   budget's clearing reaches clients; a client whose wall differs is caught by the check.
 - Not here: the history only grows (compacting it into an overlay per block is for N6, with the
   world-loading overlay); the example does not break anything yet (game messages are N6).
+
+## N4, done 2026-10-17
+
+- **Physics.** `runtime::setBodyState(world, e, position, rotation, linear, angular, asleep)`: a
+  command (PhysicsCommand::Kind::SetState, `c` the angular velocity), applied at the next step by
+  `PhysicsWorld::setBodyState` (now with `asleep`: put to sleep there; LOG_VERSION 12, golden
+  regenerated, replay unchanged). The simulation snaps; `PhysicsBody::easePosition/easeRotation`
+  hold where it was drawn, fading with a 0.1 s time constant in "physics: present".
+- **Server.** A snapshot may carry every replicated entity and every dynamic body with a NetId
+  (authored ones clients have from files; pieces): NetId, moving and asleep bits, position in mm
+  steps (signed varints), rotation smallest three at 10 bits, and for moving bodies velocities
+  (12 bits each, 64 / 32 limits). Per client, priority accumulates per NetId until sent: 10 a
+  snapshot for a player or anything only snapshots pose, 1 + speed / 2 for an awake body, 5 for one
+  asleep and not yet told so; asleep and told, nothing. Packets fill in priority order under
+  `ServerConfig::bytesPerSecond / snapshotRate` (64,000 / 30) and 1,100 bytes each.
+- **Client.** A NetProxy keeps interpolating; a body it simulates (a dynamic RigidBody, including a
+  spawned one, which now gets no NetProxy) takes the newest snapshot's state through setBodyState.
+  `SessionStats::corrections`, server `snapshotBytes`.
+- Tests: a ten-crate pyramid knocked over only on the server settles within 1 cm (and 0.01 rad)
+  on both clients through 150 ms and 5% loss; twenty-one crates under a 6 kB/s budget stay within
+  it, settle the same, and once asleep cost nothing but the player's pose; a 1 m correction snaps
+  the body and eases the drawing over a few frames.
+- Found: a test's player spawned inside the pyramid kept the whole stack awake -- a character
+  standing in a pile wakes it every step. Expected Jolt behaviour, worth knowing for games.
 
 ## Milestones
 

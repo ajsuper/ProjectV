@@ -31,9 +31,13 @@
 //   registered components as entities.json writes them (entityComponents, less `omit`), and the prefab
 //   folder it was made from, which a client instantiates from its own copy of the scene. By NetId:
 //   one is given if it has none. Destroying it, or taking Replicated off, despawns it everywhere.
-// - **Where things are.** At `snapshotRate`, every replicated entity's pose (its body's or
-//   character's in the simulation, its Transform otherwise), unreliably. A client poses its copies
-//   (NetProxy) between the two snapshots around `interpolationDelay` behind the newest.
+// - **Where things are** (N4). At `snapshotRate`, unreliably, within `bytesPerSecond` per client:
+//   replicated entities' poses and every moving body with a NetId's pose and velocities, quantised
+//   (millimetres, 10-bit smallest-three rotations, 12-bit velocities). Each client's entities gather
+//   priority until sent -- players most, moving bodies by speed; a body asleep is sent once, asleep,
+//   then left alone until it wakes. A client poses its copies (NetProxy) between the two snapshots
+//   around `interpolationDelay` behind the newest, and sets the bodies it simulates to the server's
+//   state (setBodyState: the simulation snaps, the drawing eases).
 // - **Input.** A client's `setLocalInput` goes to the server every fixed step, unreliably, the last
 //   few repeated in each message; the server hands each client's newest to `applyInput` (by default:
 //   setCharacterInput on that client's player).
@@ -79,6 +83,7 @@ namespace projv::runtime {
         uint16_t    port = 27015;
         uint32_t    maxClients = 32;
         float       snapshotRate = 30.0f;    // per second
+        uint32_t    bytesPerSecond = 64000;  // snapshot budget per client
         std::string sceneFolder;             // what clients must have the same of
         // Makes the joining client's player; NullEntity for none. It is given Replicated if it has
         // none, and destroyed when the client leaves.
@@ -125,6 +130,8 @@ namespace projv::runtime {
         std::string refusal;                 // why the server refused, or the client was refused
         uint64_t worldChanges = 0;           // a client's: edits and splits applied
         uint64_t worldMismatches = 0;        // a client's: changed voxels not the server's after them
+        uint64_t corrections = 0;            // a client's: its bodies set to the server's state
+        uint64_t snapshotBytes = 0;          // a server's: the most snapshot bytes sent to one client
     };
     SessionStats sessionStats(const World& world);
 }

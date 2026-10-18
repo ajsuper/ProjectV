@@ -54,7 +54,7 @@ namespace {
 
     // An arena: a 32 m floor (its top at y = 0) with a static collider; a stone wall, 8 x 6 m, with
     // NetId 50, that breaks; and avatar/, a prefab.
-    void writeArena(const std::filesystem::path& folder) {
+    void writeArena(const std::filesystem::path& folder, int pyramid = 0) {
         {
             projv::Scene scene;
             ComponentHandle floor = utils::addComponent(scene, projv::ComponentKind::Chunk, "floor", INVALID_COMPONENT_HANDLE, 16, 0.5f);
@@ -65,12 +65,27 @@ namespace {
             REQUIRE(utils::setMaterialPhysics(scene, wall, 0, "stone"));
             utils::setComponentTransform(scene, floor, vec3(-16, -1, -16), projv::core::quat(1, 0, 0, 0), 1.0f);
             utils::setComponentTransform(scene, wall, vec3(-4, 0, 10), projv::core::quat(1, 0, 0, 0), 1.0f);
+            // A pyramid of 1 m crates, `pyramid` wide at the base, from x = -8 at z = -8: away from where
+            // players appear.
+            for (int row = 0, n = 0; row < pyramid; row++)
+                for (int i = 0; i < pyramid - row; i++, n++) {
+                    ComponentHandle crate = utils::addComponent(scene, projv::ComponentKind::Chunk, ("crate" + std::to_string(n)).c_str(),
+                                                                INVALID_COMPONENT_HANDLE, 16, 0.25f);
+                    utils::queueVoxelAdd(scene, crate, box({0, 0, 0}, {3, 3, 3}));
+                    utils::updateScene(scene);
+                    utils::setComponentTransform(scene, crate, vec3(-8.0f + float(i) * 1.02f + float(row) * 0.51f, float(row) * 1.0f, -8.5f),
+                                                 projv::core::quat(1, 0, 0, 0), 1.0f);
+                }
             REQUIRE(utils::saveComposeToDisk(scene, INVALID_COMPONENT_HANDLE, folder.string()));
             projv::Scene saved = utils::loadComposeFromDisk(folder.string());
-            std::ofstream(folder / "entities.json")
-                << R"({ "version": 1, "entities": [ { "name": "floor", "link": )" << saved.components[0].localId
+            std::ofstream out(folder / "entities.json");
+            out << R"({ "version": 1, "entities": [ { "name": "floor", "link": )" << saved.components[0].localId
                 << R"(, "components": { "physics.static": { "v": 1 } } }, { "name": "wall", "link": )" << saved.components[1].localId
-                << R"(, "components": { "physics.static": { "v": 1 }, "projv.netid": { "v": 1, "id": 50 } } } ] })";
+                << R"(, "components": { "physics.static": { "v": 1 }, "projv.netid": { "v": 1, "id": 50 } } })";
+            for (size_t i = 2; i < saved.components.size(); i++)
+                out << R"(, { "name": ")" << saved.components[i].name << R"(", "link": )" << saved.components[i].localId
+                    << R"(, "components": { "physics.rigidbody": { "v": 1 }, "projv.netid": { "v": 1, "id": )" << (100 + i) << " } } }";
+            out << "] }";
         }
         projv::Scene avatar;
         ComponentHandle body = utils::addComponent(avatar, projv::ComponentKind::Chunk, "body", INVALID_COMPONENT_HANDLE, 16, 0.25f);
@@ -116,11 +131,13 @@ namespace {
         runtime::spawnEntities(app.world);
     }
 
-    std::unique_ptr<Machine> server(net::LoopbackNetwork& network, const std::filesystem::path& folder, uint32_t maxPieces = 3000) {
+    std::unique_ptr<Machine> server(net::LoopbackNetwork& network, const std::filesystem::path& folder, uint32_t maxPieces = 3000,
+                                    uint32_t bytesPerSecond = 64000) {
         auto m = std::make_unique<Machine>();
         m->loadScene(folder);
         installWorld(m->app, maxPieces);
         runtime::ServerConfig config;
+        config.bytesPerSecond = bytesPerSecond;
         config.sceneFolder = folder.string();
         const std::string avatar = (folder / "avatar").string();
         config.spawnPlayer = [avatar](projv::World& world, runtime::ClientId id) {
@@ -391,4 +408,78 @@ TEST_CASE("replication: a client whose wall is not the server's is told so by th
     runtime::fracture(s->app.world, runtime::entityForNetId(s->app.world, projv::NetId{50}), vec3(0, 3, 10), energyFor(1.0f), vec3(0));
     run(network, {s.get(), a.get()}, 1.0);
     CHECK(runtime::sessionStats(a->app.world).worldMismatches == 1);
+}
+
+// ---- Bodies (N4) -------------------------------------------------------------------------------------
+
+namespace {
+    // Every crate's pose on a machine, by NetId.
+    std::map<uint32_t, projv::runtime::BodyState> crates(Machine& m) {
+        std::map<uint32_t, projv::runtime::BodyState> out;
+        for (auto [e, body, id] : m.app.world.view<projv::PhysicsBody, projv::NetId>().each())
+            if (body.motion == projv::runtime::MotionType::Dynamic && id.value >= 100) out[id.value] = runtime::bodyPose(m.app.world, e);
+        return out;
+    }
+}
+
+TEST_CASE("replication: a pyramid knocked over on the server settles where it did on every client, through 150 ms and 5% loss") {
+    TempDir dir("replication_pyramid");
+    writeArena(dir.path, 4);   // ten crates
+    net::LoopbackNetwork network(8);
+    network.setConditions({0.075, 0.01, 0.05});
+    auto s = server(network, dir.path);
+    auto a = client(network, dir.path, "ann");
+    auto b = client(network, dir.path, "bo");
+    run(network, {s.get(), a.get(), b.get()}, 2.0);
+    REQUIRE(crates(*s).size() == 10);
+
+    // Only the server knows: the bottom left crate is hit hard, away from the players.
+    Entity hit = runtime::entityForNetId(s->app.world, projv::NetId{102});
+    REQUIRE(hit != projv::NullEntity);
+    runtime::setVelocity(s->app.world, hit, vec3(0, 2, -9), vec3(4, 0, 0));
+    run(network, {s.get(), a.get(), b.get()}, 8.0);
+
+    const auto truth = crates(*s);
+    for (auto [id, state] : truth) CHECK_FALSE(state.awake);   // all settled
+    for (Machine* m : {a.get(), b.get()}) {
+        const auto mine = crates(*m);
+        REQUIRE(mine.size() == truth.size());
+        for (auto [id, state] : truth) {
+            INFO("crate " << id);
+            CHECK(glm::distance(mine.at(id).position, state.position) < 0.01f);
+            CHECK(std::abs(glm::dot(mine.at(id).rotation, state.rotation)) > 0.9999f);
+        }
+        CHECK(runtime::sessionStats(m->app.world).corrections > 50);
+    }
+    // And the pyramid really fell: the hit crate is metres from where it stood.
+    CHECK(glm::distance(truth.at(102).position, vec3(-8.0f + 0.5f, 0.5f, -8.0f)) > 1.0f);
+}
+
+TEST_CASE("replication: snapshots stay within the budget, and what is asleep stops costing") {
+    TempDir dir("replication_budget");
+    writeArena(dir.path, 6);   // twenty-one crates
+    net::LoopbackNetwork network(10);
+    network.setConditions({0.03});
+    const uint32_t budget = 6000;   // bytes a second: far less than everything every snapshot
+    auto s = server(network, dir.path, 3000, budget);
+    auto a = client(network, dir.path, "ann");
+    run(network, {s.get(), a.get()}, 1.0);
+    runtime::setVelocity(s->app.world, runtime::entityForNetId(s->app.world, projv::NetId{102}), vec3(0, 3, -10), vec3(0));
+    const uint64_t before = runtime::sessionStats(s->app.world).snapshotBytes;
+    run(network, {s.get(), a.get()}, 6.0);
+    const uint64_t during = runtime::sessionStats(s->app.world).snapshotBytes - before;
+    CHECK(double(during) / 6.0 <= budget * 1.05);
+    // Settled, it all comes to the same, and then costs next to nothing.
+    run(network, {s.get(), a.get()}, 6.0);
+    const auto truth = crates(*s);
+    const auto mine = crates(*a);
+    for (auto [id, state] : truth) CHECK(glm::distance(mine.at(id).position, state.position) < 0.01f);
+    int awake = 0;
+    for (auto [id, state] : truth) awake += state.awake;
+    INFO("awake on the server: " << awake);
+    const uint64_t settled = runtime::sessionStats(s->app.world).snapshotBytes;
+    CHECK(awake == 0);
+    run(network, {s.get(), a.get()}, 2.0);
+    // Two seconds of Ann's own player, about 15 bytes at 30 Hz, and nothing for the crates.
+    CHECK(runtime::sessionStats(s->app.world).snapshotBytes - settled < 1100);
 }
