@@ -155,6 +155,19 @@ namespace projv::runtime {
         uint64_t snapshotBytes = 0;          // a server's: the most snapshot bytes sent to one client
     };
     SessionStats sessionStats(const World& world);
+
+    // A server's view of each client (N7), in client id order.
+    struct ClientStats {
+        ClientId    id = 0;
+        std::string name;
+        float       roundTripMs = 0.0f, loss = 0.0f;
+        uint64_t    bytesSent = 0, bytesReceived = 0;   // all of it, both ways
+        uint64_t    snapshotBytes = 0;                  // of what was sent, snapshots
+        size_t      inputsWaiting = 0;
+        size_t      entities = 0;                       // replicated entities it has
+        size_t      blocks = 0;                         // blocks present for it
+    };
+    std::vector<ClientStats> clientStats(const World& world);
 }
 
 #endif

@@ -75,6 +75,12 @@ if(TARGET mp_server AND TARGET mp_client)
              COMMAND ${PROJECT_SOURCE_DIR}/examples/70-multiplayer/selftest.sh ${CMAKE_BINARY_DIR})
     set_tests_properties(multiplayer_selftest PROPERTIES LABELS net TIMEOUT 120)
 endif()
+# A hundred bot clients against one server, as real sockets (examples/70-multiplayer/scale.sh).
+if(TARGET mp_server AND TARGET mp_bots)
+    add_test(NAME multiplayer_scale
+             COMMAND ${PROJECT_SOURCE_DIR}/examples/70-multiplayer/scale.sh ${CMAKE_BINARY_DIR} 100)
+    set_tests_properties(multiplayer_scale PROPERTIES LABELS net TIMEOUT 180)
+endif()
 
 # Not a compile: a scan of the voxel layer's includes. See check_layering.cmake.
 add_test(NAME layering

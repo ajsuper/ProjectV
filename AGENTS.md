@@ -44,7 +44,7 @@ ctest --preset dev
 ```
 
 Real sockets on localhost are left out too: `ctest --preset net` (ENet, and the multiplayer example as
-three headless processes). `--preset clang` builds the
+three headless processes, and a hundred bot clients against a server: `scale.sh`). `--preset clang` builds the
 tests with Clang, to check the golden physics recording on a second compiler.
 
 The physics soak (2000 bodies, ten simulated minutes, ~30 s) is left out of that run; run it

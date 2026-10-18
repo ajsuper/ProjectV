@@ -9,3 +9,7 @@ projv_add_example(mp_client
     SHADERS    clientRenderer/clientShaders
     ASSET_DIRS clientRenderer arena
 )
+projv_add_example(mp_bots
+    SOURCES    bots.cpp
+    ASSET_DIRS arena
+)

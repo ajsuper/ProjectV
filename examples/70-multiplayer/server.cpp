@@ -32,13 +32,15 @@ using projv::core::vec3;
 namespace {
     struct Options {
         uint16_t port = arena::PORT;
+        uint32_t maxClients = 128;
         double   seconds = 0.0;   // 0: forever
     };
 
-    // Where each new player starts: round the middle of the arena.
+    // Where each new player starts: a sunflower round the middle, so a hundred land apart.
     vec3 spawnPoint(projv::runtime::ClientId id) {
-        const float angle = float(id) * 2.39996f;   // the golden angle: no two land together
-        return vec3(std::cos(angle) * 4.0f, 0.0f, std::sin(angle) * 4.0f);
+        const float angle = float(id) * 2.39996f;   // the golden angle
+        const float radius = 3.0f + 1.3f * std::sqrt(float(id));
+        return vec3(std::cos(angle) * radius, 0.0f, std::sin(angle) * radius);
     }
 }
 
@@ -48,6 +50,7 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--write-arena") && i + 1 < argc) return arena::write(argv[++i]) ? 0 : 1;
         if (!std::strcmp(argv[i], "--port") && i + 1 < argc) options.port = uint16_t(std::atoi(argv[++i]));
         else if (!std::strcmp(argv[i], "--seconds") && i + 1 < argc) options.seconds = std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--max-clients") && i + 1 < argc) options.maxClients = uint32_t(std::atoi(argv[++i]));
     }
 
     const std::string folder = (projv::core::executableDirectory() / arena::FOLDER).string();
@@ -59,6 +62,7 @@ int main(int argc, char** argv) {
 
     projv::runtime::ServerConfig config;
     config.port = options.port;
+    config.maxClients = options.maxClients;
     config.sceneFolder = folder;
     const std::string avatar = (std::filesystem::path(folder) / arena::AVATAR).string();
     // A player: the avatar prefab walked by a character controller. Clients get the prefab and
@@ -71,26 +75,54 @@ int main(int argc, char** argv) {
     };
     if (!projv::runtime::installServer(app, projv::net::makeEnetTransport(), config)) return 1;
 
-    // Each second, who is here and where.
+    // How long a frame's work takes (the sleep below is not work), measured from the frame's first
+    // system to its last.
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point frameStart = Clock::now();
+    double workTotal = 0.0, workWorst = 0.0;
+    int workFrames = 0;
+    app.addSystem(projv::Stage::PreUpdate, "frame start", [&](projv::Application&) { frameStart = Clock::now(); },
+                  {.before = "net: receive", .after = ""});
+
+    // Each second, who is here, where, and what it costs.
     double logClock = 0.0, total = 0.0;
+    uint64_t lastSent = 0;
     app.addSystem(projv::Stage::Update, "report", [&](projv::Application& a) {
         logClock += a.time().unscaledDelta;
         total += a.time().unscaledDelta;
         if (logClock >= 1.0) {
-            logClock = 0.0;
             std::string where;
+            size_t listed = 0;
             for (auto [e, character] : a.world.view<projv::PhysicsCharacter>().each()) {
+                if (listed++ >= 4) { where += " ..."; break; }
                 const vec3 p = projv::runtime::characterState(a.world, e).position;
                 const projv::NetId* id = a.world.try_get<projv::NetId>(e);
                 where += " player " + std::to_string(id ? id->value : 0) + " at (" + std::to_string(p.x) + ", " +
                          std::to_string(p.y) + ", " + std::to_string(p.z) + ")";
             }
-            projv::core::info("MPSERVER: {} client(s){}", projv::runtime::sessionStats(a.world).clients, where);
+            uint64_t sent = 0;
+            float worstTrip = 0.0f;
+            for (const auto& c : projv::runtime::clientStats(a.world)) {
+                sent += c.bytesSent;
+                worstTrip = std::max(worstTrip, c.roundTripMs);
+            }
+            const double kbps = double(sent > lastSent ? sent - lastSent : 0) / logClock / 1024.0;
+            lastSent = sent;
+            projv::core::info("MPSERVER: {} client(s), frames {:.2f} ms average {:.2f} ms worst, {:.0f} KB/s out, worst round trip {:.0f} ms{}",
+                              projv::runtime::sessionStats(a.world).clients, workFrames ? workTotal / workFrames : 0.0, workWorst,
+                              kbps, worstTrip, where);
+            logClock = 0.0;
+            workTotal = workWorst = 0.0;
+            workFrames = 0;
         }
         if (options.seconds > 0.0 && total >= options.seconds) a.closeRequested = true;
     });
     // No window to wait on: sleep through the time no fixed step is owed, rather than spin.
-    app.addSystem(projv::Stage::Render, "pace", [](projv::Application&) {
+    app.addSystem(projv::Stage::Render, "pace", [&](projv::Application&) {
+        const double work = std::chrono::duration<double, std::milli>(Clock::now() - frameStart).count();
+        workTotal += work;
+        workWorst = std::max(workWorst, work);
+        workFrames++;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     });
     app.run();

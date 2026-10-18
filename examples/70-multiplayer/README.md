@@ -29,6 +29,18 @@ hash of the scene files: other files, refused with the reason), spawns by NetId 
 the entity's registered components), snapshots at 30 Hz drawn 100 ms behind, and input repeated in
 each message. Design: `docs/plans/networking.md`.
 
+## A hundred clients
+
+```bash
+cd build/examples/mp_bots && ./mp_bots --count 100 --seconds 20   # against a running mp_server
+examples/70-multiplayer/scale.sh                                   # server and bots, checked
+```
+
+`mp_bots` runs any number of clients in one process, each with its own connection. They have no
+physics and no window and walk at random. The server logs its frame time, bytes out and worst round
+trip each second. With 100 clients on one machine, its frames averaged 1.2 ms (worst 7.6 ms) and it
+sent about 39 kB/s to each client.
+
 ## Self-test
 
 ```bash

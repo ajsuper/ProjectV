@@ -1,7 +1,7 @@
 # Networking: server-authoritative, on the deterministic simulation
 
-Status: **approved**; **N0-N6 done** (2026-10-17); P0's second compiler waits on Clang being
-installed (`--preset clang` is ready). Next: N7. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
+Status: **approved**; **N0-N7 done** (2026-10-17): the plan is built; P0's second compiler waits on Clang being
+installed (`--preset clang` is ready). Open: the debug overlay (N7), encryption, items under each milestone. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
 hundreds of players as the eventual target, and clients that load and simulate only what is near them,
 decided by one rule a game writes (`world-loading.md`). Builds on the physics plan (`physics-jolt.md`:
 D6, D8, D9, A3, A7) and on the world-loading plan.
@@ -376,6 +376,27 @@ world-loading plan (W2-W4). On top of those:
 - Not here: the example's arena is small enough to send whole; per-client loading is a setting on
   the server (`loadRule`). The server judges every block for every client every 10 frames -- fine to
   a few thousand blocks and tens of clients; N7 measures it.
+
+## N7, done 2026-10-17
+
+- `runtime::clientStats(world)` (server): per client, round trip, loss, bytes both ways, snapshot
+  bytes, inputs waiting, entities and blocks it has.
+- `mp_server` logs each second its frame work time (average, worst; the pacing sleep excluded), bytes
+  out and the worst round trip; `--max-clients` (default 128); players spawn on a sunflower.
+- `mp_bots --count N`: N clients in one process, each its own Application and ENet connection, no
+  physics or window, walking at random. `scale.sh` (ctest `multiplayer_scale`, `--preset net`): a
+  server and 100 bots over localhost for 22 s.
+- Measured (this machine, 100 clients, loadEverything on the small arena): server frames 1.1-1.3 ms
+  average, 5.5-7.6 ms worst (under a 16.7 ms step), 3.9 MB/s out (about 39 kB/s a client, under the
+  64 kB/s budget: each is sent all 100 players), worst round trip 11 ms; every bot ~49 snapshot
+  packets a second.
+- Test (`test_replication.cpp`): forty clients in one process each have all forty players, are sent
+  between 5 and 21 kB/s against a 20 kB/s budget, and see forty players.
+- Not here: **the debug overlay.** The engine draws no text (only the editor has ImGui), so stats are
+  logged and in `clientStats`/`sessionStats`; an overlay waits on physics R13 or a text pass.
+  Snapshot entries are built once per snapshot and shared by every client (as planned); per-client
+  relevance judges every block for every client every 10 frames -- 400 blocks x 100 clients cost
+  nothing measurable here, a spatial index is the step when worlds are larger.
 
 ## Milestones
 

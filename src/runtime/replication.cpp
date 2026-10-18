@@ -1338,6 +1338,30 @@ namespace projv::runtime {
         }
     }
 
+    std::vector<ClientStats> clientStats(const World& world) {
+        std::vector<ClientStats> out;
+        const ServerSession* s = world.ctx().find<ServerSession>();
+        if (!s) return out;
+        for (const auto& [peer, client] : s->clients) {
+            if (!client.welcomed) continue;
+            ClientStats c;
+            c.id = client.id;
+            c.name = client.name;
+            const net::LinkStats link = s->transport->stats(peer);
+            c.roundTripMs = link.roundTripMs;
+            c.loss = link.loss;
+            c.bytesSent = link.bytesSent;
+            c.bytesReceived = link.bytesReceived;
+            c.snapshotBytes = client.snapshotBytes;
+            c.inputsWaiting = client.inputs.size();
+            c.entities = client.has.size();
+            for (utils::Presence p : client.blocks) c.blocks += p != utils::Presence::Absent;
+            out.push_back(std::move(c));
+        }
+        std::sort(out.begin(), out.end(), [](const ClientStats& a, const ClientStats& b) { return a.id < b.id; });
+        return out;
+    }
+
     SessionStats sessionStats(const World& world) {
         SessionStats out;
         if (const ServerSession* s = world.ctx().find<ServerSession>()) {

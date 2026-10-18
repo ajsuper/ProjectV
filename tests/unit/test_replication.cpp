@@ -682,3 +682,62 @@ TEST_CASE("per-client loading: two players 200 m apart each have only their own 
     CHECK(runtime::entityForNetId(a->app.world, boId) != projv::NullEntity);   // and each other, now near
     CHECK(runtime::sessionStats(a->app.world).largestCorrection < 0.05f);
 }
+
+// ---- Scale (N7) -------------------------------------------------------------------------------------
+
+TEST_CASE("scale: forty clients in one process each get everyone, within their budget, and stats say so") {
+    TempDir dir("replication_scale");
+    writeArena(dir.path);
+    net::LoopbackNetwork network(15);
+    network.setConditions({0.02});
+    auto s = std::make_unique<Machine>();
+    s->loadScene(dir.path);
+    installWorld(s->app);
+    runtime::ServerConfig config;
+    config.sceneFolder = dir.path.string();
+    config.maxClients = 64;
+    config.bytesPerSecond = 20000;
+    const std::string avatar = (dir.path / "avatar").string();
+    config.spawnPlayer = [avatar](projv::World& world, runtime::ClientId id) {
+        const float a = float(id) * 2.39996f, r = 3.0f + 1.3f * std::sqrt(float(id));
+        Entity e = runtime::instantiatePrefab(world, avatar, vec3(std::cos(a) * r, 0.0f, std::sin(a) * r));
+        world.emplace<projv::CharacterController>(e);
+        world.emplace<projv::Replicated>(e, projv::Replicated{"avatar", {"physics.character"}});
+        return e;
+    };
+    REQUIRE(runtime::installServer(s->app, network.endpoint(), config));
+    s->app.runStartup();
+    s->app.runFrame();
+
+    // Bots: no physics, a scene each, walking about.
+    std::vector<std::unique_ptr<Machine>> bots;
+    for (int i = 0; i < 40; i++) {
+        auto m = std::make_unique<Machine>();
+        m->loadScene(dir.path);
+        runtime::ClientConfig c;
+        c.sceneFolder = dir.path.string();
+        c.name = "bot" + std::to_string(i);
+        REQUIRE(runtime::installClient(m->app, network.endpoint(), c));
+        m->app.runStartup();
+        m->app.runFrame();
+        bots.push_back(std::move(m));
+    }
+    std::vector<Machine*> all{s.get()};
+    for (auto& b : bots) all.push_back(b.get());
+    run(network, all, 1.0);
+    for (size_t i = 0; i < bots.size(); i++)
+        runtime::setLocalInput(bots[i]->app.world, vec3(std::cos(float(i)), 0, std::sin(float(i))) * 2.0f);
+    const auto before = runtime::clientStats(s->app.world);
+    run(network, all, 3.0);
+    const auto after = runtime::clientStats(s->app.world);
+
+    REQUIRE(after.size() == 40);
+    for (size_t i = 0; i < after.size(); i++) {
+        CHECK(after[i].entities == 40);   // every player, its own too
+        const double perSecond = double(after[i].snapshotBytes - before[i].snapshotBytes) / 3.0;
+        CHECK(perSecond <= 20000.0 * 1.05);
+        CHECK(perSecond > 5000.0);          // and the budget is used: forty moving players
+        CHECK(after[i].bytesSent > after[i].snapshotBytes);
+    }
+    for (auto& b : bots) CHECK(proxies(*b) == 40);
+}
