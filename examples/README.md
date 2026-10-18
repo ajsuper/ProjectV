@@ -1,6 +1,6 @@
 # ProjectV Examples
 
-Eleven programs, ordered so that reading them in sequence teaches the engine. Each one is a
+Twelve programs, ordered so that reading them in sequence teaches the engine. Each one is a
 complete application, not a snippet, and each has its own README explaining not just how to run it
 but why it exists and what it decided differently from its neighbours.
 
@@ -34,6 +34,7 @@ cd build/examples/hello_voxel && ./hello_voxel
 | **40** | [advanced-renderer](40-advanced-renderer/) | The good renderer, brought up to the engine as it is today: fourteen passes, world-space probe GI, animation, transparency and refraction. | — |
 | **50** | [terrain-generator](50-terrain-generator/) | Procedural generation and streaming: chunks built on worker threads and uploaded while you fly. | — |
 | **60** | [scene-editor](60-scene-editor/) | A complete tool. ImGui docking, the scene living inside a panel, tools, undo, and Lua-scripted brushes. | ImGui + Lua submodules |
+| **70** | [multiplayer](70-multiplayer/) | A dedicated server and clients as separate programs over UDP: a headless server simulating every player, clients that join, see each other and walk. `selftest.sh` runs all three headless. | — |
 
 The numbering is reading order, not priority. Two examples carry third-party submodules of their
 own; without them the configure step skips that example with a message naming what to check out,

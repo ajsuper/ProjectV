@@ -16,6 +16,7 @@ namespace projv::net {
             PeerId   peer[2] = {NO_PEER, NO_PEER};   // the id each end knows it by
             bool     open[2] = {false, false};       // that end has seen Connected
             bool     closed = false;
+            uint64_t closedAt = 0;                   // the send order when it closed: what was sent before still lands
             uint64_t sent[2] = {0, 0};               // unreliable sequence, by sending side
             uint64_t newest[2] = {0, 0};             // newest unreliable delivered, by receiving side
             double   reliableAt[2] = {0.0, 0.0};     // when the last reliable message to that side lands
@@ -83,6 +84,7 @@ namespace projv::net {
         void close(Link* link, int by) {
             if (link->closed) return;
             link->closed = true;
+            link->closedAt = order;
             for (int side = 0; side < 2; side++) {
                 Host* h = link->host[side];
                 if (!h) continue;
@@ -91,7 +93,7 @@ namespace projv::net {
                 e.kind = NetEvent::Kind::Disconnected;
                 e.peer = link->peer[side];
                 if (side == by) h->inbox.push_back(e);
-                else post(link, side, e, now + delay());
+                else post(link, side, e, std::max(now + delay(), link->reliableAt[side] + 1e-6));   // after what is on its way
             }
         }
 
@@ -110,7 +112,7 @@ namespace projv::net {
                     if (f.link->closed) continue;
                     f.link->open[f.to] = true;
                 } else if (e.kind == NetEvent::Kind::Received) {
-                    if (f.link->closed || !f.link->open[f.to]) continue;
+                    if ((f.link->closed && f.order >= f.link->closedAt) || !f.link->open[f.to]) continue;
                     if (e.channel == Channel::Unreliable) {
                         if (f.sequence <= f.link->newest[f.to]) continue;   // older than what came already
                         f.link->newest[f.to] = f.sequence;

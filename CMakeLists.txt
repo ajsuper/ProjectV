@@ -293,6 +293,7 @@ add_library(projectV STATIC
     src/runtime/fracture.cpp
     src/runtime/impact_fracture.cpp
     src/runtime/net.cpp
+    src/runtime/replication.cpp
     src/runtime/physics.cpp
     src/runtime/scene_bridge.cpp
 

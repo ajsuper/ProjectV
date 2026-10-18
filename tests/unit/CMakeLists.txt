@@ -41,6 +41,7 @@ add_executable(projv_unit_tests
     test_physics_prediction.cpp
     test_physics_queries.cpp
     test_physics_reliability.cpp
+    test_replication.cpp
     test_physics_runtime.cpp
     test_physics_world.cpp
     test_slot_reuse.cpp
@@ -68,6 +69,12 @@ set_tests_properties(physics_soak PROPERTIES ENVIRONMENT "PROJV_SOAK=1" LABELS s
 # Real sockets on localhost (ENet). Not in the default run either: `ctest --preset net`.
 add_test(NAME net_sockets COMMAND projv_unit_tests -tc=enet* --no-skip)
 set_tests_properties(net_sockets PROPERTIES LABELS net TIMEOUT 60)
+# The multiplayer example as three processes (a server, two headless clients) on localhost.
+if(TARGET mp_server AND TARGET mp_client)
+    add_test(NAME multiplayer_selftest
+             COMMAND ${PROJECT_SOURCE_DIR}/examples/70-multiplayer/selftest.sh ${CMAKE_BINARY_DIR})
+    set_tests_properties(multiplayer_selftest PROPERTIES LABELS net TIMEOUT 120)
+endif()
 
 # Not a compile: a scan of the voxel layer's includes. See check_layering.cmake.
 add_test(NAME layering

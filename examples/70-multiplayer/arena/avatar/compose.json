@@ -1,0 +1,28 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "body",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [256, 460, 921]
+        },
+        {
+          "color": [972, 870, 716]
+        }
+      ],
+      "position": [-0.25, 0.0, -0.25],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "body.data",
+      "type": "data"
+    }
+  ],
+  "name": "avatar",
+  "version": 1
+}

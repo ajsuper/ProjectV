@@ -1,7 +1,7 @@
 # Networking: server-authoritative, on the deterministic simulation
 
-Status: **approved**; **N0, N1 done** (2026-10-17); P0's second compiler waits on Clang being
-installed (`--preset clang` is ready). Next: N2. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
+Status: **approved**; **N0-N2 done** (2026-10-17); P0's second compiler waits on Clang being
+installed (`--preset clang` is ready). Next: N3. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
 hundreds of players as the eventual target, and clients that load and simulate only what is near them,
 decided by one rule a game writes (`world-loading.md`). Builds on the physics plan (`physics-jolt.md`:
 D6, D8, D9, A3, A7) and on the world-loading plan.
@@ -242,6 +242,35 @@ world-loading plan (W2-W4). On top of those:
   newest-only with loss and duplicates, the same seed losing the same messages, disconnects, a full
   server, nobody listening, an endpoint going away. ENet on localhost both ways: `ctest --preset net`
   (`net_sockets`, excluded from the default run like the soak).
+
+## N2, done 2026-10-17
+
+- `runtime/replication.h`: `installServer(app, transport, {port, maxClients, snapshotRate, sceneFolder,
+  spawnPlayer, applyInput})`, `installClient(app, transport, {host, port, sceneFolder, name,
+  interpolationDelay})`, `setLocalInput`, `sceneFilesHash`, `sessionStats`; events ClientJoined,
+  ClientLeft (server), JoinedServer, LeftServer (client, with the reason).
+- Handshake: Hello {PROTOCOL_VERSION, scene files hash, name} -> Welcome {client id, player NetId,
+  tick length, tick} or Refuse {reason} then disconnect (sent first: ENet `disconnect_later`; the
+  loopback delivers what was sent before a close).
+- `Replicated {prefab, omit}` on the server: spawned to every welcomed client in NetId order (prefab
+  path + pose + entityComponents less `omit`), and to a joining client all that exists; destroying
+  it (or removing Replicated) despawns everywhere. A client instantiates the prefab from its own
+  scene folder (paths with `..` refused), applies the components, and marks it `NetProxy`.
+- Snapshots: every replicated entity's simulation pose (character, body, else Transform) at 30 Hz,
+  unreliable, split under 1,100 bytes; raw floats and 12-bit-a-component rotations for now
+  (quantisation and budgets are N4). Clients interpolate 100 ms behind their estimate of the
+  server's tick.
+- Input: each fixed step, the last 4 inputs (sequence, move, jump) unreliably; the server keeps the
+  newest move and any jump not seen before; default `applyInput` is setCharacterInput.
+- Example `70-multiplayer`: `mp_server` (no window), `mp_client` (window, or `--headless` with a
+  scripted walk and checks), `selftest.sh` (three processes, localhost, random port; also
+  `ctest --preset net` as `multiplayer_selftest`): both join, both see two players, Bo sees Ann walk
+  9 m.
+- Tests (`test_replication.cpp`, one process over the loopback network, no window): two clients
+  join and see both players as prefabs without the controller; a walk on the server shows on both
+  clients within 0.6 m while moving and exactly when stopped, voxels and all; a client that vanishes
+  is despawned everywhere and a late joiner gets everyone; other scene files are refused with the
+  reason; at 150 ms and 5% loss a walk still arrives.
 
 ## Milestones
 

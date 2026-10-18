@@ -1,0 +1,11 @@
+{
+    "renderer": [
+        {
+            "shaderID": 1,
+            "frameBufferInputIDs": [],
+            "resourceTexturesIDs": [],
+            "frameBufferOutputID": -1,
+            "multiPass": 0
+        }
+    ]
+}

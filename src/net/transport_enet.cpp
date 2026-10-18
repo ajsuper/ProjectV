@@ -84,7 +84,8 @@ namespace projv::net {
 
             void disconnect(PeerId id) override {
                 auto it = peers.find(id);
-                if (it != peers.end()) enet_peer_disconnect(it->second, 0);
+                // After what is queued: a refusal's reason must reach the peer before the goodbye.
+                if (it != peers.end()) enet_peer_disconnect_later(it->second, 0);
             }
 
             void poll(std::vector<NetEvent>& out) override {

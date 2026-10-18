@@ -373,3 +373,16 @@ TEST_CASE("enet: a server and a client on localhost talk both ways" * doctest::s
     });
     CHECK(gone);
 }
+
+TEST_CASE("loopback: what was sent before a disconnect still arrives, before the disconnect") {
+    Pair p({0.05, 0.02});
+    p.run(0.3);
+    REQUIRE(p.atServer != NO_PEER);
+    REQUIRE(p.server->send(p.atServer, Channel::Reliable, Pair::number(42)));
+    p.server->disconnect(p.atServer);
+    p.run(0.5);
+    REQUIRE(p.clientEvents.size() >= 3);   // connected, the message, the disconnect
+    CHECK(p.clientEvents[1].kind == NetEvent::Kind::Received);
+    CHECK(Pair::numbers(p.clientEvents, Channel::Reliable) == std::vector<uint32_t>{42});
+    CHECK(p.clientEvents.back().kind == NetEvent::Kind::Disconnected);
+}
