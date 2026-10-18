@@ -175,7 +175,10 @@ namespace {
         }
     }
 
-    size_t proxies(Machine& m) { return m.app.world.view<projv::NetProxy>().size(); }
+    // The players a client shows: everyone else's proxies, and its own (predicted, not a proxy).
+    size_t proxies(Machine& m) {
+        return m.app.world.view<projv::NetProxy>().size() + (runtime::sessionStats(m.app.world).predicting ? 1 : 0);
+    }
     Entity proxyFor(Machine& m, projv::NetId id) { return runtime::entityForNetId(m.app.world, id); }
 }
 
@@ -480,6 +483,70 @@ TEST_CASE("replication: snapshots stay within the budget, and what is asleep sto
     const uint64_t settled = runtime::sessionStats(s->app.world).snapshotBytes;
     CHECK(awake == 0);
     run(network, {s.get(), a.get()}, 2.0);
-    // Two seconds of Ann's own player, about 15 bytes at 30 Hz, and nothing for the crates.
-    CHECK(runtime::sessionStats(s->app.world).snapshotBytes - settled < 1100);
+    // Two seconds of Ann's ack (her own player, which she predicts), about 20 bytes at 30 Hz, and
+    // nothing for the crates.
+    CHECK(runtime::sessionStats(s->app.world).snapshotBytes - settled < 1400);
+}
+
+// ---- Prediction (N5) ----------------------------------------------------------------------------------
+
+TEST_CASE("prediction: your own player moves at once, and at 150 ms and 5% loss is never visibly put right") {
+    TempDir dir("replication_predict");
+    writeArena(dir.path);
+    net::LoopbackNetwork network(12);
+    network.setConditions({0.075, 0.01, 0.05});
+    auto s = server(network, dir.path);
+    auto a = client(network, dir.path, "ann");
+    run(network, {s.get(), a.get()}, 1.5);
+    REQUIRE(runtime::sessionStats(a->app.world).predicting);
+    const projv::NetId annId = a->joined[0].player;
+    Entity mine = runtime::entityForNetId(a->app.world, annId);
+    Entity theirs = runtime::entityForNetId(s->app.world, annId);
+    REQUIRE(mine != projv::NullEntity);
+
+    // At once: two frames after the key, she has moved here -- not a round trip later.
+    const vec3 before = a->app.world.get<projv::Transform>(mine).position;
+    runtime::setLocalInput(a->app.world, vec3(0, 0, 3.0f));
+    run(network, {s.get(), a.get()}, 2.0 * DT);
+    CHECK(glm::distance(a->app.world.get<projv::Transform>(mine).position, before) > 0.03f);
+
+    // A walk with turns and a jump.
+    run(network, {s.get(), a.get()}, 1.5);
+    runtime::setLocalInput(a->app.world, vec3(2.5f, 0, 0), true);
+    run(network, {s.get(), a.get()}, 1.0);
+    runtime::setLocalInput(a->app.world, vec3(-1.0f, 0, -2.0f));
+    run(network, {s.get(), a.get()}, 1.5);
+    runtime::setLocalInput(a->app.world, vec3(0.0f));
+    run(network, {s.get(), a.get()}, 1.0);
+
+    const runtime::SessionStats stats = runtime::sessionStats(a->app.world);
+    CHECK(stats.largestCorrection < 0.01f);   // nothing anyone would see
+    const vec3 server = runtime::characterState(s->app.world, theirs).position;
+    const vec3 predicted = runtime::characterState(a->app.world, mine).position;
+    CHECK(glm::distance(server, predicted) < 0.001f);
+    // Where the inputs take her: 1.0 m along x, 4.6 - 3.0 m along z.
+    CHECK(server.x - before.x == doctest::Approx(1.0f).epsilon(0.05));
+    CHECK(server.z - before.z == doctest::Approx(1.6f).epsilon(0.05));
+}
+
+TEST_CASE("prediction: when the server moves your player, you are put right in a round trip") {
+    TempDir dir("replication_correct");
+    writeArena(dir.path);
+    net::LoopbackNetwork network(13);
+    network.setConditions({0.05});
+    auto s = server(network, dir.path);
+    auto a = client(network, dir.path, "ann");
+    run(network, {s.get(), a.get()}, 1.5);
+    const projv::NetId annId = a->joined[0].player;
+    Entity theirs = runtime::entityForNetId(s->app.world, annId);
+    Entity mine = runtime::entityForNetId(a->app.world, annId);
+    // The server's game moves her 3 m (a respawn, a push): her client did not predict that.
+    runtime::physicsWorld(s->app.world).setCharacterPosition(s->app.world.get<projv::PhysicsCharacter>(theirs).id,
+                                                             runtime::characterState(s->app.world, theirs).position + vec3(3, 0, 0));
+    run(network, {s.get(), a.get()}, 0.3);
+    const runtime::SessionStats stats = runtime::sessionStats(a->app.world);
+    CHECK(stats.reconciliations >= 1);
+    CHECK(stats.largestCorrection > 2.9f);
+    CHECK(glm::distance(runtime::characterState(a->app.world, mine).position,
+                        runtime::characterState(s->app.world, theirs).position) < 0.001f);
 }

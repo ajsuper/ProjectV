@@ -1,7 +1,7 @@
 # Networking: server-authoritative, on the deterministic simulation
 
-Status: **approved**; **N0-N4 done** (2026-10-17); P0's second compiler waits on Clang being
-installed (`--preset clang` is ready). Next: N5. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
+Status: **approved**; **N0-N5 done** (2026-10-17); P0's second compiler waits on Clang being
+installed (`--preset clang` is ready). Next: N6. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
 hundreds of players as the eventual target, and clients that load and simulate only what is near them,
 decided by one rule a game writes (`world-loading.md`). Builds on the physics plan (`physics-jolt.md`:
 D6, D8, D9, A3, A7) and on the world-loading plan.
@@ -320,6 +320,32 @@ world-loading plan (W2-W4). On top of those:
   the body and eases the drawing over a few frames.
 - Found: a test's player spawned inside the pyramid kept the whole stack awake -- a character
   standing in a pile wakes it every step. Expected Jolt behaviour, worth knowing for games.
+
+## N5, done 2026-10-17
+
+- **Physics.** `PhysicsWorld::setCharacterVelocity` (logged; LOG_VERSION 13, golden regenerated,
+  replay unchanged). `runtime::hasPhysics(world)`.
+- **Server.** A client's inputs wait by sequence (at most 60); one is applied a step, in order, once
+  two have come; a gap is skipped; none waiting repeats the last move. Each snapshot to the owner
+  starts with an ack: the last input applied, the character's position (0.1 mm steps) and velocity
+  (20 bits a component) after it, and how many inputs wait. A client that said in its Hello it
+  predicts is not sent its own player's pose (the ack is it), and is sent that entity whole when it
+  spawns (Replicated::omit is for the others).
+- **Client.** With physics, its own player (spawned with its CharacterController) is predicted:
+  "net: input" (before "physics") reconciles with the newest ack, sets the step's input on the
+  character and sends the inputs; "net: predicted" (after "physics") keeps the character's state
+  after each input. A prediction off by 1 mm or 1 cm/s at the acked input is restored to the server's
+  there (restoreCharacter, setCharacterPosition, setCharacterVelocity) and every input since run again
+  with stepCharacterAlone; the drawn position moves with it. `Time::scale` runs 0.95..1.05 to keep
+  two inputs waiting at the server. Without physics, the own player stays a proxy.
+- Stats: `predicting`, `reconciliations`, `largestCorrection`.
+- Example: mp_client installs physics and the arena's entities, so it predicts; the self-test reports
+  both clients predicting, Ann's largest correction 1 mm over a 9 m walk.
+- Tests: at 150 ms and 5% loss the own player moves two frames after the key, a walk with turns and
+  a jump is never put right by 1 cm or more, ends within 1 mm of the server, where its inputs say;
+  a 3 m move by the server is taken within a round trip, to the millimetre.
+- Not here: other players are proxies, so walking into one is mispredicted until the correction
+  (N4/N5 trade-off, D9). `Time::scale` also scales Update's delta by up to 5%.
 
 ## Milestones
 

@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <set>
 
 #include <glm/gtc/quaternion.hpp>
@@ -14,6 +15,7 @@
 #include "net/wire.h"
 #include "runtime/entities.h"
 #include "runtime/physics.h"
+#include "runtime/physics/physics_world.h"
 #include "runtime/scene_bridge.h"
 #include "utils/scene_query.h"
 
@@ -168,6 +170,11 @@ namespace projv::runtime {
                 core::vec3  move{0.0f};
                 bool        jump = false;
                 uint64_t    lastInput = 0;
+                // Inputs not yet applied, by sequence; one is applied a step, in order.
+                std::map<uint64_t, std::pair<core::vec3, bool>> inputs;
+                uint64_t    applied = 0;           // the last input applied
+                bool        started = false;       // a couple of inputs have come: apply from here on
+                bool        predicts = false;      // walks its own player: not sent its pose, only acks
                 std::map<uint32_t, float> priority;   // by NetId: grows until sent
                 std::set<uint32_t>        toldAsleep; // bodies it was last told are asleep
                 uint64_t    snapshotBytes = 0;
@@ -207,10 +214,12 @@ namespace projv::runtime {
             }
         }
 
-        std::vector<uint8_t> spawnMessage(World& world, Entity e, NetId id) {
+        // `owner`: for the client whose player it is, which predicts it, and so is sent all of it.
+        std::vector<uint8_t> spawnMessage(World& world, Entity e, NetId id, bool owner = false) {
             const Replicated& r = world.get<Replicated>(e);
             nlohmann::json components = entityComponents(world, e, true);
-            for (const std::string& key : r.omit) components.erase(key);
+            if (!owner)
+                for (const std::string& key : r.omit) components.erase(key);
             net::BitWriter w;
             w.varint(uint8_t(Message::Spawn));
             w.varint(id.value);
@@ -251,6 +260,7 @@ namespace projv::runtime {
             const uint32_t protocol = uint32_t(r.varint());
             const uint64_t hash = r.bits(64);
             const std::string name = text(r.bytes(MAX_TEXT));
+            const bool predicts = r.boolean();
             if (r.failed) return refuse(s, peer, "a malformed hello");
             if (protocol != PROTOCOL_VERSION)
                 return refuse(s, peer, "protocol " + std::to_string(protocol) + ", the server speaks " +
@@ -260,6 +270,7 @@ namespace projv::runtime {
             if (client.welcomed) return;
             client.id = freeClientId(s);
             client.name = name;
+            client.predicts = predicts;
             client.welcomed = true;
             if (s.config.spawnPlayer) client.player = s.config.spawnPlayer(world, client.id);
             NetId playerId;
@@ -280,7 +291,7 @@ namespace projv::runtime {
                 if (!s.fromSplits.count(e)) existing.push_back({id, e});
             std::sort(existing.begin(), existing.end(), [](auto& a, auto& b) { return a.first.value < b.first.value; });
             for (auto [id, e] : existing)
-                if (world.valid(e)) s.transport->send(peer, net::Channel::Reliable, spawnMessage(world, e, id));
+                if (world.valid(e)) s.transport->send(peer, net::Channel::Reliable, spawnMessage(world, e, id, e == client.player));
             for (const std::vector<uint8_t>& change : s.history) s.transport->send(peer, net::Channel::Reliable, change);
             core::info("net: client {} ('{}') joined", client.id, name);
             send(world.ctx().find<Events>(), ClientJoined{client.id, client.player, name});
@@ -289,20 +300,17 @@ namespace projv::runtime {
         void serverInput(ServerSession::Client& client, net::BitReader& r) {
             const uint32_t count = uint32_t(r.varint());
             if (r.failed || count > INPUT_REDUNDANCY) return;
-            uint64_t newest = client.lastInput;
             for (uint32_t i = 0; i < count; i++) {
                 const uint64_t sequence = r.varint();
                 const core::vec3 move = net::readVector(r, 64.0f, 16);
                 const bool jump = r.boolean();
                 if (r.failed) return;
-                if (sequence <= client.lastInput) continue;
-                if (jump) client.jump = true;   // a jump in any input not seen before
-                if (sequence > newest) {
-                    newest = sequence;
-                    client.move = move;
-                }
+                if (sequence <= client.applied) continue;
+                client.inputs.try_emplace(sequence, move, jump);
+                client.lastInput = std::max(client.lastInput, sequence);
             }
-            client.lastInput = newest;
+            // A client far ahead -- or lying -- is held to a second's worth.
+            while (client.inputs.size() > 60) client.inputs.erase(client.inputs.begin());
         }
 
         void serverReceive(Application& app) {
@@ -345,9 +353,19 @@ namespace projv::runtime {
             ServerSession& s = *serverOf(world);
             for (auto& [peer, client] : s.clients) {
                 if (!client.welcomed || client.player == NullEntity || !world.valid(client.player)) continue;
+                // One input a step, in order: what the client predicted with, step for step. A lost
+                // one (gone past its redundancy) is skipped; with none waiting, the last is repeated.
+                if (!client.started) client.started = client.inputs.size() >= 2;
+                client.jump = false;
+                if (client.started && !client.inputs.empty()) {
+                    auto next = client.inputs.begin();
+                    client.applied = next->first;
+                    client.move = next->second.first;
+                    client.jump = next->second.second;
+                    client.inputs.erase(next);
+                }
                 if (s.config.applyInput) s.config.applyInput(world, client.id, client.player, client.move, client.jump);
                 else setCharacterInput(world, client.player, client.move, client.jump);
-                client.jump = false;
             }
         }
 
@@ -365,7 +383,8 @@ namespace projv::runtime {
             std::sort(fresh.begin(), fresh.end(), [](auto& a, auto& b) { return a.first.value < b.first.value; });
             for (auto [id, e] : fresh) {
                 s.sent[e] = id;
-                sendAll(s, net::Channel::Reliable, spawnMessage(world, e, id));
+                for (auto& [peer, client] : s.clients)
+                    if (client.welcomed) s.transport->send(peer, net::Channel::Reliable, spawnMessage(world, e, id, e == client.player));
             }
             for (NetId id : s.despawning) {
                 net::BitWriter w;
@@ -433,8 +452,10 @@ namespace projv::runtime {
                     if (!client.welcomed) continue;
                     // Gather priority; a body asleep and told so already gathers none.
                     std::vector<std::pair<float, const Entry*>> order;
+                    const NetId* own = client.predicts && world.valid(client.player) ? world.try_get<NetId>(client.player) : nullptr;
                     for (const Entry& entry : entries) {
                         if (entry.asleep && client.toldAsleep.count(entry.id)) continue;
+                        if (own && own->value == entry.id) continue;
                         float& p = client.priority[entry.id];
                         p += entry.weight;
                         order.push_back({p, &entry});
@@ -442,10 +463,22 @@ namespace projv::runtime {
                     std::stable_sort(order.begin(), order.end(), [](auto& a, auto& b) { return a.first > b.first; });
                     size_t spent = 0;
                     size_t next = 0;
-                    while (next < order.size() && spent < budget) {
+                    // The owner's ack, in the first packet: the last input applied, where its player is
+                    // after it, and how many inputs wait (what keeps the client's clock in step).
+                    bool ack = client.player != NullEntity && world.valid(client.player) && world.all_of<PhysicsCharacter>(client.player);
+                    while ((next < order.size() || ack) && spent < budget) {
                         net::BitWriter packet;
                         packet.varint(uint8_t(Message::Snapshot));
                         packet.varint(time.fixedStep);
+                        packet.boolean(ack);
+                        if (ack) {
+                            const CharacterState state = characterState(world, client.player);
+                            packet.varint(client.applied);
+                            net::writePosition(packet, state.position, core::vec3(0.0f), 0.0001f);
+                            net::writeVector(packet, state.velocity, 64.0f, 20);
+                            packet.varint(client.inputs.size());
+                            ack = false;
+                        }
                         net::BitWriter body;
                         uint32_t count = 0;
                         for (; next < order.size(); next++) {
@@ -459,7 +492,7 @@ namespace projv::runtime {
                             if (entry.asleep) client.toldAsleep.insert(entry.id);
                             else client.toldAsleep.erase(entry.id);
                         }
-                        if (count == 0) break;
+                        if (count == 0 && next < order.size()) break;
                         packet.varint(count);
                         packet.bytes(body.data());
                         spent += packet.data().size();
@@ -507,9 +540,21 @@ namespace projv::runtime {
             uint64_t applied = 0, mismatches = 0;
             std::map<uint32_t, uint64_t> corrected;   // by NetId: the tick of the last correction
             uint64_t corrections = 0;
+            // Prediction: the own player, walked here; what each input left it as; the newest ack.
+            Entity   predicted = NullEntity;
+            struct Predicted { uint64_t sequence; core::vec3 move; bool jump; std::vector<uint8_t> state; core::vec3 position, velocity; };
+            std::vector<Predicted> history;
+            struct Ack { uint64_t sequence; core::vec3 position, velocity; uint64_t waiting; };
+            std::optional<Ack> ack;
+            uint64_t reconciliations = 0;
+            float    largestCorrection = 0.0f;
+            float    clockScale = 1.0f;
         };
 
         ClientSession* clientOf(World& world) { return world.ctx().find<ClientSession>(); }
+        bool world_valid_predicted(World& world, const ClientSession& c) {
+            return c.predicted != NullEntity && world.valid(c.predicted) && world.all_of<CharacterController>(c.predicted);
+        }
 
         void clientSpawn(World& world, ClientSession& c, net::BitReader& r) {
             const uint32_t id = uint32_t(r.varint());
@@ -538,6 +583,15 @@ namespace projv::runtime {
                 applyEntityComponents(world, e, json, "the server");
             }
             world.emplace_or_replace<NetId>(e, NetId{id});
+            // Its own player, with physics here to walk it: predicted. Without physics, a proxy.
+            if (id == c.player.value && world.all_of<CharacterController>(e)) {
+                if (hasPhysics(world)) {
+                    c.predicted = e;
+                    c.proxies[id] = e;
+                    return;
+                }
+                world.remove<CharacterController>(e);
+            }
             // A moving body is simulated here and corrected by snapshots; anything else is posed by them.
             const RigidBody* rigid = world.try_get<RigidBody>(e);
             if (!(rigid && rigid->motion == MotionType::Dynamic))
@@ -547,6 +601,15 @@ namespace projv::runtime {
 
         void clientSnapshot(World& world, ClientSession& c, net::BitReader& r) {
             const uint64_t tick = r.varint();
+            if (r.boolean()) {
+                ClientSession::Ack ack;
+                ack.sequence = r.varint();
+                ack.position = net::readPosition(r, core::vec3(0.0f), 0.0001f);
+                ack.velocity = net::readVector(r, 64.0f, 20);
+                ack.waiting = r.varint();
+                if (r.failed) return;
+                if (!c.ack || ack.sequence > c.ack->sequence) c.ack = ack;
+            }
             const uint32_t count = uint32_t(r.varint());
             const std::vector<uint8_t> body = r.bytes(MAX_SNAPSHOT_BYTES * 2);
             if (r.failed || count > body.size()) return;
@@ -608,6 +671,7 @@ namespace projv::runtime {
                     w.varint(PROTOCOL_VERSION);
                     w.bits(c.sceneHash, 64);
                     w.bytes(text(c.config.name));
+                    w.boolean(hasPhysics(world));   // it predicts its own player: the ack is enough of it
                     c.transport->send(c.server, net::Channel::Reliable, w.data());
                     continue;
                 }
@@ -727,9 +791,48 @@ namespace projv::runtime {
             c.changes.erase(c.changes.begin(), c.changes.begin() + long(done));
         }
 
+        // The newest ack against what was predicted for that input: if they differ, back to the
+        // server's, and every input since run again, the character alone.
+        void reconcile(World& world, ClientSession& c, float dt) {
+            if (!c.ack) return;
+            const ClientSession::Ack ack = *c.ack;
+            c.ack.reset();
+            // Keep the server's queue about two inputs long: run a little faster or slower.
+            c.clockScale = std::clamp(1.0f + 0.02f * (2.0f - float(ack.waiting)), 0.95f, 1.05f);
+            const PhysicsCharacter* character = world.valid(c.predicted) ? world.try_get<PhysicsCharacter>(c.predicted) : nullptr;
+            if (!character) return;
+            auto at = std::find_if(c.history.begin(), c.history.end(), [&](const auto& p) { return p.sequence == ack.sequence; });
+            if (at == c.history.end()) return;
+            const float off = glm::distance(at->position, ack.position);
+            const bool differs = off > 0.001f || glm::distance(at->velocity, ack.velocity) > 0.01f;
+            if (differs) {
+                PhysicsWorld& sim = physicsWorld(world);
+                sim.restoreCharacter(character->id, at->state);
+                sim.setCharacterPosition(character->id, ack.position);
+                sim.setCharacterVelocity(character->id, ack.velocity);
+                for (auto later = at + 1; later != c.history.end(); ++later) {
+                    sim.setCharacterInput(character->id, later->move, later->jump);
+                    sim.stepCharacterAlone(character->id, dt);
+                    later->state = sim.saveCharacter(character->id);
+                    later->position = sim.characterState(character->id).position;
+                    later->velocity = sim.characterState(character->id).velocity;
+                }
+                PhysicsCharacter& shown = world.get<PhysicsCharacter>(c.predicted);
+                const core::vec3 now = sim.characterState(character->id).position;
+                shown.previousPosition += now - shown.position;
+                shown.position = now;
+                c.reconciliations++;
+                c.largestCorrection = std::max(c.largestCorrection, off);
+            }
+            c.history.erase(c.history.begin(), at + 1);
+        }
+
         void clientSendInput(Application& app) {
             ClientSession& c = *clientOf(app.world);
             if (!c.welcomed) return;
+            reconcile(app.world, c, app.time().fixedDelta);
+            app.time().scale = c.clockScale;
+            if (world_valid_predicted(app.world, c)) setCharacterInput(app.world, c.predicted, c.move, c.jumpPending);
             c.recent.push_back({++c.sequence, c.move, c.jumpPending});
             c.jumpPending = false;
             if (c.recent.size() > INPUT_REDUNDANCY) c.recent.erase(c.recent.begin());
@@ -742,6 +845,20 @@ namespace projv::runtime {
                 w.boolean(it->jump);
             }
             c.transport->send(c.server, net::Channel::Unreliable, w.data());
+        }
+
+        // After the step: what this step's input left the predicted player as.
+        void clientRecordPrediction(Application& app) {
+            World& world = app.world;
+            ClientSession& c = *clientOf(world);
+            if (!c.welcomed || c.recent.empty()) return;
+            const PhysicsCharacter* character = world.valid(c.predicted) ? world.try_get<PhysicsCharacter>(c.predicted) : nullptr;
+            if (!character) return;
+            const PhysicsWorld& sim = physicsWorld(world);
+            const auto& input = c.recent.back();
+            const CharacterState state = sim.characterState(character->id);
+            c.history.push_back({input.sequence, input.move, input.jump, sim.saveCharacter(character->id), state.position, state.velocity});
+            if (c.history.size() > 240) c.history.erase(c.history.begin());
         }
 
         // Each proxy between the two poses around `interpolationDelay` behind the newest snapshot.
@@ -870,7 +987,8 @@ namespace projv::runtime {
             return false;
         }
         app.addSystem(Stage::PreUpdate, "net: receive", clientReceive);
-        app.addSystem(Stage::FixedUpdate, "net: input", clientSendInput);
+        app.addSystem(Stage::FixedUpdate, "net: input", clientSendInput, {.before = "physics", .after = ""});
+        app.addSystem(Stage::FixedUpdate, "net: predicted", clientRecordPrediction, {.before = "", .after = "physics"});
         app.addSystem(Stage::FixedUpdate, "net: world", clientApplyWorld, {.before = "physics", .after = ""});
         app.addSystem(Stage::PostUpdate, "net: present", clientPresent, {.before = "scene bridge", .after = ""});
         return true;
@@ -902,6 +1020,9 @@ namespace projv::runtime {
             out.worldChanges = c->applied;
             out.worldMismatches = c->mismatches;
             out.corrections = c->corrections;
+            out.reconciliations = c->reconciliations;
+            out.largestCorrection = c->largestCorrection;
+            out.predicting = c->predicted != NullEntity;
         }
         return out;
     }

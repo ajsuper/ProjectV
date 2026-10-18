@@ -2223,6 +2223,8 @@ namespace projv::runtime {
         app.addSystem(Stage::PostUpdate, "physics: present", present, {.before = "scene bridge"});
     }
 
+    bool hasPhysics(const World& world) { return world.ctx().contains<PhysicsRuntime>(); }
+
     PhysicsWorld& physicsWorld(World& world) { return *runtimeOf(world).world; }
     const PhysicsWorld& physicsWorld(const World& world) { return *world.ctx().get<PhysicsRuntime>().world; }
 

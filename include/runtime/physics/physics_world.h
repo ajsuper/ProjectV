@@ -622,6 +622,8 @@ namespace projv::runtime {
         void setCharacterInput(CharacterId id, core::vec3 horizontal, bool jump, float jumpSpeed = 5.0f);
         // Places it; velocity kept.
         void setCharacterPosition(CharacterId id, core::vec3 feet);
+        // Its velocity, as a server's correction says (prediction, N5). Logged.
+        void setCharacterVelocity(CharacterId id, core::vec3 velocity);
         // CharacterDesc::filter, for it and its inner body, from the next step.
         void setCharacterFilter(CharacterId id, const CollisionFilter& filter);
         CharacterState characterState(CharacterId id) const;

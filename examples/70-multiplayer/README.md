@@ -13,8 +13,8 @@ cd build/examples/mp_client && ./mp_client --name bo    # and another
 W/S/A/D walk, Space jumps, the mouse turns the camera (Esc releases it, a click recaptures). Other
 machines: `--host <address>`; another port: `--port` on both.
 
-There's no prediction yet (networking plan, N5). Your own player answers a round trip late; on
-localhost you won't notice.
+Your own player moves the moment you press a key. The client walks it too, and the server puts it
+right when the two differ (prediction).
 
 ## How it is built
 

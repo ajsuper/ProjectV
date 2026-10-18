@@ -530,13 +530,13 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 12;   // 12: body states asleep; 11: body states, characters alone; 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body (written as 8 by mistake until 10); 10: frozen bodies
+        constexpr uint32_t LOG_VERSION = 13;   // 13: character velocity; 12: body states asleep; 11: body states, characters alone; 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body (written as 8 by mistake until 10); 10: frozen bodies
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
             Gravity, Step, Restore, CreateCharacter, DestroyCharacter, CharacterInput, CharacterPosition,
             CreateJoint, DestroyJoint, JointMotor, SetMaterial, SetFilter, CharacterFilter, ReportContacts, Freeze,
-            SetState, CharacterRestore, CharacterAlone
+            SetState, CharacterRestore, CharacterAlone, CharacterVelocity
         };
 
         void writeSettings(std::vector<uint8_t>& out, const PhysicsSettings& s) {
@@ -1203,6 +1203,13 @@ namespace projv::runtime {
         Impl::Character* c = impl->character(id);
         if (!c || !finite(feet)) return;
         c->controller->SetPosition(toJoltR(feet));
+    }
+
+    void PhysicsWorld::setCharacterVelocity(CharacterId id, core::vec3 velocity) {
+        if (impl->recording) { impl->op(Op::CharacterVelocity); put(impl->log, id.value); put(impl->log, velocity); }
+        Impl::Character* c = impl->character(id);
+        if (!c || !finite(velocity)) return;
+        c->controller->SetLinearVelocity(toJolt(velocity));
     }
 
     void PhysicsWorld::setCharacterFilter(CharacterId id, const CollisionFilter& filter) {
@@ -2885,6 +2892,10 @@ namespace projv::runtime {
                     world.restoreCharacter(CharacterId{id}, state);
                     break;
                 }
+                case Op::CharacterVelocity:
+                    if (!get(in, at, id) || !get(in, at, a)) return truncated();
+                    world.setCharacterVelocity(CharacterId{id}, a);
+                    break;
                 case Op::CharacterAlone:
                     if (!get(in, at, id) || !get(in, at, dt)) return truncated();
                     world.stepCharacterAlone(CharacterId{id}, dt);

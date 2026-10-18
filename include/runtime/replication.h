@@ -54,7 +54,17 @@
 //   (SessionStats::worldMismatches). A client needs physics installed to apply them, and should not
 //   install policy that changes voxels itself (impact fracture): that is the server's.
 //
-// No prediction yet (N5): a client's own player is a proxy too. Main thread only.
+// - **Prediction** (N5). A client with physics walks its own player itself: it is sent that entity
+//   whole (Replicated::omit is for everyone else), applies each fixed step's input at once, and keeps
+//   what each input left the character as. The server applies one input a step, in order (one lost
+//   is skipped; none waiting repeats the last), and in each snapshot to the owner acks the last input
+//   applied with the character's position and velocity after it. A client whose prediction differs
+//   (1 mm, 1 cm/s) goes back to the server's at that input and runs every input since again, the
+//   character alone (PhysicsWorld::stepCharacterAlone: it pushes nothing twice). It runs its clock up
+//   to 5% fast or slow to keep about two inputs waiting at the server. A client without physics
+//   shows its own player as a proxy, a round trip late.
+//
+// Main thread only.
 namespace projv {
     // On the server: send this entity to every client.
     struct Replicated {
@@ -131,6 +141,9 @@ namespace projv::runtime {
         uint64_t worldChanges = 0;           // a client's: edits and splits applied
         uint64_t worldMismatches = 0;        // a client's: changed voxels not the server's after them
         uint64_t corrections = 0;            // a client's: its bodies set to the server's state
+        bool     predicting = false;         // a client's: walking its own player itself
+        uint64_t reconciliations = 0;        // a client's: times its prediction was put right
+        float    largestCorrection = 0.0f;   // a client's: the furthest it was put right, m
         uint64_t snapshotBytes = 0;          // a server's: the most snapshot bytes sent to one client
     };
     SessionStats sessionStats(const World& world);

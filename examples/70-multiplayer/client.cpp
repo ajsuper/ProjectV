@@ -1,8 +1,8 @@
 // ProjectV Multiplayer: a client
 //
 // Connects to an mp_server, shows the arena and every player in it, and sends what you do with your
-// own. Nothing here moves anything: the server walks every player, this draws where it says they
-// are (runtime/replication.h). No prediction yet, so your own player answers a round trip late.
+// own. The server walks every player; this one walks yours too, at once, and is put right when the
+// two differ (prediction, runtime/replication.h). Everyone else is drawn where the server says.
 //
 //   ./mp_client                          connect to 127.0.0.1:27015, in a window
 //   ./mp_client --host 10.0.0.5 --port 27100 --name ann
@@ -37,7 +37,9 @@
 #include "graphics/render_instance.h"
 #include "graphics/disk_io.h"
 #include "net/transport.h"
+#include "runtime/entities.h"
 #include "runtime/net.h"
+#include "runtime/physics.h"
 #include "runtime/replication.h"
 #include "runtime/scene_bridge.h"
 
@@ -120,9 +122,12 @@ namespace {
             if (!fresh) watch.moved = std::max(watch.moved, glm::distance(it->second, t.position));
         }
         if (options.seconds <= 0.0 || watch.clock < options.seconds) return;
-        std::printf("MPTEST: %s: %s as client %u, sees %zu players, another moved %.2f m, own player at (%.2f, %.2f)\n",
+        if (stats.predicting) players++;   // its own player: walked here, not a proxy
+        std::printf("MPTEST: %s: %s as client %u, sees %zu players, another moved %.2f m, own player at (%.2f, %.2f), "
+                    "predicting %s, largest correction %.3f m\n",
                     options.name.c_str(), stats.connected ? "joined" : "not joined", unsigned(stats.you), players,
-                    watch.moved, ownPosition(app.world).x, ownPosition(app.world).z);
+                    watch.moved, ownPosition(app.world).x, ownPosition(app.world).z, stats.predicting ? "yes" : "no",
+                    stats.largestCorrection);
         bool ok = stats.connected;
         if (options.expectPlayers >= 0 && int(players) != options.expectPlayers) ok = false;
         if (options.expectMoved && watch.moved < 3.0f) ok = false;
@@ -144,6 +149,11 @@ namespace {
         }
         const std::string folder = (here / arena::FOLDER).string();
         auto& scene = app.world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk(folder));
+        // Physics here too: the client walks its own player at once (prediction), and the server
+        // puts it right when they differ.
+        projv::runtime::installSceneBridge(app);
+        projv::runtime::installPhysics(app);
+        projv::runtime::spawnEntities(app.world);
 
         projv::runtime::ClientConfig config;
         config.host = options.host;

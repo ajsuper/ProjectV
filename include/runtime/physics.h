@@ -397,6 +397,8 @@ namespace projv::runtime {
     // at a tick boundary, and a replay will not see it.
     PhysicsWorld&       physicsWorld(World& world);
     const PhysicsWorld& physicsWorld(const World& world);
+    // Whether installPhysics has run on this world.
+    bool hasPhysics(const World& world);
 
     // ---- Physics materials ---------------------------------------------------------------------------
     // The project's library: named materials (stone, wood, ice) that palette entries
