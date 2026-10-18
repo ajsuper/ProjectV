@@ -3,26 +3,645 @@
     {
       "id": 1,
       "mutability": "locked",
-      "name": "floor",
+      "name": "ground",
       "palette": [
         {
           "color": [1023, 1023, 1023],
           "name": "default"
         },
         {
-          "color": [307, 327, 358]
+          "color": [213, 376, 147]
         },
         {
-          "color": [430, 450, 481]
+          "color": [231, 408, 160]
         },
         {
-          "color": [767, 563, 307]
+          "color": [248, 439, 172]
+        },
+        {
+          "color": [266, 471, 184]
+        },
+        {
+          "color": [458, 363, 239]
+        },
+        {
+          "color": [491, 389, 256]
+        },
+        {
+          "color": [393, 311, 205]
+        },
+        {
+          "color": [426, 337, 222]
         }
       ],
-      "position": [-16.0, -1.0, -16.0],
+      "position": [-32.0, -0.5, -32.0],
       "rotation": [0.0, 0.0, 0.0, 1.0],
       "scale": 1.0,
-      "source": "floor.data",
+      "source": "ground.data",
+      "type": "data"
+    },
+    {
+      "id": 2,
+      "mutability": "locked",
+      "name": "tower",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [436, 419, 394],
+          "physics": "stone"
+        },
+        {
+          "color": [468, 450, 423],
+          "physics": "stone"
+        },
+        {
+          "color": [500, 481, 452],
+          "physics": "stone"
+        },
+        {
+          "color": [532, 512, 481],
+          "physics": "stone"
+        },
+        {
+          "color": [634, 614, 573],
+          "physics": "stone"
+        },
+        {
+          "color": [596, 577, 539],
+          "physics": "stone"
+        },
+        {
+          "color": [558, 540, 504],
+          "physics": "stone"
+        },
+        {
+          "color": [520, 503, 470],
+          "physics": "stone"
+        }
+      ],
+      "position": [12.0, 0.0, 10.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tower.data",
+      "type": "data"
+    },
+    {
+      "id": 3,
+      "mutability": "locked",
+      "name": "wall",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [737, 716, 655],
+          "physics": "mortar"
+        },
+        {
+          "color": [491, 205, 143],
+          "physics": "brick"
+        },
+        {
+          "color": [573, 235, 153],
+          "physics": "brick"
+        },
+        {
+          "color": [655, 297, 184],
+          "physics": "brick"
+        }
+      ],
+      "position": [-17.0, 0.0, 9.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "wall.data",
+      "type": "data"
+    },
+    {
+      "id": 4,
+      "mutability": "locked",
+      "name": "house",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [696, 307, 194],
+          "physics": "tile"
+        },
+        {
+          "color": [634, 256, 164],
+          "physics": "tile"
+        },
+        {
+          "color": [512, 184, 123],
+          "physics": "tile"
+        },
+        {
+          "color": [589, 442, 285],
+          "physics": "planks"
+        },
+        {
+          "color": [614, 460, 297],
+          "physics": "planks"
+        },
+        {
+          "color": [540, 405, 261],
+          "physics": "planks"
+        },
+        {
+          "color": [565, 424, 273],
+          "physics": "planks"
+        },
+        {
+          "color": [368, 246, 143],
+          "physics": "timber"
+        },
+        {
+          "color": [621, 471, 301],
+          "physics": "planks"
+        },
+        {
+          "color": [594, 450, 288],
+          "physics": "planks"
+        },
+        {
+          "color": [675, 512, 327],
+          "physics": "planks"
+        },
+        {
+          "color": [648, 491, 314],
+          "physics": "planks"
+        }
+      ],
+      "position": [-24.0, 0.0, -24.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "house.data",
+      "type": "data"
+    },
+    {
+      "id": 5,
+      "mutability": "locked",
+      "name": "tree0",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        }
+      ],
+      "position": [17.5, 0.0, -20.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree0.data",
+      "type": "data"
+    },
+    {
+      "id": 6,
+      "mutability": "locked",
+      "name": "tree1",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        }
+      ],
+      "position": [1.5, 0.0, -26.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree1.data",
+      "type": "data"
+    },
+    {
+      "id": 7,
+      "mutability": "locked",
+      "name": "tree2",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        }
+      ],
+      "position": [-28.5, 0.0, 17.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree2.data",
+      "type": "data"
+    },
+    {
+      "id": 8,
+      "mutability": "locked",
+      "name": "tree3",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        }
+      ],
+      "position": [21.5, 0.0, 21.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree3.data",
+      "type": "data"
+    },
+    {
+      "id": 9,
+      "mutability": "locked",
+      "name": "tree4",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        }
+      ],
+      "position": [-6.5, 0.0, 19.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree4.data",
+      "type": "data"
+    },
+    {
+      "id": 10,
+      "mutability": "locked",
+      "name": "crate0",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [430, 286, 164],
+          "physics": "planks"
+        },
+        {
+          "color": [696, 532, 327],
+          "physics": "planks"
+        },
+        {
+          "color": [757, 593, 368],
+          "physics": "planks"
+        }
+      ],
+      "position": [4.0, 0.0, -10.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "crate0.data",
+      "type": "data"
+    },
+    {
+      "id": 11,
+      "mutability": "locked",
+      "name": "crate1",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [430, 286, 164],
+          "physics": "planks"
+        },
+        {
+          "color": [696, 532, 327],
+          "physics": "planks"
+        },
+        {
+          "color": [757, 593, 368],
+          "physics": "planks"
+        }
+      ],
+      "position": [5.019999980926514, 0.0, -10.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "crate1.data",
+      "type": "data"
+    },
+    {
+      "id": 12,
+      "mutability": "locked",
+      "name": "crate2",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [430, 286, 164],
+          "physics": "planks"
+        },
+        {
+          "color": [696, 532, 327],
+          "physics": "planks"
+        },
+        {
+          "color": [757, 593, 368],
+          "physics": "planks"
+        }
+      ],
+      "position": [6.039999961853027, 0.0, -10.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "crate2.data",
+      "type": "data"
+    },
+    {
+      "id": 13,
+      "mutability": "locked",
+      "name": "crate3",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [430, 286, 164],
+          "physics": "planks"
+        },
+        {
+          "color": [696, 532, 327],
+          "physics": "planks"
+        },
+        {
+          "color": [757, 593, 368],
+          "physics": "planks"
+        }
+      ],
+      "position": [4.510000228881836, 1.0, -10.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "crate3.data",
+      "type": "data"
+    },
+    {
+      "id": 14,
+      "mutability": "locked",
+      "name": "crate4",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [430, 286, 164],
+          "physics": "planks"
+        },
+        {
+          "color": [696, 532, 327],
+          "physics": "planks"
+        },
+        {
+          "color": [757, 593, 368],
+          "physics": "planks"
+        }
+      ],
+      "position": [5.529999732971191, 1.0, -10.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "crate4.data",
+      "type": "data"
+    },
+    {
+      "id": 15,
+      "mutability": "locked",
+      "name": "crate5",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [430, 286, 164],
+          "physics": "planks"
+        },
+        {
+          "color": [696, 532, 327],
+          "physics": "planks"
+        },
+        {
+          "color": [757, 593, 368],
+          "physics": "planks"
+        }
+      ],
+      "position": [5.019999980926514, 2.0, -10.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "crate5.data",
+      "type": "data"
+    },
+    {
+      "id": 16,
+      "mutability": "locked",
+      "name": "stack0",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [430, 286, 164],
+          "physics": "planks"
+        },
+        {
+          "color": [696, 532, 327],
+          "physics": "planks"
+        },
+        {
+          "color": [757, 593, 368],
+          "physics": "planks"
+        }
+      ],
+      "position": [-6.0, 0.0, -6.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "stack0.data",
+      "type": "data"
+    },
+    {
+      "id": 17,
+      "mutability": "locked",
+      "name": "stack1",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [430, 286, 164],
+          "physics": "planks"
+        },
+        {
+          "color": [696, 532, 327],
+          "physics": "planks"
+        },
+        {
+          "color": [757, 593, 368],
+          "physics": "planks"
+        }
+      ],
+      "position": [-6.0, 1.0, -6.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "stack1.data",
+      "type": "data"
+    },
+    {
+      "id": 18,
+      "mutability": "locked",
+      "name": "stack2",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [430, 286, 164],
+          "physics": "planks"
+        },
+        {
+          "color": [696, 532, 327],
+          "physics": "planks"
+        },
+        {
+          "color": [757, 593, 368],
+          "physics": "planks"
+        }
+      ],
+      "position": [-6.0, 2.0, -6.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "stack2.data",
+      "type": "data"
+    },
+    {
+      "id": 19,
+      "mutability": "locked",
+      "name": "stack3",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [430, 286, 164],
+          "physics": "planks"
+        },
+        {
+          "color": [696, 532, 327],
+          "physics": "planks"
+        },
+        {
+          "color": [757, 593, 368],
+          "physics": "planks"
+        }
+      ],
+      "position": [-6.0, 3.0, -6.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "stack3.data",
       "type": "data"
     }
   ],

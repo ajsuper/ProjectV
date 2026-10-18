@@ -398,6 +398,21 @@ world-loading plan (W2-W4). On top of those:
   relevance judges every block for every client every 10 frames -- 400 blocks x 100 clients cost
   nothing measurable here, a spatial index is the step when worlds are larger.
 
+## The demo made a game (2026-10-18)
+
+- `runtime::sendToServer(world, bytes, reliable)` and `ServerConfig::onMessage`: game messages from a
+  client, whose meaning and checking are the game's (the one channel N6's draft named).
+- `70-multiplayer` became something to play: an arena of models (tower, wall, house, trees, crates)
+  of breakable materials, iron balls thrown on a left click, blasts on a right, impact fracture on
+  the server, and a renderer with sun shadows (two rays through one march call). The self-test now
+  throws at the tower: both clients apply the same 12 changes, none differing from the server's.
+- Found: snapshot entries were copied into each client's packet a bit at a time. With 100 clients
+  in the busier arena that pushed server frames to 19 ms; entries are now byte-aligned and copied
+  whole (`BitWriter::align`/`raw`, `BitReader::align`), and frames' worst is 12 ms. mp_server now
+  logs simulation steps apart from frames (steps: 1.3 ms average, 2.7 ms worst at 100 clients).
+- Found, in the example: a hash helper multiplying signed ints overflowed, and the optimiser turned
+  the loop calling it into one that never ended (then ran out of memory). Unsigned now.
+
 ## Milestones
 
 | # | What | Done when |

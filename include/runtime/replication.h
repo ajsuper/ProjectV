@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <span>
 #include <memory>
 #include <string>
 #include <vector>
@@ -102,6 +103,9 @@ namespace projv::runtime {
         // What each client has (N6): the world-loading rule, run here for each client with its player
         // as the viewer. Default: everything.
         utils::LoadPolicy loadRule;
+        // A client's game message (sendToServer): what it means is the game's to say, and to check --
+        // it comes from a machine the server does not trust.
+        std::function<void(World&, ClientId, Entity player, std::span<const uint8_t> message)> onMessage;
         // What a client's input does; default: setCharacterInput on its player.
         std::function<void(World&, ClientId, Entity player, core::vec3 move, bool jump)> applyInput;
     };
@@ -130,6 +134,10 @@ namespace projv::runtime {
     // The rule every client is judged by, or one client's own (an empty rule: back to everyone's).
     void setClientLoadRule(World& world, utils::LoadPolicy policy);
     void setClientLoadRule(World& world, ClientId client, utils::LoadPolicy policy);
+
+    // A message for the server's game (ServerConfig::onMessage): fire, use, build. Reliable, in order,
+    // unless asked otherwise. At most 64 KB. Dropped before the client is welcomed.
+    void sendToServer(World& world, std::span<const uint8_t> message, bool reliable = true);
 
     // The client's input for its player, sent from the next fixed step on, until changed.
     void setLocalInput(World& world, core::vec3 move, bool jump = false);

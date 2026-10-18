@@ -17,7 +17,7 @@ sleep 1
 grep -h "BOTS:" "$logs/bots.log"
 # The server's last seconds with every bot in.
 grep "MPSERVER: $count client" "$logs/server.log" | tail -5 | sed 's/ player .*//'
-worst=$(grep "MPSERVER: $count client" "$logs/server.log" | tail -10 | sed -E 's/.* ([0-9.]+) ms worst.*/\1/' | sort -g | tail -1)
+worst=$(grep "MPSERVER: $count client" "$logs/server.log" | tail -10 | sed -E 's/.*frames [0-9.]+ ms average ([0-9.]+) ms worst.*/\1/' | sort -g | tail -1)
 echo "SCALE: worst server frame with $count clients: ${worst:-none} ms"
 if [ $bots -eq 0 ] && [ -n "${worst:-}" ] && awk "BEGIN{exit !($worst < 16.7)}"; then
     echo "SCALE: PASS"; exit 0

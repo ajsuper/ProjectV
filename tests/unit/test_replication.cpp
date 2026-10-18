@@ -741,3 +741,33 @@ TEST_CASE("scale: forty clients in one process each get everyone, within their b
     }
     for (auto& b : bots) CHECK(proxies(*b) == 40);
 }
+
+TEST_CASE("replication: a client's game messages reach the server's game, in order, from that client") {
+    TempDir dir("replication_messages");
+    writeArena(dir.path);
+    net::LoopbackNetwork network(16);
+    network.setConditions({0.03, 0.01, 0.1});
+    auto s = std::make_unique<Machine>();
+    s->loadScene(dir.path);
+    installWorld(s->app);
+    runtime::ServerConfig config;
+    config.sceneFolder = dir.path.string();
+    std::vector<std::pair<runtime::ClientId, std::vector<uint8_t>>> heard;
+    config.onMessage = [&](projv::World&, runtime::ClientId from, Entity, std::span<const uint8_t> message) {
+        heard.push_back({from, std::vector<uint8_t>(message.begin(), message.end())});
+    };
+    REQUIRE(runtime::installServer(s->app, network.endpoint(), config));
+    s->app.runStartup();
+    s->app.runFrame();
+    auto a = client(network, dir.path, "ann");
+    const std::vector<uint8_t> early{9};
+    runtime::sendToServer(a->app.world, early);   // before the welcome: dropped
+    run(network, {s.get(), a.get()}, 1.0);
+    for (uint8_t i = 0; i < 20; i++) runtime::sendToServer(a->app.world, std::vector<uint8_t>{i, uint8_t(i * 2)});
+    run(network, {s.get(), a.get()}, 1.5);
+    REQUIRE(heard.size() == 20);   // reliable: every one, through 10% loss
+    for (uint8_t i = 0; i < 20; i++) {
+        CHECK(heard[i].first == a->joined[0].you);
+        CHECK(heard[i].second == std::vector<uint8_t>{i, uint8_t(i * 2)});
+    }
+}

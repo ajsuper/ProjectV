@@ -12,9 +12,11 @@
 //       --seconds 8       then quit, after checking:
 //       --expect-players 2    seeing this many players
 //       --expect-moved        another player moved more than 3 m while watched
+//       --throw 3 --aim 15,4,10   throw three balls at that point, then blast it
+//       --expect-breaks       something broke, and every break matched the server's
 //
 // Controls (windowed): W/S/A/D walk, Space jumps, the mouse turns the camera (Esc releases it, a
-// click recaptures).
+// click recaptures). Left click throws an iron ball; right click blasts what the crosshair is on.
 
 #include <algorithm>
 #include <chrono>
@@ -37,6 +39,7 @@
 #include "graphics/render_instance.h"
 #include "graphics/disk_io.h"
 #include "net/transport.h"
+#include "net/wire.h"
 #include "runtime/entities.h"
 #include "runtime/net.h"
 #include "runtime/physics.h"
@@ -56,6 +59,9 @@ namespace {
         double      seconds = 0.0;
         int         expectPlayers = -1;
         bool        expectMoved = false;
+        int         throws = 0;            // headless: balls to throw at `aim`, then a blast there
+        vec3        aim{0.0f};
+        bool        expectBreaks = false;  // something broke here, and every break was the server's
     };
 
     struct Camera {
@@ -64,7 +70,8 @@ namespace {
 
     // What a headless client saw, for its checks.
     struct Watch {
-        double joinedAt = -1.0, clock = 0.0;
+        double joinedAt = -1.0, clock = 0.0, lastShot = 0.0;
+        int    shots = 0;
         std::map<uint32_t, vec3> firstSeen;
         float moved = 0.0f;
         bool  failed = false;
@@ -79,6 +86,15 @@ namespace {
         return world.get<projv::Transform>(me).position;
     }
 
+    // Asks the server to throw (kind 1) or blast (kind 2) from `from` along `aim`.
+    void ask(projv::World& world, int kind, vec3 from, vec3 aim) {
+        projv::net::BitWriter w;
+        w.bits(uint64_t(kind), 8);
+        for (int i = 0; i < 3; i++) w.f32(from[i]);
+        for (int i = 0; i < 3; i++) w.f32(aim[i]);
+        projv::runtime::sendToServer(world, w.data());
+    }
+
     void playSystem(projv::Application& app) {
         auto& camera = app.world.ctx().get<Camera>();
         auto& watch = app.world.ctx().get<Watch>();
@@ -89,6 +105,14 @@ namespace {
         if (options.headless) {
             const bool walking = joined && watch.clock - watch.joinedAt < options.walkSeconds;
             projv::runtime::setLocalInput(app.world, walking ? options.walk : vec3(0.0f));
+            // A second after joining, a shot every half second at the target: balls, then a blast.
+            if (joined && watch.shots <= options.throws && options.throws > 0 && watch.clock - watch.joinedAt > 1.0 &&
+                watch.clock - watch.lastShot > 0.5) {
+                const vec3 from = ownPosition(app.world) + vec3(0.0f, 1.4f, 0.0f);
+                ask(app.world, watch.shots < options.throws ? 1 : 2, from, glm::normalize(options.aim - from));
+                watch.shots++;
+                watch.lastShot = watch.clock;
+            }
             return;
         }
         auto& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
@@ -108,6 +132,21 @@ namespace {
         if (input.down(projv::Key::A)) move -= right;
         if (glm::length(move) > 0.0f) move = glm::normalize(move) * 4.0f;
         projv::runtime::setLocalInput(app.world, move, input.pressed(projv::Key::Space));
+
+        // Left click throws a ball, right click blasts what the crosshair is on: asked of the server,
+        // which decides. Aimed from the camera, through the crosshair.
+        const bool throwing = input.cursorCaptured && input.pressed(projv::MouseButton::Left);
+        const bool blasting = input.cursorCaptured && input.pressed(projv::MouseButton::Right);
+        if (throwing || blasting) {
+            const vec3 direction{std::cos(camera.pitch) * std::cos(camera.yaw), std::sin(camera.pitch),
+                                 std::cos(camera.pitch) * std::sin(camera.yaw)};
+            const vec3 eye = ownPosition(app.world) + vec3(0.0f, 1.6f, 0.0f) - direction * 7.0f;
+            // From in front of the player, not from the camera behind it: the server checks the eye
+            // is near the player.
+            const vec3 from = ownPosition(app.world) + vec3(0.0f, 1.4f, 0.0f);
+            const vec3 target = eye + direction * 60.0f;
+            ask(app.world, throwing ? 1 : 2, throwing ? from : eye, throwing ? glm::normalize(target - from) : direction);
+        }
     }
 
     // Headless: note how far the other players went, and finish on time.
@@ -131,6 +170,9 @@ namespace {
         bool ok = stats.connected;
         if (options.expectPlayers >= 0 && int(players) != options.expectPlayers) ok = false;
         if (options.expectMoved && watch.moved < 3.0f) ok = false;
+        if (options.expectBreaks && (stats.worldChanges == 0 || stats.worldMismatches != 0)) ok = false;
+        std::printf("MPTEST: %s: world changes %llu, mismatches %llu\n", options.name.c_str(),
+                    (unsigned long long)stats.worldChanges, (unsigned long long)stats.worldMismatches);
         std::printf("MPTEST: %s: %s\n", options.name.c_str(), ok ? "PASS" : "FAIL");
         std::fflush(stdout);
         exitCode = ok ? 0 : 1;
@@ -153,6 +195,7 @@ namespace {
         // puts it right when they differ.
         projv::runtime::installSceneBridge(app);
         projv::runtime::installPhysics(app);
+        projv::runtime::loadPhysicsMaterials(app.world, (std::filesystem::path(folder) / arena::MATERIALS).string());
         projv::runtime::spawnEntities(app.world);
 
         projv::runtime::ClientConfig config;
@@ -229,6 +272,13 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--seconds")) options.seconds = std::atof(next());
         else if (!std::strcmp(argv[i], "--expect-players")) options.expectPlayers = std::atoi(next());
         else if (!std::strcmp(argv[i], "--expect-moved")) options.expectMoved = true;
+        else if (!std::strcmp(argv[i], "--throw")) options.throws = std::atoi(next());
+        else if (!std::strcmp(argv[i], "--aim")) {
+            float x = 0, y = 0, z = 0;
+            std::sscanf(next(), "%f,%f,%f", &x, &y, &z);
+            options.aim = vec3(x, y, z);
+        }
+        else if (!std::strcmp(argv[i], "--expect-breaks")) options.expectBreaks = true;
     }
 
     projv::Application app;

@@ -28,6 +28,14 @@ namespace projv::net {
         void quantized(float value, float min, float max, uint32_t count);
 
         size_t bitCount() const { return bitsWritten; }
+        // Pads with zeros to a whole byte, so what follows can be copied a byte at a time.
+        void align() { bitsWritten = (bitsWritten + 7) / 8 * 8; }
+        // Bytes as they are, appended after aligning: a pre-built, byte-aligned piece.
+        void raw(std::span<const uint8_t> data) {
+            align();
+            out.insert(out.end(), data.begin(), data.end());
+            bitsWritten += data.size() * 8;
+        }
         // The bytes, the last one padded with zeros.
         const std::vector<uint8_t>& data() const { return out; }
         std::vector<uint8_t> take() { return std::move(out); }
@@ -48,6 +56,8 @@ namespace projv::net {
         // Fails (and returns nothing) past `maxLength` bytes.
         std::vector<uint8_t> bytes(size_t maxLength);
         float    quantized(float min, float max, uint32_t count);
+        // Skips to the next whole byte (what BitWriter::align wrote).
+        void     align() { at = (at + 7) / 8 * 8; }
 
         bool   failed = false;   // read past the end, or a value past a limit
         size_t bitsLeft() const { return in.size() * 8 - std::min(at, in.size() * 8); }

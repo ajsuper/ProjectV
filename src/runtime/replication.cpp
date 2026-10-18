@@ -25,7 +25,7 @@
 namespace projv::runtime {
     namespace {
         enum class Message : uint8_t { Hello = 1, Welcome, Refuse, Spawn, Despawn, Snapshot, Input, Split, Edit, Check,
-                                       BlockPresence, BlockContent };
+                                       BlockPresence, BlockContent, Game };
 
         constexpr size_t   MAX_TEXT = 1u << 16;         // a name, a reason, a prefab path
         constexpr size_t   MAX_COMPONENTS = 1u << 20;   // an entity's components, as JSON
@@ -528,6 +528,10 @@ namespace projv::runtime {
                         const auto kind = Message(r.varint());
                         if (kind == Message::Hello && e.channel == net::Channel::Reliable) serverHello(world, s, e.peer, r);
                         else if (kind == Message::Input && it->second.welcomed) serverInput(it->second, r);
+                        else if (kind == Message::Game && it->second.welcomed && s.config.onMessage) {
+                            const std::vector<uint8_t> body = r.bytes(MAX_TEXT);
+                            if (!r.failed) s.config.onMessage(world, it->second.id, it->second.player, body);
+                        }
                         break;
                     }
                 }
@@ -640,6 +644,7 @@ namespace projv::runtime {
                         net::writeVector(w, state.angularVelocity, 32.0f, 12);
                         weight = state.awake ? 1.0f + 0.5f * glm::length(state.linearVelocity) : 5.0f;
                     }
+                    w.align();   // whole bytes: copied into every client's packet at once
                     entries.push_back({id, weight, moving && !state.awake, w.data(), w.bitCount()});
                 }
                 const size_t budget = std::max<size_t>(64, size_t(float(s.config.bytesPerSecond) / std::max(s.config.snapshotRate, 0.1f)));
@@ -681,8 +686,7 @@ namespace projv::runtime {
                             const Entry& entry = *order[next].second;
                             if (body.data().size() + entry.bits.size() > MAX_SNAPSHOT_BYTES - 32) break;
                             if (spent + body.data().size() + entry.bits.size() > budget) break;
-                            for (size_t bit = 0; bit < entry.bitCount; bit++)
-                                body.bits((entry.bits[bit / 8] >> (bit % 8)) & 1u, 1);
+                            body.raw(entry.bits);
                             count++;
                             client.priority[entry.id] = 0.0f;
                             if (entry.asleep) client.toldAsleep.insert(entry.id);
@@ -863,6 +867,7 @@ namespace projv::runtime {
                     linear = net::readVector(b, 64.0f, 12);
                     angular = net::readVector(b, 32.0f, 12);
                 }
+                b.align();
                 if (b.failed) return;
                 if (!std::isfinite(position.x + position.y + position.z)) continue;
                 Entity e = entityForNetId(world, NetId{id});
@@ -1329,6 +1334,15 @@ namespace projv::runtime {
             for (auto& [peer, c] : s->clients)
                 if (c.id == client) c.blocksDue = true;
         }
+    }
+
+    void sendToServer(World& world, std::span<const uint8_t> message, bool reliable) {
+        ClientSession* c = clientOf(world);
+        if (!c || !c->welcomed || message.size() > MAX_TEXT) return;
+        net::BitWriter w;
+        w.varint(uint8_t(Message::Game));
+        w.bytes(message);
+        c->transport->send(c->server, reliable ? net::Channel::Reliable : net::Channel::Unreliable, w.data());
     }
 
     void setLocalInput(World& world, core::vec3 move, bool jump) {

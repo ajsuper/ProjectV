@@ -10,8 +10,14 @@
 //   ./mp_server --write-arena <dir>  regenerate the arena this example ships
 //
 // Each second it logs who is connected and where their players are.
+//
+// The game's rules live here, because they are the server's: a client asks (sendToServer) to throw
+// a ball or to blast what it aims at, and the server decides. Breaking on impact is the server's
+// policy too (installImpactFracture); what breaks reaches every client as it happened.
 
 #include <chrono>
+#include <cmath>
+#include <span>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -22,6 +28,7 @@
 #include "core/log.h"
 #include "core/paths.h"
 #include "net/transport.h"
+#include "net/wire.h"
 #include "runtime/entities.h"
 #include "runtime/physics.h"
 #include "runtime/replication.h"
@@ -58,6 +65,8 @@ int main(int argc, char** argv) {
     app.world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk(folder));
     projv::runtime::installSceneBridge(app);
     projv::runtime::installPhysics(app);
+    projv::runtime::installImpactFracture(app);
+    projv::runtime::loadPhysicsMaterials(app.world, (std::filesystem::path(folder) / arena::MATERIALS).string());
     projv::runtime::spawnEntities(app.world);
 
     projv::runtime::ServerConfig config;
@@ -73,7 +82,52 @@ int main(int argc, char** argv) {
         world.emplace<projv::Replicated>(e, projv::Replicated{arena::AVATAR, {"physics.character"}});
         return e;
     };
+    // What players ask for: a ball thrown, or a blast where they aim. From an eye near their player,
+    // so a client cannot throw from across the map.
+    const std::string ball = (std::filesystem::path(folder) / arena::BALL).string();
+    struct Thrown { double at; };
+    double clock = 0.0;
+    config.onMessage = [ball, &clock](projv::World& world, projv::runtime::ClientId, projv::Entity player,
+                                      std::span<const uint8_t> message) {
+        projv::net::BitReader r(message);
+        const uint64_t kind = r.bits(8);
+        vec3 eye, aim;
+        for (int i = 0; i < 3; i++) eye[i] = r.f32();
+        for (int i = 0; i < 3; i++) aim[i] = r.f32();
+        if (r.failed || !std::isfinite(glm::dot(eye, eye) + glm::dot(aim, aim)) || glm::length(aim) < 0.5f) return;
+        aim = glm::normalize(aim);
+        if (!world.valid(player) || glm::distance(eye, projv::runtime::characterState(world, player).position) > 12.0f) return;
+        if (kind == 1) {
+            projv::Entity e = projv::runtime::instantiatePrefab(world, ball, eye + aim * 1.5f);
+            projv::RigidBody body;
+            body.shape = projv::RigidBody::Shape::Sphere;
+            body.material = "iron";
+            body.quality = projv::RigidBody::Quality::Continuous;
+            world.emplace<projv::RigidBody>(e, body);
+            world.emplace<projv::Replicated>(e, projv::Replicated{arena::BALL, {}});
+            world.emplace<Thrown>(e, Thrown{clock});
+            projv::runtime::setVelocity(world, e, aim * 32.0f);
+        } else if (kind == 2) {
+            auto hit = projv::runtime::castRay(world, eye, aim, 80.0f, 0xffffffffu, player);
+            if (!hit) return;
+            if (projv::runtime::canBreak(world, hit->entity)) projv::runtime::fracture(world, hit->entity, hit->position, 4.0e5f, aim * 6.0f);
+            for (projv::Entity near : projv::runtime::overlapSphere(world, hit->position, 4.0f)) {
+                if (!world.all_of<projv::RigidBody>(near)) continue;
+                const vec3 away = projv::runtime::bodyPose(world, near).position - hit->position;
+                const float d = std::max(glm::length(away), 0.5f);
+                projv::runtime::addVelocity(world, near, away / d * (8.0f / d) + vec3(0, 3, 0));
+            }
+        }
+    };
     if (!projv::runtime::installServer(app, projv::net::makeEnetTransport(), config)) return 1;
+    // Balls go after ten seconds.
+    app.addSystem(projv::Stage::Update, "balls", [&](projv::Application& a) {
+        clock += a.time().delta;
+        std::vector<projv::Entity> old;
+        for (auto [e, thrown] : a.world.view<Thrown>().each())
+            if (clock - thrown.at > 10.0) old.push_back(e);
+        for (projv::Entity e : old) a.world.destroy(e);
+    });
 
     // How long a frame's work takes (the sleep below is not work), measured from the frame's first
     // system to its last.
@@ -83,6 +137,18 @@ int main(int argc, char** argv) {
     int workFrames = 0;
     app.addSystem(projv::Stage::PreUpdate, "frame start", [&](projv::Application&) { frameStart = Clock::now(); },
                   {.before = "net: receive", .after = ""});
+    // And each simulation step on its own: a frame that catches up runs two.
+    Clock::time_point stepStart = Clock::now();
+    double stepTotal = 0.0, stepWorst = 0.0;
+    int steps = 0;
+    app.addSystem(projv::Stage::FixedUpdate, "step start", [&](projv::Application&) { stepStart = Clock::now(); },
+                  {.before = "net: input", .after = ""});
+    app.addSystem(projv::Stage::FixedUpdate, "step end", [&](projv::Application&) {
+        const double ms = std::chrono::duration<double, std::milli>(Clock::now() - stepStart).count();
+        stepTotal += ms;
+        stepWorst = std::max(stepWorst, ms);
+        steps++;
+    }, {.before = "", .after = "physics: impact fracture"});
 
     // Each second, who is here, where, and what it costs.
     double logClock = 0.0, total = 0.0;
@@ -108,12 +174,13 @@ int main(int argc, char** argv) {
             }
             const double kbps = double(sent > lastSent ? sent - lastSent : 0) / logClock / 1024.0;
             lastSent = sent;
-            projv::core::info("MPSERVER: {} client(s), frames {:.2f} ms average {:.2f} ms worst, {:.0f} KB/s out, worst round trip {:.0f} ms{}",
+            projv::core::info("MPSERVER: {} client(s), frames {:.2f} ms average {:.2f} ms worst, steps {:.2f} ms average "
+                              "{:.2f} ms worst, {:.0f} KB/s out, worst round trip {:.0f} ms{}",
                               projv::runtime::sessionStats(a.world).clients, workFrames ? workTotal / workFrames : 0.0, workWorst,
-                              kbps, worstTrip, where);
+                              steps ? stepTotal / steps : 0.0, stepWorst, kbps, worstTrip, where);
             logClock = 0.0;
-            workTotal = workWorst = 0.0;
-            workFrames = 0;
+            workTotal = workWorst = stepTotal = stepWorst = 0.0;
+            workFrames = steps = 0;
         }
         if (options.seconds > 0.0 && total >= options.seconds) a.closeRequested = true;
     });

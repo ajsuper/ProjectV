@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The multiplayer self-test: a server and two clients as separate processes over real sockets on
-# localhost, no windows. Ann walks; Bo watches her walk. Run from anywhere:
+# localhost, no windows. Ann walks, then throws balls at the tower and blasts it; Bo watches, and both
+# check every break they were sent matches the server's. Run from anywhere:
 #   examples/70-multiplayer/selftest.sh [build dir, default: build]
 set -u
 build="${1:-build}"
@@ -12,10 +13,10 @@ trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$logs"' EXIT
 
 "$server" --port "$port" --seconds 12 > "$logs/server.log" 2>&1 &
 sleep 0.5
-"$client" --headless --name ann --port "$port" --walk 0,3 --walk-seconds 3 --seconds 8 --expect-players 2 \
+"$client" --headless --name ann --port "$port" --walk 0,3 --walk-seconds 3 --throw 3 --aim 15,4,10 --seconds 8 --expect-players 2 --expect-breaks \
     > "$logs/ann.log" 2>&1 &
 ann=$!
-"$client" --headless --name bo --port "$port" --seconds 8 --expect-players 2 --expect-moved \
+"$client" --headless --name bo --port "$port" --seconds 8 --expect-players 2 --expect-moved --expect-breaks \
     > "$logs/bo.log" 2>&1 &
 bo=$!
 wait $ann; a=$?

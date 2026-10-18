@@ -1,0 +1,30 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "ball",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [307, 307, 327],
+          "physics": "iron"
+        },
+        {
+          "color": [389, 389, 409],
+          "physics": "iron"
+        }
+      ],
+      "position": [-0.30000001192092896, -0.30000001192092896, -0.30000001192092896],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "ball.data",
+      "type": "data"
+    }
+  ],
+  "name": "ball",
+  "version": 1
+}

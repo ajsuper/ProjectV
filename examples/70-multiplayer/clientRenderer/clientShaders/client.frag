@@ -2,17 +2,17 @@ $input v_color0
 $input v_texcoord0
 
 // =============================================================================
-// client.frag -- Hello Voxel's renderer, for the multiplayer client.
+// client.frag -- the multiplayer client's renderer: sunlight with shadows, a sky,
+// distance fog and a crosshair to aim with.
 //
-// One primary ray per pixel, straight to the back buffer. No accumulation, no
-// anti-aliasing, no lighting model: the voxel's stored colour, with a fixed tint
-// per face so the shape reads as a shape rather than a flat silhouette.
-//
-// Everything specific to ProjectV is in the two calls below. rayStartDirection
-// turns a pixel into a camera ray, and raySceneIntersect marches it through the
-// voxel scene. Both come from pjv_utils_DDA.sc, the engine's shader library,
-// which the build puts on shaderc's include path.
+// Two rays a pixel -- what the camera sees, then whether the sun reaches it --
+// through ONE call to the march, in a loop. A second call site would inline the
+// whole march twice, and that alone makes a shader of this kind about twice as
+// slow (see the note on single march call sites).
 // =============================================================================
+
+// Nothing here animates: leave the animated march out of the shader.
+#define PJV_NO_ANIMATION
 
 #include <bgfx_shader.sh>
 #include <pjv_utils_DDA.sc>
@@ -21,44 +21,69 @@ uniform vec4 windowRes;
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
 
-#define FOV 60.0
+#define FOV 65.0
+
+vec3 sky(vec3 direction, vec3 sun) {
+    float height = clamp(direction.y, 0.0, 1.0);
+    vec3 colour = mix(vec3(0.62, 0.72, 0.84), vec3(0.28, 0.46, 0.78), pow(height, 0.6));
+    float glow = pow(max(dot(direction, sun), 0.0), 64.0);
+    return colour + vec3(1.0, 0.9, 0.7) * glow * 0.8 + vec3(1.0, 0.95, 0.85) * pow(max(dot(direction, sun), 0.0), 900.0) * 4.0;
+}
 
 void main() {
-    Ray ray;
-    ray.origin    = cameraPos.xyz;
-    ray.direction = rayStartDirection(
-        v_texcoord0, windowRes.xy, cameraPos.xyz, normalize(cameraDir.xyz), FOV);
+    const vec3 sun = normalize(vec3(0.45, 0.8, 0.35));
+    Ray view;
+    view.origin    = cameraPos.xyz;
+    view.direction = rayStartDirection(v_texcoord0, windowRes.xy, cameraPos.xyz, normalize(cameraDir.xyz), FOV);
 
-    // A query carries the march's budget and level-of-detail policy. 256 steps is
-    // ample for one 64^3 chunk; a large streamed world is where the LOD fields
-    // start to matter.
-    RayQuery rayQuery = pjvPrimaryQuery(100u);
-    rayQuery.maxRaySteps = 256u;
-    rayQuery.startLOD = 0;
-    rayQuery.finishLOD = 0;
-    rayQuery.distanceToFinishLOD = 10000;
+    vec3 colour = sky(view.direction, sun);
+    vec3 albedo = vec3(0.0);
+    vec3 normal = vec3(0.0, 1.0, 0.0);
+    float distance = 0.0;
+    bool found = false;
+    bool sunlit = false;
 
-    SceneIntersectData sceneHit = raySceneIntersect(ray, rayQuery).hit;
-
-    // A miss is reported through foundBox.size and rayT rather than a flag. Trust
-    // the march's own hit data instead of re-intersecting the box: a fresh slab
-    // test disagrees by ULPs on boundary-exact hits and calls them misses.
-    vec3 normal = sceneHit.normal;
-    if (sceneHit.foundBox.size < 0.0 || sceneHit.rayT <= 0.0 || dot(normal, normal) < 0.5) {
-        // Vertical gradient, so "up" is legible even with nothing on screen.
-        float height = clamp(ray.direction.y * 0.5 + 0.5, 0.0, 1.0);
-        gl_FragColor = vec4(mix(vec3(0.05, 0.06, 0.08), vec3(0.16, 0.18, 0.22), height), 1.0);
-        return;
+    Ray ray = view;
+    RayQuery query = pjvPrimaryQuery(100u);
+    query.maxRaySteps = 768u;
+    query.startLOD = 0;
+    query.finishLOD = 0;
+    query.distanceToFinishLOD = 10000;
+    for (int pass = 0; pass < 2; pass++) {
+        SceneHit result = raySceneIntersect(ray, query);
+        if (pass == 0) {
+            SceneIntersectData hit = result.hit;
+            if (hit.foundBox.size < 0.0 || hit.rayT <= 0.0 || dot(hit.normal, hit.normal) < 0.5) break;
+            found = true;
+            albedo = fetchVoxelColor(hit.foundBox, hit.headerIndex);
+            normal = normalize(hit.normal);
+            distance = hit.rayT;
+            if (dot(normal, sun) <= 0.0) break;   // facing away: in its own shade
+            // The second pass: from just off the surface toward the sun.
+            ray.origin = view.origin + view.direction * hit.rayT + normal * 0.02;
+            ray.direction = sun;
+            query = pjvShadowQuery(384u, 80.0);
+        } else {
+            sunlit = result.stopReason != PJV_STOP_OPAQUE;
+        }
     }
 
-    vec3 albedo = fetchVoxelColor(sceneHit.foundBox, sceneHit.headerIndex);
+    if (found) {
+        float direct = sunlit ? max(dot(normal, sun), 0.0) : 0.0;
+        // Sky light from above, a little bounce from below, and the sun.
+        float ambient = 0.32 + 0.18 * normal.y;
+        vec3 lit = albedo * (vec3(1.0, 0.95, 0.85) * direct * 0.95 + vec3(0.55, 0.65, 0.8) * ambient);
+        float fog = 1.0 - exp(-max(distance - 30.0, 0.0) * 0.012);
+        colour = mix(lit, sky(view.direction, sun), fog);
+    }
 
-    // Not a light: a constant tint per axis, so the six faces of a voxel are
-    // distinguishable. Without it every face is the same colour and the sphere
-    // reads as a flat disc. A real renderer traces a shadow ray here instead --
-    // see examples/40-advanced-renderer.
-    normal = normalize(normal);
-    float facing = 0.55 + 0.45 * abs(dot(normal, normalize(vec3(0.35, 0.85, 0.4))));
+    // A little tone curve, then the crosshair: two short bars through the centre, inverted.
+    colour = colour / (colour + vec3(0.6)) * 1.6;
+    vec2 pixel = v_texcoord0 * windowRes.xy;
+    vec2 offset = abs(pixel - windowRes.xy * 0.5);
+    bool bar = (offset.x < 1.0 && offset.y < 9.0 && offset.y > 3.0) ||
+               (offset.y < 1.0 && offset.x < 9.0 && offset.x > 3.0);
+    if (bar) colour = vec3(1.0) - colour * 0.8;
 
-    gl_FragColor = vec4(albedo * facing, 1.0);
+    gl_FragColor = vec4(colour, 1.0);
 }
