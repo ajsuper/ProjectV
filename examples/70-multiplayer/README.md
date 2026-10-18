@@ -28,7 +28,15 @@ A 64 m field of grass and a dirt path, and things to break, each made of what br
 
 Balls break what they hit on impact (the server's `installImpactFracture`); a blast breaks what it
 hits and shoves everything near. Everything that breaks reaches every client as it happened, with the
-same pieces. The materials are in `arena/physics_materials.json`, so a client with another library is
+same pieces, and the server moves them. A client simulates only its own player: crates, balls and
+rubble are shown where the server has them, a tenth of a second behind, so they never jump or bounce
+from corrections.
+
+Two things are this demo's own, not the engine's:
+- your ball shows at once as a stand-in, until the server's ball arrives a round trip later;
+- each client throws out cosmetic chips where things break, simulated only there and never sent. The
+  server makes no body at all of fragments of 12 voxels or fewer (`PhysicsConfig::dustVoxels`), so
+  the chips stand in for that dust. The materials are in `arena/physics_materials.json`, so a client with another library is
 refused with the rest of the scene files.
 
 The renderer draws sunlight with shadows: a second ray per pixel toward the sun, through the same

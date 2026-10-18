@@ -8,8 +8,8 @@ build="${1:-build}"
 server="$build/examples/mp_server/mp_server"
 client="$build/examples/mp_client/mp_client"
 port=$((27200 + RANDOM % 500))
-logs="$(mktemp -d)"
-trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$logs"' EXIT
+logs="${KEEP_LOGS:-$(mktemp -d)}"
+trap 'kill $(jobs -p) 2>/dev/null; [ -n "${KEEP_LOGS:-}" ] || rm -rf "$logs"' EXIT
 
 "$server" --port "$port" --seconds 12 > "$logs/server.log" 2>&1 &
 sleep 0.5

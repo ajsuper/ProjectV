@@ -413,7 +413,37 @@ world-loading plan (W2-W4). On top of those:
 - Found, in the example: a hash helper multiplying signed ints overflowed, and the optimiser turned
   the loop calling it into one that never ended (then ran out of memory). Unsigned now.
 
-## Corrections that settle (2026-10-18, from playing the demo)
+## Clients simulate only what they own (2026-10-18, decided after playing)
+
+Played after the change below: still too many corrections, rubble bouncing as the server corrected
+it and the client simulated it again, and collisions felt late. The cause is the model, not its
+tuning: with every client simulating every body and the server pulling them back, a chaotic pile
+(rubble) diverges within a second and the two fight. User's call, of the two coherent designs:
+**server-driven presentation**, not lockstep (which D6 and D9 ruled out).
+
+- A client simulates only what it owns: its own character (predicted, N5). Every other moving body
+  -- authored crates, spawned balls, pieces of breaks -- is a NetProxy, as other players already
+  were: shown between snapshots `interpolationDelay` behind the newest, carried on by its velocity for
+  up to 0.25 s when the next is late. A proxy with a body is held (solid, so the client's character
+  meets it) and driven each fixed step to that pose (`runtime::driveBody`: a kinematic move, so what
+  it meets sees its speed); one without is posed. A body that appears (a piece a split made, a crate
+  from the files) is held where it is until its snapshots come.
+- Gone: client-side corrections of bodies, the dead zone and extrapolation of the last section, and
+  SessionStats::corrections. Kept: holdBody (driveBody uses it), setBodyState (a public tool).
+- The server sends an asleep body three times (one may be lost), then nothing until it wakes.
+- Breaks are still sent as results (N3), so every client has the same pieces; their motion is now the
+  server's.
+- What it costs: what a client hits reacts after a round trip plus the delay, and every moving body
+  must be sent while it moves (the budget sends what matters first; settled ones cost nothing). In the
+  demo (not the engine): a thrown ball shows at once as a local stand-in until the server's arrives
+  (`mp.thrower` says whose it is), the server turns fragments of 12 voxels or fewer into dust
+  (PhysicsConfig::dustVoxels: no body, nothing sent), and each client throws out cosmetic chips where
+  things break.
+- Tests: a pile the server settles is shown exactly so, and a local poke moves nothing; a sliding crate
+  is shown never stepping back or lurching, a little behind the server; the pyramid, breaks, late
+  joiners and loading pass on the new path.
+
+## Corrections that settle (2026-10-18, from playing the demo; replaced by the section above)
 
 Played: too many corrections were visible, and a piece could loop -- fall on a client but not on the
 server, be corrected, fall again -- before settling. Two causes, both reproduced in tests first:

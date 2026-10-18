@@ -453,7 +453,6 @@ TEST_CASE("replication: a pyramid knocked over on the server settles where it di
             CHECK(glm::distance(mine.at(id).position, state.position) < 0.01f);
             CHECK(std::abs(glm::dot(mine.at(id).rotation, state.rotation)) > 0.9999f);
         }
-        CHECK(runtime::sessionStats(m->app.world).corrections > 50);
     }
     // And the pyramid really fell: the hit crate is metres from where it stood.
     CHECK(glm::distance(truth.at(102).position, vec3(-8.0f + 0.5f, 0.5f, -8.0f)) > 1.0f);
@@ -772,9 +771,9 @@ TEST_CASE("replication: a client's game messages reach the server's game, in ord
     }
 }
 
-// ---- Corrections that settle (after playing the demo) ---------------------------------------------
+// ---- Server-driven bodies (after playing the demo) -------------------------------------------------
 
-TEST_CASE("corrections: once the server's pile is at rest, clients stop being corrected, and nothing local moves it") {
+TEST_CASE("server-driven: a pile the server settles is shown exactly as it settled, and nothing local moves it") {
     TempDir dir("replication_rest");
     writeArena(dir.path, 4);
     net::LoopbackNetwork network(17);
@@ -785,31 +784,39 @@ TEST_CASE("corrections: once the server's pile is at rest, clients stop being co
     runtime::setVelocity(s->app.world, runtime::entityForNetId(s->app.world, projv::NetId{102}), vec3(0, 2, -9), vec3(4, 0, 0));
     run(network, {s.get(), a.get()}, 8.0);
     for (auto [id, state] : crates(*s)) REQUIRE_FALSE(state.awake);
-
-    const uint64_t settled = runtime::sessionStats(a->app.world).corrections;
-    run(network, {s.get(), a.get()}, 3.0);
-    CHECK(runtime::sessionStats(a->app.world).corrections == settled);   // no more: it is at rest
     const auto truth = crates(*s);
-    // Something on Ann's side pokes a crate the server has at rest: it does not move here.
+    // Something on Ann's side pokes a crate: the server's to move, so it does not move here.
     Entity poked = runtime::entityForNetId(a->app.world, projv::NetId{104});
     runtime::addVelocity(a->app.world, poked, vec3(0, 6, 3));
     run(network, {s.get(), a.get()}, 2.0);
     for (auto [id, state] : crates(*a)) CHECK(glm::distance(state.position, truth.at(id).position) < 0.01f);
 }
 
-TEST_CASE("corrections: a body moving steadily is not corrected every snapshot") {
+TEST_CASE("server-driven: a sliding crate is shown moving smoothly, a tenth of a second behind the server") {
     TempDir dir("replication_glide");
     writeArena(dir.path, 1);   // one crate, NetId 102
     net::LoopbackNetwork network(18);
-    network.setConditions({0.075});
+    network.setConditions({0.075, 0.01, 0.05});
     auto s = server(network, dir.path);
     auto a = client(network, dir.path, "ann");
     run(network, {s.get(), a.get()}, 2.0);
-    // Slid along the floor on the server only; the client learns of it from snapshots.
-    runtime::setVelocity(s->app.world, runtime::entityForNetId(s->app.world, projv::NetId{102}), vec3(0, 0, -4));
-    run(network, {s.get(), a.get()}, 0.5);
-    const uint64_t before = runtime::sessionStats(a->app.world).corrections;
-    run(network, {s.get(), a.get()}, 1.0);
-    // Thirty snapshots a second came; with each snapshot brought up to now, few needed acting on.
-    CHECK(runtime::sessionStats(a->app.world).corrections - before < 10);
+    Entity theirs = runtime::entityForNetId(s->app.world, projv::NetId{102});
+    Entity mine = runtime::entityForNetId(a->app.world, projv::NetId{102});
+    runtime::setVelocity(s->app.world, theirs, vec3(0, 0, -4));
+    run(network, {s.get(), a.get()}, 0.4);
+    // Every frame for a second: never a step back, never a jump; and where the server was a little
+    // while ago.
+    float last = a->app.world.get<projv::Transform>(mine).position.z, worstStep = 0.0f, worstBack = 0.0f;
+    for (int frame = 0; frame < 60; frame++) {
+        run(network, {s.get(), a.get()}, DT);
+        const float z = a->app.world.get<projv::Transform>(mine).position.z;
+        worstStep = std::max(worstStep, last - z);
+        worstBack = std::max(worstBack, z - last);
+        last = z;
+    }
+    CHECK(worstBack < 0.002f);           // no rubber band
+    CHECK(worstStep < 4.0f * DT * 2.5f);  // no catching up in a lurch
+    const float behind = a->app.world.get<projv::Transform>(mine).position.z - runtime::bodyPose(s->app.world, theirs).position.z;
+    CHECK(behind > 0.0f);
+    CHECK(behind < 4.0f * 0.35f);        // the delay and a trip, at most
 }

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "core/log.h"
+#include "runtime/entities.h"
 #include "data_structures/scene.h"
 #include "utils/compose_io.h"
 #include "utils/editing.h"
@@ -26,6 +27,11 @@ namespace arena {
     using projv::core::vec3;
 
     inline uint32_t rgb(float r, float g, float b) { return projv::packRGB10(r, g, b); }
+
+    // On a thrown ball: who threw it, so the thrower's client can swap its own stand-in for it.
+    struct Thrower {
+        uint16_t client = 0;
+    };
 
     // A model being built: voxels, each colour naming the physics material it is made of.
     struct Model {
@@ -285,3 +291,10 @@ namespace arena {
         return true;
     }
 }
+
+template<> struct projv::runtime::ComponentTraits<arena::Thrower> {
+    static constexpr const char* key = "mp.thrower";
+    static constexpr uint32_t version = 1;
+    static nlohmann::json save(const arena::Thrower& t) { return nlohmann::json{{"client", t.client}}; }
+    static std::optional<arena::Thrower> load(const nlohmann::json& j, uint32_t) { return arena::Thrower{j.value("client", uint16_t(0))}; }
+};

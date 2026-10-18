@@ -24,6 +24,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <random>
 #include <map>
 #include <string>
 #include <thread>
@@ -80,6 +82,111 @@ namespace {
     Options options;
     int exitCode = 0;
 
+    // ---- What only this client shows: a stand-in for a ball it threw, and chips where things break.
+    //
+    // Neither is the engine's, and neither is sent anywhere: the server's ball replaces the stand-in
+    // when it comes, and chips are for the look of a break (the server turns the smallest fragments
+    // into dust, PhysicsConfig::dustVoxels, so nothing that small is simulated or sent).
+    struct StandIn { double at; };
+    struct Claimed {};
+    struct Chip { double at; };
+    struct Burst { vec3 centre; float size; std::vector<uint32_t> colours; int count; };
+    struct Effects {
+        double clock = 0.0;
+        std::deque<projv::Entity> standIns;
+        std::vector<Burst> bursts;
+        std::mt19937 random{7};
+    };
+    constexpr size_t MAX_CHIPS = 160;
+
+    // A ball of our own, at once, flying as the server's will: shown until the server's arrives.
+    void throwStandIn(projv::World& world, vec3 from, vec3 aim) {
+        auto& effects = world.ctx().get<Effects>();
+        const std::string ball = (projv::core::executableDirectory() / arena::FOLDER / arena::BALL).string();
+        projv::Entity e = projv::runtime::instantiatePrefab(world, ball, from + aim * 1.5f);
+        if (e == projv::NullEntity) return;
+        projv::RigidBody body;
+        body.shape = projv::RigidBody::Shape::Sphere;
+        body.material = "iron";
+        body.quality = projv::RigidBody::Quality::Continuous;
+        world.emplace<projv::RigidBody>(e, body);
+        world.emplace<StandIn>(e, StandIn{effects.clock});
+        projv::runtime::setVelocity(world, e, aim * 32.0f);
+        effects.standIns.push_back(e);
+    }
+
+    // Where something broke, as the server said: a burst of chips in its colours.
+    void noteBreak(projv::World& world, const projv::BodyBroken& event) {
+        const auto& scene = world.ctx().get<projv::Scene>();
+        const projv::ComponentHandle h = projv::runtime::voxelComponentOf(world, event.entity);
+        if (h == projv::INVALID_COMPONENT_HANDLE) return;
+        vec3 sum(0.0f);
+        size_t n = 0;
+        for (const auto& piece : event.pieceVoxels) for (auto v : piece) { sum += vec3(v) + 0.5f; n++; }
+        for (auto v : event.dust) { sum += vec3(v) + 0.5f; n++; }
+        if (n == 0) return;
+        const projv::ComponentRecord& rec = scene.components[h];
+        float voxel = 0.25f;
+        const projv::ChunkHandle first = rec.kind == projv::ComponentKind::Chunk ? rec.chunkHandle
+            : [&] { for (int32_t c : scene.grids[size_t(rec.gridIndex)].cellToChunk) if (c >= 0) return projv::ChunkHandle(c); return projv::INVALID_CHUNK_HANDLE; }();
+        if (first < scene.chunks.size()) voxel = scene.chunks[first].header.voxelScale;
+        Burst burst;
+        burst.centre = vec3(projv::utils::getComponentWorldMatrix(scene, h) * projv::core::vec4(sum / float(n) * (voxel / glm::length(vec3(projv::utils::getComponentWorldMatrix(scene, h)[0]))), 1.0f));
+        burst.size = std::clamp(voxel * 0.6f, 0.05f, 0.15f);
+        for (const auto& m : rec.materialPalette) burst.colours.push_back(m.packedColor);
+        burst.count = int(std::min<size_t>(10 + event.dust.size() / 3, 36));
+        world.ctx().get<Effects>().bursts.push_back(std::move(burst));
+    }
+
+    void effectsSystem(projv::Application& app) {
+        projv::World& world = app.world;
+        auto& effects = world.ctx().get<Effects>();
+        effects.clock += app.time().delta;
+        const projv::runtime::ClientId me = projv::runtime::sessionStats(world).you;
+        // The server's ball for one we threw: it replaces the oldest stand-in.
+        std::vector<projv::Entity> arrived;
+        for (auto [e, thrower] : world.view<arena::Thrower>(entt::exclude<Claimed>).each()) arrived.push_back(e);
+        for (projv::Entity e : arrived) {
+            world.emplace<Claimed>(e);
+            if (world.get<arena::Thrower>(e).client != me || effects.standIns.empty()) continue;
+            if (world.valid(effects.standIns.front())) world.destroy(effects.standIns.front());
+            effects.standIns.pop_front();
+        }
+        while (!effects.standIns.empty() && (!world.valid(effects.standIns.front()) ||
+                                             effects.clock - world.get<StandIn>(effects.standIns.front()).at > 2.0)) {
+            if (world.valid(effects.standIns.front())) world.destroy(effects.standIns.front());
+            effects.standIns.pop_front();
+        }
+        // Chips: made for each burst, gone after three seconds, never more than MAX_CHIPS.
+        std::vector<projv::Entity> old;
+        for (auto [e, chip] : world.view<Chip>().each()) if (effects.clock - chip.at > 3.0) old.push_back(e);
+        for (projv::Entity e : old) world.destroy(e);
+        auto& scene = world.ctx().get<projv::Scene>();
+        std::uniform_real_distribution<float> unit(-1.0f, 1.0f);
+        for (const Burst& burst : effects.bursts) {
+            for (int i = 0; i < burst.count && world.view<Chip>().size() < MAX_CHIPS; i++) {
+                const uint32_t colour = burst.colours.empty() ? arena::rgb(0.5f, 0.5f, 0.5f)
+                                                              : burst.colours[effects.random() % burst.colours.size()];
+                projv::ComponentHandle h = projv::utils::addComponent(scene, projv::ComponentKind::Chunk, "chip",
+                                                                      projv::INVALID_COMPONENT_HANDLE, 4, burst.size * 0.5f);
+                std::vector<projv::PendingVoxelOp> cube;
+                for (int k = 0; k < 8; k++) cube.push_back({true, projv::core::ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1), colour});
+                projv::utils::queueVoxelAdd(scene, h, cube);
+                projv::utils::updateScene(scene);
+                const vec3 spread(unit(effects.random), unit(effects.random), unit(effects.random));
+                projv::utils::setComponentTransform(scene, h, burst.centre + spread * 0.4f, projv::core::quat(1, 0, 0, 0), 1.0f);
+                projv::Entity e = projv::runtime::spawnComponent(world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+                projv::RigidBody body;
+                body.density = 1500.0f;
+                world.emplace<projv::RigidBody>(e, body);
+                world.emplace<Chip>(e, Chip{effects.clock});
+                projv::runtime::setVelocity(world, e, glm::normalize(spread + vec3(0, 1.2f, 0)) * (3.0f + 4.0f * std::abs(unit(effects.random))),
+                                            spread * 8.0f);
+            }
+        }
+        effects.bursts.clear();
+    }
+
     vec3 ownPosition(projv::World& world) {
         projv::Entity me = projv::runtime::entityForNetId(world, projv::runtime::sessionStats(world).player);
         if (me == projv::NullEntity || !world.all_of<projv::Transform>(me)) return vec3(0.0f);
@@ -110,6 +217,7 @@ namespace {
                 watch.clock - watch.lastShot > 0.5) {
                 const vec3 from = ownPosition(app.world) + vec3(0.0f, 1.4f, 0.0f);
                 ask(app.world, watch.shots < options.throws ? 1 : 2, from, glm::normalize(options.aim - from));
+                if (watch.shots < options.throws) throwStandIn(app.world, from, glm::normalize(options.aim - from));
                 watch.shots++;
                 watch.lastShot = watch.clock;
             }
@@ -146,6 +254,7 @@ namespace {
             const vec3 from = ownPosition(app.world) + vec3(0.0f, 1.4f, 0.0f);
             const vec3 target = eye + direction * 60.0f;
             ask(app.world, throwing ? 1 : 2, throwing ? from : eye, throwing ? glm::normalize(target - from) : direction);
+            if (throwing) throwStandIn(app.world, from, glm::normalize(target - from));
         }
     }
 
@@ -154,7 +263,8 @@ namespace {
         auto& watch = app.world.ctx().get<Watch>();
         const projv::runtime::SessionStats stats = projv::runtime::sessionStats(app.world);
         size_t players = 0;
-        for (auto [e, proxy, id, t] : app.world.view<projv::NetProxy, projv::NetId, projv::Transform>().each()) {
+        // Players: proxies that are not bodies (crates, balls and pieces are proxies too).
+        for (auto [e, proxy, id, t] : app.world.view<projv::NetProxy, projv::NetId, projv::Transform>(entt::exclude<projv::RigidBody>).each()) {
             players++;
             if (id == stats.player) continue;
             auto [it, fresh] = watch.firstSeen.try_emplace(id.value, t.position);
@@ -196,7 +306,10 @@ namespace {
         projv::runtime::installSceneBridge(app);
         projv::runtime::installPhysics(app);
         projv::runtime::loadPhysicsMaterials(app.world, (std::filesystem::path(folder) / arena::MATERIALS).string());
+        projv::runtime::registerComponent<arena::Thrower>(app.world);
         projv::runtime::spawnEntities(app.world);
+        app.world.ctx().emplace<Effects>();
+        app.events().on<projv::BodyBroken>([&app](const projv::BodyBroken& e) { noteBreak(app.world, e); });
 
         projv::runtime::ClientConfig config;
         config.host = options.host;
@@ -285,6 +398,7 @@ int main(int argc, char** argv) {
     app.addSystem(projv::Stage::Startup,  "startup", startup);
     app.addSystem(projv::Stage::Update,   "play",    playSystem);
     app.addSystem(projv::Stage::Update,   "watch",   watchSystem);
+    app.addSystem(projv::Stage::Update,   "effects", effectsSystem);
     app.addSystem(projv::Stage::Render,   "render",  render);
     app.addSystem(projv::Stage::Shutdown, "shutdown", shutdown);
     app.run();

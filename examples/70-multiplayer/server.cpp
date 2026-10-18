@@ -64,8 +64,13 @@ int main(int argc, char** argv) {
     projv::Application app;
     app.world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk(folder));
     projv::runtime::installSceneBridge(app);
-    projv::runtime::installPhysics(app);
+    // Fragments of a dozen voxels or fewer are dust: cut, and made into nothing -- no body to simulate
+    // or send. Clients throw out chips of their own where things break, for the look of it.
+    projv::runtime::PhysicsConfig physics;
+    physics.dustVoxels = 12;
+    projv::runtime::installPhysics(app, physics);
     projv::runtime::installImpactFracture(app);
+    projv::runtime::registerComponent<arena::Thrower>(app.world);
     projv::runtime::loadPhysicsMaterials(app.world, (std::filesystem::path(folder) / arena::MATERIALS).string());
     projv::runtime::spawnEntities(app.world);
 
@@ -87,7 +92,7 @@ int main(int argc, char** argv) {
     const std::string ball = (std::filesystem::path(folder) / arena::BALL).string();
     struct Thrown { double at; };
     double clock = 0.0;
-    config.onMessage = [ball, &clock](projv::World& world, projv::runtime::ClientId, projv::Entity player,
+    config.onMessage = [ball, &clock](projv::World& world, projv::runtime::ClientId from, projv::Entity player,
                                       std::span<const uint8_t> message) {
         projv::net::BitReader r(message);
         const uint64_t kind = r.bits(8);
@@ -104,6 +109,7 @@ int main(int argc, char** argv) {
             body.material = "iron";
             body.quality = projv::RigidBody::Quality::Continuous;
             world.emplace<projv::RigidBody>(e, body);
+            world.emplace<arena::Thrower>(e, arena::Thrower{from});
             world.emplace<projv::Replicated>(e, projv::Replicated{arena::BALL, {}});
             world.emplace<Thrown>(e, Thrown{clock});
             projv::runtime::setVelocity(world, e, aim * 32.0f);
@@ -120,6 +126,10 @@ int main(int argc, char** argv) {
         }
     };
     if (!projv::runtime::installServer(app, projv::net::makeEnetTransport(), config)) return 1;
+    // A piece broken again down to nothing is gone: destroyed, so it is despawned everywhere.
+    app.events().on<projv::BodyEmptied>([&app](const projv::BodyEmptied& e) {
+        if (app.world.valid(e.entity) && app.world.all_of<projv::Piece>(e.entity)) app.world.destroy(e.entity);
+    });
     // Balls go after ten seconds.
     app.addSystem(projv::Stage::Update, "balls", [&](projv::Application& a) {
         clock += a.time().delta;

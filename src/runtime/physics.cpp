@@ -1910,6 +1910,11 @@ namespace projv::runtime {
                         body->easeRotation = glm::normalize(shownAs * glm::conjugate(to));
                         break;
                     }
+                    case Kind::Drive:
+                        // Held, so frozen (kinematic) by now: moved, not placed.
+                        if (sim.frozen(body->id)) sim.moveKinematic(body->id, c.a, glm::normalize(c.q), dt);
+                        else sim.setPose(body->id, c.a, glm::normalize(c.q));
+                        break;
                     case Kind::Gravity: break;
                     case Kind::CharacterInput: break;
                     case Kind::JointMotor: break;
@@ -2242,6 +2247,12 @@ namespace projv::runtime {
     }
 
     bool isHeld(const World& world, Entity entity) { return world.valid(entity) && world.all_of<PhysicsHold>(entity); }
+
+    void driveBody(World& world, Entity entity, core::vec3 position, core::quat rotation) {
+        if (!world.valid(entity) || !std::isfinite(glm::dot(position, position))) return;
+        holdBody(world, entity, true);
+        queue(world, Kind::Drive, entity, position, core::vec3(0.0f), rotation);
+    }
 
     void setBodyState(World& world, Entity e, core::vec3 position, core::quat rotation, core::vec3 linear, core::vec3 angular,
                       bool asleep) {

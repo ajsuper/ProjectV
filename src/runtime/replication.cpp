@@ -221,7 +221,7 @@ namespace projv::runtime {
                 bool        started = false;       // a couple of inputs have come: apply from here on
                 bool        predicts = false;      // walks its own player: not sent its pose, only acks
                 std::map<uint32_t, float> priority;   // by NetId: grows until sent
-                std::set<uint32_t>        toldAsleep; // bodies it was last told are asleep
+                std::map<uint32_t, int>   toldAsleep; // bodies sent asleep, and how many times (three: one may be lost)
                 uint64_t    snapshotBytes = 0;
                 // What it has (N6): each block's presence as told, the content stamp of each block it
                 // was sent the voxels of, and the replicated entities it has, by NetId, with what the
@@ -654,7 +654,8 @@ namespace projv::runtime {
                     std::vector<std::pair<float, const Entry*>> order;
                     const NetId* own = client.predicts && world.valid(client.player) ? world.try_get<NetId>(client.player) : nullptr;
                     for (const Entry& entry : entries) {
-                        if (entry.asleep && client.toldAsleep.count(entry.id)) continue;
+                        if (auto told = client.toldAsleep.find(entry.id); entry.asleep && told != client.toldAsleep.end() && told->second >= 3)
+                            continue;
                         if (own && own->value == entry.id) continue;
                         if (!relevant(world, s, client, candidates[entry.id])) continue;
                         float& p = client.priority[entry.id];
@@ -689,7 +690,7 @@ namespace projv::runtime {
                             body.raw(entry.bits);
                             count++;
                             client.priority[entry.id] = 0.0f;
-                            if (entry.asleep) client.toldAsleep.insert(entry.id);
+                            if (entry.asleep) client.toldAsleep[entry.id]++;
                             else client.toldAsleep.erase(entry.id);
                         }
                         if (count == 0 && next < order.size()) break;
@@ -741,8 +742,6 @@ namespace projv::runtime {
             };
             std::vector<Change> changes;
             uint64_t applied = 0, mismatches = 0;
-            std::map<uint32_t, uint64_t> corrected;   // by NetId: the tick of the last correction
-            uint64_t corrections = 0;
             // Prediction: the own player, walked here; what each input left it as; the newest ack.
             Entity   predicted = NullEntity;
             struct Predicted { uint64_t sequence; core::vec3 move; bool jump; std::vector<uint8_t> state; core::vec3 position, velocity; };
@@ -829,10 +828,8 @@ namespace projv::runtime {
                 }
                 world.remove<CharacterController>(e);
             }
-            // A moving body is simulated here and corrected by snapshots; anything else is posed by them.
-            const RigidBody* rigid = world.try_get<RigidBody>(e);
-            if (!(rigid && rigid->motion == MotionType::Dynamic))
-                world.emplace_or_replace<NetProxy>(e, NetProxy{{{c.latestTick, position, rotation}}});
+            // Everything else the server sends is the server's to move: a proxy, shown where it says.
+            world.emplace_or_replace<NetProxy>(e, NetProxy{{{c.latestTick, position, rotation}}});
             c.proxies[id] = e;
         }
 
@@ -859,7 +856,7 @@ namespace projv::runtime {
             for (uint32_t i = 0; i < count; i++) {
                 const uint32_t id = uint32_t(b.varint());
                 const bool moving = b.boolean();
-                const bool asleep = b.boolean();
+                (void)b.boolean();   // asleep: a proxy simply stays at its last pose
                 const core::vec3 position = net::readPosition(b, core::vec3(0.0f), 0.001f);
                 const core::quat rotation = net::readRotation(b, 10);
                 core::vec3 linear(0.0f), angular(0.0f);
@@ -871,48 +868,59 @@ namespace projv::runtime {
                 if (b.failed) return;
                 if (!std::isfinite(position.x + position.y + position.z)) continue;
                 Entity e = entityForNetId(world, NetId{id});
-                if (e == NullEntity) continue;
-                if (NetProxy* proxy = world.try_get<NetProxy>(e)) {
-                    if (!proxy->poses.empty() && proxy->poses.back().tick >= tick) continue;
-                    proxy->poses.push_back({tick, position, rotation});
-                    if (proxy->poses.size() > MAX_POSES) proxy->poses.erase(proxy->poses.begin());
-                    continue;
-                }
-                // A body this client simulates: corrected to the server's, newest only.
-                if (!moving || !hasBody(world, e)) continue;
-                uint64_t& last = c.corrected[id];
-                if (tick <= last) continue;
-                last = tick;
-                // At rest on the server: held here, where the server has it, until the server says it
-                // moves again. Nothing local -- a neighbour a centimetre off, a stray hit -- moves it,
-                // so a pile the server has settled stays settled.
-                if (asleep) {
-                    const bool held = isHeld(world, e);
-                    holdBody(world, e, true);
-                    const BodyState now = bodyPose(world, e);
-                    if (!held || glm::distance(now.position, position) > 0.001f || std::abs(glm::dot(now.rotation, rotation)) < 0.999999f) {
-                        setBodyState(world, e, position, rotation, core::vec3(0.0f), core::vec3(0.0f), true);
-                        c.corrections++;
-                    }
-                    continue;
-                }
-                // Moving: the snapshot is half a round trip old. Brought up to now, it is compared with
-                // what this client has; a difference too small to see is left alone, so a body that is
-                // simulated well here is not pulled about thirty times a second.
-                const float age = 0.0005f * c.transport->stats(c.server).roundTripMs;
-                core::vec3 nowAt = position + linear * age;
-                core::quat nowAs = rotation;
-                if (const float turn = glm::length(angular) * age; turn > 1e-6f)
-                    nowAs = glm::normalize(glm::angleAxis(turn, glm::normalize(angular)) * rotation);
-                const bool held = isHeld(world, e);
-                if (held) holdBody(world, e, false);   // the server has it moving: so does this client
-                const BodyState mine = bodyPose(world, e);
-                const bool close = glm::distance(mine.position, nowAt) < 0.02f &&
-                                   std::abs(glm::dot(mine.rotation, nowAs)) > 0.99985f &&   // about 2 degrees
-                                   glm::distance(mine.linearVelocity, linear) < 0.3f;
-                if (close && !held) continue;
-                setBodyState(world, e, nowAt, nowAs, linear, angular, false);
-                c.corrections++;
+                if (e == NullEntity || e == c.predicted) continue;
+                // Anything the server sends is the server's to move: shown where it says.
+                NetProxy& proxy = world.get_or_emplace<NetProxy>(e);
+                if (!proxy.poses.empty() && proxy.poses.back().tick >= tick) continue;
+                proxy.poses.push_back({tick, position, rotation, linear, angular});
+                if (proxy.poses.size() > MAX_POSES) proxy.poses.erase(proxy.poses.begin());
+            }
+        }
+
+        // Where a proxy is at server tick `at`: between the two snapshots around it; before the first,
+        // the first; past the newest, carried on by its velocity for at most a quarter second.
+        std::pair<core::vec3, core::quat> proxyPoseAt(const NetProxy& proxy, double at, float tickDelta) {
+            const auto& poses = proxy.poses;
+            if (at <= double(poses.front().tick)) return {poses.front().position, poses.front().rotation};
+            for (size_t i = 1; i < poses.size(); i++) {
+                if (double(poses[i].tick) < at) continue;
+                const auto& a = poses[i - 1];
+                const auto& b = poses[i];
+                const float t = float((at - double(a.tick)) / double(std::max<uint64_t>(b.tick - a.tick, 1)));
+                return {glm::mix(a.position, b.position, t), glm::slerp(a.rotation, b.rotation, t)};
+            }
+            const auto& last = poses.back();
+            const float ahead = std::min(float(at - double(last.tick)) * tickDelta, 0.25f);
+            core::quat rotation = last.rotation;
+            if (const float turn = glm::length(last.angular) * ahead; turn > 1e-6f)
+                rotation = glm::normalize(glm::angleAxis(turn, glm::normalize(last.angular)) * rotation);
+            return {last.position + last.linear * ahead, rotation};
+        }
+
+        // The server tick shown now: the newest snapshot's, moved on by the time since, less the delay.
+        double shownTick(const ClientSession& c) {
+            const double estimate = double(c.latestTick) + (c.clock - c.latestAt) / double(c.tickDelta);
+            return estimate - double(c.config.interpolationDelay) / double(c.tickDelta);
+        }
+
+        // Each fixed step, before the physics: every moving body this client does not own is held and
+        // driven to where the server had it -- the client's own character meets it there, solid. A
+        // body that has just appeared (a piece a split made, a crate from the files) is held where it is
+        // until its snapshots come.
+        void clientDrive(Application& app) {
+            World& world = app.world;
+            ClientSession& c = *clientOf(world);
+            if (!c.welcomed) return;
+            for (auto [e, body, id] : world.view<PhysicsBody, NetId>().each()) {
+                if (body.motion != MotionType::Dynamic || e == c.predicted || world.all_of<NetProxy>(e)) continue;
+                const BodyState now = bodyPose(world, e);
+                world.emplace<NetProxy>(e, NetProxy{{{c.latestTick, now.position, now.rotation}}});
+            }
+            const double at = shownTick(c);
+            for (auto [e, proxy, body] : world.view<NetProxy, PhysicsBody>().each()) {
+                if (proxy.poses.empty()) continue;
+                auto [position, rotation] = proxyPoseAt(proxy, at, c.tickDelta);
+                driveBody(world, e, position, rotation);
             }
         }
 
@@ -1181,29 +1189,12 @@ namespace projv::runtime {
             World& world = app.world;
             ClientSession& c = *clientOf(world);
             if (c.welcomed) {
-                const double estimate = double(c.latestTick) + (c.clock - c.latestAt) / double(c.tickDelta);
-                const double at = estimate - double(c.config.interpolationDelay) / double(c.tickDelta);
-                for (auto [id, e] : c.proxies) {
-                    if (!world.valid(e)) continue;
-                    const NetProxy* proxy = world.try_get<NetProxy>(e);
-                    if (!proxy || proxy->poses.empty()) continue;
-                    const auto& poses = proxy->poses;
-                    core::vec3 position = poses.back().position;
-                    core::quat rotation = poses.back().rotation;
-                    if (at <= double(poses.front().tick)) {
-                        position = poses.front().position;
-                        rotation = poses.front().rotation;
-                    } else {
-                        for (size_t i = 1; i < poses.size(); i++) {
-                            if (double(poses[i].tick) < at) continue;
-                            const auto& a = poses[i - 1];
-                            const auto& b = poses[i];
-                            const float t = float((at - double(a.tick)) / double(std::max<uint64_t>(b.tick - a.tick, 1)));
-                            position = glm::mix(a.position, b.position, t);
-                            rotation = glm::slerp(a.rotation, b.rotation, t);
-                            break;
-                        }
-                    }
+                const double at = shownTick(c);
+                // Proxies without a body (players, here): posed. Those with one are driven at fixed
+                // steps, and the physics draws them.
+                for (auto [e, proxy] : world.view<NetProxy>(entt::exclude<PhysicsBody>).each()) {
+                    if (proxy.poses.empty()) continue;
+                    auto [position, rotation] = proxyPoseAt(proxy, at, c.tickDelta);
                     const Transform* now = world.try_get<Transform>(e);
                     if (now && now->position == position && now->rotation == rotation) continue;
                     float scale = now ? now->scale : 1.0f;
@@ -1344,6 +1335,7 @@ namespace projv::runtime {
         app.addSystem(Stage::FixedUpdate, "net: input", clientSendInput, {.before = "physics", .after = ""});
         app.addSystem(Stage::FixedUpdate, "net: predicted", clientRecordPrediction, {.before = "", .after = "physics"});
         app.addSystem(Stage::FixedUpdate, "net: world", clientApplyWorld, {.before = "physics", .after = ""});
+        app.addSystem(Stage::FixedUpdate, "net: drive", clientDrive, {.before = "physics", .after = "net: world"});
         app.addSystem(Stage::PostUpdate, "net: present", clientPresent, {.before = "scene bridge", .after = ""});
         return true;
     }
@@ -1422,7 +1414,6 @@ namespace projv::runtime {
             out.refusal = c->refusal;
             out.worldChanges = c->applied;
             out.worldMismatches = c->mismatches;
-            out.corrections = c->corrections;
             out.reconciliations = c->reconciliations;
             out.largestCorrection = c->largestCorrection;
             out.predicting = c->predicted != NullEntity;

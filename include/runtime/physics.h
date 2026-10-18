@@ -634,8 +634,9 @@ namespace projv::runtime {
         // JointMotor: `jump` turns it on or off, `a.x` is the velocity or target, `b.x` the MotorMode;
         // `target` names the joint's entity.
         // SetState: `a` the position, `q` the rotation, `b` and `c` the velocities, `jump` asleep.
+        // Drive: `a` the position and `q` the rotation a held body is moved to over the step.
         enum class Kind : uint8_t { Impulse, AngularImpulse, AddVelocity, SetVelocity, Teleport, Gravity, CharacterInput, JointMotor,
-                                    SetState };
+                                    SetState, Drive };
         Kind       kind = Kind::Impulse;
         NetId      target;                  // ignored for Gravity
         core::vec3 a{0.0f}, b{0.0f};        // impulse / velocity / position; b: angular velocity
@@ -652,6 +653,10 @@ namespace projv::runtime {
     // FrozenMotion meanwhile. From the next step.
     void holdBody(World& world, Entity entity, bool held);
     bool isHeld(const World& world, Entity entity);
+    // Holds the body (holdBody) and moves it to this pose over the next step, as a kinematic body is
+    // moved -- what it meets is met with that speed. For a body posed by someone else: a client's copy
+    // of what the server simulates. Call it every step it should move; between calls it stays put.
+    void driveBody(World& world, Entity entity, core::vec3 position, core::quat rotation);
 
     // A correction from elsewhere -- a server's snapshot: the body is put there, moving so (or asleep),
     // at the next step. What is drawn eases from where it was over about a tenth of a second.

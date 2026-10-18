@@ -33,13 +33,15 @@
 //   registered components as entities.json writes them (entityComponents, less `omit`), and the prefab
 //   folder it was made from, which a client instantiates from its own copy of the scene. By NetId:
 //   one is given if it has none. Destroying it, or taking Replicated off, despawns it everywhere.
-// - **Where things are** (N4). At `snapshotRate`, unreliably, within `bytesPerSecond` per client:
-//   replicated entities' poses and every moving body with a NetId's pose and velocities, quantised
-//   (millimetres, 10-bit smallest-three rotations, 12-bit velocities). Each client's entities gather
-//   priority until sent -- players most, moving bodies by speed; a body asleep is sent once, asleep,
-//   then left alone until it wakes. A client poses its copies (NetProxy) between the two snapshots
-//   around `interpolationDelay` behind the newest, and sets the bodies it simulates to the server's
-//   state (setBodyState: the simulation snaps, the drawing eases).
+// - **Where things are** (N4, revised 2026-10-18). At `snapshotRate`, unreliably, within
+//   `bytesPerSecond` per client: replicated entities' poses and every moving body with a NetId's pose
+//   and velocities, quantised (millimetres, 10-bit smallest-three rotations, 12-bit velocities). Each
+//   client's entities gather priority until sent -- players most, moving bodies by speed; a body
+//   asleep is sent a few times, asleep, then left alone until it wakes. **A client simulates nothing
+//   it does not own**: every other player and every moving body is a NetProxy, shown between the
+//   snapshots around `interpolationDelay` behind the newest (carried on by its velocity for up to a
+//   quarter second when the next is late). A proxy with a body is held -- solid, so the client's own
+//   character meets it -- and driven there each fixed step (driveBody); one without is posed.
 // - **Input.** A client's `setLocalInput` goes to the server every fixed step, unreliably, the last
 //   few repeated in each message; the server hands each client's newest to `applyInput` (by default:
 //   setCharacterInput on that client's player).
@@ -74,13 +76,14 @@ namespace projv {
         std::vector<std::string> omit;      // component keys not sent (a character's controller)
     };
 
-    // On a client: an entity the server made, posed by its snapshots. Made and removed by the
-    // client; never saved.
+    // On a client: an entity the server simulates, shown where its snapshots put it -- every player
+    // but its own, and every moving body. Made and removed by the client; never saved.
     struct NetProxy {
         struct Pose {
             uint64_t   tick;
             core::vec3 position;
             core::quat rotation;
+            core::vec3 linear{0.0f}, angular{0.0f};   // for carrying on past the newest, briefly
         };
         std::vector<Pose> poses;   // newest last, a second's worth at most
     };
@@ -156,7 +159,6 @@ namespace projv::runtime {
         std::string refusal;                 // why the server refused, or the client was refused
         uint64_t worldChanges = 0;           // a client's: edits and splits applied
         uint64_t worldMismatches = 0;        // a client's: changed voxels not the server's after them
-        uint64_t corrections = 0;            // a client's: its bodies set to the server's state
         bool     predicting = false;         // a client's: walking its own player itself
         uint64_t reconciliations = 0;        // a client's: times its prediction was put right
         float    largestCorrection = 0.0f;   // a client's: the furthest it was put right, m
