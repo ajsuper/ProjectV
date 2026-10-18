@@ -1,4 +1,5 @@
 #include "utils/scene_query.h"
+#include "utils/collision_geometry.h"
 
 #include <algorithm>
 #include <cassert>
@@ -789,6 +790,51 @@ namespace projv::utils {
 
     bool isComponentAlive(const Scene& scene, ComponentHandle handle) {
         return handle < scene.components.size() && scene.components[handle].name != DELETED_NAME;
+    }
+
+    uint64_t voxelContentHash(const Scene& scene, ComponentHandle handle) {
+        if (!isComponentAlive(scene, handle)) return 0;
+        const ComponentRecord& c = scene.components[handle];
+        struct Part { ChunkHandle chunk; core::ivec3 offset; };
+        std::vector<Part> parts;
+        if (c.kind == ComponentKind::Chunk && c.chunkHandle < scene.chunks.size()) {
+            parts.push_back({c.chunkHandle, core::ivec3(0)});
+        } else if (c.kind == ComponentKind::Grid && c.gridIndex >= 0 && size_t(c.gridIndex) < scene.grids.size()) {
+            const SceneGrid& grid = scene.grids[size_t(c.gridIndex)];
+            for (size_t lin = 0; lin < grid.cellToChunk.size(); lin++) {
+                if (grid.cellToChunk[lin] < 0) continue;
+                const ChunkHandle ch = ChunkHandle(grid.cellToChunk[lin]);
+                int x = int(lin % size_t(grid.dims.x)), y = int((lin / size_t(grid.dims.x)) % size_t(grid.dims.y));
+                int z = int(lin / (size_t(grid.dims.x) * size_t(grid.dims.y)));
+                parts.push_back({ch, (grid.originCellCoord + core::ivec3(x, y, z)) * int(scene.chunks[ch].header.resolution)});
+            }
+        }
+        std::vector<std::tuple<int, int, int, uint8_t>> voxels;
+        for (const Part& p : parts) {
+            const Chunk& chunk = scene.chunks[p.chunk];
+            if (chunk.geometryPoolIndex < 0 || size_t(chunk.geometryPoolIndex) >= scene.geometryPool.size()) continue;
+            VoxelOccupancy o;
+            std::vector<uint8_t> slots;
+            if (decodeVoxelSlots(scene.geometryPool[size_t(chunk.geometryPoolIndex)], chunk.header.resolution, 1ull << 26, o, slots) !=
+                DecodeResult::Ok)
+                continue;
+            for (int z = 0; z < o.dims.z; z++)
+                for (int y = 0; y < o.dims.y; y++)
+                    for (int x = 0; x < o.dims.x; x++) {
+                        size_t i = o.index({x, y, z});
+                        if (!o.cells[i]) continue;
+                        core::ivec3 at = p.offset + o.origin + core::ivec3(x, y, z);
+                        voxels.push_back({at.x, at.y, at.z, slots[i]});
+                    }
+        }
+        if (voxels.empty()) return 0;
+        std::sort(voxels.begin(), voxels.end());
+        uint64_t hash = 1469598103934665603ull;
+        auto add = [&hash](int32_t v) {
+            for (int i = 0; i < 4; i++) { hash ^= uint8_t(uint32_t(v) >> (8 * i)); hash *= 1099511628211ull; }
+        };
+        for (auto [x, y, z, slot] : voxels) { add(x); add(y); add(z); add(slot); }
+        return hash;
     }
 
     bool hasUnloadedBlocks(const Scene& scene, ComponentHandle handle) {

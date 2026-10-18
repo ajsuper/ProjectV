@@ -139,6 +139,11 @@ namespace projv::utils {
     // a Chunk with no chunk row, or a grid cell marked CELL_NOT_LOADED. Not its children's.
     bool hasUnloadedBlocks(const Scene& scene, ComponentHandle handle);
 
+    // A hash of a data component's voxels -- each solid voxel's position in the component's voxel
+    // space and its palette slot, in position order -- so two machines can tell whether they hold the
+    // same, whatever their trees' layout. 0 for a component with none. Decodes every chunk: not cheap.
+    uint64_t voxelContentHash(const Scene& scene, ComponentHandle handle);
+
     // Whether a chunk has geometry to draw: alive, pooled, and its blob holds a tree. An edit can
     // carve a chunk down to nothing, and a chunk with nothing must be uploaded as empty -- the
     // shader reads a tree from wherever a chunk's range starts, so an empty range would read some

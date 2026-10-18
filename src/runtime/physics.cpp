@@ -75,6 +75,8 @@ namespace projv::runtime {
                 bool       strike = false;
                 Strike     s;
                 std::shared_ptr<VoxelSplit> split;   // applyVoxelSplit
+                bool       replicated = false;       // applyVoxelEdit
+                int        waited = 0;               // steps a split has waited for its body
             };
             std::vector<Edit>             edits;
             // A strike applied but not yet cut: which voxels go together, waiting for the island pass
@@ -1447,12 +1449,41 @@ namespace projv::runtime {
                 std::vector<PhysicsRuntime::Edit> edits;
                 edits.swap(physics.edits);
                 bool queued = false;
-                for (const auto& edit : edits) {
+                std::vector<PhysicsRuntime::Edit> deferred;
+                for (auto& edit : edits) {
                     if (edit.split) {
                         if (queued) utils::updateScene(*scene);
                         queued = false;
-                        if (world.valid(edit.entity) && world.all_of<PhysicsBody>(edit.entity))
+                        if (world.valid(edit.entity) && world.all_of<PhysicsBody>(edit.entity)) {
                             applySplit(world, physics, *scene, edit.entity, *edit.split);
+                        } else if (world.valid(edit.entity) && edit.waited++ < 120) {
+                            deferred.push_back(std::move(edit));   // its body is made at this step's end
+                        } else {
+                            core::warn("physics: a split of entity {} was dropped: it has no body", static_cast<uint32_t>(edit.entity));
+                        }
+                        continue;
+                    }
+                    if (edit.replicated) {
+                        if (queued) utils::updateScene(*scene);
+                        queued = false;
+                        ComponentHandle target = voxelComponentOf(world, edit.entity);
+                        if (target == INVALID_COMPONENT_HANDLE) continue;
+                        std::vector<PendingVoxelOp> adds, removes;
+                        for (const PendingVoxelOp& op : edit.ops) (op.isAdd ? adds : removes).push_back(op);
+                        if (!adds.empty()) utils::queueVoxelAdd(*scene, target, adds);
+                        if (!removes.empty()) utils::queueVoxelRemove(*scene, target, removes);
+                        utils::updateScene(*scene);
+                        // Rebuilt for its new shape, and no island pass: the server says what came loose.
+                        if (PhysicsBody* body = world.try_get<PhysicsBody>(edit.entity)) {
+                            const VoxelComponent& link = world.get<VoxelComponent>(edit.entity);
+                            if (body->motion == MotionType::Dynamic && !physics.carried.count(edit.entity)) {
+                                BodyState state = sim.bodyState(body->id);
+                                physics.carried[edit.entity] = {state.linearVelocity, state.angularVelocity};
+                            }
+                            body->sources = sourcesOf(*scene, link.handle);
+                            physics.rebuild.push_back(edit.entity);
+                            physics.reshaped.insert(edit.entity);
+                        }
                         continue;
                     }
                     if (edit.strike) {
@@ -1474,8 +1505,12 @@ namespace projv::runtime {
                     for (const PendingVoxelOp& op : edit.ops) (op.isAdd ? adds : removes).push_back(op);
                     if (!adds.empty()) utils::queueVoxelAdd(*scene, target, adds);
                     if (!removes.empty()) utils::queueVoxelRemove(*scene, target, removes);
+                    // At once, so it is heard in order with the breaks that follow from it.
+                    if (Events* events = world.ctx().find<Events>()) events->trigger(VoxelsEdited{edit.entity, edit.ops});
                 }
                 if (queued) utils::updateScene(*scene);
+                physics.edits.insert(physics.edits.begin(), std::make_move_iterator(deferred.begin()),
+                                     std::make_move_iterator(deferred.end()));
             }
 
             // 2b. Bodies whose voxels changed or that were struck: the island pass (what came away
@@ -2181,6 +2216,15 @@ namespace projv::runtime {
 
     void editVoxels(World& world, Entity entity, const std::vector<PendingVoxelOp>& ops) {
         runtimeOf(world).edits.push_back({entity, ops});
+    }
+
+    void applyVoxelEdit(World& world, Entity entity, std::vector<PendingVoxelOp> ops) {
+        if (!world.ctx().contains<PhysicsRuntime>() || !world.valid(entity)) return;
+        PhysicsRuntime::Edit edit;
+        edit.entity = entity;
+        edit.ops = std::move(ops);
+        edit.replicated = true;
+        runtimeOf(world).edits.push_back(std::move(edit));
     }
 
     void fracture(World& world, Entity entity, const Strike& strike) {

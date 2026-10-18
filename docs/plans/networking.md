@@ -1,7 +1,7 @@
 # Networking: server-authoritative, on the deterministic simulation
 
-Status: **approved**; **N0-N2 done** (2026-10-17); P0's second compiler waits on Clang being
-installed (`--preset clang` is ready). Next: N3. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
+Status: **approved**; **N0-N3 done** (2026-10-17); P0's second compiler waits on Clang being
+installed (`--preset clang` is ready). Next: N4. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
 hundreds of players as the eventual target, and clients that load and simulate only what is near them,
 decided by one rule a game writes (`world-loading.md`). Builds on the physics plan (`physics-jolt.md`:
 D6, D8, D9, A3, A7) and on the world-loading plan.
@@ -271,6 +271,31 @@ world-loading plan (W2-W4). On top of those:
   clients within 0.6 m while moving and exactly when stopped, voxels and all; a client that vanishes
   is despawned everywhere and a late joiner gets everyone; other scene files are refused with the
   reason; at 150 ms and 5% loss a walk still arrives.
+
+## N3, done 2026-10-17
+
+- **Physics.** `VoxelsEdited {entity, ops}`, triggered as an editVoxels is applied (in order with
+  BodyBroken, which can follow from it). `applyVoxelEdit` applies a server's edit with no island or
+  support pass (the body's sources are taken as they are). A split whose target has no body yet
+  waits for it (up to 120 steps). `utils::voxelContentHash` (positions and slots, in order).
+- **Server.** A BodyBroken of an entity with a NetId goes out as a Split: the pieces' NetIds,
+  shard flags and motion, and labels over the box of every voxel cut (0 stays, k piece k, pieces +
+  1 dust). VoxelsEdited goes as an Edit (its ops). Both are kept in the session's history, which a
+  client joining later gets after its spawns. Pieces are `Replicated` and posed, never spawned:
+  every client makes them from the split. A piece cleared (or destroyed) despawns everywhere, and
+  the despawn joins the history. After each step's changes, a Check: each changed entity's voxel
+  hash.
+- **Client.** Splits, edits, despawns and checks queue in order and are applied by "net: world"
+  (FixedUpdate, before "physics"); one naming what does not exist yet (a piece an earlier split
+  makes) waits for it; a check waits for the step that applied what came before it, then counts
+  `SessionStats::worldMismatches`. The client needs physics installed, and no voxel policy of its
+  own (impact fracture).
+- Tests (`test_replication.cpp`): a wall broken on the server leaves every client with the same wall
+  (hash) and the same pieces by NetId and voxels, through 10% loss, and an edit after it likewise;
+  a client joining after the break gets the rubble less a piece the server destroyed; the debris
+  budget's clearing reaches clients; a client whose wall differs is caught by the check.
+- Not here: the history only grows (compacting it into an overlay per block is for N6, with the
+  world-loading overlay); the example does not break anything yet (game messages are N6).
 
 ## Milestones
 

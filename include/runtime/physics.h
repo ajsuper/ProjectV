@@ -458,6 +458,17 @@ namespace projv::runtime {
     // the same step. Edits made directly through utils work too; the physics notices them at the
     // next step either way, rebuilding shapes and splitting what was cut loose.
     void editVoxels(World& world, Entity entity, const std::vector<PendingVoxelOp>& ops);
+    // An edit made elsewhere -- a server's -- applied as it was: at the next step, in order with the
+    // rest, and nothing more. No island or support pass runs on it: what came loose is the server's
+    // to say (applyVoxelSplit). VoxelsEdited is not sent for it.
+    void applyVoxelEdit(World& world, Entity entity, std::vector<PendingVoxelOp> ops);
+
+    // An editVoxels is being applied (delivered at once, inside the step, in order with BodyBroken):
+    // what a server forwards.
+    struct VoxelsEdited {
+        Entity                      entity;
+        std::vector<PendingVoxelOp> ops;
+    };
 
     // A strike (runtime::fracture): where, how hard, and what becomes of the pieces. Every field but
     // `at` and one of `energy` / `reach` has a default that leaves it out.

@@ -1,6 +1,8 @@
 #include "runtime/replication.h"
 
 #include <algorithm>
+#include <climits>
+#include <limits>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -13,16 +15,122 @@
 #include "runtime/entities.h"
 #include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
+#include "utils/scene_query.h"
 
 namespace projv::runtime {
     namespace {
-        enum class Message : uint8_t { Hello = 1, Welcome, Refuse, Spawn, Despawn, Snapshot, Input };
+        enum class Message : uint8_t { Hello = 1, Welcome, Refuse, Spawn, Despawn, Snapshot, Input, Split, Edit, Check };
 
         constexpr size_t   MAX_TEXT = 1u << 16;         // a name, a reason, a prefab path
         constexpr size_t   MAX_COMPONENTS = 1u << 20;   // an entity's components, as JSON
         constexpr size_t   MAX_SNAPSHOT_BYTES = 1100;   // under a UDP packet, so ENet need not fragment
         constexpr uint32_t INPUT_REDUNDANCY = 4;        // inputs repeated in each message
         constexpr size_t   MAX_POSES = 64;              // a proxy's history
+        constexpr uint64_t MAX_SPLIT_CELLS = 1u << 24;  // the box a split's labels cover
+        constexpr uint32_t MAX_SPLIT_PIECES = 4096;
+        constexpr size_t   MAX_EDIT_OPS = 1u << 20;
+
+        // ---- World changes on the wire ----
+
+        std::vector<uint8_t> splitMessage(NetId target, const VoxelSplit& split) {
+            core::ivec3 low(std::numeric_limits<int>::max()), high(std::numeric_limits<int>::min());
+            auto widen = [&](core::ivec3 p) { low = glm::min(low, p); high = glm::max(high, p); };
+            for (const auto& piece : split.pieces) for (core::ivec3 v : piece.voxels) widen(v);
+            for (core::ivec3 v : split.dust) widen(v);
+            net::BitWriter w;
+            w.varint(uint8_t(Message::Split));
+            w.varint(target.value);
+            w.varint(split.pieces.size());
+            for (const auto& piece : split.pieces) {
+                w.varint(piece.netId.value);
+                w.boolean(piece.shard);
+                net::writeVector(w, piece.linear, 128.0f, 16);
+                net::writeVector(w, piece.angular, 128.0f, 16);
+            }
+            if (low.x > high.x) {
+                w.boolean(false);
+                return w.take();
+            }
+            w.boolean(true);
+            const core::ivec3 dims = high - low + core::ivec3(1);
+            for (int i = 0; i < 3; i++) w.signedVarint(low[i]);
+            for (int i = 0; i < 3; i++) w.varint(uint64_t(dims[i]));
+            // A label per cell of the box, x fastest: 0 stays, k the k-th piece, pieces + 1 dust.
+            std::vector<uint32_t> labels(size_t(dims.x) * size_t(dims.y) * size_t(dims.z), 0);
+            auto cell = [&](core::ivec3 v) {
+                v -= low;
+                return (size_t(v.z) * size_t(dims.y) + size_t(v.y)) * size_t(dims.x) + size_t(v.x);
+            };
+            for (size_t k = 0; k < split.pieces.size(); k++)
+                for (core::ivec3 v : split.pieces[k].voxels) labels[cell(v)] = uint32_t(k + 1);
+            for (core::ivec3 v : split.dust) labels[cell(v)] = uint32_t(split.pieces.size() + 1);
+            net::writeLabels(w, labels);
+            return w.take();
+        }
+
+        bool readSplit(net::BitReader& r, NetId& target, VoxelSplit& split) {
+            target = NetId{uint32_t(r.varint())};
+            const uint64_t pieces = r.varint();
+            if (r.failed || pieces > MAX_SPLIT_PIECES) return false;
+            split.pieces.resize(size_t(pieces));
+            for (auto& piece : split.pieces) {
+                piece.netId = NetId{uint32_t(r.varint())};
+                piece.shard = r.boolean();
+                piece.linear = net::readVector(r, 128.0f, 16);
+                piece.angular = net::readVector(r, 128.0f, 16);
+            }
+            if (!r.boolean()) return !r.failed;
+            core::ivec3 low, dims;
+            for (int i = 0; i < 3; i++) low[i] = int(r.signedVarint());
+            for (int i = 0; i < 3; i++) dims[i] = int(std::min<uint64_t>(r.varint(), MAX_SPLIT_CELLS));
+            if (r.failed || dims.x <= 0 || dims.y <= 0 || dims.z <= 0 ||
+                uint64_t(dims.x) * uint64_t(dims.y) * uint64_t(dims.z) > MAX_SPLIT_CELLS) return false;
+            const size_t cells = size_t(dims.x) * size_t(dims.y) * size_t(dims.z);
+            const std::vector<uint32_t> labels = net::readLabels(r, cells, uint32_t(pieces + 1));
+            if (r.failed || labels.size() != cells) return false;
+            for (size_t i = 0; i < cells; i++) {
+                if (!labels[i]) continue;
+                core::ivec3 v = low + core::ivec3(int(i % size_t(dims.x)), int((i / size_t(dims.x)) % size_t(dims.y)),
+                                                  int(i / (size_t(dims.x) * size_t(dims.y))));
+                if (labels[i] <= pieces) split.pieces[labels[i] - 1].voxels.push_back(v);
+                else split.dust.push_back(v);
+            }
+            return true;
+        }
+
+        std::vector<uint8_t> editMessage(NetId target, const std::vector<PendingVoxelOp>& ops) {
+            net::BitWriter w;
+            w.varint(uint8_t(Message::Edit));
+            w.varint(target.value);
+            w.varint(ops.size());
+            for (const PendingVoxelOp& op : ops) {
+                w.boolean(op.isAdd);
+                for (int i = 0; i < 3; i++) w.signedVarint(op.position[i]);
+                w.bits(op.packedColor, 32);
+                w.bits(op.slot, 8);
+            }
+            return w.take();
+        }
+
+        bool readEdit(net::BitReader& r, NetId& target, std::vector<PendingVoxelOp>& ops) {
+            target = NetId{uint32_t(r.varint())};
+            const uint64_t count = r.varint();
+            if (r.failed || count > MAX_EDIT_OPS || count > r.bitsLeft()) return false;
+            ops.resize(size_t(count));
+            for (PendingVoxelOp& op : ops) {
+                op.isAdd = r.boolean();
+                for (int i = 0; i < 3; i++) op.position[i] = int(std::clamp<int64_t>(r.signedVarint(), INT32_MIN / 2, INT32_MAX / 2));
+                op.packedColor = uint32_t(r.bits(32));
+                op.slot = uint8_t(r.bits(8));
+            }
+            return !r.failed;
+        }
+
+        uint64_t contentHashOf(World& world, Entity e) {
+            const Scene* scene = world.ctx().find<Scene>();
+            ComponentHandle h = scene ? voxelComponentOf(world, e) : INVALID_COMPONENT_HANDLE;
+            return h == INVALID_COMPONENT_HANDLE ? 0 : utils::voxelContentHash(*scene, h);
+        }
 
         void send(Events* events, auto event) {
             if (events) events->send(std::move(event));
@@ -68,6 +176,11 @@ namespace projv::runtime {
             std::vector<net::NetEvent>    early;         // gathered while flushing in "net: send"
             uint64_t                      lastSnapshot = 0;
             uint64_t                      refused = 0;
+            // World changes since the start, in order: sent to everyone as they happen, and to a
+            // client that joins later after its spawns, so it ends where everyone is.
+            std::vector<std::vector<uint8_t>> history;
+            std::set<Entity>                  fromSplits;    // pieces clients make themselves
+            std::vector<Entity>               changed;       // voxels changed this step: checked
         };
 
         ServerSession* serverOf(World& world) { return world.ctx().find<ServerSession>(); }
@@ -80,6 +193,13 @@ namespace projv::runtime {
             if (!s) return;
             if (auto it = s->sent.find(e); it != s->sent.end()) {
                 s->despawning.push_back(it->second);
+                if (s->fromSplits.erase(e)) {
+                    // A late joiner makes the piece from the history: it must hear it go, too.
+                    net::BitWriter w;
+                    w.varint(uint8_t(Message::Despawn));
+                    w.varint(it->second.value);
+                    s->history.push_back(w.take());
+                }
                 s->sent.erase(it);
             }
         }
@@ -153,10 +273,12 @@ namespace projv::runtime {
             s.transport->send(peer, net::Channel::Reliable, w.data());
             // Everything that is there already. What is spawning goes to everyone at the next send.
             std::vector<std::pair<NetId, Entity>> existing;
-            for (auto [e, id] : s.sent) existing.push_back({id, e});
+            for (auto [e, id] : s.sent)
+                if (!s.fromSplits.count(e)) existing.push_back({id, e});
             std::sort(existing.begin(), existing.end(), [](auto& a, auto& b) { return a.first.value < b.first.value; });
             for (auto [id, e] : existing)
                 if (world.valid(e)) s.transport->send(peer, net::Channel::Reliable, spawnMessage(world, e, id));
+            for (const std::vector<uint8_t>& change : s.history) s.transport->send(peer, net::Channel::Reliable, change);
             core::info("net: client {} ('{}') joined", client.id, name);
             send(world.ctx().find<Events>(), ClientJoined{client.id, client.player, name});
         }
@@ -250,6 +372,26 @@ namespace projv::runtime {
             }
             s.despawning.clear();
 
+            // What each changed body's voxels are now, after this step's changes: clients compare.
+            if (!s.changed.empty()) {
+                std::vector<std::pair<NetId, uint64_t>> hashes;
+                std::sort(s.changed.begin(), s.changed.end());
+                s.changed.erase(std::unique(s.changed.begin(), s.changed.end()), s.changed.end());
+                for (Entity e : s.changed) {
+                    const NetId* id = world.valid(e) ? world.try_get<NetId>(e) : nullptr;
+                    if (id) hashes.push_back({*id, contentHashOf(world, e)});
+                }
+                s.changed.clear();
+                net::BitWriter w;
+                w.varint(uint8_t(Message::Check));
+                w.varint(hashes.size());
+                for (auto [id, hash] : hashes) {
+                    w.varint(id.value);
+                    w.bits(hash, 64);
+                }
+                sendAll(s, net::Channel::Reliable, w.data());
+            }
+
             // Snapshots, at the rate asked, in as many packets as it takes.
             const Time& time = world.ctx().get<Time>();
             const uint64_t every = std::max<uint64_t>(1, uint64_t(1.0f / (time.fixedDelta * std::max(s.config.snapshotRate, 0.1f)) + 0.5f));
@@ -302,6 +444,17 @@ namespace projv::runtime {
             struct Sent { uint64_t sequence; core::vec3 move; bool jump; };
             std::vector<Sent> recent;
             std::vector<net::NetEvent> early;
+            // World changes, applied in order at fixed steps: one waits until what it names exists.
+            struct Change {
+                Message kind;
+                NetId   target;
+                VoxelSplit split;
+                std::vector<PendingVoxelOp> ops;
+                std::vector<std::pair<NetId, uint64_t>> hashes;   // Check
+                int     waited = 0;
+            };
+            std::vector<Change> changes;
+            uint64_t applied = 0, mismatches = 0;
         };
 
         ClientSession* clientOf(World& world) { return world.ctx().find<ClientSession>(); }
@@ -424,10 +577,32 @@ namespace projv::runtime {
                         break;
                     case Message::Despawn: {
                         const uint32_t id = uint32_t(r.varint());
-                        auto it = c.proxies.find(id);
-                        if (r.failed || it == c.proxies.end()) break;
-                        if (world.valid(it->second)) world.destroy(it->second);
-                        c.proxies.erase(it);
+                        if (r.failed) break;
+                        // In order with the world's changes: a piece goes after the split that made it.
+                        ClientSession::Change change{Message::Despawn, NetId{id}};
+                        c.changes.push_back(std::move(change));
+                        break;
+                    }
+                    case Message::Split: {
+                        ClientSession::Change change{Message::Split};
+                        if (readSplit(r, change.target, change.split)) c.changes.push_back(std::move(change));
+                        else core::warn("net: a malformed split from the server was dropped");
+                        break;
+                    }
+                    case Message::Edit: {
+                        ClientSession::Change change{Message::Edit};
+                        if (readEdit(r, change.target, change.ops)) c.changes.push_back(std::move(change));
+                        else core::warn("net: a malformed edit from the server was dropped");
+                        break;
+                    }
+                    case Message::Check: {
+                        ClientSession::Change change{Message::Check};
+                        const uint64_t count = r.varint();
+                        for (uint64_t i = 0; i < count && !r.failed && i < 4096; i++) {
+                            uint32_t id = uint32_t(r.varint());
+                            change.hashes.push_back({NetId{id}, r.bits(64)});
+                        }
+                        if (!r.failed) c.changes.push_back(std::move(change));
                         break;
                     }
                     case Message::Snapshot:
@@ -437,6 +612,49 @@ namespace projv::runtime {
                         break;
                 }
             }
+        }
+
+        // The server's world changes, in order, before the physics step that applies them. A change
+        // naming what does not exist yet -- a piece an earlier split makes this step -- waits; a check
+        // waits until what came before it has been applied.
+        void clientApplyWorld(Application& app) {
+            World& world = app.world;
+            ClientSession& c = *clientOf(world);
+            bool dispatched = false;
+            size_t done = 0;
+            for (; done < c.changes.size(); done++) {
+                ClientSession::Change& change = c.changes[done];
+                if (change.kind == Message::Check) {
+                    if (dispatched) break;   // the physics applies those at this step; check at the next
+                    for (auto [id, hash] : change.hashes) {
+                        Entity e = entityForNetId(world, id);
+                        if (e == NullEntity) continue;
+                        if (contentHashOf(world, e) != hash) {
+                            c.mismatches++;
+                            core::warn("net: entity {}'s voxels are not the server's after its changes", id.value);
+                        }
+                    }
+                    continue;
+                }
+                Entity e = entityForNetId(world, change.target);
+                if (change.kind == Message::Despawn) {
+                    if (e == NullEntity && change.waited++ < 240) break;
+                    if (e != NullEntity) world.destroy(e);
+                    c.proxies.erase(change.target.value);
+                    continue;
+                }
+                const bool ready = e != NullEntity && hasBody(world, e);
+                if (!ready) {
+                    if (change.waited++ < 240) break;
+                    core::warn("net: a change to entity {} was dropped: it is not here", change.target.value);
+                    continue;
+                }
+                if (change.kind == Message::Split) applyVoxelSplit(world, e, std::move(change.split));
+                else applyVoxelEdit(world, e, std::move(change.ops));
+                c.applied++;
+                dispatched = true;
+            }
+            c.changes.erase(c.changes.begin(), c.changes.begin() + long(done));
         }
 
         void clientSendInput(Application& app) {
@@ -532,6 +750,34 @@ namespace projv::runtime {
         world.on_construct<Replicated>().connect<&replicatedAdded>();
         world.on_destroy<Replicated>().connect<&replicatedGone>();
         for (auto e : world.view<Replicated>()) s.spawning.push_back(e);
+        // World changes, as the physics makes them: in order, inside its step.
+        app.events().on<BodyBroken>([&world](const BodyBroken& event) {
+            ServerSession* s = serverOf(world);
+            const NetId* id = world.valid(event.entity) ? world.try_get<NetId>(event.entity) : nullptr;
+            if (!s || !id) return;
+            VoxelSplit split = voxelSplitOf(world, event);
+            std::vector<uint8_t> message = splitMessage(*id, split);
+            sendAll(*s, net::Channel::Reliable, message);
+            s->history.push_back(std::move(message));
+            s->changed.push_back(event.entity);
+            // The pieces are made on every client by the split, with these ids: on the clients
+            // already, so not spawned, only posed -- and despawned when they go.
+            for (Entity piece : event.pieces) {
+                if (!world.valid(piece) || !world.all_of<NetId>(piece)) continue;
+                s->sent[piece] = world.get<NetId>(piece);
+                s->fromSplits.insert(piece);
+                world.emplace_or_replace<Replicated>(piece);
+            }
+        });
+        app.events().on<VoxelsEdited>([&world](const VoxelsEdited& event) {
+            ServerSession* s = serverOf(world);
+            const NetId* id = world.valid(event.entity) ? world.try_get<NetId>(event.entity) : nullptr;
+            if (!s || !id) return;
+            std::vector<uint8_t> message = editMessage(*id, event.ops);
+            sendAll(*s, net::Channel::Reliable, message);
+            s->history.push_back(std::move(message));
+            s->changed.push_back(event.entity);
+        });
         app.addSystem(Stage::PreUpdate, "net: receive", serverReceive);
         app.addSystem(Stage::FixedUpdate, "net: input", serverApplyInput, {.before = "physics", .after = ""});
         app.addSystem(Stage::PostUpdate, "net: send", serverSend, {.before = "", .after = "physics: present"});
@@ -555,6 +801,7 @@ namespace projv::runtime {
         }
         app.addSystem(Stage::PreUpdate, "net: receive", clientReceive);
         app.addSystem(Stage::FixedUpdate, "net: input", clientSendInput);
+        app.addSystem(Stage::FixedUpdate, "net: world", clientApplyWorld, {.before = "physics", .after = ""});
         app.addSystem(Stage::PostUpdate, "net: present", clientPresent, {.before = "scene bridge", .after = ""});
         return true;
     }
@@ -581,6 +828,8 @@ namespace projv::runtime {
             out.serverTick = c->latestTick;
             out.snapshotsReceived = c->snapshots;
             out.refusal = c->refusal;
+            out.worldChanges = c->applied;
+            out.worldMismatches = c->mismatches;
         }
         return out;
     }

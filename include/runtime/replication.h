@@ -40,6 +40,16 @@
 // - **Policy is the game's** (physics plan D8): who a player is (`spawnPlayer`), what input means
 //   (`applyInput`), and what is sent (Replicated::omit).
 //
+// - **World changes** (N3). A voxel edit (VoxelsEdited) or a break (BodyBroken) of an entity with a
+//   NetId goes to every client as what happened -- the edit's ops; the split's voxels per piece
+//   (applyVoxelSplit), as labels over a box -- in the order it happened, and is kept: a client that
+//   joins later gets the lot after its spawns. Clients apply them at fixed steps, in order, without
+//   island or support passes of their own; pieces come with the server's NetIds, so they are posed
+//   by snapshots and despawned like anything else, never spawned. After each step's changes the
+//   server sends a hash of each changed entity's voxels; a client that differs counts it
+//   (SessionStats::worldMismatches). A client needs physics installed to apply them, and should not
+//   install policy that changes voxels itself (impact fracture): that is the server's.
+//
 // No prediction yet (N5): a client's own player is a proxy too. Main thread only.
 namespace projv {
     // On the server: send this entity to every client.
@@ -113,6 +123,8 @@ namespace projv::runtime {
         uint64_t serverTick = 0;             // a client's estimate; a server's own
         uint64_t snapshotsReceived = 0, messagesRefused = 0;
         std::string refusal;                 // why the server refused, or the client was refused
+        uint64_t worldChanges = 0;           // a client's: edits and splits applied
+        uint64_t worldMismatches = 0;        // a client's: changed voxels not the server's after them
     };
     SessionStats sessionStats(const World& world);
 }

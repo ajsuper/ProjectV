@@ -4,6 +4,7 @@
 #include "doctest/doctest.h"
 
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -18,6 +19,7 @@
 #include "runtime/scene_bridge.h"
 #include "utils/compose_io.h"
 #include "utils/editing.h"
+#include "utils/material.h"
 #include "utils/scene_query.h"
 
 namespace {
@@ -50,18 +52,25 @@ namespace {
         return ops;
     }
 
-    // An arena: a 32 m floor (its top at y = 0) with a static collider, and avatar/, a prefab.
+    // An arena: a 32 m floor (its top at y = 0) with a static collider; a stone wall, 8 x 6 m, with
+    // NetId 50, that breaks; and avatar/, a prefab.
     void writeArena(const std::filesystem::path& folder) {
         {
             projv::Scene scene;
             ComponentHandle floor = utils::addComponent(scene, projv::ComponentKind::Chunk, "floor", INVALID_COMPONENT_HANDLE, 16, 0.5f);
             utils::queueVoxelAdd(scene, floor, box({0, 0, 0}, {63, 1, 63}));
+            ComponentHandle wall = utils::addComponent(scene, projv::ComponentKind::Chunk, "wall", INVALID_COMPONENT_HANDLE, 16, 0.25f);
+            utils::queueVoxelAdd(scene, wall, box({0, 0, 0}, {31, 23, 1}));
             utils::updateScene(scene);
+            REQUIRE(utils::setMaterialPhysics(scene, wall, 0, "stone"));
             utils::setComponentTransform(scene, floor, vec3(-16, -1, -16), projv::core::quat(1, 0, 0, 0), 1.0f);
+            utils::setComponentTransform(scene, wall, vec3(-4, 0, 10), projv::core::quat(1, 0, 0, 0), 1.0f);
             REQUIRE(utils::saveComposeToDisk(scene, INVALID_COMPONENT_HANDLE, folder.string()));
-            uint32_t id = utils::loadComposeFromDisk(folder.string()).components[0].localId;
-            std::ofstream(folder / "entities.json") << R"({ "version": 1, "entities": [ { "name": "floor", "link": )" << id
-                                                    << R"(, "components": { "physics.static": { "v": 1 } } } ] })";
+            projv::Scene saved = utils::loadComposeFromDisk(folder.string());
+            std::ofstream(folder / "entities.json")
+                << R"({ "version": 1, "entities": [ { "name": "floor", "link": )" << saved.components[0].localId
+                << R"(, "components": { "physics.static": { "v": 1 } } }, { "name": "wall", "link": )" << saved.components[1].localId
+                << R"(, "components": { "physics.static": { "v": 1 }, "projv.netid": { "v": 1, "id": 50 } } } ] })";
         }
         projv::Scene avatar;
         ComponentHandle body = utils::addComponent(avatar, projv::ComponentKind::Chunk, "body", INVALID_COMPONENT_HANDLE, 16, 0.25f);
@@ -94,11 +103,23 @@ namespace {
         }
     };
 
-    std::unique_ptr<Machine> server(net::LoopbackNetwork& network, const std::filesystem::path& folder) {
+    // The game's physics: the same material library on every machine.
+    void installWorld(projv::Application& app, uint32_t maxPieces = 3000) {
+        runtime::installNetIds(app.world);
+        runtime::PhysicsConfig config;
+        config.maxPieces = maxPieces;
+        runtime::installPhysics(app, config);
+        runtime::PhysicsMaterial stone{2400.0f, 0.7f, 0.0f};
+        stone.strength = 1e5f;
+        stone.shardSize = 0.5f;
+        runtime::definePhysicsMaterial(app.world, "stone", stone);
+        runtime::spawnEntities(app.world);
+    }
+
+    std::unique_ptr<Machine> server(net::LoopbackNetwork& network, const std::filesystem::path& folder, uint32_t maxPieces = 3000) {
         auto m = std::make_unique<Machine>();
         m->loadScene(folder);
-        runtime::installPhysics(m->app);
-        runtime::spawnEntities(m->app.world);
+        installWorld(m->app, maxPieces);
         runtime::ServerConfig config;
         config.sceneFolder = folder.string();
         const std::string avatar = (folder / "avatar").string();
@@ -117,6 +138,7 @@ namespace {
     std::unique_ptr<Machine> client(net::LoopbackNetwork& network, const std::filesystem::path& folder, const std::string& name) {
         auto m = std::make_unique<Machine>();
         m->loadScene(folder);
+        installWorld(m->app);
         runtime::ClientConfig config;
         config.port = 27015;
         config.sceneFolder = folder.string();
@@ -255,4 +277,118 @@ TEST_CASE("replication: at 150 ms and 5% loss a walk still arrives, and the clie
     CHECK(truth.z > 5.0f);
     CHECK(glm::distance(b->app.world.get<projv::Transform>(proxyFor(*b, annId)).position, truth) < 0.01f);
     CHECK(runtime::sessionStats(b->app.world).snapshotsReceived > 50);
+}
+
+// ---- World changes (N3) -------------------------------------------------------------------------
+
+namespace {
+    uint64_t voxelHash(Machine& m, projv::NetId id) {
+        Entity e = runtime::entityForNetId(m.app.world, id);
+        if (e == projv::NullEntity) return 0;
+        return utils::voxelContentHash(m.app.world.ctx().get<projv::Scene>(), runtime::voxelComponentOf(m.app.world, e));
+    }
+    // The pieces a machine has: NetId -> voxels.
+    std::map<uint32_t, uint64_t> piecesOf(Machine& m) {
+        std::map<uint32_t, uint64_t> out;
+        const auto& scene = m.app.world.ctx().get<projv::Scene>();
+        for (auto [e, piece, id] : m.app.world.view<projv::Piece, projv::NetId>().each())
+            out[id.value] = utils::voxelContentHash(scene, runtime::voxelComponentOf(m.app.world, e));
+        return out;
+    }
+    constexpr float PI = 3.14159265f;
+    float energyFor(float radius) { return 1e5f * 4.0f / 3.0f * PI * radius * radius * radius; }
+}
+
+TEST_CASE("replication: a wall broken on the server breaks the same on every client, through 10% loss") {
+    TempDir dir("replication_break");
+    writeArena(dir.path);
+    net::LoopbackNetwork network(4);
+    network.setConditions({0.05, 0.01, 0.1});
+    auto s = server(network, dir.path);
+    auto a = client(network, dir.path, "ann");
+    auto b = client(network, dir.path, "bo");
+    run(network, {s.get(), a.get(), b.get()}, 1.0);
+    const projv::NetId wall{50};
+    REQUIRE(voxelHash(*s, wall) != 0);
+    REQUIRE(voxelHash(*a, wall) == voxelHash(*s, wall));
+
+    runtime::fracture(s->app.world, runtime::entityForNetId(s->app.world, wall), vec3(0, 3, 10), energyFor(1.2f), vec3(0, 0, 4));
+    run(network, {s.get(), a.get(), b.get()}, 1.5);
+    const auto serverPieces = piecesOf(*s);
+    REQUIRE(serverPieces.size() > 3);
+    for (Machine* m : {a.get(), b.get()}) {
+        CHECK(voxelHash(*m, wall) == voxelHash(*s, wall));
+        CHECK(piecesOf(*m) == serverPieces);   // the same pieces, by NetId, of the same voxels
+        CHECK(runtime::sessionStats(m->app.world).worldChanges == 1);
+        CHECK(runtime::sessionStats(m->app.world).worldMismatches == 0);
+    }
+
+    // An edit to what is left goes the same way.
+    std::vector<projv::PendingVoxelOp> notch;
+    for (int x = 28; x <= 31; x++) notch.push_back({false, ivec3(x, 23, 0), 0});
+    runtime::editVoxels(s->app.world, runtime::entityForNetId(s->app.world, wall), notch);
+    run(network, {s.get(), a.get(), b.get()}, 1.0);
+    for (Machine* m : {a.get(), b.get()}) {
+        CHECK(voxelHash(*m, wall) == voxelHash(*s, wall));
+        CHECK(runtime::sessionStats(m->app.world).worldMismatches == 0);
+    }
+}
+
+TEST_CASE("replication: a client joining after the break gets the rubble, less what was cleared") {
+    TempDir dir("replication_late");
+    writeArena(dir.path);
+    net::LoopbackNetwork network(5);
+    network.setConditions({0.04});
+    auto s = server(network, dir.path);
+    auto a = client(network, dir.path, "ann");
+    run(network, {s.get(), a.get()}, 1.0);
+    runtime::fracture(s->app.world, runtime::entityForNetId(s->app.world, projv::NetId{50}), vec3(0, 3, 10), energyFor(1.0f), vec3(0, 0, 3));
+    run(network, {s.get(), a.get()}, 1.0);
+    // The server clears a piece (as its debris budget would).
+    auto pieces = piecesOf(*s);
+    REQUIRE(pieces.size() > 2);
+    s->app.world.destroy(runtime::entityForNetId(s->app.world, projv::NetId{pieces.begin()->first}));
+    run(network, {s.get(), a.get()}, 0.5);
+    CHECK(piecesOf(*a) == piecesOf(*s));
+
+    auto late = client(network, dir.path, "cy");
+    run(network, {s.get(), a.get(), late.get()}, 1.5);
+    CHECK(voxelHash(*late, projv::NetId{50}) == voxelHash(*s, projv::NetId{50}));
+    CHECK(piecesOf(*late) == piecesOf(*s));
+    CHECK(runtime::sessionStats(late->app.world).worldMismatches == 0);
+    // And the pieces are where the server has them, posed by snapshots like anything else -- not yet:
+    // a client's own bodies are corrected by snapshots in N4. Here they only exist, made alike.
+}
+
+TEST_CASE("replication: debris the server's budget clears goes on every client") {
+    TempDir dir("replication_debris");
+    writeArena(dir.path);
+    net::LoopbackNetwork network(6);
+    network.setConditions({0.03});
+    auto s = server(network, dir.path, 4);
+    auto a = client(network, dir.path, "ann");
+    run(network, {s.get(), a.get()}, 1.0);
+    runtime::fracture(s->app.world, runtime::entityForNetId(s->app.world, projv::NetId{50}), vec3(0, 3, 10), energyFor(1.2f), vec3(0, 0, 4));
+    run(network, {s.get(), a.get()}, 1.5);
+    CHECK(piecesOf(*s).size() <= 4);
+    CHECK_FALSE(piecesOf(*s).empty());
+    CHECK(piecesOf(*a) == piecesOf(*s));
+}
+
+TEST_CASE("replication: a client whose wall is not the server's is told so by the check") {
+    TempDir dir("replication_mismatch");
+    writeArena(dir.path);
+    net::LoopbackNetwork network(7);
+    network.setConditions({0.03});
+    auto s = server(network, dir.path);
+    auto a = client(network, dir.path, "ann");
+    run(network, {s.get(), a.get()}, 1.0);
+    // Ann's copy loses a corner the server never lost: a desync.
+    Entity mine = runtime::entityForNetId(a->app.world, projv::NetId{50});
+    utils::queueVoxelRemove(a->app.world.ctx().get<projv::Scene>(), runtime::voxelComponentOf(a->app.world, mine),
+                            {{false, ivec3(0, 0, 0), 0}});
+    utils::updateScene(a->app.world.ctx().get<projv::Scene>());
+    runtime::fracture(s->app.world, runtime::entityForNetId(s->app.world, projv::NetId{50}), vec3(0, 3, 10), energyFor(1.0f), vec3(0));
+    run(network, {s.get(), a.get()}, 1.0);
+    CHECK(runtime::sessionStats(a->app.world).worldMismatches == 1);
 }
