@@ -2253,6 +2253,22 @@ namespace projv::runtime {
         runtimeOf(world).edits.push_back({entity, ops});
     }
 
+    void acceptVoxelChanges(World& world, Entity entity) {
+        if (!world.ctx().contains<PhysicsRuntime>() || !world.valid(entity)) return;
+        PhysicsRuntime& physics = runtimeOf(world);
+        PhysicsBody* body = world.try_get<PhysicsBody>(entity);
+        const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
+        const Scene* scene = world.ctx().find<Scene>();
+        if (!body || !link || !scene || !utils::isComponentAlive(*scene, link->ref())) return;
+        if (body->motion == MotionType::Dynamic && !physics.carried.count(entity)) {
+            BodyState state = physics.world->bodyState(body->id);
+            physics.carried[entity] = {state.linearVelocity, state.angularVelocity};
+        }
+        body->sources = sourcesOf(*scene, link->handle);
+        physics.rebuild.push_back(entity);
+        physics.reshaped.insert(entity);
+    }
+
     void applyVoxelEdit(World& world, Entity entity, std::vector<PendingVoxelOp> ops) {
         if (!world.ctx().contains<PhysicsRuntime>() || !world.valid(entity)) return;
         PhysicsRuntime::Edit edit;

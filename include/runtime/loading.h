@@ -68,6 +68,7 @@ namespace projv::runtime {
     bool openWorld(Application& app, const std::string& folder, const WorldLoadingConfig& config = {});
 
     utils::SceneLoader& worldLoader(World& world);
+    bool hasWorldLoading(const World& world);
     void setLoadRule(World& world, utils::LoadPolicy policy);
     // The program's own viewers (a free camera), besides every LoadViewer entity. Kept until replaced.
     void setViewers(World& world, std::vector<utils::Viewer> viewers);

@@ -1,7 +1,7 @@
 # Networking: server-authoritative, on the deterministic simulation
 
-Status: **approved**; **N0-N5 done** (2026-10-17); P0's second compiler waits on Clang being
-installed (`--preset clang` is ready). Next: N6. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
+Status: **approved**; **N0-N6 done** (2026-10-17); P0's second compiler waits on Clang being
+installed (`--preset clang` is ready). Next: N7. Drafted and revised 2026-10-16 after the user's answers: ENet, a dedicated-server demo first,
 hundreds of players as the eventual target, and clients that load and simulate only what is near them,
 decided by one rule a game writes (`world-loading.md`). Builds on the physics plan (`physics-jolt.md`:
 D6, D8, D9, A3, A7) and on the world-loading plan.
@@ -346,6 +346,36 @@ world-loading plan (W2-W4). On top of those:
   a 3 m move by the server is taken within a round trip, to the millimetre.
 - Not here: other players are proxies, so walking into one is mispredicted until the correction
   (N4/N5 trade-off, D9). `Time::scale` also scales Update's delta by up to 5%.
+
+## N6, done 2026-10-17
+
+- **Server.** `ServerConfig::loadRule` (default loadEverything) and `setClientLoadRule(world[,
+  client], policy)`: the world-loading rule, run per client with its player as the viewer. Blocks
+  are numbered as a lazy open of the same files numbers them (a scratch SceneBlocks at install,
+  with their bounds and content stamps). Every 10 frames (and at once on joining) each client's
+  block presences are judged and the changes sent (BlockPresence); a block turning present whose
+  stamp moved since the start is sent first, whole (BlockContent). Replicated entities (players,
+  pieces) are judged at their position each frame and spawned or despawned per client; a client's
+  own player always. Authored entities count as a client's while any block under their component
+  is present for it. Snapshots, edits, splits and checks go only to the clients that have their
+  entity; a split's pieces are counted as had by the clients told of it, and spawned with their
+  voxels (palette and voxel list) to any other when it comes near. N3's history is gone: block
+  contents and piece spawns put a late joiner right.
+- **Client.** With world loading (`hasWorldLoading`), its loader's rule is the server's table (no
+  block until told); without, the scene is whole and only block contents apply. Block contents queue
+  with the other world changes and are applied in order -- in place, or kept for the block's next
+  load (`SceneBlocks::replaceContent`) -- and taken by physics without an island pass
+  (`runtime::acceptVoxelChanges`). A piece spawned with voxels is built as a chunk of its own, linked,
+  with its components and Piece.
+- `utils::componentVoxels` (and the hash on it).
+- Test: two players 200 m apart on a 320 m field of 400 blocks under loadNear(24, 48): each client has
+  about 40 blocks, all within 60 m of its player, neither has the other, and only Bo has the crate
+  by him, simulated; walking together at 8 m/s, Ann's floor loads ahead of her (she never drops
+  below it), Bo appears to her within 1.5 m of where the server has him, they meet, and Bo's
+  client has let the crate go. Every earlier session test passes on the new path (late joiners).
+- Not here: the example's arena is small enough to send whole; per-client loading is a setting on
+  the server (`loadRule`). The server judges every block for every client every 10 frames -- fine to
+  a few thousand blocks and tens of clients; N7 measures it.
 
 ## Milestones
 

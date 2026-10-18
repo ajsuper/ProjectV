@@ -76,6 +76,9 @@ namespace projv::utils {
         // Frees the block's chunk and its voxels, keeping them first if edited. A block whose
         // component was deleted is forgotten.
         void unload(Scene& scene, BlockId id);
+        // The block's voxels as someone else has them now (a server's): in place when it is loaded,
+        // kept for its next load when it is not. It counts as edited from then on.
+        void replaceContent(Scene& scene, BlockId id, std::vector<uint32_t> geometry, std::vector<uint8_t> materialIDs);
         void loadAll(Scene& scene);
 
         // Cells of the scene's lazily opened grids that are not blocks yet -- an edit made them --

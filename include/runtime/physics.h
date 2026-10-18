@@ -469,6 +469,10 @@ namespace projv::runtime {
     // to say (applyVoxelSplit). VoxelsEdited is not sent for it.
     void applyVoxelEdit(World& world, Entity entity, std::vector<PendingVoxelOp> ops);
 
+    // The voxels of `entity` were changed by someone whose word they are (a server's copy of them):
+    // its body is rebuilt at the next step, with no island or support pass.
+    void acceptVoxelChanges(World& world, Entity entity);
+
     // An editVoxels is being applied (delivered at once, inside the step, in order with BodyBroken):
     // what a server forwards.
     struct VoxelsEdited {

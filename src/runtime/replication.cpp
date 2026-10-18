@@ -14,14 +14,18 @@
 #include "core/log.h"
 #include "net/wire.h"
 #include "runtime/entities.h"
+#include "runtime/loading.h"
 #include "runtime/physics.h"
 #include "runtime/physics/physics_world.h"
 #include "runtime/scene_bridge.h"
+#include "utils/editing.h"
+#include "utils/scene_loading.h"
 #include "utils/scene_query.h"
 
 namespace projv::runtime {
     namespace {
-        enum class Message : uint8_t { Hello = 1, Welcome, Refuse, Spawn, Despawn, Snapshot, Input, Split, Edit, Check };
+        enum class Message : uint8_t { Hello = 1, Welcome, Refuse, Spawn, Despawn, Snapshot, Input, Split, Edit, Check,
+                                       BlockPresence, BlockContent };
 
         constexpr size_t   MAX_TEXT = 1u << 16;         // a name, a reason, a prefab path
         constexpr size_t   MAX_COMPONENTS = 1u << 20;   // an entity's components, as JSON
@@ -31,6 +35,9 @@ namespace projv::runtime {
         constexpr uint64_t MAX_SPLIT_CELLS = 1u << 24;  // the box a split's labels cover
         constexpr uint32_t MAX_SPLIT_PIECES = 4096;
         constexpr size_t   MAX_EDIT_OPS = 1u << 20;
+
+        std::vector<uint8_t> text(const std::string& s) { return {s.begin(), s.end()}; }
+        std::string text(const std::vector<uint8_t>& b) { return {b.begin(), b.end()}; }
 
         // ---- World changes on the wire ----
 
@@ -128,6 +135,46 @@ namespace projv::runtime {
             return !r.failed;
         }
 
+        // The chunk a block is in an eagerly loaded scene (the same component handles as a lazy open
+        // of the same files), or INVALID_CHUNK_HANDLE.
+        ChunkHandle chunkOfBlock(const Scene& scene, const utils::SceneBlockSource& b) {
+            if (!utils::isComponentAlive(scene, b.component)) return INVALID_CHUNK_HANDLE;
+            const ComponentRecord& rec = scene.components[b.component];
+            if (rec.kind == ComponentKind::Chunk) return rec.chunkHandle < scene.chunks.size() ? rec.chunkHandle : INVALID_CHUNK_HANDLE;
+            if (rec.kind != ComponentKind::Grid || rec.gridIndex < 0 || size_t(rec.gridIndex) >= scene.grids.size()) return INVALID_CHUNK_HANDLE;
+            const SceneGrid& grid = scene.grids[size_t(rec.gridIndex)];
+            core::ivec3 local = core::ivec3(b.entry.gridX, b.entry.gridY, b.entry.gridZ) - grid.originCellCoord;
+            if (glm::any(glm::lessThan(local, core::ivec3(0))) || glm::any(glm::greaterThanEqual(local, grid.dims))) return INVALID_CHUNK_HANDLE;
+            int32_t c = grid.cellToChunk[size_t(local.x + grid.dims.x * (local.y + grid.dims.y * local.z))];
+            return c >= 0 ? ChunkHandle(c) : INVALID_CHUNK_HANDLE;
+        }
+
+        // The entity whose voxels a component is: linked to it or to one of its parents.
+        Entity entityOverComponent(const World& world, const Scene& scene, ComponentHandle h) {
+            for (; h != INVALID_COMPONENT_HANDLE && h < scene.components.size(); h = scene.components[h].parent)
+                if (Entity e = entityFor(world, h); e != NullEntity) return e;
+            return NullEntity;
+        }
+
+        void writePalette(net::BitWriter& w, const std::vector<Material>& palette) {
+            w.varint(palette.size());
+            for (const Material& m : palette) {
+                w.bits(m.packedColor, 32); w.bits(m.packedEmission, 32); w.bits(m.packedSurface, 32); w.bits(m.packedExtra, 32);
+                w.bytes(text(m.name));
+                w.bytes(text(m.physics));
+            }
+        }
+        std::vector<Material> readPalette(net::BitReader& r) {
+            std::vector<Material> palette(std::min<uint64_t>(r.varint(), MAX_MATERIALS_PER_COMPONENT));
+            for (Material& m : palette) {
+                m.packedColor = uint32_t(r.bits(32)); m.packedEmission = uint32_t(r.bits(32));
+                m.packedSurface = uint32_t(r.bits(32)); m.packedExtra = uint32_t(r.bits(32));
+                m.name = text(r.bytes(256));
+                m.physics = text(r.bytes(256));
+            }
+            return palette;
+        }
+
         uint64_t contentHashOf(World& world, Entity e) {
             const Scene* scene = world.ctx().find<Scene>();
             ComponentHandle h = scene ? voxelComponentOf(world, e) : INVALID_COMPONENT_HANDLE;
@@ -138,8 +185,6 @@ namespace projv::runtime {
             if (events) events->send(std::move(event));
         }
 
-        std::vector<uint8_t> text(const std::string& s) { return {s.begin(), s.end()}; }
-        std::string text(const std::vector<uint8_t>& b) { return {b.begin(), b.end()}; }
 
         void writeQuat(net::BitWriter& w, core::quat q) { net::writeRotation(w, q, 12); }
 
@@ -178,6 +223,13 @@ namespace projv::runtime {
                 std::map<uint32_t, float> priority;   // by NetId: grows until sent
                 std::set<uint32_t>        toldAsleep; // bodies it was last told are asleep
                 uint64_t    snapshotBytes = 0;
+                // What it has (N6): each block's presence as told, the content stamp of each block it
+                // was sent the voxels of, and the replicated entities it has, by NetId, with what the
+                // rule last said of each.
+                std::vector<utils::Presence>       blocks;
+                std::map<uint32_t, uint64_t>       contentSent;
+                std::map<uint32_t, utils::Presence> has;
+                bool        blocksDue = true;
             };
             std::map<net::PeerId, Client> clients;
             std::map<Entity, NetId>       sent;          // replicated entities clients have, and their ids
@@ -186,11 +238,17 @@ namespace projv::runtime {
             std::vector<net::NetEvent>    early;         // gathered while flushing in "net: send"
             uint64_t                      lastSnapshot = 0;
             uint64_t                      refused = 0;
-            // World changes since the start, in order: sent to everyone as they happen, and to a
-            // client that joins later after its spawns, so it ends where everyone is.
-            std::vector<std::vector<uint8_t>> history;
-            std::set<Entity>                  fromSplits;    // pieces clients make themselves
-            std::vector<Entity>               changed;       // voxels changed this step: checked
+            std::set<Entity>              fromSplits;    // pieces: sent with their voxels to who missed the split
+            std::vector<Entity>           changed;       // voxels changed this step: checked
+            // The scene's blocks, numbered as every client numbers them (the files' order), their
+            // bounds, and their content stamp at the start: a block whose stamp moved is sent whole.
+            std::vector<utils::SceneBlockSource> blocks;
+            std::vector<utils::WorldBox>         blockBounds;
+            std::vector<uint64_t>                blockStamps;
+            std::map<ComponentHandle, std::vector<uint32_t>> blocksUnder;   // every block under a component
+            utils::LoadPolicy                    policy = utils::loadEverything();
+            std::map<ClientId, utils::LoadPolicy> policies;
+            uint64_t                             frames = 0;
         };
 
         ServerSession* serverOf(World& world) { return world.ctx().find<ServerSession>(); }
@@ -203,19 +261,14 @@ namespace projv::runtime {
             if (!s) return;
             if (auto it = s->sent.find(e); it != s->sent.end()) {
                 s->despawning.push_back(it->second);
-                if (s->fromSplits.erase(e)) {
-                    // A late joiner makes the piece from the history: it must hear it go, too.
-                    net::BitWriter w;
-                    w.varint(uint8_t(Message::Despawn));
-                    w.varint(it->second.value);
-                    s->history.push_back(w.take());
-                }
+                s->fromSplits.erase(e);
                 s->sent.erase(it);
             }
         }
 
         // `owner`: for the client whose player it is, which predicts it, and so is sent all of it.
-        std::vector<uint8_t> spawnMessage(World& world, Entity e, NetId id, bool owner = false) {
+        // `voxels`: a piece, for a client that did not see the split that made it -- its voxels go too.
+        std::vector<uint8_t> spawnMessage(World& world, Entity e, NetId id, bool owner = false, bool voxels = false) {
             const Replicated& r = world.get<Replicated>(e);
             nlohmann::json components = entityComponents(world, e, true);
             if (!owner)
@@ -230,7 +283,146 @@ namespace projv::runtime {
             const Transform* t = world.try_get<Transform>(e);
             w.f32(t ? t->scale : 1.0f);
             w.bytes(text(components.dump()));
+            const Scene* scene = world.ctx().find<Scene>();
+            const ComponentHandle h = voxels && scene ? voxelComponentOf(world, e) : INVALID_COMPONENT_HANDLE;
+            w.boolean(h != INVALID_COMPONENT_HANDLE);
+            if (h != INVALID_COMPONENT_HANDLE) {
+                const ComponentRecord& rec = scene->components[h];
+                const Chunk* first = nullptr;
+                if (rec.kind == ComponentKind::Chunk && rec.chunkHandle < scene->chunks.size()) first = &scene->chunks[rec.chunkHandle];
+                else if (rec.kind == ComponentKind::Grid)
+                    for (int32_t c : scene->grids[size_t(rec.gridIndex)].cellToChunk)
+                        if (c >= 0) { first = &scene->chunks[size_t(c)]; break; }
+                w.f32(first ? first->nativeScale / float(std::max(first->header.resolution, 1u)) : 0.25f);
+                writePalette(w, rec.materialPalette);
+                const auto all = utils::componentVoxels(*scene, h);
+                w.varint(all.size());
+                for (const auto& v : all) {
+                    for (int i = 0; i < 3; i++) w.signedVarint(v.position[i]);
+                    w.bits(v.slot, 8);
+                }
+            }
             return w.take();
+        }
+
+        // ---- Who has what (N6) ----
+
+        core::vec3 viewerOf(World& world, const ServerSession::Client& client) {
+            if (client.player == NullEntity || !world.valid(client.player)) return core::vec3(0.0f);
+            return poseOf(world, client.player).first;
+        }
+
+        // An entity's presence for a client: a replicated one by the rule at where it is (its own
+        // player always); an authored one by its blocks, as the client's world loading has it.
+        bool relevant(World& world, ServerSession& s, ServerSession::Client& client, Entity e) {
+            if (!world.valid(e)) return false;
+            const NetId* id = world.try_get<NetId>(e);
+            if (world.all_of<Replicated>(e)) return id && client.has.count(id->value);
+            const VoxelComponent* link = world.try_get<VoxelComponent>(e);
+            if (!link) return true;
+            auto under = s.blocksUnder.find(link->handle);
+            if (under == s.blocksUnder.end() || client.blocks.empty()) return true;
+            for (uint32_t b : under->second)
+                if (client.blocks[b] != utils::Presence::Absent) return true;
+            return false;
+        }
+
+        const utils::LoadPolicy& policyOf(const ServerSession& s, const ServerSession::Client& client) {
+            auto it = s.policies.find(client.id);
+            return it != s.policies.end() ? it->second : s.policy;
+        }
+
+        utils::Presence judge(const utils::LoadPolicy& policy, const utils::LoadCandidate& c, std::span<const utils::Viewer> viewers) {
+            if (policy.hint.radius > 0.0f) {
+                bool near = false;
+                for (const utils::Viewer& v : viewers) near = near || utils::distanceToBox(c.bounds, v.position) <= policy.hint.radius;
+                if (!near) return utils::Presence::Absent;
+            }
+            return policy.rule(c, viewers);
+        }
+
+        // The rule for each client: its blocks (every few frames, and at once when it joins), sending
+        // the voxels of any the server has changed first; then its entities, spawned and despawned.
+        void updateRelevance(World& world, ServerSession& s, net::PeerId peer, ServerSession::Client& client) {
+            const utils::LoadPolicy& policy = policyOf(s, client);
+            const utils::Viewer viewer{viewerOf(world, client), client.id};
+            const std::span<const utils::Viewer> viewers(&viewer, client.player != NullEntity ? 1 : 0);
+            const Scene& scene = world.ctx().get<Scene>();
+            if (client.blocksDue || s.frames % 10 == 0) {
+                client.blocksDue = false;
+                if (client.blocks.size() != s.blocks.size()) client.blocks.assign(s.blocks.size(), utils::Presence::Absent);
+                std::vector<std::pair<uint32_t, utils::Presence>> changes;
+                for (uint32_t b = 0; b < s.blocks.size(); b++) {
+                    utils::LoadCandidate c;
+                    c.id = b;
+                    c.bounds = s.blockBounds[b];
+                    c.component = s.blocks[b].component;
+                    c.cell = core::ivec3(s.blocks[b].entry.gridX, s.blocks[b].entry.gridY, s.blocks[b].entry.gridZ);
+                    c.current = client.blocks[b];
+                    const utils::Presence p = judge(policy, c, viewers);
+                    if (p == client.blocks[b]) continue;
+                    if (p != utils::Presence::Absent) {
+                        // Changed here since the files: its voxels as they are now, before it loads.
+                        const ChunkHandle ch = chunkOfBlock(scene, s.blocks[b]);
+                        const int32_t pool = ch != INVALID_CHUNK_HANDLE ? scene.chunks[ch].geometryPoolIndex : -1;
+                        const uint64_t stamp = pool >= 0 ? scene.geometryPool[size_t(pool)].contentStamp : 0;
+                        if (pool >= 0 && stamp != s.blockStamps[b] && client.contentSent[b] != stamp) {
+                            const GeometryBlob& blob = scene.geometryPool[size_t(pool)];
+                            net::BitWriter w;
+                            w.varint(uint8_t(Message::BlockContent));
+                            w.varint(b);
+                            w.varint(blob.geometry.size());
+                            for (uint32_t word : blob.geometry) w.bits(word, 32);
+                            w.bytes(blob.materialIDs);
+                            s.transport->send(peer, net::Channel::Reliable, w.data());
+                            client.contentSent[b] = stamp;
+                        }
+                    }
+                    client.blocks[b] = p;
+                    changes.push_back({b, p});
+                }
+                for (size_t at = 0; at < changes.size(); at += 4096) {
+                    net::BitWriter w;
+                    w.varint(uint8_t(Message::BlockPresence));
+                    const size_t n = std::min<size_t>(4096, changes.size() - at);
+                    w.varint(n);
+                    for (size_t i = at; i < at + n; i++) {
+                        w.varint(changes[i].first);
+                        w.bits(uint8_t(changes[i].second), 2);
+                    }
+                    s.transport->send(peer, net::Channel::Reliable, w.data());
+                }
+            }
+            // Replicated entities, in NetId order.
+            std::vector<std::pair<NetId, Entity>> all;
+            for (auto [e, id] : s.sent) if (world.valid(e)) all.push_back({id, e});
+            std::sort(all.begin(), all.end(), [](auto& a, auto& b) { return a.first.value < b.first.value; });
+            for (auto [id, e] : all) {
+                auto known = client.has.find(id.value);
+                utils::Presence p = utils::Presence::Active;
+                if (e != client.player) {
+                    const core::vec3 at = poseOf(world, e).first;
+                    utils::LoadCandidate c;
+                    c.id = std::numeric_limits<uint32_t>::max();
+                    c.bounds = {at - core::vec3(0.5f), at + core::vec3(0.5f)};
+                    c.current = known != client.has.end() ? known->second : utils::Presence::Absent;
+                    c.entity = static_cast<uint32_t>(e);
+                    p = judge(policy, c, viewers);
+                }
+                if (p != utils::Presence::Absent && known == client.has.end()) {
+                    s.transport->send(peer, net::Channel::Reliable,
+                                      spawnMessage(world, e, id, e == client.player, s.fromSplits.count(e) != 0));
+                    client.has[id.value] = p;
+                } else if (p == utils::Presence::Absent && known != client.has.end()) {
+                    net::BitWriter w;
+                    w.varint(uint8_t(Message::Despawn));
+                    w.varint(id.value);
+                    s.transport->send(peer, net::Channel::Reliable, w.data());
+                    client.has.erase(known);
+                } else if (known != client.has.end()) {
+                    known->second = p;
+                }
+            }
         }
 
         void sendAll(ServerSession& s, net::Channel channel, const std::vector<uint8_t>& data) {
@@ -285,14 +477,8 @@ namespace projv::runtime {
             w.f32(world.ctx().get<Time>().fixedDelta);
             w.varint(world.ctx().get<Time>().fixedStep);
             s.transport->send(peer, net::Channel::Reliable, w.data());
-            // Everything that is there already. What is spawning goes to everyone at the next send.
-            std::vector<std::pair<NetId, Entity>> existing;
-            for (auto [e, id] : s.sent)
-                if (!s.fromSplits.count(e)) existing.push_back({id, e});
-            std::sort(existing.begin(), existing.end(), [](auto& a, auto& b) { return a.first.value < b.first.value; });
-            for (auto [id, e] : existing)
-                if (world.valid(e)) s.transport->send(peer, net::Channel::Reliable, spawnMessage(world, e, id, e == client.player));
-            for (const std::vector<uint8_t>& change : s.history) s.transport->send(peer, net::Channel::Reliable, change);
+            // Its blocks and entities follow at the next send, as the rule has them.
+            client.blocksDue = true;
             core::info("net: client {} ('{}') joined", client.id, name);
             send(world.ctx().find<Events>(), ClientJoined{client.id, client.player, name});
         }
@@ -381,18 +567,20 @@ namespace projv::runtime {
                 fresh.push_back({assignNetId(world, e), e});
             }
             std::sort(fresh.begin(), fresh.end(), [](auto& a, auto& b) { return a.first.value < b.first.value; });
-            for (auto [id, e] : fresh) {
-                s.sent[e] = id;
-                for (auto& [peer, client] : s.clients)
-                    if (client.welcomed) s.transport->send(peer, net::Channel::Reliable, spawnMessage(world, e, id, e == client.player));
-            }
+            for (auto [id, e] : fresh) s.sent[e] = id;
+            // Gone: to each client that had it.
             for (NetId id : s.despawning) {
                 net::BitWriter w;
                 w.varint(uint8_t(Message::Despawn));
                 w.varint(id.value);
-                sendAll(s, net::Channel::Reliable, w.data());
+                for (auto& [peer, client] : s.clients)
+                    if (client.welcomed && client.has.erase(id.value)) s.transport->send(peer, net::Channel::Reliable, w.data());
             }
             s.despawning.clear();
+            // Who has what now.
+            s.frames++;
+            for (auto& [peer, client] : s.clients)
+                if (client.welcomed) updateRelevance(world, s, peer, client);
 
             // What each changed body's voxels are now, after this step's changes: clients compare.
             if (!s.changed.empty()) {
@@ -404,14 +592,21 @@ namespace projv::runtime {
                     if (id) hashes.push_back({*id, contentHashOf(world, e)});
                 }
                 s.changed.clear();
-                net::BitWriter w;
-                w.varint(uint8_t(Message::Check));
-                w.varint(hashes.size());
-                for (auto [id, hash] : hashes) {
-                    w.varint(id.value);
-                    w.bits(hash, 64);
+                for (auto& [peer, client] : s.clients) {
+                    if (!client.welcomed) continue;
+                    std::vector<std::pair<NetId, uint64_t>> mine;
+                    for (auto [id, hash] : hashes)
+                        if (relevant(world, s, client, entityForNetId(world, id))) mine.push_back({id, hash});
+                    if (mine.empty()) continue;
+                    net::BitWriter w;
+                    w.varint(uint8_t(Message::Check));
+                    w.varint(mine.size());
+                    for (auto [id, hash] : mine) {
+                        w.varint(id.value);
+                        w.bits(hash, 64);
+                    }
+                    s.transport->send(peer, net::Channel::Reliable, w.data());
                 }
-                sendAll(s, net::Channel::Reliable, w.data());
             }
 
             // Snapshots, at the rate asked: for each client, what matters most first, within its budget.
@@ -456,6 +651,7 @@ namespace projv::runtime {
                     for (const Entry& entry : entries) {
                         if (entry.asleep && client.toldAsleep.count(entry.id)) continue;
                         if (own && own->value == entry.id) continue;
+                        if (!relevant(world, s, client, candidates[entry.id])) continue;
                         float& p = client.priority[entry.id];
                         p += entry.weight;
                         order.push_back({p, &entry});
@@ -534,6 +730,9 @@ namespace projv::runtime {
                 VoxelSplit split;
                 std::vector<PendingVoxelOp> ops;
                 std::vector<std::pair<NetId, uint64_t>> hashes;   // Check
+                uint32_t block = 0;                                // BlockContent
+                std::vector<uint32_t> geometry;
+                std::vector<uint8_t>  materialIDs;
                 int     waited = 0;
             };
             std::vector<Change> changes;
@@ -549,6 +748,11 @@ namespace projv::runtime {
             uint64_t reconciliations = 0;
             float    largestCorrection = 0.0f;
             float    clockScale = 1.0f;
+            // What the server says of each block (N6), read by the world-loading rule when there is
+            // one; and the blocks as numbered, for a scene loaded whole.
+            std::shared_ptr<std::vector<utils::Presence>> presence = std::make_shared<std::vector<utils::Presence>>();
+            std::vector<utils::SceneBlockSource> blocks;
+            bool lazy = false;
         };
 
         ClientSession* clientOf(World& world) { return world.ctx().find<ClientSession>(); }
@@ -564,10 +768,39 @@ namespace projv::runtime {
             const core::quat rotation = net::readRotation(r, 12);
             const float scale = r.f32();
             const std::string components = text(r.bytes(MAX_COMPONENTS));
+            // A piece's voxels, for one this client did not see made.
+            struct Voxels { float voxel = 0.25f; std::vector<Material> palette; std::vector<PendingVoxelOp> ops; };
+            std::optional<Voxels> voxels;
+            if (r.boolean()) {
+                voxels.emplace();
+                voxels->voxel = r.f32();
+                voxels->palette = readPalette(r);
+                const uint64_t count = r.varint();
+                if (r.failed || count > MAX_EDIT_OPS || count > r.bitsLeft()) return;
+                voxels->ops.resize(size_t(count));
+                for (PendingVoxelOp& op : voxels->ops) {
+                    op.isAdd = true;
+                    for (int i = 0; i < 3; i++) op.position[i] = int(std::clamp<int64_t>(r.signedVarint(), -(1 << 20), 1 << 20));
+                    op.slot = uint8_t(r.bits(8));
+                    op.packedColor = op.slot < voxels->palette.size() ? voxels->palette[op.slot].packedColor : 0u;
+                }
+            }
             if (r.failed || id == 0) return;
-            if (c.proxies.count(id)) return;
+            if (c.proxies.count(id) || entityForNetId(world, NetId{id}) != NullEntity) return;
             Entity e = NullEntity;
-            if (!prefab.empty()) {
+            if (voxels && voxels->voxel > 0.0f && std::isfinite(voxels->voxel) && !voxels->ops.empty()) {
+                Scene& scene = world.ctx().get<Scene>();
+                ComponentHandle piece = utils::addComponent(scene, ComponentKind::Chunk, "piece", INVALID_COMPONENT_HANDLE, 16, voxels->voxel);
+                if (piece != INVALID_COMPONENT_HANDLE) {
+                    scene.components[piece].materialPalette = voxels->palette;
+                    scene.components[piece].paletteVersion++;
+                    utils::queueVoxelAdd(scene, piece, voxels->ops);
+                    utils::updateScene(scene);
+                    utils::setComponentTransform(scene, piece, position, rotation, std::isfinite(scale) ? scale : 1.0f);
+                    e = spawnComponent(world, piece, LinkMode::Root, OnUnlink::Destroy);
+                    if (e != NullEntity) world.emplace_or_replace<Piece>(e);
+                }
+            } else if (!prefab.empty()) {
                 std::string folder = (std::filesystem::path(c.config.sceneFolder) / prefab).string();
                 if (prefab.find("..") != std::string::npos) folder.clear();   // the scene's own folders only
                 if (!folder.empty()) e = instantiatePrefab(world, folder, position, rotation, std::isfinite(scale) ? scale : 1.0f);
@@ -729,6 +962,35 @@ namespace projv::runtime {
                         else core::warn("net: a malformed edit from the server was dropped");
                         break;
                     }
+                    case Message::BlockPresence: {
+                        const uint64_t count = r.varint();
+                        for (uint64_t i = 0; i < count && !r.failed && i < 4096; i++) {
+                            const uint32_t block = uint32_t(r.varint());
+                            const auto p = utils::Presence(std::min<uint64_t>(r.bits(2), 2));
+                            if (r.failed || block >= (1u << 24)) break;
+                            if (c.presence->size() <= block) c.presence->resize(size_t(block) + 1, utils::Presence::Absent);
+                            (*c.presence)[block] = p;
+                        }
+                        // Asked again at once, under the table the server keeps.
+                        if (c.lazy)
+                            worldLoader(world).setRule(utils::LoadPolicy{
+                                [table = c.presence](const utils::LoadCandidate& candidate, std::span<const utils::Viewer>) {
+                                    if (candidate.entity != 0xFFFFFFFFu) return utils::Presence::Active;   // entities: the server sends them
+                                    return candidate.id < table->size() ? (*table)[candidate.id] : utils::Presence::Absent;
+                                }, {}});
+                        break;
+                    }
+                    case Message::BlockContent: {
+                        ClientSession::Change change{Message::BlockContent};
+                        change.block = uint32_t(r.varint());
+                        const uint64_t words = r.varint();
+                        if (r.failed || words > r.bitsLeft() / 32) break;
+                        change.geometry.resize(size_t(words));
+                        for (uint32_t& word : change.geometry) word = uint32_t(r.bits(32));
+                        change.materialIDs = r.bytes(size_t(1) << 26);
+                        if (!r.failed) c.changes.push_back(std::move(change));
+                        break;
+                    }
                     case Message::Check: {
                         ClientSession::Change change{Message::Check};
                         const uint64_t count = r.varint();
@@ -768,6 +1030,26 @@ namespace projv::runtime {
                             core::warn("net: entity {}'s voxels are not the server's after its changes", id.value);
                         }
                     }
+                    continue;
+                }
+                if (change.kind == Message::BlockContent) {
+                    // A block as the server has it now: replaces the files' voxels, here or when it
+                    // loads, and is taken by the physics without an island pass of its own.
+                    Scene& scene = world.ctx().get<Scene>();
+                    ComponentHandle component = INVALID_COMPONENT_HANDLE;
+                    if (c.lazy && change.block < worldLoader(world).blocks().size()) {
+                        utils::SceneBlocks& blocks = worldLoader(world).blocks();
+                        component = blocks.source(change.block).component;
+                        blocks.replaceContent(scene, change.block, std::move(change.geometry), std::move(change.materialIDs));
+                    } else if (!c.lazy && change.block < c.blocks.size()) {
+                        component = c.blocks[change.block].component;
+                        const ChunkHandle ch = chunkOfBlock(scene, c.blocks[change.block]);
+                        if (ch != INVALID_CHUNK_HANDLE)
+                            replaceChunkGeometry(scene, ch, std::move(change.geometry), std::move(change.materialIDs),
+                                                 scene.chunks[ch].header.resolution);
+                    }
+                    if (component != INVALID_COMPONENT_HANDLE)
+                        if (Entity owner = entityOverComponent(world, scene, component); owner != NullEntity) acceptVoxelChanges(world, owner);
                     continue;
                 }
                 Entity e = entityForNetId(world, change.target);
@@ -934,6 +1216,25 @@ namespace projv::runtime {
         s.transport = std::move(transport);
         s.sceneHash = sceneFilesHash(config.sceneFolder);
         s.config = std::move(config);
+        if (s.config.loadRule.rule) s.policy = s.config.loadRule;
+        // The blocks as a client opening the folder lazily numbers them, and where they are.
+        {
+            Scene scratch;
+            utils::SceneBlocks index;
+            if (index.open(scratch, s.config.sceneFolder)) {
+                const Scene* scene = world.ctx().find<Scene>();
+                for (utils::BlockId b = 0; b < index.size(); b++) {
+                    s.blocks.push_back(index.source(b));
+                    s.blockBounds.push_back(index.bounds(scratch, b));
+                    const ChunkHandle ch = scene ? chunkOfBlock(*scene, index.source(b)) : INVALID_CHUNK_HANDLE;
+                    const int32_t pool = ch != INVALID_CHUNK_HANDLE ? scene->chunks[ch].geometryPoolIndex : -1;
+                    s.blockStamps.push_back(pool >= 0 ? scene->geometryPool[size_t(pool)].contentStamp : 0);
+                    for (ComponentHandle h = index.source(b).component; h != INVALID_COMPONENT_HANDLE && h < scratch.components.size();
+                         h = scratch.components[h].parent)
+                        s.blocksUnder[h].push_back(b);
+                }
+            }
+        }
         world.on_construct<Replicated>().connect<&replicatedAdded>();
         world.on_destroy<Replicated>().connect<&replicatedGone>();
         for (auto e : world.view<Replicated>()) s.spawning.push_back(e);
@@ -944,16 +1245,22 @@ namespace projv::runtime {
             if (!s || !id) return;
             VoxelSplit split = voxelSplitOf(world, event);
             std::vector<uint8_t> message = splitMessage(*id, split);
-            sendAll(*s, net::Channel::Reliable, message);
-            s->history.push_back(std::move(message));
             s->changed.push_back(event.entity);
-            // The pieces are made on every client by the split, with these ids: on the clients
-            // already, so not spawned, only posed -- and despawned when they go.
+            // To who has what broke: they make the pieces themselves, with these ids, so they have
+            // them already. Anyone else is sent a piece, voxels and all, when it comes near them.
+            std::vector<ServerSession::Client*> told;
+            for (auto& [peer, client] : s->clients)
+                if (client.welcomed && relevant(world, *s, client, event.entity)) {
+                    s->transport->send(peer, net::Channel::Reliable, message);
+                    told.push_back(&client);
+                }
             for (Entity piece : event.pieces) {
                 if (!world.valid(piece) || !world.all_of<NetId>(piece)) continue;
-                s->sent[piece] = world.get<NetId>(piece);
+                const NetId pieceId = world.get<NetId>(piece);
+                s->sent[piece] = pieceId;
                 s->fromSplits.insert(piece);
                 world.emplace_or_replace<Replicated>(piece);
+                for (ServerSession::Client* client : told) client->has[pieceId.value] = utils::Presence::Active;
             }
         });
         app.events().on<VoxelsEdited>([&world](const VoxelsEdited& event) {
@@ -961,8 +1268,8 @@ namespace projv::runtime {
             const NetId* id = world.valid(event.entity) ? world.try_get<NetId>(event.entity) : nullptr;
             if (!s || !id) return;
             std::vector<uint8_t> message = editMessage(*id, event.ops);
-            sendAll(*s, net::Channel::Reliable, message);
-            s->history.push_back(std::move(message));
+            for (auto& [peer, client] : s->clients)
+                if (client.welcomed && relevant(world, *s, client, event.entity)) s->transport->send(peer, net::Channel::Reliable, message);
             s->changed.push_back(event.entity);
         });
         app.addSystem(Stage::PreUpdate, "net: receive", serverReceive);
@@ -981,6 +1288,20 @@ namespace projv::runtime {
         c.transport = std::move(transport);
         c.sceneHash = sceneFilesHash(config.sceneFolder);
         c.config = std::move(config);
+        // A world opened lazily loads what the server says (nothing until it does); a scene loaded
+        // whole has everything, and only needs the blocks' numbering for their contents.
+        c.lazy = hasWorldLoading(world);
+        if (c.lazy) {
+            worldLoader(world).setRule(utils::LoadPolicy{
+                [](const utils::LoadCandidate& candidate, std::span<const utils::Viewer>) {
+                    return candidate.entity != 0xFFFFFFFFu ? utils::Presence::Active : utils::Presence::Absent;
+                }, {}});
+        } else {
+            Scene scratch;
+            utils::SceneBlocks index;
+            if (index.open(scratch, c.config.sceneFolder))
+                for (utils::BlockId b = 0; b < index.size(); b++) c.blocks.push_back(index.source(b));
+        }
         c.server = c.transport->connect(c.config.host, c.config.port);
         if (c.server == net::NO_PEER) {
             core::error("net: could not start connecting to {}:{}", c.config.host, c.config.port);
@@ -992,6 +1313,22 @@ namespace projv::runtime {
         app.addSystem(Stage::FixedUpdate, "net: world", clientApplyWorld, {.before = "physics", .after = ""});
         app.addSystem(Stage::PostUpdate, "net: present", clientPresent, {.before = "scene bridge", .after = ""});
         return true;
+    }
+
+    void setClientLoadRule(World& world, utils::LoadPolicy policy) {
+        if (ServerSession* s = serverOf(world)) {
+            s->policy = policy.rule ? std::move(policy) : utils::loadEverything();
+            for (auto& [peer, client] : s->clients) client.blocksDue = true;
+        }
+    }
+
+    void setClientLoadRule(World& world, ClientId client, utils::LoadPolicy policy) {
+        if (ServerSession* s = serverOf(world)) {
+            if (policy.rule) s->policies[client] = std::move(policy);
+            else s->policies.erase(client);
+            for (auto& [peer, c] : s->clients)
+                if (c.id == client) c.blocksDue = true;
+        }
     }
 
     void setLocalInput(World& world, core::vec3 move, bool jump) {

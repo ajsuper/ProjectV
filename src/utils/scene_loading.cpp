@@ -284,6 +284,24 @@ namespace projv::utils {
         blockResidencyCounter++;
     }
 
+    void SceneBlocks::replaceContent(Scene& scene, BlockId id, std::vector<uint32_t> geometry, std::vector<uint8_t> materialIDs) {
+        if (id >= blocks_.size()) return;
+        if (loaded(id)) {
+            const ChunkHandle handle = blocks_[id].chunk;
+            replaceChunkGeometry(scene, handle, std::move(geometry), std::move(materialIDs), scene.chunks[handle].header.resolution);
+            blocks_[id].edited = true;
+            return;
+        }
+        GeometryBlob blob;
+        blob.geometry = std::move(geometry);
+        blob.materialIDs = std::move(materialIDs);
+        blob.sourceDataPath = sources_[id].path;
+        blob.sourceBlockCoord = core::ivec3(sources_[id].entry.gridX, sources_[id].entry.gridY, sources_[id].entry.gridZ);
+        keptOrder_.remove(id);
+        kept_.erase(id);
+        keep(id, std::move(blob));
+    }
+
     void SceneBlocks::loadAll(Scene& scene) {
         for (BlockId id = 0; id < blocks_.size(); id++) load(scene, id);
     }

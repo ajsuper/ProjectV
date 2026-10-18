@@ -13,6 +13,7 @@
 #include "core/application.h"
 #include "net/transport.h"
 #include "runtime/entities.h"
+#include "runtime/loading.h"
 #include "runtime/net.h"
 #include "runtime/physics.h"
 #include "runtime/replication.h"
@@ -549,4 +550,135 @@ TEST_CASE("prediction: when the server moves your player, you are put right in a
     CHECK(stats.largestCorrection > 2.9f);
     CHECK(glm::distance(runtime::characterState(a->app.world, mine).position,
                         runtime::characterState(s->app.world, theirs).position) < 0.001f);
+}
+
+// ---- Per-client loading (N6) -----------------------------------------------------------------------
+
+namespace {
+    // A floor 320 m square of 16 m cells (400 blocks), its top at y = 0, and a crate (NetId 300) by
+    // where the second player appears, at x = +100. Players appear at x = -100 and +100.
+    void writeField(const std::filesystem::path& folder) {
+        projv::Scene scene;
+        ComponentHandle floor = utils::addComponent(scene, projv::ComponentKind::Chunk, "floor", INVALID_COMPONENT_HANDLE, 16, 1.0f);
+        utils::queueVoxelAdd(scene, floor, box({0, 0, 0}, {319, 0, 319}));
+        ComponentHandle crate = utils::addComponent(scene, projv::ComponentKind::Chunk, "crate", INVALID_COMPONENT_HANDLE, 16, 0.25f);
+        utils::queueVoxelAdd(scene, crate, box({0, 0, 0}, {3, 3, 3}));
+        utils::updateScene(scene);
+        utils::setComponentTransform(scene, floor, vec3(-160, -1, -160), projv::core::quat(1, 0, 0, 0), 1.0f);
+        utils::setComponentTransform(scene, crate, vec3(95, 0, 4), projv::core::quat(1, 0, 0, 0), 1.0f);
+        REQUIRE(utils::saveComposeToDisk(scene, INVALID_COMPONENT_HANDLE, folder.string()));
+        projv::Scene saved = utils::loadComposeFromDisk(folder.string());
+        std::ofstream(folder / "entities.json")
+            << R"({ "version": 1, "entities": [ { "name": "floor", "link": )" << saved.components[0].localId
+            << R"(, "components": { "physics.static": { "v": 1 } } }, { "name": "crate", "link": )" << saved.components[1].localId
+            << R"(, "components": { "physics.rigidbody": { "v": 1 }, "projv.netid": { "v": 1, "id": 300 } } } ] })";
+        projv::Scene avatar;
+        ComponentHandle body = utils::addComponent(avatar, projv::ComponentKind::Chunk, "body", INVALID_COMPONENT_HANDLE, 16, 0.25f);
+        utils::queueVoxelAdd(avatar, body, box({0, 0, 0}, {1, 6, 1}));
+        utils::updateScene(avatar);
+        REQUIRE(utils::saveComposeToDisk(avatar, INVALID_COMPONENT_HANDLE, (folder / "avatar").string()));
+    }
+
+    std::unique_ptr<Machine> fieldServer(net::LoopbackNetwork& network, const std::filesystem::path& folder) {
+        auto m = std::make_unique<Machine>();
+        m->loadScene(folder);
+        installWorld(m->app);
+        runtime::ServerConfig config;
+        config.sceneFolder = folder.string();
+        config.loadRule = utils::loadNear(24.0f, 48.0f);
+        const std::string avatar = (folder / "avatar").string();
+        config.spawnPlayer = [avatar](projv::World& world, runtime::ClientId id) {
+            Entity e = runtime::instantiatePrefab(world, avatar, vec3(id == 1 ? -100.0f : 100.0f, 0.0f, 0.0f));
+            world.emplace<projv::CharacterController>(e);
+            world.emplace<projv::Replicated>(e, projv::Replicated{"avatar", {"physics.character"}});
+            return e;
+        };
+        REQUIRE(runtime::installServer(m->app, network.endpoint(), config));
+        m->app.runStartup();
+        m->app.runFrame();
+        return m;
+    }
+
+    // A client that opens the world lazily: it has what the server says, and no more.
+    std::unique_ptr<Machine> lazyClient(net::LoopbackNetwork& network, const std::filesystem::path& folder, const std::string& name) {
+        auto m = std::make_unique<Machine>();
+        runtime::WorldLoadingConfig loading;
+        loading.loader.threaded = false;
+        loading.loader.maxLoadsPerUpdate = 64;
+        REQUIRE(runtime::openWorld(m->app, folder.string(), loading));
+        installWorld(m->app);
+        runtime::ClientConfig config;
+        config.sceneFolder = folder.string();
+        config.name = name;
+        REQUIRE(runtime::installClient(m->app, network.endpoint(), config));
+        m->app.runStartup();
+        m->app.runFrame();
+        return m;
+    }
+
+    vec3 serverPlayer(Machine& s, projv::NetId id) {
+        return runtime::characterState(s.app.world, runtime::entityForNetId(s.app.world, id)).position;
+    }
+}
+
+TEST_CASE("per-client loading: two players 200 m apart each have only their own part of the world") {
+    TempDir dir("replication_field");
+    writeField(dir.path);
+    net::LoopbackNetwork network(14);
+    network.setConditions({0.04});
+    auto s = fieldServer(network, dir.path);
+    auto a = lazyClient(network, dir.path, "ann");
+    run(network, {s.get(), a.get()}, 0.5);   // Ann is client 1, at x = -100
+    auto b = lazyClient(network, dir.path, "bo");
+    run(network, {s.get(), a.get(), b.get()}, 2.0);
+    REQUIRE(a->joined.size() == 1);
+    REQUIRE(b->joined.size() == 1);
+    const projv::NetId annId = a->joined[0].player, boId = b->joined[0].player;
+
+    for (auto [m, me] : {std::pair{a.get(), annId}, std::pair{b.get(), boId}}) {
+        const auto& loader = runtime::worldLoader(m->app.world);
+        const auto& scene = m->app.world.ctx().get<projv::Scene>();
+        const vec3 at = serverPlayer(*s, me);
+        CHECK(loader.stats().loaded > 0);
+        CHECK(loader.stats().loaded < 60);   // of 400: about the 48 m around them
+        for (utils::BlockId id = 0; id < loader.blocks().size(); id++)
+            if (loader.blocks().loaded(id)) CHECK(utils::distanceToBox(loader.blocks().bounds(scene, id), at) < 60.0f);
+    }
+    // Neither has the other; only Bo has the crate by him, simulated.
+    CHECK(runtime::entityForNetId(a->app.world, boId) == projv::NullEntity);
+    CHECK(runtime::entityForNetId(b->app.world, annId) == projv::NullEntity);
+    CHECK(runtime::entityForNetId(a->app.world, projv::NetId{300}) == projv::NullEntity);
+    Entity crate = runtime::entityForNetId(b->app.world, projv::NetId{300});
+    REQUIRE(crate != projv::NullEntity);
+    CHECK(runtime::hasBody(b->app.world, crate));
+    // Both stand on what they have loaded.
+    CHECK(runtime::characterState(a->app.world, runtime::entityForNetId(a->app.world, annId)).position.y > -0.05f);
+
+    // They walk toward each other. Ann's world loads ahead of her; Bo appears to her where he is.
+    runtime::setLocalInput(a->app.world, vec3(8, 0, 0));
+    runtime::setLocalInput(b->app.world, vec3(-8, 0, 0));
+    float lowest = 1e9f, firstSight = -1.0f;
+    for (int frame = 0; frame < 60 * 14; frame++) {
+        run(network, {s.get(), a.get(), b.get()}, DT);
+        Entity me = runtime::entityForNetId(a->app.world, annId);
+        lowest = std::min(lowest, runtime::characterState(a->app.world, me).position.y);
+        Entity him = runtime::entityForNetId(a->app.world, boId);
+        if (him != projv::NullEntity && firstSight < 0.0f) {
+            run(network, {s.get(), a.get(), b.get()}, DT);   // its first pose drawn
+            firstSight = glm::distance(a->app.world.get<projv::Transform>(him).position, serverPlayer(*s, boId));
+        }
+        if (glm::distance(serverPlayer(*s, annId), serverPlayer(*s, boId)) < 6.0f) break;
+    }
+    runtime::setLocalInput(a->app.world, vec3(0.0f));
+    runtime::setLocalInput(b->app.world, vec3(0.0f));
+    run(network, {s.get(), a.get(), b.get()}, 1.0);
+    CHECK(glm::distance(serverPlayer(*s, annId), serverPlayer(*s, boId)) < 8.0f);   // they met
+    CHECK(lowest > -0.05f);                    // never fell through what had not loaded
+    REQUIRE(firstSight >= 0.0f);
+    CHECK(firstSight < 1.5f);                  // he appeared where he was, not somewhere else and slid in
+    // Bo walked 95 m away from his crate: his client has let it go (and Ann's never had it).
+    CHECK(runtime::entityForNetId(b->app.world, projv::NetId{300}) == projv::NullEntity);
+    CHECK(runtime::entityForNetId(a->app.world, projv::NetId{300}) == projv::NullEntity);
+    CHECK(runtime::entityForNetId(a->app.world, boId) != projv::NullEntity);   // and each other, now near
+    CHECK(runtime::sessionStats(a->app.world).largestCorrection < 0.05f);
 }

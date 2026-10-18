@@ -792,8 +792,9 @@ namespace projv::utils {
         return handle < scene.components.size() && scene.components[handle].name != DELETED_NAME;
     }
 
-    uint64_t voxelContentHash(const Scene& scene, ComponentHandle handle) {
-        if (!isComponentAlive(scene, handle)) return 0;
+    std::vector<ComponentVoxel> componentVoxels(const Scene& scene, ComponentHandle handle) {
+        std::vector<ComponentVoxel> out;
+        if (!isComponentAlive(scene, handle)) return out;
         const ComponentRecord& c = scene.components[handle];
         struct Part { ChunkHandle chunk; core::ivec3 offset; };
         std::vector<Part> parts;
@@ -809,7 +810,6 @@ namespace projv::utils {
                 parts.push_back({ch, (grid.originCellCoord + core::ivec3(x, y, z)) * int(scene.chunks[ch].header.resolution)});
             }
         }
-        std::vector<std::tuple<int, int, int, uint8_t>> voxels;
         for (const Part& p : parts) {
             const Chunk& chunk = scene.chunks[p.chunk];
             if (chunk.geometryPoolIndex < 0 || size_t(chunk.geometryPoolIndex) >= scene.geometryPool.size()) continue;
@@ -822,18 +822,23 @@ namespace projv::utils {
                 for (int y = 0; y < o.dims.y; y++)
                     for (int x = 0; x < o.dims.x; x++) {
                         size_t i = o.index({x, y, z});
-                        if (!o.cells[i]) continue;
-                        core::ivec3 at = p.offset + o.origin + core::ivec3(x, y, z);
-                        voxels.push_back({at.x, at.y, at.z, slots[i]});
+                        if (o.cells[i]) out.push_back({p.offset + o.origin + core::ivec3(x, y, z), slots[i]});
                     }
         }
+        std::sort(out.begin(), out.end(), [](const ComponentVoxel& a, const ComponentVoxel& b) {
+            return std::tie(a.position.x, a.position.y, a.position.z) < std::tie(b.position.x, b.position.y, b.position.z);
+        });
+        return out;
+    }
+
+    uint64_t voxelContentHash(const Scene& scene, ComponentHandle handle) {
+        const std::vector<ComponentVoxel> voxels = componentVoxels(scene, handle);
         if (voxels.empty()) return 0;
-        std::sort(voxels.begin(), voxels.end());
         uint64_t hash = 1469598103934665603ull;
         auto add = [&hash](int32_t v) {
             for (int i = 0; i < 4; i++) { hash ^= uint8_t(uint32_t(v) >> (8 * i)); hash *= 1099511628211ull; }
         };
-        for (auto [x, y, z, slot] : voxels) { add(x); add(y); add(z); add(slot); }
+        for (const ComponentVoxel& v : voxels) { add(v.position.x); add(v.position.y); add(v.position.z); add(v.slot); }
         return hash;
     }
 

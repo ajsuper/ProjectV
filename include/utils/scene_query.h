@@ -143,6 +143,9 @@ namespace projv::utils {
     // space and its palette slot, in position order -- so two machines can tell whether they hold the
     // same, whatever their trees' layout. 0 for a component with none. Decodes every chunk: not cheap.
     uint64_t voxelContentHash(const Scene& scene, ComponentHandle handle);
+    // A data component's voxels: position in its voxel space and palette slot, in position order.
+    struct ComponentVoxel { core::ivec3 position; uint8_t slot; };
+    std::vector<ComponentVoxel> componentVoxels(const Scene& scene, ComponentHandle handle);
 
     // Whether a chunk has geometry to draw: alive, pooled, and its blob holds a tree. An edit can
     // carve a chunk down to nothing, and a chunk with nothing must be uploaded as empty -- the

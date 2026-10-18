@@ -13,6 +13,7 @@
 #include "core/world.h"
 #include "net/transport.h"
 #include "runtime/net.h"
+#include "utils/scene_loading.h"
 
 // Server and clients (docs/plans/networking.md, N2): a session over a net::Transport, entities the
 // server makes reaching every client by NetId, and the clients' input reaching the server.
@@ -98,6 +99,9 @@ namespace projv::runtime {
         // Makes the joining client's player; NullEntity for none. It is given Replicated if it has
         // none, and destroyed when the client leaves.
         std::function<Entity(World&, ClientId)> spawnPlayer;
+        // What each client has (N6): the world-loading rule, run here for each client with its player
+        // as the viewer. Default: everything.
+        utils::LoadPolicy loadRule;
         // What a client's input does; default: setCharacterInput on its player.
         std::function<void(World&, ClientId, Entity player, core::vec3 move, bool jump)> applyInput;
     };
@@ -122,6 +126,10 @@ namespace projv::runtime {
     bool installServer(Application& app, std::unique_ptr<net::Transport> transport, ServerConfig config);
     // Connects at once; JoinedServer or LeftServer says how it went.
     bool installClient(Application& app, std::unique_ptr<net::Transport> transport, ClientConfig config);
+
+    // The rule every client is judged by, or one client's own (an empty rule: back to everyone's).
+    void setClientLoadRule(World& world, utils::LoadPolicy policy);
+    void setClientLoadRule(World& world, ClientId client, utils::LoadPolicy policy);
 
     // The client's input for its player, sent from the next fixed step on, until changed.
     void setLocalInput(World& world, core::vec3 move, bool jump = false);

@@ -151,6 +151,10 @@ namespace projv::runtime {
     }
 
     utils::SceneLoader& worldLoader(World& world) { return *stateOf(world)->loader; }
+    bool hasWorldLoading(const World& world) {
+        const WorldLoading* state = stateOf(world);
+        return state && state->loader;
+    }
 
     void setLoadRule(World& world, utils::LoadPolicy policy) {
         WorldLoading* state = stateOf(world);
