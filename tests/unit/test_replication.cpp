@@ -771,6 +771,44 @@ TEST_CASE("replication: a client's game messages reach the server's game, in ord
     }
 }
 
+TEST_CASE("replication: the server's game messages reach one client's game or every client's, in order") {
+    TempDir dir("replication_messages_back");
+    writeArena(dir.path);
+    net::LoopbackNetwork network(18);
+    network.setConditions({0.03, 0.01, 0.1});
+    auto s = server(network, dir.path);
+    std::map<std::string, std::vector<std::vector<uint8_t>>> heard;
+    auto listening = [&](const std::string& name) {
+        auto m = std::make_unique<Machine>();
+        m->loadScene(dir.path);
+        installWorld(m->app);
+        runtime::ClientConfig config;
+        config.sceneFolder = dir.path.string();
+        config.name = name;
+        config.onMessage = [&heard, name](projv::World&, std::span<const uint8_t> message) {
+            heard[name].push_back(std::vector<uint8_t>(message.begin(), message.end()));
+        };
+        REQUIRE(runtime::installClient(m->app, network.endpoint(), config));
+        m->app.runStartup();
+        m->app.runFrame();
+        return m;
+    };
+    auto a = listening("ann");
+    auto b = listening("bo");
+    run(network, {s.get(), a.get(), b.get()}, 1.0);
+    REQUIRE(a->joined.size() == 1);
+    for (uint8_t i = 0; i < 10; i++) runtime::sendToClients(s->app.world, std::vector<uint8_t>{i});
+    for (uint8_t i = 0; i < 10; i++) runtime::sendToClient(s->app.world, a->joined[0].you, std::vector<uint8_t>{uint8_t(100 + i)});
+    run(network, {s.get(), a.get(), b.get()}, 1.5);
+    REQUIRE(heard["ann"].size() == 20);   // reliable: every one, through 10% loss
+    REQUIRE(heard["bo"].size() == 10);    // and only what was for everyone
+    for (uint8_t i = 0; i < 10; i++) {
+        CHECK(heard["ann"][i] == std::vector<uint8_t>{i});
+        CHECK(heard["ann"][10 + i] == std::vector<uint8_t>{uint8_t(100 + i)});
+        CHECK(heard["bo"][i] == std::vector<uint8_t>{i});
+    }
+}
+
 // ---- Server-driven bodies (after playing the demo) -------------------------------------------------
 
 TEST_CASE("server-driven: a pile the server settles is shown exactly as it settled, and nothing local moves it") {

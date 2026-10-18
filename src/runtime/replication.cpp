@@ -1045,6 +1045,11 @@ namespace projv::runtime {
                     case Message::Snapshot:
                         if (c.welcomed) clientSnapshot(world, c, r);
                         break;
+                    case Message::Game: {
+                        const std::vector<uint8_t> body = r.bytes(MAX_TEXT);
+                        if (c.welcomed && !r.failed && c.config.onMessage) c.config.onMessage(world, body);
+                        break;
+                    }
                     default:
                         break;
                 }
@@ -1363,6 +1368,27 @@ namespace projv::runtime {
         w.varint(uint8_t(Message::Game));
         w.bytes(message);
         c->transport->send(c->server, reliable ? net::Channel::Reliable : net::Channel::Unreliable, w.data());
+    }
+
+    void sendToClient(World& world, ClientId client, std::span<const uint8_t> message, bool reliable) {
+        ServerSession* s = serverOf(world);
+        if (!s || message.size() > MAX_TEXT) return;
+        net::BitWriter w;
+        w.varint(uint8_t(Message::Game));
+        w.bytes(message);
+        for (const auto& [peer, c] : s->clients)
+            if (c.welcomed && c.id == client)
+                s->transport->send(peer, reliable ? net::Channel::Reliable : net::Channel::Unreliable, w.data());
+    }
+
+    void sendToClients(World& world, std::span<const uint8_t> message, bool reliable) {
+        ServerSession* s = serverOf(world);
+        if (!s || message.size() > MAX_TEXT) return;
+        net::BitWriter w;
+        w.varint(uint8_t(Message::Game));
+        w.bytes(message);
+        for (const auto& [peer, c] : s->clients)
+            if (c.welcomed) s->transport->send(peer, reliable ? net::Channel::Reliable : net::Channel::Unreliable, w.data());
     }
 
     void setLocalInput(World& world, core::vec3 move, bool jump) {

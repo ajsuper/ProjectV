@@ -46,7 +46,8 @@
 //   few repeated in each message; the server hands each client's newest to `applyInput` (by default:
 //   setCharacterInput on that client's player).
 // - **Policy is the game's** (physics plan D8): who a player is (`spawnPlayer`), what input means
-//   (`applyInput`), and what is sent (Replicated::omit).
+//   (`applyInput`), and what is sent (Replicated::omit). The game's own messages go both ways
+//   (sendToServer, sendToClient): what they say is the game's.
 //
 // - **World changes** (N3). A voxel edit (VoxelsEdited) or a break (BodyBroken) of an entity with a
 //   NetId goes to every client as what happened -- the edit's ops; the split's voxels per piece
@@ -119,6 +120,9 @@ namespace projv::runtime {
         std::string sceneFolder;
         std::string name;
         float       interpolationDelay = 0.1f;   // s behind the newest snapshot
+        // The server's game messages to this client (sendToClient, sendToClients): what they mean is
+        // the game's to say -- a score, a sound, a shot to draw.
+        std::function<void(World&, std::span<const uint8_t> message)> onMessage;
     };
 
     // Server events.
@@ -141,6 +145,10 @@ namespace projv::runtime {
     // A message for the server's game (ServerConfig::onMessage): fire, use, build. Reliable, in order,
     // unless asked otherwise. At most 64 KB. Dropped before the client is welcomed.
     void sendToServer(World& world, std::span<const uint8_t> message, bool reliable = true);
+    // The other way: a message for a client's game (ClientConfig::onMessage), to one client or to
+    // every client welcomed. The same limits; one for a client not yet welcomed is dropped.
+    void sendToClient(World& world, ClientId client, std::span<const uint8_t> message, bool reliable = true);
+    void sendToClients(World& world, std::span<const uint8_t> message, bool reliable = true);
 
     // The client's input for its player, sent from the next fixed step on, until changed.
     void setLocalInput(World& world, core::vec3 move, bool jump = false);

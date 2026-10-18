@@ -1,0 +1,1573 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "ground",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [393, 311, 205]
+        },
+        {
+          "color": [426, 337, 222]
+        },
+        {
+          "color": [458, 363, 239]
+        },
+        {
+          "color": [491, 389, 256]
+        },
+        {
+          "color": [266, 471, 184]
+        },
+        {
+          "color": [213, 376, 147]
+        },
+        {
+          "color": [231, 408, 160]
+        },
+        {
+          "color": [248, 439, 172]
+        },
+        {
+          "color": [246, 229, 196]
+        },
+        {
+          "color": [266, 248, 213]
+        },
+        {
+          "color": [286, 267, 229]
+        },
+        {
+          "color": [307, 286, 246]
+        }
+      ],
+      "position": [-75.0, -0.5, -45.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "ground.data",
+      "type": "data"
+    },
+    {
+      "id": 2,
+      "mutability": "locked",
+      "name": "pen",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [307, 307, 327]
+        }
+      ],
+      "position": [-5.0, -14.0, -5.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pen.data",
+      "type": "data"
+    },
+    {
+      "id": 3,
+      "mutability": "locked",
+      "name": "front wall (blue)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        }
+      ],
+      "position": [-31.0, 0.0, -8.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "front_wall__blue_.data",
+      "type": "data"
+    },
+    {
+      "id": 4,
+      "mutability": "locked",
+      "name": "back wall (blue)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        }
+      ],
+      "position": [-51.0, 0.0, -8.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "back_wall__blue_.data",
+      "type": "data"
+    },
+    {
+      "id": 5,
+      "mutability": "locked",
+      "name": "left wall (blue)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        }
+      ],
+      "position": [-48.5, 0.0, -11.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "left_wall__blue_.data",
+      "type": "data"
+    },
+    {
+      "id": 6,
+      "mutability": "locked",
+      "name": "right wall (blue)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        }
+      ],
+      "position": [-48.5, 0.0, 9.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "right_wall__blue_.data",
+      "type": "data"
+    },
+    {
+      "id": 7,
+      "mutability": "locked",
+      "name": "tower front left (blue)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [186, 179, 165],
+          "physics": "stone"
+        },
+        {
+          "color": [206, 198, 182],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 216, 199],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [243, 229, 207],
+          "physics": "stone"
+        },
+        {
+          "color": [269, 253, 229],
+          "physics": "stone"
+        },
+        {
+          "color": [294, 277, 251],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [-31.5, 0.0, -12.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tower_front_left__blue_.data",
+      "type": "data"
+    },
+    {
+      "id": 8,
+      "mutability": "locked",
+      "name": "tower front right (blue)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [186, 179, 165],
+          "physics": "stone"
+        },
+        {
+          "color": [206, 198, 182],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 216, 199],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [243, 229, 207],
+          "physics": "stone"
+        },
+        {
+          "color": [269, 253, 229],
+          "physics": "stone"
+        },
+        {
+          "color": [294, 277, 251],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [-31.5, 0.0, 8.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tower_front_right__blue_.data",
+      "type": "data"
+    },
+    {
+      "id": 9,
+      "mutability": "locked",
+      "name": "tower back left (blue)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [186, 179, 165],
+          "physics": "stone"
+        },
+        {
+          "color": [206, 198, 182],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 216, 199],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [243, 229, 207],
+          "physics": "stone"
+        },
+        {
+          "color": [269, 253, 229],
+          "physics": "stone"
+        },
+        {
+          "color": [294, 277, 251],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [-52.0, 0.0, -12.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tower_back_left__blue_.data",
+      "type": "data"
+    },
+    {
+      "id": 10,
+      "mutability": "locked",
+      "name": "tower back right (blue)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [186, 179, 165],
+          "physics": "stone"
+        },
+        {
+          "color": [206, 198, 182],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 216, 199],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [243, 229, 207],
+          "physics": "stone"
+        },
+        {
+          "color": [269, 253, 229],
+          "physics": "stone"
+        },
+        {
+          "color": [294, 277, 251],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [-52.0, 0.0, 8.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tower_back_right__blue_.data",
+      "type": "data"
+    },
+    {
+      "id": 11,
+      "mutability": "locked",
+      "name": "keep (blue)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [172, 165, 152],
+          "physics": "stone"
+        },
+        {
+          "color": [190, 183, 168],
+          "physics": "stone"
+        },
+        {
+          "color": [208, 200, 184],
+          "physics": "stone"
+        },
+        {
+          "color": [226, 217, 200],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 211, 192],
+          "physics": "stone"
+        },
+        {
+          "color": [248, 234, 212],
+          "physics": "stone"
+        },
+        {
+          "color": [272, 256, 232],
+          "physics": "stone"
+        },
+        {
+          "color": [296, 278, 252],
+          "physics": "stone"
+        }
+      ],
+      "position": [-49.0, 0.0, -2.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "keep__blue_.data",
+      "type": "data"
+    },
+    {
+      "id": 12,
+      "mutability": "locked",
+      "name": "stairs left (blue)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [192, 185, 170],
+          "physics": "stone"
+        },
+        {
+          "color": [212, 204, 188],
+          "physics": "stone"
+        },
+        {
+          "color": [232, 224, 206],
+          "physics": "stone"
+        },
+        {
+          "color": [253, 243, 224],
+          "physics": "stone"
+        },
+        {
+          "color": [251, 236, 214],
+          "physics": "stone"
+        },
+        {
+          "color": [278, 261, 237],
+          "physics": "stone"
+        },
+        {
+          "color": [304, 286, 259],
+          "physics": "stone"
+        },
+        {
+          "color": [330, 311, 282],
+          "physics": "stone"
+        },
+        {
+          "color": [285, 269, 244],
+          "physics": "stone"
+        },
+        {
+          "color": [316, 297, 269],
+          "physics": "stone"
+        },
+        {
+          "color": [346, 325, 295],
+          "physics": "stone"
+        },
+        {
+          "color": [241, 232, 213],
+          "physics": "stone"
+        },
+        {
+          "color": [218, 210, 193],
+          "physics": "stone"
+        },
+        {
+          "color": [287, 276, 254],
+          "physics": "stone"
+        },
+        {
+          "color": [376, 354, 320],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 254, 234],
+          "physics": "stone"
+        }
+      ],
+      "position": [-32.5, 0.0, -8.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "stairs_left__blue_.data",
+      "type": "data"
+    },
+    {
+      "id": 13,
+      "mutability": "locked",
+      "name": "stairs right (blue)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [218, 210, 193],
+          "physics": "stone"
+        },
+        {
+          "color": [241, 232, 213],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 254, 234],
+          "physics": "stone"
+        },
+        {
+          "color": [253, 243, 224],
+          "physics": "stone"
+        },
+        {
+          "color": [232, 224, 206],
+          "physics": "stone"
+        },
+        {
+          "color": [212, 204, 188],
+          "physics": "stone"
+        },
+        {
+          "color": [192, 185, 170],
+          "physics": "stone"
+        },
+        {
+          "color": [376, 354, 320],
+          "physics": "stone"
+        },
+        {
+          "color": [346, 325, 295],
+          "physics": "stone"
+        },
+        {
+          "color": [316, 297, 269],
+          "physics": "stone"
+        },
+        {
+          "color": [330, 311, 282],
+          "physics": "stone"
+        },
+        {
+          "color": [304, 286, 259],
+          "physics": "stone"
+        },
+        {
+          "color": [278, 261, 237],
+          "physics": "stone"
+        },
+        {
+          "color": [251, 236, 214],
+          "physics": "stone"
+        },
+        {
+          "color": [285, 269, 244],
+          "physics": "stone"
+        },
+        {
+          "color": [287, 276, 254],
+          "physics": "stone"
+        }
+      ],
+      "position": [-32.5, 0.0, 2.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "stairs_right__blue_.data",
+      "type": "data"
+    },
+    {
+      "id": 14,
+      "mutability": "locked",
+      "name": "front wall (red)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        }
+      ],
+      "position": [29.0, 0.0, -8.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "front_wall__red_.data",
+      "type": "data"
+    },
+    {
+      "id": 15,
+      "mutability": "locked",
+      "name": "back wall (red)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        }
+      ],
+      "position": [49.0, 0.0, -8.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "back_wall__red_.data",
+      "type": "data"
+    },
+    {
+      "id": 16,
+      "mutability": "locked",
+      "name": "left wall (red)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [31.5, 0.0, -11.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "left_wall__red_.data",
+      "type": "data"
+    },
+    {
+      "id": 17,
+      "mutability": "locked",
+      "name": "right wall (red)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [31.5, 0.0, 9.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "right_wall__red_.data",
+      "type": "data"
+    },
+    {
+      "id": 18,
+      "mutability": "locked",
+      "name": "tower front left (red)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [186, 179, 165],
+          "physics": "stone"
+        },
+        {
+          "color": [206, 198, 182],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 216, 199],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [243, 229, 207],
+          "physics": "stone"
+        },
+        {
+          "color": [269, 253, 229],
+          "physics": "stone"
+        },
+        {
+          "color": [294, 277, 251],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [28.0, 0.0, -12.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tower_front_left__red_.data",
+      "type": "data"
+    },
+    {
+      "id": 19,
+      "mutability": "locked",
+      "name": "tower front right (red)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [186, 179, 165],
+          "physics": "stone"
+        },
+        {
+          "color": [206, 198, 182],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 216, 199],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [243, 229, 207],
+          "physics": "stone"
+        },
+        {
+          "color": [269, 253, 229],
+          "physics": "stone"
+        },
+        {
+          "color": [294, 277, 251],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [28.0, 0.0, 8.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tower_front_right__red_.data",
+      "type": "data"
+    },
+    {
+      "id": 20,
+      "mutability": "locked",
+      "name": "tower back left (red)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [186, 179, 165],
+          "physics": "stone"
+        },
+        {
+          "color": [206, 198, 182],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 216, 199],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [243, 229, 207],
+          "physics": "stone"
+        },
+        {
+          "color": [269, 253, 229],
+          "physics": "stone"
+        },
+        {
+          "color": [294, 277, 251],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [48.5, 0.0, -12.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tower_back_left__red_.data",
+      "type": "data"
+    },
+    {
+      "id": 21,
+      "mutability": "locked",
+      "name": "tower back right (red)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [186, 179, 165],
+          "physics": "stone"
+        },
+        {
+          "color": [206, 198, 182],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 216, 199],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [243, 229, 207],
+          "physics": "stone"
+        },
+        {
+          "color": [269, 253, 229],
+          "physics": "stone"
+        },
+        {
+          "color": [294, 277, 251],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [48.5, 0.0, 8.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tower_back_right__red_.data",
+      "type": "data"
+    },
+    {
+      "id": 22,
+      "mutability": "locked",
+      "name": "keep (red)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [172, 165, 152],
+          "physics": "stone"
+        },
+        {
+          "color": [190, 183, 168],
+          "physics": "stone"
+        },
+        {
+          "color": [226, 217, 200],
+          "physics": "stone"
+        },
+        {
+          "color": [208, 200, 184],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 211, 192],
+          "physics": "stone"
+        },
+        {
+          "color": [248, 234, 212],
+          "physics": "stone"
+        },
+        {
+          "color": [296, 278, 252],
+          "physics": "stone"
+        },
+        {
+          "color": [272, 256, 232],
+          "physics": "stone"
+        }
+      ],
+      "position": [44.0, 0.0, -2.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "keep__red_.data",
+      "type": "data"
+    },
+    {
+      "id": 23,
+      "mutability": "locked",
+      "name": "stairs left (red)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [192, 185, 170],
+          "physics": "stone"
+        },
+        {
+          "color": [212, 204, 188],
+          "physics": "stone"
+        },
+        {
+          "color": [232, 224, 206],
+          "physics": "stone"
+        },
+        {
+          "color": [253, 243, 224],
+          "physics": "stone"
+        },
+        {
+          "color": [251, 236, 214],
+          "physics": "stone"
+        },
+        {
+          "color": [278, 261, 237],
+          "physics": "stone"
+        },
+        {
+          "color": [304, 286, 259],
+          "physics": "stone"
+        },
+        {
+          "color": [330, 311, 282],
+          "physics": "stone"
+        },
+        {
+          "color": [285, 269, 244],
+          "physics": "stone"
+        },
+        {
+          "color": [316, 297, 269],
+          "physics": "stone"
+        },
+        {
+          "color": [346, 325, 295],
+          "physics": "stone"
+        },
+        {
+          "color": [241, 232, 213],
+          "physics": "stone"
+        },
+        {
+          "color": [218, 210, 193],
+          "physics": "stone"
+        },
+        {
+          "color": [287, 276, 254],
+          "physics": "stone"
+        },
+        {
+          "color": [376, 354, 320],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 254, 234],
+          "physics": "stone"
+        }
+      ],
+      "position": [31.0, 0.0, -8.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "stairs_left__red_.data",
+      "type": "data"
+    },
+    {
+      "id": 24,
+      "mutability": "locked",
+      "name": "stairs right (red)",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [218, 210, 193],
+          "physics": "stone"
+        },
+        {
+          "color": [241, 232, 213],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 254, 234],
+          "physics": "stone"
+        },
+        {
+          "color": [253, 243, 224],
+          "physics": "stone"
+        },
+        {
+          "color": [232, 224, 206],
+          "physics": "stone"
+        },
+        {
+          "color": [212, 204, 188],
+          "physics": "stone"
+        },
+        {
+          "color": [192, 185, 170],
+          "physics": "stone"
+        },
+        {
+          "color": [376, 354, 320],
+          "physics": "stone"
+        },
+        {
+          "color": [346, 325, 295],
+          "physics": "stone"
+        },
+        {
+          "color": [316, 297, 269],
+          "physics": "stone"
+        },
+        {
+          "color": [330, 311, 282],
+          "physics": "stone"
+        },
+        {
+          "color": [304, 286, 259],
+          "physics": "stone"
+        },
+        {
+          "color": [278, 261, 237],
+          "physics": "stone"
+        },
+        {
+          "color": [251, 236, 214],
+          "physics": "stone"
+        },
+        {
+          "color": [285, 269, 244],
+          "physics": "stone"
+        },
+        {
+          "color": [287, 276, 254],
+          "physics": "stone"
+        }
+      ],
+      "position": [31.0, 0.0, 2.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "stairs_right__red_.data",
+      "type": "data"
+    },
+    {
+      "id": 25,
+      "mutability": "locked",
+      "name": "cover centre",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [573, 235, 153],
+          "physics": "brick"
+        },
+        {
+          "color": [737, 716, 655],
+          "physics": "mortar"
+        },
+        {
+          "color": [655, 297, 184],
+          "physics": "brick"
+        },
+        {
+          "color": [491, 205, 143],
+          "physics": "brick"
+        }
+      ],
+      "position": [-0.25, 0.0, -4.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "cover_centre.data",
+      "type": "data"
+    },
+    {
+      "id": 26,
+      "mutability": "locked",
+      "name": "cover north",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [573, 235, 153],
+          "physics": "brick"
+        },
+        {
+          "color": [737, 716, 655],
+          "physics": "mortar"
+        },
+        {
+          "color": [655, 297, 184],
+          "physics": "brick"
+        },
+        {
+          "color": [491, 205, 143],
+          "physics": "brick"
+        }
+      ],
+      "position": [-14.0, 0.0, 14.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "cover_north.data",
+      "type": "data"
+    },
+    {
+      "id": 27,
+      "mutability": "locked",
+      "name": "cover south",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [573, 235, 153],
+          "physics": "brick"
+        },
+        {
+          "color": [737, 716, 655],
+          "physics": "mortar"
+        },
+        {
+          "color": [655, 297, 184],
+          "physics": "brick"
+        },
+        {
+          "color": [491, 205, 143],
+          "physics": "brick"
+        }
+      ],
+      "position": [7.0, 0.0, -18.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "cover_south.data",
+      "type": "data"
+    },
+    {
+      "id": 28,
+      "mutability": "locked",
+      "name": "tree0",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        }
+      ],
+      "position": [-22.5, 0.0, -26.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree0.data",
+      "type": "data"
+    },
+    {
+      "id": 29,
+      "mutability": "locked",
+      "name": "tree1",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        }
+      ],
+      "position": [15.5, 0.0, 21.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree1.data",
+      "type": "data"
+    },
+    {
+      "id": 30,
+      "mutability": "locked",
+      "name": "tree2",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        }
+      ],
+      "position": [-6.5, 0.0, 23.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree2.data",
+      "type": "data"
+    },
+    {
+      "id": 31,
+      "mutability": "locked",
+      "name": "tree3",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        }
+      ],
+      "position": [3.5, 0.0, -30.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree3.data",
+      "type": "data"
+    },
+    {
+      "id": 32,
+      "mutability": "locked",
+      "name": "tree4",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        }
+      ],
+      "position": [-28.5, 0.0, 19.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree4.data",
+      "type": "data"
+    },
+    {
+      "id": 33,
+      "mutability": "locked",
+      "name": "tree5",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        }
+      ],
+      "position": [23.5, 0.0, -24.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree5.data",
+      "type": "data"
+    }
+  ],
+  "name": "siege",
+  "version": 1
+}

@@ -1,0 +1,38 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "blue flag",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [256, 256, 276],
+          "physics": "iron"
+        },
+        {
+          "color": [409, 276, 153],
+          "physics": "timber"
+        },
+        {
+          "color": [153, 307, 972],
+          "physics": "cloth"
+        },
+        {
+          "color": [972, 921, 767],
+          "physics": "cloth"
+        }
+      ],
+      "position": [-0.375, 0.0, -0.375],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "blue_flag.data",
+      "type": "data"
+    }
+  ],
+  "name": "blue_flag",
+  "version": 1
+}
