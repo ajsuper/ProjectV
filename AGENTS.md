@@ -29,6 +29,7 @@ cd build/examples/physics_demos    && ./physics_demos      # DEMOS_SELFTEST=1 ch
 cd build/examples/world_loading    && ./world_loading      # --headless-check: the loader alone, no window
 cd build/examples/voxel_mayhem     && ./voxel_mayhem       # MAYHEM_SELFTEST=1 checks it; MAYHEM_BENCH=cannon times a break
 cd build/examples/mp_server        && ./mp_server          # then ./mp_client in build/examples/mp_client (selftest.sh: all headless)
+cd build/examples/party_client     && ./party_client       # hosts a party with bots; --host joins one (party_server: dedicated; selftest.sh)
 cd build/examples/scene_previewer  && ./scene_previewer scenes/SmallVox
 cd build/examples/renderer_gallery && ./renderer_gallery --renderer fast
 cd build/examples/scene_editor     && ./scene_editor

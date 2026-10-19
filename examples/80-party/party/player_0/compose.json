@@ -1,0 +1,37 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "player 0",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [184, 184, 205]
+        },
+        {
+          "color": [921, 225, 184]
+        },
+        {
+          "color": [972, 839, 696]
+        },
+        {
+          "color": [82, 82, 82]
+        },
+        {
+          "color": [644, 158, 129]
+        }
+      ],
+      "position": [-0.3125, -0.0, -0.3125],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "player_0.data",
+      "type": "data"
+    }
+  ],
+  "name": "player_0",
+  "version": 1
+}

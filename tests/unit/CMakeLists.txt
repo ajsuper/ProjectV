@@ -82,6 +82,13 @@ if(TARGET mp_server AND TARGET mp_bots)
     set_tests_properties(multiplayer_scale PROPERTIES LABELS net TIMEOUT 180)
 endif()
 
+# The party game as four processes (a server; three clients wandering, shoving, building, bombing).
+if(TARGET party_server AND TARGET party_client)
+    add_test(NAME party_selftest
+             COMMAND ${PROJECT_SOURCE_DIR}/examples/80-party/selftest.sh ${CMAKE_BINARY_DIR})
+    set_tests_properties(party_selftest PROPERTIES LABELS net TIMEOUT 300)
+endif()
+
 # Not a compile: a scan of the voxel layer's includes. See check_layering.cmake.
 add_test(NAME layering
          COMMAND ${CMAKE_COMMAND} -DPROJV_ROOT=${PROJECT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/check_layering.cmake)

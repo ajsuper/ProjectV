@@ -1,0 +1,28 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "pusher",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [972, 767, 102]
+        },
+        {
+          "color": [153, 153, 174]
+        }
+      ],
+      "position": [-0.75, -0.0, -0.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pusher.data",
+      "type": "data"
+    }
+  ],
+  "name": "pusher",
+  "version": 1
+}

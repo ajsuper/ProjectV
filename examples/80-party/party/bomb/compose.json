@@ -1,0 +1,38 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "bomb",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [102, 102, 123],
+          "physics": "iron"
+        },
+        {
+          "color": [870, 123, 102],
+          "physics": "iron"
+        },
+        {
+          "color": [614, 512, 358],
+          "physics": "iron"
+        },
+        {
+          "color": [1023, 870, 307],
+          "physics": "iron"
+        }
+      ],
+      "position": [-0.3499999940395355, -0.3499999940395355, -0.3499999940395355],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "bomb.data",
+      "type": "data"
+    }
+  ],
+  "name": "bomb",
+  "version": 1
+}

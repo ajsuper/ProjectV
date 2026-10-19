@@ -1,0 +1,28 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "sweeper",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [972, 972, 941]
+        },
+        {
+          "color": [921, 153, 123]
+        }
+      ],
+      "position": [-7.5, -0.0, -0.25],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "sweeper.data",
+      "type": "data"
+    }
+  ],
+  "name": "sweeper",
+  "version": 1
+}

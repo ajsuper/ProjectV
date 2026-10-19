@@ -1,0 +1,1692 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "lava",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [767, 552, 153]
+        },
+        {
+          "color": [725, 213, 51]
+        },
+        {
+          "color": [797, 234, 56]
+        },
+        {
+          "color": [870, 256, 61]
+        },
+        {
+          "color": [652, 192, 46]
+        },
+        {
+          "color": [853, 614, 171]
+        },
+        {
+          "color": [938, 675, 188]
+        },
+        {
+          "color": [1023, 737, 205]
+        }
+      ],
+      "position": [-200.0, -31.0, -60.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "lava.data",
+      "type": "data"
+    },
+    {
+      "id": 2,
+      "mutability": "locked",
+      "name": "pen",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [307, 307, 327]
+        }
+      ],
+      "position": [-5.0, -80.0, 145.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pen.data",
+      "type": "data"
+    },
+    {
+      "id": 3,
+      "mutability": "locked",
+      "name": "crumble top",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [177, 509, 552],
+          "physics": "tile"
+        },
+        {
+          "color": [169, 488, 529],
+          "physics": "tile"
+        },
+        {
+          "color": [162, 467, 506],
+          "physics": "tile"
+        },
+        {
+          "color": [184, 530, 575],
+          "physics": "tile"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [235, 678, 734],
+          "physics": "tile"
+        },
+        {
+          "color": [246, 707, 766],
+          "physics": "tile"
+        },
+        {
+          "color": [256, 737, 798],
+          "physics": "tile"
+        },
+        {
+          "color": [225, 648, 702],
+          "physics": "tile"
+        },
+        {
+          "color": [133, 405, 486],
+          "physics": "tile"
+        },
+        {
+          "color": [127, 389, 467],
+          "physics": "tile"
+        },
+        {
+          "color": [122, 373, 447],
+          "physics": "tile"
+        },
+        {
+          "color": [117, 356, 428],
+          "physics": "tile"
+        },
+        {
+          "color": [162, 495, 594],
+          "physics": "tile"
+        },
+        {
+          "color": [169, 518, 621],
+          "physics": "tile"
+        },
+        {
+          "color": [177, 540, 648],
+          "physics": "tile"
+        },
+        {
+          "color": [184, 563, 675],
+          "physics": "tile"
+        }
+      ],
+      "position": [-81.375, 7.5, -11.375],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "crumble_top.data",
+      "type": "data"
+    },
+    {
+      "id": 4,
+      "mutability": "locked",
+      "name": "crumble bottom",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [438, 269, 580],
+          "physics": "tile"
+        },
+        {
+          "color": [420, 258, 556],
+          "physics": "tile"
+        },
+        {
+          "color": [402, 246, 532],
+          "physics": "tile"
+        },
+        {
+          "color": [457, 280, 604],
+          "physics": "tile"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [584, 358, 772],
+          "physics": "tile"
+        },
+        {
+          "color": [609, 373, 805],
+          "physics": "tile"
+        },
+        {
+          "color": [634, 389, 839],
+          "physics": "tile"
+        },
+        {
+          "color": [558, 342, 738],
+          "physics": "tile"
+        },
+        {
+          "color": [339, 206, 486],
+          "physics": "tile"
+        },
+        {
+          "color": [325, 198, 467],
+          "physics": "tile"
+        },
+        {
+          "color": [312, 190, 447],
+          "physics": "tile"
+        },
+        {
+          "color": [298, 181, 428],
+          "physics": "tile"
+        },
+        {
+          "color": [414, 252, 594],
+          "physics": "tile"
+        },
+        {
+          "color": [433, 264, 621],
+          "physics": "tile"
+        },
+        {
+          "color": [452, 275, 648],
+          "physics": "tile"
+        },
+        {
+          "color": [471, 286, 675],
+          "physics": "tile"
+        }
+      ],
+      "position": [-81.375, -0.5, -11.375],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "crumble_bottom.data",
+      "type": "data"
+    },
+    {
+      "id": 5,
+      "mutability": "locked",
+      "name": "tag floor",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [678, 648, 575],
+          "physics": "tile"
+        },
+        {
+          "color": [651, 622, 552],
+          "physics": "tile"
+        },
+        {
+          "color": [623, 596, 529],
+          "physics": "tile"
+        },
+        {
+          "color": [596, 570, 506],
+          "physics": "tile"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [828, 792, 702],
+          "physics": "tile"
+        },
+        {
+          "color": [866, 828, 734],
+          "physics": "tile"
+        },
+        {
+          "color": [904, 864, 766],
+          "physics": "tile"
+        },
+        {
+          "color": [941, 900, 798],
+          "physics": "tile"
+        },
+        {
+          "color": [700, 457, 147],
+          "physics": "tile"
+        },
+        {
+          "color": [672, 438, 141],
+          "physics": "tile"
+        },
+        {
+          "color": [644, 420, 136],
+          "physics": "tile"
+        },
+        {
+          "color": [616, 402, 130],
+          "physics": "tile"
+        },
+        {
+          "color": [855, 558, 180],
+          "physics": "tile"
+        },
+        {
+          "color": [894, 584, 188],
+          "physics": "tile"
+        },
+        {
+          "color": [933, 609, 196],
+          "physics": "tile"
+        },
+        {
+          "color": [972, 634, 205],
+          "physics": "tile"
+        }
+      ],
+      "position": [-13.125, -0.5, -13.125],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tag_floor.data",
+      "type": "data"
+    },
+    {
+      "id": 6,
+      "mutability": "locked",
+      "name": "dash start",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [583, 583, 570],
+          "physics": "tile"
+        },
+        {
+          "color": [610, 610, 596],
+          "physics": "tile"
+        },
+        {
+          "color": [636, 636, 622],
+          "physics": "tile"
+        },
+        {
+          "color": [663, 663, 648],
+          "physics": "tile"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [921, 921, 900],
+          "physics": "tile"
+        },
+        {
+          "color": [884, 884, 864],
+          "physics": "tile"
+        },
+        {
+          "color": [847, 847, 828],
+          "physics": "tile"
+        },
+        {
+          "color": [810, 810, 792],
+          "physics": "tile"
+        },
+        {
+          "color": [356, 363, 389],
+          "physics": "tile"
+        },
+        {
+          "color": [373, 379, 407],
+          "physics": "tile"
+        },
+        {
+          "color": [389, 396, 424],
+          "physics": "tile"
+        },
+        {
+          "color": [405, 412, 442],
+          "physics": "tile"
+        },
+        {
+          "color": [563, 573, 614],
+          "physics": "tile"
+        },
+        {
+          "color": [540, 550, 589],
+          "physics": "tile"
+        },
+        {
+          "color": [518, 527, 565],
+          "physics": "tile"
+        },
+        {
+          "color": [495, 504, 540],
+          "physics": "tile"
+        }
+      ],
+      "position": [63.875, -0.5, -46.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "dash_start.data",
+      "type": "data"
+    },
+    {
+      "id": 7,
+      "mutability": "locked",
+      "name": "dash crumble",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [162, 467, 506],
+          "physics": "tile"
+        },
+        {
+          "color": [169, 488, 529],
+          "physics": "tile"
+        },
+        {
+          "color": [177, 509, 552],
+          "physics": "tile"
+        },
+        {
+          "color": [184, 530, 575],
+          "physics": "tile"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [256, 737, 798],
+          "physics": "tile"
+        },
+        {
+          "color": [246, 707, 766],
+          "physics": "tile"
+        },
+        {
+          "color": [235, 678, 734],
+          "physics": "tile"
+        },
+        {
+          "color": [225, 648, 702],
+          "physics": "tile"
+        },
+        {
+          "color": [117, 356, 428],
+          "physics": "tile"
+        },
+        {
+          "color": [122, 373, 447],
+          "physics": "tile"
+        },
+        {
+          "color": [127, 389, 467],
+          "physics": "tile"
+        },
+        {
+          "color": [133, 405, 486],
+          "physics": "tile"
+        },
+        {
+          "color": [184, 563, 675],
+          "physics": "tile"
+        },
+        {
+          "color": [177, 540, 648],
+          "physics": "tile"
+        },
+        {
+          "color": [169, 518, 621],
+          "physics": "tile"
+        },
+        {
+          "color": [162, 495, 594],
+          "physics": "tile"
+        }
+      ],
+      "position": [63.875, -0.5, -39.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "dash_crumble.data",
+      "type": "data"
+    },
+    {
+      "id": 8,
+      "mutability": "locked",
+      "name": "dash ring",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [616, 402, 130],
+          "physics": "tile"
+        },
+        {
+          "color": [644, 420, 136],
+          "physics": "tile"
+        },
+        {
+          "color": [672, 438, 141],
+          "physics": "tile"
+        },
+        {
+          "color": [700, 457, 147],
+          "physics": "tile"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [972, 634, 205],
+          "physics": "tile"
+        },
+        {
+          "color": [933, 609, 196],
+          "physics": "tile"
+        },
+        {
+          "color": [894, 584, 188],
+          "physics": "tile"
+        },
+        {
+          "color": [855, 558, 180],
+          "physics": "tile"
+        },
+        {
+          "color": [596, 570, 506],
+          "physics": "tile"
+        },
+        {
+          "color": [623, 596, 529],
+          "physics": "tile"
+        },
+        {
+          "color": [678, 648, 575],
+          "physics": "tile"
+        },
+        {
+          "color": [651, 622, 552],
+          "physics": "tile"
+        },
+        {
+          "color": [941, 900, 798],
+          "physics": "tile"
+        },
+        {
+          "color": [904, 864, 766],
+          "physics": "tile"
+        },
+        {
+          "color": [828, 792, 702],
+          "physics": "tile"
+        },
+        {
+          "color": [866, 828, 734],
+          "physics": "tile"
+        }
+      ],
+      "position": [62.125, -0.5, -25.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "dash_ring.data",
+      "type": "data"
+    },
+    {
+      "id": 9,
+      "mutability": "locked",
+      "name": "dash checkpoint",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [583, 583, 570],
+          "physics": "tile"
+        },
+        {
+          "color": [610, 610, 596],
+          "physics": "tile"
+        },
+        {
+          "color": [636, 636, 622],
+          "physics": "tile"
+        },
+        {
+          "color": [663, 663, 648],
+          "physics": "tile"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [921, 921, 900],
+          "physics": "tile"
+        },
+        {
+          "color": [884, 884, 864],
+          "physics": "tile"
+        },
+        {
+          "color": [847, 847, 828],
+          "physics": "tile"
+        },
+        {
+          "color": [810, 810, 792],
+          "physics": "tile"
+        },
+        {
+          "color": [356, 363, 389],
+          "physics": "tile"
+        },
+        {
+          "color": [373, 379, 407],
+          "physics": "tile"
+        },
+        {
+          "color": [389, 396, 424],
+          "physics": "tile"
+        },
+        {
+          "color": [405, 412, 442],
+          "physics": "tile"
+        },
+        {
+          "color": [563, 573, 614],
+          "physics": "tile"
+        },
+        {
+          "color": [540, 550, 589],
+          "physics": "tile"
+        },
+        {
+          "color": [518, 527, 565],
+          "physics": "tile"
+        },
+        {
+          "color": [495, 504, 540],
+          "physics": "tile"
+        }
+      ],
+      "position": [63.875, -0.5, -9.25],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "dash_checkpoint.data",
+      "type": "data"
+    },
+    {
+      "id": 10,
+      "mutability": "locked",
+      "name": "dash gaps",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [402, 246, 532],
+          "physics": "tile"
+        },
+        {
+          "color": [420, 258, 556],
+          "physics": "tile"
+        },
+        {
+          "color": [438, 269, 580],
+          "physics": "tile"
+        },
+        {
+          "color": [457, 280, 604],
+          "physics": "tile"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [634, 389, 839],
+          "physics": "tile"
+        },
+        {
+          "color": [609, 373, 805],
+          "physics": "tile"
+        },
+        {
+          "color": [584, 358, 772],
+          "physics": "tile"
+        },
+        {
+          "color": [558, 342, 738],
+          "physics": "tile"
+        },
+        {
+          "color": [298, 181, 428],
+          "physics": "tile"
+        },
+        {
+          "color": [312, 190, 447],
+          "physics": "tile"
+        },
+        {
+          "color": [325, 198, 467],
+          "physics": "tile"
+        },
+        {
+          "color": [339, 206, 486],
+          "physics": "tile"
+        },
+        {
+          "color": [471, 286, 675],
+          "physics": "tile"
+        },
+        {
+          "color": [452, 275, 648],
+          "physics": "tile"
+        },
+        {
+          "color": [433, 264, 621],
+          "physics": "tile"
+        },
+        {
+          "color": [414, 252, 594],
+          "physics": "tile"
+        }
+      ],
+      "position": [63.875, -0.5, -5.75],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "dash_gaps.data",
+      "type": "data"
+    },
+    {
+      "id": 11,
+      "mutability": "locked",
+      "name": "dash checkpoint two",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [583, 583, 570],
+          "physics": "tile"
+        },
+        {
+          "color": [610, 610, 596],
+          "physics": "tile"
+        },
+        {
+          "color": [636, 636, 622],
+          "physics": "tile"
+        },
+        {
+          "color": [663, 663, 648],
+          "physics": "tile"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [921, 921, 900],
+          "physics": "tile"
+        },
+        {
+          "color": [884, 884, 864],
+          "physics": "tile"
+        },
+        {
+          "color": [847, 847, 828],
+          "physics": "tile"
+        },
+        {
+          "color": [810, 810, 792],
+          "physics": "tile"
+        },
+        {
+          "color": [356, 363, 389],
+          "physics": "tile"
+        },
+        {
+          "color": [373, 379, 407],
+          "physics": "tile"
+        },
+        {
+          "color": [389, 396, 424],
+          "physics": "tile"
+        },
+        {
+          "color": [405, 412, 442],
+          "physics": "tile"
+        },
+        {
+          "color": [563, 573, 614],
+          "physics": "tile"
+        },
+        {
+          "color": [540, 550, 589],
+          "physics": "tile"
+        },
+        {
+          "color": [518, 527, 565],
+          "physics": "tile"
+        },
+        {
+          "color": [495, 504, 540],
+          "physics": "tile"
+        }
+      ],
+      "position": [63.875, -0.5, 15.25],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "dash_checkpoint_two.data",
+      "type": "data"
+    },
+    {
+      "id": 12,
+      "mutability": "locked",
+      "name": "dash narrow",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [207, 428, 194],
+          "physics": "tile"
+        },
+        {
+          "color": [217, 447, 203],
+          "physics": "tile"
+        },
+        {
+          "color": [236, 486, 221],
+          "physics": "tile"
+        },
+        {
+          "color": [226, 467, 212],
+          "physics": "tile"
+        },
+        {
+          "color": [327, 675, 307],
+          "physics": "tile"
+        },
+        {
+          "color": [314, 648, 295],
+          "physics": "tile"
+        },
+        {
+          "color": [288, 594, 270],
+          "physics": "tile"
+        },
+        {
+          "color": [301, 621, 282],
+          "physics": "tile"
+        },
+        {
+          "color": [162, 356, 156],
+          "physics": "tile"
+        },
+        {
+          "color": [169, 373, 163],
+          "physics": "tile"
+        },
+        {
+          "color": [184, 405, 177],
+          "physics": "tile"
+        },
+        {
+          "color": [177, 389, 170],
+          "physics": "tile"
+        },
+        {
+          "color": [256, 563, 246],
+          "physics": "tile"
+        },
+        {
+          "color": [246, 540, 236],
+          "physics": "tile"
+        },
+        {
+          "color": [225, 495, 216],
+          "physics": "tile"
+        },
+        {
+          "color": [235, 518, 226],
+          "physics": "tile"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        }
+      ],
+      "position": [63.875, -0.5, 18.75],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "dash_narrow.data",
+      "type": "data"
+    },
+    {
+      "id": 13,
+      "mutability": "locked",
+      "name": "dash finish",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [648, 519, 130],
+          "physics": "tile"
+        },
+        {
+          "color": [678, 542, 136],
+          "physics": "tile"
+        },
+        {
+          "color": [707, 566, 141],
+          "physics": "tile"
+        },
+        {
+          "color": [737, 589, 147],
+          "physics": "tile"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [1023, 818, 205],
+          "physics": "tile"
+        },
+        {
+          "color": [982, 786, 196],
+          "physics": "tile"
+        },
+        {
+          "color": [941, 753, 188],
+          "physics": "tile"
+        },
+        {
+          "color": [900, 720, 180],
+          "physics": "tile"
+        },
+        {
+          "color": [596, 441, 78],
+          "physics": "tile"
+        },
+        {
+          "color": [623, 461, 81],
+          "physics": "tile"
+        },
+        {
+          "color": [651, 481, 85],
+          "physics": "tile"
+        },
+        {
+          "color": [678, 501, 88],
+          "physics": "tile"
+        },
+        {
+          "color": [941, 696, 123],
+          "physics": "tile"
+        },
+        {
+          "color": [904, 668, 118],
+          "physics": "tile"
+        },
+        {
+          "color": [866, 640, 113],
+          "physics": "tile"
+        },
+        {
+          "color": [828, 612, 108],
+          "physics": "tile"
+        }
+      ],
+      "position": [63.875, -0.5, 32.75],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "dash_finish.data",
+      "type": "data"
+    },
+    {
+      "id": 14,
+      "mutability": "locked",
+      "name": "climb ground",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [358, 358, 389],
+          "physics": "stone"
+        },
+        {
+          "color": [508, 491, 466],
+          "physics": "stone"
+        },
+        {
+          "color": [536, 519, 492],
+          "physics": "stone"
+        },
+        {
+          "color": [565, 546, 518],
+          "physics": "stone"
+        },
+        {
+          "color": [522, 504, 478],
+          "physics": "stone"
+        },
+        {
+          "color": [552, 534, 506],
+          "physics": "stone"
+        },
+        {
+          "color": [583, 564, 535],
+          "physics": "stone"
+        },
+        {
+          "color": [614, 593, 563],
+          "physics": "stone"
+        },
+        {
+          "color": [480, 464, 440],
+          "physics": "stone"
+        }
+      ],
+      "position": [-156.0, -0.5, -6.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "climb_ground.data",
+      "type": "data"
+    },
+    {
+      "id": 15,
+      "mutability": "locked",
+      "name": "blueprint pad 0",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [737, 180, 147],
+          "physics": "stone"
+        },
+        {
+          "color": [508, 491, 466],
+          "physics": "stone"
+        },
+        {
+          "color": [536, 519, 492],
+          "physics": "stone"
+        },
+        {
+          "color": [565, 546, 518],
+          "physics": "stone"
+        },
+        {
+          "color": [522, 504, 478],
+          "physics": "stone"
+        },
+        {
+          "color": [552, 534, 506],
+          "physics": "stone"
+        },
+        {
+          "color": [583, 564, 535],
+          "physics": "stone"
+        },
+        {
+          "color": [614, 593, 563],
+          "physics": "stone"
+        },
+        {
+          "color": [480, 464, 440],
+          "physics": "stone"
+        }
+      ],
+      "position": [156.0, -0.5, -2.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "blueprint_pad_0.data",
+      "type": "data"
+    },
+    {
+      "id": 16,
+      "mutability": "locked",
+      "name": "blueprint pad 1",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [164, 344, 777],
+          "physics": "stone"
+        },
+        {
+          "color": [508, 491, 466],
+          "physics": "stone"
+        },
+        {
+          "color": [536, 519, 492],
+          "physics": "stone"
+        },
+        {
+          "color": [565, 546, 518],
+          "physics": "stone"
+        },
+        {
+          "color": [522, 504, 478],
+          "physics": "stone"
+        },
+        {
+          "color": [552, 534, 506],
+          "physics": "stone"
+        },
+        {
+          "color": [583, 564, 535],
+          "physics": "stone"
+        },
+        {
+          "color": [614, 593, 563],
+          "physics": "stone"
+        },
+        {
+          "color": [480, 464, 440],
+          "physics": "stone"
+        }
+      ],
+      "position": [147.5, -0.5, 6.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "blueprint_pad_1.data",
+      "type": "data"
+    },
+    {
+      "id": 17,
+      "mutability": "locked",
+      "name": "blueprint pad 2",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [205, 655, 246],
+          "physics": "stone"
+        },
+        {
+          "color": [508, 491, 466],
+          "physics": "stone"
+        },
+        {
+          "color": [536, 519, 492],
+          "physics": "stone"
+        },
+        {
+          "color": [565, 546, 518],
+          "physics": "stone"
+        },
+        {
+          "color": [522, 504, 478],
+          "physics": "stone"
+        },
+        {
+          "color": [552, 534, 506],
+          "physics": "stone"
+        },
+        {
+          "color": [583, 564, 535],
+          "physics": "stone"
+        },
+        {
+          "color": [614, 593, 563],
+          "physics": "stone"
+        },
+        {
+          "color": [480, 464, 440],
+          "physics": "stone"
+        }
+      ],
+      "position": [139.0, -0.5, -2.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "blueprint_pad_2.data",
+      "type": "data"
+    },
+    {
+      "id": 18,
+      "mutability": "locked",
+      "name": "blueprint pad 3",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [802, 671, 123],
+          "physics": "stone"
+        },
+        {
+          "color": [508, 491, 466],
+          "physics": "stone"
+        },
+        {
+          "color": [536, 519, 492],
+          "physics": "stone"
+        },
+        {
+          "color": [565, 546, 518],
+          "physics": "stone"
+        },
+        {
+          "color": [522, 504, 478],
+          "physics": "stone"
+        },
+        {
+          "color": [552, 534, 506],
+          "physics": "stone"
+        },
+        {
+          "color": [583, 564, 535],
+          "physics": "stone"
+        },
+        {
+          "color": [614, 593, 563],
+          "physics": "stone"
+        },
+        {
+          "color": [480, 464, 440],
+          "physics": "stone"
+        }
+      ],
+      "position": [147.5, -0.5, -11.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "blueprint_pad_3.data",
+      "type": "data"
+    },
+    {
+      "id": 19,
+      "mutability": "locked",
+      "name": "blueprint display",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [123, 123, 133],
+          "physics": "anchor"
+        },
+        {
+          "color": [1023, 818, 205],
+          "physics": "stone"
+        },
+        {
+          "color": [508, 491, 466],
+          "physics": "stone"
+        },
+        {
+          "color": [536, 519, 492],
+          "physics": "stone"
+        },
+        {
+          "color": [565, 546, 518],
+          "physics": "stone"
+        },
+        {
+          "color": [522, 504, 478],
+          "physics": "stone"
+        },
+        {
+          "color": [552, 534, 506],
+          "physics": "stone"
+        },
+        {
+          "color": [583, 564, 535],
+          "physics": "stone"
+        },
+        {
+          "color": [614, 593, 563],
+          "physics": "stone"
+        },
+        {
+          "color": [480, 464, 440],
+          "physics": "stone"
+        }
+      ],
+      "position": [147.5, -0.5, -2.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "blueprint_display.data",
+      "type": "data"
+    },
+    {
+      "id": 20,
+      "mutability": "locked",
+      "name": "dash arch",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [972, 972, 941]
+        },
+        {
+          "color": [1023, 839, 205]
+        }
+      ],
+      "position": [63.375, 0.0, 33.25],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "dash_arch.data",
+      "type": "data"
+    },
+    {
+      "id": 21,
+      "mutability": "locked",
+      "name": "climb posts",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [307, 307, 348]
+        },
+        {
+          "color": [972, 972, 941]
+        },
+        {
+          "color": [1023, 839, 205]
+        }
+      ],
+      "position": [-156.75, 0.0, -6.75],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "climb_posts.data",
+      "type": "data"
+    },
+    {
+      "id": 22,
+      "mutability": "locked",
+      "name": "blueprint plaza",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [666, 648, 621]
+        },
+        {
+          "color": [696, 678, 649]
+        },
+        {
+          "color": [805, 786, 746]
+        },
+        {
+          "color": [839, 818, 777]
+        },
+        {
+          "color": [757, 737, 706]
+        },
+        {
+          "color": [727, 707, 678]
+        },
+        {
+          "color": [772, 753, 715]
+        },
+        {
+          "color": [738, 720, 684]
+        }
+      ],
+      "position": [138.0, -0.5, -12.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "blueprint_plaza.data",
+      "type": "data"
+    },
+    {
+      "id": 23,
+      "mutability": "locked",
+      "name": "pillar 0",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [246, 205, 205]
+        },
+        {
+          "color": [172, 143, 143]
+        },
+        {
+          "color": [196, 164, 164]
+        },
+        {
+          "color": [221, 184, 184]
+        }
+      ],
+      "position": [-82.0, -30.0, -14.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pillar_0.data",
+      "type": "data"
+    },
+    {
+      "id": 24,
+      "mutability": "locked",
+      "name": "pillar 1",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [221, 184, 184]
+        },
+        {
+          "color": [196, 164, 164]
+        },
+        {
+          "color": [172, 143, 143]
+        },
+        {
+          "color": [246, 205, 205]
+        }
+      ],
+      "position": [-64.0, -30.0, 8.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pillar_1.data",
+      "type": "data"
+    },
+    {
+      "id": 25,
+      "mutability": "locked",
+      "name": "pillar 2",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [246, 205, 205]
+        },
+        {
+          "color": [172, 143, 143]
+        },
+        {
+          "color": [196, 164, 164]
+        },
+        {
+          "color": [221, 184, 184]
+        }
+      ],
+      "position": [-12.0, -30.0, -14.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pillar_2.data",
+      "type": "data"
+    },
+    {
+      "id": 26,
+      "mutability": "locked",
+      "name": "pillar 3",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [246, 205, 205]
+        },
+        {
+          "color": [221, 184, 184]
+        },
+        {
+          "color": [196, 164, 164]
+        },
+        {
+          "color": [172, 143, 143]
+        }
+      ],
+      "position": [6.0, -30.0, 8.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pillar_3.data",
+      "type": "data"
+    },
+    {
+      "id": 27,
+      "mutability": "locked",
+      "name": "pillar 4",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [172, 143, 143]
+        },
+        {
+          "color": [196, 164, 164]
+        },
+        {
+          "color": [221, 184, 184]
+        },
+        {
+          "color": [246, 205, 205]
+        }
+      ],
+      "position": [58.0, -30.0, -14.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pillar_4.data",
+      "type": "data"
+    },
+    {
+      "id": 28,
+      "mutability": "locked",
+      "name": "pillar 5",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [221, 184, 184]
+        },
+        {
+          "color": [196, 164, 164]
+        },
+        {
+          "color": [172, 143, 143]
+        },
+        {
+          "color": [246, 205, 205]
+        }
+      ],
+      "position": [76.0, -30.0, 8.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pillar_5.data",
+      "type": "data"
+    },
+    {
+      "id": 29,
+      "mutability": "locked",
+      "name": "pillar 6",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [246, 205, 205]
+        },
+        {
+          "color": [221, 184, 184]
+        },
+        {
+          "color": [196, 164, 164]
+        },
+        {
+          "color": [172, 143, 143]
+        }
+      ],
+      "position": [-162.0, -30.0, -14.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pillar_6.data",
+      "type": "data"
+    },
+    {
+      "id": 30,
+      "mutability": "locked",
+      "name": "pillar 7",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [172, 143, 143]
+        },
+        {
+          "color": [196, 164, 164]
+        },
+        {
+          "color": [221, 184, 184]
+        },
+        {
+          "color": [246, 205, 205]
+        }
+      ],
+      "position": [-144.0, -30.0, 8.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pillar_7.data",
+      "type": "data"
+    },
+    {
+      "id": 31,
+      "mutability": "locked",
+      "name": "pillar 8",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [172, 143, 143]
+        },
+        {
+          "color": [196, 164, 164]
+        },
+        {
+          "color": [221, 184, 184]
+        },
+        {
+          "color": [246, 205, 205]
+        }
+      ],
+      "position": [138.0, -30.0, -14.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pillar_8.data",
+      "type": "data"
+    },
+    {
+      "id": 32,
+      "mutability": "locked",
+      "name": "pillar 9",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [246, 205, 205]
+        },
+        {
+          "color": [172, 143, 143]
+        },
+        {
+          "color": [196, 164, 164]
+        },
+        {
+          "color": [221, 184, 184]
+        }
+      ],
+      "position": [156.0, -30.0, 8.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "pillar_9.data",
+      "type": "data"
+    }
+  ],
+  "name": "party",
+  "version": 1
+}

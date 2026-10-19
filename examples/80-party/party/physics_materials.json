@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "materials": [
+    { "name": "tile",   "density": 900,  "friction": 0.7, "restitution": 0.0 },
+    { "name": "anchor", "density": 900,  "friction": 0.7, "restitution": 0.0, "anchor": true },
+    { "name": "stone",  "density": 2200, "friction": 0.8, "restitution": 0.0 },
+    { "name": "iron",   "density": 3000, "friction": 0.6, "restitution": 0.3 }
+  ]
+}
