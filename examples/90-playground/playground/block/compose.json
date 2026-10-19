@@ -1,0 +1,54 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "block",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [365, 383, 435],
+          "physics": "stone"
+        },
+        {
+          "color": [387, 405, 460],
+          "physics": "stone"
+        },
+        {
+          "color": [408, 428, 486],
+          "physics": "stone"
+        },
+        {
+          "color": [430, 450, 512],
+          "physics": "stone"
+        },
+        {
+          "color": [583, 603, 661],
+          "physics": "stone"
+        },
+        {
+          "color": [552, 571, 626],
+          "physics": "stone"
+        },
+        {
+          "color": [614, 634, 696],
+          "physics": "stone"
+        },
+        {
+          "color": [522, 539, 591],
+          "physics": "stone"
+        }
+      ],
+      "position": [-0.5, 0.0, -0.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "block.data",
+      "type": "data"
+    }
+  ],
+  "name": "block",
+  "version": 1
+}

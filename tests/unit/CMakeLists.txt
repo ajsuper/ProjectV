@@ -89,6 +89,13 @@ if(TARGET party_server AND TARGET party_client)
     set_tests_properties(party_selftest PROPERTIES LABELS net TIMEOUT 300)
 endif()
 
+# The playground as three processes (a server; two clients using every tool on the castle).
+if(TARGET playground_server AND TARGET playground_client)
+    add_test(NAME playground_selftest
+             COMMAND ${PROJECT_SOURCE_DIR}/examples/90-playground/selftest.sh ${CMAKE_BINARY_DIR})
+    set_tests_properties(playground_selftest PROPERTIES LABELS net TIMEOUT 180)
+endif()
+
 # Not a compile: a scan of the voxel layer's includes. See check_layering.cmake.
 add_test(NAME layering
          COMMAND ${CMAKE_COMMAND} -DPROJV_ROOT=${PROJECT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/check_layering.cmake)

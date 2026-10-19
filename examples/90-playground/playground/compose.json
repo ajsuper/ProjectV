@@ -1,0 +1,1110 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "ground",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [213, 376, 147]
+        },
+        {
+          "color": [231, 408, 160]
+        },
+        {
+          "color": [248, 439, 172]
+        },
+        {
+          "color": [266, 471, 184]
+        },
+        {
+          "color": [458, 363, 239]
+        },
+        {
+          "color": [491, 389, 256]
+        },
+        {
+          "color": [393, 311, 205]
+        },
+        {
+          "color": [426, 337, 222]
+        },
+        {
+          "color": [507, 491, 458]
+        },
+        {
+          "color": [552, 532, 501]
+        },
+        {
+          "color": [516, 496, 468]
+        },
+        {
+          "color": [550, 532, 496]
+        },
+        {
+          "color": [634, 614, 573]
+        },
+        {
+          "color": [442, 426, 401]
+        },
+        {
+          "color": [479, 461, 434]
+        },
+        {
+          "color": [592, 573, 535]
+        }
+      ],
+      "position": [-70.0, -0.5, -70.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "ground.data",
+      "type": "data"
+    },
+    {
+      "id": 2,
+      "mutability": "locked",
+      "name": "ramp west",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [319, 443, 213]
+        },
+        {
+          "color": [401, 306, 210]
+        },
+        {
+          "color": [430, 327, 225]
+        },
+        {
+          "color": [344, 262, 180]
+        },
+        {
+          "color": [372, 284, 195]
+        },
+        {
+          "color": [344, 477, 229]
+        },
+        {
+          "color": [368, 512, 246]
+        },
+        {
+          "color": [295, 409, 196]
+        }
+      ],
+      "position": [0.0, 0.0, -34.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "ramp_west.data",
+      "type": "data"
+    },
+    {
+      "id": 3,
+      "mutability": "locked",
+      "name": "ramp east",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [344, 262, 180]
+        },
+        {
+          "color": [372, 284, 195]
+        },
+        {
+          "color": [401, 306, 210]
+        },
+        {
+          "color": [430, 327, 225]
+        },
+        {
+          "color": [368, 512, 246]
+        },
+        {
+          "color": [295, 409, 196]
+        },
+        {
+          "color": [319, 443, 213]
+        },
+        {
+          "color": [344, 477, 229]
+        }
+      ],
+      "position": [24.0, 0.0, -34.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "ramp_east.data",
+      "type": "data"
+    },
+    {
+      "id": 4,
+      "mutability": "locked",
+      "name": "castle south wall",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        }
+      ],
+      "position": [-10.0, 0.0, 28.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "castle_south_wall.data",
+      "type": "data"
+    },
+    {
+      "id": 5,
+      "mutability": "locked",
+      "name": "castle north wall",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        }
+      ],
+      "position": [-10.0, 0.0, 46.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "castle_north_wall.data",
+      "type": "data"
+    },
+    {
+      "id": 6,
+      "mutability": "locked",
+      "name": "castle west wall",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        }
+      ],
+      "position": [-10.0, 0.0, 29.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "castle_west_wall.data",
+      "type": "data"
+    },
+    {
+      "id": 7,
+      "mutability": "locked",
+      "name": "castle east wall",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        }
+      ],
+      "position": [8.5, 0.0, 29.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "castle_east_wall.data",
+      "type": "data"
+    },
+    {
+      "id": 8,
+      "mutability": "locked",
+      "name": "castle tower south west",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [186, 179, 165],
+          "physics": "stone"
+        },
+        {
+          "color": [206, 198, 182],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 216, 199],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [243, 229, 207],
+          "physics": "stone"
+        },
+        {
+          "color": [269, 253, 229],
+          "physics": "stone"
+        },
+        {
+          "color": [294, 277, 251],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [-11.75, 0.0, 26.25],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "castle_tower_south_west.data",
+      "type": "data"
+    },
+    {
+      "id": 9,
+      "mutability": "locked",
+      "name": "castle tower north west",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [186, 179, 165],
+          "physics": "stone"
+        },
+        {
+          "color": [206, 198, 182],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 216, 199],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [243, 229, 207],
+          "physics": "stone"
+        },
+        {
+          "color": [269, 253, 229],
+          "physics": "stone"
+        },
+        {
+          "color": [294, 277, 251],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [-11.75, 0.0, 46.25],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "castle_tower_north_west.data",
+      "type": "data"
+    },
+    {
+      "id": 10,
+      "mutability": "locked",
+      "name": "castle tower south east",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [186, 179, 165],
+          "physics": "stone"
+        },
+        {
+          "color": [206, 198, 182],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 216, 199],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [243, 229, 207],
+          "physics": "stone"
+        },
+        {
+          "color": [269, 253, 229],
+          "physics": "stone"
+        },
+        {
+          "color": [294, 277, 251],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [8.25, 0.0, 26.25],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "castle_tower_south_east.data",
+      "type": "data"
+    },
+    {
+      "id": 11,
+      "mutability": "locked",
+      "name": "castle tower north east",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [186, 179, 165],
+          "physics": "stone"
+        },
+        {
+          "color": [206, 198, 182],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 216, 199],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [243, 229, 207],
+          "physics": "stone"
+        },
+        {
+          "color": [269, 253, 229],
+          "physics": "stone"
+        },
+        {
+          "color": [294, 277, 251],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        }
+      ],
+      "position": [8.25, 0.0, 46.25],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "castle_tower_north_east.data",
+      "type": "data"
+    },
+    {
+      "id": 12,
+      "mutability": "locked",
+      "name": "keep",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [172, 165, 152],
+          "physics": "stone"
+        },
+        {
+          "color": [190, 183, 168],
+          "physics": "stone"
+        },
+        {
+          "color": [226, 217, 200],
+          "physics": "stone"
+        },
+        {
+          "color": [208, 200, 184],
+          "physics": "stone"
+        },
+        {
+          "color": [225, 211, 192],
+          "physics": "stone"
+        },
+        {
+          "color": [248, 234, 212],
+          "physics": "stone"
+        },
+        {
+          "color": [296, 278, 252],
+          "physics": "stone"
+        },
+        {
+          "color": [272, 256, 232],
+          "physics": "stone"
+        }
+      ],
+      "position": [-2.5, 0.0, 38.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "keep.data",
+      "type": "data"
+    },
+    {
+      "id": 13,
+      "mutability": "locked",
+      "name": "chimney north",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [655, 297, 184],
+          "physics": "brick"
+        },
+        {
+          "color": [737, 716, 655],
+          "physics": "mortar"
+        },
+        {
+          "color": [491, 205, 143],
+          "physics": "brick"
+        },
+        {
+          "color": [573, 235, 153],
+          "physics": "brick"
+        }
+      ],
+      "position": [30.0, 0.0, 8.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "chimney_north.data",
+      "type": "data"
+    },
+    {
+      "id": 14,
+      "mutability": "locked",
+      "name": "chimney middle",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [655, 297, 184],
+          "physics": "brick"
+        },
+        {
+          "color": [737, 716, 655],
+          "physics": "mortar"
+        },
+        {
+          "color": [491, 205, 143],
+          "physics": "brick"
+        },
+        {
+          "color": [573, 235, 153],
+          "physics": "brick"
+        }
+      ],
+      "position": [34.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "chimney_middle.data",
+      "type": "data"
+    },
+    {
+      "id": 15,
+      "mutability": "locked",
+      "name": "chimney south",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [655, 297, 184],
+          "physics": "brick"
+        },
+        {
+          "color": [737, 716, 655],
+          "physics": "mortar"
+        },
+        {
+          "color": [491, 205, 143],
+          "physics": "brick"
+        },
+        {
+          "color": [573, 235, 153],
+          "physics": "brick"
+        }
+      ],
+      "position": [30.0, 0.0, -8.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "chimney_south.data",
+      "type": "data"
+    },
+    {
+      "id": 16,
+      "mutability": "locked",
+      "name": "brick wall",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [491, 205, 143],
+          "physics": "brick"
+        },
+        {
+          "color": [737, 716, 655],
+          "physics": "mortar"
+        },
+        {
+          "color": [573, 235, 153],
+          "physics": "brick"
+        },
+        {
+          "color": [655, 297, 184],
+          "physics": "brick"
+        }
+      ],
+      "position": [24.0, 0.0, -8.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "brick_wall.data",
+      "type": "data"
+    },
+    {
+      "id": 17,
+      "mutability": "locked",
+      "name": "house",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "planks"
+        },
+        {
+          "color": [648, 495, 306],
+          "physics": "planks"
+        },
+        {
+          "color": [692, 529, 327],
+          "physics": "planks"
+        },
+        {
+          "color": [737, 563, 348],
+          "physics": "planks"
+        },
+        {
+          "color": [604, 461, 285],
+          "physics": "planks"
+        },
+        {
+          "color": [615, 462, 279],
+          "physics": "planks"
+        },
+        {
+          "color": [576, 432, 261],
+          "physics": "planks"
+        },
+        {
+          "color": [537, 403, 243],
+          "physics": "planks"
+        },
+        {
+          "color": [655, 491, 297],
+          "physics": "planks"
+        },
+        {
+          "color": [311, 123, 82],
+          "physics": "planks"
+        },
+        {
+          "color": [337, 133, 89],
+          "physics": "planks"
+        },
+        {
+          "color": [430, 172, 115],
+          "physics": "planks"
+        },
+        {
+          "color": [460, 184, 123],
+          "physics": "planks"
+        },
+        {
+          "color": [368, 147, 98],
+          "physics": "planks"
+        },
+        {
+          "color": [399, 160, 106],
+          "physics": "planks"
+        },
+        {
+          "color": [363, 143, 95],
+          "physics": "planks"
+        },
+        {
+          "color": [389, 153, 102],
+          "physics": "planks"
+        }
+      ],
+      "position": [-34.0, 0.0, -3.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "house.data",
+      "type": "data"
+    },
+    {
+      "id": 18,
+      "mutability": "locked",
+      "name": "greenhouse",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [921, 921, 880],
+          "physics": "timber"
+        }
+      ],
+      "position": [-22.0, 0.0, -32.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "greenhouse.data",
+      "type": "data"
+    },
+    {
+      "id": 19,
+      "mutability": "locked",
+      "name": "bridge",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [182, 175, 161],
+          "physics": "stone"
+        },
+        {
+          "color": [201, 193, 178],
+          "physics": "stone"
+        },
+        {
+          "color": [220, 212, 195],
+          "physics": "stone"
+        },
+        {
+          "color": [239, 230, 212],
+          "physics": "stone"
+        },
+        {
+          "color": [202, 194, 179],
+          "physics": "stone"
+        },
+        {
+          "color": [223, 215, 198],
+          "physics": "stone"
+        },
+        {
+          "color": [245, 235, 216],
+          "physics": "stone"
+        },
+        {
+          "color": [266, 256, 235],
+          "physics": "stone"
+        },
+        {
+          "color": [238, 224, 203],
+          "physics": "stone"
+        },
+        {
+          "color": [263, 247, 224],
+          "physics": "stone"
+        },
+        {
+          "color": [288, 271, 246],
+          "physics": "stone"
+        },
+        {
+          "color": [313, 295, 267],
+          "physics": "stone"
+        },
+        {
+          "color": [264, 249, 225],
+          "physics": "stone"
+        },
+        {
+          "color": [292, 275, 249],
+          "physics": "stone"
+        },
+        {
+          "color": [320, 301, 273],
+          "physics": "stone"
+        },
+        {
+          "color": [348, 327, 297],
+          "physics": "stone"
+        }
+      ],
+      "position": [8.0, 0.0, -34.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "bridge.data",
+      "type": "data"
+    },
+    {
+      "id": 20,
+      "mutability": "locked",
+      "name": "tree 0",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        }
+      ],
+      "position": [-20.5, 0.0, 9.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree_0.data",
+      "type": "data"
+    },
+    {
+      "id": 21,
+      "mutability": "locked",
+      "name": "tree 1",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        }
+      ],
+      "position": [17.5, 0.0, 19.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree_1.data",
+      "type": "data"
+    },
+    {
+      "id": 22,
+      "mutability": "locked",
+      "name": "tree 2",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        }
+      ],
+      "position": [-26.5, 0.0, 27.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree_2.data",
+      "type": "data"
+    },
+    {
+      "id": 23,
+      "mutability": "locked",
+      "name": "tree 3",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        }
+      ],
+      "position": [-14.5, 0.0, -20.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree_3.data",
+      "type": "data"
+    },
+    {
+      "id": 24,
+      "mutability": "locked",
+      "name": "tree 4",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        }
+      ],
+      "position": [23.5, 0.0, -26.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree_4.data",
+      "type": "data"
+    },
+    {
+      "id": 25,
+      "mutability": "locked",
+      "name": "tree 5",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [338, 225, 133],
+          "physics": "timber"
+        },
+        {
+          "color": [184, 424, 147],
+          "physics": "leaves"
+        },
+        {
+          "color": [143, 329, 115],
+          "physics": "leaves"
+        },
+        {
+          "color": [164, 376, 131],
+          "physics": "leaves"
+        },
+        {
+          "color": [205, 471, 164],
+          "physics": "leaves"
+        }
+      ],
+      "position": [-42.5, 0.0, 15.5],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tree_5.data",
+      "type": "data"
+    }
+  ],
+  "name": "playground",
+  "version": 1
+}

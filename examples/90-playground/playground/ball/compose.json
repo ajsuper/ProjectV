@@ -1,0 +1,34 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "ball",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [1003, 870, 205],
+          "physics": "rubber"
+        },
+        {
+          "color": [205, 767, 972],
+          "physics": "rubber"
+        },
+        {
+          "color": [972, 307, 614],
+          "physics": "rubber"
+        }
+      ],
+      "position": [-0.6000000238418579, -0.6000000238418579, -0.6000000238418579],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "ball.data",
+      "type": "data"
+    }
+  ],
+  "name": "ball",
+  "version": 1
+}

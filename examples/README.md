@@ -37,6 +37,7 @@ cd build/examples/hello_voxel && ./hello_voxel
 | **60** | [scene-editor](60-scene-editor/) | A complete tool. ImGui docking, the scene living inside a panel, tools, undo, and Lua-scripted brushes. | ImGui + Lua submodules |
 | **70** | [multiplayer](70-multiplayer/) | A dedicated server and clients as separate programs over UDP: a headless server simulating every player, clients that join, see each other and walk. `selftest.sh` runs all three headless. | — |
 | **80** | [party](80-party/) | A whole little game on the engine, for three or four friends: five party games in turn over a sea of lava -- bomb tag, a race with bridges to build, a tower-building climb, tiles that drop, and copying a shape in cubes -- scored over a match, bots in the empty seats, first or third person. Host it, join it, or run a dedicated server; `selftest.sh` plays it headless. | — |
+| **90** | [playground](90-playground/) | A physics sandbox for up to four friends over the network: a castle, chimneys, a house, a greenhouse and a bridge to break with a cannon, blasts, TNT, digging and pushing; crates and balls to throw, stone to build with, the Moon's gravity, and a reset. `selftest.sh` checks it headless. | — |
 
 The numbering is reading order, not priority. Two examples carry third-party submodules of their
 own; without them the configure step skips that example with a message naming what to check out,

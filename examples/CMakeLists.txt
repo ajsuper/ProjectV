@@ -17,6 +17,7 @@ add_subdirectory(40-advanced-renderer)
 add_subdirectory(50-terrain-generator)
 add_subdirectory(70-multiplayer)
 add_subdirectory(80-party)
+add_subdirectory(90-playground)
 
 # Examples with third-party dependencies of their own. Each is skipped, with a reason, when its
 # submodule is not checked out -- an uninitialised submodule should not fail the whole build.

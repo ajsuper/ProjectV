@@ -1,0 +1,30 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "tnt",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [870, 123, 82],
+          "physics": "tnt"
+        },
+        {
+          "color": [972, 951, 900],
+          "physics": "tnt"
+        }
+      ],
+      "position": [-0.3125, -0.375, -0.3125],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "tnt.data",
+      "type": "data"
+    }
+  ],
+  "name": "tnt",
+  "version": 1
+}
