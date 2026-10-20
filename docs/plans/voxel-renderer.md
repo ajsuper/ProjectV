@@ -28,7 +28,7 @@ What shipped renderers do (research, 2026-10-20):
 
 ```
 gbuffer (render scale)  primary ray + sun shadow ray, one march call; jittered; writes motion
-ao                      contact AO only, from the G-buffer (no bounce)
+ao                      AO at two scales, from the G-buffer (no bounce)
 shade                   sun x shadow + sky ambient x AO + emission, fog
 reconstruct (output)    voxel-identity upscale + edge AA (jitter-aware)
 taa (output)            motion-vector reprojection, YCoCg variance clip, fast blend
@@ -52,15 +52,15 @@ display                 grade
   the depth it showed (its alpha). History is the same view if that depth lies in the 3x3's range of
   last-frame depths (3%); a thin feature the jitter finds only some frames stays in range. Not the same:
   tight clip, half this frame.
-- **Cost first.** GI, colour bounce and the wide AO are out until the base is fast and steady; GI comes
-  back world-space (step R5), so motion and jitter cannot make it boil.
+- **Cost first.** GI and the colour bounce are out until the base is fast and steady (the wide AO stays, as
+  the stand-in for enclosure); GI comes back world-space (step R5), so motion and jitter cannot make it boil.
 
 ## Steps
 
 | | Step | State |
 |---|---|---|
 | R0 | Gallery entry (`--renderer voxel`), `--bench`, `--capture`, `--look`, `--pan`, `--voxel-folder`; `frames.py` flicker measure | done |
-| R1 | Strip: drop ray GI (raygi, giaccum, giblur x2) and the bounce; AO contact only; shade simplified; one spec loader for the HUD games | |
+| R1 | Strip: drop ray GI (raygi, giaccum, giblur x2) and the bounce; AO keeps both scales (the wide one stands in for GI); shade simplified; one spec loader for the HUD games | done |
 | R2 | Motion vectors: previous chunk poses (`prevPoses`, `voxel_renderer::uploadPoses`), gMotion in place of gLight (sun visibility moved to gNormal.w) | done |
 | R3 | TAA: motion-vector reprojection, depth disocclusion, variance clip, own-sample jitter | done |
 | R4 | Speed: the G-buffer march (half of what remains), reconstruction | |
