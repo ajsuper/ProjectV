@@ -42,6 +42,9 @@ $input v_texcoord0
 // in the voxel's own frame. With world axes a 45-degree crate's neighbouring voxels read as one, and
 // its faces' footprints were measured along the wrong edges.
 //
+// The G-buffer is jittered (jitterParams): texel i was traced through i + 0.5 + jitter, and the colour
+// weights are measured from there. The voxels themselves are where they are, whichever ray found them.
+//
 // Inputs: FBO 3 (the lit frame, slot 0), FBO 1 (the G-buffer, slots 1..6).
 // Input slot 0 here is shade's output, the lit frame.
 // Output (FBO 4): the frame at output resolution, for taa.frag to accumulate.
@@ -61,6 +64,7 @@ uniform vec4 cameraDir;
 // z: bypass -- point-sample the render-resolution frame, what the frame is without this pass.
 // w: debug -- green where reconstructed geometry claimed the pixel, red where it fell back.
 uniform vec4 renderParams;
+uniform vec4 jitterParams;   // xy: where this frame's texels were traced, off their centres, in texels
 
 #define FOV 60.0
 #define SEARCH_RADIUS 1
@@ -159,8 +163,9 @@ void main() {
         return;
     }
 
-    vec2 centreTexel = floor(v_texcoord0 * srcRes);
-    vec2 srcPos = v_texcoord0 * srcRes;
+    // In texel units, relative to where the texels were traced: texel i's sample is at i + 0.5 + jitter.
+    vec2 srcPos = v_texcoord0 * srcRes - jitterParams.xy;
+    vec2 centreTexel = floor(srcPos);
     vec3 rayDir = rayDirection(v_texcoord0, passTargetRes.xy);
     vec3 forward = normalize(cameraDir.xyz);
     vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
@@ -236,7 +241,7 @@ void main() {
     float w3 = mix(rem2 * a3, min(a3, rem2), part3);
     float wRest = max(0.0, 1.0 - w1 - w2 - w3);
 
-    vec3 background = skyWeight > 0.0 ? skySum / skyWeight : texture2D(composedHDR, v_texcoord0).rgb;
+    vec3 background = skyWeight > 0.0 ? skySum / skyWeight : texture2D(composedHDR, srcPos * srcTexel).rgb;
     vec3 col1 = w1c > 0.0 ? c1 / w1c : background;
     vec3 col2 = w2c > 0.0 ? c2 / w2c : background;
     vec3 col3 = w3c > 0.0 ? c3 / w3c : background;

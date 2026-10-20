@@ -25,11 +25,17 @@ $input v_texcoord0
 // two chunks (see GRR_STATS below), so fixed per-ray work and the shader's size are most of the bill.
 // What this gives up is see-through voxels: every voxel is opaque, to the camera and to the sun.
 //
-// Outputs (FBO 1):
+// Motion: every chunk's pose last frame is in prevPoses (two texels a header slot, filled by
+// voxel_renderer::upload from the Scene), so the hit is carried back through its own chunk's motion as
+// well as the camera's -- a falling crate's pixel knows where that crate was.
+//
+// Input: prevPoses (resource, slot 0). Outputs (FBO 1):
 //   0 gPos     xyz world hit, w = distance along the ray (w < 0: sky)
-//   1 gNormal  xyz face normal, w = the hit voxel's edge length
+//   1 gNormal  xyz face normal, w = sun visibility (0 or 1)
 //   2 gAlbedo  rgb surface colour (sky: the sky's colour), a = emission, as a multiple of the albedo
-//   3 gLight   x = sun visibility (0 or 1), y = n . sun
+//   3 gMotion  xy = where this sample was on screen last frame, minus where it is now (uv);
+//              z = its distance from last frame's camera (the sky: SKY_DEPTH), for the TAA to tell a
+//              surface it saw from one just uncovered
 //   4 gFace    xyz the voxel FACE's centre, w = voxel edge length (0: sky)
 //   5 gRot     the chunk's rotation quaternion -- the voxel's own axes, for the reconstruction
 // =============================================================================
@@ -51,9 +57,13 @@ $input v_texcoord0
 #include <pjv_utils_DDA.sc>
 #include <grr_common.sc>
 
+SAMPLER2D(prevPoses, 0);   // per header slot: (position, 1 if known), (rotation)
+
 uniform vec4 passTargetRes;
-// x = frame index, y = jitter amplitude in render pixels (0 = none), z = TAA on, w = camera moved
-uniform vec4 frameParams;
+uniform vec4 prevCameraPos;
+uniform vec4 prevCameraDir;
+// xy = this frame's sub-texel jitter, in render texels (0 with TAA off)
+uniform vec4 jitterParams;
 // x = shadows on, y = AO on, z = reconstruction bypass, w = debug view
 uniform vec4 renderParams;
 
@@ -68,30 +78,38 @@ uniform vec4 renderParams;
 // The primary ray takes no LOD at all: at a reduced render scale "a node smaller than a render pixel"
 // is several output pixels, and the merged blocks read as a visible change of detail with distance.
 
-float halton(int index, int base) {
-    float f = 1.0, r = 0.0;
-    for (int k = 0; k < 8; k++) {
-        if (index <= 0) break;
-        f /= float(base);
-        r += f * float(index - (index / base) * base);
-        index /= base;
-    }
-    return r;
+// Where world point P, on the chunk in header slot `slot` (now at `position`, turned by `rotation`), was
+// last frame: carried through the chunk's own motion. A slot with no pose last frame did not move.
+vec3 previousPoint(vec3 P, uint slot, vec3 position, vec4 rotation) {
+    int width = int(textureSize(prevPoses, 0).x);
+    int texel = int(slot) * 2;
+    ivec2 at = ivec2(texel % width, texel / width);
+    vec4 was = texelFetch(prevPoses, at, 0);
+    if (was.w < 0.5 || at.y >= int(textureSize(prevPoses, 0).y)) return P;
+    vec4 wasRotation = texelFetch(prevPoses, at + ivec2(1, 0), 0);
+    vec3 local = (P - position) * rotationFromQuat(rotation);   // row-vector product: R^T (P - position)
+    return was.xyz + rotationFromQuat(wasRotation) * local;
 }
+
+// The screen motion of a world point, from where it is now to where it was (uv units).
+vec2 screenMotion(vec2 uvNow, vec3 previous) {
+    bool valid;
+    vec2 then = grrWorldToUV(previous, prevCameraPos.xyz, prevCameraDir.xyz, passTargetRes.xy, valid);
+    return then - uvNow;
+}
+
+#define SKY_DEPTH 60000.0
 
 bool isMiss(SceneIntersectData h) {
     return h.foundBox.size < 0.0 || h.rayT <= 0.0 || dot(h.normal, h.normal) < 0.5;
 }
 
 void main() {
-    // Sub-pixel jitter for TAA, off unless E turns it on (frameParams.y is then 1).
-    int frame = int(frameParams.x);
-    int phase = frame - (frame / 16) * 16 + 1;
-    vec2 jitter = (vec2(halton(phase, 2), halton(phase, 3)) - 0.5) * frameParams.y;
-
+    // Each frame through another sub-texel point, for the TAA to average.
+    vec2 sampleUV = v_texcoord0 + jitterParams.xy * passTargetRes.zw;
     Ray ray;
     ray.origin = cameraPos.xyz;
-    ray.direction = grrCameraRay(v_texcoord0 + jitter * passTargetRes.zw, passTargetRes.xy, cameraDir.xyz);
+    ray.direction = grrCameraRay(sampleUV, passTargetRes.xy, cameraDir.xyz);
     vec3 primaryDirection = ray.direction;
     vec3 sun = normalize(sunDir.xyz);
     RayQuery query = pjvPrimaryQuery(PRIMARY_STEPS);
@@ -144,7 +162,8 @@ void main() {
 #if GRR_STATS
         gl_FragData[2] = statsOut;
 #endif
-        gl_FragData[3] = vec4(1.0, 0.0, 0.0, 0.0);
+        // The sky moves only with the camera's turn: a point far along the ray, from where the camera was.
+        gl_FragData[3] = vec4(screenMotion(sampleUV, prevCameraPos.xyz + primaryDirection * 1.0e4), SKY_DEPTH, 0.0);
         gl_FragData[4] = vec4(0.0, 0.0, 0.0, 0.0);
         gl_FragData[5] = vec4(0.0, 0.0, 0.0, 1.0);
         return;
@@ -163,18 +182,20 @@ void main() {
 
     // The voxel's centre is its minimum LOCAL corner plus the half-diagonal turned by the chunk's
     // rotation, so the face centre is right for a turned chunk as well as an axis-aligned one.
-    vec4 rotation = headers(int(hit.headerIndex)).rotation;
+    chunkHeader header = headers(int(hit.headerIndex));
+    vec4 rotation = header.rotation;
     float voxelSize = hit.foundBox.size;
     vec3 centre = hit.foundBox.position + rotationFromQuat(rotation) * vec3(voxelSize * 0.5);
     vec3 faceCentre = centre + normal * (voxelSize * 0.5);
 
+    vec3 wasAt = previousPoint(P, hit.headerIndex, vec3(header.positionX, header.positionY, header.positionZ), rotation);
     gl_FragData[0] = vec4(P, hit.rayT);
-    gl_FragData[1] = vec4(normal, voxelSize);
+    gl_FragData[1] = vec4(normal, visibility);
     gl_FragData[2] = vec4(albedo, emission);
 #if GRR_STATS
     gl_FragData[2] = statsOut;
 #endif
-    gl_FragData[3] = vec4(visibility, dot(normal, sun), 0.0, 0.0);
+    gl_FragData[3] = vec4(screenMotion(sampleUV, wasAt), min(distance(wasAt, prevCameraPos.xyz), SKY_DEPTH * 0.5), 0.0);
     gl_FragData[4] = vec4(faceCentre, voxelSize);
     gl_FragData[5] = rotation;
 }

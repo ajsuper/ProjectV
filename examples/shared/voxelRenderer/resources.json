@@ -35,6 +35,10 @@
         {
             "name": "renderParams",
             "type": "vec4"
+        },
+        {
+            "name": "jitterParams",
+            "type": "vec4"
         }
     ],
     "shaders": [
@@ -90,7 +94,7 @@
         },
         {
             "texID": 4,
-            "name": "gLight",
+            "name": "gMotion",
             "format": "RGBA16_FLOAT",
             "sizeMode": "relative",
             "scale": 1.0,
@@ -143,6 +147,15 @@
             "sizeMode": "relative",
             "scale": 1.0,
             "origin": "CreateNew"
+        },
+        {
+            "texID": 11,
+            "name": "prevPoses",
+            "format": "RGBA32_FLOAT",
+            "resX": 1024,
+            "resY": 512,
+            "sizeMode": "fixed",
+            "origin": "CPUBuffer"
         }
     ],
     "framebuffers": [

@@ -3,7 +3,9 @@
         {
             "shaderID": 1,
             "frameBufferInputIDs": [],
-            "resourceTexturesIDs": [],
+            "resourceTexturesIDs": [
+                11
+            ],
             "frameBufferOutputID": 1,
             "multiPass": 0
         },

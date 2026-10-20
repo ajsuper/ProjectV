@@ -13,7 +13,8 @@ $input v_texcoord0
 // small same-surface ring for the same reason: magnified, a binary shadow would stair-step in the signal
 // itself, where no reconstruction can reach it.
 //
-// Inputs: FBO 1 (G-buffer, slots 0..5), FBO 2 (AO, slot 6). Output (FBO 3): linear HDR.
+// Inputs: FBO 1 (G-buffer, slots 0..5; the sun visibility is gNormal.w), FBO 2 (AO, slot 6).
+// Output (FBO 3): linear HDR.
 // =============================================================================
 
 #include <bgfx_shader.sh>
@@ -22,11 +23,11 @@ $input v_texcoord0
 SAMPLER2D(gPos,    0);
 SAMPLER2D(gNormal, 1);
 SAMPLER2D(gAlbedo, 2);
-SAMPLER2D(gLight,  3);
+SAMPLER2D(gMotion, 3);
 SAMPLER2D(aoRaw,   6);
 
 uniform vec4 passTargetRes;
-uniform vec4 renderParams;   // x = shadows, y = AO, w = debug view (2 = AO only, 3 = sun visibility)
+uniform vec4 renderParams;   // x = shadows, y = AO, w = debug view (2 AO only, 3 sun visibility, 4 motion)
 
 #define SHADOW_RING_TAPS   8
 #define SHADOW_RING_PIXELS 1.25
@@ -38,10 +39,14 @@ uniform vec4 renderParams;   // x = shadows, y = AO, w = debug view (2 = AO only
 // move, a lit scene reads as painted cardboard.
 #define SHEEN_STRENGTH     0.05
 
-bool sameSurface(float depth, vec3 normal, vec2 uv) {
+// Whether the texel at uv is on this pixel's surface (depth and normal close); its sun visibility, if so.
+bool sameSurface(float depth, vec3 normal, vec2 uv, out float sunSeen) {
+    sunSeen = 0.0;
     float d = texture2D(gPos, uv).w;
     if (d < 0.0 || abs(d - depth) > depth * DEPTH_TOLERANCE + lightParams.w) return false;
-    return dot(texture2D(gNormal, uv).xyz, normal) > 0.8;
+    vec4 n = texture2D(gNormal, uv);
+    sunSeen = n.w;
+    return dot(n.xyz, normal) > 0.8;
 }
 
 void main() {
@@ -56,8 +61,9 @@ void main() {
         return;
     }
     float depth = pos.w;
-    vec3 normal = normalize(texture2D(gNormal, v_texcoord0).xyz);
-    vec2 light = texture2D(gLight, v_texcoord0).xy;
+    vec4 normalSun = texture2D(gNormal, v_texcoord0);
+    vec3 normal = normalize(normalSun.xyz);
+    vec2 light = vec2(normalSun.w, dot(normal, normalize(sunDir.xyz)));   // sun visibility, n . sun
     vec2 texel = passTargetRes.zw;
 
     // AO: 5x5, [1 2 2 2 1] on each axis, centred on the pixel, same surface only.
@@ -67,7 +73,8 @@ void main() {
     for (int j = -2; j <= 2; j++)
         for (int i = -2; i <= 2; i++) {
             vec2 uv = centre + vec2(float(i), float(j)) * texel;
-            if (!sameSurface(depth, normal, uv)) continue;
+            float unused;
+            if (!sameSurface(depth, normal, uv, unused)) continue;
             float w = (abs(i) == 2 ? 1.0 : 2.0) * (abs(j) == 2 ? 1.0 : 2.0);
             ao += texture2D(aoRaw, uv).rg * w;
             aoWeight += w;
@@ -83,7 +90,8 @@ void main() {
         float a = (float(k) + 0.5) * (6.2831853 / float(SHADOW_RING_TAPS));
         vec2 uv = v_texcoord0 + vec2(cos(a), sin(a)) * SHADOW_RING_PIXELS * texel;
         uv = (floor(uv * passTargetRes.xy) + 0.5) * texel;   // a G-buffer value, not a blend of two
-        if (sameSurface(depth, normal, uv)) visibility += texture2D(gLight, uv).x;
+        float seen;
+        if (sameSurface(depth, normal, uv, seen)) visibility += seen;
     }
     visibility /= float(SHADOW_RING_TAPS + 1);
 
@@ -100,6 +108,11 @@ void main() {
 
     vec3 colour = albedo * (direct + ambient) + sheen + albedo * albedoE.a;
 
+    if (renderParams.w > 3.5 && renderParams.w < 4.5) {           // debug: screen motion, red x green y, 10 px = 1
+        vec2 m = abs(texture2D(gMotion, v_texcoord0).xy * passTargetRes.xy) * 0.1;
+        gl_FragColor = vec4(m, 0.0, 1.0);
+        return;
+    }
     if (renderParams.w > 4.5 && renderParams.w < 6.5) {           // debug: raw contact (5) / wide (6) AO, unblurred
         float raw = renderParams.w < 5.5 ? texture2D(aoRaw, centre).r : texture2D(aoRaw, centre).g;
         gl_FragColor = vec4(raw, raw, raw, 1.0);

@@ -188,6 +188,8 @@ static void uploadVoxelUniforms(std::shared_ptr<projv::ConstructedRenderer> rend
     voxel_renderer::View& view = ctx.world->ctx().get<voxel_renderer::View>();
     static const int debugView = std::getenv("GALLERY_DEBUG") ? std::atoi(std::getenv("GALLERY_DEBUG")) : 0;
     view.debugView = debugView;
+    static const float jitter = std::getenv("GALLERY_JITTER") ? float(std::atof(std::getenv("GALLERY_JITTER"))) : 1.0f;
+    view.jitter = jitter;
     view.sun = ctx.sunAngle;
     view.taa = g_voxelTAA;
     voxel_renderer::upload(*ctx.world, renderer, ctx.cameraPosition, ctx.cameraDirection);

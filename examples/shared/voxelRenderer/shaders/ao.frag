@@ -26,6 +26,7 @@ $input v_texcoord0
 
 SAMPLER2D(gPos,    0);
 SAMPLER2D(gNormal, 1);
+SAMPLER2D(gFace,   4);   // w = the voxel's edge
 
 uniform vec4 passTargetRes;
 uniform vec4 renderParams;   // y = AO on
@@ -88,7 +89,7 @@ void main() {
 
     // World size of one render pixel at this distance: world radii to screen radii.
     float pixelWorld = pos.w * (2.0 * tan(radians(GRR_FOV * 0.5))) / passTargetRes.y;
-    float bias = max(BIAS_VOXELS * nv.w, pixelWorld * 0.05);
+    float bias = max(BIAS_VOXELS * texture2D(gFace, v_texcoord0).w, pixelWorld * 0.05);
     vec2 pixel = floor(v_texcoord0 * passTargetRes.xy);
     vec2 centre = (pixel + 0.5) * passTargetRes.zw;
     float turn = (bayer4(pixel) + 0.5) / 16.0;

@@ -40,7 +40,18 @@ display                 grade
   through it (`prev = prevPos + prevR * R^T * (P - pos)`) and writes the screen-space motion. TAA and any
   later history follow moving bodies instead of refusing them.
 - **TAA: responsive by default.** History clipped to the current neighbourhood (variance box, YCoCg),
-  blend ~0.1, Catmull-Rom history. No long accumulation.
+  Catmull-Rom history, blend ~0.1 while moving. No long accumulation.
+- **Jitter through the output pixels' own centres.** At half scale a render texel covers 2x2 output
+  pixels; the jitter visits their four centres in turn (diagonals first). Each frame one pixel in each
+  block is sampled exactly; TAA takes 80% of a frame whose sample is the pixel's own (Gaussian on the
+  sample's distance, 0.3 px) and nothing of the others while still. A still view repeats the same four
+  samples, so it settles to the full-resolution, reconstruction-antialiased image and stays there; any
+  change reaches every pixel within four frames. A Halton jitter with an exponential blend never
+  settles: measured 0.26-0.40 flicker against 0.08 for this.
+- **Disocclusion by depth.** gMotion.z is each sample's distance from last frame's camera; history keeps
+  the depth it showed (its alpha). History is the same view if that depth lies in the 3x3's range of
+  last-frame depths (3%); a thin feature the jitter finds only some frames stays in range. Not the same:
+  tight clip, half this frame.
 - **Cost first.** GI, colour bounce and the wide AO are out until the base is fast and steady; GI comes
   back world-space (step R5), so motion and jitter cannot make it boil.
 
@@ -50,8 +61,8 @@ display                 grade
 |---|---|---|
 | R0 | Gallery entry (`--renderer voxel`), `--bench`, `--capture`, `--look`, `--pan`, `--voxel-folder`; `frames.py` flicker measure | done |
 | R1 | Strip: drop ray GI (raygi, giaccum, giblur x2) and the bounce; AO contact only; shade simplified; one spec loader for the HUD games | |
-| R2 | Motion vectors: previous chunk poses, G-buffer motion target | |
-| R3 | TAA: motion-vector reprojection, variance clip, jitter | |
+| R2 | Motion vectors: previous chunk poses (`prevPoses`, `voxel_renderer::uploadPoses`), gMotion in place of gLight (sun visibility moved to gNormal.w) | done |
+| R3 | TAA: motion-vector reprojection, depth disocclusion, variance clip, own-sample jitter | done |
 | R4 | Speed: the G-buffer march (half of what remains), reconstruction | |
 | R5 | GI, world-space | |
 | R6 | The fork (`nightRenderer`), docs | |
@@ -67,3 +78,15 @@ stuck slow, ~5x, and are discarded):
 |---|---|---|---|---|---|---|---|---|---|---|
 | Bistro (gallery framing) | 30.8 | 10.5 | 4.2 | 5.8 | 0.3 | 2.0 | 1.9 | 4.2 | 1.7 | 0.25 |
 | Voxel Mayhem (`MAYHEM_GPU`) | 16.3 | 7.6 | 0.4 | 1.9 | 0.2 | 2.2 | 0.8 | 2.2 | 0.8 | 0.1 |
+
+After R1 (six passes), window 840x1072 (the desktop's choice that day; compare within a batch only):
+
+| | frame | gbuffer | ao | shade | reconstruct | taa | display |
+|---|---|---|---|---|---|---|---|
+| Bistro, R1 | 9.2-9.4 | 5.5 | 0.4 | 0.5 | 1.8 | 0.9 | 0.15 |
+| Bistro, R3 | 9.4-9.6 | 5.6 | 0.4 | 0.4 | 1.9 | 1.1 | 0.15 |
+| Voxel Mayhem, R3 | 12.7 | 8.6 | 0.4 | 0.5 | 2.0 | 0.9 | 0.2 |
+
+Still-camera flicker (mean |frame 302 - 301|, 0-255), Bistro: no jitter 0.002; Halton 8 + exponential
+blend 0.40 (wide clip and 0.03 blend: 0.26); own-sample jitter 0.08. Moving: a 3 px/frame pan and
+falling debris (Mayhem, cannon through the castle wall) show no smear or ghost.
