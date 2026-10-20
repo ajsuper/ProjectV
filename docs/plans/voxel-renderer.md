@@ -28,8 +28,10 @@ What shipped renderers do (research, 2026-10-20):
 
 ```
 gbuffer (render scale)  primary ray + sun shadow ray, one march call; jittered; writes motion
+probes (32x16x32)       GI probe update: an eighth of the probes a frame, 6 voxel rays each
+pack                    probes filtered with their 6 neighbours, laid into one texture
 ao                      AO at two scales, from the G-buffer (no bounce)
-shade                   sun x shadow + sky ambient x AO + emission, fog
+shade                   sun x shadow + probe GI x AO + emission, fog
 reconstruct (output)    voxel-identity upscale + edge AA (jitter-aware)
 taa (output)            motion-vector reprojection, YCoCg variance clip, fast blend
 display                 grade
@@ -64,7 +66,7 @@ display                 grade
 | R2 | Motion vectors: previous chunk poses (`prevPoses`, `voxel_renderer::uploadPoses`), gMotion in place of gLight (sun visibility moved to gNormal.w) | done |
 | R3 | TAA: motion-vector reprojection, depth disocclusion, variance clip, own-sample jitter | done |
 | R4 | Speed: the G-buffer march (half of what remains), reconstruction | |
-| R5 | GI, world-space | |
+| R5 | GI, world-space: a probe grid round the camera (DDGI-like, L1 SH, no visibility maps) | done |
 | R6 | The fork (`nightRenderer`), docs | |
 
 ## Measurements
@@ -90,3 +92,28 @@ After R1 (six passes), window 840x1072 (the desktop's choice that day; compare w
 Still-camera flicker (mean |frame 302 - 301|, 0-255), Bistro: no jitter 0.002; Halton 8 + exponential
 blend 0.40 (wide clip and 0.03 blend: 0.26); own-sample jitter 0.08. Moving: a 3 px/frame pan and
 falling debris (Mayhem, cannon through the castle wall) show no smear or ghost.
+
+### R5: GI from a probe grid
+
+- 32x16x32 probes, 16 finest voxels apart (2 m in Mayhem: 64x32x64 m), scrolling with the camera in whole
+  cells and stored at cell mod dims (each probe's last texel names its cell; a probe whose slot holds
+  another cell starts over). Shading blends the 8 round the point (offset half a cell along the normal),
+  weighted toward those on the normal's side and by how usable each is (the share of its rays that did
+  not start inside solid); the sky ambient beyond the grid, faded over its last 3 cells.
+- An update: 6 rays on a turned spherical Fibonacci lattice; a hit's light is the sun on it (shadow ray),
+  its emission, and the nearest probe's light there (a bounce more each update). Hysteresis 0.9, 0.5
+  when the light plainly changed. Probe texture 1024x16 (4 targets), packed 4096x16.
+- Cost lessons: updating a scattered eighth cost as much as updating all (every GPU wave held a few
+  tracing probes): 2.6 ms; by 8x8 texture block: 1.37 ms (Mayhem), 0.7 ms (Bistro). Twelve rays a
+  quarter of the probes, nearest-8 lookups at the hits, 24-spacing rays: 5.1 ms.
+- Noise: 6 rays an update left 2 m blotches; the pack filters each probe with its 6 neighbours (history
+  stays unfiltered, or it would blur again every frame).
+- Bug found: GLSL integer % is undefined for negatives; cells below zero landed in the wrong slots. Floor
+  mod through floats.
+
+| Bistro, 840x1072 | frame | gbuffer | probes | ao | shade | reconstruct | taa |
+|---|---|---|---|---|---|---|---|
+| R3 (no GI) | 8.5-9.5 | 4.5-5.6 | - | 0.4 | 0.4 | 1.8-2.3 | 0.9-1.1 |
+| R5 | 10.3 | 5.5 | 0.7 | 0.4 | 0.5 | 1.9 | 1.0 |
+
+Still-camera flicker, Bistro: 0.17 (0.08 without GI: the probes keep refining).

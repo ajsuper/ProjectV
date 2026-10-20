@@ -4,7 +4,11 @@ $input v_texcoord0
 // =============================================================================
 // shade.frag -- pass 3, at render resolution. Lights the frame.
 //
-//   colour = albedo * ( sun * N.L * shadow  +  ambient(N) * AO )  +  emission,  then fog.
+//   colour = albedo * ( sun * N.L * shadow  +  indirect(N) * AO )  +  emission,  then fog.
+//
+// The indirect light is the GI probes' (grr_gi.sc, probes.frag) where the grid reaches, the sky ambient
+// beyond it. The probes are a metre or so apart, so the AO adds what they are too coarse to see: the
+// contact scale whole, the wide one lightly (with no GI it stands in for it, and darkens more).
 //
 // The AO is filtered 5x5 with weights [1 2 2 2 1] on each axis, over taps on the same surface (depth and
 // normal both close), so a crate's AO does not bleed onto the wall behind it. Those weights give each of
@@ -13,7 +17,8 @@ $input v_texcoord0
 // small same-surface ring for the same reason: magnified, a binary shadow would stair-step in the signal
 // itself, where no reconstruction can reach it.
 //
-// Inputs: FBO 1 (G-buffer, slots 0..5; the sun visibility is gNormal.w), FBO 2 (AO, slot 6).
+// Inputs: FBO 1 (G-buffer, slots 0..5; the sun visibility is gNormal.w), FBO 2 (AO, slot 6), FBO 13
+// (the GI probes, slot 7).
 // Output (FBO 3): linear HDR.
 // =============================================================================
 
@@ -25,9 +30,11 @@ SAMPLER2D(gNormal, 1);
 SAMPLER2D(gAlbedo, 2);
 SAMPLER2D(gMotion, 3);
 SAMPLER2D(aoRaw,   6);
+SAMPLER2D(giPacked, 7);
+#include <grr_gi.sc>
 
 uniform vec4 passTargetRes;
-uniform vec4 renderParams;   // x = shadows, y = AO, w = debug view (2 AO only, 3 sun visibility, 4 motion)
+uniform vec4 renderParams;   // x = shadows, y = AO, w = debug view (2 AO only, 3 sun visibility, 4 motion, 7 GI only)
 
 #define SHADOW_RING_TAPS   8
 #define SHADOW_RING_PIXELS 1.25
@@ -35,6 +42,8 @@ uniform vec4 renderParams;   // x = shadows, y = AO, w = debug view (2 AO only, 
 // How much the wide scale darkens. Below 1 so an enclosed space is dim rather than black -- the light
 // that real bounce would carry in is what this lacks, and leaving some of the ambient is its stand-in.
 #define WIDE_AO_STRENGTH   0.85
+// ...and with the GI, which sees enclosure itself at the probes' scale.
+#define WIDE_AO_WITH_GI    0.35
 // A small sheen at grazing angles, the one view-dependent term: without anything that changes as you
 // move, a lit scene reads as painted cardboard.
 #define SHEEN_STRENGTH     0.05
@@ -81,7 +90,8 @@ void main() {
         }
     ao = aoWeight > 0.0 ? ao / aoWeight : texture2D(aoRaw, v_texcoord0).rg;
     // (ao.frag sets each scale's response; no squaring here.)
-    float occlusion = ao.x * mix(1.0, ao.y, WIDE_AO_STRENGTH);
+    bool gi = giParams.x > 0.5;
+    float occlusion = ao.x * mix(1.0, ao.y, gi ? WIDE_AO_WITH_GI : WIDE_AO_STRENGTH);
 
     // Sun visibility: a ring, divided by the whole ring, so a tap on another surface counts as unlit and
     // a lone voxel is not brighter than a wall in the same light.
@@ -98,7 +108,13 @@ void main() {
     vec3 albedo = albedoE.rgb;
     vec3 sun = grrSunColor();
     vec3 direct = sun * (max(light.y, 0.0) * visibility / GRR_PI);
-    vec3 ambient = grrAmbient(normal) * occlusion;
+    float giWeight = 0.0;
+    vec3 indirect = gi ? giIrradiance(pos.xyz, normal, giWeight) : vec3(0.0, 0.0, 0.0);
+    vec3 ambient = mix(grrAmbient(normal), indirect, giWeight) * occlusion;
+    if (renderParams.w > 6.5 && renderParams.w < 7.5) {           // debug: the indirect light alone, on white
+        gl_FragColor = vec4(ambient, 1.0);
+        return;
+    }
 
     // Fresnel-gated sun sheen: nearly nothing head-on, a rim at grazing angles, only where the sun is.
     vec3 H = normalize(sunDir.xyz - view);

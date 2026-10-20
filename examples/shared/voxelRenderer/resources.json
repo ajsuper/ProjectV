@@ -39,6 +39,14 @@
         {
             "name": "jitterParams",
             "type": "vec4"
+        },
+        {
+            "name": "giParams",
+            "type": "vec4"
+        },
+        {
+            "name": "giOrigin",
+            "type": "vec4"
         }
     ],
     "shaders": [
@@ -65,6 +73,14 @@
         {
             "shaderID": 6,
             "path": "./voxelRenderer/shaders/display.bin"
+        },
+        {
+            "shaderID": 7,
+            "path": "./voxelRenderer/shaders/probes.bin"
+        },
+        {
+            "shaderID": 8,
+            "path": "./voxelRenderer/shaders/pack.bin"
         }
     ],
     "textures": [
@@ -156,6 +172,51 @@
             "resY": 512,
             "sizeMode": "fixed",
             "origin": "CPUBuffer"
+        },
+        {
+            "texID": 12,
+            "name": "probeR",
+            "format": "RGBA16_FLOAT",
+            "resX": 1024,
+            "resY": 16,
+            "sizeMode": "fixed",
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 13,
+            "name": "probeG",
+            "format": "RGBA16_FLOAT",
+            "resX": 1024,
+            "resY": 16,
+            "sizeMode": "fixed",
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 14,
+            "name": "probeB",
+            "format": "RGBA16_FLOAT",
+            "resX": 1024,
+            "resY": 16,
+            "sizeMode": "fixed",
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 15,
+            "name": "probeMeta",
+            "format": "RGBA16_FLOAT",
+            "resX": 1024,
+            "resY": 16,
+            "sizeMode": "fixed",
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 16,
+            "name": "giPacked",
+            "format": "RGBA16_FLOAT",
+            "resX": 4096,
+            "resY": 16,
+            "sizeMode": "fixed",
+            "origin": "CreateNew"
         }
     ],
     "framebuffers": [
@@ -192,6 +253,21 @@
             "fboID": 5,
             "textureIDs": [
                 10
+            ]
+        },
+        {
+            "fboID": 12,
+            "textureIDs": [
+                12,
+                13,
+                14,
+                15
+            ]
+        },
+        {
+            "fboID": 13,
+            "textureIDs": [
+                16
             ]
         }
     ]

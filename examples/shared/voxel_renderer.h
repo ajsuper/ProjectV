@@ -1,5 +1,6 @@
 // The examples' shared renderer (examples/shared/voxelRenderer/): a G-buffer (one primary and one sun
-// shadow ray a render pixel), AO at two scales, the shade, the voxel reconstruction, TAA and the display.
+// shadow ray a render pixel), GI from a grid of probes round the camera, AO at two scales, the shade, the
+// voxel reconstruction, TAA and the display.
 // First written for Voxel Mayhem (examples/19-voxel-mayhem); plan: docs/plans/voxel-renderer.md.
 //
 //     projv_add_example(name ... RENDERER ../shared/voxelRenderer INCLUDE_DIRS ../shared)
@@ -33,7 +34,9 @@ namespace voxel_renderer {
 
     struct View {
         bool  shadows = true, ambientOcclusion = true, taa = true;
-        int   debugView = 0;       // 0 off, 1 reconstruction coverage, 2 AO only, 3 sun visibility, 4 motion
+        bool  gi = true;           // the probe grid's light; off: the sky ambient alone
+        float giSpacing = 0.0f;    // between probes, world units; 0: sixteen of the finest voxels
+        int   debugView = 0;       // 0 off, 1 reconstruction coverage, 2 AO only, 3 sun visibility, 4 motion, 7 GI
         float sun = 0.86f;         // the sun's angle up its arc
         bool  crosshair = false;   // two bars through the centre, for aiming
         float jitter = 1.0f;       // the TAA's sub-texel jitter, in texels across
@@ -163,6 +166,12 @@ namespace voxel_renderer {
         setUniformToValue(renderer, "jitterParams", jitter);
         vec4 frameParams(float(view.frame++), 0.0f, view.taa ? 1.0f : 0.0f, moved ? 1.0f : 0.0f);
         setUniformToValue(renderer, "frameParams", frameParams);
+        // The GI's probe grid (grr_gi.sc): GI_X x GI_Y x GI_Z cells round the camera, in whole cells.
+        const float spacing = view.giSpacing > 0.0f ? view.giSpacing : 16.0f * view.finestVoxel;
+        vec4 giParams(view.gi ? 1.0f : 0.0f, spacing, float(view.frame), 0.0f);
+        setUniformToValue(renderer, "giParams", giParams);
+        vec4 giOrigin(glm::floor(position / spacing) - vec3(16.0f, 8.0f, 16.0f), 0.0f);
+        setUniformToValue(renderer, "giOrigin", giOrigin);
         vec4 renderParams(view.shadows ? 1.0f : 0.0f, view.ambientOcclusion ? 1.0f : 0.0f, 0.0f, float(view.debugView));
         setUniformToValue(renderer, "renderParams", renderParams);
         view.prevPosition = position;

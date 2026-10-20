@@ -50,8 +50,8 @@ TNT by the gate takes the gate and the wall with it.
 | T / P | slow motion / pause |
 | F5 / F9 | snapshot the physics / rewind to it (`savePhysics` / `restorePhysics`: refused once anything has been made or broken since -- no world rollback, by design) |
 | R | rebuild the world |
-| H / O / K | sun shadows / AO / TAA |
-| U | debug view: AO only, sun visibility |
+| H / O / I / K | sun shadows / AO / GI / TAA |
+| U | debug view: AO only, sun visibility, the indirect light only |
 | [ ] | the sun |
 | F1 | help |
 
