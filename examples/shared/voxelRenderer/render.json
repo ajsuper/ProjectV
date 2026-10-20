@@ -17,51 +17,10 @@
             "multiPass": 0
         },
         {
-            "shaderID": 8,
-            "frameBufferInputIDs": [
-                1
-            ],
-            "resourceTexturesIDs": [],
-            "frameBufferOutputID": 7,
-            "multiPass": 0
-        },
-        {
-            "shaderID": 9,
-            "frameBufferInputIDs": [
-                7,
-                1,
-                8
-            ],
-            "resourceTexturesIDs": [],
-            "frameBufferOutputID": 8,
-            "multiPass": 0
-        },
-        {
-            "shaderID": 10,
-            "frameBufferInputIDs": [
-                8,
-                1
-            ],
-            "resourceTexturesIDs": [],
-            "frameBufferOutputID": 9,
-            "multiPass": 0
-        },
-        {
-            "shaderID": 11,
-            "frameBufferInputIDs": [
-                9,
-                1
-            ],
-            "resourceTexturesIDs": [],
-            "frameBufferOutputID": 10,
-            "multiPass": 0
-        },
-        {
             "shaderID": 3,
             "frameBufferInputIDs": [
                 1,
-                2,
-                10
+                2
             ],
             "resourceTexturesIDs": [],
             "frameBufferOutputID": 3,

@@ -11,8 +11,7 @@ cd build/examples/voxel_mayhem && ./voxel_mayhem
 Where [17-physics-demos](../17-physics-demos/) shows each feature alone, in a set piece of its own, this
 one puts them all in the same simulation -- which is what a game does, and where the features meet: a
 cannonball through a castle wall throws shards onto the jump pads, which launch them into the balloons;
-TNT by the gate takes the gate and the wall with it; the ray-traced GI lights the courtyard with the
-fireball.
+TNT by the gate takes the gate and the wall with it.
 
 ## The park
 
@@ -51,8 +50,8 @@ fireball.
 | T / P | slow motion / pause |
 | F5 / F9 | snapshot the physics / rewind to it (`savePhysics` / `restorePhysics`: refused once anything has been made or broken since -- no world rollback, by design) |
 | R | rebuild the world |
-| H / O / I / J / K | sun shadows / AO / ray-traced GI / colour bounce (off, normal, strong) / TAA |
-| U | debug view: AO only, the colour bounce only, the ray-traced GI only |
+| H / O / K | sun shadows / AO / TAA |
+| U | debug view: AO only, sun visibility |
 | [ ] | the sun |
 | F1 | help |
 
@@ -92,25 +91,11 @@ its corners swung into the wall beside it and the hinge's servo could not move i
 
 ## Rendering
 
-`examples/shared/voxelRenderer/` (shared with the multiplayer client; `examples/shared/voxel_renderer.h` sets it up) is ten passes, built from the physics demos' renderer:
-
-| | Pass | What it does |
-|---|---|---|
-| 1 | `gbuffer` | one primary and one sun shadow ray per render pixel, through one call of the march |
-| 2 | `ssao` | AO at two scales and a one-bounce colour bounce from the same samples: surface points read back from the G-buffer in a spiral round the pixel, each occluding by its elevation above the pixel's tangent plane -- so slanted faces never occlude themselves and convex edges get no dark rim |
-| 3 | `raygi` | one cosine-weighted voxel ray per 2×2 render pixels: the sky where it escapes, the lit surface where it hits (a shadow ray to the sun from there, its emission) |
-| 4 | `giaccum` | the GI's own history, reprojected through the previous camera, kept where the surface point still matches |
-| 5–6 | `giblur1`, `giblur2` | a 5×5 à-trous blur at stride 1 and 3, stopped at surface changes |
-| 7 | `shade` | sun and shadow, the ray GI times the contact AO, the colour bounce, emission, fog |
-| 8 | `reconstruct` | the voxel reconstruction: the upscale *and* the edge antialiasing |
-| 9 | `taa` | steadies motion (no jitter: the reconstruction already antialiases) |
-| 10 | `display` | exposure, ACES, grade |
-
-The scene is traced at half the window's width and height; the GI at a quarter. On an RTX 3070 the
-frame is about 3.7 ms without the ray GI and 4.8–5.0 ms with it. Its limit is anything that moves:
-there are no per-object motion vectors, so a moving body's GI is one frame's ray, blurred, until it
-stops. Explosions light the scene through it: the fireball is emissive, and the rays that hit it
-carry its light.
+`examples/shared/voxelRenderer/` (shared with the other games and the renderer gallery;
+`examples/shared/voxel_renderer.h` sets it up): a G-buffer (one primary and one sun shadow ray per
+render pixel, through one call of the march), AO at two scales, the shade, the voxel reconstruction
+(the upscale and the edge antialiasing), TAA and the display. Being rebuilt for speed first, then
+feel, then GI: [docs/plans/voxel-renderer.md](../../docs/plans/voxel-renderer.md).
 
 ## Self-test
 

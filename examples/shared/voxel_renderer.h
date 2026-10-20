@@ -1,18 +1,22 @@
-// The examples' shared renderer (examples/shared/voxelRenderer/): ten passes -- a G-buffer,
-// screen-space AO and colour bounce, one-bounce ray-traced GI at a sixteenth of the render pixels
-// with its own history and blur, the shade with sun shadows, the voxel reconstruction, TAA and the
-// display. First written for Voxel Mayhem (examples/19-voxel-mayhem).
+// The examples' shared renderer (examples/shared/voxelRenderer/): a G-buffer (one primary and one sun
+// shadow ray a render pixel), AO at two scales, the shade, the voxel reconstruction, TAA and the display.
+// First written for Voxel Mayhem (examples/19-voxel-mayhem); plan: docs/plans/voxel-renderer.md.
 //
 //     projv_add_example(name ... RENDERER ../shared/voxelRenderer INCLUDE_DIRS ../shared)
 //
 //     voxel_renderer::install(world, renderInstance, here);              // at startup
-//     voxel_renderer::draw(world, renderInstance, gpu, eye, forward);    // each frame
+//     voxel_renderer::draw(world, renderInstance, gpu, scene, eye, forward);   // each frame
+//
+// A program that adds passes of its own (a HUD) takes the specification from `specification`, extends
+// it, and constructs it itself; then calls `upload` and renders each frame.
 //
 // Its look is the View in world.ctx(): what the passes do, the sun's height, and the scene's scale.
 #pragma once
 
 #include <cmath>
 #include <filesystem>
+#include <memory>
+#include <string>
 
 #include "core/math.h"
 #include "core/world.h"
@@ -28,41 +32,45 @@ namespace voxel_renderer {
 
     struct View {
         bool  shadows = true, ambientOcclusion = true, taa = true;
-        int   bounce = 1;          // the colour bounce: off, normal, strong
-        bool  rayGI = true;        // the traced large-scale light
-        int   debugView = 0;       // 0 off, 2 AO only, 4 the bounce only, 7 the ray GI only
+        int   debugView = 0;       // 0 off, 1 reconstruction coverage, 2 AO only, 3 sun visibility
         float sun = 0.86f;         // the sun's angle up its arc
         bool  crosshair = false;   // two bars through the centre, for aiming
         float renderScale = 0.5f;  // of the window, each way: reconstruction and TAA rebuild the rest
-        // The scene's scale: the finest voxel's edge (AO and GI radii are in it), and the radius the
-        // haze is measured over (8% lost across it).
+        // The scene's scale: the finest voxel's edge (AO radii are in it), and the radius the haze is
+        // measured over (8% lost across it).
         float finestVoxel = 0.125f;
         float hazeRadius = 150.0f;
-        // Last frame's camera, for TAA and the GI history.
+        // Last frame's camera, for TAA.
         vec3  prevPosition{0.0f}, prevDirection{0.0f, 0.0f, 1.0f};
         bool  hasPrevious = false;
         int   frame = 0;
     };
 
-    // Loads the renderer staged beside the binary (`here`/voxelRenderer) into `renderInstance` as its
-    // active renderer, at the View's render scale. Emplaces a View if there is none.
-    inline void install(projv::World& world, projv::graphics::RenderInstance& renderInstance, const std::filesystem::path& here) {
+    // The renderer staged beside the binary (`here`/`folder`), with its render-resolution targets scaled
+    // by the View's render scale. Emplaces a View if there is none.
+    inline projv::RendererSpecification specification(projv::World& world, const std::filesystem::path& here,
+                                                      const std::string& folder = "voxelRenderer") {
         View& view = world.ctx().contains<View>() ? world.ctx().get<View>() : world.ctx().emplace<View>();
-        projv::RendererSpecification specification =
-            projv::graphics::loadRendererSpecification((here / "voxelRenderer").string() + "/");
-        for (projv::Texture& texture : specification.resources.textures)
+        projv::RendererSpecification spec = projv::graphics::loadRendererSpecification((here / folder).string() + "/");
+        // Everything but what is at output resolution: the reconstruction and the TAA.
+        for (projv::Texture& texture : spec.resources.textures)
             if (texture.sizeMode == projv::TextureSizeMode::Relative && texture.name != "reconstructed" && texture.name != "taaColor")
                 texture.scale *= view.renderScale;
-        renderInstance.addRendererSpecification(1, specification);
-        bgfx::ShaderHandle vertexShader = projv::graphics::loadShader((here / "voxelRenderer/shaders/vs_quad.bin").string());
+        return spec;
+    }
+
+    // Loads the renderer as `renderInstance`'s active renderer.
+    inline void install(projv::World& world, projv::graphics::RenderInstance& renderInstance, const std::filesystem::path& here,
+                        const std::string& folder = "voxelRenderer") {
+        renderInstance.addRendererSpecification(1, specification(world, here, folder));
+        bgfx::ShaderHandle vertexShader = projv::graphics::loadShader((here / folder / "shaders/vs_quad.bin").string());
         renderInstance.setActiveRenderer(
             projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader));
     }
 
     // Sets this frame's uniforms from the View and the camera.
-    inline void upload(projv::World& world, projv::graphics::RenderInstance& renderInstance, vec3 position, vec3 direction) {
+    inline void upload(projv::World& world, std::shared_ptr<projv::ConstructedRenderer> renderer, vec3 position, vec3 direction) {
         using projv::graphics::setUniformToValue;
-        auto renderer = renderInstance.getActiveRenderer();
         View& view = world.ctx().get<View>();
         if (!view.hasPrevious) {
             view.prevPosition = position;
@@ -87,11 +95,11 @@ namespace voxel_renderer {
         setUniformToValue(renderer, "frameParams", frameParams);
         vec4 renderParams(view.shadows ? 1.0f : 0.0f, view.ambientOcclusion ? 1.0f : 0.0f, 0.0f, float(view.debugView));
         setUniformToValue(renderer, "renderParams", renderParams);
-        static const float bounceStrength[3] = {0.0f, 2.5f, 5.0f};
-        vec4 giParams(view.ambientOcclusion ? bounceStrength[view.bounce] : 0.0f, view.rayGI ? 1.0f : 0.0f, 0.0f, 0.0f);
-        setUniformToValue(renderer, "giParams", giParams);
         view.prevPosition = position;
         view.prevDirection = direction;
+    }
+    inline void upload(projv::World& world, projv::graphics::RenderInstance& renderInstance, vec3 position, vec3 direction) {
+        upload(world, renderInstance.getActiveRenderer(), position, direction);
     }
 
     // Uploads the scene's changes, sets the uniforms and draws.

@@ -35,8 +35,8 @@
 //   right-drag  hold and drag a body (the wheel: nearer/farther)   V  walk / fly   E  drive the car
 //   B  wrecking ball: let go / wind back    N  bowl (again: re-rack)   G  gravity: Earth / Moon / none
 //   T  slow motion   P  pause   F5  snapshot   F9  rewind to it   R  rebuild the world
-//   H  sun shadows   O  ambient occlusion   I  ray-traced GI   J  colour bounce   K  TAA
-//   U  debug view (AO / bounce / ray GI)
+//   H  sun shadows   O  ambient occlusion   K  TAA
+//   U  debug view (AO / sun visibility)
 //   [ ]  the sun   F1  this help   Esc  free the cursor
 //
 //   cd build/examples/voxel_mayhem && ./voxel_mayhem
@@ -45,8 +45,7 @@
 //                                      it should (MAYHEM_CAPTURE=<prefix> also saves screenshots)
 //   MAYHEM_BENCH=cannon|blast|barrage  times a break at the castle wall (MAYHEM_ONLY=castle: nothing else)
 //   MAYHEM_LOOK=x,y,z,tx,ty,tz          a still from there, at 4 s, then exits (MAYHEM_FIRE, MAYHEM_AO,
-//                                      MAYHEM_RAYGI, MAYHEM_BOUNCE, MAYHEM_DEBUG set it up); MAYHEM_GPU=1
-//                                      prints each pass's GPU time
+//                                      MAYHEM_DEBUG set it up); MAYHEM_GPU=1 prints each pass's GPU time
 
 #include <algorithm>
 #include <chrono>
@@ -1835,9 +1834,9 @@ void followCamera(projv::Application& app) {
 }
 
 // =================================================================================================
-// The renderer (examples/shared/voxelRenderer/, staged as voxelRenderer/): ten passes -- a G-buffer, screen-space AO and colour bounce, one-bounce
-// ray-traced GI at a sixteenth of the render pixels with its own history and blur, the shade, the voxel
-// reconstruction, TAA and the display. Its uniforms are set here, every frame.
+// The renderer (examples/shared/voxelRenderer/, staged as voxelRenderer/): a G-buffer, AO, the shade, the
+// voxel reconstruction, TAA and the display (docs/plans/voxel-renderer.md). Its uniforms are set here,
+// every frame.
 // =================================================================================================
 
 // The renderer and its settings are shared with other examples: examples/shared/voxel_renderer.h.
@@ -1859,8 +1858,8 @@ void printHelp() {
         "  V walk / fly    E drive the car (W/S, A/D, Space brakes)   B wrecking ball   N bowl\n"
         "  G gravity: Earth / Moon / none    T slow motion   P pause   R rebuild the world\n"
         "  F5 snapshot the physics   F9 rewind to it (refused once anything has broken or been made)\n"
-        "  H shadows  O ambient occlusion  I ray-traced GI  J colour bounce (off/normal/strong)  K TAA\n"
-        "  U debug view (AO / bounce / ray GI)\n"
+        "  H shadows  O ambient occlusion  K TAA\n"
+        "  U debug view (AO / sun visibility)\n"
         "  [ ] the sun   F1 this help\n"
         "  -------------------------------------------------------------------------------\n"
         "  South: ball pit (stand on the yellow plate), jump pads, balloons, slides, car and ramp\n"
@@ -1939,18 +1938,9 @@ void controls(projv::Application& app) {
     if (input.pressed(projv::Key::H)) view.shadows = !view.shadows;
     if (input.pressed(projv::Key::O)) view.ambientOcclusion = !view.ambientOcclusion;
     if (input.pressed(projv::Key::K)) view.taa = !view.taa;
-    if (input.pressed(projv::Key::I)) {
-        view.rayGI = !view.rayGI;
-        projv::core::info("mayhem: ray-traced GI {}", view.rayGI ? "on" : "off (the cheap sky ambient and wide AO instead)");
-    }
-    if (input.pressed(projv::Key::J)) {
-        view.bounce = (view.bounce + 1) % 3;
-        static const char* names[3] = {"off", "normal", "strong"};
-        projv::core::info("mayhem: colour bounce {}", names[view.bounce]);
-    }
     if (input.pressed(projv::Key::U)) {
-        view.debugView = view.debugView == 0 ? 2 : view.debugView == 2 ? 4 : view.debugView == 4 ? 7 : 0;
-        static const char* names[8] = {"off", "", "AO only", "", "the colour bounce only", "", "", "the ray-traced GI only"};
+        view.debugView = view.debugView == 0 ? 2 : view.debugView == 2 ? 3 : 0;
+        static const char* names[4] = {"off", "", "AO only", "sun visibility"};
         projv::core::info("mayhem: debug view {}", names[view.debugView]);
     }
     if (input.down(projv::Key::LeftBracket)) view.sun -= 0.4f * time.unscaledDelta;
@@ -2407,10 +2397,8 @@ void startup(projv::Application& app) {
     world.ctx().emplace<Camera>();
     world.ctx().emplace<Shake>();
     View& look = world.ctx().emplace<View>();
-    if (const char* v = std::getenv("MAYHEM_BOUNCE")) look.bounce = std::clamp(std::atoi(v), 0, 2);
     if (const char* v = std::getenv("MAYHEM_DEBUG")) look.debugView = std::atoi(v);
     if (const char* v = std::getenv("MAYHEM_AO")) look.ambientOcclusion = std::atoi(v) != 0;
-    if (const char* v = std::getenv("MAYHEM_RAYGI")) look.rayGI = std::atoi(v) != 0;
     world.ctx().emplace<Watch>();
     auto& scene = world.ctx().emplace<projv::Scene>();
     auto& m = world.ctx().emplace<Mayhem>();
@@ -2534,9 +2522,9 @@ void render(projv::Application& app) {
             samples++;
         }
         if (app.frameCount == 361 && samples > 0) {
-            static const char* names[] = {"gbuffer", "ssao", "raygi", "giaccum", "giblur1", "giblur2", "shade", "reconstruct", "taa", "display"};
+            static const char* names[] = {"gbuffer", "ao", "shade", "reconstruct", "taa", "display"};
             std::string line = fmt::format("GPU frame {:.2f} ms |", frameMs / samples);
-            for (int v = 0; v < 10; v++) line += fmt::format(" {} {:.2f}", names[v], passMs[v] / samples);
+            for (int v = 0; v < 6; v++) line += fmt::format(" {} {:.2f}", names[v], passMs[v] / samples);
             projv::core::info("{}", line);
         }
     }

@@ -500,10 +500,7 @@ namespace {
         voxel_renderer::View& view = world.ctx().emplace<voxel_renderer::View>();
         view.finestVoxel = 0.125f;
         view.hazeRadius = 200.0f;
-        projv::RendererSpecification spec = projv::graphics::loadRendererSpecification((here / "voxelRenderer").string() + "/");
-        for (projv::Texture& texture : spec.resources.textures)
-            if (texture.sizeMode == projv::TextureSizeMode::Relative && texture.name != "reconstructed" && texture.name != "taaColor")
-                texture.scale *= view.renderScale;
+        projv::RendererSpecification spec = voxel_renderer::specification(world, here);
         uint32_t textureId = 0, frameBufferId = 0, shaderId = 0;
         for (const auto& t : spec.resources.textures) textureId = std::max(textureId, t.textureID + 1);
         for (const auto& f : spec.resources.FrameBuffers) frameBufferId = std::max(frameBufferId, f.frameBufferID + 1);

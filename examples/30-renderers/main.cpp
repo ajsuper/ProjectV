@@ -20,6 +20,8 @@
 //   world-cascade       world-space radiance cascades: the gather traces real voxel rays, so
 //                       occlusion and sky visibility are correct off-screen too
 //   world-face-cascade  world-space cascades anchored to voxel face centres, accumulated per face
+//   voxel               the examples' game renderer (examples/shared/voxelRenderer): what the physics
+//                       demos, the explosion and the multiplayer games draw with
 //
 // Usage:
 //   ./renderer_gallery [--renderer <name>] [--scene <directory>] [--list]
@@ -27,6 +29,13 @@
 //   --renderer   which renderer to run (default: tree64)
 //   --scene      a folder holding a compose.json (default: SanMiguel, from the scene previewer)
 //   --list       print the available renderers and exit
+//
+// Measuring (unattended; the window opens and closes by itself):
+//   --bench            each pass's GPU time over frames 120..360, printed, then exit
+//   --capture <prefix> saves frames 300, 301 and 302 as <prefix>-<frame>.tga, then exits
+//   --look x,y,z,tx,ty,tz   stands the camera at x,y,z looking at tx,ty,tz (default: the framing)
+//   --pan <rad>        turns the camera this much a frame (a moving-camera measurement)
+//   --voxel-folder <f> which staged folder the voxel renderer loads (default: voxelRenderer)
 //
 // Selection is a flag rather than a prompt so the gallery can be scripted: a benchmark or a
 // screenshot matrix across all seven is a shell loop.
@@ -37,7 +46,11 @@
 //   R/F          — move up / down
 //   Mouse        — look around (cursor is captured; Esc releases it, left-click re-captures)
 //   Scroll wheel — sun elevation
+//   T            — TAA on / off (voxel)
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -57,6 +70,7 @@
 #include "graphics/type_mapping.h"
 #include "utils/compose_io.h"
 #include "utils/picking.h"
+#include "voxel_renderer.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -84,6 +98,8 @@ struct FrameContext {
     int               frameCameraLastMovedOn;
     projv::core::vec2 windowResolution;
     projv::core::vec3 sunDirection;   // normalized; scroll-wheel controlled (see render()).
+    float             sunAngle;       // the same, as its angle up the arc
+    projv::World*     world;
 };
 
 // A self-contained description of a selectable renderer.
@@ -95,7 +111,13 @@ struct RendererModule {
     // Uploads this renderer's per-frame uniforms. Must set every uniform the
     // renderer's resources.json declares (and may ignore the rest).
     std::function<void(std::shared_ptr<projv::ConstructedRenderer>, const FrameContext&)> uploadUniforms;
+    // Optional: loads the renderer itself, in place of the generic load of `directory`.
+    std::function<void(projv::Application&, projv::graphics::RenderInstance&, const projv::Scene&)> install;
 };
+
+// The voxel renderer's staged folder (--voxel-folder), and its TAA (T).
+static std::string g_voxelFolder = "voxelRenderer";
+static bool g_voxelTAA = true;
 
 // Bypass the reconstruction and point-sample the render-resolution frame instead (Q). Only the
 // `reconstruction` renderer reads it; the others declare no such uniform. Flipping between the two
@@ -147,6 +169,30 @@ static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRendere
     projv::graphics::setUniformToValue(renderer, "prevCameraDir", prevCameraDirection);
 }
 
+static bool measureSceneBounds(const projv::Scene& scene, projv::core::vec3& boundsMin, projv::core::vec3& boundsMax);
+
+// The examples' game renderer: its own loader (it scales its targets by the View's render scale) and its
+// own uniforms, from the View. The scene sets its scale: the finest voxel, and the haze across it.
+static void installVoxelRenderer(projv::Application& app, projv::graphics::RenderInstance& renderInstance, const projv::Scene& scene) {
+    voxel_renderer::View& view = app.world.ctx().emplace<voxel_renderer::View>();
+    float finest = 0.0f;
+    for (const projv::Chunk& chunk : scene.chunks)
+        if (chunk.alive && chunk.header.voxelScale > 0.0f) finest = finest > 0.0f ? std::min(finest, chunk.header.voxelScale) : chunk.header.voxelScale;
+    if (finest > 0.0f) view.finestVoxel = finest;
+    projv::core::vec3 boundsMin, boundsMax;
+    if (measureSceneBounds(scene, boundsMin, boundsMax)) view.hazeRadius = std::max(projv::core::length(boundsMax - boundsMin), 1.0f);
+    voxel_renderer::install(app.world, renderInstance, std::filesystem::current_path(), g_voxelFolder);
+}
+
+static void uploadVoxelUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
+    voxel_renderer::View& view = ctx.world->ctx().get<voxel_renderer::View>();
+    static const int debugView = std::getenv("GALLERY_DEBUG") ? std::atoi(std::getenv("GALLERY_DEBUG")) : 0;
+    view.debugView = debugView;
+    view.sun = ctx.sunAngle;
+    view.taa = g_voxelTAA;
+    voxel_renderer::upload(*ctx.world, renderer, ctx.cameraPosition, ctx.cameraDirection);
+}
+
 // The registry. One entry per folder under renderers/; adding an eighth renderer means adding a
 // directory and one push_back here.
 //
@@ -196,6 +242,16 @@ static std::vector<RendererModule> buildRendererRegistry() {
         uploadReconstructionUniforms
     });
 
+    // The one the games use, from examples/shared/voxelRenderer (staged as voxelRenderer/).
+    registry.push_back({
+        "voxel",
+        "The examples' game renderer: G-buffer, AO and bounce, ray-traced GI, reconstruction, TAA. T toggles TAA.",
+        "./voxelRenderer/",
+        "./voxelRenderer/shaders/vs_quad.bin",
+        uploadVoxelUniforms,
+        installVoxelRenderer
+    });
+
     return registry;
 }
 
@@ -206,6 +262,16 @@ struct Options {
     std::string scenePath;                // Empty: use the bundled scene beside the binary.
     bool        listAndExit = false;
 };
+
+// Unattended measurement (--bench, --capture, --look, --pan).
+struct Measure {
+    bool        bench = false;
+    std::string capture;
+    bool        look = false;
+    projv::core::vec3 from{0.0f}, at{0.0f};
+    float       pan = 0.0f;
+};
+static Measure g_measure;
 
 static void printRenderers(const std::vector<RendererModule>& registry) {
     std::cout << "Available renderers:\n";
@@ -229,6 +295,17 @@ static bool parseCommandLine(int argc, char** argv, const std::vector<RendererMo
             printRenderers(registry);
             options.listAndExit = true;
             return true;
+        }
+        if (argument == "--bench") { g_measure.bench = true; continue; }
+        if ((argument == "--capture" || argument == "--look" || argument == "--pan" || argument == "--voxel-folder") && i + 1 < argc) {
+            const char* value = argv[++i];
+            if (argument == "--capture") g_measure.capture = value;
+            else if (argument == "--pan") g_measure.pan = float(std::atof(value));
+            else if (argument == "--voxel-folder") g_voxelFolder = value;
+            else if (std::sscanf(value, "%f,%f,%f,%f,%f,%f", &g_measure.from.x, &g_measure.from.y, &g_measure.from.z,
+                                 &g_measure.at.x, &g_measure.at.y, &g_measure.at.z) == 6) g_measure.look = true;
+            else { std::cerr << "--look takes x,y,z,tx,ty,tz\n"; return false; }
+            continue;
         }
         if (argument == "--renderer" || argument == "--scene") {
             if (i + 1 >= argc) {
@@ -424,6 +501,12 @@ void startup(projv::Application& app) {
     framing = frameScene(scene);
     cameraPhi = framing.yaw;
 
+    if (selectedRenderer.install) {
+        selectedRenderer.install(app, renderInstance, scene);
+        gpuData = projv::graphics::createTexturesForScene(scene);
+        return;
+    }
+
     projv::RendererSpecification rendererSpec = projv::graphics::loadRendererSpecification(selectedRenderer.directory);
     renderInstance.addRendererSpecification(1, rendererSpec);
 
@@ -502,12 +585,24 @@ void render(projv::Application& app) {
     if (!cameraInitialized) {
         cameraPosition = framing.position;
         cameraPitch    = framing.pitch;
+        if (g_measure.look) {
+            projv::core::vec3 d = projv::core::normalize(g_measure.at - g_measure.from);
+            cameraPosition = g_measure.from;
+            cameraPhi = std::atan2(d.z, d.x);
+            cameraPitch = std::asin(d.y);
+        }
         cameraInitialized = true;
+    }
+    const bool unattended = g_measure.bench || !g_measure.capture.empty();
+    if (g_measure.pan != 0.0f) {
+        cameraPhi += g_measure.pan;
+        cameraMoved = true;
     }
 
     // Cursor capture toggle: Esc releases the cursor (so it can leave the
     // window), left-click re-captures it. Only look around while captured.
-    static bool mouseCaptured = true;
+    static bool mouseCaptured = !unattended;
+    if (unattended) glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     if (mouseCaptured && glfwGetKey(renderInstance.window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
         glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         mouseCaptured = false;
@@ -592,6 +687,16 @@ void render(projv::Application& app) {
         prevQ = q;
     }
 
+    {
+        static bool prevT = false;
+        bool t = glfwGetKey(renderInstance.window, GLFW_KEY_T) == GLFW_PRESS;
+        if (t && !prevT) {
+            g_voxelTAA = !g_voxelTAA;
+            projv::core::info("TAA: {}", g_voxelTAA ? "on" : "off");
+        }
+        prevT = t;
+    }
+
     // H re-frames on the scene, for when navigation has left the subject behind.
     if (glfwGetKey(renderInstance.window, GLFW_KEY_H)) {
         cameraPosition = framing.position;
@@ -637,10 +742,48 @@ void render(projv::Application& app) {
     ctx.frameCameraLastMovedOn = frameCameraLastMovedOn;
     ctx.windowResolution       = renderInstance.getWindowResolution();
     ctx.sunDirection           = sunDirection;
+    ctx.sunAngle               = sunAngle;
+    ctx.world                  = &app.world;
 
     selectedRenderer.uploadUniforms(renderInstance.getActiveRenderer(), ctx);
 
     projv::graphics::renderConstructedRenderer(renderInstance, renderInstance.getActiveRenderer(), &gpuData);
+
+    // --bench: each pass's GPU time, frames 120..360, by the shader each view ran.
+    if (g_measure.bench) {
+        static double passMs[32] = {}, frameMs = 0.0;
+        static int samples = 0;
+        if (app.frameCount == 1) bgfx::setDebug(BGFX_DEBUG_PROFILER);
+        const bgfx::Stats* stats = bgfx::getStats();
+        if (app.frameCount > 120 && app.frameCount <= 360 && stats && stats->gpuTimerFreq > 0) {
+            const double toMs = 1000.0 / double(stats->gpuTimerFreq);
+            frameMs += double(stats->gpuTimeEnd - stats->gpuTimeBegin) * toMs;
+            for (uint16_t v = 0; v < stats->numViews; v++)
+                if (stats->viewStats[v].view < 32)
+                    passMs[stats->viewStats[v].view] += double(stats->viewStats[v].gpuTimeEnd - stats->viewStats[v].gpuTimeBegin) * toMs;
+            samples++;
+        }
+        if (app.frameCount == 361) {
+            const projv::RendererSpecification& spec = renderInstance.getRendererSpecification(1);
+            std::string line = fmt::format("BENCH {} {}x{}: frame {:.2f} ms |", selectedRenderer.id, int(ctx.windowResolution.x),
+                                           int(ctx.windowResolution.y), samples ? frameMs / samples : 0.0);
+            const auto& passes = spec.dependencyGraph.renderPasses;
+            for (size_t v = 0; v < passes.size() && v < 32; v++) {
+                std::string name = std::to_string(passes[v].shaderID);
+                for (const projv::Shader& shader : spec.resources.shaders)
+                    if (shader.shaderID == passes[v].shaderID) name = std::filesystem::path(shader.filePath).stem().string();
+                line += fmt::format(" {} {:.2f}", name, samples ? passMs[v] / samples : 0.0);
+            }
+            projv::core::info("{}", line);
+            app.closeRequested = true;
+        }
+    }
+    // --capture: three frames in a row, for what changes between them with nothing moving.
+    if (!g_measure.capture.empty()) {
+        if (app.frameCount >= 300 && app.frameCount <= 302)
+            bgfx::requestScreenShot(BGFX_INVALID_HANDLE, fmt::format("{}-{}", g_measure.capture, app.frameCount).c_str());
+        if (app.frameCount > 306) app.closeRequested = true;
+    }
 
     // Remember this frame's camera for next frame's reprojection.
     prevCameraPosition  = cameraPosition;

@@ -35,10 +35,6 @@
         {
             "name": "renderParams",
             "type": "vec4"
-        },
-        {
-            "name": "giParams",
-            "type": "vec4"
         }
     ],
     "shaders": [
@@ -48,7 +44,7 @@
         },
         {
             "shaderID": 2,
-            "path": "./voxelRenderer/shaders/ssao.bin"
+            "path": "./voxelRenderer/shaders/ao.bin"
         },
         {
             "shaderID": 3,
@@ -65,22 +61,6 @@
         {
             "shaderID": 6,
             "path": "./voxelRenderer/shaders/display.bin"
-        },
-        {
-            "shaderID": 8,
-            "path": "./voxelRenderer/shaders/raygi.bin"
-        },
-        {
-            "shaderID": 9,
-            "path": "./voxelRenderer/shaders/giaccum.bin"
-        },
-        {
-            "shaderID": 10,
-            "path": "./voxelRenderer/shaders/giblur1.bin"
-        },
-        {
-            "shaderID": 11,
-            "path": "./voxelRenderer/shaders/giblur2.bin"
         }
     ],
     "textures": [
@@ -135,7 +115,7 @@
         {
             "texID": 7,
             "name": "aoRaw",
-            "format": "RGBA16_FLOAT",
+            "format": "RG16_FLOAT",
             "sizeMode": "relative",
             "scale": 1.0,
             "origin": "CreateNew"
@@ -163,54 +143,6 @@
             "sizeMode": "relative",
             "scale": 1.0,
             "origin": "CreateNew"
-        },
-        {
-            "texID": 11,
-            "name": "giRaw",
-            "format": "RGBA16_FLOAT",
-            "sizeMode": "relative",
-            "scale": 1.0,
-            "origin": "CreateNew"
-        },
-        {
-            "texID": 12,
-            "name": "giRay",
-            "format": "RGBA16_FLOAT",
-            "sizeMode": "relative",
-            "scale": 0.5,
-            "origin": "CreateNew"
-        },
-        {
-            "texID": 13,
-            "name": "giHist",
-            "format": "RGBA16_FLOAT",
-            "sizeMode": "relative",
-            "scale": 0.5,
-            "origin": "CreateNew"
-        },
-        {
-            "texID": 14,
-            "name": "giHistPos",
-            "format": "RGBA32_FLOAT",
-            "sizeMode": "relative",
-            "scale": 0.5,
-            "origin": "CreateNew"
-        },
-        {
-            "texID": 15,
-            "name": "giBlurA",
-            "format": "RGBA16_FLOAT",
-            "sizeMode": "relative",
-            "scale": 0.5,
-            "origin": "CreateNew"
-        },
-        {
-            "texID": 16,
-            "name": "giBlurB",
-            "format": "RGBA16_FLOAT",
-            "sizeMode": "relative",
-            "scale": 0.5,
-            "origin": "CreateNew"
         }
     ],
     "framebuffers": [
@@ -228,8 +160,7 @@
         {
             "fboID": 2,
             "textureIDs": [
-                7,
-                11
+                7
             ]
         },
         {
@@ -248,31 +179,6 @@
             "fboID": 5,
             "textureIDs": [
                 10
-            ]
-        },
-        {
-            "fboID": 7,
-            "textureIDs": [
-                12
-            ]
-        },
-        {
-            "fboID": 8,
-            "textureIDs": [
-                13,
-                14
-            ]
-        },
-        {
-            "fboID": 9,
-            "textureIDs": [
-                15
-            ]
-        },
-        {
-            "fboID": 10,
-            "textureIDs": [
-                16
             ]
         }
     ]
