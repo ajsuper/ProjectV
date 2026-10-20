@@ -1,0 +1,373 @@
+{
+    "uniforms": [
+        {
+            "name": "cameraPos",
+            "type": "vec4"
+        },
+        {
+            "name": "cameraDir",
+            "type": "vec4"
+        },
+        {
+            "name": "prevCameraPos",
+            "type": "vec4"
+        },
+        {
+            "name": "prevCameraDir",
+            "type": "vec4"
+        },
+        {
+            "name": "sunDir",
+            "type": "vec4"
+        },
+        {
+            "name": "lightParams",
+            "type": "vec4"
+        },
+        {
+            "name": "fogParams",
+            "type": "vec4"
+        },
+        {
+            "name": "frameParams",
+            "type": "vec4"
+        },
+        {
+            "name": "renderParams",
+            "type": "vec4"
+        },
+        {
+            "name": "giParams",
+            "type": "vec4"
+        },
+        {
+            "name": "flashParams",
+            "type": "vec4"
+        },
+        {
+            "name": "flashColor",
+            "type": "vec4"
+        },
+        {
+            "name": "skyParams",
+            "type": "vec4"
+        },
+        {
+            "name": "smokeBox",
+            "type": "vec4"
+        },
+        {
+            "name": "smokeGridInfo",
+            "type": "vec4"
+        },
+        {
+            "name": "smokeParams",
+            "type": "vec4"
+        },
+        {
+            "name": "smokeShape",
+            "type": "vec4"
+        },
+        {
+            "name": "smokeBlocks",
+            "type": "vec4"
+        },
+        {
+            "name": "emberGrid",
+            "type": "vec4"
+        },
+        {
+            "name": "emberInfo",
+            "type": "vec4"
+        }
+    ],
+    "shaders": [
+        {
+            "shaderID": 1,
+            "path": "./nightRenderer/shaders/gbuffer.bin"
+        },
+        {
+            "shaderID": 2,
+            "path": "./nightRenderer/shaders/ssao.bin"
+        },
+        {
+            "shaderID": 3,
+            "path": "./nightRenderer/shaders/shade.bin"
+        },
+        {
+            "shaderID": 4,
+            "path": "./nightRenderer/shaders/reconstruct.bin"
+        },
+        {
+            "shaderID": 5,
+            "path": "./nightRenderer/shaders/taa.bin"
+        },
+        {
+            "shaderID": 6,
+            "path": "./nightRenderer/shaders/display.bin"
+        },
+        {
+            "shaderID": 8,
+            "path": "./nightRenderer/shaders/raygi.bin"
+        },
+        {
+            "shaderID": 9,
+            "path": "./nightRenderer/shaders/giaccum.bin"
+        },
+        {
+            "shaderID": 10,
+            "path": "./nightRenderer/shaders/giblur1.bin"
+        },
+        {
+            "shaderID": 11,
+            "path": "./nightRenderer/shaders/giblur2.bin"
+        },
+        {
+            "shaderID": 12,
+            "path": "./nightRenderer/shaders/smoke.bin"
+        }
+    ],
+    "textures": [
+        {
+            "texID": 1,
+            "name": "gPos",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 2,
+            "name": "gNormal",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 3,
+            "name": "gAlbedo",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 4,
+            "name": "gLight",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 5,
+            "name": "gFace",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 6,
+            "name": "gRot",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 7,
+            "name": "aoRaw",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 8,
+            "name": "litHDR",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 9,
+            "name": "reconstructed",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 10,
+            "name": "taaColor",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 11,
+            "name": "giRaw",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 12,
+            "name": "giRay",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 13,
+            "name": "giHist",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 14,
+            "name": "giHistPos",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 15,
+            "name": "giBlurA",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 16,
+            "name": "giBlurB",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 17,
+            "name": "smokeGrid",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "fixed",
+            "resX": 960,
+            "resY": 960,
+            "origin": "CPUBuffer"
+        },
+        {
+            "texID": 18,
+            "name": "smokeColor",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 19,
+            "name": "emberCubes",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "fixed",
+            "resX": 1024,
+            "resY": 1024,
+            "origin": "CPUBuffer"
+        },
+        {
+            "texID": 20,
+            "name": "emberCells",
+            "format": "RG32_FLOAT",
+            "sizeMode": "fixed",
+            "resX": 1024,
+            "resY": 640,
+            "origin": "CPUBuffer"
+        },
+        {
+            "texID": 21,
+            "name": "emberIndex",
+            "format": "R32_FLOAT",
+            "sizeMode": "fixed",
+            "resX": 1024,
+            "resY": 2048,
+            "origin": "CPUBuffer"
+        }
+    ],
+    "framebuffers": [
+        {
+            "fboID": 1,
+            "textureIDs": [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6
+            ]
+        },
+        {
+            "fboID": 2,
+            "textureIDs": [
+                7,
+                11
+            ]
+        },
+        {
+            "fboID": 3,
+            "textureIDs": [
+                8
+            ]
+        },
+        {
+            "fboID": 4,
+            "textureIDs": [
+                9
+            ]
+        },
+        {
+            "fboID": 5,
+            "textureIDs": [
+                10
+            ]
+        },
+        {
+            "fboID": 7,
+            "textureIDs": [
+                12
+            ]
+        },
+        {
+            "fboID": 8,
+            "textureIDs": [
+                13,
+                14
+            ]
+        },
+        {
+            "fboID": 9,
+            "textureIDs": [
+                15
+            ]
+        },
+        {
+            "fboID": 10,
+            "textureIDs": [
+                16
+            ]
+        },
+        {
+            "fboID": 11,
+            "textureIDs": [
+                18
+            ]
+        }
+    ]
+}

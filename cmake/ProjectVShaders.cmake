@@ -68,9 +68,15 @@ function(projv_compile_shaders)
     if(engineShaderInclude)
         list(APPEND includeFlags -i "${engineShaderInclude}")
     endif()
+    # The .sc files in the include directories are every shader's includes too (a renderer's light rig,
+    # its shared helpers): without them as dependencies, editing one rebuilt nothing and the old binaries
+    # ran on.
+    set(includeDirSources "")
     foreach(dir IN LISTS ARG_INCLUDE_DIRS)
         get_filename_component(dir "${dir}" ABSOLUTE)
         list(APPEND includeFlags -i "${dir}")
+        file(GLOB dirSources "${dir}/*.sc")
+        list(APPEND includeDirSources ${dirSources})
     endforeach()
 
     set(allOutputs "")
@@ -96,6 +102,7 @@ function(projv_compile_shaders)
         # library (pjv_utils_DDA.sc) is included by nearly everything. Neither showed up as a
         # dependency, so editing either left stale binaries that the next run quietly loaded.
         list(APPEND sharedIncludes ${fragmentShaders})
+        list(APPEND sharedIncludes ${includeDirSources})
         if(engineShaderInclude)
             file(GLOB engineShaderSources "${engineShaderInclude}/*.sc")
             list(APPEND sharedIncludes ${engineShaderSources})

@@ -1,6 +1,6 @@
 # ProjectV Examples
 
-Thirteen programs, ordered so that reading them in sequence teaches the engine. Each one is a
+Sixteen programs, ordered so that reading them in sequence teaches the engine. Each one is a
 complete application, not a snippet, and each has its own README explaining not just how to run it
 but why it exists and what it decided differently from its neighbours.
 
@@ -31,6 +31,7 @@ cd build/examples/hello_voxel && ./hello_voxel
 | **18** | [world-loading](18-world-loading/) | Loading part of a world: a 768 m terrain opened with no voxels, blocks read around the camera on a worker thread as you fly, decided by one rule (`loadNear`, `loadInside`, `loadEverything`, or your own). | — |
 | **19** | [voxel-mayhem](19-voxel-mayhem/) | Every physics feature in one world, all at once: a 220 m park -- a castle that breaks, a Ferris wheel, a domino spiral, balloons, jump pads, a car, a wrecking ball, a quarry to dig -- and eight tools (cannon, blast, pickaxe, dig, spawn, TNT, orb, push). Rendered with one-bounce ray-traced GI. Interactive; `MAYHEM_SELFTEST=1` checks it. | — |
 | **20** | [mesh-voxelizer](20-mesh-voxelizer/) | Getting your own data in: meshes and Minecraft worlds to Compose scenes. Headless command-line tool. | Assimp submodule |
+| **25** | [explosion](25-explosion/) | A big explosion, three ways -- a city, a house on a suburban street, a pine forest flattened like Tunguska -- by day or on a dark night. Fracture at scale (one strike takes a whole building apart, by a fracture pattern of its own), collapse, thousands of trees knocked flat and bent over by voxel edits, and a mushroom cloud of glowing voxel embers traced in the G-buffer. `--graphics 1\|2\|3` trades lighting for frame rate; `EXPLOSION_RECORD` renders a real-time video in slow motion. | — |
 | **30** | [renderers](30-renderers/) | Seven renderers over one scene and one camera — the comparison is the point. Accumulation, reprojection, per-face GI, and four cascade variants. | — |
 | **40** | [advanced-renderer](40-advanced-renderer/) | The good renderer, brought up to the engine as it is today: fourteen passes, world-space probe GI, animation, transparency and refraction. | — |
 | **50** | [terrain-generator](50-terrain-generator/) | Procedural generation and streaming: chunks built on worker threads and uploaded while you fly. | — |
