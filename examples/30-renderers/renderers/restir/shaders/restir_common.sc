@@ -42,12 +42,15 @@ uniform vec4 restirReuse;     // x temporal reuse, y spatial reuse, z visibility
 uniform vec4 restirDenoise;   // x a-trous on, y GI accumulation on, z view (0 image, 1 indirect, 2 direct), w GI history cap
 uniform vec4 restirJitter;    // xy this frame's offset inside the block, z stride (4 or 2), w 1 = start every history over
 uniform vec4 jitterParams;    // xy: where this frame's render texels are traced, off their centres, in texels
-uniform vec4 restirLook;      // x SSAO radius (world units), y its strength on the indirect light
+uniform vec4 restirLook;      // x SSAO radius (world units), y its strength on the indirect light, z the sun's
+                              // penumbra width per unit of blocker distance (0: hard shadows), w the fog's
+                              // density, per world unit (0: none)
+#define RESTIR_FOV 60.0       // the gallery's, as every renderer here
+
 uniform vec4 restirSettings;  // x the trace loops' bound (a uniform, so they are not unrolled), y surface offset
                               // (world units, a twentieth of the finest voxel), z the image's longest history
                               // (resolve), w one render texel's width per unit of distance (2 tan(fov/2) / height)
 
-#define RESTIR_FOV 60.0       // the gallery's, as every renderer here
 
 // The look. The gallery's shared sky (pjv_sun_sky.sc) is bright and pale -- its zenith is about four
 // times the voxel renderer's -- and lighting by it flooded every surface with blue-white and washed the
@@ -133,6 +136,33 @@ float restirLum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 // (what the camera sees).
 vec3 restirSky(vec3 d) { return skyGradient(d) * RESTIR_SKY_LIGHT; }
 vec3 restirSkyWithSun(vec3 d) { return dot(d, SUN_DIR) > cos(SUN_ANGULAR) ? SUN_COLOR : restirSky(d); }
+
+// The camera ray through uv (0..1 across this pass's target, the jitter already added), built as the
+// engine's rayStartDirection builds it.
+vec3 restirViewDirection(vec2 uv) {
+    vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
+    float scale = tan(radians(RESTIR_FOV * 0.5));
+    float aspect = passTargetRes.x / passTargetRes.y;
+    vec3 forward = normalize(cameraDir.xyz);
+    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+    vec3 right = normalize(cross(forward, worldUp));
+    vec3 up = normalize(cross(right, forward));
+    return normalize(right * (ndc.x * scale * aspect) + up * (ndc.y * scale) + forward);
+}
+
+// Distance fog: the light from a surface t away along d, seen through air (restirLook.w per unit). The air
+// takes on the colour of the sky at the horizon in that direction -- so the far distance melts into the
+// horizon it stands against -- warmed towards the sun. It starts a little way out (RESTIR_FOG_START of
+// the fog's own length), so what is near stays crisp, and never quite hides anything (RESTIR_FOG_MAX).
+#define RESTIR_FOG_START 0.1
+#define RESTIR_FOG_MAX   0.85
+vec3 restirFog(vec3 colour, vec3 d, float t) {
+    if (restirLook.w <= 0.0 || t < 0.0) return colour;
+    float amount = RESTIR_FOG_MAX * (1.0 - exp(-max(t * restirLook.w - RESTIR_FOG_START, 0.0)));
+    vec3 horizon = restirSky(normalize(vec3(d.x, max(d.y, 0.0) * 0.5 + 0.02, d.z)));
+    vec3 air = horizon + SUN_COLOR * 0.04 * pow(max(dot(d, normalize(SUN_DIR)), 0.0), 6.0);
+    return mix(colour, air, amount);
+}
 
 // A ReSTIR GI reservoir: the sample (a reconnection point x2 with its normal and outgoing light), the
 // visible point it was formed at (x1, n1, distance t1; t1 < 0 = no surface), and the weights.

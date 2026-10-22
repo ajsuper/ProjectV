@@ -43,7 +43,7 @@
 // screenshot matrix across all seven is a shell loop.
 //
 // Controls:
-//   W/S          — move forward / backward
+//   W/S          — move forward / backward (Shift: four times as fast)
 //   A/D          — strafe left / right
 //   R/F          — move up / down
 //   Mouse        — look around (cursor is captured; Esc releases it, left-click re-captures)
@@ -52,7 +52,8 @@
 //   Q            — reconstruction bypassed: point-sample the render resolution (reconstruction, restir)
 //   G            — the image / indirect light only / direct light only / ambient occlusion (restir)
 //   J            — ReSTIR reuse on / off (restir)
-//   P            — post-processing on / off (restir); V vignette, B colour grade, E auto-exposure
+//   P            — post-processing on / off (restir); V vignette, B colour grade, E auto-exposure, K depth of field
+//   O / U        — distance fog / soft sun shadow on / off (restir)
 
 #include <algorithm>
 #include <chrono>
@@ -182,9 +183,16 @@ static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRendere
 // The post (display.frag): P turns it all off and on, V the vignette, B the grade, E the auto-exposure.
 static int  g_restirView = 0;
 static bool g_restirReuse = true;
-struct RestirPost { bool on = true, vignette = true, grade = true, exposure = true; };
+// K the depth of field (part of the post). Two more are the scene's, not the post's: O the distance fog,
+// U the sun's soft shadow.
+struct RestirPost { bool on = true, vignette = true, grade = true, exposure = true, dof = true; };
 static RestirPost g_restirPost;
-static constexpr float RESTIR_VIGNETTE = 0.15f;   // the corners' falloff: subtle
+static bool g_restirFog = true;
+static bool g_restirSoftShadow = true;
+static constexpr float RESTIR_VIGNETTE = 0.15f;       // the corners' falloff: subtle
+static constexpr float RESTIR_DOF_PIXELS = 1.5f;      // the far distance's blur radius at 1080 lines: very slight
+static constexpr float RESTIR_SUN_HALF_ANGLE = 0.02f; // radians, ~4x the real sun's: penumbrae a little soft
+static float g_sceneRadius = 100.0f;                  // frameScene's, for the fog's length
 static int  g_restirStride = 4;   // --restir-gi: GI for one window pixel in stride x stride (4 or 2)
 static constexpr float RESTIR_RENDER_SCALE = 0.5f;   // its G-buffer, each way; resources.json's 0.5 targets
 
@@ -213,8 +221,12 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     const int cell = cellOrder[ctx.frameCount % 4];
     vec4 jitterParams{(float(cell % 2) + 0.5f) * 0.5f - 0.5f, (float(cell / 2) + 0.5f) * 0.5f - 0.5f, 0.0f, 0.0f};
     vec4 renderParams{0.0f, 0.0f, g_reconstructBypass ? 1.0f : 0.0f, 0.0f};
-    // SSAO six of the finest voxels round, darkening the indirect light by up to half.
-    vec4 look{6.0f * finest, 0.5f, 0.0f, 0.0f};
+    // SSAO six of the finest voxels round, darkening the indirect light by up to half; the sun's penumbra
+    // per unit of blocker distance (the disc's full width); the fog's density: its length 1.6 scene radii,
+    // so the far side of the scene is about a third hazed, held to 30..300 m of Teardown-scale voxels.
+    const float fogLength = std::clamp(1.6f * g_sceneRadius, 300.0f, 3000.0f);
+    vec4 look{6.0f * finest, 0.5f, g_restirSoftShadow ? 2.0f * std::tan(RESTIR_SUN_HALF_ANGLE) : 0.0f,
+              g_restirFog ? 1.0f / fogLength : 0.0f};
     static bool first = true;
 
     vec4 cameraPos{ctx.cameraPosition, 1.0f}, cameraDir{ctx.cameraDirection, 0.0f};
@@ -222,11 +234,13 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     vec4 sunDir{ctx.sunDirection, 0.0f};
     vec4 frameCount{float(ctx.frameCount), ctx.cameraMoved ? 1.0f : 0.0f, 0.0f, 0.0f};
     vec4 reuse{g_restirReuse ? 1.0f : 0.0f, g_restirReuse ? 1.0f : 0.0f, 1.0f, 4.0f};   // temporal, spatial, visibility, M cap
-    // For unattended captures (--capture): RESTIR_VIEW picks the starting view, RESTIR_POST=0 starts with
-    // the post off.
+    // For unattended captures (--capture): RESTIR_VIEW picks the starting view; RESTIR_POST=0, RESTIR_FOG=0
+    // and RESTIR_SOFT=0 start with the post, the fog or the soft shadow off.
     static const bool fromEnv = [] {
         if (const char* v = std::getenv("RESTIR_VIEW")) g_restirView = std::atoi(v) & 3;
         if (const char* v = std::getenv("RESTIR_POST")) g_restirPost.on = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_FOG")) g_restirFog = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_SOFT")) g_restirSoftShadow = std::atoi(v) != 0;
         return true;
     }();
     (void)fromEnv;
@@ -258,6 +272,8 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     vec4 postParams{post.on && post.vignette ? RESTIR_VIGNETTE : 0.0f, post.on && post.grade ? 1.0f : 0.0f,
                     post.on && post.exposure ? 1.0f : 0.0f, seconds};
     setUniformToValue(renderer, "restirPost", postParams);
+    vec4 dof{post.on && post.dof ? RESTIR_DOF_PIXELS * ctx.windowResolution.y / 1080.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+    setUniformToValue(renderer, "restirDof", dof);
     setUniformToValue(renderer, "jitterParams", jitterParams);
     setUniformToValue(renderer, "renderParams", renderParams);
     first = false;
@@ -343,7 +359,7 @@ static std::vector<RendererModule> buildRendererRegistry() {
     // frame in about a quarter of the path tracer's time at a similar or better image.
     registry.push_back({
         "restir",
-        "ReSTIR GI at a sixteenth of the pixels, SSAO, a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, P post (V, B, E).",
+        "ReSTIR GI at a sixteenth of the pixels, SSAO, a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, P post (V, B, E, K), O fog, U soft shadow.",
         "./renderers/restir/",
         "./renderers/restir/shaders/vs_quad.bin",
         uploadRestirUniforms
@@ -452,7 +468,7 @@ struct CameraFraming {
     projv::core::vec3 position;
     float yaw;
     float pitch;
-    float moveSpeed;   // World units per frame.
+    float moveSpeed;   // World units per second.
 };
 
 // Bounding box of every live chunk. A chunk header carries its world position and scale, which is
@@ -482,7 +498,7 @@ static CameraFraming frameScene(const projv::Scene& scene) {
         framing.position = vec3(0.0f, 0.0f, -100.0f);
         framing.yaw = 3.14159f / 2.0f;
         framing.pitch = 0.0f;
-        framing.moveSpeed = 1.0f;
+        framing.moveSpeed = 60.0f;
         return framing;
     }
 
@@ -490,6 +506,7 @@ static CameraFraming frameScene(const projv::Scene& scene) {
     vec3 extents = boundsMax - boundsMin;
     float radius = length(extents) * 0.5f;
     if (radius <= 0.0f) radius = 1.0f;
+    g_sceneRadius = radius;
 
     projv::core::info("Scene extents: {:.1f} x {:.1f} x {:.1f} (radius {:.1f})",
                       extents.x, extents.y, extents.z, radius);
@@ -557,10 +574,12 @@ static CameraFraming frameScene(const projv::Scene& scene) {
         // least-bad guess and at least is not inside the floor.
         framing.position.y = center.y;
     }
-    // Roughly two seconds to cross the scene at 60fps, so the controls feel the same at any scale.
-    framing.moveSpeed = std::max(radius * 2.0f / 120.0f, 0.01f);
+    // About ten seconds to cross the scene, so a small model is as quick to get round as a big one -- but
+    // no more than ten eye heights a second (80 voxels: 8 m/s at Teardown's scale), or a level whose
+    // bounds take in its terrain and sea is crossed at a car's speed. Shift moves four times as fast.
+    framing.moveSpeed = std::min(std::max(radius * 2.0f / 10.0f, 0.5f), std::max(10.0f * eyeHeight, 0.5f));
 
-    projv::core::info("Framed camera at ({:.1f}, {:.1f}, {:.1f}), move speed {:.2f}/frame",
+    projv::core::info("Framed camera at ({:.1f}, {:.1f}, {:.1f}), move speed {:.2f}/s",
                       framing.position.x, framing.position.y, framing.position.z, framing.moveSpeed);
     return framing;
 }
@@ -767,11 +786,14 @@ void render(projv::Application& app) {
     // Horizontal forward from yaw only, so W/S flies level regardless of pitch.
     projv::core::vec3 forwardDirection = { projv::core::cos(cameraPhi), 0, projv::core::sin(cameraPhi) };
 
-    // Movement speed in world units per frame. Voxels are 1 world unit (voxelScale = 1), so a
-    // res-512 model spans ~512 units; this keeps traversal feeling the same as the old ~37-unit world.
-    // Derived from the scene's size (see frameScene), so flying feels the same whether the scene
-    // is a 64^3 asset or a 4096-wide street. Scroll used to be the sun only; the sun still has it.
-    const float moveSpeed = framing.moveSpeed;
+    // Movement: the framing's speed (world units a second, from the scene's size -- see frameScene) times
+    // this frame's length, so it does not change with the frame rate. Shift moves four times as fast.
+    static auto lastMove = std::chrono::steady_clock::now();
+    const auto moveNow = std::chrono::steady_clock::now();
+    const float moveSeconds = std::min(std::chrono::duration<float>(moveNow - lastMove).count(), 0.1f);
+    lastMove = moveNow;
+    const bool fast = glfwGetKey(renderInstance.window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+    const float moveSpeed = framing.moveSpeed * moveSeconds * (fast ? 4.0f : 1.0f);
 
     // Horizontal movement (W/A/S/D).
     if (glfwGetKey(renderInstance.window, GLFW_KEY_W)) { cameraPosition += forwardDirection * moveSpeed; cameraMoved = true; }
@@ -827,13 +849,17 @@ void render(projv::Application& app) {
             {GLFW_KEY_V, &g_restirPost.vignette, "vignette", false},
             {GLFW_KEY_B, &g_restirPost.grade, "colour grade", false},
             {GLFW_KEY_E, &g_restirPost.exposure, "auto-exposure", false},
+            {GLFW_KEY_K, &g_restirPost.dof, "depth of field", false},
+            {GLFW_KEY_O, &g_restirFog, "distance fog", false},
+            {GLFW_KEY_U, &g_restirSoftShadow, "soft sun shadow", false},
         };
         for (PostKey& k : postKeys) {
             bool down = glfwGetKey(renderInstance.window, k.key) == GLFW_PRESS;
             if (down && !k.prev) {
                 *k.flag = !*k.flag;
+                const bool partOfPost = k.flag != &g_restirPost.on && k.flag != &g_restirFog && k.flag != &g_restirSoftShadow;
                 projv::core::info("ReSTIR {}: {}{}", k.name, *k.flag ? "on" : "off",
-                                  k.flag != &g_restirPost.on && !g_restirPost.on ? " (post is off: P)" : "");
+                                  partOfPost && !g_restirPost.on ? " (post is off: P)" : "");
             }
             k.prev = down;
         }

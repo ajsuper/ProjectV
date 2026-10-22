@@ -10,11 +10,15 @@ $input v_texcoord0
 // them at half scale, in turn), so over four frames every window pixel is sampled exactly, and a still
 // view repeats the same four: the resolve settles to them and stays.
 //
+// The sun's light is not added here: shadow_soft.frag softens the shadow first (a penumbra sized by the
+// distance to what casts it), so this pass hands on whether the sun is seen and, if not, how far away the
+// blocker is.
+//
 // Outputs (in the slots the voxel renderer's reconstruction reads them from):
 //   0 gPos     xyz the hit, w distance (< 0 sky)
-//   1 gNormal  the face's normal
-//   2 gAlbedo
-//   3 gDirect  emission + sun; the sky's radiance for a miss
+//   1 gNormal  xyz the face's normal, w the sun's blocker: its distance along the shadow ray, -1 none
+//   2 gAlbedo  rgb albedo, a the sun's visibility (1 seen, 0 blocked or facing away)
+//   3 gDirect  emission; the sky's radiance for a miss
 //   4 gFace    xyz the face's centre, w the voxel's edge (0 sky)
 //   5 gRot     the chunk's rotation
 
@@ -36,6 +40,8 @@ void main() {
     vec4 face = vec4(0.0, 0.0, 0.0, 0.0);
     vec4 rotation = vec4(0.0, 0.0, 0.0, 1.0);
     float facing = 0.0;
+    float visible = 0.0;
+    float blocker = -1.0;
     int rays = min(int(restirSettings.x), 2);
     for (int i = 0; i < rays; i++) {
         RestirHit hit = restirTrace(origin, rayDir, kind, 1e30);
@@ -53,12 +59,13 @@ void main() {
             rayDir = toSun;
             kind = RESTIR_KIND_SHADOW;
         } else {
-            if (!hit.hit) direct += albedo * (SUN_COLOR / RESTIR_PI) * facing;
+            visible = hit.hit ? 0.0 : 1.0;
+            blocker = hit.hit ? hit.t : -1.0;
         }
     }
     gl_FragData[0] = position;
-    gl_FragData[1] = vec4(normal, 0.0);
-    gl_FragData[2] = vec4(albedo, 1.0);
+    gl_FragData[1] = vec4(normal, blocker);
+    gl_FragData[2] = vec4(albedo, visible);
     gl_FragData[3] = vec4(direct, 1.0);
     gl_FragData[4] = face;
     gl_FragData[5] = rotation;

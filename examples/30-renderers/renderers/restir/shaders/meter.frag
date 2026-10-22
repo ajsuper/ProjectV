@@ -1,7 +1,7 @@
 $input v_color0
 $input v_texcoord0
 
-// meter.frag -- pass 15, a fixed 64x64 target: the image's brightness, for the auto-exposure. Each texel
+// meter.frag -- a fixed 64x64 target: the image's brightness, for the auto-exposure. Each texel
 // is the mean log2 luminance of a 4x4 grid of samples across its block of the window, so the whole frame
 // is metered from 64K samples, wherever the window's size. Log, so a small bright sky does not outweigh
 // a large dim room the way a mean of the luminance itself would let it.

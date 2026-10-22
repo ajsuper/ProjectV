@@ -32,7 +32,7 @@ worked examples of it, at every scale from four passes to ten.
 |---|---|---|---|
 | [tree64](renderers/tree64/) | full path trace | accumulate; hard reset on camera move | The baseline. Converges to a reference image while parked. |
 | [reprojection](renderers/reprojection/) | full path trace | temporal reprojection + à-trous denoise | Stays converged *while moving*. The machinery the others reuse. |
-| [restir](renderers/restir/) | two bounces, ReSTIR GI at 1/16 of the pixels | reservoir reuse + SVGF-style denoise; ½-res G-buffer reconstructed, then accumulated | SSAO on the indirect light. G views, J reuse, Q reconstruction, P post (V vignette, B grade, E auto-exposure). |
+| [restir](renderers/restir/) | two bounces, ReSTIR GI at 1/16 of the pixels | reservoir reuse + SVGF-style denoise; ½-res G-buffer reconstructed, then accumulated | SSAO on the indirect light. G views, J reuse, Q reconstruction, P post (V vignette, B grade, E auto-exposure, K depth of field), O fog, U soft sun shadow. |
 | [fast](renderers/fast/) | none — direct + RTAO | deterministic; TAA for AA only | Cheapest. Nothing to converge because nothing is random. |
 | [face](renderers/face/) | full, per voxel face | none needed; exact-key history gate | Zero spatial noise by construction. Blocky by design. |
 | [radiance-cascade](renderers/radiance-cascade/) | screen-space cascades | temporal mean | Kept for the comparison. Screen space cannot see off-screen. |
@@ -85,6 +85,7 @@ done
 | `W` / `S` | Move forward / backward |
 | `A` / `D` | Strafe left / right |
 | `R` / `F` | Move up / down |
+| `Shift` | Move four times as fast (the base speed crosses the scene in about ten seconds, at most 80 voxels a second) |
 | Mouse | Look around (cursor is captured; `Esc` releases it, left-click re-captures) |
 | Scroll wheel | Raise / lower the sun |
 

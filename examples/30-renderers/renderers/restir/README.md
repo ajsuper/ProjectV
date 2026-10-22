@@ -14,19 +14,21 @@ It started in the ray lab (the fork at `../ProjectV-raylab`, modes 12 and 13).
 
 | # | Pass | Resolution | What it does |
 |---|---|---|---|
-| 1 | `gbuffer` | ½ × ½ | Camera ray and one sun shadow ray (straight at the sun's centre: hard shadows, no noise); the hit face and chunk rotation for the reconstruction |
+| 1 | `gbuffer` | ½ × ½ | Camera ray and one sun shadow ray (straight at the sun's centre: no noise), handing on the sun's visibility and its blocker's distance; the hit face and chunk rotation for the reconstruction |
 | 2 | `sample` | ¼ × ¼ | One candidate per GI pixel: a cosine bounce to x2, and x2's outgoing light (emission, sun, one more bounce with its sun) |
 | 3 | `temporal` | ¼ × ¼ | ReSTIR temporal reuse: the candidate against last frame's reservoir for the same surface |
 | 4 | `spatial` | ¼ × ¼ | ReSTIR spatial reuse: five neighbours' reservoirs, then a visibility ray for a borrowed sample; resolves to indirect light divided by albedo |
 | 5 | `gi_accumulate` | ¼ × ¼ | Temporal accumulation of that light, with luminance moments (variance) |
 | 6–9 | `atrous1/2/4/8` | ¼ × ¼ | À-trous filter at steps 1, 2, 4 and 8 (61 GI pixels across), edge-stopped by normal, plane and a loose (6σ) luminance test: the GI is meant to be soft |
 | 10 | `ssao` | ½ × ½ | Subtle screen-space AO: twelve samples, six voxels round, in a fixed 4×4 rotation pattern |
+| 10b | `shadow_soft` | ½ × ½ | The sun's light with a soft shadow: a penumbra as wide as the blocker's distance × the sun's width, found and filtered in screen space on the same surface (PCSS-style) |
 | 11 | `composite` | ½ × ½ | Edge-aware upsample of the indirect light; the direct light and albedo × indirect, kept apart |
-| 12 | `ao_apply` | ½ × ½ | The SSAO blurred over its 4×4 pattern (depth-aware), darkening the indirect light by up to half; the views (G) |
+| 12 | `ao_apply` | ½ × ½ | The SSAO blurred over its 4×4 pattern (depth-aware), darkening the indirect light by up to half; the sun's light added; the distance fog; the views (G) |
 | 13 | `reconstruct` | window | The voxel renderer's reconstruction (`examples/shared/voxelRenderer/shaders/reconstruct.frag`, copied): voxel by voxel, antialiased |
 | 14 | `resolve` | window | Temporal accumulation: the 2×2 jitter's four samples, and what noise is left |
 | 15 | `meter` | 64 × 64 | Log luminance of the frame, 16 samples a texel, for the auto-exposure |
-| 16 | `exposure` | 1 × 1 | The auto-exposure: centre-weighted average, its target, adapted from last frame's |
+| 16 | `exposure` | 1 × 1 | The auto-exposure (centre-weighted average, eased from last frame's) and the depth of field's autofocus (the centre's distance, eased) |
+| 16b | `dof` | window | Depth of field round the focus: a scatter-as-gather disc, at most 1.5 px (at 1080 lines) for the far distance |
 | 17 | `display` | window | The post (vignette, exposure, grade; P) and the engine's neutral display transform (`pjvDisplay`) |
 
 Each render texel is traced through the centre of another of the 2×2 window pixels it covers each frame,
@@ -56,8 +58,17 @@ exact.
   | V | vignette | 15% darker in the corners, flat over the middle |
   | E | auto-exposure | passes 15-16: the frame's log luminance metered at 64x64 (centre-weighted), the exposure that brings it 80% of the way to 0.08 (a sunlit exterior needs about none), held to -2..+3 stops and adapted over time (darkening faster than brightening) |
   | B | grade | contrast ×1.08 as a power about middle grey (no black crush), saturation ×1.10, a slightly warm white |
+  | K | depth of field | autofocus on the view's centre (eased, as a camera racks); the far distance blurs 1.5 px at 1080 lines, nearer than the focus as much |
 
-  The views (G) skip the post. `RESTIR_POST=0` starts with it off, `RESTIR_VIEW=n` on view n (for `--capture`).
+- **The scene's own**, outside the post:
+
+  | Key | Part | What |
+  |---|---|---|
+  | U | soft sun shadow | the sun as a disc 0.04 rad across (~4× the real one): the penumbra is 4% of the blocker's distance -- a 10 m wall's shadow-edge 40 cm wide at its foot |
+  | O | distance fog | towards the horizon sky's colour in that direction, warmed towards the sun; its length 1.6 scene radii (held to 300..3000 units), starting a tenth of the way out, at most 85% |
+
+  The views (G) skip the post and the fog. For `--capture`: `RESTIR_POST=0`, `RESTIR_FOG=0`, `RESTIR_SOFT=0`
+  start with each off, `RESTIR_VIEW=n` on view n.
 
 ## Stable at a distance
 
