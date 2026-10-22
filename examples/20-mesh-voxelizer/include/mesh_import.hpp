@@ -61,6 +61,10 @@ struct ImportedMaterial {
     int textureIndex = -1;                                  // Into ImportedModel::textures; -1 = untextured.
     int heightTextureIndex = -1;                            // Grayscale height/bump map; -1 = none.
     projv::core::vec3 diffuseColor{200.0f, 200.0f, 200.0f}; // 0-255, the untextured fallback.
+    // See-through as authored: opacity below 1, any transmission, or "glass" in its name (the one
+    // signal many exporters leave on a window that otherwise looks opaque). --no-transparent
+    // drops these triangles before voxelizing.
+    bool transparent = false;
 };
 
 struct ImportedModel {
@@ -261,6 +265,13 @@ inline ImportedMaterial importMaterial(const aiScene& scene, const aiMaterial& m
     if (material.Get(AI_MATKEY_NAME, materialName) == AI_SUCCESS) {
         imported.name = materialName.C_Str();
     }
+
+    float opacity = 1.0f, transmission = 0.0f;
+    material.Get(AI_MATKEY_OPACITY, opacity);
+    material.Get(AI_MATKEY_TRANSMISSION_FACTOR, transmission);
+    std::string lowerName = imported.name;
+    for (char& c : lowerName) c = char(std::tolower(static_cast<unsigned char>(c)));
+    imported.transparent = opacity < 0.999f || transmission > 0.0f || lowerName.find("glass") != std::string::npos;
 
     aiColor4D color;
     if (material.Get(AI_MATKEY_BASE_COLOR, color) == AI_SUCCESS ||

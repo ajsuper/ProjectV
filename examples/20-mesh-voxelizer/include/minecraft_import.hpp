@@ -62,6 +62,9 @@ struct ImportOptions {
     size_t maxVoxels = 30000000;              // Refuses to allocate past this; ~500 MB of samples.
     std::filesystem::path resourcePack;       // Optional; sampled for exact block colors.
     bool includeWater = true;
+    // False skips the blocks a renderer has to see through -- glass of every kind, ice, slime,
+    // honey, and water -- so a window becomes an opening instead (--no-transparent).
+    bool includeTransparent = true;
 };
 
 struct Voxel {
@@ -179,10 +182,16 @@ inline std::string stripNamespace(const std::string& id, std::string& namespaceO
  * Resolves block names to colors: resource pack first when one is supplied, then the built-in table
  * and naming rules. Results are cached, so each distinct block name costs one lookup per run.
  */
+// Blocks drawn see-through in the game. Glass covers every stained and tinted variant and the panes.
+inline bool isTransparentBlock(const std::string& name) {
+    return name.find("glass") != std::string::npos || name == "ice" || name == "frosted_ice" ||
+           name == "slime_block" || name == "honey_block";
+}
+
 class BlockColorResolver {
 public:
-    BlockColorResolver(std::filesystem::path resourcePack, bool includeWater)
-        : resourcePack_(std::move(resourcePack)), includeWater_(includeWater) {}
+    BlockColorResolver(std::filesystem::path resourcePack, bool includeWater, bool includeTransparent)
+        : resourcePack_(std::move(resourcePack)), includeWater_(includeWater), includeTransparent_(includeTransparent) {}
 
     /**
      * @param id Full block id, namespace included.
@@ -200,7 +209,9 @@ public:
         std::string name = stripNamespace(id, blockNamespace);
 
         Entry entry;
-        entry.visible = !isSkippedBlock(name) && (includeWater_ || (name != "water" && name != "bubble_column"));
+        const bool water = name == "water" || name == "bubble_column";
+        entry.visible = !isSkippedBlock(name) && (includeWater_ || !water) &&
+                        (includeTransparent_ || !(water || isTransparentBlock(name)));
 
         if (entry.visible && !sampleFromResourcePack(blockNamespace, name, entry.color)) {
             if (!resolveBlockColor(name, entry.color)) {
@@ -286,6 +297,7 @@ private:
 
     std::filesystem::path resourcePack_;
     bool includeWater_;
+    bool includeTransparent_;
     std::unordered_map<std::string, Entry> cache_;
     std::vector<std::string> unknownNames_;
     size_t texturesSampled_ = 0;
@@ -432,7 +444,7 @@ inline bool importWorld(const std::filesystem::path& worldPath, const ImportOpti
     info("  Importing blocks X [{}, {}], Z [{}, {}], Y [{}, {}].", minX, maxX, minZ, maxZ,
         options.minY, options.maxY);
 
-    detail::BlockColorResolver resolver(options.resourcePack, options.includeWater);
+    detail::BlockColorResolver resolver(options.resourcePack, options.includeWater, options.includeTransparent);
 
     ivec3 boundsMin{INT_MAX, INT_MAX, INT_MAX};
     ivec3 boundsMax{INT_MIN, INT_MIN, INT_MIN};

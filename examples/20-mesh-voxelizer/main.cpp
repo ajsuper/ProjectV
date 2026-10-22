@@ -35,6 +35,7 @@
 #include "include/CLI.hpp"
 #include "include/mesh_import.hpp"
 #include "include/minecraft_import.hpp"
+#include "teardown/teardown_import.h"
 
 #include <algorithm>
 #include <atomic>
@@ -554,7 +555,7 @@ void writeComposeScene(projv::DataFile& dataFile, const std::string& outputDirec
     composeOut.close();
 }
 
-void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetDirectory, int voxelizationResolution, std::string outputDirectory, bool flipTextureV, uint8_t alphaCutoff, unsigned int threadCount, const DisplaceOptions& displace) {
+void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetDirectory, int voxelizationResolution, std::string outputDirectory, bool flipTextureV, uint8_t alphaCutoff, unsigned int threadCount, const DisplaceOptions& displace, bool noTransparent) {
     using namespace projv::core;
     info("--------------------------------------------");
     info("  ProjectV Voxelizer");
@@ -587,6 +588,21 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
         return; // importModel has already logged why.
     }
     info("  {} ({} mesh(es), {} material(s)).", model.formatName, model.meshCount, model.materials.size());
+
+    // --no-transparent: triangles of see-through materials (windows, mostly) are dropped before
+    // anything is measured or sampled, so a window is an opening rather than a solid pane.
+    if (noTransparent) {
+        size_t kept = 0, dropped = 0;
+        for (size_t t = 0; t < model.triangleMaterials.size(); t++) {
+            if (model.materials[model.triangleMaterials[t]].transparent) { dropped++; continue; }
+            model.triangleMaterials[kept] = model.triangleMaterials[t];
+            for (int v = 0; v < 3; v++) model.vertices[kept * 3 + v] = model.vertices[t * 3 + v];
+            kept++;
+        }
+        model.triangleMaterials.resize(kept);
+        model.vertices.resize(kept * 3);
+        info("  --no-transparent: {} triangle(s) of transparent materials left out.", dropped);
+    }
 
     // Decode every texture the model references, once, into a slot parallel to model.textures.
     std::vector<Texture> textures(model.textures.size());
@@ -1356,7 +1372,7 @@ bool isMinecraftWorld(const std::filesystem::path& path) {
 
 int main(int argc, char** argv) {
     CLI::App app{"A voxelizer to convert polygon models (obj, fbx, gltf/glb, dae, stl, ply, 3ds, "
-                 "blend, ...) and Minecraft worlds to voxel ProjectV models."};
+                 "blend, ...), Minecraft worlds and Teardown levels to voxel ProjectV models."};
     argv = app.ensure_utf8(argv);
 
     std::string assetDirectory = "";
@@ -1379,6 +1395,13 @@ int main(int argc, char** argv) {
     std::string resourcePack = "";
     bool minecraftNoWater = false;
     bool forceMinecraft = false;
+    bool noTransparent = false;
+
+    teardown::Options teardownOptions;
+    std::vector<float> teardownFocus;
+    bool teardownNoPreview = false, teardownNoWater = false, teardownNoPhysics = false;
+    bool teardownBakeDynamic = false, teardownNoVoxscripts = false;
+    int teardownVerbosity = 1;
 
     app.add_option("-m, --modelDir, -a, --assetDir", assetDirectory,
         "Root directory to search for the model's textures. Defaults to the model file's own "
@@ -1453,13 +1476,72 @@ int main(int argc, char** argv) {
         "Without one, colors come from a built-in table covering the common blocks.");
     app.add_flag("--mc-no-water", minecraftNoWater, "Skip water, leaving oceans and lakes hollow.");
 
+    // --- Applies to every input ---
+    app.add_flag("--no-transparent", noTransparent,
+        "Leave out everything see-through -- glass, windows, water, ice -- so a renderer without "
+        "transparency sees through the openings instead of hitting a solid pane. Meshes: materials "
+        "with opacity below 1, transmission, or 'glass' in their name. Minecraft: glass, ice, slime, "
+        "honey and water. Teardown: glass voxels and water.");
+
+    // --- Teardown levels ---
+    // A level file passed with -f is detected by its <scene> root; the installed game is found in
+    // the Steam libraries (Flatpak or native) for --td-list, --td-level and --td-all.
+    app.add_flag("--td-list", teardownOptions.list, "List the Teardown levels installed (mods, DLC, Workshop), then exit.");
+    app.add_option("--td-level", teardownOptions.levels, "Installed Teardown level(s) to convert, by id from --td-list. "
+        "Each is written to <-o>/<id> (default converted/<id>).");
+    app.add_flag("--td-all", teardownOptions.all, "Convert every installed Teardown level.");
+    app.add_option("--td-game", teardownOptions.game, "Teardown's game folder, if it is not in a Steam library.");
+    app.add_option("--td-scale", teardownOptions.scale,
+        "World units per metre (default 10: one unit per 0.1 m Teardown voxel, ProjectV's convention).");
+    app.add_option("--td-block", teardownOptions.blockResolution, "World grid block size in voxels: 16, 64 or 256 (default 64).")
+        ->check(CLI::IsMember({16, 64, 256}));
+    app.add_flag("--td-bake-dynamic", teardownBakeDynamic, "Merge dynamic bodies (props, vehicles) into the static world.");
+    app.add_flag("--td-no-voxscripts", teardownNoVoxscripts, "Skip procedural geometry (trees, windows, terrain scripts).");
+    app.add_flag("--td-no-water", teardownNoWater, "Do not convert water surfaces.");
+    app.add_flag("--td-no-physics", teardownNoPhysics, "No physics material names and no entities.json.");
+    app.add_flag("--td-no-preview", teardownNoPreview, "Do not render preview.png beside each level.");
+    app.add_option("--td-preview-width", teardownOptions.previewWidth, "Preview width in pixels (default 1600).");
+    app.add_option("--td-preview-focus", teardownFocus, "Render only r metres around (x, z): x z r.")->expected(3);
+    app.add_option("--td-verify", teardownOptions.verify,
+        "Load converted folders through ProjectV and check every block, then exit.");
+    app.add_option("--td-rescale", teardownOptions.rescale,
+        "Multiply converted folders' compose.json by a factor, then exit: factor dir...")->expected(2, -1);
+    app.add_option("--td-dump-vox", teardownOptions.dumpVox, "Describe how a .vox file loads, then exit.");
+    app.add_option("--td-verbosity", teardownVerbosity, "0 quiet, 1 normal, 2 verbose, 3 every shape (default 1).");
+
     CLI11_PARSE(app, argc, argv);
 
     if (listFormats) {
         projv::core::info("Supported model formats:");
         projv::core::info("  {}", meshimport::supportedExtensions());
         projv::core::info("Also supported: Minecraft (Java Edition) worlds — pass the world directory.");
+        projv::core::info("Also supported: Teardown levels — pass a level .xml, or see --td-list.");
         return 0;
+    }
+
+    const bool teardownInput = teardownOptions.list || teardownOptions.all || !teardownOptions.levels.empty() ||
+                               !teardownOptions.verify.empty() || !teardownOptions.rescale.empty() ||
+                               !teardownOptions.dumpVox.empty() || (!modelFile.empty() && teardown::isLevelFile(modelFile));
+    if (teardownInput) {
+        teardown::g_verbosity = teardownVerbosity;
+        teardownOptions.levelFile = teardownOptions.list || teardownOptions.all || !teardownOptions.levels.empty() ? "" : modelFile;
+        teardownOptions.outputDirectory = outputDirectory;
+        teardownOptions.transparent = !noTransparent;
+        teardownOptions.water = !teardownNoWater;
+        teardownOptions.physics = !teardownNoPhysics;
+        teardownOptions.preview = !teardownNoPreview;
+        teardownOptions.separateDynamic = !teardownBakeDynamic;
+        teardownOptions.voxscripts = !teardownNoVoxscripts;
+        teardownOptions.threads = threadCount;
+        if (teardownFocus.size() == 3) {
+            teardownOptions.previewFocus = vec3(teardownFocus[0], 0.0f, teardownFocus[1]);
+            teardownOptions.previewRadius = teardownFocus[2];
+        }
+        if (teardownOptions.scale <= 0.0f) {
+            projv::core::error("--td-scale must be positive.");
+            return 1;
+        }
+        return teardown::run(teardownOptions);
     }
 
     if (modelFile.empty()) {
@@ -1490,6 +1572,7 @@ int main(int argc, char** argv) {
         }
         minecraftOptions.resourcePack = resourcePack;
         minecraftOptions.includeWater = !minecraftNoWater;
+        minecraftOptions.includeTransparent = !noTransparent;
 
         // A block is a voxel here, so there is no resolution to choose — the grid follows the
         // selected area. Saying so is better than silently ignoring the flag.
@@ -1528,7 +1611,7 @@ int main(int argc, char** argv) {
                                                            : HeightPolarity::Auto;
 
     voxelizeModel(modelPath, assetPath, resolution, outputDirectory, flipTextureV, alphaCutoff,
-                  threadCount, displaceOptions);
+                  threadCount, displaceOptions, noTransparent);
 
     return 0;
 }

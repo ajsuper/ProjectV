@@ -1,12 +1,14 @@
 # 20 — Mesh Voxelizer
 
-A command-line tool that converts polygon models **and Minecraft worlds** into ProjectV's Compose scene format. For meshes it parses geometry and material data and samples diffuse textures at each voxel's surface intersection using barycentric UV interpolation; for Minecraft it reads the save's block data directly. Either way the result is a grid-volume `.data` container plus the `compose.json` that places it — a folder that `loadComposeFromDisk` can open directly.
+A command-line tool that converts polygon models, **Minecraft worlds and Teardown levels** into ProjectV's Compose scene format. For meshes it parses geometry and material data and samples diffuse textures at each voxel's surface intersection using barycentric UV interpolation; for Minecraft it reads the save's block data directly; for Teardown it rebuilds the level from its XML and `.vox` files. Either way the result is a grid-volume `.data` container plus the `compose.json` that places it — a folder that `loadComposeFromDisk` can open directly.
 
 ## Supported Formats
 
 Any format [Assimp](https://github.com/assimp/assimp) can read — around 68 of them, including **OBJ**, **FBX**, **glTF / GLB**, **Collada (DAE)**, **STL**, **PLY**, **3DS**, **Blender (.blend)**, **DirectX (.x)**, **LWO**, **MD2/MD3/MD5** and **X3D**. Run `./mesh_voxelizer --list-formats` to print exactly what your build accepts.
 
 Plus **Minecraft (Java Edition) worlds** — see [Minecraft Worlds](#minecraft-worlds) below. Point `-f` at a world directory and the tool detects it automatically.
+
+Plus **Teardown levels** — see [Teardown Levels](#teardown-levels) below. Point `-f` at a level `.xml`, or convert what is installed with `--td-list` / `--td-level` / `--td-all`.
 
 Format handling is confined to [`include/mesh_import.hpp`](include/mesh_import.hpp), which flattens any input into a single world-space triangle soup; the voxelizer itself is format-blind. That header is also where the per-format quirks are absorbed:
 
@@ -104,6 +106,19 @@ entry on. The reason to do it is correctness, not a measurable colour gain.
 Use `--no-alpha-cutoff` for a model whose alpha channel carries something other than a cutout mask
 (some exporters write opacity, gloss, or plain garbage there). The symptom of needing it is geometry
 disappearing that should be solid.
+
+### `--no-transparent`
+
+Leaves out everything see-through, for every input: a window becomes an opening that a renderer
+without transparency can look through, instead of a solid pane it stops at.
+
+| Input | What counts as transparent |
+|---|---|
+| Mesh | Materials with opacity below 1, any transmission, or `glass` in their name (many exporters mark a window no other way). Their triangles are dropped before voxelizing. |
+| Minecraft | Glass of every kind (stained, tinted, panes), ice, slime, honey, and water. |
+| Teardown | Every voxel whose material is not fully opaque (glass), and water. Window frames stay. |
+
+On Villa Gordon this leaves out 4.2 M glass voxels and the ocean around the island.
 
 ## Displacement
 
@@ -287,6 +302,72 @@ Worlds older than **1.13** stored numeric block ids instead of a palette; those 
 
 Compressed chunk payloads are inflated with zlib, which Assimp already vendors — Minecraft support adds no new dependency.
 
+## Teardown Levels
+
+[Teardown](https://teardowngame.com)'s levels are already voxels (0.1 m each), so this path builds
+them rather than rasterizing anything. It reads the level files the game ships for its mods, DLCs and
+Workshop items, and the MagicaVoxel files they place, and writes a compose folder per level. Nothing
+of the game is redistributed: the tool reads your own install.
+
+```bash
+./mesh_voxelizer --td-list                                  # what is installed
+./mesh_voxelizer --td-level castle --td-level villagordon   # -> converted/castle, converted/villagordon
+./mesh_voxelizer --td-all -o ~/teardown-scenes              # everything (about 5 min, about 2 GB)
+./mesh_voxelizer -f path/to/mod/main.xml -o ./scene/        # one level file, wherever it is
+```
+
+The game is found in the Steam libraries, the Flatpak Steam's first and then a native one;
+`--td-game` names it otherwise. Each level folder holds:
+
+| File | What |
+|---|---|
+| `compose.json` | The world grid, the water, and one entry per dynamic body |
+| `world.data` | All static geometry, one grid of 64³ blocks |
+| `water.data` | Water surfaces, translucent, at 0.4 m (an 800 m ocean is 4 M voxels, not 64 M) |
+| `bodies/*.data` | One per *distinct* dynamic body; identical props share a file |
+| `entities.json` | `physics.static` on the world, `physics.rigidbody` on each body |
+| `physics_materials.json` | Teardown's substances (wood, masonry, glass, …) as a physics library |
+| `preview.png` | A software render, for checking a conversion without opening the engine |
+
+**Scale.** Every component carries `"scale": 10` (`--td-scale`), so one Teardown voxel is one world
+unit, as in ProjectV's own scenes; the `.data` files stay in metres. `--td-rescale <k> <dir>...`
+multiplies converted folders in place, and compounds if run twice.
+
+**Checked.** After writing, each level is loaded back through `loadComposeFromDisk` and every block
+decoded; the run fails if a voxel is missing. `--td-verify <dir>...` repeats that on folders on disk.
+
+### What is converted
+
+- **Shapes**: `vox` (whole files and named objects, scale, mirroring), `voxbox` (plain, or tiled
+  from a brush), `voxagon` (polygon extrusions) and `compound`. Child shapes merge into their parent,
+  so `hole` brushes and palette index 255 carve it, as in the game.
+- **Voxscripts** — the Lua that draws trees, windows, walls, roofs and terrain from heightmaps — run
+  against an implementation of the voxscript API, on the Lua the scene editor vendors. Without that
+  submodule the build still works and skips them.
+- **Prefabs**, groups, scripts, vehicles and rigs, with the editor's `instance=` wrapper transform
+  dropped the way the game drops it. The `sandbox` layer is active.
+- **Materials**: palette colour plus MATL (metal, glass, emission); the substance, from Teardown's
+  palette rows, becomes a physics material name. A world with more than 256 materials is clustered
+  in Oklab; the log reports the largest colour shift.
+- **Water**: rectangles, polygons and unbounded planes (held to the level plus 20 m).
+- MagicaVoxel `XYZI` models and Teardown's own compressed `TDCZ` chunk, which is not held to 256 per axis.
+
+### What is not
+
+- **The campaign.** Its levels ship only as compiled snapshots (`data/bin/*.bin`), not as level files.
+  Editor versions of several are among the mods (Lee Chemicals, Frustrum, Cullington, West Point
+  Marina, Villa Gordon, Tilläggaryd) and convert.
+- Behaviour: scripts, lights, joints, ropes, triggers. Vehicles arrive as separate bodies.
+- Detail textures (`texture`, `blendtexture`). Heightmap terrain is filled a few voxels deep, not solid.
+
+Other flags: `--td-bake-dynamic`, `--td-no-voxscripts`, `--td-no-water`, `--td-no-physics`,
+`--td-block 16|64|256`, `--td-no-preview`, `--td-preview-focus x z r`, `--td-verbosity 0-3`
+(3 prints every shape's source and world bounds), `--td-dump-vox file.vox`.
+
+The code is in [`teardown/`](teardown/): `level.cpp` walks the XML, `shapes.cpp` and `voxscript.cpp`
+build shapes, `vox_file.cpp` reads `.vox`, `canvas.cpp` holds and places voxels, `writer.cpp` writes
+through the engine's tree64 builder and `.data` writer.
+
 ## Color Quantization
 
 Voxels do not store colors. A voxel stores an 8-bit **material ID** into its component's material palette, and that palette is capped at 255 entries for the whole component — the voxelizer's entire output is one component. A textured mesh sampled naively yields tens or hundreds of thousands of distinct colors, so the loader would hit the cap, log `internMaterial: palette full`, and hand every remaining voxel `INVALID_MATERIAL`.
@@ -348,5 +429,7 @@ them rather than a reason not to.
 - [zlib](https://zlib.net/) — inflating the compressed NBT in Minecraft region files. Comes from Assimp's bundled copy, so it costs no additional dependency
 - [stb_image](https://github.com/nothings/stb) — texture loading, from files, from embedded bytes, and from resource packs
 - [CLI11](https://github.com/CLIUtils/CLI11) — command-line argument parsing
+- [pugixml](https://pugixml.org) 1.14 — Teardown level files. Vendored in `include/pugixml/` with its MIT licence
+- [Lua](https://www.lua.org) 5.4 — Teardown voxscripts. The scene editor's submodule (`../60-scene-editor/external/lua`), shared rather than vendored twice; optional
 
 NBT and Anvil parsing are implemented directly in `include/` rather than taken as a dependency; the formats are small and fully specified, and the C++ libraries for them are heavier than the few hundred lines they replace.
