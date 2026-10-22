@@ -231,14 +231,16 @@ void startup(projv::Application& app) {
 
     // The renderer is described by data, not code: render.json is the pass order, resources.json
     // names the shaders, textures and framebuffers. Paths inside resources.json are relative to
-    // the working directory, which is why the folder is passed as a path from here.
-    const std::string rendererDirectory = (assetDirectory() / "helloRenderer").string() + "/";
+    // the working directory, which is why the folder is passed as a path from here. This one is
+    // examples/shared/basicRenderer, the one-pass renderer every feature example draws with; the
+    // others call basic_renderer.h, which does exactly what this function and render() do.
+    const std::string rendererDirectory = (assetDirectory() / "basicRenderer").string() + "/";
     projv::RendererSpecification specification =
         projv::graphics::loadRendererSpecification(rendererDirectory);
     renderInstance.addRendererSpecification(1, specification);
 
     const std::string vertexShaderPath =
-        (assetDirectory() / "helloRenderer/helloShaders/vs_quad.bin").string();
+        (assetDirectory() / "basicRenderer/shaders/vs_quad.bin").string();
     bgfx::ShaderHandle vertexShader = projv::graphics::loadShader(vertexShaderPath);
 
     renderInstance.setActiveRenderer(projv::graphics::constructRendererSpecification(
@@ -282,10 +284,12 @@ void render(projv::Application& app) {
     };
 
     projv::core::vec2 resolution = renderInstance.getWindowResolution();
+    projv::core::vec4 viewOptions{0.0f};   // x: a crosshair, which nothing here aims
     auto renderer = renderInstance.getActiveRenderer();
     projv::graphics::setUniformToValue(renderer, "cameraPos", camera.position);
     projv::graphics::setUniformToValue(renderer, "cameraDir", direction);
     projv::graphics::setUniformToValue(renderer, "windowRes", resolution);
+    projv::graphics::setUniformToValue(renderer, "viewOptions", viewOptions);
 
     projv::graphics::renderConstructedRenderer(renderInstance, renderer, &gpuData);
 }

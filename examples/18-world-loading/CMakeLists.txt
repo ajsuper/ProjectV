@@ -1,5 +1,5 @@
 projv_add_example(world_loading
-    SOURCES    main.cpp
-    SHADERS    worldRenderer/worldShaders
-    ASSET_DIRS worldRenderer
+    SOURCES      main.cpp
+    RENDERER     ../shared/basicRenderer
+    INCLUDE_DIRS ../shared   # basic_renderer.h
 )

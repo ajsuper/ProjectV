@@ -13,11 +13,11 @@
 #       ASSET_FILES  LDR_RGBA_7.png                     # optional
 #       INCLUDE_DIRS include                            # optional
 #       LIBRARIES    ...                                # optional extra deps
-#       RENDERER     ../shared/voxelRenderer            # optional: a renderer folder several examples share
+#       RENDERER     ../shared/basicRenderer            # optional: a renderer folder several examples share
 #   )
 #
-# A shared RENDERER folder holds render.json, resources.json, shaders/ and include/ (its shader
-# includes). Its shaders are compiled once, by a target of its own that every example using it waits
+# A shared RENDERER folder holds render.json, resources.json, shaders/ and, if it has any, include/
+# (its shader includes). Its shaders are compiled once, by a target of its own that every example using it waits
 # on -- they are written beside their sources, so two examples compiling them would both claim the
 # same outputs -- and the folder is staged beside each binary under its own name.
 #
@@ -107,10 +107,14 @@ function(projv_add_example name)
         set(rendererTarget projv_renderer_${rendererName})
         if(NOT TARGET ${rendererTarget}_shaders)
             add_custom_target(${rendererTarget})   # what projv_compile_shaders hangs its shaders off
+            set(rendererIncludeDirs "")
+            if(EXISTS "${rendererDir}/include")
+                set(rendererIncludeDirs "${rendererDir}/include")
+            endif()
             projv_compile_shaders(
                 TARGET       ${rendererTarget}
                 SHADER_DIRS  "${rendererDir}/shaders"
-                INCLUDE_DIRS "${rendererDir}/include"
+                INCLUDE_DIRS ${rendererIncludeDirs}
             )
         endif()
         add_dependencies(${name} ${rendererTarget}_shaders)

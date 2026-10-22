@@ -1,8 +1,9 @@
 # Voxel renderer: rebuilt for speed, then feel, then looks
 
-The examples' game renderer (`examples/shared/voxelRenderer`, set up by `examples/shared/voxel_renderer.h`):
-Voxel Mayhem, Playground, Party, Multiplayer, and the gallery (`renderer_gallery --renderer voxel`).
-Explosion runs a fork (`25-explosion/nightRenderer`). Started 2026-10-20.
+The `_demo` examples' renderer (`examples/shared/voxelRenderer`, set up by `examples/shared/voxel_renderer.h`):
+Voxel Mayhem, Playground and Party, plus the gallery (`renderer_gallery --renderer voxel`). Multiplayer used it
+until 2026-10-20. Since then the feature examples draw with `examples/shared/basicRenderer`.
+Explosion runs a fork (`85-explosion-demo/nightRenderer`). Started 2026-10-20.
 
 Priorities, in order: **1 performance, 2 a polished feel** (responsive, no ghosting or smearing on
 moving things, steady when still), **3 visual complexity** (GI and the rest).

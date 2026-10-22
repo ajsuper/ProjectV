@@ -31,7 +31,7 @@
 #include <thread>
 
 #include "arena.h"
-#include "voxel_renderer.h"
+#include "basic_renderer.h"
 #include "core/application.h"
 #include "core/log.h"
 #include "core/paths.h"
@@ -330,14 +330,9 @@ namespace {
 
         if (options.headless) return;
         auto& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
-        // The examples' shared renderer (examples/shared/voxelRenderer): sun shadows, AO, a colour bounce,
-        // ray-traced GI, voxel reconstruction and TAA. Scaled to this arena: 64 m across, its finest
-        // voxels an eighth of a metre.
-        voxel_renderer::View& view = app.world.ctx().emplace<voxel_renderer::View>();
-        view.finestVoxel = 0.125f;
-        view.hazeRadius = 90.0f;
-        view.crosshair = true;   // what a throw or a blast aims at
-        voxel_renderer::install(app.world, renderInstance, here);
+        // The feature examples' basic renderer (examples/shared/basicRenderer): the voxels' colours under
+        // a fixed sun. This example is about the network; the party and playground demos draw better.
+        basic_renderer::install(renderInstance, here);
         app.world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
     }
 
@@ -355,7 +350,8 @@ namespace {
         vec3 direction{std::cos(camera.pitch) * std::cos(camera.yaw), std::sin(camera.pitch),
                        std::cos(camera.pitch) * std::sin(camera.yaw)};
         vec3 eye = ownPosition(app.world) + vec3(0.0f, 1.6f, 0.0f) - direction * 7.0f;
-        voxel_renderer::draw(app.world, renderInstance, gpuData, scene, eye, direction);
+        // A crosshair: what a throw or a blast aims at.
+        basic_renderer::draw(renderInstance, gpuData, scene, eye, direction, {.crosshair = true});
     }
 
     void shutdown(projv::Application& app) {

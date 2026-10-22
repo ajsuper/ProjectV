@@ -1,14 +1,12 @@
 # 10 — Scene Previewer
 
-A minimal, fast viewer for any Compose scene folder. It renders a scene's **pure albedos** — the colours stored in the material palette — with no lighting of any kind: no shadow ray, no ambient occlusion, no global illumination, no sky. One primary ray per pixel, and the voxel's colour written straight out.
-
-It is derived from the [renderer gallery](../30-renderers/) example's `fast` renderer, the cheapest of that example's seven, with everything except the primary march removed.
+A minimal, fast viewer for any Compose scene folder. It draws with the feature examples' [basic renderer](../shared/basicRenderer/): one primary ray per pixel, and the colour stored in the material palette under one fixed sun. No shadow ray, no ambient occlusion, no global illumination.
 
 ## Why
 
-The lit renderers answer "how does this scene look". This one answers "what is actually *in* this scene". Those are different questions, and the second one is the one you have after voxelizing something — a [MeshVoxelizer](../20-mesh-voxelizer/) import, a Minecraft world, a tree asset — when you want to know whether the data is right before spending path-tracer frames on it.
+The full renderers answer "how does this scene look". This one answers "what is actually *in* this scene". Those are different questions, and the second one is the one you have after voxelizing something — a [MeshVoxelizer](../20-mesh-voxelizer/) import, a Minecraft world, a tree asset — when you want to know whether the data is right before looking at it in a better renderer.
 
-Because nothing is modulated by light transport, what you see is exactly what a voxelizer wrote. A material that reads wrong here is wrong in the **data**, not in the lighting — which makes this the fastest way to tell those two failure modes apart. Common things it catches immediately: a model that sampled the mirrored half of its texture atlas (see MeshVoxelizer's `--flip-v`), a palette that quantized badly, an import that came out uniformly grey because its textures never resolved.
+Because nothing but plain N·L sits on top of the stored colour, what you see is what a voxelizer wrote. A material that reads wrong here is wrong in the **data**, not in the lighting — which makes this the fastest way to tell those two failure modes apart. Common things it catches immediately: a model that sampled the mirrored half of its texture atlas (see MeshVoxelizer's `--flip-v`), a palette that quantized badly, an import that came out uniformly grey because its textures never resolved.
 
 ## How to Build
 
@@ -81,7 +79,7 @@ The Minecraft bounds are not arbitrary. A saved world is mostly underground ston
 | `A` / `D` | Strafe left / right |
 | `R` / `F` | Move up / down |
 | Mouse | Look around (cursor is captured; `Esc` releases it, left-click re-captures) |
-| Scroll wheel | Movement speed (the lit renderers use this for the sun; there is no sun here) |
+| Scroll wheel | Movement speed (the lit renderers use this for the sun; the sun is fixed here) |
 | `H` | Re-frame the camera on the scene |
 
 ### Automatic framing
@@ -98,23 +96,11 @@ Both are reported at startup, along with the chunk and component counts:
 
 ## Renderer
 
-Three passes (`previewRenderer/render.json`), against the `fast` renderer's five and the tree64 path tracer's four:
-
-1. **albedo** — one primary ray per pixel through the shared voxel DDA (`pjv_utils_DDA.sc`), writing `fetchVoxelColor` straight out. Sub-pixel jittered (Halton) so the next pass can resolve anti-aliased edges; that jitter is the only stochastic input in the entire renderer. Misses write a neutral dark gradient rather than the sky model, so a bright or tinted backdrop does not drag your perception of the albedos in front of it.
-2. **accumulate** — a plain running mean of a still camera's jittered samples, reset the moment the camera moves. Not a denoiser and not a reprojecting TAA: the input is already noise-free, so all this does is anti-alias.
-3. **display** — copies to the back buffer, deliberately doing nothing to the image. See below.
-
-Per pixel that is **one** scene ray, against `2 + AO_SAMPLES` for the fast renderer and a full path for the others.
-
-### No tone map, no gamma
-
-The lit renderers ACES tone-map and gamma-encode on output because they produce open-ended HDR radiance. This one produces *reflectance*, already in `[0, 1]` and exactly the value in the material palette (`fetchVoxelColor` decodes R10G10B10 straight to 0–1). Tone mapping would desaturate and lift it; a gamma curve would wash it out relative to the source texture the voxelizer sampled. Either one means the previewer is no longer showing you the colour that is in the file, which is the one thing it exists to do — so the display pass is a straight copy.
-
-If a scene's palette was authored linear rather than sRGB, set `PREVIEW_APPLY_GAMMA` to `1` at the top of `display.frag`.
-
-### Reading shape in an unlit image
-
-Pure albedo means every face of a voxel is the same colour, so form is carried entirely by silhouette and flat regions read as flat. That is the honest view of the data and it is the default. If you want form legible instead, set `PREVIEW_FACE_SHADING` to `1` at the top of `albedo.frag`: it multiplies in a fixed per-face gradient from the voxel normal — no rays, no light source, just a constant tint per axis. The image is then no longer the unmodified stored colour, which is why it is off by default.
+One pass: [`examples/shared/basicRenderer`](../shared/basicRenderer/), staged beside the binary as
+`basicRenderer/` and set up by [`basic_renderer.h`](../shared/basic_renderer.h). It is the renderer every
+feature example uses. It fires one ray per pixel through the voxel DDA (`pjv_utils_DDA.sc`) and shades
+`fetchVoxelColor` by a fixed sun (N·L) and a little sky light, so every face is readable. There is no
+anti-aliasing and no tone map, so a lit face shows the palette colour almost unchanged.
 
 ## ProjectV Features Used
 
@@ -125,15 +111,10 @@ Pure albedo means every face of a voxel is the same colour, so form is carried e
 | **Logging** | `info`/`warn`/`perf` via the spdlog wrapper for the scene report and frame profiling |
 | **Compose I/O** | `loadComposeFromDisk` — opens any Compose scene folder |
 | **GPU Interface** | `createTexturesForScene`, `GPUData` — uploads the voxel scene to the GPU |
-| **Manage Resources** | `RendererSpecification`, `ConstructedRenderer`, `constructRendererSpecification` |
-| **Disk I/O** | `loadRendererSpecification`, `loadShader` |
-| **Render Instance** | Window creation, active renderer management, window resolution query |
-| **Perform Renderer** | `renderConstructedRenderer`, `setUniformToValue` |
+| **Render Instance** | Window creation, window resolution query; the renderer through `basic_renderer.h` |
 | **Scene** | `Scene::chunks`, `ChunkHeader::position` / `scale` — read directly for automatic framing |
 
 ## Third-Party Dependencies
 
 - [bgfx](https://github.com/bkaradzic/bgfx) — cross-platform GPU abstraction (via ProjectV)
 - [GLFW](https://www.glfw.org/) — window and input handling (via bgfx/ProjectV)
-
-No blue-noise LUT and no `stb_image`: there is nothing stochastic to decorrelate beyond the Halton sub-pixel jitter, which is analytic, and no textures to load.

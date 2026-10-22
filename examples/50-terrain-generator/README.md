@@ -77,23 +77,20 @@ fills in over the first few seconds.
 | `2` | Player camera — gravity and terrain collision; `Space` jumps |
 | `E` | Place a sphere of voxels 500 units ahead of the camera |
 | `Q` | Carve the same sphere out of the terrain |
-| Scroll wheel | Raise / lower the sun |
 
 `E` and `Q` are the interesting ones: they are the engine's editing API
 (`queueVoxelAdd`/`queueVoxelRemove` → `updateScene`) applied to geometry that was generated rather
 than loaded, on a grid that may have to expand to accept the edit.
 
-## Renderers
+## Renderer
 
-Two, both borrowed from [30-renderers](../30-renderers/):
-
-- `worldCascadeRenderer/` — world-space radiance cascades. The default.
-- `fastRenderer/` — direct sun plus RTAO. Cheaper, for when generation is what you are profiling
-  and you do not want the renderer in the measurement.
-
-Switching is an edit to the `loadRendererSpecification` path in `startup()`. Unlike the gallery,
-this example has no `--renderer` flag; it is a terrain demo that happens to need a renderer rather
-than a comparison of them.
+The feature examples' [basic renderer](../shared/basicRenderer/), set up by
+[`basic_renderer.h`](../shared/basic_renderer.h): one ray a pixel, the voxels' colours under a fixed
+sun. The engine's march walks the grid with no help from the renderer, so the same one-pass shader that
+draws a single chunk in Hello Voxel draws this whole streamed world. The example uploads the scene's
+changes in Update, on its own budget, so it calls `basic_renderer::render` (draw without the flush).
+With nothing else to the look, the renderer barely shows up in the frame time, and generation is what
+you measure.
 
 ## Measuring it
 
@@ -117,14 +114,10 @@ watching are `generateChunkVoxels` (worker cost), `updateChunkFromBrickMap` (tre
 | **Editing** | `queueVoxelAdd`, `queueVoxelRemove`, `updateScene`, `expandGridToInclude` |
 | **Scene query** | Grid cell lookup, component transforms |
 | **GPU interface** | `createTexturesForScene`, `flushSceneUpdates`, `updateChunkHeader` — incremental upload is the load-bearing one |
-| **Disk I/O** | `loadRendererSpecification`, `loadShader` |
-| **Render instance** | Window creation, active renderer |
-| **Perform renderer** | `renderConstructedRenderer`, `setUniformToValue` |
+| **Render instance** | Window creation; the renderer through `basic_renderer.h` |
 
 ## Third-party dependencies
 
-- [stb_image](https://github.com/nothings/stb) — the blue-noise LUT
-- `renderdoc_app.h` — optional RenderDoc capture hooks
 - [bgfx](https://github.com/bkaradzic/bgfx) and [GLFW](https://www.glfw.org/) (via ProjectV)
 
 Noise is generated in-tree (`include/terrain_noise.hpp`, `include/noise.hpp`); nothing is pulled in

@@ -41,6 +41,7 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
+#include "basic_renderer.h"
 #include "runtime/loading.h"
 #include "runtime/physics.h"
 #include "utils/compose_io.h"
@@ -282,12 +283,7 @@ void startup(projv::Application& app) {
     config.policy = projv::utils::loadNear(96.0f, 192.0f);
     if (!projv::runtime::openWorld(app, folder.string(), config)) std::exit(1);
 
-    projv::RendererSpecification specification =
-        projv::graphics::loadRendererSpecification((here / "worldRenderer").string() + "/");
-    renderInstance.addRendererSpecification(1, specification);
-    bgfx::ShaderHandle vertexShader = projv::graphics::loadShader((here / "worldRenderer/worldShaders/vs_quad.bin").string());
-    renderInstance.setActiveRenderer(
-        projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader));
+    basic_renderer::install(renderInstance, here);
 
     auto& scene = app.world.ctx().get<projv::Scene>();
     app.world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
@@ -300,17 +296,10 @@ void render(projv::Application& app) {
     auto& gpuData = app.world.ctx().get<projv::GPUData>();
     const auto& camera = app.world.ctx().get<Camera>();
 
-    // Blocks that arrived are new chunks; blocks that went are freed ones. This uploads both.
-    projv::graphics::flushSceneUpdates(scene, gpuData);
-
     vec3 direction{std::cos(camera.pitch) * std::cos(camera.yaw), std::sin(camera.pitch),
                    std::cos(camera.pitch) * std::sin(camera.yaw)};
-    auto renderer = renderInstance.getActiveRenderer();
-    projv::graphics::setUniformToValue(renderer, "cameraPos", camera.position);
-    projv::graphics::setUniformToValue(renderer, "cameraDir", direction);
-    projv::core::vec2 resolution = renderInstance.getWindowResolution();
-    projv::graphics::setUniformToValue(renderer, "windowRes", resolution);
-    projv::graphics::renderConstructedRenderer(renderInstance, renderer, &gpuData);
+    // Blocks that arrived are new chunks; blocks that went are freed ones. draw uploads both.
+    basic_renderer::draw(renderInstance, gpuData, scene, camera.position, direction);
 }
 
 void shutdown(projv::Application& app) {

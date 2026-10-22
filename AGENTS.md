@@ -22,22 +22,31 @@ the binary. Run them from there -- the engine resolves relative paths against th
 directory, and renderer folders name their shaders relative to it in `resources.json`:
 
 ```bash
-cd build/examples/hello_voxel      && ./hello_voxel
-cd build/examples/entities         && ./entities
-cd build/examples/sandbox          && ./sandbox            # SANDBOX_SELFTEST=600 plays itself
-cd build/examples/physics_demos    && ./physics_demos      # DEMOS_SELFTEST=1 checks all eleven (DEMOS_ONLY=9 or 2,11: some)
-cd build/examples/world_loading    && ./world_loading      # --headless-check: the loader alone, no window
-cd build/examples/voxel_mayhem     && ./voxel_mayhem       # MAYHEM_SELFTEST=1 checks it; MAYHEM_BENCH=cannon times a break
-cd build/examples/explosion        && ./explosion --map city|house|forest --graphics 1|2|3
-cd build/examples/mp_server        && ./mp_server          # then ./mp_client in build/examples/mp_client (selftest.sh: all headless)
-cd build/examples/party_client     && ./party_client       # hosts a party with bots; --host joins one (party_server: dedicated; selftest.sh)
-cd build/examples/playground_client && ./playground_client  # a sandbox to break things in together; --host joins one (playground_server; selftest.sh)
-cd build/examples/scene_previewer  && ./scene_previewer scenes/SmallVox
-cd build/examples/renderer_gallery && ./renderer_gallery --renderer fast
-cd build/examples/scene_editor     && ./scene_editor
+# Feature examples (the basic renderer, unless rendering is the subject)
+cd build/examples/hello_voxel       && ./hello_voxel
+cd build/examples/scene_previewer   && ./scene_previewer scenes/SmallVox
+cd build/examples/entities          && ./entities
+cd build/examples/sandbox           && ./sandbox            # SANDBOX_SELFTEST=600 plays itself
+cd build/examples/physics           && ./physics            # DEMOS_SELFTEST=1 checks all eleven (DEMOS_ONLY=9 or 2,11: some)
+cd build/examples/world_loading     && ./world_loading      # --headless-check: the loader alone, no window
+cd build/examples/renderer_gallery  && ./renderer_gallery --renderer fast
+cd build/examples/advanced_renderer && ./advanced_renderer
+cd build/examples/terrain_generator && ./terrain_generator
+cd build/examples/scene_editor      && ./scene_editor
+cd build/examples/mp_server         && ./mp_server          # then ./mp_client in build/examples/mp_client (selftest.sh: all headless)
+# Demos (_demo: many features at once, the full renderers)
+cd build/examples/voxel_mayhem_demo && ./voxel_mayhem_demo  # MAYHEM_SELFTEST=1 checks it; MAYHEM_BENCH=cannon times a break
+cd build/examples/explosion_demo    && ./explosion_demo --map city|house|forest --graphics 1|2|3
+cd build/examples/party_demo        && ./party_demo         # hosts a party with bots; --host joins one (party_demo_server: dedicated; selftest.sh)
+cd build/examples/playground_demo   && ./playground_demo    # a sandbox to break things in together; --host joins one (playground_demo_server; selftest.sh)
 ```
 
-Examples live in `examples/`, numbered in reading order (`00-hello-voxel` .. `90-playground`).
+Examples live in `examples/`, numbered in reading order (`00-hello-voxel` .. `95-playground-demo`).
+Two kinds: **feature examples** (`00`-`70`) teach one part of the engine and draw with
+`examples/shared/basicRenderer` (one pass: albedo under a fixed sun; `shared/basic_renderer.h`), unless
+rendering is what they teach (`30-renderers`, `40-advanced-renderer`, the scene editor's viewport).
+**Demos** (`80`+, `_demo` suffix on the folder and the target) combine many features to show them off, and
+draw with the full renderers (`shared/voxelRenderer`, the explosion's `nightRenderer`).
 Target names are not the directory names: `00-hello-voxel` builds `hello_voxel`, `30-renderers`
 builds `renderer_gallery`.
 
@@ -148,7 +157,7 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 |---|---|
 | `include/` `src/` | The engine. `core/`, `graphics/`, `utils/`, `data_structures/`, `runtime/`. |
 | `cmake/` | `ProjectVConfig.cmake.in`, plus the `projv_compile_shaders()` and `projv_add_example()` helpers. |
-| `examples/` | Sixteen examples, numbered in reading order. See `examples/README.md`. |
+| `examples/` | Twelve feature examples and four `_demo`s, numbered in reading order; `shared/` holds their renderers. See `examples/README.md`. |
 | `tests/unit/` | The automated suite (doctest, ctest). CPU only. |
 | `tests/manual/` | Harnesses that need a display. Not examples. See `tests/README.md`. |
 | `docs/data_structures/` | Format references: the `.data` container, compose scenes, entities, tree64, renderers. |

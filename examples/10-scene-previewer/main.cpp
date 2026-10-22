@@ -1,14 +1,12 @@
 // ProjectV Scene Previewer
-// A minimal, fast viewer for any Compose scene folder. It renders the scene's *pure albedos* —
-// the colours stored in the material palette — with no lighting of any kind: no shadow ray, no
-// ambient occlusion, no global illumination, no sky. One primary ray per pixel, and the voxel's
-// colour written straight out.
+// A minimal, fast viewer for any Compose scene folder. It draws with the feature examples' basic
+// renderer (examples/shared/basicRenderer): one primary ray per pixel, the colour stored in the
+// material palette under one fixed sun -- no shadows, no ambient occlusion, no global illumination.
 //
-// It is derived from the renderer gallery's `fast` renderer (the cheapest of that example's six)
-// with everything except the primary march stripped away. What remains is the answer to "what is
-// actually in this scene": a material that reads wrong here is wrong in the data, not in the
-// lighting. That makes it the tool to reach for after voxelizing something — MeshVoxelizer's
-// output, a Minecraft import, a tree asset — before spending path-tracer frames on it.
+// What remains is the answer to "what is actually in this scene": with nothing but N.L on top of
+// the stored colour, a material that reads wrong here is wrong in the data, not in the lighting.
+// That makes it the tool to reach for after voxelizing something -- MeshVoxelizer's output, a
+// Minecraft import, a tree asset -- before looking at it in a better renderer.
 //
 // Usage:
 //   ./scene_previewer [scene-directory]
@@ -25,7 +23,7 @@
 //   A/D          — strafe left / right
 //   R/F          — move up / down
 //   Mouse        — look around (cursor is captured; Esc releases it, left-click re-captures)
-//   Scroll wheel — movement speed (the lit renderers use this for the sun; there is no sun here)
+//   Scroll wheel — movement speed (the lit renderers use this for the sun; the sun is fixed here)
 //   H            — re-frame the camera on the scene
 
 #include <algorithm>
@@ -43,7 +41,9 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/type_mapping.h"
+#include "core/paths.h"
 #include "utils/compose_io.h"
+#include "basic_renderer.h"
 
 #include <bgfx/bgfx.h>
 #include <chrono>
@@ -152,9 +152,8 @@ static CameraFraming frameScene(const projv::Scene& scene) {
 // Benchmark mode
 // =============================================================================
 
-// PREVIEW_BENCH=<frames> flies a scripted camera path, moving on EVERY frame -- the case that
-// matters, because a moving camera resets the accumulation and gets no help from history -- and
-// prints the mean GPU time of each pass over <frames> frames, then exits. Two runs measure the same
+// PREVIEW_BENCH=<frames> flies a scripted camera path, moving on every frame, and prints the mean
+// GPU time of each pass over <frames> frames, then exits. Two runs measure the same
 // views, so two builds are comparable. PREVIEW_BENCH_PATH picks the path:
 //   orbit (default) -- circles the framing's look-at point at the framing distance: the subject
 //                      seen from outside, mostly geometry with sky around it.
@@ -232,19 +231,7 @@ void startup(projv::Application& app) {
     projv::core::info("Framed camera at ({:.1f}, {:.1f}, {:.1f}), move speed {:.2f}/frame",
         framing.position.x, framing.position.y, framing.position.z, framing.moveSpeed);
 
-    projv::RendererSpecification rendererSpec =
-        projv::graphics::loadRendererSpecification("./previewRenderer/");
-    renderInstance.addRendererSpecification(1, rendererSpec);
-
-    bgfx::ShaderHandle vsh =
-        projv::graphics::loadShader("./previewRenderer/previewShaders/vs_quad.bin");
-    std::shared_ptr<projv::ConstructedRenderer> constructedRenderer =
-        projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vsh);
-
-    // No resource textures to upload: the previewer has no blue-noise LUT because it has nothing
-    // stochastic to decorrelate beyond the Halton sub-pixel jitter, which is analytic.
-
-    renderInstance.setActiveRenderer(constructedRenderer);
+    basic_renderer::install(renderInstance, projv::core::executableDirectory());
     // Per-view GPU timestamps are only collected with the profiler on.
     if (g_bench.frames > 0) bgfx::setDebug(BGFX_DEBUG_PROFILER);
     gpuData = projv::graphics::createTexturesForScene(scene);
@@ -277,7 +264,7 @@ void update(projv::Application& app) {
 #endif
 }
 
-// Render: handle camera input, upload the per-frame uniforms, dispatch the three passes.
+// Render: handle camera input, then draw.
 void render(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance =
         app.world.ctx().get<projv::graphics::RenderInstance>();
@@ -296,7 +283,6 @@ void render(projv::Application& app) {
         cameraInitialized = true;
     }
 
-    bool cameraMoved = false;
 
     // Cursor capture toggle: Esc releases the cursor (so it can leave the window), left-click
     // re-captures it. Only look around while captured.
@@ -334,7 +320,6 @@ void render(projv::Application& app) {
         const float pitchLimit = 1.55f; // ~89 degrees, just shy of gimbal flip.
         if (cameraPitch >  pitchLimit) cameraPitch =  pitchLimit;
         if (cameraPitch < -pitchLimit) cameraPitch = -pitchLimit;
-        cameraMoved = true;
     }
 
     if (g_bench.frames > 0) {
@@ -352,7 +337,6 @@ void render(projv::Application& app) {
                 std::cos(cameraPitch) * std::sin(cameraPhi) };
             cameraPosition = framing.center - lookDirection * framing.distance;
         }
-        cameraMoved = true;
     }
 
     projv::core::vec3 cameraDirection;
@@ -367,51 +351,31 @@ void render(projv::Application& app) {
     // proportional change whether the scene is 64 or 8192 voxels across.
     float moveSpeed = framing.moveSpeed * std::pow(1.2f, (float)g_speedScrollAccum);
 
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_W)) { cameraPosition += forwardDirection * moveSpeed; cameraMoved = true; }
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_S)) { cameraPosition -= forwardDirection * moveSpeed; cameraMoved = true; }
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_W)) { cameraPosition += forwardDirection * moveSpeed; }
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_S)) { cameraPosition -= forwardDirection * moveSpeed; }
     if (glfwGetKey(renderInstance.window, GLFW_KEY_A)) {
         float leftPhi = cameraPhi + 3.14159265f / 2;
         projv::core::vec3 leftDirection = { projv::core::cos(leftPhi), 0, projv::core::sin(leftPhi) };
         cameraPosition -= leftDirection * moveSpeed;
-        cameraMoved = true;
     }
     if (glfwGetKey(renderInstance.window, GLFW_KEY_D)) {
         float rightPhi = cameraPhi - 3.14159265f / 2;
         projv::core::vec3 rightDirection = { projv::core::cos(rightPhi), 0, projv::core::sin(rightPhi) };
         cameraPosition -= rightDirection * moveSpeed;
-        cameraMoved = true;
     }
 
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_R)) { cameraPosition[1] += moveSpeed; cameraMoved = true; }
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_F)) { cameraPosition[1] -= moveSpeed; cameraMoved = true; }
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_R)) { cameraPosition[1] += moveSpeed; }
+    if (glfwGetKey(renderInstance.window, GLFW_KEY_F)) { cameraPosition[1] -= moveSpeed; }
 
     // H re-frames on the scene, for when navigation has left the subject behind.
     if (glfwGetKey(renderInstance.window, GLFW_KEY_H)) {
         cameraPosition = framing.position;
         cameraPhi = framing.yaw;
         cameraPitch = framing.pitch;
-        cameraMoved = true;
     }
 
-    // The accumulate pass resets its running mean on this, so a stale value would freeze the
-    // image on the previous view.
-    static int frameCameraLastMovedOn = 0;
-    if (cameraMoved) frameCameraLastMovedOn = app.frameCount;
-
     projv::core::vec2 windowResolution = renderInstance.getWindowResolution();
-    projv::core::vec4 frameCount = {
-        (float)app.frameCount, (float)cameraMoved, (float)frameCameraLastMovedOn, 0.0f
-    };
-    projv::core::vec2 texelSize = { 1.0f / windowResolution.x, 1.0f / windowResolution.y };
-
-    std::shared_ptr<projv::ConstructedRenderer> renderer = renderInstance.getActiveRenderer();
-    projv::graphics::setUniformToValue(renderer, "cameraPos",  cameraPosition);
-    projv::graphics::setUniformToValue(renderer, "cameraDir",  cameraDirection);
-    projv::graphics::setUniformToValue(renderer, "windowRes",  windowResolution);
-    projv::graphics::setUniformToValue(renderer, "frameCount", frameCount);
-    projv::graphics::setUniformToValue(renderer, "texelSize",  texelSize);
-
-    projv::graphics::renderConstructedRenderer(renderInstance, renderer, &gpuData);
+    basic_renderer::draw(renderInstance, gpuData, app.world.ctx().get<projv::Scene>(), cameraPosition, cameraDirection);
 
     if (g_bench.frames > 0 &&
         recordBenchFrame(app.frameCount, int(windowResolution.x), int(windowResolution.y))) {

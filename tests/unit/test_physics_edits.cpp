@@ -371,7 +371,7 @@ TEST_CASE("a body carved to nothing before its first step is emptied too, not re
 }
 
 TEST_CASE("a copy of a prefab-shaped prototype, cracked through, splits") {
-    // How examples/17-physics-demos builds its bricks: one prototype asset with a chunk inside, and
+    // How examples/17-physics builds its bricks: one prototype asset with a chunk inside, and
     // every brick a duplicateComponent of it, sharing its geometry until edited.
     Fixture f;
     f.floor();

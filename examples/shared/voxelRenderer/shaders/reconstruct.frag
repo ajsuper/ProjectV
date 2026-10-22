@@ -4,7 +4,7 @@ $input v_texcoord0
 // =============================================================================
 // reconstruct.frag -- the render-resolution frame rebuilt at OUTPUT resolution, voxel by voxel, and
 // antialiased in the same stroke. Taken unchanged from the physics demos' renderer
-// (17-physics-demos/demoRenderer), which is where the turned-chunk support below was added.
+// (the physics example's demoRenderer, since retired), which is where the turned-chunk support below was added.
 //
 // It is bound by its texture fetches, not its maths: a fast path that skipped the coverage work for
 // pixels whose whole 3x3 window recorded one face measured SLOWER (0.44 -> 0.50 ms), because its own

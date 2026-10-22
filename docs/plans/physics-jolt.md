@@ -959,7 +959,8 @@ Physics adds one module, `runtime/physics`, and one engine change: system orderi
 **I6. Rendering.**
 - **No renderer changes.** Bodies are loose chunks, and their headers and the loose BVH are
   rebuilt as they are now.
-- (2026-10-14) The demos have their own renderer, `examples/17-physics-demos/demoRenderer/`:
+- (2026-10-14) The demos had their own renderer, `examples/17-physics-demos/demoRenderer/` (removed
+  2026-10-20: the example is now `17-physics`, drawn by the feature examples' basic renderer):
   quarter-resolution G-buffer with a sun shadow ray, SSAO, and rotation-aware voxel
   reconstruction (cd5956b). Engine-side speedups it brought: `PJV_NO_ANIMATION` compiles the
   animated march out, and chunk headers carry a content box (6 texels) that rays skip on a miss.

@@ -1,24 +1,29 @@
 # Bundled examples, in reading order. Each subdirectory declares itself with projv_add_example();
 # the helper lives in cmake/ProjectVExample.cmake alongside the shader rule it uses.
 #
-# The numbering is the order they are meant to be read, not a priority: 00 is the smallest thing
-# that draws a voxel, 60 is a complete editor.
+# Two kinds. Feature examples (00-70) each teach one part of the engine and draw with the basic
+# renderer (shared/basicRenderer), unless rendering is what they teach. Demos (80 and up, `_demo`)
+# put many features together to show what the engine can do, and draw with the full renderers.
+# The numbering is the order they are meant to be read, not a priority.
 include(ProjectVExample)
 
+# Feature examples.
 add_subdirectory(00-hello-voxel)
 add_subdirectory(10-scene-previewer)
 add_subdirectory(15-entities)
 add_subdirectory(16-sandbox)
-add_subdirectory(17-physics-demos)
+add_subdirectory(17-physics)
 add_subdirectory(18-world-loading)
-add_subdirectory(19-voxel-mayhem)
-add_subdirectory(25-explosion)
 add_subdirectory(30-renderers)
 add_subdirectory(40-advanced-renderer)
 add_subdirectory(50-terrain-generator)
 add_subdirectory(70-multiplayer)
-add_subdirectory(80-party)
-add_subdirectory(90-playground)
+
+# Demos.
+add_subdirectory(80-voxel-mayhem-demo)
+add_subdirectory(85-explosion-demo)
+add_subdirectory(90-party-demo)
+add_subdirectory(95-playground-demo)
 
 # Examples with third-party dependencies of their own. Each is skipped, with a reason, when its
 # submodule is not checked out -- an uninitialised submodule should not fail the whole build.

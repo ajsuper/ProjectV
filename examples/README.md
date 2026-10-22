@@ -1,8 +1,17 @@
 # ProjectV Examples
 
-Sixteen programs, ordered so that reading them in sequence teaches the engine. Each one is a
-complete application, not a snippet, and each has its own README explaining not just how to run it
-but why it exists and what it decided differently from its neighbours.
+Sixteen programs of two kinds. Each one is a complete application, not a snippet, and each has its own
+README explaining how to run it, why it exists and what it does differently from its neighbours.
+
+- **Feature examples** (`00`–`70`) each teach one part of the engine, and reading them in order teaches
+  the engine. They draw with the **basic renderer** ([`shared/basicRenderer`](shared/basicRenderer/),
+  set up by [`shared/basic_renderer.h`](shared/basic_renderer.h)): one ray a pixel, the voxel's colour
+  under a fixed sun, and nothing else. The image is plain, so what you see is the feature. The exceptions
+  are the examples whose subject is rendering: [30-renderers](30-renderers/),
+  [40-advanced-renderer](40-advanced-renderer/), and the scene editor's viewport.
+- **Demos** (`80` and up, named `_demo`) put many features together to show what the engine can do. They
+  draw with the full renderers: [`shared/voxelRenderer`](shared/voxelRenderer/) (probe-grid GI, AO,
+  voxel reconstruction, TAA), and the explosion's own night-capable fork of it.
 
 Everything builds from the repository root:
 
@@ -19,26 +28,31 @@ directory, and a renderer folder names its shaders relative to it in `resources.
 cd build/examples/hello_voxel && ./hello_voxel
 ```
 
-## The examples
+## Feature examples
 
 | | Example | What it teaches | Needs |
 |---|---|---|---|
 | **00** | [hello-voxel](00-hello-voxel/) | The startup sequence, at the smallest size that draws anything. Builds its voxels in memory, so there is nothing to download. | — |
-| **10** | [scene-previewer](10-scene-previewer/) | Loading a scene from disk, framing it automatically, flying around it. Pure albedo, no lighting — it shows what is *in* a scene rather than how it looks. | — |
+| **10** | [scene-previewer](10-scene-previewer/) | Loading a scene from disk, framing it automatically, flying around it. Albedo under a fixed sun and nothing else, so it shows what is *in* a scene rather than how it looks. | — |
 | **15** | [entities](15-entities/) | The runtime: entities linked to voxel components, systems driven by `Time`, `Input` and events, and entities saved beside the voxels in `entities.json` -- ECS components as themselves, linked by component id. | — |
 | **16** | [sandbox](16-sandbox/) | Everything at once, as a toy: prefabs (voxels plus their entity) spawned at runtime, physics in FixedUpdate with interpolated rendering, popping as an event with chain reactions, and an arena whose spawners are entities in its `entities.json`. Interactive. | — |
-| **17** | [physics_demos](17-physics-demos/) | Ten physics set pieces built from voxels in code: a crate pyramid and a wrecking ball, a brick wall blown into fragments, a barrage of balls of five sizes, a spinning kinematic beam sweeping a field, two giants colliding, and joints (a plank bridge, a windmill, a door, a breakable chain), a car made of joints that you drive, gears turning a winch, a trebuchet shattering stone walls, and crates sliding down ramps of ice, wood and slate into walls of rubber, oak and clay (physics materials). Interactive; `DEMOS_SELFTEST=1` checks them. | — |
+| **17** | [physics](17-physics/) | Eleven physics set pieces built from voxels in code: a crate pyramid and a wrecking ball, a brick wall blown into fragments, a barrage of balls of five sizes, a spinning kinematic beam sweeping a field, two giants colliding, and joints (a plank bridge, a windmill, a door, a breakable chain), a car made of joints that you drive, gears turning a winch, a trebuchet shattering stone walls, and crates sliding down ramps of ice, wood and slate into walls of rubber, oak and clay (physics materials). Interactive; `DEMOS_SELFTEST=1` checks them. | — |
 | **18** | [world-loading](18-world-loading/) | Loading part of a world: a 768 m terrain opened with no voxels, blocks read around the camera on a worker thread as you fly, decided by one rule (`loadNear`, `loadInside`, `loadEverything`, or your own). | — |
-| **19** | [voxel-mayhem](19-voxel-mayhem/) | Every physics feature in one world, all at once: a 220 m park -- a castle that breaks, a Ferris wheel, a domino spiral, balloons, jump pads, a car, a wrecking ball, a quarry to dig -- and eight tools (cannon, blast, pickaxe, dig, spawn, TNT, orb, push). Rendered with one-bounce ray-traced GI. Interactive; `MAYHEM_SELFTEST=1` checks it. | — |
 | **20** | [mesh-voxelizer](20-mesh-voxelizer/) | Getting your own data in: meshes and Minecraft worlds to Compose scenes. Headless command-line tool. | Assimp submodule |
-| **25** | [explosion](25-explosion/) | A big explosion, three ways -- a city, a house on a suburban street, a pine forest flattened like Tunguska -- by day or on a dark night. Fracture at scale (one strike takes a whole building apart, by a fracture pattern of its own), collapse, thousands of trees knocked flat and bent over by voxel edits, and a mushroom cloud of glowing voxel embers traced in the G-buffer. `--graphics 1\|2\|3` trades lighting for frame rate; `EXPLOSION_RECORD` renders a real-time video in slow motion. | — |
 | **30** | [renderers](30-renderers/) | Seven renderers over one scene and one camera — the comparison is the point. Accumulation, reprojection, per-face GI, and four cascade variants. | — |
 | **40** | [advanced-renderer](40-advanced-renderer/) | The good renderer, brought up to the engine as it is today: fourteen passes, world-space probe GI, animation, transparency and refraction. | — |
 | **50** | [terrain-generator](50-terrain-generator/) | Procedural generation and streaming: chunks built on worker threads and uploaded while you fly. | — |
 | **60** | [scene-editor](60-scene-editor/) | A complete tool. ImGui docking, the scene living inside a panel, tools, undo, and Lua-scripted brushes. | ImGui + Lua submodules |
 | **70** | [multiplayer](70-multiplayer/) | A dedicated server and clients as separate programs over UDP: a headless server simulating every player, clients that join, see each other and walk. `selftest.sh` runs all three headless. | — |
-| **80** | [party](80-party/) | A whole little game on the engine, for three or four friends: five party games in turn over a sea of lava -- bomb tag, a race with bridges to build, a tower-building climb, tiles that drop, and copying a shape in cubes -- scored over a match, bots in the empty seats, first or third person. Host it, join it, or run a dedicated server; `selftest.sh` plays it headless. | — |
-| **90** | [playground](90-playground/) | A physics sandbox for up to four friends over the network: a castle, chimneys, a house, a greenhouse and a bridge to break with a cannon, blasts, TNT, digging and pushing; crates and balls to throw, stone to build with, the Moon's gravity, and a reset. `selftest.sh` checks it headless. | — |
+
+## Demos
+
+| | Demo | What it shows | Needs |
+|---|---|---|---|
+| **80** | [voxel-mayhem-demo](80-voxel-mayhem-demo/) | Every physics feature in one world, all at once: a 220 m park -- a castle that breaks, a Ferris wheel, a domino spiral, balloons, jump pads, a car, a wrecking ball, a quarry to dig -- and eight tools (cannon, blast, pickaxe, dig, spawn, TNT, orb, push). Drawn with the demos' renderer: probe-grid GI, AO and TAA. Interactive; `MAYHEM_SELFTEST=1` checks it. | — |
+| **85** | [explosion-demo](85-explosion-demo/) | A big explosion, three ways -- a city, a house on a suburban street, a pine forest flattened like Tunguska -- by day or on a dark night. Fracture at scale (one strike takes a whole building apart, by a fracture pattern of its own), collapse, thousands of trees knocked flat and bent over by voxel edits, and a mushroom cloud of glowing voxel embers traced in the G-buffer. `--graphics 1\|2\|3` trades lighting for frame rate; `EXPLOSION_RECORD` renders a real-time video in slow motion. | — |
+| **90** | [party-demo](90-party-demo/) | A whole little game on the engine, for three or four friends: five party games in turn over a sea of lava -- bomb tag, a race with bridges to build, a tower-building climb, tiles that drop, and copying a shape in cubes -- scored over a match, bots in the empty seats, first or third person. Host it, join it, or run a dedicated server; `selftest.sh` plays it headless. | — |
+| **95** | [playground-demo](95-playground-demo/) | A physics sandbox for up to four friends over the network: a castle, chimneys, a house, a greenhouse and a bridge to break with a cannon, blasts, TNT, digging and pushing; crates and balls to throw, stone to build with, the Moon's gravity, and a reset. `selftest.sh` checks it headless. | — |
 
 The numbering is reading order, not priority. Two examples carry third-party submodules of their
 own; without them the configure step skips that example with a message naming what to check out,
@@ -57,13 +71,18 @@ with.
 
 **Want to see your own model** — [20-mesh-voxelizer](20-mesh-voxelizer/) converts it, then
 [10-scene-previewer](10-scene-previewer/) shows you what came out. That pairing is deliberate: the
-previewer applies no lighting at all, so anything that looks wrong there is wrong in the data.
+previewer adds nothing but N·L, so anything that looks wrong there is wrong in the data.
 
 **Here about rendering** — [30-renderers](30-renderers/) is the survey and
 [40-advanced-renderer](40-advanced-renderer/) is the destination.
 
 **Building a tool** — [60-scene-editor](60-scene-editor/) is the one that renders the scene into a
 panel rather than the window, which is the thing every editor-shaped application needs first.
+
+**Want to see what it can do** — the demos. [80-voxel-mayhem-demo](80-voxel-mayhem-demo/) is every
+physics feature at once, [85-explosion-demo](85-explosion-demo/) is fracture at the scale of a city,
+and [90-party-demo](90-party-demo/) and [95-playground-demo](95-playground-demo/) are networked games
+for friends.
 
 ## A caveat about the bundled scenes
 

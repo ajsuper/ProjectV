@@ -42,9 +42,10 @@ Two things are this demo's own, not the engine's:
 The materials are in `arena/physics_materials.json`, so a client with another library is refused with
 the rest of the scene files.
 
-It is drawn with the examples' shared renderer (`examples/shared/voxelRenderer`, first written for
-Voxel Mayhem): sun shadows, screen-space AO and a colour bounce, one-bounce ray-traced GI, voxel
-reconstruction and TAA, with a crosshair for aiming.
+It is drawn with the feature examples' basic renderer ([`examples/shared/basicRenderer`](../shared/basicRenderer/)):
+the voxels' colours under a fixed sun, with a crosshair for aiming. The example is about the network.
+[90-party-demo](../90-party-demo/) and [95-playground-demo](../95-playground-demo/) are full games on
+the same networking, drawn with the full renderer.
 
 Your own player moves the moment you press a key. The client walks it too, and the server puts it
 right when the two differ (prediction).

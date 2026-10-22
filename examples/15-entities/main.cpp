@@ -45,6 +45,7 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
+#include "basic_renderer.h"
 #include "runtime/entities.h"
 #include "runtime/scene_bridge.h"
 #include "utils/compose_io.h"
@@ -246,13 +247,7 @@ void startup(projv::Application& app) {
     app.world.on_construct<Orbit>().connect<&startOrbit>();
     projv::runtime::spawnEntities(app.world);
 
-    projv::RendererSpecification specification =
-        projv::graphics::loadRendererSpecification((here / "entitiesRenderer").string() + "/");
-    renderInstance.addRendererSpecification(1, specification);
-    bgfx::ShaderHandle vertexShader =
-        projv::graphics::loadShader((here / "entitiesRenderer/entitiesShaders/vs_quad.bin").string());
-    renderInstance.setActiveRenderer(projv::graphics::constructRendererSpecification(
-        renderInstance.getRendererSpecification(1), vertexShader));
+    basic_renderer::install(renderInstance, here);
 
     app.world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
     projv::core::info("Entities: {} entities, {} component(s) in the scene.",
@@ -265,18 +260,10 @@ void render(projv::Application& app) {
     auto& gpuData = app.world.ctx().get<projv::GPUData>();
     const auto& camera = app.world.ctx().get<Camera>();
 
-    // The bridge has rewritten the moved chunks' headers on the CPU; this is what reaches the GPU.
-    projv::graphics::flushSceneUpdates(scene, gpuData);
-
-    projv::core::vec3 position = camera.position;
     projv::core::vec3 direction{std::cos(camera.pitch) * std::cos(camera.yaw), std::sin(camera.pitch),
                                 std::cos(camera.pitch) * std::sin(camera.yaw)};
-    projv::core::vec2 resolution = renderInstance.getWindowResolution();
-    auto renderer = renderInstance.getActiveRenderer();
-    projv::graphics::setUniformToValue(renderer, "cameraPos", position);
-    projv::graphics::setUniformToValue(renderer, "cameraDir", direction);
-    projv::graphics::setUniformToValue(renderer, "windowRes", resolution);
-    projv::graphics::renderConstructedRenderer(renderInstance, renderer, &gpuData);
+    // The bridge has rewritten the moved chunks' headers on the CPU; draw flushes them to the GPU first.
+    basic_renderer::draw(renderInstance, gpuData, scene, camera.position, direction);
 }
 
 void shutdown(projv::Application& app) {

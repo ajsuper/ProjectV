@@ -42,19 +42,19 @@ namespace {
     bool g_shutdownRan = false;
     int  g_framesBeforeClose = 10;
 
-    // Borrows the scene previewer's renderer so the test drives a real ConstructedRenderer
+    // Borrows the feature examples' basic renderer (examples/shared/basicRenderer) so the test drives a real ConstructedRenderer
     // through the real submit path rather than a stand-in. The scene is left empty: this test
     // is about the loop, not about what is drawn.
     //
-    // The renderer has to be loaded with the working directory set to the example's own folder.
-    // Its resources.json names shader binaries as "./previewRenderer/previewShaders/albedo.bin"
+    // The renderer has to be loaded with the working directory set to the folder that holds it.
+    // Its resources.json names shader binaries as "./basicRenderer/shaders/basic.bin"
     // -- paths inside the data, resolved against the process CWD -- so pointing the loader at
     // the folder from elsewhere finds the JSON and then fails on every shader it names.
     // executableDirectory() does not help here: the coupling is in the scene data, not the call.
     // Making renderer folders relocatable is its own change; this test just obeys the rule.
-    const char* kExampleDir      = "../../examples/10-scene-previewer";
-    const char* kRendererDir     = "./previewRenderer/";
-    const char* kVertexShaderBin = "./previewRenderer/previewShaders/vs_quad.bin";
+    const char* kExampleDir      = "../../examples/shared";
+    const char* kRendererDir     = "./basicRenderer/";
+    const char* kVertexShaderBin = "./basicRenderer/shaders/vs_quad.bin";
 
     void startup(projv::Application& app) {
         std::error_code chdirError;

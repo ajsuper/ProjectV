@@ -1,7 +1,7 @@
 // The examples' shared renderer (examples/shared/voxelRenderer/): a G-buffer (one primary and one sun
 // shadow ray a render pixel), GI from a grid of probes round the camera, AO at two scales, the shade, the
 // voxel reconstruction, TAA and the display.
-// First written for Voxel Mayhem (examples/19-voxel-mayhem); plan: docs/plans/voxel-renderer.md.
+// First written for Voxel Mayhem (examples/80-voxel-mayhem-demo); plan: docs/plans/voxel-renderer.md.
 //
 //     projv_add_example(name ... RENDERER ../shared/voxelRenderer INCLUDE_DIRS ../shared)
 //

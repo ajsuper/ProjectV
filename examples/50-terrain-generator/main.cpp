@@ -39,6 +39,7 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/type_mapping.h"
+#include "core/paths.h"
 #include "utils/compose_io.h"
 #include "utils/editing.h"
 #include "utils/voxel_management.h"
@@ -48,11 +49,7 @@
 #include "rock_detail.hpp"
 #include "tree_placement.hpp"
 
-#include <dlfcn.h>
-#include "renderdoc_app.h"
-
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
+#include "basic_renderer.h"
 
 namespace fs = std::filesystem;
 
@@ -71,26 +68,6 @@ static inline float hash2f(int x, int z) {
 
 struct ivec3_hash { size_t operator()(const projv::core::ivec3& v) const { return size_t(v.x) * 73856093 ^ size_t(v.y) * 19349663 ^ size_t(v.z) * 83492791; } };
 
-struct FrameContext {
-    projv::core::vec3 cameraPosition, cameraDirection;
-    projv::core::vec3 prevCameraPosition, prevCameraDirection;
-    projv::core::vec3 sunDirection;
-    int frameCount;
-    bool cameraMoved;
-    int frameCameraLastMovedOn;
-    projv::core::vec2 windowResolution;
-};
-
-// Sun elevation angle (radians), driven by the mouse scroll wheel: scrolling up raises the
-// sun, scrolling down lowers it (through sunset and on below the horizon into night). Plain global (not ECS state)
-// because it's written from a GLFW callback on the same thread the render loop reads it from.
-static float g_sunElevation = 0.26f;
-
-void sunScrollCallback(GLFWwindow* /*window*/, double /*xoffset*/, double yoffset) {
-    const float sensitivity = 0.03f;
-    g_sunElevation += float(yoffset) * sensitivity;
-}
-
 struct CameraState {
     projv::core::vec3 position       = projv::core::vec3(0, 1000, 0);
     projv::core::vec3 prevPosition   = projv::core::vec3(0, 1000, 0);
@@ -101,24 +78,6 @@ struct CameraState {
     bool  playerMode = false;
     float playerVelocityY = 0.0f;
 };
-
-static void uploadCommonUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
-    projv::core::vec3 cp = ctx.cameraPosition, cd = ctx.cameraDirection;
-    projv::core::vec3 pp = ctx.prevCameraPosition, pd = ctx.prevCameraDirection;
-    projv::core::vec2 wr = ctx.windowResolution;
-    projv::core::vec2 texelSize = { 1.0f / wr.x, 1.0f / wr.y };
-    projv::core::vec4 frameCount = { (float)ctx.frameCount, ctx.cameraMoved ? 1.0f : 0.0f, (float)ctx.frameCameraLastMovedOn, 0.0f };
-    projv::core::vec4 sunDir = { ctx.sunDirection.x, ctx.sunDirection.y, ctx.sunDirection.z, 0.0f };
-
-    projv::graphics::setUniformToValue(renderer, "cameraPos",  cp);
-    projv::graphics::setUniformToValue(renderer, "cameraDir",  cd);
-    projv::graphics::setUniformToValue(renderer, "windowRes",  wr);
-    projv::graphics::setUniformToValue(renderer, "prevCameraPos", pp);
-    projv::graphics::setUniformToValue(renderer, "prevCameraDir", pd);
-    projv::graphics::setUniformToValue(renderer, "frameCount", frameCount);
-    projv::graphics::setUniformToValue(renderer, "texelSize",  texelSize);
-    projv::graphics::setUniformToValue(renderer, "sunDir",     sunDir);
-}
 
 // =============================================================================
 // Terrain state & chunk streaming
@@ -2958,7 +2917,6 @@ void startup(projv::Application& app) {
         app.world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1920, 1080, "ProjectV Terrain Generator");
     glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    glfwSetScrollCallback(renderInstance.window, sunScrollCallback);
 
     projv::Scene& scene    = app.world.ctx().emplace<projv::Scene>();
     projv::GPUData& gpuData = app.world.ctx().emplace<projv::GPUData>();
@@ -3071,20 +3029,9 @@ void startup(projv::Application& app) {
     // Create GPU textures (scene is empty — grid exists but no chunks yet)
     gpuData = projv::graphics::createTexturesForScene(scene);
 
-    // --- Set up renderer ---
-    projv::RendererSpecification spec = projv::graphics::loadRendererSpecification("./worldCascadeRenderer/");
-    renderInstance.addRendererSpecification(1, spec);
-    bgfx::ShaderHandle vsh = projv::graphics::loadShader("./worldCascadeRenderer/pathTracerShaders/vs_quad.bin");
-    auto cr = projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vsh);
-    renderInstance.setActiveRenderer(cr);
-
-    // Load blue-noise LUT (used by the path tracer for sample decorrelation).
-    {
-        int width, height, channels;
-        unsigned char* img = stbi_load("LDR_RGBA_7.png", &width, &height, &channels, 4);
-        projv::core::info("Blue-noise texture: {}x{}", width, height);
-        projv::graphics::setTextureToData(cr, 1, img, width, height);
-    }
+    // The feature examples' basic renderer (examples/shared/basicRenderer): the grid is marched like
+    // any other scene, and nothing about the look competes with the streaming for attention.
+    basic_renderer::install(renderInstance, projv::core::executableDirectory());
 
     // Start worker threads — leave 2 cores for the render thread and main thread
     int numWorkers = std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 2);
@@ -3560,68 +3507,9 @@ void render(projv::Application& app) {
     projv::GPUData& gpuData = app.world.ctx().get<projv::GPUData>();
     CameraState& cam = app.world.ctx().get<CameraState>();
 
-    static vec3 prevCameraPosition = cam.position;
-    static vec3 prevCameraDirection{0, 0, 1};
-    static bool prevInitialized = false;
-    static int frameCameraLastMovedOn = 0;
-    bool cameraMoved = false;
-
     vec3 camDir{cos(cam.pitch) * cos(cam.phi), sin(cam.pitch), cos(cam.pitch) * sin(cam.phi)};
-
-    // Detect camera movement for temporal reprojection.
-    if (length(cam.position - prevCameraPosition) > 0.001f ||
-        length(camDir - prevCameraDirection) > 0.001f) {
-        cameraMoved = true;
-    }
-
-    if (!prevInitialized) {
-        prevCameraPosition = cam.position;
-        prevCameraDirection = camDir;
-        prevInitialized = true;
-    }
-
-    if (cameraMoved) frameCameraLastMovedOn = app.frameCount;
-
-    // Sun elevation is mouse-scroll controlled (see g_sunElevation / sunScrollCallback);
-    // azimuth stays fixed.
-    const float sunAzX = -0.6402f, sunAzZ = 0.7682f;
-    vec3 sunDirection = { cos(g_sunElevation) * sunAzX, sin(g_sunElevation), cos(g_sunElevation) * sunAzZ };
-
-    FrameContext ctx;
-    ctx.cameraPosition = cam.position;
-    ctx.cameraDirection = camDir;
-    ctx.prevCameraPosition = prevCameraPosition;
-    ctx.prevCameraDirection = prevCameraDirection;
-    ctx.sunDirection = sunDirection;
-    ctx.frameCount = app.frameCount;
-    ctx.cameraMoved = cameraMoved;
-    ctx.frameCameraLastMovedOn = frameCameraLastMovedOn;
-    ctx.windowResolution = ri.getWindowResolution();
-
-    // --- RenderDoc auto-capture at frame 150 (polls; works with inject mode) ---
-    {
-        static RENDERDOC_API_1_6_0* rdoc = nullptr;
-        static bool rdocFound = false;
-        if (!rdocFound && app.frameCount % 10 == 0) {
-            if (void* mod = dlopen("librenderdoc.so", RTLD_NOW | RTLD_NOLOAD)) {
-                pRENDERDOC_GetAPI RENDERDOC_GetAPI = (pRENDERDOC_GetAPI)dlsym(mod, "RENDERDOC_GetAPI");
-                int ret = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_6_0, (void**)&rdoc);
-                if (ret == 1) { rdocFound = true; projv::core::info("[RDC] RenderDoc API loaded, will capture at frame 150"); }
-                else rdoc = nullptr;
-            }
-        }
-        if (rdocFound && rdoc && app.frameCount == 150) {
-            projv::core::info("[RDC] Triggering capture at frame {}", app.frameCount);
-            rdoc->TriggerCapture();
-            projv::core::info("[RDC] Capture triggered");
-        }
-    }
-
-    uploadCommonUniforms(ri.getActiveRenderer(), ctx);
-    projv::graphics::renderConstructedRenderer(ri, ri.getActiveRenderer(), &gpuData);
-
-    prevCameraPosition = cam.position;
-    prevCameraDirection = camDir;
+    // The scene's changes were flushed in Update, on its own budget; this only draws.
+    basic_renderer::render(ri, gpuData, cam.position, camDir);
 
     static auto lastTime = high_resolution_clock::now();
     auto now = high_resolution_clock::now();

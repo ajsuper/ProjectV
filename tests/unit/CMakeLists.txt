@@ -83,16 +83,16 @@ if(TARGET mp_server AND TARGET mp_bots)
 endif()
 
 # The party game as four processes (a server; three clients wandering, shoving, building, bombing).
-if(TARGET party_server AND TARGET party_client)
+if(TARGET party_demo_server AND TARGET party_demo)
     add_test(NAME party_selftest
-             COMMAND ${PROJECT_SOURCE_DIR}/examples/80-party/selftest.sh ${CMAKE_BINARY_DIR})
+             COMMAND ${PROJECT_SOURCE_DIR}/examples/90-party-demo/selftest.sh ${CMAKE_BINARY_DIR})
     set_tests_properties(party_selftest PROPERTIES LABELS net TIMEOUT 300)
 endif()
 
 # The playground as three processes (a server; two clients using every tool on the castle).
-if(TARGET playground_server AND TARGET playground_client)
+if(TARGET playground_demo_server AND TARGET playground_demo)
     add_test(NAME playground_selftest
-             COMMAND ${PROJECT_SOURCE_DIR}/examples/90-playground/selftest.sh ${CMAKE_BINARY_DIR})
+             COMMAND ${PROJECT_SOURCE_DIR}/examples/95-playground-demo/selftest.sh ${CMAKE_BINARY_DIR})
     set_tests_properties(playground_selftest PROPERTIES LABELS net TIMEOUT 180)
 endif()
 

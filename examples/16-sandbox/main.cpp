@@ -59,6 +59,7 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
+#include "basic_renderer.h"
 #include "runtime/entities.h"
 #include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
@@ -727,13 +728,7 @@ void startup(projv::Application& app) {
         }
     });
 
-    projv::RendererSpecification specification =
-        projv::graphics::loadRendererSpecification((here / "sandboxRenderer").string() + "/");
-    renderInstance.addRendererSpecification(1, specification);
-    bgfx::ShaderHandle vertexShader =
-        projv::graphics::loadShader((here / "sandboxRenderer/sandboxShaders/vs_quad.bin").string());
-    renderInstance.setActiveRenderer(projv::graphics::constructRendererSpecification(
-        renderInstance.getRendererSpecification(1), vertexShader));
+    basic_renderer::install(renderInstance, here);
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
     projv::core::info("Sandbox: {} spawner(s) found in the arena. Left click throws, right click pops.",
@@ -759,17 +754,8 @@ void render(projv::Application& app) {
     auto& gpuData = world.ctx().get<projv::GPUData>();
     const auto& camera = world.ctx().get<Camera>();
 
-    // New prefabs' geometry, moved bodies' headers, and deleted components, all in one flush.
-    projv::graphics::flushSceneUpdates(scene, gpuData);
-
-    vec3 position = camera.position;
-    vec3 direction = camera.forward();
-    projv::core::vec2 resolution = renderInstance.getWindowResolution();
-    auto renderer = renderInstance.getActiveRenderer();
-    projv::graphics::setUniformToValue(renderer, "cameraPos", position);
-    projv::graphics::setUniformToValue(renderer, "cameraDir", direction);
-    projv::graphics::setUniformToValue(renderer, "windowRes", resolution);
-    projv::graphics::renderConstructedRenderer(renderInstance, renderer, &gpuData);
+    // New prefabs' geometry, moved bodies' headers, and deleted components go up in draw's one flush.
+    basic_renderer::draw(renderInstance, gpuData, scene, camera.position, camera.forward(), {.crosshair = true});
 }
 
 void shutdown(projv::Application& app) {
