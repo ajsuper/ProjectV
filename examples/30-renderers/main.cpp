@@ -101,7 +101,8 @@ struct FrameContext {
     projv::core::vec3 cameraDirection;
     projv::core::vec3 prevCameraPosition;
     projv::core::vec3 prevCameraDirection;
-    bool              cameraMoved;
+    bool              cameraMoved;    // the camera or the sun
+    bool              sunMoved;       // the sun alone: the light changed, not just the view
     int               frameCount;
     int               frameCameraLastMovedOn;
     projv::core::vec2 windowResolution;
@@ -232,7 +233,8 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     vec4 cameraPos{ctx.cameraPosition, 1.0f}, cameraDir{ctx.cameraDirection, 0.0f};
     vec4 prevCameraPos{ctx.prevCameraPosition, 1.0f}, prevCameraDir{ctx.prevCameraDirection, 0.0f};
     vec4 sunDir{ctx.sunDirection, 0.0f};
-    vec4 frameCount{float(ctx.frameCount), ctx.cameraMoved ? 1.0f : 0.0f, 0.0f, 0.0f};
+    // z: the sun moved -- the light changed, so every history (the reservoirs' cached light included) starts over.
+    vec4 frameCount{float(ctx.frameCount), ctx.cameraMoved ? 1.0f : 0.0f, ctx.sunMoved ? 1.0f : 0.0f, 0.0f};
     vec4 reuse{g_restirReuse ? 1.0f : 0.0f, g_restirReuse ? 1.0f : 0.0f, 1.0f, 4.0f};   // temporal, spatial, visibility, M cap
     // For unattended captures (--capture): RESTIR_VIEW picks the starting view; RESTIR_POST=0, RESTIR_FOG=0
     // and RESTIR_SOFT=0 start with the post, the fog or the soft shadow off.
@@ -244,13 +246,16 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
         return true;
     }();
     (void)fromEnv;
-    vec4 denoise{1.0f, 1.0f, float(g_restirView), 32.0f};                           // a-trous, GI accumulation, view, its cap
+    vec4 denoise{1.0f, 1.0f, float(g_restirView), 12.0f};                           // a-trous, GI accumulation, view, its cap
     vec4 jitter{float(offset[0]), float(offset[1]), float(giStride), first ? 1.0f : 0.0f};
-    // The image's history: short while the camera or the sun moves, so changing light is not dragged along.
     // w: one render texel's width per unit of distance, for the tests that ask "is this the same surface?".
     const float renderHeight = std::max(ctx.windowResolution.y * RESTIR_RENDER_SCALE, 1.0f);
     const float pixelWidth = 2.0f * std::tan(30.0f * 3.14159265f / 180.0f) / renderHeight;
-    vec4 settings{6.0f, finest * 0.05f, ctx.cameraMoved ? 16.0f : 1024.0f, pixelWidth};
+    // The image's history: none when the sun moved (the light is new); short while the camera moves, so
+    // changing light is not dragged along; 64 frames on a still view -- enough to average the jitter and
+    // what noise is left, short enough that the GI's own history, not this one, decides how fast it settles.
+    const float imageHistory = ctx.sunMoved ? 1.0f : ctx.cameraMoved ? 16.0f : 64.0f;
+    vec4 settings{6.0f, finest * 0.05f, imageHistory, pixelWidth};
     setUniformToValue(renderer, "cameraPos", cameraPos);
     setUniformToValue(renderer, "cameraDir", cameraDir);
     setUniformToValue(renderer, "prevCameraPos", prevCameraPos);
@@ -899,6 +904,10 @@ void render(projv::Application& app) {
     // = cos(theta)*azimuth + sin(theta)*up is unit-length for a unit azimuth, so no renormalize. A
     // sun change counts as "moved" so the temporal history refreshes to the new lighting.
     static double prevSunScroll = 0.0;
+    // GALLERY_SUN_STEP_AT=n lowers the sun three notches (~14 degrees) at frame n: with --capture and
+    // GALLERY_CAPTURE_AT, how fast the image follows a change of light.
+    static const int sunStepAt = std::getenv("GALLERY_SUN_STEP_AT") ? std::atoi(std::getenv("GALLERY_SUN_STEP_AT")) : -1;
+    if (app.frameCount == sunStepAt) g_sunScrollAccum -= 3.0;
     float sunAngle = 0.86f + (float)g_sunScrollAccum * 0.08f;  // radians; ~0.86 default, ~4.6deg/notch
     const float sunAzX = -0.6402f, sunAzZ = 0.7682f;          // = normalize(vec2(-0.5, 0.6))
     float ca = projv::core::cos(sunAngle), sa = projv::core::sin(sunAngle);
@@ -917,6 +926,7 @@ void render(projv::Application& app) {
     ctx.prevCameraPosition     = prevCameraPosition;
     ctx.prevCameraDirection    = prevCameraDirection;
     ctx.cameraMoved            = cameraMoved;
+    ctx.sunMoved               = sunMoved;
     ctx.frameCount             = app.frameCount;
     ctx.frameCameraLastMovedOn = frameCameraLastMovedOn;
     ctx.windowResolution       = renderInstance.getWindowResolution();
@@ -957,11 +967,19 @@ void render(projv::Application& app) {
             app.closeRequested = true;
         }
     }
-    // --capture: three frames in a row, for what changes between them with nothing moving.
+    // --capture: three frames in a row, for what changes between them with nothing moving -- or the frames
+    // GALLERY_CAPTURE_AT lists ("4,8,16,300"), for how fast an image settles after the first frame.
     if (!g_measure.capture.empty()) {
-        if (app.frameCount >= 300 && app.frameCount <= 302)
+        static const std::vector<int> frames = [] {
+            std::vector<int> list;
+            if (const char* v = std::getenv("GALLERY_CAPTURE_AT"))
+                for (const char* c = v; *c; ) { list.push_back(std::atoi(c)); while (*c && *c != ',') ++c; if (*c) ++c; }
+            if (list.empty()) list = {300, 301, 302};
+            return list;
+        }();
+        if (std::find(frames.begin(), frames.end(), app.frameCount) != frames.end())
             bgfx::requestScreenShot(BGFX_INVALID_HANDLE, fmt::format("{}-{}", g_measure.capture, app.frameCount).c_str());
-        if (app.frameCount > 306) app.closeRequested = true;
+        if (app.frameCount > *std::max_element(frames.begin(), frames.end()) + 4) app.closeRequested = true;
     }
 
     // Remember this frame's camera for next frame's reprojection.

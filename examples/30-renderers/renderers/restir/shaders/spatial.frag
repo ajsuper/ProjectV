@@ -7,11 +7,16 @@ $input v_texcoord0
 // only if formed on a similar surface and weighted by the target here times the Jacobian. A sample taken
 // from a neighbour is then checked for visibility from this pixel's point (one shadow-kind ray, through
 // the one restirTrace call site) -- without it, light leaks round corners -- and a blocked one is replaced by
-// the pixel's own reservoir. (The result is not fed back: the
-// temporal history stays pass 3's, as in the paper.)
+// the pixel's own reservoir.
 //
-// Output, giIrr: the indirect light leaving the surface, divided by its albedo -- Lo cos W / pi -- which
-// the denoiser filters and the composite multiplies back by the full-res albedo.
+// The result IS fed back: it is next frame's temporal history (temporal.frag reads it), as ReSTIR DI
+// does. That is what spreads a rare good path -- one GI pixel's bounce onto a sunlit patch -- to a wider
+// neighbourhood every frame, rather than once per frame from scratch: it is most of why the GI settles
+// in a handful of frames. The temporal pass's M cap keeps the feedback from piling up.
+//
+// Outputs: 0 giIrr, the indirect light leaving the surface, divided by its albedo -- Lo cos W / pi --
+// which the denoiser filters and the composite multiplies back by the full-res albedo; 1-4 the
+// reservoir (sres0..3, restir_common.sc's layout).
 //
 // Inputs: 0-3 res0..3 (pass 3, this frame).
 
@@ -33,7 +38,7 @@ Reservoir restirLoad(ivec2 at) {
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     Reservoir self = restirLoad(p);
-    if (self.t1 < 0.0) { gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); return; }
+    if (self.t1 < 0.0) { gl_FragData[0] = vec4(0.0, 0.0, 0.0, 0.0); restirWrite1(self); return; }
     vec3 x1 = self.x1;
     vec3 n1 = self.n1;
 
@@ -86,5 +91,9 @@ void main() {
         }
     }
     vec3 light = r.Lo * max(0.0, dot(n1, direction)) * r.W / RESTIR_PI;
-    gl_FragColor = vec4(light, 1.0);
+    r.x1 = x1;
+    r.n1 = n1;
+    r.t1 = self.t1;
+    gl_FragData[0] = vec4(light, 1.0);
+    restirWrite1(r);
 }

@@ -37,7 +37,7 @@ uniform vec4 cameraPos;
 uniform vec4 cameraDir;
 uniform vec4 prevCameraPos;   // last frame's camera, for every temporal pass
 uniform vec4 prevCameraDir;
-uniform vec4 frameCount;      // x = frame index, y = 1 when the camera or the sun moved this frame
+uniform vec4 frameCount;      // x = frame index, y = 1 when the camera or the sun moved this frame, z = 1 when the sun did
 uniform vec4 restirReuse;     // x temporal reuse, y spatial reuse, z visibility re-test, w temporal M cap
 uniform vec4 restirDenoise;   // x a-trous on, y GI accumulation on, z view (0 image, 1 indirect, 2 direct), w GI history cap
 uniform vec4 restirJitter;    // xy this frame's offset inside the block, z stride (4 or 2), w 1 = start every history over
@@ -216,6 +216,13 @@ Reservoir restirUnpack(vec4 a, vec4 b, vec4 c, vec4 d) {
     gl_FragData[1] = vec4(restirOctEncode((RESTIR_R).n2), (RESTIR_R).Lo.g, (RESTIR_R).Lo.b); \
     gl_FragData[2] = vec4((RESTIR_R).x1, (RESTIR_R).t1); \
     gl_FragData[3] = vec4(restirOctEncode((RESTIR_R).n1), (RESTIR_R).M, (RESTIR_R).W)
+// The same four, to outputs 1-4 (the spatial pass writes its light to 0). Literal indices: bgfx's
+// translation does not take an expression in gl_FragData[].
+#define restirWrite1(RESTIR_R) \
+    gl_FragData[1] = vec4((RESTIR_R).x2, (RESTIR_R).Lo.r); \
+    gl_FragData[2] = vec4(restirOctEncode((RESTIR_R).n2), (RESTIR_R).Lo.g, (RESTIR_R).Lo.b); \
+    gl_FragData[3] = vec4((RESTIR_R).x1, (RESTIR_R).t1); \
+    gl_FragData[4] = vec4(restirOctEncode((RESTIR_R).n1), (RESTIR_R).M, (RESTIR_R).W)
 
 // The target function at visible point (x1, n1): the sample's light, cosine-weighted. (The Lambertian
 // BRDF's albedo / pi is the same for every sample at a pixel and drops out.)

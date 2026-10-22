@@ -3,13 +3,14 @@ $input v_texcoord0
 
 // temporal.frag -- pass 3, GI resolution: ReSTIR GI temporal reuse.
 //
-// The candidate (pass 2) is combined with last frame's reservoir for the same surface: the candidate's
+// The candidate (pass 2) is combined with last frame's reservoir for the same surface -- the reservoir
+// the SPATIAL pass ended last frame with, so what spatial reuse found carries forward: the candidate's
 // visible point is carried through last frame's camera to a GI pixel, whose reservoir is kept only if
 // it was formed on this surface (normal and plane). Its M is capped (restirReuse.w) so old samples cannot
 // drown new ones, and its sample is weighted by the target here times the reconnection Jacobian (restirJacobian).
 // The result is this pixel's reservoir for this frame and the history for the next.
 //
-// Inputs: 0-3 cand0..3 (pass 2), 4-7 res0..3 (this pass, last frame). Outputs: res0..3.
+// Inputs: 0-3 cand0..3 (pass 2), 4 giIrr, 5-8 sres0..3 (the spatial pass, last frame). Outputs: res0..3.
 
 #include <bgfx_shader.sh>
 #include "restir_common.sc"
@@ -18,15 +19,17 @@ SAMPLER2D(cand0, 0);
 SAMPLER2D(cand1, 1);
 SAMPLER2D(cand2, 2);
 SAMPLER2D(cand3, 3);
-SAMPLER2D(res0, 4);
-SAMPLER2D(res1, 5);
-SAMPLER2D(res2, 6);
-SAMPLER2D(res3, 7);
+SAMPLER2D(sres0, 5);
+SAMPLER2D(sres1, 6);
+SAMPLER2D(sres2, 7);
+SAMPLER2D(sres3, 8);
 
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     Reservoir fresh = restirUnpack(texelFetch(cand0, p, 0), texelFetch(cand1, p, 0), texelFetch(cand2, p, 0), texelFetch(cand3, p, 0));
-    if (fresh.t1 < 0.0 || restirReuse.x < 0.5 || restirJitter.w > 0.5) { restirWrite(fresh); return; }
+    // No history on the first frame, nor when the sun moved: a reservoir's sample carries the light it
+    // saw (Lo), which a new sun has made wrong.
+    if (fresh.t1 < 0.0 || restirReuse.x < 0.5 || restirJitter.w > 0.5 || frameCount.z > 0.5) { restirWrite(fresh); return; }
 
     uint seed = uint(p.x) * 2654435761u + uint(p.y) * 40503u + uint(frameCount.x) * 9176u + 7u;
     restirPcg(seed);
@@ -38,7 +41,7 @@ void main() {
     vec2 then = restirWorldToUV(fresh.x1, prevCameraPos.xyz, prevCameraDir.xyz, res, inFront);
     ivec2 pp = ivec2(floor(then * res));
     if (inFront && pp.x >= 0 && pp.y >= 0 && pp.x < int(res.x) && pp.y < int(res.y)) {
-        Reservoir h = restirUnpack(texelFetch(res0, pp, 0), texelFetch(res1, pp, 0), texelFetch(res2, pp, 0), texelFetch(res3, pp, 0));
+        Reservoir h = restirUnpack(texelFetch(sres0, pp, 0), texelFetch(sres1, pp, 0), texelFetch(sres2, pp, 0), texelFetch(sres3, pp, 0));
         if (h.t1 >= 0.0 && h.M > 0.0 && restirSameSurface(h.x1, h.n1, fresh.x1, fresh.n1, fresh.t1)) {
             h.M = min(h.M, restirReuse.w);
             float jacobian = restirJacobian(h, fresh.x1);

@@ -69,7 +69,12 @@ cd build/examples/renderer_gallery
 --renderer <name>    which renderer to run (default: tree64)
 --scene <directory>  any folder holding a compose.json (default: the bundled Sponza)
 --list               print the available renderers and exit
+--look x,y,z,tx,ty,tz  start the camera at x,y,z looking at tx,ty,tz
+--capture <prefix>   save frames 300-302 as <prefix>-<frame>.tga, then exit
 ```
+
+For measuring: `GALLERY_CAPTURE_AT=4,8,16,300` captures those frames instead, and
+`GALLERY_SUN_STEP_AT=n` lowers the sun ~14° at frame n (how fast an image follows a change of light).
 
 Selection is a flag rather than a prompt so the gallery can be scripted. A screenshot matrix or a
 benchmark across all seven is a shell loop:

@@ -16,9 +16,9 @@ It started in the ray lab (the fork at `../ProjectV-raylab`, modes 12 and 13).
 |---|---|---|---|
 | 1 | `gbuffer` | ½ × ½ | Camera ray and one sun shadow ray (straight at the sun's centre: no noise), handing on the sun's visibility and its blocker's distance; the hit face and chunk rotation for the reconstruction |
 | 2 | `sample` | ¼ × ¼ | One candidate per GI pixel: a cosine bounce to x2, and x2's outgoing light (emission, sun, one more bounce with its sun) |
-| 3 | `temporal` | ¼ × ¼ | ReSTIR temporal reuse: the candidate against last frame's reservoir for the same surface |
-| 4 | `spatial` | ¼ × ¼ | ReSTIR spatial reuse: five neighbours' reservoirs, then a visibility ray for a borrowed sample; resolves to indirect light divided by albedo |
-| 5 | `gi_accumulate` | ¼ × ¼ | Temporal accumulation of that light, with luminance moments (variance) |
+| 3 | `temporal` | ¼ × ¼ | ReSTIR temporal reuse: the candidate against last frame's reservoir for the same surface -- the one the spatial pass ended last frame with (M capped at 4) |
+| 4 | `spatial` | ¼ × ¼ | ReSTIR spatial reuse: five neighbours' reservoirs, then a visibility ray for a borrowed sample; resolves to indirect light divided by albedo, and hands its reservoir on as next frame's temporal history |
+| 5 | `gi_accumulate` | ¼ × ¼ | Temporal accumulation of that light (12 frames at most), with luminance moments (variance) |
 | 6–9 | `atrous1/2/4/8` | ¼ × ¼ | À-trous filter at steps 1, 2, 4 and 8 (61 GI pixels across), edge-stopped by normal, plane and a loose (6σ) luminance test: the GI is meant to be soft |
 | 10 | `ssao` | ½ × ½ | Subtle screen-space AO: twelve samples, six voxels round, in a fixed 4×4 rotation pattern |
 | 10b | `shadow_soft` | ½ × ½ | The sun's light with a soft shadow: a penumbra as wide as the blocker's distance × the sun's width, found and filtered in screen space on the same surface (PCSS-style) |
@@ -79,7 +79,7 @@ width at that distance:
 - the GI history, the reservoir reuse and the upsample (`restirSameSurface`) widen their plane test by
   the GI pixel's width, and stop comparing normals once that width passes a voxel;
 - the denoiser's edge-stopping does the same;
-- the resolve keeps a still camera's history unconditionally, and while the camera moves clamps it to
+- the resolve keeps a still camera's history (64 frames) unconditionally, and while the camera moves clamps it to
   this frame's 3×3 neighbourhood instead of rejecting it surface by surface.
 
 Before, all of them demanded the exact same face and the distance shimmered: on Lee Chemicals, 23% of
@@ -98,6 +98,29 @@ weights blow up.
 A borrowed sample is checked for visibility before it is used. Without that, light leaks round
 corners; with the textbook fix (zeroing it), the image darkens where small lights sit behind corners,
 so a blocked one falls back to the pixel's own reservoir instead.
+
+## Histories, and how fast the light settles
+
+The reuse is in the **reservoirs** -- paths, re-weighted for each pixel and frame -- so the radiance
+histories on top are short. The spatial pass's reservoirs are the next frame's temporal history (as ReSTIR
+DI does), which spreads a rare good path a neighbourhood further each frame.
+
+| History | Length | Starts over when |
+|---|---|---|
+| reservoirs (`temporal`) | M ≤ 4 | the sun moves: a reservoir's cached light (`Lo`) is the old sun's |
+| GI light (`gi_accumulate`) | 12 frames | the sun moves, or the surface is new (reprojection) |
+| image (`resolve`) | 64 still, 16 moving | the sun moves; while moving, clamped to the 3×3 neighbourhood |
+
+Measured on the test room's window view, the sun lowered 14° (indirect light only, fraction of the
+change not yet shown): before, 0.99 / 0.85 / 0.42 at +2 / +16 / +64 frames -- the 32-frame GI history,
+the 1024-frame image history and the reservoirs all dragged the old light along; after, 0.78 / 0.42 /
+0.16, which is the GI settling from scratch. Flicker on a still view (low frequency, linear): 0.11% of
+the light before, 0.34% after.
+
+Not yet handled: a change of light the renderer is not told of (anything but the sun, in a game). A
+reservoir's `Lo` never expires, and the feedback passes it on; the fix is **validation** -- re-tracing
+a share of the reservoirs' paths each frame and dropping those whose light changed -- planned with
+ReSTIR PT (`docs/plans/restir-pt.md`).
 
 ## Keys
 

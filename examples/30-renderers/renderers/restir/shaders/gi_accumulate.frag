@@ -9,15 +9,15 @@ $input v_texcoord0
 // moments of luminance, for the variance the a-trous filter scales its luminance test by; a pixel with
 // little history takes a 3x3 spatial variance instead, so a new pixel is blurred harder.
 //
-// Inputs: 0 giIrr (pass 4); 1-4 res0..3 (this frame's visible points); 5-8 accIrr, accMom, accPos, accNrm
+// Inputs: 0 giIrr, 1-4 sres0..3 (pass 4: the light, and this frame's visible points); 5-8 accIrr, accMom, accPos, accNrm
 // (last frame). Outputs: accIrr (rgb, history length), accMom (m1, m2, variance), accPos, accNrm.
 
 #include <bgfx_shader.sh>
 #include "restir_common.sc"
 
 SAMPLER2D(giIrr, 0);
-SAMPLER2D(res2, 3);
-SAMPLER2D(res3, 4);
+SAMPLER2D(sres2, 3);
+SAMPLER2D(sres3, 4);
 SAMPLER2D(accIrr, 5);
 SAMPLER2D(accMom, 6);
 SAMPLER2D(accPos, 7);
@@ -26,8 +26,8 @@ SAMPLER2D(accNrm, 8);
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     vec3 current = texelFetch(giIrr, p, 0).rgb;
-    vec4 surface = texelFetch(res2, p, 0);
-    vec3 N = restirOctDecode(texelFetch(res3, p, 0).xy);
+    vec4 surface = texelFetch(sres2, p, 0);
+    vec3 N = restirOctDecode(texelFetch(sres3, p, 0).xy);
     vec3 P = surface.xyz;
     float t = surface.w;
     gl_FragData[2] = surface;
@@ -45,7 +45,7 @@ void main() {
     vec2 moments = vec2(0.0, 0.0);
     float historyLength = 0.0;
     float weight = 0.0;
-    if (restirDenoise.y > 0.5 && restirJitter.w < 0.5) {
+    if (restirDenoise.y > 0.5 && restirJitter.w < 0.5 && frameCount.z < 0.5) {   // the sun moved: start over
         bool nowInFront;
         bool thenInFront;
         vec2 uvNow = restirWorldToUV(P, cameraPos.xyz, cameraDir.xyz, res, nowInFront);
