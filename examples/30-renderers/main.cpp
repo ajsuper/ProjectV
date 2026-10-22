@@ -14,6 +14,7 @@
 //
 //   tree64              accumulation path tracer; resets whenever the camera moves
 //   reprojection        path traced, temporally reprojected, so it stays converged while moving
+//   restir              ReSTIR GI at a sixteenth of the pixels, denoised, then a temporal resolve
 //   fast                direct sun + screen-space AO, anti-aliased by TAA. Cheapest.
 //   face                per-face flat shading with full GI, accumulated by exact face identity
 //   radiance-cascade    screen-space radiance cascades
@@ -36,6 +37,7 @@
 //   --look x,y,z,tx,ty,tz   stands the camera at x,y,z looking at tx,ty,tz (default: the framing)
 //   --pan <rad>        turns the camera this much a frame (a moving-camera measurement)
 //   --voxel-folder <f> which staged folder the voxel renderer loads (default: voxelRenderer)
+//   --restir-gi <n>    restir traces GI for one pixel in n x n: 4 (a sixteenth, default) or 2 (a quarter)
 //
 // Selection is a flag rather than a prompt so the gallery can be scripted: a benchmark or a
 // screenshot matrix across all seven is a shell loop.
@@ -47,6 +49,10 @@
 //   Mouse        — look around (cursor is captured; Esc releases it, left-click re-captures)
 //   Scroll wheel — sun elevation
 //   T            — TAA on / off (voxel)
+//   Q            — reconstruction bypassed: point-sample the render resolution (reconstruction, restir)
+//   G            — the image / indirect light only / direct light only / ambient occlusion (restir)
+//   J            — ReSTIR reuse on / off (restir)
+//   C            — palette colours decoded from sRGB / read as linear (restir)
 
 #include <algorithm>
 #include <cmath>
@@ -169,6 +175,72 @@ static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRendere
     projv::graphics::setUniformToValue(renderer, "prevCameraDir", prevCameraDirection);
 }
 
+// The restir renderer's switches: G cycles what it shows (the image, the indirect light alone, the
+// direct alone, the ambient occlusion), J turns ReSTIR's reuse off -- each GI pixel's one fresh sample,
+// denoised -- for the A/B, and Q bypasses the reconstruction, as for the reconstruction renderer.
+static int  g_restirView = 0;
+static bool g_restirReuse = true;
+static bool g_restirSRGB = true;   // C: decode the palette's colours from sRGB (see restir_trace.sc)
+static int  g_restirStride = 4;   // --restir-gi: GI for one window pixel in stride x stride (4 or 2)
+static constexpr float RESTIR_RENDER_SCALE = 0.5f;   // its G-buffer, each way; resources.json's 0.5 targets
+
+// ReSTIR GI at a sixteenth (or a quarter) of the window's pixels, a G-buffer at half resolution each way
+// rebuilt to the window by the voxel renderer's reconstruction, then a temporal resolve.
+static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
+    using projv::core::vec4;
+    using projv::graphics::setUniformToValue;
+    // Surfaces are offset a twentieth of the finest voxel before a ray leaves them; the same-surface
+    // tests are scaled from it too.
+    static float finest = 0.0f;
+    if (finest <= 0.0f) {
+        for (const projv::Chunk& chunk : ctx.world->ctx().get<projv::Scene>().chunks)
+            if (chunk.alive && chunk.header.voxelScale > 0.0f)
+                finest = finest > 0.0f ? std::min(finest, chunk.header.voxelScale) : chunk.header.voxelScale;
+        if (finest <= 0.0f) finest = 1.0f;
+    }
+    // Which render texel of its block each GI pixel samples this frame (the block: the GI stride against
+    // the render resolution, 2 or 1): every one in turn, diagonals first.
+    const int giStride = std::max(1, int(float(g_restirStride) * RESTIR_RENDER_SCALE));
+    static const int order4[4][2] = {{0, 0}, {1, 1}, {1, 0}, {0, 1}};
+    const int* offset = order4[giStride == 2 ? ctx.frameCount % 4 : 0];
+    // Each render texel is traced through the centre of another of the 2x2 window pixels it covers each
+    // frame, as the voxel renderer does: a still view repeats the same four, and the resolve settles on them.
+    static const int cellOrder[4] = {0, 3, 1, 2};
+    const int cell = cellOrder[ctx.frameCount % 4];
+    vec4 jitterParams{(float(cell % 2) + 0.5f) * 0.5f - 0.5f, (float(cell / 2) + 0.5f) * 0.5f - 0.5f, 0.0f, 0.0f};
+    vec4 renderParams{0.0f, 0.0f, g_reconstructBypass ? 1.0f : 0.0f, 0.0f};
+    // SSAO six of the finest voxels round, darkening the indirect light by up to half; the palette's encoding.
+    vec4 look{6.0f * finest, 0.5f, g_restirSRGB ? 1.0f : 0.0f, 0.0f};
+    static bool first = true;
+
+    vec4 cameraPos{ctx.cameraPosition, 1.0f}, cameraDir{ctx.cameraDirection, 0.0f};
+    vec4 prevCameraPos{ctx.prevCameraPosition, 1.0f}, prevCameraDir{ctx.prevCameraDirection, 0.0f};
+    vec4 sunDir{ctx.sunDirection, 0.0f};
+    vec4 frameCount{float(ctx.frameCount), ctx.cameraMoved ? 1.0f : 0.0f, 0.0f, 0.0f};
+    vec4 reuse{g_restirReuse ? 1.0f : 0.0f, g_restirReuse ? 1.0f : 0.0f, 1.0f, 4.0f};   // temporal, spatial, visibility, M cap
+    vec4 denoise{1.0f, 1.0f, float(g_restirView), 32.0f};                              // a-trous, GI accumulation, view, its cap
+    vec4 jitter{float(offset[0]), float(offset[1]), float(giStride), first ? 1.0f : 0.0f};
+    // The image's history: short while the camera or the sun moves, so changing light is not dragged along.
+    // w: one render texel's width per unit of distance, for the tests that ask "is this the same surface?".
+    const float renderHeight = std::max(ctx.windowResolution.y * RESTIR_RENDER_SCALE, 1.0f);
+    const float pixelWidth = 2.0f * std::tan(30.0f * 3.14159265f / 180.0f) / renderHeight;
+    vec4 settings{6.0f, finest * 0.05f, ctx.cameraMoved ? 16.0f : 1024.0f, pixelWidth};
+    setUniformToValue(renderer, "cameraPos", cameraPos);
+    setUniformToValue(renderer, "cameraDir", cameraDir);
+    setUniformToValue(renderer, "prevCameraPos", prevCameraPos);
+    setUniformToValue(renderer, "prevCameraDir", prevCameraDir);
+    setUniformToValue(renderer, "sunDir", sunDir);
+    setUniformToValue(renderer, "frameCount", frameCount);
+    setUniformToValue(renderer, "restirReuse", reuse);
+    setUniformToValue(renderer, "restirDenoise", denoise);
+    setUniformToValue(renderer, "restirJitter", jitter);
+    setUniformToValue(renderer, "restirSettings", settings);
+    setUniformToValue(renderer, "restirLook", look);
+    setUniformToValue(renderer, "jitterParams", jitterParams);
+    setUniformToValue(renderer, "renderParams", renderParams);
+    first = false;
+}
+
 static bool measureSceneBounds(const projv::Scene& scene, projv::core::vec3& boundsMin, projv::core::vec3& boundsMax);
 
 // The examples' game renderer: its own loader (it scales its targets by the View's render scale) and its
@@ -244,6 +316,17 @@ static std::vector<RendererModule> buildRendererRegistry() {
         uploadReconstructionUniforms
     });
 
+    // ReSTIR GI: two bounces of light, traced for a sixteenth of the pixels and shared between pixels
+    // and frames by reservoir resampling, then denoised. Born in the ray lab, where it ran the whole
+    // frame in about a quarter of the path tracer's time at a similar or better image.
+    registry.push_back({
+        "restir",
+        "ReSTIR GI at a sixteenth of the pixels, SSAO, a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, C colours.",
+        "./renderers/restir/",
+        "./renderers/restir/shaders/vs_quad.bin",
+        uploadRestirUniforms
+    });
+
     // The one the games use, from examples/shared/voxelRenderer (staged as voxelRenderer/).
     registry.push_back({
         "voxel",
@@ -299,11 +382,13 @@ static bool parseCommandLine(int argc, char** argv, const std::vector<RendererMo
             return true;
         }
         if (argument == "--bench") { g_measure.bench = true; continue; }
-        if ((argument == "--capture" || argument == "--look" || argument == "--pan" || argument == "--voxel-folder") && i + 1 < argc) {
+        if ((argument == "--capture" || argument == "--look" || argument == "--pan" || argument == "--voxel-folder" ||
+             argument == "--restir-gi") && i + 1 < argc) {
             const char* value = argv[++i];
             if (argument == "--capture") g_measure.capture = value;
             else if (argument == "--pan") g_measure.pan = float(std::atof(value));
             else if (argument == "--voxel-folder") g_voxelFolder = value;
+            else if (argument == "--restir-gi") g_restirStride = std::atoi(value) == 2 ? 2 : 4;
             else if (std::sscanf(value, "%f,%f,%f,%f,%f,%f", &g_measure.from.x, &g_measure.from.y, &g_measure.from.z,
                                  &g_measure.at.x, &g_measure.at.y, &g_measure.at.z) == 6) g_measure.look = true;
             else { std::cerr << "--look takes x,y,z,tx,ty,tz\n"; return false; }
@@ -510,19 +595,29 @@ void startup(projv::Application& app) {
     }
 
     projv::RendererSpecification rendererSpec = projv::graphics::loadRendererSpecification(selectedRenderer.directory);
+    // restir's GI targets are its quarter-size ones; --restir-gi sets how far below the window they are.
+    if (selectedRenderer.id == "restir")
+        for (projv::Texture& texture : rendererSpec.resources.textures)
+            if (texture.scale == 0.25f) texture.scale = 1.0f / float(g_restirStride);
     renderInstance.addRendererSpecification(1, rendererSpec);
 
     bgfx::ShaderHandle vsh = projv::graphics::loadShader(selectedRenderer.vertexShaderPath);
     std::shared_ptr<projv::ConstructedRenderer> constructedRenderer = projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vsh);
 
-    // Load the blue-noise LUT used by the path tracers for sample decorrelation.
-    int width, height, channels;
-    unsigned char* img = stbi_load("LDR_RGBA_7.png", &width, &height, &channels, 4);
-    if (img) {
-        projv::core::info("Blue-noise texture: {}x{}", width, height);
-        projv::graphics::setTextureToData(constructedRenderer, 1, img, width, height);
-    } else {
-        projv::core::warn("Could not load LDR_RGBA_7.png; sampling will be correlated and noisier.");
+    // Load the blue-noise LUT used by the path tracers for sample decorrelation -- into texture 1, for
+    // the renderers that declare it there as a CPU-fed texture. (restir's texture 1 is a render target.)
+    bool wantsBlueNoise = false;
+    for (const projv::Texture& texture : rendererSpec.resources.textures)
+        if (texture.textureID == 1 && texture.origin == projv::CPUBuffer) wantsBlueNoise = true;
+    if (wantsBlueNoise) {
+        int width, height, channels;
+        unsigned char* img = stbi_load("LDR_RGBA_7.png", &width, &height, &channels, 4);
+        if (img) {
+            projv::core::info("Blue-noise texture: {}x{}", width, height);
+            projv::graphics::setTextureToData(constructedRenderer, 1, img, width, height);
+        } else {
+            projv::core::warn("Could not load LDR_RGBA_7.png; sampling will be correlated and noisier.");
+        }
     }
 
     renderInstance.setActiveRenderer(constructedRenderer);
@@ -697,6 +792,29 @@ void render(projv::Application& app) {
             projv::core::info("TAA: {}", g_voxelTAA ? "on" : "off");
         }
         prevT = t;
+    }
+
+    {
+        static bool prevG = false, prevJ = false, prevC = false;
+        bool g = glfwGetKey(renderInstance.window, GLFW_KEY_G) == GLFW_PRESS;
+        bool j = glfwGetKey(renderInstance.window, GLFW_KEY_J) == GLFW_PRESS;
+        bool c = glfwGetKey(renderInstance.window, GLFW_KEY_C) == GLFW_PRESS;
+        if (c && !prevC) {
+            g_restirSRGB = !g_restirSRGB;
+            projv::core::info("ReSTIR palette colours: {}", g_restirSRGB ? "decoded from sRGB" : "read as linear");
+        }
+        prevC = c;
+        if (g && !prevG) {
+            g_restirView = (g_restirView + 1) % 4;
+            static const char* views[] = {"the image", "indirect light only", "direct light only", "ambient occlusion"};
+            projv::core::info("ReSTIR view: {}", views[g_restirView]);
+        }
+        if (j && !prevJ) {
+            g_restirReuse = !g_restirReuse;
+            projv::core::info("ReSTIR reuse: {}", g_restirReuse ? "on" : "off (one fresh sample per GI pixel)");
+        }
+        prevG = g;
+        prevJ = j;
     }
 
     // H re-frames on the scene, for when navigation has left the subject behind.

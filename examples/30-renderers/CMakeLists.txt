@@ -9,6 +9,7 @@ projv_add_example(renderer_gallery
                         renderers/taa/shaders
                         renderers/fast/shaders
                         renderers/reconstruction/shaders
+                        renderers/restir/shaders
     # The example's own shader library: the sun/sky model and the cascade maths. The engine's
     # pjv_utils_DDA.sc is on the include path already.
     SHADER_INCLUDE_DIRS sharedShaders

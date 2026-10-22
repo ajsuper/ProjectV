@@ -1,0 +1,19 @@
+{
+    "renderer": [
+        {"shaderID": 1, "frameBufferInputIDs": [], "resourceTexturesIDs": [], "frameBufferOutputID": 1, "multiPass": 0},
+        {"shaderID": 2, "frameBufferInputIDs": [1], "resourceTexturesIDs": [], "frameBufferOutputID": 2, "multiPass": 0},
+        {"shaderID": 3, "frameBufferInputIDs": [2, 3], "resourceTexturesIDs": [], "frameBufferOutputID": 3, "multiPass": 0},
+        {"shaderID": 4, "frameBufferInputIDs": [3], "resourceTexturesIDs": [], "frameBufferOutputID": 4, "multiPass": 0},
+        {"shaderID": 5, "frameBufferInputIDs": [4, 3, 5], "resourceTexturesIDs": [], "frameBufferOutputID": 5, "multiPass": 0},
+        {"shaderID": 6, "frameBufferInputIDs": [5], "resourceTexturesIDs": [], "frameBufferOutputID": 6, "multiPass": 0},
+        {"shaderID": 7, "frameBufferInputIDs": [6, 5], "resourceTexturesIDs": [], "frameBufferOutputID": 7, "multiPass": 0},
+        {"shaderID": 8, "frameBufferInputIDs": [7, 5], "resourceTexturesIDs": [], "frameBufferOutputID": 8, "multiPass": 0},
+        {"shaderID": 9, "frameBufferInputIDs": [8, 5], "resourceTexturesIDs": [], "frameBufferOutputID": 9, "multiPass": 0},
+        {"shaderID": 10, "frameBufferInputIDs": [1], "resourceTexturesIDs": [], "frameBufferOutputID": 10, "multiPass": 0},
+        {"shaderID": 11, "frameBufferInputIDs": [9, 1], "resourceTexturesIDs": [], "frameBufferOutputID": 11, "multiPass": 0},
+        {"shaderID": 12, "frameBufferInputIDs": [11, 10], "resourceTexturesIDs": [], "frameBufferOutputID": 12, "multiPass": 0},
+        {"shaderID": 13, "frameBufferInputIDs": [12, 1], "resourceTexturesIDs": [], "frameBufferOutputID": 13, "multiPass": 0},
+        {"shaderID": 14, "frameBufferInputIDs": [13, 1, 14], "resourceTexturesIDs": [], "frameBufferOutputID": 14, "multiPass": 0},
+        {"shaderID": 15, "frameBufferInputIDs": [14], "resourceTexturesIDs": [], "frameBufferOutputID": -1, "multiPass": 0}
+    ]
+}
