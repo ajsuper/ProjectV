@@ -146,6 +146,10 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 - `chunkQueue` on Chunk is the legacy edit staging area (to be removed after P1 verification).
 - `editQueue` on ComponentRecord is the new per-component edit queue (P1+).
 - `forkBlob` creates a COW copy without decrementing the original's refCount.
+- Each blob's GPU range is its tree64 nodes followed by its **block table** (`utils/block_table.h`),
+  built at upload and never stored; the shader's march reads the table instead of descending the tree.
+  `#define PJV_TREE64_MARCH` compiles the old descent for A/B captures. Plan:
+  `docs/plans/block-table-traversal.md`.
 - A blob's `contentStamp` names its voxel content (physics shapes are cached by it). Code that
   replaces `blob.geometry` in place calls `markBlobContentChanged(blob)`, never just clears
   `contentBoundsValid`. What voxels collide as is `utils::buildCollisionPieces`

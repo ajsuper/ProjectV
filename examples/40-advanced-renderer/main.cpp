@@ -1948,6 +1948,16 @@ void render(projv::Application& app) {
     // do change that, so a key press on either triggers a re-bake; see updateAnimControls.
     gpuData.animation.time =
         std::chrono::duration<float>(std::chrono::steady_clock::now() - state.startTime).count();
+    // ADVANCED_CAPTURE=<prefix>: a screenshot of frame ADVANCED_CAPTURE_FRAME (default 240) to
+    // <prefix>.tga, then exit -- for comparing two builds. Animation runs on the frame count (1/60 s a
+    // frame) instead of the clock while capturing, so both builds draw the same instant.
+    static const char* capturePrefix = std::getenv("ADVANCED_CAPTURE");
+    if (capturePrefix) {
+        static const int captureFrame = std::getenv("ADVANCED_CAPTURE_FRAME") ? std::atoi(std::getenv("ADVANCED_CAPTURE_FRAME")) : 240;
+        gpuData.animation.time = float(app.frameCount) / 60.0f;
+        if (app.frameCount == captureFrame) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capturePrefix);
+        if (app.frameCount > captureFrame + 3) app.closeRequested = true;
+    }
     configureEngineMotion(gpuData.animation, state.wave);
 
     // Resizes the render targets to the window, runs the passes at their own targets' sizes, and

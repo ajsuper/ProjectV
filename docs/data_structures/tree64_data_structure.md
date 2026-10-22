@@ -58,6 +58,20 @@ upload time only — see `GeometryBlob::renderLOD` in
 [scene_data_structure.md](/docs/data_structures/scene_data_structure.md). The CPU copy is always
 full resolution.
 
+### Block tables (GPU only)
+
+The GPU march does not descend the tree from its root. At upload each tree gets a **block table**
+(`utils/block_table.h`) appended to its range in the tree64 texture: one texel per 64³ region (a copy
+of that region node's mask) and one per 16³ block (a copy of the block node's mask and the index of
+its first child leaf, relative to the root). A ray reads those two from its cell's coordinate and then
+the leaf — the tree's own node. Nothing below the 16³ level is copied, so the table costs a few percent
+of the tree. It is derived, never stored: the `.data` format is unchanged.
+
+Trees smaller than a region or a block (resolution 16 and 4) get a synthetic one-child entry. Every
+tree the engine builds or downsamples keeps its leaves on its last level, which the table relies on
+(`utils::buildBlockTable` counts any leaf above the 4³ level as a stray). See
+[block-table-traversal.md](/docs/plans/block-table-traversal.md).
+
 ### More
 
 For more information on this project, visit our [README.md](README.md)

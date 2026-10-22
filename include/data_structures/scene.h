@@ -374,8 +374,11 @@ namespace projv{
         uint32_t geometryStartIndex;
         uint32_t geometryEndIndex;
         uint32_t materialIDStartIndex;      // index into materialID texture (in bytes)
-        uint32_t materialIDEndIndex;        // end index (exclusive, in bytes)
-        uint32_t dataRefID;
+        // Where the tree's block table starts (utils/block_table.h): a texel index into the tree64
+        // texture, right after the tree's nodes. These two words were materialIDEndIndex and
+        // dataRefID, which no shader read.
+        uint32_t blockTableStartIndex;
+        uint32_t envelopeTableStartIndex;   // the envelope tree's block table; unused without one
         uint32_t paletteOffset; // replaced padding[1]: per-blob offset into global palette
         float rotationX;
         float rotationY;
