@@ -6,15 +6,19 @@ Everything builds from the top-level CMake project. There are no per-example Mak
 per-example shader scripts any more -- one target, one shader rule.
 
 ```bash
-cmake --preset dev            # configure (submodule deps, examples on)
-cmake --build --preset dev    # build the library, the examples, and their shaders
+cmake --preset dev                        # configure (submodule deps, examples on)
+cmake --build --preset dev -j$(nproc)     # build the library, the examples, and their shaders
 ```
+
+**Always build in parallel** (`-j$(nproc)`, on every `cmake --build`). The presets use the Makefile
+generator and set no job count, so a build without `-j` runs on one core -- over ten minutes for a
+first build that takes a fraction of that in parallel. Nothing in the build depends on serial order.
 
 The first build is slow: it compiles bgfx, bx, bimg and shaderc from `external/bgfx.cmake`.
 
 Build just the library:
 ```bash
-cmake --build build --target projectV
+cmake --build build --target projectV -j$(nproc)
 ```
 
 Examples land in `build/examples/<name>/`, with their renderer folders and scenes staged beside

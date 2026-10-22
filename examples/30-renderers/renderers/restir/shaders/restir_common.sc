@@ -19,7 +19,9 @@
 //   13 reconstruct    window     the voxel renderer's reconstruction: voxel by voxel, antialiased
 //   14 resolve        window     temporal accumulation of the image (what is left of the noise, and the
 //                                2x2 jitter's samples)
-//   15 display        window     ACES and gamma
+//   15 meter          64x64      log luminance, for the auto-exposure
+//   16 exposure       1x1        the auto-exposure, adapted over time
+//   17 display        window     the post (P: vignette, exposure, grade), then the neutral display transform
 //
 // The GI resolution is half the render resolution each way (the host's --restir-gi 2: the same as it).
 // A GI pixel takes its visible point from one render texel of its stride x stride block -- a different
@@ -40,8 +42,7 @@ uniform vec4 restirReuse;     // x temporal reuse, y spatial reuse, z visibility
 uniform vec4 restirDenoise;   // x a-trous on, y GI accumulation on, z view (0 image, 1 indirect, 2 direct), w GI history cap
 uniform vec4 restirJitter;    // xy this frame's offset inside the block, z stride (4 or 2), w 1 = start every history over
 uniform vec4 jitterParams;    // xy: where this frame's render texels are traced, off their centres, in texels
-uniform vec4 restirLook;      // x SSAO radius (world units), y its strength on the indirect light, z 1 = the
-                              // palette's colours are sRGB-encoded: decode them to linear albedo (C)
+uniform vec4 restirLook;      // x SSAO radius (world units), y its strength on the indirect light
 uniform vec4 restirSettings;  // x the trace loops' bound (a uniform, so they are not unrolled), y surface offset
                               // (world units, a twentieth of the finest voxel), z the image's longest history
                               // (resolve), w one render texel's width per unit of distance (2 tan(fov/2) / height)

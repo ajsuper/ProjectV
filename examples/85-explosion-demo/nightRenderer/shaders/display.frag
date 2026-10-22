@@ -5,13 +5,17 @@ $input v_texcoord0
 // display.frag -- the last pass, at output resolution: the smoke composited over the frame, then linear
 // HDR to the screen. All the grading is here, and the crosshair when one is asked for.
 //
-//   exposure (lightParams.z) -> vignette -> ACES -> gamma -> contrast, saturation -> dither
+//   exposure (lightParams.z) -> vignette -> grade (pjvGrade: contrast, saturation) -> pjvDisplay
+//
+// All in linear light, before the engine's neutral transform (include/pjv_color.sc). The grade is this
+// renderer's look; its contrast is a power about middle grey, so it cannot crush the shadows to black.
 //
 // The dither is not a look: the sky and the fog are smooth ramps over hundreds of pixels, and eight bits
 // band them without it. It is hashed from the pixel only, so a still frame stays still.
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_color.sc>
 #include <grr_common.sc>
 
 SAMPLER2D(frame, 0);
@@ -19,13 +23,9 @@ SAMPLER2D(smokeColor, 1);   // smoke.frag: rgb the gas's light, a what still sho
 uniform vec4 smokeParams;   // z = smoke on
 uniform vec4 renderParams;   // w = debug view: views 1 and 2 pass through ungraded
 
-#define CONTRAST   1.12
-#define SATURATION 1.25
+#define CONTRAST   1.08
+#define SATURATION 1.10
 #define VIGNETTE   0.18
-
-vec3 aces(vec3 x) {
-    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
-}
 
 void main() {
     vec3 hdr = texture2D(frame, v_texcoord0).rgb;
@@ -41,13 +41,7 @@ void main() {
     float r2 = dot(q, q) * 2.0;
     hdr *= lightParams.z * (1.0 - VIGNETTE * r2 * r2);
 
-    vec3 col = pow(aces(hdr), vec3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
-    col = (col - 0.5) * CONTRAST + 0.5;
-    float luma = dot(col, vec3(0.299, 0.587, 0.114));
-    col = mix(vec3(luma, luma, luma), col, SATURATION);
-
-    float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-    col += (noise - 0.5) / 255.0;
+    vec3 col = pjvDisplay(pjvGrade(hdr, CONTRAST, SATURATION, vec3(1.0, 1.0, 1.0)), 1.0, gl_FragCoord.xy);
 
     // A crosshair, when asked for (sunDir.w): two short bars through the centre, inverted against
     // what is behind them.

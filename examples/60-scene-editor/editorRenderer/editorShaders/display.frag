@@ -4,21 +4,17 @@ $input v_texcoord0
 // =============================================================================
 // display.frag  --  Pass 4 of the scene editor's viewport renderer.
 //
-// Copies the accumulated image to the viewport texture, deliberately doing
-// nothing to it. (In the standalone previewer this pass targets the back buffer;
+// Copies the accumulated image to the viewport texture, sRGB-encoded and otherwise
+// untouched. (In the standalone previewer this pass targets the back buffer;
 // here it targets FBO 3, which the editor hands to ImGui as the image drawn in
-// the Viewport panel. Everything below is otherwise unchanged.) The lit renderers ACES tone-map and gamma-encode here because they produce
+// the Viewport panel.) The lit renderers tone-map here because they produce
 // open-ended HDR radiance; this one produces reflectance, which is already in
-// [0, 1] and is exactly the value stored in the scene's material palette
-// (fetchVoxelColor decodes R10G10B10 straight to 0..1).
+// [0, 1]: the palette's colour, decoded to linear by decodeMaterial (the colour
+// convention, include/pjv_color.sc). Encoding it again is the exact inverse, so
+// an unlit voxel shows the colour that is in the file, to the bit.
 //
-// Tone mapping that would desaturate and lift it, and a gamma curve would wash
-// it out relative to the source texture the voxelizer sampled -- either one
-// means the previewer is no longer showing you the colour that is in the file.
-// So: straight through.
-//
-// If your scene's palette was authored in linear rather than sRGB, set
-// PREVIEW_APPLY_GAMMA to 1 to encode on the way out.
+// A tone curve would desaturate and lift it -- the previewer would no longer be
+// showing you the colour that is in the file. So: no curve, only the encoding.
 //
 // --- Except with the advanced preview on -------------------------------------
 //
@@ -30,8 +26,8 @@ $input v_texcoord0
 // a white blob -- and "what colour is this emitter" is precisely the question the
 // toggle was added to answer.
 //
-// So the overshoot is rolled off instead. What is NOT done is the ACES-plus-gamma
-// pipeline Render mode's display pass uses, even though it is sitting right there:
+// So the overshoot is rolled off instead. What is NOT done is the tone curve
+// Render mode's display pass uses, even though it is sitting right there:
 // that curve lifts and desaturates the whole image, including the 99% of pixels
 // that are plain stored reflectance and were correct already. Toggling the preview
 // would then appear to change every material in the scene, which is exactly the
@@ -60,14 +56,13 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_color.sc>
 
 SAMPLER2D(accumColor, 0);
 // x = advanced preview. Only the rolloff below reads it, and only to stay out of the way when it is
 // off: with no emission and no reflection upstream there is nothing above 1 to roll off, and running
 // the curve anyway would put a knee in an image that has no need of one.
 uniform vec4 previewSettings;
-
-#define PREVIEW_APPLY_GAMMA 0
 
 // Where the rolloff starts. High enough that it is above anything a scene's reflectance is doing --
 // a stored albedo of 0.85 is already an unusually bright material -- and low enough to leave a
@@ -94,9 +89,9 @@ void main() {
         }
     }
 
-#if PREVIEW_APPLY_GAMMA
-    color = pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));
-#endif
+    // The palette reaches the shaders decoded to linear (include/pjv_color.sc), so the preview encodes on
+    // the way out: an unlit albedo comes back to exactly the colour stored.
+    color = pjvLinearToSrgb(color);
 
     gl_FragColor = vec4(color, 1.0);
 }

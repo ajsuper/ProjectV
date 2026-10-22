@@ -4,19 +4,20 @@ $input v_texcoord0
 // =============================================================================
 // display.frag  --  Pass 3 of the scene editor's Render mode.
 //
-// Lens dispersion, exposure, tone map, gamma, and out to the texture the Render tab draws.
+// Lens dispersion, exposure, tone map, sRGB encoding, and out to the texture the Render tab draws.
 //
 // This is the one place Render mode and the Viewport genuinely disagree about what
 // a pixel means. The Viewport's display pass is a straight copy and says so at
 // length: that renderer's output is stored reflectance, already in [0, 1], and
 // tone mapping it would mean the editor is no longer showing the colour that is in
-// the file.
+// the file. (Both encode to sRGB on the way out: include/pjv_color.sc.)
 //
 // This renderer's output is radiance. It is open-ended -- a sunlit white voxel and
 // the sun disk behind it differ by four orders of magnitude -- so it has to be
-// mapped into a display range before it can be looked at, and ACES is the curve
-// that does it without the highlight hue shifts a simple Reinhard gives you (the
-// classic one being sunlit skin and orange-lit stone going yellow as they clip).
+// mapped into a display range before it can be looked at. The curve is the engine's
+// (pjvTonemapNeutral): the identity up to 0.76, so a lit surface keeps its stored
+// colour, then a shoulder that compresses the peak channel and keeps the hue, without
+// the highlight shifts a simple Reinhard gives you (sunlit orange stone going yellow).
 //
 // Exposure is applied before the curve, in stops, because that is what an exposure
 // control is: a multiply on the light reaching the sensor, not a lift on the
@@ -32,6 +33,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_color.sc>
 
 SAMPLER2D(taaColor, 0);
 
@@ -57,16 +59,6 @@ uniform vec4 gradeTint;
 // not the traced image's -- the two differ as soon as the trace runs at a fraction of the display.
 uniform vec4 passTargetRes;
 
-// ACES filmic, Narkowicz's fit. Cheap, and close enough to the reference curve that the
-// difference does not survive an 8-bit target.
-vec3 acesToneMap(vec3 x) {
-    const float a = 2.51;
-    const float b = 0.03;
-    const float c = 2.43;
-    const float d = 0.59;
-    const float e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-}
 
 // Transverse chromatic aberration: a real lens does not bring every wavelength to the same
 // magnification, so the image formed in red is very slightly larger than the one formed in blue.
@@ -120,7 +112,7 @@ void main() {
     // The colour cast goes in here, while the image is still radiance. See the uniform's comment.
     hdr *= gradeTint.rgb;
 
-    vec3 mapped = acesToneMap(hdr);
+    vec3 mapped = pjvTonemapNeutral(hdr);
 
     // ---- After the curve: the picture ----
     //
@@ -147,9 +139,9 @@ void main() {
         mapped *= 1.0 - falloff * falloff * gradeParams.w;
     }
 
-    // sRGB-ish encode. The target is a plain RGBA8 texture that ImGui samples without a
+    // sRGB encode. The target is a plain RGBA8 texture that ImGui samples without a
     // sRGB view, so the curve has to be applied here rather than left to the hardware.
-    mapped = pow(max(mapped, vec3(0.0)), vec3(1.0 / 2.2));
+    mapped = pjvLinearToSrgb(mapped);
 
     gl_FragColor = vec4(mapped, 1.0);
 }

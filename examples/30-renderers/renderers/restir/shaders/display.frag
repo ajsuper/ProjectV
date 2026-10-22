@@ -1,32 +1,37 @@
 $input v_color0
 $input v_texcoord0
 
-// display.frag -- pass 15: the voxel renderer's grading (examples/shared/voxelRenderer/shaders/
-// display.frag) without its vignette: ACES, gamma, then a little contrast and saturation -- and a dither,
-// which is not a look: the sky is a smooth ramp over hundreds of pixels, and eight bits band it without.
-// Input: 0 resolved.
+// display.frag -- pass 17, window: linear light to the screen.
+//
+//   post on (P):  vignette (V) -> auto-exposure (E) -> grade (B) -> pjvDisplay
+//   post off:     pjvDisplay, the engine's neutral transform: tone curve, sRGB encoding, dither
+//
+// Every step of the post is in linear light, before the tone curve, and each is the identity when off,
+// so with all three off the image is exactly the neutral one. The views (G) other than the image skip it:
+// they are for reading one part of the light, which a look would only distort.
+// Inputs: 0 resolved, 1 exposure (pass 16).
 
 #include <bgfx_shader.sh>
+#include <pjv_color.sc>
 
 SAMPLER2D(resolved, 0);
+SAMPLER2D(exposure, 1);
 
-#ifndef RESTIR_GRADE
-#define RESTIR_GRADE 1
-#endif
-#define CONTRAST   1.12
-#define SATURATION 1.25
+uniform vec4 restirPost;      // x vignette strength (0 off), y grade on, z auto-exposure on, w seconds since last frame
+uniform vec4 restirDenoise;   // z the view (0 the image)
+
+// The grade: a touch of contrast about middle grey, a touch of colour, and a slightly warm white.
+#define GRADE_CONTRAST   1.08
+#define GRADE_SATURATION 1.10
+#define GRADE_WHITE      vec3(1.02, 1.0, 0.97)
 
 void main() {
     vec2 size = vec2(textureSize(resolved, 0));
     vec3 c = texelFetch(resolved, ivec2(v_texcoord0 * size), 0).rgb;
-    c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
-    c = pow(c, vec3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
-#if RESTIR_GRADE
-    c = (c - 0.5) * CONTRAST + 0.5;
-    float luma = dot(c, vec3(0.299, 0.587, 0.114));
-    c = mix(vec3(luma, luma, luma), c, SATURATION);
-    float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-    c += (noise - 0.5) / 255.0;
-#endif
-    gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+    if (restirDenoise.z < 0.5) {
+        if (restirPost.x > 0.0) c *= pjvVignette(v_texcoord0, size.x / size.y, restirPost.x);
+        if (restirPost.z > 0.5) c *= texelFetch(exposure, ivec2(0, 0), 0).x;
+        if (restirPost.y > 0.5) c = pjvGrade(c, GRADE_CONTRAST, GRADE_SATURATION, GRADE_WHITE);
+    }
+    gl_FragColor = vec4(pjvDisplay(c, 1.0, gl_FragCoord.xy), 1.0);
 }

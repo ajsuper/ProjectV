@@ -18,6 +18,7 @@ $input v_texcoord0
 
 #include <bgfx_shader.sh>
 #include <pjv_utils_DDA.sc>
+#include <pjv_color.sc>
 
 uniform vec4 windowRes;     // xy: the window, in pixels
 uniform vec4 cameraPos;     // xyz
@@ -29,7 +30,7 @@ uniform vec4 viewOptions;   // x: draw a crosshair (1) or not (0)
 
 vec3 sky(vec3 direction) {
     float height = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
-    return mix(vec3(0.10, 0.11, 0.14), vec3(0.42, 0.55, 0.72), height * height);
+    return pjvSrgbToLinear(mix(vec3(0.10, 0.11, 0.14), vec3(0.42, 0.55, 0.72), height * height));   // picked as sRGB
 }
 
 void main() {
@@ -63,6 +64,8 @@ void main() {
         float skyLight = 0.3 + 0.1 * normal.y;   // more from above than below
         colour = albedo * (0.75 * sun + skyLight);
     }
+
+    colour = pjvDisplay(colour, 1.0, gl_FragCoord.xy);   // linear light out to the screen
 
     // Crosshair: two short bars through the centre, inverted against what is behind.
     if (viewOptions.x > 0.5) {

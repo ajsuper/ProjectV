@@ -25,7 +25,9 @@ It started in the ray lab (the fork at `../ProjectV-raylab`, modes 12 and 13).
 | 12 | `ao_apply` | ½ × ½ | The SSAO blurred over its 4×4 pattern (depth-aware), darkening the indirect light by up to half; the views (G) |
 | 13 | `reconstruct` | window | The voxel renderer's reconstruction (`examples/shared/voxelRenderer/shaders/reconstruct.frag`, copied): voxel by voxel, antialiased |
 | 14 | `resolve` | window | Temporal accumulation: the 2×2 jitter's four samples, and what noise is left |
-| 15 | `display` | window | ACES, gamma, and the voxel renderer's grading: contrast ×1.12, saturation ×1.25, a dither |
+| 15 | `meter` | 64 × 64 | Log luminance of the frame, 16 samples a texel, for the auto-exposure |
+| 16 | `exposure` | 1 × 1 | The auto-exposure: centre-weighted average, its target, adapted from last frame's |
+| 17 | `display` | window | The post (vignette, exposure, grade; P) and the engine's neutral display transform (`pjvDisplay`) |
 
 Each render texel is traced through the centre of another of the 2×2 window pixels it covers each frame,
 as the voxel renderer does; a still view repeats the same four and the resolve settles on them. A GI
@@ -43,10 +45,19 @@ exact.
 
 - **The sky is dimmed** (`RESTIR_SKY_LIGHT`, 0.35 of the gallery's shared sky). That sky's zenith is about
   four times the voxel renderer's, and lighting by it flooded every surface with blue-white.
-- **The palette is decoded from sRGB** (C toggles it). The Teardown converter writes colours as sRGB bytes;
-  the engine's renderers all read them as linear, which lifts and greys every colour. Off, restir reads them
-  as the others do.
-- **The voxel renderer's grading** after the tone map.
+- **Colour** follows the engine's convention (`include/pjv_color.sc`, `docs/plans/color-convention.md`):
+  the palette arrives decoded to linear, and the display is the neutral transform -- identity up to 0.76,
+  a highlight shoulder above, the exact sRGB curve, a dither.
+- **The post** (`display.frag`, on by default; P turns it all off), each part in linear light before the
+  tone curve, each the identity when off:
+
+  | Key | Part | What |
+  |---|---|---|
+  | V | vignette | 15% darker in the corners, flat over the middle |
+  | E | auto-exposure | passes 15-16: the frame's log luminance metered at 64x64 (centre-weighted), the exposure that brings it 80% of the way to 0.08 (a sunlit exterior needs about none), held to -2..+3 stops and adapted over time (darkening faster than brightening) |
+  | B | grade | contrast ×1.08 as a power about middle grey (no black crush), saturation ×1.10, a slightly warm white |
+
+  The views (G) skip the post. `RESTIR_POST=0` starts with it off, `RESTIR_VIEW=n` on view n (for `--capture`).
 
 ## Stable at a distance
 

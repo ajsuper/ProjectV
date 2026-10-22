@@ -76,10 +76,7 @@ RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) 
     h.normal = found.normal;
     if (!shadow) {
         VoxelMaterial material = fetchVoxelMaterialFromHit(found);
-        // The palette holds colours as authored, which for the converted scenes is sRGB (the Teardown
-        // converter writes sRGB bytes); the engine's renderers read them as linear, which lifts and greys
-        // every colour. restirLook.z decodes them (C toggles it).
-        h.albedo = restirLook.z > 0.5 ? pow(material.albedo, vec3(2.2, 2.2, 2.2)) : material.albedo;
+        h.albedo = material.albedo;   // linear: the engine decodes the palette's sRGB (pjv_color.sc)
         h.emission = material.emission;
     }
     if (kind == RESTIR_KIND_CAMERA) {

@@ -174,7 +174,7 @@ bool refractDebug() { return refractDebugMode() == 1; }
 
 vec3 backgroundColor(vec3 direction) {
     float height = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
-    return mix(BACKGROUND_BOTTOM, BACKGROUND_TOP, height);
+    return pjvSrgbToLinear(mix(BACKGROUND_BOTTOM, BACKGROUND_TOP, height));   // picked as sRGB; the display encodes
 }
 
 // PCG, one round. Matches Render mode's generator, so the two modes make the same stochastic

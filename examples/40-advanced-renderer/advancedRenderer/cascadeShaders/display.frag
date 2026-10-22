@@ -13,11 +13,11 @@ $input v_texcoord0
 // The pipeline below runs in this fixed order:
 //
 //   linear HDR  ->  VIGNETTE                        (still linear -- a lens effect, not a paint)
-//               ->  EXPOSURE + white-balance TINT   (still linear / scene-referred)
-//               ->  ACES tone map                   (HDR -> [0,1] display range)
-//               ->  gamma encode (^(1/2.2))         (linear -> sRGB-ish)
-//               ->  CONTRAST + SATURATION           (display-referred trim)
-//               ->  DITHER                          (last, at the output quantum)
+//               ->  EXPOSURE                        (still linear / scene-referred)
+//               ->  pjvGrade: TINT, CONTRAST, SATURATION   (linear; contrast is a power about middle
+//                                                   grey, so it cannot crush shadows to black)
+//               ->  pjvDisplay                      (the engine's neutral tone curve, the sRGB curve, a
+//                                                   dither: include/pjv_color.sc)
 //
 // Every knob is a #define right here. Recompile the renderer (compAdvanced.sh) after editing.
 //
@@ -30,26 +30,21 @@ $input v_texcoord0
 //                pjv_sun_sky.sc, which tints the key light and leaves the sky-lit shadows cool. A
 //                white balance cannot do that -- it moves lit and shadowed pixels by the same
 //                factor -- so this one stays small and only finishes the job.
-//   CONTRAST   - S-curve strength around mid-grey, applied AFTER tone map. 1.0 = none, >1 punchier.
-//   SATURATION - colourfulness AFTER tone map. 1.0 = none, 0.0 = greyscale, >1 = more saturated.
+//   CONTRAST   - power about middle grey (0.18), in linear light. 1.0 = none, >1 punchier.
+//   SATURATION - colourfulness against luminance, in linear light. 1.0 = none, 0.0 = greyscale.
 //   VIGNETTE   - corner falloff, applied in LINEAR light before the tone map, which is what a lens
 //                actually does: the corners lose light and the tone curve then rolls what is left,
 //                so bright corners darken gracefully instead of being multiplied down after
 //                clipping. 0.0 = off.
-//   DITHER     - amplitude, in output quanta, of the noise added at the very end. This is not a
-//                look; it is what stops the sky gradient and the distance fog from banding. Both
-//                are smooth ramps over hundreds of pixels, an 8-bit output quantises them into
-//                visible steps, and a fraction of a quantum of noise makes the step boundary
-//                dither across a few pixels instead of falling on one line. Costs three multiplies.
 //
-// To swap the TONE MAPPER itself, replace the body of acesToneMap() (e.g. Reinhard
-// `x / (1.0 + x)`, or a filmic/AgX curve) -- everything else stays the same. To change the sky/sun
+// The tone curve and the dither are the engine's (pjvDisplay), shared by every renderer. To change the sky/sun
 // look with the time of day, that lives in sharedShaders/pjv_sun_sky.sc, not here.
 //
 // Input (FBO 9): 0 upscaledColor (anti-aliased HDR).
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_color.sc>
 
 // taaColor is now at OUTPUT resolution and is read 1:1 -- the magnify that used to live in this pass
 // moved ahead of taa into upscale.frag, so that the edges it reconstructs are averaged by the temporal
@@ -232,10 +227,9 @@ vec3 sampleBSpline(sampler2D tex, vec2 uv, vec4 texRes) {
 // ---- Colour grading knobs ---------------------------------------------------
 #define EXPOSURE    0.8
 #define TINT        vec3(1.02, 1.00, 0.97)
-#define CONTRAST    1.1
-#define SATURATION  1.3
+#define CONTRAST    1.08
+#define SATURATION  1.15
 #define VIGNETTE    0.20
-#define DITHER      1.0
 // How much of the blurred bright-pass is added back. The bloom's own threshold and width live in
 // bloomdown.frag and bloomblur.frag; this is only the mix. Emissive voxels are usually the brightest
 // things in a voxel scene, so this is what makes them read as light sources rather than bright pixels.
@@ -258,14 +252,6 @@ vec3 sampleBSpline(sampler2D tex, vec2 uv, vec4 texRes) {
 #define GODRAY_SS_MIX_WITH_VOLUMETRIC 0.5
 
 
-vec3 acesToneMap(vec3 x) {
-    const float a = 2.51;
-    const float b = 0.03;
-    const float c = 2.43;
-    const float d = 0.59;
-    const float e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-}
 
 // Quartic falloff from the frame centre: flat across the middle two-thirds, then dropping into the
 // corners. Quartic rather than the usual quadratic because a quadratic starts falling immediately and
@@ -277,22 +263,10 @@ float vignetteAt(vec2 uv) {
 }
 
 vec3 gradeToDisplay(vec3 hdr, vec2 uv) {
-    hdr *= EXPOSURE * TINT * vignetteAt(uv);
-    return pow(acesToneMap(hdr), vec3(1.0 / 2.2));
+    hdr *= EXPOSURE * vignetteAt(uv);
+    return pjvGrade(hdr, CONTRAST, SATURATION, TINT);   // still linear: pjvDisplay encodes
 }
 
-// Interleaved gradient noise -- Jorge Jimenez's, and the reason for choosing it over a sin/fract hash
-// is that its output is well distributed over any small NEIGHBOURHOOD rather than merely over the
-// whole frame, which is exactly what a dither has to be to break up a band.
-//
-// FRAME-INDEPENDENT, deliberately, like the AO rotation in compose.frag. A dither that changes every
-// frame is the textbook version and averages to nothing, but this renderer's whole claim is that two
-// frames of a still scene are bit-identical; per-frame noise here would be the only thing in the
-// pipeline that shimmers on a static image, and it would do it in the flat sky where it is most
-// visible. Static noise costs nothing and cannot flicker.
-float interleavedGradientNoise(vec2 pixel) {
-    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
-}
 
 void main() {
     // ---- TAA AGE VIEW (P key, renderParams.x == 2) ----------------------------------------------
@@ -384,17 +358,5 @@ void main() {
         hdr += mix(wide, tight, BLOOM_CORE) * BLOOM_STRENGTH;
     }
 
-    vec3 col = gradeToDisplay(hdr, v_texcoord0);
-
-    // Display-referred trim: contrast around mid-grey, then saturation about luma.
-    col = (col - 0.5) * CONTRAST + 0.5;
-    float luma = dot(col, vec3(0.299, 0.587, 0.114));
-    col = mix(vec3(luma), col, SATURATION);
-
-    // Debanding, after every other operation and before the clamp -- it has to be the last thing,
-    // because it is sized to the OUTPUT quantum and anything applied afterwards would rescale it.
-    // Centred on zero so it does not shift the mean brightness.
-    col += (interleavedGradientNoise(gl_FragCoord.xy) - 0.5) * (DITHER / 255.0);
-
-    gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+    gl_FragColor = vec4(pjvDisplay(gradeToDisplay(hdr, v_texcoord0), 1.0, gl_FragCoord.xy), 1.0);
 }

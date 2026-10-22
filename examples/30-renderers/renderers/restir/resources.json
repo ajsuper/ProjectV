@@ -12,7 +12,8 @@
         {"name": "restirSettings", "type": "vec4"},
         {"name": "restirLook", "type": "vec4"},
         {"name": "jitterParams", "type": "vec4"},
-        {"name": "renderParams", "type": "vec4"}
+        {"name": "renderParams", "type": "vec4"},
+        {"name": "restirPost", "type": "vec4"}
     ],
     "shaders": [
         {"shaderID": 1, "path": "./renderers/restir/shaders/gbuffer.bin"},
@@ -29,7 +30,9 @@
         {"shaderID": 12, "path": "./renderers/restir/shaders/ao_apply.bin"},
         {"shaderID": 13, "path": "./renderers/restir/shaders/reconstruct.bin"},
         {"shaderID": 14, "path": "./renderers/restir/shaders/resolve.bin"},
-        {"shaderID": 15, "path": "./renderers/restir/shaders/display.bin"}
+        {"shaderID": 15, "path": "./renderers/restir/shaders/display.bin"},
+        {"shaderID": 16, "path": "./renderers/restir/shaders/meter.bin"},
+        {"shaderID": 17, "path": "./renderers/restir/shaders/exposure.bin"}
     ],
     "textures": [
         {"texID": 1, "name": "gPos", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
@@ -62,7 +65,9 @@
         {"texID": 62, "name": "litIndirect", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
         {"texID": 63, "name": "litHDR", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
         {"texID": 70, "name": "reconstructed", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
-        {"texID": 71, "name": "resolved", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"}
+        {"texID": 71, "name": "resolved", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 80, "name": "meter", "format": "R32_FLOAT", "sizeMode": "fixed", "resX": 64, "resY": 64, "origin": "CreateNew"},
+        {"texID": 81, "name": "exposure", "format": "RGBA32_FLOAT", "sizeMode": "fixed", "resX": 1, "resY": 1, "origin": "CreateNew"}
     ],
     "framebuffers": [
         {"fboID": 1, "textureIDs": [1, 2, 3, 4, 5, 6]},
@@ -78,6 +83,8 @@
         {"fboID": 11, "textureIDs": [61, 62]},
         {"fboID": 12, "textureIDs": [63]},
         {"fboID": 13, "textureIDs": [70]},
-        {"fboID": 14, "textureIDs": [71]}
+        {"fboID": 14, "textureIDs": [71]},
+        {"fboID": 15, "textureIDs": [80]},
+        {"fboID": 16, "textureIDs": [81]}
     ]
 }

@@ -113,19 +113,20 @@ namespace projv{
         uint32_t defaultNormal = 0;
     };
 
-    // Pack Color (8-bit RGB) into R10G10B10A2 format (A=3 for filled).
+    // Pack Color (8-bit RGB) into R10G10B10A2 format (A=3 for filled). Both are sRGB-encoded -- the
+    // colour convention (include/pjv_color.sc) -- and 255 widens to 1023, so white stays white.
     inline uint32_t packColor(Color c) {
-        return (static_cast<uint32_t>(c.r * 4) << 20) |  // R10
-               (static_cast<uint32_t>(c.g * 4) << 10) |  // G10
-               (static_cast<uint32_t>(c.b * 4));          // B10
+        auto widen = [](uint8_t v) { return (static_cast<uint32_t>(v) * 1023u + 127u) / 255u; };
+        return (widen(c.r) << 20) | (widen(c.g) << 10) | widen(c.b);
     }
 
-    // Unpack Color from R10G10B10A2 format.
+    // Unpack Color from R10G10B10A2 format: the inverse of packColor, rounding to the nearest byte.
     inline Color unpackColor(uint32_t packed) {
+        auto narrow = [](uint32_t v) { return static_cast<uint8_t>(((v & 0x3FFu) * 255u + 511u) / 1023u); };
         Color c;
-        c.r = static_cast<uint8_t>(((packed >> 20) & 0x3FF) / 4);
-        c.g = static_cast<uint8_t>(((packed >> 10) & 0x3FF) / 4);
-        c.b = static_cast<uint8_t>((packed & 0x3FF) / 4);
+        c.r = narrow(packed >> 20);
+        c.g = narrow(packed >> 10);
+        c.b = narrow(packed);
         return c;
     }
 }

@@ -1,3 +1,5 @@
+#include <pjv_color.sc>   // stored colours are sRGB-encoded; decodeMaterial hands out linear ones
+
 #define MAX_STACK_SIZE 12
 #define RENDER_MODE 3 //1-8
 #define VOXEL_TYPEDATA_SLICES 3
@@ -978,7 +980,9 @@ bool pjvMaterialIsAdvected(VoxelMaterial m) {
 
 VoxelMaterial decodeMaterial(uvec4 texel) {
     VoxelMaterial m;
-    m.albedo = unpackPaletteRGB10(texel.x);
+    // A palette colour is stored sRGB-encoded (docs/plans/color-convention.md); shading wants linear light,
+    // so it is decoded here, once, for every renderer. The emission colour likewise; its strength is linear.
+    m.albedo = pjvSrgbToLinear(unpackPaletteRGB10(texel.x));
 
     // Exponential, matching projv::unpackEmissiveStrength on the CPU: raw 0 is exactly zero, so a
     // legacy entry is not an emitter, and 1..255 spans roughly 0.004 to 245 with raw 128 sitting at
@@ -990,7 +994,7 @@ VoxelMaterial decodeMaterial(uvec4 texel) {
     // an emission colour picked, without giving up independent emission for the surfaces that need
     // it (a black voxel cannot glow if emission is albedo * strength). See
     // projv::materialEffectiveEmissionColor.
-    vec3 emissionColour = texel.y == 0u ? m.albedo : unpackPaletteRGB10(texel.y);
+    vec3 emissionColour = texel.y == 0u ? m.albedo : pjvSrgbToLinear(unpackPaletteRGB10(texel.y));
     m.emission = emissionColour * strength;
 
     m.glossiness   = float((texel.z >> 24u) & 0xFFu) / 255.0;

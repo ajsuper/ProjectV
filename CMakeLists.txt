@@ -450,9 +450,10 @@ if(PROJV_INSTALL)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
 
-    # Headers, plus pjv_utils_DDA.sc -- the engine's shader-side voxel traversal. It is a
-    # shader include living in the C++ include tree, and it has to ship: every renderer in
-    # the tree includes it, so shaderc needs <prefix>/include/projv on its -i path.
+    # Headers, plus pjv_utils_DDA.sc -- the engine's shader-side voxel traversal -- and pjv_color.sc,
+    # the colour convention it decodes palettes by. They are shader includes living in the C++
+    # include tree, and they have to ship: every renderer in the tree includes them, so shaderc
+    # needs <prefix>/include/projv on its -i path.
     install(DIRECTORY include/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/projv
         FILES_MATCHING

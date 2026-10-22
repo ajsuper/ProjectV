@@ -84,6 +84,36 @@ The wire format is **strict JSON** (RFC 8259). The loader is configured with `ig
 | `scale` | number \| `[x,y,z]` | no (default `1.0`) | A single number is uniform scale. A 3-array is per-axis scale. |
 | `mutability` | `"locked"` \| `"direct"` \| `"copy"` | no (default `"locked"`) | Only meaningful for `type: data`. See [Mutability](#mutability). Ignored on `asset` (each inner `data` declares its own). |
 | `attachments` | object | no | Program data about this entry. See [Attachments](#attachments). |
+| `palette` | array | no | The materials its voxels' 8-bit ids index, in order. See [Palette](#palette). |
+
+#### Palette
+
+One entry per material id (at most 256), on a `data` component:
+
+```json
+"palette": [
+    { "color": [816, 612, 456] },
+    { "color": [1023, 900, 600], "emission": [1023, 820, 400], "emissiveStrength": 1.0, "name": "lamp" },
+    { "color": [700, 820, 900], "transparency": 0.8, "ior": 1.5, "physics": "glass" }
+]
+```
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `color` | `[r, g, b]` 0..1023 | Albedo, **sRGB-encoded**, 10 bits a channel. An 8-bit colour `v` is `round(v × 1023 / 255)` (`packColor`). |
+| `emission` | `[r, g, b]` 0..1023 | Emitted colour, sRGB-encoded like `color`. Absent: emit in the albedo's colour. |
+| `emissiveStrength` | number | Linear intensity of the emission (0: none). |
+| `glossiness`, `metallic`, `transparency`, `transmission` | 0..1 | Surface terms. 0 is the plain case for each (rough, dielectric, opaque). |
+| `ior` | number ≥ 1 | Index of refraction (default 1). |
+| `flags` | integer | Material flags. |
+| `name` | string | Label for tools. |
+| `physics` | string | A physics material name from the project's library. |
+
+**Colour convention.** Stored colours are sRGB-encoded -- what a colour picker, a texture or a `.vox`
+palette already holds -- so a file stores the colour as authored. The renderer decodes to linear light in
+`decodeMaterial` (`include/pjv_color.sc`); every renderer shades linear and encodes once, at display.
+Files written before 2026-10-22 hold `v × 4` (white 1020); they load unchanged. See
+[docs/plans/color-convention.md](../plans/color-convention.md).
 
 > **Note on `source` naming:** the key is `source`, not `data`, because it points to a *file* for `type:data` but a *folder* for `type:asset`. One key, two resolutions, disambiguated by `type`.
 

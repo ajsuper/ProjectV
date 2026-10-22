@@ -52,9 +52,10 @@
 //   Q            — reconstruction bypassed: point-sample the render resolution (reconstruction, restir)
 //   G            — the image / indirect light only / direct light only / ambient occlusion (restir)
 //   J            — ReSTIR reuse on / off (restir)
-//   C            — palette colours decoded from sRGB / read as linear (restir)
+//   P            — post-processing on / off (restir); V vignette, B colour grade, E auto-exposure
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -178,9 +179,12 @@ static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRendere
 // The restir renderer's switches: G cycles what it shows (the image, the indirect light alone, the
 // direct alone, the ambient occlusion), J turns ReSTIR's reuse off -- each GI pixel's one fresh sample,
 // denoised -- for the A/B, and Q bypasses the reconstruction, as for the reconstruction renderer.
+// The post (display.frag): P turns it all off and on, V the vignette, B the grade, E the auto-exposure.
 static int  g_restirView = 0;
 static bool g_restirReuse = true;
-static bool g_restirSRGB = true;   // C: decode the palette's colours from sRGB (see restir_trace.sc)
+struct RestirPost { bool on = true, vignette = true, grade = true, exposure = true; };
+static RestirPost g_restirPost;
+static constexpr float RESTIR_VIGNETTE = 0.15f;   // the corners' falloff: subtle
 static int  g_restirStride = 4;   // --restir-gi: GI for one window pixel in stride x stride (4 or 2)
 static constexpr float RESTIR_RENDER_SCALE = 0.5f;   // its G-buffer, each way; resources.json's 0.5 targets
 
@@ -209,8 +213,8 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     const int cell = cellOrder[ctx.frameCount % 4];
     vec4 jitterParams{(float(cell % 2) + 0.5f) * 0.5f - 0.5f, (float(cell / 2) + 0.5f) * 0.5f - 0.5f, 0.0f, 0.0f};
     vec4 renderParams{0.0f, 0.0f, g_reconstructBypass ? 1.0f : 0.0f, 0.0f};
-    // SSAO six of the finest voxels round, darkening the indirect light by up to half; the palette's encoding.
-    vec4 look{6.0f * finest, 0.5f, g_restirSRGB ? 1.0f : 0.0f, 0.0f};
+    // SSAO six of the finest voxels round, darkening the indirect light by up to half.
+    vec4 look{6.0f * finest, 0.5f, 0.0f, 0.0f};
     static bool first = true;
 
     vec4 cameraPos{ctx.cameraPosition, 1.0f}, cameraDir{ctx.cameraDirection, 0.0f};
@@ -218,7 +222,15 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     vec4 sunDir{ctx.sunDirection, 0.0f};
     vec4 frameCount{float(ctx.frameCount), ctx.cameraMoved ? 1.0f : 0.0f, 0.0f, 0.0f};
     vec4 reuse{g_restirReuse ? 1.0f : 0.0f, g_restirReuse ? 1.0f : 0.0f, 1.0f, 4.0f};   // temporal, spatial, visibility, M cap
-    vec4 denoise{1.0f, 1.0f, float(g_restirView), 32.0f};                              // a-trous, GI accumulation, view, its cap
+    // For unattended captures (--capture): RESTIR_VIEW picks the starting view, RESTIR_POST=0 starts with
+    // the post off.
+    static const bool fromEnv = [] {
+        if (const char* v = std::getenv("RESTIR_VIEW")) g_restirView = std::atoi(v) & 3;
+        if (const char* v = std::getenv("RESTIR_POST")) g_restirPost.on = std::atoi(v) != 0;
+        return true;
+    }();
+    (void)fromEnv;
+    vec4 denoise{1.0f, 1.0f, float(g_restirView), 32.0f};                           // a-trous, GI accumulation, view, its cap
     vec4 jitter{float(offset[0]), float(offset[1]), float(giStride), first ? 1.0f : 0.0f};
     // The image's history: short while the camera or the sun moves, so changing light is not dragged along.
     // w: one render texel's width per unit of distance, for the tests that ask "is this the same surface?".
@@ -236,6 +248,16 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     setUniformToValue(renderer, "restirJitter", jitter);
     setUniformToValue(renderer, "restirSettings", settings);
     setUniformToValue(renderer, "restirLook", look);
+    // The post's switches, and the frame's length for the exposure's adaptation (its own clock: the
+    // gallery's frame timer exists only in perf builds).
+    static auto lastFrame = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    const float seconds = std::chrono::duration<float>(now - lastFrame).count();
+    lastFrame = now;
+    const RestirPost& post = g_restirPost;
+    vec4 postParams{post.on && post.vignette ? RESTIR_VIGNETTE : 0.0f, post.on && post.grade ? 1.0f : 0.0f,
+                    post.on && post.exposure ? 1.0f : 0.0f, seconds};
+    setUniformToValue(renderer, "restirPost", postParams);
     setUniformToValue(renderer, "jitterParams", jitterParams);
     setUniformToValue(renderer, "renderParams", renderParams);
     first = false;
@@ -321,7 +343,7 @@ static std::vector<RendererModule> buildRendererRegistry() {
     // frame in about a quarter of the path tracer's time at a similar or better image.
     registry.push_back({
         "restir",
-        "ReSTIR GI at a sixteenth of the pixels, SSAO, a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, C colours.",
+        "ReSTIR GI at a sixteenth of the pixels, SSAO, a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, P post (V, B, E).",
         "./renderers/restir/",
         "./renderers/restir/shaders/vs_quad.bin",
         uploadRestirUniforms
@@ -795,15 +817,26 @@ void render(projv::Application& app) {
     }
 
     {
-        static bool prevG = false, prevJ = false, prevC = false;
+        static bool prevG = false, prevJ = false;
         bool g = glfwGetKey(renderInstance.window, GLFW_KEY_G) == GLFW_PRESS;
         bool j = glfwGetKey(renderInstance.window, GLFW_KEY_J) == GLFW_PRESS;
-        bool c = glfwGetKey(renderInstance.window, GLFW_KEY_C) == GLFW_PRESS;
-        if (c && !prevC) {
-            g_restirSRGB = !g_restirSRGB;
-            projv::core::info("ReSTIR palette colours: {}", g_restirSRGB ? "decoded from sRGB" : "read as linear");
+        // The post's toggles: P all of it, V the vignette, B the grade, E the auto-exposure.
+        struct PostKey { int key; bool* flag; const char* name; bool prev; };
+        static PostKey postKeys[] = {
+            {GLFW_KEY_P, &g_restirPost.on, "post-processing", false},
+            {GLFW_KEY_V, &g_restirPost.vignette, "vignette", false},
+            {GLFW_KEY_B, &g_restirPost.grade, "colour grade", false},
+            {GLFW_KEY_E, &g_restirPost.exposure, "auto-exposure", false},
+        };
+        for (PostKey& k : postKeys) {
+            bool down = glfwGetKey(renderInstance.window, k.key) == GLFW_PRESS;
+            if (down && !k.prev) {
+                *k.flag = !*k.flag;
+                projv::core::info("ReSTIR {}: {}{}", k.name, *k.flag ? "on" : "off",
+                                  k.flag != &g_restirPost.on && !g_restirPost.on ? " (post is off: P)" : "");
+            }
+            k.prev = down;
         }
-        prevC = c;
         if (g && !prevG) {
             g_restirView = (g_restirView + 1) % 4;
             static const char* views[] = {"the image", "indirect light only", "direct light only", "ambient occlusion"};
