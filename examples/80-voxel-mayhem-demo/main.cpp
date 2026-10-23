@@ -66,6 +66,7 @@
 #include <GLFW/glfw3.h>
 
 #include "voxel_renderer.h"
+#include "restir_test.h"   // MAYHEM_RENDERER=restir-pt: an experiment
 #include "core/application.h"
 #include "core/log.h"
 #include "core/paths.h"
@@ -2169,7 +2170,9 @@ void lookTest(projv::Application& app) {
         m.tool = Tool::Cannon;
         use(world, m, aimer);
     }
-    if (!shot && t > 4.0f) {
+    // MAYHEM_LOOK_AT=seconds: when the still is taken (default 4 s; earlier catches the rubble in flight).
+    static const float shotAt = std::getenv("MAYHEM_LOOK_AT") ? float(std::atof(std::getenv("MAYHEM_LOOK_AT"))) : 4.0f;
+    if (!shot && t > shotAt) {
         shot = true;
         if (const char* prefix = std::getenv("MAYHEM_CAPTURE")) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, prefix);
     }
@@ -2468,7 +2471,10 @@ void startup(projv::Application& app) {
 
     // The renderer, at half the window's width and height; the reconstruction and TAA
     // rebuild the full frame.
-    voxel_renderer::install(world, renderInstance, here);
+    if (!(restir_test::wanted() && restir_test::install(renderInstance, here)))
+        voxel_renderer::install(world, renderInstance, here);
+    else
+        world.ctx().emplace<restir_test::State>();
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
     buildWorld(world);
@@ -2509,7 +2515,13 @@ void render(projv::Application& app) {
         shaken.pitch += amount * SHAKE_TURN * noise(5.0f);
         direction = shaken.forward();
     }
-    voxel_renderer::upload(world, renderInstance, position, direction);
+    if (restir_test::State* restir = world.ctx().find<restir_test::State>()) {
+        const View& view = world.ctx().get<View>();
+        restir_test::upload(*restir, renderInstance.getActiveRenderer(), renderInstance.getWindowResolution(), position, direction,
+                            view.sun, view.finestVoxel, view.hazeRadius);
+    } else {
+        voxel_renderer::upload(world, renderInstance, position, direction);
+    }
     projv::graphics::renderConstructedRenderer(renderInstance, renderInstance.getActiveRenderer(), &gpuData);
     if (bench) bench->renderMs += msSince(renderStart);
     // MAYHEM_GPU=1: each pass's GPU time, averaged over frames 120..360, printed once (needs the profiler).
