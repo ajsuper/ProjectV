@@ -1,6 +1,8 @@
 # ReSTIR PT: paths with materials, reused
 
-Proposed 2026-10-22. Status: **proposal**.
+Proposed 2026-10-22. Status: **delivered in part, 2026-10-22** -- `restir-pt` has replaced `restir` in the
+gallery and `pt-reference` its path tracers; see the delivery log at the end for what is done, what
+deviates from the design below, and what is not done.
 
 The gallery's `restir` renderer is ReSTIR GI: one diffuse bounce reused by reconnection, Lambertian
 everywhere. Two things it cannot do:
@@ -106,3 +108,96 @@ floor, a metal wall and a mirror panel.
    1 in 4 (`--restir-gi 2` today) is likely the floor for specular. Cost to be measured in T1.
 2. **Replace or sit beside.** Proposed: `restir-pt` beside `restir` until T5.
 3. **Transparency** (glass refraction, rough transmission) is out of scope here; it would follow T4.
+
+## Delivery log
+
+### 2026-10-22 -- T0 to T3, most of T4; `restir` retired at once
+
+Asked for: replace `restir` with ReSTIR PT (not beside it: open question 2), GI at 1/16 of the pixels first
+(open question 1), and a reference path tracer that replaces the gallery's others (`tree64`, `taa`).
+
+**Done.**
+
+- `include/pjv_bsdf.sc`: the editor's model, expression for expression, plus a split evaluation (diffuse
+  factor and specular apart) and the specular lobe's directional albedo. The editor's Render-tab path
+  tracer is on it; its compiled shader is the same size to the byte with renumbered IDs (no SPIR-V
+  disassembler here to diff further; not looked at on screen).
+- `pt-reference` (README in its folder), and `--scene material-room`, built in main.cpp rather than
+  shipped: glossy checker floor, metal wall, mirror panel, red wall, skylight, window, semi-glossy block,
+  white cube, lamp. `sharedShaders/pjv_path_light.sc`: the sun as a 0.02-radian disc and the sky at 0.35,
+  shared by the reference and restir-pt.
+- `restir-pt`: materials in the G-buffer (`gDirect.a`, RGBA32F, as planned); the sun through the BSDF
+  with the lobe widened by the disc; three-bounce BSDF-sampled paths with sun NEE and MIS; reservoirs as
+  paths (seed, k, x_k and its material, Le, sun visibility, w_k, L, the reconnection's cos/d^2); the
+  hybrid shift (random replay, then reconnection; k = 0 replayed whole), with invertibility checks;
+  validation; diffuse and specular accumulated and filtered apart, each demodulated, the specular history
+  2..12 frames by roughness and its filter held to the lobe's reach.
+
+**Deviations, and why.**
+
+- *w_k is sampled cosine-weighted at the reconnection vertex*, not from the BSDF. Its BSDF density depends
+  on the incoming direction a shift changes; cosine makes the reflected light pi f L for any x_{k-1}, and
+  lets validation re-trace the suffix without knowing where the path came from.
+- *NEE at x_k is stored as visibility* and re-evaluated at the disc's centre through x_k's BSDF on a shift.
+- *Weights are 1/M with M counting only shifts that succeeded*, not pairwise MIS (which needs every
+  neighbour's sample shifted back, more rays). Counting failed shifts darkened reuse to 0.6-0.8 of the
+  reference; this gives 0.92-1.06.
+- *The specular lobe is sampled from the NDF* (the editor's), not VNDF: the editor had to stay as it was.
+- *The directional albedo is Karis's analytic fit*, not a LUT.
+- *Secondary rays are exact.* restir's coarse bricks (bounces past 64 voxels, their sun past 16) shrank
+  every opening that was not brick-aligned and took the material room's indirect light to 0.75-0.8.
+- *The à-trous luminance test is against the 3x3 mean* (the diffuse), and the specular has none: against
+  the noisy centre, a sparse signal was darkened (the mirror to 0.54 of the reference without reuse).
+- *Specular reprojection at the reflected point's depth is not done*; the specular history is only short.
+
+**Measured** (material room, linear region means over pt-reference; restir-pt's README has the table):
+no reuse 0.94-1.01, ReSTIR PT at 1/16 0.92-1.06, at 1/4 0.94-1.00. The mirror at 1/16 is the right
+brightness but mottled; at 1/4 it reads clearly -- **open question 1: 1/4 is the floor for specular**,
+as guessed; 1/16 stays the default as asked.
+
+**Validation (T3)** is exact -- bit-identical images with and without it on an unchanged scene, once the
+direction and normal a suffix starts from are rounded to the reservoir's packing before first use -- but
+made no measurable difference to an untold change of light (the sun lowered 14 degrees without telling the
+renderer, `RESTIR_UNTOLD=1`): SanMiguel's indirect light was 0.44 of the change behind at +64 frames and
+0.03 at +256 with it or without. The lag is the image's own histories (the resolve's 64 frames, the GI's
+12), which only a told change resets; reservoirs (M capped at 4) are displaced by new paths within a few
+frames. So "settles within ~4 frames of reservoir age" holds for the reservoirs and is not what an untold
+change waits on. Costs ~0.5 ms on Lee Chemicals.
+
+**Cost** (RTX 3070, 1273x1370, `--bench`): SanMiguel 4.2 -> 6.7 ms a frame (paths 1.4 -> 3.9),
+Lee Chemicals 7.7 -> 16.7 (2.8 -> 11.8). Six exact rays a path to restir's four coarse, replays for glossy
+pixels, and occupancy: the walk's state is live across the traversal. Slimming it took Lee Chemicals from
+19.7 to 16.7.
+
+**Not done.** Pairwise MIS (T2). Virtual-depth specular reprojection (T4). Transparency (out of scope).
+NEE to emissive voxels (neither renderer has it; the reference shows a lamp as fireflies for a long time).
+The diffuse filter still costs the white cube a few percent against the reference.
+
+### 2026-10-22 (later) -- made cheap; mirrors by screen-space reflection
+
+Asked for: cheap, 1/16, coarse rays; the diffuse/specular look, not necessarily mirrors; a basic SSR for
+mirror surfaces. Now the default: the paths see glossiness capped at 0.5 (every vertex rough, so every path
+reconnects at x2), two bounces (pt-reference too), coarse secondary rays, random replay and validation
+compiled out (`RESTIR_REPLAY`, `RESTIR_VALIDATE`). Glossiness 0.9 and up gets an SSR in the composite (last
+frame's image, G-buffer march, fading back to the paths' blurred reflection). Lee Chemicals at 1273x669:
+5.4 ms a frame, paths 2.25 ms (from 16.7 / 11.8 at 1273x1370 for the full configuration); restir was 4.4 /
+~1.5. A mirror facing the camera mostly reflects what is off screen, which SSR cannot show.
+
+### 2026-10-22 (later still) -- final render vs raw path trace; sun shafts
+
+P is now the final-render switch: off is the raw path-traced image (no post, fog, shafts or SSAO). Light
+shafts (`shafts.frag`, L): world-space single scattering of the sun, one coarse shadow ray per GI pixel at
+a point drawn from an exponential falloff (48 finest voxels), HG g = 0.6, 16-frame reprojected history,
+depth-aware 4x4 upsample. 0.04 ms on Lee Chemicals. Not done: shafts from emissive voxels.
+
+### 2026-10-22 (evening) -- bloom, SSAO, and the disocclusion flare
+
+Bloom (a 13-tap mip chain, 4%, N) and a two-scale Alchemy-style obscurance replacing the SSAO (0.85 on
+the indirect light). Uncovered areas came in bright and faded over ~100 frames: the reuse skipped empty
+reservoirs (W = 0, a path that found no light -- about half of them in the material room), which weighs
+bright paths as if dark ones never happen. Spatial reuse alone was ~4x too bright; the temporal history
+diluted it in steady state, but nothing without a history had one. Fixed by counting them; the reuse is
+now weighted by the generalized balance heuristic (analytic shifts, so pairwise-style MIS without rays),
+with a wider search for pixels with no history. A sidestep's uncovered area: 10% of pixels more than 25%
+off at +1 frame before, 0.6% after; whole-frame +14% -> +1%. In the raw per-frame estimate a steady ~10-20%
+excess remains (mostly the glossy floor's specular), hidden in the filtered image; not yet traced.

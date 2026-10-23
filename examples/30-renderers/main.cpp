@@ -1,34 +1,31 @@
 // ProjectV Renderer Gallery
 //
-// One host application, seven renderers, the same scene and the same camera. The point is the
+// One host application, several renderers, the same scene and the same camera. The point is the
 // comparison: each renderer answers "how should this scene be lit" differently, and the only way
 // to judge that is to put them side by side under identical conditions.
 //
 // A renderer here is *data*, not code -- a folder holding render.json (the pass order),
 // resources.json (the shaders, render targets and framebuffers) and the shaders themselves. This
 // file supplies the window, the camera, the scene and the per-frame uniforms; everything that
-// makes one renderer differ from another lives in its folder. Adding an eighth is dropping in a
+// makes one renderer differ from another lives in its folder. Adding another is dropping in a
 // directory and adding one entry to buildRendererRegistry() below.
 //
-// Each renderer has its own README in renderers/<name>/, and renderers/README.md compares them.
+// Each renderer has its own README in renderers/<name>/, and the example's README compares them.
 //
-//   tree64              accumulation path tracer; resets whenever the camera moves
-//   reprojection        path traced, temporally reprojected, so it stays converged while moving
-//   restir              ReSTIR GI at a sixteenth of the pixels, denoised, then a temporal resolve
-//   fast                direct sun + screen-space AO, anti-aliased by TAA. Cheapest.
-//   face                per-face flat shading with full GI, accumulated by exact face identity
-//   radiance-cascade    screen-space radiance cascades
-//   world-cascade       world-space radiance cascades: the gather traces real voxel rays, so
-//                       occlusion and sky visibility are correct off-screen too
-//   world-face-cascade  world-space cascades anchored to voxel face centres, accumulated per face
+//   pt-reference        the reference: a plain path tracer on the engine's BSDF, accumulated while still
+//   fast                direct sun + ray-traced AO, anti-aliased by TAA. Cheapest.
+//   reconstruction      half-resolution tracing rebuilt to full from voxel face identity
+//   restir-pt           ReSTIR PT: two-bounce paths through the materials, reused at a sixteenth of the
+//                       pixels, denoised, then a temporal resolve
 //   voxel               the examples' game renderer (examples/shared/voxelRenderer): what the physics
 //                       demos, the explosion and the multiplayer games draw with
 //
 // Usage:
 //   ./renderer_gallery [--renderer <name>] [--scene <directory>] [--list]
 //
-//   --renderer   which renderer to run (default: tree64)
-//   --scene      a folder holding a compose.json (default: SanMiguel, from the scene previewer)
+//   --renderer   which renderer to run (default: pt-reference)
+//   --scene      a folder holding a compose.json (default: SanMiguel, from the scene previewer), or
+//                material-room: a room built here, to compare materials in (glossy floor, metal, mirror)
 //   --list       print the available renderers and exit
 //
 // Measuring (unattended; the window opens and closes by itself):
@@ -37,10 +34,10 @@
 //   --look x,y,z,tx,ty,tz   stands the camera at x,y,z looking at tx,ty,tz (default: the framing)
 //   --pan <rad>        turns the camera this much a frame (a moving-camera measurement)
 //   --voxel-folder <f> which staged folder the voxel renderer loads (default: voxelRenderer)
-//   --restir-gi <n>    restir traces GI for one pixel in n x n: 4 (a sixteenth, default) or 2 (a quarter)
+//   --restir-gi <n>    restir-pt traces paths for one pixel in n x n: 4 (a sixteenth, default) or 2 (a quarter)
 //
 // Selection is a flag rather than a prompt so the gallery can be scripted: a benchmark or a
-// screenshot matrix across all seven is a shell loop.
+// screenshot matrix across all of them is a shell loop.
 //
 // Controls:
 //   W/S          — move forward / backward (Shift: four times as fast)
@@ -49,11 +46,14 @@
 //   Mouse        — look around (cursor is captured; Esc releases it, left-click re-captures)
 //   Scroll wheel — sun elevation
 //   T            — TAA on / off (voxel)
-//   Q            — reconstruction bypassed: point-sample the render resolution (reconstruction, restir)
-//   G            — the image / indirect light only / direct light only / ambient occlusion (restir)
-//   J            — ReSTIR reuse on / off (restir)
-//   P            — post-processing on / off (restir); V vignette, B colour grade, E auto-exposure, K depth of field
-//   O / U        — distance fog / soft sun shadow on / off (restir)
+//   Q            — reconstruction bypassed: point-sample the render resolution (reconstruction, restir-pt)
+//   G            — the image / indirect light / direct light / ambient occlusion / indirect diffuse /
+//                  indirect specular (restir-pt)
+//   J            — ReSTIR reuse on / off (restir-pt)
+//   P            — the final render / the raw path-traced image (restir-pt): off drops the post, the fog, the
+//                  light shafts and the SSAO. Within it: V vignette, B colour grade, E auto-exposure, K depth
+//                  of field, N bloom, O distance fog, L light shafts
+//   U            — soft sun shadow on / off (restir-pt)
 
 #include <algorithm>
 #include <chrono>
@@ -77,7 +77,9 @@
 #include "graphics/perform_renderer.h"
 #include "graphics/type_mapping.h"
 #include "utils/compose_io.h"
+#include "utils/material.h"
 #include "utils/picking.h"
+#include "utils/voxel_management.h"
 #include "voxel_renderer.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -151,14 +153,28 @@ static void uploadCommonUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     projv::graphics::setUniformToValue(renderer, "sunDir",     sunDir);
 }
 
-// Renderer 1: original tree64 accumulation renderer — only the common uniforms.
-static void uploadTree64Uniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
-    uploadCommonUniforms(renderer, ctx);
+// The finest voxel edge in the scene: rays leave a surface a twentieth of it off, and the "same surface"
+// tests of the reusing renderers scale from it.
+static float finestVoxel(const projv::World& world) {
+    static float finest = 0.0f;
+    if (finest <= 0.0f) {
+        for (const projv::Chunk& chunk : world.ctx().get<projv::Scene>().chunks)
+            if (chunk.alive && chunk.header.voxelScale > 0.0f)
+                finest = finest > 0.0f ? std::min(finest, chunk.header.voxelScale) : chunk.header.voxelScale;
+        if (finest <= 0.0f) finest = 1.0f;
+    }
+    return finest;
 }
 
-// Renderer 2: reprojection renderer — additionally needs last frame's camera
-// so it can project this frame's hits into the previous frame's screen space.
-// Renderer 3 (fast) uses the same set: its TAA pass reprojects the same way.
+// The reference path tracer: the common uniforms, and its settings -- the loop's bound (a path ray and
+// a shadow ray per vertex), the surface offset, and the bounces (restir-pt's path length).
+static constexpr int PATH_BOUNCES = 2;   // restir's: cheap; a third bounce cost half again for little light
+static void uploadReferenceUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
+    uploadCommonUniforms(renderer, ctx);
+    projv::core::vec4 settings{float(2 * (PATH_BOUNCES + 1)), finestVoxel(*ctx.world) * 0.05f, float(PATH_BOUNCES), 0.0f};
+    projv::graphics::setUniformToValue(renderer, "ptSettings", settings);
+}
+
 // The reconstruction demo. Its G-buffer and compose run at half resolution and the reconstruction
 // magnifies to the output grid, so it needs the two uniforms that pass reads: debugParams.x carries
 // the bypass, renderParams.x a debug view it does not use here.
@@ -170,6 +186,7 @@ static void uploadReconstructionUniforms(std::shared_ptr<projv::ConstructedRende
     projv::graphics::setUniformToValue(renderer, "renderParams", renderParams);
 }
 
+// The fast renderer: its TAA reprojects, so it needs last frame's camera too.
 static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
     uploadCommonUniforms(renderer, ctx);
     projv::core::vec3 prevCameraPosition = ctx.prevCameraPosition;
@@ -178,21 +195,42 @@ static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRendere
     projv::graphics::setUniformToValue(renderer, "prevCameraDir", prevCameraDirection);
 }
 
-// The restir renderer's switches: G cycles what it shows (the image, the indirect light alone, the
-// direct alone, the ambient occlusion), J turns ReSTIR's reuse off -- each GI pixel's one fresh sample,
-// denoised -- for the A/B, and Q bypasses the reconstruction, as for the reconstruction renderer.
+// The restir-pt renderer's switches: G cycles what it shows (the image, the indirect light alone, the
+// direct alone, the ambient occlusion, the indirect diffuse alone, the indirect specular alone), J turns
+// ReSTIR's reuse off -- each GI pixel's one fresh path, denoised -- for the A/B, and Q bypasses the
+// reconstruction, as for the reconstruction renderer.
 // The post (display.frag): P turns it all off and on, V the vignette, B the grade, E the auto-exposure.
 static int  g_restirView = 0;
 static bool g_restirReuse = true;
-// K the depth of field (part of the post). Two more are the scene's, not the post's: O the distance fog,
-// U the sun's soft shadow.
-struct RestirPost { bool on = true, vignette = true, grade = true, exposure = true, dof = true; };
+// K the depth of field. P is the final render as a whole: off, the raw path-traced image -- no post, and
+// none of what is laid over the light either: O the distance fog, L the light shafts, the SSAO. U, the
+// sun's soft shadow, is the lighting's, not the final render's.
+struct RestirPost { bool on = true, vignette = true, grade = true, exposure = true, dof = true, bloom = true; };
 static RestirPost g_restirPost;
 static bool g_restirFog = true;
+static bool g_restirShafts = false;  // L, part of the final render (P); off by default: not worth it
 static bool g_restirSoftShadow = true;
 static constexpr float RESTIR_VIGNETTE = 0.15f;       // the corners' falloff: subtle
 static constexpr float RESTIR_DOF_PIXELS = 1.5f;      // the far distance's blur radius at 1080 lines: very slight
+static constexpr float RESTIR_BLOOM = 0.04f;          // the bloom's share of the image (N): a glow, not a haze
+static constexpr float RESTIR_SSAO = 0.85f;           // how far the obscurance darkens the indirect light
 static constexpr float RESTIR_SUN_HALF_ANGLE = 0.02f; // radians, ~4x the real sun's: penumbrae a little soft
+                                                      // (pjv_path_light.sc's PATH_SUN_HALF_ANGLE: the same disc)
+// The light shafts (shafts.frag): the haze's optical depth over its falloff, the falloff's length in the
+// finest voxels (the air further out than about that is not counted: open sunlit air reads as a light
+// haze, not glare), the phase function's forward scattering, and the frames they are accumulated over.
+static constexpr float RESTIR_SHAFT_STRENGTH = 0.2f;
+static constexpr float RESTIR_SHAFT_FALLOFF_VOXELS = 48.0f;
+static constexpr float RESTIR_SHAFT_PHASE_G = 0.6f;
+static constexpr float RESTIR_SHAFT_HISTORY = 16.0f;
+static constexpr int RESTIR_VIEWS = 6;
+// Rays a GI pixel may trace in the sample pass (a new path: 4; validating the history's suffix: 3;
+// shifting it here: 4 if it must be replayed) and in the spatial pass (its own path and five neighbours',
+// replayed only where a reconnection was too close to make, and a visibility ray). The paths see every
+// surface as rough (restir_common.sc), so nearly every shift is a reconnection and traces nothing.
+static constexpr float RESTIR_SAMPLE_RAYS = 12.0f;
+static constexpr float RESTIR_SPATIAL_RAYS = 8.0f;
+static constexpr float RESTIR_VALIDATION = 0.1f;   // a path's light changed by more than this share: stale
 static float g_sceneRadius = 100.0f;                  // frameScene's, for the fog's length
 static int  g_restirStride = 4;   // --restir-gi: GI for one window pixel in stride x stride (4 or 2)
 static constexpr float RESTIR_RENDER_SCALE = 0.5f;   // its G-buffer, each way; resources.json's 0.5 targets
@@ -204,13 +242,7 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     using projv::graphics::setUniformToValue;
     // Surfaces are offset a twentieth of the finest voxel before a ray leaves them; the same-surface
     // tests are scaled from it too.
-    static float finest = 0.0f;
-    if (finest <= 0.0f) {
-        for (const projv::Chunk& chunk : ctx.world->ctx().get<projv::Scene>().chunks)
-            if (chunk.alive && chunk.header.voxelScale > 0.0f)
-                finest = finest > 0.0f ? std::min(finest, chunk.header.voxelScale) : chunk.header.voxelScale;
-        if (finest <= 0.0f) finest = 1.0f;
-    }
+    const float finest = finestVoxel(*ctx.world);
     // Which render texel of its block each GI pixel samples this frame (the block: the GI stride against
     // the render resolution, 2 or 1): every one in turn, diagonals first.
     const int giStride = std::max(1, int(float(g_restirStride) * RESTIR_RENDER_SCALE));
@@ -222,31 +254,58 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     const int cell = cellOrder[ctx.frameCount % 4];
     vec4 jitterParams{(float(cell % 2) + 0.5f) * 0.5f - 0.5f, (float(cell / 2) + 0.5f) * 0.5f - 0.5f, 0.0f, 0.0f};
     vec4 renderParams{0.0f, 0.0f, g_reconstructBypass ? 1.0f : 0.0f, 0.0f};
+    // For unattended captures (--capture): RESTIR_VIEW picks the starting view; RESTIR_POST=0 (the raw path
+    // trace), RESTIR_FOG=0, RESTIR_SHAFTS=0 and RESTIR_SOFT=0 start with the final render, the fog, the
+    // shafts or the soft shadow off; RESTIR_VALIDATE=1 turns the
+    // paths' validation on (off by default: it bought nothing measurable); RESTIR_REUSE=0 the reuse off,
+    // RESTIR_SSAO=0 the SSAO (for comparing with pt-reference, which has none). RESTIR_UNTOLD=1 moves the sun without telling the renderer -- no
+    // history starts over -- as a game's light changes: what only validation can catch.
+    static bool untold = false;
+    static float validation = 0.0f;
+    static float ssao = RESTIR_SSAO;
+    static const bool fromEnv = [] {
+        if (const char* v = std::getenv("RESTIR_VIEW")) g_restirView = std::clamp(std::atoi(v), 0, RESTIR_VIEWS - 1);
+        if (const char* v = std::getenv("RESTIR_VALIDATE")) validation = std::atoi(v) != 0 ? RESTIR_VALIDATION : 0.0f;
+        if (const char* v = std::getenv("RESTIR_REUSE")) g_restirReuse = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_SSAO")) ssao = std::atoi(v) != 0 ? RESTIR_SSAO : 0.0f;
+        if (const char* v = std::getenv("RESTIR_UNTOLD")) untold = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_POST")) g_restirPost.on = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_FOG")) g_restirFog = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_SHAFTS")) g_restirShafts = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_BLOOM")) g_restirPost.bloom = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_SOFT")) g_restirSoftShadow = std::atoi(v) != 0;
+        return true;
+    }();
+    (void)fromEnv;
     // SSAO six of the finest voxels round, darkening the indirect light by up to half; the sun's penumbra
     // per unit of blocker distance (the disc's full width); the fog's density: its length 1.6 scene radii,
     // so the far side of the scene is about a third hazed, held to 30..300 m of Teardown-scale voxels.
     const float fogLength = std::clamp(1.6f * g_sceneRadius, 300.0f, 3000.0f);
-    vec4 look{6.0f * finest, 0.5f, g_restirSoftShadow ? 2.0f * std::tan(RESTIR_SUN_HALF_ANGLE) : 0.0f,
-              g_restirFog ? 1.0f / fogLength : 0.0f};
+    // The SSAO and the fog are the final render's (P), not the path tracer's.
+    const bool finalRender = g_restirPost.on;
+    vec4 look{6.0f * finest, finalRender ? ssao : 0.0f, g_restirSoftShadow ? 2.0f * std::tan(RESTIR_SUN_HALF_ANGLE) : 0.0f,
+              finalRender && g_restirFog ? 1.0f / fogLength : 0.0f};
+    vec4 shafts{finalRender && g_restirShafts ? RESTIR_SHAFT_STRENGTH : 0.0f, 1.0f / (RESTIR_SHAFT_FALLOFF_VOXELS * finest),
+                RESTIR_SHAFT_PHASE_G, RESTIR_SHAFT_HISTORY};
     static bool first = true;
 
     vec4 cameraPos{ctx.cameraPosition, 1.0f}, cameraDir{ctx.cameraDirection, 0.0f};
     vec4 prevCameraPos{ctx.prevCameraPosition, 1.0f}, prevCameraDir{ctx.prevCameraDirection, 0.0f};
     vec4 sunDir{ctx.sunDirection, 0.0f};
     // z: the sun moved -- the light changed, so every history (the reservoirs' cached light included) starts over.
-    vec4 frameCount{float(ctx.frameCount), ctx.cameraMoved ? 1.0f : 0.0f, ctx.sunMoved ? 1.0f : 0.0f, 0.0f};
-    vec4 reuse{g_restirReuse ? 1.0f : 0.0f, g_restirReuse ? 1.0f : 0.0f, 1.0f, 4.0f};   // temporal, spatial, visibility, M cap
-    // For unattended captures (--capture): RESTIR_VIEW picks the starting view; RESTIR_POST=0, RESTIR_FOG=0
-    // and RESTIR_SOFT=0 start with the post, the fog or the soft shadow off.
-    static const bool fromEnv = [] {
-        if (const char* v = std::getenv("RESTIR_VIEW")) g_restirView = std::atoi(v) & 3;
-        if (const char* v = std::getenv("RESTIR_POST")) g_restirPost.on = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_FOG")) g_restirFog = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_SOFT")) g_restirSoftShadow = std::atoi(v) != 0;
-        return true;
-    }();
-    (void)fromEnv;
-    vec4 denoise{1.0f, 1.0f, float(g_restirView), 12.0f};                           // a-trous, GI accumulation, view, its cap
+    // (An untold sun is no move at all, as far as the renderer knows: the camera stands still in that test.)
+    const bool sunMoved = ctx.sunMoved && !untold;
+    const bool moved = ctx.cameraMoved && !(ctx.sunMoved && untold);
+    vec4 frameCount{float(ctx.frameCount), moved ? 1.0f : 0.0f, sunMoved ? 1.0f : 0.0f, 0.0f};
+    // RESTIR_TEMPORAL=0 / RESTIR_SPATIAL=0: one half of the reuse alone, for measuring.
+    static const bool temporal = !std::getenv("RESTIR_TEMPORAL") || std::atoi(std::getenv("RESTIR_TEMPORAL")) != 0;
+    static const bool spatial = !std::getenv("RESTIR_SPATIAL") || std::atoi(std::getenv("RESTIR_SPATIAL")) != 0;
+    static const bool visibility = !std::getenv("RESTIR_VISIBILITY") || std::atoi(std::getenv("RESTIR_VISIBILITY")) != 0;
+    vec4 reuse{g_restirReuse && temporal ? 1.0f : 0.0f, g_restirReuse && spatial ? 1.0f : 0.0f, visibility ? 1.0f : 0.0f, 4.0f};   // temporal, spatial, visibility, M cap
+    static const float atrous = std::getenv("RESTIR_ATROUS") ? float(std::atoi(std::getenv("RESTIR_ATROUS")) != 0) : 1.0f;
+    // RESTIR_RAW=1: no GI accumulation and no image history -- each frame's estimate alone, for measuring.
+    static const bool raw = std::getenv("RESTIR_RAW") && std::atoi(std::getenv("RESTIR_RAW")) != 0;
+    vec4 denoise{atrous, raw ? 0.0f : 1.0f, float(g_restirView), 12.0f};                           // a-trous, GI accumulation, view, its cap
     vec4 jitter{float(offset[0]), float(offset[1]), float(giStride), first ? 1.0f : 0.0f};
     // w: one render texel's width per unit of distance, for the tests that ask "is this the same surface?".
     const float renderHeight = std::max(ctx.windowResolution.y * RESTIR_RENDER_SCALE, 1.0f);
@@ -254,7 +313,7 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     // The image's history: none when the sun moved (the light is new); short while the camera moves, so
     // changing light is not dragged along; 64 frames on a still view -- enough to average the jitter and
     // what noise is left, short enough that the GI's own history, not this one, decides how fast it settles.
-    const float imageHistory = ctx.sunMoved ? 1.0f : ctx.cameraMoved ? 16.0f : 64.0f;
+    const float imageHistory = sunMoved || raw ? 1.0f : moved ? 16.0f : 64.0f;
     vec4 settings{6.0f, finest * 0.05f, imageHistory, pixelWidth};
     setUniformToValue(renderer, "cameraPos", cameraPos);
     setUniformToValue(renderer, "cameraDir", cameraDir);
@@ -267,6 +326,10 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     setUniformToValue(renderer, "restirJitter", jitter);
     setUniformToValue(renderer, "restirSettings", settings);
     setUniformToValue(renderer, "restirLook", look);
+    // RESTIR_BOUNCES=n: the paths' length, for measuring (pt-reference keeps PATH_BOUNCES).
+    static const float bounces = std::getenv("RESTIR_BOUNCES") ? float(std::atoi(std::getenv("RESTIR_BOUNCES"))) : float(PATH_BOUNCES);
+    vec4 path{bounces, RESTIR_SAMPLE_RAYS, RESTIR_SPATIAL_RAYS, validation};
+    setUniformToValue(renderer, "restirPath", path);
     // The post's switches, and the frame's length for the exposure's adaptation (its own clock: the
     // gallery's frame timer exists only in perf builds).
     static auto lastFrame = std::chrono::steady_clock::now();
@@ -277,8 +340,10 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     vec4 postParams{post.on && post.vignette ? RESTIR_VIGNETTE : 0.0f, post.on && post.grade ? 1.0f : 0.0f,
                     post.on && post.exposure ? 1.0f : 0.0f, seconds};
     setUniformToValue(renderer, "restirPost", postParams);
-    vec4 dof{post.on && post.dof ? RESTIR_DOF_PIXELS * ctx.windowResolution.y / 1080.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+    vec4 dof{post.on && post.dof ? RESTIR_DOF_PIXELS * ctx.windowResolution.y / 1080.0f : 0.0f,
+             post.on && post.bloom ? RESTIR_BLOOM : 0.0f, 0.0f, 0.0f};   // y: display.frag's bloom
     setUniformToValue(renderer, "restirDof", dof);
+    setUniformToValue(renderer, "restirShafts", shafts);
     setUniformToValue(renderer, "jitterParams", jitterParams);
     setUniformToValue(renderer, "renderParams", renderParams);
     first = false;
@@ -310,32 +375,23 @@ static void uploadVoxelUniforms(std::shared_ptr<projv::ConstructedRenderer> rend
     voxel_renderer::upload(*ctx.world, renderer, ctx.cameraPosition, ctx.cameraDirection);
 }
 
-// The registry. One entry per folder under renderers/; adding an eighth renderer means adding a
-// directory and one push_back here.
+// The registry. One entry per folder under renderers/; adding a renderer means adding a directory and
+// one push_back here.
 //
 // The `id` must match the directory name: --renderer takes it, and it is what the per-renderer
 // README is filed under.
 static std::vector<RendererModule> buildRendererRegistry() {
     std::vector<RendererModule> registry;
 
+    // The reference: one path per pixel per frame through the engine's BSDF (pjv_bsdf.sc), nothing
+    // reused or filtered, averaged while the view is still. Slow and exact -- what the others are
+    // measured against, restir-pt above all (the same sun, sky, path length and display).
     registry.push_back({
-        "tree64",
-        "Accumulation path tracer. Converges while the camera is still, resets when it moves.",
-        "./renderers/tree64/",
-        "./renderers/tree64/shaders/vs_quad.bin",
-        uploadTree64Uniforms
-    });
-    // The temporal filtering demo. It happens to be built on a path tracer, but the path trace is
-    // the *input* here rather than the subject: what this shows is how to reproject last frame's
-    // result through this frame's camera, validate the match, and blend -- the machinery every
-    // temporal upscaler and antialiaser is made of. AdvancedRenderer used to carry a TAA pass; this
-    // is where that technique is taught now.
-    registry.push_back({
-        "taa",
-        "Temporal reprojection and accumulation -- the TAA technique, shown on a path traced input.",
-        "./renderers/taa/",
-        "./renderers/taa/shaders/vs_quad.bin",
-        uploadReprojectionUniforms
+        "pt-reference",
+        "Reference path tracer: two bounces through the materials, accumulated while still. What the others are measured against.",
+        "./renderers/pt-reference/",
+        "./renderers/pt-reference/shaders/vs_quad.bin",
+        uploadReferenceUniforms
     });
     registry.push_back({
         "fast",
@@ -359,14 +415,14 @@ static std::vector<RendererModule> buildRendererRegistry() {
         uploadReconstructionUniforms
     });
 
-    // ReSTIR GI: two bounces of light, traced for a sixteenth of the pixels and shared between pixels
-    // and frames by reservoir resampling, then denoised. Born in the ray lab, where it ran the whole
-    // frame in about a quarter of the path tracer's time at a similar or better image.
+    // ReSTIR PT: two-bounce paths through the materials, traced for a sixteenth of the pixels and
+    // shared between pixels and frames by resampling whole paths (reconnected where that is safe,
+    // replayed where it is not), then denoised diffuse and specular apart.
     registry.push_back({
-        "restir",
-        "ReSTIR GI at a sixteenth of the pixels, SSAO, a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, P post (V, B, E, K), O fog, U soft shadow.",
-        "./renderers/restir/",
-        "./renderers/restir/shaders/vs_quad.bin",
+        "restir-pt",
+        "ReSTIR PT at a sixteenth of the pixels, through the materials; a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, P final render / raw path trace (V, B, E, K, N bloom, O fog, L light shafts), U soft shadow.",
+        "./renderers/restir-pt/",
+        "./renderers/restir-pt/shaders/vs_quad.bin",
         uploadRestirUniforms
     });
 
@@ -386,7 +442,7 @@ static std::vector<RendererModule> buildRendererRegistry() {
 // Command line. Selection is a flag rather than a prompt so the gallery can be driven by a
 // script -- a benchmark across all seven renderers should not need someone at the keyboard.
 struct Options {
-    std::string rendererId = "tree64";
+    std::string rendererId = "pt-reference";
     std::string scenePath;                // Empty: use the bundled scene beside the binary.
     bool        listAndExit = false;
 };
@@ -527,7 +583,7 @@ static CameraFraming frameScene(const projv::Scene& scene) {
     float distance = (radius / std::tan(FOV_RADIANS * 0.5f)) * 1.25f;
 
     // ...but not further than the renderers can actually see. These are walkthrough path tracers:
-    // their primary rays carry a step budget (tree64 uses maxRaySteps = 200) and drop to a coarse
+    // their primary rays carry a step budget (tree64, the old path tracer, used 200) and drop to a coarse
     // LOD only after distanceToFinishLOD, so a ray crossing a long stretch of empty space runs out
     // of steps before it reaches anything. Framing a 4096-wide scene from outside its bounding
     // sphere therefore renders *black* -- and renders it fast, because every ray terminates on the
@@ -558,7 +614,7 @@ static CameraFraming frameScene(const projv::Scene& scene) {
     // onto whatever is below the chosen spot and stand on it, using the engine's own CPU picker.
     // This is also the cheapest demonstration of utils::pickVoxel in the tree.
     // A person's height in voxels, not a fraction of the scene. Scaling this with the scene put the
-    // camera 46 units up in SanMiguel, which sounds harmless until you count steps: tree64's primary
+    // camera 46 units up in SanMiguel, which sounds harmless until you count steps: tree64's (since retired) primary
     // ray is 100 steps at LOD 0, so a floor 46 units below is only reachable by rays steeper than
     // about 30 degrees. Everything shallower missed, and tree64 writes a miss as black -- the whole
     // frame went dark while the other renderers, which coarsen to LOD 1-2 and reach much further,
@@ -590,6 +646,94 @@ static CameraFraming frameScene(const projv::Scene& scene) {
 }
 
 // =============================================================================
+// The material room (--scene material-room)
+// =============================================================================
+//
+// What restir-pt is compared with pt-reference on: one 64^3 chunk of quarter-metre voxels, a room 16 m
+// across with a checkered glossy floor, a metal wall, a mirror panel, a red wall to bleed colour, a
+// window and a skylight the default sun falls through onto the floor, a semi-glossy block, a white cube
+// and a small lamp. Built here rather than shipped, so the materials are in the code that names them.
+
+static constexpr float ROOM_VOXEL = 0.25f;
+
+static projv::Scene buildMaterialRoom() {
+    using projv::packColor;
+    constexpr int N = 64;
+    projv::Scene scene;
+    projv::Chunk chunk;
+    chunk.header.chunkID = 1;
+    chunk.header.position = projv::core::vec3(0.0f);
+    chunk.header.scale = N * ROOM_VOXEL;
+    chunk.header.voxelScale = ROOM_VOXEL;
+    chunk.header.resolution = N;
+    chunk.header.rotation = projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    chunk.requestedLOD = 0;
+    chunk.alive = true;
+    chunk.componentHandle = 0;
+    scene.components.push_back(projv::ComponentRecord{projv::ComponentKind::Chunk, 0, -1, "internal/material-room", false, {}, -1});
+
+    // glossiness, metallic; an emitter's strength (its light is its albedo's colour).
+    auto material = [&](const char* name, projv::Color colour, float glossiness, float metallic, float emission = 0.0f) {
+        uint8_t slot = projv::utils::addMaterial(scene, 0, name, packColor(colour));
+        projv::utils::setMaterialProperties(scene, 0, slot, 0u, projv::packSurfaceWord(glossiness, metallic, 0.0f, 1.0f),
+                                            projv::packExtraWord(emission, 0.0f, 0u));
+        return slot;
+    };
+    const uint8_t floorLight = material("floor light", {200, 195, 185}, 0.85f, 0.0f);
+    const uint8_t floorDark  = material("floor dark", {60, 62, 70}, 0.85f, 0.0f);
+    const uint8_t white      = material("white", {220, 220, 220}, 0.0f, 0.0f);
+    const uint8_t red        = material("red", {190, 50, 40}, 0.0f, 0.0f);
+    const uint8_t metal      = material("metal", {230, 170, 120}, 0.75f, 1.0f);
+    const uint8_t mirror     = material("mirror", {240, 240, 240}, 1.0f, 1.0f);
+    const uint8_t satin      = material("satin blue", {50, 90, 200}, 0.5f, 0.0f);
+    const uint8_t lamp       = material("lamp", {255, 200, 140}, 0.0f, 0.0f, 8.0f);
+
+    auto map = projv::utils::createVoxelBrickMap(projv::utils::computeBrickDims(N));
+    auto box = [&](int x0, int y0, int z0, int x1, int y1, int z1, uint8_t slot) {   // [x0, x1) etc.
+        for (int z = z0; z < z1; ++z)
+            for (int y = y0; y < y1; ++y)
+                for (int x = x0; x < x1; ++x) projv::utils::brickMapSetVoxel(*map, x, y, z, slot);
+    };
+    auto hole = [&](int x0, int y0, int z0, int x1, int y1, int z1) {
+        for (int z = z0; z < z1; ++z)
+            for (int y = y0; y < y1; ++y)
+                for (int x = x0; x < x1; ++x) projv::utils::brickMapClearVoxel(*map, x, y, z);
+    };
+    for (int z = 0; z < N; z += 8)   // the floor: 2 m tiles, light and dark, both glossy
+        for (int x = 0; x < N; x += 8) box(x, 0, z, x + 8, 2, z + 8, ((x + z) / 8) % 2 ? floorDark : floorLight);
+    box(0, 38, 0, N, 40, N, white);       // the ceiling...
+    hole(8, 38, 30, 32, 40, 54);          // ...and its skylight: the default sun lands mid-floor
+    box(0, 2, 0, 2, 38, N, metal);        // west: brushed metal
+    box(62, 2, 0, N, 38, N, red);         // east: red, to bleed onto the floor
+    box(2, 2, 62, 62, 38, N, white);      // north: white, with a mirror panel
+    box(16, 6, 62, 48, 30, 63, mirror);
+    box(2, 2, 0, 62, 38, 2, white);       // south: white, with a window
+    hole(24, 8, 0, 40, 28, 2);
+    box(40, 2, 40, 48, 10, 48, white);    // a white cube
+    box(14, 2, 30, 22, 14, 38, satin);    // a semi-glossy block
+    box(50, 2, 12, 52, 4, 14, lamp);      // a small lamp
+
+    projv::utils::updateChunkFromBrickMap(chunk, *map);
+    std::vector<uint8_t> materialIDs;
+    projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, materialIDs, *map);
+    const int32_t blob = projv::internChunkGeometry(scene, chunk, std::move(map));
+    if (blob >= 0 && size_t(blob) < scene.geometryPool.size()) scene.geometryPool[blob].materialIDs = std::move(materialIDs);
+    scene.chunks.push_back(std::move(chunk));
+    scene.looseChunks.push_back(0);
+    scene.looseChunkCount = 1;
+    return scene;
+}
+
+// Standing in the south of the room, looking north along the floor at the mirror, the metal wall to the
+// right and the red one to the left.
+static void frameMaterialRoom(CameraFraming& framing) {
+    framing.position = projv::core::vec3(32.0f, 8.0f, 6.0f) * ROOM_VOXEL;
+    framing.yaw = 3.14159265f * 0.5f;
+    framing.pitch = -0.2f;
+    framing.moveSpeed = 3.0f;
+}
+
+// =============================================================================
 // Application stages
 // =============================================================================
 
@@ -617,8 +761,9 @@ void startup(projv::Application& app) {
     selectedRenderer = g_selectedRenderer;
 
     // Eager load: loads all scene geometry up front.
+    const bool materialRoom = g_scenePath == "material-room/";
     projv::core::info("Loading scene: {}", g_scenePath);
-    scene = projv::utils::loadComposeFromDisk(g_scenePath);
+    scene = materialRoom ? buildMaterialRoom() : projv::utils::loadComposeFromDisk(g_scenePath);
     projv::core::info("Renderer: {}", selectedRenderer.id);
 
     // A scene can parse and still hold no geometry -- most often because its .data containers are
@@ -632,6 +777,7 @@ void startup(projv::Application& app) {
     // The camera used to be hardcoded to a position tuned for one scene, which meant --scene
     // pointed anywhere else opened inside the geometry or in the void.
     framing = frameScene(scene);
+    if (materialRoom) frameMaterialRoom(framing);
     cameraPhi = framing.yaw;
 
     if (selectedRenderer.install) {
@@ -641,10 +787,11 @@ void startup(projv::Application& app) {
     }
 
     projv::RendererSpecification rendererSpec = projv::graphics::loadRendererSpecification(selectedRenderer.directory);
-    // restir's GI targets are its quarter-size ones; --restir-gi sets how far below the window they are.
-    if (selectedRenderer.id == "restir")
+    // restir-pt's path targets are its quarter-size ones; --restir-gi sets how far below the window they are.
+    if (selectedRenderer.id == "restir-pt")
         for (projv::Texture& texture : rendererSpec.resources.textures)
-            if (texture.scale == 0.25f) texture.scale = 1.0f / float(g_restirStride);
+            if (texture.scale == 0.25f && texture.name.rfind("bloom", 0) != 0)   // the bloom's own quarter level is not one
+                texture.scale = 1.0f / float(g_restirStride);
     renderInstance.addRendererSpecification(1, rendererSpec);
 
     bgfx::ShaderHandle vsh = projv::graphics::loadShader(selectedRenderer.vertexShaderPath);
@@ -847,38 +994,51 @@ void render(projv::Application& app) {
         static bool prevG = false, prevJ = false;
         bool g = glfwGetKey(renderInstance.window, GLFW_KEY_G) == GLFW_PRESS;
         bool j = glfwGetKey(renderInstance.window, GLFW_KEY_J) == GLFW_PRESS;
-        // The post's toggles: P all of it, V the vignette, B the grade, E the auto-exposure.
+        // The final render's toggles: P all of it, V the vignette, B the grade, E the auto-exposure, K the depth
+        // of field, N the bloom, O the fog, L the shafts; U the soft shadow, which is the lighting's.
         struct PostKey { int key; bool* flag; const char* name; bool prev; };
         static PostKey postKeys[] = {
-            {GLFW_KEY_P, &g_restirPost.on, "post-processing", false},
+            {GLFW_KEY_P, &g_restirPost.on, "final render (off: the raw path trace)", false},
             {GLFW_KEY_V, &g_restirPost.vignette, "vignette", false},
             {GLFW_KEY_B, &g_restirPost.grade, "colour grade", false},
             {GLFW_KEY_E, &g_restirPost.exposure, "auto-exposure", false},
             {GLFW_KEY_K, &g_restirPost.dof, "depth of field", false},
+            {GLFW_KEY_N, &g_restirPost.bloom, "bloom", false},
             {GLFW_KEY_O, &g_restirFog, "distance fog", false},
+            {GLFW_KEY_L, &g_restirShafts, "light shafts", false},
             {GLFW_KEY_U, &g_restirSoftShadow, "soft sun shadow", false},
         };
         for (PostKey& k : postKeys) {
             bool down = glfwGetKey(renderInstance.window, k.key) == GLFW_PRESS;
             if (down && !k.prev) {
                 *k.flag = !*k.flag;
-                const bool partOfPost = k.flag != &g_restirPost.on && k.flag != &g_restirFog && k.flag != &g_restirSoftShadow;
+                const bool partOfPost = k.flag != &g_restirPost.on && k.flag != &g_restirSoftShadow;
                 projv::core::info("ReSTIR {}: {}{}", k.name, *k.flag ? "on" : "off",
-                                  partOfPost && !g_restirPost.on ? " (post is off: P)" : "");
+                                  partOfPost && !g_restirPost.on ? " (the final render is off: P)" : "");
             }
             k.prev = down;
         }
         if (g && !prevG) {
-            g_restirView = (g_restirView + 1) % 4;
-            static const char* views[] = {"the image", "indirect light only", "direct light only", "ambient occlusion"};
+            g_restirView = (g_restirView + 1) % RESTIR_VIEWS;
+            static const char* views[] = {"the image", "indirect light only", "direct light only", "ambient occlusion",
+                                          "indirect diffuse only", "indirect specular only"};
             projv::core::info("ReSTIR view: {}", views[g_restirView]);
         }
         if (j && !prevJ) {
             g_restirReuse = !g_restirReuse;
-            projv::core::info("ReSTIR reuse: {}", g_restirReuse ? "on" : "off (one fresh sample per GI pixel)");
+            projv::core::info("ReSTIR reuse: {}", g_restirReuse ? "on" : "off (one fresh path per GI pixel)");
         }
         prevG = g;
         prevJ = j;
+    }
+
+    // GALLERY_STEP_AT=n sidesteps the camera half a second's walk to the right at frame n: with --capture and
+    // GALLERY_CAPTURE_AT, how what that uncovers settles (disocclusion).
+    static const int stepAt = std::getenv("GALLERY_STEP_AT") ? std::atoi(std::getenv("GALLERY_STEP_AT")) : -1;
+    if (app.frameCount == stepAt) {
+        float rightPhi = cameraPhi - 3.14159265f / 2.0f;
+        cameraPosition -= projv::core::vec3(projv::core::cos(rightPhi), 0.0f, projv::core::sin(rightPhi)) * (framing.moveSpeed * 0.5f);
+        cameraMoved = true;
     }
 
     // H re-frames on the scene, for when navigation has left the subject behind.

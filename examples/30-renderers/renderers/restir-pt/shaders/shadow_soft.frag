@@ -1,7 +1,12 @@
 $input v_color0
 $input v_texcoord0
 
-// shadow_soft.frag -- render resolution, after the SSAO: the sun's light, with a soft-edged shadow.
+// shadow_soft.frag -- render resolution, after the SSAO: the sun's light through the surface's BSDF
+// (pjv_bsdf.sc: the diffuse lobe and the specular highlight), with a soft-edged shadow.
+//
+// The sun is a disc (PATH_SUN_HALF_ANGLE), and a glossy surface mirrors the whole of it: its lobe is
+// widened by the disc's half-width before it is evaluated at the disc's centre, so a mirror shows a sun
+// the disc's size rather than a point, and a rough surface is unchanged.
 //
 // The G-buffer traces one shadow ray at the sun's centre: a hard edge, noise-free. A real sun is a disc,
 // so its shadow's edge is a penumbra as wide as the blocker's distance times the disc's angle
@@ -12,8 +17,9 @@ $input v_texcoord0
 //      so a shadow does not soften across a step onto another face.
 // The taps turn a little each frame; the resolve's accumulation smooths what is left of the pattern.
 //
-// Output: rgb the sun's light leaving the surface (albedo x sun x cosine x visibility), a 0.
-// Inputs: 0-5 the G-buffer (gPos 0, gNormal 1 -- w the blocker distance, gAlbedo 2 -- a the visibility).
+// Output: rgb the sun's light leaving the surface towards the camera (BSDF x sun x cosine x visibility), a 0.
+// Inputs: 0-5 the G-buffer (gPos 0, gNormal 1 -- w the blocker distance, gAlbedo 2 -- a the visibility,
+// gDirect 3 -- a the material).
 
 #include <bgfx_shader.sh>
 #include "restir_common.sc"
@@ -21,6 +27,7 @@ $input v_texcoord0
 SAMPLER2D(gPos, 0);
 SAMPLER2D(gNormal, 1);
 SAMPLER2D(gAlbedo, 2);
+SAMPLER2D(gDirect, 3);
 
 #define SOFT_SEARCH_TAPS 16
 #define SOFT_FILTER_TAPS 24
@@ -41,8 +48,15 @@ void main() {
     vec4 ab = texelFetch(gAlbedo, p, 0);
     vec3 P = surface.xyz;
     vec3 N = normalize(nb.xyz);
-    float facing = max(dot(N, normalize(SUN_DIR)), 0.0);
-    vec3 sunLit = ab.rgb * (SUN_COLOR / RESTIR_PI) * facing;
+    vec3 toSun = normalize(SUN_DIR);
+    float facing = max(dot(N, toSun), 0.0);
+    vec2 material = restirUnpackMaterial(texelFetch(gDirect, p, 0).a);
+    PjvBsdf bsdf = pjvBsdf(ab.rgb, material.x, material.y);
+    bsdf.alpha = sqrt(bsdf.alpha * bsdf.alpha + 0.25 * PATH_SUN_HALF_ANGLE * PATH_SUN_HALF_ANGLE);
+    vec3 f;
+    float pdf;
+    pjvBsdfEvaluate(bsdf, N, normalize(cameraPos.xyz - P), toSun, f, pdf);
+    vec3 sunLit = f * SUN_COLOR * facing;
     if (facing <= 0.0 || restirLook.z <= 0.0) { gl_FragColor = vec4(sunLit * ab.a, 0.0); return; }
 
     ivec2 last = ivec2(passTargetRes.xy) - ivec2(1, 1);

@@ -1,17 +1,20 @@
 $input v_color0
 $input v_texcoord0
 
-// ssao.frag -- pass 10, render resolution: screen-space ambient occlusion, kept subtle.
+// ssao.frag -- pass 10, render resolution: screen-space ambient obscurance, for the contact shading the
+// paths lose. They are traced for one pixel in sixteen and blurred over dozens, so the light they bring is
+// broad: a corner, a crease, the floor under a block are not darker than the wall beside them, and objects
+// look set down rather than standing. This puts that small-scale shading back, on the indirect light only
+// (ao_apply; the sun's shadows are traced, and exact).
 //
-// Twelve points in the hemisphere over the surface, out to restirLook.x, each carried to the screen; one
-// is occluded when the G-buffer there is nearer the camera than it is (by more than a sliver), and only
-// within the radius -- something far in front of the point is not round it. The kernel's rotation is a
-// fixed 4x4 pattern per texel, not per frame, so the result does not crawl; ao_apply's 4x4 blur takes
-// the pattern out again.
+// Alchemy obscurance (McGuire et al. 2011), from the G-buffer's world positions: points on a spiral round
+// the texel, each counting by how far it rises above the texel's plane -- max(0, n . v / |v| - bias) --
+// fading out by its distance. A flat floor counts nothing (no self-occlusion, the old depth test's grey),
+// a wall meeting it counts about half. Two scales: contact (restirLook.x / 2: about three voxels) and the
+// surroundings (2 restirLook.x), multiplied. The spiral turns per texel and per frame; ao_apply's 4x4
+// blur and the resolve's history average it out.
 //
-// It darkens only the indirect light (ao_apply): the sun's own shadows are traced, and are exact.
-//
-// Inputs: 0-5 the G-buffer (gPos, gNormal, ...). Output: ao (r occlusion-free share, g distance; < 0 sky).
+// Inputs: 0-5 the G-buffer (gPos, gNormal, ...). Output: ao (r the unoccluded share, g distance; < 0 sky).
 
 #include <bgfx_shader.sh>
 #include "restir_common.sc"
@@ -19,7 +22,28 @@ $input v_texcoord0
 SAMPLER2D(gPos, 0);
 SAMPLER2D(gNormal, 1);
 
-#define RESTIR_AO_SAMPLES 12
+#define RESTIR_AO_SAMPLES 8     // a scale
+#define RESTIR_AO_BIAS 0.1      // n . v / |v| below this counts nothing: a slightly curved or noisy plane
+#define RESTIR_AO_STRENGTH 1.6
+#define RESTIR_AO_MAX_PIXELS 48.0
+
+// The obscurance from points within `radius` (world units) of P, out to `pixels` texels on screen.
+float restirObscurance(vec3 P, vec3 N, float radius, float pixels, float turn, ivec2 p) {
+    ivec2 last = ivec2(passTargetRes.xy) - ivec2(1, 1);
+    float sum = 0.0;
+    for (int i = 0; i < RESTIR_AO_SAMPLES; i++) {
+        float u = (float(i) + 0.5) / float(RESTIR_AO_SAMPLES);
+        float a = turn + float(i) * 2.39996323;            // the golden angle
+        ivec2 q = clamp(p + ivec2(round(vec2(cos(a), sin(a)) * (u * pixels))), ivec2(0, 0), last);
+        vec4 there = texelFetch(gPos, q, 0);
+        if (there.w < 0.0) continue;
+        vec3 v = there.xyz - P;
+        float d2 = dot(v, v);
+        float fade = max(1.0 - d2 / (radius * radius), 0.0);
+        sum += max(dot(N, v) * inversesqrt(d2 + 1e-8) - RESTIR_AO_BIAS, 0.0) * fade;
+    }
+    return clamp(1.0 - RESTIR_AO_STRENGTH * sum / float(RESTIR_AO_SAMPLES), 0.0, 1.0);
+}
 
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
@@ -27,35 +51,12 @@ void main() {
     if (surface.w < 0.0) { gl_FragColor = vec4(1.0, -1.0, 0.0, 0.0); return; }
     vec3 P = surface.xyz;
     vec3 N = normalize(texelFetch(gNormal, p, 0).xyz);
-    float radius = restirLook.x;
-    vec2 res = passTargetRes.xy;
-
-    // The 4x4 Bayer matrix's entry, as the kernel's turn.
-    int bx = p.x & 3;
-    int by = p.y & 3;
-    // B4 = 4 B2(low bits) + B2(high bits), with B2(x, y) = 2 (x xor y) + y: [[0, 2], [3, 1]].
-    int bayer = 4 * ((((bx ^ by) & 1) << 1) | (by & 1)) + ((((bx ^ by) >> 1) << 1) | (by >> 1));
-    float turn = (float(bayer) + 0.5) / 16.0 * 2.0 * RESTIR_PI;
-    vec3 t;
-    vec3 b;
-    restirBasis(N, t, b);
-
-    float open = 0.0;
-    for (int i = 0; i < RESTIR_AO_SAMPLES; i++) {
-        float u = (float(i) + 0.5) / float(RESTIR_AO_SAMPLES);
-        float phi = turn + float(i) * 2.39996;                 // the golden angle
-        float up = sqrt(1.0 - u);                              // cosine-weighted elevation
-        float out_ = sqrt(u);
-        float reach = radius * mix(0.2, 1.0, u * u);           // more samples close in
-        vec3 Q = P + N * (radius * 0.04) + (t * (cos(phi) * out_) + b * (sin(phi) * out_) + N * up) * reach;
-        bool inFront;
-        vec2 uv = restirWorldToUV(Q, cameraPos.xyz, cameraDir.xyz, res, inFront);
-        if (!inFront || uv.x < 0.0 || uv.y < 0.0 || uv.x >= 1.0 || uv.y >= 1.0) { open += 1.0; continue; }
-        vec4 there = texelFetch(gPos, ivec2(uv * res), 0);
-        float depthQ = distance(Q, cameraPos.xyz);
-        if (there.w < 0.0 || there.w > depthQ - radius * 0.05) { open += 1.0; continue; }
-        // Occluded -- unless what is in front is well outside the radius of P.
-        open += 1.0 - clamp(radius / max(abs(surface.w - there.w), 1e-4) - 1.0, 0.0, 1.0);
-    }
-    gl_FragColor = vec4(open / float(RESTIR_AO_SAMPLES), surface.w, 0.0, 0.0);
+    // A world unit's width in texels here.
+    float perUnit = 1.0 / max(restirSettings.w * surface.w, 1e-6);
+    float turn = 6.2831853 * fract(52.9829189 * fract(dot(vec2(p), vec2(0.06711056, 0.00583715))) + frameCount.x * 0.618034);
+    float contact = 0.5 * restirLook.x;
+    float around = 2.0 * restirLook.x;
+    float open = restirObscurance(P, N, contact, min(contact * perUnit, RESTIR_AO_MAX_PIXELS), turn, p) *
+                 restirObscurance(P, N, around, min(around * perUnit, RESTIR_AO_MAX_PIXELS), turn + 1.0, p);
+    gl_FragColor = vec4(open, surface.w, 0.0, 0.0);
 }

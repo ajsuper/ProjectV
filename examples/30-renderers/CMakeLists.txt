@@ -5,11 +5,10 @@
 # renderer -- they are meant to be read and compared, so none of them borrows another's tricks.
 projv_add_example(renderer_gallery
     SOURCES             main.cpp
-    SHADERS             renderers/tree64/shaders
-                        renderers/taa/shaders
+    SHADERS             renderers/pt-reference/shaders
                         renderers/fast/shaders
                         renderers/reconstruction/shaders
-                        renderers/restir/shaders
+                        renderers/restir-pt/shaders
     # The example's own shader library: the sun/sky model and the cascade maths. The engine's
     # pjv_utils_DDA.sc is on the include path already.
     SHADER_INCLUDE_DIRS sharedShaders

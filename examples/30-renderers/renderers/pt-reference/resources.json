@@ -1,0 +1,22 @@
+{
+    "uniforms": [
+        {"name": "cameraPos", "type": "vec4"},
+        {"name": "cameraDir", "type": "vec4"},
+        {"name": "sunDir", "type": "vec4"},
+        {"name": "frameCount", "type": "vec4"},
+        {"name": "ptSettings", "type": "vec4"}
+    ],
+    "shaders": [
+        {"shaderID": 1, "path": "./renderers/pt-reference/shaders/trace.bin"},
+        {"shaderID": 2, "path": "./renderers/pt-reference/shaders/accumulate.bin"},
+        {"shaderID": 3, "path": "./renderers/pt-reference/shaders/display.bin"}
+    ],
+    "textures": [
+        {"texID": 1, "name": "radiance", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 2, "name": "accumulated", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"}
+    ],
+    "framebuffers": [
+        {"fboID": 1, "textureIDs": [1]},
+        {"fboID": 2, "textureIDs": [2]}
+    ]
+}

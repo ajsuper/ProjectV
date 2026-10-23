@@ -14,6 +14,9 @@
 // The SUN_DIR / SUN_COLOR / SKY_* names are preserved as macros so existing consumers are unchanged.
 // =============================================================================
 
+#ifndef PJV_SUN_SKY_SC
+#define PJV_SUN_SKY_SC
+
 uniform vec4 sunDir;   // xyz = normalized sun direction (from main.cpp); w unused.
 
 #define SUN_DIR     (sunDir.xyz)
@@ -71,3 +74,5 @@ vec3 skyColor(vec3 dir) {
     if (dot(dir, SUN_DIR) > cos(SUN_ANGULAR)) sky = SUN_COLOR;
     return sky;
 }
+
+#endif

@@ -1,6 +1,6 @@
 # 30 — Renderers
 
-Seven renderers, one scene, one camera. The comparison is the point: each answers "how should this
+Several renderers, one scene, one camera. The comparison is the point: each answers "how should this
 scene be lit" differently, and the only way to judge that is to put them side by side under
 identical conditions.
 
@@ -20,31 +20,30 @@ renderers/<name>/
 ```
 
 `main.cpp` supplies the window, the camera, the scene and the per-frame uniforms. Everything that
-makes one renderer differ from another lives in its folder. Adding an eighth is dropping in a
+makes one renderer differ from another lives in its folder. Adding another is dropping in a
 directory and adding one entry to `buildRendererRegistry()`.
 
-That is also why this example is the right place to learn the renderer format: there are seven
+That is also why this example is the right place to learn the renderer format: there are several
 worked examples of it, at every scale from four passes to ten.
 
-## The seven
+## The renderers
 
 | Renderer | GI | Noise strategy | Notes |
 |---|---|---|---|
-| [tree64](renderers/tree64/) | full path trace | accumulate; hard reset on camera move | The baseline. Converges to a reference image while parked. |
-| [reprojection](renderers/reprojection/) | full path trace | temporal reprojection + à-trous denoise | Stays converged *while moving*. The machinery the others reuse. |
-| [restir](renderers/restir/) | two bounces, ReSTIR GI at 1/16 of the pixels | reservoir reuse + SVGF-style denoise; ½-res G-buffer reconstructed, then accumulated | SSAO on the indirect light. G views, J reuse, Q reconstruction, P post (V vignette, B grade, E auto-exposure, K depth of field), O fog, U soft sun shadow. |
+| [pt-reference](renderers/pt-reference/) | two-bounce path trace through the materials | accumulate; hard reset on camera or sun move | The reference: exact, slow, converges while parked. What the others are measured against. The default. |
 | [fast](renderers/fast/) | none — direct + RTAO | deterministic; TAA for AA only | Cheapest. Nothing to converge because nothing is random. |
-| [face](renderers/face/) | full, per voxel face | none needed; exact-key history gate | Zero spatial noise by construction. Blocky by design. |
-| [radiance-cascade](renderers/radiance-cascade/) | screen-space cascades | temporal mean | Kept for the comparison. Screen space cannot see off-screen. |
-| [world-cascade](renderers/world-cascade/) | world-space cascades | temporal mean on indirect only | The gather traces real voxel rays. Best-looking here. |
-| [world-face-cascade](renderers/world-face-cascade/) | world-space cascades, per face | exact-key history gate | Fewest gather rays of the three cascade renderers. |
+| [reconstruction](renderers/reconstruction/) | none — direct sun and an ambient term | none needed | Traces at half resolution and rebuilds full from voxel face identity. Q toggles it. |
+| [restir-pt](renderers/restir-pt/) | two bounces through the materials, ReSTIR PT at 1/16 of the pixels | path reuse (reconnect / replay) + diffuse and specular denoised apart; ½-res G-buffer reconstructed, then accumulated | G views, J reuse, Q reconstruction, P final render / raw path trace (V vignette, B grade, E auto-exposure, K depth of field, O fog, L sun shafts, SSAO), U soft sun shadow. `--restir-gi 2`: a quarter of the pixels. |
+| voxel | ray-traced GI from a probe grid | TAA | The examples' game renderer, from `examples/shared/voxelRenderer`. T toggles TAA. |
 
-Read them in that order and the argument is visible: accumulation, then reprojection to survive
-motion, then dropping GI entirely for speed, then changing the *unit of work* to kill noise at the
-source, then cascades, then fixing what screen space cannot do, then combining the last two ideas.
+`pt-reference` replaced the gallery's two older path tracers, `tree64` and `taa`, and `restir-pt` replaced
+`restir` (ReSTIR GI), all on 2026-10-22: neither old path tracer knew about materials, and a reference
+must shade what it checks the way the renderer it checks does. The material model all of them share is
+the engine's `include/pjv_bsdf.sc`.
 
-Per pixel, cost runs roughly `fast` < `face` < `world-face-cascade` < `radiance-cascade` <
-`world-cascade` < `reprojection` < `tree64`.
+`--scene material-room` opens a room built in main.cpp for comparing materials: a checkered glossy floor,
+a metal wall, a mirror panel, a red wall, a skylight and a window, a semi-glossy block, a white cube and a
+lamp. See pt-reference's README for comparing restir-pt against the reference on it.
 
 ## How to build
 
@@ -53,10 +52,10 @@ cmake --preset dev
 cmake --build --preset dev --target renderer_gallery
 ```
 
-That builds every renderer's shaders too. All seven share the engine's voxel DDA
+That builds every renderer's shaders too. All of them share the engine's voxel DDA
 (`pjv_utils_DDA.sc`, on the shader include path automatically) and this example's own
-`sharedShaders/` — the sun/sky model and the cascade maths — so they stay in step with each other
-and with the engine.
+`sharedShaders/` — the sun/sky model (with `pjv_path_light.sc`, the path tracers' version of it) and
+the cascade maths — so they stay in step with each other and with the engine.
 
 ## How to run
 
@@ -66,8 +65,8 @@ cd build/examples/renderer_gallery
 ```
 
 ```
---renderer <name>    which renderer to run (default: tree64)
---scene <directory>  any folder holding a compose.json (default: the bundled Sponza)
+--renderer <name>    which renderer to run (default: pt-reference)
+--scene <directory>  any folder holding a compose.json (default: SanMiguel), or material-room
 --list               print the available renderers and exit
 --look x,y,z,tx,ty,tz  start the camera at x,y,z looking at tx,ty,tz
 --capture <prefix>   save frames 300-302 as <prefix>-<frame>.tga, then exit
@@ -77,7 +76,7 @@ For measuring: `GALLERY_CAPTURE_AT=4,8,16,300` captures those frames instead, an
 `GALLERY_SUN_STEP_AT=n` lowers the sun ~14° at frame n (how fast an image follows a change of light).
 
 Selection is a flag rather than a prompt so the gallery can be scripted. A screenshot matrix or a
-benchmark across all seven is a shell loop:
+benchmark across all of them is a shell loop:
 
 ```bash
 for r in $(./renderer_gallery --list | grep -oE '^  [a-z-]+'); do
@@ -95,7 +94,7 @@ done
 | Scroll wheel | Raise / lower the sun |
 
 When the camera is stationary the accumulating renderers refine each frame. Movement, or a sun
-change, resets accumulation in `tree64` and shortens the history in the reprojecting ones.
+change, resets accumulation in `pt-reference` and shortens the history in the reprojecting ones.
 
 ## A note on the bundled scene
 

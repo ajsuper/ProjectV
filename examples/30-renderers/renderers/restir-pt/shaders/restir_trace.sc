@@ -11,13 +11,18 @@
 #include "restir_common.sc"
 
 #define RESTIR_KIND_CAMERA 0   // nearest surface, its material
-#define RESTIR_KIND_BOUNCE 1   // nearest surface, its material
+#define RESTIR_KIND_BOUNCE 1   // nearest surface, its material; coarse in the distance (seen only indirectly)
 #define RESTIR_KIND_SHADOW 2   // is anything in the way? nothing else is read
 #define RESTIR_KIND_SHADOW_INDIRECT 3   // the same, from a bounce's surface: its light is seen indirectly
+#define RESTIR_KIND_BOUNCE_SHARP 4      // a bounce seen sharply (off a glossy surface, from the camera): exact
 #define RESTIR_STEPS 512u
 
 // Coarse tracing, by what the ray is for. A distance is in voxels from the ray's origin; past it, a
 // non-empty 4^3 brick counts as solid (its material: the first voxel the tree finds in it). 0 = exact.
+//
+// The cost: a brick is solid where any voxel of it is, so an opening that is not brick-aligned shrinks
+// for the rays that light a room through it -- in the material room (a skylight and a window) the
+// indirect light came out about a fifth dark against pt-reference. Set both to 0 for exact rays.
 #ifndef RESTIR_BOUNCE_LOD
 #define RESTIR_BOUNCE_LOD 64            // the ray lab's mode 10: bounces see bricks past 64 voxels
 #endif
@@ -37,6 +42,8 @@ struct RestirHit {
     vec3  normal;     // the face the ray entered; zero when it started inside a voxel
     vec3  albedo;
     vec3  emission;   // radiance
+    float glossiness;
+    float metallic;
     vec4  face;       // camera rays only: the hit face's centre, w = the voxel's edge (0: no hit)
     vec4  rotation;   // camera rays only: the chunk's rotation (the voxel's own axes)
 };
@@ -67,6 +74,8 @@ RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) 
     h.normal = vec3(0.0, 0.0, 0.0);
     h.albedo = vec3(0.0, 0.0, 0.0);
     h.emission = vec3(0.0, 0.0, 0.0);
+    h.glossiness = 0.0;
+    h.metallic = 0.0;
     h.face = vec4(0.0, 0.0, 0.0, 0.0);
     h.rotation = vec4(0.0, 0.0, 0.0, 1.0);
     // The engine's own miss test, as every renderer writes it.
@@ -78,6 +87,10 @@ RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) 
         VoxelMaterial material = fetchVoxelMaterialFromHit(found);
         h.albedo = material.albedo;   // linear: the engine decodes the palette's sRGB (pjv_color.sc)
         h.emission = material.emission;
+        // The paths' cap (restir_common.sc); the camera ray keeps the real one, for the sun's highlight
+        // and the screen-space reflection.
+        h.glossiness = kind == RESTIR_KIND_CAMERA ? material.glossiness : min(material.glossiness, RESTIR_GI_MAX_GLOSSINESS);
+        h.metallic = material.metallic;
     }
     if (kind == RESTIR_KIND_CAMERA) {
         // What the reconstruction needs to know the whole voxel: its face's centre, its edge, and its

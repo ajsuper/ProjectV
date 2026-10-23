@@ -119,7 +119,7 @@ for the same reason restir does now.
   backdrop greys decoded, as they were picked in display terms) and Render tab (neutral curve, exact sRGB;
   its user grade unchanged).
 - restir: the palette decode and the C key gone; a post chain (P: vignette V, grade B, auto-exposure E) --
-  see `examples/30-renderers/renderers/restir/README.md`. Auto-exposure key 0.08 at 80% strength, measured:
+  see `examples/30-renderers/renderers/restir/README.md` (since 2026-10-22 `restir-pt/`, which replaced it). Auto-exposure key 0.08 at 80% strength, measured:
   sunlit Lee Chemicals meters 0.064 and moves under 0.3 stops; the test room's back wall meters 0.007 and
   is lifted about 2.8 stops.
 - Checked: unit suite and layering pass; gallery captures of Lee Chemicals in restir, voxel, fast,

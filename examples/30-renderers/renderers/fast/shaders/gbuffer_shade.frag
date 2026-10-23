@@ -125,9 +125,9 @@ bool sunVisible(vec3 p, vec3 n) {
 
 void main() {
     // No sub-pixel jitter. It existed to feed a temporal pass that would average it into clean
-    // edges, and this renderer no longer has one -- see renderers/taa for where that technique
-    // lives now. Left in, the jitter is pure shimmer: every frame samples a different sub-pixel
-    // position and nothing ever reconciles them.
+    // edges, and this renderer no longer has one -- the voxel renderer's TAA (examples/shared/
+    // voxelRenderer) is where that technique lives now. Left in, the jitter is pure shimmer: every
+    // frame samples a different sub-pixel position and nothing ever reconciles them.
     //
     // With it gone this renderer is fully deterministic: two frames of a static scene are
     // identical, which is the property that makes it usable as a stable comparison point for the

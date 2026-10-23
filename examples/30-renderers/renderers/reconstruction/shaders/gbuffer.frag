@@ -35,7 +35,7 @@ uniform vec4 frameCount;
 #define FOV 60.0
 
 // One hard shadow ray. Soft shadows would need many, and this renderer is not the one making that
-// argument -- see renderers/tree64.
+// argument -- see renderers/pt-reference.
 bool inSunShadow(vec3 origin, vec3 normal) {
     Ray shadow;
     shadow.origin    = origin + normal * 0.02;

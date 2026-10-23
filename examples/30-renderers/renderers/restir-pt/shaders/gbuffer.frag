@@ -18,7 +18,8 @@ $input v_texcoord0
 //   0 gPos     xyz the hit, w distance (< 0 sky)
 //   1 gNormal  xyz the face's normal, w the sun's blocker: its distance along the shadow ray, -1 none
 //   2 gAlbedo  rgb albedo, a the sun's visibility (1 seen, 0 blocked or facing away)
-//   3 gDirect  emission; the sky's radiance for a miss
+//   3 gDirect  rgb emission; the sky's radiance for a miss. a the material: restirPackMaterial (RGBA32F, so
+//              its sixteen bits are exact)
 //   4 gFace    xyz the face's centre, w the voxel's edge (0 sky)
 //   5 gRot     the chunk's rotation
 
@@ -36,7 +37,8 @@ void main() {
     vec4 position = vec4(cameraPos.xyz + direction * 1.0e4, -1.0);
     vec3 normal = vec3(0.0, 0.0, 0.0);
     vec3 albedo = vec3(0.0, 0.0, 0.0);
-    vec3 direct = restirSkyWithSun(direction);
+    vec3 direct = pathSkyWithSun(direction);
+    float material = 0.0;
     vec4 face = vec4(0.0, 0.0, 0.0, 0.0);
     vec4 rotation = vec4(0.0, 0.0, 0.0, 1.0);
     float facing = 0.0;
@@ -51,6 +53,7 @@ void main() {
             position = vec4(cameraPos.xyz + direction * hit.t, hit.t);
             albedo = hit.albedo;
             direct = hit.emission;
+            material = restirPackMaterial(hit.glossiness, hit.metallic);
             face = hit.face;
             rotation = hit.rotation;
             facing = dot(normal, toSun);
@@ -66,7 +69,7 @@ void main() {
     gl_FragData[0] = position;
     gl_FragData[1] = vec4(normal, blocker);
     gl_FragData[2] = vec4(albedo, visible);
-    gl_FragData[3] = vec4(direct, 1.0);
+    gl_FragData[3] = vec4(direct, material);
     gl_FragData[4] = face;
     gl_FragData[5] = rotation;
 }

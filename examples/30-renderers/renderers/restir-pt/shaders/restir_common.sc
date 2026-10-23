@@ -1,36 +1,32 @@
-// restir_common.sc -- what every pass of the restir renderer shares: its uniforms, a hash RNG, the
-// camera's inverse, the ReSTIR GI reservoir and its four-texture layout, and the reuse arithmetic.
+// restir_common.sc -- what every pass of the restir-pt renderer shares: its uniforms, a hash RNG, the
+// camera's inverse, the packings, and the ReSTIR PT reservoir -- a path, not a point -- with its layout.
 //
-// THE PIPELINE (render.json). "render" is the render resolution, half the window each way; the
-// reconstruction rebuilds the window's resolution from it, as the voxel renderer does.
-//    1 gbuffer        render     camera ray + sun shadow ray: position, normal, albedo, direct light, and
-//                                the hit face and the chunk's rotation for the reconstruction
-//    2 sample         GI         one candidate per GI pixel: a cosine bounce from its visible point, and
-//                                that point's outgoing light (sun, emission, one more bounce + its sun)
-//    3 temporal       GI         ReSTIR temporal reuse: the candidate against last frame's reservoir
-//    4 spatial        GI         ReSTIR spatial reuse: five neighbours' reservoirs, and a visibility ray;
-//                                resolves to demodulated indirect light (divided by albedo)
-//    5 gi_accumulate  GI         temporal accumulation of that light, with luminance moments (variance)
-//    6-9 atrous*      GI         SVGF-style a-trous filter, steps 1, 2, 4 and 8, edge-stopped by normal,
-//                                plane and variance-scaled luminance; the last also hands on the surfaces
+// THE PIPELINE (render.json). "render" is the render resolution, half the window each way; "GI" is the
+// path resolution, half that again (a sixteenth of the window's pixels; --restir-gi 2: a quarter).
+//    1 gbuffer        render     camera ray + sun shadow ray: position, normal, albedo, material, emission,
+//                                the sun's visibility and blocker, the face and rotation for the reconstruction
+//    2 surface        GI         each GI pixel's visible point: one render texel of its block, compacted
+//    3 sample         GI         a new path from it (three bounces, BSDF-sampled, NEE to the sun), the
+//                                history's path validated (a quarter a frame) and shifted here: temporal reuse
+//    4 spatial        GI         five neighbours' paths shifted here: spatial reuse; resolves to the diffuse
+//                                and specular indirect light, each demodulated, and hands its reservoirs on
+//    5 gi_accumulate  GI         temporal accumulation of both, with luminance moments
+//    6-9 atrous*      GI         a-trous filter, steps 1, 2, 4, 8, both lobes; the specular by its roughness
 //   10 ssao           render     screen-space ambient occlusion, in a fixed 4x4 pattern
-//   11 composite      render     edge-aware upsample of the indirect light: direct, and albedo * indirect
-//   12 ao_apply       render     the SSAO, blurred over its pattern, on the indirect light; the views (G)
+//   10b shadow_soft   render     the sun through the BSDF (highlight included), its shadow softened
+//   11 composite      render     edge-aware upsample of both: direct; diffuse x albedo + specular x its albedo
+//   12 ao_apply       render     the SSAO on the indirect light, the sun, the fog; the views (G)
 //   13 reconstruct    window     the voxel renderer's reconstruction: voxel by voxel, antialiased
-//   14 resolve        window     temporal accumulation of the image (what is left of the noise, and the
-//                                2x2 jitter's samples)
-//   15 meter          64x64      log luminance, for the auto-exposure
-//   16 exposure       1x1        the auto-exposure, adapted over time
-//   17 display        window     the post (P: vignette, exposure, grade), then the neutral display transform
+//   14 resolve        window     temporal accumulation of the image
+//   15-17             window     meter, exposure, depth of field; display: the post and the display transform
 //
-// The GI resolution is half the render resolution each way (the host's --restir-gi 2: the same as it).
-// A GI pixel takes its visible point from one render texel of its stride x stride block -- a different
-// one each frame (restirJitter.xy), so over four frames every texel's surface is sampled.
+// A GI pixel takes its visible point from one render texel of its 2x2 block -- a different one each frame
+// (restirJitter.xy), so over four frames every texel's surface is sampled.
 
 #ifndef RESTIR_COMMON_SC
 #define RESTIR_COMMON_SC
 
-#include <pjv_sun_sky.sc>   // sunDir, SUN_COLOR, skyColor / skyGradient: the gallery's light rig
+#include <pjv_path_light.sc>   // the sun and sky pt-reference renders by, and pjv_bsdf.sc
 
 uniform vec4 passTargetRes;   // engine-set: xy = this pass's target size, zw = 1 / size
 uniform vec4 cameraPos;
@@ -39,27 +35,38 @@ uniform vec4 prevCameraPos;   // last frame's camera, for every temporal pass
 uniform vec4 prevCameraDir;
 uniform vec4 frameCount;      // x = frame index, y = 1 when the camera or the sun moved this frame, z = 1 when the sun did
 uniform vec4 restirReuse;     // x temporal reuse, y spatial reuse, z visibility re-test, w temporal M cap
-uniform vec4 restirDenoise;   // x a-trous on, y GI accumulation on, z view (0 image, 1 indirect, 2 direct), w GI history cap
-uniform vec4 restirJitter;    // xy this frame's offset inside the block, z stride (4 or 2), w 1 = start every history over
+uniform vec4 restirDenoise;   // x a-trous on, y GI accumulation on, z view (G), w the diffuse GI history cap
+uniform vec4 restirJitter;    // xy this frame's offset inside the block, z the GI stride in render texels (2; 1 for
+                              // --restir-gi 2), w 1 = start every history over
 uniform vec4 jitterParams;    // xy: where this frame's render texels are traced, off their centres, in texels
 uniform vec4 restirLook;      // x SSAO radius (world units), y its strength on the indirect light, z the sun's
                               // penumbra width per unit of blocker distance (0: hard shadows), w the fog's
                               // density, per world unit (0: none)
+uniform vec4 restirPath;      // x bounces after the visible point, y the sample pass's ray budget, z the spatial
+                              // pass's, w validation: the relative change in a path's light that counts (0: off)
 #define RESTIR_FOV 60.0       // the gallery's, as every renderer here
 
-uniform vec4 restirSettings;  // x the trace loops' bound (a uniform, so they are not unrolled), y surface offset
-                              // (world units, a twentieth of the finest voxel), z the image's longest history
-                              // (resolve), w one render texel's width per unit of distance (2 tan(fov/2) / height)
-
-
-// The look. The gallery's shared sky (pjv_sun_sky.sc) is bright and pale -- its zenith is about four
-// times the voxel renderer's -- and lighting by it flooded every surface with blue-white and washed the
-// colours out. restir lights by (and shows) a sky RESTIR_SKY_LIGHT as bright, near the voxel renderer's.
-#ifndef RESTIR_SKY_LIGHT
-#define RESTIR_SKY_LIGHT 0.35
-#endif
+uniform vec4 restirSettings;  // x the G-buffer's trace loop bound (a uniform, so it is not unrolled), y surface
+                              // offset (world units, a twentieth of the finest voxel), z the image's longest
+                              // history (resolve), w one render texel's width per unit of distance
 
 #define RESTIR_PI 3.14159265
+
+// The paths see every surface as rough: glossiness is capped at RESTIR_GI_MAX_GLOSSINESS (GGX alpha 0.25),
+// so every vertex can be reconnected at and a shift never has to re-trace a path -- ReSTIR GI's cost,
+// with a specular lobe. What the cap loses is sharp reflection: surfaces at RESTIR_MIRROR_GLOSSINESS
+// and above take theirs from the screen instead (composite.frag), the paths' blurred one where it misses.
+#define RESTIR_GI_MAX_GLOSSINESS 0.5
+#define RESTIR_MIRROR_GLOSSINESS 0.9
+
+// The views (G, restirDenoise.z).
+#define RESTIR_VIEW_IMAGE    0
+#define RESTIR_VIEW_INDIRECT 1
+#define RESTIR_VIEW_DIRECT   2
+#define RESTIR_VIEW_AO       3
+#define RESTIR_VIEW_DIFFUSE  4
+#define RESTIR_VIEW_SPECULAR 5
+bool restirView(int view) { return abs(restirDenoise.z - float(view)) < 0.5; }
 
 // PCG hash (Jarzynski & Olano), one state word per pixel.
 uint restirPcg(inout uint state) {
@@ -93,30 +100,7 @@ void restirBasis(vec3 n, out vec3 t, out vec3 b) {
     b = cross(n, t);
 }
 
-// Cosine-weighted over the hemisphere round n: the Lambertian BRDF and the cosine cancel against the pdf.
-vec3 restirCosine(vec3 n, inout uint seed) {
-    float u1 = restirRandom(seed);
-    float u2 = restirRandom(seed);
-    float r = sqrt(u1);
-    float phi = 2.0 * RESTIR_PI * u2;
-    vec3 t;
-    vec3 b;
-    restirBasis(n, t, b);
-    return normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - u1)));
-}
-
-// A direction inside the sun's cone, uniformly (soft shadow edges).
-vec3 restirToSun(inout uint seed) {
-    float cosT = mix(cos(SUN_ANGULAR), 1.0, restirRandom(seed));
-    float sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
-    float phi = 2.0 * RESTIR_PI * restirRandom(seed);
-    vec3 t;
-    vec3 b;
-    restirBasis(SUN_DIR, t, b);
-    return normalize(t * (cos(phi) * sinT) + b * (sin(phi) * sinT) + SUN_DIR * cosT);
-}
-
-// Octahedral normal encoding (two floats).
+// Octahedral normal encoding (two floats in -1..1).
 vec2 restirOctWrap(vec2 v) {
     return (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
 }
@@ -130,12 +114,58 @@ vec3 restirOctDecode(vec2 e) {
     return normalize(n);
 }
 
-float restirLum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+// Packings into one float each. A float32 holds every integer below 2^24 exactly, so up to 24 bits of
+// fields go in as an integer: no bit casts, nothing a render target could flush or canonicalise.
+//   a unit vector     octahedral, 12 bits a coordinate (0.05 degrees)
+//   a colour 0..1     8 bits a channel, square-root encoded (dark albedo keeps its steps)
+//   a material        glossiness and metallic, 8 bits each (as decodeMaterial reads them)
+float restirPackDir(vec3 n) {
+    uvec2 q = uvec2(clamp(restirOctEncode(n) * 0.5 + 0.5, 0.0, 1.0) * 4095.0 + 0.5);
+    return float(q.x * 4096u + q.y);
+}
+vec3 restirUnpackDir(float f) {
+    uint u = uint(f);
+    return restirOctDecode(vec2(float(u >> 12u), float(u & 4095u)) / 4095.0 * 2.0 - 1.0);
+}
+float restirPackColour(vec3 c) {
+    uvec3 q = uvec3(sqrt(clamp(c, 0.0, 1.0)) * 255.0 + 0.5);
+    return float((q.r << 16u) | (q.g << 8u) | q.b);
+}
+vec3 restirUnpackColour(float f) {
+    uint u = uint(f);
+    vec3 s = vec3(float(u >> 16u), float((u >> 8u) & 255u), float(u & 255u)) / 255.0;
+    return s * s;
+}
+float restirPackMaterial(float glossiness, float metallic) {
+    return float(uint(clamp(glossiness, 0.0, 1.0) * 255.0 + 0.5) * 256u + uint(clamp(metallic, 0.0, 1.0) * 255.0 + 0.5));
+}
+vec2 restirUnpackMaterial(float f) {
+    uint u = uint(f);
+    return vec2(float((u >> 8u) & 255u), float(u & 255u)) / 255.0;
+}
 
-// The sky's radiance along d, without the sun's disc (what bounce rays that escape gather), and with it
-// (what the camera sees).
-vec3 restirSky(vec3 d) { return skyGradient(d) * RESTIR_SKY_LIGHT; }
-vec3 restirSkyWithSun(vec3 d) { return dot(d, SUN_DIR) > cos(SUN_ANGULAR) ? SUN_COLOR : restirSky(d); }
+// The surface pass's two texels: surf0 = (x1, t1; t1 < 0 none), surf1 = (oct n1, material, albedo).
+struct RestirSurface {
+    vec3  x;
+    float t;          // < 0: the sky, no surface
+    vec3  n;
+    vec3  albedo;
+    float glossiness;
+    float metallic;
+};
+RestirSurface restirSurface(vec4 a, vec4 b) {
+    RestirSurface s;
+    s.x = a.xyz;
+    s.t = a.w;
+    s.n = restirOctDecode(b.xy);
+    vec2 m = restirUnpackMaterial(b.z);
+    s.glossiness = m.x;
+    s.metallic = m.y;
+    s.albedo = restirUnpackColour(b.w);
+    return s;
+}
+
+float restirLum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
 // The camera ray through uv (0..1 across this pass's target, the jitter already added), built as the
 // engine's rayStartDirection builds it.
@@ -159,112 +189,125 @@ vec3 restirViewDirection(vec2 uv) {
 vec3 restirFog(vec3 colour, vec3 d, float t) {
     if (restirLook.w <= 0.0 || t < 0.0) return colour;
     float amount = RESTIR_FOG_MAX * (1.0 - exp(-max(t * restirLook.w - RESTIR_FOG_START, 0.0)));
-    vec3 horizon = restirSky(normalize(vec3(d.x, max(d.y, 0.0) * 0.5 + 0.02, d.z)));
+    vec3 horizon = pathSky(normalize(vec3(d.x, max(d.y, 0.0) * 0.5 + 0.02, d.z)));
     vec3 air = horizon + SUN_COLOR * 0.04 * pow(max(dot(d, normalize(SUN_DIR)), 0.0), 6.0);
     return mix(colour, air, amount);
 }
 
-// A ReSTIR GI reservoir: the sample (a reconnection point x2 with its normal and outgoing light), the
-// visible point it was formed at (x1, n1, distance t1; t1 < 0 = no surface), and the weights.
-//   texel 0: x2.xyz, Lo.r                 (RGBA32F)
-//   texel 1: oct(n2), Lo.g, Lo.b          (RGBA16F)
-//   texel 2: x1.xyz, t1                   (RGBA32F)
-//   texel 3: oct(n1), M, W                (RGBA32F)
+// A ReSTIR PT reservoir: one path, kept as what a shift needs to rebuild it from another visible point,
+// plus the weights (docs/plans/restir-pt.md). The path is x1 (the visible point) .. x4.
+//
+//   seed   its random numbers: each vertex draws from its own stream, hashed from the seed and the vertex's
+//          index, so a REPLAY from another visible point takes the same decisions vertex by vertex
+//   k      the reconnection vertex: the first rough vertex, more than a few voxels from a rough vertex
+//          before it. 0: none (an all-glossy path), replayed whole. 2: x1 -> x2 is the reconnection --
+//          on a diffuse scene every path is this, ReSTIR GI's case. 3 or 4: x1 (and x2) are glossy and
+//          replayed, then reconnected -- a diffuse wall seen in a mirror
+//   x, n, albedo, glossiness, metallic   x_k and its material, to evaluate its BSDF for a new incoming
+//          direction; for a reconnection to the sky, a point 10^4 out along it
+//   Le     x_k's emission (or the sky's radiance)
+//   vis    whether x_k sees the sun (its next-event estimate, re-evaluated through the BSDF on a shift)
+//   wk, L  the direction out of x_k and the light the rest of the path brought back along it. wk was
+//          sampled cosine-weighted -- not from the BSDF, whose density would depend on the incoming
+//          direction a shift changes -- so the reflected light is pi f(new in, wk) L, whatever x_{k-1} is
+//   q      cos / d^2 at x_k seen from x_{k-1}, the reconnection's geometry: a shift's Jacobian is the new
+//          one's over this (< 0: the sky, Jacobian 1)
+//   M, W   the resampling weights: candidates seen, and the unbiased contribution weight
+//   x1, n1 the visible point this reservoir was formed at (for the temporal pass's same-surface test)
+//
+// Layout, five RGBA32F texels:
+//   0: x.xyz, q                    1: L.rgb, dir(n)              2: Le.rgb, dir(wk)
+//   3: seed|k|vis, M|glossiness|metallic, W, colour(albedo)      4: x1.xyz, dir(n1) (-1: no surface)
 struct Reservoir {
-    vec3  x2;
-    vec3  n2;
-    vec3  Lo;
-    vec3  x1;
-    float t1;
-    vec3  n1;
+    uint  seed;
+    int   k;
+    vec3  x;
+    vec3  n;
+    vec3  albedo;
+    float glossiness;
+    float metallic;
+    vec3  Le;
+    float vis;
+    vec3  wk;
+    vec3  L;
+    float q;
     float M;
     float W;
     float wSum;   // only while resampling
+    vec3  x1;
+    vec3  n1;
+    bool  formed; // x1 is a surface
 };
 
 Reservoir restirEmpty() {
     Reservoir r;
-    r.x2 = vec3(0.0, 0.0, 0.0);
-    r.n2 = vec3(0.0, 1.0, 0.0);
-    r.Lo = vec3(0.0, 0.0, 0.0);
-    r.x1 = vec3(0.0, 0.0, 0.0);
-    r.t1 = -1.0;
-    r.n1 = vec3(0.0, 1.0, 0.0);
+    r.seed = 0u;
+    r.k = 0;
+    r.x = vec3(0.0, 0.0, 0.0);
+    r.n = vec3(0.0, 1.0, 0.0);
+    r.albedo = vec3(0.0, 0.0, 0.0);
+    r.glossiness = 0.0;
+    r.metallic = 0.0;
+    r.Le = vec3(0.0, 0.0, 0.0);
+    r.vis = 0.0;
+    r.wk = vec3(0.0, 1.0, 0.0);
+    r.L = vec3(0.0, 0.0, 0.0);
+    r.q = -1.0;
     r.M = 0.0;
     r.W = 0.0;
     r.wSum = 0.0;
+    r.x1 = vec3(0.0, 0.0, 0.0);
+    r.n1 = vec3(0.0, 1.0, 0.0);
+    r.formed = false;
     return r;
 }
 
-Reservoir restirUnpack(vec4 a, vec4 b, vec4 c, vec4 d) {
+Reservoir restirUnpack(vec4 a, vec4 b, vec4 c, vec4 d, vec4 e) {
     Reservoir r;
-    r.x2 = a.xyz;
-    r.Lo = vec3(a.w, b.z, b.w);
-    r.n2 = restirOctDecode(b.xy);
-    r.x1 = c.xyz;
-    r.t1 = c.w;
-    r.n1 = restirOctDecode(d.xy);
-    r.M = d.z;
-    r.W = d.w;
+    r.x = a.xyz;
+    r.q = a.w;
+    r.L = b.rgb;
+    r.n = restirUnpackDir(b.w);
+    r.Le = c.rgb;
+    r.wk = restirUnpackDir(c.w);
+    uint path = uint(d.x);
+    r.seed = path >> 4u;
+    r.k = int((path >> 1u) & 7u);
+    r.vis = float(path & 1u);
+    uint weights = uint(d.y);
+    r.M = float(weights >> 16u);
+    r.glossiness = float((weights >> 8u) & 255u) / 255.0;
+    r.metallic = float(weights & 255u) / 255.0;
+    r.W = d.z;
+    r.albedo = restirUnpackColour(d.w);
+    r.x1 = e.xyz;
+    r.formed = e.w >= 0.0;
+    r.n1 = restirUnpackDir(max(e.w, 0.0));
     r.wSum = 0.0;
     return r;
 }
 
-// A macro, not a function: bgfx's HLSL-family translation only lets main() write the outputs.
+float restirPackPath(Reservoir r) {
+    return float(((r.seed & 0xFFFFFu) << 4u) | (uint(r.k) << 1u) | (r.vis > 0.5 ? 1u : 0u));
+}
+float restirPackWeights(Reservoir r) {
+    uint m = uint(clamp(r.M, 0.0, 255.0) + 0.5);
+    return float((m << 16u) | (uint(r.glossiness * 255.0 + 0.5) << 8u) | uint(r.metallic * 255.0 + 0.5));
+}
+
+// A macro, not a function: bgfx's HLSL-family translation only lets main() write the outputs. Outputs
+// 0-4; the spatial pass writes its light after them.
 #define restirWrite(RESTIR_R) \
-    gl_FragData[0] = vec4((RESTIR_R).x2, (RESTIR_R).Lo.r); \
-    gl_FragData[1] = vec4(restirOctEncode((RESTIR_R).n2), (RESTIR_R).Lo.g, (RESTIR_R).Lo.b); \
-    gl_FragData[2] = vec4((RESTIR_R).x1, (RESTIR_R).t1); \
-    gl_FragData[3] = vec4(restirOctEncode((RESTIR_R).n1), (RESTIR_R).M, (RESTIR_R).W)
-// The same four, to outputs 1-4 (the spatial pass writes its light to 0). Literal indices: bgfx's
-// translation does not take an expression in gl_FragData[].
-#define restirWrite1(RESTIR_R) \
-    gl_FragData[1] = vec4((RESTIR_R).x2, (RESTIR_R).Lo.r); \
-    gl_FragData[2] = vec4(restirOctEncode((RESTIR_R).n2), (RESTIR_R).Lo.g, (RESTIR_R).Lo.b); \
-    gl_FragData[3] = vec4((RESTIR_R).x1, (RESTIR_R).t1); \
-    gl_FragData[4] = vec4(restirOctEncode((RESTIR_R).n1), (RESTIR_R).M, (RESTIR_R).W)
-
-// The target function at visible point (x1, n1): the sample's light, cosine-weighted. (The Lambertian
-// BRDF's albedo / pi is the same for every sample at a pixel and drops out.)
-float restirTarget(Reservoir r, vec3 x1, vec3 n1) {
-    vec3 d = r.x2 - x1;
-    float len2 = dot(d, d);
-    if (len2 < 1e-8) return 0.0;
-    return restirLum(r.Lo) * max(0.0, dot(n1, d * inversesqrt(len2)));
-}
-
-// The reconnection shift's Jacobian (ReSTIR GI, eq. 11): moving the visible point from r.x1 to x1 while
-// keeping x2 changes the solid angle x2 subtends -- dw = cos(at x2) dA / d^2 -- so a reservoir's weight,
-// an inverse solid-angle pdf, carries over multiplied by (cos_now / cos_was) * (d_was^2 / d_now^2).
-// That is what this returns, and callers MULTIPLY by it. (The paper writes p / |J| with J the other way
-// up. Dividing by this ratio instead brightened the image and threw fireflies.) Shifts that change it by
-// more than 8x either way are refused (0): those are the near-grazing reconnections whose weights blow up.
-float restirJacobian(Reservoir r, vec3 x1) {
-    vec3 was = r.x1 - r.x2;
-    vec3 now = x1 - r.x2;
-    float wasLen2 = max(dot(was, was), 1e-8);
-    float nowLen2 = max(dot(now, now), 1e-8);
-    float cosWas = abs(dot(r.n2, was * inversesqrt(wasLen2)));
-    float cosNow = abs(dot(r.n2, now * inversesqrt(nowLen2)));
-    float ratio = (cosNow / max(cosWas, 1e-4)) * (wasLen2 / nowLen2);
-    return ratio < 0.125 || ratio > 8.0 ? 0.0 : ratio;
-}
-
-// Weighted reservoir update: take `s`'s sample with probability w / wSum.
-void restirUpdate(inout Reservoir r, Reservoir s, float w, float u) {
-    r.wSum += w;
-    r.M += s.M;
-    if (w > 0.0 && u * r.wSum < w) {
-        r.x2 = s.x2;
-        r.n2 = s.n2;
-        r.Lo = s.Lo;
-    }
-}
+    gl_FragData[0] = vec4((RESTIR_R).x, (RESTIR_R).q); \
+    gl_FragData[1] = vec4((RESTIR_R).L, restirPackDir((RESTIR_R).n)); \
+    gl_FragData[2] = vec4((RESTIR_R).Le, restirPackDir((RESTIR_R).wk)); \
+    gl_FragData[3] = vec4(restirPackPath(RESTIR_R), restirPackWeights(RESTIR_R), (RESTIR_R).W, restirPackColour((RESTIR_R).albedo)); \
+    gl_FragData[4] = vec4((RESTIR_R).x1, (RESTIR_R).formed ? restirPackDir((RESTIR_R).n1) : -1.0)
 
 // Is (x, n) the same surface as (x0, n0) seen at distance t0, as far as a GI pixel can tell? Off its
 // plane by more than a sliver is another surface -- but the sliver grows with the GI pixel's width at
 // that distance, and once that width passes a voxel the normals stop counting: one GI pixel then spans
-// several voxels and faces, and the full-res pixel it samples (a different one each frame, jittered)
+// several voxels and faces, and the render texel it samples (a different one each frame, jittered)
 // lands on any of them. Holding that to the exact face threw the history away every frame in the
 // distance -- the shimmer.
 bool restirSameSurface(vec3 x, vec3 n, vec3 x0, vec3 n0, float t0) {
@@ -274,7 +317,7 @@ bool restirSameSurface(vec3 x, vec3 n, vec3 x0, vec3 n0, float t0) {
     return dot(n, n0) > minCos && abs(dot(x - x0, n0)) < 0.004 * t0 + 4.0 * restirSettings.y + 2.0 * giPixel;
 }
 
-// The GI resolution's pixel, and the full-res pixel it takes its visible point from this frame.
+// The GI resolution's pixel, and the render texel it takes its visible point from this frame.
 ivec2 restirFullPixel(ivec2 giPixel, ivec2 fullSize) {
     int stride = int(restirJitter.z);
     return min(giPixel * stride + ivec2(restirJitter.xy), fullSize - ivec2(1, 1));
