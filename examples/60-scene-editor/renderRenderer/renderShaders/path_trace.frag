@@ -59,6 +59,7 @@ $input v_texcoord0
 #define MAX_PEEL_ITERATIONS 65
 
 #include <pjv_utils_DDA.sc>
+#include <pjv_bsdf.sc>   // the material model: GGX over Lambert, shared with the renderer gallery
 
 uniform vec4 passTargetRes;   // Engine-set: (w, h, 1/w, 1/h) of THIS pass's target.
 uniform vec4 cameraPos;
@@ -237,25 +238,6 @@ float halton(int index, int base) {
     return r;
 }
 
-// An orthonormal basis around n, for turning a local-space sample into a world one.
-mat3 basisAround(vec3 n) {
-    vec3 tangent = abs(n.z) < 0.999 ? normalize(cross(vec3(0.0, 0.0, 1.0), n))
-                                    : normalize(cross(vec3(0.0, 1.0, 0.0), n));
-    return mat3(tangent, cross(n, tangent), n);
-}
-
-// Cosine-weighted over the hemisphere about n. Its pdf is cos(theta)/PI, which cancels
-// the Lambertian BRDF's own cos/PI exactly -- so a diffuse bounce multiplies the
-// throughput by the albedo and nothing else.
-vec3 sampleCosineHemisphere(vec3 n, inout uint seed) {
-    float u1 = randomUnit(seed);
-    float u2 = randomUnit(seed);
-    float phi = 2.0 * PI * u1;
-    float cosTheta = sqrt(1.0 - u2);
-    float sinTheta = sqrt(u2);
-    return basisAround(n) * vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
-}
-
 // Uniform over a unit disk, by Shirley's concentric mapping. The obvious
 // polar construction -- r = u1, theta = 2*pi*u2 -- clumps samples at the centre; taking the
 // square root fixes the density but distorts the stratification. Concentric does neither, which
@@ -295,15 +277,8 @@ vec3 sampleSunCone(inout uint seed) {
     float cosTheta = mix(cos(sunDir.w), 1.0, u1);
     float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
     float phi = 2.0 * PI * u2;
-    return basisAround(normalize(sunDir.xyz)) *
+    return pjvBasisAround(normalize(sunDir.xyz)) *
            vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
-}
-
-// Power heuristic with beta = 2. Standard MIS: weights each estimator by how likely it
-// was to have produced the sample, so the two sum to one estimate rather than two.
-float powerHeuristic(float pdfA, float pdfB) {
-    float a = pdfA * pdfA;
-    return a / max(a + pdfB * pdfB, 1e-9);
 }
 
 // =============================================================================
@@ -325,92 +300,13 @@ float powerHeuristic(float pdfA, float pdfB) {
 //      quietly put a sheen on every scene already on disk.
 //
 //   2. NEE AND BSDF SAMPLING MUST AGREE. Both estimators are weighted against each
-//      other's pdf, so both go through evaluateSurface -- the value for the estimator,
+//      other's pdf, so both go through pjvBsdfEvaluate -- the value for the estimator,
 //      the pdf for the weight. Two code paths that disagreed by a factor would not
 //      look wrong so much as slightly, unfixably wrong in the parts of the image where
 //      one estimator dominates.
 
-float luminance(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
-
-// GGX / Trowbridge-Reitz normal distribution.
-float ggxDistribution(float cosHalf, float alpha) {
-    float a2 = alpha * alpha;
-    float d = cosHalf * cosHalf * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * d * d, 1e-9);
-}
-
-// One direction's term of the separable Smith masking-shadowing function for GGX.
-float smithG1(float cosTheta, float alpha) {
-    float a2 = alpha * alpha;
-    return 2.0 * cosTheta /
-           max(cosTheta + sqrt(a2 + (1.0 - a2) * cosTheta * cosTheta), 1e-9);
-}
-
-vec3 fresnelSchlick(float cosTheta, vec3 f0) {
-    float m = clamp(1.0 - cosTheta, 0.0, 1.0);
-    float m2 = m * m;
-    return f0 + (vec3(1.0) - f0) * (m2 * m2 * m);
-}
-
-// GGX roughness from the stored glossiness. The perceptual roughness is floored rather
-// than allowed to reach zero: a true mirror is a delta lobe, which this estimator cannot
-// sample, and an alpha of zero makes the distribution divide by zero. At the floor the
-// lobe is tight enough to read as a mirror and still has finite density.
-float alphaFromGlossiness(float glossiness) {
-    float perceptual = clamp(1.0 - glossiness, 0.03, 1.0);
-    return perceptual * perceptual;
-}
-
-// The surface's response for one light direction, and the density the BSDF sampler below
-// would have had for that same direction.
-void evaluateSurface(vec3 normal, vec3 viewDirection, vec3 lightDirection,
-                     vec3 diffuseAlbedo, vec3 f0, float alpha, float specularProbability,
-                     out vec3 bsdf, out float pdf) {
-    bsdf = vec3(0.0);
-    pdf = 0.0;
-
-    float cosLight = dot(normal, lightDirection);
-    float cosView = dot(normal, viewDirection);
-    if (cosLight <= 0.0 || cosView <= 0.0) return;
-
-    vec3 diffuse = diffuseAlbedo / PI;
-    float diffusePdf = cosLight / PI;
-
-    if (specularProbability <= 0.0) {
-        // Rule 1: the untouched-material path, byte for byte the old Lambertian.
-        bsdf = diffuse;
-        pdf = diffusePdf;
-        return;
-    }
-
-    // NOTE: `half` is a reserved type name in HLSL -- do not name this that.
-    vec3 halfVector = normalize(viewDirection + lightDirection);
-    float cosHalf = max(dot(normal, halfVector), 0.0);
-    float viewDotHalf = max(dot(viewDirection, halfVector), 1e-4);
-
-    float d = ggxDistribution(cosHalf, alpha);
-    float g = smithG1(cosView, alpha) * smithG1(cosLight, alpha);
-    vec3  f = fresnelSchlick(viewDotHalf, f0);
-
-    vec3 specular = f * (d * g / max(4.0 * cosView * cosLight, 1e-6));
-    // What the specular lobe reflects, the diffuse lobe underneath it does not get to
-    // scatter. Without this a glossy surface is brighter than the light falling on it.
-    bsdf = diffuse * (vec3(1.0) - f) + specular;
-
-    float specularPdf = d * cosHalf / (4.0 * viewDotHalf);
-    pdf = mix(diffusePdf, specularPdf, specularProbability);
-}
-
-// A half vector from the GGX distribution, for the specular lobe's bounce direction.
-vec3 sampleGGXHalfVector(vec3 n, float alpha, inout uint seed) {
-    float u1 = randomUnit(seed);
-    float u2 = randomUnit(seed);
-    float phi = 2.0 * PI * u1;
-    float a2 = alpha * alpha;
-    float cosTheta = sqrt(clamp((1.0 - u2) / (1.0 + (a2 - 1.0) * u2), 0.0, 1.0));
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    return basisAround(n) * vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
-}
+// The model itself -- lobes, evaluation, sampling -- is the engine's pjv_bsdf.sc, which this file
+// defined first and which the renderer gallery's path tracers now share.
 
 // =============================================================================
 // Rays
@@ -643,27 +539,11 @@ void main() {
         }
 
         // --- Lobe setup ----------------------------------------------------------
-        // A metal has no diffuse lobe and tints its reflection with its own colour; a
-        // dielectric keeps its diffuse colour and reflects white. The dielectric's F0 is
-        // scaled by glossiness so that a fully rough entry has no specular lobe at all --
-        // see rule 1 above, which is what keeps existing scenes looking like themselves.
-        float dielectricF0 = 0.04 * material.glossiness;
-        vec3  diffuseAlbedo = albedo * (1.0 - material.metallic);
-        vec3  f0 = mix(vec3(dielectricF0), albedo, material.metallic);
-        float alpha = alphaFromGlossiness(material.glossiness);
-
-        float specularProbability = 0.0;
-        if (max(dielectricF0, material.metallic) > 0.0) {
-            // Pick the lobe in proportion to how much light each carries, so a mirror
-            // rarely wastes a sample on its diffuse lobe and a chalky surface rarely
-            // wastes one on its specular. Clamped away from 0 and 1 because a lobe that
-            // is never sampled but still evaluated in the pdf biases the estimator.
-            float specularLuminance = luminance(f0);
-            float diffuseLuminance = luminance(diffuseAlbedo);
-            specularProbability = clamp(specularLuminance /
-                                        max(specularLuminance + diffuseLuminance, 1e-4),
-                                        0.05, 0.95);
-        }
+        // pjv_bsdf.sc: a metal has no diffuse lobe and tints its reflection with its own colour; a
+        // dielectric keeps its diffuse colour and reflects white, with an F0 scaled by glossiness so
+        // that a fully rough entry has no specular lobe at all -- rule 1 above, which is what keeps
+        // existing scenes looking like themselves.
+        PjvBsdf surface = pjvBsdf(albedo, material.glossiness, material.metallic);
 
         // --- Next event estimation: one shadow ray at the sun -------------------
         vec3 lightDirection = sampleSunCone(seed);
@@ -687,9 +567,8 @@ void main() {
                 // untouched material this is the Lambertian arithmetic it always was.
                 vec3 bsdf;
                 float bsdfPdf;
-                evaluateSurface(normal, viewDirection, lightDirection,
-                                diffuseAlbedo, f0, alpha, specularProbability, bsdf, bsdfPdf);
-                float weight = powerHeuristic(sunPdf, bsdfPdf);
+                pjvBsdfEvaluate(surface, normal, viewDirection, lightDirection, bsdf, bsdfPdf);
+                float weight = pjvPowerHeuristic(sunPdf, bsdfPdf);
                 radiance += weight * throughput * shadowTransmittance * bsdf * cosAtSurface *
                             sunRadiance / sunPdf;
             }
@@ -701,11 +580,16 @@ void main() {
         // fell. Sampling one lobe and dividing by only that lobe's density is the classic
         // way to get a glossy surface that is subtly too bright.
         vec3 nextDirection;
-        if (specularProbability > 0.0 && randomUnit(seed) < specularProbability) {
-            vec3 halfVector = sampleGGXHalfVector(normal, alpha, seed);
-            nextDirection = reflect(-viewDirection, halfVector);
+        // (pjvBsdfSample, open-coded: the lobe's draw is taken only when there is a choice to make,
+        // which keeps a default material's random sequence what it always was.)
+        if (surface.specularProbability > 0.0 && randomUnit(seed) < surface.specularProbability) {
+            float u1 = randomUnit(seed);
+            float u2 = randomUnit(seed);
+            nextDirection = reflect(-viewDirection, pjvSampleGgxHalf(normal, surface.alpha, u1, u2));
         } else {
-            nextDirection = sampleCosineHemisphere(normal, seed);
+            float u1 = randomUnit(seed);
+            float u2 = randomUnit(seed);
+            nextDirection = pjvSampleCosine(normal, u1, u2);
         }
 
         float cosNext = dot(normal, nextDirection);
@@ -713,8 +597,7 @@ void main() {
 
         vec3 nextBsdf;
         float nextPdf;
-        evaluateSurface(normal, viewDirection, nextDirection,
-                        diffuseAlbedo, f0, alpha, specularProbability, nextBsdf, nextPdf);
+        pjvBsdfEvaluate(surface, normal, viewDirection, nextDirection, nextBsdf, nextPdf);
         if (nextPdf <= 0.0) break;
 
         // For an untouched material this reduces to `throughput *= albedo` exactly:
@@ -722,7 +605,7 @@ void main() {
         throughput *= nextBsdf * cosNext / nextPdf;
 
         // What this ray's weight would be if it escapes onto the sun disk.
-        bsdfSunWeight = powerHeuristic(nextPdf, sunPdf);
+        bsdfSunWeight = pjvPowerHeuristic(nextPdf, sunPdf);
 
         ray.origin = position + normal * originBias;
         ray.direction = nextDirection;
