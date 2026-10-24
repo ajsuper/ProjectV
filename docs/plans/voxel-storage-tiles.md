@@ -208,9 +208,7 @@ decoding is on big chunks (the marina's), whose map loading is not on this branc
 - The authoring brick-map path still builds a tree first (converted to tiles on the terrain's workers,
   elsewhere on first read). A brick map -> tile table builder would skip it, but buys little: tree and
   table together are 0.32 ms of a 256^3 terrain chunk's 85 ms on the workers (columns 45, voxels 37).
-- Voxel Mayhem's `MAYHEM_MAP` and its marina measurements live on `restir-pt`; re-measure the fracture
-  cost there once both branches meet.
-- The voxel collision shape (below).
+- The voxel collision shape: its own plan, `voxel-collision-shape.md`.
 
 ### 2026-10-24 -- the dense levels over the content's box (D9)
 
@@ -303,6 +301,28 @@ edge) or more than 32 blocks are touched. On that chunk: one voxel **0.31 ms**, 
 blocks) **1.38 ms**. Voxel Mayhem's cannon (small chunks) is unchanged: 166 / 162 ms of physics in the
 first 0.5 s against `main`'s 167 / 156.
 
+### 2026-10-24 -- merged into restir-pt; the marina's fracture re-measured
+
+`tile-tables` merged into `restir-pt` (45bcdaf; the one conflict, the local support pass, was the same
+code before and after its port to tiles). West Point Marina in Voxel Mayhem (`MAYHEM_MAP`, the v3
+conversion, `MAYHEM_BENCH_SHOT=50,60,-140,69.2,29.4,-44.8`), physics in the first 0.5 s after the shot,
+two runs each, interleaved:
+
+| | restir-pt before (0dfa5ed) | merged | merged, the v4 conversion |
+|---|---|---|---|
+| cannon | 26 / 29 ms | 29 / 31 ms | 31 ms |
+| blast | 580 / 584 ms (worst frame 166 / 169) | 615 / 604 ms (161 / 172) | 577 ms (163) |
+
+The same pieces both ways (308 and 236), so the simulation is unchanged. Fracture's own share of the
+blast's step is small: the strike 29 ms and the island pass 12 ms, while **Jolt re-creating the world's
+static body takes ~100 ms** at every change, and the world's collision build 1,980 ms at load. Both are
+collision, not storage: `voxel-collision-shape.md`. Images on the merged tree: restir-pt within its
+noise (mean |difference| 0.0009 material room, 0.0006 castle), the voxel renderer pixel-identical.
+
+The physics demos' "F's shards went on through the wall" check sits on its threshold in the full run on
+both sides (merged 97, 98; before 117 of 162, then 99 of 164 -- 98.4 passes), and passes alone
+(`DEMOS_ONLY=11`: 119 and 115 of 167). It depends on what the demos before it leave; not this change.
+
 ## Related: physics that reads voxels directly
 
 Teardown collides voxel shapes against each other directly: a voxel corner can only meet a face, and
@@ -314,8 +334,8 @@ edit. As a custom Jolt shape on tile tables:
 - raycasts: the march.
 That removes the 107-131 ms world rebuild, the box budget (`CollisionParams::pieceBudget`, where 4,096
 left 431 of the marina's chunks colliding as solid blocks) and the 2.2 s collision build at load. Risks:
-tunnelling of fast small pieces (Teardown substeps), many-contact flush faces, the edge-edge test. Its
-own plan once Phase 1 lands.
+tunnelling of fast small pieces (Teardown substeps), many-contact flush faces, the edge-edge test.
+Planned in `voxel-collision-shape.md` (2026-10-24).
 
 Near-term physics fixes that do not wait for this:
 - fewer catch-up steps when the fixed clock falls behind, so one slow step is not followed by eight;
