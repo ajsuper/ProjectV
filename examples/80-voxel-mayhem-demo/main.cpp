@@ -44,6 +44,13 @@
 //   MAYHEM_SELFTEST=1 ./voxel_mayhem_demo   plays itself for a while and checks that every feature did what
 //                                      it should (MAYHEM_CAPTURE=<prefix> also saves screenshots)
 //   MAYHEM_BENCH=cannon|blast|barrage  times a break at the castle wall (MAYHEM_ONLY=castle: nothing else)
+//   MAYHEM_MAP=<folder>                 an authored map (compose.json, entities.json, physics_materials.json:
+//                                      the Teardown imports, say) in place of the park, to break with the
+//                                      same tools, brought to life size (MAYHEM_MAP_SCALE, default 0.1); the
+//                                      park's set pieces (B, N, R, E) are not there. Its bodies start asleep
+//                                      (MAYHEM_MAP_AWAKE=1: not); bodies the converter left overlapping are
+//                                      welded, and world voxels inside a body cleared (MAYHEM_MAP_SCAN=1
+//                                      reports the overlaps and exits)
 //   MAYHEM_LOOK=x,y,z,tx,ty,tz          a still from there, at 4 s, then exits (MAYHEM_FIRE, MAYHEM_AO,
 //                                      MAYHEM_GI, MAYHEM_DEBUG set it up); MAYHEM_GPU=1 prints each pass's GPU time
 
@@ -53,12 +60,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <random>
 #include <set>
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <glm/gtc/quaternion.hpp>
@@ -77,7 +86,9 @@
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
 #include "runtime/physics.h"
+#include "runtime/entities.h"
 #include "runtime/scene_bridge.h"
+#include "utils/compose_io.h"
 #include "utils/editing.h"
 #include "utils/material.h"
 #include "utils/scene_query.h"
@@ -103,6 +114,11 @@ constexpr float EYE_HEIGHT = 1.6f;
 constexpr float WALK_SPEED = 7.0f, FLY_SPEED = 24.0f;
 constexpr float WALK_GRIP = 12.0f, AIR_GRIP = 1.5f, FLY_GRIP = 5.0f;
 constexpr uint32_t SMALL_DEBRIS_VOXELS = 3;   // walked through and aimed through
+// On a map (10 cm voxels, soft materials) a break makes thousands of shards, and each landing on the
+// map's detailed ground is what a step spent its time on (measured: a blast at the marina, 1,900 pieces,
+// 64 ms of physics a frame). A piece this small or smaller is light debris there: it collides as one box
+// fitted to it, without continuous collision, and not with other debris.
+constexpr uint32_t MAP_DEBRIS_VOXELS = 64;
 constexpr int SHARD_FAMILY_STEPS = 15;        // fixed steps a break's shards pass through each other
 const quat IDENTITY(1, 0, 0, 0);
 
@@ -320,6 +336,7 @@ struct Mayhem {
         barrel, glassBox, balloon, orb, gondola, wreckerProto, fireball, beam;
 
     Entity floor = NullEntity;
+    bool map = false;            // MAYHEM_MAP: an authored map instead of the park
     std::vector<Entity> owned;   // everything the world was built of that is not swept up by body type
 
     Tool tool = Tool::Cannon;
@@ -1716,12 +1733,22 @@ void markDebris(World& world, Entity piece) {
     const projv::Scene* scene = world.ctx().find<projv::Scene>();
     const projv::VoxelComponent* link = world.try_get<projv::VoxelComponent>(piece);
     if (!scene || !link) return;
-    const bool small = utils::getComponentVoxelCount(*scene, link->handle) <= SMALL_DEBRIS_VOXELS;
+    const uint64_t voxels = utils::getComponentVoxelCount(*scene, link->handle);
+    const bool small = voxels <= SMALL_DEBRIS_VOXELS;
+    const bool light = world.ctx().get<Mayhem>().map && voxels <= MAP_DEBRIS_VOXELS;
     projv::CollisionGroups groups = world.all_of<projv::CollisionGroups>(piece) ? world.get<projv::CollisionGroups>(piece)
                                                                                : projv::CollisionGroups{};
     groups.groups.clear();
-    if (small) groups.groups.push_back("small debris");
+    groups.ignores.clear();
+    if (small || light) groups.groups.push_back("small debris");
+    if (light) groups.ignores.push_back("small debris");
     world.emplace_or_replace<projv::CollisionGroups>(piece, std::move(groups));
+    if (light && world.all_of<projv::RigidBody>(piece))
+        world.patch<projv::RigidBody>(piece, [](projv::RigidBody& body) {
+            body.shape = projv::RigidBody::Shape::Box;   // fitted to its voxels' content box
+            body.halfExtents = vec3(0.0f);
+            body.quality = projv::RigidBody::Quality::Discrete;
+        });
 }
 
 void onBrokenBody(World& world, const projv::BodyBroken& e) {
@@ -1914,7 +1941,8 @@ void controls(projv::Application& app) {
         rackPins(world, m);
         m.bowlIn = 1.0f;
     }
-    if (input.pressed(projv::Key::R)) {
+    if (input.pressed(projv::Key::R) && m.map) projv::core::info("mayhem: a map is not rebuilt -- start again to restore it");
+    else if (input.pressed(projv::Key::R)) {
         clearWorld(world);
         buildWorld(world);
         projv::core::info("mayhem: the world, rebuilt");
@@ -2082,7 +2110,18 @@ void benchFrame(projv::Application& app) {
         // A cannonball every 0.4 s at a different place on the castle's walls, for 12 s: a long run of
         // breaks to sample a profiler over.
         static float next = 3.0f;
-        if (m.clock > next && m.clock < 15.0f) {
+        if (m.clock > next && m.clock < 15.0f && m.map) {   // a map: blasts round MAYHEM_BENCH_SHOT's target
+            next += 0.4f;
+            vec3 from(0.0f, 30.0f, 0.0f), at(0.0f);
+            if (const char* shot = std::getenv("MAYHEM_BENCH_SHOT"))
+                std::sscanf(shot, "%f,%f,%f,%f,%f,%f", &from.x, &from.y, &from.z, &at.x, &at.y, &at.z);
+            camera.position = from;
+            vec3 d = glm::normalize(at + vec3(uniform(m, -8, 8), uniform(m, -3, 3), uniform(m, -8, 8)) - camera.position);
+            camera.yaw = std::atan2(d.z, d.x);
+            camera.pitch = std::asin(d.y);
+            m.tool = Tool::Blast;
+            use(world, m, camera);
+        } else if (m.clock > next && m.clock < 15.0f) {
             next += 0.4f;
             float a = uniform(m, 0.0f, 2.0f * PI);
             camera.position = CASTLE + vec3(std::cos(a) * 30.0f, 6.0f, std::sin(a) * 30.0f);
@@ -2097,8 +2136,12 @@ void benchFrame(projv::Application& app) {
     }
     if (!b->fired && m.clock > 3.0f) {
         b->fired = true;
-        camera.position = vec3(0, 7, 30);
-        vec3 d = glm::normalize(vec3(4, 6, 55.5f) - camera.position);
+        // MAYHEM_BENCH_SHOT=x,y,z,tx,ty,tz: from there, at that (a map has no castle wall to aim at).
+        vec3 from(0, 7, 30), at(4, 6, 55.5f);
+        if (const char* shot = std::getenv("MAYHEM_BENCH_SHOT"))
+            std::sscanf(shot, "%f,%f,%f,%f,%f,%f", &from.x, &from.y, &from.z, &at.x, &at.y, &at.z);
+        camera.position = from;
+        vec3 d = glm::normalize(at - camera.position);
         camera.yaw = std::atan2(d.z, d.x);
         camera.pitch = std::asin(d.y);
         m.tool = b->what == "blast" ? Tool::Blast : Tool::Cannon;
@@ -2113,13 +2156,16 @@ void benchFrame(projv::Application& app) {
         double spike = 0.0, worst = 0.0;
         for (const auto& r : b->after)
             if (r.t < 4.0f) { spike += r.physics; worst = std::max(worst, r.frame); }
-        projv::core::info("BENCH SUMMARY physics in the first 0.5 s: {:.0f} ms, worst frame {:.0f} ms, pieces {}", spike, worst,
-                          b->after.empty() ? 0 : b->after.back().pieces);
-        projv::core::info("BENCH   t      frame  physics(steps) handler  flush  render  bodies pieces");
+        double later = 0.0, laterFrames = 0.0;
+        for (const auto& r : b->after)
+            if (r.t > 4.0f) { later += r.physics; laterFrames += 1.0; }
+        projv::core::info("BENCH SUMMARY physics in the first 0.5 s: {:.0f} ms, worst frame {:.0f} ms, pieces {}, physics a frame after 1 s {:.1f} ms",
+                          spike, worst, b->after.empty() ? 0 : b->after.back().pieces, laterFrames > 0.0 ? later / laterFrames : 0.0);
+        projv::core::info("BENCH   t      frame  physics(steps) handler  flush  render  other  bodies pieces");
         for (const auto& r : b->after)
             if (r.frame > 2.0 * mean || r.physics > 8.0)
-                projv::core::info("BENCH   {:5.2f} {:7.1f} {:7.1f}({}) {:7.1f} {:6.1f} {:6.1f} {:7} {:6}", r.t, r.frame, r.physics, r.steps,
-                                  r.handler, r.flush, r.render, r.bodies, r.pieces);
+                projv::core::info("BENCH   {:5.2f} {:7.1f} {:7.1f}({}) {:7.1f} {:6.1f} {:6.1f} {:6.1f} {:7} {:6}", r.t, r.frame, r.physics, r.steps,
+                                  r.handler, r.flush, r.render, r.frame - r.physics - r.flush - r.render, r.bodies, r.pieces);
         app.closeRequested = true;
     }
 }
@@ -2390,6 +2436,145 @@ void makePrototypes(projv::Scene& scene, Mayhem& m) {
     });
 }
 
+// A map's bodies that overlap each other: what the Teardown converter leaves where the game had joints or
+// rules it does not export -- a vehicle's wheels sit in its wheel wells (Teardown never collides a wheel
+// with its own vehicle), a container's doors in its frame (hinged, in the game). Free, each pair shoves
+// itself apart at every step. So each group of overlapping bodies is made one thing: one collision
+// family (they never collide with each other), and every member welded to the group's largest with a
+// fixed joint, which a hard enough hit breaks.
+//
+// MAYHEM_MAP_SCAN=1 also reports, for every body, the share of its voxels inside the static world or
+// another body (worst first), and exits.
+void joinOverlappingBodies(World& world, Mayhem& m, const projv::Scene& scene, bool report) {
+    struct Placed { Entity e; ComponentHandle h; bool dynamic; std::vector<glm::ivec3> cells; };
+    auto voxelSize = [&](ComponentHandle h) {
+        for (const projv::Chunk& c : scene.chunks) {
+            if (!c.alive) continue;
+            ComponentHandle owner = c.gridIndex >= 0 ? scene.grids[c.gridIndex].componentHandle : c.componentHandle;
+            // The chunk's world edge over its voxels across: header.voxelScale is not that for a loaded
+            // .data chunk, and is not rescaled with the component
+            if (owner == h) return c.header.resolution > 0 ? c.header.scale / float(c.header.resolution) : 0.0f;
+        }
+        return 0.0f;
+    };
+    std::vector<Placed> placed;
+    float cell = 0.0f;   // the bin every voxel centre is put in: the finest voxel
+    for (auto [e, body] : world.view<projv::RigidBody>().each()) {
+        ComponentHandle h = runtime::voxelComponentOf(world, e);
+        if (h != projv::INVALID_COMPONENT_HANDLE && body.motion == runtime::MotionType::Dynamic) placed.push_back({e, h, true, {}});
+    }
+    for (auto [e, collider] : world.view<projv::StaticCollider>().each()) {
+        ComponentHandle h = runtime::voxelComponentOf(world, e);
+        if (h != projv::INVALID_COMPONENT_HANDLE) placed.push_back({e, h, false, {}});
+    }
+    for (const Placed& p : placed) {
+        const float v = voxelSize(p.h);
+        if (v > 0.0f) cell = cell > 0.0f ? std::min(cell, v) : v;
+    }
+    if (cell <= 0.0f) return;
+    auto key = [](glm::ivec3 c) { return (int64_t(c.x + 1048576) << 42) | (int64_t(c.y + 1048576) << 21) | int64_t(c.z + 1048576); };
+    std::unordered_map<int64_t, int> bodyCells;   // cell -> the first body (index into placed) to claim it
+    // The static voxels under a body: cell -> which static component, and the voxel there in its own space
+    // (to carve it). Only those in a metre cell some body reaches are kept: the world has millions.
+    struct StaticVoxel { int index; glm::ivec3 voxel; };
+    std::unordered_map<int64_t, StaticVoxel> staticCells;
+    std::unordered_set<int64_t> nearBodies;
+    for (int pass = 0; pass < 2; pass++)   // the bodies first, then the static world round them
+        for (size_t i = 0; i < placed.size(); i++) {
+            Placed& p = placed[i];
+            if (p.dynamic != (pass == 0)) continue;
+            const projv::ComponentRecord& rec = scene.components[p.h];
+            const float v = voxelSize(p.h);
+            for (const projv::utils::ComponentVoxel& vox : projv::utils::componentVoxels(scene, p.h)) {
+                const vec3 w = rec.localPosition + rec.localRotation * ((vec3(vox.position) + 0.5f) * v);
+                const glm::ivec3 c = glm::ivec3(glm::floor(w / cell));
+                if (p.dynamic) {
+                    p.cells.push_back(c);
+                    bodyCells.emplace(key(c), int(i));
+                    nearBodies.insert(key(glm::ivec3(glm::floor(w))));
+                } else if (nearBodies.count(key(glm::ivec3(glm::floor(w))))) {
+                    staticCells.emplace(key(c), StaticVoxel{int(i), vox.position});
+                }
+            }
+        }
+    // Overlaps, pair by pair: voxels of body i in a cell body j claimed.
+    std::map<std::pair<int, int>, int> shared;
+    std::vector<int> inWorld(placed.size(), 0), inBodies(placed.size(), 0);
+    std::map<int, std::vector<projv::PendingVoxelOp>> carve;   // static index -> its voxels a body stands in
+    for (size_t i = 0; i < placed.size(); i++) {
+        if (!placed[i].dynamic) continue;
+        for (glm::ivec3 c : placed[i].cells) {
+            if (auto it = staticCells.find(key(c)); it != staticCells.end()) {
+                inWorld[i]++;
+                carve[it->second.index].push_back({false, it->second.voxel, 0u});
+                staticCells.erase(it);
+            }
+            auto it = bodyCells.find(key(c));
+            if (it == bodyCells.end() || it->second == int(i)) continue;
+            inBodies[i]++;
+            shared[{std::min(int(i), it->second), std::max(int(i), it->second)}]++;
+        }
+    }
+    if (report) {
+        std::vector<size_t> order;
+        for (size_t i = 0; i < placed.size(); i++) if (placed[i].dynamic && !placed[i].cells.empty()) order.push_back(i);
+        auto share = [&](size_t i) { return float(inWorld[i] + inBodies[i]) / float(placed[i].cells.size()); };
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return share(a) > share(b); });
+        int bad = 0;
+        for (size_t i : order) {
+            if (share(i) > 0.15f) bad++;
+            const projv::ComponentRecord& rec = scene.components[placed[i].h];
+            projv::core::info("SCAN body id {} ({} voxels) at ({:.1f}, {:.1f}, {:.1f}): {:.0f}% in the world, {:.0f}% in other bodies",
+                              rec.localId, placed[i].cells.size(), rec.localPosition.x, rec.localPosition.y, rec.localPosition.z,
+                              100.0f * inWorld[i] / placed[i].cells.size(), 100.0f * inBodies[i] / placed[i].cells.size());
+        }
+        projv::core::info("SCAN {} bodies, {} over 15% inside something", order.size(), bad);
+    }
+
+    // Groups: bodies joined by any real overlap (a few voxels' contact is not one).
+    std::vector<int> parent(placed.size());   // (static entries stay alone: only bodies are grouped)
+    for (size_t i = 0; i < parent.size(); i++) parent[i] = int(i);
+    std::function<int(int)> find = [&](int i) { return parent[i] == i ? i : parent[i] = find(parent[i]); };
+    for (const auto& [pair, n] : shared)
+        if (n >= 8) parent[find(pair.first)] = find(pair.second);
+    std::map<int, std::vector<int>> groups;
+    for (size_t i = 0; i < placed.size(); i++)
+        if (placed[i].dynamic) groups[find(int(i))].push_back(int(i));
+    uint32_t family = 500000;   // clear of the shards' (from 1000) and the ferris wheel's (7)
+    int joined = 0;
+    for (auto& [root, members] : groups) {
+        if (members.size() < 2) continue;
+        family++;
+        const int core = *std::max_element(members.begin(), members.end(),
+                                           [&](int a, int b) { return placed[a].cells.size() < placed[b].cells.size(); });
+        for (int i : members) {
+            projv::CollisionGroups g = world.all_of<projv::CollisionGroups>(placed[i].e) ? world.get<projv::CollisionGroups>(placed[i].e) : projv::CollisionGroups{};
+            g.family = family;
+            world.emplace_or_replace<projv::CollisionGroups>(placed[i].e, g);
+            if (i == core) continue;
+            vec3 centre(0.0f);
+            for (glm::ivec3 c : placed[i].cells) centre += (vec3(c) + 0.5f) * cell;
+            projv::Joint weld;
+            weld.type = runtime::JointType::Fixed;
+            weld.anchor = centre / float(placed[i].cells.size());
+            weld.breakForce = 4.0e4f;   // N: a wheel or a door stays on through a knock, not a cannonball
+            weld.breakTorque = 2.0e4f;
+            joint(world, m, placed[i].e, placed[core].e, weld);
+            joined++;
+        }
+    }
+    // A body inside the static world (a container sunk into the quay, where the level had a hole cut
+    // for it that the converter does not carve: teardown-physics.md, A1) takes the space: the world's
+    // voxels there go.
+    size_t carved = 0;
+    for (auto& [i, ops] : carve) {
+        carved += ops.size();
+        runtime::editVoxels(world, placed[i].e, ops);
+    }
+    projv::core::info("mayhem: {} overlapping bodies welded into {} groups; {} world voxels inside bodies cleared",
+                      joined, family - 500000, carved);
+}
+
 void startup(projv::Application& app) {
     World& world = app.world;
     const fs::path here = projv::core::executableDirectory();
@@ -2408,14 +2593,58 @@ void startup(projv::Application& app) {
     if (const char* v = std::getenv("MAYHEM_AO")) look.ambientOcclusion = std::atoi(v) != 0;
     if (const char* v = std::getenv("MAYHEM_GI")) look.gi = std::atoi(v) != 0;
     world.ctx().emplace<Watch>();
-    auto& scene = world.ctx().emplace<projv::Scene>();
+    // MAYHEM_MAP=<folder>: an authored map's voxels in place of the park's floor.
+    const char* mapFolder = std::getenv("MAYHEM_MAP");
+    auto& scene = mapFolder ? world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk(mapFolder))
+                            : world.ctx().emplace<projv::Scene>();
     auto& m = world.ctx().emplace<Mayhem>();
     m.unattended = unattended;
+    m.map = mapFolder != nullptr;
+    vec3 mapMin{0.0f}, mapMax{0.0f};
+    if (m.map) {
+        // The Teardown imports are written ten times life size (the converter's --td-scale 10: a voxel a
+        // world unit, where Teardown's are 10 cm), which to the physics is a level that falls slowly
+        // and weighs a thousand times what it should. MAYHEM_MAP_SCALE (default 0.1) brings it back to
+        // metres, the size Mayhem's tools are made for; 1 leaves it as written.
+        const float rescale = std::getenv("MAYHEM_MAP_SCALE") ? float(std::atof(std::getenv("MAYHEM_MAP_SCALE"))) : 0.1f;
+        if (rescale > 0.0f && rescale != 1.0f)
+            for (ComponentHandle h : projv::utils::rootComponents(scene)) {
+                const projv::ComponentRecord& c = scene.components[h];
+                projv::utils::setComponentTransform(scene, h, c.localPosition * rescale, c.localRotation, c.localScale * rescale);
+            }
+        bool found = false;
+        float finest = 0.0f;
+        for (const projv::Chunk& chunk : scene.chunks) {
+            if (!chunk.alive || chunk.header.scale <= 0.0f) continue;
+            const vec3 lo = chunk.header.position, hi = chunk.header.position + vec3(chunk.header.scale);
+            mapMin = found ? glm::min(mapMin, lo) : lo;
+            mapMax = found ? glm::max(mapMax, hi) : hi;
+            found = true;
+            // the chunk's world edge over its voxels across (header.voxelScale is not that for a .data chunk)
+            const float v = chunk.header.resolution > 0 ? chunk.header.scale / float(chunk.header.resolution) : 0.0f;
+            if (v > 0.0f) finest = finest > 0.0f ? std::min(finest, v) : v;
+        }
+        if (!found) {
+            projv::core::error("mayhem: no map in '{}' (a folder with a compose.json)", mapFolder);
+            std::exit(1);
+        }
+        if (finest > 0.0f) look.finestVoxel = finest;
+        look.hazeRadius = std::max(glm::length(mapMax - mapMin), 1.0f);
+        projv::core::info("mayhem: map '{}', {:.0f} x {:.0f} x {:.0f} m, from ({:.0f}, {:.0f}, {:.0f})", mapFolder, mapMax.x - mapMin.x,
+                          mapMax.y - mapMin.y, mapMax.z - mapMin.z, mapMin.x, mapMin.y, mapMin.z);
+    }
 
     runtime::installSceneBridge(app);
     runtime::PhysicsConfig physics;
     physics.settings.worldMin = vec3(-1000.0f, -40.0f, -1000.0f);
     physics.settings.worldMax = vec3(1000.0f, 250.0f, 1000.0f);   // balloons that get away are gone at 250 m
+    if (m.map) {   // the map's bounds, with room round them
+        // A map's 10 cm chunks are far more detailed than the park's: up to 16k boxes a chunk before one
+        // collides as its content box (a solid block you cannot walk into).
+        physics.collision.pieceBudget = std::getenv("MAYHEM_MAP_BOXES") ? uint32_t(std::atoi(std::getenv("MAYHEM_MAP_BOXES"))) : 16384u;
+        physics.settings.worldMin = glm::min(physics.settings.worldMin, mapMin - vec3(200.0f, 40.0f, 200.0f));
+        physics.settings.worldMax = glm::max(physics.settings.worldMax, mapMax + vec3(200.0f, 250.0f, 200.0f));
+    }
     physics.maxPieces = 2500;
     physics.dustVoxels = 1;   // a lone voxel a break leaves is dust: no body
     // A shard breaks again only on a hit that would break at least two of its material's shard sizes:
@@ -2430,19 +2659,53 @@ void startup(projv::Application& app) {
     runtime::registerFracturePattern(world, "slabs", slabs);   // before the library names it
     if (!runtime::loadPhysicsMaterials(world, (here / "physics_materials.json").string()))
         projv::core::error("mayhem: physics_materials.json did not load; materials will all behave alike");
+    // The map's own materials (the Teardown imports' td_*), beside Mayhem's.
+    if (m.map && !runtime::loadPhysicsMaterials(world, (fs::path(mapFolder) / "physics_materials.json").string()))
+        projv::core::warn("mayhem: the map has no physics_materials.json; its voxels break as the default material");
     defineThrownTwins(world);
     for (const char* group : {"small debris", "player"}) runtime::definePhysicsGroup(world, group);
 
     // The floor: 220 m square of half-metre voxels, grass round a stone plaza, its top at y = 0.
-    ComponentHandle floor = voxels(scene, "floor", ivec3(440, 2, 440), 0.5f, vec3(-FLOOR_HALF, -1.0f, -FLOOR_HALF), [](int x, int, int z) {
-        float wx = float(x) * 0.5f - FLOOR_HALF, wz = float(z) * 0.5f - FLOOR_HALF;
-        if (std::abs(wx) < 24.0f && std::abs(wz) < 26.0f)
-            return ((x / 4 + z / 4) % 2) ? rgb(0.62f, 0.6f, 0.56f) : rgb(0.56f, 0.54f, 0.5f);
-        int n = (x * 73 + z * 151 + (x / 7) * 31 + (z / 5) * 17) % 7;
-        return n < 3 ? rgb(0.34f, 0.52f, 0.24f) : n < 5 ? rgb(0.31f, 0.49f, 0.22f) : rgb(0.37f, 0.55f, 0.26f);
-    });
-    m.floor = runtime::spawnComponent(world, floor);
-    world.emplace<projv::StaticCollider>(m.floor);
+    if (!m.map) {
+        ComponentHandle floor = voxels(scene, "floor", ivec3(440, 2, 440), 0.5f, vec3(-FLOOR_HALF, -1.0f, -FLOOR_HALF), [](int x, int, int z) {
+            float wx = float(x) * 0.5f - FLOOR_HALF, wz = float(z) * 0.5f - FLOOR_HALF;
+            if (std::abs(wx) < 24.0f && std::abs(wz) < 26.0f)
+                return ((x / 4 + z / 4) % 2) ? rgb(0.62f, 0.6f, 0.56f) : rgb(0.56f, 0.54f, 0.5f);
+            int n = (x * 73 + z * 151 + (x / 7) * 31 + (z / 5) * 17) % 7;
+            return n < 3 ? rgb(0.34f, 0.52f, 0.24f) : n < 5 ? rgb(0.31f, 0.49f, 0.22f) : rgb(0.37f, 0.55f, 0.26f);
+        });
+        m.floor = runtime::spawnComponent(world, floor);
+        world.emplace<projv::StaticCollider>(m.floor);
+    } else {
+        // The map's entities.json: its static world and its breakable bodies.
+        runtime::spawnEntities(world);
+        // The level itself breaks like the park's walls: a hit hard enough breaks it, and what a break
+        // or a dig leaves standing on nothing falls (held by the ground at the bottom of the level). Only
+        // a fast hit is an impact on it -- a cannonball's 50 m/s, not debris landing -- or its soft
+        // materials (dirt at 400) would break under every falling shard, and those shards break it again.
+        for (auto [e, collider] : world.view<projv::StaticCollider>().each())
+            world.patch<projv::StaticCollider>(e, [](projv::StaticCollider& c) {
+                c.breaksOnImpact = true;
+                c.minImpactSpeed = 12.0f;
+                c.splits = true;
+                c.anchorBase = true;
+            });
+        joinOverlappingBodies(world, m, scene, std::getenv("MAYHEM_MAP_SCAN") != nullptr);
+        if (std::getenv("MAYHEM_MAP_SCAN")) std::exit(0);
+        // Every body starts asleep, as a level's props do: costing nothing until something reaches it.
+        // Awake, the bodies the converter left overlapping (docs/plans/teardown-physics.md, Part A)
+        // shove each other apart at every step and the simulation falls behind.
+        if (!std::getenv("MAYHEM_MAP_AWAKE"))
+            for (auto [e, body, t] : world.view<projv::RigidBody, projv::Transform>().each())
+                if (body.motion == runtime::MotionType::Dynamic)
+                    runtime::setBodyState(world, e, t.position, t.rotation, vec3(0.0f), vec3(0.0f), true);
+        auto& camera = world.ctx().get<Camera>();
+        const vec3 centre = (mapMin + mapMax) * 0.5f, size = mapMax - mapMin;
+        camera.position = vec3(centre.x, mapMin.y + std::min(size.y, 40.0f) + 10.0f, mapMin.z - 10.0f);
+        const vec3 d = glm::normalize(vec3(centre.x, mapMin.y, centre.z) - camera.position);
+        camera.yaw = std::atan2(d.z, d.x);
+        camera.pitch = std::asin(d.y);
+    }
 
     makePrototypes(scene, m);
 
@@ -2458,7 +2721,7 @@ void startup(projv::Application& app) {
         world.ctx().get<Mayhem>().piecesCleared += int(e.entities.size());
     });
     app.events().on<projv::BodyLeftWorld>([&world](const projv::BodyLeftWorld& e) {
-        if (e.position.y < 0.0f && std::abs(e.position.x) < FLOOR_HALF - 2.0f && std::abs(e.position.z) < FLOOR_HALF - 2.0f) {
+        if (!world.ctx().get<Mayhem>().map && e.position.y < 0.0f && std::abs(e.position.x) < FLOOR_HALF - 2.0f && std::abs(e.position.z) < FLOOR_HALF - 2.0f) {
             world.ctx().get<Mayhem>().fellThrough++;
             projv::core::error("mayhem: a body fell through the floor at ({:.1f}, {:.1f})", e.position.x, e.position.z);
         }
@@ -2477,7 +2740,8 @@ void startup(projv::Application& app) {
         world.ctx().emplace<restir_test::State>();
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
-    buildWorld(world);
+    if (!m.map) buildWorld(world);
+    if (auto* restir = world.ctx().find<restir_test::State>(); restir && m.map) restir->ground = mapMin.y;
     if (const char* what = std::getenv("MAYHEM_BENCH")) {
         world.ctx().emplace<Bench>().what = what;
     } else if (std::getenv("MAYHEM_SELFTEST")) {
@@ -2517,7 +2781,7 @@ void render(projv::Application& app) {
     }
     if (restir_test::State* restir = world.ctx().find<restir_test::State>()) {
         const View& view = world.ctx().get<View>();
-        restir_test::upload(*restir, renderInstance.getActiveRenderer(), renderInstance.getWindowResolution(), position, direction,
+        restir_test::upload(*restir, world, renderInstance.getActiveRenderer(), renderInstance.getWindowResolution(), position, direction,
                             view.sun, view.finestVoxel, view.hazeRadius);
     } else {
         voxel_renderer::upload(world, renderInstance, position, direction);
