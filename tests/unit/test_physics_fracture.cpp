@@ -916,6 +916,39 @@ TEST_CASE("support: cut away the whole base and all of it falls") {
     CHECK(runtime::bodyPose(f.app.world, rest).centerOfMass.y < before - 0.1f);   // it dropped
 }
 
+TEST_CASE("support: a collider too big to look over whole finds what fell from the change outward") {
+    // A level: a pedestal filling the lowest row of blocks (y 0..17, the ground), a tower on it, and one
+    // voxel far off that makes its box ~500M cells -- past what the whole-body pass takes.
+    Fixture f;
+    ComponentHandle level = utils::addComponent(f.scene, projv::ComponentKind::Chunk, "level", INVALID_COMPONENT_HANDLE, 16, 0.25f);
+    utils::queueVoxelAdd(f.scene, level, fill({0, 0, 0}, {11, 17, 11}, GREY));
+    utils::queueVoxelAdd(f.scene, level, fill({4, 18, 4}, {7, 33, 7}, GREY));
+    utils::queueVoxelAdd(f.scene, level, fill({5000, 0, 5000}, {5000, 0, 5000}, GREY));
+    utils::updateScene(f.scene);
+    REQUIRE(utils::setMaterialPhysics(f.scene, level, slotOf(f.scene, level, GREY), "stone"));
+    Entity e = runtime::spawnComponent(f.app.world, level);
+    projv::StaticCollider collider;
+    collider.splits = true;
+    collider.anchorBase = true;
+    f.app.world.emplace<projv::StaticCollider>(e, collider);
+    runtime::assignNetId(f.app.world, e);
+    f.frames(2);
+    // A hole in the ground cuts nothing loose.
+    runtime::editVoxels(f.app.world, e, slot({0, 10, 0}, {11, 10, 2}));
+    f.frames(2);
+    CHECK(f.splits.empty());
+    // The tower's bottom course: the 15 courses above it stand on nothing, and fall.
+    runtime::editVoxels(f.app.world, e, slot({4, 18, 4}, {7, 18, 7}));
+    f.frames(1);
+    REQUIRE(f.splits.size() == 1);
+    REQUIRE(f.splits[0].pieces.size() == 1);
+    Entity tower = f.splits[0].pieces[0];
+    CHECK(countOf(f.scene, f.app.world.get<projv::VoxelComponent>(tower).handle).voxels == uint64_t(4 * 15 * 4));
+    const float before = runtime::bodyPose(f.app.world, tower).centerOfMass.y;
+    f.frames(30);
+    CHECK(runtime::bodyPose(f.app.world, tower).centerOfMass.y < before - 0.1f);
+}
+
 TEST_CASE("support: a collider that does not split keeps standing on nothing") {
     Fixture f;
     Entity wall = f.wall();

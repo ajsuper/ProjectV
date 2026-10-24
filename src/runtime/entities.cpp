@@ -1,3 +1,4 @@
+#include "utils/blob_voxels.h"
 #include "runtime/entities.h"
 
 #include <algorithm>
@@ -212,7 +213,10 @@ namespace projv::runtime {
         bool stillPinned(const Scene& scene, int32_t index, const GeometryBlob& source) {
             if (index < 0 || static_cast<size_t>(index) >= scene.geometryPool.size()) return false;
             const GeometryBlob& blob = scene.geometryPool[index];
-            return blob.refCount > 0 && blob.geometry == source.geometry && blob.materialIDs == source.materialIDs;
+            if (blob.refCount == 0) return false;
+            const utils::TileTable& a = utils::blobTiles(blob);
+            const utils::TileTable& b = utils::blobTiles(source);
+            return a.texels == b.texels && a.materials == b.materials;
         }
 
         std::string cacheKey(const std::string& folder) {

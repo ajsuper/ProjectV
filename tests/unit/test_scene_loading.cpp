@@ -1,6 +1,7 @@
 // Loading part of a scene (utils/scene_loading.h): a scene opens with its tree and no voxels, and
 // each block -- one chunk, or one grid cell -- loads and unloads on its own. CPU only.
 
+#include "utils/blob_voxels.h"
 #include "doctest/doctest.h"
 
 #include <filesystem>
@@ -87,8 +88,8 @@ namespace {
         CHECK(x.resolution == y.resolution);
         CHECK(a.chunks[ca].nativeScale == doctest::Approx(b.chunks[cb].nativeScale));
         CHECK(a.chunks[ca].mutability == b.chunks[cb].mutability);
-        CHECK(blobOf(a, ca).geometry == blobOf(b, cb).geometry);
-        CHECK(blobOf(a, ca).materialIDs == blobOf(b, cb).materialIDs);
+        CHECK(utils::blobTiles(blobOf(a, ca)).texels == utils::blobTiles(blobOf(b, cb)).texels);
+        CHECK(utils::blobTiles(blobOf(a, ca)).materials == utils::blobTiles(blobOf(b, cb)).materials);
     }
 
     // The block of `component` (the cell at `coord`, for a grid).
@@ -172,7 +173,7 @@ TEST_CASE("scene loading: one cell loads, unloads and loads again; its memory go
     REQUIRE(blocks.load(scene, middle));
     const size_t bytes = utils::residentVoxelBytes(scene);
     CHECK(bytes > 0);
-    const std::vector<uint32_t> geometry = blobOf(scene, blocks.chunk(middle)).geometry;
+    const std::vector<uint32_t> geometry = utils::blobTiles(blobOf(scene, blocks.chunk(middle))).texels;
     const uint32_t voxels = utils::getComponentVoxelCount(scene, ground);
     CHECK(voxels == 16 * 2 * 16 + 9 * 4);   // a slab of the floor and the whole pillar
 
@@ -188,7 +189,7 @@ TEST_CASE("scene loading: one cell loads, unloads and loads again; its memory go
 
     REQUIRE(blocks.load(scene, middle));
     CHECK(utils::residentVoxelBytes(scene) == bytes);
-    CHECK(blobOf(scene, blocks.chunk(middle)).geometry == geometry);
+    CHECK(utils::blobTiles(blobOf(scene, blocks.chunk(middle))).texels == geometry);
 
     // A hundred times round leaves memory where one load left it: the pool slot is reused.
     for (int i = 0; i < 100; i++) {
@@ -501,7 +502,7 @@ TEST_CASE("loader: reads on the worker thread give what reads in update give") {
     const projv::SceneGrid& ge = eager.grids[0];
     const projv::SceneGrid& gl = scene.grids[0];
     for (size_t i = 0; i < ge.cellToChunk.size(); i++)
-        CHECK(blobOf(eager, ge.cellToChunk[i]).geometry == blobOf(scene, gl.cellToChunk[i]).geometry);
+        CHECK(utils::blobTiles(blobOf(eager, ge.cellToChunk[i])).texels == utils::blobTiles(blobOf(scene, gl.cellToChunk[i])).texels);
 
     // Reads pending when the rule changes its mind land and are dropped.
     utils::SceneLoader second;

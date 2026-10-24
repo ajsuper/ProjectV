@@ -94,7 +94,7 @@ struct GeometryBlob {
     bool                  ownsSourceFile = true; // false until first Copy persist
     uint32_t              refCount = 0;          // live chunks referencing this blob
     bool                  dirty = false;         // GPU copy is stale
-    uint32_t              renderLOD = 0;         // tree64 levels to drop on upload (storage LOD)
+    uint32_t              renderLOD = 0;         // levels to drop on upload (storage LOD)
 };
 ```
 
@@ -105,9 +105,9 @@ is made writable.
 
 #### Storage LOD (`renderLOD`)
 
-`renderLOD` is how many tree64 levels to drop when the blob is uploaded, each step being 4x coarser
+`renderLOD` is how many levels to drop when the blob is uploaded, each step being 4x coarser
 per axis (64³ → 16³ → 4³). It is purely a VRAM knob: the blob's CPU arrays are always full
-resolution, and the coarsened copy is built at upload time by `downsampleTree64` into scratch that
+resolution, and the coarsened copy is built at upload time by `downsampleTileTable` into scratch that
 is discarded immediately. Editing, persistence and the brick map therefore never see it.
 
 Set it with `setBlobRenderLOD(scene, poolIndex, lod)`, which marks the blob dirty. That is all

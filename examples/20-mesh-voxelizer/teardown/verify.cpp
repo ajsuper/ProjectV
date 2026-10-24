@@ -1,6 +1,7 @@
 // --td-verify: reads a converted folder back through the engine, the way a game would, and decodes
 // every block's tree64 to count what it holds.
 
+#include "utils/tile_table.h"
 #include "verify.h"
 
 #include <bit>
@@ -41,14 +42,15 @@ VerifyResult verifyFolder(const std::string& folder, bool print) {
             }
             files++;
             for (const projv::DataBlock& b : data.blocks) {
-                auto map = projv::utils::brickMapFromTree64(b.geometry, b.materialIDs, data.resolution);
+                // A v4 block is its tile table; an older one is a tree, read as the table built from it.
+                const projv::utils::TileTable tiles = b.tiles.texels.empty()
+                    ? projv::utils::buildTileTable(b.geometry, b.materialIDs, data.resolution) : b.tiles;
                 size_t n = 0;
                 uint8_t maxSlot = 0;
-                for (const auto& brick : map->bricks) {
-                    if (!brick) continue;
-                    for (uint64_t row : brick->mask) n += size_t(std::popcount(row));
-                    for (const auto& [z, slot] : brick->materials) maxSlot = std::max(maxSlot, slot);
-                }
+                projv::utils::forEachTileVoxel(tiles, [&](projv::core::ivec3, uint8_t slot) {
+                    n++;
+                    maxSlot = std::max(maxSlot, slot);
+                });
                 if (n == 0 || maxSlot >= c.palette.size()) {
                     std::printf("  %s block (%d,%d,%d): %zu voxels, slot %u of a %zu-entry palette\n", c.source.c_str(), b.gridX,
                                 b.gridY, b.gridZ, n, maxSlot, c.palette.size());

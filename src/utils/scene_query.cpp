@@ -1,3 +1,4 @@
+#include "utils/blob_voxels.h"
 #include "utils/scene_query.h"
 #include "utils/collision_geometry.h"
 
@@ -186,18 +187,9 @@ namespace projv::utils {
     }
 
     namespace {
-        // Voxels in a blob = set child bits across its leaf nodes. materialIDs.size() is NOT a
-        // substitute: uniform leaves store a single material byte for all their voxels.
         uint32_t blobVoxelCount(const Scene& scene, int32_t poolIdx) {
             if (poolIdx < 0 || static_cast<size_t>(poolIdx) >= scene.geometryPool.size()) return 0;
-            const std::vector<uint32_t>& geom = scene.geometryPool[poolIdx].geometry;
-            uint32_t total = 0;
-            for (size_t n = 0, nodes = geom.size() / 3; n < nodes; ++n) {
-                if (!tree64IsLeaf(geom[n * 3 + 2])) continue;
-                total += static_cast<uint32_t>(__builtin_popcount(geom[n * 3 + 0]) +
-                                               __builtin_popcount(geom[n * 3 + 1]));
-            }
-            return total;
+            return uint32_t(tileTableVoxelCount(blobTiles(scene.geometryPool[poolIdx])));
         }
     }
 
@@ -785,7 +777,7 @@ namespace projv::utils {
         if (chunk >= scene.chunks.size()) return false;
         const Chunk& c = scene.chunks[chunk];
         if (!c.alive || c.geometryPoolIndex < 0 || size_t(c.geometryPoolIndex) >= scene.geometryPool.size()) return false;
-        return scene.geometryPool[size_t(c.geometryPoolIndex)].geometry.size() >= 3;
+        return !blobEmpty(scene.geometryPool[size_t(c.geometryPoolIndex)]);
     }
 
     bool isComponentAlive(const Scene& scene, ComponentHandle handle) {

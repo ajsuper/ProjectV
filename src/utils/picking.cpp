@@ -5,6 +5,7 @@
 
 #include <glm/gtc/quaternion.hpp>
 
+#include "utils/blob_voxels.h"
 #include "utils/picking.h"
 #include "utils/voxel_math.h"
 #include "core/log.h"
@@ -92,52 +93,13 @@ namespace projv::utils {
 
     bool queryVoxelMaterial(const GeometryBlob& blob, uint32_t resolution,
                             core::ivec3 voxelCoord, uint8_t& materialSlotOut) {
-        if (blob.geometry.empty() || resolution == 0) return false;
+        if (resolution == 0) return false;
         if (voxelCoord.x < 0 || voxelCoord.y < 0 || voxelCoord.z < 0) return false;
         if (uint32_t(voxelCoord.x) >= resolution || uint32_t(voxelCoord.y) >= resolution ||
             uint32_t(voxelCoord.z) >= resolution) {
             return false;
         }
-
-        uint64_t zOrder = createZOrderIndex(voxelCoord);
-
-        // Depth is derived from the resolution the same way the shader derives it: six bits of
-        // Z-order per level, so a level is 4x per axis.
-        uint32_t treeLevels = uint32_t(std::log2(float(resolution)) / 2.0f);
-        if (treeLevels == 0) return false;
-        int level = int(treeLevels) - 1;
-        uint64_t stepSize = 1ull << (6u * uint32_t(level));
-
-        size_t nodeIndex = 0;
-        for (; level >= 0; --level) {
-            if ((nodeIndex * 3 + 2) >= blob.geometry.size()) return false;
-            uint32_t mask1 = blob.geometry[nodeIndex * 3 + 0];
-            uint32_t mask2 = blob.geometry[nodeIndex * 3 + 1];
-            uint32_t data3 = blob.geometry[nodeIndex * 3 + 2];
-            uint64_t occupancy = nodeOccupancy(mask1, mask2);
-            uint32_t childPos = uint32_t((zOrder / stepSize) & 63ull);
-
-            if (tree64IsLeaf(data3)) {
-                // The leaf's mask says which of its 64 cells are solid. The shader skips this test
-                // because it only asks about voxels a ray already hit; a pick has to ask.
-                if (!childIsPresent(occupancy, childPos)) return false;
-
-                uint32_t materialOffset = tree64LeafMatOffset(data3);
-                // A uniform leaf stores one byte for all of its voxels rather than one each.
-                uint32_t withinLeaf = tree64LeafIsUniform(data3) ? 0u : siblingsBefore(occupancy, childPos);
-                size_t materialIndex = size_t(materialOffset) + withinLeaf;
-                if (materialIndex >= blob.materialIDs.size()) return false;
-                materialSlotOut = blob.materialIDs[materialIndex];
-                return true;
-            }
-
-            if (!childIsPresent(occupancy, childPos)) return false;   // Empty space.
-
-            uint32_t childPointer = data3 >> 1;
-            nodeIndex = nodeIndex + childPointer + siblingsBefore(occupancy, childPos);
-            stepSize >>= 6;
-        }
-        return false;
+        return tileTableVoxel(blobTiles(blob), voxelCoord, &materialSlotOut);
     }
 
     core::vec3 rayDirectionThroughImage(core::vec2 uv, core::vec2 resolution,

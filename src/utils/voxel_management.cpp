@@ -5,8 +5,11 @@
 
 namespace projv {
     GeometryBlob::GeometryBlob(const GeometryBlob& rhs)
-        : geometry(rhs.geometry)
-        , materialIDs(rhs.materialIDs)
+        : voxelForm(rhs.voxelForm)
+        , treeNodes(rhs.treeNodes)
+        , treeMaterials(rhs.treeMaterials)
+        , tiles(rhs.tiles)
+        , derivedStamp(rhs.derivedStamp)
         , envelope(rhs.envelope)
         , envelopeMotion(rhs.envelopeMotion)
         , brickMap(rhs.brickMap ? utils::cloneBrickMap(*rhs.brickMap) : nullptr)
@@ -21,8 +24,11 @@ namespace projv {
 
     GeometryBlob& GeometryBlob::operator=(const GeometryBlob& rhs) {
         if (this == &rhs) return *this;
-        geometry       = rhs.geometry;
-        materialIDs    = rhs.materialIDs;
+        voxelForm      = rhs.voxelForm;
+        treeNodes      = rhs.treeNodes;
+        treeMaterials  = rhs.treeMaterials;
+        tiles          = rhs.tiles;
+        derivedStamp   = rhs.derivedStamp;
         envelope       = rhs.envelope;
         envelopeMotion = rhs.envelopeMotion;
         brickMap       = rhs.brickMap ? utils::cloneBrickMap(*rhs.brickMap) : nullptr;

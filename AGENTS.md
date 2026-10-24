@@ -150,12 +150,16 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 - `chunkQueue` on Chunk is the legacy edit staging area (to be removed after P1 verification).
 - `editQueue` on ComponentRecord is the new per-component edit queue (P1+).
 - `forkBlob` creates a COW copy without decrementing the original's refCount.
-- Each blob's GPU range is its tree64 nodes followed by its **block table** (`utils/block_table.h`),
-  built at upload and never stored; the shader's march reads the table instead of descending the tree.
-  `#define PJV_TREE64_MARCH` compiles the old descent for A/B captures. Plan:
-  `docs/plans/block-table-traversal.md`.
+- A blob's voxels are a **tile table** (`utils/tile_table.h`): dense region and block masks, tiles for
+  solid one-material children, leaves only for partly filled bricks. It is what the GPU marches, what
+  edits change in place (`applyTileEdits`) and what physics reads, and `.data` v4 stores it. **Read and
+  write a blob's voxels through `utils/blob_voxels.h`** (`blobTiles`, `setBlobTiles`, `editBlobTiles`,
+  and `blobTree`/`setBlobTree` for code that still takes a tree): a blob holds whichever form was
+  written last and derives the other on demand; tiles derived from a tree replace it. Code that makes
+  voxels off the main thread (a streaming worker) builds the table there and installs it with
+  `setBlobTiles`/`replaceChunkTiles`. Plan: `docs/plans/voxel-storage-tiles.md`.
 - A blob's `contentStamp` names its voxel content (physics shapes are cached by it). Code that
-  replaces `blob.geometry` in place calls `markBlobContentChanged(blob)`, never just clears
+  replaces a blob's voxels in place calls `markBlobContentChanged(blob)` (the blob_voxels setters do), never just clears
   `contentBoundsValid`. What voxels collide as is `utils::buildCollisionPieces`
   (`utils/collision_geometry.h`), and nothing else.
 

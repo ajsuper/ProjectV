@@ -14,6 +14,7 @@
 
 #include "core/math.h"
 #include "data_structures/voxel.h"
+#include "utils/tile_table.h"
 
 namespace projv{
 
@@ -374,11 +375,11 @@ namespace projv{
         uint32_t geometryStartIndex;
         uint32_t geometryEndIndex;
         uint32_t materialIDStartIndex;      // index into materialID texture (in bytes)
-        // Where the tree's block table starts (utils/block_table.h): a texel index into the tree64
-        // texture, right after the tree's nodes. These two words were materialIDEndIndex and
-        // dataRefID, which no shader read.
-        uint32_t blockTableStartIndex;
-        uint32_t envelopeTableStartIndex;   // the envelope tree's block table; unused without one
+        // Where the chunk's tile table's leaves start (utils/tile_table.h), a texel index into the
+        // tree64 texture: geometryStartIndex is the table's masks and starts, this its leaves. These
+        // two words were materialIDEndIndex and dataRefID, which no shader read.
+        uint32_t leafStartIndex;
+        uint32_t envelopeLeafStartIndex;   // the envelope's tile table's leaves; unused without one
         uint32_t paletteOffset; // replaced padding[1]: per-blob offset into global palette
         float rotationX;
         float rotationY;
@@ -399,7 +400,7 @@ namespace projv{
         // that carries the answer rather than the start index because offset 0 is a perfectly valid
         // place for the first blob's range to live.
         uint32_t envelopeStartIndex;        // texel offset into the tree64 texture
-        uint32_t envelopeNodeCount;         // nodes; 0 = no envelope on this chunk
+        uint32_t envelopeNodeCount;         // the envelope table's texels before its leaves; 0 = no envelope
         uint32_t envelopeMotionStartIndex;  // BYTE offset into the materialID texture, as materialIDStartIndex is
         // ---- The 6th texel: where the voxels are -------------------------------------------------
         //
@@ -480,25 +481,33 @@ namespace projv{
 
     // One unique geometry blob shared across chunk instances. See Scene.geometryPool.
     struct GeometryBlob {
-        std::vector<uint32_t> geometry;
-        // One byte per solid voxel, addressed through each leaf's material offset in `geometry` and
-        // naming a slot in the owning component's palette. This is what the .data stores and what the
-        // GPU reads: there is no second per-voxel colour representation to keep in step with it.
-        std::vector<uint8_t>  materialIDs;
+        // ---- The voxels -----------------------------------------------------------------------------
+        //
+        // **Read and written through utils/blob_voxels.h, never directly.** Two forms: the tile table
+        // (utils/tile_table.h) -- what the GPU marches, what edits change in place and what physics
+        // reads -- and the tree64 with its material bytes, the form a v1 .data stores and the brick-map
+        // authoring path builds. `voxelForm` is the one held; the other is derived from it on demand and
+        // is current while `derivedStamp == contentStamp`. Tiles derived from a tree replace it (the
+        // form becomes Tiles), so a blob holds its voxels once. Material bytes name slots in the owning
+        // component's palette, in either form.
+        enum class VoxelForm : uint8_t { Tree, Tiles };
+        mutable VoxelForm voxelForm = VoxelForm::Tree;
+        mutable std::vector<uint32_t> treeNodes;
+        mutable std::vector<uint8_t>  treeMaterials;
+        mutable utils::TileTable      tiles;
+        mutable uint64_t              derivedStamp = 0;
         // The animation envelope, and the motion set per set cell. Adjacent and optional: empty is
         // what every blob loaded from a v2 .data carries, and what almost every blob will always
         // carry. See DataBlock in compose.h for what they are and why the envelope is a SEPARATE
-        // tree at a quarter resolution rather than voxels dilated into `geometry`.
+        // tree at a quarter resolution rather than voxels dilated into the geometry.
         //
-        // The short version, because it is the invariant the whole design rests on: `geometry` keeps
+        // The short version, because it is the invariant the whole design rests on: the geometry keeps
         // meaning the REST POSE. Nothing in here changes what an animation-blind renderer, the fold,
         // picking or the voxelizer see.
         std::vector<uint32_t> envelope;
         std::vector<uint8_t>  envelopeMotion;
-        // The editable form. Built lazily from geometry + materialIDs on the first edit
-        // (ensureBrickMapExists -> brickMapFromTree64) and rebaked back into that pair after.
-        // Deliberately covers the geometry only: the envelope is DERIVED from it by the bake, so an
-        // edit invalidates the envelope rather than editing it.
+        // A brick map an authoring path built the geometry from, kept for it. Edits do not use it: they
+        // change the tile table in place (applyEditsToChunk).
         std::unique_ptr<VoxelBrickMap> brickMap;
 
         GeometryBlob() = default;
@@ -520,16 +529,16 @@ namespace projv{
         // slot is recycled via Scene.blobFreeList. Bounds pool growth over a long dynamic session.
         uint32_t refCount = 0;
 
-        // The box the voxels in `geometry` actually occupy, in chunk voxel coordinates, inclusive --
+        // The box the voxels actually occupy, in chunk voxel coordinates, inclusive --
         // as distinct from the chunk's whole cube. Cached here by utils::blobContentBounds, which
-        // fills it on first use; **every write that replaces `geometry` clears contentBoundsValid**
+        // fills it on first use; **every write that replaces the voxels clears contentBoundsValid**
         // (internChunkGeometry, replaceChunkGeometry and the edit path do). The loose-chunk BVH's
         // leaves are built from it, so a stale box would cull geometry that is really there.
         mutable core::ivec3 contentMin{0};
         mutable core::ivec3 contentMax{-1};
         mutable bool contentBoundsValid = false;
-        // Names this blob's voxel content: equal stamps, equal `geometry`. A new blob gets a fresh
-        // one, a copy keeps its source's (same voxels), and every write that replaces `geometry` in
+        // Names this blob's voxel content: equal stamps, equal voxels. A new blob gets a fresh
+        // one, a copy keeps its source's (same voxels), and every write that replaces the voxels in
         // place takes a fresh one -- through markBlobContentChanged, which also clears
         // contentBoundsValid, so the two cannot drift apart. What caches derived from the voxels
         // (physics collision shapes) are keyed by. Local to this process: never persist or send it.
@@ -537,9 +546,9 @@ namespace projv{
         // P5: true when the blob's GPU content is stale (newly forked, interned, or content changed).
         // Cleared by flushSceneUpdates after the incremental upload.
         bool dirty = false;
-        // Storage LOD: how many tree64 levels to drop when uploading this blob to the GPU. The CPU
+        // Storage LOD: how many levels to drop when uploading this blob to the GPU. The CPU
         // arrays above always stay full resolution -- only the GPU copy is coarsened, at upload
-        // time, by downsampleTree64. Each step is 4x coarser per axis (see clampRenderLOD in
+        // time, by downsampleTileTable. Each step is 4x coarser per axis (see clampRenderLOD in
         // voxel.h). This is the VRAM knob: distant geometry can be resident at a fraction of the
         // cost without any of it leaving CPU memory, so editing, persistence and the brick map are
         // all untouched by it. Set via setBlobRenderLOD below.
@@ -748,7 +757,7 @@ namespace projv{
         if (--blob.refCount == 0) scene.blobFreeList.push_back(static_cast<uint32_t>(poolIdx));
     }
 
-    // Call after replacing a blob's `geometry` in place: drops the cached content bounds and takes a
+    // Call after replacing a blob's voxels in place (setBlobTree / setBlobTiles do): drops the cached content bounds and takes a
     // fresh content stamp, so nothing derived from the old voxels is mistaken for the new.
     inline void markBlobContentChanged(GeometryBlob& blob) {
         blob.contentBoundsValid = false;
@@ -763,7 +772,7 @@ namespace projv{
                                        std::unique_ptr<VoxelBrickMap> brickMap = nullptr) {
         if (chunk.geometryPoolIndex >= 0) return chunk.geometryPoolIndex;
         GeometryBlob blob;
-        blob.geometry = std::move(chunk.geometryData);
+        blob.treeNodes = std::move(chunk.geometryData);   // a fresh blob: its stamp already names this tree
         if (brickMap) blob.brickMap = std::move(brickMap);
         blob.refCount = 1;
         blob.dirty = true;
@@ -816,7 +825,7 @@ namespace projv{
     // Requests that `handle`'s GPU-visible geometry represent `requestedResolution`. If the chunk's
     // stored (native) resolution -- header.resolution, set once at generation time -- is >= the
     // request, the engine derives the coarser view via the existing GPU-upload truncation path
-    // (setBlobRenderLOD/downsampleTree64) and returns Coarsened (or Unchanged if already there); no
+    // (setBlobRenderLOD/downsampleTileTable) and returns Coarsened (or Unchanged if already there); no
     // CPU regeneration is needed. If the request is finer than what's stored, nothing is changed --
     // NeedsRegeneration tells the caller it must generate finer geometry itself and install it via
     // replaceChunkGeometry, then call requestChunkLOD again. requestedResolution must be reachable
@@ -895,9 +904,12 @@ namespace projv{
         }
 
         GeometryBlob& blob = scene.geometryPool[targetIdx];
-        blob.geometry = std::move(newGeometry);
+        // setBlobTree, written out: this header cannot include utils/blob_voxels.h, which includes it.
+        blob.treeNodes = std::move(newGeometry);
+        blob.treeMaterials = std::move(newMaterialIDs);
+        blob.tiles = utils::TileTable{};
+        blob.voxelForm = GeometryBlob::VoxelForm::Tree;
         markBlobContentChanged(blob);
-        blob.materialIDs = std::move(newMaterialIDs);
         if (newBrickMap) blob.brickMap = std::move(newBrickMap);
         blob.renderLOD = 0;
         blob.dirty = true;

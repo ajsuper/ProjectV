@@ -1,3 +1,4 @@
+#include "utils/blob_voxels.h"
 #include "utils/collision_geometry.h"
 
 #include <algorithm>
@@ -20,60 +21,28 @@ namespace projv::utils {
 
         constexpr uint8_t CLAIMED = 2;
 
-        // Walks the tree the way blobContentBounds does -- positions are recovered from the descent
-        // path, a child's Z-order within its parent being its bit index in the parent's mask -- and
-        // marks every solid voxel. False if the tree points outside itself or outside the bounds it
-        // was measured to have.
+        // Marks every solid voxel of the blob's tile table. False if one lies outside the bounds the
+        // table was measured to have.
         //
-        // With `materials`, each voxel's palette slot is also read (a uniform leaf stores one byte for
-        // all its voxels, any other one per voxel in mask order) and its material written to
-        // `material`. A slot byte the blob does not have is material 0.
-        bool decode(const std::vector<uint32_t>& geometry, VoxelOccupancy& occupancy, uint64_t& solid,
-                    const std::vector<uint8_t>* materialIDs = nullptr, const SlotMaterials* materials = nullptr,
-                    std::vector<uint16_t>* material = nullptr, std::vector<uint8_t>* slots = nullptr) {
-            const size_t nodeCount = geometry.size() / 3;
-            struct Pending { size_t node; uint64_t cellZOrder; };
-            std::vector<Pending> stack;
-            if (nodeCount > 0) stack.push_back({0, 0});
+        // With `materials`, each voxel's material is written to `material` (its palette slot through
+        // `materials`); with `slots`, its palette slot.
+        bool decode(const TileTable& tiles, VoxelOccupancy& occupancy, uint64_t& solid,
+                    const SlotMaterials* materials = nullptr, std::vector<uint16_t>* material = nullptr,
+                    std::vector<uint8_t>* slots = nullptr) {
             const core::ivec3 high = occupancy.origin + occupancy.dims - core::ivec3(1);
-            while (!stack.empty()) {
-                Pending current = stack.back();
-                stack.pop_back();
-                if (current.node >= nodeCount) return false;
-                uint64_t mask = (uint64_t(geometry[current.node * 3]) << 32) | uint64_t(geometry[current.node * 3 + 1]);
-                uint32_t data3 = geometry[current.node * 3 + 2];
-                if (mask == 0) continue;
-                if (tree64IsLeaf(data3)) {
-                    const size_t offset = tree64LeafMatOffset(data3);
-                    const bool uniform = tree64LeafIsUniform(data3);
-                    uint32_t rank = 0;
-                    for (uint32_t child = 0; child < 64; child++) {
-                        if ((mask & (1ull << (63 - child))) == 0) continue;   // bit 63 is Z-order 0
-                        core::ivec3 p = reverseZOrderIndex(current.cellZOrder * 64 + child);
-                        if (glm::any(glm::lessThan(p, occupancy.origin)) || glm::any(glm::greaterThan(p, high)))
-                            return false;
-                        size_t at = occupancy.index(p - occupancy.origin);
-                        uint8_t& cell = occupancy.cells[at];
-                        if (!cell) { cell = 1; solid++; }
-                        if (material || slots) {
-                            size_t byte = offset + (uniform ? 0 : rank);
-                            uint8_t slot = byte < materialIDs->size() ? (*materialIDs)[byte] : 0;
-                            if (material) (*material)[at] = byte < materialIDs->size() ? (*materials)[slot] : 0;
-                            if (slots) (*slots)[at] = slot;
-                        }
-                        rank++;
-                    }
-                    continue;
+            bool inside = true;
+            forEachTileVoxel(tiles, [&](core::ivec3 p, uint8_t slot) {
+                if (glm::any(glm::lessThan(p, occupancy.origin)) || glm::any(glm::greaterThan(p, high))) {
+                    inside = false;
+                    return;
                 }
-                size_t firstChild = current.node + (data3 >> 1);
-                uint32_t rank = 0;
-                for (uint32_t child = 0; child < 64; child++) {
-                    if ((mask & (1ull << (63 - child))) == 0) continue;
-                    stack.push_back({firstChild + rank, current.cellZOrder * 64 + child});
-                    rank++;
-                }
-            }
-            return true;
+                const size_t at = occupancy.index(p - occupancy.origin);
+                uint8_t& cell = occupancy.cells[at];
+                if (!cell) { cell = 1; solid++; }
+                if (material) (*material)[at] = (*materials)[slot];
+                if (slots) (*slots)[at] = slot;
+            });
+            return inside;
         }
 
         // Greedy box merging, in a fixed order so the result is deterministic: the first unclaimed
@@ -163,7 +132,7 @@ namespace projv::utils {
         if (cellCount > maxCells) return DecodeResult::TooLarge;
         out.cells.assign(size_t(cellCount), 0);
         slots.assign(size_t(cellCount), 0);
-        if (!decode(blob.geometry, out, out.solid, &blob.materialIDs, nullptr, nullptr, &slots)) return DecodeResult::Malformed;
+        if (!decode(blobTiles(blob), out, out.solid, nullptr, nullptr, &slots)) return DecodeResult::Malformed;
         return DecodeResult::Ok;
     }
 
@@ -185,7 +154,7 @@ namespace projv::utils {
         if (cellCount > maxCells) return DecodeResult::TooLarge;
         out.cells.assign(size_t(cellCount), 0);
         if (materials) material->assign(size_t(cellCount), 0);
-        if (!decode(blob.geometry, out, out.solid, &blob.materialIDs, materials, materials ? material : nullptr))
+        if (!decode(blobTiles(blob), out, out.solid, materials, materials ? material : nullptr))
             return DecodeResult::Malformed;
         return DecodeResult::Ok;
     }

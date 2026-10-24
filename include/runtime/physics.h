@@ -386,6 +386,11 @@ namespace projv::runtime {
             // that break on impact from cascading: every break makes smaller pieces, and one below
             // the least break cannot be broken by a hit.
             float    minImpactBreak = 1.0f;
+            // A static collider that splits but is too big to look over whole (a level's world): what
+            // a change cut loose is searched for from the change outward instead, and a search that
+            // reaches more than this many voxels (1024 .. 16M) without closing off counts as held.
+            // The most a falling piece of it can be.
+            uint32_t localSupportVoxels = 1u << 21;
         } fracture;
     };
 

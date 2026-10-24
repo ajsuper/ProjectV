@@ -6,6 +6,7 @@
 #include <string>
 #include <stdint.h>
 
+#include "utils/tile_table.h"
 #include "core/math.h"
 #include "data_structures/scene.h" // for projv::Mutability (runtime home)
 
@@ -30,7 +31,12 @@ namespace projv {
     // nothing about the material system is rebuilt at load time.
     struct DataBlock {
         int32_t gridX = 0, gridY = 0, gridZ = 0; // grid coordinate of this block
-        std::vector<uint32_t> geometry;          // tree64 array
+        // The voxels, in one of two forms. A v4 file holds the tile table (utils/tile_table.h), what the
+        // engine edits, simulates and draws; a v2 or v3 file holds a tree64 and its material bytes. A
+        // block read from disk carries whichever its file has; one handed to writeDataFile may carry
+        // either, and a tree is written as the tile table built from it.
+        utils::TileTable      tiles;
+        std::vector<uint32_t> geometry;          // tree64 array (v2, v3)
         std::vector<uint8_t>  materialIDs;       // one byte per solid voxel, uniform leaves collapsed
 
         // ---- The animation envelope: adjacent, and never required (v3) --------------------------
@@ -94,6 +100,10 @@ namespace projv {
         uint32_t envelopeLength = 0;              // length in uint32 units (0 if absent)
         uint64_t envelopeMotionOffset = 0;        // byte offset of the envelopeMotion uint8[]
         uint32_t envelopeMotionLength = 0;        // length in BYTES (0 if absent)
+        // The file's version and resolution, which say what the geometry words are: from v4, a tile
+        // table of that resolution and the material bytes its own; before, a tree64.
+        uint32_t version = 0;
+        uint32_t resolution = 0;
     };
 
     // The header + block table of a .data container, WITHOUT the blob region. Lets a streamer learn a

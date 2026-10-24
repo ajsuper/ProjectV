@@ -1,3 +1,4 @@
+#include "utils/blob_voxels.h"
 #include "runtime/replication.h"
 
 #include <algorithm>
@@ -371,9 +372,12 @@ namespace projv::runtime {
                             net::BitWriter w;
                             w.varint(uint8_t(Message::BlockContent));
                             w.varint(b);
-                            w.varint(blob.geometry.size());
-                            for (uint32_t word : blob.geometry) w.bits(word, 32);
-                            w.bytes(blob.materialIDs);
+                            // On the wire as its tile table: the words and the material bytes. The peer knows
+                            // the block's resolution, which says where the leaves start.
+                            const utils::TileTable& tiles = utils::blobTiles(blob);
+                            w.varint(tiles.texels.size());
+                            for (uint32_t word : tiles.texels) w.bits(word, 32);
+                            w.bytes(tiles.materials);
                             s.transport->send(peer, net::Channel::Reliable, w.data());
                             client.contentSent[b] = stamp;
                         }
@@ -736,8 +740,7 @@ namespace projv::runtime {
                 std::vector<PendingVoxelOp> ops;
                 std::vector<std::pair<NetId, uint64_t>> hashes;   // Check
                 uint32_t block = 0;                                // BlockContent
-                std::vector<uint32_t> geometry;
-                std::vector<uint8_t>  materialIDs;
+                utils::TileTable tiles;                            // its voxels, as they came off the wire
                 int     waited = 0;
             };
             std::vector<Change> changes;
@@ -1026,9 +1029,9 @@ namespace projv::runtime {
                         change.block = uint32_t(r.varint());
                         const uint64_t words = r.varint();
                         if (r.failed || words > r.bitsLeft() / 32) break;
-                        change.geometry.resize(size_t(words));
-                        for (uint32_t& word : change.geometry) word = uint32_t(r.bits(32));
-                        change.materialIDs = r.bytes(size_t(1) << 26);
+                        change.tiles.texels.resize(size_t(words));
+                        for (uint32_t& word : change.tiles.texels) word = uint32_t(r.bits(32));
+                        change.tiles.materials = r.bytes(size_t(1) << 26);
                         if (!r.failed) c.changes.push_back(std::move(change));
                         break;
                     }
@@ -1083,16 +1086,31 @@ namespace projv::runtime {
                     // loads, and is taken by the physics without an island pass of its own.
                     Scene& scene = world.ctx().get<Scene>();
                     ComponentHandle component = INVALID_COMPONENT_HANDLE;
+                    // The table as it came off the wire, at the block's own resolution -- checked before
+                    // anything reads it, and dropped if its offsets leave it.
+                    auto received = [&](uint32_t resolution) {
+                        utils::TileTable t = std::move(change.tiles);
+                        t.resolution = resolution;
+                        t.leafStart = t.texels.empty() ? 0u : uint32_t(utils::tileTableLayout(t).leafStart);   // from its header; checked below
+                        if (!utils::tileTableWellFormed(t)) {
+                            core::warn("replication: block {}'s content is malformed; it is dropped", change.block);
+                            return std::optional<utils::TileTable>();
+                        }
+                        utils::tileTableRecount(t);
+                        return std::optional<utils::TileTable>(std::move(t));
+                    };
                     if (c.lazy && change.block < worldLoader(world).blocks().size()) {
                         utils::SceneBlocks& blocks = worldLoader(world).blocks();
                         component = blocks.source(change.block).component;
-                        blocks.replaceContent(scene, change.block, std::move(change.geometry), std::move(change.materialIDs));
+                        if (auto t = received(blocks.source(change.block).resolution)) blocks.replaceContent(scene, change.block, std::move(*t));
+                        else component = INVALID_COMPONENT_HANDLE;
                     } else if (!c.lazy && change.block < c.blocks.size()) {
                         component = c.blocks[change.block].component;
                         const ChunkHandle ch = chunkOfBlock(scene, c.blocks[change.block]);
-                        if (ch != INVALID_CHUNK_HANDLE)
-                            replaceChunkGeometry(scene, ch, std::move(change.geometry), std::move(change.materialIDs),
-                                                 scene.chunks[ch].header.resolution);
+                        std::optional<utils::TileTable> t;
+                        if (ch != INVALID_CHUNK_HANDLE) t = received(scene.chunks[ch].header.resolution);
+                        if (t) utils::replaceChunkTiles(scene, ch, std::move(*t));
+                        else component = INVALID_COMPONENT_HANDLE;
                     }
                     if (component != INVALID_COMPONENT_HANDLE)
                         if (Entity owner = entityOverComponent(world, scene, component); owner != NullEntity) acceptVoxelChanges(world, owner);

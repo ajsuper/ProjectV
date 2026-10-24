@@ -1,3 +1,4 @@
+#include "utils/blob_voxels.h"
 #include "utils/editing.h"
 
 #include "core/log.h"
@@ -51,47 +52,32 @@ namespace projv::utils {
             return comp.dataRefID;
         }
 
-        // Ensure the blob has a brick map. If null, rebuild one from the baked pair the blob was
-        // loaded with -- the tree64 and its material bytes are all a .data stores, so the editable
-        // form is reconstructed from them on the first edit rather than kept resident from load.
-        //
-        // The palette is untouched: the material bytes name slots the component already carries, so
-        // nothing needs interning and slot numbering survives the round trip exactly.
-        void ensureBrickMapExists(Scene& scene, GeometryBlob& blob, uint32_t resolution, ComponentRecord& comp) {
-            (void)scene;
-            (void)comp;
-            if (blob.brickMap) return;
-            blob.brickMap = brickMapFromTree64(blob.geometry, blob.materialIDs, resolution);
-        }
-
-        // Apply a batch of PendingVoxelOps directly to a brick map.
-        // Positions are in continuous component-space coords; the brick map stores
-        // them directly (no cell bucketing — that's for the Grid path).
-        // Colours from ops are interned into the component's material palette;
-        // the returned local slot is stored in the brick map.
-        void applyOpsToBrickMap(Scene& scene, VoxelBrickMap& map, uint32_t resolution,
-                                const std::vector<PendingVoxelOp>& ops,
-                                ComponentRecord& comp) {
+        // A batch of PendingVoxelOps as tile edits. Positions are in continuous component-space coords,
+        // wrapped into the chunk's cube; colours are interned into the component's palette, and the local
+        // slot is what the edit stores.
+        std::vector<TileEdit> tileEditsFor(Scene& scene, uint32_t resolution, const std::vector<PendingVoxelOp>& ops,
+                                           ComponentRecord& comp) {
+            std::vector<TileEdit> edits;
+            edits.reserve(ops.size());
             for (const PendingVoxelOp& op : ops) {
-                int32_t x = static_cast<int32_t>(floorMod(op.position.x, static_cast<int32_t>(resolution)));
-                int32_t y = static_cast<int32_t>(floorMod(op.position.y, static_cast<int32_t>(resolution)));
-                int32_t z = static_cast<int32_t>(floorMod(op.position.z, static_cast<int32_t>(resolution)));
-                if (x < 0 || y < 0 || z < 0 ||
-                    x >= static_cast<int32_t>(resolution) ||
-                    y >= static_cast<int32_t>(resolution) ||
-                    z >= static_cast<int32_t>(resolution)) {
+                const int32_t x = static_cast<int32_t>(floorMod(op.position.x, static_cast<int32_t>(resolution)));
+                const int32_t y = static_cast<int32_t>(floorMod(op.position.y, static_cast<int32_t>(resolution)));
+                const int32_t z = static_cast<int32_t>(floorMod(op.position.z, static_cast<int32_t>(resolution)));
+                if (x < 0 || y < 0 || z < 0 || x >= static_cast<int32_t>(resolution) ||
+                    y >= static_cast<int32_t>(resolution) || z >= static_cast<int32_t>(resolution)) {
                     continue;
                 }
-                if (op.isAdd) {
-                    uint8_t slot = op.slot != INVALID_MATERIAL ? op.slot : internMaterial(scene, comp, "", op.packedColor);
-                    brickMapSetVoxel(map, x, y, z, slot);
-                } else {
-                    brickMapClearVoxel(map, x, y, z);
-                }
+                TileEdit e;
+                e.voxel = core::ivec3(x, y, z);
+                e.add = op.isAdd;
+                if (op.isAdd) e.slot = op.slot != INVALID_MATERIAL ? op.slot : internMaterial(scene, comp, "", op.packedColor);
+                edits.push_back(e);
             }
+            return edits;
         }
 
-        // Apply edits to a single existing chunk using the brick map.
+        // Apply edits to a single existing chunk: its tile table, changed in place (applyTileEdits) --
+        // only the 16^3 blocks the edits touch are decoded and re-encoded.
 void applyEditsToChunk(Scene& scene, Chunk& chunk,
                                 const std::vector<PendingVoxelOp>& ops) {
             if (ops.empty()) return;
@@ -118,20 +104,13 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
 
             GeometryBlob& blob = scene.geometryPool[chunk.geometryPoolIndex];
             uint32_t res = chunk.header.resolution;
-            ensureBrickMapExists(scene, blob, res, comp);
-            applyOpsToBrickMap(scene, *blob.brickMap, res, ops, comp);
+            const std::vector<TileEdit> edits = tileEditsFor(scene, res, ops, comp);
+            TileTable& tiles = editBlobTiles(blob, res);
+            applyTileEdits(tiles, edits);
+            blob.brickMap.reset();   // an authoring path's; stale now
 
-            updateChunkFromBrickMap(chunk, *blob.brickMap);
-
-            bakeMaterialsFromBrickMap(chunk.geometryData, blob.materialIDs, *blob.brickMap);
-
-            blob.geometry = std::move(chunk.geometryData);
-            markBlobContentChanged(blob);
-
-            core::edit(" applyEditsToChunk: done res={} geomNodes={} materialIDs={}",
-                       chunk.header.resolution,
-                       chunk.geometryData.size() / 3,
-                       blob.materialIDs.size());
+            core::edit(" applyEditsToChunk: done res={} leaves={} materials={}",
+                       chunk.header.resolution, tiles.partialBricks, tiles.materials.size());
         }
 
         // Drain one component's queue. Handles both Chunk (loose) and Grid components.
@@ -352,7 +331,7 @@ void applyEditsToChunk(Scene& scene, Chunk& chunk,
 
                     if (newChunk.geometryPoolIndex >= 0) {
                         GeometryBlob& newBlob = scene.geometryPool[newChunk.geometryPoolIndex];
-                        newBlob.materialIDs = std::move(bakedMaterialIDs);
+                        setBlobTreeMaterials(newBlob, std::move(bakedMaterialIDs));
                         newBlob.brickMap = std::move(brickMap);
                     }
 

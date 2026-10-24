@@ -232,7 +232,7 @@ namespace {
         std::vector<std::thread> pool;
         for (int t = 0; t < std::max(1, threads); t++) pool.emplace_back(work);
         for (auto& t : pool) t.join();
-        std::erase_if(file.blocks, [](const projv::DataBlock& b) { return b.geometry.empty(); });
+        std::erase_if(file.blocks, [](const projv::DataBlock& b) { return b.geometry.empty() && b.tiles.texels.empty(); });
         size_t expected = 0;
         canvas.forEach([&](int, int, int, MatId m) { expected += m != MAT_HOLE; });
         if (expected != totalPlaced) logWarn("placed %zu of %zu voxels (res %d)", totalPlaced.load(), expected, resolution);
