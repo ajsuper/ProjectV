@@ -34,8 +34,9 @@ of. Plan and delivery log: `docs/plans/restir-pt.md`. Its reference is [pt-refer
 | 11 | `composite` | ½ × ½ | Edge-aware upsample of both lobes; the diffuse times the texel's diffuse albedo, the specular times its specular albedo: the demodulation put back at full resolution |
 | 12 | `ao_apply` | ½ × ½ | The SSAO on the indirect light, the sun's light added, the distance fog, the views (G) |
 | 13 | `reconstruct` | window | The voxel renderer's reconstruction, copied: voxel by voxel, antialiased |
-| 14 | `resolve` | window | Temporal accumulation: the 2×2 jitter's four samples, and what noise is left |
+| 14 | `resolve` | window | Temporal accumulation (TAA): the jitter's samples and what noise is left, reprojected by the G-buffer's motion vectors |
 | 15–17 | `meter`, `exposure`, `dof`, `display` | | The post (P) and the engine's display transform, as restir had them |
+| | `motion_blur` | window | After the depth of field: a very subtle blur along each pixel's motion (M; part of P) |
 
 Every ray goes through the engine's `raySceneIntersectFrom` from one call site per pass, in a loop whose
 bound is a uniform (`restirPath`: 17 rays in `sample`, 12 in `spatial`). Transparent materials draw as
@@ -181,9 +182,17 @@ for specular.
 
 ## The look
 
-- **The light** is pt-reference's (`sharedShaders/pjv_path_light.sc`): the gallery's sky at 0.35 (its
-  zenith is about four times the voxel renderer's, and lighting by it flooded every surface with
-  blue-white), and the sun a disc 0.02 radians across each way. The camera sees that disc.
+- **The light** is pt-reference's (`sharedShaders/pjv_path_light.sc`): a sky of its own -- a deep zenith,
+  a bright band low on the horizon, the sunset's warmth gathered towards the sun while it is low, the
+  sun's aureole, and below the horizon the haze carrying on rather than a black ground -- and the sun a
+  disc 0.02 radians across each way. The camera also sees clouds (fractal noise on a plane, lit by the
+  sun with a silver lining towards it, hiding the disc where thick); they do not light the scene, which
+  would only add noise to the GI. pt-reference shows the same.
+- **TAA**: every render texel is traced through a different point of itself each frame (a 16-phase Halton
+  sequence over the whole texel, so over the 2x2 window pixels it covers and within each), and the
+  resolve's history averages them -- supersampling while still, and a voxel thinner than a texel is found
+  part of the time instead of always or never. (Before, each texel cycled through the four window-pixel
+  centres it covers: a still view repeated the same four points, and the distance aliased.)
 - **Colour** follows the engine's convention (`include/pjv_color.sc`, `docs/plans/color-convention.md`).
 - **The post** (`display.frag`, on by default; P turns it all off), each part in linear light before the
   tone curve, each the identity when off:
@@ -196,7 +205,11 @@ for specular.
   | K | depth of field | autofocus on the view's centre; the far distance blurs 1.5 px at 1080 lines |
 
 - **The scene's own**, outside the post: U the soft sun shadow (the disc's penumbra, 4% of the blocker's
-  distance), O the distance fog (towards the horizon's colour, 1.6 scene radii long).
+  distance), O the distance fog: height fog, densest at the scene's lowest point and thinning over 0.15
+  of its length upwards, integrated along the view ray exactly -- no onset, no edge: a faint haze that
+  builds (about 45% at its length, 1.6 scene radii held to 300..3000 units, at most 90%) -- towards the
+  air's colour in that direction (the horizon's haze and the aureole), so the far distance melts into the
+  sky it stands against. (Before: a hard start at a tenth of its length, then a steep rise.)
 
 ## Stable at a distance
 
@@ -218,7 +231,8 @@ pixels changing between still frames to none.
 
 For measuring: `GALLERY_STEP_AT=n` sidesteps the camera at frame n (what it uncovers), `RESTIR_RAW=1`
 shows each frame's estimate alone (no GI accumulation, no image history), `RESTIR_TEMPORAL=0`,
-`RESTIR_SPATIAL=0` and `RESTIR_VISIBILITY=0` turn off one part of the reuse.
+`RESTIR_SPATIAL=0` and `RESTIR_VISIBILITY=0` turn off one part of the reuse. `RESTIR_JITTER=0` goes back to the four window-pixel
+centres instead of the TAA's Halton jitter; `GALLERY_BYPASS=1` starts with the reconstruction bypassed (Q).
 
 For `--capture`: `RESTIR_VIEW=n`, and `RESTIR_POST=0` (the raw path trace), `RESTIR_FOG=0`, `RESTIR_SHAFTS=0`, `RESTIR_SOFT=0`, `RESTIR_SSAO=0`,
 `RESTIR_REUSE=0`, `RESTIR_VALIDATE=0`, `RESTIR_ATROUS=0` each start with that part off; `RESTIR_UNTOLD=1`
@@ -252,3 +266,15 @@ twice pt-reference's (whose GI-free loop is lighter, and whose full-resolution r
 a sixteenth of the pixels). Slimming that state took Lee Chemicals from 19.7 to 16.7 ms. Coarse secondary
 rays (restir's 64 and 16 voxels) save under a millisecond and cost the image a fifth of its indirect light,
 so they are off. Halving the spatial ray budget (24 → 12) saved little: replays are not most of it.
+
+## Motion vectors
+
+The G-buffer writes `gMotion` (fbo 1's seventh target): for each texel, where its surface was on screen last
+frame minus where it is now. A chunk's own motion comes from its pose last frame -- the host uploads
+`voxel_renderer::uploadPoses(world, renderer, 99)` each frame into `prevPoses` -- and the camera's from
+`prevCameraPos`/`prevCameraDir`. The resolve reprojects its history along them (the nearest surface's in
+3×3 texels, with a neighbourhood clamp while anything moves) and `motion_blur` streaks along them: eight taps
+over half the frame's travel (film's 180° shutter) (`restirDof.z`), at most 12 pixels at 1080 lines (`restirDof.w`). A still pixel
+that showed something moving last frame (its stored history length is negative) was just uncovered, and
+is clamped too, so a body crossing a still view leaves no trail. The GI's
+reservoirs and accumulation still follow the camera alone: a moving body's indirect light lags a few frames.

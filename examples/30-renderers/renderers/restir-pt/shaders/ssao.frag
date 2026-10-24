@@ -26,6 +26,10 @@ SAMPLER2D(gNormal, 1);
 #define RESTIR_AO_BIAS 0.1      // n . v / |v| below this counts nothing: a slightly curved or noisy plane
 #define RESTIR_AO_STRENGTH 1.6
 #define RESTIR_AO_MAX_PIXELS 48.0
+// The far scale: a radius of this many texels on screen, wherever that is wider than the surroundings'
+// scale -- far away, where two voxels are under a texel and the world-space scales see nothing. It gives
+// distant terrain and canopy the creases and contact shading the near field gets from the others.
+#define RESTIR_AO_FAR_PIXELS 24.0
 
 // The obscurance from points within `radius` (world units) of P, out to `pixels` texels on screen.
 float restirObscurance(vec3 P, vec3 N, float radius, float pixels, float turn, ivec2 p) {
@@ -58,5 +62,9 @@ void main() {
     float around = 2.0 * restirLook.x;
     float open = restirObscurance(P, N, contact, min(contact * perUnit, RESTIR_AO_MAX_PIXELS), turn, p) *
                  restirObscurance(P, N, around, min(around * perUnit, RESTIR_AO_MAX_PIXELS), turn + 1.0, p);
+    // Fading in from where it is twice the surroundings' radius, so near surfaces are as they were.
+    float far = RESTIR_AO_FAR_PIXELS / perUnit;
+    float farShare = smoothstep(2.0 * around, 4.0 * around, far);
+    if (restirLook.w > 0.5 && farShare > 0.0) open *= mix(1.0, restirObscurance(P, N, far, RESTIR_AO_FAR_PIXELS, turn + 2.0, p), farShare);
     gl_FragColor = vec4(open, surface.w, 0.0, 0.0);
 }

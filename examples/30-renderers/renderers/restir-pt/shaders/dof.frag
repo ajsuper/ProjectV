@@ -12,14 +12,14 @@ $input v_texcoord0
 // own circle reaches this pixel (scatter-as-gather): a sharp subject does not smear into the blurred
 // background round it, and the background does not bleed onto it.
 //
-// Inputs: 0 resolved, 1.. the G-buffer (gPos 1, render resolution), 7 exposure (y: the focus).
+// Inputs: 0 resolved, 1-7 the G-buffer (gPos 1, render resolution), 8 exposure (y: the focus).
 // Output: dofColor. The views (G) other than the image pass through.
 
 #include <bgfx_shader.sh>
 
 SAMPLER2D(resolved, 0);
 SAMPLER2D(gPos, 1);
-SAMPLER2D(exposure, 7);
+SAMPLER2D(exposure, 8);   // after the G-buffer's seven (gMotion the last)
 
 uniform vec4 restirDof;       // x the far distance's blur radius, window pixels (0: off)
 uniform vec4 restirDenoise;   // z the view (0 the image)

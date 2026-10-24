@@ -66,9 +66,11 @@ namespace voxel_renderer {
     }
 
     // Sends last frame's poses and keeps this frame's. A chunk new to its slot is sent where it is now.
-    inline void uploadPoses(projv::World& world, std::shared_ptr<projv::ConstructedRenderer> renderer) {
+    // `texture`: the renderer's prevPoses texture ID (another renderer may use a different slot).
+    inline void uploadPoses(projv::World& world, std::shared_ptr<projv::ConstructedRenderer> renderer,
+                            uint32_t texture = Poses::TEXTURE) {
         const projv::Scene* scene = world.ctx().find<projv::Scene>();
-        auto handle = renderer->resources.textures.textureHandles.find(Poses::TEXTURE);
+        auto handle = renderer->resources.textures.textureHandles.find(texture);
         if (!scene || handle == renderer->resources.textures.textureHandles.end() || !bgfx::isValid(handle->second)) return;
         Poses& poses = world.ctx().contains<Poses>() ? world.ctx().get<Poses>() : world.ctx().emplace<Poses>();
         const size_t slots = std::min<size_t>(scene->chunks.size(), size_t(Poses::WIDTH / 2) * Poses::HEIGHT);

@@ -15,7 +15,7 @@ $input v_texcoord0
 // hands on only that one as the indirect light). Only the image is fogged and has the shafts.
 //
 // Inputs: 0 litDirect, 1 litIndirect (composite), 2 ao (g: the distance, < 0 sky), 3 sunLight; 4 shafts,
-// 5 shaftDepth (resources).
+// 5 shaftDepth, 6 gAlbedo (resources).
 // Output: litHDR.
 
 #include <bgfx_shader.sh>
@@ -27,16 +27,29 @@ SAMPLER2D(ao, 2);
 SAMPLER2D(sunLight, 3);
 SAMPLER2D(shafts, 4);
 SAMPLER2D(shaftDepth, 5);
+SAMPLER2D(gAlbedo, 6);
 
-// The light shafts (shafts.frag, GI resolution) here: a 4x4 tent of GI pixels round this texel, each
-// weighted by how near its view ray's length is to this one's, so a shaft does not bleed across a
-// silhouette onto what stands in front of it. Wide on purpose: the shafts are soft, and the tent takes out
-// what noise the accumulation left.
+// The light shafts (shafts.frag, GI resolution) here, filtered two ways.
+//
+// First a 4x4 tent of GI pixels round this texel, each weighted by how near its view ray's length is to
+// this one's, so a shaft does not bleed across a silhouette onto what stands in front of it.
+//
+// Then a radial blur: a shaft is a streak along the line from the sun (its point on screen, or the point
+// opposite it when the sun is behind the camera -- shafts converge there), so the traced shafts are
+// averaged along that line, towards the sun, with weights that decay. That is where their noise goes:
+// along the streak, not across it, so the shadows' edges stay. The march stops at the first tap whose view
+// ray is clearly shorter than this one's -- something stands in front there, and the little air in front of
+// it says nothing about the air in front of this pixel -- and a tap that sees further counts only the share
+// of its air this pixel has (t / tq), so the sky's long column does not brighten a mountain in front of it.
+#define RESTIR_SHAFT_TAPS 16
+#define RESTIR_SHAFT_SPAN 0.2      // the march's longest reach, as a share of the screen's height
+#define RESTIR_SHAFT_DECAY 0.93    // each tap's weight against the one before
 vec3 restirShaftsHere(ivec2 p, float t) {
     float stride = restirJitter.z;
+    vec2 res = vec2(textureSize(shafts, 0));
     vec2 f = (vec2(p) + 0.5) / stride - 0.5;
     ivec2 base = ivec2(floor(f));
-    ivec2 last = ivec2(textureSize(shafts, 0)) - ivec2(1, 1);
+    ivec2 last = ivec2(res) - ivec2(1, 1);
     vec3 sum = vec3(0.0, 0.0, 0.0);
     float total = 0.0;
     for (int y = -1; y <= 2; y++)
@@ -49,7 +62,35 @@ vec3 restirShaftsHere(ivec2 p, float t) {
             sum += texelFetch(shafts, g, 0).rgb * w;
             total += w;
         }
-    return total > 1e-6 ? sum / total : vec3(0.0, 0.0, 0.0);
+    vec3 centre = total > 1e-6 ? sum / total : vec3(0.0, 0.0, 0.0);
+
+    // The sun's point on screen, in GI pixels (or the antisolar point's).
+    vec3 toSun = normalize(SUN_DIR);
+    bool inFront;
+    vec2 sunUV = restirWorldToUV(cameraPos.xyz + toSun * 1.0e4, cameraPos.xyz, cameraDir.xyz, res, inFront);
+    if (!inFront) sunUV = restirWorldToUV(cameraPos.xyz - toSun * 1.0e4, cameraPos.xyz, cameraDir.xyz, res, inFront);
+    vec2 here = f + 0.5;
+    vec2 toward = sunUV * res - here;
+    float reach = sqrt(dot(toward, toward));
+    if (reach < 1.0) return centre;
+    vec2 direction = toward / reach;
+    float step = min(reach, RESTIR_SHAFT_SPAN * res.y) / float(RESTIR_SHAFT_TAPS);
+    float offset = fract(52.9829189 * fract(dot(vec2(p), vec2(0.06711056, 0.00583715))) + frameCount.x * 0.618034);
+
+    vec3 radial = centre;
+    float weights = 1.0;
+    float w = 1.0;
+    for (int i = 1; i <= RESTIR_SHAFT_TAPS; i++) {
+        vec2 q = here + direction * (step * (float(i) - 1.0 + offset));
+        if (q.x < 0.0 || q.y < 0.0 || q.x >= res.x || q.y >= res.y) break;
+        ivec2 g = ivec2(floor(q));
+        float tq = texelFetch(shaftDepth, g, 0).x;
+        if (tq < 0.8 * t) break;
+        w *= RESTIR_SHAFT_DECAY;
+        radial += texelFetch(shafts, g, 0).rgb * (w * min(t / max(tq, 1e-3), 1.0));
+        weights += w;
+    }
+    return radial / weights;
 }
 
 void main() {
@@ -74,7 +115,14 @@ void main() {
     float shade = mix(1.0, open, restirLook.y);
     vec3 colour = direct + indirect * shade;
     vec2 uv = v_texcoord0 + jitterParams.xy * passTargetRes.zw;   // as the G-buffer traced it (same resolution)
-    colour = restirFog(colour, restirViewDirection(uv), t);
+    // How lit the air in front is: the light this surface receives (its colour over its albedo) against the
+    // air's own brightness -- a shadowed outdoor wall is about half, an interior next to nothing -- and over
+    // a long distance the air is the open air's, whatever is at its end.
+    vec3 d = restirViewDirection(uv);
+    float received = restirLum(colour) / max(restirLum(texelFetch(gAlbedo, p, 0).rgb), 0.05);
+    float lit = smoothstep(0.0, 0.5, received / max(restirLum(pathAir(d)), 1e-4));
+    lit = max(lit, smoothstep(0.0, 1.0, t * (restirHaze.x + restirAir.x) / 0.6));   // t over the fog's length
+    colour = restirFog(colour, d, t, lit);
     colour += restirShaftsHere(p, t < 0.0 ? 1.0e4 : t);   // all zero when they are off (L, P)
     if (restirView(RESTIR_VIEW_INDIRECT) || restirView(RESTIR_VIEW_DIFFUSE) || restirView(RESTIR_VIEW_SPECULAR)) colour = indirect * shade;
     else if (restirView(RESTIR_VIEW_DIRECT)) colour = direct;

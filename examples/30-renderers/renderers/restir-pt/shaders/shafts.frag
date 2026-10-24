@@ -17,6 +17,13 @@ $input v_texcoord0
 // restirShafts.w frames, carried through last frame's camera by the view ray's end point (refused where
 // that distance changed: a silhouette); ao_apply upsamples and blurs what is left, depth-aware.
 //
+// Two hazes scatter it: the shafts' own (above: dense, gone a few dozen voxels out -- light through a
+// skylight) and the aerial haze (restirShaftsAir: x its strength at full depth, y its density at the
+// camera's height -- thin, but as long as the fog, so the sun streams between ridges a valley away). One
+// point per frame still: a haze is picked in proportion to what it can scatter along this ray (W_i =
+// strength_i (1 - exp(-lambda_i t))), the point drawn from its falloff, and then the estimate is exactly
+// visible(s) * phase * SUN_COLOR * (W_near + W_air) -- the two falloffs' mixture is the pdf.
+//
 // The shadow ray is the bounces' kind, coarse past 16 voxels: a shaft's edge is soft anyway.
 //
 // Inputs: 0 shafts, 1 shaftDepth (last frame: this pass's own, ping-ponged), 2 surf0 (resource).
@@ -30,6 +37,7 @@ SAMPLER2D(shaftDepth, 1);
 SAMPLER2D(surf0, 2);
 
 uniform vec4 restirShafts;   // x strength (0: off), y lambda (1 / falloff distance), z phase g, w history cap
+uniform vec4 restirShaftsAir; // x the aerial haze's strength, y its lambda (0: none), z its onset length
 
 float restirPhase(float c, float g) {
     float gg = g * g;
@@ -51,12 +59,19 @@ void main() {
     // A point drawn from the falloff (truncated at t), stratified: interleaved gradient noise per pixel,
     // turned by the golden ratio each frame.
     float u = fract(52.9829189 * fract(dot(vec2(p), vec2(0.06711056, 0.00583715))) + frameCount.x * 0.618034);
-    float lambda = restirShafts.y;
+    float pick = fract(52.9829189 * fract(dot(vec2(p), vec2(0.00583715, 0.06711056))) + frameCount.x * 0.7548777);
+    float nearWeight = restirShafts.x * (1.0 - exp(-restirShafts.y * t));
+    float airWeight = restirShaftsAir.y > 0.0 ? restirShaftsAir.x * (1.0 - exp(-restirShaftsAir.y * t)) : 0.0;
+    float total = nearWeight + airWeight;
+    float lambda = pick * total < nearWeight ? restirShafts.y : restirShaftsAir.y;
     float reach = 1.0 - exp(-lambda * t);
     float s = -log(max(1.0 - u * reach, 1e-6)) / lambda;
     RestirHit hit = restirTrace(cameraPos.xyz + view * s, toSun, RESTIR_KIND_SHADOW_INDIRECT, 1e30);
+    // The aerial haze thickens with distance as the fog's does (restirFog): its point counts by s over the
+    // onset length, so the open air just in front of the camera is clear rather than a sunlit veil.
+    float onset = lambda == restirShafts.y ? 1.0 : min(s / max(restirShaftsAir.z, 1e-3), 2.0);
     vec3 light = hit.hit ? vec3(0.0, 0.0, 0.0)
-                         : SUN_COLOR * (restirPhase(dot(view, toSun), restirShafts.z) * restirShafts.x * reach);
+                         : SUN_COLOR * (restirPhase(dot(view, toSun), restirShafts.z) * total * onset);
 
     // History, through last frame's camera, unless the sun moved (told) or this is the first frame.
     vec2 res = passTargetRes.xy;

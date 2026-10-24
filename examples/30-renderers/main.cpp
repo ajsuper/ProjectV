@@ -52,7 +52,7 @@
 //   J            — ReSTIR reuse on / off (restir-pt)
 //   P            — the final render / the raw path-traced image (restir-pt): off drops the post, the fog, the
 //                  light shafts and the SSAO. Within it: V vignette, B colour grade, E auto-exposure, K depth
-//                  of field, N bloom, O distance fog, L light shafts
+//                  of field, N bloom, M motion blur, O distance fog, L light shafts
 //   U            — soft sun shadow on / off (restir-pt)
 
 #include <algorithm>
@@ -205,14 +205,18 @@ static bool g_restirReuse = true;
 // K the depth of field. P is the final render as a whole: off, the raw path-traced image -- no post, and
 // none of what is laid over the light either: O the distance fog, L the light shafts, the SSAO. U, the
 // sun's soft shadow, is the lighting's, not the final render's.
-struct RestirPost { bool on = true, vignette = true, grade = true, exposure = true, dof = true, bloom = true; };
+struct RestirPost { bool on = true, vignette = true, grade = true, exposure = true, dof = true, bloom = true, motionBlur = true; };
 static RestirPost g_restirPost;
 static bool g_restirFog = true;
-static bool g_restirShafts = false;  // L, part of the final render (P); off by default: not worth it
+static bool g_restirShafts = true;   // L, part of the final render (P)
 static bool g_restirSoftShadow = true;
+static bool g_restirAir = true;      // RESTIR_AIR=0: no aerial haze (nor its shafts), for comparing
+static bool g_restirFarAO = true;    // RESTIR_FAR_AO=0: no far-field SSAO scale, for comparing
 static constexpr float RESTIR_VIGNETTE = 0.15f;       // the corners' falloff: subtle
 static constexpr float RESTIR_DOF_PIXELS = 1.5f;      // the far distance's blur radius at 1080 lines: very slight
 static constexpr float RESTIR_BLOOM = 0.04f;          // the bloom's share of the image (N): a glow, not a haze
+static constexpr float RESTIR_SHUTTER = 0.5f;         // the motion blur (M): the share of a frame's motion blurred over (film's 180 degrees)
+static constexpr float RESTIR_BLUR_PIXELS = 12.0f;    // ...and its longest streak at 1080 lines: very subtle
 static constexpr float RESTIR_SSAO = 0.85f;           // how far the obscurance darkens the indirect light
 static constexpr float RESTIR_SUN_HALF_ANGLE = 0.02f; // radians, ~4x the real sun's: penumbrae a little soft
                                                       // (pjv_path_light.sc's PATH_SUN_HALF_ANGLE: the same disc)
@@ -222,7 +226,17 @@ static constexpr float RESTIR_SUN_HALF_ANGLE = 0.02f; // radians, ~4x the real s
 static constexpr float RESTIR_SHAFT_STRENGTH = 0.2f;
 static constexpr float RESTIR_SHAFT_FALLOFF_VOXELS = 48.0f;
 static constexpr float RESTIR_SHAFT_PHASE_G = 0.6f;
-static constexpr float RESTIR_SHAFT_HISTORY = 16.0f;
+static constexpr float RESTIR_SHAFT_HISTORY = 4.0f;   // short: ao_apply's radial blur takes the noise out
+// The aerial perspective: a thin haze over the whole scene, on top of the ground fog -- what makes the far
+// distance read as far. It thickens with distance (restirFog: its density grows from nothing at the camera
+// to RESTIR_AIR_DEPTH e-folds per fog length at one fog length out), so what is near stays crisp and only
+// the distance fades; a plain exponential that is visible on a mountain range already greys the trees under
+// the camera. Also the least height it thins over, as a share of the fog's length (a scene taller than that
+// thins over its own height, so a mountain range stands in the haze rather than above it). The light shafts'
+// second source is this same air, so shafts reach across a valley and not only a few dozen voxels.
+static constexpr float RESTIR_AIR_DEPTH = 2.0f;
+static constexpr float RESTIR_AIR_HEIGHT = 0.5f;
+static constexpr float RESTIR_AIR_SHAFT_STRENGTH = 0.12f;
 static constexpr int RESTIR_VIEWS = 6;
 // Rays a GI pixel may trace in the sample pass (a new path: 4; validating the history's suffix: 3;
 // shifting it here: 4 if it must be replayed) and in the spatial pass (its own path and five neighbours',
@@ -232,6 +246,8 @@ static constexpr float RESTIR_SAMPLE_RAYS = 12.0f;
 static constexpr float RESTIR_SPATIAL_RAYS = 8.0f;
 static constexpr float RESTIR_VALIDATION = 0.1f;   // a path's light changed by more than this share: stale
 static float g_sceneRadius = 100.0f;                  // frameScene's, for the fog's length
+static float g_sceneGround = 0.0f;                    // ...and the scene's lowest point, for the fog's height
+static float g_sceneHeight = 0.0f;                    // ...and its height, for the aerial haze's
 static int  g_restirStride = 4;   // --restir-gi: GI for one window pixel in stride x stride (4 or 2)
 static constexpr float RESTIR_RENDER_SCALE = 0.5f;   // its G-buffer, each way; resources.json's 0.5 targets
 
@@ -248,12 +264,27 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     const int giStride = std::max(1, int(float(g_restirStride) * RESTIR_RENDER_SCALE));
     static const int order4[4][2] = {{0, 0}, {1, 1}, {1, 0}, {0, 1}};
     const int* offset = order4[giStride == 2 ? ctx.frameCount % 4 : 0];
-    // Each render texel is traced through the centre of another of the 2x2 window pixels it covers each
-    // frame, as the voxel renderer does: a still view repeats the same four, and the resolve settles on them.
-    static const int cellOrder[4] = {0, 3, 1, 2};
-    const int cell = cellOrder[ctx.frameCount % 4];
-    vec4 jitterParams{(float(cell % 2) + 0.5f) * 0.5f - 0.5f, (float(cell / 2) + 0.5f) * 0.5f - 0.5f, 0.0f, 0.0f};
-    vec4 renderParams{0.0f, 0.0f, g_reconstructBypass ? 1.0f : 0.0f, 0.0f};
+    // TAA: each render texel is traced through a different point of itself each frame -- a 16-phase Halton
+    // sequence over the whole texel, so over the 2x2 window pixels it covers and within each. The resolve's
+    // history then averages them into a supersampled image, and a voxel thinner than a texel is found some
+    // of the time rather than always or never (the distance's aliasing). The reconstruction weighs each
+    // texel's colour from where its ray actually went.
+    auto halton = [](int index, int base) {
+        float f = 1.0f, r = 0.0f;
+        for (; index > 0; index /= base) { f /= float(base); r += f * float(index % base); }
+        return r;
+    };
+    const int phase = ctx.frameCount % 16 + 1;
+    vec4 jitterParams{halton(phase, 2) - 0.5f, halton(phase, 3) - 0.5f, 0.0f, 0.0f};
+    // RESTIR_JITTER=0: the old four window-pixel centres, for comparing.
+    static const bool halton16 = !std::getenv("RESTIR_JITTER") || std::atoi(std::getenv("RESTIR_JITTER")) != 0;
+    if (!halton16) {
+        static const int cellOrder[4] = {0, 3, 1, 2};
+        const int cell = cellOrder[ctx.frameCount % 4];
+        jitterParams = vec4((float(cell % 2) + 0.5f) * 0.5f - 0.5f, (float(cell / 2) + 0.5f) * 0.5f - 0.5f, 0.0f, 0.0f);
+    }
+    static const bool bypassAtStart = std::getenv("GALLERY_BYPASS") && std::atoi(std::getenv("GALLERY_BYPASS")) != 0;
+    vec4 renderParams{0.0f, 0.0f, g_reconstructBypass != bypassAtStart ? 1.0f : 0.0f, 0.0f};
     // For unattended captures (--capture): RESTIR_VIEW picks the starting view; RESTIR_POST=0 (the raw path
     // trace), RESTIR_FOG=0, RESTIR_SHAFTS=0 and RESTIR_SOFT=0 start with the final render, the fog, the
     // shafts or the soft shadow off; RESTIR_VALIDATE=1 turns the
@@ -272,21 +303,39 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
         if (const char* v = std::getenv("RESTIR_POST")) g_restirPost.on = std::atoi(v) != 0;
         if (const char* v = std::getenv("RESTIR_FOG")) g_restirFog = std::atoi(v) != 0;
         if (const char* v = std::getenv("RESTIR_SHAFTS")) g_restirShafts = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_AIR")) g_restirAir = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_FAR_AO")) g_restirFarAO = std::atoi(v) != 0;
         if (const char* v = std::getenv("RESTIR_BLOOM")) g_restirPost.bloom = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_MBLUR")) g_restirPost.motionBlur = std::atoi(v) != 0;
         if (const char* v = std::getenv("RESTIR_SOFT")) g_restirSoftShadow = std::atoi(v) != 0;
         return true;
     }();
     (void)fromEnv;
-    // SSAO six of the finest voxels round, darkening the indirect light by up to half; the sun's penumbra
-    // per unit of blocker distance (the disc's full width); the fog's density: its length 1.6 scene radii,
-    // so the far side of the scene is about a third hazed, held to 30..300 m of Teardown-scale voxels.
+    // SSAO six of the finest voxels round, and how far it darkens the indirect light; the sun's penumbra per
+    // unit of blocker distance (the disc's full width); the fog's length, 1.6 scene radii held to 300..3000
+    // units (30..300 m of Teardown-scale voxels).
     const float fogLength = std::clamp(1.6f * g_sceneRadius, 300.0f, 3000.0f);
     // The SSAO and the fog are the final render's (P), not the path tracer's.
     const bool finalRender = g_restirPost.on;
     vec4 look{6.0f * finest, finalRender ? ssao : 0.0f, g_restirSoftShadow ? 2.0f * std::tan(RESTIR_SUN_HALF_ANGLE) : 0.0f,
-              finalRender && g_restirFog ? 1.0f / fogLength : 0.0f};
+              g_restirFarAO ? 1.0f : 0.0f};
+    // The height fog: at the ground, 0.6 of an e-fold over the fog's length (about 45% hidden there,
+    // gathering from nothing), thinning over 0.15 of it in height, never more than 90%.
+    vec4 haze{finalRender && g_restirFog ? 0.6f / fogLength : 0.0f, g_sceneGround, 0.15f * fogLength, 0.9f};
+    setUniformToValue(renderer, "restirHaze", haze);
+    // The aerial haze (O with the fog): RESTIR_AIR_DEPTH e-folds per fog length at the ground once a fog length
+    // out, thinning over the scene's height (at least half the fog's length); w the length its onset grows over.
+    const float airHeight = std::max(g_sceneHeight, RESTIR_AIR_HEIGHT * fogLength);
+    const float airDensity = finalRender && g_restirFog && g_restirAir ? RESTIR_AIR_DEPTH / fogLength : 0.0f;
+    vec4 air{airDensity, g_sceneGround, airHeight, fogLength};
+    setUniformToValue(renderer, "restirAir", air);
     vec4 shafts{finalRender && g_restirShafts ? RESTIR_SHAFT_STRENGTH : 0.0f, 1.0f / (RESTIR_SHAFT_FALLOFF_VOXELS * finest),
                 RESTIR_SHAFT_PHASE_G, RESTIR_SHAFT_HISTORY};
+    // The shafts' second source, the aerial haze: its density at the camera's height (constant along the ray:
+    // the shafts are soft, and the camera is where they are seen from), so they reach as far as the haze does.
+    const float airAtCamera = airDensity * std::exp(-std::max(ctx.cameraPosition.y - g_sceneGround, 0.0f) / airHeight);
+    vec4 shaftsAir{RESTIR_AIR_SHAFT_STRENGTH, airAtCamera, fogLength, 0.0f};
+    setUniformToValue(renderer, "restirShaftsAir", shaftsAir);
     static bool first = true;
 
     vec4 cameraPos{ctx.cameraPosition, 1.0f}, cameraDir{ctx.cameraDirection, 0.0f};
@@ -341,8 +390,12 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
                     post.on && post.exposure ? 1.0f : 0.0f, seconds};
     setUniformToValue(renderer, "restirPost", postParams);
     vec4 dof{post.on && post.dof ? RESTIR_DOF_PIXELS * ctx.windowResolution.y / 1080.0f : 0.0f,
-             post.on && post.bloom ? RESTIR_BLOOM : 0.0f, 0.0f, 0.0f};   // y: display.frag's bloom
+             post.on && post.bloom ? RESTIR_BLOOM : 0.0f,                // y: display.frag's bloom
+             post.on && post.motionBlur ? RESTIR_SHUTTER : 0.0f,         // zw: motion_blur.frag's
+             RESTIR_BLUR_PIXELS * ctx.windowResolution.y / 1080.0f};
     setUniformToValue(renderer, "restirDof", dof);
+    // Last frame's pose of every chunk, for the G-buffer's motion vectors (resources.json: prevPoses).
+    if (ctx.world) voxel_renderer::uploadPoses(*ctx.world, renderer, 99);
     setUniformToValue(renderer, "restirShafts", shafts);
     setUniformToValue(renderer, "jitterParams", jitterParams);
     setUniformToValue(renderer, "renderParams", renderParams);
@@ -420,7 +473,7 @@ static std::vector<RendererModule> buildRendererRegistry() {
     // replayed where it is not), then denoised diffuse and specular apart.
     registry.push_back({
         "restir-pt",
-        "ReSTIR PT at a sixteenth of the pixels, through the materials; a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, P final render / raw path trace (V, B, E, K, N bloom, O fog, L light shafts), U soft shadow.",
+        "ReSTIR PT at a sixteenth of the pixels, through the materials; a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, P final render / raw path trace (V, B, E, K, N bloom, M motion blur, O fog, L light shafts), U soft shadow.",
         "./renderers/restir-pt/",
         "./renderers/restir-pt/shaders/vs_quad.bin",
         uploadRestirUniforms
@@ -568,6 +621,8 @@ static CameraFraming frameScene(const projv::Scene& scene) {
     float radius = length(extents) * 0.5f;
     if (radius <= 0.0f) radius = 1.0f;
     g_sceneRadius = radius;
+    g_sceneGround = boundsMin.y;
+    g_sceneHeight = extents.y;
 
     projv::core::info("Scene extents: {:.1f} x {:.1f} x {:.1f} (radius {:.1f})",
                       extents.x, extents.y, extents.z, radius);
@@ -995,7 +1050,7 @@ void render(projv::Application& app) {
         bool g = glfwGetKey(renderInstance.window, GLFW_KEY_G) == GLFW_PRESS;
         bool j = glfwGetKey(renderInstance.window, GLFW_KEY_J) == GLFW_PRESS;
         // The final render's toggles: P all of it, V the vignette, B the grade, E the auto-exposure, K the depth
-        // of field, N the bloom, O the fog, L the shafts; U the soft shadow, which is the lighting's.
+        // of field, N the bloom, M the motion blur, O the fog, L the shafts; U the soft shadow, which is the lighting's.
         struct PostKey { int key; bool* flag; const char* name; bool prev; };
         static PostKey postKeys[] = {
             {GLFW_KEY_P, &g_restirPost.on, "final render (off: the raw path trace)", false},
@@ -1004,6 +1059,7 @@ void render(projv::Application& app) {
             {GLFW_KEY_E, &g_restirPost.exposure, "auto-exposure", false},
             {GLFW_KEY_K, &g_restirPost.dof, "depth of field", false},
             {GLFW_KEY_N, &g_restirPost.bloom, "bloom", false},
+            {GLFW_KEY_M, &g_restirPost.motionBlur, "motion blur", false},
             {GLFW_KEY_O, &g_restirFog, "distance fog", false},
             {GLFW_KEY_L, &g_restirShafts, "light shafts", false},
             {GLFW_KEY_U, &g_restirSoftShadow, "soft sun shadow", false},

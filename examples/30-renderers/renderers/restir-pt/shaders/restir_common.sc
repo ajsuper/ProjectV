@@ -40,8 +40,10 @@ uniform vec4 restirJitter;    // xy this frame's offset inside the block, z the 
                               // --restir-gi 2), w 1 = start every history over
 uniform vec4 jitterParams;    // xy: where this frame's render texels are traced, off their centres, in texels
 uniform vec4 restirLook;      // x SSAO radius (world units), y its strength on the indirect light, z the sun's
-                              // penumbra width per unit of blocker distance (0: hard shadows), w the fog's
-                              // density, per world unit (0: none)
+                              // penumbra width per unit of blocker distance (0: hard shadows), w 1: the far SSAO scale
+uniform vec4 restirHaze;      // the height fog: x density at the ground per world unit (0: off), y the ground's
+                              // height, z the height it thins over (e-folding), w the most it hides
+uniform vec4 restirAir;       // the aerial haze: x, y, z as restirHaze's, w the distance its onset grows over
 uniform vec4 restirPath;      // x bounces after the visible point, y the sample pass's ray budget, z the spatial
                               // pass's, w validation: the relative change in a path's light that counts (0: off)
 #define RESTIR_FOV 60.0       // the gallery's, as every renderer here
@@ -180,18 +182,38 @@ vec3 restirViewDirection(vec2 uv) {
     return normalize(right * (ndc.x * scale * aspect) + up * (ndc.y * scale) + forward);
 }
 
-// Distance fog: the light from a surface t away along d, seen through air (restirLook.w per unit). The air
-// takes on the colour of the sky at the horizon in that direction -- so the far distance melts into the
-// horizon it stands against -- warmed towards the sun. It starts a little way out (RESTIR_FOG_START of
-// the fog's own length), so what is near stays crisp, and never quite hides anything (RESTIR_FOG_MAX).
-#define RESTIR_FOG_START 0.1
-#define RESTIR_FOG_MAX   0.85
-vec3 restirFog(vec3 colour, vec3 d, float t) {
-    if (restirLook.w <= 0.0 || t < 0.0) return colour;
-    float amount = RESTIR_FOG_MAX * (1.0 - exp(-max(t * restirLook.w - RESTIR_FOG_START, 0.0)));
-    vec3 horizon = pathSky(normalize(vec3(d.x, max(d.y, 0.0) * 0.5 + 0.02, d.z)));
-    vec3 air = horizon + SUN_COLOR * 0.04 * pow(max(dot(d, normalize(SUN_DIR)), 0.0), 6.0);
-    return mix(colour, air, amount);
+// Distance fog: height fog -- densest at the ground (restirHaze.y), thinning with altitude over
+// restirHaze.z -- integrated along the view ray exactly (an exponential's integral), so it has no onset and
+// no edge: it starts as a faint haze and builds smoothly, and a ray climbing away from the ground (towards
+// a hill's top, or the sky) collects less of it than one skimming the ground. It fades towards the air's
+// colour in that direction (pathAir: the horizon's haze and the aureole), so the far distance melts into
+// the horizon it stands against. restirHaze.x the density at the ground per world unit (0: none), w the
+// most it ever hides.
+//
+// `lit` (0..1) is how lit the air in front of the surface is: the haze hides what is behind it everywhere,
+// but only adds its own glow where daylight reaches it -- in a dark interior the air is dark too, and a
+// sky-coloured veil over black walls read as grey once the exposure rose to meet it.
+// The optical depth of one exponential height layer (density, ground, height, -) along the view ray.
+float restirLayerDepth(vec4 layer, vec3 d, float t) {
+    if (layer.x <= 0.0) return 0.0;
+    float H = max(layer.z, 1e-3);
+    float above = max(cameraPos.y - layer.y, -4.0 * H);
+    float rise = max(d.y * t / H, -20.0);
+    float alongRay = abs(rise) > 1e-3 ? (1.0 - exp(-rise)) / rise : 1.0 - 0.5 * rise;
+    return layer.x * exp(-above / H) * t * alongRay;
+}
+
+// Two layers: the ground fog (restirHaze), dense low down and gone a short way up, and the aerial haze
+// (restirAir), thin but over the scene's whole height -- what takes a far mountain's contrast and turns it
+// towards the sky behind it, so distance reads as distance however high the camera and the far side stand.
+// The aerial haze thickens with distance: its depth is the layer's times t / restirAir.w (a density growing
+// linearly from the camera), so the foreground keeps its contrast and the far distance does not.
+vec3 restirFog(vec3 colour, vec3 d, float t, float lit) {
+    if (t < 0.0 || (restirHaze.x <= 0.0 && restirAir.x <= 0.0)) return colour;
+    float ground = restirLayerDepth(restirHaze, d, t);
+    float air = restirLayerDepth(restirAir, d, t) * min(t / max(restirAir.w, 1e-3), 2.0);
+    float amount = min(1.0 - exp(-(ground + air)), restirHaze.w);
+    return colour * (1.0 - amount) + pathAir(d) * (amount * lit);
 }
 
 // A ReSTIR PT reservoir: one path, kept as what a shift needs to rebuild it from another visible point,

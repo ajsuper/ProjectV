@@ -46,7 +46,26 @@ struct RestirHit {
     float metallic;
     vec4  face;       // camera rays only: the hit face's centre, w = the voxel's edge (0: no hit)
     vec4  rotation;   // camera rays only: the chunk's rotation (the voxel's own axes)
+    vec3  previous;   // camera rays, with RESTIR_MOTION: where the hit point was last frame (its chunk's motion)
 };
+
+#ifdef RESTIR_MOTION
+// Where world point P, on the chunk in header slot `slot` (now at `position`, turned by `rotation`), was
+// last frame: carried through the chunk's own motion (prevPoses, two texels a slot, filled by the host from
+// the Scene: voxel_renderer::uploadPoses). A slot with no pose last frame did not move. The voxel
+// renderer's previousPoint.
+vec3 restirPreviousPoint(vec3 P, uint slot, vec3 position, vec4 rotation) {
+    int width = int(textureSize(prevPoses, 0).x);
+    int texel = int(slot) * 2;
+    ivec2 at = ivec2(texel % width, texel / width);
+    if (at.y >= int(textureSize(prevPoses, 0).y)) return P;
+    vec4 was = texelFetch(prevPoses, at, 0);
+    if (was.w < 0.5) return P;
+    vec4 wasRotation = texelFetch(prevPoses, at + ivec2(1, 0), 0);
+    vec3 local = (P - position) * rotationFromQuat(rotation);   // row-vector product: R^T (P - position)
+    return was.xyz + rotationFromQuat(wasRotation) * local;
+}
+#endif
 
 RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) {
     Ray ray;
@@ -78,6 +97,7 @@ RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) 
     h.metallic = 0.0;
     h.face = vec4(0.0, 0.0, 0.0, 0.0);
     h.rotation = vec4(0.0, 0.0, 0.0, 1.0);
+    h.previous = origin + direction * 1.0e4;   // a miss: a point far along the ray (moves with the camera only)
     // The engine's own miss test, as every renderer writes it.
     if (found.foundBox.size < 0.0 || found.rayT <= 0.0 || dot(found.normal, found.normal) < 0.5) return h;
     h.hit = true;
@@ -99,6 +119,11 @@ RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) 
         float edge = found.foundBox.size;
         vec3 centre = found.foundBox.position + rotationFromQuat(h.rotation) * vec3(edge * 0.5, edge * 0.5, edge * 0.5);
         h.face = vec4(centre + normalize(found.normal) * (edge * 0.5), edge);
+        h.previous = origin + direction * found.rayT;
+#ifdef RESTIR_MOTION
+        chunkHeader header = headers(int(found.headerIndex));
+        h.previous = restirPreviousPoint(h.previous, found.headerIndex, vec3(header.positionX, header.positionY, header.positionZ), h.rotation);
+#endif
     }
     return h;
 }

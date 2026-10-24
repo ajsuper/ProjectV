@@ -22,8 +22,15 @@ $input v_texcoord0
 //              its sixteen bits are exact)
 //   4 gFace    xyz the face's centre, w the voxel's edge (0 sky)
 //   5 gRot     the chunk's rotation
+//   6 gMotion  xy where the hit was on screen last frame minus where it is now (uv; jitter-free: both are
+//              projections of the hit itself), through its chunk's own motion and the camera's -- the motion
+//              vectors the resolve reprojects by and the motion blur follows
+//
+// Input: prevPoses (resource, slot 0): every chunk's pose last frame (restir_trace.sc).
 
 #include <bgfx_shader.sh>
+SAMPLER2D(prevPoses, 0);
+#define RESTIR_MOTION
 #include "restir_trace.sc"
 
 void main() {
@@ -37,13 +44,14 @@ void main() {
     vec4 position = vec4(cameraPos.xyz + direction * 1.0e4, -1.0);
     vec3 normal = vec3(0.0, 0.0, 0.0);
     vec3 albedo = vec3(0.0, 0.0, 0.0);
-    vec3 direct = pathSkyWithSun(direction);
+    vec3 direct = pathSkyView(direction);   // the sky, its clouds and the sun
     float material = 0.0;
     vec4 face = vec4(0.0, 0.0, 0.0, 0.0);
     vec4 rotation = vec4(0.0, 0.0, 0.0, 1.0);
     float facing = 0.0;
     float visible = 0.0;
     float blocker = -1.0;
+    vec3 previous = prevCameraPos.xyz + direction * 1.0e4;   // the sky: moves with the camera's turn only
     int rays = min(int(restirSettings.x), 2);
     for (int i = 0; i < rays; i++) {
         RestirHit hit = restirTrace(origin, rayDir, kind, 1e30);
@@ -56,6 +64,7 @@ void main() {
             material = restirPackMaterial(hit.glossiness, hit.metallic);
             face = hit.face;
             rotation = hit.rotation;
+            previous = hit.previous;
             facing = dot(normal, toSun);
             if (facing <= 0.0) break;
             origin = position.xyz + normal * restirSettings.y;
@@ -72,4 +81,9 @@ void main() {
     gl_FragData[3] = vec4(direct, material);
     gl_FragData[4] = face;
     gl_FragData[5] = rotation;
+    bool nowInFront;
+    bool thenInFront;
+    vec2 now = restirWorldToUV(position.xyz, cameraPos.xyz, cameraDir.xyz, passTargetRes.xy, nowInFront);
+    vec2 then = restirWorldToUV(previous, prevCameraPos.xyz, prevCameraDir.xyz, passTargetRes.xy, thenInFront);
+    gl_FragData[6] = vec4(thenInFront ? then - now : vec2(0.0, 0.0), 0.0, 0.0);
 }

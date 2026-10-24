@@ -92,7 +92,9 @@ void main() {
         RefHit hit = refTrace(origin, rayDir, shadow, maxDistance);
         if (!shadow) {
             if (!hit.hit) {
-                radiance += throughput * (pathSky(rayDir) + (pathInSun(rayDir) ? pathSunRadiance() * sunWeight : vec3(0.0, 0.0, 0.0)));
+                // The camera sees the clouds (pathSkyView); a bounce gathers the sky without them, as restir-pt's do.
+                radiance += vertex == 0 ? pathSkyView(rayDir)
+                                        : throughput * (pathSky(rayDir) + (pathInSun(rayDir) ? pathSunRadiance() * sunWeight : vec3(0.0, 0.0, 0.0)));
                 break;
             }
             vertex++;

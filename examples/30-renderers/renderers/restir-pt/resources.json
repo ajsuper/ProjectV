@@ -16,7 +16,10 @@
         {"name": "renderParams", "type": "vec4"},
         {"name": "restirPost", "type": "vec4"},
         {"name": "restirDof", "type": "vec4"},
-        {"name": "restirShafts", "type": "vec4"}
+        {"name": "restirShafts", "type": "vec4"},
+        {"name": "restirHaze", "type": "vec4"},
+        {"name": "restirAir", "type": "vec4"},
+        {"name": "restirShaftsAir", "type": "vec4"}
     ],
     "shaders": [
         {"shaderID": 1, "path": "./renderers/restir-pt/shaders/gbuffer.bin"},
@@ -38,6 +41,7 @@
         {"shaderID": 17, "path": "./renderers/restir-pt/shaders/exposure.bin"},
         {"shaderID": 18, "path": "./renderers/restir-pt/shaders/shadow_soft.bin"},
         {"shaderID": 19, "path": "./renderers/restir-pt/shaders/dof.bin"},
+        {"shaderID": 22, "path": "./renderers/restir-pt/shaders/motion_blur.bin"},
         {"shaderID": 21, "path": "./renderers/restir-pt/shaders/shafts.bin"},
         {"shaderID": 30, "path": "./renderers/restir-pt/shaders/bloom_down1.bin"},
         {"shaderID": 31, "path": "./renderers/restir-pt/shaders/bloom_down2.bin"},
@@ -56,6 +60,7 @@
         {"texID": 4, "name": "gDirect", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
         {"texID": 5, "name": "gFace", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
         {"texID": 6, "name": "gRot", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
+        {"texID": 9, "name": "gMotion", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
         {"texID": 7, "name": "surf0", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 0.25, "origin": "CreateNew"},
         {"texID": 8, "name": "surf1", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 0.25, "origin": "CreateNew"},
         {"texID": 10, "name": "res0", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 0.25, "origin": "CreateNew"},
@@ -92,6 +97,8 @@
         {"texID": 80, "name": "meter", "format": "R32_FLOAT", "sizeMode": "fixed", "resX": 64, "resY": 64, "origin": "CreateNew"},
         {"texID": 81, "name": "exposure", "format": "RGBA32_FLOAT", "sizeMode": "fixed", "resX": 1, "resY": 1, "origin": "CreateNew"},
         {"texID": 82, "name": "dofColor", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 83, "name": "mbColor", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 1.0, "origin": "CreateNew"},
+        {"texID": 99, "name": "prevPoses", "format": "RGBA32_FLOAT", "sizeMode": "fixed", "resX": 1024, "resY": 512, "origin": "CPUBuffer"},
         {"texID": 90, "name": "shafts", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.25, "origin": "CreateNew"},
         {"texID": 91, "name": "shaftDepth", "format": "R32_FLOAT", "sizeMode": "relative", "scale": 0.25, "origin": "CreateNew"},
         {"texID": 100, "name": "bloomDown1", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
@@ -105,7 +112,7 @@
         {"texID": 108, "name": "bloomUp1", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"}
     ],
     "framebuffers": [
-        {"fboID": 1, "textureIDs": [1, 2, 3, 4, 5, 6]},
+        {"fboID": 1, "textureIDs": [1, 2, 3, 4, 5, 6, 9]},
         {"fboID": 2, "textureIDs": [7, 8]},
         {"fboID": 3, "textureIDs": [10, 11, 12, 13, 14]},
         {"fboID": 4, "textureIDs": [20, 21, 22, 23, 24, 25, 26]},
@@ -132,6 +139,7 @@
         {"fboID": 25, "textureIDs": [105]},
         {"fboID": 26, "textureIDs": [106]},
         {"fboID": 27, "textureIDs": [107]},
-        {"fboID": 28, "textureIDs": [108]}
+        {"fboID": 28, "textureIDs": [108]},
+        {"fboID": 29, "textureIDs": [83]}
     ]
 }

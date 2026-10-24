@@ -201,3 +201,27 @@ now weighted by the generalized balance heuristic (analytic shifts, so pairwise-
 with a wider search for pixels with no history. A sidestep's uncovered area: 10% of pixels more than 25%
 off at +1 frame before, 0.6% after; whole-frame +14% -> +1%. In the raw per-frame estimate a steady ~10-20%
 excess remains (mostly the glossy floor's specular), hidden in the filtered image; not yet traced.
+
+### 2026-10-22 (night) -- sky, fog, TAA
+
+A new sky in pjv_path_light.sc (shared with pt-reference): deep zenith, horizon band, sunset towards the
+sun, aureole, haze below the horizon (no black ground band); clouds for the camera only. Height fog
+integrated exactly along the view ray (no onset kink), fading to the horizon's air colour. TAA: a 16-phase
+Halton jitter over the whole render texel replaces the four window-pixel centres, so a still view
+supersamples and sub-texel distant voxels stop aliasing. Not measured against pt-reference since; the sky
+changed for both.
+
+### 2026-10-22 (late) -- motion vectors, motion blur
+
+The G-buffer writes per-texel motion (gMotion, fbo 1's seventh target) from each chunk's previous pose (the
+voxel renderer's prevPoses upload, texture 99 here) and the previous camera. The resolve reprojects along it
+(nearest-depth motion over 3x3, neighbourhood clamp and a history of at most 16 while anything moves), so
+Voxel Mayhem's moving bodies no longer smear; a still pixel that showed something moving last frame (history
+length stored negative) is clamped too, which removed the trails behind debris under a still camera. A new
+motion_blur pass after the depth of field: 8 taps over half the frame's travel (a 180-degree shutter), capped at 12 px per 1080 lines, a still foreground not dragged over a moving
+background; M toggles it, RESTIR_MBLUR=0 starts it off. Still open: the GI's reservoirs and accumulation
+reproject through the camera only, so a moving body's indirect light lags.
+
+Fog over dark interiors: the haze's in-scatter is scaled by how lit the air in front of a surface is (the
+surface's received light against the air's brightness, rising to full over the fog's length); extinction is
+unchanged. Before, a sky-coloured veil over black interiors read as medium grey once auto-exposure rose.

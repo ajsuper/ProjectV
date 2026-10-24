@@ -3,7 +3,8 @@ $input v_texcoord0
 
 // =============================================================================
 // reconstruct.frag -- restir's pass 13: examples/shared/voxelRenderer/shaders/reconstruct.frag, copied
-// unchanged (a renderer folder's shaders compile from their own directory). restir's G-buffer writes the
+// (a renderer folder's shaders compile from their own directory), with one change: what fills the part
+// of a pixel no voxel layer claimed (see `background` below). restir's G-buffer writes the
 // slots it reads (gNormal 2, gFace 5, gRot 6), and ao_apply's lit frame is its slot 0.
 //
 // The render-resolution frame rebuilt at OUTPUT resolution, voxel by voxel, and
@@ -184,6 +185,8 @@ void main() {
     float t3 = 1e30, a3 = 0.0, w3c = 0.0, s3 = 0.0; vec3 c3 = vec3(0.0), v3 = vec3(0.0); vec4 q3 = vec4(0, 0, 0, 1); int f3 = 0;
     vec3 skySum = vec3(0.0);
     float skyWeight = 0.0;
+    vec3 geometrySum = vec3(0.0);   // every texel that saw a voxel, whichever voxel: the window's own mix
+    float geometryWeight = 0.0;
 
     for (int j = -SEARCH_RADIUS; j <= SEARCH_RADIUS; j++)
     for (int i = -SEARCH_RADIUS; i <= SEARCH_RADIUS; i++) {
@@ -196,6 +199,11 @@ void main() {
             skySum += texture2D(composedHDR, uv).rgb * w;
             skyWeight += w;
             continue;
+        }
+        {
+            float w = max(texelTent(tap, srcPos), 1e-6);
+            geometrySum += texture2D(composedHDR, uv).rgb * w;
+            geometryWeight += w;
         }
         float t, coverage, size; vec3 centre; vec4 q;
         int faceId;
@@ -245,7 +253,20 @@ void main() {
     float w3 = mix(rem2 * a3, min(a3, rem2), part3);
     float wRest = max(0.0, 1.0 - w1 - w2 - w3);
 
-    vec3 background = skyWeight > 0.0 ? skySum / skyWeight : texture2D(composedHDR, srcPos * srcTexel).rgb;
+    // What fills the part of the pixel no layer claimed. At a silhouette it is the sky -- the layers claim
+    // as much of the pixel as the window's texels saw geometry. In foliage it is not: leaves smaller than a
+    // pixel, more of them than three layers, each claiming only its sliver, while nearly every texel saw a
+    // leaf. Filled with the sky there, one sky texel lit every pixel within reach of it: sharp, pale squares
+    // in distant trees. So the remainder takes the geometry's mix for as much of the window's geometry as
+    // the layers left unclaimed, and the sky for the rest.
+    vec3 background = texture2D(composedHDR, srcPos * srcTexel).rgb;
+    if (skyWeight > 0.0) {
+        float seen = geometryWeight / (geometryWeight + skyWeight);   // the window's share of geometry
+        float claimed = 1.0 - wRest;
+        float unclaimedGeometry = wRest > 1e-4 ? clamp((seen - claimed) / wRest, 0.0, 1.0) : 0.0;
+        vec3 geometry = geometryWeight > 0.0 ? geometrySum / geometryWeight : skySum / skyWeight;
+        background = mix(skySum / skyWeight, geometry, unclaimedGeometry);
+    }
     vec3 col1 = w1c > 0.0 ? c1 / w1c : background;
     vec3 col2 = w2c > 0.0 ? c2 / w2c : background;
     vec3 col3 = w3c > 0.0 ? c3 / w3c : background;
