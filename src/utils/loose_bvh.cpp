@@ -8,6 +8,7 @@
 
 #include <glm/gtc/quaternion.hpp>
 
+#include "utils/blob_voxels.h"
 #include "utils/voxel_math.h"
 
 namespace projv::utils {
@@ -18,45 +19,8 @@ namespace projv::utils {
             return maximum.x >= minimum.x;
         }
 
-        // Promoted from the scene editor's chunkContentBounds. An explicit stack, because the
-        // Z-order accumulated down the descent is what recovers a voxel's position: positions are
-        // not stored, only the path to them.
-        const std::vector<uint32_t>& geometry = blob.geometry;
-        const size_t nodeCount = geometry.size() / 3;
-        bool any = false;
-        core::ivec3 low(0), high(-1);
-        struct Pending { size_t node; uint64_t cellZOrder; };
-        std::vector<Pending> stack;
-        if (nodeCount > 0) stack.push_back({0, 0});
-
-        while (!stack.empty()) {
-            Pending current = stack.back();
-            stack.pop_back();
-            if (current.node >= nodeCount) continue;
-            uint64_t mask = (uint64_t(geometry[current.node * 3]) << 32) | uint64_t(geometry[current.node * 3 + 1]);
-            uint32_t data3 = geometry[current.node * 3 + 2];
-            if (mask == 0) continue;
-
-            if (tree64IsLeaf(data3)) {
-                for (uint32_t child = 0; child < 64; child++) {
-                    // Bit 63 is Z-order 0 -- the convention the brick map writes with.
-                    if ((mask & (1ull << (63 - child))) == 0) continue;
-                    core::ivec3 position = reverseZOrderIndex(current.cellZOrder * 64 + child);
-                    if (!any) { low = high = position; any = true; }
-                    else { low = core::min(low, position); high = core::max(high, position); }
-                }
-                continue;
-            }
-            // Children are contiguous in ascending Z-order from the node's own address.
-            size_t firstChild = current.node + (data3 >> 1);
-            uint32_t rank = 0;
-            for (uint32_t child = 0; child < 64; child++) {
-                if ((mask & (1ull << (63 - child))) == 0) continue;
-                stack.push_back({firstChild + rank, current.cellZOrder * 64 + child});
-                rank++;
-            }
-        }
-
+        core::ivec3 low, high;
+        const bool any = tileTableBounds(blobTiles(blob), low, high);
         blob.contentMin = low;
         blob.contentMax = high;
         blob.contentBoundsValid = true;

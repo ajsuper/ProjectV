@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "utils/blob_voxels.h"
 #include "core/application.h"
 #include "core/math.h"
 #include "core/log.h"
@@ -125,6 +126,9 @@ struct ProcessedChunk {
     projv::Chunk chunk;
     std::vector<uint8_t> materialIDs;   // already in final global-palette slots (interned during
                                         // generation via the thread-safe internMaterial)
+    // The voxels as the blob holds them, built here on the worker from the tree and materials above
+    // (which are then dropped), so the main thread installs the table instead of converting the tree.
+    projv::utils::TileTable tiles;
     bool empty = false;  // true if the batch was empty (no geometry to intern)
     // Storage LOD this result was generated at. An `empty` result is only authoritative for THIS
     // LOD -- see TerrainState::emptyChunks.
@@ -1815,6 +1819,10 @@ static void runChunkWorkItem(projv::Scene& scene, TerrainState& ts, const ChunkW
         projv::utils::bakeMaterialsFromBrickMap(result.chunk.geometryData,
                                                   result.materialIDs, *brickMap);
         phases.materials = phaseSplit();
+        result.tiles = projv::utils::buildTileTable(result.chunk.geometryData, result.materialIDs, res);
+        std::vector<uint32_t>().swap(result.chunk.geometryData);
+        std::vector<uint8_t>().swap(result.materialIDs);
+        phases.tree64 += phaseSplit();   // the voxel format: the tree and the table made from it
     }
     recordGenPhases(item.lod, phases);
     if (item.isEdit) result.finishedAt = std::chrono::steady_clock::now();
@@ -1941,8 +1949,7 @@ static void releaseChunk(projv::Scene& scene, TerrainState& ts, projv::ChunkHand
         bool wasLastRef = (blob.refCount == 1);
         projv::releaseBlob(scene, pool);
         if (wasLastRef) {
-            blob.geometry.clear();      blob.geometry.shrink_to_fit();
-            blob.materialIDs.clear();   blob.materialIDs.shrink_to_fit();
+            projv::utils::setBlobTree(blob, {}, {});   // frees the voxels
             blob.brickMap.reset();
             blob.dirty = false;
         }
@@ -2522,12 +2529,12 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
 
         projv::internChunkGeometry(scene, proc.chunk);
 
-        // Material IDs are already in final global-palette slots (interned during generation via
-        // the thread-safe internMaterial) -- just transfer them to the blob.
+        // The worker built the tile table (its material bytes already in final global-palette slots,
+        // interned during generation via the thread-safe internMaterial) -- just hand it to the blob.
         if (proc.chunk.geometryPoolIndex >= 0 &&
             static_cast<size_t>(proc.chunk.geometryPoolIndex) < scene.geometryPool.size()) {
             projv::GeometryBlob& blob = scene.geometryPool[proc.chunk.geometryPoolIndex];
-            blob.materialIDs = std::move(proc.materialIDs);
+            projv::utils::setBlobTiles(blob, std::move(proc.tiles));
             blob.dirty = true;
         }
 
@@ -2648,10 +2655,7 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
 
         if (proc.buried) ts.buriedCoords.insert(proc.coord);
         else             ts.buriedCoords.erase(proc.coord);
-        projv::replaceChunkGeometry(scene, proc.refineHandle,
-                                    std::move(proc.chunk.geometryData),
-                                    std::move(proc.materialIDs),
-                                    proc.chunk.header.resolution);
+        projv::utils::replaceChunkTiles(scene, proc.refineHandle, std::move(proc.tiles), proc.chunk.header.resolution);
         core_info_every(64, "[REFINE] coord=({},{},{}) h={} resolution={}",
                         proc.coord.x, proc.coord.y, proc.coord.z,
                         proc.refineHandle, proc.chunk.header.resolution);
@@ -3384,7 +3388,7 @@ void update(projv::Application& app) {
             if (effLOD == 0) lod0++;
             else if (effLOD == 1) lod1++;
             else lod2++;
-            fullResNodes += blob.geometry.size() / 3;
+            fullResNodes += projv::utils::blobTiles(blob).texels.size() / 4;   // texels, as geomTexelLen counts
             if (b < gpuData.blobRanges.size() && gpuData.blobRanges[b].uploaded)
                 residentNodes += gpuData.blobRanges[b].geomTexelLen;
         }

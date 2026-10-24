@@ -1,5 +1,6 @@
 #include <algorithm>
 
+#include "utils/blob_voxels.h"
 #include "edit_history.h"
 #include "core/log.h"
 
@@ -132,7 +133,7 @@ namespace projv::editor {
             capturedBlobs.push_back(chunk.geometryPoolIndex);
 
             const GeometryBlob& blob = scene.geometryPool[chunk.geometryPoolIndex];
-            snapshot.blobMaterials.push_back({chunk.geometryPoolIndex, blob.materialIDs});
+            snapshot.blobMaterials.push_back({chunk.geometryPoolIndex, utils::blobMaterials(blob)});
 
             if (!blob.brickMap) continue;
             // Flattened: the brick map is a sparse array of hash maps, and the snapshot only needs
@@ -179,7 +180,9 @@ namespace projv::editor {
         for (const std::pair<int32_t, std::vector<uint8_t>>& entry : snapshot.blobMaterials) {
             if (entry.first < 0 || size_t(entry.first) >= scene.geometryPool.size()) continue;
             GeometryBlob& blob = scene.geometryPool[entry.first];
-            blob.materialIDs = entry.second;
+            // Only slots changed since the capture, so the bytes line up with the blob's form as it is.
+            std::vector<uint8_t>& materials = utils::editBlobMaterials(blob);
+            if (materials.size() == entry.second.size()) materials = entry.second;
             blob.dirty = true;
         }
 

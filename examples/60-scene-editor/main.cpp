@@ -54,6 +54,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "utils/loose_bvh.h"
 #include "core/application.h"
 #include "core/math.h"
 #include "core/log.h"
@@ -11707,9 +11708,7 @@ static std::string uniqueComponentName(const projv::Scene& scene, const std::str
 
 // The box one chunk's voxels actually occupy, in that chunk's own coordinates.
 //
-// Walked over the tree64 rather than probed cell by cell. The tree has one node per *occupied*
-// region, so the walk costs the geometry rather than the volume -- which is the difference between
-// instant and unusable on a 256^3 chunk, where probing would be 16.7 million tree descents.
+// The engine's blobContentBounds: measured once from the blob's voxels, then cached on it.
 //
 // Returns false when there is nothing in it.
 static bool chunkContentBounds(const projv::Scene& scene, projv::ChunkHandle chunkHandle,
@@ -11720,56 +11719,7 @@ static bool chunkContentBounds(const projv::Scene& scene, projv::ChunkHandle chu
     const projv::Chunk& chunk = scene.chunks[chunkHandle];
     int32_t poolIndex = chunk.geometryPoolIndex;
     if (poolIndex < 0 || size_t(poolIndex) >= scene.geometryPool.size()) return false;
-    const std::vector<uint32_t>& geometry = scene.geometryPool[poolIndex].geometry;
-
-    size_t nodeCount = geometry.size() / 3;
-    if (nodeCount == 0) return false;
-
-    bool any = false;
-    // An explicit stack, matching brickMapFromTree64's traversal exactly -- the Z-order accumulated
-    // down the descent path is what recovers a voxel's position, since positions are not stored.
-    struct Pending { size_t node; uint64_t cellZOrder; };
-    std::vector<Pending> stack;
-    stack.push_back({0, 0});
-
-    while (!stack.empty()) {
-        Pending current = stack.back();
-        stack.pop_back();
-        if (current.node >= nodeCount) continue;
-
-        uint32_t mask1 = geometry[current.node * 3];
-        uint32_t mask2 = geometry[current.node * 3 + 1];
-        uint32_t data3 = geometry[current.node * 3 + 2];
-        uint64_t mask = (uint64_t(mask1) << 32) | uint64_t(mask2);
-        if (mask == 0) continue;
-
-        if (projv::tree64IsLeaf(data3)) {
-            for (uint32_t child = 0; child < 64; child++) {
-                // Bit 63 is Z-order 0 -- the convention the brick map writes with.
-                if ((mask & (1ull << (63 - child))) == 0) continue;
-                ivec3 position = projv::utils::reverseZOrderIndex(current.cellZOrder * 64 + child);
-                if (!any) {
-                    minimum = maximum = position;
-                    any = true;
-                } else {
-                    minimum = projv::core::min(minimum, position);
-                    maximum = projv::core::max(maximum, position);
-                }
-            }
-            continue;
-        }
-
-        // Children are stored contiguously in ascending Z-order from the node's own address --
-        // addPointersTree64 writes the pointer relative to the parent, so the sum is absolute.
-        size_t firstChild = current.node + (data3 >> 1);
-        uint32_t rank = 0;
-        for (uint32_t child = 0; child < 64; child++) {
-            if ((mask & (1ull << (63 - child))) == 0) continue;
-            stack.push_back({firstChild + rank, current.cellZOrder * 64 + child});
-            rank++;
-        }
-    }
-    return any;
+    return projv::utils::blobContentBounds(scene.geometryPool[poolIndex], minimum, maximum);
 }
 
 // The box a component's voxels actually occupy, in the component's own continuous voxel space.

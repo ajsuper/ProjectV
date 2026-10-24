@@ -40,6 +40,7 @@
 #include <filesystem>
 #include <string>
 
+#include "utils/blob_voxels.h"
 #include "core/application.h"
 #include "core/log.h"
 #include "core/math.h"
@@ -154,7 +155,7 @@ projv::Scene buildScene() {
     // share one volume. internChunkGeometry moves it there and returns the blob's index.
     const int32_t blobIndex = projv::internChunkGeometry(scene, chunk, std::move(brickMap));
     if (blobIndex >= 0 && static_cast<size_t>(blobIndex) < scene.geometryPool.size()) {
-        scene.geometryPool[blobIndex].materialIDs = std::move(bakedMaterialIDs);
+        projv::utils::setBlobTreeMaterials(scene.geometryPool[blobIndex], std::move(bakedMaterialIDs));
     }
 
     scene.chunks.push_back(std::move(chunk));

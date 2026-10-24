@@ -1,3 +1,4 @@
+#include "utils/blob_voxels.h"
 #include "utils/animation.h"
 
 #include <algorithm>
@@ -286,9 +287,9 @@ namespace projv::utils {
                 const uint32_t resolution = chunk.header.resolution;
                 const uint32_t envRes = envelopeResolutionFor(resolution);
 
-                std::unique_ptr<VoxelBrickMap> geom =
-                    brickMapFromTree64(blob.geometry, blob.materialIDs, resolution);
+                std::unique_ptr<VoxelBrickMap> geom = createVoxelBrickMap(computeBrickDims(resolution));
                 if (!geom) { report.blobsSkipped++; continue; }
+                forEachTileVoxel(blobTiles(blob), [&](core::ivec3 p, uint8_t slot) { brickMapSetVoxel(*geom, p.x, p.y, p.z, slot); });
 
                 core::ivec3 envBrickDims{
                     std::max(1, static_cast<int>(envRes / BRICK_SIZE)),

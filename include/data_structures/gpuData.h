@@ -43,13 +43,13 @@ namespace projv {
         uint32_t envMotionTexelLen = 0;
         uint32_t envMotionTexelAllocated = 0;
         uint32_t envMotionByteLen = 0;
-        // ---- Block tables (utils/block_table.h), appended to the two trees' own ranges ---------
+        // ---- Tile tables (utils/tile_table.h): what the two ranges hold ---------------------------
         //
-        // A tree's range holds its nodes and then its block table, so geomTexelLen / envTexelLen count
-        // both, and every allocation, repack and overlap check carries the table with no ranges of its
-        // own. These say where the nodes end, which is where each table starts.
-        uint32_t geomNodeCount = 0;
-        uint32_t envNodeCount = 0;
+        // A blob's geometry range (and its envelope's) holds its tile table: the region and block masks
+        // and starts, then the leaves. geomTexelLen / envTexelLen count all of it. These say where the
+        // leaves start, in texels from the range's start -- 0 for an empty table.
+        uint32_t geomLeafStart = 0;
+        uint32_t envLeafStart = 0;
         // Storage LOD of the data actually resident in the textures right now. Distinct from
         // GeometryBlob::renderLOD, which is the *requested* value and may not be flushed yet.
         // makeHeader reads this one so the header's resolution always describes the tree that is

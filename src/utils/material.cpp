@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "utils/blob_voxels.h"
 #include "utils/material.h"
 #include "core/log.h"
 
@@ -85,42 +86,19 @@ namespace {
 
     // Voxels per palette slot in one blob.
     //
-    // Counting the materialIDs array directly would count *bytes*, not voxels: a uniform leaf (every
-    // set voxel in it sharing a material) stores exactly one byte for up to 64 voxels, and on
-    // heightfield terrain ~96% of leaves are uniform. So the tree is walked instead, and each leaf
-    // contributes the number of voxels its occupancy mask actually has.
+    // Counted voxel by voxel: a material byte can stand for up to 64 voxels (a uniform leaf, a full brick)
+    // or 4096 (a full block).
     void accumulateBlobUsage(const GeometryBlob& blob, std::vector<uint32_t>& usage) {
-        size_t nodeCount = blob.geometry.size() / 3;
-        for (size_t node = 0; node < nodeCount; node++) {
-            uint32_t data3 = blob.geometry[node * 3 + 2];
-            if (!tree64IsLeaf(data3)) continue;
-
-            uint64_t occupancy = (uint64_t(blob.geometry[node * 3 + 0]) << 32) |
-                                  uint64_t(blob.geometry[node * 3 + 1]);
-            uint32_t voxelsInLeaf = uint32_t(__builtin_popcountll(occupancy));
-            uint32_t materialOffset = tree64LeafMatOffset(data3);
-
-            if (tree64LeafIsUniform(data3)) {
-                if (materialOffset >= blob.materialIDs.size()) continue;
-                uint8_t slot = blob.materialIDs[materialOffset];
-                if (slot < usage.size()) usage[slot] += voxelsInLeaf;
-                continue;
-            }
-            // A non-uniform leaf stores one byte per set voxel, in mask order.
-            for (uint32_t i = 0; i < voxelsInLeaf; i++) {
-                size_t materialIndex = size_t(materialOffset) + i;
-                if (materialIndex >= blob.materialIDs.size()) break;
-                uint8_t slot = blob.materialIDs[materialIndex];
-                if (slot < usage.size()) usage[slot]++;
-            }
-        }
+        forEachTileVoxel(blobTiles(blob), [&](core::ivec3, uint8_t slot) {
+            if (slot < usage.size()) usage[slot]++;
+        });
     }
 
     // Applies a 256-entry slot remap to a blob's baked material bytes and, when one exists, to the
     // brick map behind them. The brick map is the source of truth for later voxel edits, so leaving
     // it on the old numbering would resurrect the removed slot the next time the blob is rebaked.
     void remapBlobMaterials(GeometryBlob& blob, const uint8_t (&slotRemap)[256]) {
-        for (uint8_t& materialID : blob.materialIDs) {
+        for (uint8_t& materialID : editBlobMaterials(blob)) {
             materialID = slotRemap[materialID];
         }
         if (!blob.brickMap) return;

@@ -1,3 +1,4 @@
+#include "utils/blob_voxels.h"
 #include "utils/scene_loading.h"
 
 #include <algorithm>
@@ -25,8 +26,7 @@ namespace projv::utils {
         }
 
         size_t blobBytes(const GeometryBlob& b) {
-            return b.geometry.size() * sizeof(uint32_t) + b.materialIDs.size() +
-                   b.envelope.size() * sizeof(uint32_t) + b.envelopeMotion.size();
+            return blobVoxelBytes(b) + b.envelope.size() * sizeof(uint32_t) + b.envelopeMotion.size();
         }
 
         // Where a block's chunk goes and how it is placed. The same numbers loadComposeFromDisk's
@@ -183,14 +183,14 @@ namespace projv::utils {
             scene.geometryPool[size_t(pool)].refCount++;
             block.edited = false;
         } else {
-            if (!data || data->geometry.empty()) {
+            if (!data || (data->geometry.empty() && data->tiles.texels.empty())) {
                 core::error("SceneBlocks: block ({}, {}, {}) of {} could not be read", s.entry.gridX,
                             s.entry.gridY, s.entry.gridZ, s.path);
                 return false;
             }
             GeometryBlob blob;
-            blob.geometry = std::move(data->geometry);
-            blob.materialIDs = std::move(data->materialIDs);
+            if (!data->tiles.texels.empty()) setBlobTiles(blob, std::move(data->tiles));
+            else setBlobTree(blob, std::move(data->geometry), std::move(data->materialIDs));
             blob.envelope = std::move(data->envelope);
             blob.envelopeMotion = std::move(data->envelopeMotion);
             blob.sourceDataPath = s.path;
@@ -253,8 +253,7 @@ namespace projv::utils {
             releaseBlob(scene, pool);
             // The CPU copy goes now; the GPU frees its range when it sees refCount 0.
             if (blob.refCount == 0) {
-                blob.geometry = {};
-                blob.materialIDs = {};
+                setBlobTree(blob, {}, {});
                 blob.envelope = {};
                 blob.envelopeMotion = {};
                 blob.brickMap.reset();
@@ -284,17 +283,15 @@ namespace projv::utils {
         blockResidencyCounter++;
     }
 
-    void SceneBlocks::replaceContent(Scene& scene, BlockId id, std::vector<uint32_t> geometry, std::vector<uint8_t> materialIDs) {
+    void SceneBlocks::replaceContent(Scene& scene, BlockId id, TileTable tiles) {
         if (id >= blocks_.size()) return;
         if (loaded(id)) {
-            const ChunkHandle handle = blocks_[id].chunk;
-            replaceChunkGeometry(scene, handle, std::move(geometry), std::move(materialIDs), scene.chunks[handle].header.resolution);
+            replaceChunkTiles(scene, blocks_[id].chunk, std::move(tiles));
             blocks_[id].edited = true;
             return;
         }
         GeometryBlob blob;
-        blob.geometry = std::move(geometry);
-        blob.materialIDs = std::move(materialIDs);
+        setBlobTiles(blob, std::move(tiles));
         blob.sourceDataPath = sources_[id].path;
         blob.sourceBlockCoord = core::ivec3(sources_[id].entry.gridX, sources_[id].entry.gridY, sources_[id].entry.gridZ);
         keptOrder_.remove(id);
@@ -405,8 +402,7 @@ namespace projv::utils {
             file.resolution = sources_[id].resolution;
             file.voxelScale = sources_[id].voxelScale;
             DataBlock block;
-            block.geometry = std::move(kept.blob.geometry);
-            block.materialIDs = std::move(kept.blob.materialIDs);
+            block.tiles = blobTiles(kept.blob);
             block.envelope = std::move(kept.blob.envelope);
             block.envelopeMotion = std::move(kept.blob.envelopeMotion);
             file.blocks.push_back(std::move(block));
@@ -415,13 +411,12 @@ namespace projv::utils {
                 // Kept in memory rather than lost: over the limit is better than gone.
                 core::error("SceneBlocks: an edited block could not be written to {}; it stays in memory", path);
                 DataBlock& back = file.blocks[0];
-                kept.blob.geometry = std::move(back.geometry);
-                kept.blob.materialIDs = std::move(back.materialIDs);
-                kept.blob.envelope = std::move(back.envelope);
+                kept.blob.envelope = std::move(back.envelope);   // its voxels never left
                 kept.blob.envelopeMotion = std::move(back.envelopeMotion);
                 return;
             }
             kept.file = path;
+            setBlobTree(kept.blob, {}, {});   // on disk now; read back by takeKept
             inMemory -= kept.bytes;
         }
     }
@@ -437,8 +432,8 @@ namespace projv::utils {
                 return false;
             }
             DataBlock& b = file.blocks[0];
-            kept.blob.geometry = std::move(b.geometry);
-            kept.blob.materialIDs = std::move(b.materialIDs);
+            if (!b.tiles.texels.empty()) setBlobTiles(kept.blob, std::move(b.tiles));
+            else setBlobTree(kept.blob, std::move(b.geometry), std::move(b.materialIDs));
             kept.blob.envelope = std::move(b.envelope);
             kept.blob.envelopeMotion = std::move(b.envelopeMotion);
             std::error_code e;

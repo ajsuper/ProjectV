@@ -307,6 +307,8 @@ add_library(projectV STATIC
     src/utils/editing.cpp
     src/utils/loose_bvh.cpp
     src/utils/block_table.cpp
+    src/utils/tile_table.cpp
+    src/utils/blob_voxels.cpp
     src/utils/material.cpp
     src/utils/picking.cpp
     src/utils/scene_query.cpp

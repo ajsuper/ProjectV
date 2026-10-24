@@ -190,7 +190,7 @@ bool occludedInFrontLayer(int headerIndex, vec3 centre, float size, int face, ve
             if (any(lessThan(probe, ivec3(0, 0, 0))) ||
                 any(greaterThanEqual(probe, ivec3(int(header.resolution))))) return true;
             uint unusedOffset;
-            if (pjvProbeTree(header.geometryStartIndex, header.resolution, probe, unusedOffset)) return true;
+            if (pjvProbeTree(header.geometryStartIndex, header.leafStartIndex, header.resolution, probe, unusedOffset)) return true;
         }
         if (cell.x == endCell.x && cell.y == endCell.y) break;
         if (tNext.x < tNext.y) { cell.x += stepDirection.x; tNext.x += tDelta.x; }

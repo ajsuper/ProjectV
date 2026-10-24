@@ -1,3 +1,4 @@
+#include "utils/blob_voxels.h"
 #include "utils/compose_io.h"
 #include "utils/material.h"
 
@@ -12,6 +13,7 @@
 
 #include <glm/gtc/quaternion.hpp>
 
+#include "utils/block_table.h"
 #include "utils/voxel_management.h"
 #include "utils/scene_query.h"
 #include "utils/attachments.h"
@@ -23,7 +25,9 @@ namespace projv::utils {
         // v3 adds the animation envelope: a second, quarter-resolution tree64 per block plus a
         // motion byte per set cell. Both are optional, and a v3 file with neither is byte-comparable
         // to a v2 one apart from the wider block table -- see readDataFile's version branch.
-        constexpr uint32_t PVDT_VERSION = 3;
+        // v4 stores each block's geometry as its tile table (utils/tile_table.h): the geometry words are
+        // the table's texels, the material bytes its own. The layout is otherwise v3's.
+        constexpr uint32_t PVDT_VERSION = 4;
         constexpr uint32_t PVDT_VERSION_MIN = 2;   // oldest version still readable
         constexpr uint32_t COMPOSE_VERSION = 1;
         // With geometry instancing, a repeated .data block costs only one shared pool entry plus a
@@ -84,21 +88,37 @@ namespace projv::utils {
                 e.envelopeMotionOffset = readPod<uint64_t>(in);
                 e.envelopeMotionLength = readPod<uint32_t>(in);
             }
+            e.version = version;
             return e;
         }
 
         // The blob halves of one block. Shared by readDataFile and both readDataBlock overloads so
         // there is one place that knows a block is four optional arrays rather than two.
         void readBlockBlobs(std::ifstream& in, const BlockEntry& e, DataBlock& b) {
+            // From v4 the geometry words are the tile table and the bytes its materials.
+            const bool tiles = e.version >= 4;
+            std::vector<uint32_t>& words = tiles ? b.tiles.texels : b.geometry;
+            std::vector<uint8_t>& bytes = tiles ? b.tiles.materials : b.materialIDs;
             if (e.geometryLength > 0) {
-                b.geometry.resize(e.geometryLength);
+                words.resize(e.geometryLength);
                 in.seekg(static_cast<std::streamoff>(e.geometryOffset), std::ios::beg);
-                in.read(reinterpret_cast<char*>(b.geometry.data()), e.geometryLength * sizeof(uint32_t));
+                in.read(reinterpret_cast<char*>(words.data()), e.geometryLength * sizeof(uint32_t));
             }
             if (e.materialLength > 0) {
-                b.materialIDs.resize(e.materialLength);
+                bytes.resize(e.materialLength);
                 in.seekg(static_cast<std::streamoff>(e.materialOffset), std::ios::beg);
-                in.read(reinterpret_cast<char*>(b.materialIDs.data()), e.materialLength);
+                in.read(reinterpret_cast<char*>(bytes.data()), e.materialLength);
+            }
+            if (tiles) {
+                b.tiles.resolution = e.resolution;
+                b.tiles.leafStart = b.tiles.texels.empty() ? 0u : uint32_t(tileTableLayout(b.tiles).leafStart);   // from its header; checked below
+                if (!tileTableWellFormed(b.tiles)) {   // a file is not trusted: a bad offset is a crash later
+                    core::error("readDataBlock: block ({}, {}, {})'s tile table points outside itself; it is dropped",
+                                e.gridX, e.gridY, e.gridZ);
+                    b.tiles = TileTable{};
+                    return;
+                }
+                tileTableRecount(b.tiles);
             }
             if (e.envelopeLength > 0) {
                 b.envelope.resize(e.envelopeLength);
@@ -133,6 +153,20 @@ namespace projv::utils {
             if (!b.envelope.empty()) { flags |= PVDT_FLAG_HAS_ENVELOPE; break; }
         }
 
+        // Every block's geometry as the tile table it is written as: its own, or one built from its tree.
+        std::vector<TileTable> built(blockCount);
+        std::vector<const TileTable*> tilesOf(blockCount);
+        for (uint32_t i = 0; i < blockCount; i++) {
+            const DataBlock& b = data.blocks[i];
+            if (!b.tiles.texels.empty() || b.geometry.empty()) {
+                tilesOf[i] = &b.tiles;
+                continue;
+            }
+            const uint32_t resolution = data.resolution ? data.resolution : tree64Resolution(b.geometry);
+            built[i] = buildTileTable(b.geometry, b.materialIDs, resolution);
+            tilesOf[i] = &built[i];
+        }
+
         // Compute blob-region offsets. The blob starts right after the block table.
         uint64_t cursor = HEADER_SIZE + static_cast<uint64_t>(blockCount) * BLOCK_ENTRY_SIZE_V3;
         struct BlobLoc {
@@ -144,13 +178,14 @@ namespace projv::utils {
         std::vector<BlobLoc> locs(blockCount);
         for (uint32_t i = 0; i < blockCount; i++) {
             const DataBlock& b = data.blocks[i];
-            locs[i].geomLen = static_cast<uint32_t>(b.geometry.size());
+            const TileTable& t = *tilesOf[i];
+            locs[i].geomLen = static_cast<uint32_t>(t.texels.size());
             locs[i].geomOff = cursor;
             cursor += static_cast<uint64_t>(locs[i].geomLen) * sizeof(uint32_t);
 
-            if (!b.materialIDs.empty()) {
-                // Bytes, not words: materialIDs is one uint8 per solid voxel.
-                locs[i].matLen = static_cast<uint32_t>(b.materialIDs.size());
+            if (!t.materials.empty()) {
+                // Bytes, not words: one uint8 per material entry.
+                locs[i].matLen = static_cast<uint32_t>(t.materials.size());
                 locs[i].matOff = cursor;
                 cursor += locs[i].matLen;
             } else {
@@ -208,12 +243,12 @@ namespace projv::utils {
         // Blob region, in the same order the offsets were computed.
         for (uint32_t i = 0; i < blockCount; i++) {
             const DataBlock& b = data.blocks[i];
-            if (!b.geometry.empty()) {
-                out.write(reinterpret_cast<const char*>(b.geometry.data()),
-                          b.geometry.size() * sizeof(uint32_t));
+            const TileTable& t = *tilesOf[i];
+            if (!t.texels.empty()) {
+                out.write(reinterpret_cast<const char*>(t.texels.data()), t.texels.size() * sizeof(uint32_t));
             }
-            if (!b.materialIDs.empty()) {
-                out.write(reinterpret_cast<const char*>(b.materialIDs.data()), b.materialIDs.size());
+            if (!t.materials.empty()) {
+                out.write(reinterpret_cast<const char*>(t.materials.data()), t.materials.size());
             }
             if (!b.envelope.empty()) {
                 out.write(reinterpret_cast<const char*>(b.envelope.data()),
@@ -278,6 +313,7 @@ namespace projv::utils {
         std::vector<BlockEntry> entries(blockCount);
         for (uint32_t i = 0; i < blockCount; i++) {
             entries[i] = readBlockEntry(in, data.version);
+            entries[i].resolution = data.resolution;
         }
 
         data.blocks.resize(blockCount);
@@ -325,6 +361,7 @@ namespace projv::utils {
         hdr.blocks.resize(blockCount);
         for (uint32_t i = 0; i < blockCount; i++) {
             hdr.blocks[i] = readBlockEntry(in, hdr.version);
+            hdr.blocks[i].resolution = hdr.resolution;
         }
         return hdr;
     }
@@ -780,8 +817,8 @@ namespace projv::utils {
                             // the material bytes -- and v2 exists to delete exactly that: the file
                             // already holds what the GPU reads. The brick map stays null until the
                             // first edit asks for one (ensureBrickMapExists).
-                            gb.geometry         = block.geometry;
-                            gb.materialIDs      = block.materialIDs;
+                            if (!block.tiles.texels.empty()) setBlobTiles(gb, block.tiles);
+                            else setBlobTree(gb, block.geometry, block.materialIDs);
                             // Empty for every v2 file and for every v3 file with no animation, which
                             // is the overwhelming majority. Carried straight through for the same
                             // reason the pair above is: the file already holds what the GPU reads.
@@ -1279,15 +1316,12 @@ namespace projv::utils {
             block.gridX = gridCoord.x;
             block.gridY = gridCoord.y;
             block.gridZ = gridCoord.z;
-            // A straight copy of the pair the blob already holds. Every edit path ends by rebaking
-            // both out of the brick map (applyEditsToChunk), so what is in the blob is what the GPU is
-            // rendering, and writing anything else would be writing something nobody has seen.
-            block.geometry = blob.geometry;
-            block.materialIDs = blob.materialIDs;
+            // The blob's tile table, as it is: what the GPU is drawing and what edits changed in place.
+            block.tiles = blobTiles(blob);
             block.envelope = blob.envelope;
             block.envelopeMotion = blob.envelopeMotion;
 
-            if (block.geometry.empty()) return;
+            if (block.tiles.texels.empty()) return;
 
             if (data.resolution == 0) {
                 data.resolution = chunk.header.resolution;

@@ -489,10 +489,11 @@ struct chunkHeader {
     uint geometryStartIndex;
     uint geometryEndIndex;
     uint materialIDStartIndex;
-    // Where the tree's block table starts in tree64Data (utils/block_table.h): the dense top of the
-    // tree the march reads instead of descending from the root. The envelope's, for its own tree.
-    uint blockTableStartIndex;
-    uint envelopeTableStartIndex;
+    // The chunk's voxels are a tile table (utils/tile_table.h) in tree64Data: its region and block
+    // masks and starts from geometryStartIndex, its leaves from leafStartIndex. The envelope's, for its
+    // own table.
+    uint leafStartIndex;
+    uint envelopeLeafStartIndex;
     uint paletteOffset;
     vec4 rotation;
     // Levels dropped below `resolution` this chunk instance's traversal should cap itself at, on
@@ -501,7 +502,7 @@ struct chunkHeader {
     // computed on the CPU side.
     uint traversalLOD;
     // ---- The animation envelope (see DataBlock in compose.h) --------------------------------
-    // A SECOND tree64 for this chunk, at a quarter of `resolution`, marking where animated geometry
+    // A SECOND tile table for this chunk, at a quarter of `resolution`, marking where animated geometry
     // may be drawn. It lives in the same tree64Data texture through its own range, which is why it
     // needs no sampler stage of its own -- there were none left to spend.
     //
@@ -1459,8 +1460,8 @@ chunkHeader headers(int headerIndex) {
     header.geometryStartIndex = pixel1.b;
     header.geometryEndIndex = pixel1.a;
     header.materialIDStartIndex = pixel2.r;
-    header.blockTableStartIndex = pixel2.g;
-    header.envelopeTableStartIndex = pixel2.b;
+    header.leafStartIndex = pixel2.g;
+    header.envelopeLeafStartIndex = pixel2.b;
     header.paletteOffset = pixel2.a;
     header.rotation = vec4(uintBitsToFloat(pixel3.r), uintBitsToFloat(pixel3.g),
                            uintBitsToFloat(pixel3.b), uintBitsToFloat(pixel3.a));
@@ -1684,6 +1685,13 @@ Tree64NodeData tree64(uint indexOfNode) {
     nodeData.data3 = pixel.z;
     nodeData.childPtr = pixel.w;
     return nodeData; 
+}
+
+// One texel of tree64Data as it is: a tile table's mask or start entry, whose words are not a node's.
+uvec4 tree64Texel(uint index) {
+    uint w = uint(tree64Dims.x);
+    uint shift = uint(tree64Dims.y);
+    return texelFetch(tree64Data, ivec2(int(index & (w - 1u)), int(index >> shift)), 0);
 }
 
 // See if the valid bit for this z order is set.
@@ -2003,374 +2011,140 @@ float cellExitDistance(Ray ray, vec3 invRayDir, ivec3 cellMin, uint cellSize) {
 // consumed there, and they belong to the same body of glass. The symptom would be an interface alpha
 // charged twice (a body darkening with depth) or skipped (a surface losing its reflection), varying
 // with the chunk's scale, which is about as hard to attribute as this file gets.
-// ---- Block tables (utils/block_table.h) ---------------------------------------------------------
+// ---- Tile tables (utils/tile_table.h) -------------------------------------------------------------
 //
-// A tree's block table sits in tree64Data right after its nodes: one texel per 64^3 region (the region
-// node's mask), then one per 16^3 block (the block node's mask, and its first leaf's index relative to
-// the root). Read through tree64(), which is just a texel fetch.
-// How many cubes the block-table march may leave per unit of RayQuery::maxRaySteps. The tree march
+// A chunk's voxels, in tree64Data: from geometryStartIndex, a header texel (the boxes the dense levels
+// cover, below), the region masks (one texel per 64^3
+// region: occupied hi, lo, full hi, lo), the region starts (one word each, four to a texel: its full
+// blocks' first material), the block masks (per 16^3 block, the same two masks over its bricks) and the
+// block starts (two words each, two blocks to a texel: its first partial leaf, relative to
+// leafStartIndex, and its full bricks' first material); from leafStartIndex, the leaves of the partly
+// filled 4^3 bricks, encoded as tree64 leaves. A full child -- a tile, solid and one
+// material -- has nothing below it, and is read as a synthetic leaf (pjvTileLeafOf): every voxel set,
+// uniform, its material byte the tile's. So every caller of a leaf is unchanged.
+//
+// The region and block levels cover only the box the content spans, not the chunk's cube: the header
+// holds the region box and the block box (origin, size - 1; 10 bits an axis), the arrays run x-fastest
+// over them, and a region outside its box is empty. A region's occupied bits are clear for every block
+// outside the block box, so only the region read needs the box test; the block index is clamped, so its
+// read -- issued beside the region's, not after it -- never leaves the table. The march needs neither:
+// it is clipped to the block box, so every cell it reads is inside both boxes (pjvTileRegionIn).
+// How many cubes the march may leave per unit of RayQuery::maxRaySteps. The tree march it replaced
 // counted outer iterations, each of up to twelve DDA steps, so a budget meant more there than one step
 // per cube does here.
 #ifndef PJV_TABLE_STEP_SCALE
 #define PJV_TABLE_STEP_SCALE 8
 #endif
-uint pjvTableRegions(uint resolution) { return max(resolution >> 6u, 1u); }
-uint pjvTableBlocks(uint resolution)  { return max(resolution >> 4u, 1u); }
-uint pjvTableLinear(ivec3 c, uint n)  { return uint(c.x) + n * (uint(c.y) + n * uint(c.z)); }
+// Where a table's arrays are, read from its header texel at `start`.
+struct PjvTiles {
+    ivec3 regionOrigin;
+    ivec3 regionDims;
+    ivec3 blockOrigin;
+    ivec3 blockDims;
+    uint regionMasks;
+    uint regionStarts;
+    uint blockMasks;
+    uint blockStarts;
+};
+ivec3 pjvUnpack10(uint w) { return ivec3(int(w & 1023u), int((w >> 10u) & 1023u), int((w >> 20u) & 1023u)); }
+PjvTiles pjvTilesAt(uint start) {
+    uvec4 h = tree64Texel(start);
+    PjvTiles t;
+    t.regionOrigin = pjvUnpack10(h.x);
+    t.regionDims = pjvUnpack10(h.y) + ivec3(1, 1, 1);
+    t.blockOrigin = pjvUnpack10(h.z);
+    t.blockDims = pjvUnpack10(h.w) + ivec3(1, 1, 1);
+    uint rc = uint(t.regionDims.x * t.regionDims.y * t.regionDims.z);
+    uint bc = uint(t.blockDims.x * t.blockDims.y * t.blockDims.z);
+    t.regionMasks = start + 1u;
+    t.regionStarts = t.regionMasks + rc;
+    t.blockMasks = t.regionStarts + (rc + 3u) / 4u;
+    t.blockStarts = t.blockMasks + bc;
+    return t;
+}
+// The index of `c` (chunk coordinates) in a box, clamped into it.
+uint pjvBoxIndex(ivec3 c, ivec3 origin, ivec3 dims) {
+    ivec3 l = clamp(c - origin, ivec3(0, 0, 0), dims - ivec3(1, 1, 1));
+    return uint(l.x + dims.x * (l.y + dims.y * l.z));
+}
+bool pjvInBox(ivec3 c, ivec3 origin, ivec3 dims) {
+    ivec3 l = c - origin;
+    return min(l.x, min(l.y, l.z)) >= 0 && l.x < dims.x && l.y < dims.y && l.z < dims.z;
+}
+// Region `region`'s masks (occupied hi lo, full hi lo), and in `rl` its index; empty outside the box.
+uvec4 pjvTileRegion(PjvTiles t, ivec3 region, out uint rl) {
+    rl = pjvBoxIndex(region, t.regionOrigin, t.regionDims);
+    uvec4 m = tree64Texel(t.regionMasks + rl);
+    return pjvInBox(region, t.regionOrigin, t.regionDims) ? m : uvec4(0u, 0u, 0u, 0u);
+}
+uint pjvTileBlockIndex(PjvTiles t, ivec3 block) { return pjvBoxIndex(block, t.blockOrigin, t.blockDims); }
+// The same two indices for a cell known to be inside the block box: no clamp, no test.
+uint pjvTileRegionIn(PjvTiles t, ivec3 region) {
+    ivec3 l = region - t.regionOrigin;
+    return uint(l.x + t.regionDims.x * (l.y + t.regionDims.y * l.z));
+}
+uint pjvTileBlockIn(PjvTiles t, ivec3 block) {
+    ivec3 l = block - t.blockOrigin;
+    return uint(l.x + t.blockDims.x * (l.y + t.blockDims.y * l.z));
+}
 
-// The leaf node covering the 4^3 brick that holds `voxel`, through the table: two reads, then the leaf.
-// False when the brick is empty. `voxel` must lie inside the tree.
-bool pjvTableLeaf(uint treeStart, uint tableStart, uint resolution, ivec3 voxel, out Tree64NodeData leaf) {
-    uint regions = pjvTableRegions(resolution);
-    uint blocks = pjvTableBlocks(resolution);
-    Tree64NodeData region = tree64(tableStart + pjvTableLinear(voxel >> 6, regions));
-    Tree64NodeData block = tree64(tableStart + regions * regions * regions + pjvTableLinear(voxel >> 4, blocks));
-    leaf = region;
+// Region `rl`'s start: its full blocks' first material. Four regions to a texel, from `startsBase`.
+uint pjvTileRegionStart(uint startsBase, uint rl) {
+    uvec4 t = tree64Texel(startsBase + (rl >> 2u));
+    uint k = rl & 3u;
+    return k == 0u ? t.x : (k == 1u ? t.y : (k == 2u ? t.z : t.w));
+}
+
+// Block `bl`'s starts: its first partial leaf and its full bricks' first material. Two blocks to a texel,
+// from `startsBase`.
+uvec2 pjvTileBlockStart(uint startsBase, uint bl) {
+    uvec4 t = tree64Texel(startsBase + (bl >> 1u));
+    return (bl & 1u) != 0u ? t.zw : t.xy;
+}
+
+// A full child read as a leaf: all 64 voxels set, uniform, its one material byte at `materialOffset`.
+Tree64NodeData pjvTileLeafOf(uint materialOffset) {
+    Tree64NodeData leaf;
+    leaf.data1 = 0xFFFFFFFFu;
+    leaf.data2 = 0xFFFFFFFFu;
+    leaf.data3 = (materialOffset << 2u) | 3u;   // encodeLeafNode(materialOffset, uniform)
+    leaf.childPtr = 0u;
+    return leaf;
+}
+
+// The leaf of brick `zBrick` in block `bl`, whose masks are `block` (occupied xy, full zw) and whose
+// starts are read from `startsBase` on: a tile's synthetic leaf, or the stored one. The brick must be
+// occupied.
+Tree64NodeData pjvTileBrickLeaf(uvec4 block, uint startsBase, uint bl, uint leafStart, uint zBrick) {
+    uvec2 start = pjvTileBlockStart(startsBase, bl);   // first partial leaf, first full-brick material
+    if (checkZOrderInValidMasks(block.z, block.w, zBrick))
+        return pjvTileLeafOf(start.y + calculateSiblingsBeforeThisZOrder(4, block.z, block.w, zBrick));
+    return tree64(leafStart + start.x + calculateSiblingsBeforeThisZOrder(4, block.x & ~block.z, block.y & ~block.w, zBrick));
+}
+
+// The leaf covering the 4^3 brick that holds `voxel`: the region and block masks (addressed from the
+// cell), then a tile or the stored leaf. False when the brick is empty. `voxel` must lie inside.
+bool pjvTileLeaf(uint start, uint leafStart, uint resolution, ivec3 voxel, out Tree64NodeData leaf) {
+    PjvTiles t = pjvTilesAt(start);
+    uint rl;
+    uvec4 region = pjvTileRegion(t, voxel >> 6, rl);
+    uint bl = pjvTileBlockIndex(t, voxel >> 4);
+    leaf = pjvTileLeafOf(0u);
     ivec3 inRegion = (voxel >> 4) & 3;
     ivec3 inBlock = (voxel >> 2) & 3;
-    if (!checkZOrderInValidMasks(region.data1, region.data2, calculateZOrderIndex4(uint(inRegion.x), uint(inRegion.y), uint(inRegion.z)))) return false;
+    uint zBlock = calculateZOrderIndex4(uint(inRegion.x), uint(inRegion.y), uint(inRegion.z));
+    if (!checkZOrderInValidMasks(region.x, region.y, zBlock)) return false;
+    if (checkZOrderInValidMasks(region.z, region.w, zBlock)) {   // a solid 16^3 tile
+        leaf = pjvTileLeafOf(pjvTileRegionStart(t.regionStarts, rl) + calculateSiblingsBeforeThisZOrder(4, region.z, region.w, zBlock));
+        return true;
+    }
+    uvec4 block = tree64Texel(t.blockMasks + bl);
     uint zBrick = calculateZOrderIndex4(uint(inBlock.x), uint(inBlock.y), uint(inBlock.z));
-    if (!checkZOrderInValidMasks(block.data1, block.data2, zBrick)) return false;
-    leaf = tree64(treeStart + block.data3 + calculateSiblingsBeforeThisZOrder(4, block.data1, block.data2, zBrick));
+    if (!checkZOrderInValidMasks(block.x, block.y, zBrick)) return false;
+    leaf = pjvTileBrickLeaf(block, t.blockStarts, bl, leafStart, zBrick);
     return true;
 }
 
-#ifdef PJV_TREE64_MARCH
-// The tree64 march this file used before block tables (utils/block_table.h): a descent from the root
-// with a node stack. Define PJV_TREE64_MARCH before including this file to compile it instead of the
-// block-table march below -- for A/B captures only; it ignores blockTableStart.
-SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float tMin, BoxAABB boundingBox, uint tree64StartIndex, uint blockTableStart, uint tree64Resolution, uint chunkTraversalLOD, uint materialIDStart, uint paletteOffsetIn, float limitT, float localToWorld, bool skipAnimated, inout PeelAccum peel) {
-    SceneIntersectData returnData;
-    returnData.rayT = -1.0;
-    returnData.exitT = -1.0;
-    returnData.normal = vec3(0.0);
-    vec3 invRayDir = 1.0/ray.direction;
-    // Whether a leaf hit has to resolve its material at all. The peel needs it to decide; a caller
-    // that means to shade the hit wants it handed back rather than refetched. A pure visibility query
-    // needs neither, and skips two texel fetches per hit -- which is what this march has always cost.
-    bool needMaterial = peel.active || peel.wantMaterial || skipAnimated;
-    // Normal of the face the ray most recently crossed. Starts as the volume entry face
-    // (zero if the ray origin is inside the volume) and is updated on every committed
-    // DDA step, so any hit — found while descending or while stepping — reports the
-    // face the ray actually came through, with no analytic re-derivation.
-    vec3 hitNormal = getRayBoxEntry(ray, boundingBox).normal;
-    // If res = 4, treeLevels = 1. In this case just the root node exists.
-    // If res = 16, treeLevels = 2. In this case just the root node exists.
-    uint treeLevels = log2(tree64Resolution)/2.0; // Levels in the tree. 1 for 4x4x4 volume, 2 for 16x16x16 etc...
-    // If res = 4, candidateNodeLevel = 0. In this case, candidate node IS highest resolution node (hence the - 1 to make it 0).
-    uint candidateNodeLevel = treeLevels - 1; // Starting one level down into the tree.
-    uint shift = 2 * candidateNodeLevel;
-    uint stepSize = 1u << (shift);
-
-    ivec3 traversalPosition = ivec3(0); // Always at 1 voxel resolution, even if level/step size isn't.
-    traversalPosition = determineTraversalCoordinatesFromRayAndBox(ray, boundingBox);
-    // Above is same logic used in push!
-
-    nodeStack[0].thisNodeZOrderInParent = 0;
-    nodeStack[0].dataIndex = tree64StartIndex;
-    nodeStack[1].thisNodeZOrderInParent = getZOrderInParentFromThisNodesLevel(traversalPosition, candidateNodeLevel);
-    nodeStack[1].dataIndex = 0;
-    nodeStackQuantity = 2;
-
-    //traversalPosition = roundVoxelCoordinatesBasedOnNodeSize(traversalPosition, tree64Resolution/4);
-    traversalPosition = (traversalPosition >> shift) << shift;
-    ivec3 stepI = ivec3(sign(ray.direction));
-    float rayT = getRayBoxEntryDistanceForSureHit(ray, boundingBox);
-
-    uint stepCount = 0;
-    bool previouslyPopped = false;
-    Tree64NodeData data = tree64(tree64StartIndex);
-    for (; stepCount < rayQuery.maxRaySteps; stepCount++) {
-        //stepCount += 1;
-        while (candidateNodeLevel >= 0) {
-            //stepCount -= 1;
-            if (previouslyPopped) break;
-            if (checkZOrderInValidMasks(data.data1, data.data2, nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent)) {
-                if((data.data3 & 0b1) == 1u) {
-                    // Leaf found! Handle accordingly -- unless it sits at or before tMin, which is
-                    // the case a peeling caller has already consumed. This is the branch that
-                    // matters for a ray whose origin is INSIDE a solid voxel: the descent reaches
-                    // that voxel immediately at rayT == 0, and returning it would hand back the
-                    // surface the caller is trying to get past. Breaking out of the descent instead
-                    // drops into the DDA stepping section below, which walks out of the voxel one
-                    // step at a time and reports the next one properly, with a real normal.
-                    if (tMin <= 0.0 || rayT >= tMin) {
-                        // `data` IS the leaf node here -- the leaf flag is carried by the node whose
-                        // 64 children are voxels, and the candidate we just validated against its
-                        // masks is one of those voxels. So the material offset is available from the
-                        // values already in registers, with no fetch and no second descent. See
-                        // SceneIntersectData::materialListIndex.
-                        uint leafOffset = leafMaterialListOffset(
-                            data, nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent);
-                        float cellExitT = cellExitDistance(ray, invRayDir, traversalPosition, stepSize);
-                        int verdict = PJV_PEEL_STOP_HERE;
-                        // Held LOCALLY until the verdict is known. Publishing it to `peel` before
-                        // deciding is what made a skipped voxel's material outlive the skip: the
-                        // march walks past every animated voxel publishing each one, then stops on
-                        // the first ordinary voxel and publishes that -- and if the animated march
-                        // then wins the merge, the hit is the animated voxel while the material is
-                        // the one behind it. Position, normal and shadows all come out right and only
-                        // the ALBEDO is another voxel's, which on screen reads as seeing through the
-                        // geometry rather than as a material bug.
-                        VoxelMaterial leafMaterial = emptyVoxelMaterial();
-                        if (needMaterial) {
-                            leafMaterial = decodeMaterial(materialPaletteTexel(
-                                materialID(leafOffset + materialIDStart) + paletteOffsetIn));
-                            // This voxel's drawn position belongs to the envelope, not to its own
-                            // cell. Step through it: pjvAnimatedMarch will report it wherever it
-                            // actually is. Without this it is drawn TWICE -- once at rest here and
-                            // once displaced there -- which reads as a doubled, smeared field.
-                            //
-                            // ONLY WITHIN THE RESOLVE DISTANCE. Past it the animated march does not
-                            // run, so skipping here would hand these voxels to nobody and they would
-                            // vanish at range. Beyond the cutoff an animated voxel is ordinary
-                            // geometry drawn at its rest position -- it stops moving, it does not
-                            // stop existing.
-                            if (skipAnimated && rayT * localToWorld <= rayQuery.animResolveDistance &&
-                                (leafMaterial.flags & PJV_MAT_FLAG_ANIMATED) != 0u) {
-                                verdict = PJV_PEEL_CONTINUE;
-                            } else {
-                                verdict = pjvPeelConsume(peel, leafMaterial,
-                                                         rayT * localToWorld, cellExitT * localToWorld,
-                                                         float(stepSize) * localToWorld, limitT);
-                            }
-                        }
-                        if (verdict == PJV_PEEL_ABORT) {
-                            returnData.foundBox.position = vec3(0);
-                            returnData.foundBox.size = -1;
-                            returnData.voxelCoord = ivec3(0);
-                            returnData.steps = stepCount;
-                            returnData.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
-                            peel.hitMaterialValid = false;
-                            return returnData;
-                        }
-                        if (verdict == PJV_PEEL_STOP_HERE) {
-                            peel.hitMaterial = leafMaterial;
-                            peel.hitMaterialValid = needMaterial;
-                            returnData.foundBox.position = traversalPosition;
-                            returnData.voxelCoord = traversalPosition;
-                            returnData.foundBox.size = stepSize;
-                            returnData.steps = stepCount;
-                            returnData.rayT = rayT;
-                            returnData.exitT = cellExitT;
-                            returnData.normal = hitNormal;
-                            returnData.materialListIndex = leafOffset;
-                            return returnData;
-                        }
-                        // Consumed as a transparent layer. Break out of the descent, which drops into
-                        // the stepping section below and walks out of this voxel one step at a time --
-                        // the same route the tMin gate takes for a layer the caller already consumed.
-                    }
-                    break;
-                }
-                // LOD cutoff. This candidate is occupied (valid in its parent's
-                // mask) but is an interior node we would normally descend into.
-                // If it already sits at (or below) the coarsest level allowed for
-                // its distance along the ray, stop here and treat the whole node
-                // as solid instead of resolving finer geometry inside it. rayT is
-                // the distance to this candidate in voxel units, and this is the
-                // only place the traversal descends, so capping here is sufficient
-                // to guarantee we never resolve finer than the requested LOD.
-                //
-                // chunkTraversalLOD is a second, independent cap: this specific chunk instance's
-                // own requested detail level, which can be coarser than what's actually uploaded
-                // (e.g. one of several instances sharing a blob that another, closer instance
-                // forced finer -- see makeHeader in gpu_interface.cpp). It never makes the ray see
-                // MORE detail than computeTargetLOD already allows, only less -- hence max(), not
-                // a replacement.
-                if (candidateNodeLevel <= max(computeTargetLOD(rayT, rayQuery), chunkTraversalLOD)) {
-                    // Same tMin gate as the leaf above. A coarsened node is treated as wholly solid,
-                    // so there is no finer geometry inside it for a peel to find -- stepping past it
-                    // is the right way to get beyond a layer the caller already consumed.
-                    if (tMin <= 0.0 || rayT >= tMin) {
-                        // A coarsened node is treated as wholly SOLID, and therefore as opaque: it
-                        // spans 4, 16 or 64 voxels with no single transparency to read, so there is
-                        // nothing for the peel to decide with. Guessing either way would be wrong for
-                        // most of the node -- and at the distance a node is coarsened to, the
-                        // difference is below what the frame can resolve anyway.
-                        peel.hitMaterialValid = false;
-                        returnData.foundBox.position = traversalPosition;
-                        returnData.voxelCoord = traversalPosition;
-                        returnData.foundBox.size = stepSize;
-                        returnData.steps = stepCount;
-                        returnData.rayT = rayT;
-                        returnData.exitT = cellExitDistance(ray, invRayDir, traversalPosition, stepSize);
-                        returnData.normal = hitNormal;
-                        // The one hit that cannot name a material. This candidate is an INTERIOR node
-                        // returned whole, so there is no leaf to read a material byte from and no one
-                        // voxel it would belong to -- the node spans 4, 16 or 64 of them. Hand the
-                        // caller the sentinel and let it descend on voxelCoord, which reproduces
-                        // exactly what a coarsened hit has always shaded as (the material of the
-                        // node's minimum-corner voxel, or empty if that corner is not filled).
-                        returnData.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
-                        return returnData;
-                    }
-                    break;
-                }
-                BoxAABB candidateBox;
-                candidateBox.position = vec3(traversalPosition);
-                candidateBox.size = float(stepSize);
-                ivec3 highResPosition = determineTraversalCoordinatesFromRayAndBoxAndRayDistance(ray, candidateBox, rayT);
-                uint parentDataIndex = nodeStack[nodeStackQuantity - 2u].dataIndex;
-                uint childrenBeforeThisNode = calculateSiblingsBeforeThisZOrder(4, data.data1, data.data2, nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent);
-                uint childDataIndex = parentDataIndex + data.childPtr + childrenBeforeThisNode;
-                nodeStack[nodeStackQuantity - 1u].dataIndex = childDataIndex;
-                nodeStack[nodeStackQuantity].thisNodeZOrderInParent = getZOrderInParentFromThisNodesLevel(highResPosition, candidateNodeLevel - 1);
-                nodeStack[nodeStackQuantity].dataIndex = 0;
-                nodeStackQuantity += 1;
-                candidateNodeLevel -= 1;
-                // equates to : pow(4, candidateNodeLevel);
-                shift = 2u * candidateNodeLevel;
-                stepSize = 1u << (shift);
-                traversalPosition = (highResPosition >> shift) << shift;
-
-                data = tree64(childDataIndex);
-            } else {
-                break;
-            }
-        }
-
-        vec3 nextPlanes = mix(vec3(traversalPosition), vec3(traversalPosition) + vec3(stepSize), step(vec3(0.0), ray.direction));
-
-        vec3 tMax = (nextPlanes - ray.origin) * invRayDir;
-        vec3 tDelta = stepSize * abs(invRayDir);
-        previouslyPopped = false;
-        //Tree64NodeData parentData = tree64(nodeStack[nodeStackQuantity - 2u].dataIndex);
-        for (int i = 0; i < 12; i++) {
-            // Actually do DDA
-
-            // Step exactly ONE axis per iteration: the axis whose next cell boundary is
-            // nearest. Ties (the ray crossing an edge or corner where two/three tMax
-            // components are equal) are broken deterministically x > y > z, so the ray
-            // advances one axis at a time and enters the face-adjacent voxel first,
-            // reaching the corner voxel on the following iteration. Stepping multiple
-            // axes at once (as step(tMax, min) would on a tie) moves diagonally and
-            // skips the voxel that only touches that edge/corner, which is what caused
-            // the speckle/clip-through artifacts. Single-axis stepping also keeps the
-            // node-coordinate diff single-axis so getBoundariesCrossed stays well-defined.
-            float sx = float(tMax.x <= tMax.y && tMax.x <= tMax.z);
-            float sy = float(tMax.y <= tMax.x && tMax.y <= tMax.z) * (1.0 - sx);
-            float sz = 1.0 - sx - sy;
-            vec3 axisMask = vec3(sx, sy, sz);   // exactly one component is 1.0
-
-            rayT = dot(tMax, axisMask);         // t of the stepped axis (== the minimum)
-
-            tMax += axisMask * tDelta;
-
-            ivec3 directionSteppedIn = ivec3(axisMask) * stepI;
-
-            ivec3 proposedTraversalPosition = traversalPosition + directionSteppedIn * stepSize;
-            if (proposedTraversalPosition.x < 0 || proposedTraversalPosition.y < 0 || proposedTraversalPosition.z < 0 ||
-              proposedTraversalPosition.x >= tree64Resolution || proposedTraversalPosition.y >= tree64Resolution || proposedTraversalPosition.z >= tree64Resolution) {
-                returnData.foundBox.position = vec3(0);
-                returnData.foundBox.size = -1;
-                returnData.voxelCoord = ivec3(0);
-                returnData.steps = stepCount;
-                returnData.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
-                return returnData;
-            }
-            // Get our coordinates in node space. Shift right is the same as traversalPosition / 4^stepSize
-            ivec3 previousNodeCoordinate = traversalPosition >> (shift); // Used to be uint(log2(stepSize));
-            ivec3 proposedNodeCoordinate = proposedTraversalPosition >> (shift);
-            uint boundariesCrossed = getBoundariesCrossed(previousNodeCoordinate, proposedNodeCoordinate, candidateNodeLevel);
-
-            if (boundariesCrossed != 0) { // If we cross boundaires, pop.
-                uint newParentIdx = nodeStack[nodeStackQuantity - 2u - boundariesCrossed].dataIndex;
-                nodeStackQuantity -= boundariesCrossed;
-                candidateNodeLevel += boundariesCrossed;
-                shift = 2 * candidateNodeLevel;
-                stepSize = 1u << (shift);
-                traversalPosition = (traversalPosition >> shift) << shift;
-                previouslyPopped = true;
-                data = tree64(newParentIdx);
-                break;
-            }
-
-            nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent = moveZOrder(nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent, directionSteppedIn);
-            traversalPosition = proposedTraversalPosition;
-            hitNormal = vec3(-directionSteppedIn);
-
-            // Zero-measure guard: on an exact edge/corner crossing two tMax components
-            // tie, so the cell we just stepped into is exited at the SAME t on the other
-            // tied axis — the ray only touches it at a point. Treating it as occupied is
-            // what produced the boundary fireflies (a solid cell the ray never actually
-            // travels through gets returned as a hit, and descending into it hands the
-            // push a corner-exact rayT). Skip its validity check entirely; the next
-            // iteration steps the tied axis at the same rayT and lands in the diagonal
-            // cell, which is then tested with real measure.
-            float cellExitT = min(min(tMax.x, tMax.y), tMax.z);
-
-            // Only check for if its valid after we advance.
-            // This is because if we are advancing it could mean that we just popped out of a valid candidate,
-            // checking if its valid before we advance would just put us right back into the one we popped out of.
-            // Used to be 17 -
-            if (cellExitT > rayT &&
-                checkZOrderInValidMasks(data.data1, data.data2, nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent)) { // New valid z order found!!
-                if ((data.data3 & 0b1) == 1) {
-                    // Leaf found, handle accordingly.
-                    if (tMin <= 0.0 || rayT >= tMin) {
-                        // Same as the descent's leaf hit: `data` is the leaf, and moveZOrder has just
-                        // put this voxel's index among its 64 children on the top of the stack. The
-                        // z-order stays within the node by construction (MOVE_LUT is 6 bits wide), so
-                        // it is the leaf-local index the material list is ranked by.
-                        uint leafOffset2 = leafMaterialListOffset(
-                            data, nodeStack[nodeStackQuantity - 1u].thisNodeZOrderInParent);
-                        int verdict2 = PJV_PEEL_STOP_HERE;
-                        VoxelMaterial leafMaterial2 = emptyVoxelMaterial();   // see the descent site
-                        if (needMaterial) {
-                            leafMaterial2 = decodeMaterial(materialPaletteTexel(
-                                materialID(leafOffset2 + materialIDStart) + paletteOffsetIn));
-                            if (skipAnimated && rayT * localToWorld <= rayQuery.animResolveDistance &&
-                                (leafMaterial2.flags & PJV_MAT_FLAG_ANIMATED) != 0u) {
-                                verdict2 = PJV_PEEL_CONTINUE;   // see the descent site
-                            } else {
-                                verdict2 = pjvPeelConsume(peel, leafMaterial2,
-                                                          rayT * localToWorld, cellExitT * localToWorld,
-                                                          float(stepSize) * localToWorld, limitT);
-                            }
-                        }
-                        if (verdict2 == PJV_PEEL_ABORT) {
-                            returnData.foundBox.position = vec3(0);
-                            returnData.foundBox.size = -1;
-                            returnData.voxelCoord = ivec3(0);
-                            returnData.steps = stepCount;
-                            returnData.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
-                            peel.hitMaterialValid = false;
-                            return returnData;
-                        }
-                        if (verdict2 == PJV_PEEL_STOP_HERE) {
-                            peel.hitMaterial = leafMaterial2;
-                            peel.hitMaterialValid = needMaterial;
-                            returnData.foundBox.position = traversalPosition;
-                            returnData.voxelCoord = traversalPosition;
-                            returnData.foundBox.size = stepSize;
-                            returnData.steps = stepCount;
-                            returnData.rayT = rayT;
-                            returnData.exitT = cellExitT;
-                            returnData.normal = hitNormal;
-                            returnData.materialListIndex = leafOffset2;
-                            return returnData;
-                        }
-                        // Consumed as a transparent layer: fall through and keep stepping.
-                    }
-                    // At or before tMin, or consumed in place: a surface this ray is done with. Keep
-                    // stepping through this leaf rather than returning it. Deliberately does NOT
-                    // break -- breaking would leave the stepping loop and re-descend onto the same
-                    // voxel.
-                } else {
-                    break;   // Interior node: leave the stepping loop and descend into it.
-                }
-            }
-        }
-    }
-    returnData.foundBox.position = vec3(0);
-    returnData.foundBox.size = -1;
-    returnData.voxelCoord = ivec3(0);
-    returnData.steps = stepCount;
-    returnData.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
-    return returnData;
-}
-#else
 // The leaf whose material a voxel that may be EMPTY reads -- what the tree descent always did for a
 // coarsened (LOD) hit, whose voxelCoord is a cube's corner and often not a voxel at all: at each level
 // whose bit for the voxel is unset it takes the next present child (the last, when none follows),
@@ -2390,38 +2164,42 @@ uint pjvNextPresentChild(uint data1, uint data2, uint z) {
         if (checkZOrderInValidMasks(data1, data2, k)) return k;
     return 0u;
 }
-bool pjvTableLeafNearest(uint treeStart, uint tableStart, uint resolution, ivec3 voxel, out Tree64NodeData leaf) {
-    uint regions = pjvTableRegions(resolution);
-    uint blocks = pjvTableBlocks(resolution);
-    Tree64NodeData region = tree64(tableStart + pjvTableLinear(voxel >> 6, regions));
-    leaf = region;
-    if ((region.data1 | region.data2) == 0u) return false;
+bool pjvTileLeafNearest(uint start, uint leafStart, uint resolution, ivec3 voxel, out Tree64NodeData leaf) {
+    PjvTiles t = pjvTilesAt(start);
+    uint rl;
+    uvec4 region = pjvTileRegion(t, voxel >> 6, rl);
+    leaf = pjvTileLeafOf(0u);
+    if ((region.x | region.y) == 0u) return false;
     ivec3 inRegion = (voxel >> 4) & 3;
-    uint zBlock = pjvNextPresentChild(region.data1, region.data2, calculateZOrderIndex4(uint(inRegion.x), uint(inRegion.y), uint(inRegion.z)));
-    ivec3 blockCell = ((voxel >> 6) << 2) + reverseZOrder4(zBlock);
-    Tree64NodeData block = tree64(tableStart + regions * regions * regions + pjvTableLinear(blockCell, blocks));
+    uint zBlock = pjvNextPresentChild(region.x, region.y, calculateZOrderIndex4(uint(inRegion.x), uint(inRegion.y), uint(inRegion.z)));
+    if (checkZOrderInValidMasks(region.z, region.w, zBlock)) {   // a solid 16^3 tile
+        leaf = pjvTileLeafOf(pjvTileRegionStart(t.regionStarts, rl) + calculateSiblingsBeforeThisZOrder(4, region.z, region.w, zBlock));
+        return true;
+    }
+    uint bl = pjvTileBlockIndex(t, ((voxel >> 6) << 2) + reverseZOrder4(zBlock));
+    uvec4 block = tree64Texel(t.blockMasks + bl);
     ivec3 inBlock = (voxel >> 2) & 3;
-    uint zBrick = calculateZOrderIndex4(uint(inBlock.x), uint(inBlock.y), uint(inBlock.z));
-    uint rank = calculateSiblingsBeforeThisZOrder(4, block.data1, block.data2, zBrick);
-    uint count = countbits(block.data1) + countbits(block.data2);
-    leaf = tree64(treeStart + block.data3 + min(rank, max(count, 1u) - 1u));
+    uint zBrick = pjvNextPresentChild(block.x, block.y, calculateZOrderIndex4(uint(inBlock.x), uint(inBlock.y), uint(inBlock.z)));
+    leaf = pjvTileBrickLeaf(block, t.blockStarts, bl, leafStart, zBrick);
     return true;
 }
 
-// The march, over a chunk's block table and the tree's own leaves. `ray` is in the tree's voxel frame,
-// `boundingBox` is [0, resolution). Same contract, arguments and outputs as the tree march above.
+// The march, over a chunk's tile table. `ray` is in the chunk's voxel frame, `boundingBox` is
+// [0, resolution). `tree64StartIndex` is the table's start (geometryStartIndex), `leafStart` its
+// leaves' (leafStartIndex).
 //
 // Each step finds the largest empty aligned cube round the current voxel -- 64, 16, 4 or 1 on a side --
-// from the region mask, the block mask and the leaf, and leaves it through the face the ray reaches
-// first. The region and block reads are addressed from the cell, so they are independent; the leaf is
-// the one read that waits on another. The tree march waited on a chain of four (root, 64^3, 16^3, leaf)
-// and carried a node stack; measured in examples/99-ray-lab, this is about twice as fast.
+// from the region masks, the block masks and the leaf, and leaves it through the face the ray reaches
+// first. The region and block reads are addressed from the cell, so they are independent; a stored
+// leaf is the one read that waits on another, and a tile (a full child) needs none -- it is a voxel hit
+// with the tile's material. The tree march this replaced waited on a chain of four reads (root, 64^3,
+// 16^3, leaf); the block table halved that, and the tiles keep it (docs/plans/voxel-storage-tiles.md).
 //
 // Everything a leaf hit decides is unchanged and happens at the one voxel-hit site below: the tMin
 // gate, the zero-measure corner guard, the material fetch when the peel or the caller needs it, the
 // animated skip, and pjvPeelConsume. Query LOD maps onto the table's levels: level 1 treats a non-empty
 // 4^3 brick as solid, 2 a 16^3 block, 3 a 64^3 region -- never the chunk's root, as before.
-SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float tMin, BoxAABB boundingBox, uint tree64StartIndex, uint blockTableStart, uint tree64Resolution, uint chunkTraversalLOD, uint materialIDStart, uint paletteOffsetIn, float limitT, float localToWorld, bool skipAnimated, inout PeelAccum peel) {
+SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float tMin, BoxAABB boundingBox, uint tree64StartIndex, uint leafStart, uint tree64Resolution, uint chunkTraversalLOD, uint materialIDStart, uint paletteOffsetIn, float limitT, float localToWorld, bool skipAnimated, inout PeelAccum peel) {
     SceneIntersectData returnData;
     returnData.rayT = -1.0;
     returnData.exitT = -1.0;
@@ -2434,20 +2212,45 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
     bool needMaterial = peel.active || peel.wantMaterial || skipAnimated;
 
     int res = int(tree64Resolution);
+    PjvTiles tiles = pjvTilesAt(tree64StartIndex);
+    // The march runs inside the table's block box (and the caller's box): everything outside it is empty,
+    // and inside it every region and block index is in range, so no step tests one. The entry is the
+    // caller's box entry's, on the smaller box -- the same floor on a grid plane, the same normal -- and
+    // `entered` is read off the plane entered through, as a step reads it off the plane it crosses.
+    ivec3 boxLo = max(ivec3(boundingBox.position), tiles.blockOrigin * 16);
+    ivec3 boxHi = min(ivec3(boundingBox.position + vec3(boundingBox.size)), min((tiles.blockOrigin + tiles.blockDims) * 16, ivec3(res, res, res)));
+    if (any(greaterThanEqual(boxLo, boxHi))) return returnData;
     vec3 invRayDir = 1.0 / ray.direction;
-    vec3 tA = (vec3(0.0) - ray.origin) * invRayDir;
-    vec3 tB = (vec3(float(res)) - ray.origin) * invRayDir;
+    vec3 tA = (vec3(boxLo) - ray.origin) * invRayDir;
+    vec3 tB = (vec3(boxHi) - ray.origin) * invRayDir;
+    vec3 tNearVec = min(tA, tB);
     vec3 tFarVec = max(tA, tB);
     float tExit = min(min(tFarVec.x, tFarVec.y), tFarVec.z);
-    float rayT = getRayBoxEntryDistanceForSureHit(ray, boundingBox);
-    if (rayT > tExit) return returnData;
-    ivec3 cell = determineTraversalCoordinatesFromRayAndBox(ray, boundingBox);
-    vec3 hitNormal = getRayBoxEntry(ray, boundingBox).normal;
+    float tNear = max(max(tNearVec.x, tNearVec.y), tNearVec.z);
+    float rayT = max(tNear, 0.0);
+    if (rayT > tExit || tExit < 0.0) return returnData;
     ivec3 positive = ivec3(ray.direction.x > 0.0 ? 1 : 0, ray.direction.y > 0.0 ? 1 : 0, ray.direction.z > 0.0 ? 1 : 0);
-
-    uint regions = pjvTableRegions(tree64Resolution);
-    uint blocks = pjvTableBlocks(tree64Resolution);
-    uint blockBase = blockTableStart + regions * regions * regions;
+    vec3 p = clamp(ray.origin + ray.direction * rayT, vec3(boxLo), vec3(boxHi) - vec3(1e-4, 1e-4, 1e-4));
+    vec3 fp = floor(p);
+    fp -= vec3(equal(p, fp)) * vec3(lessThan(ray.direction, vec3(0.0, 0.0, 0.0)));
+    ivec3 cell = clamp(ivec3(fp), boxLo, boxHi - ivec3(1, 1, 1));
+    vec3 hitNormal = vec3(0.0, 0.0, 0.0);
+    int entered = 3;
+    bool inside = all(greaterThanEqual(ray.origin, vec3(boxLo))) && all(lessThanEqual(ray.origin, vec3(boxHi)));
+    if (!inside) {
+        int plane;
+        if (tNear == tNearVec.x) {
+            hitNormal = vec3(-sign(ray.direction.x), 0.0, 0.0);
+            plane = positive.x == 1 ? boxLo.x : boxHi.x;
+        } else if (tNear == tNearVec.y) {
+            hitNormal = vec3(0.0, -sign(ray.direction.y), 0.0);
+            plane = positive.y == 1 ? boxLo.y : boxHi.y;
+        } else {
+            hitNormal = vec3(0.0, 0.0, -sign(ray.direction.z));
+            plane = positive.z == 1 ? boxLo.z : boxHi.z;
+        }
+        entered = (plane & 63) == 0 ? 3 : ((plane & 15) == 0 ? 2 : ((plane & 3) == 0 ? 1 : 0));
+    }
     // The tree march's budget was outer iterations of up to twelve DDA steps each; this one counts
     // every cube it leaves, so it is given proportionally more.
     uint maxSteps = rayQuery.maxRaySteps * uint(PJV_TABLE_STEP_SCALE);
@@ -2455,43 +2258,49 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
     // into a node: a ray already inside a block when the ramp passes 2 resolves it in full rather than
     // turning solid halfway through. `entered` is the coarsest level whose cube the last step entered
     // (3 a 64^3 region, 2 a 16^3 block, 1 a 4^3 brick, 0 only a voxel), read off the boundary it
-    // crossed. Remembering the three cubes' positions instead cost every ray, LOD or not, 5-12% at
+    // crossed (set above, from the box face the ray came in by). Remembering the three cubes' positions instead cost every ray, LOD or not, 5-12% at
     // 2560x1440 in examples/99-ray-lab. (Skipping computeTargetLOD for queries that ask for no LOD was
     // also tried, and made the animated and transparent queries in the advanced renderer 50-60%
     // slower -- the compiler laid the bigger shaders out worse -- so the ramp is evaluated every step.)
-    int entered = 3;
 
     for (uint stepCount = 0u; stepCount < maxSteps; stepCount++) {
         returnData.steps = stepCount;
         uint targetLOD = max(computeTargetLOD(rayT, rayQuery), chunkTraversalLOD);
         bool pastTMin = tMin <= 0.0 || rayT >= tMin;
         ivec3 c1 = cell >> 4;
-        Tree64NodeData region = tree64(blockTableStart + pjvTableLinear(cell >> 6, regions));
-        Tree64NodeData block = tree64(blockBase + pjvTableLinear(c1, blocks));
+        uint rl = pjvTileRegionIn(tiles, cell >> 6);
+        uint bl = pjvTileBlockIn(tiles, c1);
+        uvec4 region = tree64Texel(tiles.regionMasks + rl);   // occupied hi lo, full hi lo
+        uvec4 block = tree64Texel(tiles.blockMasks + bl);
         ivec3 inRegion = c1 & 3;
         ivec3 inBlock = (cell >> 2) & 3;
         ivec3 inLeaf = cell & 3;
+        uint zBlock = calculateZOrderIndex4(uint(inRegion.x), uint(inRegion.y), uint(inRegion.z));
         uint zBrick = calculateZOrderIndex4(uint(inBlock.x), uint(inBlock.y), uint(inBlock.z));
+        // A block that is itself a tile stores nothing at its entry: every brick of it is full.
+        bool solidBlock = checkZOrderInValidMasks(region.z, region.w, zBlock);
         bool newRegion = entered >= 3;
         bool newBlock = entered >= 2;
         bool newBrick = entered >= 1;
 
         int shift = 0;        // log2 of the cube to leave
         bool coarse = false;  // a non-empty cube of edge 1 << shift, taken as solid (LOD)
-        if ((region.data1 | region.data2) == 0u) {
+        if ((region.x | region.y) == 0u) {
             shift = 6;
         } else if (res > 64 && newRegion && targetLOD >= 3u) {
             shift = 6; coarse = true;
-        } else if (!checkZOrderInValidMasks(region.data1, region.data2, calculateZOrderIndex4(uint(inRegion.x), uint(inRegion.y), uint(inRegion.z)))) {
+        } else if (!checkZOrderInValidMasks(region.x, region.y, zBlock)) {
             shift = 4;
         } else if (res > 16 && newBlock && targetLOD >= 2u) {
             shift = 4; coarse = true;
-        } else if (!checkZOrderInValidMasks(block.data1, block.data2, zBrick)) {
+        } else if (!solidBlock && !checkZOrderInValidMasks(block.x, block.y, zBrick)) {
             shift = 2;
         } else if (res > 4 && newBrick && targetLOD >= 1u) {
             shift = 2; coarse = true;
         } else {
-            Tree64NodeData leaf = tree64(tree64StartIndex + block.data3 + calculateSiblingsBeforeThisZOrder(4, block.data1, block.data2, zBrick));
+            Tree64NodeData leaf = solidBlock
+                ? pjvTileLeafOf(pjvTileRegionStart(tiles.regionStarts, rl) + calculateSiblingsBeforeThisZOrder(4, region.z, region.w, zBlock))
+                : pjvTileBrickLeaf(block, tiles.blockStarts, bl, leafStart, zBrick);
             uint zVoxel = calculateZOrderIndex4(uint(inLeaf.x), uint(inLeaf.y), uint(inLeaf.z));
             if (checkZOrderInValidMasks(leaf.data1, leaf.data2, zVoxel)) {
                 float cellExitT = cellExitDistance(ray, invRayDir, cell, 1u);
@@ -2579,11 +2388,10 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
         }
         entered = (plane & 63) == 0 ? 3 : ((plane & 15) == 0 ? 2 : ((plane & 3) == 0 ? 1 : 0));
         cell = next;
-        if (any(lessThan(cell, ivec3(0, 0, 0))) || any(greaterThanEqual(cell, ivec3(res, res, res)))) return returnData;
+        if (any(lessThan(cell, boxLo)) || any(greaterThanEqual(cell, boxHi))) return returnData;
     }
     return returnData;
 }
-#endif
 
 // =============================================================================
 // Animation: resolving what is drawn inside an envelope cell
@@ -2614,30 +2422,16 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
 // before descending. That function is written for coordinates already known to be occupied, and
 // following childPtr past an unset child reads a node belonging to some other branch. This probes
 // arbitrary coordinates -- most of them empty, by construction -- so the check is not optional.
-bool pjvProbeTree(uint startIndex, uint resolution, ivec3 coord, out uint outLeafOffset) {
+bool pjvProbeTree(uint startIndex, uint leafStart, uint resolution, ivec3 coord, out uint outLeafOffset) {
     outLeafOffset = 0u;
     if (any(lessThan(coord, ivec3(0))) || any(greaterThanEqual(coord, ivec3(int(resolution))))) return false;
-
-    uint zOrder = calculateZOrderIndex(uint(coord.x), uint(coord.y), uint(coord.z), resolution);
-    uint nodeIdx = startIndex;
-    uint treeLevels = uint(log2(float(resolution)) / 2.0);
-    int level = int(treeLevels) - 1;
-    uint stepSize = 1u << (6u * uint(level));
-
-    for (; level >= 0; --level) {
-        Tree64NodeData node = tree64(nodeIdx);
-        uint childZOrder = (zOrder / stepSize) & 63u;
-        if ((node.data3 & 1u) != 0u) {
-            if (!checkZOrderInValidMasks(node.data1, node.data2, childZOrder)) return false;
-            outLeafOffset = leafMaterialListOffset(node, childZOrder);
-            return true;
-        }
-        if (!checkZOrderInValidMasks(node.data1, node.data2, childZOrder)) return false;
-        uint siblingsBefore = calculateSiblingsBeforeThisZOrder(4, node.data1, node.data2, childZOrder);
-        nodeIdx = nodeIdx + node.childPtr + siblingsBefore;
-        stepSize >>= 6u;
-    }
-    return false;
+    Tree64NodeData leaf;
+    if (!pjvTileLeaf(startIndex, leafStart, resolution, coord, leaf)) return false;
+    ivec3 inLeaf = coord & 3;
+    uint z = calculateZOrderIndex4(uint(inLeaf.x), uint(inLeaf.y), uint(inLeaf.z));
+    if (!checkZOrderInValidMasks(leaf.data1, leaf.data2, z)) return false;
+    outLeafOffset = leafMaterialListOffset(leaf, z);
+    return true;
 }
 
 // Descend to the LEAF NODE covering a 4x4x4 block, and stop there.
@@ -2651,33 +2445,11 @@ bool pjvProbeTree(uint startIndex, uint resolution, ivec3 coord, out uint outLea
 // Without it the resolve pays a descent per candidate -- up to eight per cell, a dozen cells per
 // block -- and descents are what a resolve costs. The prototype measured this as the second largest
 // cost it had.
-bool pjvProbeLeafNode(uint startIndex, uint tableStart, uint resolution, ivec3 blockMin, out Tree64NodeData outLeaf) {
-#ifndef PJV_TREE64_MARCH
-    // Through the block table: two reads and the leaf, where the descent below took four.
-    outLeaf = tree64(startIndex);
+bool pjvProbeLeafNode(uint startIndex, uint leafStart, uint resolution, ivec3 blockMin, out Tree64NodeData outLeaf) {
+    // Through the tile table: the region and block masks, then a tile or the stored leaf.
+    outLeaf = pjvTileLeafOf(0u);
     if (any(lessThan(blockMin, ivec3(0))) || any(greaterThanEqual(blockMin, ivec3(int(resolution))))) return false;
-    return pjvTableLeaf(startIndex, tableStart, resolution, blockMin, outLeaf);
-#else
-    outLeaf = tree64(startIndex);
-    if (any(lessThan(blockMin, ivec3(0))) || any(greaterThanEqual(blockMin, ivec3(int(resolution))))) return false;
-
-    uint zOrder = calculateZOrderIndex(uint(blockMin.x), uint(blockMin.y), uint(blockMin.z), resolution);
-    uint nodeIdx = startIndex;
-    uint treeLevels = uint(log2(float(resolution)) / 2.0);
-    int level = int(treeLevels) - 1;
-    uint stepSize = 1u << (6u * uint(level));
-
-    for (; level >= 0; --level) {
-        Tree64NodeData node = tree64(nodeIdx);
-        if ((node.data3 & 1u) != 0u) { outLeaf = node; return true; }
-        uint childZOrder = (zOrder / stepSize) & 63u;
-        if (!checkZOrderInValidMasks(node.data1, node.data2, childZOrder)) return false;
-        uint siblingsBefore = calculateSiblingsBeforeThisZOrder(4, node.data1, node.data2, childZOrder);
-        nodeIdx = nodeIdx + node.childPtr + siblingsBefore;
-        stepSize >>= 6u;
-    }
-    return false;
-#endif
+    return pjvTileLeaf(startIndex, leafStart, resolution, blockMin, outLeaf);
 }
 
 // Is an animated source stored at this voxel, and under WHICH motion set?
@@ -2725,7 +2497,7 @@ bool pjvAnimatedSourceAt(chunkHeader h, ivec3 voxel,
         // zero-length .bin. One descent shape, used everywhere, is what keeps it under.
         ivec3 outBlock = voxel & ivec3(~3);
         Tree64NodeData outLeaf;
-        if (!pjvProbeLeafNode(h.geometryStartIndex, h.blockTableStartIndex, h.resolution, outBlock, outLeaf)) return false;
+        if (!pjvProbeLeafNode(h.geometryStartIndex, h.leafStartIndex, h.resolution, outBlock, outLeaf)) return false;
         uint zOut = calculateZOrderIndex4(uint(voxel.x - outBlock.x), uint(voxel.y - outBlock.y),
                                           uint(voxel.z - outBlock.z));
         if (!checkZOrderInValidMasks(outLeaf.data1, outLeaf.data2, zOut)) return false;
@@ -2921,7 +2693,7 @@ bool pjvResolveAdvect(chunkHeader h, MotionSet ms, uint setIndex, ivec3 cell,
                             all(lessThan(c, ivec3(int(h.resolution))));
             ivec3 blockMin = c & ivec3(~3);
             if (inBounds && (!haveCache || any(notEqual(blockMin, cacheMin)))) {
-                haveCache = pjvProbeLeafNode(h.geometryStartIndex, h.blockTableStartIndex, h.resolution, blockMin, cacheLeaf);
+                haveCache = pjvProbeLeafNode(h.geometryStartIndex, h.leafStartIndex, h.resolution, blockMin, cacheLeaf);
                 cacheMin = blockMin;
             }
             uint leafOffset = 0u;
@@ -3256,7 +3028,7 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
         stepRay.origin = envOriginBase + ray.direction * tAdvance;
         stepRay.direction = ray.direction;
         SceneIntersectData cellHit = marchRayThroughTree64_DDA(
-            stepRay, envQuery, 0.0, envBox, h.envelopeStartIndex, h.envelopeTableStartIndex, envRes, 0u,
+            stepRay, envQuery, 0.0, envBox, h.envelopeStartIndex, h.envelopeLeafStartIndex, envRes, 0u,
             h.envelopeMotionStartIndex, h.paletteOffset, -1.0, 1.0, false, noPeel);
         if (cellHit.foundBox.size < 0.0 || cellHit.rayT < 0.0) return miss;
         float cellEnterT = cellHit.rayT + tAdvance;   // envelope-frame, from the ray's own origin
@@ -3323,7 +3095,7 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
             // One descent for the whole envelope cell. See pjvProbeLeafNode: the geometry leaf
             // covering this block and the envelope cell are the same box.
             Tree64NodeData blockLeaf;
-            bool haveBlockLeaf = pjvProbeLeafNode(h.geometryStartIndex, h.blockTableStartIndex, h.resolution, blockMin, blockLeaf);
+            bool haveBlockLeaf = pjvProbeLeafNode(h.geometryStartIndex, h.leafStartIndex, h.resolution, blockMin, blockLeaf);
 
             // ---- THE BRACKET HINT, ONCE PER ENVELOPE CELL RATHER THAN ONCE PER SUB-CELL --------
             //
@@ -3640,7 +3412,7 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
         // a restart per refracting INTERFACE costs one per surface, which is what it has to cost.
         float geometryLimitT = (animate && peel.active) ? -1.0 : limitT;
 
-        tree64Intersect = marchRayThroughTree64_DDA(transformedRay, rayQuery, localTMin, tree64BoundingBox, tree64StartIndex, header.blockTableStartIndex, header.resolution, header.traversalLOD, header.materialIDStartIndex, header.paletteOffset, geometryLimitT, localToWorld, animate, peel);
+        tree64Intersect = marchRayThroughTree64_DDA(transformedRay, rayQuery, localTMin, tree64BoundingBox, tree64StartIndex, header.leafStartIndex, header.resolution, header.traversalLOD, header.materialIDStartIndex, header.paletteOffset, geometryLimitT, localToWorld, animate, peel);
 
         SceneIntersectData animHit;
         animHit.foundBox.size = -1.0;
@@ -3815,51 +3587,15 @@ VoxelMaterial fetchVoxelMaterialAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
 
     ivec3 voxelPos = clamp(hitVoxelCoord, ivec3(0), ivec3(int(res) - 1));
 
-#ifndef PJV_TREE64_MARCH
-    // Through the block table: the brick's leaf in two reads and one dependent one. A voxel that is not
-    // there -- a coarsened hit's corner -- reads the material the tree descent always gave it; see
-    // pjvTableLeafNearest.
+    // Through the tile table: the brick's leaf (or its tile) in two reads and at most one dependent one.
+    // A voxel that is not there -- a coarsened hit's corner -- reads the material the tree descent
+    // always gave it; see pjvTileLeafNearest.
     Tree64NodeData tableLeaf;
-    if (!pjvTableLeafNearest(h.geometryStartIndex, h.blockTableStartIndex, res, voxelPos, tableLeaf)) return emptyVoxelMaterial();
+    if (!pjvTileLeafNearest(h.geometryStartIndex, h.leafStartIndex, res, voxelPos, tableLeaf)) return emptyVoxelMaterial();
     ivec3 inLeaf = voxelPos & 3;
     uint zInLeaf = calculateZOrderIndex4(uint(inLeaf.x), uint(inLeaf.y), uint(inLeaf.z));
     return decodeMaterial(materialPaletteTexel(
         materialID(h.materialIDStartIndex + leafMaterialListOffset(tableLeaf, zInLeaf)) + h.paletteOffset));
-#else
-    uint zOrder = calculateZOrderIndex(uint(voxelPos.x), uint(voxelPos.y), uint(voxelPos.z), res);
-
-    uint nodeIdx = h.geometryStartIndex;
-    uint treeLevels = uint(log2(float(res)) / 2.0);
-    int level = int(treeLevels) - 1;
-    uint stepSize = 1u << (6u * uint(level));
-
-    for (; level >= 0; --level) {
-        Tree64NodeData node = tree64(nodeIdx);
-        if ((node.data3 & 1u) != 0u) {
-            // Leaf: bit 1 = uniform flag, bits 2.. = material byte offset. See voxel.h for the
-            // layout, and leafMaterialListOffset for the decode -- shared with the march's own hit
-            // sites so the fast path and this fallback cannot disagree about which byte a voxel owns.
-            //
-            // The rank used to be open-coded here, and it was missing the `childPos == 0` guard that
-            // calculateSiblingsBeforeThisZOrder carries: `0xFFFFFFFFu << 32u` is undefined in GLSL and
-            // masks to a shift of zero in HLSL, which returns the whole mask's popcount where the
-            // answer is zero. That mis-shaded the first-numbered voxel of every non-uniform leaf.
-            // NOTE: `uniform` is a reserved storage qualifier in HLSL/GLSL — do not name it that.
-            uint matID = materialID(h.materialIDStartIndex +
-                                    leafMaterialListOffset(node, (zOrder / stepSize) & 63u)) +
-                         h.paletteOffset;
-            return decodeMaterial(materialPaletteTexel(matID));
-        }
-        uint childZOrder = (zOrder / stepSize) & 63u;
-        uint siblingsBefore = calculateSiblingsBeforeThisZOrder(4, node.data1, node.data2, childZOrder);
-        uint childIdx = nodeIdx + node.childPtr + siblingsBefore;
-        nodeIdx = childIdx;
-        stepSize >>= 6u;
-    }
-
-    // Fell out of the descent without finding a leaf: an empty voxel.
-    return emptyVoxelMaterial();
-#endif
 }
 
 // Albedo only, for the renderers that shade from a colour and nothing else.

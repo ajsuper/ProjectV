@@ -196,7 +196,7 @@ Notes:
 
 ### `.data` Container Format
 
-A `.data` file holds the **intrinsic** voxel data for one component: one tree64, or a grid of equally-sized, grid-aligned tree64s. It carries an index so individual blocks can be **seeked/streamed without reading the whole file**. Placement (position/rotation/scale) is **not** stored here — it lives in `compose.json`.
+A `.data` file holds the **intrinsic** voxel data for one component: one block, or a grid of equally-sized, grid-aligned blocks. It carries an index so individual blocks can be **seeked/streamed without reading the whole file**. Placement (position/rotation/scale) is **not** stored here — it lives in `compose.json`.
 
 Binary layout, little-endian:
 
@@ -204,24 +204,35 @@ Binary layout, little-endian:
 Offset  Size  Field
 ------  ----  -----
 0       4     magic         = "PVDT" (0x50 0x56 0x44 0x54)
-4       4     uint32 version        (current: 1)
-8       4     uint32 flags          (bit0: voxelTypeData present)
+4       4     uint32 version        (current: 4; 2 and 3 still read)
+8       4     uint32 flags          (bit0: some block has an animation envelope)
 12      4     uint32 blockCount     (1 for a simple asset; N for a grid volume)
 16      4     uint32 resolution     (edge resolution; shared by all blocks)
 20      4     float  voxelScale     (world size of one voxel at resolution)
 24      ...   BlockEntry[blockCount] (block table, see below)
-...     ...   blob region: raw uint32 arrays, referenced by offsets below
+...     ...   blob region, referenced by offsets below
 ```
 
-`BlockEntry` (fixed 40 bytes):
+`BlockEntry` (64 bytes from v3; 40 in v2, without the envelope pairs):
 
 ```
 int32  gridX, gridY, gridZ     grid coordinate of this block (0,0,0 for a single-block asset)
-uint64 geometryOffset          byte offset into the file of this block's tree64 uint32[]
-uint32 geometryLength          length of the tree64 array, in uint32 units
-uint64 voxelTypeOffset         byte offset of this block's voxelTypeData uint32[] (0 if absent)
-uint32 voxelTypeLength         length in uint32 units (0 if absent)
+uint32 (padding)
+uint64 geometryOffset          byte offset of this block's geometry uint32[]
+uint32 geometryLength          its length, in uint32 units
+uint64 materialOffset          byte offset of its material bytes uint8[] (0 if absent)
+uint32 materialLength          their length, in bytes
+uint64 envelopeOffset          v3: the animation envelope's tree64 uint32[] (0 if absent)
+uint32 envelopeLength
+uint64 envelopeMotionOffset    v3: one motion byte per set envelope cell (0 if absent)
+uint32 envelopeMotionLength
 ```
+
+**What the geometry words are depends on the version.** From v4 they are the block's **tile table**
+(`utils/tile_table.h`) at the file's resolution, and the material bytes are that table's own; its first
+texel says where its arrays and leaves are (the boxes its dense levels cover). In v2 and v3 they are a tree64 and its leaf material bytes
+([tree64_data_structure.md](/docs/data_structures/tree64_data_structure.md)). The writer always writes
+v4; a reader checks a v4 block's offsets (`tileTableWellFormed`) before anything uses them.
 
 This one format covers both cases the plan needs:
 

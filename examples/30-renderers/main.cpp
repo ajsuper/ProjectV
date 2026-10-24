@@ -76,6 +76,7 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/type_mapping.h"
+#include "utils/blob_voxels.h"
 #include "utils/compose_io.h"
 #include "utils/material.h"
 #include "utils/picking.h"
@@ -772,7 +773,7 @@ static projv::Scene buildMaterialRoom() {
     std::vector<uint8_t> materialIDs;
     projv::utils::bakeMaterialsFromBrickMap(chunk.geometryData, materialIDs, *map);
     const int32_t blob = projv::internChunkGeometry(scene, chunk, std::move(map));
-    if (blob >= 0 && size_t(blob) < scene.geometryPool.size()) scene.geometryPool[blob].materialIDs = std::move(materialIDs);
+    if (blob >= 0 && size_t(blob) < scene.geometryPool.size()) projv::utils::setBlobTreeMaterials(scene.geometryPool[blob], std::move(materialIDs));
     scene.chunks.push_back(std::move(chunk));
     scene.looseChunks.push_back(0);
     scene.looseChunkCount = 1;

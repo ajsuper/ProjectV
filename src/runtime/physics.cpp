@@ -17,6 +17,7 @@
 
 #include "core/log.h"
 #include "runtime/loading.h"
+#include "utils/blob_voxels.h"
 #include "utils/loose_bvh.h"
 #include "utils/scene_query.h"
 #include "utils/picking.h"
@@ -622,39 +623,26 @@ namespace projv::runtime {
         }
 
         // The voxels of `source` whose centres lie within `radius` of `at` (both in voxels), with their
-        // palette slots, in z, y, x order. Chunks are decoded once and kept in `decoded`.
-        struct Decoded { utils::VoxelOccupancy occupancy; std::vector<uint8_t> slots; bool ok = false; };
-        std::vector<FractureVoxel> voxelsNear(const Scene& scene, const VoxelSource& source, core::vec3 at, float radius,
-                                              uint64_t maxCells, std::map<size_t, Decoded>& decoded) {
+        // palette slots, in z, y, x order. Read from each chunk's tile table in place: only the 16^3 blocks
+        // the sphere's box reaches are looked at, so a strike on a big chunk costs its neighbourhood, not
+        // the chunk.
+        std::vector<FractureVoxel> voxelsNear(const Scene& scene, const VoxelSource& source, core::vec3 at, float radius) {
             std::vector<FractureVoxel> out;
             const core::ivec3 low(glm::floor(at - radius)), high(glm::ceil(at + radius));
             for (const VoxelSource::Part& part : source.parts) {
                 core::ivec3 partHigh = part.offset + core::ivec3(int(part.resolution) - 1);
                 if (glm::any(glm::lessThan(partHigh, low)) || glm::any(glm::greaterThan(part.offset, high))) continue;
-                auto [it, fresh] = decoded.try_emplace(part.chunk);
-                Decoded& d = it->second;
-                if (fresh) {
-                    const Chunk& chunk = scene.chunks[part.chunk];
-                    if (chunk.geometryPoolIndex >= 0 && size_t(chunk.geometryPoolIndex) < scene.geometryPool.size())
-                        d.ok = utils::decodeVoxelSlots(scene.geometryPool[size_t(chunk.geometryPoolIndex)], part.resolution,
-                                                       maxCells, d.occupancy, d.slots) == utils::DecodeResult::Ok;
-                }
-                if (!d.ok) continue;
-                const utils::VoxelOccupancy& o = d.occupancy;
-                core::ivec3 from = glm::max(low - part.offset - o.origin, core::ivec3(0));
-                core::ivec3 to = glm::min(high - part.offset - o.origin, o.dims - core::ivec3(1));
-                for (int z = from.z; z <= to.z; z++)
-                    for (int y = from.y; y <= to.y; y++)
-                        for (int x = from.x; x <= to.x; x++) {
-                            size_t i = o.index({x, y, z});
-                            if (!o.cells[i]) continue;
-                            core::ivec3 p = part.offset + o.origin + core::ivec3(x, y, z);
-                            if (glm::distance(core::vec3(p) + core::vec3(0.5f), at) > radius) continue;
-                            FractureVoxel v;
-                            v.position = p;
-                            v.slot = d.slots[i];
-                            out.push_back(v);
-                        }
+                const Chunk& chunk = scene.chunks[part.chunk];
+                if (chunk.geometryPoolIndex < 0 || size_t(chunk.geometryPoolIndex) >= scene.geometryPool.size()) continue;
+                const utils::TileTable& tiles = utils::blobTiles(scene.geometryPool[size_t(chunk.geometryPoolIndex)]);
+                utils::forEachTileVoxelIn(tiles, low - part.offset, high - part.offset, [&](core::ivec3 local, uint8_t slot) {
+                    const core::ivec3 p = part.offset + local;
+                    if (glm::distance(core::vec3(p) + core::vec3(0.5f), at) > radius) return;
+                    FractureVoxel v;
+                    v.position = p;
+                    v.slot = slot;
+                    out.push_back(v);
+                });
             }
             std::sort(out.begin(), out.end(), [](const FractureVoxel& a, const FractureVoxel& b) {
                 return std::make_tuple(a.position.z, a.position.y, a.position.x) < std::make_tuple(b.position.z, b.position.y, b.position.x);
@@ -759,10 +747,8 @@ namespace projv::runtime {
             auto breakable = [&](uint16_t m) { return m != 0 && sim.material(m).strength > 0.0f; };
 
             // What was struck: the voxel nearest the point.
-            std::map<size_t, Decoded> decoded;
-            const uint64_t maxCells = physics.collision.maxDecodedCells;
             const PhysicsConfig::FractureLimits& limits = physics.fractureLimits;
-            std::vector<FractureVoxel> near = voxelsNear(scene, source, at, limits.searchVoxels, maxCells, decoded);
+            std::vector<FractureVoxel> near = voxelsNear(scene, source, at, limits.searchVoxels);
             if (near.empty()) {
                 core::trace("physics: fracture of entity {}: no voxel within {} of the strike", static_cast<uint32_t>(entity),
                             limits.searchVoxels);
@@ -819,7 +805,7 @@ namespace projv::runtime {
                                           limits.maxReachVoxels);
                 return it->second;
             };
-            std::vector<FractureVoxel> voxels = voxelsNear(scene, source, at, outer, maxCells, decoded);
+            std::vector<FractureVoxel> voxels = voxelsNear(scene, source, at, outer);
             for (FractureVoxel& v : voxels) {
                 v.material = materialOf(v.slot);
                 v.breakable = breakable(v.material) &&
@@ -872,16 +858,13 @@ namespace projv::runtime {
 
         constexpr uint64_t MAX_ISLAND_CELLS = 1ull << 24;   // the box islands are worked out in, at most
 
-        // Every voxel under a source, counted.
-        uint64_t voxelCount(const Scene& scene, const VoxelSource& source, uint64_t maxCells) {
+        // Every voxel under a source, counted from its tile tables (no decode).
+        uint64_t voxelCount(const Scene& scene, const VoxelSource& source) {
             uint64_t total = 0;
             for (const VoxelSource::Part& part : source.parts) {
-                utils::VoxelOccupancy o;
                 const Chunk& chunk = scene.chunks[part.chunk];
-                if (chunk.geometryPoolIndex >= 0 &&
-                    utils::decodeOccupancy(scene.geometryPool[size_t(chunk.geometryPoolIndex)], part.resolution, maxCells, o) ==
-                        utils::DecodeResult::Ok)
-                    total += o.solid;
+                if (chunk.geometryPoolIndex >= 0 && size_t(chunk.geometryPoolIndex) < scene.geometryPool.size())
+                    total += utils::tileTableVoxelCount(utils::blobTiles(scene.geometryPool[size_t(chunk.geometryPoolIndex)]));
             }
             return total;
         }
@@ -1044,10 +1027,9 @@ namespace projv::runtime {
             for (const VoxelSplit::Piece& piece : split.pieces) for (core::ivec3 p : piece.voxels) widen(p);
             for (core::ivec3 p : split.dust) widen(p);
             if (low.x > high.x) return;
-            std::map<size_t, Decoded> decoded;
             const core::vec3 middle = 0.5f * core::vec3(low + high + core::ivec3(1));
             const float radius = glm::length(core::vec3(high - low + core::ivec3(1))) * 0.5f + 1.0f;
-            const std::vector<FractureVoxel> voxels = voxelsNear(scene, source, middle, radius, physics.collision.maxDecodedCells, decoded);
+            const std::vector<FractureVoxel> voxels = voxelsNear(scene, source, middle, radius);
             std::map<std::tuple<int, int, int>, size_t> at;
             for (size_t i = 0; i < voxels.size(); i++) at[{voxels[i].position.x, voxels[i].position.y, voxels[i].position.z}] = i;
             size_t missing = 0;
@@ -1077,7 +1059,7 @@ namespace projv::runtime {
             if (body.motion == MotionType::Dynamic && !physics.carried.count(entity))
                 physics.carried[entity] = {state.linearVelocity, state.angularVelocity};
             const RigidBody* rigid = world.try_get<RigidBody>(entity);
-            const uint64_t total = rigid && rigid->mass > 0.0f ? voxelCount(scene, source, physics.collision.maxDecodedCells) : 0;
+            const uint64_t total = rigid && rigid->mass > 0.0f ? voxelCount(scene, source) : 0;
             cutIslands(world, physics, scene, entity, h, source, voxels, std::move(cuts), total, state, nullptr,
                        BreakCause::Replicated, dust);
             // Rebuilt for its new shape, and no island pass: the server's split is the whole change.
@@ -1118,31 +1100,35 @@ namespace projv::runtime {
                 partAt[key(core::ivec3(utils::floorDiv(part.offset.x, res), utils::floorDiv(part.offset.y, res),
                                        utils::floorDiv(part.offset.z, res)))] = i;
             }
-            struct Block { Decoded d; std::vector<uint8_t> mark; };
-            std::map<size_t, Block> blocks;
-            const uint64_t maxCells = physics.collision.maxDecodedCells;
+            // The 16^3 blocks the floods reach, each decoded from its chunk's tile table when first reached:
+            // every cell's slot + 1 (0 empty) and its mark.
+            struct Block { std::array<uint16_t, 4096> cells{}; std::array<uint8_t, 4096> mark{}; };   // 16 bits: slot 255 + 1
+            std::map<Key, Block> blocks;
             // The voxel at p: whether it is solid, its slot, and its mark (null if not solid).
             auto at = [&](core::ivec3 p, uint8_t& slot) -> uint8_t* {
                 if (gone.count(key(p))) return nullptr;
-                auto it = partAt.find(key(core::ivec3(utils::floorDiv(p.x, res), utils::floorDiv(p.y, res), utils::floorDiv(p.z, res))));
-                if (it == partAt.end()) return nullptr;
-                const VoxelSource::Part& part = source.parts[it->second];
-                auto [b, fresh] = blocks.try_emplace(it->second);
-                if (fresh) {
-                    const Chunk& chunk = scene.chunks[part.chunk];
-                    if (chunk.geometryPoolIndex >= 0 && size_t(chunk.geometryPoolIndex) < scene.geometryPool.size())
-                        b->second.d.ok = utils::decodeVoxelSlots(scene.geometryPool[size_t(chunk.geometryPoolIndex)], part.resolution,
-                                                                 maxCells, b->second.d.occupancy, b->second.d.slots) == utils::DecodeResult::Ok;
-                    if (b->second.d.ok) b->second.mark.assign(b->second.d.occupancy.cells.size(), 0);
-                }
+                const core::ivec3 blockCoord(utils::floorDiv(p.x, 16), utils::floorDiv(p.y, 16), utils::floorDiv(p.z, 16));
+                auto [b, fresh] = blocks.try_emplace(key(blockCoord));
                 Block& block = b->second;
-                if (!block.d.ok) return nullptr;
-                const utils::VoxelOccupancy& o = block.d.occupancy;
-                const core::ivec3 q = p - part.offset - o.origin;
-                if (glm::any(glm::lessThan(q, core::ivec3(0))) || glm::any(glm::greaterThanEqual(q, o.dims))) return nullptr;
-                const size_t i = o.index(q);
-                if (!o.cells[i]) return nullptr;
-                slot = block.d.slots[i];
+                if (fresh) {
+                    auto it = partAt.find(key(core::ivec3(utils::floorDiv(p.x, res), utils::floorDiv(p.y, res), utils::floorDiv(p.z, res))));
+                    if (it != partAt.end()) {
+                        const VoxelSource::Part& part = source.parts[it->second];
+                        const Chunk& chunk = scene.chunks[part.chunk];
+                        if (chunk.geometryPoolIndex >= 0 && size_t(chunk.geometryPoolIndex) < scene.geometryPool.size()) {
+                            const core::ivec3 origin = blockCoord * 16 - part.offset;   // the block in its chunk
+                            utils::forEachTileVoxelIn(utils::blobTiles(scene.geometryPool[size_t(chunk.geometryPoolIndex)]),
+                                                      origin, origin + core::ivec3(15), [&](core::ivec3 v, uint8_t s) {
+                                const core::ivec3 l = v - origin;
+                                block.cells[size_t(l.x) + 16 * (size_t(l.y) + 16 * size_t(l.z))] = uint16_t(s + 1);
+                            });
+                        }
+                    }
+                }
+                const core::ivec3 l = p - blockCoord * 16;
+                const size_t i = size_t(l.x) + 16 * (size_t(l.y) + 16 * size_t(l.z));
+                if (!block.cells[i]) return nullptr;
+                slot = uint8_t(block.cells[i] - 1);
                 return &block.mark[i];
             };
 
@@ -1226,7 +1212,7 @@ namespace projv::runtime {
                 }
                 cuts.push_back(std::move(cut));
             }
-            core::trace("physics: entity {}: local support pass from {} voxels gone: {} islands, {} blocks decoded",
+            core::trace("physics: entity {}: local support pass from {} voxels gone: {} islands, {} 16^3 blocks decoded",
                         static_cast<uint32_t>(entity), gone.size(), islands, blocks.size());
             if (cuts.empty()) return;
             cutIslands(world, physics, scene, entity, h, source, voxels, std::move(cuts), 0, state, strike,
@@ -1318,12 +1304,11 @@ namespace projv::runtime {
                     }
                     islands.push_back(std::move(island));
                 }
-                if (parentMass > 0.0f) total = voxelCount(scene, source, physics.collision.maxDecodedCells);
+                if (parentMass > 0.0f) total = voxelCount(scene, source);
             } else {
-                std::map<size_t, Decoded> decoded;
                 const core::vec3 middle = 0.5f * core::vec3(low + high + core::ivec3(1));
                 const float radius = glm::length(core::vec3(dims)) * 0.5f + 1.0f;
-                voxels = voxelsNear(scene, source, middle, radius, physics.collision.maxDecodedCells, decoded);
+                voxels = voxelsNear(scene, source, middle, radius);
                 if (voxels.empty()) return;
                 total = voxels.size();
                 group.assign(voxels.size(), 0);

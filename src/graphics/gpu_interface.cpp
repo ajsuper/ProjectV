@@ -1,5 +1,7 @@
 #include "graphics/gpu_interface.h"
 #include "utils/block_table.h"
+#include "utils/blob_voxels.h"
+#include "utils/tile_table.h"
 #include "utils/scene_query.h"
 #include "utils/loose_bvh.h"
 #include "utils/material.h"
@@ -298,14 +300,15 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
     g.geometryStartIndex = r.geomTexelOffset;
     g.geometryEndIndex = r.geomTexelOffset + r.geomTexelLen;
     g.materialIDStartIndex = r.matTexelOffset * 4u;
-    // Each tree's block table follows its nodes in the same range (see GPUBlobRange).
-    g.blockTableStartIndex = r.geomTexelOffset + r.geomNodeCount;
-    g.envelopeTableStartIndex = r.envTexelOffset + r.envNodeCount;
-    // Zero node count is how a chunk says it has no animation envelope, and it is the common case.
+    // Each table's leaves follow its masks and starts in the same range (see GPUBlobRange).
+    g.leafStartIndex = r.geomTexelOffset + r.geomLeafStart;
+    g.envelopeLeafStartIndex = r.envTexelOffset + r.envLeafStart;
+    // Zero (an envelope table with no texels before its leaves: none at all) is how a chunk says it has
+    // no animation envelope, and it is the common case.
     // Nothing else in the header changes for such a chunk, which is what makes the structure
     // adjacent: a renderer that never looks at these words cannot tell they exist.
     g.envelopeStartIndex = r.envTexelOffset;
-    g.envelopeNodeCount = r.envNodeCount;
+    g.envelopeNodeCount = r.envLeafStart;
     g.envelopeMotionStartIndex = r.envMotionTexelOffset * 4u;
     g.positionX = chunk.header.position.x;
     g.positionY = chunk.header.position.y;
@@ -402,18 +405,22 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
 
 
-        // A tree packed for upload: its nodes, then its block table (utils/block_table.h), which the
-        // march reads instead of the tree's upper levels. `nodes` is the node count -- where the
-        // table starts. An empty tree packs to nothing.
-        std::vector<uint32_t> packTreeWithTable(const std::vector<uint32_t>& tree64, uint32_t& nodes) {
-            nodes = static_cast<uint32_t>(tree64.size() / 3);
-            if (nodes == 0) return {};
-            std::vector<uint32_t> out = packGeometryTexels(tree64);
+        // A tree packed for upload: its tile table (utils/tile_table.h), what the GPU marches. The
+        // table replaces the tree on the GPU, and its own materials replace the tree's `materials`
+        // (they add the full tiles' bytes): `outMaterials` is what goes to the materialID texture.
+        // `leafStart` is where the table's leaves start, in texels from its start. An empty tree packs
+        // to nothing.
+        std::vector<uint32_t> packTiles(const std::vector<uint32_t>& tree64, const std::vector<uint8_t>& materials,
+                                        uint32_t& leafStart, std::vector<uint8_t>& outMaterials) {
+            leafStart = 0;
+            outMaterials.clear();
+            if (tree64.size() < 3) return {};
             uint32_t stray = 0;
-            std::vector<uint32_t> table = utils::buildBlockTable(tree64, utils::tree64Resolution(tree64), &stray);
-            if (stray) core::warn("packTreeWithTable: {} leaves above the 4^3 level -- they will not be drawn", stray);
-            out.insert(out.end(), table.begin(), table.end());
-            return out;
+            utils::TileTable table = utils::buildTileTable(tree64, materials, utils::tree64Resolution(tree64), &stray);
+            if (stray) core::warn("packTiles: {} leaves above the 4^3 level -- they will not be drawn", stray);
+            leafStart = table.leafStart;
+            outMaterials = std::move(table.materials);
+            return std::move(table.texels);
         }
 
         // Resolve what a blob should actually upload, applying its storage LOD.
@@ -422,10 +429,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         // they cannot disagree about a blob's on-GPU size -- a disagreement would mean the allocator
         // reserved one length and the header advertised another.
         //
-        // At renderLOD 0 the scratch buffers are untouched and the blob's own arrays are used
-        // directly, so the common case costs nothing. Otherwise the coarsened copy is built into
-        // caller-owned scratch: the blob's CPU arrays always stay full resolution.
-        // The envelope is deliberately NOT run through downsampleTree64 alongside the geometry.
+        // The envelope is deliberately NOT downsampled alongside the geometry.
         //
         // Storage LOD exists to trade geometric detail for VRAM at distance, and it is applied to a
         // tree whose cells are voxels. The envelope's cells are already 4x4x4 voxels, so one LOD step
@@ -435,20 +439,12 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         // want LOD is a chunk whose animation is well below a pixel, which is what the query's
         // animResolveDistance already turns off. So a coarsened blob keeps its envelope at full
         // envelope resolution, and the resolve simply stops running at that distance.
-        void effectiveBlobData(const GeometryBlob& blob,
-                               std::vector<uint32_t>& scratchGeom,
-                               std::vector<uint8_t>& scratchMat,
-                               const std::vector<uint32_t>*& outGeom,
-                               const std::vector<uint8_t>*& outMat) {
-            if (blob.renderLOD == 0) {
-                outGeom = &blob.geometry;
-                outMat = &blob.materialIDs;
-                return;
-            }
-            utils::downsampleTree64(blob.geometry, blob.materialIDs, blob.renderLOD,
-                                    scratchGeom, scratchMat);
-            outGeom = &scratchGeom;
-            outMat = &scratchMat;
+        // At renderLOD 0 that is the blob's own tile table, uploaded as it is. Coarsened, it is downsampled
+        // into caller-owned scratch: the blob's own voxels always stay full resolution.
+        const utils::TileTable& effectiveBlobTiles(const GeometryBlob& blob, utils::TileTable& scratch) {
+            if (blob.renderLOD == 0) return utils::blobTiles(blob);
+            scratch = utils::downsampleTileTable(utils::blobTiles(blob), blob.renderLOD);
+            return scratch;
         }
 
         std::vector<uint8_t> packMaterialIDTexels8(const std::vector<uint8_t>& materialIDs) {
@@ -1221,29 +1217,29 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         uint32_t geomUsedPadded = 0, matUsedPadded = 0;
         uint32_t liveBlobs = 0;
         // Reused across blobs; see the matching scratch in uploadDirtyBlobs.
-        std::vector<uint32_t> lodGeomScratch;
-        std::vector<uint8_t> lodMatScratch;
+        utils::TileTable lodTileScratch;
 
         for (size_t b = 0; b < scene.geometryPool.size(); b++) {
             const GeometryBlob& blob = scene.geometryPool[b];
             if (blob.refCount == 0) continue;
             liveBlobs++;
 
-            const std::vector<uint32_t>* geomSrc = nullptr;
-            const std::vector<uint8_t>* matSrc = nullptr;
-            effectiveBlobData(blob, lodGeomScratch, lodMatScratch, geomSrc, matSrc);
+            const utils::TileTable& tiles = effectiveBlobTiles(blob, lodTileScratch);
+            const std::vector<uint8_t>* matSrc = &tiles.materials;
 
-            uint32_t geomNodes = 0, envNodeCount = 0;
-            std::vector<uint32_t> gt = packTreeWithTable(*geomSrc, geomNodes);
-            std::vector<uint32_t> et = packTreeWithTable(blob.envelope, envNodeCount);
-            uint32_t nodes = static_cast<uint32_t>(gt.size() / 4);   // texels: nodes + block table
+            uint32_t geomNodes = 0, envLeafStart = 0;   // where each table's leaves start
+            std::vector<uint8_t> envMaterials;
+            geomNodes = tiles.leafStart;
+            const std::vector<uint32_t>& gt = tiles.texels;
+            std::vector<uint32_t> et = packTiles(blob.envelope, blob.envelopeMotion, envLeafStart, envMaterials);
+            uint32_t nodes = static_cast<uint32_t>(gt.size() / 4);   // texels: the tile table, leaves included
             uint32_t matTexels = static_cast<uint32_t>((matSrc->size() + 3) / 4);
             uint32_t gAlloc = paddedAlloc(nodes);
             uint32_t mAlloc = paddedAlloc(matTexels);
-            // Never coarsened; see effectiveBlobData. Zero for a blob with no animation, and zero
+            // Never coarsened; see effectiveBlobTiles. Zero for a blob with no animation, and zero
             // must short-circuit paddedAlloc's floor so a static blob reserves nothing at all.
-            uint32_t envNodes = static_cast<uint32_t>(et.size() / 4);   // texels: nodes + block table
-            uint32_t envMotTexels = static_cast<uint32_t>((blob.envelopeMotion.size() + 3) / 4);
+            uint32_t envNodes = static_cast<uint32_t>(et.size() / 4);   // texels, likewise
+            uint32_t envMotTexels = static_cast<uint32_t>((envMaterials.size() + 3) / 4);
             uint32_t eAlloc = envNodes ? paddedAlloc(envNodes) : 0u;
             uint32_t emAlloc = envMotTexels ? paddedAlloc(envMotTexels) : 0u;
 
@@ -1263,9 +1259,9 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             rng.envMotionTexelOffset = matUsedPadded + mAlloc;
             rng.envMotionTexelLen    = envMotTexels;
             rng.envMotionTexelAllocated = emAlloc;
-            rng.envMotionByteLen     = static_cast<uint32_t>(blob.envelopeMotion.size());
-            rng.geomNodeCount      = geomNodes;
-            rng.envNodeCount       = envNodeCount;
+            rng.envMotionByteLen     = static_cast<uint32_t>(envMaterials.size());
+            rng.geomLeafStart      = geomNodes;
+            rng.envLeafStart       = envLeafStart;
             rng.uploadedLOD        = blob.renderLOD;
             rng.uploaded           = true;
             gpuData.blobRanges[b]  = rng;
@@ -1280,7 +1276,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 tree64Texels.insert(tree64Texels.end(), static_cast<size_t>(eAlloc - envNodes) * 4, 0u);
             }
             if (emAlloc) {
-                std::vector<uint8_t> emt = packMaterialIDTexels8(blob.envelopeMotion);
+                std::vector<uint8_t> emt = packMaterialIDTexels8(envMaterials);
                 materialIDTexels.insert(materialIDTexels.end(), emt.begin(), emt.end());
                 materialIDTexels.insert(materialIDTexels.end(), static_cast<size_t>(emAlloc - envMotTexels) * 4, 0u);
             }
@@ -1381,8 +1377,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         }
 
         // Reused across blobs so a flush that coarsens many chunks does not reallocate per blob.
-        std::vector<uint32_t> lodGeomScratch;
-        std::vector<uint8_t> lodMatScratch;
+        utils::TileTable lodTileScratch;
 
         for (size_t b = 0; b < scene.geometryPool.size(); b++) {
             GeometryBlob& blob = scene.geometryPool[b];
@@ -1393,7 +1388,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 gpuData.materialIDAlloc.free(r.matTexelOffset, r.matTexelAllocated);
                 if (r.envTexelAllocated) gpuData.tree64Alloc.free(r.envTexelOffset, r.envTexelAllocated);
                 if (r.envMotionTexelAllocated) gpuData.materialIDAlloc.free(r.envMotionTexelOffset, r.envMotionTexelAllocated);
-                r.envTexelAllocated = 0; r.envTexelLen = 0; r.envNodeCount = 0;
+                r.envTexelAllocated = 0; r.envTexelLen = 0; r.envLeafStart = 0;
                 r.envMotionTexelAllocated = 0; r.envMotionTexelLen = 0;
                 r.uploaded = false;
                 continue;
@@ -1401,22 +1396,23 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             if (blob.refCount == 0) continue;
             if (!blob.dirty) continue;
 
-            const std::vector<uint32_t>* geomSrc = nullptr;
-            const std::vector<uint8_t>* matSrc = nullptr;
-            effectiveBlobData(blob, lodGeomScratch, lodMatScratch, geomSrc, matSrc);
+            const utils::TileTable& tiles = effectiveBlobTiles(blob, lodTileScratch);
+            const std::vector<uint8_t>* matSrc = &tiles.materials;
 
-            // Each tree is packed with its block table appended, so the lengths below are texels.
-            uint32_t geomNodes = 0, envNodeCount = 0;
-            std::vector<uint32_t> geomPacked = packTreeWithTable(*geomSrc, geomNodes);
+            // Each tree is packed as its tile table, so the lengths below are texels.
+            uint32_t geomNodes = 0, envLeafStart = 0;   // where each table's leaves start
+            std::vector<uint8_t> envMaterials;
+            geomNodes = tiles.leafStart;
+            const std::vector<uint32_t>& geomPacked = tiles.texels;
             uint32_t nodes = static_cast<uint32_t>(geomPacked.size() / 4);
             uint32_t matTexels = static_cast<uint32_t>((matSrc->size() + 3) / 4);
             uint32_t matBytes = static_cast<uint32_t>(matSrc->size());
-            // The envelope is never coarsened -- see effectiveBlobData -- so it comes straight off
+            // The envelope is never coarsened -- see effectiveBlobTiles -- so it comes straight off
             // the blob whatever the LOD is.
-            std::vector<uint32_t> envPacked = packTreeWithTable(blob.envelope, envNodeCount);
+            std::vector<uint32_t> envPacked = packTiles(blob.envelope, blob.envelopeMotion, envLeafStart, envMaterials);
             uint32_t envNodes = static_cast<uint32_t>(envPacked.size() / 4);
-            uint32_t envMotTexels = static_cast<uint32_t>((blob.envelopeMotion.size() + 3) / 4);
-            uint32_t envMotBytes = static_cast<uint32_t>(blob.envelopeMotion.size());
+            uint32_t envMotTexels = static_cast<uint32_t>((envMaterials.size() + 3) / 4);
+            uint32_t envMotBytes = static_cast<uint32_t>(envMaterials.size());
 
             // An LOD change forces a realloc even when the blob shrank. The normal test only fires
             // on growth, so without this a demoted blob would keep its old oversized range until
@@ -1486,8 +1482,8 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             }
             // Record what is now resident, so makeHeader advertises the matching resolution.
             r.uploadedLOD = blob.renderLOD;
-            r.geomNodeCount = geomNodes;
-            r.envNodeCount = envNodeCount;
+            r.geomLeafStart = geomNodes;
+            r.envLeafStart = envLeafStart;
 
             uploadTexelSpan(gpuData.tree64Texture, gpuData.tree64Width,
                            geomPacked, r.geomTexelOffset, r.geomTexelLen);
@@ -1505,7 +1501,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                                 envPacked, r.envTexelOffset, r.envTexelLen);
             }
             if (envMotTexels) {
-                std::vector<uint8_t> envMotPacked = packMaterialIDTexels8(blob.envelopeMotion);
+                std::vector<uint8_t> envMotPacked = packMaterialIDTexels8(envMaterials);
                 uploadTexelSpan8(gpuData.materialIDTexture, gpuData.materialIDWidth,
                                  envMotPacked, r.envMotionTexelOffset, r.envMotionTexelLen);
             }
@@ -1623,26 +1619,26 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
         uint32_t geomUsedPadded = 0, matUsedPadded = 0;
         uint32_t liveBlobs = 0;
         // Reused across blobs; see the matching scratch in uploadDirtyBlobs.
-        std::vector<uint32_t> lodGeomScratch;
-        std::vector<uint8_t> lodMatScratch;
+        utils::TileTable lodTileScratch;
         for (size_t b = 0; b < scene.geometryPool.size(); b++) {
             const GeometryBlob& blob = scene.geometryPool[b];
             if (blob.refCount == 0) { gpuData.blobRanges[b].uploaded = false; continue; }
             liveBlobs++;
-            const std::vector<uint32_t>* geomSrc = nullptr;
-            const std::vector<uint8_t>* matSrc = nullptr;
-            effectiveBlobData(blob, lodGeomScratch, lodMatScratch, geomSrc, matSrc);
-            uint32_t geomNodes = 0, envNodeCount = 0;
-            std::vector<uint32_t> gt = packTreeWithTable(*geomSrc, geomNodes);
-            std::vector<uint32_t> et = packTreeWithTable(blob.envelope, envNodeCount);
-            uint32_t nodes = static_cast<uint32_t>(gt.size() / 4);   // texels: nodes + block table
+            const utils::TileTable& tiles = effectiveBlobTiles(blob, lodTileScratch);
+            const std::vector<uint8_t>* matSrc = &tiles.materials;
+            uint32_t geomNodes = 0, envLeafStart = 0;   // where each table's leaves start
+            std::vector<uint8_t> envMaterials;
+            geomNodes = tiles.leafStart;
+            const std::vector<uint32_t>& gt = tiles.texels;
+            std::vector<uint32_t> et = packTiles(blob.envelope, blob.envelopeMotion, envLeafStart, envMaterials);
+            uint32_t nodes = static_cast<uint32_t>(gt.size() / 4);   // texels: the tile table, leaves included
             uint32_t matTexels = static_cast<uint32_t>((matSrc->size() + 3) / 4);
             uint32_t gAlloc = paddedAlloc(nodes);
             uint32_t mAlloc = paddedAlloc(matTexels);
             // See the matching block in growDataTextures. Same layout rule: a blob's envelope
             // immediately follows its geometry, and zero allocates nothing.
-            uint32_t envNodes = static_cast<uint32_t>(et.size() / 4);   // texels: nodes + block table
-            uint32_t envMotTexels = static_cast<uint32_t>((blob.envelopeMotion.size() + 3) / 4);
+            uint32_t envNodes = static_cast<uint32_t>(et.size() / 4);   // texels, likewise
+            uint32_t envMotTexels = static_cast<uint32_t>((envMaterials.size() + 3) / 4);
             uint32_t eAlloc = envNodes ? paddedAlloc(envNodes) : 0u;
             uint32_t emAlloc = envMotTexels ? paddedAlloc(envMotTexels) : 0u;
             GPUBlobRange rng{};
@@ -1659,9 +1655,9 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             rng.envMotionTexelOffset = matUsedPadded + mAlloc;
             rng.envMotionTexelLen    = envMotTexels;
             rng.envMotionTexelAllocated = emAlloc;
-            rng.envMotionByteLen     = static_cast<uint32_t>(blob.envelopeMotion.size());
-            rng.geomNodeCount      = geomNodes;
-            rng.envNodeCount       = envNodeCount;
+            rng.envMotionByteLen     = static_cast<uint32_t>(envMaterials.size());
+            rng.geomLeafStart      = geomNodes;
+            rng.envLeafStart       = envLeafStart;
             rng.uploadedLOD        = blob.renderLOD;
             rng.uploaded           = true;
             gpuData.blobRanges[b]  = rng;
@@ -1675,7 +1671,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
                 tree64Texels.insert(tree64Texels.end(), static_cast<size_t>(eAlloc - envNodes) * 4, 0u);
             }
             if (emAlloc) {
-                std::vector<uint8_t> emt = packMaterialIDTexels8(blob.envelopeMotion);
+                std::vector<uint8_t> emt = packMaterialIDTexels8(envMaterials);
                 materialIDTexels.insert(materialIDTexels.end(), emt.begin(), emt.end());
                 materialIDTexels.insert(materialIDTexels.end(), static_cast<size_t>(emAlloc - envMotTexels) * 4, 0u);
             }

@@ -53,24 +53,26 @@ exact power of 4, because both the shader and the CPU builder derive tree depth 
 `log2(resolution)/2` with an implicit truncation. A 64³ tree goes 64 → 16 → 4; a resolution of 32
 would be read as 2 levels and traversed as if it were 16³.
 
-This is implemented by `downsampleTree64` (`src/utils/voxel_management.cpp`) and applied at GPU
+This is implemented by `downsampleTree64` (`src/utils/voxel_management.cpp`). The engine now applies
+storage LOD to tile tables (`downsampleTileTable`, which gives the table of the downsampled tree), at GPU
 upload time only — see `GeometryBlob::renderLOD` in
 [scene_data_structure.md](/docs/data_structures/scene_data_structure.md). The CPU copy is always
 full resolution.
 
-### Block tables (GPU only)
+### Tile tables replaced the tree as the engine's format
 
-The GPU march does not descend the tree from its root. At upload each tree gets a **block table**
-(`utils/block_table.h`) appended to its range in the tree64 texture: one texel per 64³ region (a copy
-of that region node's mask) and one per 16³ block (a copy of the block node's mask and the index of
-its first child leaf, relative to the root). A ray reads those two from its cell's coordinate and then
-the leaf — the tree's own node. Nothing below the 16³ level is copied, so the table costs a few percent
-of the tree. It is derived, never stored: the `.data` format is unchanged.
+A blob's voxels are now a **tile table** (`utils/tile_table.h`; plan:
+[voxel-storage-tiles.md](/docs/plans/voxel-storage-tiles.md)): the GPU marches it, edits change it in
+place and physics reads it, and `.data` v4 stores it. A tile table keeps the tree64's **leaf encoding**
+exactly -- the 64-bit voxel mask, and data3 as above (leaf flag, uniform flag, material offset) -- for its
+leaves, so everything on this page about leaves still holds. What it drops is the tree's upper levels:
+the region (64³) and block (16³) levels are dense masks over the box the content spans, addressed from a
+voxel's coordinate, with a
+second mask for children that are solid and one material, which need no leaf at all.
 
-Trees smaller than a region or a block (resolution 16 and 4) get a synthetic one-child entry. Every
-tree the engine builds or downsamples keeps its leaves on its last level, which the table relies on
-(`utils::buildBlockTable` counts any leaf above the 4³ level as a stray). See
-[block-table-traversal.md](/docs/plans/block-table-traversal.md).
+The tree64 is still the form the brick-map authoring path builds and the form v2 and v3 `.data` files
+hold; a blob converts between the two on demand
+(`utils/blob_voxels.h`).
 
 ### More
 
