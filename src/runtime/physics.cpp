@@ -8,6 +8,7 @@
 #include <memory>
 #include <set>
 #include <map>
+#include <queue>
 #include <cstring>
 #include <fstream>
 #include <tuple>
@@ -87,6 +88,9 @@ namespace projv::runtime {
                 float edge = 0.0f, strength = 0.0f, metres = 0.0f;
             };
             std::map<Entity, Break>       breaking;
+            // The voxels each entity's plain edits removed this step (its component's voxel space): where
+            // the island pass of a collider too big to look over whole starts (localSupport).
+            std::map<Entity, std::vector<core::ivec3>> removed;
             // The physics material library: names in definition order (index = position + 1).
             struct Library {
                 std::vector<std::string>        names;
@@ -1084,6 +1088,151 @@ namespace projv::runtime {
             }
         }
 
+        // The island pass of a static collider too big to look over whole (a level's world, billions of
+        // cells): what the change cut loose is found from the change outward. Each solid voxel beside
+        // what went -- an edit's removals, a strike's shards -- starts a flood through solid voxels,
+        // lowest first so that one standing on the ground finds it quickly. A flood that reaches an
+        // anchor (anchor material; with anchorBase, the component's lowest row of blocks, where a level's
+        // ground is), a voxel an earlier flood found held, or more than localSupportVoxels voxels, is
+        // held; one that closes off first is an island, and comes away with the strike's shards.
+        // Chunks are decoded as the floods reach them. Deterministic: the seeds are taken in voxel order
+        // and each flood in (y, z, x) order.
+        void localSupport(World& world, PhysicsRuntime& physics, Scene& scene, Entity entity, ComponentHandle h,
+                          const VoxelSource& source, ComponentHandle owner, bool anchorBase, core::ivec3 low,
+                          const BodyState& state, const PhysicsRuntime::Break* strike, std::vector<core::ivec3> removed) {
+            // The voxels that went: an edit's removals and the strike's shards (cut below, so not solid).
+            using Key = std::tuple<int, int, int>;
+            auto key = [](core::ivec3 p) { return Key{p.x, p.y, p.z}; };
+            std::set<Key> gone;
+            for (core::ivec3 p : removed) gone.insert(key(p));
+            if (strike)
+                for (const auto& shard : strike->shards)
+                    for (const FractureVoxel& v : shard) gone.insert(key(v.position));
+
+            // The parts by block, decoded on demand, each with a mark per cell: 0 not reached, 1 reached
+            // by the flood under way, 2 held, 3 an island's.
+            const int res = int(source.parts.front().resolution);
+            std::map<Key, size_t> partAt;
+            for (size_t i = 0; i < source.parts.size(); i++) {
+                const VoxelSource::Part& part = source.parts[i];
+                partAt[key(core::ivec3(utils::floorDiv(part.offset.x, res), utils::floorDiv(part.offset.y, res),
+                                       utils::floorDiv(part.offset.z, res)))] = i;
+            }
+            struct Block { Decoded d; std::vector<uint8_t> mark; };
+            std::map<size_t, Block> blocks;
+            const uint64_t maxCells = physics.collision.maxDecodedCells;
+            // The voxel at p: whether it is solid, its slot, and its mark (null if not solid).
+            auto at = [&](core::ivec3 p, uint8_t& slot) -> uint8_t* {
+                if (gone.count(key(p))) return nullptr;
+                auto it = partAt.find(key(core::ivec3(utils::floorDiv(p.x, res), utils::floorDiv(p.y, res), utils::floorDiv(p.z, res))));
+                if (it == partAt.end()) return nullptr;
+                const VoxelSource::Part& part = source.parts[it->second];
+                auto [b, fresh] = blocks.try_emplace(it->second);
+                if (fresh) {
+                    const Chunk& chunk = scene.chunks[part.chunk];
+                    if (chunk.geometryPoolIndex >= 0 && size_t(chunk.geometryPoolIndex) < scene.geometryPool.size())
+                        b->second.d.ok = utils::decodeVoxelSlots(scene.geometryPool[size_t(chunk.geometryPoolIndex)], part.resolution,
+                                                                 maxCells, b->second.d.occupancy, b->second.d.slots) == utils::DecodeResult::Ok;
+                    if (b->second.d.ok) b->second.mark.assign(b->second.d.occupancy.cells.size(), 0);
+                }
+                Block& block = b->second;
+                if (!block.d.ok) return nullptr;
+                const utils::VoxelOccupancy& o = block.d.occupancy;
+                const core::ivec3 q = p - part.offset - o.origin;
+                if (glm::any(glm::lessThan(q, core::ivec3(0))) || glm::any(glm::greaterThanEqual(q, o.dims))) return nullptr;
+                const size_t i = o.index(q);
+                if (!o.cells[i]) return nullptr;
+                slot = block.d.slots[i];
+                return &block.mark[i];
+            };
+
+            utils::SlotMaterials slotMaterials;
+            slotMaterialsOf(physics, scene, owner, slotMaterials);
+            const uint16_t own = ownMaterial(world, physics, entity);
+            std::array<uint8_t, 256> anchorSlot{};
+            for (size_t slot = 0; slot < 256; slot++) {
+                const uint16_t m = slotMaterials[slot] ? slotMaterials[slot] : own;
+                anchorSlot[slot] = m != 0 && physics.world->material(m).anchor;
+            }
+            const int baseTop = low.y + res;   // anchorBase: the lowest row of blocks holds
+            auto anchored = [&](core::ivec3 p, uint8_t slot) { return anchorSlot[slot] || (anchorBase && p.y < baseTop); };
+
+            static const core::ivec3 faces[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+            std::vector<core::ivec3> seeds;
+            for (const Key& k : gone) {
+                const core::ivec3 p(std::get<0>(k), std::get<1>(k), std::get<2>(k));
+                for (core::ivec3 f : faces) seeds.push_back(p + f);
+            }
+            std::sort(seeds.begin(), seeds.end(), [](core::ivec3 a, core::ivec3 b) {
+                return std::make_tuple(a.z, a.y, a.x) < std::make_tuple(b.z, b.y, b.x);
+            });
+            seeds.erase(std::unique(seeds.begin(), seeds.end()), seeds.end());
+
+            std::vector<FractureVoxel> voxels;
+            std::vector<Cut> cuts;
+            if (strike)
+                for (const auto& shard : strike->shards) {
+                    Cut cut;
+                    cut.shard = true;
+                    for (const FractureVoxel& v : shard) {
+                        cut.members.push_back(voxels.size());
+                        voxels.push_back(v);
+                    }
+                    cuts.push_back(std::move(cut));
+                }
+            const uint32_t budget = physics.fractureLimits.localSupportVoxels;
+            uint32_t islands = 0;
+            for (core::ivec3 seed : seeds) {
+                uint8_t slot = 0;
+                uint8_t* mark = at(seed, slot);
+                if (!mark || *mark != 0) continue;
+                // The flood, lowest voxel first.
+                using Item = std::tuple<int, int, int>;   // y, z, x
+                std::priority_queue<Item, std::vector<Item>, std::greater<Item>> open;
+                std::vector<std::pair<uint8_t*, FractureVoxel>> reached;
+                *mark = 1;
+                open.push({seed.y, seed.z, seed.x});
+                reached.push_back({mark, FractureVoxel{seed, slot}});
+                bool held = anchored(seed, slot);
+                while (!open.empty() && !held) {
+                    const auto [y, z, x] = open.top();
+                    open.pop();
+                    const core::ivec3 p(x, y, z);
+                    for (core::ivec3 f : faces) {
+                        uint8_t s = 0;
+                        uint8_t* m = at(p + f, s);
+                        if (!m || *m == 1 || *m == 3) continue;
+                        if (*m == 2 || anchored(p + f, s)) { held = true; break; }
+                        *m = 1;
+                        open.push({p.y + f.y, p.z + f.z, p.x + f.x});
+                        reached.push_back({m, FractureVoxel{p + f, s}});
+                    }
+                    if (reached.size() > budget) held = true;
+                }
+                if (held || islands >= physics.fractureLimits.maxIslands) {
+                    for (auto& r : reached) *r.first = 2;
+                    continue;
+                }
+                islands++;
+                std::sort(reached.begin(), reached.end(), [](const auto& a, const auto& b) {
+                    return std::make_tuple(a.second.position.z, a.second.position.y, a.second.position.x) <
+                           std::make_tuple(b.second.position.z, b.second.position.y, b.second.position.x);
+                });
+                Cut cut;
+                for (auto& r : reached) {
+                    *r.first = 3;
+                    cut.members.push_back(voxels.size());
+                    voxels.push_back(r.second);
+                }
+                cuts.push_back(std::move(cut));
+            }
+            core::trace("physics: entity {}: local support pass from {} voxels gone: {} islands, {} blocks decoded",
+                        static_cast<uint32_t>(entity), gone.size(), islands, blocks.size());
+            if (cuts.empty()) return;
+            cutIslands(world, physics, scene, entity, h, source, voxels, std::move(cuts), 0, state, strike,
+                       strike ? strike->s.cause : BreakCause::Support);
+        }
+
         // The one pass, run after a voxel body's voxels changed for whatever reason -- an edit, a strike
         // (`strike`, its shards not yet cut), support lost: its face-connected islands, across all its
         // chunks (a grid's cells too), each stay or come away as a body of their own (BodyBroken). A
@@ -1140,6 +1289,15 @@ namespace projv::runtime {
             }
             const core::ivec3 dims = high - low + core::ivec3(1);
             const uint64_t cells = uint64_t(dims.x) * uint64_t(dims.y) * uint64_t(dims.z);
+            if (whole && cells > MAX_ISLAND_CELLS && rest == Rest::Anchored) {
+                std::vector<core::ivec3> removed;
+                if (auto it = physics.removed.find(entity); it != physics.removed.end()) {
+                    removed = std::move(it->second);
+                    physics.removed.erase(it);
+                }
+                localSupport(world, physics, scene, entity, h, source, owner, anchorBase, low, state, strike, std::move(removed));
+                return;
+            }
             if (whole && cells > MAX_ISLAND_CELLS) {
                 if (!strike) {
                     core::warn("physics: entity {} is too big ({} cells) to find its islands; nothing comes away",
@@ -1436,6 +1594,7 @@ namespace projv::runtime {
             //     (a plain edit is applied first), and a second strike on a body struck already this step
             //     sees the first one's cut (that body's pass runs first).
             Scene* scene = world.ctx().find<Scene>();
+            physics.removed.clear();   // this step's, filled below and taken by the island pass
             auto broke = [&](Entity entity, const PhysicsRuntime::Break* strike) {
                 const PhysicsBody& body = world.get<PhysicsBody>(entity);
                 BodyState state = sim.bodyState(body.id);
@@ -1505,6 +1664,7 @@ namespace projv::runtime {
                     for (const PendingVoxelOp& op : edit.ops) (op.isAdd ? adds : removes).push_back(op);
                     if (!adds.empty()) utils::queueVoxelAdd(*scene, target, adds);
                     if (!removes.empty()) utils::queueVoxelRemove(*scene, target, removes);
+                    for (const PendingVoxelOp& op : removes) physics.removed[edit.entity].push_back(op.position);
                     // At once, so it is heard in order with the breaks that follow from it.
                     if (Events* events = world.ctx().find<Events>()) events->trigger(VoxelsEdited{edit.entity, edit.ops});
                 }
@@ -2180,6 +2340,7 @@ namespace projv::runtime {
             got.maxShards = std::clamp<uint32_t>(want.maxShards, 1, 4096);
             got.maxIslands = std::clamp<uint32_t>(want.maxIslands, 1, 4096);
             got.minImpactBreak = std::clamp(finiteOr(want.minImpactBreak, 1.0f), 0.5f, 16.0f);
+            got.localSupportVoxels = std::clamp<uint32_t>(want.localSupportVoxels, 1024, 1u << 24);
             if (got.searchVoxels != want.searchVoxels || got.maxReachVoxels != want.maxReachVoxels ||
                 got.maxShards != want.maxShards || got.maxIslands != want.maxIslands || got.minImpactBreak != want.minImpactBreak)
                 core::warn("physics: fracture limits out of range, clamped to search {} voxels, reach {} voxels, {} shards, "
