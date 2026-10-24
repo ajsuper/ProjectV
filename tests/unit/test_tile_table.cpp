@@ -572,3 +572,49 @@ TEST_CASE("blob voxels: tiles made from a tree replace it; a refine installs a t
     projv::utils::replaceChunkTiles(scene, 0, finer);
     CHECK(scene.chunks[0].header.resolution == 256);
 }
+
+
+TEST_CASE("tile edits: edits in place leave the table a fresh build of the same voxels gives") {
+    // Each round's edits are few and inside the box, so most go in place; some empty a block on the box's
+    // edge or fill one outside it, and repack. Either way the bytes must be the canonical ones.
+    for (int resolution : {64, 256}) {
+        CAPTURE(resolution);
+        BuiltTree tree = buildTree(resolution, [](int x, int y, int z) { return y < 30 + (x * 3 + z) % 9 || (x > 40 && x < 52 && y < 60); },
+                                   [](int x, int y, int z) { return y < 20 ? 3 : (x + z) % 4 == 0 ? 1 : 2; });
+        projv::utils::TileTable table = projv::utils::buildTileTable(tree.geometry, tree.materialIDs, uint32_t(resolution));
+        Reference ref(resolution);
+        projv::utils::forEachTileVoxel(table, [&](ivec3 p, uint8_t slot) { ref.at(p) = slot; });
+        std::mt19937 random(uint32_t(resolution) + 11u);
+        for (int round = 0; round < 24; ++round) {
+            CAPTURE(round);
+            std::vector<projv::utils::TileEdit> edits;
+            const ivec3 c{int(random() % uint32_t(resolution - 20)), int(random() % 60u), int(random() % uint32_t(resolution - 20))};
+            const int kind = round % 4;
+            for (int i = 0; i < 300; ++i) {
+                projv::utils::TileEdit e;
+                e.voxel = glm::min(c + ivec3(int(random() % 20u), int(random() % 20u), int(random() % 20u)), ivec3(resolution - 1));
+                e.add = kind == 0 ? false : kind == 1 ? true : (random() % 2) != 0;
+                e.slot = uint8_t(kind == 3 ? 3 : random() % 5);   // kind 3 fills with the interior's slot: tiles form
+                edits.push_back(e);
+            }
+            if (kind == 1) {   // a whole block of one slot, to become a tile and back
+                for (int z = 0; z < 16; ++z)
+                    for (int y = 32; y < 48; ++y)
+                        for (int x = 0; x < 16; ++x) edits.push_back({{x, y, z}, round % 8 == 1, 3});
+            }
+            edit(table, ref, edits);
+            CHECK(differences(table, ref) == 0);
+            std::vector<uint32_t> again;
+            std::vector<uint8_t> againMaterials;
+            projv::utils::treeFromTileTable(table, again, againMaterials);
+            const projv::utils::TileTable fresh = projv::utils::buildTileTable(again, againMaterials, uint32_t(resolution));
+            CHECK(table.texels == fresh.texels);
+            CHECK(table.materials == fresh.materials);
+            CHECK(table.leafStart == fresh.leafStart);
+            CHECK(table.fullBlocks == fresh.fullBlocks);
+            CHECK(table.fullBricks == fresh.fullBricks);
+            CHECK(table.partialBricks == fresh.partialBricks);
+            CHECK(projv::utils::tileTableWellFormed(table));
+        }
+    }
+}

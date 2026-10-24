@@ -398,28 +398,192 @@ namespace projv::utils {
         return emitTable(resolution, blocks);
     }
 
+    namespace {
+        // Block `b`'s new encoding `n` (its old one `o`) written into `t` in place: its region bits, its
+        // solid byte, its block entry, its run of materials and its leaves replaced, and every offset
+        // behind them shifted -- the bytes emitTable would lay out for the same blocks, without decoding
+        // the rest. `b` must be inside the block box, and the box must not change.
+        void spliceBlock(TileTable& t, const TileLayout& L, core::ivec3 b, const BlockData& o, const BlockData& n) {
+            const size_t rl = size_t(L.regionIndex(b / 4)), bl = size_t(L.blockIndex(b));
+            const uint32_t zb = childZOrder(b % 4);
+            uint32_t* const words = t.texels.data();
+            auto regionStart = [&](size_t r) -> uint32_t& { return words[L.regionStarts * 4 + r]; };
+            auto blockStart = [&](size_t i) { return &words[L.blockStarts * 4 + i * 2]; };
+            auto regionMask = [&](size_t r) { return &words[(L.regionMasks + r) * 4]; };
+            // Whether block z of region r has a run (leaves or full-brick bytes): occupied, not a solid tile.
+            auto hasRun = [&](size_t r, uint32_t z) {
+                const uint32_t* m = regionMask(r);
+                return maskBit(m[0], m[1], z) && !maskBit(m[2], m[3], z);
+            };
+            const bool oRun = !o.empty && !o.solid, nRun = !n.empty && !n.solid;
+            const size_t leafCount = t.texels.size() / 4 - t.leafStart;
+
+            // Where its solid byte goes, and where its run (materials, leaves) is or would be: before the
+            // next run in the layout's order, or at the end of its region's materials / of the leaves.
+            const uint32_t* region = regionMask(rl);
+            const uint32_t pSolid = regionStart(rl) + rankBefore(region[2], region[3], zb);
+            uint32_t pRun = 0, lRun = 0;
+            if (oRun) {
+                pRun = blockStart(bl)[1];
+                lRun = blockStart(bl)[0];
+            } else {
+                bool materialFound = false, leafFound = false;
+                for (size_t r = rl; r < L.regionCount && !leafFound; ++r) {
+                    const core::ivec3 rc = L.regionOrigin + core::ivec3(int(r % size_t(L.regionDims.x)),
+                                                                        int(r / size_t(L.regionDims.x) % size_t(L.regionDims.y)),
+                                                                        int(r / (size_t(L.regionDims.x) * size_t(L.regionDims.y))));
+                    for (uint32_t z = (r == rl ? zb + 1 : 0); z < 64; ++z) {
+                        const core::ivec3 c = rc * 4 + reverseZOrderIndex(z);
+                        if (!hasRun(r, z)) continue;
+                        const uint32_t* st = blockStart(size_t(L.blockIndex(c)));
+                        if (r == rl) { pRun = st[1]; materialFound = true; }
+                        lRun = st[0];
+                        leafFound = true;
+                        break;
+                    }
+                    if (r == rl && !materialFound) {
+                        pRun = rl + 1 < L.regionCount ? regionStart(rl + 1) : uint32_t(t.materials.size());
+                        materialFound = true;
+                    }
+                }
+                if (!leafFound) lRun = uint32_t(leafCount);
+            }
+            const uint32_t oRunLength = oRun ? uint32_t(o.fullMaterials.size() + o.leafMaterials.size()) : 0u;
+            const uint32_t oLeaves = oRun ? uint32_t(o.leaves.size() / 4) : 0u;
+            const uint32_t nLeaves = nRun ? uint32_t(n.leaves.size() / 4) : 0u;
+            const int64_t dSolid = int64_t(n.solid) - int64_t(o.solid);
+            const int64_t dRun = int64_t(nRun ? n.fullMaterials.size() + n.leafMaterials.size() : 0u) - int64_t(oRunLength);
+            const int64_t dLeaves = int64_t(nLeaves) - int64_t(oLeaves);
+
+            // A material index that was at or past the solid byte's place moves by it; past the run's
+            // place, by the run's change too.
+            auto shifted = [&](uint32_t m) -> uint32_t {
+                if (m >= pRun) return uint32_t(int64_t(m) + dSolid + dRun);
+                if (m >= pSolid) return uint32_t(int64_t(m) + dSolid);
+                return m;
+            };
+            if (dSolid != 0 || dRun != 0) {
+                for (size_t k = 0; k < leafCount; ++k) {
+                    if (k >= lRun && k < size_t(lRun) + oLeaves) continue;
+                    uint32_t& d3 = words[(t.leafStart + k) * 4 + 2];
+                    d3 = encodeLeafNode(shifted(tree64LeafMatOffset(d3)), tree64LeafIsUniform(d3));
+                }
+                for (size_t r = rl + 1; r < L.regionCount; ++r) regionStart(r) = uint32_t(int64_t(regionStart(r)) + dSolid + dRun);
+            }
+            for (size_t i = 0; i < L.blockCount; ++i) {
+                if (i == bl) continue;
+                const core::ivec3 c = L.blockOrigin + core::ivec3(int(i % size_t(L.blockDims.x)),
+                                                                  int(i / size_t(L.blockDims.x) % size_t(L.blockDims.y)),
+                                                                  int(i / (size_t(L.blockDims.x) * size_t(L.blockDims.y))));
+                const size_t r = size_t(L.regionIndex(c / 4));
+                const uint32_t z = childZOrder(c % 4);
+                if (!hasRun(r, z)) continue;
+                uint32_t* st = blockStart(i);
+                st[1] = shifted(st[1]);
+                if (r > rl || (r == rl && z > zb)) st[0] = uint32_t(int64_t(st[0]) + dLeaves);
+            }
+
+            // The arrays: the run (the later place) first, then the solid byte before it.
+            std::vector<uint8_t> run;
+            if (nRun) {
+                run = n.fullMaterials;
+                run.insert(run.end(), n.leafMaterials.begin(), n.leafMaterials.end());
+            }
+            t.materials.erase(t.materials.begin() + pRun, t.materials.begin() + pRun + oRunLength);
+            t.materials.insert(t.materials.begin() + pRun, run.begin(), run.end());
+            if (o.solid && n.solid) t.materials[pSolid] = n.solidSlot;
+            else if (o.solid) t.materials.erase(t.materials.begin() + pSolid);
+            else if (n.solid) t.materials.insert(t.materials.begin() + pSolid, n.solidSlot);
+
+            const uint32_t runAt = uint32_t(int64_t(pRun) + dSolid);
+            std::vector<uint32_t> leaves;
+            if (nRun) {
+                leaves.reserve(n.leaves.size());
+                const uint32_t base = runAt + uint32_t(n.fullMaterials.size());
+                for (size_t k = 0; k < n.leaves.size(); k += 4) {
+                    const uint32_t d3 = n.leaves[k + 2];
+                    leaves.insert(leaves.end(), {n.leaves[k], n.leaves[k + 1], encodeLeafNode(base + tree64LeafMatOffset(d3), tree64LeafIsUniform(d3)), 0u});
+                }
+            }
+            const size_t leafAt = (size_t(t.leafStart) + lRun) * 4;
+            t.texels.erase(t.texels.begin() + leafAt, t.texels.begin() + leafAt + size_t(oLeaves) * 4);
+            t.texels.insert(t.texels.begin() + leafAt, leaves.begin(), leaves.end());
+
+            // Its own entries (the texels may have moved).
+            uint32_t* m = &t.texels[(L.regionMasks + rl) * 4];
+            const uint64_t bit = 1ull << (63u - zb);
+            auto setMask = [&](uint32_t& high, uint32_t& low, bool on) {
+                uint64_t v = (uint64_t(high) << 32) | low;
+                v = on ? (v | bit) : (v & ~bit);
+                high = uint32_t(v >> 32);
+                low = uint32_t(v);
+            };
+            setMask(m[0], m[1], !n.empty);
+            setMask(m[2], m[3], n.solid);
+            uint32_t* block = &t.texels[(L.blockMasks + bl) * 4];
+            uint32_t* st = &t.texels[L.blockStarts * 4 + bl * 2];
+            if (nRun) {
+                block[0] = n.occupied[0]; block[1] = n.occupied[1]; block[2] = n.full[0]; block[3] = n.full[1];
+                st[0] = lRun;
+                st[1] = runAt;
+            } else {
+                block[0] = block[1] = block[2] = block[3] = 0;
+                st[0] = st[1] = 0;
+            }
+            t.fullBlocks = uint32_t(int64_t(t.fullBlocks) + dSolid);
+            t.fullBricks = uint32_t(int64_t(t.fullBricks) + int64_t(nRun ? n.fullMaterials.size() : 0u) - int64_t(oRun ? o.fullMaterials.size() : 0u));
+            t.partialBricks = uint32_t(int64_t(t.partialBricks) + dLeaves);
+        }
+    }
+
     void applyTileEdits(TileTable& t, const std::vector<TileEdit>& edits) {
         const uint32_t resolution = t.resolution;
         if (edits.empty() || resolution < 4) return;
 
-        // Every block it holds, then the touched ones decoded, edited and re-encoded.
-        std::map<BlockKey, BlockData> blocks = readBlocks(t);
+        // The touched blocks, decoded, edited and re-encoded.
+        const TileLayout L = tileTableLayout(t);
         std::map<BlockKey, Cells> touched;
+        std::map<BlockKey, BlockData> before;
         for (const TileEdit& e : edits) {
             const core::ivec3 v = e.voxel;
             if (v.x < 0 || v.y < 0 || v.z < 0 || v.x >= int(resolution) || v.y >= int(resolution) || v.z >= int(resolution)) continue;
             const BlockKey key = keyOf(v / 16);
             auto [it, fresh] = touched.try_emplace(key);
             if (fresh) {
-                auto old = blocks.find(key);
-                if (old != blocks.end()) expandBlock(old->second, it->second);
-                else it->second.fill(0);
+                BlockData old = readBlock(t, L, v / 16);
+                expandBlock(old, it->second);
+                before.emplace(key, std::move(old));
             }
             it->second[cellIndex(v % 16)] = e.add ? uint16_t(e.slot + 1) : uint16_t(0);
         }
         if (touched.empty()) return;
-        for (const auto& [key, cells] : touched) {
-            BlockData d = encodeBlock(cells);
+        std::map<BlockKey, BlockData> after;
+        for (const auto& [key, cells] : touched) after.emplace(key, encodeBlock(cells));
+
+        // In place, unless the box would change -- a block filled outside it, or one emptied on its edge
+        // (the box might shrink) -- or so many blocks are touched that one repack is cheaper.
+        bool inPlace = !t.texels.empty() && touched.size() <= 32;
+        const core::ivec3 lo = L.blockOrigin, hi = L.blockOrigin + L.blockDims - core::ivec3(1);
+        for (const auto& [key, d] : after) {
+            if (!inPlace) break;
+            const core::ivec3 b = blockOf(key);
+            const bool inside = L.blockIndex(b) >= 0;
+            if (!d.empty && !inside) inPlace = false;
+            else if (d.empty && !before.at(key).empty &&
+                     (b.x == lo.x || b.y == lo.y || b.z == lo.z || b.x == hi.x || b.y == hi.y || b.z == hi.z)) inPlace = false;
+        }
+        if (inPlace) {
+            for (const auto& [key, d] : after) {
+                const BlockData& o = before.at(key);
+                if (o.empty && d.empty) continue;
+                spliceBlock(t, L, blockOf(key), o, d);
+            }
+            return;
+        }
+
+        // A repack: every block the table holds, the touched ones replaced.
+        std::map<BlockKey, BlockData> blocks = readBlocks(t);
+        for (auto& [key, d] : after) {
             if (d.empty) blocks.erase(key);
             else blocks[key] = std::move(d);
         }

@@ -201,8 +201,8 @@ pays (Phase 0b's scaling). The park's chunks are small, so its breaks cost the s
 decoding is on big chunks (the marina's), whose map loading is not on this branch yet.
 
 **Left.**
-- Per-block uploads, and the per-block leaf allocator with slack the plan describes (edits now repack the
-  chunk's table, carrying untouched blocks over -- O(chunk), not O(block)).
+- Per-block uploads, and the per-block leaf allocator with slack the plan describes. Edits now splice
+  the touched blocks in place (below), but the blob still re-uploads whole.
 - The authoring brick-map path still builds a tree first (converted to tiles on the terrain's workers,
   elsewhere on first read); a brick map -> tile table builder would skip it.
 - Voxel Mayhem's `MAYHEM_MAP` and its marina measurements live on `restir-pt`; re-measure the fracture
@@ -286,6 +286,19 @@ to a just-interned tree -- refuses and logs once the tree is gone, rather than j
 rebuilt from tiles that were made without them; every caller calls it straight after interning.
 Tested (`tiles made from a tree replace it; a refine installs a table at its new resolution`). Unit
 tests (352), layering, soak, net (5/5), Voxel Mayhem and sandbox self-tests pass.
+
+### 2026-10-24 -- edits in place
+
+`applyTileEdits` decoded every block of the chunk and emitted the table again for each batch: **4.4 ms**
+on a 256^3 chunk of 94,596 texels, whatever the edit's size. It now decodes only the touched blocks
+and splices each into the table: its region bits and solid byte, its block entry, its run of materials
+and its leaves replaced, and the offsets behind them shifted (the leaves' material offsets, the later
+blocks' starts, the later regions' starts). The result is the bytes a fresh build gives -- tested over
+48 random batches at 64^3 and 256^3 against the table rebuilt from its own voxels (41 went in place, 7
+repacked). It repacks as before when the box would change (a block filled outside it, one emptied on its
+edge) or more than 32 blocks are touched. On that chunk: one voxel **0.31 ms**, a radius-8 sphere (8
+blocks) **1.38 ms**. Voxel Mayhem's cannon (small chunks) is unchanged: 166 / 162 ms of physics in the
+first 0.5 s against `main`'s 167 / 156.
 
 ## Related: physics that reads voxels directly
 
