@@ -202,9 +202,12 @@ decoding is on big chunks (the marina's), whose map loading is not on this branc
 
 **Left.**
 - Per-block uploads, and the per-block leaf allocator with slack the plan describes. Edits now splice
-  the touched blocks in place (below), but the blob still re-uploads whole.
+  the touched blocks in place (below), but the blob still re-uploads whole. Measured, not worth a layout
+  change yet: a 36k-texel span uploads in ~0.15 ms (so ~0.4 ms for a 94k-texel chunk), against 0.3-1.4 ms
+  for the edit itself.
 - The authoring brick-map path still builds a tree first (converted to tiles on the terrain's workers,
-  elsewhere on first read); a brick map -> tile table builder would skip it.
+  elsewhere on first read). A brick map -> tile table builder would skip it, but buys little: tree and
+  table together are 0.32 ms of a 256^3 terrain chunk's 85 ms on the workers (columns 45, voxels 37).
 - Voxel Mayhem's `MAYHEM_MAP` and its marina measurements live on `restir-pt`; re-measure the fracture
   cost there once both branches meet.
 - The voxel collision shape (below).
