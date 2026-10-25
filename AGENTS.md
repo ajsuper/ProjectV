@@ -50,7 +50,8 @@ Two kinds: **feature examples** (`00`-`70`) teach one part of the engine and dra
 `examples/shared/basicRenderer` (one pass: albedo under a fixed sun; `shared/basic_renderer.h`), unless
 rendering is what they teach (`30-renderers`, `40-advanced-renderer`, the scene editor's viewport).
 **Demos** (`80`+, `_demo` suffix on the folder and the target) combine many features to show them off, and
-draw with the full renderers (`shared/voxelRenderer`, the explosion's `nightRenderer`).
+draw with the full renderers (`shared/voxelRenderer`, the explosion's `nightRenderer`; Voxel Mayhem
+draws with the gallery's restir-pt, its uniforms in `shared/restir_pt.h`, `MAYHEM_RENDERER=voxel` the voxel renderer).
 Target names are not the directory names: `00-hello-voxel` builds `hello_voxel`, `30-renderers`
 builds `renderer_gallery`.
 

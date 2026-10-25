@@ -91,11 +91,17 @@ its corners swung into the wall beside it and the hinge's servo could not move i
 
 ## Rendering
 
-`examples/shared/voxelRenderer/` (shared with the other games and the renderer gallery;
-`examples/shared/voxel_renderer.h` sets it up): a G-buffer (one primary and one sun shadow ray per
-render pixel, through one call of the march), AO at two scales, the shade, the voxel reconstruction
-(the upscale and the edge antialiasing), TAA and the display. Being rebuilt for speed first, then
-feel, then GI: [docs/plans/voxel-renderer.md](../../docs/plans/voxel-renderer.md).
+The renderer gallery's **restir-pt** (`examples/30-renderers/renderers/restir-pt/`, its README): ReSTIR
+GI over two-bounce paths at a sixteenth of the window's pixels, a half-resolution G-buffer rebuilt to the
+window by the voxel reconstruction, a temporal resolve, the light shafts, the fog and the post. Drawn as
+the gallery draws it at its defaults: the uniforms are worked out in one place for both
+(`examples/shared/restir_pt.h`). The gallery compiles its shaders; the build stages the folder here as
+`renderers/restir-pt/`. Moving bodies' motion vectors come from each chunk's last pose.
+
+`MAYHEM_RENDERER=voxel` draws with the demos' voxel renderer instead (`examples/shared/voxelRenderer/`,
+`examples/shared/voxel_renderer.h`): a G-buffer, AO at two scales, the shade, the voxel reconstruction,
+TAA and the display ([docs/plans/voxel-renderer.md](../../docs/plans/voxel-renderer.md)) -- cheaper, and
+what its View's keys change.
 
 ## Self-test
 

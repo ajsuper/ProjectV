@@ -78,7 +78,7 @@
 #include <GLFW/glfw3.h>
 
 #include "voxel_renderer.h"
-#include "restir_test.h"   // MAYHEM_RENDERER=restir-pt: an experiment
+#include "restir_pt.h"
 #include "core/application.h"
 #include "core/log.h"
 #include "core/paths.h"
@@ -1875,6 +1875,51 @@ void followCamera(projv::Application& app) {
 // The renderer and its settings are shared with other examples: examples/shared/voxel_renderer.h.
 using View = voxel_renderer::View;
 
+// The main renderer: the renderer gallery's restir-pt, its uniforms the gallery's at their defaults
+// (examples/shared/restir_pt.h), fed from the camera (the shaken one: drawn only), the View's sun and the
+// scene's scale. Moving bodies' motion vectors come from each chunk's pose last frame; the GI's own
+// histories follow the camera, so a moving body's indirect light lags a few frames.
+struct Restir {
+    restir_pt::Settings   settings;
+    restir_pt::SceneScale scene;
+    int  frame = 0;
+    bool has = false;
+    vec3 prevPosition{0.0f}, prevDirection{0.0f, 0.0f, 1.0f};
+    float prevSun = 0.0f;
+    std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+
+    void draw(World& world, projv::graphics::RenderInstance& renderInstance, vec3 position, vec3 direction, const View& view) {
+        if (!has) {
+            prevPosition = position;
+            prevDirection = direction;
+            prevSun = view.sun;
+        }
+        restir_pt::Frame f;
+        f.position = position;
+        f.direction = direction;
+        f.prevPosition = prevPosition;
+        f.prevDirection = prevDirection;
+        f.sunDirection = vec3(std::cos(view.sun) * -0.6402f, std::sin(view.sun), std::cos(view.sun) * 0.7682f);
+        f.sunMoved = view.sun != prevSun;
+        f.moved = f.sunMoved || glm::length(position - prevPosition) > 1e-5f || glm::length(direction - prevDirection) > 1e-6f;
+        f.first = !has;
+        f.count = frame;
+        f.window = renderInstance.getWindowResolution();
+        const auto now = std::chrono::steady_clock::now();
+        f.seconds = std::chrono::duration<float>(now - last).count();
+        last = now;
+        // The gallery's scale: the finest voxel, and half the scene's diagonal.
+        scene.finest = view.finestVoxel;
+        scene.radius = 0.5f * view.hazeRadius;
+        restir_pt::upload(renderInstance.getActiveRenderer(), f, scene, settings, &world);
+        prevPosition = position;
+        prevDirection = direction;
+        prevSun = view.sun;
+        has = true;
+        frame++;
+    }
+};
+
 // =================================================================================================
 // Controls
 // =================================================================================================
@@ -2808,16 +2853,27 @@ void startup(projv::Application& app) {
         said = true;
     });
 
-    // The renderer, at half the window's width and height; the reconstruction and TAA
-    // rebuild the full frame.
-    if (!(restir_test::wanted() && restir_test::install(renderInstance, here)))
-        voxel_renderer::install(world, renderInstance, here);
-    else
-        world.ctx().emplace<restir_test::State>();
+    // The renderer: the renderer gallery's restir-pt (examples/shared/restir_pt.h), as the gallery draws it;
+    // MAYHEM_RENDERER=voxel (or restir-pt not staged): the demos' voxel renderer, at half the window's width
+    // and height, the reconstruction and TAA rebuilding the full frame.
+    {
+        const char* which = std::getenv("MAYHEM_RENDERER");
+        std::error_code error;
+        std::filesystem::current_path(here, error);
+        if (!(which && std::string(which) == "voxel") && restir_pt::install(renderInstance)) {
+            world.ctx().emplace<Restir>();
+            projv::core::info("mayhem: drawing with restir-pt (MAYHEM_RENDERER=voxel: the voxel renderer)");
+        } else {
+            voxel_renderer::install(world, renderInstance, here);
+        }
+    }
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
     if (!m.map) buildWorld(world);
-    if (auto* restir = world.ctx().find<restir_test::State>(); restir && m.map) restir->ground = mapMin.y;
+    if (Restir* restir = world.ctx().find<Restir>()) {   // the fog's ground, and the scene's height for the haze
+        restir->scene.ground = m.map ? mapMin.y : 0.0f;
+        restir->scene.height = m.map ? mapMax.y - mapMin.y : 0.0f;
+    }
     if (const char* what = std::getenv("MAYHEM_BENCH")) {
         world.ctx().emplace<Bench>().what = what;
     } else if (std::getenv("MAYHEM_SELFTEST")) {
@@ -2855,10 +2911,9 @@ void render(projv::Application& app) {
         shaken.pitch += amount * SHAKE_TURN * noise(5.0f);
         direction = shaken.forward();
     }
-    if (restir_test::State* restir = world.ctx().find<restir_test::State>()) {
+    if (Restir* restir = world.ctx().find<Restir>()) {
         const View& view = world.ctx().get<View>();
-        restir_test::upload(*restir, world, renderInstance.getActiveRenderer(), renderInstance.getWindowResolution(), position, direction,
-                            view.sun, view.finestVoxel, view.hazeRadius);
+        restir->draw(world, renderInstance, position, direction, view);
     } else {
         voxel_renderer::upload(world, renderInstance, position, direction);
     }

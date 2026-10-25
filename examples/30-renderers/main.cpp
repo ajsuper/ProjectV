@@ -81,6 +81,7 @@
 #include "utils/material.h"
 #include "utils/picking.h"
 #include "utils/voxel_management.h"
+#include "restir_pt.h"
 #include "voxel_renderer.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -213,85 +214,30 @@ static bool g_restirShafts = true;   // L, part of the final render (P)
 static bool g_restirSoftShadow = true;
 static bool g_restirAir = true;      // RESTIR_AIR=0: no aerial haze (nor its shafts), for comparing
 static bool g_restirFarAO = true;    // RESTIR_FAR_AO=0: no far-field SSAO scale, for comparing
-static constexpr float RESTIR_VIGNETTE = 0.15f;       // the corners' falloff: subtle
-static constexpr float RESTIR_DOF_PIXELS = 1.5f;      // the far distance's blur radius at 1080 lines: very slight
-static constexpr float RESTIR_BLOOM = 0.04f;          // the bloom's share of the image (N): a glow, not a haze
-static constexpr float RESTIR_SHUTTER = 0.5f;         // the motion blur (M): the share of a frame's motion blurred over (film's 180 degrees)
-static constexpr float RESTIR_BLUR_PIXELS = 12.0f;    // ...and its longest streak at 1080 lines: very subtle
-static constexpr float RESTIR_SSAO = 0.85f;           // how far the obscurance darkens the indirect light
-static constexpr float RESTIR_SUN_HALF_ANGLE = 0.02f; // radians, ~4x the real sun's: penumbrae a little soft
-                                                      // (pjv_path_light.sc's PATH_SUN_HALF_ANGLE: the same disc)
-// The light shafts (shafts.frag): the haze's optical depth over its falloff, the falloff's length in the
-// finest voxels (the air further out than about that is not counted: open sunlit air reads as a light
-// haze, not glare), the phase function's forward scattering, and the frames they are accumulated over.
-static constexpr float RESTIR_SHAFT_STRENGTH = 0.2f;
-static constexpr float RESTIR_SHAFT_FALLOFF_VOXELS = 48.0f;
-static constexpr float RESTIR_SHAFT_PHASE_G = 0.6f;
-static constexpr float RESTIR_SHAFT_HISTORY = 4.0f;   // short: ao_apply's radial blur takes the noise out
-// The aerial perspective: a thin haze over the whole scene, on top of the ground fog -- what makes the far
-// distance read as far. It thickens with distance (restirFog: its density grows from nothing at the camera
-// to RESTIR_AIR_DEPTH e-folds per fog length at one fog length out), so what is near stays crisp and only
-// the distance fades; a plain exponential that is visible on a mountain range already greys the trees under
-// the camera. Also the least height it thins over, as a share of the fog's length (a scene taller than that
-// thins over its own height, so a mountain range stands in the haze rather than above it). The light shafts'
-// second source is this same air, so shafts reach across a valley and not only a few dozen voxels.
-static constexpr float RESTIR_AIR_DEPTH = 2.0f;
-static constexpr float RESTIR_AIR_HEIGHT = 0.5f;
-static constexpr float RESTIR_AIR_SHAFT_STRENGTH = 0.12f;
-static constexpr int RESTIR_VIEWS = 6;
-// Rays a GI pixel may trace in the sample pass (a new path: 4; validating the history's suffix: 3;
-// shifting it here: 4 if it must be replayed) and in the spatial pass (its own path and five neighbours',
-// replayed only where a reconnection was too close to make, and a visibility ray). The paths see every
-// surface as rough (restir_common.sc), so nearly every shift is a reconnection and traces nothing.
-static constexpr float RESTIR_SAMPLE_RAYS = 12.0f;
-static constexpr float RESTIR_SPATIAL_RAYS = 8.0f;
-static constexpr float RESTIR_VALIDATION = 0.1f;   // a path's light changed by more than this share: stale
+// The constants are restir_pt's (examples/shared/restir_pt.h), where its uniforms are worked out for
+// every program that draws with it.
+static constexpr float RESTIR_SSAO = restir_pt::SSAO;
+static constexpr float RESTIR_VALIDATION = restir_pt::VALIDATION;
+static constexpr int RESTIR_VIEWS = restir_pt::VIEWS;
 static float g_sceneRadius = 100.0f;                  // frameScene's, for the fog's length
 static float g_sceneGround = 0.0f;                    // ...and the scene's lowest point, for the fog's height
 static float g_sceneHeight = 0.0f;                    // ...and its height, for the aerial haze's
 static int  g_restirStride = 4;   // --restir-gi: GI for one window pixel in stride x stride (4 or 2)
-static constexpr float RESTIR_RENDER_SCALE = 0.5f;   // its G-buffer, each way; resources.json's 0.5 targets
+static constexpr float RESTIR_RENDER_SCALE = restir_pt::RENDER_SCALE;   // its G-buffer, each way
 
 // ReSTIR GI at a sixteenth (or a quarter) of the window's pixels, a G-buffer at half resolution each way
 // rebuilt to the window by the voxel renderer's reconstruction, then a temporal resolve.
 static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
-    using projv::core::vec4;
-    using projv::graphics::setUniformToValue;
-    // Surfaces are offset a twentieth of the finest voxel before a ray leaves them; the same-surface
-    // tests are scaled from it too.
-    const float finest = finestVoxel(*ctx.world);
-    // Which render texel of its block each GI pixel samples this frame (the block: the GI stride against
-    // the render resolution, 2 or 1): every one in turn, diagonals first.
-    const int giStride = std::max(1, int(float(g_restirStride) * RESTIR_RENDER_SCALE));
-    static const int order4[4][2] = {{0, 0}, {1, 1}, {1, 0}, {0, 1}};
-    const int* offset = order4[giStride == 2 ? ctx.frameCount % 4 : 0];
-    // TAA: each render texel is traced through a different point of itself each frame -- a 16-phase Halton
-    // sequence over the whole texel, so over the 2x2 window pixels it covers and within each. The resolve's
-    // history then averages them into a supersampled image, and a voxel thinner than a texel is found some
-    // of the time rather than always or never (the distance's aliasing). The reconstruction weighs each
-    // texel's colour from where its ray actually went.
-    auto halton = [](int index, int base) {
-        float f = 1.0f, r = 0.0f;
-        for (; index > 0; index /= base) { f /= float(base); r += f * float(index % base); }
-        return r;
-    };
-    const int phase = ctx.frameCount % 16 + 1;
-    vec4 jitterParams{halton(phase, 2) - 0.5f, halton(phase, 3) - 0.5f, 0.0f, 0.0f};
-    // RESTIR_JITTER=0: the old four window-pixel centres, for comparing.
-    static const bool halton16 = !std::getenv("RESTIR_JITTER") || std::atoi(std::getenv("RESTIR_JITTER")) != 0;
-    if (!halton16) {
-        static const int cellOrder[4] = {0, 3, 1, 2};
-        const int cell = cellOrder[ctx.frameCount % 4];
-        jitterParams = vec4((float(cell % 2) + 0.5f) * 0.5f - 0.5f, (float(cell / 2) + 0.5f) * 0.5f - 0.5f, 0.0f, 0.0f);
-    }
-    static const bool bypassAtStart = std::getenv("GALLERY_BYPASS") && std::atoi(std::getenv("GALLERY_BYPASS")) != 0;
-    vec4 renderParams{0.0f, 0.0f, g_reconstructBypass != bypassAtStart ? 1.0f : 0.0f, 0.0f};
-    // For unattended captures (--capture): RESTIR_VIEW picks the starting view; RESTIR_POST=0 (the raw path
-    // trace), RESTIR_FOG=0, RESTIR_SHAFTS=0 and RESTIR_SOFT=0 start with the final render, the fog, the
-    // shafts or the soft shadow off; RESTIR_VALIDATE=1 turns the
-    // paths' validation on (off by default: it bought nothing measurable); RESTIR_REUSE=0 the reuse off,
-    // RESTIR_SSAO=0 the SSAO (for comparing with pt-reference, which has none). RESTIR_UNTOLD=1 moves the sun without telling the renderer -- no
-    // history starts over -- as a game's light changes: what only validation can catch.
+    // The uniforms are restir_pt::upload's, from the gallery's switches (its keys, and these environment
+    // variables for unattended captures and measuring).
+    // RESTIR_VIEW picks the starting view; RESTIR_POST=0 (the raw path trace), RESTIR_FOG=0, RESTIR_SHAFTS=0
+    // and RESTIR_SOFT=0 start with the final render, the fog, the shafts or the soft shadow off;
+    // RESTIR_VALIDATE=1 turns the paths' validation on (off by default: it bought nothing measurable);
+    // RESTIR_REUSE=0 the reuse off, RESTIR_SSAO=0 the SSAO (for comparing with pt-reference, which has none).
+    // RESTIR_UNTOLD=1 moves the sun without telling the renderer -- no history starts over -- as a game's
+    // light changes: what only validation can catch. RESTIR_JITTER=0: the old four window-pixel centres.
+    // RESTIR_TEMPORAL=0 / RESTIR_SPATIAL=0: one half of the reuse alone; RESTIR_RAW=1: no GI accumulation
+    // and no image history; RESTIR_BOUNCES=n: the paths' length.
     static bool untold = false;
     static float validation = 0.0f;
     static float ssao = RESTIR_SSAO;
@@ -312,95 +258,58 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
         return true;
     }();
     (void)fromEnv;
-    // SSAO six of the finest voxels round, and how far it darkens the indirect light; the sun's penumbra per
-    // unit of blocker distance (the disc's full width); the fog's length, 1.6 scene radii held to 300..3000
-    // units (30..300 m of Teardown-scale voxels).
-    const float fogLength = std::clamp(1.6f * g_sceneRadius, 300.0f, 3000.0f);
-    // The SSAO and the fog are the final render's (P), not the path tracer's.
-    const bool finalRender = g_restirPost.on;
-    vec4 look{6.0f * finest, finalRender ? ssao : 0.0f, g_restirSoftShadow ? 2.0f * std::tan(RESTIR_SUN_HALF_ANGLE) : 0.0f,
-              g_restirFarAO ? 1.0f : 0.0f};
-    // The height fog: at the ground, 0.6 of an e-fold over the fog's length (about 45% hidden there,
-    // gathering from nothing), thinning over 0.15 of it in height, never more than 90%.
-    vec4 haze{finalRender && g_restirFog ? 0.6f / fogLength : 0.0f, g_sceneGround, 0.15f * fogLength, 0.9f};
-    setUniformToValue(renderer, "restirHaze", haze);
-    // The aerial haze (O with the fog): RESTIR_AIR_DEPTH e-folds per fog length at the ground once a fog length
-    // out, thinning over the scene's height (at least half the fog's length); w the length its onset grows over.
-    const float airHeight = std::max(g_sceneHeight, RESTIR_AIR_HEIGHT * fogLength);
-    const float airDensity = finalRender && g_restirFog && g_restirAir ? RESTIR_AIR_DEPTH / fogLength : 0.0f;
-    vec4 air{airDensity, g_sceneGround, airHeight, fogLength};
-    setUniformToValue(renderer, "restirAir", air);
-    vec4 shafts{finalRender && g_restirShafts ? RESTIR_SHAFT_STRENGTH : 0.0f, 1.0f / (RESTIR_SHAFT_FALLOFF_VOXELS * finest),
-                RESTIR_SHAFT_PHASE_G, RESTIR_SHAFT_HISTORY};
-    // The shafts' second source, the aerial haze: its density at the camera's height (constant along the ray:
-    // the shafts are soft, and the camera is where they are seen from), so they reach as far as the haze does.
-    const float airAtCamera = airDensity * std::exp(-std::max(ctx.cameraPosition.y - g_sceneGround, 0.0f) / airHeight);
-    vec4 shaftsAir{RESTIR_AIR_SHAFT_STRENGTH, airAtCamera, fogLength, 0.0f};
-    setUniformToValue(renderer, "restirShaftsAir", shaftsAir);
-    static bool first = true;
-
-    vec4 cameraPos{ctx.cameraPosition, 1.0f}, cameraDir{ctx.cameraDirection, 0.0f};
-    vec4 prevCameraPos{ctx.prevCameraPosition, 1.0f}, prevCameraDir{ctx.prevCameraDirection, 0.0f};
-    vec4 sunDir{ctx.sunDirection, 0.0f};
-    // z: the sun moved -- the light changed, so every history (the reservoirs' cached light included) starts over.
-    // (An untold sun is no move at all, as far as the renderer knows: the camera stands still in that test.)
-    const bool sunMoved = ctx.sunMoved && !untold;
-    const bool moved = ctx.cameraMoved && !(ctx.sunMoved && untold);
-    vec4 frameCount{float(ctx.frameCount), moved ? 1.0f : 0.0f, sunMoved ? 1.0f : 0.0f, 0.0f};
-    // RESTIR_TEMPORAL=0 / RESTIR_SPATIAL=0: one half of the reuse alone, for measuring.
+    static const bool halton16 = !std::getenv("RESTIR_JITTER") || std::atoi(std::getenv("RESTIR_JITTER")) != 0;
+    static const bool bypassAtStart = std::getenv("GALLERY_BYPASS") && std::atoi(std::getenv("GALLERY_BYPASS")) != 0;
     static const bool temporal = !std::getenv("RESTIR_TEMPORAL") || std::atoi(std::getenv("RESTIR_TEMPORAL")) != 0;
     static const bool spatial = !std::getenv("RESTIR_SPATIAL") || std::atoi(std::getenv("RESTIR_SPATIAL")) != 0;
     static const bool visibility = !std::getenv("RESTIR_VISIBILITY") || std::atoi(std::getenv("RESTIR_VISIBILITY")) != 0;
-    vec4 reuse{g_restirReuse && temporal ? 1.0f : 0.0f, g_restirReuse && spatial ? 1.0f : 0.0f, visibility ? 1.0f : 0.0f, 4.0f};   // temporal, spatial, visibility, M cap
     static const float atrous = std::getenv("RESTIR_ATROUS") ? float(std::atoi(std::getenv("RESTIR_ATROUS")) != 0) : 1.0f;
-    // RESTIR_RAW=1: no GI accumulation and no image history -- each frame's estimate alone, for measuring.
     static const bool raw = std::getenv("RESTIR_RAW") && std::atoi(std::getenv("RESTIR_RAW")) != 0;
-    vec4 denoise{atrous, raw ? 0.0f : 1.0f, float(g_restirView), 12.0f};                           // a-trous, GI accumulation, view, its cap
-    vec4 jitter{float(offset[0]), float(offset[1]), float(giStride), first ? 1.0f : 0.0f};
-    // w: one render texel's width per unit of distance, for the tests that ask "is this the same surface?".
-    const float renderHeight = std::max(ctx.windowResolution.y * RESTIR_RENDER_SCALE, 1.0f);
-    const float pixelWidth = 2.0f * std::tan(30.0f * 3.14159265f / 180.0f) / renderHeight;
-    // The image's history: none when the sun moved (the light is new); short while the camera moves, so
-    // changing light is not dragged along; 64 frames on a still view -- enough to average the jitter and
-    // what noise is left, short enough that the GI's own history, not this one, decides how fast it settles.
-    const float imageHistory = sunMoved || raw ? 1.0f : moved ? 16.0f : 64.0f;
-    vec4 settings{6.0f, finest * 0.05f, imageHistory, pixelWidth};
-    setUniformToValue(renderer, "cameraPos", cameraPos);
-    setUniformToValue(renderer, "cameraDir", cameraDir);
-    setUniformToValue(renderer, "prevCameraPos", prevCameraPos);
-    setUniformToValue(renderer, "prevCameraDir", prevCameraDir);
-    setUniformToValue(renderer, "sunDir", sunDir);
-    setUniformToValue(renderer, "frameCount", frameCount);
-    setUniformToValue(renderer, "restirReuse", reuse);
-    setUniformToValue(renderer, "restirDenoise", denoise);
-    setUniformToValue(renderer, "restirJitter", jitter);
-    setUniformToValue(renderer, "restirSettings", settings);
-    setUniformToValue(renderer, "restirLook", look);
-    // RESTIR_BOUNCES=n: the paths' length, for measuring (pt-reference keeps PATH_BOUNCES).
     static const float bounces = std::getenv("RESTIR_BOUNCES") ? float(std::atoi(std::getenv("RESTIR_BOUNCES"))) : float(PATH_BOUNCES);
-    vec4 path{bounces, RESTIR_SAMPLE_RAYS, RESTIR_SPATIAL_RAYS, validation};
-    setUniformToValue(renderer, "restirPath", path);
-    // The post's switches, and the frame's length for the exposure's adaptation (its own clock: the
-    // gallery's frame timer exists only in perf builds).
+
+    restir_pt::Settings settings;
+    settings.view = g_restirView;
+    settings.reuse = g_restirReuse;
+    settings.temporal = temporal;
+    settings.spatial = spatial;
+    settings.visibility = visibility;
+    settings.atrous = atrous;
+    settings.raw = raw;
+    settings.bypass = g_reconstructBypass != bypassAtStart;
+    settings.halton16 = halton16;
+    settings.post = {g_restirPost.on, g_restirPost.vignette, g_restirPost.grade, g_restirPost.exposure, g_restirPost.dof,
+                     g_restirPost.bloom, g_restirPost.motionBlur};
+    settings.fog = g_restirFog;
+    settings.shafts = g_restirShafts;
+    settings.softShadow = g_restirSoftShadow;
+    settings.air = g_restirAir;
+    settings.farAO = g_restirFarAO;
+    settings.ssao = ssao;
+    settings.validation = validation;
+    settings.bounces = bounces;
+    settings.stride = g_restirStride;
+
+    // The post's frame length for the exposure's adaptation: its own clock (the gallery's frame timer
+    // exists only in perf builds).
     static auto lastFrame = std::chrono::steady_clock::now();
     const auto now = std::chrono::steady_clock::now();
-    const float seconds = std::chrono::duration<float>(now - lastFrame).count();
+    static bool first = true;
+    restir_pt::Frame frame;
+    frame.position = ctx.cameraPosition;
+    frame.direction = ctx.cameraDirection;
+    frame.prevPosition = ctx.prevCameraPosition;
+    frame.prevDirection = ctx.prevCameraDirection;
+    frame.sunDirection = ctx.sunDirection;
+    // An untold sun is no move at all, as far as the renderer knows: the camera stands still in that test.
+    frame.sunMoved = ctx.sunMoved && !untold;
+    frame.moved = ctx.cameraMoved && !(ctx.sunMoved && untold);
+    frame.first = first;
+    frame.count = ctx.frameCount;
+    frame.window = ctx.windowResolution;
+    frame.seconds = std::chrono::duration<float>(now - lastFrame).count();
     lastFrame = now;
-    const RestirPost& post = g_restirPost;
-    vec4 postParams{post.on && post.vignette ? RESTIR_VIGNETTE : 0.0f, post.on && post.grade ? 1.0f : 0.0f,
-                    post.on && post.exposure ? 1.0f : 0.0f, seconds};
-    setUniformToValue(renderer, "restirPost", postParams);
-    vec4 dof{post.on && post.dof ? RESTIR_DOF_PIXELS * ctx.windowResolution.y / 1080.0f : 0.0f,
-             post.on && post.bloom ? RESTIR_BLOOM : 0.0f,                // y: display.frag's bloom
-             post.on && post.motionBlur ? RESTIR_SHUTTER : 0.0f,         // zw: motion_blur.frag's
-             RESTIR_BLUR_PIXELS * ctx.windowResolution.y / 1080.0f};
-    setUniformToValue(renderer, "restirDof", dof);
-    // Last frame's pose of every chunk, for the G-buffer's motion vectors (resources.json: prevPoses).
-    if (ctx.world) voxel_renderer::uploadPoses(*ctx.world, renderer, 99);
-    setUniformToValue(renderer, "restirShafts", shafts);
-    setUniformToValue(renderer, "jitterParams", jitterParams);
-    setUniformToValue(renderer, "renderParams", renderParams);
     first = false;
+    restir_pt::upload(renderer, frame, {finestVoxel(*ctx.world), g_sceneRadius, g_sceneGround, g_sceneHeight}, settings, ctx.world);
 }
 
 static bool measureSceneBounds(const projv::Scene& scene, projv::core::vec3& boundsMin, projv::core::vec3& boundsMax);
