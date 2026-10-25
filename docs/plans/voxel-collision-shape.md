@@ -1,7 +1,7 @@
 # A voxel collision shape: bodies collide as their voxels
 
-Status: **Phases 1 and 2 delivered** 2026-10-24 (see "Phase 1: delivered", "Phase 2: delivered"); Phases
-3-4 not started. Follows from `voxel-storage-tiles.md` ("Related: physics
+Status: **Phases 1-3 delivered** 2026-10-24 (see "Phase 1: delivered", "Phase 2: delivered", "Phase 3:
+delivered"); Phase 4 (the default) not started. Follows from `voxel-storage-tiles.md` ("Related: physics
 that reads voxels directly") now that tile tables are every blob's voxels.
 
 Goal: a voxel body's collision *is* its tile table, read in place, as Teardown's is its voxels. Nothing
@@ -303,6 +303,48 @@ ever found; the tile golden on Clang (none on the machine it was made on).
 - Mass properties; dynamic bodies' chunks use the shape; voxel vs voxel (corners, edges, manifolds).
 - Measured: the steady 6-10 ms a frame with 215 pieces on the marina, against boxes; the castle cannon
   and the park bench; contacts a pair.
+
+### Phase 3: delivered (2026-10-24)
+
+With `CollisionRepresentation::Tiles`, moving voxel bodies are tile shapes too, made for motion
+(`shapeFromTiles(..., moving)`); static ones are as in Phase 2, so the static world and its numbers
+are unchanged.
+
+- **Weighed from the table, once**: each box's mass at its slot's density (as a compound of boxes'
+  pieces: the material's, or otherDensity; 1 a voxel without materials), the centre of mass their
+  centroid, the inertia theirs about it (parallel axis). Jolt hands shapes their queries in
+  centre-of-mass space; every query adds the centre back (zero for a static shape). The materials
+  test's two-material bar weighs and balances as it does as boxes.
+- **What it collides by**: a moving shape merges its voxels across bricks within each 16^3 block
+  once (`utils::tileBlockBoxes`), looked up by block; its bounds are its voxels' own box. (Its blocks'
+  box -- a static shape's, harmless there -- made a 3-voxel piece reach a block's width round it, and
+  the broadphase paired a pile of 400 pieces nearly all with all: 36,000 pairs a step, 4.6 ms against
+  boxes' 1.07. With its own box: 1.13.) Its inner radius is its largest box's, as a compound's is.
+- **Voxels against voxels** (`VoxelVoxelQueries`): the other's boxes where the two meet, fetched once
+  (none, nothing to do); then the smaller shape's boxes there, each against those of the other its
+  bounds reach, a Jolt box against a Jolt box; a pair of ids met twice (a coarse shape) keeps its
+  deepest contact. Casts likewise, against the boxes under the whole sweep. Not Teardown's corners
+  and edges: measured first, and at parity this was not needed.
+- **Recording**: a tile shape logs whether it is for motion (LOG_VERSION 15); the tile golden now
+  records moving bodies as tiles (52,776 bytes, 231 steps).
+
+Measured (`PROJV_COLLISION` / `MAYHEM_COLLISION` for the other column):
+
+| | Boxes | Tiles |
+|---|---|---|
+| A pile of 400 pieces on a voxel floor (`tiles bench`), ms a step | 1.04-1.07 | 1.13 |
+| West Point Marina's barrage, ms a step (debris on) | 6.7-7.0 | 5.9-6.0 |
+| The park's cannon: physics in the first 0.5 s / a frame after 1 s | 159 ms / 1.8 ms | 250 ms / 2.1 ms |
+| The park's blast: the same | 228 ms / 1.9 ms | 321 ms / 2.0 ms |
+
+The park's first half second after a break is the one place tiles cost clearly more (40-60%), and
+the least repeatable number here (the two representations break the castle differently: 793 pieces
+against 744, 347 against 1,474). Steady frames are within ~10%. Checks on tiles: the unit suite (369
+of 369), Voxel Mayhem's and the sandbox's self-tests, the physics demos (78 of 79: the Titans' crate,
+order-sensitive, fails after demos 1 and 2 on boxes too), soak, net (5 of 5).
+
+Left: the park's post-break half second (where the cost goes: the shards' first contacts, or making
+their shapes); Teardown's corners and edges, if a big flat piece face-down ever costs too much.
 
 ### Phase 4: the default
 

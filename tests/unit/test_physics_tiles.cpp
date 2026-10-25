@@ -193,3 +193,45 @@ TEST_CASE("tiles: a shape given fewer id bits names its contacts by coarser cell
     moving.shape = PhysicsShape::fromVoxels(physics.shapeFromTiles(shared), 0.25f);
     CHECK_FALSE(physics.createBody(moving).valid());
 }
+
+TEST_CASE("tiles bench: a pile of voxel pieces on a voxel floor, boxes against tiles" * doctest::skip()) {
+    // Run with: build/bin/projv_unit_tests -tc="tiles bench*" --no-skip
+    // 400 pieces of four shapes dropped in a 6 m square onto a voxel floor; ms a step and how they settle.
+    // Measured 2026-10-24: boxes 1.04-1.07 ms a step, tiles 1.13 (4.6 before a moving shape's bounds
+    // were its voxels' rather than its blocks').
+    for (CollisionRepresentation r : {CollisionRepresentation::Boxes, CollisionRepresentation::Tiles}) {
+        Fixture f(r);
+        f.solid(fill({0, 0, 0}, {127, 1, 127}), vec3(-16, -0.5f, -16), 0.25f);
+        std::vector<std::vector<projv::PendingVoxelOp>> shapes = {fill({0, 0, 0}, {2, 1, 1}), fill({0, 0, 0}, {3, 0, 3}),
+                                                                  fill({0, 0, 0}, {1, 3, 1}), fill({0, 0, 0}, {2, 2, 2})};
+        for (auto op : fill({0, 0, 0}, {0, 2, 0})) shapes[0].push_back({true, op.position + ivec3(3, 0, 0), op.packedColor});   // an L
+        std::vector<Entity> pieces;
+        for (int i = 0; i < 400; i++) {
+            ComponentHandle h = utils::addComponent(f.scene, projv::ComponentKind::Chunk, "p", INVALID_COMPONENT_HANDLE, 16, 0.25f);
+            utils::setComponentTransform(f.scene, h, vec3(-3.0f + float(i % 10) * 0.6f, 0.5f + float(i / 100) * 0.8f, -3.0f + float((i / 10) % 10) * 0.6f),
+                                         glm::angleAxis(float(i) * 0.7f, glm::normalize(vec3(1, 2, 3))), 1.0f);
+            utils::queueVoxelAdd(f.scene, h, shapes[size_t(i) % shapes.size()]);
+            utils::updateScene(f.scene);
+            Entity e = spawnComponent(f.app.world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+            f.app.world.emplace<projv::RigidBody>(e);
+            pieces.push_back(e);
+        }
+        f.frames(2);
+        double ms = 0.0;
+        int steps = 0;
+        for (int i = 0; i < 6 * 60; i++) {
+            f.frames(1);
+            ms += physicsWorld(f.app.world).stats().lastStepMilliseconds;
+            steps++;
+        }
+        int asleep = 0, under = 0;
+        for (Entity e : pieces) {
+            const BodyState s = f.pose(e);
+            asleep += !s.awake;
+            under += s.centerOfMass.y < 0.0f;
+        }
+        MESSAGE((r == CollisionRepresentation::Tiles ? "tiles" : "boxes") << ": " << ms / steps << " ms a step over " << steps
+                << "; " << asleep << " of 400 asleep, " << under << " under the floor");
+        CHECK(under == 0);
+    }
+}

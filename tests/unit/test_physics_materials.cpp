@@ -214,7 +214,7 @@ TEST_CASE("a body of two materials weighs what each half does, and balances wher
     CHECK(s.centerOfMass.x - s.position.x == doctest::Approx((500.0f * 0.5f + 125.0f * 1.5f) / 625.0f).epsilon(1e-3));
     CHECK(s.centerOfMass.y - s.position.y == doctest::Approx(0.25f).epsilon(1e-3));
     REQUIRE(f.body(bar).voxelParts.size() == 1);
-    CHECK(f.body(bar).voxelParts[0].shape->pieces == 2);
+    if (!f.body(bar).voxelParts[0].shape->tiles) CHECK(f.body(bar).voxelParts[0].shape->pieces == 2);   // boxes' count (tiles: none)
 
     // The body's own material weighs the voxels whose entry names none: wood all through, now.
     REQUIRE(utils::setMaterialPhysics(f.scene, h, slotOf(f.scene, h, RED), ""));
@@ -237,7 +237,7 @@ TEST_CASE("three colours of one material collide as one; renaming an entry's mat
     f.app.world.emplace<projv::RigidBody>(e);
     f.frames(2);
     REQUIRE(f.app.world.all_of<projv::PhysicsBody>(e));
-    CHECK(f.body(e).voxelParts[0].shape->pieces == 1);
+    if (!f.body(e).voxelParts[0].shape->tiles) CHECK(f.body(e).voxelParts[0].shape->pieces == 1);   // boxes' count (tiles: none)
     float stoneMass = runtime::physicsWorld(f.app.world).bodyMass(f.body(e).id);
     CHECK(stoneMass == doctest::Approx(2000.0f * 3.0f).epsilon(1e-3));   // 3 m^3
     runtime::BodyId first = f.body(e).id;
@@ -245,7 +245,7 @@ TEST_CASE("three colours of one material collide as one; renaming an entry's mat
     REQUIRE(utils::setMaterialPhysics(f.scene, h, slotOf(f.scene, h, GREEN), "wood"));
     f.frames(2);
     CHECK_FALSE(f.body(e).id == first);   // rebuilt
-    CHECK(f.body(e).voxelParts[0].shape->pieces == 3);
+    if (!f.body(e).voxelParts[0].shape->tiles) CHECK(f.body(e).voxelParts[0].shape->pieces == 3);   // boxes' count (tiles: none)
     CHECK(runtime::physicsWorld(f.app.world).bodyMass(f.body(e).id) ==
           doctest::Approx(2000.0f * 2.0f + 500.0f * 1.0f).epsilon(1e-3));
     // Redefining a material it uses rebuilds it too, with the new density.

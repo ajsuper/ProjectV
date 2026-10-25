@@ -28,10 +28,10 @@ namespace projv::utils {
         // Voxels merged greedily into axis-aligned boxes: exact, no overlaps, solid all the way
         // through (a body that ends up inside is pushed out, which a surface mesh would not do).
         Boxes = 1,
-        // A static body's voxels collide as its blob's tile table, read in place (runtime/physics's
+        // A body's voxels collide as its blob's tile table, read in place (runtime/physics's
         // VoxelShape; docs/plans/voxel-collision-shape.md): exact, nothing built, solid all the way
-        // through as boxes are. A moving body's still collide as Boxes (voxels against voxels is the
-        // plan's Phase 3). pieceBudget and maxDecodedCells do not apply to it.
+        // through as boxes are -- static bodies and, weighed from the table, moving ones, which collide
+        // with each other box by box. pieceBudget and maxDecodedCells do not apply to it.
         Tiles = 2,
     };
 

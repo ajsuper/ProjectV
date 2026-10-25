@@ -18,11 +18,12 @@ namespace projv::runtime {
         core::vec3 toCore(JPH::Vec3Arg v) { return {v.GetX(), v.GetY(), v.GetZ()}; }
         JPH::Vec3 toJolt(core::vec3 v) { return JPH::Vec3(v.x, v.y, v.z); }
 
-        // The boxes of one query, per thread: Jolt collides on several.
-        std::vector<utils::TileBox>& scratch() {
-            thread_local std::vector<utils::TileBox> boxes;
-            boxes.clear();
-            return boxes;
+        // The boxes of one query, per thread: Jolt collides on several. `level` 1 for a query that
+        // makes another inside it (voxels against voxels: one shape's boxes, then each against the other's).
+        std::vector<utils::TileBox>& scratch(int level = 0) {
+            thread_local std::vector<utils::TileBox> boxes[2];
+            boxes[level].clear();
+            return boxes[level];
         }
 
         // A box's Jolt box, centred on its middle, rounded as a compound of boxes' are (the convex
@@ -48,7 +49,8 @@ namespace projv::runtime {
     }
 
     VoxelShape::VoxelShape(std::shared_ptr<const utils::TileTable> table,
-                           std::array<JPH::RefConst<JPH::PhysicsMaterial>, 256> slotMaterials, JPH::uint idBits)
+                           std::array<JPH::RefConst<JPH::PhysicsMaterial>, 256> slotMaterials, JPH::uint idBits,
+                           const std::array<float, 256>* densities)
         : JPH::Shape(JPH::EShapeType::User1, SUBTYPE), tiles(std::move(table)), materials(std::move(slotMaterials)) {
         layout = utils::tileTableLayout(*tiles);
         const core::ivec3 low = layout.blockOrigin * 16, high = (layout.blockOrigin + layout.blockDims) * 16;
@@ -59,6 +61,66 @@ namespace projv::runtime {
         cellShift = utils::tileCellShift(tiles->resolution, idBits);
         cellsPerAxis = 1 << std::max(levels - cellShift, 0);
         bits = JPH::uint(std::max(3 * (levels - cellShift), 1));
+        if (!densities) return;
+        // Its weight, once: every box's mass at its slot's density, their centre, and their inertia
+        // about it -- each box's own about its middle, moved there (the parallel axis theorem).
+        moving = true;
+        utils::tileBlockBoxes(*tiles, layout, greedy, greedyStarts);
+        // Its voxels' own box, not its blocks': a piece of a few voxels in a 16^3 block would reach a
+        // block's width round it, and the broadphase would pair it with everything near.
+        core::ivec3 contentLow, contentHigh;
+        if (utils::tileTableBounds(*tiles, contentLow, contentHigh))
+            bounds = JPH::AABox(toJolt(core::vec3(contentLow)), toJolt(core::vec3(contentHigh + core::ivec3(1))));
+        std::vector<utils::TileBox> boxes;
+        boxesIn(core::ivec3(0), core::ivec3(int(tiles->resolution) - 1), boxes);
+        double total = 0.0;
+        core::dvec3 moment(0.0);
+        for (const utils::TileBox& b : boxes) {
+            const core::dvec3 size(b.high - b.low + core::ivec3(1));
+            const double m = size.x * size.y * size.z * double((*densities)[b.slot]);
+            total += m;
+            moment += m * (core::dvec3(b.low) + 0.5 * size);
+        }
+        if (!(total > 0.0)) total = 1.0;
+        for (const utils::TileBox& b : boxes)
+            innerRadius = std::max(innerRadius, 0.5f * float(glm::min(glm::min(b.high.x - b.low.x, b.high.y - b.low.y), b.high.z - b.low.z) + 1));
+        const core::dvec3 c = moment / total;
+        centre = JPH::Vec3(float(c.x), float(c.y), float(c.z));
+        double inertia[3][3] = {};
+        for (const utils::TileBox& b : boxes) {
+            const core::dvec3 size(b.high - b.low + core::ivec3(1));
+            const double m = size.x * size.y * size.z * double((*densities)[b.slot]);
+            const core::dvec3 d = core::dvec3(b.low) + 0.5 * size - c;
+            const double own[3] = {m / 12.0 * (size.y * size.y + size.z * size.z), m / 12.0 * (size.x * size.x + size.z * size.z),
+                                   m / 12.0 * (size.x * size.x + size.y * size.y)};
+            const double dd = glm::dot(d, d);
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++) inertia[i][j] += (i == j ? own[i] + m * dd : 0.0) - m * d[i] * d[j];
+        }
+        mass.mMass = float(total);
+        mass.mInertia = JPH::Mat44::sIdentity();
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++) mass.mInertia(i, j) = float(inertia[i][j]);
+    }
+
+    void VoxelShape::boxesIn(core::ivec3 low, core::ivec3 high, std::vector<utils::TileBox>& out) const {
+        if (greedy.empty()) {
+            utils::tileBoxesIn(*tiles, layout, low, high, out);
+            return;
+        }
+        low = glm::max(low, layout.blockOrigin * 16);
+        high = glm::min(high, (layout.blockOrigin + layout.blockDims) * 16 - core::ivec3(1));
+        if (glm::any(glm::greaterThan(low, high))) return;
+        const core::ivec3 blockLow = low >> 4, blockHigh = high >> 4;
+        for (int bz = blockLow.z; bz <= blockHigh.z; ++bz)
+            for (int by = blockLow.y; by <= blockHigh.y; ++by)
+                for (int bx = blockLow.x; bx <= blockHigh.x; ++bx) {
+                    const size_t index = size_t(layout.blockIndex({bx, by, bz}));
+                    for (uint32_t i = greedyStarts[index]; i < greedyStarts[index + 1]; i++) {
+                        const utils::TileBox& b = greedy[i];
+                        if (glm::all(glm::lessThanEqual(b.low, high)) && glm::all(glm::lessThanEqual(low, b.high))) out.push_back(b);
+                    }
+                }
     }
 
     JPH::SubShapeIDCreator VoxelShape::cellId(const JPH::SubShapeIDCreator& creator, core::ivec3 voxel) const {
@@ -75,6 +137,7 @@ namespace projv::runtime {
     }
 
     JPH::MassProperties VoxelShape::GetMassProperties() const {
+        if (moving) return mass;
         // Static, so never weighed; a compound of it asks, to place its centre (one voxel a unit).
         JPH::MassProperties p;
         p.SetMassAndInertiaOfSolidBox(bounds.GetSize(), bounds.GetSize().ReduceMin() > 0.0f ? volume / bounds.GetVolume() : 1.0f);
@@ -87,7 +150,7 @@ namespace projv::runtime {
         bool found = utils::tileTableVoxel(*tiles, corner, &slot);
         if (!found) {   // the cell's first box: a contact names its cell, not its voxel
             std::vector<utils::TileBox>& boxes = scratch();
-            utils::tileBoxesIn(*tiles, layout, corner, corner + core::ivec3(cellSize() - 1), boxes);
+            boxesIn(corner, corner + core::ivec3(cellSize() - 1), boxes);
             if ((found = !boxes.empty())) slot = boxes.front().slot;
         }
         const JPH::PhysicsMaterial* m = found ? materials[slot].GetPtr() : nullptr;
@@ -95,7 +158,7 @@ namespace projv::runtime {
     }
 
     JPH::Vec3 VoxelShape::GetSurfaceNormal(const JPH::SubShapeID& id, JPH::Vec3Arg position) const {
-        const core::vec3 p = toCore(position);
+        const core::vec3 p = toCore(position + centre);
         const core::ivec3 n = utils::tileSurfaceNormal(*tiles, p);
         if (n != core::ivec3(0)) return toJolt(core::vec3(n));
         // Not on a face (inside, or off the surface by more than a quarter voxel): the cell's side nearest it.
@@ -111,7 +174,7 @@ namespace projv::runtime {
         // The face of the box the id names (its first voxel's), or of the box round a cell's solid voxels.
         const core::ivec3 corner = cellCorner(id), last = corner + core::ivec3(cellSize() - 1);
         std::vector<utils::TileBox>& boxes = scratch();
-        utils::tileBoxesIn(*tiles, layout, corner, last, boxes);
+        boxesIn(corner, last, boxes);
         if (boxes.empty()) return;
         utils::TileBox all = boxes.front();
         if (boxes.size() > 1) {
@@ -122,13 +185,13 @@ namespace projv::runtime {
             }
         }
         CellBox cell(all, nullptr);
-        cell.shape.GetSupportingFace(JPH::SubShapeID(), direction, scale, transform * JPH::Mat44::sTranslation(scale * cell.centre),
-                                     vertices);
+        cell.shape.GetSupportingFace(JPH::SubShapeID(), direction, scale,
+                                     transform * JPH::Mat44::sTranslation(scale * (cell.centre - centre)), vertices);
     }
 
     bool VoxelShape::CastRay(const JPH::RayCast& ray, const JPH::SubShapeIDCreator& creator, JPH::RayCastResult& hit) const {
         utils::TileRayHit h;
-        if (!utils::tileTableRaycast(*tiles, layout, toCore(ray.mOrigin), toCore(ray.mDirection), hit.mFraction, h) ||
+        if (!utils::tileTableRaycast(*tiles, layout, toCore(ray.mOrigin + centre), toCore(ray.mDirection), hit.mFraction, h) ||
             !(h.t < hit.mFraction))
             return false;
         hit.mFraction = h.t;
@@ -141,7 +204,7 @@ namespace projv::runtime {
         if (!filter.ShouldCollide(this, creator.GetID())) return;
         const float early = collector.GetEarlyOutFraction();
         utils::TileRayHit h;
-        if (!utils::tileTableRaycast(*tiles, layout, toCore(ray.mOrigin), toCore(ray.mDirection), std::min(early, 1.0f), h) ||
+        if (!utils::tileTableRaycast(*tiles, layout, toCore(ray.mOrigin + centre), toCore(ray.mDirection), std::min(early, 1.0f), h) ||
             !(h.t < early))
             return;
         JPH::RayCastResult result;
@@ -153,7 +216,7 @@ namespace projv::runtime {
     void VoxelShape::CollidePoint(JPH::Vec3Arg point, const JPH::SubShapeIDCreator& creator,
                                   JPH::CollidePointCollector& collector, const JPH::ShapeFilter& filter) const {
         if (!filter.ShouldCollide(this, creator.GetID())) return;
-        const core::ivec3 v(glm::floor(toCore(point)));
+        const core::ivec3 v(glm::floor(toCore(point + centre)));
         if (!utils::tileTableVoxel(*tiles, v)) return;
         JPH::CollidePointResult result;
         result.mSubShapeID2 = cellId(creator, v).GetID();
@@ -174,6 +237,21 @@ namespace projv::runtime {
             bool                    has = false;
             JPH::CollideShapeResult best;
         };
+
+        // The deepest contact of each pair of ids, passed on at the end: voxels against voxels where
+        // one shape's boxes share their cell's id (a coarse shape), so no pair of ids comes twice.
+        class PairDeepestCollector final : public JPH::CollideShapeCollector {
+        public:
+            void AddHit(const JPH::CollideShapeResult& result) override {
+                for (JPH::CollideShapeResult& r : results)
+                    if (r.mSubShapeID1 == result.mSubShapeID1 && r.mSubShapeID2 == result.mSubShapeID2) {
+                        if (result.mPenetrationDepth > r.mPenetrationDepth) r = result;
+                        return;
+                    }
+                results.push_back(result);
+            }
+            std::vector<JPH::CollideShapeResult> results;
+        };
     }
 
     struct VoxelShapeQueries {
@@ -188,14 +266,17 @@ namespace projv::runtime {
             const JPH::Mat44 oneToTwo = transform2.InversedRotationTranslation() * transform1;
             JPH::AABox reach = shape1->GetLocalBounds().Scaled(scale1);
             reach.ExpandBy(JPH::Vec3::sReplicate(settings.mMaxSeparationDistance));
+            reach = reach.Transformed(oneToTwo);
+            reach.Translate(scale2 * voxels->centre);   // centre-of-mass space to voxel space
             core::ivec3 low, high;
-            voxelRange(reach.Transformed(oneToTwo), scale2, low, high);
+            voxelRange(reach, scale2, low, high);
             std::vector<utils::TileBox>& boxes = scratch();
-            utils::tileBoxesIn(*voxels->tiles, voxels->layout, low, high, boxes);
+            voxels->boxesIn(low, high, boxes);
             auto one = [&](const utils::TileBox& b, JPH::CollideShapeCollector& into) {
                 CellBox cell(b, voxels->materials[b.slot].GetPtr());
                 JPH::CollisionDispatch::sCollideShapeVsShape(
-                    shape1, &cell.shape, scale1, scale2, transform1, transform2 * JPH::Mat44::sTranslation(scale2 * cell.centre),
+                    shape1, &cell.shape, scale1, scale2, transform1,
+                    transform2 * JPH::Mat44::sTranslation(scale2 * (cell.centre - voxels->centre)),
                     creator1, voxels->cellId(creator2, b.low), settings, into, filter);
             };
             if (voxels->cellShift == 0) {   // every box its own id
@@ -229,13 +310,14 @@ namespace projv::runtime {
                          JPH::CastShapeCollector& collector) {
             JPH_ASSERT(shape->GetSubType() == VoxelShape::SUBTYPE);
             const auto* voxels = static_cast<const VoxelShape*>(shape);
-            const JPH::AABox start = sweep.mShapeWorldBounds;
+            const JPH::Vec3 shift = scale * voxels->centre;   // centre-of-mass space to voxel space
+            const JPH::AABox start(sweep.mShapeWorldBounds.mMin + shift, sweep.mShapeWorldBounds.mMax + shift);
             JPH::AABox swept = start;
             swept.Encapsulate(JPH::AABox(start.mMin + sweep.mDirection, start.mMax + sweep.mDirection));
             core::ivec3 low, high;
             voxelRange(swept, scale, low, high);
             std::vector<utils::TileBox>& boxes = scratch();
-            utils::tileBoxesIn(*voxels->tiles, voxels->layout, low, high, boxes);
+            voxels->boxesIn(low, high, boxes);
             if (boxes.empty()) return;
             // Where the sweep's bounds first reach each box: a slab test of the box grown by them.
             const JPH::Vec3 centre = start.GetCenter(), extent = start.GetExtent();
@@ -262,10 +344,142 @@ namespace projv::runtime {
             for (const auto& [enter, i] : order) {
                 if (collector.ShouldEarlyOut() || enter >= collector.GetPositiveEarlyOutFraction()) break;
                 CellBox cell(boxes[i], voxels->materials[boxes[i].slot].GetPtr());
-                const JPH::Mat44 local = JPH::Mat44::sTranslation(scale * cell.centre);
+                const JPH::Mat44 local = JPH::Mat44::sTranslation(scale * (cell.centre - voxels->centre));
                 JPH::CollisionDispatch::sCastShapeVsShapeLocalSpace(sweep.PostTransformed(local.InversedRotationTranslation()),
                                                                     settings, &cell.shape, scale, filter, transform2 * local, creator1,
                                                                     voxels->cellId(creator2, boxes[i].low), collector);
+            }
+        }
+    };
+
+    struct VoxelVoxelQueries {
+        static const VoxelShape* voxels(const JPH::Shape* s) {
+            JPH_ASSERT(s->GetSubType() == VoxelShape::SUBTYPE);
+            return static_cast<const VoxelShape*>(s);
+        }
+
+        // A box of a shape, as an axis-aligned box in another space: where `toSpace` puts the box's
+        // middle (of `scale`d voxels, centred on the shape's centre of mass), grown by the box's
+        // half-extents turned by it.
+        static JPH::AABox placed(const CellBox& cell, const VoxelShape& shape, JPH::Vec3Arg scale, JPH::Mat44Arg toSpace) {
+            const JPH::Vec3 middle = toSpace * (scale * (cell.centre - shape.centre));
+            const JPH::Vec3 half = scale.Abs() * cell.half;
+            const JPH::Vec3 reach(std::abs(toSpace(0, 0)) * half.GetX() + std::abs(toSpace(0, 1)) * half.GetY() + std::abs(toSpace(0, 2)) * half.GetZ(),
+                                  std::abs(toSpace(1, 0)) * half.GetX() + std::abs(toSpace(1, 1)) * half.GetY() + std::abs(toSpace(1, 2)) * half.GetZ(),
+                                  std::abs(toSpace(2, 0)) * half.GetX() + std::abs(toSpace(2, 1)) * half.GetY() + std::abs(toSpace(2, 2)) * half.GetZ());
+            return JPH::AABox(middle - reach, middle + reach);
+        }
+
+        // A box of `shape`, in its own centre-of-mass space, scaled.
+        static JPH::AABox own(const utils::TileBox& b, const VoxelShape& shape, JPH::Vec3Arg scale) {
+            const JPH::Vec3 low = scale * (toJolt(core::vec3(b.low)) - shape.centre);
+            const JPH::Vec3 high = scale * (toJolt(core::vec3(b.high + core::ivec3(1))) - shape.centre);
+            return JPH::AABox(JPH::Vec3::sMin(low, high), JPH::Vec3::sMax(low, high));
+        }
+
+        // Voxels against voxels, as a compound of boxes against another: the other's boxes where the
+        // two shapes' bounds meet, fetched once (nothing there, nothing to do); then of the smaller
+        // one's boxes there, each against those of the other its bounds reach, one Jolt box against
+        // another. Not Teardown's corners and edges -- the plan's design for when this is too slow.
+        static void collide(const JPH::Shape* shape1, const JPH::Shape* shape2, JPH::Vec3Arg scale1, JPH::Vec3Arg scale2,
+                            JPH::Mat44Arg transform1, JPH::Mat44Arg transform2, const JPH::SubShapeIDCreator& creator1,
+                            const JPH::SubShapeIDCreator& creator2, const JPH::CollideShapeSettings& settings,
+                            JPH::CollideShapeCollector& collector, const JPH::ShapeFilter& filter) {
+            const VoxelShape* a = voxels(shape1);
+            const VoxelShape* b = voxels(shape2);
+            const float volumeA = a->volume * std::abs(scale1.GetX() * scale1.GetY() * scale1.GetZ());
+            const float volumeB = b->volume * std::abs(scale2.GetX() * scale2.GetY() * scale2.GetZ());
+            if (volumeA > volumeB) {   // the smaller one's boxes: the other way round
+                JPH::CollisionDispatch::sReversedCollideShape(shape1, shape2, scale1, scale2, transform1, transform2, creator1,
+                                                              creator2, settings, collector, filter);
+                return;
+            }
+            const float margin = settings.mMaxSeparationDistance;
+            // b's boxes where a reaches, in b's space.
+            const JPH::Mat44 oneToTwo = transform2.InversedRotationTranslation() * transform1;
+            JPH::AABox reachB = a->GetLocalBounds().Scaled(scale1);
+            reachB.ExpandBy(JPH::Vec3::sReplicate(margin));
+            reachB = reachB.Transformed(oneToTwo);
+            reachB.Translate(scale2 * b->centre);
+            core::ivec3 low, high;
+            voxelRange(reachB, scale2, low, high);
+            std::vector<utils::TileBox>& near = scratch(1);
+            b->boxesIn(low, high, near);
+            if (near.empty()) return;
+            // a's boxes where b reaches, in a's space.
+            const JPH::Mat44 twoToOne = transform1.InversedRotationTranslation() * transform2;
+            JPH::AABox reachA = b->GetLocalBounds().Scaled(scale2);
+            reachA.ExpandBy(JPH::Vec3::sReplicate(margin));
+            reachA = reachA.Transformed(twoToOne);
+            reachA.Translate(scale1 * a->centre);
+            voxelRange(reachA, scale1, low, high);
+            std::vector<utils::TileBox>& boxes = scratch(0);
+            a->boxesIn(low, high, boxes);
+            PairDeepestCollector pairs;
+            pairs.SetContext(collector.GetContext());
+            JPH::CollideShapeCollector& into = a->cellShift == 0 && b->cellShift == 0 ? collector : pairs;
+            std::vector<JPH::AABox> nearBounds;
+            nearBounds.reserve(near.size());
+            for (const utils::TileBox& n : near) nearBounds.push_back(own(n, *b, scale2));
+            for (const utils::TileBox& box : boxes) {
+                if (collector.ShouldEarlyOut()) break;
+                CellBox cellA(box, a->materials[box.slot].GetPtr());
+                JPH::AABox inB = placed(cellA, *a, scale1, oneToTwo);
+                inB.ExpandBy(JPH::Vec3::sReplicate(margin));
+                const JPH::Mat44 boxTransform = transform1 * JPH::Mat44::sTranslation(scale1 * (cellA.centre - a->centre));
+                const JPH::SubShapeIDCreator idA = a->cellId(creator1, box.low);
+                for (size_t k = 0; k < near.size(); k++) {
+                    if (!inB.Overlaps(nearBounds[k])) continue;
+                    CellBox cellB(near[k], b->materials[near[k].slot].GetPtr());
+                    JPH::CollisionDispatch::sCollideShapeVsShape(&cellA.shape, &cellB.shape, scale1, scale2, boxTransform,
+                                                                 transform2 * JPH::Mat44::sTranslation(scale2 * (cellB.centre - b->centre)),
+                                                                 idA, b->cellId(creator2, near[k].low), settings, into, filter);
+                }
+            }
+            for (const JPH::CollideShapeResult& r : pairs.results) collector.AddHit(r);
+        }
+
+        // Voxels swept against voxels: the other's boxes under the whole sweep, fetched once; then each
+        // of the swept shape's boxes, cast against those its own sweep reaches.
+        static void cast(const JPH::ShapeCast& sweep, const JPH::ShapeCastSettings& settings, const JPH::Shape* shape,
+                         JPH::Vec3Arg scale, const JPH::ShapeFilter& filter, JPH::Mat44Arg transform2,
+                         const JPH::SubShapeIDCreator& creator1, const JPH::SubShapeIDCreator& creator2,
+                         JPH::CastShapeCollector& collector) {
+            const VoxelShape* a = voxels(sweep.mShape);
+            const VoxelShape* b = voxels(shape);
+            // The sweep is in b's space: its bounds, start to end, are where b's boxes can be met.
+            JPH::AABox swept = sweep.mShapeWorldBounds;
+            swept.Encapsulate(JPH::AABox(swept.mMin + sweep.mDirection, swept.mMax + sweep.mDirection));
+            JPH::AABox inVoxels = swept;
+            inVoxels.Translate(scale * b->centre);
+            core::ivec3 low, high;
+            voxelRange(inVoxels, scale, low, high);
+            std::vector<utils::TileBox>& near = scratch(1);
+            b->boxesIn(low, high, near);
+            if (near.empty()) return;
+            std::vector<JPH::AABox> nearBounds;
+            nearBounds.reserve(near.size());
+            for (const utils::TileBox& n : near) nearBounds.push_back(own(n, *b, scale));
+            std::vector<utils::TileBox>& boxes = scratch(0);
+            a->boxesIn(core::ivec3(0), core::ivec3(int(a->tiles->resolution) - 1), boxes);
+            for (const utils::TileBox& box : boxes) {
+                if (collector.ShouldEarlyOut()) break;
+                CellBox cellA(box, a->materials[box.slot].GetPtr());
+                JPH::AABox mine = placed(cellA, *a, sweep.mScale, sweep.mCenterOfMassStart);
+                mine.Encapsulate(JPH::AABox(mine.mMin + sweep.mDirection, mine.mMax + sweep.mDirection));
+                const JPH::ShapeCast one(&cellA.shape, sweep.mScale,
+                                         sweep.mCenterOfMassStart * JPH::Mat44::sTranslation(sweep.mScale * (cellA.centre - a->centre)),
+                                         sweep.mDirection);
+                const JPH::SubShapeIDCreator idA = a->cellId(creator1, box.low);
+                for (size_t k = 0; k < near.size(); k++) {
+                    if (collector.ShouldEarlyOut()) break;
+                    if (!mine.Overlaps(nearBounds[k])) continue;
+                    CellBox cellB(near[k], b->materials[near[k].slot].GetPtr());
+                    const JPH::Mat44 local = JPH::Mat44::sTranslation(scale * (cellB.centre - b->centre));
+                    JPH::CollisionDispatch::sCastShapeVsShapeLocalSpace(one.PostTransformed(local.InversedRotationTranslation()), settings,
+                                                                        &cellB.shape, scale, filter, transform2 * local, idA,
+                                                                        b->cellId(creator2, near[k].low), collector);
+                }
             }
         }
     };
@@ -279,5 +493,7 @@ namespace projv::runtime {
             JPH::CollisionDispatch::sRegisterCollideShape(SUBTYPE, s, JPH::CollisionDispatch::sReversedCollideShape);
             JPH::CollisionDispatch::sRegisterCastShape(SUBTYPE, s, JPH::CollisionDispatch::sReversedCastShape);
         }
+        JPH::CollisionDispatch::sRegisterCollideShape(SUBTYPE, SUBTYPE, VoxelVoxelQueries::collide);
+        JPH::CollisionDispatch::sRegisterCastShape(SUBTYPE, SUBTYPE, VoxelVoxelQueries::cast);
     }
 }

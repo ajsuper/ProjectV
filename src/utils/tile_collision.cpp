@@ -175,6 +175,53 @@ namespace projv::utils {
                 }
     }
 
+    void tileBlockBoxes(const TileTable& t, const TileLayout& L, std::vector<TileBox>& boxes, std::vector<uint32_t>& starts) {
+        boxes.clear();
+        starts.assign(L.blockCount + 1, 0);
+        if (t.texels.empty()) return;
+        std::array<int16_t, 16 * 16 * 16> grid;   // a slot, or -1 for empty
+        auto at = [](int x, int y, int z) { return size_t(x + 16 * (y + 16 * z)); };
+        for (int bz = 0; bz < L.blockDims.z; ++bz)
+            for (int by = 0; by < L.blockDims.y; ++by)
+                for (int bx = 0; bx < L.blockDims.x; ++bx) {
+                    const core::ivec3 b = L.blockOrigin + core::ivec3(bx, by, bz);
+                    const int64_t index = L.blockIndex(b);
+                    starts[size_t(index)] = uint32_t(boxes.size());
+                    const Block block = blockAt(t, L, b);
+                    if (block.kind == Block::Empty) continue;
+                    const core::ivec3 corner = b * 16;
+                    if (block.kind == Block::Full) {
+                        boxes.push_back({corner, corner + core::ivec3(15), block.slot});
+                        continue;
+                    }
+                    grid.fill(-1);
+                    forEachTileVoxelIn(t, corner, corner + core::ivec3(15),
+                                       [&](core::ivec3 p, uint8_t slot) { grid[at(p.x - corner.x, p.y - corner.y, p.z - corner.z)] = int16_t(slot); });
+                    for (int z = 0; z < 16; z++)
+                        for (int y = 0; y < 16; y++)
+                            for (int x = 0; x < 16; x++) {
+                                const int16_t s = grid[at(x, y, z)];
+                                if (s < 0) continue;
+                                int x1 = x, y1 = y, z1 = z;
+                                while (x1 + 1 < 16 && grid[at(x1 + 1, y, z)] == s) x1++;
+                                for (bool grow = true; grow && y1 + 1 < 16;) {
+                                    for (int i = x; i <= x1 && grow; i++) grow = grid[at(i, y1 + 1, z)] == s;
+                                    if (grow) y1++;
+                                }
+                                for (bool grow = true; grow && z1 + 1 < 16;) {
+                                    for (int k = y; k <= y1 && grow; k++)
+                                        for (int i = x; i <= x1 && grow; i++) grow = grid[at(i, k, z1 + 1)] == s;
+                                    if (grow) z1++;
+                                }
+                                for (int k = z; k <= z1; k++)
+                                    for (int j = y; j <= y1; j++)
+                                        for (int i = x; i <= x1; i++) grid[at(i, j, k)] = -1;
+                                boxes.push_back({corner + core::ivec3(x, y, z), corner + core::ivec3(x1, y1, z1), uint8_t(s)});
+                            }
+                }
+        starts[L.blockCount] = uint32_t(boxes.size());
+    }
+
     namespace {
         // Cells of size `size` along a ray, in order: a 3D DDA over [low, high) (voxel units, multiples of
         // `size`) from parameter `t` to `tEnd`. `visit(cell, t0, t1, axis)` sees each cell entered, the

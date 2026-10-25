@@ -408,16 +408,14 @@ namespace projv::runtime {
         }
 
         // Voxels whose palette entry names a physics material are built with it; the rest weigh
-        // `otherDensity`. A static body's collide as their tile tables when the representation says
-        // Tiles; a moving body's are boxes whatever it says (voxels against voxels is not built yet).
+        // `otherDensity`. When the representation says Tiles they collide as their tile tables -- a
+        // moving body's made for motion (weighed, centred), a static one's not.
         // `boundsOnly`: the bounds and nothing else -- a primitive fitted to the voxels needs no shape of them.
         std::vector<PhysicsShapePart> voxelParts(PhysicsRuntime& runtime, const Scene& scene, ComponentHandle h,
                                                  core::vec3 position, core::quat rotation, float otherDensity, bool fixed,
                                                  Box3& bounds, std::vector<PhysicsVoxelPart>& voxelOut, bool boundsOnly = false) {
             PhysicsWorld& physics = *runtime.world;
-            utils::CollisionParams params = runtime.collision;
-            if (!fixed && params.representation == utils::CollisionRepresentation::Tiles)
-                params.representation = utils::CollisionRepresentation::Boxes;
+            const utils::CollisionParams& params = runtime.collision;
             std::vector<ChunkHandle> chunks;
             collectChunks(scene, h, chunks);
             // The sub-shape id bits each chunk's shape is left under the compound of them all.
@@ -454,7 +452,7 @@ namespace projv::runtime {
                     hasSlots = slotMaterialsOf(runtime, scene, owner, slots);
                 }
                 CollisionShapeRef shape = physics.voxelShape(blob, chunk.header.resolution, params,
-                                                             hasSlots ? &slots : nullptr, otherDensity, idBits);
+                                                             hasSlots ? &slots : nullptr, otherDensity, idBits, !fixed);
                 if (!shape) continue;   // an empty chunk: nothing there to collide with
                 float voxelSize = chunk.header.scale / float(chunk.header.resolution);
                 PhysicsShapePart part;

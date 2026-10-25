@@ -163,9 +163,10 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   replaces a blob's voxels in place calls `markBlobContentChanged(blob)` (the blob_voxels setters do), never just clears
   `contentBoundsValid`. What voxels collide as is set by `CollisionParams::representation`
   (`utils/collision_geometry.h`): `Boxes` (the default) is `utils::buildCollisionPieces`, and nothing
-  else; `Tiles` makes static voxel bodies collide as their blob's tile table, read in place
-  (`src/runtime/physics/voxel_shape.h`, `utils/tile_collision.h`) -- moving ones stay boxes. Voxel
-  Mayhem's maps use Tiles; `PROJV_COLLISION=tiles` runs anything (the unit suite, a demo) on it.
+  else; `Tiles` makes voxel bodies collide as their blob's tile table, read in place
+  (`src/runtime/physics/voxel_shape.h`, `utils/tile_collision.h`) -- static ones as they are, moving
+  ones weighed and merged by block once, colliding with each other box by box. Voxel Mayhem's maps use
+  Tiles; `PROJV_COLLISION=tiles` runs anything (the unit suite, a demo) on it.
   Plan: `docs/plans/voxel-collision-shape.md`.
 - **Cheap debris** (`PhysicsConfig::debris`, off by default): a break's pieces of up to `maxVoxels`
   are `Debris`, not bodies -- drawn, falling and bouncing against static bodies, never in the solver

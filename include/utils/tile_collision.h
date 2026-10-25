@@ -27,6 +27,14 @@ namespace projv::utils {
     void tileBoxesIn(const TileTable& table, const TileLayout& layout, core::ivec3 low, core::ivec3 high,
                      std::vector<TileBox>& out);
 
+    // The table's solid voxels as few boxes as a greedy merge within each 16^3 block makes -- along x,
+    // then y, then z, boxes of one slot, across the block's bricks -- block by block in the layout's
+    // order, with `starts[i]` the first box of block i (layout.blockIndex) and `starts.back()` the
+    // count: what a moving body's shape collides by, made once, and looked up by block as tileBoxesIn
+    // is. (tileBoxesIn's merge stops at every 4^3 brick, and a piece met box by box costs a test a box.)
+    void tileBlockBoxes(const TileTable& table, const TileLayout& layout, std::vector<TileBox>& boxes,
+                        std::vector<uint32_t>& starts);
+
     struct TileRayHit {
         float       t = 0.0f;          // origin + t * direction is where it enters the voxel
         core::ivec3 voxel{0};

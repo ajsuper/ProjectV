@@ -97,6 +97,7 @@ namespace projv::runtime {
         std::shared_ptr<const utils::TileTable>       tiles;
         utils::SlotMaterials                          slots{};
         uint32_t                                      idBits = 32;   // the sub-shape id bits it names voxels in
+        bool                                          moving = false;   // made for a moving body: weighed, centred
         struct Native;                            // the Jolt shape; defined where Jolt is
         std::shared_ptr<Native>  native;
     };
@@ -579,17 +580,19 @@ namespace projv::runtime {
         CollisionShapeRef voxelShape(const GeometryBlob& blob, uint32_t resolution,
                                      const utils::CollisionParams& params = {},
                                      const utils::SlotMaterials* materials = nullptr, float otherDensity = 1000.0f,
-                                     uint32_t idBits = 32);
+                                     uint32_t idBits = 32, bool moving = false);
         // The same, from pieces already built, and not cached.
         CollisionShapeRef shapeFromPieces(const utils::CollisionPieces& pieces, float otherDensity = 1000.0f);
         // A shape that is the table's voxels, read in place (CollisionRepresentation::Tiles), and not
         // cached: static bodies only. Null for an empty table, or a material out of range (logged).
         // `idBits`: the sub-shape id bits it may name its contacts in (what a compound above it leaves;
         // utils::tileCellShift) -- voxels when they fit, coarser cells otherwise. voxelShape's, for a
-        // Tiles shape, likewise (and cached apart by it).
+        // Tiles shape, likewise (and cached apart by it). `moving`: for a body that moves -- weighed at
+        // its slots' densities (otherDensity where a slot names no material), its centre of mass its
+        // voxels'; a shape not made for motion is refused by a moving body.
         CollisionShapeRef shapeFromTiles(std::shared_ptr<const utils::TileTable> table,
                                          const utils::SlotMaterials* materials = nullptr, float otherDensity = 1000.0f,
-                                         uint32_t idBits = 32);
+                                         uint32_t idBits = 32, bool moving = false);
         // Drops cached shapes nothing uses any more: no ref held outside the cache, no body built
         // from it. step() does this once a second of ticks; call it to release memory sooner.
         void pruneShapeCache();

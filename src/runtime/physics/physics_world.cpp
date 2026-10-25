@@ -285,10 +285,12 @@ namespace projv::runtime {
             return false;
         }
 
-        bool containsTiles(const PhysicsShape& shape) {
-            if (shape.kind == PhysicsShape::Kind::Voxels) return shape.voxels && shape.voxels->tiles;
+        // Whether it holds a tile-table voxel shape (`staticOnly`: one not made for motion).
+        bool containsTiles(const PhysicsShape& shape, bool staticOnly = false) {
+            if (shape.kind == PhysicsShape::Kind::Voxels)
+                return shape.voxels && shape.voxels->tiles && !(staticOnly && shape.voxels->moving);
             for (const PhysicsShapePart& part : shape.parts)
-                if (containsTiles(part.shape)) return true;
+                if (containsTiles(part.shape, staticOnly)) return true;
             return false;
         }
 
@@ -542,7 +544,7 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 14;   // 14: destroys that wake given boxes; 13: character velocity; 12: body states asleep; 11: body states, characters alone; 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body (written as 8 by mistake until 10); 10: frozen bodies
+        constexpr uint32_t LOG_VERSION = 15;   // 15: tile shapes for motion; 14: destroys that wake given boxes; 13: character velocity; 12: body states asleep; 11: body states, characters alone; 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body (written as 8 by mistake until 10); 10: frozen bodies
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
@@ -586,6 +588,7 @@ namespace projv::runtime {
                     if (tiles) {   // the table as it is, its slots' materials and its id bits
                         put(out, shape.voxels->otherDensity);
                         put(out, shape.voxels->idBits);
+                        put(out, uint8_t(shape.voxels->moving));
                         for (uint16_t m : shape.voxels->slots) put(out, m);
                         put(out, tiles->resolution);
                         put(out, uint32_t(tiles->texels.size()));
@@ -632,7 +635,8 @@ namespace projv::runtime {
                         utils::SlotMaterials slots{};
                         float otherDensity = 0.0f;
                         uint32_t words = 0, bytes = 0, idBits = 0;
-                        if (!get(in, at, otherDensity) || !get(in, at, idBits)) return false;
+                        uint8_t moving = 0;
+                        if (!get(in, at, otherDensity) || !get(in, at, idBits) || !get(in, at, moving)) return false;
                         for (uint16_t& m : slots) if (!get(in, at, m)) return false;
                         if (!get(in, at, table.resolution) || !get(in, at, words) || words > (in.size() - at) / 4) return false;
                         table.texels.resize(words);
@@ -643,7 +647,8 @@ namespace projv::runtime {
                         table.leafStart = table.texels.empty() ? 0u : uint32_t(utils::tileTableLayout(table).leafStart);
                         if (!utils::tileTableWellFormed(table)) return false;
                         utils::tileTableRecount(table);
-                        shape.voxels = build(std::make_shared<const utils::TileTable>(std::move(table)), slots, otherDensity, idBits);
+                        shape.voxels = build(std::make_shared<const utils::TileTable>(std::move(table)), slots, otherDensity, idBits,
+                                             moving != 0);
                         return true;
                     }
                     utils::CollisionPieces pieces;
@@ -920,8 +925,8 @@ namespace projv::runtime {
         if (!(desc.density > 0.0f) || !std::isfinite(desc.density) || !std::isfinite(desc.mass) || desc.mass < 0.0f)
             return refuse("a density that is not positive, or a negative mass");
 
-        if (desc.motion != MotionType::Static && containsTiles(desc.shape))
-            return refuse("a moving body of tile-table voxels (CollisionRepresentation::Tiles is for static bodies)");
+        if (desc.motion != MotionType::Static && containsTiles(desc.shape, true))
+            return refuse("a moving body of tile-table voxels not made for motion (shapeFromTiles' `moving`)");
         // Voxel materials: the shape is built with each piece's density, and weighs what it says.
         const bool materials = containsMaterials(desc.shape);
         JPH::ShapeRefC shape = materials ? makeShape(desc.shape, desc.density) : makeShape(desc.shape);
@@ -2125,7 +2130,8 @@ namespace projv::runtime {
     }
 
     CollisionShapeRef PhysicsWorld::shapeFromTiles(std::shared_ptr<const utils::TileTable> table,
-                                                   const utils::SlotMaterials* materials, float otherDensity, uint32_t idBits) {
+                                                   const utils::SlotMaterials* materials, float otherDensity, uint32_t idBits,
+                                                   bool moving) {
         if (!table || table->texels.empty()) return nullptr;
         std::array<JPH::RefConst<JPH::PhysicsMaterial>, 256> joltMaterials;
         bool hasMaterials = false;
@@ -2147,13 +2153,22 @@ namespace projv::runtime {
         out->tiles = table;
         out->native = std::make_shared<CollisionShape::Native>();
         out->idBits = std::min(idBits, 32u);
-        out->native->shape = new VoxelShape(std::move(table), std::move(joltMaterials), out->idBits);
+        out->moving = moving;
+        // What a unit voxel of each slot weighs: as a compound of boxes' pieces do -- its material's
+        // density, or otherDensity -- and, with no materials, 1 (the body's mass is then its volume's).
+        std::array<float, 256> densities;
+        for (size_t slot = 0; slot < densities.size(); slot++) {
+            const uint16_t m = materials ? (*materials)[slot] : 0;
+            densities[slot] = !hasMaterials ? 1.0f : m && impl->materialDefined[m] ? impl->materials[m].density : otherDensity;
+        }
+        out->native->shape = new VoxelShape(std::move(table), std::move(joltMaterials), out->idBits, moving ? &densities : nullptr);
         return out;
     }
 
     CollisionShapeRef PhysicsWorld::voxelShape(const GeometryBlob& blob, uint32_t resolution,
                                                const utils::CollisionParams& params,
-                                               const utils::SlotMaterials* materials, float otherDensity, uint32_t idBits) {
+                                               const utils::SlotMaterials* materials, float otherDensity, uint32_t idBits,
+                                               bool moving) {
         // The materials' part of the key: 0 without any, so those shapes are shared as they always
         // were; otherwise the slots, the material-0 density and the table's version (densities are
         // baked into the shape).
@@ -2167,13 +2182,13 @@ namespace projv::runtime {
         } else {
             materials = nullptr;
         }
-        const uint32_t idKey = params.representation == utils::CollisionRepresentation::Tiles ? idBits : 0u;
+        const uint32_t idKey = params.representation == utils::CollisionRepresentation::Tiles ? idBits * 2u + (moving ? 1u : 0u) : 0u;
         auto key = std::make_tuple(blob.contentStamp, params.key() * 33u + idKey, materialKey);
         auto found = impl->shapeCache.find(key);
         if (found != impl->shapeCache.end()) return found->second;
         CollisionShapeRef shape;
         if (params.representation == utils::CollisionRepresentation::Tiles) {
-            shape = shapeFromTiles(utils::shareBlobTiles(blob), materials, otherDensity, idBits);
+            shape = shapeFromTiles(utils::shareBlobTiles(blob), materials, otherDensity, idBits, moving);
         } else {
             utils::CollisionPieces pieces = utils::buildCollisionPieces(blob, resolution, params, materials);
             shape = shapeFromPieces(pieces, otherDensity);
@@ -2852,8 +2867,8 @@ namespace projv::runtime {
                 return world.shapeFromPieces(pieces, otherDensity);
             }
             CollisionShapeRef operator()(std::shared_ptr<const utils::TileTable> table, const utils::SlotMaterials& slots,
-                                         float otherDensity, uint32_t idBits) {
-                return world.shapeFromTiles(std::move(table), &slots, otherDensity, idBits);
+                                         float otherDensity, uint32_t idBits, bool moving) {
+                return world.shapeFromTiles(std::move(table), &slots, otherDensity, idBits, moving);
             }
         } build{world};
         auto truncated = [&] {
