@@ -43,7 +43,8 @@
 //
 //   MAYHEM_SELFTEST=1 ./voxel_mayhem_demo   plays itself for a while and checks that every feature did what
 //                                      it should (MAYHEM_CAPTURE=<prefix> also saves screenshots)
-//   MAYHEM_BENCH=cannon|blast|barrage  times a break at the castle wall (MAYHEM_ONLY=castle: nothing else)
+//   MAYHEM_BENCH=cannon|blast|barrage  times a break at the castle wall (MAYHEM_ONLY=castle: nothing else);
+//                                      MAYHEM_BENCH_SETTLE=<s> after a barrage: then what is still awake
 //   MAYHEM_MAP=<folder>                 an authored map (compose.json, entities.json, physics_materials.json:
 //                                      the Teardown imports, say) in place of the park, to break with the
 //                                      same tools, brought to life size (MAYHEM_MAP_SCALE, default 0.1); the
@@ -121,7 +122,7 @@ constexpr uint32_t SMALL_DEBRIS_VOXELS = 3;   // walked through and aimed throug
 // 64 ms of physics a frame). A piece this small or smaller is light debris there: it collides as one box
 // fitted to it, without continuous collision, and not with other debris.
 constexpr uint32_t MAP_DEBRIS_VOXELS = 64;
-constexpr int SHARD_FAMILY_STEPS = 15;        // fixed steps a break's shards pass through each other
+constexpr int SHARD_FAMILY_STEPS = 4;         // fixed steps a break's shards pass through each other
 const quat IDENTITY(1, 0, 0, 0);
 
 uint32_t rgb(float r, float g, float b) { return projv::packRGB10(r, g, b); }
@@ -1756,10 +1757,12 @@ void markDebris(World& world, Entity piece) {
 void onBrokenBody(World& world, const projv::BodyBroken& e) {
     auto& m = world.ctx().get<Mayhem>();
     m.pieces += int(e.pieces.size());
-    // A strike's shards are born flush against each other; one family for their first quarter second,
-    // so the solver does not spend the break's first steps on every shard against its neighbours
-    // (measured: with SHARD_FAMILY_STEPS and minImpactBreak 2, a cannonball through the castle wall
-    // costs 40% less physics in its first half second).
+    // A strike's shards are born flush against each other; one family for their first few steps, so the
+    // solver does not spend the break's first steps on every shard against its neighbours (measured: a
+    // cannonball through the castle wall costs 182 ms of physics in its first half second with 15
+    // steps, 219 with 4, 236 with none). Not longer: shards that fall into each other while they pass
+    // through end up inside each other, wedged, and push back and forth for good -- 15 steps left 238
+    // pieces awake 10 s after the marina's barrage (MAYHEM_BENCH_SETTLE), 8 left 7, 4 none.
     if (SHARD_FAMILY_STEPS > 0 && e.shards > 1) {
         static uint32_t nextFamily = 1000;
         const uint32_t family = nextFamily++;
@@ -2155,7 +2158,31 @@ void benchFrame(projv::Application& app) {
     if (m.clock > 1.0f) (b->fired ? b->after : b->before).push_back(row);
     auto& camera = world.ctx().get<Camera>();
     if (b->what == "barrage") {
-        if (runtime::physicsWorld(world).tick() < BARRAGE_END) return;
+        // MAYHEM_BENCH_SETTLE=<seconds>: the barrage over, that long more, then what has not come to rest.
+        static const uint64_t settle = std::getenv("MAYHEM_BENCH_SETTLE") ? uint64_t(std::atof(std::getenv("MAYHEM_BENCH_SETTLE")) * 60.0) : 0;
+        if (runtime::physicsWorld(world).tick() < BARRAGE_END + settle) return;
+        if (settle > 0) {
+            int awakePieces = 0, awakeOthers = 0, movingDebris = 0, debrisCount = 0;
+            float fastest = 0.0f;
+            std::vector<float> speeds;
+            for (auto [e, body] : world.view<projv::PhysicsBody>().each()) {
+                if (body.motion != runtime::MotionType::Dynamic) continue;
+                const runtime::BodyState st = runtime::bodyPose(world, e);
+                if (!st.awake) continue;
+                (world.all_of<projv::Piece>(e) ? awakePieces : awakeOthers)++;
+                speeds.push_back(glm::length(st.linearVelocity));
+                fastest = std::max(fastest, glm::length(st.linearVelocity));
+            }
+            for (auto [e, d] : world.view<projv::Debris>().each()) {
+                debrisCount++;
+                if (!d.resting) movingDebris++;
+            }
+            std::sort(speeds.begin(), speeds.end());
+            projv::core::info("BENCH SETTLE {:.1f} s after the barrage: awake {} pieces and {} other bodies (speed median {:.2f} m/s, "
+                              "fastest {:.2f}); debris {} of {} not resting",
+                              float(settle) / 60.0f, awakePieces, awakeOthers, speeds.empty() ? 0.0f : speeds[speeds.size() / 2],
+                              fastest, movingDebris, debrisCount);
+        }
         double worstFrame = 0.0, frames = 0.0;
         uint32_t bodies = 0;
         int counted = 0;

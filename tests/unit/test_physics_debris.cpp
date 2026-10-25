@@ -54,12 +54,12 @@ namespace {
             app.world.emplace<projv::StaticCollider>(spawnComponent(app.world, floorComponent));
         }
         void frames(int n) { for (int i = 0; i < n; i++) { now += DT; app.runFrame(); } }
-        // A 1 m crate of quarter-metre voxels with a 2^3 nub on a one-voxel bridge, up at `at`.
+        // A 1 m crate of quarter-metre voxels with a nub (`nub`^3 voxels) on a one-voxel bridge, up at `at`.
         struct Crate { Entity entity; ComponentHandle component; };
-        Crate crate(vec3 at) {
+        Crate crate(vec3 at, int nub = 2) {
             std::vector<projv::PendingVoxelOp> ops = fill({0, 0, 0}, {3, 3, 3});
             for (auto op : fill({4, 1, 1}, {4, 1, 1})) ops.push_back(op);   // the bridge
-            for (auto op : fill({5, 0, 0}, {6, 1, 1})) ops.push_back(op);   // the nub
+            for (auto op : fill({5, 0, 0}, {4 + nub, nub - 1, nub - 1})) ops.push_back(op);   // the nub
             ComponentHandle h = utils::addComponent(scene, projv::ComponentKind::Chunk, "crate", INVALID_COMPONENT_HANDLE, 16, 0.25f);
             utils::setComponentTransform(scene, h, at, quat(1, 0, 0, 0), 1.0f);
             utils::queueVoxelAdd(scene, h, ops);
@@ -162,6 +162,38 @@ TEST_CASE("debris: resting debris falls again when the ground under it is cut aw
     REQUIRE(f.app.world.valid(d));
     CHECK_FALSE(f.app.world.get<projv::Debris>(d).resting);
     CHECK(f.app.world.get<projv::Debris>(d).position.y < -1.5f);
+}
+
+TEST_CASE("debris: debris pressed into a corner it overlaps comes to rest, and gathers no speed") {
+    // A shard's sphere sits at its voxels' centre, so one cut from a wall can start inside what is left
+    // of it: it comes out, and rests in the corner. Debris met by two surfaces in one step slides along
+    // the crease between them or stops (stepDebris). What made that necessary -- debris in the marina's
+    // grooves and corners gathering speed while it stood still, 60 m/s, never resting -- this does not
+    // reproduce (the code before passes it too); MAYHEM_BENCH=barrage with MAYHEM_BENCH_SETTLE=10 does:
+    // 205 debris of 1,300 still moving 10 s on, then none.
+    Fixture f(on());
+    // A wall on the floor, its face at x = 2.
+    utils::queueVoxelAdd(f.scene, f.floorComponent, fill({24, 2, 0}, {25, 5, 39}));
+    utils::updateScene(f.scene);
+    f.frames(2);
+    for (vec3 at : {vec3(1.8f, 0.2f, 0.0f), vec3(1.9f, 0.15f, 1.0f), vec3(1.82f, 0.4f, 2.0f)}) {   // into the wall and the floor
+        Entity e = f.app.world.create();
+        f.app.world.emplace<projv::Transform>(e, projv::Transform{at});
+        projv::Debris d;
+        d.position = d.previousPosition = at;
+        d.radius = 0.25f;
+        d.velocity = vec3(1.0f, -1.0f, 0.0f);
+        f.app.world.emplace<projv::Debris>(e, d);
+    }
+    float fastest = 0.0f;
+    for (int i = 0; i < 3 * 60; i++) {
+        f.frames(1);
+        for (auto [e, d] : f.app.world.view<projv::Debris>().each()) fastest = std::max(fastest, glm::length(d.velocity));
+    }
+    int resting = 0;
+    for (auto [e, d] : f.app.world.view<projv::Debris>().each()) resting += d.resting;
+    CHECK(resting == 3);
+    CHECK(fastest < 3.0f);
 }
 
 TEST_CASE("debris: a networked body's small pieces are bodies still") {

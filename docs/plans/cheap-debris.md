@@ -90,6 +90,19 @@ West Point Marina, `MAYHEM_BENCH=barrage` (12 s of blasts):
 Within reach of the floor measured with the small pieces not made at all (5.0-6.1 ms): what is left
 of a small piece's cost is cutting its component, which drawing it needs.
 
+Found after (2026-10-24, playing the marina: "bodies jittering back and forth, never sleeping"), with
+`MAYHEM_BENCH_SETTLE=10` (the barrage over, 10 s more, then what is still awake):
+- **Debris** stood still in grooves and corners while gathering speed -- 7 to 60 m/s: met by two
+  surfaces in one step, each in turn sent its speed into the other, and gravity added more, so it was
+  never slow enough to rest. It now slides along up to three surfaces a step, and nothing of its
+  velocity or move goes back into one met that step (along the crease, or nowhere). 183-207 debris of
+  ~1,250 still moving 10 s on -> 0.
+- **Pieces** (Voxel Mayhem's, not the engine's): a break's shards passed through each other for 15
+  steps; those that fell into each other meanwhile were inside each other when it ended, wedged, and
+  pushed back and forth for good at ~0 speed (Jolt's sleep test watches points move, and the solver's
+  position correction moved them). 238 pieces awake 10 s on, on tiles and boxes alike. 4 steps: none
+  (8: 7), for 219 ms of physics in the cannon's first half second instead of 182.
+
 Left: networked breaks make no debris (a client could make its own from the dust a split carries);
 debris is a sphere to the world, so a long thin shard lands as a ball would; nothing hits debris
 (rays, overlaps, bodies).

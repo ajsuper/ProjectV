@@ -1689,29 +1689,57 @@ namespace projv::runtime {
                     d.still = 0.0f;
                 }
                 d.velocity += gravity * dt;
-                const core::vec3 move = d.velocity * dt;
-                const float length = glm::length(move);
+                // The step's move, slid along what it meets (up to three surfaces). Nothing of the
+                // velocity, or of the move left, may go back into a surface met this step: in a crease
+                // of two it goes along the crease or nowhere. (Without that, debris wedged in a groove
+                // stayed where it was while each wall in turn turned its speed into the other, and
+                // gravity added more every step: 60 m/s, standing still.)
+                core::vec3 remaining = d.velocity * dt;
                 bool touched = false;
-                if (length > 1e-6f) {
-                    const core::vec3 direction = move / length;
-                    auto hit = sim.castSphere(centre, d.radius, direction, length, statics);
-                    if (hit && glm::dot(hit->normal, direction) < 0.0f) {
-                        touched = true;
-                        centre += direction * std::max(hit->distance - 1e-3f, 0.0f);
-                        const core::vec3 n = hit->normal;
-                        const float into = glm::dot(d.velocity, n);
-                        if (into < 0.0f) {
-                            const core::vec3 across = d.velocity - into * n;
-                            const float acrossSpeed = glm::length(across);
-                            // The bounce's impulse, and friction up to mu times it against the sliding.
-                            const float impulse = -(1.0f + config.restitution) * into;
-                            const float keep = acrossSpeed > 1e-6f ? std::max(0.0f, 1.0f - config.friction * impulse / acrossSpeed) : 0.0f;
-                            d.velocity = -config.restitution * into * n + across * keep;
-                            d.angularVelocity *= 0.7f;
-                        }
-                    } else {
-                        centre += move;
+                core::vec3 met[3];
+                int count = 0;
+                auto clip = [&](core::vec3 v) {
+                    for (int i = 0; i < count; i++) {
+                        const float into = glm::dot(v, met[i]);
+                        if (into < 0.0f) v -= into * met[i];
                     }
+                    for (int i = 0; i < count; i++) {
+                        if (glm::dot(v, met[i]) >= -1e-6f) continue;
+                        core::vec3 along = count >= 2 ? glm::cross(met[0], met[1]) : core::vec3(0.0f);
+                        const float l = glm::length(along);
+                        v = l > 1e-4f ? glm::dot(v, along / l) * (along / l) : core::vec3(0.0f);
+                        for (int j = 0; j < count; j++)
+                            if (glm::dot(v, met[j]) < -1e-6f) v = core::vec3(0.0f);
+                        break;
+                    }
+                    return v;
+                };
+                for (int pass = 0; pass < 3; pass++) {
+                    const float length = glm::length(remaining);
+                    if (length < 1e-6f) break;
+                    const core::vec3 direction = remaining / length;
+                    auto hit = sim.castSphere(centre, d.radius, direction, length, statics);
+                    if (!hit || glm::dot(hit->normal, direction) >= 0.0f) {
+                        centre += remaining;
+                        break;
+                    }
+                    touched = true;
+                    const float travel = std::max(hit->distance - 1e-3f, 0.0f);
+                    centre += direction * travel;
+                    const core::vec3 n = hit->normal;
+                    const float into = glm::dot(d.velocity, n);
+                    if (into < 0.0f) {
+                        const core::vec3 across = d.velocity - into * n;
+                        const float acrossSpeed = glm::length(across);
+                        // The bounce's impulse, and friction up to mu times it against the sliding.
+                        const float impulse = -(1.0f + config.restitution) * into;
+                        const float keep = acrossSpeed > 1e-6f ? std::max(0.0f, 1.0f - config.friction * impulse / acrossSpeed) : 0.0f;
+                        d.velocity = -config.restitution * into * n + across * keep;
+                        d.angularVelocity *= 0.7f;
+                    }
+                    met[count++] = n;
+                    d.velocity = clip(d.velocity);
+                    remaining = clip(remaining - direction * travel);
                 }
                 if (glm::length(d.angularVelocity) > 1e-6f) {
                     const core::quat spin(0.0f, d.angularVelocity.x, d.angularVelocity.y, d.angularVelocity.z);
