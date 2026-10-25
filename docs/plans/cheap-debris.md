@@ -97,11 +97,20 @@ Found after (2026-10-24, playing the marina: "bodies jittering back and forth, n
   never slow enough to rest. It now slides along up to three surfaces a step, and nothing of its
   velocity or move goes back into one met that step (along the crease, or nowhere). 183-207 debris of
   ~1,250 still moving 10 s on -> 0.
-- **Pieces** (Voxel Mayhem's, not the engine's): a break's shards passed through each other for 15
-  steps; those that fell into each other meanwhile were inside each other when it ended, wedged, and
-  pushed back and forth for good at ~0 speed (Jolt's sleep test watches points move, and the solver's
-  position correction moved them). 238 pieces awake 10 s on, on tiles and boxes alike. 4 steps: none
-  (8: 7), for 219 ms of physics in the cannon's first half second instead of 182.
+- **Pieces** (Voxel Mayhem's, not the engine's): a break's shards passed through each other for their
+  first 15 steps; those that fell into each other meanwhile were inside each other when it ended,
+  wedged, and pushed back and forth for good at ~0 speed (Jolt's sleep test watches points move, and the
+  solver's position correction moved them) -- and kept every piece touching them awake (Jolt sleeps
+  islands whole): 238 pieces awake 10 s on, on tiles and boxes alike. Cut to 4 steps it looked fixed in
+  one run; three gave 217, 1 and 233. Any length wedges some, so the window is gone: 0 awake in three
+  runs, and the barrage and the 10 s after it cost 3.8-4.0 s of physics instead of 6.7 (the piles
+  sleep). A break's first half second costs more (the park's cannon: 234 ms, 182 with the window).
+  (Tried and not kept: putting a body that goes nowhere for 4 s to sleep. It must take every body it
+  touches with it, or they wake it and their own sleep starts over; and the few wedged bodies that
+  never count as going nowhere -- turning past 0.1 rad back and forth -- held their whole piles awake.)
+- **Debris turns**: friction acts on the slip where its sphere meets the ground, its spin counted (a
+  solid sphere), so debris that lands sliding rolls and tumbles; debris thrown by a break starts with a
+  tumble (half its speed over its radius, at most 15 rad/s); a little rolling resistance lets it rest.
 
 Left: networked breaks make no debris (a client could make its own from the dust a split carries);
 debris is a sphere to the world, so a long thin shard lands as a ball would; nothing hits debris

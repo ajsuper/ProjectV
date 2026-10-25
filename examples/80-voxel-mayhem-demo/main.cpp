@@ -122,7 +122,6 @@ constexpr uint32_t SMALL_DEBRIS_VOXELS = 3;   // walked through and aimed throug
 // 64 ms of physics a frame). A piece this small or smaller is light debris there: it collides as one box
 // fitted to it, without continuous collision, and not with other debris.
 constexpr uint32_t MAP_DEBRIS_VOXELS = 64;
-constexpr int SHARD_FAMILY_STEPS = 4;         // fixed steps a break's shards pass through each other
 const quat IDENTITY(1, 0, 0, 0);
 
 uint32_t rgb(float r, float g, float b) { return projv::packRGB10(r, g, b); }
@@ -401,7 +400,6 @@ struct Mayhem {
     vec3 chipAt{0.0f}, chipDirection{0.0f, 0.0f, 1.0f};
     std::vector<Entity> toThrow;
     std::vector<Slippery> slippery;
-    std::vector<std::pair<Entity, int>> newborn;   // shards still in their break's family, and for how many steps
 
     struct Grab { Entity body = NullEntity; vec3 local{0.0f}; float distance = 0.0f; } grab;
     std::vector<uint8_t> snapshot;
@@ -1644,10 +1642,6 @@ void gameTick(projv::Application& app) {
     fuseTick(world, m, dt);
     if (!m.toThrow.empty()) throwChip(world, m);
     if (!m.slippery.empty()) restoreChips(world, m);
-    for (auto& [e, steps] : m.newborn)
-        if (--steps == 0 && world.valid(e) && world.all_of<projv::CollisionGroups>(e))
-            world.patch<projv::CollisionGroups>(e, [](projv::CollisionGroups& g) { g.family = 0; });
-    std::erase_if(m.newborn, [](const auto& n) { return n.second <= 0; });
     if (m.relatchIn > 0 && --m.relatchIn == 0) latchWrecker(world, m);
 
     // The gate opens while anything stands on its plate (a sensor: what is touching it now).
@@ -1757,23 +1751,11 @@ void markDebris(World& world, Entity piece) {
 void onBrokenBody(World& world, const projv::BodyBroken& e) {
     auto& m = world.ctx().get<Mayhem>();
     m.pieces += int(e.pieces.size());
-    // A strike's shards are born flush against each other; one family for their first few steps, so the
-    // solver does not spend the break's first steps on every shard against its neighbours (measured: a
-    // cannonball through the castle wall costs 182 ms of physics in its first half second with 15
-    // steps, 219 with 4, 236 with none). Not longer: shards that fall into each other while they pass
-    // through end up inside each other, wedged, and push back and forth for good -- 15 steps left 238
-    // pieces awake 10 s after the marina's barrage (MAYHEM_BENCH_SETTLE), 8 left 7, 4 none.
-    if (SHARD_FAMILY_STEPS > 0 && e.shards > 1) {
-        static uint32_t nextFamily = 1000;
-        const uint32_t family = nextFamily++;
-        for (size_t i = 0; i < e.shards; i++)
-            if (world.valid(e.pieces[i])) {
-                projv::CollisionGroups g = world.all_of<projv::CollisionGroups>(e.pieces[i]) ? world.get<projv::CollisionGroups>(e.pieces[i]) : projv::CollisionGroups{};
-                g.family = family;
-                world.emplace_or_replace<projv::CollisionGroups>(e.pieces[i], g);
-                m.newborn.push_back({e.pieces[i], SHARD_FAMILY_STEPS});
-            }
-    }
+    // A strike's shards collide with each other from the start. They once passed through each other for
+    // their first steps (a family) -- a third less physics in a cannon break's first half second -- but
+    // those that fell into each other meanwhile were inside each other when it ended, wedged, pushed
+    // back and forth for good, and kept every piece touching them awake: 200 of the marina's, 10 s
+    // after its barrage (MAYHEM_BENCH_SETTLE), for any length of it; none without.
     for (Entity piece : e.pieces)
         if (world.valid(piece)) markDebris(world, piece);
     if (world.valid(e.entity) && world.all_of<projv::Piece>(e.entity)) markDebris(world, e.entity);

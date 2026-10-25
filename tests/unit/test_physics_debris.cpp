@@ -196,6 +196,34 @@ TEST_CASE("debris: debris pressed into a corner it overlaps comes to rest, and g
     CHECK(fastest < 3.0f);
 }
 
+TEST_CASE("debris: debris that lands sliding starts to roll, then comes to rest") {
+    // Friction acts on the slip where the sphere meets the ground, its spin counted, so what it takes from
+    // the sliding it gives to the turning: debris rolls and tumbles rather than skating along unturned.
+    Fixture f(on());
+    f.frames(2);
+    Entity e = f.app.world.create();
+    const vec3 at(-5.0f, 0.3f, 0.0f);
+    f.app.world.emplace<projv::Transform>(e, projv::Transform{at});
+    projv::Debris d;
+    d.position = d.previousPosition = at;
+    d.radius = 0.25f;
+    d.velocity = vec3(4.0f, 0.0f, 0.0f);   // sliding, not turning
+    f.app.world.emplace<projv::Debris>(e, d);
+    float rolling = 0.0f;   // the most |omega| r / |v| seen while it moved: 1 is rolling without slipping
+    for (int i = 0; i < 60; i++) {
+        f.frames(1);
+        const projv::Debris& now = f.app.world.get<projv::Debris>(e);
+        const float speed = glm::length(now.velocity);
+        if (speed > 0.5f) rolling = std::max(rolling, glm::length(now.angularVelocity) * now.radius / speed);
+    }
+    CHECK(rolling > 0.9f);
+    CHECK(rolling < 1.1f);
+    const projv::Debris& turned = f.app.world.get<projv::Debris>(e);
+    CHECK(glm::angle(turned.rotation) > 1.0f);   // it turned as it went
+    f.frames(8 * 60);
+    CHECK(f.app.world.get<projv::Debris>(e).resting);
+}
+
 TEST_CASE("debris: a networked body's small pieces are bodies still") {
     Fixture f(on());
     Fixture::Crate c = f.crate(vec3(-0.5f, 2.0f, -0.5f));

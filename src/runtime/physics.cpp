@@ -1069,6 +1069,18 @@ namespace projv::runtime {
                     }
                     const core::ivec3 size = hi - lo + core::ivec3(1);
                     d.radius = 0.5f * float(std::min({size.x, size.y, size.z})) * source.voxel * scale;
+                    // Thrown debris tumbles: half its speed over its radius (at most 15 rad/s), about an axis of its own
+                    // (from the entity: debris is a break's look, not shared state, so it need only be
+                    // the same each run).
+                    const float speed = glm::length(motion.linear);
+                    if (speed > 0.5f && glm::length(motion.angular) < 0.5f * speed / std::max(d.radius, 1e-3f)) {
+                        uint32_t h = static_cast<uint32_t>(e) * 2654435761u;
+                        auto next = [&h] { h ^= h << 13; h ^= h >> 17; h ^= h << 5; return float(h & 0xFFFF) / 65535.0f * 2.0f - 1.0f; };
+                        core::vec3 axis(next(), next(), next());
+                        if (glm::length(axis) < 1e-3f) axis = core::vec3(0, 1, 0);
+                        const float turn = std::min(0.5f * speed / std::max(d.radius, 1e-3f), 15.0f);   // rad/s, at most ~2.4 turns
+                        d.angularVelocity += glm::normalize(axis) * (0.5f + 0.5f * std::abs(next())) * turn;
+                    }
                     d.madeAt = tick;
                     world.emplace<Debris>(e, d);
                     event.debris.push_back(e);
@@ -1729,17 +1741,30 @@ namespace projv::runtime {
                     const core::vec3 n = hit->normal;
                     const float into = glm::dot(d.velocity, n);
                     if (into < 0.0f) {
-                        const core::vec3 across = d.velocity - into * n;
-                        const float acrossSpeed = glm::length(across);
-                        // The bounce's impulse, and friction up to mu times it against the sliding.
+                        // The bounce's impulse (per unit mass), and friction up to mu times it against the
+                        // slip -- how fast the sphere's surface moves over the ground there, its spin counted:
+                        // what the friction takes from the sliding it gives to the turning (a solid sphere,
+                        // I = 2/5 m r^2), so debris that lands sliding rolls and tumbles. Enough of it stops
+                        // the slip outright: 2/7 of it.
                         const float impulse = -(1.0f + config.restitution) * into;
-                        const float keep = acrossSpeed > 1e-6f ? std::max(0.0f, 1.0f - config.friction * impulse / acrossSpeed) : 0.0f;
-                        d.velocity = -config.restitution * into * n + across * keep;
-                        d.angularVelocity *= 0.7f;
+                        d.velocity += impulse * n;
+                        const core::vec3 lever = -d.radius * n;   // centre to contact
+                        core::vec3 slip = d.velocity + glm::cross(d.angularVelocity, lever);
+                        slip -= glm::dot(slip, n) * n;
+                        const float slipSpeed = glm::length(slip);
+                        if (slipSpeed > 1e-6f) {
+                            const core::vec3 push = -std::min(config.friction * impulse, slipSpeed * (2.0f / 7.0f)) * (slip / slipSpeed);
+                            d.velocity += push;
+                            d.angularVelocity += (2.5f / (d.radius * d.radius)) * glm::cross(lever, push);
+                        }
                     }
                     met[count++] = n;
                     d.velocity = clip(d.velocity);
                     remaining = clip(remaining - direction * travel);
+                }
+                if (touched) {   // rolling resistance: what lets rolling debris come to rest
+                    d.velocity *= 0.995f;
+                    d.angularVelocity *= 0.98f;
                 }
                 if (glm::length(d.angularVelocity) > 1e-6f) {
                     const core::quat spin(0.0f, d.angularVelocity.x, d.angularVelocity.y, d.angularVelocity.z);
