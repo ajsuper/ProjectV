@@ -181,6 +181,24 @@ TEST_CASE("deleting a floor wakes what sleeps on it") {
     CHECK(f.pose(crate).position.y < -1.0f);
 }
 
+TEST_CASE("an edit to a static body wakes what rests on the chunks it changed, and nothing else") {
+    // A level's world is one body over every chunk: woken whole, one edit woke the level.
+    Fixture f;
+    Entity floor = f.floor();   // 40 x 40 voxels of 16^3 chunks: 3 x 3 of them
+    Entity near = f.body(fill({0, 0, 0}, {3, 3, 3}), vec3(6.0f, 0.0f, 6.0f));     // on the far corner's chunk
+    Entity far = f.body(fill({0, 0, 0}, {3, 3, 3}), vec3(-8.0f, 0.0f, -8.0f));    // on the first chunk
+    f.frames(3 * 60);
+    REQUIRE(f.app.world.get<projv::PhysicsBody>(floor).voxelParts.size() == 9);
+    REQUIRE_FALSE(f.pose(near).awake);
+    REQUIRE_FALSE(f.pose(far).awake);
+    // One voxel from the floor's corner: in the near crate's chunk, though not under it.
+    utils::queueVoxelRemove(f.scene, f.floorComponent, {{false, ivec3(39, 1, 39), 0}});
+    utils::updateScene(f.scene);
+    f.frames(1);
+    CHECK(f.pose(near).awake);
+    CHECK_FALSE(f.pose(far).awake);
+}
+
 TEST_CASE("destruction: a crate cut in two becomes two bodies, sharing its mass and its motion") {
     Fixture f;
     runtime::setGravity(f.app.world, vec3(0));

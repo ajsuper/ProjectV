@@ -50,7 +50,9 @@
 //                                      park's set pieces (B, N, R, E) are not there. Its bodies start asleep
 //                                      (MAYHEM_MAP_AWAKE=1: not); bodies the converter left overlapping are
 //                                      welded, and world voxels inside a body cleared (MAYHEM_MAP_SCAN=1
-//                                      reports the overlaps and exits)
+//                                      reports the overlaps and exits); its world collides as its tile tables
+//                                      (MAYHEM_COLLISION=boxes: as boxes); pieces of up to 64 voxels are cheap
+//                                      debris (MAYHEM_DEBRIS=<voxels>, 0: bodies)
 //   MAYHEM_LOOK=x,y,z,tx,ty,tz          a still from there, at 4 s, then exits (MAYHEM_FIRE, MAYHEM_AO,
 //                                      MAYHEM_GI, MAYHEM_DEBUG set it up); MAYHEM_GPU=1 prints each pass's GPU time
 
@@ -2074,7 +2076,15 @@ struct Bench {
     bool fired = false;
     struct Row { float t; double frame, physics, handler, flush, render; int steps; uint32_t bodies; int pieces; };
     std::vector<Row> before, after;
+    // The barrage: shots fired on physics ticks, from the step hook, so every run breaks the same things
+    // (the simulation is deterministic) and runs compare -- and what its steps cost from the first shot.
+    uint64_t nextShot = 0;
+    std::mt19937 aim{12345};   // its own: Mayhem's is drawn on by effects, frame by frame
+    double   barrageMs = 0.0;
+    int      barrageSteps = 0;
 };
+
+constexpr uint64_t BARRAGE_FIRST = 180, BARRAGE_LAST = 900, BARRAGE_END = 960, BARRAGE_EVERY = 24;   // ticks: 3 s, 15 s, 16 s, 0.4 s
 
 // The break handler, timed.
 void onBroken(World& world, const projv::BodyBroken& e) {
@@ -2083,13 +2093,51 @@ void onBroken(World& world, const projv::BodyBroken& e) {
     if (Bench* b = world.ctx().find<Bench>()) b->handlerMs += msSince(start);
 }
 
+// A barrage shot, when its tick comes: a cannonball every 0.4 s at a different place on the castle's walls
+// (a map: blasts round MAYHEM_BENCH_SHOT's target), for 12 s.
+void barrageShot(World& world, Bench& b) {
+    const uint64_t tick = runtime::physicsWorld(world).tick();
+    if (b.nextShot == 0) b.nextShot = BARRAGE_FIRST;
+    if (tick < b.nextShot || tick > BARRAGE_LAST) return;
+    b.nextShot += BARRAGE_EVERY;
+    auto& m = world.ctx().get<Mayhem>();
+    auto& camera = world.ctx().get<Camera>();
+    auto pick = [&](float low, float high) { return std::uniform_real_distribution<float>(low, high)(b.aim); };
+    if (m.map) {
+        vec3 from(0.0f, 30.0f, 0.0f), at(0.0f);
+        if (const char* shot = std::getenv("MAYHEM_BENCH_SHOT"))
+            std::sscanf(shot, "%f,%f,%f,%f,%f,%f", &from.x, &from.y, &from.z, &at.x, &at.y, &at.z);
+        camera.position = from;
+        vec3 d = glm::normalize(at + vec3(pick(-8, 8), pick(-3, 3), pick(-8, 8)) - camera.position);
+        camera.yaw = std::atan2(d.z, d.x);
+        camera.pitch = std::asin(d.y);
+        m.tool = Tool::Blast;
+    } else {
+        float a = pick(0.0f, 2.0f * PI);
+        camera.position = CASTLE + vec3(std::cos(a) * 30.0f, 6.0f, std::sin(a) * 30.0f);
+        vec3 d = glm::normalize(CASTLE + vec3(pick(-10, 10), pick(2, 9), pick(-10, 10)) - camera.position);
+        camera.yaw = std::atan2(d.z, d.x);
+        camera.pitch = std::asin(d.y);
+        m.tool = Tool::Cannon;
+    }
+    use(world, m, camera);
+}
+
 void benchStepStart(projv::Application& app) {
-    if (Bench* b = app.world.ctx().find<Bench>()) b->stepStart = BenchClock::now();
+    if (Bench* b = app.world.ctx().find<Bench>()) {
+        if (b->what == "barrage") barrageShot(app.world, *b);
+        b->stepStart = BenchClock::now();
+    }
 }
 void benchStepEnd(projv::Application& app) {
     if (Bench* b = app.world.ctx().find<Bench>()) {
-        b->physicsMs += msSince(b->stepStart);
+        const double ms = msSince(b->stepStart);
+        b->physicsMs += ms;
         b->steps++;
+        if (b->what == "barrage" && runtime::physicsWorld(app.world).tick() > BARRAGE_FIRST) {
+            b->barrageMs += ms;
+            b->barrageSteps++;
+        }
     }
 }
 
@@ -2107,31 +2155,23 @@ void benchFrame(projv::Application& app) {
     if (m.clock > 1.0f) (b->fired ? b->after : b->before).push_back(row);
     auto& camera = world.ctx().get<Camera>();
     if (b->what == "barrage") {
-        // A cannonball every 0.4 s at a different place on the castle's walls, for 12 s: a long run of
-        // breaks to sample a profiler over.
-        static float next = 3.0f;
-        if (m.clock > next && m.clock < 15.0f && m.map) {   // a map: blasts round MAYHEM_BENCH_SHOT's target
-            next += 0.4f;
-            vec3 from(0.0f, 30.0f, 0.0f), at(0.0f);
-            if (const char* shot = std::getenv("MAYHEM_BENCH_SHOT"))
-                std::sscanf(shot, "%f,%f,%f,%f,%f,%f", &from.x, &from.y, &from.z, &at.x, &at.y, &at.z);
-            camera.position = from;
-            vec3 d = glm::normalize(at + vec3(uniform(m, -8, 8), uniform(m, -3, 3), uniform(m, -8, 8)) - camera.position);
-            camera.yaw = std::atan2(d.z, d.x);
-            camera.pitch = std::asin(d.y);
-            m.tool = Tool::Blast;
-            use(world, m, camera);
-        } else if (m.clock > next && m.clock < 15.0f) {
-            next += 0.4f;
-            float a = uniform(m, 0.0f, 2.0f * PI);
-            camera.position = CASTLE + vec3(std::cos(a) * 30.0f, 6.0f, std::sin(a) * 30.0f);
-            vec3 d = glm::normalize(CASTLE + vec3(uniform(m, -10, 10), uniform(m, 2, 9), uniform(m, -10, 10)) - camera.position);
-            camera.yaw = std::atan2(d.z, d.x);
-            camera.pitch = std::asin(d.y);
-            m.tool = Tool::Cannon;
-            use(world, m, camera);
+        if (runtime::physicsWorld(world).tick() < BARRAGE_END) return;
+        double worstFrame = 0.0, frames = 0.0;
+        uint32_t bodies = 0;
+        int counted = 0;
+        for (const auto& r : b->before) {
+            if (r.t < 3.0f) continue;
+            worstFrame = std::max(worstFrame, r.frame);
+            frames += r.frame;
+            counted++;
+            bodies = std::max(bodies, r.bodies);
         }
-        if (m.clock > 16.0f) app.closeRequested = true;
+        projv::core::info("BENCH SUMMARY barrage: physics {:.0f} ms over {} steps, {:.2f} ms a step; frames {:.1f} ms on average, "
+                          "{:.0f} at worst; up to {} bodies, {} pieces and {} debris at the end; {} steps dropped",
+                          b->barrageMs, b->barrageSteps, b->barrageSteps ? b->barrageMs / b->barrageSteps : 0.0,
+                          counted ? frames / counted : 0.0, worstFrame, bodies, m.pieces, world.view<projv::Debris>().size(),
+                          app.time().droppedFixedSteps);
+        app.closeRequested = true;
         return;
     }
     if (!b->fired && m.clock > 3.0f) {
@@ -2639,9 +2679,18 @@ void startup(projv::Application& app) {
     physics.settings.worldMin = vec3(-1000.0f, -40.0f, -1000.0f);
     physics.settings.worldMax = vec3(1000.0f, 250.0f, 1000.0f);   // balloons that get away are gone at 250 m
     if (m.map) {   // the map's bounds, with room round them
-        // A map's 10 cm chunks are far more detailed than the park's: up to 16k boxes a chunk before one
-        // collides as its content box (a solid block you cannot walk into).
+        // A map's 10 cm chunks are far more detailed than the park's: its world collides as its voxels'
+        // tile tables, read in place -- nothing to build at load, nothing approximated (MAYHEM_COLLISION=boxes:
+        // as boxes, up to 16k a chunk before one collides as its content box, a solid block you cannot
+        // walk into).
+        const char* representation = std::getenv("MAYHEM_COLLISION");
+        physics.collision.representation = representation && std::string(representation) == "boxes"
+                                               ? projv::utils::CollisionRepresentation::Boxes
+                                               : projv::utils::CollisionRepresentation::Tiles;
         physics.collision.pieceBudget = std::getenv("MAYHEM_MAP_BOXES") ? uint32_t(std::atoi(std::getenv("MAYHEM_MAP_BOXES"))) : 16384u;
+        // A map's breaks make thousands of small pieces: up to MAP_DEBRIS_VOXELS, cheap debris -- no
+        // bodies, a fall and a bounce against the world (MAYHEM_DEBRIS=0: bodies, as the park's are).
+        physics.debris.maxVoxels = std::getenv("MAYHEM_DEBRIS") ? uint32_t(std::atoi(std::getenv("MAYHEM_DEBRIS"))) : MAP_DEBRIS_VOXELS;
         physics.settings.worldMin = glm::min(physics.settings.worldMin, mapMin - vec3(200.0f, 40.0f, 200.0f));
         physics.settings.worldMax = glm::max(physics.settings.worldMax, mapMax + vec3(200.0f, 250.0f, 200.0f));
     }

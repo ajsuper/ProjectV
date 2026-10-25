@@ -1,0 +1,195 @@
+// Static voxels colliding as their tile tables (CollisionRepresentation::Tiles; the voxel collision
+// shape plan, Phase 2). The rest of the suite runs on them with PROJV_COLLISION=tiles; these are what
+// the representation changes: no content-box fallback, no seams on a floor, nothing through a thin
+// wall, and contacts named by coarser cells when a body has too many chunks for voxel ids.
+
+#include "doctest/doctest.h"
+
+#include <cmath>
+#include <vector>
+
+#include "core/application.h"
+#include "runtime/physics.h"
+#include "utils/collision_geometry.h"
+#include "utils/editing.h"
+#include "utils/scene_query.h"
+#include "utils/tile_table.h"
+
+namespace {
+    using namespace projv::runtime;
+    using projv::ComponentHandle;
+    using projv::Entity;
+    using projv::INVALID_COMPONENT_HANDLE;
+    using projv::core::ivec3;
+    using projv::core::quat;
+    using projv::core::vec3;
+    using projv::utils::CollisionRepresentation;
+    namespace utils = projv::utils;
+    constexpr double DT = 1.0 / 60.0;
+
+    std::vector<projv::PendingVoxelOp> fill(ivec3 low, ivec3 high, uint32_t colour = 0x3FFFFFFFu) {
+        std::vector<projv::PendingVoxelOp> ops;
+        for (int z = low.z; z <= high.z; z++)
+            for (int y = low.y; y <= high.y; y++)
+                for (int x = low.x; x <= high.x; x++) ops.push_back({true, ivec3(x, y, z), colour});
+        return ops;
+    }
+
+    struct Fixture {
+        projv::Application app;
+        projv::Scene& scene;
+        double now = 0.0;
+        explicit Fixture(CollisionRepresentation representation, uint32_t pieceBudget = 1024)
+            : scene(app.world.ctx().emplace<projv::Scene>()) {
+            app.clock = [this] { return now; };
+            installSceneBridge(app);
+            PhysicsConfig config;
+            config.collision.representation = representation;
+            config.collision.pieceBudget = pieceBudget;
+            installPhysics(app, config);
+            app.runStartup();
+            app.runFrame();
+        }
+        void frames(int n) { for (int i = 0; i < n; i++) { now += DT; app.runFrame(); } }
+        Entity solid(const std::vector<projv::PendingVoxelOp>& ops, vec3 at, float voxel, uint32_t resolution = 16) {
+            ComponentHandle h = utils::addComponent(scene, projv::ComponentKind::Chunk, "c", INVALID_COMPONENT_HANDLE, resolution, voxel);
+            utils::setComponentTransform(scene, h, at, quat(1, 0, 0, 0), 1.0f);
+            utils::queueVoxelAdd(scene, h, ops);
+            utils::updateScene(scene);
+            Entity e = spawnComponent(app.world, h);
+            app.world.emplace<projv::StaticCollider>(e);
+            return e;
+        }
+        Entity ball(vec3 at, float radius, projv::RigidBody rigid = {}) {
+            Entity e = app.world.create();
+            app.world.emplace<projv::Transform>(e, projv::Transform{at});
+            rigid.shape = projv::RigidBody::Shape::Sphere;
+            rigid.radius = radius;
+            app.world.emplace<projv::RigidBody>(e, rigid);
+            return e;
+        }
+        Entity box(vec3 at, vec3 half, projv::RigidBody rigid = {}) {
+            Entity e = app.world.create();
+            app.world.emplace<projv::Transform>(e, projv::Transform{at});
+            rigid.shape = projv::RigidBody::Shape::Box;
+            rigid.halfExtents = half;
+            app.world.emplace<projv::RigidBody>(e, rigid);
+            return e;
+        }
+        BodyState pose(Entity e) { return bodyPose(app.world, e); }
+    };
+}
+
+TEST_CASE("tiles: a chunk too detailed for its box budget collides as its voxels, not its content box") {
+    // A 2 m slab of 0.125 m voxels with a checker of holes in its top and a shaft down its middle: more
+    // boxes than a budget of 64, so as boxes it is one solid box -- and a ball dropped down the shaft
+    // lands on its lid. As tiles the shaft is there.
+    std::vector<projv::PendingVoxelOp> ops;
+    for (int z = 0; z < 16; z++)
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++) {
+                if (x >= 6 && x <= 9 && z >= 6 && z <= 9) continue;              // the shaft, 0.5 m across
+                if (y == 15 && (x + z) % 2) continue;                            // the checker
+                ops.push_back({true, ivec3(x, y, z), 0x3FFFFFFFu});
+            }
+    for (CollisionRepresentation r : {CollisionRepresentation::Boxes, CollisionRepresentation::Tiles}) {
+        CAPTURE(int(r));
+        Fixture f(r, 64);
+        f.solid(ops, vec3(-1, -2, -1), 0.125f);
+        Entity ball = f.ball(vec3(0, 1, 0), 0.15f);
+        f.frames(120);
+        const float y = f.pose(ball).position.y;
+        if (r == CollisionRepresentation::Boxes) CHECK(y > -0.1f);   // on the content box's top, at y = 0
+        else CHECK(y < -2.0f);                                       // down the shaft and out of the bottom
+    }
+}
+
+TEST_CASE("tiles: a box slides across a voxel floor of many chunks without catching on a seam") {
+    // A 16 m floor of 0.25 m voxels in 16^3 chunks -- 4 x 4 chunks, a seam every 4 m -- and a box sliding
+    // across it without friction: a catch at any seam, between voxels or chunks, takes speed or bumps it.
+    for (CollisionRepresentation r : {CollisionRepresentation::Boxes, CollisionRepresentation::Tiles}) {
+        CAPTURE(int(r));
+        Fixture f(r);
+        f.solid(fill({0, 0, 0}, {63, 1, 63}), vec3(-8, -0.5f, -8), 0.25f);
+        projv::RigidBody rigid;
+        rigid.friction = 0.0f;
+        rigid.linearDamping = 0.0f;
+        rigid.angularDamping = 0.0f;
+        Entity crate = f.box(vec3(-7, 0.3f, 0.1f), vec3(0.3f), rigid);
+        f.frames(30);
+        setVelocity(f.app.world, crate, vec3(2, 0, 0));
+        float slowest = 2.0f, highest = 0.0f;
+        for (int i = 0; i < 6 * 60; i++) {
+            f.frames(1);
+            const BodyState s = f.pose(crate);
+            slowest = std::min(slowest, s.linearVelocity.x);
+            highest = std::max(highest, std::abs(s.linearVelocity.y));
+        }
+        CHECK(f.pose(crate).position.x > 4.5f);     // across three seams
+        CHECK(slowest > 1.98f);                     // no speed lost to them
+        CHECK(highest < 0.05f);                     // and no bump
+    }
+}
+
+TEST_CASE("tiles: fast small balls do not pass through a wall one voxel thick") {
+    Fixture f(CollisionRepresentation::Tiles);
+    f.solid(fill({0, 0, 0}, {15, 15, 0}), vec3(-2, -2, 5), 0.25f);   // 4 x 4 m, 0.25 m thick, at z = 5
+    std::vector<Entity> balls;
+    projv::RigidBody rigid;
+    rigid.gravityFactor = 0.0f;
+    rigid.quality = projv::RigidBody::Quality::Continuous;
+    for (int i = 0; i < 20; i++) balls.push_back(f.ball(vec3(-1.5f + 0.15f * float(i), 0.1f * float(i % 7), 0), 0.05f, rigid));
+    f.frames(1);
+    for (Entity b : balls) setVelocity(f.app.world, b, vec3(0, 0, 200));
+    f.frames(30);
+    int through = 0;
+    for (Entity b : balls) through += f.pose(b).position.z > 5.0f;
+    CHECK(through == 0);
+}
+
+TEST_CASE("tiles: a shape given fewer id bits names its contacts by coarser cells, and still collides") {
+    PhysicsWorld physics;
+    utils::TileTable table;
+    table.resolution = 64;
+    std::vector<utils::TileEdit> edits;
+    for (int z = 0; z < 64; z++)
+        for (int x = 0; x < 64; x++)
+            for (int y = 0; y <= 2 + (x / 3 + z / 5) % 3; y++) edits.push_back({ivec3(x, y, z), true, uint8_t((x + y) % 2)});
+    utils::applyTileEdits(table, edits);
+    auto shared = std::make_shared<const utils::TileTable>(std::move(table));
+    for (uint32_t bits : {32u, 12u}) {   // 18 bits name every voxel of 64^3; 12 name 4^3 bricks
+        CAPTURE(bits);
+        CollisionShapeRef shape = physics.shapeFromTiles(shared, nullptr, 1000.0f, bits);
+        REQUIRE(shape);
+        BodyDesc floor;
+        floor.shape = PhysicsShape::fromVoxels(shape, 0.25f);
+        floor.motion = MotionType::Static;
+        floor.layer = PhysicsLayer::Static;
+        floor.position = vec3(float(bits) * 100.0f, 0, 0);
+        BodyId id = physics.createBody(floor);
+        REQUIRE(id.valid());
+        auto hit = physics.castRay(floor.position + vec3(5.1f, 10, 5.1f), vec3(0, -1, 0), 20.0f);
+        REQUIRE(hit);
+        REQUIRE(hit->path.size() == 2);   // the cell, and its level
+        CHECK(hit->path[1] == (bits == 32u ? 0u : 2u));
+        // Boxes dropped on the stepped ground come to rest on it, whatever names their contacts.
+        std::vector<BodyId> crates;
+        for (int i = 0; i < 6; i++) {
+            BodyDesc d;
+            d.shape = PhysicsShape::box(vec3(0.2f));
+            d.position = floor.position + vec3(2.0f + 2.0f * float(i), 3, 8);
+            crates.push_back(physics.createBody(d));
+        }
+        for (int i = 0; i < 240; i++) physics.step(float(DT));
+        for (BodyId c : crates) {
+            const BodyState s = physics.bodyState(c);
+            CHECK(s.position.y > 0.5f);   // on the ground (at least 3 voxels up), not through it
+            CHECK(s.position.y < 1.5f);
+            CHECK(glm::length(s.linearVelocity) < 0.05f);
+        }
+    }
+    // A moving body of tile voxels is refused, not asserted on.
+    BodyDesc moving;
+    moving.shape = PhysicsShape::fromVoxels(physics.shapeFromTiles(shared), 0.25f);
+    CHECK_FALSE(physics.createBody(moving).valid());
+}

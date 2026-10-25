@@ -90,8 +90,13 @@ namespace projv::runtime {
         // material's, or otherDensity for material 0) and a body's mass comes from it.
         bool                     hasMaterials = false;
         float                    otherDensity = 1000.0f;
-        // What it was built from, kept so a recording can carry the shape as data.
+        // What it was built from, kept so a recording can carry the shape as data: its pieces, or
+        // (CollisionRepresentation::Tiles) the blob's tile table it reads in place, shared, and the
+        // physics material of each of its palette slots (all 0: none).
         std::shared_ptr<const utils::CollisionPieces> source;
+        std::shared_ptr<const utils::TileTable>       tiles;
+        utils::SlotMaterials                          slots{};
+        uint32_t                                      idBits = 32;   // the sub-shape id bits it names voxels in
         struct Native;                            // the Jolt shape; defined where Jolt is
         std::shared_ptr<Native>  native;
     };
@@ -224,6 +229,11 @@ namespace projv::runtime {
         // whatever the world's (PhysicsSettings::minImpactSpeed) -- higher or lower. Of two bodies that
         // set one, the lower counts. Negative: none of its own.
         float        minImpactSpeed = -1.0f;
+    };
+
+    // A box in world space: what destroyBody wakes, given boxes.
+    struct WorldBox {
+        core::vec3 min{0.0f}, max{0.0f};
     };
 
     struct BodyId {
@@ -511,6 +521,10 @@ namespace projv::runtime {
         // Removes and destroys a body, first waking every body its bounds touch -- so what rested on
         // it falls, rather than sleeping in mid-air. A stale or invalid id is ignored.
         void destroyBody(BodyId id);
+        // The same, waking only the bodies these boxes touch: for a static body made again at once
+        // with only part of it changed -- a level's world after an edit, whose bounds take in
+        // everything resting anywhere in the level.
+        void destroyBody(BodyId id, const std::vector<WorldBox>& wake);
         bool isAlive(BodyId id) const;
 
         // Default state for an id that is not alive.
@@ -564,9 +578,18 @@ namespace projv::runtime {
         // apart.
         CollisionShapeRef voxelShape(const GeometryBlob& blob, uint32_t resolution,
                                      const utils::CollisionParams& params = {},
-                                     const utils::SlotMaterials* materials = nullptr, float otherDensity = 1000.0f);
+                                     const utils::SlotMaterials* materials = nullptr, float otherDensity = 1000.0f,
+                                     uint32_t idBits = 32);
         // The same, from pieces already built, and not cached.
         CollisionShapeRef shapeFromPieces(const utils::CollisionPieces& pieces, float otherDensity = 1000.0f);
+        // A shape that is the table's voxels, read in place (CollisionRepresentation::Tiles), and not
+        // cached: static bodies only. Null for an empty table, or a material out of range (logged).
+        // `idBits`: the sub-shape id bits it may name its contacts in (what a compound above it leaves;
+        // utils::tileCellShift) -- voxels when they fit, coarser cells otherwise. voxelShape's, for a
+        // Tiles shape, likewise (and cached apart by it).
+        CollisionShapeRef shapeFromTiles(std::shared_ptr<const utils::TileTable> table,
+                                         const utils::SlotMaterials* materials = nullptr, float otherDensity = 1000.0f,
+                                         uint32_t idBits = 32);
         // Drops cached shapes nothing uses any more: no ref held outside the cache, no body built
         // from it. step() does this once a second of ticks; call it to release memory sooner.
         void pruneShapeCache();
@@ -702,6 +725,7 @@ namespace projv::runtime {
         void updateCharacter(size_t slot, float dt, bool pushes);
         void checkJoints(float dt);
         void removeJointsOf(BodyId body);
+        void removeBody(BodyId id);   // destroyBody's, after the waking
         BodyId createBodyUnrecorded(const BodyDesc& desc);
         struct Impl;
         std::unique_ptr<Impl> impl;

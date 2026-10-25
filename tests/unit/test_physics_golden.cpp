@@ -4,6 +4,9 @@
 // the simulation is a function of its inputs; this is what shows the function is the same
 // everywhere, which a server and its clients rest on.
 //
+// Two recordings of it: the static voxels as boxes (physics_golden.rec) and as their tile tables
+// (physics_golden_tiles.rec, CollisionRepresentation::Tiles), while both representations exist.
+//
 // The session covers what makes and destroys bodies, not only what moves them: a stack, a wall that
 // breaks on impact, a boulder through it, a strike, the pieces breaking again, a hinge, a character.
 //
@@ -34,7 +37,11 @@ namespace {
     constexpr double DT = 1.0 / 60.0;
     constexpr uint32_t GREY = 0x2AAAAAAAu, RED = 0x3FF00000u;
 
-    std::filesystem::path goldenPath() { return std::filesystem::path(PROJV_TEST_DATA_DIR) / "physics_golden.rec"; }
+    using utils::CollisionRepresentation;
+    std::filesystem::path goldenPath(CollisionRepresentation r) {
+        return std::filesystem::path(PROJV_TEST_DATA_DIR) /
+               (r == CollisionRepresentation::Tiles ? "physics_golden_tiles.rec" : "physics_golden.rec");
+    }
 
     ComponentHandle block(Scene& scene, const char* name, vec3 corner, ivec3 size, float voxel, uint32_t colour) {
         ComponentHandle h = utils::addComponent(scene, ComponentKind::Chunk, name, INVALID_COMPONENT_HANDLE, 16, voxel);
@@ -49,7 +56,7 @@ namespace {
     }
 
     // The session, scripted by step: the same on every build up to the floats Jolt computes.
-    runtime::PhysicsLog record() {
+    runtime::PhysicsLog record(CollisionRepresentation representation) {
         Application app;
         Scene& scene = app.world.ctx().emplace<Scene>();
         double now = 0.0;
@@ -57,6 +64,7 @@ namespace {
         runtime::installSceneBridge(app);
         runtime::PhysicsConfig config;
         config.settings.record = true;
+        config.collision.representation = representation;
         runtime::installPhysics(app, config);
         runtime::installImpactFracture(app);
         app.runStartup();
@@ -150,22 +158,25 @@ namespace {
 }
 
 TEST_CASE("golden: a session recorded on one build replays bit for bit on this one") {
-    if (std::getenv("PROJV_WRITE_GOLDEN")) {
-        const runtime::PhysicsLog recording = record();
-        std::filesystem::create_directories(goldenPath().parent_path());
-        REQUIRE(recording.saveToFile(goldenPath().string()));
-        MESSAGE("wrote " << goldenPath().string() << ", " << recording.bytes.size() << " bytes, " << recording.steps << " steps");
-        CHECK(runtime::PhysicsWorld::replay(recording).matched);   // and it replays here, at least
-        return;
+    for (CollisionRepresentation r : {CollisionRepresentation::Boxes, CollisionRepresentation::Tiles}) {
+        CAPTURE(goldenPath(r).filename().string());
+        if (std::getenv("PROJV_WRITE_GOLDEN")) {
+            const runtime::PhysicsLog recording = record(r);
+            std::filesystem::create_directories(goldenPath(r).parent_path());
+            REQUIRE(recording.saveToFile(goldenPath(r).string()));
+            MESSAGE("wrote " << goldenPath(r).string() << ", " << recording.bytes.size() << " bytes, " << recording.steps << " steps");
+            CHECK(runtime::PhysicsWorld::replay(recording).matched);   // and it replays here, at least
+            continue;
+        }
+        runtime::PhysicsLog recording;
+        REQUIRE_MESSAGE(runtime::PhysicsLog::loadFromFile(goldenPath(r).string(), recording),
+                        "no golden recording at " << goldenPath(r).string() << ": see the top of this file");
+        const runtime::ReplayResult result = runtime::PhysicsWorld::replay(recording);
+        CAPTURE(result.problem);
+        CAPTURE(result.firstDivergentStep);
+        CHECK(result.matched);
+        CHECK(result.stepsReplayed > 200);
     }
-    runtime::PhysicsLog recording;
-    REQUIRE_MESSAGE(runtime::PhysicsLog::loadFromFile(goldenPath().string(), recording),
-                    "no golden recording at " << goldenPath().string() << ": see the top of this file");
-    const runtime::ReplayResult result = runtime::PhysicsWorld::replay(recording);
-    CAPTURE(result.problem);
-    CAPTURE(result.firstDivergentStep);
-    CHECK(result.matched);
-    CHECK(result.stepsReplayed > 200);
 }
 
 TEST_CASE("golden: the session it was recorded from is still the same session") {
@@ -173,9 +184,12 @@ TEST_CASE("golden: the session it was recorded from is still the same session") 
     // the engine does with the same calls has changed (or this file has), and the golden file is
     // out of date even if it still replays.
     if (std::getenv("PROJV_WRITE_GOLDEN")) return;
-    runtime::PhysicsLog golden;
-    REQUIRE(runtime::PhysicsLog::loadFromFile(goldenPath().string(), golden));
-    const runtime::PhysicsLog now = record();
-    CHECK(now.bytes.size() == golden.bytes.size());
-    CHECK(now.bytes == golden.bytes);
+    for (CollisionRepresentation r : {CollisionRepresentation::Boxes, CollisionRepresentation::Tiles}) {
+        CAPTURE(goldenPath(r).filename().string());
+        runtime::PhysicsLog golden;
+        REQUIRE(runtime::PhysicsLog::loadFromFile(goldenPath(r).string(), golden));
+        const runtime::PhysicsLog now = record(r);
+        CHECK(now.bytes.size() == golden.bytes.size());
+        CHECK(now.bytes == golden.bytes);
+    }
 }

@@ -20,6 +20,7 @@
 #include "utils/blob_voxels.h"
 #include "utils/loose_bvh.h"
 #include "utils/scene_query.h"
+#include "utils/tile_collision.h"
 #include "utils/picking.h"
 #include "utils/editing.h"
 #include "utils/voxel_math.h"
@@ -41,6 +42,9 @@ namespace projv::runtime {
             bool                          destroyLeavers = true;
             uint32_t                      maxPieces = 3000;
             uint32_t                      dustVoxels = 0;
+            PhysicsConfig::DebrisConfig   debris;
+            uint64_t                      debrisWorldStamp = 0;   // latestBlobContentStamp when resting debris last looked down
+            core::vec3                    worldMin{-1e9f}, worldMax{1e9f};   // PhysicsSettings': debris past them goes
             PhysicsConfig::FractureLimits fractureLimits;
             uint64_t                      seenDroppedSteps = 0;
             uint64_t                      lastSlowWarningTick = 0;
@@ -123,7 +127,10 @@ namespace projv::runtime {
             std::map<uint64_t, std::pair<Entity, Entity>>         contactBodies;
             std::map<std::pair<Entity, Entity>, EntityPair>       contactEntities;
             std::vector<BodyContact>                              contacts;   // the last step's
-            uint64_t                      seenPalettes = 0;  // palette versions and library at the last check
+            // Each component's palette version, and the library's, at the last check (step 2c): what
+            // tells the components whose palettes changed since.
+            std::vector<uint64_t>         seenPalettes;
+            uint64_t                      seenLibrary = 0;
             std::set<std::string>         warnedPatterns;    // fracture patterns named but not registered
             std::set<Entity>              warnedUnanchored;  // colliders that split with nothing to stand on
         };
@@ -351,15 +358,71 @@ namespace projv::runtime {
             return out;
         }
 
+        // Where the chunks a static body's rebuild changes are, in the world: each whose content
+        // stamp differs from the one it was built with, or that came or went -- a chunk that is
+        // there its cube, one that is gone the pieces it had. Destroying the old body wakes only
+        // what these touch, not everything its bounds do: a level's world spans the level, and an
+        // edit to one chunk of it woke every body resting anywhere on it (the steady 2-3 ms a step
+        // after each of West Point Marina's blasts). False when no chunk changed (a rebuild for
+        // its values or materials), which wakes as before.
+        bool changedChunkBoxes(const Scene& scene, const PhysicsBody& body, const Sources& now,
+                               std::vector<WorldBox>& out) {
+            std::map<ChunkHandle, uint64_t> before(body.sources.begin(), body.sources.end()), after(now.begin(), now.end());
+            std::set<ChunkHandle> changed;
+            for (const auto& [chunk, stamp] : before)
+                if (auto it = after.find(chunk); it == after.end() || it->second != stamp) changed.insert(chunk);
+            for (const auto& [chunk, stamp] : after)
+                if (!before.count(chunk)) changed.insert(chunk);
+            if (changed.empty()) return false;
+            auto add = [&](auto&& corner) {
+                WorldBox box{core::vec3(std::numeric_limits<float>::max()), core::vec3(std::numeric_limits<float>::lowest())};
+                for (int i = 0; i < 8; i++) {
+                    core::vec3 p = corner(core::vec3(i & 1, (i >> 1) & 1, (i >> 2) & 1));
+                    box.min = glm::min(box.min, p);
+                    box.max = glm::max(box.max, p);
+                }
+                out.push_back(box);
+            };
+            for (ChunkHandle c : changed) {
+                if (after.count(c)) {
+                    const ChunkHeader& h = scene.chunks[c].header;
+                    add([&](core::vec3 unit) { return h.position + h.rotation * (unit * h.scale); });
+                    continue;
+                }
+                for (const PhysicsVoxelPart& part : body.voxelParts) {
+                    if (part.chunk != c || !part.shape) continue;
+                    auto place = [&](core::vec3 voxel) {
+                        return body.position + body.rotation * (part.position + part.rotation * (voxel * part.voxelSize));
+                    };
+                    if (part.shape->tiles) {   // the table's block box
+                        const utils::TileLayout L = utils::tileTableLayout(*part.shape->tiles);
+                        add([&](core::vec3 unit) { return place(core::vec3(L.blockOrigin * 16) + unit * core::vec3(L.blockDims * 16)); });
+                        continue;
+                    }
+                    if (!part.shape->source) continue;
+                    for (const utils::CollisionPiece& piece : part.shape->source->pieces)
+                        add([&](core::vec3 unit) { return place(glm::mix(piece.min, piece.max, unit)); });
+                }
+            }
+            return true;
+        }
+
         // Voxels whose palette entry names a physics material are built with it; the rest weigh
-        // `otherDensity`.
+        // `otherDensity`. A static body's collide as their tile tables when the representation says
+        // Tiles; a moving body's are boxes whatever it says (voxels against voxels is not built yet).
+        // `boundsOnly`: the bounds and nothing else -- a primitive fitted to the voxels needs no shape of them.
         std::vector<PhysicsShapePart> voxelParts(PhysicsRuntime& runtime, const Scene& scene, ComponentHandle h,
-                                                 core::vec3 position, core::quat rotation, float otherDensity,
-                                                 Box3& bounds, std::vector<PhysicsVoxelPart>& voxelOut) {
+                                                 core::vec3 position, core::quat rotation, float otherDensity, bool fixed,
+                                                 Box3& bounds, std::vector<PhysicsVoxelPart>& voxelOut, bool boundsOnly = false) {
             PhysicsWorld& physics = *runtime.world;
-            const utils::CollisionParams& params = runtime.collision;
+            utils::CollisionParams params = runtime.collision;
+            if (!fixed && params.representation == utils::CollisionRepresentation::Tiles)
+                params.representation = utils::CollisionRepresentation::Boxes;
             std::vector<ChunkHandle> chunks;
             collectChunks(scene, h, chunks);
+            // The sub-shape id bits each chunk's shape is left under the compound of them all.
+            uint32_t idBits = 32;
+            for (size_t n = 1; n < chunks.size(); n <<= 1) idBits--;
             const core::quat inverse = glm::conjugate(rotation);
             std::vector<PhysicsShapePart> parts;
             ComponentHandle lastOwner = INVALID_COMPONENT_HANDLE;
@@ -372,13 +435,26 @@ namespace projv::runtime {
                     size_t(chunk.geometryPoolIndex) >= scene.geometryPool.size() || chunk.header.resolution == 0)
                     continue;
                 const GeometryBlob& blob = scene.geometryPool[size_t(chunk.geometryPoolIndex)];
+                if (boundsOnly) {
+                    const float voxelSize = chunk.header.scale / float(chunk.header.resolution);
+                    const core::vec3 at = inverse * (chunk.header.position - position);
+                    const core::quat turn = glm::normalize(inverse * chunk.header.rotation);
+                    core::ivec3 low, high;
+                    if (utils::blobContentBounds(blob, low, high))
+                        for (int corner = 0; corner < 8; corner++) {
+                            core::vec3 local((corner & 1) ? high.x + 1 : low.x, (corner & 2) ? high.y + 1 : low.y,
+                                             (corner & 4) ? high.z + 1 : low.z);
+                            bounds.add(at + turn * (local * voxelSize));
+                        }
+                    continue;
+                }
                 ComponentHandle owner = paletteOwner(scene, chunk);
                 if (owner != lastOwner || lastOwner == INVALID_COMPONENT_HANDLE) {
                     lastOwner = owner;
                     hasSlots = slotMaterialsOf(runtime, scene, owner, slots);
                 }
                 CollisionShapeRef shape = physics.voxelShape(blob, chunk.header.resolution, params,
-                                                             hasSlots ? &slots : nullptr, otherDensity);
+                                                             hasSlots ? &slots : nullptr, otherDensity, idBits);
                 if (!shape) continue;   // an empty chunk: nothing there to collide with
                 float voxelSize = chunk.header.scale / float(chunk.header.resolution);
                 PhysicsShapePart part;
@@ -448,7 +524,8 @@ namespace projv::runtime {
             Box3 bounds;
             std::vector<PhysicsShapePart> parts;
             if (linked) {
-                parts = voxelParts(physics, *scene, link->handle, d.position, d.rotation, d.density, bounds, out.voxelParts);
+                parts = voxelParts(physics, *scene, link->handle, d.position, d.rotation, d.density,
+                                   motion == MotionType::Static, bounds, out.voxelParts, kind != RigidBody::Shape::Voxels);
                 out.sources = sourcesOf(*scene, link->handle);
             }
             out.materialKey = materialKeyOf(physics, scene, linked ? link->handle : INVALID_COMPONENT_HANDLE,
@@ -958,9 +1035,12 @@ namespace projv::runtime {
             const float share = total > 0 ? 1.0f / float(total) : 0.0f;
             const CollisionGroups* parentGroups = world.try_get<CollisionGroups>(entity);
             const std::optional<CollisionGroups> groups = parentGroups ? std::optional(*parentGroups) : std::nullopt;
+            const bool debrisAllowed = physics.debris.maxVoxels > 0 && !networked;
             for (const Made& m : made) {
+                const bool debris = debrisAllowed && !m.cut->netId && m.voxels <= physics.debris.maxVoxels;
                 Entity e = world.create();
-                if (!linkComponent(world, e, m.component, LinkMode::Root, onUnlink)) {
+                // Debris is a break's look: its component goes with it, whatever the body's did.
+                if (!linkComponent(world, e, m.component, LinkMode::Root, debris ? OnUnlink::Destroy : onUnlink)) {
                     world.destroy(e);
                     continue;
                 }
@@ -977,6 +1057,25 @@ namespace projv::runtime {
                 }
                 PhysicsRuntime::Motion motion{velocity, state.angularVelocity};
                 if (m.cut->motion) motion = *m.cut->motion;
+                if (debris) {
+                    Debris d;
+                    d.velocity = motion.linear;
+                    d.angularVelocity = motion.angular;
+                    d.position = d.previousPosition = utils::getComponentWorldPosition(scene, m.component);
+                    d.rotation = d.previousRotation = utils::getComponentWorldRotation(scene, m.component);
+                    d.centre = glm::conjugate(d.rotation) * (m.centre - d.position);
+                    core::ivec3 lo(std::numeric_limits<int>::max()), hi(std::numeric_limits<int>::min());
+                    for (size_t i : m.cut->members) {
+                        lo = glm::min(lo, voxels[i].position);
+                        hi = glm::max(hi, voxels[i].position);
+                    }
+                    const core::ivec3 size = hi - lo + core::ivec3(1);
+                    d.radius = 0.5f * float(std::min({size.x, size.y, size.z})) * source.voxel * scale;
+                    d.madeAt = tick;
+                    world.emplace<Debris>(e, d);
+                    event.debris.push_back(e);
+                    continue;
+                }
                 physics.carried[e] = motion;
                 if (m.cut->netId) {
                     if (entityForNetId(world, *m.cut->netId) != NullEntity)
@@ -1560,6 +1659,89 @@ namespace projv::runtime {
             }
         }
 
+        // Cheap debris, one fixed step (PhysicsConfig::debris): each that moves falls and is swept as a
+        // sphere against static bodies, bouncing off what it meets; slow and touching for half a
+        // second it rests, until the static world changes and it finds nothing under it. Then the
+        // old ones go: past their seconds, and the oldest past the count. In entity order: debris
+        // feeds nothing in the simulation, so its order is its own.
+        void stepDebris(World& world, PhysicsRuntime& physics, float dt) {
+            auto all = world.view<Debris>();
+            if (all.empty()) return;
+            PhysicsWorld& sim = *physics.world;
+            const PhysicsConfig::DebrisConfig& config = physics.debris;
+            const core::vec3 gravity = sim.gravity();
+            const uint64_t tick = sim.tick();
+            QueryFilter statics;
+            statics.layers = QueryFilter::only(PhysicsLayer::Static);
+            // The static world changed: resting debris looks down again.
+            const bool worldChanged = latestBlobContentStamp() != physics.debrisWorldStamp;
+            physics.debrisWorldStamp = latestBlobContentStamp();
+            std::vector<std::pair<uint64_t, Entity>> byAge;
+            std::vector<Entity> gone;
+            for (auto [e, d] : all.each()) {
+                d.previousPosition = d.position;
+                d.previousRotation = d.rotation;
+                if (float(tick - d.madeAt) * dt > config.seconds) { gone.push_back(e); continue; }
+                byAge.push_back({d.madeAt, e});
+                core::vec3 centre = d.position + d.rotation * d.centre;
+                if (d.resting) {
+                    if (!worldChanged) continue;
+                    if (sim.castSphere(centre, d.radius, glm::normalize(gravity), 2.0f * d.radius + 0.05f, statics)) continue;
+                    d.resting = false;
+                    d.still = 0.0f;
+                }
+                d.velocity += gravity * dt;
+                const core::vec3 move = d.velocity * dt;
+                const float length = glm::length(move);
+                bool touched = false;
+                if (length > 1e-6f) {
+                    const core::vec3 direction = move / length;
+                    auto hit = sim.castSphere(centre, d.radius, direction, length, statics);
+                    if (hit && glm::dot(hit->normal, direction) < 0.0f) {
+                        touched = true;
+                        centre += direction * std::max(hit->distance - 1e-3f, 0.0f);
+                        const core::vec3 n = hit->normal;
+                        const float into = glm::dot(d.velocity, n);
+                        if (into < 0.0f) {
+                            const core::vec3 across = d.velocity - into * n;
+                            const float acrossSpeed = glm::length(across);
+                            // The bounce's impulse, and friction up to mu times it against the sliding.
+                            const float impulse = -(1.0f + config.restitution) * into;
+                            const float keep = acrossSpeed > 1e-6f ? std::max(0.0f, 1.0f - config.friction * impulse / acrossSpeed) : 0.0f;
+                            d.velocity = -config.restitution * into * n + across * keep;
+                            d.angularVelocity *= 0.7f;
+                        }
+                    } else {
+                        centre += move;
+                    }
+                }
+                if (glm::length(d.angularVelocity) > 1e-6f) {
+                    const core::quat spin(0.0f, d.angularVelocity.x, d.angularVelocity.y, d.angularVelocity.z);
+                    d.rotation = glm::normalize(d.rotation + (0.5f * dt) * (spin * d.rotation));
+                }
+                d.position = centre - d.rotation * d.centre;
+                if (touched && glm::length(d.velocity) < 0.3f) {
+                    d.still += dt;
+                    if (d.still > 0.5f) {
+                        d.resting = true;
+                        d.velocity = d.angularVelocity = core::vec3(0.0f);
+                    }
+                } else if (!touched) {
+                    d.still = 0.0f;
+                }
+                if (glm::any(glm::lessThan(d.position, physics.worldMin)) || glm::any(glm::greaterThan(d.position, physics.worldMax)))
+                    gone.push_back(e);
+            }
+            if (byAge.size() > config.maxCount) {
+                std::sort(byAge.begin(), byAge.end());
+                for (size_t i = 0; i < byAge.size() - config.maxCount; i++) gone.push_back(byAge[i].second);
+            }
+            std::sort(gone.begin(), gone.end());
+            gone.erase(std::unique(gone.begin(), gone.end()), gone.end());
+            for (Entity e : gone)
+                if (world.valid(e)) world.destroy(e);
+        }
+
         void step(Application& app) {
             World& world = app.world;
             PhysicsRuntime& physics = runtimeOf(world);
@@ -1724,15 +1906,34 @@ namespace projv::runtime {
             }
 
             // 2c. Bodies whose materials changed: a palette entry named another, the library redefined
-            //     one. Only looked for when some palette or the library changed since the last step.
+            //     one. Only the bodies over a palette that changed since the last step are looked at --
+            //     every body when the library did. A component not seen before is not a change: no body
+            //     was made from it yet (every break makes some, and looking at every body for each was
+            //     10% of the physics a break costs on West Point Marina).
             if (scene) {
-                Fnv palettes;
-                palettes.add(physics.library.version);
-                for (const ComponentRecord& record : scene->components) palettes.add(record.paletteVersion);
-                if (palettes.value != physics.seenPalettes) {
-                    physics.seenPalettes = palettes.value;
+                const bool library = physics.library.version != physics.seenLibrary;
+                physics.seenLibrary = physics.library.version;
+                const size_t seen = physics.seenPalettes.size();
+                std::vector<uint8_t> paletteChanged(scene->components.size(), 0);
+                bool anyChanged = library;
+                physics.seenPalettes.resize(scene->components.size());
+                for (size_t h = 0; h < scene->components.size(); h++) {
+                    const uint64_t version = scene->components[h].paletteVersion;
+                    if (h < seen && physics.seenPalettes[h] != version) anyChanged = paletteChanged[h] = 1;
+                    physics.seenPalettes[h] = version;
+                }
+                if (anyChanged) {
                     std::vector<std::pair<Entity, uint32_t>> changed;
                     for (auto [entity, body] : world.view<PhysicsBody>().each()) {
+                        if (!library) {   // over a changed palette?
+                            bool over = false;
+                            for (const auto& [chunk, stamp] : body.sources) {
+                                if (chunk >= scene->chunks.size()) continue;
+                                const ComponentHandle owner = paletteOwner(*scene, scene->chunks[chunk]);
+                                if (owner < paletteChanged.size() && paletteChanged[owner]) { over = true; break; }
+                            }
+                            if (!over) continue;
+                        }
                         const VoxelComponent* link = world.try_get<VoxelComponent>(entity);
                         bool linked = link && utils::isComponentAlive(*scene, link->ref());
                         const RigidBody* rigid = world.try_get<RigidBody>(entity);
@@ -1767,7 +1968,17 @@ namespace projv::runtime {
                     BodyState state = sim.bodyState(body->id);
                     physics.carried[e] = {state.linearVelocity, state.angularVelocity};
                 }
-                dropBody(world, physics, e);
+                // A static body of voxels wakes only what its changed chunks touch.
+                std::vector<WorldBox> wake;
+                const PhysicsBody* body = world.try_get<PhysicsBody>(e);
+                const VoxelComponent* link = world.try_get<VoxelComponent>(e);
+                if (body && body->motion == MotionType::Static && scene && link && utils::isComponentAlive(*scene, link->ref()) &&
+                    changedChunkBoxes(*scene, *body, sourcesOf(*scene, link->handle), wake)) {
+                    sim.destroyBody(body->id, wake);
+                    world.remove<PhysicsBody>(e);
+                } else {
+                    dropBody(world, physics, e);
+                }
                 if (wantsBody(world, e)) physics.pending.push_back(e);
             }
             physics.rebuild.clear();
@@ -1914,10 +2125,16 @@ namespace projv::runtime {
             //       its motion kept in FrozenMotion; Active (or not taking part) thaws it and gives the
             //       motion back. In NetId-then-entity order.
             {
+                // Only bodies that are, or may want to be, frozen: every frozen one has its FrozenMotion.
                 std::vector<Entity> moving;
-                for (auto [e, body] : world.view<PhysicsBody>().each())
-                    if (body.motion == MotionType::Dynamic) moving.push_back(e);
+                auto consider = [&](Entity e) {
+                    if (world.get<PhysicsBody>(e).motion == MotionType::Dynamic) moving.push_back(e);
+                };
+                for (Entity e : world.view<PhysicsBody, LoadState>()) consider(e);
+                for (Entity e : world.view<PhysicsBody, PhysicsHold>()) consider(e);
+                for (Entity e : world.view<PhysicsBody, FrozenMotion>()) consider(e);
                 std::sort(moving.begin(), moving.end(), [&](Entity a, Entity b) { return order(a) < order(b); });
+                moving.erase(std::unique(moving.begin(), moving.end()), moving.end());
                 for (Entity e : moving) {
                     const BodyId id = world.get<PhysicsBody>(e).id;
                     const LoadState* load = world.try_get<LoadState>(e);
@@ -2112,6 +2329,9 @@ namespace projv::runtime {
                 c.position = sim.characterState(c.id).position;
             }
 
+            // 7c. Cheap debris, after the solver: it falls against the world as the step left it.
+            stepDebris(world, physics, dt);
+
             // 7a. Contacts begun and ended, as entities: queued (ContactBegan, ContactEnded) and kept
             //     for runtime::contacts.
             gatherContacts(world, physics);
@@ -2200,6 +2420,16 @@ namespace projv::runtime {
                 body.presentedPosition = position;
                 body.presentedRotation = rotation;
                 writes.push_back({entity, position, rotation});
+            }
+            for (auto [entity, d] : world.view<Debris>().each()) {
+                if (d.resting && d.previousPosition == d.position && d.previousRotation == d.rotation) continue;
+                if (!world.all_of<Transform>(entity)) continue;
+                writes.push_back({entity, glm::mix(d.previousPosition, d.position, alpha),
+                                  glm::slerp(d.previousRotation, d.rotation, alpha)});
+                if (d.resting) {   // presented where it rests; nothing more to write until it moves
+                    d.previousPosition = d.position;
+                    d.previousRotation = d.rotation;
+                }
             }
             std::vector<std::pair<Entity, core::vec3>> characters;
             for (auto [entity, c] : world.view<PhysicsCharacter>().each()) {
@@ -2316,6 +2546,12 @@ namespace projv::runtime {
         physics.destroyLeavers = config.destroyBodiesThatLeaveTheWorld;
         physics.maxPieces = config.maxPieces;
         physics.dustVoxels = config.dustVoxels;
+        physics.debris = config.debris;
+        physics.worldMin = config.settings.worldMin;
+        physics.worldMax = config.settings.worldMax;
+        physics.debris.seconds = std::isfinite(config.debris.seconds) ? std::max(config.debris.seconds, 0.0f) : 20.0f;
+        physics.debris.restitution = std::isfinite(config.debris.restitution) ? std::clamp(config.debris.restitution, 0.0f, 1.0f) : 0.25f;
+        physics.debris.friction = std::isfinite(config.debris.friction) ? std::max(config.debris.friction, 0.0f) : 0.6f;
         {
             // Guards, clamped rather than refused: a bad value must not leave fracture unguarded.
             PhysicsConfig::FractureLimits want = config.fracture, &got = physics.fractureLimits;
@@ -2898,21 +3134,34 @@ namespace projv::runtime {
             }
             if (partIndex >= body->voxelParts.size()) return out;
             const PhysicsVoxelPart& part = body->voxelParts[partIndex];
-            const utils::CollisionPieces* pieces = part.shape ? part.shape->source.get() : nullptr;
-            if (!pieces || pieces->pieces.empty()) return out;
-            size_t pieceIndex = 0;
-            if (pieces->pieces.size() > 1) {
+            // The voxels the hit can be on: its piece's, or for a tile shape the cell its id names
+            // (a brick, or a block).
+            core::ivec3 voxelMin, voxelMax;
+            if (part.shape && part.shape->tiles) {
                 if (level >= hit->path.size()) return out;
-                pieceIndex = hit->path[level];
+                if (level + 1 >= hit->path.size()) return out;
+                const uint32_t packed = hit->path[level];
+                const int cell = 1 << std::min(hit->path[level + 1], 10u);
+                voxelMin = core::ivec3(int(packed & 1023u), int((packed >> 10) & 1023u), int((packed >> 20) & 1023u)) * cell;
+                voxelMax = voxelMin + core::ivec3(cell - 1);
+            } else {
+                const utils::CollisionPieces* pieces = part.shape ? part.shape->source.get() : nullptr;
+                if (!pieces || pieces->pieces.empty()) return out;
+                size_t pieceIndex = 0;
+                if (pieces->pieces.size() > 1) {
+                    if (level >= hit->path.size()) return out;
+                    pieceIndex = hit->path[level];
+                }
+                if (pieceIndex >= pieces->pieces.size()) return out;
+                voxelMin = pieces->pieces[pieceIndex].voxelMin;
+                voxelMax = pieces->pieces[pieceIndex].voxelMax;
             }
-            if (pieceIndex >= pieces->pieces.size()) return out;
-            const utils::CollisionPiece& piece = pieces->pieces[pieceIndex];
 
             BodyState pose = physicsWorld(world).bodyState(body->id);
             core::vec3 inside = hit->position - hit->normal * (0.5f * part.voxelSize);
             core::vec3 local = glm::conjugate(pose.rotation) * (inside - pose.position);
             core::vec3 voxel = glm::conjugate(part.rotation) * (local - part.position) / part.voxelSize;
-            out.voxel = glm::clamp(core::ivec3(glm::floor(voxel)), piece.voxelMin, piece.voxelMax);
+            out.voxel = glm::clamp(core::ivec3(glm::floor(voxel)), voxelMin, voxelMax);
             out.chunk = part.chunk;
             out.onVoxel = true;
             if (part.chunk < scene->chunks.size()) {

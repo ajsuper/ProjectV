@@ -489,12 +489,14 @@ namespace projv{
         // authoring path builds. `voxelForm` is the one held; the other is derived from it on demand and
         // is current while `derivedStamp == contentStamp`. Tiles derived from a tree replace it (the
         // form becomes Tiles), so a blob holds its voxels once. Material bytes name slots in the owning
-        // component's palette, in either form.
+        // component's palette, in either form. The tile table is shared, copy-on-write: a copy of the
+        // blob, or a physics shape made of it (shareBlobTiles), holds the same table until one of them
+        // is edited. Null is empty.
         enum class VoxelForm : uint8_t { Tree, Tiles };
         mutable VoxelForm voxelForm = VoxelForm::Tree;
         mutable std::vector<uint32_t> treeNodes;
         mutable std::vector<uint8_t>  treeMaterials;
-        mutable utils::TileTable      tiles;
+        mutable std::shared_ptr<utils::TileTable> tiles;
         mutable uint64_t              derivedStamp = 0;
         // The animation envelope, and the motion set per set cell. Adjacent and optional: empty is
         // what every blob loaded from a v2 .data carries, and what almost every blob will always
@@ -907,7 +909,7 @@ namespace projv{
         // setBlobTree, written out: this header cannot include utils/blob_voxels.h, which includes it.
         blob.treeNodes = std::move(newGeometry);
         blob.treeMaterials = std::move(newMaterialIDs);
-        blob.tiles = utils::TileTable{};
+        blob.tiles.reset();
         blob.voxelForm = GeometryBlob::VoxelForm::Tree;
         markBlobContentChanged(blob);
         if (newBrickMap) blob.brickMap = std::move(newBrickMap);

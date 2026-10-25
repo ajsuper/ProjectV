@@ -1,6 +1,7 @@
 # A voxel collision shape: bodies collide as their voxels
 
-Status: **draft**, 2026-10-24. Nothing built. Follows from `voxel-storage-tiles.md` ("Related: physics
+Status: **Phases 1 and 2 delivered** 2026-10-24 (see "Phase 1: delivered", "Phase 2: delivered"); Phases
+3-4 not started. Follows from `voxel-storage-tiles.md` ("Related: physics
 that reads voxels directly") now that tile tables are every blob's voxels.
 
 Goal: a voxel body's collision *is* its tile table, read in place, as Teardown's is its voxels. Nothing
@@ -21,7 +22,7 @@ physics step timed by stage (temporary timers, removed):
 | -- the strike (voxels near, shards laid out) | 29 |
 | -- the island pass (local support) | 12 |
 | -- describing the bodies (the world's 4.4, cached per chunk; 221 pieces ~3) | ~8 |
-| -- **Jolt re-creating the world's body** (every change to it) | **99-102** |
+| -- **Jolt re-creating the world's body** (every change to it) | **99-102** (Phase 1: 1.4) |
 | -- the simulation step | 7 |
 | Then, with 215 more bodies: physics a frame | 6-10 |
 | Physics in the first 0.5 s after the blast | 580-615 |
@@ -33,6 +34,11 @@ there.
 
 So two costs, one cause: the world is one static body whose shape is a compound of every chunk's
 boxes, and boxes have to be built.
+
+(Phase 1 found the first cost was not the compound itself: Jolt's `StaticCompoundShape` constructor
+asks every part for its mass properties and its sub-shape id bits, and a chunk's shape -- a compound
+of its boxes -- works both out by walking every box, every time. Making the world's shape walked all
+1.2M boxes in the world, twice. See "Phase 1: delivered".)
 
 ## The design
 
@@ -95,14 +101,16 @@ A contact or a hit has to lead back to a voxel (materials, damage, `ContactRepor
 `SubShapeID` is 32 bits, shared with any compound above it:
 
 - A chunk's shape uses the **voxel's index** when `3 * log2(resolution)` plus its compound's bits fit
-  (a 256^3 chunk: 24 bits, so a compound of up to 256 chunks), else the **brick's** (a 1024^3 chunk:
-  24 bits), with the voxel found again from the contact point.
-- The static world stops being one compound (next section), so its chunks never share the bits.
+  (a 256^3 chunk: 24 bits, so a compound of up to 256 chunks), else the **brick's** (a 256^3 chunk:
+  18 bits; a 1024^3 chunk: 24), with the voxel found again from the contact point.
+- The static world stays one compound (Phase 1 kept it: a body per chunk brought seams between
+  chunks), so its chunks share the bits: West Point Marina's 4,140 take 13, which leaves 19 -- a
+  256^3 chunk's brick index, not its voxel's.
 
-### The static world: a body per chunk
+### The static world: a body per chunk (tried in Phase 1, not kept)
 
-The world is one body today because it was one shape. With voxel shapes, each of its chunks is a
-static body of its own:
+The world is one body because it was one shape. The idea was that each of its chunks be a static
+body of its own:
 
 - An edit changes one chunk's table, and its body's shape is swapped (`BodyInterface::SetShape`) --
   O(1), not a 100 ms re-creation. A chunk that empties is removed; one that appears is added.
@@ -112,7 +120,14 @@ static body of its own:
   tree, never simulated); the counts in `PhysicsSettings` get the headroom (A-capacity).
 
 This part does not need the custom shape: a body per chunk of *box* shapes already turns the 100 ms
-into the cost of the changed chunks' boxes. It is Phase 1 for that reason.
+into the cost of the changed chunks' boxes. It was Phase 1 for that reason, and it was built and
+measured -- and not kept: Jolt removes internal edges (`mEnhancedInternalEdgeRemoval`) within a body
+pair only, so a body sliding from one chunk's body onto the next catches on the edge between them.
+The materials test's block on an ice floor of several chunks slid 4.98 m of the 5.70 m it should
+(13% lost at seams); a replication test's prediction drifted past its millimetre. One body keeps
+every seam inside one pair. What the per-chunk bodies did buy -- the 100 ms, and not waking the
+level -- one body gets as well (Phase 1: delivered), and a voxel shape (Phase 2) answers for its own
+mass, so the world's compound stays cheap to make.
 
 ### Sharing the table
 
@@ -143,7 +158,7 @@ golden is retired (a deliberate change, regenerated and committed with it).
 | | Decision | Why |
 |---|---|---|
 | V1 | The shape reads the blob's tile table, shared, not a copy or a derived structure | Nothing to build, nothing to keep in step; the table's masks are already the hierarchy collision wants |
-| V2 | One static body per chunk for the world, in Phase 1, before the custom shape | Removes the 100 ms per change on its own, with box shapes; and the voxel shape needs it (sub-shape bits) |
+| V2 | ~~One static body per chunk for the world~~ -- the world stays one body; its chunk shapes cache their mass properties and id bits (MassCachedShape), and an edit wakes only what its changed chunks touch | Measured both (Phase 1): the same speed, and a body per chunk catches at every chunk seam; the voxel shape fits one compound with brick-index sub-shape ids |
 | V3 | Normals only from exposed faces | No seam catching on flat ground (a known box-compound flaw); the face masks make it cheap |
 | V4 | Voxel vs voxel by surface corners plus edge-edge, as Teardown | Corners alone miss crossing edges; a full voxel-voxel SAT is too slow at thousands of voxels |
 | V5 | Both representations behind `CollisionRepresentation` until the voxel shape is proven; then voxels the default | A6's seam exists for this; the box path is the reference to test against |
@@ -151,14 +166,53 @@ golden is retired (a deliberate change, regenerated and committed with it).
 
 ## Phases
 
-### Phase 1: a static body per chunk (box shapes)
+### Phase 1: the world's body cheap to change (box shapes)
 
-- `StaticCollider` components that split (a level's world) get one Jolt body per chunk, each its
-  chunk's box shape; an edit re-describes and re-creates only the changed chunks' bodies.
-- Measured: the blast step without the 100 ms (target: under 60 ms); load unchanged (the 2 s is the box
-  build, Phase 2's).
-- Golden: the recordings' scenes have one-chunk floors, so it should replay unchanged; if not, find
-  out why before regenerating.
+Planned as a body per chunk; delivered as one body made cheap, after measuring both.
+
+### Phase 1: delivered (2026-10-24)
+
+Where the 100 ms went (temporary timers, removed): all of it in `StaticCompoundShapeSettings::Create`
+for the world's 3,887 chunk parts. That constructor asks each part for its mass properties (to place
+the compound's centre of mass) and checks its sub-shape id bits; a chunk's shape is a compound of its
+boxes, and Jolt's compounds answer both by walking every box, each time they are asked. The world's
+compound walked all ~1.2M boxes in the world twice: 98-122 ms for mass, then ~25 ms for the bits.
+
+- **`MassCachedShape`** (`src/runtime/physics/mass_cached_shape.{h,cpp}`): a Jolt decorated shape of
+  its own subtype (`User2`) around each chunk's compound of boxes, which works out the inner shape's
+  mass properties and id bits once and passes everything else -- collide and cast against every
+  subtype, rays, points, sub-shape ids -- to it unchanged. Jolt's shapes are `final`, so it is a
+  decorator rather than a subclass. It takes no id bits, and `pathTo` passes through it. Collision is
+  unchanged bit for bit: the golden recording replayed as it was with it alone, and all 353 tests
+  passed. The world's shape: **98-122 ms -> 0.8 ms**; its body's re-creation **1.4 ms**.
+- **An edit wakes only what its changed chunks touch.** Destroying the world's old body woke every
+  body its bounds touch -- the whole level -- on every edit, which kept the marina's debris awake: a
+  steady 2-3 ms a step more after each blast. `PhysicsWorld::destroyBody(id, wake)` wakes only the
+  given boxes (recorded as `Op::DestroyWaking`, so a replay wakes the same); the runtime passes, for a
+  static voxel body rebuilt because its voxels changed, each changed, added or removed chunk's box
+  (its cube, or the pieces it had when it is gone). A rebuild for anything else (its values, its
+  materials) wakes as before. Test: "an edit to a static body wakes what rests on the chunks it
+  changed, and nothing else" (fails without it).
+- **Golden:** regenerated (19,844 -> 19,900 bytes, 231 steps; LOG_VERSION 14). The session's wall is rebuilt with the
+  targeted wake (two `DestroyWaking` ops for `Destroy`), a deliberate change to which bodies wake. It
+  was not re-checked on Clang: no Clang on the machine it was made on.
+- **Tried and not kept: a body per chunk** (the plan's V2; "The static world" above). Same speed
+  (blast 402 ms over its first 0.5 s), but seams between chunks' bodies.
+
+West Point Marina, `MAYHEM_BENCH=blast` (two runs each):
+
+| | before | Phase 1 |
+|---|---|---|
+| Physics in the first 0.5 s after the blast | 580-624 ms | 409-412 ms |
+| Worst frame | 157-178 ms | 65-66 ms |
+| Physics a frame after 1 s | 4.9 ms | 3.0-3.1 ms |
+| Pieces | 236 | 236 |
+
+`MAYHEM_BENCH=cannon`: 27 ms in the first 0.5 s (was 26-31), 308 pieces as before. Load: the world's
+body is made in ~1.4 ms instead of ~100; describing it (the box build, 1,980 ms) is Phase 2's.
+Checks: unit tests (354), soak, net (5 of 5), Voxel Mayhem's, the sandbox's and the physics demos'
+self-tests (two full runs, 79 of 79 checks; a third exited early without a result, as runs on main
+do).
 
 ### Phase 2: the shape, for convex bodies against the world
 
@@ -170,6 +224,79 @@ golden is retired (a deliberate change, regenerated and committed with it).
 - Measured: load's collision 1,980 ms -> near zero; a convex resting on a flat voxel floor and sliding
   across it (no seam catches, which the box floor fails today); the marina's 17 content-box chunks
   collide as their voxels.
+
+### Phase 2: delivered (2026-10-24)
+
+Static voxel bodies collide as their tile tables when `CollisionParams::representation` is `Tiles`;
+moving ones stay boxes (createBody refuses a moving body of tiles, logged). Boxes stay the default
+(V5); Voxel Mayhem's maps use Tiles, and `PROJV_COLLISION=tiles` makes it what `PhysicsConfig` starts
+with, to run anything on it.
+
+- **The table is shared, copy-on-write** (V6): `GeometryBlob::tiles` a `shared_ptr`;
+  `utils::shareBlobTiles` hands a shape the table as it is, and `editBlobTiles` (and
+  `editBlobMaterials`) copy it first when anything else holds it. A blob copy (`forkBlob`) now
+  shares its table too, until one is edited.
+- **What collision reads** (`utils/tile_collision.h`, no Jolt; tested against a plain voxel grid in
+  `test_tile_collision.cpp`): `tileBoxesIn` -- a full block one box, a block's full bricks merged
+  greedily into boxes of one slot, a partial brick's voxels merged likewise within it; merged over
+  the whole block or brick, so the boxes a body meets do not depend on where it is.
+  `tileTableRaycast` -- a DDA through blocks, bricks, voxels, only where the level above holds
+  something. `tileSurfaceNormal` -- the open face a point lies on.
+- **`VoxelShape`** (`src/runtime/physics/voxel_shape.{h,cpp}`, Jolt `User1`): a convex against it
+  collides with each box under its bounds as a Jolt box made on the stack (`CollisionDispatch`, so
+  contacts, faces for manifolds, `CharacterVirtual`'s support and `mEnhancedInternalEdgeRemoval` are
+  Jolt's own); a convex cast casts against the boxes under the sweep, nearest first, with early out;
+  rays march the table; points, surface normals, supporting faces and materials (a palette slot's
+  physics material) from the cell an id names. Registered both ways round against every convex
+  subtype; compounds and decorators reach it through their own dispatch (debris box compounds,
+  characters' capsules, continuous collision's casts, the runtime's queries).
+- **Sub-shape ids: as fine as the bits allow.** Jolt keeps one contact manifold per pair of sub-shape
+  ids, so boxes need ids of their own -- and a voxel index (a box by its first voxel) takes 24 bits at
+  256^3, while a compound of n chunks takes ceil(log2 n) of the 32. The runtime gives each chunk's shape
+  what its body's compound leaves (`voxelShape(..., idBits)`, cached apart by it):
+  - up to 256 chunks of 256^3 (every test, the park): every box its own id, exact;
+  - more (West Point Marina: 4,140 chunks leave 19 bits): ids name 2^k-voxel cells
+    (`utils::tileCellShift`; the marina's are bricks), and a cell's boxes give one contact between them,
+    the deepest. Measured first the other way -- one contact per brick everywhere -- and a character
+    could not climb a 45-degree voxel staircase (tread and riser in one brick are one contact): so
+    exact ids wherever they fit.
+  Hits trace to their voxel as before: the path names the cell and its level, and the point finds
+  the voxel in it (`resolve`).
+- **Not built: normals from exposed faces only (V3).** Jolt's internal edge removal, run on the
+  shape's boxes as it is on a compound's, is enough for what was measured: a frictionless box slid 12 m
+  across a 4 x 4-chunk floor at 2 m/s keeps its speed (> 1.98 m/s) and does not bump (< 0.05 m/s up),
+  on tiles and on boxes alike -- the box floor does not catch either, so the "fails today" this phase
+  expected was not there. Kept for when something does catch.
+- **Recording:** a tile shape is logged as its table's bytes, slot materials and id bits
+  (`writeShape`, has-voxels value 2), and a replay builds the same shape. A second golden
+  (`physics_golden_tiles.rec`, 24,355 bytes, 231 steps) records the session on tiles; the box golden
+  is unchanged.
+
+Measured, West Point Marina (`MAYHEM_BENCH=blast`, `MAYHEM_COLLISION=boxes` for the other column;
+temporary timers, removed):
+
+| | Boxes | Tiles |
+|---|---|---|
+| The world's collision at load (describe + create, 3,887 parts) | 2,052 ms | 26 ms |
+| Chunks colliding as their content box | 17 | 0 |
+| Physics in the first 0.5 s after the blast | 409 ms | 403 ms |
+| Worst frame | 66 ms | 60 ms |
+| Physics a frame after 1 s | 2.9 ms | 3.0 ms |
+| Pieces | 236 | 225 |
+
+(Fewer pieces: the break is the same, what the debris lands on is not.)
+
+Tests (`test_physics_tiles.cpp`): a chunk over its box budget lets a ball down a shaft its content box
+filled; the seam slide above; 20 balls at 200 m/s stopped by a wall one voxel thick; a shape given 12
+id bits names bricks and still holds crates up; a moving body of tiles refused. The whole unit suite
+passes on tiles (`PROJV_COLLISION=tiles`: 362 of 362), as do Voxel Mayhem's and the sandbox's
+self-tests. The physics demos' self-test passes on tiles but for the Titans' crate check, which fails
+in a full run on tiles and, run after demos 1 and 2, on boxes too (it is order-sensitive; alone it
+passes on both).
+
+Left for Phase 3 and after: moving bodies (mass properties, voxels against voxels); the coarse-id
+case's lost contacts within a cell (a body of more than 256 chunks); exposed-face normals if a seam is
+ever found; the tile golden on Clang (none on the machine it was made on).
 
 ### Phase 3: voxels against voxels
 
@@ -212,14 +339,15 @@ golden is retired (a deliberate change, regenerated and committed with it).
   substeps instead; that is the fallback.
 - **Many contacts on flush faces** (a piece lying flat): the face polygon given to Jolt's manifold
   builder is what keeps it at 4 points; if Jolt prunes badly, the reduction is done before it sees them.
-- **4,140 static bodies:** the broadphase's static tree is rebuilt as bodies are added; adding them in
-  one batch (`AddBodiesPrepare` / `AddBodiesFinalize`) at load keeps it one build.
+- **Seams between bodies.** Jolt removes internal edges within a body pair only (Phase 1 measured a
+  13% slide loss across chunk bodies), so the world stays one body. A dynamic body of several chunks
+  is one compound for the same reason.
 
 ## Open questions
 
 1. Edge vs edge: every exposed edge pair near each other, or only edges of voxels whose corners found
    nothing? (The second is cheaper; does it miss real contacts?)
-2. Should a static world chunk's body be per chunk, or per 4^3 chunks (fewer bodies, an edit swaps a
-   compound child)? Per chunk is simpler; measure the broadphase at 4,140 first.
+2. ~~Should a static world chunk's body be per chunk, or per 4^3 chunks?~~ Neither: one body
+   (Phase 1). Per-chunk bodies catch at the seams between them.
 3. Is a dynamic body's shape per chunk (a compound for a grid body) or one shape over its chunks'
    tables? Per chunk matches the static world and the sub-shape bits.

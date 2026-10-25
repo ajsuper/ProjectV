@@ -1136,7 +1136,9 @@ Planned:
   checks bodies only when `latestBlobContentStamp()` moved, and rebuilds those whose list differs
   (NetId order). A dynamic body keeps its velocities across a rebuild. Destroying any body first
   wakes everything its bounds touch (`wakeBodiesAround`), so carving or deleting a floor drops
-  what slept on it, and voxels added inside a body push it out.
+  what slept on it, and voxels added inside a body push it out. (Since 2026-10-24 a static voxel
+  body rebuilt for changed voxels wakes only what its changed chunks touch -- a level's world spans
+  the level; `voxel-collision-shape.md`, Phase 1. LOG_VERSION 14.)
 - `utils/voxel_islands.h`: 6-connected islands in scan order; `splitVoxelIslands` keeps the
   largest, and makes each other island a duplicate of the component carved down to it (palette
   and materials kept), optionally as a root placed in the world. Occupancy decoding is shared

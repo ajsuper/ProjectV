@@ -151,6 +151,22 @@ namespace projv {
 
     // The simulation's side of a RigidBody or StaticCollider. Made and removed by physics; never
     // saved, never written by anything else.
+    // A piece of a break too small to be a body (PhysicsConfig::debris): its entity is linked to the
+    // piece's component, as a body's is, and physics moves it -- each fixed step it falls, is swept as a
+    // sphere against static bodies, and bounces -- writing its Transform. Made and removed by physics.
+    struct Debris {
+        core::vec3 velocity{0.0f}, angularVelocity{0.0f};
+        // The component's pose (its Transform) at the last two fixed steps, which presentation
+        // interpolates between.
+        core::vec3 previousPosition{0.0f}, position{0.0f};
+        core::quat previousRotation{1.0f, 0.0f, 0.0f, 0.0f}, rotation{1.0f, 0.0f, 0.0f, 0.0f};
+        core::vec3 centre{0.0f};    // its voxels' centre in its own frame: where the sphere is
+        float      radius = 0.1f;   // half its voxels' box's smallest side
+        uint64_t   madeAt = 0;      // the physics tick it was made at
+        float      still = 0.0f;    // seconds it has been slow and touching
+        bool       resting = false; // not stepped until the static world under it changes
+    };
+
     struct PhysicsBody {
         runtime::BodyId id;
         runtime::MotionType motion = runtime::MotionType::Static;
@@ -306,6 +322,9 @@ namespace projv {
         std::vector<std::vector<core::ivec3>>            pieceVoxels;
         std::vector<std::pair<core::vec3, core::vec3>>   pieceMotion;   // linear, angular
         std::vector<core::ivec3>                         dust;
+        // The pieces made cheap debris (PhysicsConfig::debris): Debris, not bodies. Not in `pieces`,
+        // and never sent: a client of a networked body's break makes none.
+        std::vector<Entity>                              debris;
     };
 
     // What a break made (BodyBroken): a shard, or an island that came away. Physics puts it on every
@@ -354,7 +373,9 @@ namespace projv {
 namespace projv::runtime {
     struct PhysicsConfig {
         PhysicsSettings        settings;
-        utils::CollisionParams collision;
+        // What voxels collide as. Its representation is Boxes unless PROJV_COLLISION=tiles says Tiles
+        // (utils::defaultCollisionRepresentation): static voxel bodies then collide as their tile tables.
+        utils::CollisionParams collision{utils::defaultCollisionRepresentation()};
         // A body that leaves the world bounds is falling forever or flung away; by default its
         // entity goes (after BodyLeftWorld is sent). False leaves the decision to the game.
         bool                   destroyBodiesThatLeaveTheWorld = true;
@@ -366,6 +387,19 @@ namespace projv::runtime {
         // The smallest piece: an island of this many voxels or fewer that would come away is removed
         // instead, as dust -- no body, no entity. The same for shards and fallen pieces. 0: none.
         uint32_t               dustVoxels = 0;
+        // Cheap debris (docs/plans/cheap-debris.md): a piece of `maxVoxels` voxels or fewer (and more
+        // than dustVoxels) from a break of a body without a NetId is no body -- its voxels are drawn as
+        // ever, but it is moved by a fall and a bounce against static bodies (runtime's Debris), pushes
+        // nothing and is pushed by nothing, and goes after `seconds`, or the oldest past `maxCount`.
+        // A break makes most of its pieces this small, and making bodies of them was most of a big
+        // break's cost. 0 (the default): every piece is a body.
+        struct DebrisConfig {
+            uint32_t maxVoxels = 0;
+            float    seconds = 20.0f;
+            uint32_t maxCount = 4000;
+            float    restitution = 0.25f;   // of the speed into a surface, what it bounces back with
+            float    friction = 0.6f;       // Coulomb, against the bounce's impulse
+        } debris;
         // Guards on a strike (runtime::fracture), like maxLinearSpeed on motion: what a game may
         // change, never what it may turn off. Out of range, installPhysics clamps them and says so.
         struct FractureLimits {

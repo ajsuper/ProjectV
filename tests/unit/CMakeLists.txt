@@ -21,6 +21,7 @@ add_executable(projv_unit_tests
     test_application.cpp
     test_attachments.cpp
     test_block_table.cpp
+    test_tile_collision.cpp
     test_tile_table.cpp
     test_color.cpp
     test_collision_geometry.cpp
@@ -34,6 +35,8 @@ add_executable(projv_unit_tests
     test_physics_edits.cpp
     test_physics_fracture.cpp
     test_physics_golden.cpp
+    test_physics_tiles.cpp
+    test_physics_debris.cpp
     test_physics_groups.cpp
     test_physics_contacts.cpp
     test_physics_kinematic.cpp

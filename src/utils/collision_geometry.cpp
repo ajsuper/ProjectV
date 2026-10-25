@@ -2,6 +2,8 @@
 #include "utils/collision_geometry.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <string>
 
 #include "core/log.h"
 #include "utils/loose_bvh.h"
@@ -158,6 +160,17 @@ namespace projv::utils {
             return DecodeResult::Malformed;
         return DecodeResult::Ok;
     }
+    }
+
+    CollisionRepresentation defaultCollisionRepresentation() {
+        static const CollisionRepresentation chosen = [] {
+            const char* name = std::getenv("PROJV_COLLISION");
+            if (!name || std::string(name) == "boxes") return CollisionRepresentation::Boxes;
+            if (std::string(name) == "tiles") return CollisionRepresentation::Tiles;
+            core::warn("collision: PROJV_COLLISION is '{}'; it takes tiles or boxes", name);
+            return CollisionRepresentation::Boxes;
+        }();
+        return chosen;
     }
 
     uint64_t CollisionParams::key() const {

@@ -54,6 +54,9 @@
 
 #include "core/log.h"
 #include "job_pool.h"
+#include "mass_cached_shape.h"
+#include "utils/blob_voxels.h"
+#include "voxel_shape.h"
 
 namespace projv::runtime {
     struct CollisionShape::Native {
@@ -98,6 +101,8 @@ namespace projv::runtime {
             JPH_IF_ENABLE_ASSERTS(JPH::AssertFailed = joltAssertFailed;)
             JPH::Factory::sInstance = new JPH::Factory();
             JPH::RegisterTypes();
+            MassCachedShape::sRegister();
+            VoxelShape::sRegister();
         }
 
         void releaseJolt() {
@@ -277,6 +282,13 @@ namespace projv::runtime {
             if (shape.kind == PhysicsShape::Kind::Voxels) return true;
             for (const PhysicsShapePart& part : shape.parts)
                 if (containsVoxels(part.shape)) return true;
+            return false;
+        }
+
+        bool containsTiles(const PhysicsShape& shape) {
+            if (shape.kind == PhysicsShape::Kind::Voxels) return shape.voxels && shape.voxels->tiles;
+            for (const PhysicsShapePart& part : shape.parts)
+                if (containsTiles(part.shape)) return true;
             return false;
         }
 
@@ -530,13 +542,13 @@ namespace projv::runtime {
     // simulation, in the order made: what a fresh world needs to be given to end up the same.
     namespace {
         constexpr uint32_t LOG_MAGIC = 0x4c564a50u;   // "PJVL"
-        constexpr uint32_t LOG_VERSION = 13;   // 13: character velocity; 12: body states asleep; 11: body states, characters alone; 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body (written as 8 by mistake until 10); 10: frozen bodies
+        constexpr uint32_t LOG_VERSION = 14;   // 14: destroys that wake given boxes; 13: character velocity; 12: body states asleep; 11: body states, characters alone; 2: joint motor modes; 3: collideConnected; 4: materials; 5: sleep settings; 6: collision filters, no debris layer; 7: contact reports, senses; 8: kinematic blocking; 9: minImpactSpeed per body (written as 8 by mistake until 10); 10: frozen bodies
 
         enum class Op : uint8_t {
             Create = 1, Destroy, Impulse, AngularImpulse, AddVelocity, SetVelocity, SetPose, MoveKinematic,
             Gravity, Step, Restore, CreateCharacter, DestroyCharacter, CharacterInput, CharacterPosition,
             CreateJoint, DestroyJoint, JointMotor, SetMaterial, SetFilter, CharacterFilter, ReportContacts, Freeze,
-            SetState, CharacterRestore, CharacterAlone, CharacterVelocity
+            SetState, CharacterRestore, CharacterAlone, CharacterVelocity, DestroyWaking
         };
 
         void writeSettings(std::vector<uint8_t>& out, const PhysicsSettings& s) {
@@ -569,7 +581,19 @@ namespace projv::runtime {
                 case PhysicsShape::Kind::Voxels: {
                     put(out, shape.voxelSize);
                     const utils::CollisionPieces* pieces = shape.voxels ? shape.voxels->source.get() : nullptr;
-                    put(out, uint8_t(pieces != nullptr));
+                    const utils::TileTable* tiles = shape.voxels ? shape.voxels->tiles.get() : nullptr;
+                    put(out, uint8_t(tiles ? 2 : pieces != nullptr));
+                    if (tiles) {   // the table as it is, its slots' materials and its id bits
+                        put(out, shape.voxels->otherDensity);
+                        put(out, shape.voxels->idBits);
+                        for (uint16_t m : shape.voxels->slots) put(out, m);
+                        put(out, tiles->resolution);
+                        put(out, uint32_t(tiles->texels.size()));
+                        for (uint32_t w : tiles->texels) put(out, w);
+                        put(out, uint32_t(tiles->materials.size()));
+                        out.insert(out.end(), tiles->materials.begin(), tiles->materials.end());
+                        break;
+                    }
                     if (!pieces) break;
                     put(out, shape.voxels->otherDensity);
                     put(out, uint8_t(pieces->fallback));
@@ -603,6 +627,25 @@ namespace projv::runtime {
                     uint8_t has = 0;
                     if (!get(in, at, shape.voxelSize) || !get(in, at, has)) return false;
                     if (!has) return true;
+                    if (has == 2) {
+                        utils::TileTable table;
+                        utils::SlotMaterials slots{};
+                        float otherDensity = 0.0f;
+                        uint32_t words = 0, bytes = 0, idBits = 0;
+                        if (!get(in, at, otherDensity) || !get(in, at, idBits)) return false;
+                        for (uint16_t& m : slots) if (!get(in, at, m)) return false;
+                        if (!get(in, at, table.resolution) || !get(in, at, words) || words > (in.size() - at) / 4) return false;
+                        table.texels.resize(words);
+                        for (uint32_t& w : table.texels) if (!get(in, at, w)) return false;
+                        if (!get(in, at, bytes) || bytes > in.size() - at) return false;
+                        table.materials.assign(in.begin() + long(at), in.begin() + long(at + bytes));
+                        at += bytes;
+                        table.leafStart = table.texels.empty() ? 0u : uint32_t(utils::tileTableLayout(table).leafStart);
+                        if (!utils::tileTableWellFormed(table)) return false;
+                        utils::tileTableRecount(table);
+                        shape.voxels = build(std::make_shared<const utils::TileTable>(std::move(table)), slots, otherDensity, idBits);
+                        return true;
+                    }
                     utils::CollisionPieces pieces;
                     uint8_t fallback = 0;
                     uint32_t count = 0;
@@ -877,6 +920,8 @@ namespace projv::runtime {
         if (!(desc.density > 0.0f) || !std::isfinite(desc.density) || !std::isfinite(desc.mass) || desc.mass < 0.0f)
             return refuse("a density that is not positive, or a negative mass");
 
+        if (desc.motion != MotionType::Static && containsTiles(desc.shape))
+            return refuse("a moving body of tile-table voxels (CollisionRepresentation::Tiles is for static bodies)");
         // Voxel materials: the shape is built with each piece's density, and weighs what it says.
         const bool materials = containsMaterials(desc.shape);
         JPH::ShapeRefC shape = materials ? makeShape(desc.shape, desc.density) : makeShape(desc.shape);
@@ -1054,6 +1099,28 @@ namespace projv::runtime {
         if (impl->recording) { impl->op(Op::Destroy); put(impl->log, id.value); }
         if (!isAlive(id)) return;
         wakeBodiesAround(id);
+        removeBody(id);
+    }
+
+    void PhysicsWorld::destroyBody(BodyId id, const std::vector<WorldBox>& wake) {
+        if (impl->recording) {
+            impl->op(Op::DestroyWaking);
+            put(impl->log, id.value);
+            put(impl->log, uint32_t(wake.size()));
+            for (const WorldBox& box : wake) { put(impl->log, box.min); put(impl->log, box.max); }
+        }
+        if (!isAlive(id)) return;
+        JPH::BodyInterface& bodies = impl->system.GetBodyInterface();
+        for (const WorldBox& box : wake) {
+            if (!finite(box.min) || !finite(box.max)) continue;
+            JPH::AABox bounds(toJolt(glm::min(box.min, box.max)), toJolt(glm::max(box.min, box.max)));
+            bounds.ExpandBy(JPH::Vec3::sReplicate(0.05f));   // and what rests exactly on its faces
+            bodies.ActivateBodiesInAABox(bounds, JPH::BroadPhaseLayerFilter(), JPH::ObjectLayerFilter());
+        }
+        removeBody(id);
+    }
+
+    void PhysicsWorld::removeBody(BodyId id) {
         removeJointsOf(id);
         if (!impl->touching.empty()) endContactsOf(id, false);
         impl->reporting[JPH::BodyID(id.value).GetIndex()] = 0;
@@ -2042,7 +2109,8 @@ namespace projv::runtime {
                 core::warn("physics: voxel compound shape failed: {}", result.GetError().c_str());
                 return nullptr;
             }
-            shape = result.Get();
+            // Its mass properties summed once, not by every compound made of it (MassCachedShape).
+            shape = new MassCachedShape(result.Get());
         }
         auto out = std::make_shared<CollisionShape>();
         out->pieces = uint32_t(pieces.pieces.size());
@@ -2056,9 +2124,36 @@ namespace projv::runtime {
         return out;
     }
 
+    CollisionShapeRef PhysicsWorld::shapeFromTiles(std::shared_ptr<const utils::TileTable> table,
+                                                   const utils::SlotMaterials* materials, float otherDensity, uint32_t idBits) {
+        if (!table || table->texels.empty()) return nullptr;
+        std::array<JPH::RefConst<JPH::PhysicsMaterial>, 256> joltMaterials;
+        bool hasMaterials = false;
+        if (materials)
+            for (size_t slot = 0; slot < materials->size(); slot++) {
+                const uint16_t m = (*materials)[slot];
+                if (m >= MAX_PHYSICS_MATERIALS) {
+                    core::warn("physics: voxel slot material {} is out of range; the shape is refused", m);
+                    return nullptr;
+                }
+                if (m) joltMaterials[slot] = impl->joltMaterial(m);
+                hasMaterials = hasMaterials || m != 0;
+            }
+        auto out = std::make_shared<CollisionShape>();
+        out->volume = float(utils::tileTableVoxelCount(*table));
+        out->hasMaterials = hasMaterials;
+        out->otherDensity = otherDensity;
+        if (materials) out->slots = *materials;
+        out->tiles = table;
+        out->native = std::make_shared<CollisionShape::Native>();
+        out->idBits = std::min(idBits, 32u);
+        out->native->shape = new VoxelShape(std::move(table), std::move(joltMaterials), out->idBits);
+        return out;
+    }
+
     CollisionShapeRef PhysicsWorld::voxelShape(const GeometryBlob& blob, uint32_t resolution,
                                                const utils::CollisionParams& params,
-                                               const utils::SlotMaterials* materials, float otherDensity) {
+                                               const utils::SlotMaterials* materials, float otherDensity, uint32_t idBits) {
         // The materials' part of the key: 0 without any, so those shapes are shared as they always
         // were; otherwise the slots, the material-0 density and the table's version (densities are
         // baked into the shape).
@@ -2072,11 +2167,17 @@ namespace projv::runtime {
         } else {
             materials = nullptr;
         }
-        auto key = std::make_tuple(blob.contentStamp, params.key(), materialKey);
+        const uint32_t idKey = params.representation == utils::CollisionRepresentation::Tiles ? idBits : 0u;
+        auto key = std::make_tuple(blob.contentStamp, params.key() * 33u + idKey, materialKey);
         auto found = impl->shapeCache.find(key);
         if (found != impl->shapeCache.end()) return found->second;
-        utils::CollisionPieces pieces = utils::buildCollisionPieces(blob, resolution, params, materials);
-        CollisionShapeRef shape = shapeFromPieces(pieces, otherDensity);
+        CollisionShapeRef shape;
+        if (params.representation == utils::CollisionRepresentation::Tiles) {
+            shape = shapeFromTiles(utils::shareBlobTiles(blob), materials, otherDensity, idBits);
+        } else {
+            utils::CollisionPieces pieces = utils::buildCollisionPieces(blob, resolution, params, materials);
+            shape = shapeFromPieces(pieces, otherDensity);
+        }
         // An empty blob is cached as "no shape" too: asking again is as cheap as the first answer.
         impl->shapeCache.emplace(key, shape);
         return shape;
@@ -2616,8 +2717,16 @@ namespace projv::runtime {
                     path.push_back(compound->GetCompoundUserData(index));
                     shape = compound->GetSubShape(index).mShape;
                     id = rest;
+                } else if (type == VoxelShape::SUBTYPE) {
+                    // The cell the id names, its first voxel packed 10 bits an axis in units of the cell
+                    // (utils::tileCellShift), and the cell's level.
+                    const auto* voxels = static_cast<const VoxelShape*>(shape);
+                    const core::ivec3 c = voxels->cellCorner(id) >> voxels->cellLevel();
+                    path.push_back(uint32_t(c.x) | uint32_t(c.y) << 10 | uint32_t(c.z) << 20);
+                    path.push_back(uint32_t(voxels->cellLevel()));
+                    break;
                 } else if (type == JPH::EShapeSubType::RotatedTranslated || type == JPH::EShapeSubType::Scaled ||
-                           type == JPH::EShapeSubType::OffsetCenterOfMass) {
+                           type == JPH::EShapeSubType::OffsetCenterOfMass || type == MassCachedShape::SUBTYPE) {
                     shape = static_cast<const JPH::DecoratedShape*>(shape)->GetInnerShape();
                 } else {
                     break;
@@ -2737,9 +2846,16 @@ namespace projv::runtime {
         }
         settings.record = false;
         PhysicsWorld world(settings);
-        auto build = [&](const utils::CollisionPieces& pieces, float otherDensity) {
-            return world.shapeFromPieces(pieces, otherDensity);
-        };
+        struct Build {
+            PhysicsWorld& world;
+            CollisionShapeRef operator()(const utils::CollisionPieces& pieces, float otherDensity) {
+                return world.shapeFromPieces(pieces, otherDensity);
+            }
+            CollisionShapeRef operator()(std::shared_ptr<const utils::TileTable> table, const utils::SlotMaterials& slots,
+                                         float otherDensity, uint32_t idBits) {
+                return world.shapeFromTiles(std::move(table), &slots, otherDensity, idBits);
+            }
+        } build{world};
         auto truncated = [&] {
             result.problem = "the recording is truncated after step " + std::to_string(result.stepsReplayed);
             return result;
@@ -2767,6 +2883,15 @@ namespace projv::runtime {
                     if (!get(in, at, id)) return truncated();
                     world.destroyBody(BodyId{id});
                     break;
+                case Op::DestroyWaking: {
+                    uint32_t count = 0;
+                    if (!get(in, at, id) || !get(in, at, count) || count > (in.size() - at) / sizeof(WorldBox)) return truncated();
+                    std::vector<WorldBox> wake(count);
+                    for (WorldBox& box : wake)
+                        if (!get(in, at, box.min) || !get(in, at, box.max)) return truncated();
+                    world.destroyBody(BodyId{id}, wake);
+                    break;
+                }
                 case Op::Impulse:
                     if (!get(in, at, id) || !get(in, at, a)) return truncated();
                     world.addImpulse(BodyId{id}, a);

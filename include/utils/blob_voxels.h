@@ -2,6 +2,7 @@
 #define PROJECTV_BLOB_VOXELS_H
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "data_structures/scene.h"
@@ -19,6 +20,10 @@
 namespace projv::utils {
     // The voxels as a tile table.
     const TileTable& blobTiles(const GeometryBlob& blob);
+
+    // The same table, shared: it stays as it is now, whatever is done to the blob after (an edit copies
+    // the blob's first). What a physics shape reads its voxels from. Null when the blob is empty.
+    std::shared_ptr<const TileTable> shareBlobTiles(const GeometryBlob& blob);
 
     // The voxels as a tree64 (3 words a node, root first) and the material bytes its leaves index.
     const std::vector<uint32_t>& blobTree(const GeometryBlob& blob);

@@ -120,7 +120,8 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   iteration in anything that feeds a step, and a Jolt upgrade is deliberate, with the physics
   tests run. Plan: `docs/plans/physics-jolt.md`.
 - **The golden recording** (`tests/unit/data/physics_golden.rec`, `test_physics_golden.cpp`) is one
-  committed session every build must replay bit for bit. A change to what the simulation does --
+  committed session every build must replay bit for bit (twice: `physics_golden_tiles.rec` is the same
+  session with static voxels as tile tables). A change to what the simulation does --
   a Jolt upgrade, a new rule in the step, a new log field -- fails it on purpose: find out why, and
   when the change is meant, regenerate it with `PROJV_WRITE_GOLDEN=1 build/bin/projv_unit_tests
   -tc="golden*"` and commit the file with the change.
@@ -160,8 +161,15 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   `setBlobTiles`/`replaceChunkTiles`. Plan: `docs/plans/voxel-storage-tiles.md`.
 - A blob's `contentStamp` names its voxel content (physics shapes are cached by it). Code that
   replaces a blob's voxels in place calls `markBlobContentChanged(blob)` (the blob_voxels setters do), never just clears
-  `contentBoundsValid`. What voxels collide as is `utils::buildCollisionPieces`
-  (`utils/collision_geometry.h`), and nothing else.
+  `contentBoundsValid`. What voxels collide as is set by `CollisionParams::representation`
+  (`utils/collision_geometry.h`): `Boxes` (the default) is `utils::buildCollisionPieces`, and nothing
+  else; `Tiles` makes static voxel bodies collide as their blob's tile table, read in place
+  (`src/runtime/physics/voxel_shape.h`, `utils/tile_collision.h`) -- moving ones stay boxes. Voxel
+  Mayhem's maps use Tiles; `PROJV_COLLISION=tiles` runs anything (the unit suite, a demo) on it.
+  Plan: `docs/plans/voxel-collision-shape.md`.
+- **Cheap debris** (`PhysicsConfig::debris`, off by default): a break's pieces of up to `maxVoxels`
+  are `Debris`, not bodies -- drawn, falling and bouncing against static bodies, never in the solver
+  or a query. Voxel Mayhem's maps use it (64 voxels). Plan: `docs/plans/cheap-debris.md`.
 
 ## Where things are
 

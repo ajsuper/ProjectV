@@ -9,12 +9,25 @@
 
 namespace projv::utils {
     namespace {
+        const TileTable& tilesOf(const GeometryBlob& blob) {
+            static const TileTable empty;
+            return blob.tiles ? *blob.tiles : empty;
+        }
+
+        // The blob's table to change: its own, copied first when anything else holds it too (a copy of
+        // the blob, a physics shape), so they keep the voxels they were made from.
+        TileTable& ownTiles(const GeometryBlob& blob) {
+            if (!blob.tiles) blob.tiles = std::make_shared<TileTable>();
+            else if (blob.tiles.use_count() > 1) blob.tiles = std::make_shared<TileTable>(*blob.tiles);
+            return *blob.tiles;
+        }
+
         // The form that was not written last, brought up to date with the one that was. Tiles derived
         // from a tree replace it: the tree is the form the engine reads least (only a tree asked for
         // again rebuilds it), and keeping both would hold every streamed or authored blob twice.
         void deriveTiles(const GeometryBlob& blob) {
             if (blob.voxelForm == GeometryBlob::VoxelForm::Tiles) return;
-            blob.tiles = buildTileTable(blob.treeNodes, blob.treeMaterials, tree64Resolution(blob.treeNodes));
+            blob.tiles = std::make_shared<TileTable>(buildTileTable(blob.treeNodes, blob.treeMaterials, tree64Resolution(blob.treeNodes)));
             std::vector<uint32_t>().swap(blob.treeNodes);
             std::vector<uint8_t>().swap(blob.treeMaterials);
             blob.voxelForm = GeometryBlob::VoxelForm::Tiles;
@@ -22,13 +35,19 @@ namespace projv::utils {
         }
         void deriveTree(const GeometryBlob& blob) {
             if (blob.voxelForm == GeometryBlob::VoxelForm::Tree || blob.derivedStamp == blob.contentStamp) return;
-            treeFromTileTable(blob.tiles, blob.treeNodes, blob.treeMaterials);
+            treeFromTileTable(tilesOf(blob), blob.treeNodes, blob.treeMaterials);
             blob.derivedStamp = blob.contentStamp;
         }
     }
 
     const TileTable& blobTiles(const GeometryBlob& blob) {
         deriveTiles(blob);
+        return tilesOf(blob);
+    }
+
+    std::shared_ptr<const TileTable> shareBlobTiles(const GeometryBlob& blob) {
+        deriveTiles(blob);
+        if (!blob.tiles || blob.tiles->texels.empty()) return nullptr;
         return blob.tiles;
     }
 
@@ -45,13 +64,13 @@ namespace projv::utils {
     void setBlobTree(GeometryBlob& blob, std::vector<uint32_t> tree, std::vector<uint8_t> materials) {
         blob.treeNodes = std::move(tree);
         blob.treeMaterials = std::move(materials);
-        blob.tiles = TileTable{};   // derived again when asked for
+        blob.tiles.reset();   // derived again when asked for
         blob.voxelForm = GeometryBlob::VoxelForm::Tree;
         markBlobContentChanged(blob);
     }
 
     void setBlobTiles(GeometryBlob& blob, TileTable tiles) {
-        blob.tiles = std::move(tiles);
+        blob.tiles = std::make_shared<TileTable>(std::move(tiles));
         blob.treeNodes.clear();
         blob.treeMaterials.clear();
         blob.voxelForm = GeometryBlob::VoxelForm::Tiles;
@@ -60,12 +79,13 @@ namespace projv::utils {
 
     TileTable& editBlobTiles(GeometryBlob& blob, uint32_t resolution) {
         deriveTiles(blob);
-        if (blob.tiles.resolution == 0) blob.tiles.resolution = resolution;   // an empty tree has none
+        TileTable& tiles = ownTiles(blob);
+        if (tiles.resolution == 0) tiles.resolution = resolution;   // an empty tree has none
         blob.treeNodes.clear();
         blob.treeMaterials.clear();
         blob.voxelForm = GeometryBlob::VoxelForm::Tiles;
         markBlobContentChanged(blob);
-        return blob.tiles;
+        return tiles;
     }
 
     void setBlobTreeMaterials(GeometryBlob& blob, std::vector<uint8_t> materials) {
@@ -80,21 +100,21 @@ namespace projv::utils {
     }
 
     const std::vector<uint8_t>& blobMaterials(const GeometryBlob& blob) {
-        return blob.voxelForm == GeometryBlob::VoxelForm::Tiles ? blob.tiles.materials : blob.treeMaterials;
+        return blob.voxelForm == GeometryBlob::VoxelForm::Tiles ? tilesOf(blob).materials : blob.treeMaterials;
     }
 
     std::vector<uint8_t>& editBlobMaterials(GeometryBlob& blob) {
         markBlobContentChanged(blob);   // the other form, derived from the old bytes, is stale now
-        return blob.voxelForm == GeometryBlob::VoxelForm::Tiles ? blob.tiles.materials : blob.treeMaterials;
+        return blob.voxelForm == GeometryBlob::VoxelForm::Tiles ? ownTiles(blob).materials : blob.treeMaterials;
     }
 
     bool blobEmpty(const GeometryBlob& blob) {
-        return blob.voxelForm == GeometryBlob::VoxelForm::Tiles ? blob.tiles.texels.empty() : blob.treeNodes.empty();
+        return blob.voxelForm == GeometryBlob::VoxelForm::Tiles ? tilesOf(blob).texels.empty() : blob.treeNodes.empty();
     }
 
     size_t blobVoxelBytes(const GeometryBlob& blob) {
         if (blob.voxelForm == GeometryBlob::VoxelForm::Tiles)
-            return blob.tiles.texels.size() * sizeof(uint32_t) + blob.tiles.materials.size();
+            return tilesOf(blob).texels.size() * sizeof(uint32_t) + tilesOf(blob).materials.size();
         return blob.treeNodes.size() * sizeof(uint32_t) + blob.treeMaterials.size();
     }
 

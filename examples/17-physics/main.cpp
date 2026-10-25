@@ -2401,14 +2401,23 @@ void selfTest(projv::Application& app) {
         }
     }
     if (stage == 10 && t > 1.0f && !acted) {
-        // Three colours, one material: each ramp collides as one box per grid cell, as a plain one would.
+        // Three colours, one material: each ramp collides as one box per grid cell, as a plain one would
+        // (as boxes; as tiles nothing is merged, and its voxels' slots all name the one material).
         for (const Demos::Slide::Track& tr : demos.slide.tracks) {
             const auto& parts = world.get<projv::PhysicsBody>(tr.rampEntity).voxelParts;
             uint32_t pieces = 0;
-            bool materials = true;
-            for (const auto& part : parts) { pieces += part.shape->pieces; materials = materials && part.shape->hasMaterials; }
-            check(*test, !parts.empty() && pieces == parts.size() && materials,
-                  fmt::format("the {} ramp, three colours of one material, is {} boxes in {} cells", tr.ramp, pieces, parts.size()));
+            bool materials = true, tiles = !parts.empty();
+            for (const auto& part : parts) {
+                pieces += part.shape->pieces;
+                materials = materials && part.shape->hasMaterials;
+                tiles = tiles && part.shape->tiles;
+            }
+            if (tiles)
+                check(*test, materials, fmt::format("the {} ramp, three colours of one material, collides as its voxels in {} cells",
+                                                    tr.ramp, parts.size()));
+            else
+                check(*test, !parts.empty() && pieces == parts.size() && materials,
+                      fmt::format("the {} ramp, three colours of one material, is {} boxes in {} cells", tr.ramp, pieces, parts.size()));
         }
         acted = true;
     }

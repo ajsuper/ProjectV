@@ -28,7 +28,16 @@ namespace projv::utils {
         // Voxels merged greedily into axis-aligned boxes: exact, no overlaps, solid all the way
         // through (a body that ends up inside is pushed out, which a surface mesh would not do).
         Boxes = 1,
+        // A static body's voxels collide as its blob's tile table, read in place (runtime/physics's
+        // VoxelShape; docs/plans/voxel-collision-shape.md): exact, nothing built, solid all the way
+        // through as boxes are. A moving body's still collide as Boxes (voxels against voxels is the
+        // plan's Phase 3). pieceBudget and maxDecodedCells do not apply to it.
+        Tiles = 2,
     };
+
+    // Boxes, unless the environment says PROJV_COLLISION=tiles: what runtime::PhysicsConfig starts with,
+    // to run a suite, or a game, on the other representation. A representation set explicitly is kept.
+    CollisionRepresentation defaultCollisionRepresentation();
 
     struct CollisionParams {
         CollisionRepresentation representation = CollisionRepresentation::Boxes;

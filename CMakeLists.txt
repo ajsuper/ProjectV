@@ -307,6 +307,7 @@ add_library(projectV STATIC
     src/utils/editing.cpp
     src/utils/loose_bvh.cpp
     src/utils/block_table.cpp
+    src/utils/tile_collision.cpp
     src/utils/tile_table.cpp
     src/utils/blob_voxels.cpp
     src/utils/material.cpp
@@ -381,7 +382,9 @@ target_link_libraries(projectV PUBLIC
 # multiply-adds in code that feeds the simulation, the same rule Jolt's deterministic build follows.
 add_library(projv_physics OBJECT
     src/runtime/physics/job_pool.cpp
+    src/runtime/physics/mass_cached_shape.cpp
     src/runtime/physics/physics_world.cpp
+    src/runtime/physics/voxel_shape.cpp
 )
 target_include_directories(projv_physics PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(projv_physics PRIVATE cxx_std_20)
