@@ -48,7 +48,9 @@ cd build/examples/playground_demo   && ./playground_demo    # a sandbox to break
 Examples live in `examples/`, numbered in reading order (`00-hello-voxel` .. `95-playground-demo`).
 Two kinds: **feature examples** (`00`-`70`) teach one part of the engine and draw with
 `examples/shared/basicRenderer` (one pass: albedo under a fixed sun; `shared/basic_renderer.h`), unless
-rendering is what they teach (`30-renderers`, `40-advanced-renderer`, the scene editor's viewport).
+rendering is what they teach (`30-renderers`, `40-advanced-renderer`, the scene editor's viewport), or the
+look is the point (`50-terrain-generator` draws with the shared ReSTIR GI renderer, `shared/restirRenderer`,
+which the gallery's `restir` also uses).
 **Demos** (`80`+, `_demo` suffix on the folder and the target) combine many features to show them off, and
 draw with the full renderers (`shared/voxelRenderer`, the explosion's `nightRenderer`).
 Target names are not the directory names: `00-hello-voxel` builds `hello_voxel`, `30-renderers`

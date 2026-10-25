@@ -78,6 +78,7 @@
 #include "graphics/type_mapping.h"
 #include "utils/compose_io.h"
 #include "utils/picking.h"
+#include "restir_renderer.h"
 #include "voxel_renderer.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -195,47 +196,10 @@ static constexpr float RESTIR_DOF_PIXELS = 1.5f;      // the far distance's blur
 static constexpr float RESTIR_SUN_HALF_ANGLE = 0.02f; // radians, ~4x the real sun's: penumbrae a little soft
 static float g_sceneRadius = 100.0f;                  // frameScene's, for the fog's length
 static int  g_restirStride = 4;   // --restir-gi: GI for one window pixel in stride x stride (4 or 2)
-static constexpr float RESTIR_RENDER_SCALE = 0.5f;   // its G-buffer, each way; resources.json's 0.5 targets
 
-// ReSTIR GI at a sixteenth (or a quarter) of the window's pixels, a G-buffer at half resolution each way
-// rebuilt to the window by the voxel renderer's reconstruction, then a temporal resolve.
+// ReSTIR GI, the shared renderer (examples/shared/restirRenderer, restir_renderer.h): the gallery's
+// keys set its View each frame, and the View does the rest.
 static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
-    using projv::core::vec4;
-    using projv::graphics::setUniformToValue;
-    // Surfaces are offset a twentieth of the finest voxel before a ray leaves them; the same-surface
-    // tests are scaled from it too.
-    static float finest = 0.0f;
-    if (finest <= 0.0f) {
-        for (const projv::Chunk& chunk : ctx.world->ctx().get<projv::Scene>().chunks)
-            if (chunk.alive && chunk.header.voxelScale > 0.0f)
-                finest = finest > 0.0f ? std::min(finest, chunk.header.voxelScale) : chunk.header.voxelScale;
-        if (finest <= 0.0f) finest = 1.0f;
-    }
-    // Which render texel of its block each GI pixel samples this frame (the block: the GI stride against
-    // the render resolution, 2 or 1): every one in turn, diagonals first.
-    const int giStride = std::max(1, int(float(g_restirStride) * RESTIR_RENDER_SCALE));
-    static const int order4[4][2] = {{0, 0}, {1, 1}, {1, 0}, {0, 1}};
-    const int* offset = order4[giStride == 2 ? ctx.frameCount % 4 : 0];
-    // Each render texel is traced through the centre of another of the 2x2 window pixels it covers each
-    // frame, as the voxel renderer does: a still view repeats the same four, and the resolve settles on them.
-    static const int cellOrder[4] = {0, 3, 1, 2};
-    const int cell = cellOrder[ctx.frameCount % 4];
-    vec4 jitterParams{(float(cell % 2) + 0.5f) * 0.5f - 0.5f, (float(cell / 2) + 0.5f) * 0.5f - 0.5f, 0.0f, 0.0f};
-    vec4 renderParams{0.0f, 0.0f, g_reconstructBypass ? 1.0f : 0.0f, 0.0f};
-    // SSAO six of the finest voxels round, darkening the indirect light by up to half; the sun's penumbra
-    // per unit of blocker distance (the disc's full width); the fog's density: its length 1.6 scene radii,
-    // so the far side of the scene is about a third hazed, held to 30..300 m of Teardown-scale voxels.
-    const float fogLength = std::clamp(1.6f * g_sceneRadius, 300.0f, 3000.0f);
-    vec4 look{6.0f * finest, 0.5f, g_restirSoftShadow ? 2.0f * std::tan(RESTIR_SUN_HALF_ANGLE) : 0.0f,
-              g_restirFog ? 1.0f / fogLength : 0.0f};
-    static bool first = true;
-
-    vec4 cameraPos{ctx.cameraPosition, 1.0f}, cameraDir{ctx.cameraDirection, 0.0f};
-    vec4 prevCameraPos{ctx.prevCameraPosition, 1.0f}, prevCameraDir{ctx.prevCameraDirection, 0.0f};
-    vec4 sunDir{ctx.sunDirection, 0.0f};
-    // z: the sun moved -- the light changed, so every history (the reservoirs' cached light included) starts over.
-    vec4 frameCount{float(ctx.frameCount), ctx.cameraMoved ? 1.0f : 0.0f, ctx.sunMoved ? 1.0f : 0.0f, 0.0f};
-    vec4 reuse{g_restirReuse ? 1.0f : 0.0f, g_restirReuse ? 1.0f : 0.0f, 1.0f, 4.0f};   // temporal, spatial, visibility, M cap
     // For unattended captures (--capture): RESTIR_VIEW picks the starting view; RESTIR_POST=0, RESTIR_FOG=0
     // and RESTIR_SOFT=0 start with the post, the fog or the soft shadow off.
     static const bool fromEnv = [] {
@@ -246,42 +210,31 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
         return true;
     }();
     (void)fromEnv;
-    vec4 denoise{1.0f, 1.0f, float(g_restirView), 12.0f};                           // a-trous, GI accumulation, view, its cap
-    vec4 jitter{float(offset[0]), float(offset[1]), float(giStride), first ? 1.0f : 0.0f};
-    // w: one render texel's width per unit of distance, for the tests that ask "is this the same surface?".
-    const float renderHeight = std::max(ctx.windowResolution.y * RESTIR_RENDER_SCALE, 1.0f);
-    const float pixelWidth = 2.0f * std::tan(30.0f * 3.14159265f / 180.0f) / renderHeight;
-    // The image's history: none when the sun moved (the light is new); short while the camera moves, so
-    // changing light is not dragged along; 64 frames on a still view -- enough to average the jitter and
-    // what noise is left, short enough that the GI's own history, not this one, decides how fast it settles.
-    const float imageHistory = ctx.sunMoved ? 1.0f : ctx.cameraMoved ? 16.0f : 64.0f;
-    vec4 settings{6.0f, finest * 0.05f, imageHistory, pixelWidth};
-    setUniformToValue(renderer, "cameraPos", cameraPos);
-    setUniformToValue(renderer, "cameraDir", cameraDir);
-    setUniformToValue(renderer, "prevCameraPos", prevCameraPos);
-    setUniformToValue(renderer, "prevCameraDir", prevCameraDir);
-    setUniformToValue(renderer, "sunDir", sunDir);
-    setUniformToValue(renderer, "frameCount", frameCount);
-    setUniformToValue(renderer, "restirReuse", reuse);
-    setUniformToValue(renderer, "restirDenoise", denoise);
-    setUniformToValue(renderer, "restirJitter", jitter);
-    setUniformToValue(renderer, "restirSettings", settings);
-    setUniformToValue(renderer, "restirLook", look);
-    // The post's switches, and the frame's length for the exposure's adaptation (its own clock: the
-    // gallery's frame timer exists only in perf builds).
-    static auto lastFrame = std::chrono::steady_clock::now();
-    const auto now = std::chrono::steady_clock::now();
-    const float seconds = std::chrono::duration<float>(now - lastFrame).count();
-    lastFrame = now;
-    const RestirPost& post = g_restirPost;
-    vec4 postParams{post.on && post.vignette ? RESTIR_VIGNETTE : 0.0f, post.on && post.grade ? 1.0f : 0.0f,
-                    post.on && post.exposure ? 1.0f : 0.0f, seconds};
-    setUniformToValue(renderer, "restirPost", postParams);
-    vec4 dof{post.on && post.dof ? RESTIR_DOF_PIXELS * ctx.windowResolution.y / 1080.0f : 0.0f, 0.0f, 0.0f, 0.0f};
-    setUniformToValue(renderer, "restirDof", dof);
-    setUniformToValue(renderer, "jitterParams", jitterParams);
-    setUniformToValue(renderer, "renderParams", renderParams);
-    first = false;
+    restir_renderer::View& view = ctx.world->ctx().get<restir_renderer::View>();
+    view.debugView = g_restirView;
+    view.reuse = g_restirReuse;
+    view.reconstructBypass = g_reconstructBypass;
+    view.softShadow = g_restirSoftShadow;
+    view.sunHalfAngle = RESTIR_SUN_HALF_ANGLE;
+    view.fog = g_restirFog;
+    // The fog's length: 1.6 scene radii, so the far side of the scene is about a third hazed, held to
+    // 30..300 m of Teardown-scale voxels.
+    view.fogLength = std::clamp(1.6f * g_sceneRadius, 300.0f, 3000.0f);
+    view.post = g_restirPost.on;
+    view.vignette = g_restirPost.vignette;
+    view.grade = g_restirPost.grade;
+    view.exposure = g_restirPost.exposure;
+    view.dof = g_restirPost.dof;
+    view.vignetteAmount = RESTIR_VIGNETTE;
+    view.dofPixels = RESTIR_DOF_PIXELS;
+    restir_renderer::upload(*ctx.world, renderer, ctx.windowResolution, ctx.cameraPosition,
+                            ctx.cameraDirection, ctx.sunDirection);
+}
+
+static void installRestirRenderer(projv::Application& app, projv::graphics::RenderInstance& renderInstance, const projv::Scene&) {
+    restir_renderer::View& view = app.world.ctx().emplace<restir_renderer::View>();
+    view.giStride = g_restirStride;
+    restir_renderer::install(app.world, renderInstance, std::filesystem::current_path());
 }
 
 static bool measureSceneBounds(const projv::Scene& scene, projv::core::vec3& boundsMin, projv::core::vec3& boundsMax);
@@ -365,9 +318,10 @@ static std::vector<RendererModule> buildRendererRegistry() {
     registry.push_back({
         "restir",
         "ReSTIR GI at a sixteenth of the pixels, SSAO, a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, P post (V, B, E, K), O fog, U soft shadow.",
-        "./renderers/restir/",
-        "./renderers/restir/shaders/vs_quad.bin",
-        uploadRestirUniforms
+        "./restirRenderer/",
+        "./restirRenderer/shaders/vs_quad.bin",
+        uploadRestirUniforms,
+        installRestirRenderer
     });
 
     // The one the games use, from examples/shared/voxelRenderer (staged as voxelRenderer/).
@@ -641,10 +595,6 @@ void startup(projv::Application& app) {
     }
 
     projv::RendererSpecification rendererSpec = projv::graphics::loadRendererSpecification(selectedRenderer.directory);
-    // restir's GI targets are its quarter-size ones; --restir-gi sets how far below the window they are.
-    if (selectedRenderer.id == "restir")
-        for (projv::Texture& texture : rendererSpec.resources.textures)
-            if (texture.scale == 0.25f) texture.scale = 1.0f / float(g_restirStride);
     renderInstance.addRendererSpecification(1, rendererSpec);
 
     bgfx::ShaderHandle vsh = projv::graphics::loadShader(selectedRenderer.vertexShaderPath);

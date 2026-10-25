@@ -1,0 +1,399 @@
+{
+  "comment": "Canyonlands (Colorado Plateau) assets: pinyon-juniper woodland and boulders of the cliff-forming sandstones. See docs/plans/biome-canyonlands.md. Each design is one brush's parameters (examples/60-scene-editor/brushes/<brush>.lua); terrain_asset_baker grows it and adjusts `height` until the asset is its targetHeight (+-3) voxels tall. One asset voxel is one nearest-ring terrain voxel (2.8 units). Strata are compressed ~15x against the trees, so a juniper is 35-55 voxels and a Wingate wall ~150.",
+  "targetHeight": 45,
+  "voxelScale": 1.0,
+  "treeVoxelWorldSize": 2.8,
+  "designs": [
+    {
+      "name": "juniper_a",
+      "kind": "juniper",
+      "label": "Utah juniper",
+      "targetHeight": 45,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "juniper": true,
+        "canopy": 22,
+        "curve": 0.5,
+        "dieback": 0.3,
+        "seed": 11
+      }
+    },
+    {
+      "name": "juniper_b",
+      "kind": "juniper",
+      "label": "Utah juniper (half dead)",
+      "targetHeight": 38,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "juniper": true,
+        "canopy": 20,
+        "curve": 0.6,
+        "dieback": 0.55,
+        "seed": 23
+      }
+    },
+    {
+      "name": "juniper_c",
+      "kind": "juniper",
+      "label": "Utah juniper (twisted)",
+      "targetHeight": 52,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "juniper": true,
+        "canopy": 24,
+        "curve": 0.4,
+        "twist": 1.0,
+        "dieback": 0.25,
+        "seed": 37
+      }
+    },
+    {
+      "name": "juniper_d",
+      "kind": "juniper",
+      "label": "Utah juniper (leaning)",
+      "targetHeight": 36,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "juniper": true,
+        "canopy": 18,
+        "curve": 0.9,
+        "dieback": 0.2,
+        "seed": 41
+      }
+    },
+    {
+      "name": "juniper_e",
+      "kind": "juniper",
+      "label": "Utah juniper (full)",
+      "targetHeight": 48,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "juniper": true,
+        "canopy": 25,
+        "curve": 0.3,
+        "dieback": 0.0,
+        "seed": 53
+      }
+    },
+    {
+      "name": "pinyon_a",
+      "kind": "pinyon",
+      "label": "Two-needle pinyon",
+      "targetHeight": 62,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "pinyon": true,
+        "canopy": 28,
+        "curve": 0.3,
+        "seed": 17
+      }
+    },
+    {
+      "name": "pinyon_b",
+      "kind": "pinyon",
+      "label": "Two-needle pinyon (young)",
+      "targetHeight": 52,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "pinyon": true,
+        "canopy": 24,
+        "curve": 0.4,
+        "seed": 29
+      }
+    },
+    {
+      "name": "pinyon_c",
+      "kind": "pinyon",
+      "label": "Two-needle pinyon (old)",
+      "targetHeight": 72,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "pinyon": true,
+        "canopy": 32,
+        "curve": 0.5,
+        "seed": 31
+      }
+    },
+    {
+      "name": "snag_a",
+      "kind": "snag",
+      "label": "Dead juniper",
+      "targetHeight": 34,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "snag": true,
+        "canopy": 16,
+        "curve": 0.6,
+        "seed": 43
+      }
+    },
+    {
+      "name": "snag_b",
+      "kind": "snag",
+      "label": "Dead juniper (stump)",
+      "targetHeight": 26,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "snag": true,
+        "canopy": 14,
+        "curve": 0.9,
+        "twist": 1.0,
+        "seed": 59
+      }
+    },
+    {
+      "name": "sage_a",
+      "kind": "shrub",
+      "label": "Sagebrush",
+      "targetHeight": 7,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "shrub": true,
+        "canopy": 5,
+        "seed": 61
+      }
+    },
+    {
+      "name": "sage_b",
+      "kind": "shrub",
+      "label": "Sagebrush (small)",
+      "targetHeight": 5,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "shrub": true,
+        "canopy": 4,
+        "seed": 67
+      }
+    },
+    {
+      "name": "sage_c",
+      "kind": "shrub",
+      "label": "Sagebrush (large)",
+      "targetHeight": 9,
+      "params": {
+        "broadleaf": false,
+        "conifer": false,
+        "shrub": true,
+        "canopy": 7,
+        "seed": 71
+      }
+    },
+    {
+      "name": "wingate_s",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Wingate block (small)",
+      "targetHeight": 7,
+      "params": {
+        "rock": "Wingate block",
+        "seed": 101
+      }
+    },
+    {
+      "name": "wingate_m",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Wingate block",
+      "targetHeight": 15,
+      "params": {
+        "rock": "Wingate block",
+        "seed": 103
+      }
+    },
+    {
+      "name": "wingate_l",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Wingate block (large)",
+      "targetHeight": 26,
+      "params": {
+        "rock": "Wingate block",
+        "seed": 107
+      }
+    },
+    {
+      "name": "wingate_xl",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Wingate block (house-sized)",
+      "targetHeight": 36,
+      "params": {
+        "rock": "Wingate block",
+        "seed": 109
+      }
+    },
+    {
+      "name": "wingate_pillar",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Wingate block (on end)",
+      "targetHeight": 20,
+      "params": {
+        "rock": "Wingate block",
+        "width": 0.55,
+        "seed": 113
+      }
+    },
+    {
+      "name": "wingate_flat",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Wingate block (flat)",
+      "targetHeight": 10,
+      "params": {
+        "rock": "Wingate block",
+        "width": 1.7,
+        "seed": 127
+      }
+    },
+    {
+      "name": "wingate_s2",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Wingate block",
+      "targetHeight": 6,
+      "params": {
+        "rock": "Wingate block",
+        "width": 1.0,
+        "seed": 173
+      }
+    },
+    {
+      "name": "wingate_s3",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Wingate block",
+      "targetHeight": 9,
+      "params": {
+        "rock": "Wingate block",
+        "width": 1.2,
+        "seed": 179
+      }
+    },
+    {
+      "name": "wingate_m2",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Wingate block",
+      "targetHeight": 12,
+      "params": {
+        "rock": "Wingate block",
+        "width": 0.9,
+        "seed": 181
+      }
+    },
+    {
+      "name": "wingate_m3",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Wingate block",
+      "targetHeight": 18,
+      "params": {
+        "rock": "Wingate block",
+        "width": 1.3,
+        "seed": 191
+      }
+    },
+    {
+      "name": "wingate_l2",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Wingate block",
+      "targetHeight": 22,
+      "params": {
+        "rock": "Wingate block",
+        "width": 0.8,
+        "seed": 193
+      }
+    },
+    {
+      "name": "navajo_s",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Navajo boulder (small)",
+      "targetHeight": 7,
+      "params": {
+        "rock": "Navajo boulder",
+        "seed": 131
+      }
+    },
+    {
+      "name": "navajo_m",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Navajo boulder",
+      "targetHeight": 14,
+      "params": {
+        "rock": "Navajo boulder",
+        "seed": 137
+      }
+    },
+    {
+      "name": "navajo_l",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Navajo boulder (large)",
+      "targetHeight": 24,
+      "params": {
+        "rock": "Navajo boulder",
+        "seed": 139
+      }
+    },
+    {
+      "name": "navajo_xl",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Navajo boulder (huge)",
+      "targetHeight": 30,
+      "params": {
+        "rock": "Navajo boulder",
+        "seed": 149
+      }
+    },
+    {
+      "name": "kayenta_s",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Kayenta slab (small)",
+      "targetHeight": 4,
+      "params": {
+        "rock": "Kayenta slab",
+        "seed": 151
+      }
+    },
+    {
+      "name": "kayenta_m",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Kayenta slab",
+      "targetHeight": 6,
+      "params": {
+        "rock": "Kayenta slab",
+        "seed": 157
+      }
+    },
+    {
+      "name": "kayenta_l",
+      "kind": "boulder",
+      "brush": "rocks",
+      "label": "Kayenta slab (large)",
+      "targetHeight": 9,
+      "params": {
+        "rock": "Kayenta slab",
+        "seed": 163
+      }
+    }
+  ]
+}

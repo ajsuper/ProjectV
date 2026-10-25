@@ -8,7 +8,7 @@ everywhere. Two things it cannot do:
 - **Materials.** Glossiness and metallic are in every palette (`decodeMaterial`) and ignored. A glossy
   floor, a metal panel, a mirror all shade as chalk.
 - **Stale light.** A reservoir caches the light its path saw (`Lo`). The renderer resets every history
-  when the *sun* moves (done 2026-10-22, see `examples/30-renderers/renderers/restir/README.md`), but any
+  when the *sun* moves (done 2026-10-22, see `examples/shared/restirRenderer/README.md`), but any
   other change -- an explosion, a door, a light switched on in a game -- is reused, and spread by the
   spatial feedback, until the reservoir happens to be replaced.
 

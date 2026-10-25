@@ -13,7 +13,7 @@
 #       ASSET_FILES  LDR_RGBA_7.png                     # optional
 #       INCLUDE_DIRS include                            # optional
 #       LIBRARIES    ...                                # optional extra deps
-#       RENDERER     ../shared/basicRenderer            # optional: a renderer folder several examples share
+#       RENDERER     ../shared/basicRenderer            # optional: renderer folder(s) several examples share
 #   )
 #
 # A shared RENDERER folder holds render.json, resources.json, shaders/ and, if it has any, include/
@@ -28,8 +28,8 @@
 
 function(projv_add_example name)
     set(multiValueArgs SOURCES SHADERS SHADER_INCLUDE_DIRS ASSET_DIRS ASSET_FILES
-                       INCLUDE_DIRS LIBRARIES)
-    cmake_parse_arguments(ARG "" "RENDERER" "${multiValueArgs}" ${ARGN})
+                       INCLUDE_DIRS LIBRARIES RENDERER)
+    cmake_parse_arguments(ARG "" "" "${multiValueArgs}" ${ARGN})
 
     if(NOT ARG_SOURCES)
         message(FATAL_ERROR "projv_add_example(${name}): SOURCES is required")
@@ -101,15 +101,22 @@ function(projv_add_example name)
         )
     endforeach()
 
-    if(ARG_RENDERER)
-        get_filename_component(rendererDir "${CMAKE_CURRENT_SOURCE_DIR}/${ARG_RENDERER}" ABSOLUTE)
+    # Each shared renderer is compiled once, by a target of its own, and staged beside every example
+    # that names it. Its shaders see its own include/ and the include/ beside it (examples/shared/
+    # include: what more than one renderer, or an example's own shaders, also include).
+    foreach(rendererPath IN LISTS ARG_RENDERER)
+        get_filename_component(rendererDir "${CMAKE_CURRENT_SOURCE_DIR}/${rendererPath}" ABSOLUTE)
         get_filename_component(rendererName "${rendererDir}" NAME)
         set(rendererTarget projv_renderer_${rendererName})
         if(NOT TARGET ${rendererTarget}_shaders)
             add_custom_target(${rendererTarget})   # what projv_compile_shaders hangs its shaders off
             set(rendererIncludeDirs "")
             if(EXISTS "${rendererDir}/include")
-                set(rendererIncludeDirs "${rendererDir}/include")
+                list(APPEND rendererIncludeDirs "${rendererDir}/include")
+            endif()
+            get_filename_component(sharedIncludeDir "${rendererDir}/../include" ABSOLUTE)
+            if(EXISTS "${sharedIncludeDir}")
+                list(APPEND rendererIncludeDirs "${sharedIncludeDir}")
             endif()
             projv_compile_shaders(
                 TARGET       ${rendererTarget}
@@ -125,7 +132,7 @@ function(projv_add_example name)
             COMMENT "Staging ${rendererName} for ${name}"
             VERBATIM
         )
-    endif()
+    endforeach()
 
     foreach(assetFile IN LISTS ARG_ASSET_FILES)
         add_custom_command(TARGET ${name} POST_BUILD

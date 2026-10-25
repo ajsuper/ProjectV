@@ -1,0 +1,533 @@
+{
+  "comment": "Written by terrain_asset_baker from designs.json beside this folder. The terrain generator reads the assets, their kinds and climate bands from here.",
+  "species": [
+    {
+      "abundance": 1.0,
+      "height": 46,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "juniper",
+      "label": "Utah juniper",
+      "name": "juniper_a",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 8021,
+      "width": 38
+    },
+    {
+      "abundance": 1.0,
+      "height": 37,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "juniper",
+      "label": "Utah juniper (half dead)",
+      "name": "juniper_b",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 2555,
+      "width": 37
+    },
+    {
+      "abundance": 1.0,
+      "height": 53,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "juniper",
+      "label": "Utah juniper (twisted)",
+      "name": "juniper_c",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 17515,
+      "width": 54
+    },
+    {
+      "abundance": 1.0,
+      "height": 37,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "juniper",
+      "label": "Utah juniper (leaning)",
+      "name": "juniper_d",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 5931,
+      "width": 36
+    },
+    {
+      "abundance": 1.0,
+      "height": 49,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "juniper",
+      "label": "Utah juniper (full)",
+      "name": "juniper_e",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 14864,
+      "width": 53
+    },
+    {
+      "abundance": 1.0,
+      "height": 63,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "pinyon",
+      "label": "Two-needle pinyon",
+      "name": "pinyon_a",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 23552,
+      "width": 49
+    },
+    {
+      "abundance": 1.0,
+      "height": 51,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "pinyon",
+      "label": "Two-needle pinyon (young)",
+      "name": "pinyon_b",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 24812,
+      "width": 57
+    },
+    {
+      "abundance": 1.0,
+      "height": 74,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "pinyon",
+      "label": "Two-needle pinyon (old)",
+      "name": "pinyon_c",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 35155,
+      "width": 60
+    },
+    {
+      "abundance": 1.0,
+      "height": 36,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "snag",
+      "label": "Dead juniper",
+      "name": "snag_a",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 1298,
+      "width": 27
+    },
+    {
+      "abundance": 1.0,
+      "height": 25,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "snag",
+      "label": "Dead juniper (stump)",
+      "name": "snag_b",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 588,
+      "width": 24
+    },
+    {
+      "abundance": 1.0,
+      "height": 7,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "shrub",
+      "label": "Sagebrush",
+      "name": "sage_a",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 161,
+      "width": 10
+    },
+    {
+      "abundance": 1.0,
+      "height": 5,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "shrub",
+      "label": "Sagebrush (small)",
+      "name": "sage_b",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 94,
+      "width": 9
+    },
+    {
+      "abundance": 1.0,
+      "height": 8,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "shrub",
+      "label": "Sagebrush (large)",
+      "name": "sage_c",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 611,
+      "width": 17
+    },
+    {
+      "abundance": 1.0,
+      "height": 8,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Wingate block (small)",
+      "name": "wingate_s",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 769,
+      "width": 13
+    },
+    {
+      "abundance": 1.0,
+      "height": 15,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Wingate block",
+      "name": "wingate_m",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 5580,
+      "width": 23
+    },
+    {
+      "abundance": 1.0,
+      "height": 27,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Wingate block (large)",
+      "name": "wingate_l",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 25261,
+      "width": 37
+    },
+    {
+      "abundance": 1.0,
+      "height": 36,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Wingate block (house-sized)",
+      "name": "wingate_xl",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 61355,
+      "width": 61
+    },
+    {
+      "abundance": 1.0,
+      "height": 20,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Wingate block (on end)",
+      "name": "wingate_pillar",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 3665,
+      "width": 17
+    },
+    {
+      "abundance": 1.0,
+      "height": 13,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Wingate block (flat)",
+      "name": "wingate_flat",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 7177,
+      "width": 29
+    },
+    {
+      "abundance": 1.0,
+      "height": 8,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Wingate block",
+      "name": "wingate_s2",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 749,
+      "width": 11
+    },
+    {
+      "abundance": 1.0,
+      "height": 11,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Wingate block",
+      "name": "wingate_s3",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 2736,
+      "width": 21
+    },
+    {
+      "abundance": 1.0,
+      "height": 15,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Wingate block",
+      "name": "wingate_m2",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 2624,
+      "width": 19
+    },
+    {
+      "abundance": 1.0,
+      "height": 18,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Wingate block",
+      "name": "wingate_m3",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 15723,
+      "width": 34
+    },
+    {
+      "abundance": 1.0,
+      "height": 23,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Wingate block",
+      "name": "wingate_l2",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 6936,
+      "width": 23
+    },
+    {
+      "abundance": 1.0,
+      "height": 8,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Navajo boulder (small)",
+      "name": "navajo_s",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 1027,
+      "width": 17
+    },
+    {
+      "abundance": 1.0,
+      "height": 14,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Navajo boulder",
+      "name": "navajo_m",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 4928,
+      "width": 24
+    },
+    {
+      "abundance": 1.0,
+      "height": 23,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Navajo boulder (large)",
+      "name": "navajo_l",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 16662,
+      "width": 41
+    },
+    {
+      "abundance": 1.0,
+      "height": 29,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Navajo boulder (huge)",
+      "name": "navajo_xl",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 45074,
+      "width": 51
+    },
+    {
+      "abundance": 1.0,
+      "height": 5,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Kayenta slab (small)",
+      "name": "kayenta_s",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 876,
+      "width": 23
+    },
+    {
+      "abundance": 1.0,
+      "height": 9,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Kayenta slab",
+      "name": "kayenta_m",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 4708,
+      "width": 31
+    },
+    {
+      "abundance": 1.0,
+      "height": 11,
+      "humid": [
+        0.5,
+        0.18
+      ],
+      "kind": "boulder",
+      "label": "Kayenta slab (large)",
+      "name": "kayenta_l",
+      "temp": [
+        0.5,
+        0.15
+      ],
+      "voxels": 15261,
+      "width": 49
+    }
+  ],
+  "treeVoxelWorldSize": 2.8
+}

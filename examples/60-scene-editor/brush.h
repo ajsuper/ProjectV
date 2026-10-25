@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <array>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -193,6 +194,11 @@ struct BrushMaterial {
     // Ramp: 0 or 1 means a single entry (and colorTo is ignored).
     int steps = 1;
     float colorTo[3] = { 0.0f, 0.0f, 0.0f };
+    // Or a ramp given stop by stop: `colors = { {r,g,b}, ... }`, one entry per step, which sets
+    // `steps`. A straight line from color to colorTo cannot hue-shift -- shadows that go cooler and
+    // highlights that go warmer is most of what makes foliage read as lit -- so a ramp that wants it
+    // lists its stops. Empty for an ordinary ramp.
+    std::vector<std::array<float, 3>> stops;
 
     // The non-colour half of a palette entry, in the units the panel shows rather than the packed
     // words -- see Material in scene.h. All zero is an opaque, fully rough dielectric, which is what
@@ -303,6 +309,10 @@ struct BrushContext {
     float crevice = 0.0f;
     float distance = 0.0f;                    // 0 at the dab centre .. 1 at the rim.
     float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+    // Scatter only: the user asked for a placement at exactly this site (BRUSH_FORCE_PARAM). Always
+    // pushed to a scatter script as `ctx.force`, so a brush can skip its own site tests -- the host
+    // has already skipped the lattice and will skip the fit test.
+    bool force = false;
 };
 
 // What a brush said about one voxel.
@@ -363,7 +373,7 @@ class BrushInvocation {
         friend BrushInvocation brushBeginStroke(BrushDefinition&, std::string&);
         friend BrushVerdict brushEvaluate(BrushInvocation&, const BrushContext&);
         friend bool brushEvaluateScatter(BrushInvocation&, const BrushContext&,
-                                         std::vector<BrushPlacementVoxel>&);
+                                         std::vector<BrushPlacementVoxel>&, std::string*);
 
         BrushDefinition* definition = nullptr;
         std::shared_ptr<BrushScript> script;   // Kept alive for the stroke even across a reload.
@@ -487,12 +497,17 @@ BrushVerdict brushEvaluate(BrushInvocation& invocation, const BrushContext& cont
  * One site, for a Scatter brush. `context` describes the surface voxel the site landed on; `out`
  * receives the placement's voxels, relative to it.
  *
+ * A script may refuse with a reason: `return nil, "too steep"`. The second value lands in `reason`
+ * (when given; cleared otherwise), so the editor can say *why* a dab planted nothing rather than only
+ * that it did -- a brush with eight ways to refuse and no way to say which one is a brush that looks
+ * broken.
+ *
  * @return True when something was planted. False for `nil`, for an empty list, and on any error --
  *         all three mean "nothing here", which is the common case for a scatter brush and not a
  *         failure.
  */
 bool brushEvaluateScatter(BrushInvocation& invocation, const BrushContext& context,
-                          std::vector<BrushPlacementVoxel>& out);
+                          std::vector<BrushPlacementVoxel>& out, std::string* reason = nullptr);
 
 /**
  * Installs the fit query a scatter script reaches through `pv.solid(x, y, z)`. Cleared by passing an
@@ -560,6 +575,11 @@ std::string brushMaterialBinding(const BrushDefinition& brush, const std::string
 // defaults and is simply not tunable in those two respects.
 extern const char* const BRUSH_SPACING_PARAM;   // "spacing", in voxels.
 extern const char* const BRUSH_DENSITY_PARAM;   // "density", 0..1 of eligible sites, or per 100 voxels.
+// "force", a bool. When on, a dab plants exactly one placement, on the surface voxel under the cursor:
+// no lattice, no coverage roll, `ctx.force` set so the script skips its own site tests, and the host's
+// fit test relaxed -- cells already holding something are left as they are rather than refusing the
+// whole placement. "Put one *here*", which the lattice cannot be asked.
+extern const char* const BRUSH_FORCE_PARAM;
 
 // The runaway guard. `while true do end` in a file the user is actively editing must not be able to
 // hang the editor, and a brush is saved and reloaded every few seconds while it is being written, so

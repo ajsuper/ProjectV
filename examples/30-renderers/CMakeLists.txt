@@ -9,13 +9,13 @@ projv_add_example(renderer_gallery
                         renderers/taa/shaders
                         renderers/fast/shaders
                         renderers/reconstruction/shaders
-                        renderers/restir/shaders
-    # The example's own shader library: the sun/sky model and the cascade maths. The engine's
-    # pjv_utils_DDA.sc is on the include path already.
-    SHADER_INCLUDE_DIRS sharedShaders
+    # The example's own shader library (the cascade maths), and the sun/sky model in ../shared/include,
+    # which ReSTIR shares. The engine's pjv_utils_DDA.sc is on the include path already.
+    SHADER_INCLUDE_DIRS sharedShaders ../shared/include
     INCLUDE_DIRS        include ../shared
-    # The examples' game renderer, staged as voxelRenderer/ (--renderer voxel).
-    RENDERER            ../shared/voxelRenderer
+    # The examples' game renderer, staged as voxelRenderer/ (--renderer voxel), and ReSTIR GI, staged
+    # as restirRenderer/ (--renderer restir) -- shared, because the terrain generator draws with it too.
+    RENDERER            ../shared/voxelRenderer ../shared/restirRenderer
     ASSET_DIRS          renderers SponzaScene QuadSponza
     ASSET_FILES         LDR_RGBA_7.png
 )

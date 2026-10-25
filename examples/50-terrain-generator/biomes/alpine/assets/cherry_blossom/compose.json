@@ -1,0 +1,130 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "model",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [164, 123, 123],
+          "name": "tree.bark.1"
+        },
+        {
+          "color": [256, 184, 153],
+          "name": "tree.bark.2"
+        },
+        {
+          "color": [368, 276, 205],
+          "name": "tree.bark.3"
+        },
+        {
+          "color": [491, 389, 286],
+          "name": "tree.bark.4"
+        },
+        {
+          "color": [61, 143, 102],
+          "name": "tree.leaf.1"
+        },
+        {
+          "color": [113, 246, 113],
+          "name": "tree.leaf.2"
+        },
+        {
+          "color": [205, 368, 133],
+          "name": "tree.leaf.3"
+        },
+        {
+          "color": [348, 512, 153],
+          "name": "tree.leaf.4"
+        },
+        {
+          "color": [563, 655, 246],
+          "name": "tree.leaf.5"
+        },
+        {
+          "color": [36, 102, 102],
+          "name": "tree.needle.1"
+        },
+        {
+          "color": [61, 174, 143],
+          "name": "tree.needle.2"
+        },
+        {
+          "color": [113, 266, 174],
+          "name": "tree.needle.3"
+        },
+        {
+          "color": [205, 368, 194],
+          "name": "tree.needle.4"
+        },
+        {
+          "color": [348, 481, 225],
+          "name": "tree.needle.5"
+        },
+        {
+          "color": [962, 777, 839],
+          "name": "tree.blossom"
+        },
+        {
+          "color": [307, 266, 225],
+          "name": "tree.dead.1"
+        },
+        {
+          "color": [471, 430, 379],
+          "name": "tree.dead.2"
+        },
+        {
+          "color": [205, 153, 143],
+          "name": "tree.branch.1"
+        },
+        {
+          "color": [317, 235, 174],
+          "name": "tree.branch.2"
+        },
+        {
+          "color": [450, 348, 246],
+          "name": "tree.branch.3"
+        },
+        {
+          "color": [358, 317, 276],
+          "name": "tree.deadlimb.1"
+        },
+        {
+          "color": [542, 501, 450],
+          "name": "tree.deadlimb.2"
+        },
+        {
+          "color": [225, 61, 51],
+          "name": "tree.autumn.1"
+        },
+        {
+          "color": [430, 113, 51],
+          "name": "tree.autumn.2"
+        },
+        {
+          "color": [675, 276, 72],
+          "name": "tree.autumn.3"
+        },
+        {
+          "color": [849, 481, 123],
+          "name": "tree.autumn.4"
+        },
+        {
+          "color": [951, 716, 266],
+          "name": "tree.autumn.5"
+        }
+      ],
+      "position": [0.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "model.data",
+      "type": "data"
+    }
+  ],
+  "name": "cherry_blossom",
+  "version": 1
+}

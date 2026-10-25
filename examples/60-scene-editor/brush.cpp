@@ -23,6 +23,7 @@ namespace projv::editor {
 
 const char* const BRUSH_SPACING_PARAM = "spacing";
 const char* const BRUSH_DENSITY_PARAM = "density";
+const char* const BRUSH_FORCE_PARAM = "force";
 
 // =============================================================================
 // Names
@@ -680,7 +681,36 @@ bool readMaterial(lua_State* state, BrushMaterial& material, std::string& error)
     double steps = 1.0;
     fieldNumber(state, -1, "steps", steps);
     material.steps = std::clamp(int(steps), 1, 64);
-    if (material.steps > 1) {
+
+    // `colors`: the ramp stop by stop. It sets the step count, and `color` defaults to its first stop
+    // so a declaration that gives only the list still has a representative colour.
+    lua_getfield(state, -1, "colors");
+    if (lua_istable(state, -1)) {
+        lua_Integer count = luaL_len(state, -1);
+        for (lua_Integer i = 1; i <= count && i <= 64; i++) {
+            lua_rawgeti(state, -1, i);
+            std::array<float, 3> stop = { 1.0f, 1.0f, 1.0f };
+            if (lua_istable(state, -1)) {
+                for (int channel = 0; channel < 3; channel++) {
+                    lua_rawgeti(state, -1, channel + 1);
+                    if (lua_isnumber(state, -1)) {
+                        stop[size_t(channel)] = float(std::clamp(lua_tonumber(state, -1), 0.0, 1.0));
+                    }
+                    lua_pop(state, 1);
+                }
+                material.stops.push_back(stop);
+            }
+            lua_pop(state, 1);
+        }
+    }
+    lua_pop(state, 1);
+    if (!material.stops.empty()) {
+        material.steps = int(material.stops.size());
+        if (lua_getfield(state, -1, "color") == LUA_TNIL) {
+            std::memcpy(material.color, material.stops.front().data(), sizeof(material.color));
+        }
+        lua_pop(state, 1);
+    } else if (material.steps > 1) {
         // A ramp without a second colour is a ramp to black, which is almost never meant. Falling
         // back to the first colour makes such a declaration a flat set of identical entries, which is
         // harmless and visibly wrong -- better than silently darkening.
@@ -784,10 +814,14 @@ void brushExpandMaterials(const BrushDefinition& brush, std::vector<BrushMateria
                 // Named with a one-based index so the palette reads in the order the ramp runs, and
                 // so a brush's entries sort together in the palette panel.
                 slot.declaredName = material.name + "." + std::to_string(i + 1);
-                float t = float(i) / float(steps - 1);
-                for (int channel = 0; channel < 3; channel++) {
-                    slot.color[channel] = material.color[channel] +
-                                          (material.colorTo[channel] - material.color[channel]) * t;
+                if (size_t(i) < material.stops.size()) {
+                    std::memcpy(slot.color, material.stops[size_t(i)].data(), sizeof(slot.color));
+                } else {
+                    float t = float(i) / float(steps - 1);
+                    for (int channel = 0; channel < 3; channel++) {
+                        slot.color[channel] = material.color[channel] +
+                                              (material.colorTo[channel] - material.color[channel]) * t;
+                    }
                 }
             }
             applyBinding(slot);
@@ -1865,8 +1899,9 @@ bool readPlacementVoxel(lua_State* state, BrushPlacementVoxel& voxel) {
 } // namespace
 
 bool brushEvaluateScatter(BrushInvocation& invocation, const BrushContext& context,
-                          std::vector<BrushPlacementVoxel>& out) {
+                          std::vector<BrushPlacementVoxel>& out, std::string* reason) {
     out.clear();
+    if (reason) reason->clear();
     if (!invocation.valid() || invocation.failedFlag) return false;
 
     BrushScript* script = invocation.script.get();
@@ -1876,11 +1911,15 @@ bool brushEvaluateScatter(BrushInvocation& invocation, const BrushContext& conte
     lua_rawgeti(state, LUA_REGISTRYINDEX, script->applyRef);
     lua_rawgeti(state, LUA_REGISTRYINDEX, script->contextRef);
     pushContextFields(state, brush, context);
+    // Always set, not only when true: the context table is reused across calls, so a field written
+    // only on a forced site would still read true at every site after it.
+    lua_pushboolean(state, context.force ? 1 : 0);
+    lua_setfield(state, -2, "force");
     lua_rawgeti(state, LUA_REGISTRYINDEX, script->paramsRef);
 
     script->callStart = std::chrono::steady_clock::now();
     invocation.calls++;
-    if (lua_pcall(state, 2, 1, 0) != LUA_OK) {
+    if (lua_pcall(state, 2, 2, 0) != LUA_OK) {
         const char* message = lua_tostring(state, -1);
         invocation.failedFlag = true;
         invocation.errorText = message ? message : "the brush raised an error";
@@ -1888,6 +1927,10 @@ bool brushEvaluateScatter(BrushInvocation& invocation, const BrushContext& conte
         appendMessage(script->owner, true, invocation.errorText);
         return false;
     }
+    // The optional second result: why nothing grows here. Read and dropped first, so everything below
+    // sees the placement on top of the stack exactly as it did when apply returned one value.
+    if (reason && lua_type(state, -1) == LUA_TSTRING) *reason = lua_tostring(state, -1);
+    lua_pop(state, 1);
 
     // nil, false, or an empty list: nothing grows here. The overwhelmingly common answer, and not
     // something to report -- a scatter brush is asked about every eligible site and plants on few.

@@ -406,22 +406,13 @@ Splitting the colors out this way also keeps the container small — a byte per 
 | **Materials** | `bakeMaterialsFromBrickMap` — emits the per-voxel `materialIDs` array and stamps each tree64 leaf with its offset into it |
 | **Z-Order Indexing** | `createZOrderIndex` / `reverseZOrderIndex` — Morton-coded spatial layout, both for chunks within the grid and voxels within a chunk |
 
-## `trees/` — prebuilt assets
+## Tree assets
 
-`trees/` holds eight tree species voxelized at 64³ from a Wavefront tree pack, one folder each. The
-terrain_generator example reads them from here and scatters them into its terrain (see
-`../50-terrain-generator/include/tree_placement.hpp`). To regenerate:
-
-```bash
-./mesh_voxelizer -m <modelRoot>/ -f <modelRoot>/split/<Name>.obj -o trees/<Name> -r 64 --no-flip-v
-```
-
-That source pack needs `--no-flip-v`; see above for how to tell when a model does.
-
-The committed folders predate [alpha cutout](#alpha-cutout), so they were voxelized with every leaf
-card solid. Re-running the command above now applies the cutoff and will produce noticeably sparser,
-more leaf-shaped trees — a different result from what is checked in, and the reason to regenerate
-them rather than a reason not to.
+This folder used to hold eight tree species voxelized from a Wavefront tree pack, for the terrain
+generator. They were a retired `.data` version that no longer loaded, and they are gone: the terrain
+generator's trees are now grown by the scene editor's tree brush and live in
+[`../50-terrain-generator/biomes/`](../50-terrain-generator/biomes/). A tree voxelized from a mesh with
+this tool still works as a scene asset anywhere else.
 
 ## Third-Party Dependencies
 

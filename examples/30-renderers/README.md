@@ -32,7 +32,7 @@ worked examples of it, at every scale from four passes to ten.
 |---|---|---|---|
 | [tree64](renderers/tree64/) | full path trace | accumulate; hard reset on camera move | The baseline. Converges to a reference image while parked. |
 | [reprojection](renderers/reprojection/) | full path trace | temporal reprojection + à-trous denoise | Stays converged *while moving*. The machinery the others reuse. |
-| [restir](renderers/restir/) | two bounces, ReSTIR GI at 1/16 of the pixels | reservoir reuse + SVGF-style denoise; ½-res G-buffer reconstructed, then accumulated | SSAO on the indirect light. G views, J reuse, Q reconstruction, P post (V vignette, B grade, E auto-exposure, K depth of field), O fog, U soft sun shadow. |
+| [restir](../shared/restirRenderer/) | two bounces, ReSTIR GI at 1/16 of the pixels | reservoir reuse + SVGF-style denoise; ½-res G-buffer reconstructed, then accumulated | SSAO on the indirect light. G views, J reuse, Q reconstruction, P post (V vignette, B grade, E auto-exposure, K depth of field), O fog, U soft sun shadow. |
 | [fast](renderers/fast/) | none — direct + RTAO | deterministic; TAA for AA only | Cheapest. Nothing to converge because nothing is random. |
 | [face](renderers/face/) | full, per voxel face | none needed; exact-key history gate | Zero spatial noise by construction. Blocky by design. |
 | [radiance-cascade](renderers/radiance-cascade/) | screen-space cascades | temporal mean | Kept for the comparison. Screen space cannot see off-screen. |
@@ -55,8 +55,9 @@ cmake --build --preset dev --target renderer_gallery
 
 That builds every renderer's shaders too. All seven share the engine's voxel DDA
 (`pjv_utils_DDA.sc`, on the shader include path automatically) and this example's own
-`sharedShaders/` — the sun/sky model and the cascade maths — so they stay in step with each other
-and with the engine.
+`sharedShaders/` (the cascade maths) and `../shared/include/pjv_sun_sky.sc` (the sun/sky model), so
+they stay in step with each other and with the engine. `restir` and `voxel` are the shared renderers in
+`../shared/` -- `restir` because the terrain generator draws with it too.
 
 ## How to run
 

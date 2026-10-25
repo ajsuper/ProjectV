@@ -49,28 +49,118 @@
 -- neighbouring tree grow through this", and trunks and branches need opposite answers. Two trunks in
 -- one cell is a mistake; two crowns whose branches cross is what a wood looks like.
 --
--- Appended rather than inserted, so every index below keeps the value it had.
-local BARK     = 1     -- ...through 3: root to crown. The trunk, and nothing else.
-local LEAF     = 4     -- ...through 7: inside to outside.
-local NEEDLE   = 8     -- ...through 10.
-local BLOSSOM  = 11
-local DEAD     = 12    -- ...through 13. A bare tree's trunk.
-local BRANCH   = 14    -- ...through 16. Limbs and surface roots.
-local DEADLIMB = 17    -- ...through 18. The same, on a bare tree.
+-- ## The palette
+--
+-- **Hue-shifted ramps, not straight lines.** A ramp interpolated from one colour to another only
+-- changes value, and foliage shaded that way looks like one green with the lights turned down. Painted
+-- foliage -- and real foliage under a blue sky -- shifts hue across its ramp: the shadows go cooler and
+-- bluer (lit by sky, not sun), the highlights warmer and yellower (lit by sun). So the ramps that carry
+-- most of a tree are given stop by stop (`colors`), each step turned a little round the wheel. Bark gets
+-- the same treatment in miniature: a cool, nearly purple-grey underside and a warm grey-brown top.
+--
+-- Every colour must also differ from every other material's, step by step -- see the note on the
+-- branch ramps below.
+local MATERIALS = {
+    -- The trunk. Darkest at the root, where it is shaded and wet.
+    { name = "tree.bark", colors = {
+        { 0.16, 0.12, 0.12 }, { 0.25, 0.18, 0.15 }, { 0.36, 0.27, 0.20 }, { 0.48, 0.38, 0.28 } } },
+    -- Broadleaf foliage, the same hue shift as the needles but brighter and yellower: deep blue-green
+    -- shade inside the crown to a warm yellow-green where the sun hits the top of a clump.
+    { name = "tree.leaf", colors = {
+        { 0.06, 0.14, 0.10 }, { 0.11, 0.24, 0.11 }, { 0.20, 0.36, 0.13 }, { 0.34, 0.50, 0.15 },
+        { 0.55, 0.64, 0.24 } } },
+    -- Needles: teal-black in the shade under a tier, through blue-green, to a warm yellow-green where
+    -- the sun catches the top of a spray. Darker overall than broadleaf foliage, as conifers are.
+    { name = "tree.needle", colors = {
+        { 0.035, 0.10, 0.10 }, { 0.06, 0.17, 0.14 }, { 0.11, 0.26, 0.17 }, { 0.20, 0.36, 0.19 },
+        { 0.34, 0.47, 0.22 } } },
+    { name = "tree.blossom",            color = { 0.94, 0.76, 0.82 } },
+    { name = "tree.dead",    steps = 2, color = { 0.30, 0.26, 0.22 }, colorTo = { 0.46, 0.42, 0.37 } },
+    -- These exist to be *named* differently -- see the note at the top -- but they must also be
+    -- *coloured* differently, and that is a hard requirement rather than a preference: interning a
+    -- role falls back to matching an existing entry by colour when the name is new, so a ramp that
+    -- duplicated tree.bark's colours exactly would bind to tree.bark and never become an entry of its
+    -- own. Younger wood is lighter and greyer than trunk bark, so the shift these need in order to
+    -- exist is one they wanted anyway.
+    { name = "tree.branch", colors = {
+        { 0.20, 0.15, 0.14 }, { 0.31, 0.23, 0.17 }, { 0.44, 0.34, 0.24 } } },
+    { name = "tree.deadlimb", steps = 2, color = { 0.35, 0.31, 0.27 }, colorTo = { 0.53, 0.49, 0.44 } },
+    -- Season = Autumn: the leaf ramp's replacement. Shadow is a deep oxblood, light a warm gold, and
+    -- each clump picks its own stretch of it so a crown comes out mixed reds and yellows.
+    { name = "tree.autumn", colors = {
+        { 0.22, 0.06, 0.05 }, { 0.42, 0.11, 0.05 }, { 0.66, 0.27, 0.07 }, { 0.83, 0.47, 0.12 },
+        { 0.93, 0.70, 0.26 } } },
+
+    -- ---- Pinyon-juniper woodland (the Juniper, Pinyon, Snag and Sagebrush kinds) ----
+    -- Appended, so every ramp above keeps its index and the other kinds come out as before.
+    --
+    -- Utah juniper's scale foliage is an olive, slightly grey green -- yellower and duller than a
+    -- spruce's needles -- going blue-grey in the shade.
+    { name = "tree.juniper", colors = {
+        { 0.14, 0.17, 0.12 }, { 0.23, 0.28, 0.17 }, { 0.34, 0.39, 0.23 }, { 0.47, 0.51, 0.31 },
+        { 0.61, 0.63, 0.42 } } },
+    -- Pinyon needles: a deeper, truer green than the juniper beside it.
+    { name = "tree.pinyon", colors = {
+        { 0.04, 0.09, 0.08 }, { 0.07, 0.15, 0.11 }, { 0.12, 0.23, 0.14 }, { 0.20, 0.32, 0.17 },
+        { 0.31, 0.42, 0.21 } } },
+    -- Juniper strip bark: long fibrous strips, red-brown where freshly exposed and weathered grey on
+    -- the outside. The ramp runs dark, red-brown, grey; the trunk picks along it by stripe.
+    { name = "tree.stripbark", colors = {
+        { 0.17, 0.13, 0.12 }, { 0.30, 0.21, 0.17 }, { 0.44, 0.31, 0.24 }, { 0.52, 0.45, 0.39 },
+        { 0.63, 0.58, 0.52 } } },
+    { name = "tree.juniperlimb", colors = {
+        { 0.24, 0.18, 0.15 }, { 0.38, 0.29, 0.23 }, { 0.52, 0.46, 0.40 } } },
+    -- Pinyon bark: scaly, grey-brown with a little red.
+    { name = "tree.pinyonbark", colors = {
+        { 0.19, 0.15, 0.14 }, { 0.29, 0.23, 0.20 }, { 0.40, 0.32, 0.26 }, { 0.50, 0.42, 0.34 } } },
+    { name = "tree.pinyonlimb", colors = {
+        { 0.25, 0.20, 0.17 }, { 0.36, 0.29, 0.24 }, { 0.46, 0.39, 0.32 } } },
+    -- Dead juniper wood: weathered silver, warm in the light. Stands for centuries.
+    { name = "tree.silver", colors = {
+        { 0.33, 0.31, 0.29 }, { 0.47, 0.45, 0.42 }, { 0.62, 0.60, 0.56 }, { 0.76, 0.74, 0.69 } } },
+    -- Juniper berries: dusty blue, a few on the outside of the foliage.
+    { name = "tree.berry", color = { 0.42, 0.50, 0.63 } },
+    -- Sagebrush: silver grey-green leaves on twisted grey-brown stems.
+    { name = "tree.sage", colors = {
+        { 0.27, 0.31, 0.27 }, { 0.40, 0.45, 0.38 }, { 0.53, 0.58, 0.49 }, { 0.66, 0.70, 0.60 } } },
+    { name = "tree.sagestem", colors = { { 0.30, 0.25, 0.21 }, { 0.42, 0.37, 0.31 } } },
+}
+
+-- Where each material's ramp starts in the expanded list `apply` returns indices into, worked out
+-- from the table rather than written by hand -- a ramp gaining a step used to mean renumbering every
+-- constant after it, and getting one wrong shades a tree in the next material's colours.
+local RAMP_START, RAMP_STEPS = {}, {}
+do
+    local index = 1
+    for _, material in ipairs(MATERIALS) do
+        local steps = material.colors and #material.colors or (material.steps or 1)
+        RAMP_START[material.name], RAMP_STEPS[material.name] = index, steps
+        index = index + steps
+    end
+end
+local BARK     = RAMP_START["tree.bark"]       -- Root to crown. The trunk, and nothing else.
+local LEAF     = RAMP_START["tree.leaf"]       -- Inside to outside.
+local NEEDLE   = RAMP_START["tree.needle"]     -- Shade to sun.
+local BLOSSOM  = RAMP_START["tree.blossom"]
+local DEAD     = RAMP_START["tree.dead"]       -- A bare tree's trunk.
+local BRANCH   = RAMP_START["tree.branch"]     -- Limbs and surface roots.
+local DEADLIMB = RAMP_START["tree.deadlimb"]   -- The same, on a bare tree.
+local AUTUMN   = RAMP_START["tree.autumn"]     -- Season = Autumn's leaves.
+local BARK_STEPS, NEEDLE_STEPS, BRANCH_STEPS =
+    RAMP_STEPS["tree.bark"], RAMP_STEPS["tree.needle"], RAMP_STEPS["tree.branch"]
+local LEAF_STEPS, AUTUMN_STEPS = RAMP_STEPS["tree.leaf"], RAMP_STEPS["tree.autumn"]
+local DEAD_STEPS, DEADLIMB_STEPS = RAMP_STEPS["tree.dead"], RAMP_STEPS["tree.deadlimb"]
+local JUNIPER, PINYON = RAMP_START["tree.juniper"], RAMP_START["tree.pinyon"]
+local STRIPBARK, JUNIPERLIMB = RAMP_START["tree.stripbark"], RAMP_START["tree.juniperlimb"]
+local PINYONBARK, PINYONLIMB = RAMP_START["tree.pinyonbark"], RAMP_START["tree.pinyonlimb"]
+local SILVER, BERRY = RAMP_START["tree.silver"], RAMP_START["tree.berry"]
+local SAGE, SAGESTEM = RAMP_START["tree.sage"], RAMP_START["tree.sagestem"]
 
 local TAU = 6.28318530718
 
 -- What one placement may cost, kept under the host's own ceiling so a miscount is a slightly smaller
 -- tree rather than a refused one.
 local BUDGET = 110000
--- Foliage thinner than this stops reading as leaves and starts reading as a rendering fault, so when
--- the budget cannot buy a crown at this density the crown is made smaller instead of sparser.
-local MIN_LEAF_DENSITY = 0.30
--- How coarsely the foliage's shape noise is sampled, in voxels, and the frequency that goes with it.
--- See the note at the sample site: this is the brush's main cost control and 2 is close to free
--- visually, because the warp's own features are several voxels across.
-local WARP_STRIDE = 2
-local WARP_FREQ = 0.11 * WARP_STRIDE
 
 local floor, sqrt, cos, sin, max, min, abs = math.floor, math.sqrt, math.cos, math.sin,
                                              math.max, math.min, math.abs
@@ -117,7 +207,9 @@ local UNDERGROWTH = {
 -- not, every remaining refusal in a dense planting was a limb against a limb -- branches reach most of
 -- the crown's radius, so any spacing under about twice that refused, which is the same wall one step
 -- further out.
-local CANOPY = { "tree.leaf", "tree.needle", "tree.blossom", "tree.branch", "tree.deadlimb" }
+local CANOPY = { "tree.leaf", "tree.autumn", "tree.needle", "tree.blossom", "tree.branch", "tree.deadlimb",
+                 "tree.juniper", "tree.pinyon", "tree.berry", "tree.juniperlimb", "tree.pinyonlimb",
+                 "tree.sage", "tree.sagestem" }
 
 local DISPLACES = {}
 for _, name in ipairs(UNDERGROWTH) do DISPLACES[#DISPLACES + 1] = name end
@@ -319,21 +411,106 @@ local function trunkCost(height, baseRadius, tipRadius)
     return total / samples * height
 end
 
-local function growTrunk(tree, path, height, baseRadius, tipRadius, material, steps, phase)
+-- A ramp step for a continuous position `v` (0..1) along it, dithered so neighbouring steps interleave
+-- across a band instead of meeting at a line. **Choosing the step by `floor(v * steps)` alone draws
+-- the ramp as stripes**: on a trunk, where `v` is the height, every step change is a perfect
+-- horizontal ring, and a four-step bark ramp reads as four painted bands. Blurring the boundary by
+-- most of a step with a hash -- and a smooth noise underneath it, so the mixing comes in patches rather
+-- than as salt -- is the voxel equivalent of a painter's dithering.
+local function ditheredStep(v, steps, x, y, z, seed, spread)
+    spread = spread or 0.85
+    local jitter = (pv.hash(x, y, z, seed) - 0.5) * spread
+                 + (pv.noise(x * 0.31, y * 0.19, z * 0.31, seed + 3) - 0.5) * spread
+    return max(0, min(steps - 1, floor(v * steps + jitter)))
+end
+
+-- The trunk, a level at a time.
+--
+-- **Not a cylinder.** Drawn as perfect discs a big trunk is exactly what it is: a tapered tube, and
+-- the eye finds the primitive at once. Three things break it, all cheap:
+--
+--   * the cross-section is warped by noise around the circumference and up the height, so the trunk
+--     bulges and flattens a little as it rises (a real one is never round);
+--   * **furrows**: narrow vertical grooves, wandering as they go up, cut a voxel into the surface and
+--     shaded darker -- the plates and fissures of bark, which are what say "bark" at any size;
+--   * **colour by bark plate, not by height band**: each surface voxel's step comes from its height,
+--     its furrow, a vertically stretched noise (plates are tall and thin) and a dither.
+--
+-- The inside stays hollow when the trunk is thick enough (`wall`), as it always was: nothing can see it.
+local function growTrunk(tree, path, height, baseRadius, tipRadius, material, steps, phase, ctx, seed)
+    ctx = ctx or { x = 0, y = 0, z = 0 }
+    seed = seed or 0
+    -- More furrows round a wider trunk, so their spacing stays a few voxels whatever the size.
+    local furrows = max(5, floor(baseRadius * 2.2))
     for level = 1, height do
         local t = (height > 1) and ((level - 1) / (height - 1)) or 0
         -- Most of the taper happens low down, which is where a real trunk loses it.
         local radius = baseRadius + (tipRadius - baseRadius) * (t ^ 0.7)
-        -- Root flare: a swelling in the bottom eighth, squared so it is a curve into the ground
-        -- rather than a step. Only worth drawing on a trunk thick enough to show it.
         local flare = 0
         if baseRadius >= 2.0 then
             local low = clamp01(1.0 - t / 0.12)
             flare = low * low * 0.75
         end
-        local shade = material + min(steps - 1, floor(t * steps))
-        tree:disc(floor(path[level][1] + 0.5), level, floor(path[level][2] + 0.5),
-                  radius, shade, flare, phase, min(radius, max(2.0, radius * 0.4)))
+        local cx, cz = floor(path[level][1] + 0.5), floor(path[level][2] + 0.5)
+        if radius < 1.6 then
+            -- Too thin for any of it to show: a plain disc, dithered.
+            local extent = floor(radius + 0.5)
+            for dz = -extent, extent do
+                for dx = -extent, extent do
+                    if dx * dx + dz * dz <= radius * radius + 0.25 then
+                        local step = ditheredStep(t, steps, ctx.x + cx + dx, ctx.y + level, ctx.z + cz + dz, seed + 61)
+                        tree:plot(cx + dx, level, cz + dz, material + step)
+                    end
+                end
+            end
+        else
+            local wall = min(radius, max(2.0, radius * 0.4))
+            local reach = radius * (1.15 + flare * 2.0) + 0.5
+            local extent = floor(reach + 1.0)
+            -- Inside this nothing is drawn whatever the noise says; outside `reach` likewise. Tested
+            -- before the noise is paid for, which is most of the cells of a thick trunk.
+            local inner = max(0, radius * 0.85 - 0.9 - wall)
+            -- Everything noisy here depends on the angle round the trunk and the level, never on the
+            -- distance from the centre -- so it is worked out once per slice of angle per level, not
+            -- once per voxel. At the largest trunks that is the difference between the call fitting in
+            -- the editor's time limit and being killed as a runaway.
+            local slices = max(24, floor(radius * 7))
+            local warpAt, grooveAt, plateAt = {}, {}, {}
+            for i = 0, slices - 1 do
+                local angle = (i + 0.5) / slices * TAU - math.pi
+                local ca, sa = cos(angle), sin(angle)
+                warpAt[i] = (pv.noise(ca * 1.4 + 11.0, level * 0.07, sa * 1.4, seed + 5) - 0.5) * 0.30
+                local wander = (pv.noise(level * 0.11, ca + 3.0, sa, seed + 17) - 0.5) * 3.0
+                grooveAt[i] = cos(angle * furrows + wander + phase) > 0.72
+                plateAt[i] = (pv.noise(ca * 2.2, level * 0.05, sa * 2.2, seed + 29) - 0.5) * 0.35
+            end
+            for dz = -extent, extent do
+                for dx = -extent, extent do
+                    local d = sqrt(dx * dx + dz * dz)
+                    if d <= reach and d >= inner then
+                    local angle = math.atan(dz, dx)
+                    local slice = min(slices - 1, floor((angle + math.pi) / TAU * slices))
+                    -- The warp: smooth round the trunk and up it, so it is a lumpiness of the whole
+                    -- stem, not of single voxels.
+                    local r = radius * (1.0 + warpAt[slice])
+                    if flare > 0 then
+                        local lobe = 0.5 + 0.5 * cos(angle * 3.0 + phase)
+                        r = r * (1.0 + flare * lobe)
+                    end
+                    -- A furrow: where a wandering line round the circumference comes close. The wander
+                    -- is what keeps them from reading as flutes on a column.
+                    local inFurrow = grooveAt[slice]
+                    if inFurrow then r = r - 0.9 end
+                    if d <= r and d >= r - wall then
+                        local ax, ay, az = ctx.x + cx + dx, ctx.y + level, ctx.z + cz + dz
+                        -- Plates: a noise stretched up the trunk, so colour runs in tall patches.
+                        local v = t * 0.65 + 0.30 + plateAt[slice] + (inFurrow and -0.35 or 0.0)
+                        tree:plot(cx + dx, level, cz + dz, material + ditheredStep(v, steps, ax, ay, az, seed + 61))
+                    end
+                    end
+                end
+            end
+        end
         if tree.full then return end
     end
 end
@@ -375,149 +552,205 @@ local function growRoots(tree, ctx, count, spread, radius, material, steps, phas
 end
 
 -- ---------------------------------------------------------------------------------------------
--- The branching skeleton
+-- Leaf clumps
 -- ---------------------------------------------------------------------------------------------
 
--- Grows one limb and then, unless it is a terminal one, two or three children aimed in a cone around
--- it. Terminal limbs record their tip in `tips`; that list is what the foliage is hung on.
+-- One clump of leaves, the broadleaf's unit of foliage, built like the conifer's needle sprays:
 --
--- Recursion depth is the shape control that the old brush was missing entirely. Depth 0 is a stick,
--- which is what the old `growBranches` amounted to; depth 2 is a tree.
-local function growBranch(tree, ctx, p, x, y, z, dx, dy, dz, length, radius, depth, tips,
-                          material, steps, seed)
-    if tree.full or length < 1.5 then return end
-
-    -- Branches reach up; the higher they start the less they have to. `curl` is in the same units as
-    -- the direction, so 0.6 is a firm bend over the limb's length and 0 is a straight ray.
-    local tipX, tipY, tipZ, ndx, ndy, ndz =
-        tree:limb(x, y, z, dx, dy, dz, length, radius, max(0.4, radius * 0.45),
-                  0, 1, 0, p.reach, material, steps)
-
-    if depth <= 0 then
-        tips[#tips + 1] = { tipX, tipY, tipZ, length }
+--   * a big clump is three to five small ones at jittered offsets, so a large crown is lumpy with
+--     consistent small shapes instead of being made of visible ovals;
+--   * the rim is warped by a smooth noise;
+--   * shaded top-lit (the top of each clump is lighter, the underside darker -- the per-clump half of
+--     the two-level shading painted foliage uses), shifted by `light` (the per-crown half), and
+--     dithered so the ramp's steps interleave instead of meeting at lines.
+--
+-- A little flatter underneath than on top, as a clump of leaves hangs.
+local function leafClump(tree, ctx, p, x, y, z, radius, light, seed, ramp, steps, nested)
+    if radius >= 2.6 and not nested then
+        local count = 3 + floor(pv.hash(floor(x), floor(y), floor(z), seed + 201) * 3)
+        for i = 1, count do
+            local a = pv.hash(i, floor(x), floor(z), seed + 203) * TAU
+            local out = radius * (0.25 + 0.4 * pv.hash(i, floor(y), floor(x), seed + 207))
+            local sub = radius * (0.5 + 0.22 * pv.hash(floor(z), i, floor(y), seed + 209))
+            leafClump(tree, ctx, p, x + cos(a) * out, y + (pv.hash(i, i, floor(x), seed + 211) - 0.5) * radius * 0.5,
+                      z + sin(a) * out, sub, light, seed + i * 37, ramp, steps, true)
+        end
         return
     end
-
-    local children = 2
-    if pv.hash(floor(x), floor(y) + depth, floor(z), seed + 31) > 0.55 then children = 3 end
-    local ax, ay, az, bx, by, bz = basisOf(ndx, ndy, ndz)
-    -- The golden angle between siblings, jittered. Evenly spaced children are as readable as an even
-    -- anything -- and unjittered, two trees whose branches start at the same angle are visibly the
-    -- same tree.
-    local spin = pv.hash(floor(x), floor(y), floor(z), seed + depth * 7) * TAU
-    for child = 1, children do
-        local jitter = pv.hash(floor(x) + child, floor(y), floor(z), seed + 53)
-        local azimuth = spin + child * 2.39996 + (jitter - 0.5) * 1.1
-        local spread = (0.45 + jitter * 0.40)          -- radians off the parent
-        local sx, sy, sz = normalize(
-            ndx * cos(spread) + (ax * cos(azimuth) + bx * sin(azimuth)) * sin(spread),
-            ndy * cos(spread) + (ay * cos(azimuth) + by * sin(azimuth)) * sin(spread),
-            ndz * cos(spread) + (az * cos(azimuth) + bz * sin(azimuth)) * sin(spread))
-        local shrink = 0.62 + jitter * 0.16
-        growBranch(tree, ctx, p, tipX, tipY, tipZ, sx, sy, sz,
-                   length * shrink, max(0.4, radius * 0.62), depth - 1, tips, material, steps,
-                   seed + child * 101)
+    local up, down = radius * 0.85, radius * 0.6
+    local e0 = floor(radius * 1.2 + 0.5)
+    local ix, iy, iz = floor(x + 0.5), floor(y + 0.5), floor(z + 0.5)
+    for dy = -floor(down * 1.2 + 0.5), floor(up * 1.2 + 0.5) do
+        local rv = dy >= 0 and up or down
+        for dz = -e0, e0 do
+            for dx = -e0, e0 do
+                local e = (dx * dx + dz * dz) / (radius * radius) + (dy * dy) / (rv * rv)
+                local ax, ay, az = ctx.x + ix + dx, ctx.y + iy + dy, ctx.z + iz + dz
+                if e > 0.45 and e < 1.6 then
+                    e = e * (1.0 + (pv.noise(ax * 0.4, ay * 0.4, az * 0.4, seed + 11) - 0.5) * 0.8)
+                end
+                if e <= 1.0 and not (e > 0.55 and pv.hash(ax, ay, az, seed) < (e - 0.55) / 0.45 * p.ragged * 0.55) then
+                    local v = 0.46 + 0.34 * (dy / rv) + light
+                    tree:plot(ix + dx, iy + dy, iz + dz, ramp + ditheredStep(v, steps, ax, ay, az, seed + 7, 0.7))
+                end
+            end
+        end
     end
 end
 
 -- ---------------------------------------------------------------------------------------------
--- Foliage
+-- Broadleaf and bare: space colonization
 -- ---------------------------------------------------------------------------------------------
-
--- One lobe of leaves: a shell, warped by fbm, eroded at the rim by hash.
 --
--- The shell is the affordability of the whole brush. Foliage is opaque, so the inside of a lobe can
--- never be seen -- filling it spends the budget on voxels that exist only to be hidden, and it is a
--- cubic cost against the shell's square one. A solid crown of radius 20 is 33000 voxels and cannot be
--- placed at all; the same crown as shells fits several times over.
+-- **The branches are grown by competing for space** (Runions, Lane & Prusinkiewicz, "Modeling Trees
+-- with a Space Colonization Algorithm", 2007). The crown's volume is seeded with attraction points --
+-- markers of free space a branch could grow into. Each step every point pulls on the nearest branch
+-- node within the radius of influence `di`; each node pulled grows one new node a distance `D` along
+-- the average of the unit vectors to its points (plus a tropism: up toward the light, or down for a
+-- weeping crown); and a point is consumed once a node comes within the kill distance `dk`. Repeat
+-- until the points are gone.
 --
--- The fbm warp is what stops each lobe being a small sphere. Raggedness erodes the rim, which changes
--- how an outline is textured; warping the radius changes what the outline *is*, coherently, so the
--- lobe has lumps rather than fuzz.
--- `base` is the first index of the four-step ramp the lobe shades through, and `flatten` how much
--- wider than tall it is. Both are arguments rather than constants because the conifer hangs its
--- needles through this same function: the two kinds differ in the skeleton they hang foliage on and in
--- what that foliage is called, not in how a clump of foliage is built, and a second copy of this loop
--- was a second place for the budget and the shell arithmetic to drift.
-local function growLobe(tree, ctx, p, cx, cy, cz, radius, density, seed, base, flatten, steps)
-    base = base or LEAF
-    -- The ramp's own length, because not every ramp is four steps. Hardcoding four shaded the
-    -- conifer's three-step needle ramp into the entry *after* it, which is tree.blossom -- so a fir
-    -- came out flecked with pink. A ramp is only as long as it is declared.
-    steps = steps or 4
-    local warpSpan = p.lumpiness * 0.85
-    local extent = floor(radius * (1.0 + warpSpan) + 0.5) + 1
-    -- Wider than tall: a crown spreads, and a conifer's spray is flatter still.
-    local squash = 1.0 / (flatten or 0.82)
-    local thickness = min(radius, max(2.0, radius * 0.34))
-    local innerFraction = 1.0 - thickness / radius
-    local ox, oy, oz = ctx.x + cx, ctx.y + cy, ctx.z + cz
+-- What this buys over the recursive skeleton it replaced is the thing that recursion cannot do:
+-- **branches avoid each other.** A recursive tree is the same branching rule applied everywhere, so it
+-- reads as a pattern; here two limbs never grow into the same space, gaps open between them, and the
+-- crown fills its envelope the way a real one fills the light. The shape of the envelope is the
+-- crown-shape control (Weber & Penn's 1995 ShapeRatio idea: the crown's radius as a function of
+-- height). Points are seeded denser toward the envelope -- the paper's Figure 7 -- because that is
+-- where the light is and where a real crown's twigs are.
+--
+-- Branch thickness is the **pipe model** (Shinozaki et al.): a branch carries the cross-sections of
+-- everything above it, r^n = r1^n + r2^n with n = 2.5, computed from the tips down -- then remapped so
+-- the trunk is the width asked for and the twigs are a single voxel. That is what makes the wood taper
+-- convincingly: a limb is exactly as thick as what it holds up.
+--
+-- And the paper's smoothing pass, moving each one-child node toward its neighbours, takes the kinks out
+-- of the D-length steps so limbs curve rather than zig-zag.
 
-    -- **What a cell must be within to have any chance, before the noise is paid for.** fbm is the
-    -- expensive call in this brush by an order of magnitude -- one per candidate cell, against a
-    -- candidate box that is cubic in the radius -- so the loop asks it only about cells some warp
-    -- could actually bring into the shell. The bounds are the extremes the warp can reach, which
-    -- makes the cull exact: nothing that would have been drawn is skipped.
-    --
-    -- How much it saves depends entirely on `lumpiness`, and it is worth knowing which way round. The
-    -- outer bound always earns its keep -- it is what stops the corners of the box being sampled. The
-    -- inner one pays only when the warp is narrow: at lumpiness 0 it removes the whole hollow middle,
-    -- and at 1 it collapses to nearly nothing, because a warp that wide genuinely can pull a cell
-    -- near the centre out into the shell. Lumpy crowns cost more to generate than smooth ones, and
-    -- that is a real property of them rather than a missed optimisation.
-    local outerBound = radius * (1.0 + warpSpan)
-    local innerBound = innerFraction * radius * (1.0 - warpSpan)
+local CROWN_SHAPES = { "Round", "Spreading", "Columnar", "Weeping" }
+-- How tall each crown is, as a multiple of its radius.
+local CROWN_HEIGHT = { Round = 1.8, Spreading = 1.15, Columnar = 3.2, Weeping = 1.9 }
 
-    -- Per lobe rather than per tree: the keys are absolute coordinates, so a shared table would keep
-    -- growing across a whole placement for no reuse -- lobes do not overlap enough to pay for it.
-    local warpCache = {}
+-- The crown's radius at height `h` up it (0..1), as a fraction of the crown radius.
+local function crownProfile(shape, h)
+    if h <= 0 or h >= 1 then return 0 end
+    if shape == "Spreading" then
+        -- Widest a third of the way up, a low dome above: an oak in open ground.
+        local d = (h < 0.35) and ((0.35 - h) / 0.35) or ((h - 0.35) / 0.65)
+        return sqrt(max(0, 1 - d * d))
+    elseif shape == "Juniper" then
+        -- Bushy to the ground, fullest a little under the middle: a juniper's crown starts where its
+        -- trunk forks, a few voxels up.
+        local d = (h < 0.42) and ((0.42 - h) / 0.50) or ((h - 0.42) / 0.58)
+        return sqrt(max(0, 1 - d * d))
+    elseif shape == "Pinyon" then
+        -- A low, broad dome, widest a third of the way up.
+        local d = (h < 0.34) and ((0.34 - h) / 0.42) or ((h - 0.34) / 0.66)
+        return sqrt(max(0, 1 - d * d))
+    elseif shape == "Columnar" then
+        -- A poplar: a long tapered cylinder with rounded ends.
+        return min(1, sqrt(h / 0.12)) * min(1, sqrt((1 - h) / 0.25)) * (1 - 0.3 * h)
+    end
+    -- Round and Weeping: an egg, fullest a little above the middle.
+    local d = (h < 0.55) and ((0.55 - h) / 0.55) or ((h - 0.55) / 0.45)
+    return sqrt(max(0, 1 - d * d))
+end
 
-    for dy = -extent, extent do
-        for dz = -extent, extent do
-            for dx = -extent, extent do
-                local ey = dy * squash
-                local d = sqrt(dx * dx + ey * ey + dz * dz)
-                if d <= outerBound and d >= innerBound then
-                    -- The warp, sampled coarsely and remembered. It is a smooth field -- the input is
-                    -- scaled to about a nine-voxel wavelength -- so asking for it once per cell was
-                    -- sampling it several times inside every feature it has, and fbm is the single
-                    -- most-called thing in this brush by an order of magnitude (a large tree asked for
-                    -- it half a million times). One sample per WARP_STRIDE cells on each axis is the
-                    -- same field to look at and a fraction of the calls; what quantising costs is a
-                    -- surface that steps in twos, which is invisible under a rim the raggedness test
-                    -- is already eroding a cell at a time.
-                    -- Keyed on the quantised *offset* from the lobe's centre, not on the absolute
-                    -- coordinate. The offset is bounded by the lobe's own extent, so the key cannot
-                    -- run out of the range packed into it -- an absolute coordinate can, on a
-                    -- component large enough to need a grid, and the failure would be two cells
-                    -- silently sharing a warp value somewhere out in the scene.
-                    local ux, uy, uz = dx // WARP_STRIDE, dy // WARP_STRIDE, dz // WARP_STRIDE
-                    local wkey = (ux + 512) + (uy + 512) * 1024 + (uz + 512) * 1048576
-                    local warp = warpCache[wkey]
-                    if not warp then
-                        warp = pv.fbm((ox + ux * WARP_STRIDE) * 0.11, (oy + uy * WARP_STRIDE) * 0.11,
-                                      (oz + uz * WARP_STRIDE) * 0.11, 2, seed)
-                        warpCache[wkey] = warp
-                    end
-                    local effective = radius * (1.0 + (warp - 0.5) * p.lumpiness * 1.7)
-                    if effective > 0.5 then
-                        local edge = d / effective
-                        if edge <= 1.0 and edge >= innerFraction then
-                            -- Thinner towards the outside, as before, and then thinned again by
-                            -- whatever the budget could afford.
-                            local n = pv.hash(ox + dx, oy + dy, oz + dz, seed)
-                            if n > edge * edge * p.ragged * 0.85 then
-                                if density >= 1.0 or
-                                   pv.hash(ox + dx, oy + dy, oz + dz, seed + 991) < density then
-                                    -- Shaded across the *shell's* span, not the lobe's radius. The
-                                    -- ramp runs inside-to-outside and the shell only occupies its
-                                    -- outer third, so measuring from the centre spent a four-step
-                                    -- ramp on two shades and threw away the darks that give the
-                                    -- foliage its depth.
-                                    local through = (edge - innerFraction) /
-                                                    max(0.001, 1.0 - innerFraction)
-                                    local shade = base + min(steps - 1, floor(through * steps))
-                                    tree:plot(cx + dx, cy + dy, cz + dz, shade)
+-- `look` (optional) is what turns this into a juniper, a pinyon or a snag rather than a broadleaf; see
+-- LOOKS in apply. Every field is optional and an absent one keeps the broadleaf's behaviour.
+local function growBroadleaf(tree, ctx, p, kind, path, trunkHeight, bole, crownH, R, trunkRadius,
+                             rootCount, phase, look)
+    look = look or {}
+    local bare = kind == "bare" or look.bare
+    local shape = look.shape or p.crownShape
+    local barkMaterial, barkSteps = bare and DEAD or BARK, bare and DEAD_STEPS or BARK_STEPS
+    local limbMaterial, limbSteps = bare and DEADLIMB or BRANCH, bare and DEADLIMB_STEPS or BRANCH_STEPS
+    if look.bark then
+        barkMaterial, barkSteps = look.bark, RAMP_STEPS[look.barkName]
+        limbMaterial, limbSteps = look.limb, RAMP_STEPS[look.limbName]
+    end
+    local cx, cz = path[trunkHeight][1], path[trunkHeight][2]
+
+    -- ---- The parameters of the colonization, in voxels ----
+    -- D is the step: a tenth of the crown radius keeps a ~100-voxel tree's limbs smooth without a
+    -- node per voxel. di = 8D-ish is the paper's "tree" end of the range (17D is a shrub); dk is the
+    -- density control -- small and the crown fills with fine twigs, large and it is a few bold limbs.
+    local D = max(1.0, R / 10)
+    local di = max(6 * D, R * 0.8)
+    local density = ({ [0] = 2.5, 6.0, 4.0, 2.5, 1.7 })[floor(p.branching)] or 2.5
+    if look.density then density = look.density end
+    if bare then density = density * 0.75 end   -- A bare tree *is* its twigs.
+    local dk = D * density
+
+    -- ---- Attraction points ----
+    local volume = 3.14159 * R * R * crownH * 0.5
+    local target = floor(min(1300, max(120, volume / (D * D * D) * 0.35)))
+    local px, py, pz, alive, best, owner = {}, {}, {}, {}, {}, {}
+    local tries = 0
+    while #px < target and tries < target * 12 do
+        tries = tries + 1
+        local h = pv.hash(tries, 1, 7, p.seed + 1301)
+        local x = (pv.hash(tries, 2, 7, p.seed + 1303) * 2 - 1) * R
+        local z = (pv.hash(tries, 3, 7, p.seed + 1307) * 2 - 1) * R
+        local rr = crownProfile(shape, h) * R
+        -- An irregular envelope: the radius wanders round the crown and up it, so the outline is a few
+        -- big lobes -- a juniper's or a pinyon's crown is never a clean dome.
+        if look.lobes then
+            local az = math.atan(z, x)
+            rr = rr * (1.0 + look.lobes * (pv.noise(cos(az) * 1.3 + 3.0, h * 2.2, sin(az) * 1.3, p.seed + 1319) - 0.5) * 2.0)
+        end
+        local d = sqrt(x * x + z * z)
+        if d <= rr and pv.hash(tries, 4, 7, p.seed + 1311) < 0.3 + 0.7 * (d / max(0.001, rr)) ^ 2 then
+            local i = #px + 1
+            px[i], py[i], pz[i] = cx + x, bole + h * crownH, cz + z
+            alive[i], best[i] = true, math.huge
+        end
+    end
+    local living = #px
+
+    -- ---- Nodes: the trunk up to the crown, then whatever grows ----
+    local nx, ny, nz, parent = {}, {}, {}, {}
+    local function addNode(x, y, z, from)
+        local i = #nx + 1
+        nx[i], ny[i], nz[i], parent[i] = x, y, z, from
+        return i
+    end
+    local previous = nil
+    local y = 1
+    while y <= bole + 0.01 do
+        local level = max(1, min(trunkHeight, floor(y + 0.5)))
+        previous = addNode(path[level][1], y, path[level][2], previous)
+        y = y + D
+    end
+    local trunkTop = previous
+
+    -- Points bucketed by `di`, so a node only looks at the points that could be its.
+    local cell = di
+    local grid = {}
+    local function key(gx, gy, gz) return (gx + 512) + (gy + 512) * 1024 + (gz + 512) * 1048576 end
+    for i = 1, #px do
+        local k = key(floor(px[i] / cell), floor(py[i] / cell), floor(pz[i] / cell))
+        local list = grid[k]
+        if not list then list = {}; grid[k] = list end
+        list[#list + 1] = i
+    end
+    -- A point's nearest node can only change when a node is added, so each new node is offered to
+    -- the points around it once, instead of every point searching every node every step.
+    local function offer(n)
+        local gx, gy, gz = floor(nx[n] / cell), floor(ny[n] / cell), floor(nz[n] / cell)
+        for kz = gz - 1, gz + 1 do
+            for ky = gy - 1, gy + 1 do
+                for kx = gx - 1, gx + 1 do
+                    local list = grid[key(kx, ky, kz)]
+                    if list then
+                        for _, i in ipairs(list) do
+                            if alive[i] then
+                                local dx, dy, dz = px[i] - nx[n], py[i] - ny[n], pz[i] - nz[n]
+                                local d = sqrt(dx * dx + dy * dy + dz * dz)
+                                if d < dk then
+                                    alive[i] = false
+                                    living = living - 1
+                                elseif d < di and d < best[i] then
+                                    best[i], owner[i] = d, n
                                 end
                             end
                         end
@@ -526,41 +759,621 @@ local function growLobe(tree, ctx, p, cx, cy, cz, radius, density, seed, base, f
             end
         end
     end
+
+    -- Tropism: up toward the light, harder with Branch reach; down for a weeping crown.
+    local lift = look.lift or ((shape == "Weeping") and -0.30 or (0.06 + 0.22 * p.reach))
+    -- Twist: every step turned a little round the vertical, so limbs spiral as they grow -- the
+    -- twisted, wind-wrung wood of an old juniper.
+    local twistC, twistS = cos(look.twist or 0), sin(look.twist or 0)
+    local taken = {}
+    local fresh = {}
+    for n = 1, #nx do
+        if ny[n] >= bole - D * 1.5 then fresh[#fresh + 1] = n end
+    end
+    for _ = 1, 240 do
+        for _, n in ipairs(fresh) do offer(n) end
+        if living <= 0 then break end
+        local sx, sy, sz = {}, {}, {}
+        local pulled = {}
+        for i = 1, #px do
+            local n = owner[i]
+            if alive[i] and n then
+                local d = max(1e-6, best[i])
+                if not sx[n] then
+                    sx[n], sy[n], sz[n] = 0, 0, 0
+                    pulled[#pulled + 1] = n
+                end
+                sx[n] = sx[n] + (px[i] - nx[n]) / d
+                sy[n] = sy[n] + (py[i] - ny[n]) / d
+                sz[n] = sz[n] + (pz[i] - nz[n]) / d
+            end
+        end
+        -- In node order, never table order, so the same site always grows the same tree.
+        table.sort(pulled)
+        fresh = {}
+        for _, n in ipairs(pulled) do
+            local length = sqrt(sx[n] * sx[n] + sy[n] * sy[n] + sz[n] * sz[n])
+            if length > 1e-3 then
+                local dx, dy, dz = normalize(sx[n] / length, sy[n] / length + lift, sz[n] / length)
+                if look.twist then dx, dz = dx * twistC - dz * twistS, dx * twistS + dz * twistC end
+                local x, y, z = nx[n] + dx * D, ny[n] + dy * D, nz[n] + dz * D
+                -- Two pulls that cancel, or a node re-growing the step it already took, would loop
+                -- forever on the same spot; a position is grown into once.
+                local q = floor(x * 2 + 0.5) + floor(y * 2 + 0.5) * 4096 + floor(z * 2 + 0.5) * 16777216
+                if not taken[q] and y > 1 then
+                    taken[q] = true
+                    fresh[#fresh + 1] = addNode(x, y, z, n)
+                end
+            end
+        end
+        if #fresh == 0 or #nx > 6000 then break end
+    end
+
+    local count = #nx
+    local children, onlyChild = {}, {}
+    for i = 2, count do
+        local from = parent[i]
+        children[from] = (children[from] or 0) + 1
+        onlyChild[from] = i
+    end
+
+    -- ---- Dieback ----
+    -- An old juniper sheds whole limbs to drought and keeps living on the rest: one or two of the main
+    -- limbs are bare silver wood, the others in leaf. A limb is dead if the main limb it grows from is;
+    -- nodes are numbered after their parents, so one pass in order settles it.
+    local dead = {}
+    if look.dieback and look.dieback > 0 then
+        for i = trunkTop + 1, count do
+            local from = parent[i]
+            if from <= trunkTop then dead[i] = pv.hash(i, 5, 3, p.seed + 1409) < look.dieback
+            else dead[i] = dead[from] end
+        end
+    end
+
+    -- ---- Smoothing: the paper's pass, twice ----
+    for _ = 1, 2 do
+        local mx, my, mz = {}, {}, {}
+        for i = trunkTop + 1, count do
+            local from = parent[i]
+            if from and children[i] == 1 then
+                local c = onlyChild[i]
+                mx[i] = nx[i] * 0.5 + (nx[from] + nx[c]) * 0.25
+                my[i] = ny[i] * 0.5 + (ny[from] + ny[c]) * 0.25
+                mz[i] = nz[i] * 0.5 + (nz[from] + nz[c]) * 0.25
+            end
+        end
+        for i, v in pairs(mx) do nx[i], ny[i], nz[i] = v, my[i], mz[i] end
+    end
+
+    -- ---- Pipe model ----
+    local PIPE, TIP = 2.5, 0.45
+    local flow, hops = {}, {}
+    for i = count, 1, -1 do
+        local f = flow[i] or TIP ^ PIPE
+        flow[i] = f
+        hops[i] = hops[i] or 0
+        local from = parent[i]
+        if from then
+            flow[from] = (flow[from] or 0) + f
+            hops[from] = min(hops[from] or math.huge, hops[i] + 1)
+        end
+    end
+    local rootPipe = flow[1] ^ (1 / PIPE)
+    local radius = {}
+    for i = 1, count do
+        local r = flow[i] ^ (1 / PIPE)
+        radius[i] = 0.5 + (r - TIP) / max(1e-6, rootPipe - TIP) * (trunkRadius - 0.5)
+    end
+
+    -- ---- Draw ----
+    -- The bole with the trunk drawer (bark plates, furrows, flare); everything above as tapered sweeps.
+    growTrunk(tree, path, max(2, floor(bole)), trunkRadius, max(0.6, radius[trunkTop]), barkMaterial,
+              barkSteps, phase, ctx, p.seed + 401)
+    if p.roots > 0 then
+        growRoots(tree, ctx, rootCount, trunkRadius * 2.2 * p.roots, max(0.9, trunkRadius * 0.5),
+                  limbMaterial, limbSteps, phase, p.seed + 811)
+    end
+
+    local function sweep(i)
+        local from = parent[i]
+        local x0, y0, z0, x1, y1, z1 = nx[from], ny[from], nz[from], nx[i], ny[i], nz[i]
+        local r0, r1 = radius[from], radius[i]
+        local length = sqrt((x1 - x0) ^ 2 + (y1 - y0) ^ 2 + (z1 - z0) ^ 2)
+        local steps = max(1, floor(length / 0.5 + 0.5))
+        for k = 0, steps do
+            local t = k / steps
+            local r = r0 + (r1 - r0) * t
+            local bx = floor(x0 + (x1 - x0) * t + 0.5)
+            local by = floor(y0 + (y1 - y0) * t + 0.5)
+            local bz = floor(z0 + (z1 - z0) * t + 0.5)
+            local material = (r > 1.6 and not bare and r > trunkRadius * 0.55) and barkMaterial or limbMaterial
+            -- The trunk's continuation into the crown is shaded by height exactly as the bole below
+            -- it is (see growTrunk), or the seam between the two shows as a dark collar. Limbs go by
+            -- thickness: thick wood is older and darker. Dithered, as everything here is.
+            local v
+            if material == barkMaterial then
+                v = (by / max(1, trunkHeight)) * 0.65 + 0.30
+            else
+                v = 0.25 + 0.6 * (1.0 - min(1.0, r / max(1.0, trunkRadius)))
+            end
+            -- Strip bark: long streaks running up the wood, alternating red-brown and grey.
+            if look.stripes and r > 0.9 then
+                v = 0.45 + 0.45 * (pv.noise((ctx.x + bx) * 0.55, (ctx.y + by) * 0.08, (ctx.z + bz) * 0.55, p.seed + 1423) - 0.5) * 2.0
+                    + 0.15 * (by / max(1, trunkHeight))
+            end
+            local rampSteps = (material == barkMaterial) and barkSteps or limbSteps
+            if dead[i] then material, rampSteps = SILVER, RAMP_STEPS["tree.silver"] end
+            tree:ball(bx, by, bz, r, material + ditheredStep(v, rampSteps, ctx.x + bx, ctx.y + by, ctx.z + bz, p.seed + 71))
+        end
+    end
+    -- Thick wood before the leaves (it should show through gaps in the crown), twigs after (they
+    -- should only show where the leaves left a gap).
+    local TWIG = 0.9
+    -- A snag's twigs have broken off: only wood thicker than `breakHops` steps from a tip is left.
+    local function kept(i) return not look.breakHops or hops[i] >= look.breakHops end
+    for i = trunkTop + 1, count do
+        if radius[i] >= TWIG and kept(i) then sweep(i) end
+        if tree.full then break end
+    end
+
+    if not bare then
+        local autumn = p.season == "Autumn"
+        local ramp, steps = autumn and AUTUMN or LEAF, autumn and AUTUMN_STEPS or LEAF_STEPS
+        if look.foliage then ramp, steps = look.foliage, RAMP_STEPS[look.foliageName] end
+        local clump = max(1.5, min(5.0, D * 1.25 * p.leafSize))
+        if look.clump then clump = max(1.2, look.clump * R * p.leafSize) end
+        local holders = {}
+        for i = trunkTop + 1, count do
+            if hops[i] <= (look.holderHops or 2) and not dead[i] then
+                local h = clamp01((ny[i] - bole) / crownH)
+                local out = sqrt((nx[i] - cx) ^ 2 + (nz[i] - cz) ^ 2) / max(1, crownProfile(shape, max(0.02, min(0.98, h))) * R)
+                -- The inside of a crown is in its own shade and invisible: thin out leaves there.
+                if out > 0.45 or h > 0.72 or pv.hash(i, 3, 5, p.seed + 17) < (look.innerLeaves or 0.25) then
+                    holders[#holders + 1] = { i, h, min(1, out) }
+                end
+            end
+        end
+        local estimate = #holders * 4.19 * clump ^ 3 * 0.42
+        local available = (BUDGET - tree.spent) * 0.9
+        if estimate > available and available > 0 then
+            clump = max(1.2, clump * (available / estimate) ^ (1 / 3))
+        end
+        for _, holder in ipairs(holders) do
+            if tree.full then break end
+            local i, h, out = holder[1], holder[2], holder[3]
+            local jitter = pv.hash(i, 9, 1, p.seed + 601)
+            -- The per-crown half of the shading: lighter toward the top and the outside. In autumn
+            -- each clump also takes its own stretch of the ramp, so the crown is mixed reds and golds.
+            local light = 0.22 * (h - 0.5) + 0.12 * (out - 0.6) + (autumn and (jitter - 0.5) * 0.5 or 0)
+            leafClump(tree, ctx, p, nx[i], ny[i], nz[i], clump * (0.8 + 0.4 * jitter), light,
+                      p.seed + i * 13, ramp, steps)
+            -- A weeping crown hangs curtains from its twigs.
+            -- A weeping crown hangs curtains from its twigs: strands two voxels across, swaying a
+            -- little, lit like the outside of the crown and only darkening toward their ends.
+            if shape == "Weeping" and jitter < 0.6 then
+                local hang = floor(crownH * (0.15 + 0.35 * pv.hash(i, 2, 9, p.seed + 3)))
+                local ix, iy, iz = floor(nx[i] + 0.5), floor(ny[i] + 0.5), floor(nz[i] + 0.5)
+                local side = (pv.hash(i, 4, 4, p.seed + 7) < 0.5) and 1 or -1
+                for k = 1, hang do
+                    local sx = floor((pv.noise(i * 0.7, k * 0.12, 0, p.seed + 5) - 0.5) * 4 + 0.5)
+                    local sz = floor((pv.noise(0, k * 0.12, i * 0.7, p.seed + 6) - 0.5) * 4 + 0.5)
+                    local v = 0.62 - 0.25 * (k / hang) + light
+                    local wx, wy, wz = ix + sx, iy - k, iz + sz
+                    tree:plot(wx, wy, wz, ramp + ditheredStep(v, steps, ctx.x + wx, ctx.y + wy, ctx.z + wz, p.seed + 9, 0.7))
+                    if k < hang * 0.8 then
+                        tree:plot(wx + side, wy, wz, ramp + ditheredStep(v - 0.1, steps, ctx.x + wx + side, ctx.y + wy, ctx.z + wz, p.seed + 9, 0.7))
+                    end
+                end
+            end
+        end
+    end
+
+    for i = trunkTop + 1, count do
+        if radius[i] < TWIG and kept(i) then sweep(i) end
+        if tree.full then break end
+    end
+
+    -- Berries: a scatter of dusty blue on the outside of a juniper's foliage.
+    if look.berries and not bare then
+        local last = look.foliage + RAMP_STEPS[look.foliageName] - 1
+        for i = 1, #tree.voxels do
+            local voxel = tree.voxels[i]
+            -- The two lightest steps are the outside of the clumps.
+            if voxel[4] >= last - 1 and voxel[4] <= last then
+                if pv.hash(ctx.x + voxel[1], ctx.y + voxel[2], ctx.z + voxel[3], p.seed + 1433) < look.berries then
+                    voxel[4] = BERRY
+                end
+            end
+        end
+    end
+
+    if p.blossom and not bare then
+        for i = 1, #tree.voxels do
+            local voxel = tree.voxels[i]
+            if voxel[4] >= LEAF and voxel[4] < LEAF + LEAF_STEPS then
+                local n = pv.hash(ctx.x + voxel[1], ctx.y + voxel[2], ctx.z + voxel[3], p.seed + 5)
+                if n > 0.82 then voxel[4] = BLOSSOM end
+            end
+        end
+    end
+    return tree.voxels
 end
 
--- What a lobe will cost, before one is generated. A shell's volume times the two thinning factors,
--- which is rough -- the fbm warp moves cells across the boundary in both directions and roughly
--- cancels -- but it only has to be good enough to choose a density, and being wrong by a fifth costs
--- a fifth of the crown's density rather than a failed placement.
-local function lobeCost(p, radius)
-    local thickness = min(radius, max(2.0, radius * 0.34))
-    local inner = radius - thickness
-    local shell = 4.18879 * (radius * radius * radius - inner * inner * inner) / 0.82
-    return shell * (1.0 - p.ragged * 0.28)
+-- ---------------------------------------------------------------------------------------------
+-- Sagebrush
+-- ---------------------------------------------------------------------------------------------
+--
+-- A shrub, not a small tree: no trunk, but five to eight thin, twisted stems leaning out of one root
+-- crown, carrying a mound of small silver-green tufts. What says "sagebrush" at a few voxels across is
+-- the colour and the mound -- wider than tall, rough-edged, the stems showing underneath.
+local function growShrub(tree, ctx, p, height, radius, phase)
+    local stems = 5 + floor(pv.hash(ctx.x, ctx.y, ctx.z, p.seed + 31) * 4)
+    local sageSteps, stemSteps = RAMP_STEPS["tree.sage"], RAMP_STEPS["tree.sagestem"]
+    local tips = {}
+    for s = 1, stems do
+        local h = pv.hash(s, 3, 1, p.seed + 33)
+        local a = phase + s * 2.39996 + (h - 0.5) * 0.6
+        local out = (0.45 + 0.6 * h) * radius / max(1, height)
+        local length = height * (0.7 + 0.3 * pv.hash(s, 5, 1, p.seed + 35))
+        local x, y, z = tree:limb(0, 1, 0, cos(a) * out, 1.0, sin(a) * out, length, 0.6, 0.5,
+                                  cos(a), 0.2, sin(a), 0.6, SAGESTEM, stemSteps)
+        tips[#tips + 1] = { x, y, z }
+    end
+    -- Tufts at the stem tips and part way up them, then a few more round the mound's outline so it
+    -- closes into one plant instead of a bunch of lollipops.
+    local tuft = max(1.2, radius * 0.32)
+    local function tuftAt(x, y, z, k)
+        local light = 0.25 * (y / max(1, height) - 0.5)
+        leafClump(tree, ctx, p, x, y, z, tuft * (0.8 + 0.4 * pv.hash(k, 7, 3, p.seed + 37)), light,
+                  p.seed + k * 11, SAGE, sageSteps, true)
+    end
+    for k, tip in ipairs(tips) do
+        tuftAt(tip[1], tip[2], tip[3], k)
+        tuftAt(tip[1] * 0.6, 1 + (tip[2] - 1) * 0.65, tip[3] * 0.6, k + 50)
+    end
+    local ring = 4 + floor(radius)
+    for k = 1, ring do
+        local a = phase + k * TAU / ring + pv.hash(k, 1, 9, p.seed + 39)
+        local up = 0.35 + 0.4 * pv.hash(k, 2, 9, p.seed + 41)
+        tuftAt(cos(a) * radius * 0.75, 1 + height * up, sin(a) * radius * 0.75, k + 100)
+    end
+    return tree.voxels
 end
 
--- Fits the crown to what is left of the budget: thin the leaves first, and once thinning would take
--- them below the point of reading as foliage, shrink the lobes instead. Returns the density and the
--- radius scale to build them at.
-local function fitCrown(p, tips, radius, spent)
-    local budget = BUDGET - spent
-    if budget <= 0 or #tips == 0 then return 0, 1.0 end
-    local estimate = lobeCost(p, radius) * #tips
-    if estimate <= budget then return 1.0, 1.0 end
+-- ---------------------------------------------------------------------------------------------
+-- Conifer
+-- ---------------------------------------------------------------------------------------------
+--
+-- **Built the way a spruce or fir is built: Massart's architectural model.** One straight trunk
+-- (orthotropic, monopodial) that grows in spurts, and at the top of each spurt a *tier* of 4-8
+-- near-horizontal (plagiotropic) branches. Each branch carries side branches that alternate left and
+-- right **in the branch's own horizontal plane**, so a branch with its side shoots is a flat frond --
+-- and the needles sit on those fronds. That flat, layered habit is the whole look: shelves of foliage
+-- with dark gaps between them, through which you see the limbs and the trunk.
+--
+-- Two earlier versions missed it from opposite sides. Needle *lobes* hung on drooping sticks came out
+-- as a shaggy blob, because lobes are round and a stack of round things is round. Solid needle *tiers*
+-- got the silhouette but had no branches at all -- a stack of green lampshades. This one draws the
+-- branches and lets the shelves come out of them.
+--
+-- Three details carry most of the realism:
+--
+--   * **The sweep.** A spruce limb leaves the trunk level or slightly down, sags along its length and
+--     turns up again at the tip (`rise`, `sag`, `turn` below). Low limbs sag more -- they are longer
+--     and older -- and the top ones angle upward. Branch reach scales the sag.
+--   * **Bare inner wood.** Needles live a few years, so the inner third of every limb, in the shade of
+--     the tiers above, has lost them. Drawing needles only on the outer part is what lets the limbs be
+--     seen at all.
+--   * **Shading per spray, then per crown.** The top of each spray catches the sun and the underside is
+--     in shade, which is what separates the shelves; on top of that the crown lightens toward its top
+--     and its outside. The needle ramp is hue-shifted (see MATERIALS), so the shade is cool and the
+--     light is warm.
+--
+-- Plus the small things a real one has: tiers rotated by the golden angle so no two line up, smaller
+-- branches between the tiers on a big tree, dead stubs on the bare lower trunk, and a leader at the top.
 
-    local density = budget / estimate
-    if density >= MIN_LEAF_DENSITY then return density, 1.0 end
-    -- Shrink until the crown costs what MIN_LEAF_DENSITY can pay for. Cost goes as roughly the square
-    -- of the radius once the shell thickness has stopped growing with it, which is the regime this
-    -- branch is only ever reached in.
-    local scale = (budget / (estimate * MIN_LEAF_DENSITY)) ^ 0.5
-    return MIN_LEAF_DENSITY, max(0.25, min(1.0, scale))
+-- Where a primary branch is at `s` (0 at the trunk, 1 at the tip).
+local function limbPoint(limb, s)
+    local reach = limb.length * s
+    local lift = limb.length * (limb.rise * s - limb.sag * s * s + limb.turn * s * s * s)
+    local bearing = limb.azimuth + limb.curl * s * s
+    return limb.x + cos(bearing) * reach, limb.y + lift, limb.z + sin(bearing) * reach, bearing
+end
+
+-- One flattened clump of needles: a spray. Wider than tall, because the shoots it stands for lie in
+-- the plane of their branch -- and **lopsided, deeper below than above**: a thin layer over the top
+-- that hides the twig it grows on, and a deeper hang underneath, which is how a spruce's shoots droop
+-- off their branch. Hanging the whole clump below the twig instead left the wood showing along the top
+-- of every frond. `light` shifts its whole ramp (crown position); the top of the clump is lit and the
+-- underside shaded on top of that.
+local function needleSpray(tree, ctx, p, x, y, z, radius, light, seed, nested)
+    -- **A big spray is several small ones.** One ellipsoid at a radius of four or more is exactly what
+    -- it is -- an oval, and a crown of them is a crown of ovals. Built from three to five clumps at
+    -- jittered offsets, it has a lumpy outline made of the same small shapes as a little tree's, which is
+    -- how a painter builds foliage too: big masses out of a consistent small leaf-clump.
+    if radius >= 2.2 and not nested then
+        local count = 3 + floor(pv.hash(floor(x), floor(y), floor(z), seed + 101) * 3)
+        for i = 1, count do
+            local a = pv.hash(i, floor(x), floor(z), seed + 103) * TAU
+            local reachOut = radius * (0.25 + 0.4 * pv.hash(i, floor(y), floor(x), seed + 107))
+            local sub = radius * (0.5 + 0.22 * pv.hash(floor(z), i, floor(y), seed + 109))
+            needleSpray(tree, ctx, p, x + cos(a) * reachOut,
+                        y + (pv.hash(i, i, floor(x), seed + 113) - 0.5) * radius * 0.35,
+                        z + sin(a) * reachOut, sub, light, seed + i * 31, true)
+        end
+        return
+    end
+    local rh = radius
+    -- Branch angle reshapes the clump with the limb: a pine's upswept tufts are rounder and sit on
+    -- top of the shoot; a juniper's or weeping spruce's hang well below it.
+    local lift, hang = max(0, p.limbAngle), max(0, -p.limbAngle)
+    local up = max(0.8, radius * (0.35 + 0.30 * lift))
+    local down = max(1.0, radius * (0.75 - 0.20 * lift + 0.45 * hang))
+    local eh = floor(rh * 1.2 + 0.5)
+    local ix, iy, iz = floor(x + 0.5), floor(y + 0.5), floor(z + 0.5)
+    local sparse = (1.0 - p.needles * 0.6) * p.ragged
+    for dy = -floor(down + 0.5), floor(up + 0.5) do
+        local rv = dy >= 0 and up or down
+        for dz = -eh, eh do
+            for dx = -eh, eh do
+                local e = (dx * dx + dz * dz) / (rh * rh) + (dy * dy) / (rv * rv)
+                local ax, ay, az = ctx.x + ix + dx, ctx.y + iy + dy, ctx.z + iz + dz
+                -- The rim warped by a smooth noise, so even a small clump is not a clean ellipse. Only
+                -- near the rim, where it can change the answer.
+                if e > 0.45 and e < 1.6 then
+                    e = e * (1.0 + (pv.noise(ax * 0.45, ay * 0.45, az * 0.45, seed + 11) - 0.5) * 0.8)
+                end
+                if e <= 1.0 then
+                    local keep = true
+                    if e > 0.5 and pv.hash(ax, ay, az, seed) < (e - 0.5) / 0.5 * sparse then
+                        keep = false
+                    end
+                    if keep then
+                        local layer = dy / rv   -- -1 underside .. +1 top
+                        local v = 0.48 + 0.36 * layer + light
+                        local shade = ditheredStep(v, NEEDLE_STEPS, ax, ay, az, seed + 7, 0.7)
+                        tree:plot(ix + dx, iy + dy, iz + dz, NEEDLE + shade)
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function growConifer(tree, ctx, p, trunkHeight, crownRadius, trunkRadius, rootCount, phase,
+                           dirX, dirZ, arc)
+    -- Straighter than a broadleaf: a conifer's leader grows to the light and the trunk follows it.
+    local path = trunkPath(ctx, trunkHeight, p.curve * 0.25, dirX, dirZ, arc * 0.25, p.seed)
+    local function trunkAt(y)
+        local level = max(1, min(trunkHeight, floor(y + 0.5)))
+        return path[level][1], path[level][2]
+    end
+
+    local base = max(1, floor(trunkHeight * 0.16))
+    local top = trunkHeight + max(1, floor(crownRadius * 0.2))
+    local span = max(3, top - base)
+    -- Tier spacing. A year's growth on a big tree; never so close that the shelves merge.
+    local step = max(2.5, min(span / 4, 1.8 + crownRadius * 0.36))
+    local sprayRadius = max(1.0, min(4.0, crownRadius * 0.10 + 0.6))
+
+    -- ---- The leader, and the dense little spire around it ----
+    -- Drawn before the trunk, so the top of the trunk inside it is needles rather than a stub of bark
+    -- standing out of the crown -- plot keeps the first thing written to a cell.
+    do
+        local tx, tz = trunkAt(trunkHeight)
+        local itx, itz = floor(tx + 0.5), floor(tz + 0.5)
+        local from = floor(top - step * 1.5)
+        if crownRadius >= 8 then
+            -- **Not a cone.** Stacked sprays of steadily shrinking radius made a perfect triangle at
+            -- the top of every big tree. Instead a few clumps scattered round the leader, of uneven
+            -- size and height -- and on an upswept pine, fewer and wider, which is how a pine's top
+            -- goes from a point to a rounded crown with age.
+            local clumps = 4 + floor(pv.hash(itx, top, itz, p.seed + 5) * 3)
+            for i = 1, clumps do
+                local h = pv.hash(i, top, p.seed, p.seed + 7)
+                local a = i * 2.39996 + h
+                local out = sprayRadius * (0.3 + 0.9 * h) * (1.0 + 0.6 * max(0, p.limbAngle))
+                local ly = from + (top + 1 - from) * pv.hash(i, p.seed, 3, p.seed + 9)
+                needleSpray(tree, ctx, p, itx + cos(a) * out, ly, itz + sin(a) * out,
+                            sprayRadius * (0.6 + 0.6 * h), 0.14, p.seed + 3 + i)
+            end
+        else
+            for ly = top + 1, from, -1 do
+                local r = (top + 1 - ly) / (step * 1.5 + 1) * sprayRadius * 1.1
+                r = r * (0.7 + 0.6 * pv.hash(itx, ly, itz, p.seed + 15))
+                if r < 0.75 then
+                    tree:plot(itx, ly, itz, NEEDLE + NEEDLE_STEPS - 2)
+                else
+                    needleSpray(tree, ctx, p, itx, ly, itz, r, 0.12, p.seed + 3)
+                end
+            end
+        end
+        for ly = min(from, trunkHeight), top + 1 do tree:plot(itx, ly, itz, NEEDLE + NEEDLE_STEPS - 2) end
+    end
+
+    growTrunk(tree, path, trunkHeight, trunkRadius, max(0.6, trunkRadius * 0.2), BARK, BARK_STEPS, phase,
+              ctx, p.seed + 401)
+    if p.roots > 0 then
+        -- Short: they only have to break the seam under the lowest limbs.
+        growRoots(tree, ctx, rootCount, trunkRadius * 1.3 * p.roots,
+                  max(0.9, trunkRadius * 0.5), BRANCH, 2, phase, p.seed + 811)
+    end
+
+    -- ---- The limbs: tiers, plus the smaller ones between them ----
+    local limbs = {}
+    -- -1 hanging (juniper, weeping spruce), 0 the spruce/fir sweep, +1 upswept (a big pine).
+    local angle = max(-1.0, min(1.0, p.limbAngle))
+    local function addTier(y, k, lengthScale, countBias)
+        local j = pv.hash(k, p.seed, 3, p.seed + 71)
+        local t = (y - base) / span
+        -- The cone. The power just under 1 keeps the lower tiers broad.
+        -- An upswept pine's crown rounds and flattens with age: the profile's power drops toward a
+        -- dome, so the upper tiers stay long.
+        local profile = 0.95 - 0.55 * max(0, angle)
+        local length = (crownRadius * ((1.0 - t) ^ profile) * (0.8 + 0.4 * j) + 0.6) * lengthScale
+        if length < 1.2 then return end
+        local count = floor(min(8, max(3, 3.5 + length * 0.22 + j + countBias)))
+        local cx, cz = trunkAt(y)
+        -- Golden angle between tiers, so no limb sits straight over the one below.
+        local spin = k * 2.39996 + j * TAU
+        for i = 1, count do
+            local h = pv.hash(k, i, p.seed, p.seed + 13)
+            local slot = TAU / count
+            limbs[#limbs + 1] = {
+                x = cx, y = y, z = cz,
+                azimuth = spin + i * slot + (h - 0.5) * slot * p.lumpiness,
+                -- Uneven, and now and then broken short: one smooth cone of limb lengths is a clean
+                -- triangle of a silhouette, which a real crown never is.
+                length = length * (0.68 + 0.55 * h) * ((pv.hash(k, i, 5, p.seed + 19) < 0.12) and 0.5 or 1.0),
+                -- Level or a little down low, angled up near the top -- then tilted as a whole by
+                -- Branch angle: steeply down for a juniper, up for a big pine.
+                rise = -0.10 + 0.50 * t + (h - 0.5) * 0.12 + angle * 0.85,
+                -- An upswept limb barely sags; a hanging one sags further still.
+                sag = (0.35 + 0.45 * (1.0 - t)) * (0.35 + p.reach) *
+                      (angle >= 0 and (1.0 - 0.75 * angle) or (1.0 - 0.6 * angle)),
+                turn = 0,
+                curl = (h - 0.5) * 0.5,
+                t = t, seed = p.seed + k * 131 + i * 17,
+            }
+            local limb = limbs[#limbs]
+            -- The upswept tip. Fades out as the limbs turn down: a juniper's branch ends hang, they
+            -- do not curl back up.
+            limb.turn = limb.sag * 0.6 * min(1.0, 1.0 + angle)
+        end
+    end
+
+    local y, k = base, 0
+    while y < top - 1.5 do
+        addTier(y, k, 1.0, 0)
+        -- Interwhorl branches on a big tree: short and few, halfway up the spurt, in the lower crown
+        -- only. Enough to stop a large conifer reading as a stack of plates; any longer and they fill
+        -- the gaps under the tiers, which are what show the layering at all.
+        if crownRadius >= 12 and (y - base) / span < 0.6 then addTier(y + step * 0.5, k + 1000, 0.38, -2) end
+        local j = pv.hash(k, p.seed, 9, p.seed + 5)
+        y = y + step * (0.8 + 0.4 * j)
+        k = k + 1
+    end
+
+    -- ---- The fronds: side branches alternating in the limb's own plane ----
+    local twigs = {}
+    for _, limb in ipairs(limbs) do
+        local spacing = max(1.2, sprayRadius * 1.05) / limb.length
+        local side = (pv.hash(limb.seed, 1, 2, 3) > 0.5) and 1 or -1
+        -- Bare for the inner part: the needles there were shed in the shade of the tier above.
+        local s = 0.30 + 0.22 * max(0, angle) + spacing * 0.5
+        while s <= 0.97 do
+            local px, py, pz, bearing = limbPoint(limb, s)
+            local h = pv.hash(limb.seed, floor(s * 100), 7, p.seed + 29)
+            local angle = bearing + side * (0.85 + h * 0.3)
+            local length = ((1.0 - s) * limb.length * 0.5 + 1.0) * (0.8 + 0.4 * h)
+            twigs[#twigs + 1] = { px, py, pz, cos(angle), sin(angle), length, limb.t, s }
+            side = -side
+            s = s + spacing
+        end
+        -- The leading shoot of the limb carries needles too.
+        local tx, ty, tz, bearing = limbPoint(limb, 1.0)
+        twigs[#twigs + 1] = { tx, ty, tz, cos(bearing), sin(bearing), max(1.0, sprayRadius), limb.t, 1.0 }
+    end
+
+    -- ---- Fit the needles to the budget ----
+    -- Sprays every `sprayRadius` along every twig: estimate their cost, and shrink the sprays (not
+    -- drop them -- a gap in a frond reads as damage) until they fit what the wood left.
+    local samples = 0
+    for _, twig in ipairs(twigs) do samples = samples + max(1, floor(twig[6] / (sprayRadius * 0.9)) + 1) end
+    local estimate = samples * 4.19 * sprayRadius * sprayRadius * max(0.6, sprayRadius * 0.42) * 0.45
+    local woodGuess = #limbs * crownRadius * 2.0
+    local available = (BUDGET - tree.spent - woodGuess) * 0.9
+    if estimate > available and available > 0 then
+        sprayRadius = max(1.0, sprayRadius * (available / estimate) ^ (1.0 / 3.0))
+    end
+
+    -- ---- Draw: inner limbs, needles, then the outer limbs and twigs inside them ----
+    -- Order is visibility: plot keeps the first material written to a cell. The bare inner wood goes
+    -- first so it stays wood; the needles next; and the outer limbs and twigs last, so they only show
+    -- where the needles left a gap -- underneath a frond, which is exactly where a real one's are
+    -- seen. Drawn first, the outer limbs ran along the middle of every frond and showed through its top
+    -- as a brown stripe.
+    local BARE = 0.34 + 0.22 * max(0, angle)
+    -- How far the side shoots fall away from their limb: hardly at all on a pine, like a curtain on a
+    -- juniper.
+    local twigDroop = 0.12 + 0.55 * max(0, -angle)
+    local function drawLimbs(from, to)
+        for _, limb in ipairs(limbs) do
+            -- A limb is a fraction of the trunk, and thin: at the ~100-voxel size this is tuned for a
+            -- spruce limb is one or two voxels thick where it leaves the trunk and a single voxel
+            -- for most of its length. Thicker read as logs bolted to a post.
+            local radius0 = max(0.5, min(trunkRadius * 0.38, limb.length * 0.035))
+            local walk = max(2, floor(limb.length / 0.5))
+            for i = 0, walk do
+                local s = i / walk
+                if s >= from and s <= to then
+                    local lx, ly, lz = limbPoint(limb, s)
+                    local radius = radius0 + (0.5 - radius0) * s
+                    local bx, by, bz = floor(lx + 0.5), floor(ly + 0.5), floor(lz + 0.5)
+                    local shade = BRANCH + ditheredStep(s, BRANCH_STEPS, ctx.x + bx, ctx.y + by, ctx.z + bz, limb.seed)
+                    tree:ball(bx, by, bz, radius, shade)
+                end
+            end
+            if tree.full then break end
+        end
+    end
+    drawLimbs(0.0, BARE)
+
+    for i, twig in ipairs(twigs) do
+        if tree.full then break end
+        local x0, y0, z0, ux, uz, length, t, s = twig[1], twig[2], twig[3], twig[4], twig[5], twig[6], twig[7], twig[8]
+        -- Lighter toward the top of the crown and toward the outside of each tier.
+        local light = 0.20 * (t - 0.4) + 0.14 * (s - 0.6)
+        local count = max(1, floor(length / (sprayRadius * 0.9)) + 1)
+        for c = 0, count - 1 do
+            local u = (count > 1) and (c / (count - 1)) or 0.5
+            local d = length * u
+            needleSpray(tree, ctx, p, x0 + ux * d, y0 - twigDroop * d * u, z0 + uz * d,
+                        sprayRadius * (1.0 - 0.3 * u) * (0.75 + 0.35 * p.needles), light, p.seed + i * 7)
+        end
+    end
+
+    drawLimbs(BARE, 1.0)
+    for _, twig in ipairs(twigs) do
+        if tree.full then break end
+        local x0, y0, z0, ux, uz, length = twig[1], twig[2], twig[3], twig[4], twig[5], twig[6]
+        local walk = max(1, floor(length / 0.5))
+        for i = 0, walk do
+            local d = length * i / walk
+            tree:plot(floor(x0 + ux * d + 0.5), floor(y0 - twigDroop * d * (i / walk) + 0.5),
+                      floor(z0 + uz * d + 0.5), BRANCH + BRANCH_STEPS - 1)
+        end
+    end
+
+    -- ---- Dead stubs on the bare lower trunk ----
+    -- A conifer self-prunes: the lowest limbs die in the shade and break off, leaving short stubs.
+    if trunkHeight >= 16 then
+        local sy = 2 + step * 0.5
+        local n = 0
+        while sy < base - 1 do
+            n = n + 1
+            local h = pv.hash(n, p.seed, 41, p.seed)
+            local cx, cz = trunkAt(sy)
+            local a = n * 2.39996 + h * 2.0
+            tree:limb(cx, sy, cz, cos(a), -0.25, sin(a), trunkRadius + 1.0 + h * 2.0,
+                      0.7, 0.5, 0, -1, 0, 0, BRANCH, 1)
+            sy = sy + step * (0.6 + h * 0.6)
+        end
+    end
+
+    return tree.voxels
 end
 
 return {
     name = "Trees",
     kind = "scatter",
-    description = "Branching broadleaf, whorled conifer and bare trees, each checked for room before it lands.",
+    -- **Where it grows, said where the user reads it.** Any solid surface: there is no material filter,
+    -- so stone, dirt, sand and painted grass ground all take a tree. What it will not stand *on* is
+    -- undergrowth (blades, flowers, moss -- UNDERGROWTH), which it grows through instead; what refuses a
+    -- site is shape, not material: slope, enclosure, footing and room.
+    description = "Broadleaf, conifer and bare trees. Grows on any solid surface -- stone, dirt, grass "
+               .. "ground -- and through grass blades and flowers. Sites are refused for slope, "
+               .. "footing or room; the status line says which. Force plants one exactly where you click.",
     author = "ProjectV",
 
     needs = { "position", "normal", "crevice", "material" },
@@ -571,51 +1384,91 @@ return {
     displaces = DISPLACES,
 
     params = {
+        -- Read by name by the editor, like spacing and density below: see BRUSH_FORCE_PARAM.
+        { name = "force", label = "Force (one, exactly where I click)", type = "bool", default = false,
+          tooltip = "Plant one tree on the voxel under the cursor, every time.\n\n"
+                 .. "Skips the spacing grid and Coverage, and every site test below -- slope,\n"
+                 .. "enclosure, footing, headroom, clearance. Cells already holding something are\n"
+                 .. "left as they are rather than refusing the tree, so a tree forced against a wall\n"
+                 .. "keeps the wall. Dragging plants a row, one per Spacing." },
+
         -- The editor's two, read by name.
-        { name = "spacing", label = "Spacing", type = "int", default = 14, min = 1, max = 128,
+        { name = "spacing", label = "Spacing", type = "int", default = 36, min = 1, max = 128,
           tooltip = "How far apart trees are, in voxels. Far larger than a grass brush wants: this is\n"
                  .. "roughly the width of a crown, and below it every tree is refused for want of\n"
                  .. "room by the one beside it.\n\n"
-                 .. "Scale this with Trunk height. A tall tree at a small spacing plants one tree and\n"
-                 .. "refuses its neighbours." },
+                 .. "Trees grow only at one site per Spacing cell, so a brush narrower than this\n"
+                 .. "often covers no site at all. Widen the brush, or use Force.\n\n"
+                 .. "Scale this with Tree height: about a third of it suits a mixed wood. A tall tree\n"
+                 .. "at a small spacing plants one tree and refuses its neighbours." },
         { name = "density", label = "Coverage", type = "float", default = 0.6, min = 0.0, max = 1.0,
           tooltip = "What fraction of the eligible cells get a tree. Refusals come out of this: a\n"
                  .. "wooded slope plants far fewer than a flat clearing at the same setting." },
 
         -- What may grow, in any combination.
         { name = "broadleaf", label = "Broadleaf", type = "bool", default = true,
-          tooltip = "A tapering trunk, a branching skeleton, and foliage hung in lobes at the tips." },
+          tooltip = "Branches grown by space colonization -- limbs competing for room inside the crown\n"
+                 .. "shape -- with leaf clumps on the twigs. Crown shape, Season and Leaf clump size\n"
+                 .. "shape it." },
         { name = "conifer", label = "Conifer", type = "bool", default = true,
-          tooltip = "A straight trunk under whorls of drooping branches. The narrowest, so the one\n"
-                 .. "that still fits where a broadleaf will not." },
+          tooltip = "A straight trunk under tiers of branches carrying flat needle fronds. Branch\n"
+                 .. "angle turns it from a juniper into a spruce into a pine." },
         { name = "bare", label = "Bare", type = "bool", default = false,
-          tooltip = "The same skeleton with no foliage, and branched one level further -- a bare tree\n"
-                 .. "is its branching, so there is more of it to see. Fits almost anywhere, which\n"
-                 .. "makes it the useful one for a crowded or a dead landscape." },
+          tooltip = "The broadleaf's skeleton with no leaves and finer twigs -- a bare tree is its\n"
+                 .. "branching, so there is more of it to see. Winter, or a dead landscape." },
+        { name = "juniper", label = "Juniper", type = "bool", default = false,
+          tooltip = "Utah juniper: a short trunk forked low into twisted stems, an irregular bushy crown\n"
+                 .. "of olive scale foliage with blue berries, strip bark -- and often a dead silver limb\n"
+                 .. "(Dieback). Tuned for 35-55 voxels tall." },
+        { name = "pinyon", label = "Pinyon", type = "bool", default = false,
+          tooltip = "Two-needle pinyon: a short trunk under a low, broad, dense dome of dark needles.\n"
+                 .. "Tuned for 50-75 voxels tall." },
+        { name = "snag", label = "Dead juniper", type = "bool", default = false,
+          tooltip = "A juniper long dead: twisted silver wood, the twigs broken off." },
+        { name = "shrub", label = "Sagebrush", type = "bool", default = false,
+          tooltip = "A mound of silver-green tufts on thin twisted stems. Tree height is the shrub's\n"
+                 .. "height (4-12) and Crown radius its half-width." },
+        { name = "dieback", label = "Dieback", type = "float", default = 0.3, min = 0.0, max = 1.0,
+          tooltip = "Juniper: the chance each main limb is dead, bare silver wood among the living ones." },
+        { name = "twist", label = "Twist", type = "float", default = 0.6, min = 0.0, max = 1.0,
+          tooltip = "Juniper and dead juniper: how hard the limbs spiral as they grow." },
         { name = "blossom", label = "Blossom", type = "bool", default = false,
           tooltip = "Scatters petals through a broadleaf crown. Costs one more palette entry and\n"
                  .. "nothing else." },
 
-        { name = "height", label = "Trunk height", type = "int", default = 8, min = 2, max = 256,
-          tooltip = "The tallest a trunk may be. Each tree takes a share of it, so this is the top of\n"
-                 .. "a range rather than a fixed height.\n\n"
-                 .. "This is the master control: trunk thickness, branch count and how deeply the\n"
-                 .. "skeleton divides are all derived from it unless they are set by hand. Raising it\n"
-                 .. "alone gives a bigger tree rather than a longer wire." },
-        { name = "canopy", label = "Crown radius", type = "int", default = 4, min = 1, max = 96,
-          tooltip = "How wide the foliage is, measured to the outside of the whole crown -- not the\n"
-                 .. "size of one lobe. Cost is paid out of the placement budget, so a crown too large\n"
-                 .. "for it comes back thinner and then smaller rather than failing to place." },
+        { name = "height", label = "Tree height", type = "int", default = 100, min = 4, max = 256,
+          tooltip = "How tall the trees are, in voxels. Each tree takes 72-100% of it, so a stand\n"
+                 .. "varies a little. Tuned for about 100; below 30 there is too little room for the\n"
+                 .. "branch structure to show.\n\n"
+                 .. "This is the master control: trunk thickness and how finely the branches divide\n"
+                 .. "follow from it unless they are set by hand." },
+        { name = "canopy", label = "Crown radius", type = "int", default = 28, min = 1, max = 96,
+          tooltip = "How wide the foliage is, measured to the outside of the whole crown. A conifer\n"
+                 .. "takes 70% of it and never more than 30% of its height, so one setting suits a mixed\n"
+                 .. "wood. Cost is paid out of the placement budget, so a crown too large for it comes\n"
+                 .. "back with smaller clumps rather than failing to place." },
+        { name = "crownShape", label = "Crown shape", type = "enum", default = "Round",
+          options = CROWN_SHAPES,
+          tooltip = "Broadleaf and bare: the envelope the branches grow to fill.\n\n"
+                 .. "  Round      an egg, fullest above the middle (lime, maple)\n"
+                 .. "  Spreading  wide and low-domed (an oak in open ground)\n"
+                 .. "  Columnar   a tall narrow column (poplar)\n"
+                 .. "  Weeping    round, with branches pulled down and curtains of leaves (willow)" },
+        { name = "season", label = "Season", type = "enum", default = "Summer", options = { "Summer", "Autumn" },
+          tooltip = "Broadleaf leaves: summer greens, or autumn's mix of reds, oranges and golds." },
+        { name = "leafSize", label = "Leaf clump size", type = "float", default = 1.0, min = 0.4, max = 2.0,
+          tooltip = "Broadleaf: how big each clump of leaves on a twig is. Small shows the branches\n"
+                 .. "through the crown; large closes it into masses." },
         { name = "trunk", label = "Trunk radius", type = "int", default = 0, min = 0, max = 32,
           tooltip = "Radius of the trunk at the ground, in voxels. **0 derives it from the height**,\n"
                  .. "which is what you want almost always -- it is the setting that keeps a tall tree\n"
                  .. "from being a wire, and deriving it means one control scales the whole tree.\n\n"
                  .. "Set it only to make something deliberately squat or spindly." },
-        { name = "branching", label = "Branch levels", type = "int", default = 0, min = 0, max = 4,
-          tooltip = "How many times the skeleton divides. 0 derives it from the height: a small tree\n"
-                 .. "has no room for branches worth drawing, a large one needs three levels before\n"
-                 .. "the crown stops looking like one lump.\n\n"
-                 .. "Each level roughly doubles the limb count, so this is the expensive control." },
+        { name = "branching", label = "Branch density", type = "int", default = 0, min = 0, max = 4,
+          tooltip = "Broadleaf and bare: how finely the crown divides. 1 is a few bold limbs, 4 a\n"
+                 .. "dense mass of twigs; 0 is the default, between 2 and 3.\n\n"
+                 .. "(It is the colonization's kill distance: how close a branch must come to a patch\n"
+                 .. "of free space before that space counts as taken.)" },
         { name = "roots", label = "Roots", type = "float", default = 1.0, min = 0.0, max = 3.0,
           tooltip = "How far surface roots spread from the base, as a multiple of the trunk's radius.\n"
                  .. "0 turns them off.\n\n"
@@ -624,9 +1477,20 @@ return {
                  .. "break that seam. They lie on the surface rather than digging into it, so they\n"
                  .. "never carve the terrain -- which does mean they read best on ground that is\n"
                  .. "roughly level under the trunk." },
+        { name = "limbAngle", label = "Branch angle", type = "float", default = 0.0, min = -1.0, max = 1.0,
+          tooltip = "Conifers: which way the limbs go.\n\n"
+                 .. "  -1  hanging -- steeply down, no upturn, side shoots like a curtain\n"
+                 .. "      (a juniper, a weeping spruce)\n"
+                 .. "   0  level, sagging, tip turned up (spruce, fir)\n"
+                 .. "  +1  swept up, hardly sagging, needles in tufts toward the ends (a big pine)\n\n"
+                 .. "Branch reach still sets how deep the sag is within that." },
+        { name = "needles", label = "Needle fullness", type = "float", default = 0.75, min = 0.0, max = 1.0,
+          tooltip = "Conifers: how full the needle sprays are. Low shows more of the branches and the\n"
+                 .. "trunk through the tiers -- a pine on a windy ridge; high is a dense young fir." },
         { name = "reach", label = "Branch reach", type = "float", default = 0.6, min = 0.0, max = 1.5,
           tooltip = "How hard branches curl toward the light as they grow. 0 gives straight rays out\n"
-                 .. "of the trunk; high values give the upswept look of an old broadleaf." },
+                 .. "of the trunk; high values give the upswept look of an old broadleaf.\n\n"
+                 .. "On a conifer it is the sweep: how far each limb sags before its tip turns up." },
         { name = "ragged", label = "Raggedness", type = "float", default = 0.8, min = 0.0, max = 1.0,
           tooltip = "How eroded the rim of the foliage is. This is the *texture* of the outline." },
         { name = "lumpiness", label = "Lumpiness", type = "float", default = 0.55, min = 0.0, max = 1.0,
@@ -643,6 +1507,14 @@ return {
                  .. "itself takes. 0 lets crowns touch; 2 or more keeps them apart and refuses far\n"
                  .. "more sites. This is the one check the editor cannot do for the brush -- it knows\n"
                  .. "what the tree occupies, not what it wants to be left alone." },
+        -- The material filter the paint brushes have, so "only on the grass" is a setting. Empty -- the
+        -- default -- means any solid ground at all; see the description.
+        { name = "onlyOn", label = "Only on material", type = "text", default = "",
+          tooltip = "Leave empty to grow on any solid surface: stone, dirt, sand, painted grass\n"
+                 .. "ground -- whatever the palette entry is called.\n\n"
+                 .. "Otherwise a site is used only when the name of the material under it contains\n"
+                 .. "this text -- 'grass' catches grass.lush and grass.dry alike. Grass blades and\n"
+                 .. "flowers are never stood on either way: a tree grows through them instead." },
         { name = "footing", label = "Footing", type = "int", default = 3, min = 0, max = 9,
           tooltip = "How many of the nine cells under the base must be solid ground. 9 demands a flat\n"
                  .. "slab; 0 will plant a tree on a single voxel sticking out of a cliff." },
@@ -661,21 +1533,7 @@ return {
         { name = "seed", type = "seed", default = 7 },
     },
 
-    materials = {
-        { name = "tree.bark",    steps = 3, color = { 0.26, 0.18, 0.12 }, colorTo = { 0.44, 0.33, 0.22 } },
-        { name = "tree.leaf",    steps = 4, color = { 0.10, 0.26, 0.09 }, colorTo = { 0.38, 0.62, 0.22 } },
-        { name = "tree.needle",  steps = 3, color = { 0.07, 0.20, 0.13 }, colorTo = { 0.20, 0.40, 0.22 } },
-        { name = "tree.blossom",            color = { 0.94, 0.76, 0.82 } },
-        { name = "tree.dead",    steps = 2, color = { 0.30, 0.26, 0.22 }, colorTo = { 0.46, 0.42, 0.37 } },
-        -- These exist to be *named* differently -- see the note by the constants -- but they must
-        -- also be *coloured* differently, and that is a hard requirement rather than a preference:
-        -- interning a role falls back to matching an existing entry by colour when the name is new,
-        -- so a ramp that duplicated tree.bark's colours exactly would bind to tree.bark and never
-        -- become an entry of its own. Younger wood is lighter and greyer than trunk bark, so the
-        -- shift these need in order to exist is one they wanted anyway.
-        { name = "tree.branch",  steps = 3, color = { 0.31, 0.23, 0.15 }, colorTo = { 0.52, 0.41, 0.28 } },
-        { name = "tree.deadlimb", steps = 2, color = { 0.35, 0.31, 0.27 }, colorTo = { 0.53, 0.49, 0.44 } },
-    },
+    materials = MATERIALS,
 
     apply = function(ctx, p)
         -- ---- 1. The ground ----
@@ -686,21 +1544,40 @@ return {
         -- the bare comparison makes `maxSlope = 0` mean "refuse everywhere" rather than "flat ground
         -- only" -- a setting that reads as the strictest useful value and is actually the one value
         -- that can never plant a tree. The whole control was unusable at its own minimum.
-        if ctx.ny < 1.0 - p.maxSlope - 0.03 then return nil end
-        if ctx.crevice > p.enclosure then return nil end
+        --
+        -- Every refusal says why (`return nil, "reason"`): the editor tallies them per dab and shows
+        -- the count in the status line, which is the difference between "it planted nothing" and "it
+        -- planted nothing because the ground is too steep". `ctx.force` -- the Force setting -- skips
+        -- all of these site tests: the user has said where, and the host writes what fits.
+        local force = ctx.force
+        if not force then
+            if ctx.ny < 1.0 - p.maxSlope - 0.03 then return nil, "too steep" end
+            if ctx.crevice > p.enclosure then return nil, "too enclosed" end
+        end
 
         -- Not on top of the undergrowth. A blade of grass is a surface voxel like any other, so the
         -- scatter lattice offers its tip as a site perfectly happily, and a tree planted there stands
         -- on a stalk with its roots in the air. The ground voxels around it are offered too, and those
         -- are the ones to grow from -- so this is a refusal that costs nothing: it rejects a site the
         -- lattice will make a better offer for.
-        if isUndergrowth(ctx.materialName) then return nil end
+        -- `ctx.material`, the name the host passes. This read `ctx.materialName` -- a field nothing sets --
+        -- so the check never fired and trees were happily rooted on the tips of grass blades.
+        if not force and isUndergrowth(ctx.material) then return nil, "on undergrowth" end
+        if p.onlyOn ~= "" and not force then
+            if not ctx.material or not string.find(ctx.material, p.onlyOn, 1, true) then
+                return nil, "not on " .. p.onlyOn
+            end
+        end
 
         local kinds = {}
         if p.broadleaf then kinds[#kinds + 1] = "broadleaf" end
         if p.conifer   then kinds[#kinds + 1] = "conifer" end
         if p.bare      then kinds[#kinds + 1] = "bare" end
-        if #kinds == 0 then return nil end
+        if p.juniper   then kinds[#kinds + 1] = "juniper" end
+        if p.pinyon    then kinds[#kinds + 1] = "pinyon" end
+        if p.snag      then kinds[#kinds + 1] = "snag" end
+        if p.shrub     then kinds[#kinds + 1] = "shrub" end
+        if #kinds == 0 then return nil, "no tree kind ticked" end
 
         local r1 = pv.hash(ctx.x, ctx.y, ctx.z, p.seed)
         local r2 = pv.hash(ctx.x, ctx.y, ctx.z, p.seed + 101)
@@ -710,14 +1587,14 @@ return {
         -- Is the base standing on anything? A tree rooted on a one-voxel spur reads as a mistake, and
         -- nothing else here would reject it -- the site is a surface voxel, so it is solid by
         -- definition; what is in question is its neighbours.
-        if p.footing > 0 then
+        if p.footing > 0 and not force then
             local firm = 0
             for dz = -1, 1 do
                 for dx = -1, 1 do
                     if pv.solid(ctx.x + dx, ctx.y, ctx.z + dz) then firm = firm + 1 end
                 end
             end
-            if firm < p.footing then return nil end
+            if firm < p.footing then return nil, "not enough footing" end
         end
 
         -- ---- 2. Proportions ----
@@ -726,17 +1603,27 @@ return {
         -- headroom test below can be told the truth about how tall this tree will be, and so that one
         -- control scales the whole thing. The derivations are the point of the rewrite; the old brush
         -- had a 1-voxel trunk at every height and a crown that did not know how tall it was.
-        local trunkHeight = max(2, floor(p.height * (0.55 + r2 * 0.45)))
-        local crownRadius = p.canopy
-        if kind == "conifer" then crownRadius = max(1, p.canopy * 0.8) end
+        -- `height` is the whole tree's, and each tree takes 72-100% of it: a stand varies, but a brush
+        -- set to 100 should plant trees about 100 tall, which is the size all of this is tuned for.
+        local trunkHeight = max(4, floor(p.height * (0.72 + r2 * 0.28)))
+        local crownRadius = p.canopy * (0.85 + 0.3 * r3)
+        -- A conifer is a spire: however wide the crown setting, it stays well under half its height,
+        -- or the tiers flatten into a pancake that reads as a bush.
+        if kind == "conifer" then crownRadius = max(1.5, min(p.canopy * 0.7, trunkHeight * 0.3)) end
 
-        -- A real trunk is about a fortieth of its height. A voxel one has to be chunkier than that or
-        -- it is a wire: below a radius of about 1.2 a limb is a single line of cells whatever the
-        -- arithmetic says, because a ball of radius 0.9 contains exactly one voxel. A ninth is the
-        -- ratio that keeps every part of the skeleton above that floor at the sizes this brush is
-        -- used at, and it is deliberately stouter than nature.
+        -- **Trunk thickness, from the height.** A real trunk is a fiftieth to a thirtieth of its
+        -- height across. Voxels want it chunkier than nature -- below a radius of about 1.2 a stem is a
+        -- single line of cells -- but this used to be a *ninth*, which at 100 tall is a log 22 voxels
+        -- across: every tree read as a stump with a crown. Now a fortieth for a conifer (about 5
+        -- across at 100 tall) and a thirtieth for a broadleaf (about 7), each well clear of the
+        -- one-voxel floor at the sizes this is for.
         local trunkRadius = p.trunk
-        if trunkRadius <= 0 then trunkRadius = max(1.2, trunkHeight / 9.0) end
+        if trunkRadius <= 0 then
+            trunkRadius = (kind == "conifer") and max(1.0, trunkHeight / 40.0) or max(1.2, trunkHeight / 30.0)
+            -- A juniper is short and stout, its trunk thick for its height; a pinyon a little less so.
+            if kind == "juniper" or kind == "snag" then trunkRadius = max(1.5, trunkHeight / 12.0) end
+            if kind == "pinyon" then trunkRadius = max(1.3, trunkHeight / 24.0) end
+        end
         trunkRadius = min(trunkRadius, max(1.2, crownRadius * 0.8))
 
         -- How many times the skeleton divides. Derived from how much trunk there is to divide: below
@@ -762,7 +1649,7 @@ return {
         -- is a tree sheared off, which reads as a bug rather than as a limit. Shrinking first costs
         -- the user a smaller tree than they asked for, which is a thing they can see and answer.
         --
-        -- Only the skeleton is solved for here. The crown is fitted separately and later (fitCrown),
+        -- Only the skeleton is solved for here. The crown is fitted separately and later,
         -- against what the skeleton actually spent rather than against an estimate of it, because by
         -- then the real number is known.
         for _ = 1, 12 do
@@ -782,8 +1669,10 @@ return {
         -- deriving rather than guessing: a headroom check that stops short of the crown passes sites
         -- where the top of the tree is inside a ceiling, and the editor then refuses the placement
         -- anyway -- so the brush pays for generating a whole tree to have it thrown away.
-        local topY = ctx.y + trunkHeight + floor(crownRadius * 1.6) + 2
-        if not pv.fits(ctx.x, ctx.y + 1, ctx.z, ctx.x, topY, ctx.z) then return nil end
+        local topY = ctx.y + trunkHeight + floor(crownRadius * 0.3) + 3
+        if not force and not pv.fits(ctx.x, ctx.y + 1, ctx.z, ctx.x, topY, ctx.z) then
+            return nil, "no headroom"
+        end
 
         -- The trunk's own footprint, two levels of it, before anything is generated.
         --
@@ -798,9 +1687,9 @@ return {
         -- host's whole answer would be the box test this brush just stopped doing; this one is a few
         -- thousand cells and catches the common case.
         local footprint = floor(trunkRadius * 1.8) + 1
-        if not pv.fits(ctx.x - footprint, ctx.y + 1, ctx.z - footprint,
-                       ctx.x + footprint, ctx.y + 2, ctx.z + footprint) then
-            return nil
+        if not force and not pv.fits(ctx.x - footprint, ctx.y + 1, ctx.z - footprint,
+                                     ctx.x + footprint, ctx.y + 2, ctx.z + footprint) then
+            return nil, "a trunk already there"
         end
 
         -- ---- 3. Room to spread ----
@@ -822,7 +1711,7 @@ return {
         local arc = p.curve * (0.4 + r3) * trunkHeight * 0.35
         local angle = r2 * TAU
         local dirX, dirZ = cos(angle), sin(angle)
-        if p.clearance > 0 then
+        if p.clearance > 0 and not force then
             local lean = floor(arc + 0.5)
             local reach = floor(crownRadius + p.clearance + abs(lean)) + 1
             local top = topY + p.clearance
@@ -836,7 +1725,7 @@ return {
                     local a = probe * TAU / PROBES + r1 * TAU
                     local px = ctx.x + floor(cos(a) * at + 0.5)
                     local pz = ctx.z + floor(sin(a) * at + 0.5)
-                    if not pv.fits(px, ctx.y + 1, pz, px, top, pz) then return nil end
+                    if not pv.fits(px, ctx.y + 1, pz, px, top, pz) then return nil, "short of clearance" end
                 end
             end
         end
@@ -846,238 +1735,63 @@ return {
         local tree = newTree()
         local phase = r1 * TAU
 
+        if kind == "shrub" then
+            return growShrub(tree, ctx, p, trunkHeight, crownRadius, phase)
+        end
+
+        -- ---- Pinyon-juniper: the broadleaf's colonization with a different look ----
+        --
+        -- A juniper is grown the same way as a broadleaf -- branches competing for room inside the
+        -- crown's envelope -- because that is what produces its habit: a trunk that forks a few voxels
+        -- up into several stems, each wandering off on its own. The envelope starts almost at the
+        -- ground and is lumpy; the stems twist; strip bark; olive foliage in big tufts.
+        if kind == "juniper" or kind == "pinyon" or kind == "snag" then
+            local looks = {
+                juniper = { shape = "Juniper", bark = STRIPBARK, barkName = "tree.stripbark",
+                            limb = JUNIPERLIMB, limbName = "tree.juniperlimb",
+                            foliage = JUNIPER, foliageName = "tree.juniper",
+                            lobes = 0.35, density = 3.2, lift = 0.10, twist = 0.10 * p.twist,
+                            stripes = true, dieback = p.dieback, berries = 0.035, clump = 0.16,
+                            holderHops = 4, innerLeaves = 0.6,
+                            boleFraction = 0.10, crownFraction = 0.90 },
+                snag    = { shape = "Juniper", bare = true, bark = SILVER, barkName = "tree.silver",
+                            limb = SILVER, limbName = "tree.silver",
+                            lobes = 0.4, density = 3.6, lift = 0.10, twist = 0.12 * p.twist,
+                            breakHops = 2, boleFraction = 0.12, crownFraction = 0.85 },
+                pinyon  = { shape = "Pinyon", bark = PINYONBARK, barkName = "tree.pinyonbark",
+                            limb = PINYONLIMB, limbName = "tree.pinyonlimb",
+                            foliage = PINYON, foliageName = "tree.pinyon",
+                            lobes = 0.22, density = 2.2, lift = 0.16, clump = 0.14,
+                            holderHops = 5, innerLeaves = 0.85,
+                            boleFraction = 0.08, crownFraction = 0.90 },
+            }
+            local look = looks[kind]
+            local crownH = trunkHeight * look.crownFraction
+            local bole = max(2, floor(trunkHeight * look.boleFraction))
+            local path = trunkPath(ctx, trunkHeight, p.curve, dirX, dirZ, arc * 0.5, p.seed)
+            return growBroadleaf(tree, ctx, p, kind, path, trunkHeight, bole, crownH, crownRadius,
+                                 trunkRadius, rootCount, phase, look)
+        end
+
         -- ---- Conifer ----
         --
-        -- Whorls, not a cone. A conifer's silhouette is layered and you can see the trunk between the
-        -- layers; a solid taper is the one shape that cannot read as one, however finely its rim is
-        -- eroded. Each whorl is a ring of short drooping branches with needle clusters hung along
-        -- them, and the vertical gaps between whorls are as much of the look as the branches.
+        -- Its own generator (growConifer, above), because a conifer is not a broadleaf with different
+        -- foliage: its silhouette is the shape, and the shape is tiers.
         if kind == "conifer" then
-            local path = trunkPath(ctx, trunkHeight, p.curve * 0.35, dirX, dirZ, arc * 0.35, p.seed)
-            growTrunk(tree, path, trunkHeight, trunkRadius, max(0.6, trunkRadius * 0.22), BARK, 3, phase)
-            if p.roots > 0 then
-                growRoots(tree, ctx, rootCount, trunkRadius * 2.4 * p.roots,
-                          max(0.9, trunkRadius * 0.55), BRANCH, 3, phase, p.seed + 811)
-            end
-
-            local crownBase = max(2, floor(trunkHeight * 0.28))
-            local crownTop = trunkHeight
-            local span = max(1, crownTop - crownBase)
-            -- **The gap between whorls is the whole effect.** Two voxels apart they merge and the
-            -- result is the solid cone this was written to replace -- the layers have to be further
-            -- apart than the needle clusters hanging off them are deep, or there is nothing to see
-            -- between them. Three voxels is the floor at which the eye separates them at all.
-            local step = max(3.0, trunkHeight * 0.085)
-
-            -- Collected first and needled second, for the same reason the broadleaf does it: the
-            -- branches are the part that must not be thinned, so they are paid for before the budget
-            -- is divided among the foliage.
-            local hangs = {}
-            local level = crownBase
-            local whorl = 0
-            while level <= crownTop do
-                whorl = whorl + 1
-                local t = (level - crownBase) / span
-                local jitter = pv.hash(ctx.x, ctx.y + level, ctx.z, p.seed + 71)
-                -- The profile: mostly a taper, perturbed per whorl so no two rings agree. Kept under
-                -- the crown radius that was asked for -- a jitter that can multiply above 1 makes the
-                -- widest whorl wider than the control says, and the control is what the clearance
-                -- test was given.
-                local profile = crownRadius * ((1.0 - t) ^ 0.75) * (0.72 + jitter * 0.38)
-                if profile >= 1.0 then
-                    local count = floor(min(11, max(4, 4 + profile * 0.9)))
-                    local spin = jitter * TAU
-                    local cx = path[min(level, trunkHeight)][1]
-                    local cz = path[min(level, trunkHeight)][2]
-                    for branch = 1, count do
-                        local azimuth = spin + branch * TAU / count
-                        local droop = -0.18 - jitter * 0.18
-                        -- A gentle sag over the branch's length, not a fall. At a firmer curl the
-                        -- lowest whorls -- the longest ones -- reach the ground and pool there, and
-                        -- the bottom of the tree becomes a solid slab with the tiers only visible
-                        -- above it.
-                        -- **A conifer's branch is a twig, whatever the trunk is doing.** Taken from
-                        -- the trunk's radius it grew with the tree -- at a large crown that is a
-                        -- four-voxel log eighty voxels long, ninety times over, and the wood alone
-                        -- came to 66000 of the placement's budget. The needles then had nothing left
-                        -- to be built from, so the tree arrived as bare branches with a few beads on
-                        -- them. Sized from the branch's own length instead, and capped.
-                        local ex, ey, ez, _, _, _ = tree:limb(
-                            cx, level, cz, cos(azimuth), droop, sin(azimuth),
-                            profile, max(0.8, min(2.6, profile * 0.07)), 0.5,
-                            0, -1, 0, 0.18, BRANCH, 3)
-                        hangs[#hangs + 1] = { cx, level, cz, ex, ey, ez, profile }
-                        if tree.full then break end
-                    end
-                end
-                if tree.full then break end
-                level = level + max(1, floor(step * (0.75 + jitter * 0.5) + 0.5))
-            end
-
-            -- The leader: a bare spike of trunk above the last whorl, which is what a fir has and
-            -- what the old brush's single top voxel was reaching for.
-            local leader = max(1, floor(trunkHeight * 0.04))
-            for i = 1, leader do
-                tree:disc(floor(path[trunkHeight][1] + 0.5), trunkHeight + i,
-                          floor(path[trunkHeight][2] + 0.5), 0.6 - i * 0.1, NEEDLE + 2)
-            end
-
-            -- ---- Needles ----
-            --
-            -- Sprays hung along each whorl branch, built by the same shelled, budget-fitted lobe the
-            -- broadleaf's crown is made of -- flattened harder, because a conifer's spray is a frond
-            -- rather than a ball.
-            --
-            -- **Their size comes from the branch they hang on.** Capped at a constant radius they did
-            -- not grow when the tree did: a branch eighty voxels long carried the same two-voxel beads
-            -- as one eight voxels long, which is what made a large conifer read as bare sticks with
-            -- decorations. Everything about a tree has to be proportional to it or it only looks right
-            -- at the one size it was tuned at -- the same lesson as the trunk, in the other direction.
-            local sprays = {}
-            for i = 1, #hangs do
-                local h = hangs[i]
-                -- **The floor is not cosmetic.** Below about two voxels the shell arithmetic in
-                -- growLobe degenerates: the warp band collapses onto a handful of candidate cells, the
-                -- raggedness test then removes most of those, and consecutive sprays -- spaced by a
-                -- fraction of their own radius -- deduplicate into each other. A small conifer came out
-                -- with two hundred needles on it for that reason, which is the barren look at the other
-                -- end of the size range from the one the proportional radius fixed.
-                local sprayRadius = max(2.4, h[7] * 0.20)
-                -- Spaced at just under a radius so consecutive sprays merge into a continuous frond
-                -- along the branch instead of a string of beads.
-                local along = max(2, floor(h[7] / (sprayRadius * 0.9)))
-                for c = 1, along do
-                    -- Starts a little out from the trunk: the inner part of a whorl branch is bare on
-                    -- a real conifer, and it is also where every branch of the whorl converges, so
-                    -- foliage there is hidden inside the tree.
-                    local t = 0.25 + 0.75 * (c / along)
-                    sprays[#sprays + 1] = {
-                        h[1] + (h[4] - h[1]) * t,
-                        h[2] + (h[5] - h[2]) * t,
-                        h[3] + (h[6] - h[3]) * t,
-                        -- Tapering toward the branch's tip.
-                        sprayRadius * (1.15 - 0.45 * t),
-                    }
-                end
-            end
-
-            -- Fitted to what the skeleton left, exactly as the broadleaf's crown is. fitCrown wants
-            -- one representative radius, so it is given the mean.
-            local meanRadius = 0
-            for i = 1, #sprays do meanRadius = meanRadius + sprays[i][4] end
-            meanRadius = #sprays > 0 and (meanRadius / #sprays) or 1
-            local density, scale = fitCrown(p, sprays, meanRadius, tree.spent)
-            for i = 1, #sprays do
-                if tree.full then break end
-                local spray = sprays[i]
-                growLobe(tree, ctx, p, floor(spray[1] + 0.5), floor(spray[2] + 0.5),
-                         floor(spray[3] + 0.5), max(1.0, spray[4] * scale), density,
-                         p.seed + 401 + i * 7, NEEDLE, 0.62, 3)
-            end
-
-            return tree.voxels
+            return growConifer(tree, ctx, p, trunkHeight, crownRadius, trunkRadius, rootCount, phase,
+                               dirX, dirZ, arc)
         end
 
         -- ---- Broadleaf and bare ----
         --
-        -- The same skeleton. A bare tree is one with the foliage step skipped and a level more
-        -- branching, which is the honest relationship between them: what you see of a bare tree *is*
-        -- the structure a leafy one hides.
-        local barkMaterial = (kind == "bare") and DEAD or BARK
-        local limbMaterial = (kind == "bare") and DEADLIMB or BRANCH
-        local barkSteps = (kind == "bare") and 2 or 3
-
+        -- One generator (growBroadleaf, space colonization), and a bare tree is the same tree with
+        -- the leaves skipped and a finer twig density -- what you see of a bare tree *is* the
+        -- structure a leafy one hides. The crown sits on a clear bole: as tall as the shape asks for,
+        -- but never more than 80% of the tree.
+        local crownH = min((CROWN_HEIGHT[p.crownShape] or 1.8) * crownRadius, trunkHeight * 0.8)
+        local bole = max(2, floor(trunkHeight - crownH))
         local path = trunkPath(ctx, trunkHeight, p.curve, dirX, dirZ, arc, p.seed)
-        growTrunk(tree, path, trunkHeight, trunkRadius, max(0.5, trunkRadius * 0.3),
-                  barkMaterial, barkSteps, phase)
-        if p.roots > 0 then
-            growRoots(tree, ctx, rootCount, trunkRadius * 2.4 * p.roots,
-                      max(0.9, trunkRadius * 0.55), limbMaterial, barkSteps, phase, p.seed + 811)
-        end
-
-        local tips = {}
-        -- Primary limbs off the upper trunk. More of them on a bigger tree, because the count that
-        -- makes a small crown irregular makes a large one bald.
-        local primary = floor(min(7, max(3, 3 + crownRadius * 0.22)))
-        local first = max(2, floor(trunkHeight * 0.45))
-
-        -- **The crown has to end up the size that was asked for.** A limb is not the whole reach: each
-        -- level of branching adds its children's length on top of its own, so a primary limb of the
-        -- crown's radius makes a crown two and a half times too wide -- which is what "Crown radius"
-        -- did before it meant anything. Divide the reach by the length of the chain that will grow out
-        -- of it, and the control means what its label says at every branch depth.
-        local spanFactor, term = 1.0, 1.0
-        for _ = 1, levels do
-            term = term * 0.70
-            spanFactor = spanFactor + term
-        end
-        local limbLength = crownRadius * 0.62 / spanFactor
-        for limb = 1, primary do
-            local jitter = pv.hash(ctx.x + limb, ctx.y, ctx.z, p.seed + 401)
-            local level = min(trunkHeight, first + floor((trunkHeight - first) * (limb - 1) / primary
-                                                         + jitter * 2.0))
-            local azimuth = phase + limb * 2.39996 + (jitter - 0.5) * 0.9
-            -- Higher limbs leave the trunk closer to vertical, which is what stacks a crown rather
-            -- than spoking it.
-            local rise = 0.35 + 0.75 * (level / trunkHeight)
-            local length = limbLength * (0.78 + jitter * 0.44)
-            growBranch(tree, ctx, p,
-                       path[level][1], level, path[level][2],
-                       cos(azimuth), rise, sin(azimuth),
-                       length, max(0.9, trunkRadius * 0.62), levels, tips,
-                       limbMaterial, barkSteps, p.seed + limb * 37)
-            if tree.full then break end
-        end
-
-        -- A crown with no branches to hang on still needs somewhere to put its leaves: a small tree
-        -- is a trunk with a lobe on top, which is correct for a sapling and is the one case the old
-        -- brush's shape was actually right for.
-        if #tips == 0 then
-            tips[1] = { path[trunkHeight][1], trunkHeight + crownRadius * 0.5,
-                        path[trunkHeight][2], crownRadius }
-        end
-
-        if kind == "bare" then return tree.voxels end
-
-        -- ---- Foliage ----
-        --
-        -- **A lobe's size comes from how many there are.** Sized as a fixed fraction of the crown it
-        -- works at one branch depth and fails at the next: three lobes at 0.38 of the crown is a
-        -- pleasantly lumpy tree, and forty of them at 0.38 is a sphere again -- a bigger primitive
-        -- than the one this brush was rewritten to stop making, and the shape a large tree came out as
-        -- for exactly that reason. Solving for a share of the crown's volume instead keeps the gaps
-        -- between clumps open at every size, which is what lets the branches be seen through the
-        -- foliage and is most of what makes a big tree read as a tree.
-        --
-        -- Under 1: the lobes are meant to overlap, and a coverage of 1 would mean a crown filled
-        -- exactly once over -- which, with them clustered around branch tips rather than spread
-        -- evenly, is a solid ball with bald patches at the rim.
-        local COVERAGE = 0.45
-        local lobeRadius = crownRadius * ((COVERAGE / max(1, #tips)) ^ (1.0 / 3.0))
-        lobeRadius = max(1.5, min(lobeRadius, crownRadius * (levels > 0 and 0.55 or 1.0)))
-        local density, scale = fitCrown(p, tips, lobeRadius, tree.spent)
-        lobeRadius = lobeRadius * scale
-        for i = 1, #tips do
-            if tree.full then break end
-            local tip = tips[i]
-            local jitter = pv.hash(floor(tip[1]) + i, floor(tip[2]), floor(tip[3]), p.seed + 601)
-            growLobe(tree, ctx, p, floor(tip[1] + 0.5), floor(tip[2] + 0.5), floor(tip[3] + 0.5),
-                     lobeRadius * (0.75 + jitter * 0.5), density, p.seed + 3 + i * 13)
-        end
-
-        if p.blossom then
-            -- Sprinkled through the crown afterwards rather than chosen per leaf inside it: the
-            -- crown is already written, and a second pass over its voxels is cheaper than a branch
-            -- inside the triple loop that generated them.
-            for i = 1, #tree.voxels do
-                local voxel = tree.voxels[i]
-                if voxel[4] >= LEAF and voxel[4] < LEAF + 4 then
-                    local n = pv.hash(ctx.x + voxel[1], ctx.y + voxel[2], ctx.z + voxel[3], p.seed + 5)
-                    if n > 0.82 then voxel[4] = BLOSSOM end
-                end
-            end
-        end
-
-        return tree.voxels
+        return growBroadleaf(tree, ctx, p, kind, path, trunkHeight, bole, crownH, crownRadius,
+                             trunkRadius, rootCount, phase)
     end,
 }

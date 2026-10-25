@@ -1,0 +1,274 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "model",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [164, 123, 123],
+          "name": "tree.bark.1"
+        },
+        {
+          "color": [256, 184, 153],
+          "name": "tree.bark.2"
+        },
+        {
+          "color": [368, 276, 205],
+          "name": "tree.bark.3"
+        },
+        {
+          "color": [491, 389, 286],
+          "name": "tree.bark.4"
+        },
+        {
+          "color": [61, 143, 102],
+          "name": "tree.leaf.1"
+        },
+        {
+          "color": [113, 246, 113],
+          "name": "tree.leaf.2"
+        },
+        {
+          "color": [205, 368, 133],
+          "name": "tree.leaf.3"
+        },
+        {
+          "color": [348, 512, 153],
+          "name": "tree.leaf.4"
+        },
+        {
+          "color": [563, 655, 246],
+          "name": "tree.leaf.5"
+        },
+        {
+          "color": [36, 102, 102],
+          "name": "tree.needle.1"
+        },
+        {
+          "color": [61, 174, 143],
+          "name": "tree.needle.2"
+        },
+        {
+          "color": [113, 266, 174],
+          "name": "tree.needle.3"
+        },
+        {
+          "color": [205, 368, 194],
+          "name": "tree.needle.4"
+        },
+        {
+          "color": [348, 481, 225],
+          "name": "tree.needle.5"
+        },
+        {
+          "color": [962, 777, 839],
+          "name": "tree.blossom"
+        },
+        {
+          "color": [307, 266, 225],
+          "name": "tree.dead.1"
+        },
+        {
+          "color": [471, 430, 379],
+          "name": "tree.dead.2"
+        },
+        {
+          "color": [205, 153, 143],
+          "name": "tree.branch.1"
+        },
+        {
+          "color": [317, 235, 174],
+          "name": "tree.branch.2"
+        },
+        {
+          "color": [450, 348, 246],
+          "name": "tree.branch.3"
+        },
+        {
+          "color": [358, 317, 276],
+          "name": "tree.deadlimb.1"
+        },
+        {
+          "color": [542, 501, 450],
+          "name": "tree.deadlimb.2"
+        },
+        {
+          "color": [225, 61, 51],
+          "name": "tree.autumn.1"
+        },
+        {
+          "color": [430, 113, 51],
+          "name": "tree.autumn.2"
+        },
+        {
+          "color": [675, 276, 72],
+          "name": "tree.autumn.3"
+        },
+        {
+          "color": [849, 481, 123],
+          "name": "tree.autumn.4"
+        },
+        {
+          "color": [951, 716, 266],
+          "name": "tree.autumn.5"
+        },
+        {
+          "color": [143, 174, 123],
+          "name": "tree.juniper.1"
+        },
+        {
+          "color": [235, 286, 174],
+          "name": "tree.juniper.2"
+        },
+        {
+          "color": [348, 399, 235],
+          "name": "tree.juniper.3"
+        },
+        {
+          "color": [481, 522, 317],
+          "name": "tree.juniper.4"
+        },
+        {
+          "color": [624, 644, 430],
+          "name": "tree.juniper.5"
+        },
+        {
+          "color": [41, 92, 82],
+          "name": "tree.pinyon.1"
+        },
+        {
+          "color": [72, 153, 113],
+          "name": "tree.pinyon.2"
+        },
+        {
+          "color": [123, 235, 143],
+          "name": "tree.pinyon.3"
+        },
+        {
+          "color": [205, 327, 174],
+          "name": "tree.pinyon.4"
+        },
+        {
+          "color": [317, 430, 215],
+          "name": "tree.pinyon.5"
+        },
+        {
+          "color": [174, 133, 123],
+          "name": "tree.stripbark.1"
+        },
+        {
+          "color": [307, 215, 174],
+          "name": "tree.stripbark.2"
+        },
+        {
+          "color": [450, 317, 246],
+          "name": "tree.stripbark.3"
+        },
+        {
+          "color": [532, 460, 399],
+          "name": "tree.stripbark.4"
+        },
+        {
+          "color": [644, 593, 532],
+          "name": "tree.stripbark.5"
+        },
+        {
+          "color": [246, 184, 153],
+          "name": "tree.juniperlimb.1"
+        },
+        {
+          "color": [389, 297, 235],
+          "name": "tree.juniperlimb.2"
+        },
+        {
+          "color": [532, 471, 409],
+          "name": "tree.juniperlimb.3"
+        },
+        {
+          "color": [194, 153, 143],
+          "name": "tree.pinyonbark.1"
+        },
+        {
+          "color": [297, 235, 205],
+          "name": "tree.pinyonbark.2"
+        },
+        {
+          "color": [409, 327, 266],
+          "name": "tree.pinyonbark.3"
+        },
+        {
+          "color": [512, 430, 348],
+          "name": "tree.pinyonbark.4"
+        },
+        {
+          "color": [256, 205, 174],
+          "name": "tree.pinyonlimb.1"
+        },
+        {
+          "color": [368, 297, 246],
+          "name": "tree.pinyonlimb.2"
+        },
+        {
+          "color": [471, 399, 327],
+          "name": "tree.pinyonlimb.3"
+        },
+        {
+          "color": [338, 317, 297],
+          "name": "tree.silver.1"
+        },
+        {
+          "color": [481, 460, 430],
+          "name": "tree.silver.2"
+        },
+        {
+          "color": [634, 614, 573],
+          "name": "tree.silver.3"
+        },
+        {
+          "color": [777, 757, 706],
+          "name": "tree.silver.4"
+        },
+        {
+          "color": [430, 512, 644],
+          "name": "tree.berry"
+        },
+        {
+          "color": [276, 317, 276],
+          "name": "tree.sage.1"
+        },
+        {
+          "color": [409, 460, 389],
+          "name": "tree.sage.2"
+        },
+        {
+          "color": [542, 593, 501],
+          "name": "tree.sage.3"
+        },
+        {
+          "color": [675, 716, 614],
+          "name": "tree.sage.4"
+        },
+        {
+          "color": [307, 256, 215],
+          "name": "tree.sagestem.1"
+        },
+        {
+          "color": [430, 379, 317],
+          "name": "tree.sagestem.2"
+        }
+      ],
+      "position": [0.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "model.data",
+      "type": "data"
+    }
+  ],
+  "name": "snag_a",
+  "version": 1
+}
