@@ -223,6 +223,30 @@ if(NOT TARGET Jolt::Jolt)
     set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
     set(JPH_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     set(ENABLE_INSTALL ${PROJV_INSTALL} CACHE BOOL "" FORCE)
+    # One patch to the submodule: a read-only accessor for the impulses the solver applied at each
+    # contact, which breaking under load needs (runtime/physics/physics_world.h: contactLoads). Applied
+    # here when it is not already; a Jolt found elsewhere lacks it, and the engine then breaks on
+    # impact energy alone (PROJV_JOLT_APPLIED_IMPULSES undefined).
+    set(PROJV_JOLT_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/jolt-applied-impulses.patch")
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" apply --reverse --check "${PROJV_JOLT_PATCH}"
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/external/JoltPhysics"
+                        RESULT_VARIABLE PROJV_JOLT_PATCHED OUTPUT_QUIET ERROR_QUIET)
+        if(NOT PROJV_JOLT_PATCHED EQUAL 0)
+            execute_process(COMMAND "${GIT_EXECUTABLE}" apply "${PROJV_JOLT_PATCH}"
+                            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/external/JoltPhysics"
+                            RESULT_VARIABLE PROJV_JOLT_PATCH_FAILED)
+            if(PROJV_JOLT_PATCH_FAILED)
+                message(FATAL_ERROR "Could not apply ${PROJV_JOLT_PATCH} to external/JoltPhysics: is the "
+                                    "submodule at the pinned commit (`git submodule update external/JoltPhysics`)?")
+            endif()
+            message(STATUS "Applied cmake/patches/jolt-applied-impulses.patch to external/JoltPhysics")
+        endif()
+        set(PROJV_JOLT_APPLIED_IMPULSES ON)
+    else()
+        message(WARNING "git was not found to patch external/JoltPhysics: breaking under load is off")
+    endif()
     add_subdirectory(external/JoltPhysics/Build)
     set(PROJV_VENDORED_DEPS ON)
 endif()
@@ -389,6 +413,9 @@ add_library(projv_physics OBJECT
 target_include_directories(projv_physics PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(projv_physics PRIVATE cxx_std_20)
 target_compile_definitions(projv_physics PRIVATE ${PROJV_LOG_DEFS})
+if(PROJV_JOLT_APPLIED_IMPULSES)
+    target_compile_definitions(projv_physics PRIVATE PROJV_JOLT_APPLIED_IMPULSES)
+endif()
 target_compile_options(projv_physics PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra;-ffp-contract=off>
     $<$<CXX_COMPILER_ID:MSVC>:/W4;/fp:precise>

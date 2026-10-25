@@ -5,6 +5,8 @@
 
 #include "doctest/doctest.h"
 
+#include <spdlog/spdlog.h>
+
 #include <cmath>
 #include <vector>
 
@@ -12,6 +14,7 @@
 #include "runtime/physics.h"
 #include "utils/collision_geometry.h"
 #include "utils/editing.h"
+#include "utils/material.h"
 #include "utils/scene_query.h"
 #include "utils/tile_table.h"
 
@@ -233,5 +236,78 @@ TEST_CASE("tiles bench: a pile of voxel pieces on a voxel floor, boxes against t
         MESSAGE((r == CollisionRepresentation::Tiles ? "tiles" : "boxes") << ": " << ms / steps << " ms a step over " << steps
                 << "; " << asleep << " of 400 asleep, " << under << " under the floor");
         CHECK(under == 0);
+    }
+}
+
+TEST_CASE("tiles diagnosis: a big hull falls on a floor one voxel thick" * doctest::skip()) {
+    // Run with: build/bin/projv_unit_tests -tc="tiles diagnosis*" --no-skip
+    spdlog::set_level(spdlog::level::trace);
+    for (CollisionRepresentation r : {CollisionRepresentation::Boxes, CollisionRepresentation::Tiles})
+    for (float height : {10.0f, 4.0f})
+    for (float floorSpeed : {12.0f, 3.0f}) {
+        projv::Application app;
+        projv::Scene& scene = app.world.ctx().emplace<projv::Scene>();
+        double now = 0.0;
+        app.clock = [&now] { return now; };
+        installSceneBridge(app);
+        PhysicsConfig config;
+        config.collision.representation = r;
+        installPhysics(app, config);
+        installImpactFracture(app);
+        int breaks = 0, impactCount = 0;
+        float fastestImpact = 0.0f, mostEnergy = 0.0f;
+        app.events().on<projv::BodyBroken>([&](const projv::BodyBroken&) { breaks++; });
+        app.runStartup();
+        app.runFrame();
+        PhysicsMaterial concrete{2400.0f, 0.8f, 0.0f};
+        concrete.strength = 4e5f;
+        concrete.shardSize = 0.3f;
+        definePhysicsMaterial(app.world, "concrete", concrete);
+        PhysicsMaterial wood{600.0f, 0.6f, 0.0f};
+        wood.strength = 1e5f;
+        wood.shardSize = 0.3f;
+        definePhysicsMaterial(app.world, "wood", wood);
+        const uint32_t GREY = 0x2AAAAAAAu, BROWN = 0x1F0A0000u;
+        ComponentHandle floor = utils::addComponent(scene, projv::ComponentKind::Chunk, "floor", INVALID_COMPONENT_HANDLE, 64, 0.1f);
+        utils::setComponentTransform(scene, floor, vec3(-10, -0.1f, -10), quat(1, 0, 0, 0), 1.0f);
+        utils::queueVoxelAdd(scene, floor, fill({0, 0, 0}, {199, 0, 199}, GREY));
+        utils::updateScene(scene);
+        utils::setMaterialPhysics(scene, floor, utils::findMaterialByColor(scene.components[floor], GREY), "concrete");
+        Entity floorEntity = spawnComponent(app.world, floor);
+        projv::StaticCollider fixed;
+        fixed.breaksOnImpact = true;
+        fixed.minImpactSpeed = floorSpeed;   // Voxel Mayhem's map world: 12 m/s
+        app.world.emplace<projv::StaticCollider>(floorEntity, fixed);
+        // A hull: a 6 x 1.5 x 2 m box of 10 cm voxels, its walls and bottom one voxel thick, open at the top.
+        std::vector<projv::PendingVoxelOp> hull;
+        for (int z = 0; z < 20; z++)
+            for (int y = 0; y < 15; y++)
+                for (int x = 0; x < 60; x++)
+                    if (y == 0 || x == 0 || x == 59 || z == 0 || z == 19) hull.push_back({true, ivec3(x, y, z), BROWN});
+        ComponentHandle boat = utils::addComponent(scene, projv::ComponentKind::Chunk, "boat", INVALID_COMPONENT_HANDLE, 64, 0.1f);
+        utils::setComponentTransform(scene, boat, vec3(-3, height, -1), glm::angleAxis(0.15f, vec3(0, 0, 1)), 1.0f);
+        utils::queueVoxelAdd(scene, boat, hull);
+        utils::updateScene(scene);
+        utils::setMaterialPhysics(scene, boat, utils::findMaterialByColor(scene.components[boat], BROWN), "wood");
+        Entity boatEntity = spawnComponent(app.world, boat, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+        projv::RigidBody rigid;
+        rigid.breaksOnImpact = true;
+        app.world.emplace<projv::RigidBody>(boatEntity, rigid);
+        float lowest = 1e9f;
+        for (int i = 0; i < 4 * 60; i++) {
+            now += DT;
+            app.runFrame();
+            for (const BodyImpact& hit : impacts(app.world)) {
+                impactCount++;
+                fastestImpact = std::max(fastestImpact, hit.speed);
+                mostEnergy = std::max(mostEnergy, hit.energy);
+            }
+            if (app.world.valid(boatEntity) && app.world.all_of<projv::PhysicsBody>(boatEntity))
+                lowest = std::min(lowest, bodyPose(app.world, boatEntity).position.y);
+        }
+        const BodyState end = app.world.valid(boatEntity) ? bodyPose(app.world, boatEntity) : BodyState{};
+        MESSAGE((r == CollisionRepresentation::Tiles ? "tiles" : "boxes") << " from " << height << " m, floor's least " << floorSpeed << " m/s: impacts " << impactCount << " (fastest " << fastestImpact
+                << " m/s, most " << mostEnergy << " J), breaks " << breaks << "; the hull's corner lowest y " << lowest << ", ends at y "
+                << end.position.y << ", awake " << end.awake << ", speed " << glm::length(end.linearVelocity));
     }
 }

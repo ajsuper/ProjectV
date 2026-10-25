@@ -487,6 +487,9 @@ patterns are code, registered by name, all through one interface.
   each brick near it, and thrown bricks break where they land hard.
 - Not yet: patterns that read authored crack lines (an attachment), sounds on impacts, merging
   settled debris back into static geometry.
+- Since (2026-10-25, `docs/plans/impact-loads.md`): voxel bodies are continuous; `minImpactEnergy`;
+  an impact strikes at the hardest-pushed point with its share of the energy (a patch to Jolt reads
+  the solver's impulses); the built-in patterns leave a ragged rim instead of a ball.
 
 ## Debris and support (built 2026-10-15)
 

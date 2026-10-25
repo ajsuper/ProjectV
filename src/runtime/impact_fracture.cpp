@@ -10,12 +10,13 @@ namespace projv::runtime {
             ImpactFractureConfig config;
         };
 
-        // Whether a hit may break `entity`: a voxel body that asked to (breaksOnImpact).
-        bool breaksOnImpact(const World& world, Entity entity) {
+        // Whether a hit carrying `energy` may break `entity`: a voxel body that asked to
+        // (breaksOnImpact), and the hit at least its minImpactEnergy.
+        bool breaksOnImpact(const World& world, Entity entity, float energy) {
             if (const RigidBody* rigid = world.try_get<RigidBody>(entity))
-                return rigid->breaksOnImpact && rigid->shape == RigidBody::Shape::Voxels;
+                return rigid->breaksOnImpact && rigid->shape == RigidBody::Shape::Voxels && energy >= rigid->minImpactEnergy;
             const StaticCollider* fixed = world.try_get<StaticCollider>(entity);
-            return fixed && fixed->breaksOnImpact;
+            return fixed && fixed->breaksOnImpact && energy >= fixed->minImpactEnergy;
         }
 
         // After each step: every side of every impact that can break is struck, at the next step, in
@@ -24,14 +25,18 @@ namespace projv::runtime {
             World& world = app.world;
             const ImpactFractureConfig& config = world.ctx().get<ImpactFracture>().config;
             for (const BodyImpact& hit : impacts(world)) {
+                // What the hardest-hit point meets: a body landing on many points spreads its energy
+                // over them, and only the worst of them cracks -- a boat set down hard chips at its
+                // keel, rather than making the crater its whole energy would.
+                const float energy = hit.energy * hit.share;
                 const Entity sides[2] = {hit.a, hit.b};
                 const core::vec3 velocities[2] = {hit.velocityA, hit.velocityB};
                 for (int k = 0; k < 2; k++) {
                     const Entity struck = sides[k], striker = sides[1 - k];
-                    if (!world.valid(struck) || !breaksOnImpact(world, struck) || !canBreak(world, struck)) continue;
+                    if (!world.valid(struck) || !breaksOnImpact(world, struck, energy) || !canBreak(world, struck)) continue;
                     Strike strike;
                     strike.at = hit.point;
-                    strike.energy = hit.energy;
+                    strike.energy = energy;
                     strike.striker = striker;
                     strike.cause = BreakCause::Impact;
                     // The body's motion from before the hit: the contact has since stopped it.

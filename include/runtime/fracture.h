@@ -55,6 +55,7 @@ namespace projv::runtime {
         float      shardSize = 1.0f;                // the material's
         core::vec3 grain{0.0f, 1.0f, 0.0f};         // the material's, unit length
         const PhysicsMaterial& material;            // the struck voxel's
+        core::vec3 direction{0.0f};                 // the way the blow went (Strike::push), unit length; 0: none
     };
 
     // The randomness a pattern may use (splitmix64): the same numbers for the same strike on every
@@ -86,7 +87,11 @@ namespace projv::runtime {
     // Null when there is none of that name.
     const FracturePattern* fracturePattern(const World& world, const std::string& name);
 
-    // The built-in patterns, as functions: for wrapping in a pattern of your own, and for tests.
+    // The built-in patterns, as functions: for wrapping in a pattern of your own, and for tests. Each
+    // breaks everything near the strike and less towards its reach: a shard whose nearest voxel is past
+    // 40% of the reach stays, cracked but held, with a chance rising to 70% at the reach -- so a hole's
+    // edge is ragged, not a sphere, and the wall round it keeps some of its shards. With a direction the
+    // distance is across it: what is in the blow's way goes, and the rim round its path stays.
     namespace fracture_patterns {
         // Stone, glass: Voronoi cells round seeds scattered among the voxels, small shards at the
         // strike growing to shardSize at the reach. Seeds beyond the reach stay, so the break's edge
@@ -94,7 +99,7 @@ namespace projv::runtime {
         std::vector<int32_t> shatter(const FractureInput& in, FractureRandom& random);
         // Wood: as shatter, but the cells are three times longer along the grain than across it.
         std::vector<int32_t> splinter(const FractureInput& in, FractureRandom& random);
-        // Plaster, earth, snow: cells of shardSize throughout, and the break round, at the reach.
+        // Plaster, earth, snow: cells of shardSize throughout, out to the reach.
         std::vector<int32_t> crumble(const FractureInput& in, FractureRandom& random);
         // Brick, planks: apart where palette entries meet first. Each run of touching voxels of one
         // entry that the strike reaches comes away whole -- a brick, a plank -- and is crumbled

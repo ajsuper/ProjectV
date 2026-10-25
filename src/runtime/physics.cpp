@@ -37,6 +37,9 @@ namespace projv::runtime {
         };
 
         struct PhysicsRuntime {
+            // The last step's impacts (runtime::impacts), and those whose share the solver had not said
+            // yet (a continuous body's sweep), for the next step's.
+            std::vector<BodyImpact> impacts, waiting;
             std::unique_ptr<PhysicsWorld> world;
             utils::CollisionParams        collision;
             bool                          destroyLeavers = true;
@@ -591,11 +594,15 @@ namespace projv::runtime {
                     case RigidBody::Quality::Continuous: d.continuous = true; break;
                     case RigidBody::Quality::Discrete:   d.continuous = false; break;
                     case RigidBody::Quality::Auto: {
-                        // Small things are the ones that slip through others in a step.
+                        // Small things are the ones that slip through others in a step -- and anything of
+                        // voxels, however big: its walls may be one voxel thick (a hull, a crate), and so may
+                        // what it lands on (a floor). A big hull falling 10 m went 0.47 m into a floor 0.1 m
+                        // thick and ended wedged under it. Jolt sweeps a continuous body only in a step that
+                        // moves it more than a share of its inner radius, so a body at rest costs nothing more.
                         float smallest = bounds.empty() ? 2.0f * std::max(rigid->radius, 0.0f)
                                                         : std::min({bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y,
                                                                     bounds.max.z - bounds.min.z});
-                        d.continuous = motion == MotionType::Dynamic && smallest < 1.0f;
+                        d.continuous = motion == MotionType::Dynamic && (smallest < 1.0f || kind == RigidBody::Shape::Voxels);
                         break;
                     }
                 }
@@ -902,7 +909,10 @@ namespace projv::runtime {
             if (strike.reach > 0.0f) seed.add(strike.reach);
             if (strike.shardSize > 0.0f) seed.add(strike.shardSize);
             FractureRandom random(seed.value);
-            const FractureInput input{voxels, at, reach, outer, shardMetres / metres, material.grain, material};
+            // The way the blow went, in the component's frame: what a pattern breaks along it rather than round it.
+            core::vec3 blow = core::vec3(glm::inverse(toWorld) * core::vec4(strike.push, 0.0f));
+            blow = glm::length(blow) > 1e-6f ? glm::normalize(blow) : core::vec3(0.0f);
+            const FractureInput input{voxels, at, reach, outer, shardMetres / metres, material.grain, material, blow};
             std::vector<int32_t> shardOf = (*pattern)(input, random);
             if (shardOf.size() != voxels.size()) {
                 core::warn("physics: fracture pattern '{}' answered for {} voxels of {}; nothing breaks", material.fracture,
@@ -978,6 +988,7 @@ namespace projv::runtime {
                 pieceRigid.material = fixed->material;
                 pieceRigid.breaksOnImpact = fixed->breaksOnImpact;
                 pieceRigid.minImpactSpeed = fixed->minImpactSpeed;
+                pieceRigid.minImpactEnergy = fixed->minImpactEnergy;
             }
             const OnUnlink onUnlink = link->onUnlink;
             const bool networked = world.all_of<NetId>(entity);
@@ -1676,6 +1687,46 @@ namespace projv::runtime {
         // passes -- and it finds nothing under it. Then the
         // old ones go: past their seconds, and the oldest past the count. In entity order: debris
         // feeds nothing in the simulation, so its order is its own.
+        // The step's impacts, as entities (runtime::impacts). One whose share the solver could not say
+        // -- a continuous body's sweep stopped it, outside the solver -- waits a step, and takes its share
+        // and point from that step's load between the two, pressed together by then; its energy and
+        // velocities stay the hit's. Held by entity: a break in between remakes a body under another id.
+        // One that has parted by then met at a point, and keeps all of it. The waiting come after the
+        // step's own, in their order; of two for one pair, the faster stays.
+        void gatherImpacts(World& world, PhysicsRuntime& physics) {
+            const PhysicsWorld& sim = *physics.world;
+            auto entityOf = [&](BodyId id) {
+                auto it = physics.byBody.find(id.value);
+                return it != physics.byBody.end() && world.valid(it->second) ? it->second : NullEntity;
+            };
+            std::vector<BodyImpact> now, waiting;
+            for (const Impact& hit : sim.impacts()) {
+                BodyImpact e{entityOf(hit.a), entityOf(hit.b), hit.point, hit.normal, hit.speed, hit.energy, hit.velocityA,
+                             hit.velocityB, hit.share, hit.impulse};
+                if (e.a == NullEntity || e.b == NullEntity) continue;
+                (e.share < 0.0f ? waiting : now).push_back(e);
+            }
+            for (BodyImpact e : physics.waiting) {
+                if (!world.valid(e.a) || !world.valid(e.b)) continue;
+                const PhysicsBody* a = world.try_get<PhysicsBody>(e.a);
+                const PhysicsBody* b = world.try_get<PhysicsBody>(e.b);
+                std::optional<ContactLoad> load = a && b ? sim.contactLoad(a->id, b->id) : std::nullopt;
+                e.share = load ? load->share : 1.0f;
+                if (load) { e.impulse = load->impulse; e.point = load->point; }
+                bool replaced = false, faster = true;
+                for (BodyImpact& other : now)
+                    if ((other.a == e.a && other.b == e.b) || (other.a == e.b && other.b == e.a)) {
+                        replaced = true;
+                        faster = e.speed > other.speed;
+                        if (faster) other = e;
+                        break;
+                    }
+                if (!replaced) now.push_back(e);
+            }
+            physics.impacts = std::move(now);
+            physics.waiting = std::move(waiting);
+        }
+
         void stepDebris(World& world, PhysicsRuntime& physics, float dt) {
             auto all = world.view<Debris>();
             if (all.empty()) return;
@@ -2387,6 +2438,7 @@ namespace projv::runtime {
 
             // 6. The step.
             sim.step(dt);
+            gatherImpacts(world, physics);
 
             // 7. The poses it left.
             for (auto [entity, body] : world.view<PhysicsBody>().each()) {
@@ -2821,18 +2873,8 @@ namespace projv::runtime {
     }
 
     std::vector<BodyImpact> impacts(const World& world) {
-        std::vector<BodyImpact> out;
         const PhysicsRuntime* physics = world.ctx().find<PhysicsRuntime>();
-        if (!physics) return out;
-        auto entityOf = [&](BodyId id) {
-            auto it = physics->byBody.find(id.value);
-            return it != physics->byBody.end() && world.valid(it->second) ? it->second : NullEntity;
-        };
-        for (const Impact& hit : physics->world->impacts()) {
-            BodyImpact e{entityOf(hit.a), entityOf(hit.b), hit.point, hit.normal, hit.speed, hit.energy, hit.velocityA, hit.velocityB};
-            if (e.a != NullEntity && e.b != NullEntity) out.push_back(e);
-        }
-        return out;
+        return physics ? physics->impacts : std::vector<BodyImpact>{};
     }
 
     std::vector<BodyContact> contacts(const World& world) {
@@ -3118,6 +3160,8 @@ namespace projv::runtime {
         put(out, uint32_t(physics.commands.size()));
         for (const Command& c : physics.commands) { put(out, c.c); put(out, c.entity); }
         put(out, physics.sequence);
+        put(out, uint32_t(physics.waiting.size()));
+        for (const BodyImpact& e : physics.waiting) put(out, e);
         return out;
     }
 
@@ -3154,6 +3198,14 @@ namespace projv::runtime {
             commands.push_back(c);
         }
         if (!get(snapshot, at, sequence)) return false;
+        uint32_t waitingCount = 0;
+        std::vector<BodyImpact> waiting;
+        if (!get(snapshot, at, waitingCount)) return false;
+        for (uint32_t i = 0; i < waitingCount; i++) {
+            BodyImpact e;
+            if (!get(snapshot, at, e)) return false;
+            waiting.push_back(e);
+        }
 
         // The same bodies, matched by NetId (or by entity, for those without): checked before
         // anything is touched.
@@ -3176,6 +3228,8 @@ namespace projv::runtime {
         }
         physics.commands = std::move(commands);
         physics.sequence = sequence;
+        physics.waiting = std::move(waiting);
+        physics.impacts.clear();
         rebuildContacts(world, physics);
         return true;
     }
@@ -3342,6 +3396,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::RigidBody>::save(const pro
     if (b.blockedByStatic == projv::runtime::KinematicBlocking::Stop) j["blockedByStatic"] = "stop";
     if (b.blockedByStatic == projv::runtime::KinematicBlocking::Slide) j["blockedByStatic"] = "slide";
     if (b.minImpactSpeed >= 0.0f) j["minImpactSpeed"] = tidy(b.minImpactSpeed);
+    if (b.minImpactEnergy > 0.0f) j["minImpactEnergy"] = tidy(b.minImpactEnergy);
     return j;
 }
 
@@ -3396,6 +3451,7 @@ std::optional<projv::RigidBody> projv::runtime::ComponentTraits<projv::RigidBody
     else if (blocked == "slide") b.blockedByStatic = projv::runtime::KinematicBlocking::Slide;
     else if (blocked != "none") return std::nullopt;
     b.minImpactSpeed = j.value("minImpactSpeed", -1.0f);
+    b.minImpactEnergy = j.value("minImpactEnergy", 0.0f);
     return b;
 }
 
@@ -3411,6 +3467,7 @@ nlohmann::json projv::runtime::ComponentTraits<projv::StaticCollider>::save(cons
     if (c.breaksOnImpact) j["breaksOnImpact"] = true;
     if (c.senses != defaults.senses) j["senses"] = layerNames(c.senses);
     if (c.minImpactSpeed >= 0.0f) j["minImpactSpeed"] = tidy(c.minImpactSpeed);
+    if (c.minImpactEnergy > 0.0f) j["minImpactEnergy"] = tidy(c.minImpactEnergy);
     return j;
 }
 
@@ -3434,6 +3491,7 @@ std::optional<projv::StaticCollider> projv::runtime::ComponentTraits<projv::Stat
         c.senses = *senses;
     }
     c.minImpactSpeed = j.value("minImpactSpeed", -1.0f);
+    c.minImpactEnergy = j.value("minImpactEnergy", 0.0f);
     return c;
 }
 

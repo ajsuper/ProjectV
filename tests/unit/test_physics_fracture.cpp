@@ -438,6 +438,37 @@ TEST_CASE("the built-in patterns break within their reach, and the same strike t
     CHECK(along > 1.5f * across);
 }
 
+
+TEST_CASE("the built-in patterns leave the rim: all goes near the strike, much of it stays near the reach") {
+    std::vector<runtime::FractureVoxel> voxels = block({24, 24, 24});
+    runtime::PhysicsMaterial m;
+    using Pattern = std::vector<int32_t> (*)(const runtime::FractureInput&, runtime::FractureRandom&);
+    const std::pair<const char*, Pattern> patterns[] = {{"shatter", runtime::fracture_patterns::shatter},
+                                                         {"splinter", runtime::fracture_patterns::splinter},
+                                                         {"crumble", runtime::fracture_patterns::crumble},
+                                                         {"seams", runtime::fracture_patterns::seams}};
+    for (bool directed : {false, true}) {
+        // Directed: a blow along z, measured across it -- the whole column the blow went through breaks.
+        runtime::FractureInput in{voxels, vec3(12, 12, 12), 8.0f, 12.0f, 2.0f, vec3(0, 1, 0), m,
+                                  directed ? vec3(0, 0, 1) : vec3(0)};
+        for (auto [name, pattern] : patterns) {
+            CAPTURE(name);
+            CAPTURE(directed);
+            runtime::FractureRandom random(42);
+            std::vector<int32_t> out = pattern(in, random);
+            size_t near = 0, nearBroken = 0, rim = 0, rimBroken = 0;
+            for (size_t i = 0; i < out.size(); i++) {
+                vec3 offset = vec3(voxels[i].position) + 0.5f - in.at;
+                float d = directed ? glm::length(glm::vec2(offset.x, offset.y)) : glm::length(offset);
+                if (glm::length(offset) > in.reach) continue;
+                if (d < 0.25f * in.reach && glm::length(offset) < 0.6f * in.reach) { near++; nearBroken += out[i] >= 0; }
+                if (d > 0.8f * in.reach) { rim++; rimBroken += out[i] >= 0; }
+            }
+            CHECK(nearBroken == near);
+            CHECK(float(rimBroken) < 0.75f * float(rim));
+        }
+    }
+}
 TEST_CASE("a library file carries strength and how a material breaks") {
     Fixture f;
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "projv_fracture_library.json";
@@ -562,6 +593,66 @@ TEST_CASE("on impact: what is struck hard enough breaks, and what struck it carr
     runtime::BodyState after = runtime::bodyPose(f.app.world, rock);
     CHECK(after.position.z > 1.0f);
     CHECK(after.linearVelocity.z > 5.0f);
+}
+
+TEST_CASE("on impact: what decides is the hit's energy, not its speed -- a heavy slow body breaks what a light fast one does not") {
+    // minImpactEnergy: a wall that takes 100 kJ to break. A speed threshold had it backwards: a heavy body
+    // landing slowly is the harder hit.
+    runtime::PhysicsMaterial chalk{300.0f, 0.6f, 0.0f};
+    chalk.strength = 1e5f;
+    for (bool heavy : {false, true}) {
+        CAPTURE(heavy);
+        Fixture f;
+        runtime::definePhysicsMaterial(f.app.world, "chalk", chalk);
+        Entity wall = f.wall("chalk", true);
+        f.app.world.patch<projv::StaticCollider>(wall, [](projv::StaticCollider& c) { c.minImpactEnergy = 1e5f; });
+        f.frames(2);
+        // Four tonnes at 10 m/s (200 kJ), or 100 kg at 30 m/s (45 kJ).
+        ball(f, vec3(0, 3, -6), vec3(0, 0, heavy ? 10.0f : 30.0f), heavy ? 4000.0f : 100.0f);
+        for (int i = 0; i < 60 && f.fractures.empty(); i++) f.frames(1);
+        CHECK(f.fractures.empty() == !heavy);
+    }
+}
+
+TEST_CASE("on impact: a body that lands on many points spreads its energy over them; a ball meets it at one") {
+    // The same tonne at the same 20 m/s (200 kJ) into the same wall: as a ball, all of it at the point
+    // it touches; as a 2 m slab face on, a share -- that of its hardest-pushed corner. The slab is
+    // continuous, so its sweep stops it outside the solver: the share is the next step's.
+    runtime::PhysicsMaterial chalk{300.0f, 0.6f, 0.0f};
+    chalk.strength = 1e5f;
+    const float energy = 0.5f * 1000.0f * 20.0f * 20.0f;
+    for (bool flat : {false, true}) {
+        CAPTURE(flat);
+        Fixture f;
+        runtime::definePhysicsMaterial(f.app.world, "chalk", chalk);
+        f.wall("chalk", true);
+        f.frames(2);
+        if (!flat) {
+            ball(f, vec3(0, 3, -6), vec3(0, 0, 20), 1000.0f);
+        } else {
+            ComponentHandle h = utils::addComponent(f.scene, projv::ComponentKind::Chunk, "slab", INVALID_COMPONENT_HANDLE, 16, 0.25f);
+            utils::setComponentTransform(f.scene, h, vec3(-1, 2, -6), quat(1, 0, 0, 0), 1.0f);
+            utils::queueVoxelAdd(f.scene, h, fill({0, 0, 0}, {7, 7, 0}, RED));
+            utils::updateScene(f.scene);
+            Entity e = runtime::spawnComponent(f.app.world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+            projv::RigidBody r;
+            r.shape = projv::RigidBody::Shape::Box;
+            r.mass = 1000.0f;
+            r.gravityFactor = 0.0f;
+            r.linearDamping = 0.0f;
+            r.quality = projv::RigidBody::Quality::Continuous;
+            f.app.world.emplace<projv::RigidBody>(e, r);
+            runtime::assignNetId(f.app.world, e);
+            f.frames(1);
+            runtime::setVelocity(f.app.world, e, vec3(0, 0, 20));
+        }
+        for (int i = 0; i < 40 && f.fractures.empty(); i++) f.frames(1);
+        REQUIRE(f.fractures.size() >= 1);
+        // Face on, it lands on its four corners, not evenly: at most half at the worst of them. (A voxel
+        // body lands on every part of it that touches -- a hull on a floor on dozens.)
+        if (flat) CHECK(f.fractures[0].energy < 0.5f * energy);
+        else CHECK(f.fractures[0].energy == doctest::Approx(energy).epsilon(0.02));
+    }
 }
 
 TEST_CASE("on impact: a knock breaks nothing, nor does a body that did not ask to break") {
@@ -1163,6 +1254,14 @@ TEST_CASE("shards are made flush, not overlapping: without gravity, thrown out o
     // (a hole's shards held by friction under gravity is the weight of the stack, not this).
     Fixture f;
     runtime::setGravity(f.app.world, vec3(0));
+    // Everything in reach, a shard a voxel: the built-ins keep some of the rim, and a kept voxel in front
+    // of a shard stops it, which is right but not what this is about.
+    runtime::registerFracturePattern(f.app.world, "shatter", [](const runtime::FractureInput& in, runtime::FractureRandom&) {
+        std::vector<int32_t> shard(in.voxels.size(), -1);
+        for (size_t i = 0; i < in.voxels.size(); i++)
+            if (glm::distance(vec3(in.voxels[i].position) + 0.5f, in.at) <= in.reach) shard[i] = int32_t(i);
+        return shard;
+    });
     Entity wall = f.wall();
     f.frames(2);
     std::vector<Entity> shards;

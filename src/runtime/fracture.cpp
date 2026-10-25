@@ -100,6 +100,33 @@ namespace projv::runtime {
 
         constexpr size_t MAX_SEEDS = 256;
 
+        // A real break is not a ball: near the strike everything goes, but towards the edge of the reach
+        // more and more of the cells stay, cracked but held, so the hole's edge is ragged and the wall
+        // round it keeps its shards. Each shard stays with a chance that grows with how far its nearest
+        // voxel is from the strike: none within 40% of the reach, rising to STAY_AT_EDGE at the reach.
+        // A blow with a direction measures across it, so what lies in its path goes (a cannonball's
+        // hole runs through the wall) and the rim round the path stays. A shard kept with nothing left
+        // to hold it falls anyway, as any island does.
+        constexpr float STAY_FROM = 0.4f, STAY_AT_EDGE = 0.7f;
+        void leaveSomeAttached(const FractureInput& in, FractureRandom& random, std::vector<int32_t>& out) {
+            const float reach = std::max(in.reach, 1e-3f);
+            std::map<int32_t, float> closest;
+            for (size_t i = 0; i < out.size(); i++) {
+                if (out[i] < 0) continue;
+                core::vec3 offset = centreOf(in.voxels[i]) - in.at;
+                float d = glm::length(offset - in.direction * glm::dot(offset, in.direction));
+                auto [it, made] = closest.try_emplace(out[i], d);
+                if (!made) it->second = std::min(it->second, d);
+            }
+            std::map<int32_t, bool> stays;
+            for (auto [shard, d] : closest) {
+                float t = std::clamp((d / reach - STAY_FROM) / (1.0f - STAY_FROM), 0.0f, 1.0f);
+                stays[shard] = random.uniform() < STAY_AT_EDGE * t;
+            }
+            for (int32_t& shard : out)
+                if (shard >= 0 && stays[shard]) shard = -1;
+        }
+
         std::vector<int32_t> voronoi(const FractureInput& in, FractureRandom& random, float elongation) {
             std::vector<Seed> seeds;
             int32_t next = 0;
@@ -112,7 +139,9 @@ namespace projv::runtime {
             // What stays: seeds of shardSize beyond the reach.
             scatter(in, random, in.reach, in.outer, elongation, MAX_SEEDS, false, [&](float) { return in.shardSize; }, any,
                     seeds, next);
-            return nearest(in, seeds, elongation);
+            std::vector<int32_t> out = nearest(in, seeds, elongation);
+            leaveSomeAttached(in, random, out);
+            return out;
         }
     }
 
@@ -149,6 +178,7 @@ namespace projv::runtime {
             std::vector<int32_t> out = nearest(in, seeds, 1.0f);
             for (size_t i = 0; i < out.size(); i++)
                 if (glm::distance(centreOf(in.voxels[i]), in.at) > in.reach) out[i] = -1;
+            leaveSomeAttached(in, random, out);
             return out;
         }
 
@@ -207,6 +237,7 @@ namespace projv::runtime {
                     }
                 }
             }
+            leaveSomeAttached(in, random, out);
             return out;
         }
     }

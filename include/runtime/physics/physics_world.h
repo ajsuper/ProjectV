@@ -334,13 +334,30 @@ namespace projv::runtime {
     // contact, so what the collision took out can be given back (a boulder through a wall).
     struct Impact {
         BodyId     a, b;
-        core::vec3 point{0.0f};               // world space, between the two surfaces
+        // World space, between the two surfaces: where the solver pushed hardest when that is known
+        // (`share` below), otherwise the fastest contact.
+        core::vec3 point{0.0f};
         core::vec3 normal{0.0f, 1.0f, 0.0f};  // from a towards b
         float      speed = 0.0f;              // closing speed along the normal, m/s
         // What the collision can take out of the motion: half the pair's reduced mass times the
         // closing speed squared (the whole of the striker's when it strikes something static), J.
         float      energy = 0.0f;
         core::vec3 velocityA{0.0f}, velocityB{0.0f};   // each body's linear velocity, before
+        // The share of the pair's contact impulse in this step that its hardest-pushed contact point
+        // took (0..1): how much of `energy` that one point meets. A boat landing flat spreads its
+        // energy over the dozens of points it lands on; a ball meets it at one. Negative when not known:
+        // the solver did not take the contact (a continuous body's sweep stopped it), and the next
+        // step's contactLoad, with the two pressed together, says (runtime::impacts waits for it). 1
+        // with a Jolt that lacks the patch (cmake/patches).
+        float      share = 1.0f;
+        float      impulse = 0.0f;            // the pair's, along the normal, N s; 0 when not known
+    };
+
+    // What the solver pushed two touching bodies apart with in the last step (PhysicsWorld::contactLoad).
+    struct ContactLoad {
+        float      impulse = 0.0f;    // along the normals, summed over their contact points, N s
+        float      share = 1.0f;      // of it, the hardest-pushed point's
+        core::vec3 point{0.0f};       // that point, world space
     };
 
     // Two bodies began or stopped touching in a step (PhysicsWorld::contactChanges), one of them a
@@ -710,6 +727,9 @@ namespace projv::runtime {
         // The impacts of the last step, ordered by (a, b): the same on every machine, whatever
         // thread the solver met each contact on.
         const std::vector<Impact>& impacts() const;
+        // The load between two bodies in the last step, from the solver; none when they did not touch
+        // in it, or with a Jolt that lacks the patch (cmake/patches).
+        std::optional<ContactLoad> contactLoad(BodyId a, BodyId b) const;
         // The contacts that began and ended in the last step, ordered by (a, b), ends first; pairs
         // a destroyBody (or setReportContacts off) ended since the step before are among them.
         const std::vector<ContactChange>& contactChanges() const;
@@ -720,6 +740,7 @@ namespace projv::runtime {
     private:
         void snapshotVelocities();
         void orderImpacts();
+        void shareImpacts();
         void trackContacts();
         core::vec3 sweepAgainstStatic(BodyId id, core::vec3 target, bool slide) const;
         void endContactsOf(BodyId body, bool unlessReported);

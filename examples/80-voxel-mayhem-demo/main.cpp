@@ -2783,13 +2783,15 @@ void startup(projv::Application& app) {
         // The map's entities.json: its static world and its breakable bodies.
         runtime::spawnEntities(world);
         // The level itself breaks like the park's walls: a hit hard enough breaks it, and what a break
-        // or a dig leaves standing on nothing falls (held by the ground at the bottom of the level). Only
-        // a fast hit is an impact on it -- a cannonball's 50 m/s, not debris landing -- or its soft
-        // materials (dirt at 400) would break under every falling shard, and those shards break it again.
+        // or a dig leaves standing on nothing falls (held by the ground at the bottom of the level). A hit
+        // must carry 20 kJ to break it -- a heavy body landing slowly does, a cannonball does, a piece of
+        // rubble landing does not -- or its soft materials (dirt at 400) would crater under every falling
+        // piece, and those pieces break it again. (It was a speed, 12 m/s, which a boat dropped a few
+        // metres never reached however heavy.)
         for (auto [e, collider] : world.view<projv::StaticCollider>().each())
             world.patch<projv::StaticCollider>(e, [](projv::StaticCollider& c) {
                 c.breaksOnImpact = true;
-                c.minImpactSpeed = 12.0f;
+                c.minImpactEnergy = 20000.0f;
                 c.splits = true;
                 c.anchorBase = true;
             });

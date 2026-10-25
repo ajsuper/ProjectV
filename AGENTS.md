@@ -119,7 +119,9 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   no public header names a Jolt type. `runtime::PhysicsWorld` (`runtime/physics/physics_world.h`)
   is the core. It must stay deterministic and restorable: no clocks, thread counts or unordered
   iteration in anything that feeds a step, and a Jolt upgrade is deliberate, with the physics
-  tests run. Plan: `docs/plans/physics-jolt.md`.
+  tests run. Plan: `docs/plans/physics-jolt.md`. The submodule carries one patch, applied at configure
+  time (`cmake/patches/jolt-applied-impulses.patch`: the solver's contact impulses, for impact load
+  shares); an upgrade re-makes it. Plan: `docs/plans/impact-loads.md`.
 - **The golden recording** (`tests/unit/data/physics_golden.rec`, `test_physics_golden.cpp`) is one
   committed session every build must replay bit for bit (twice: `physics_golden_tiles.rec` is the same
   session with static voxels as tile tables). A change to what the simulation does --

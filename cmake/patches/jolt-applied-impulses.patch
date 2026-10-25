@@ -1,0 +1,101 @@
+diff --git a/Jolt/Physics/Constraints/ContactConstraintManager.cpp b/Jolt/Physics/Constraints/ContactConstraintManager.cpp
+index efb7aee2..184a274d 100644
+--- a/Jolt/Physics/Constraints/ContactConstraintManager.cpp
++++ b/Jolt/Physics/Constraints/ContactConstraintManager.cpp
+@@ -2015,6 +2015,50 @@ void ContactConstraintManager::FinishConstraintBuffer()
+ 	mWriteCache = nullptr;
+ }
+ 
++void ContactConstraintManager::GetAppliedImpulses(Array<AppliedImpulse> &outImpulses) const
++{
++	outImpulses.clear();
++	const ManifoldCache &cache = mCache[mCacheWriteIdx ^ 1];
++
++	Array<const BPKeyValue *> all_bp;
++	cache.GetAllBodyPairsSorted(all_bp);
++	Array<const MKeyValue *> all_m;
++	for (const BPKeyValue *bp_kv : all_bp)
++	{
++		all_m.clear();
++		cache.GetAllManifoldsSorted(bp_kv->GetValue(), all_m);
++		for (const MKeyValue *m_kv : all_m)
++		{
++			const CachedManifold &cm = m_kv->GetValue();
++			if ((cm.mFlags & (uint16)CachedManifold::EFlags::CCDContact) != 0 || cm.mNumContactPoints == 0)
++				continue;
++
++			AppliedImpulse &out = outImpulses.emplace_back();
++			const SubShapeIDPair &key = m_kv->GetKey();
++			out.mBody1ID = key.GetBody1ID();
++			out.mBody2ID = key.GetBody2ID();
++			out.mSubShapeID1 = key.GetSubShapeID1();
++			out.mSubShapeID2 = key.GetSubShapeID2();
++			out.mNormal = Vec3::sLoadFloat3Unsafe(cm.mContactNormal);
++			out.mNormalImpulse = 0.0f;
++			out.mLargestPointImpulse = 0.0f;
++			out.mNumContactPoints = cm.mNumContactPoints;
++			Vec3 weighted = Vec3::sZero();
++			Vec3 sum = Vec3::sZero();
++			for (uint32 i = 0; i < cm.mNumContactPoints; ++i)
++			{
++				const CachedContactPoint &cp = cm.mContactPoints[i];
++				Vec3 p = Vec3::sLoadFloat3Unsafe(cp.mPosition1);
++				weighted += cp.mNonPenetrationLambda * p;
++				sum += p;
++				out.mNormalImpulse += cp.mNonPenetrationLambda;
++				out.mLargestPointImpulse = max(out.mLargestPointImpulse, cp.mNonPenetrationLambda);
++			}
++			out.mPoint1 = out.mNormalImpulse > 0.0f ? weighted / out.mNormalImpulse : sum / float(cm.mNumContactPoints);
++		}
++	}
++}
++
+ void ContactConstraintManager::SaveState(StateRecorder &inStream, const StateRecorderFilter *inFilter) const
+ {
+ 	mCache[mCacheWriteIdx ^ 1].SaveState(inStream, inFilter);
+diff --git a/Jolt/Physics/Constraints/ContactConstraintManager.h b/Jolt/Physics/Constraints/ContactConstraintManager.h
+index d76f3fc3..0b528fa0 100644
+--- a/Jolt/Physics/Constraints/ContactConstraintManager.h
++++ b/Jolt/Physics/Constraints/ContactConstraintManager.h
+@@ -158,6 +158,24 @@ public:
+ 	/// Uses the read collision cache to determine if 2 bodies are in contact.
+ 	bool						WereBodiesInContact(const BodyID &inBody1ID, const BodyID &inBody2ID) const;
+ 
++	/// A contact manifold of the last simulation step and the impulses the solver applied to it (ProjectV patch, cmake/patches)
++	struct AppliedImpulse
++	{
++		BodyID					mBody1ID;
++		BodyID					mBody2ID;
++		SubShapeID				mSubShapeID1;
++		SubShapeID				mSubShapeID2;
++		Vec3					mNormal;							///< Contact normal, in the center of mass space of body 2
++		Vec3					mPoint1;							///< Where the impulse acted (its points weighted by their impulse), in the center of mass space of body 1
++		float					mNormalImpulse;						///< Total impulse along the normal (N s), summed over the contact points
++		float					mLargestPointImpulse;				///< The largest of the contact points' impulses (N s)
++		uint					mNumContactPoints;
++	};
++
++	/// Get the impulses applied during the last simulation step, one per contact manifold, ordered by body pair and then sub shape pair (deterministic).
++	/// Only valid between simulation steps.
++	void						GetAppliedImpulses(Array<AppliedImpulse> &outImpulses) const;
++
+ 	/// Get the number of contact constraints that were found
+ 	uint32						GetNumConstraints() const											{ return min<uint32>(uint32(mNumConstraintsAndNextConstraintOffset.load(memory_order_relaxed)), mMaxConstraints); }
+ 
+diff --git a/Jolt/Physics/PhysicsSystem.h b/Jolt/Physics/PhysicsSystem.h
+index b244a516..e0488c96 100644
+--- a/Jolt/Physics/PhysicsSystem.h
++++ b/Jolt/Physics/PhysicsSystem.h
+@@ -372,6 +372,12 @@ private:
+ 	/// The contact manager resolves all contacts during a simulation step
+ 	ContactConstraintManager	mContactManager;
+ 
++public:
++	/// The impulses the solver applied in the last step, one per contact manifold (ProjectV patch, cmake/patches)
++	void						GetAppliedContactImpulses(Array<ContactConstraintManager::AppliedImpulse> &outImpulses) const { mContactManager.GetAppliedImpulses(outImpulses); }
++
++private:
++
+ 	/// All non-contact constraints
+ 	ConstraintManager			mConstraintManager;
+ 

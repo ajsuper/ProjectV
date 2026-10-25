@@ -86,6 +86,10 @@ namespace projv {
         // when both bodies set one, the lower counts. Negative: the world's. Pieces copy it with
         // the rest of the RigidBody.
         float                 minImpactSpeed = -1.0f;
+        // J: the least an impact must carry to break it (installImpactFracture) -- what decides, beside
+        // its material's strength, whether a hit breaks it, whatever the speed: a heavy body landing
+        // slowly can, a light one landing fast cannot. 0: any impact may. Pieces copy it.
+        float                 minImpactEnergy = 0.0f;
         // On the sensor layer, the body is a sensor (a trigger volume that moves): it is collided with
         // by nothing, and reports what enters and leaves (ContactBegan). These are the layers it
         // senses, runtime::layerBit()s; "senses" in the file, by name. Static: only a kinematic sensor.
@@ -133,6 +137,8 @@ namespace projv {
         bool                  breaksOnImpact = false;
         // As RigidBody::minImpactSpeed.
         float                 minImpactSpeed = -1.0f;
+        // As RigidBody::minImpactEnergy. The pieces that fall when support goes take it on.
+        float                 minImpactEnergy = 0.0f;
         // As RigidBody::senses, on the sensor layer: a trigger volume that stays put. It senses a body
         // as it comes in moving; one that falls asleep inside stays sensed.
         uint32_t              senses = runtime::layerBit(runtime::PhysicsLayer::Moving) |
@@ -609,13 +615,17 @@ namespace projv::runtime {
     // theirs, the one that sets one, or PhysicsSettings::minImpactSpeed).
     struct BodyImpact {
         Entity     a = NullEntity, b = NullEntity;
-        core::vec3 point{0.0f};               // world space, between the two surfaces
+        core::vec3 point{0.0f};               // world space, between the two surfaces (PhysicsWorld::Impact)
         core::vec3 normal{0.0f, 1.0f, 0.0f};  // from a towards b
         float      speed = 0.0f;              // closing speed along the normal, m/s
         // What the collision can take out of the motion: half the pair's reduced mass times the
         // closing speed squared (the whole of the striker's when it strikes something static), J.
         float      energy = 0.0f;
         core::vec3 velocityA{0.0f}, velocityB{0.0f};   // each body's linear velocity, before
+        // The share of the pair's impulse its hardest-pushed point took, and the impulse (N s): see
+        // PhysicsWorld::Impact. What breaks at `point` is energy times share.
+        float      share = 1.0f;
+        float      impulse = 0.0f;
     };
     // The last step's impacts, in the order every peer agrees on. Read it from a FixedUpdate system
     // ordered after "physics": it is replaced at every step. What breaking on impact, sounds and

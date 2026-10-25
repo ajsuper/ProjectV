@@ -815,6 +815,11 @@ namespace projv::runtime {
         uint64_t                              materialsVersion = 0;   // bumped by every setMaterial
         MaterialContacts                      contacts;
         std::vector<Impact>                   impacts;   // the last step's, ordered
+#ifdef PROJV_JOLT_APPLIED_IMPULSES
+        JPH::Array<JPH::ContactConstraintManager::AppliedImpulse> applied;   // shareImpacts', kept for its memory
+        std::map<std::pair<uint32_t, uint32_t>, ContactLoad> loads;   // the last step's, by pair (low id first)
+        bool                                  loadsRead = false;
+#endif
         float                                 minImpactSpeed = 1.0f;
         // ---- Contact reports (BodyDesc::reportContacts, sensors) ----
         // Per body index: REPORTS, SENSOR, FRESH. The pairs touching now, by (a, b) ids with a < b;
@@ -2693,6 +2698,59 @@ namespace projv::runtime {
         for (const Impact& i : raw)
             if (impl->impacts.empty() || impl->impacts.back().a != i.a || impl->impacts.back().b != i.b)
                 impl->impacts.push_back(i);
+        shareImpacts();
+    }
+
+    // What the solver did with each impact (the Jolt patch, cmake/patches): the share of the pair's
+    // impulse its hardest-pushed point took, and that point. An impact the solver did not take -- a
+    // continuous body's sweep stops it with an impulse of its own, outside it -- is left unknown.
+    void PhysicsWorld::shareImpacts() {
+        impl->loadsRead = false;
+        for (Impact& i : impl->impacts) {
+            std::optional<ContactLoad> load = contactLoad(i.a, i.b);
+            if (!load) { i.share = -1.0f; continue; }
+            i.impulse = load->impulse;
+            i.share = load->share;
+            i.point = load->point;
+        }
+    }
+
+    std::optional<ContactLoad> PhysicsWorld::contactLoad(BodyId a, BodyId b) const {
+#ifdef PROJV_JOLT_APPLIED_IMPULSES
+        if (!impl->loadsRead) {
+            // Every pair's, once a step, when first asked: in the order Jolt's cache sorts pairs and
+            // parts, which does not depend on threads.
+            impl->loadsRead = true;
+            impl->loads.clear();
+            impl->applied.clear();
+            impl->system.GetAppliedContactImpulses(impl->applied);
+            struct Hardest { float largest = 0.0f; JPH::BodyID body1; JPH::Vec3 point1 = JPH::Vec3::sZero(); };
+            std::map<std::pair<uint32_t, uint32_t>, Hardest> hardest;
+            for (const JPH::ContactConstraintManager::AppliedImpulse& m : impl->applied) {
+                uint32_t x = m.mBody1ID.GetIndexAndSequenceNumber(), y = m.mBody2ID.GetIndexAndSequenceNumber();
+                std::pair<uint32_t, uint32_t> key{std::min(x, y), std::max(x, y)};
+                impl->loads[key].impulse += m.mNormalImpulse;
+                Hardest& h = hardest[key];
+                if (m.mLargestPointImpulse > h.largest) h = {m.mLargestPointImpulse, m.mBody1ID, m.mPoint1};
+            }
+            const JPH::BodyLockInterfaceNoLock& bodies = impl->system.GetBodyLockInterfaceNoLock();
+            for (auto it = impl->loads.begin(); it != impl->loads.end();) {
+                const Hardest& h = hardest[it->first];
+                const JPH::Body* body = bodies.TryGetBody(h.body1);
+                if (!(it->second.impulse > 0.0f) || !body) { it = impl->loads.erase(it); continue; }
+                it->second.share = std::clamp(h.largest / it->second.impulse, 0.0f, 1.0f);
+                JPH::RVec3 p = body->GetCenterOfMassTransform() * h.point1;
+                it->second.point = core::vec3(float(p.GetX()), float(p.GetY()), float(p.GetZ()));
+                ++it;
+            }
+        }
+        auto found = impl->loads.find({std::min(a.value, b.value), std::max(a.value, b.value)});
+        if (found != impl->loads.end()) return found->second;
+#else
+        (void)a;
+        (void)b;
+#endif
+        return std::nullopt;
     }
 
     namespace {
