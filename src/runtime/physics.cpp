@@ -1670,8 +1670,10 @@ namespace projv::runtime {
         }
 
         // Cheap debris, one fixed step (PhysicsConfig::debris): each that moves falls and is swept as a
-        // sphere against static bodies, bouncing off what it meets; slow and touching for half a
-        // second it rests, until the static world changes and it finds nothing under it. Then the
+        // sphere against static and moving bodies, bouncing off what it meets as that moves there (a
+        // moving body is not pushed back: debris is a break's look); slow and touching for half a second
+        // it rests, until the static world changes -- or, on a body that can move, a quarter second
+        // passes -- and it finds nothing under it. Then the
         // old ones go: past their seconds, and the oldest past the count. In entity order: debris
         // feeds nothing in the simulation, so its order is its own.
         void stepDebris(World& world, PhysicsRuntime& physics, float dt) {
@@ -1681,8 +1683,8 @@ namespace projv::runtime {
             const PhysicsConfig::DebrisConfig& config = physics.debris;
             const core::vec3 gravity = sim.gravity();
             const uint64_t tick = sim.tick();
-            QueryFilter statics;
-            statics.layers = QueryFilter::only(PhysicsLayer::Static);
+            QueryFilter statics;   // what debris meets: every body but sensors and characters
+            statics.layers = QueryFilter::only(PhysicsLayer::Static) | QueryFilter::only(PhysicsLayer::Moving);
             // The static world changed: resting debris looks down again.
             const bool worldChanged = latestBlobContentStamp() != physics.debrisWorldStamp;
             physics.debrisWorldStamp = latestBlobContentStamp();
@@ -1695,9 +1697,10 @@ namespace projv::runtime {
                 byAge.push_back({d.madeAt, e});
                 core::vec3 centre = d.position + d.rotation * d.centre;
                 if (d.resting) {
-                    if (!worldChanged) continue;
+                    if (!worldChanged && !(d.onBody && tick % 15 == 0)) continue;
                     if (sim.castSphere(centre, d.radius, glm::normalize(gravity), 2.0f * d.radius + 0.05f, statics)) continue;
                     d.resting = false;
+                    d.onBody = false;
                     d.still = 0.0f;
                 }
                 d.velocity += gravity * dt;
@@ -1708,8 +1711,18 @@ namespace projv::runtime {
                 // gravity added more every step: 60 m/s, standing still.)
                 core::vec3 remaining = d.velocity * dt;
                 bool touched = false;
-                core::vec3 met[3];
+                core::vec3 met[3], metVelocity[3];   // the surfaces met this step, and how fast each moved there
                 int count = 0;
+                bool onMoving = false;   // what it touched can move
+                core::vec3 support(0.0f);   // the velocity of the last surface it touched
+                // Nothing of the velocity goes back into a surface met this step, as that surface moves.
+                auto clipVelocity = [&](core::vec3 v) {
+                    for (int i = 0; i < count; i++) {
+                        const float into = glm::dot(v - metVelocity[i], met[i]);
+                        if (into < 0.0f) v -= into * met[i];
+                    }
+                    return v;
+                };
                 auto clip = [&](core::vec3 v) {
                     for (int i = 0; i < count; i++) {
                         const float into = glm::dot(v, met[i]);
@@ -1739,6 +1752,12 @@ namespace projv::runtime {
                     const float travel = std::max(hit->distance - 1e-3f, 0.0f);
                     centre += direction * travel;
                     const core::vec3 n = hit->normal;
+                    // How fast the surface moves where it was met: zero for a static body.
+                    const BodyState surface = sim.bodyState(hit->body);
+                    const core::vec3 surfaceVelocity = surface.linearVelocity + glm::cross(surface.angularVelocity, hit->position - surface.centerOfMass);
+                    if (sim.bodyMass(hit->body) > 0.0f) onMoving = true;
+                    support = surfaceVelocity;
+                    d.velocity -= surfaceVelocity;   // the bounce and the friction in the surface's frame
                     const float into = glm::dot(d.velocity, n);
                     if (into < 0.0f) {
                         // The bounce's impulse (per unit mass), and friction up to mu times it against the
@@ -1758,8 +1777,10 @@ namespace projv::runtime {
                             d.angularVelocity += (2.5f / (d.radius * d.radius)) * glm::cross(lever, push);
                         }
                     }
+                    d.velocity += surfaceVelocity;
+                    metVelocity[count] = surfaceVelocity;
                     met[count++] = n;
-                    d.velocity = clip(d.velocity);
+                    d.velocity = clipVelocity(d.velocity);
                     remaining = clip(remaining - direction * travel);
                 }
                 if (touched) {   // rolling resistance: what lets rolling debris come to rest
@@ -1771,10 +1792,12 @@ namespace projv::runtime {
                     d.rotation = glm::normalize(d.rotation + (0.5f * dt) * (spin * d.rotation));
                 }
                 d.position = centre - d.rotation * d.centre;
-                if (touched && glm::length(d.velocity) < 0.3f) {
+                // Rests only where what holds it is still: on a moving crate it rides along instead.
+                if (touched && glm::length(d.velocity) < 0.3f && glm::length(support) < 0.05f) {
                     d.still += dt;
                     if (d.still > 0.5f) {
                         d.resting = true;
+                        d.onBody = onMoving;
                         d.velocity = d.angularVelocity = core::vec3(0.0f);
                     }
                 } else if (!touched) {

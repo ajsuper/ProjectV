@@ -224,6 +224,48 @@ TEST_CASE("debris: debris that lands sliding starts to roll, then comes to rest"
     CHECK(f.app.world.get<projv::Debris>(e).resting);
 }
 
+TEST_CASE("debris: debris meets moving bodies too -- a crate stops it, and it falls when the crate is gone") {
+    // Debris met static bodies only: a cannonball through a crate threw its debris on through the crate's
+    // far side and the wall beyond, both of them bodies that can move.
+    Fixture f(on());
+    auto crateAt = [&](vec3 at) {
+        ComponentHandle h = utils::addComponent(f.scene, projv::ComponentKind::Chunk, "box", INVALID_COMPONENT_HANDLE, 16, 0.25f);
+        utils::setComponentTransform(f.scene, h, at, quat(1, 0, 0, 0), 1.0f);
+        utils::queueVoxelAdd(f.scene, h, fill({0, 0, 0}, {7, 7, 7}));   // 2 m
+        utils::updateScene(f.scene);
+        Entity e = spawnComponent(f.app.world, h, projv::LinkMode::Root, projv::OnUnlink::Destroy);
+        f.app.world.emplace<projv::RigidBody>(e);
+        return e;
+    };
+    Entity wall = crateAt(vec3(3, 0, -1));   // its near face at x = 3
+    Entity table = crateAt(vec3(-6, 0, -1));
+    f.frames(60);
+    auto debrisAt = [&](vec3 at, vec3 velocity) {
+        Entity e = f.app.world.create();
+        f.app.world.emplace<projv::Transform>(e, projv::Transform{at});
+        projv::Debris d;
+        d.position = d.previousPosition = at;
+        d.radius = 0.15f;
+        d.velocity = velocity;
+        f.app.world.emplace<projv::Debris>(e, d);
+        return e;
+    };
+    Entity thrown = debrisAt(vec3(0, 1, 0), vec3(12, 0, 0));
+    Entity lying = debrisAt(vec3(-5, 2.5f, 0), vec3(0));   // dropped on the table's top, at y = 2
+    float furthest = 0.0f;
+    for (int i = 0; i < 90; i++) {
+        f.frames(1);
+        furthest = std::max(furthest, f.app.world.get<projv::Debris>(thrown).position.x);
+    }
+    CHECK(furthest < 3.0f);   // stopped at the crate's face, not through it
+    REQUIRE(f.app.world.get<projv::Debris>(lying).resting);
+    CHECK(f.app.world.get<projv::Debris>(lying).position.y > 1.9f);
+    f.app.world.destroy(table);
+    f.frames(45);
+    CHECK(f.app.world.get<projv::Debris>(lying).position.y < 1.0f);   // the table gone, it fell
+    (void)wall;
+}
+
 TEST_CASE("debris: a networked body's small pieces are bodies still") {
     Fixture f(on());
     Fixture::Crate c = f.crate(vec3(-0.5f, 2.0f, -0.5f));

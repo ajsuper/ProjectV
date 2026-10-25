@@ -153,7 +153,8 @@ namespace projv {
     // saved, never written by anything else.
     // A piece of a break too small to be a body (PhysicsConfig::debris): its entity is linked to the
     // piece's component, as a body's is, and physics moves it -- each fixed step it falls, is swept as a
-    // sphere against static bodies, and bounces -- writing its Transform. Made and removed by physics.
+    // sphere against static and moving bodies, and bounces off them (moving with what it lands on, but
+    // never pushing it) -- writing its Transform. Made and removed by physics.
     struct Debris {
         core::vec3 velocity{0.0f}, angularVelocity{0.0f};
         // The component's pose (its Transform) at the last two fixed steps, which presentation
@@ -165,6 +166,7 @@ namespace projv {
         uint64_t   madeAt = 0;      // the physics tick it was made at
         float      still = 0.0f;    // seconds it has been slow and touching
         bool       resting = false; // not stepped until the static world under it changes
+        bool       onBody = false;  // resting on a body that can move: looked at again every quarter second
     };
 
     struct PhysicsBody {
