@@ -18,8 +18,12 @@
 
 namespace projv{
 
-    constexpr uint32_t MAX_MATERIALS_PER_COMPONENT = 256u;
+    constexpr uint32_t MAX_MATERIALS_PER_COMPONENT = 256u;   // the slot space: a material byte's values
     constexpr uint8_t  INVALID_MATERIAL = 255u;
+    // The entries a palette may hold: slots 0..254. Slot 255 is INVALID_MATERIAL ("no slot": an edit
+    // that names none, a name or colour not found), so a 256th entry is one nothing can tell apart
+    // from none -- a voxel on it is cut into a piece without its material, say.
+    constexpr uint32_t MAX_PALETTE_ENTRIES = MAX_MATERIALS_PER_COMPONENT - 1;
 
     // One palette entry: four words of properties plus an editor-facing name.
     //

@@ -141,6 +141,10 @@ namespace projv {
         // a recolour is a small JSON edit instead of a geometry rewrite. Empty for `asset` entries,
         // which own no voxels.
         std::vector<Material> palette;
+        // A palette read with a 256th entry (more than MAX_PALETTE_ENTRIES): the slot that entry was
+        // folded into (utils::foldOverflowSlot), which its voxels are remapped to as they load.
+        // INVALID_MATERIAL: none was.
+        uint8_t               foldedSlot = INVALID_MATERIAL;
         // Program data saved with this entry: attachment key -> the value as JSON text. Carried
         // through without interpretation -- see AttachmentStore in scene.h and utils/attachments.h.
         std::map<std::string, std::string> attachments;

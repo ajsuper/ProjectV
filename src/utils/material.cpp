@@ -50,6 +50,40 @@ uint8_t findMaterialByName(const ComponentRecord& comp, const std::string& name)
     return INVALID_MATERIAL;
 }
 
+uint8_t foldOverflowSlot(std::vector<Material>& palette) {
+    if (palette.size() <= MAX_PALETTE_ENTRIES) return INVALID_MATERIAL;
+    palette.resize(MAX_MATERIALS_PER_COMPONENT);
+    const Material& last = palette[INVALID_MATERIAL];
+    auto channel = [](uint32_t c, int shift) { return int((c >> shift) & 0x3FFu); };
+    auto distance = [&](const Material& m) {
+        int64_t d = 0;
+        for (int shift : {20, 10, 0}) {
+            const int64_t e = channel(m.packedColor, shift) - channel(last.packedColor, shift);
+            d += e * e;
+        }
+        return d;
+    };
+    size_t best = 0;
+    bool bestSame = false;
+    int64_t bestDistance = INT64_MAX;
+    for (size_t i = 0; i < MAX_PALETTE_ENTRIES; i++) {
+        const bool same = palette[i].physics == last.physics;
+        const int64_t d = distance(palette[i]);
+        if ((same && !bestSame) || (same == bestSame && d < bestDistance)) {
+            best = i;
+            bestSame = same;
+            bestDistance = d;
+        }
+    }
+    palette.resize(MAX_PALETTE_ENTRIES);
+    return uint8_t(best);
+}
+
+void remapSlotBytes(std::vector<uint8_t>& bytes, uint8_t from, uint8_t to) {
+    for (uint8_t& b : bytes)
+        if (b == from) b = to;
+}
+
 uint8_t findMaterialByColor(const ComponentRecord& comp, uint32_t packedColor, const std::string& physics) {
     for (size_t i = 0; i < comp.materialPalette.size(); ++i) {
         if (comp.materialPalette[i].packedColor == packedColor && comp.materialPalette[i].physics == physics) {

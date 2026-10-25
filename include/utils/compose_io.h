@@ -77,6 +77,7 @@ namespace projv::utils {
         uint32_t        resolution = 0;       // the file's
         float           voxelScale = 0.0f;    // the file's, before any transform
         Mutability      mutability = Mutability::Locked;
+        uint8_t         foldedSlot = INVALID_MATERIAL;   // ComposeComponent::foldedSlot: slot 255's voxels go there
     };
 
     // loadComposeFromDisk without the voxels: every component, palette, attachment and transform,

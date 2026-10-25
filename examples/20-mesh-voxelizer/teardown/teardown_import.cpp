@@ -90,8 +90,8 @@ namespace {
         }
         const auto t2 = std::chrono::steady_clock::now();
         logInfo("   world: %zu voxels in %zu blocks, %zu materials%s", report.worldVoxels, report.worldBlocks,
-                report.worldMaterials, report.worldMaterials > 256 ? " (quantised to 256)" : "");
-        if (report.worldMaterials > 256) logInfo("   palette: largest colour shift %.3f (Oklab)", report.worldPaletteError);
+                report.worldMaterials, report.worldMaterials > 255 ? " (quantised to 255)" : "");
+        if (report.worldMaterials > 255) logInfo("   palette: largest colour shift %.3f (Oklab)", report.worldPaletteError);
         logInfo("   bodies: %zu placed from %zu files, %zu voxels", report.bodies, report.bodyFiles, report.bodyVoxels);
         if (report.waterVoxels) logInfo("   water: %zu voxels", report.waterVoxels);
         logInfo("   wrote %s  (%.1f MB, %.1fs)", folderPath.c_str(), report.bytes / 1048576.0,

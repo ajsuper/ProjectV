@@ -1,4 +1,5 @@
 #include "utils/blob_voxels.h"
+#include "utils/material.h"
 #include "utils/scene_loading.h"
 
 #include <algorithm>
@@ -22,7 +23,8 @@ namespace projv::utils {
         // The key the eager loader shares blobs by: one source block, one mutability.
         std::string poolKey(const SceneBlockSource& s) {
             return s.path + "#" + std::to_string(s.entry.gridX) + "_" + std::to_string(s.entry.gridY) + "_" +
-                   std::to_string(s.entry.gridZ) + "#" + std::to_string(static_cast<int>(s.mutability));
+                   std::to_string(s.entry.gridZ) + "#" + std::to_string(static_cast<int>(s.mutability)) + "#" +
+                   std::to_string(int(s.foldedSlot));
         }
 
         size_t blobBytes(const GeometryBlob& b) {
@@ -191,6 +193,8 @@ namespace projv::utils {
             GeometryBlob blob;
             if (!data->tiles.texels.empty()) setBlobTiles(blob, std::move(data->tiles));
             else setBlobTree(blob, std::move(data->geometry), std::move(data->materialIDs));
+            if (s.foldedSlot != INVALID_MATERIAL)   // a 256th palette entry's voxels, moved (ComposeComponent::foldedSlot)
+                remapSlotBytes(editBlobMaterials(blob), INVALID_MATERIAL, s.foldedSlot);
             blob.envelope = std::move(data->envelope);
             blob.envelopeMotion = std::move(data->envelopeMotion);
             blob.sourceDataPath = s.path;

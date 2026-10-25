@@ -25,6 +25,16 @@ uint8_t internMaterial(Scene& scene, ComponentRecord& comp, const std::string& n
 uint8_t findMaterialByName(const ComponentRecord& comp, const std::string& name);
 uint8_t findMaterialByColor(const ComponentRecord& comp, uint32_t packedColor, const std::string& physics = {});
 
+// A palette with more than MAX_PALETTE_ENTRIES entries (a file written by a tool that took 256 for the
+// limit): its entry in slot 255 is folded into the nearest of the others -- one of the same physics
+// material if any has it, then the nearest colour -- and the palette cut to MAX_PALETTE_ENTRIES.
+// Returns the slot it went into, for remapSlotBytes on the voxels; INVALID_MATERIAL when nothing was
+// folded (the palette was within the limit).
+uint8_t foldOverflowSlot(std::vector<Material>& palette);
+
+// Every material byte `from` made `to`: a folded slot's voxels moved to the slot it went into.
+void remapSlotBytes(std::vector<uint8_t>& bytes, uint8_t from, uint8_t to);
+
 // --- Palette editing -------------------------------------------------------------------------
 //
 // The interning path above exists to *build* a palette while voxelizing: it dedupes, so asking for

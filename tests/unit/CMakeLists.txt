@@ -21,6 +21,7 @@ add_executable(projv_unit_tests
     test_application.cpp
     test_attachments.cpp
     test_block_table.cpp
+    test_palette_overflow.cpp
     test_tile_collision.cpp
     test_tile_table.cpp
     test_color.cpp

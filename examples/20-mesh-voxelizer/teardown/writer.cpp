@@ -25,7 +25,7 @@ namespace teardown {
 namespace {
     // ---- Palettes ---------------------------------------------------------------------------
     //
-    // A ProjectV component indexes at most 256 materials. A Teardown level mixes hundreds of vox
+    // A ProjectV component indexes at most 255 materials (MAX_PALETTE_ENTRIES: 255 means none). A Teardown level mixes hundreds of vox
     // palettes, so the world usually has thousands; they are clustered down with k-means in Oklab,
     // weighted by voxel count, with transparency, emission and metalness as extra dimensions so a
     // pane of glass or a lamp never merges into the wall around it.
@@ -67,7 +67,7 @@ namespace {
         std::vector<std::pair<MatId, uint64_t>> items(counts.begin(), counts.end());
         // Most used first, so the order is stable and slot 0 is the commonest material.
         std::sort(items.begin(), items.end(), [](auto& a, auto& b) { return a.second != b.second ? a.second > b.second : a.first < b.first; });
-        if (items.size() <= projv::MAX_MATERIALS_PER_COMPONENT) {
+        if (items.size() <= projv::MAX_PALETTE_ENTRIES) {
             for (size_t i = 0; i < items.size(); i++) {
                 p.entries.push_back(materials().get(items[i].first));
                 p.slot[items[i].first] = uint8_t(i);
@@ -75,7 +75,7 @@ namespace {
             return p;
         }
 
-        const size_t K = projv::MAX_MATERIALS_PER_COMPONENT;
+        const size_t K = projv::MAX_PALETTE_ENTRIES;   // slot 255 is INVALID_MATERIAL, not a slot
         std::vector<Feature> feats;
         for (auto& [id, n] : items) feats.push_back(feature(materials().get(id)));
         // k-means++ seeding, weighted by count, deterministic.

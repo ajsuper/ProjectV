@@ -166,7 +166,7 @@ namespace projv::runtime {
             }
         }
         std::vector<Material> readPalette(net::BitReader& r) {
-            std::vector<Material> palette(std::min<uint64_t>(r.varint(), MAX_MATERIALS_PER_COMPONENT));
+            std::vector<Material> palette(std::min<uint64_t>(r.varint(), MAX_PALETTE_ENTRIES));
             for (Material& m : palette) {
                 m.packedColor = uint32_t(r.bits(32)); m.packedEmission = uint32_t(r.bits(32));
                 m.packedSurface = uint32_t(r.bits(32)); m.packedExtra = uint32_t(r.bits(32));

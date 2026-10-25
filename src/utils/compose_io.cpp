@@ -590,6 +590,13 @@ namespace projv::utils {
                     }
                     c.palette.push_back(std::move(material));
                 }
+                // A 256th entry is slot 255, which no edit can name: folded into its nearest.
+                const std::string foldedName = c.palette.size() > MAX_PALETTE_ENTRIES ? c.palette.back().name : std::string();
+                c.foldedSlot = utils::foldOverflowSlot(c.palette);
+                if (c.foldedSlot != INVALID_MATERIAL)
+                    core::warn("parseComposeJson: '{}' has {} materials in {}; slot 255 ('{}') is not a slot (it means none), "
+                               "so its voxels take slot {} ('{}'), the nearest", c.source, MAX_MATERIALS_PER_COMPONENT,
+                               composeJsonPath, foldedName, c.foldedSlot, c.palette[c.foldedSlot].name);
             }
 
             doc.components.push_back(std::move(c));
@@ -776,7 +783,7 @@ namespace projv::utils {
                     // Lazy: where each block is, and the component's data reference now -- an edit
                     // reads the resolution from it, and there may be no loaded block to take it from.
                     auto listBlock = [&](size_t i) {
-                        lazy->push_back({myHandle, resolved, header->blocks[i], fileResolution, fileVoxelScale, c.mutability});
+                        lazy->push_back({myHandle, resolved, header->blocks[i], fileResolution, fileVoxelScale, c.mutability, c.foldedSlot});
                     };
                     if (lazy) {
                         DataReference reference{resolved, fileResolution, fileVoxelScale * uniformScale};
@@ -807,7 +814,8 @@ namespace projv::utils {
                         chunk.mutability = c.mutability;
                         std::string poolKey = resolved + "#" + std::to_string(block.gridX) + "_" +
                                               std::to_string(block.gridY) + "_" + std::to_string(block.gridZ) +
-                                              "#" + std::to_string(static_cast<int>(c.mutability));
+                                              "#" + std::to_string(static_cast<int>(c.mutability)) +
+                                              "#" + std::to_string(int(c.foldedSlot));
                         auto poolIt = poolKeyToIndex.find(poolKey);
                         if (poolIt == poolKeyToIndex.end()) {
                             int32_t idx = static_cast<int32_t>(geometryPool.size());
@@ -819,6 +827,8 @@ namespace projv::utils {
                             // first edit asks for one (ensureBrickMapExists).
                             if (!block.tiles.texels.empty()) setBlobTiles(gb, block.tiles);
                             else setBlobTree(gb, block.geometry, block.materialIDs);
+                            if (c.foldedSlot != INVALID_MATERIAL)   // a 256th palette entry's voxels, moved
+                                remapSlotBytes(editBlobMaterials(gb), INVALID_MATERIAL, c.foldedSlot);
                             // Empty for every v2 file and for every v3 file with no animation, which
                             // is the overwhelming majority. Carried straight through for the same
                             // reason the pair above is: the file already holds what the GPU reads.
