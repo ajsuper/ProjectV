@@ -68,6 +68,20 @@ upgrade re-makes the patch.
 Hull diagnosis with the share: from 10 m, 6-15 small breaks and the hull ends on the floor; from 4 m
 on a floor of 3 m/s, 4 breaks.
 
+## Found playing Teardown maps (2026-10-26)
+
+- **Unbreakable is not an anchor.** The importer makes rock, hard metal and hard masonry anchors.
+  Lee Chemicals' 27 m telephone poles are a third rock from the ground to the top, so a pole cut at its
+  foot stood on the rock in its own top. In Voxel Mayhem's maps, dirt alone anchors. Dirt, grass,
+  rock, hard metal and hard masonry are unbreakable.
+- **Support joins at edges and corners.** A static collider's support (`localSupport`, and the
+  whole-body pass for one that splits) counts voxels touching at an edge or a corner as joined
+  (`aroundVoxel`). The maps lay shapes onto the grid at an angle, so a diagonal brace is a staircase
+  of voxels touching at corners. Joined by faces only, a pylon with its feet cut dropped its uprights
+  and left its braces and top in the air (`test_physics_fracture.cpp`, "support: voxels that meet at
+  an edge or a corner"). A moving body's islands are still by faces. The marina barrage: 2.4 ms a
+  step, unchanged.
+
 ## Open: how big a break a big slow body buys
 
 The worst frames left are the biggest boat on the marina, about 1,180 t, falling ~10 m onto its keel:

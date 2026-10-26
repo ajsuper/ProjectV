@@ -2765,6 +2765,23 @@ void startup(projv::Application& app) {
     // The map's own materials (the Teardown imports' td_*), beside Mayhem's.
     if (m.map && !runtime::loadPhysicsMaterials(world, (fs::path(mapFolder) / "physics_materials.json").string()))
         projv::core::warn("mayhem: the map has no physics_materials.json; its voxels break as the default material");
+    // The ground does not break: the dirt (the land and the sea floor) and the grass on it, as rock,
+    // hard metal and hard masonry already do not (the imports give them no strength). What holds the
+    // rest up is the dirt alone. The imports make every unbreakable material an anchor, but the maps
+    // build with them too -- Lee Chemicals' 27 m telephone poles are a third rock all the way up, so a
+    // pole cut at its foot stood on the rock in its own top. Grass holds nothing either, so a tree's
+    // leaves still fall with its trunk.
+    if (m.map) {
+        auto redefine = [&](const char* name, bool anchor) {
+            if (std::optional<runtime::PhysicsMaterial> material = runtime::physicsMaterial(world, name)) {
+                material->strength = 0.0f;
+                material->anchor = anchor;
+                runtime::definePhysicsMaterial(world, name, *material);
+            }
+        };
+        redefine("td_dirt", true);
+        for (const char* unbreakable : {"td_foliage", "td_rock", "td_hardmetal", "td_hardmasonry"}) redefine(unbreakable, false);
+    }
     defineThrownTwins(world);
     for (const char* group : {"small debris", "player"}) runtime::definePhysicsGroup(world, group);
 

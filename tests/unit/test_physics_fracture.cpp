@@ -1040,6 +1040,41 @@ TEST_CASE("support: a collider too big to look over whole finds what fell from t
     CHECK(runtime::bodyPose(f.app.world, tower).centerOfMass.y < before - 0.1f);
 }
 
+TEST_CASE("support: voxels that meet at an edge or a corner hold each other up -- a pylon's braces fall with it") {
+    // A pylon on a pedestal: an upright, a diagonal brace from its top touching voxel to voxel only at
+    // corners (a shape laid onto the grid at an angle), and a crossbar on the brace's end, met at a corner
+    // too. Cut the upright's foot and all of it falls; joined by faces only, the brace and the crossbar
+    // were left in the air. Both passes: the whole body's, and from the change outward (a level too big
+    // to look over: a voxel far off).
+    for (bool level : {false, true}) {
+        CAPTURE(level);
+        Fixture f;
+        ComponentHandle h = utils::addComponent(f.scene, projv::ComponentKind::Chunk, "pylon", INVALID_COMPONENT_HANDLE, 16, 0.25f);
+        utils::queueVoxelAdd(f.scene, h, fill({0, 0, 0}, {11, 17, 11}, GREY));   // the ground
+        utils::queueVoxelAdd(f.scene, h, fill({4, 18, 4}, {4, 30, 4}, GREY));    // the upright
+        for (int i = 1; i <= 3; i++) utils::queueVoxelAdd(f.scene, h, fill({4 + i, 30 + i, 4 + i}, {4 + i, 30 + i, 4 + i}, GREY));
+        utils::queueVoxelAdd(f.scene, h, fill({8, 34, 8}, {10, 35, 10}, GREY));  // the crossbar
+        if (level) utils::queueVoxelAdd(f.scene, h, fill({5000, 0, 5000}, {5000, 0, 5000}, GREY));
+        utils::updateScene(f.scene);
+        REQUIRE(utils::setMaterialPhysics(f.scene, h, slotOf(f.scene, h, GREY), "stone"));
+        Entity e = runtime::spawnComponent(f.app.world, h);
+        projv::StaticCollider collider;
+        collider.splits = true;
+        collider.anchorBase = true;
+        f.app.world.emplace<projv::StaticCollider>(e, collider);
+        runtime::assignNetId(f.app.world, e);
+        f.frames(2);
+        const uint64_t before = countOf(f.scene, h).voxels;
+        runtime::editVoxels(f.app.world, e, slot({4, 18, 4}, {4, 18, 4}));
+        f.frames(1);
+        REQUIRE(f.splits.size() == 1);
+        uint64_t fallen = 0;
+        for (Entity piece : f.splits[0].pieces) fallen += countOf(f.scene, f.app.world.get<projv::VoxelComponent>(piece).handle).voxels;
+        CHECK(fallen == uint64_t(12 + 3 + 18));
+        CHECK(countOf(f.scene, h).voxels == before - 1 - fallen);
+    }
+}
+
 TEST_CASE("support: a collider that does not split keeps standing on nothing") {
     Fixture f;
     Entity wall = f.wall();

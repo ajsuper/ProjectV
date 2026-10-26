@@ -407,6 +407,10 @@ namespace projv::runtime {
             uint32_t maxCount = 4000;
             float    restitution = 0.25f;   // of the speed into a surface, what it bounces back with
             float    friction = 0.6f;       // Coulomb, against the bounce's impulse
+            // rad/s: the fastest debris turns. Small debris that rolls truly spins very fast (a 5 cm
+            // piece rolling at 5 m/s: 100 rad/s), and looks wrong; past this it slides instead. 0: it
+            // never turns.
+            float    maxAngularSpeed = 10.0f;
         } debris;
         // Guards on a strike (runtime::fracture), like maxLinearSpeed on motion: what a game may
         // change, never what it may turn off. Out of range, installPhysics clamps them and says so.

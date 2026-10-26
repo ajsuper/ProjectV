@@ -199,7 +199,10 @@ TEST_CASE("debris: debris pressed into a corner it overlaps comes to rest, and g
 TEST_CASE("debris: debris that lands sliding starts to roll, then comes to rest") {
     // Friction acts on the slip where the sphere meets the ground, its spin counted, so what it takes from
     // the sliding it gives to the turning: debris rolls and tumbles rather than skating along unturned.
-    Fixture f(on());
+    // (Rolling at 4 m/s it turns at 16 rad/s: the limit is raised past that.)
+    PhysicsConfig::DebrisConfig config = on();
+    config.maxAngularSpeed = 100.0f;
+    Fixture f(config);
     f.frames(2);
     Entity e = f.app.world.create();
     const vec3 at(-5.0f, 0.3f, 0.0f);
@@ -222,6 +225,33 @@ TEST_CASE("debris: debris that lands sliding starts to roll, then comes to rest"
     CHECK(glm::angle(turned.rotation) > 1.0f);   // it turned as it went
     f.frames(8 * 60);
     CHECK(f.app.world.get<projv::Debris>(e).resting);
+}
+
+TEST_CASE("debris: it turns no faster than maxAngularSpeed -- small debris rolling fast slides instead") {
+    for (float limit : {10.0f, 0.0f}) {
+        CAPTURE(limit);
+        PhysicsConfig::DebrisConfig config = on();
+        config.maxAngularSpeed = limit;
+        Fixture f(config);
+        f.frames(2);
+        Entity e = f.app.world.create();
+        const vec3 at(-5.0f, 0.06f, 0.0f);
+        f.app.world.emplace<projv::Transform>(e, projv::Transform{at});
+        projv::Debris d;
+        d.position = d.previousPosition = at;
+        d.radius = 0.05f;
+        d.velocity = vec3(6.0f, 0.0f, 0.0f);         // rolling, it would turn at 120 rad/s
+        d.angularVelocity = vec3(0.0f, 0.0f, 300.0f);  // and it starts spinning far past that
+        f.app.world.emplace<projv::Debris>(e, d);
+        float fastest = 0.0f;
+        for (int i = 0; i < 120; i++) {
+            f.frames(1);
+            fastest = std::max(fastest, glm::length(f.app.world.get<projv::Debris>(e).angularVelocity));
+        }
+        CHECK(fastest <= limit + 1e-3f);
+        f.frames(8 * 60);
+        CHECK(f.app.world.get<projv::Debris>(e).resting);
+    }
 }
 
 TEST_CASE("debris: debris meets moving bodies too -- a crate stops it, and it falls when the crate is gone") {

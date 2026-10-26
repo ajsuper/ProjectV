@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <span>
 #include <map>
 #include <queue>
 #include <cstring>
@@ -1092,6 +1093,10 @@ namespace projv::runtime {
                         const float turn = std::min(0.5f * speed / std::max(d.radius, 1e-3f), 15.0f);   // rad/s, at most ~2.4 turns
                         d.angularVelocity += glm::normalize(axis) * (0.5f + 0.5f * std::abs(next())) * turn;
                     }
+                    if (glm::length(d.angularVelocity) > physics.debris.maxAngularSpeed)
+                        d.angularVelocity = physics.debris.maxAngularSpeed > 0.0f
+                                                ? glm::normalize(d.angularVelocity) * physics.debris.maxAngularSpeed
+                                                : core::vec3(0.0f);
                     d.madeAt = tick;
                     world.emplace<Debris>(e, d);
                     event.debris.push_back(e);
@@ -1190,13 +1195,32 @@ namespace projv::runtime {
             }
         }
 
+        // What holds up a static collider counts voxels that meet at an edge or a corner as joined, not
+        // only those that share a face: the levels are built of shapes laid onto the grid at an angle,
+        // and a diagonal brace laid so is a staircase of voxels touching at corners. Joined by faces
+        // only, a pylon whose feet were cut lost its uprights and left its braces and top in the air.
+        // (A moving body's islands are still by faces: a piece hanging by a corner comes away.)
+        const std::array<core::ivec3, 26>& aroundVoxel() {
+            static const std::array<core::ivec3, 26> around = [] {
+                std::array<core::ivec3, 26> out{};
+                size_t n = 0;
+                for (int z = -1; z <= 1; z++)
+                    for (int y = -1; y <= 1; y++)
+                        for (int x = -1; x <= 1; x++)
+                            if (x || y || z) out[n++] = core::ivec3(x, y, z);
+                return out;
+            }();
+            return around;
+        }
+
         // The island pass of a static collider too big to look over whole (a level's world, billions of
         // cells): what the change cut loose is found from the change outward. Each solid voxel beside
         // what went -- an edit's removals, a strike's shards -- starts a flood through solid voxels,
         // lowest first so that one standing on the ground finds it quickly. A flood that reaches an
         // anchor (anchor material; with anchorBase, the component's lowest row of blocks, where a level's
         // ground is), a voxel an earlier flood found held, or more than localSupportVoxels voxels, is
-        // held; one that closes off first is an island, and comes away with the strike's shards.
+        // held; one that closes off first is an island, and comes away with the strike's shards. Voxels
+        // are joined through faces, edges and corners (aroundVoxel).
         // Chunks are decoded as the floods reach them. Deterministic: the seeds are taken in voxel order
         // and each flood in (y, z, x) order.
         void localSupport(World& world, PhysicsRuntime& physics, Scene& scene, Entity entity, ComponentHandle h,
@@ -1263,11 +1287,11 @@ namespace projv::runtime {
             const int baseTop = low.y + res;   // anchorBase: the lowest row of blocks holds
             auto anchored = [&](core::ivec3 p, uint8_t slot) { return anchorSlot[slot] || (anchorBase && p.y < baseTop); };
 
-            static const core::ivec3 faces[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+            const std::array<core::ivec3, 26>& around = aroundVoxel();
             std::vector<core::ivec3> seeds;
             for (const Key& k : gone) {
                 const core::ivec3 p(std::get<0>(k), std::get<1>(k), std::get<2>(k));
-                for (core::ivec3 f : faces) seeds.push_back(p + f);
+                for (core::ivec3 f : around) seeds.push_back(p + f);
             }
             std::sort(seeds.begin(), seeds.end(), [](core::ivec3 a, core::ivec3 b) {
                 return std::make_tuple(a.z, a.y, a.x) < std::make_tuple(b.z, b.y, b.x);
@@ -1304,7 +1328,7 @@ namespace projv::runtime {
                     const auto [y, z, x] = open.top();
                     open.pop();
                     const core::ivec3 p(x, y, z);
-                    for (core::ivec3 f : faces) {
+                    for (core::ivec3 f : around) {
                         uint8_t s = 0;
                         uint8_t* m = at(p + f, s);
                         if (!m || *m == 1 || *m == 3) continue;
@@ -1445,6 +1469,10 @@ namespace projv::runtime {
                             if (inside(v.position))
                                 if (int32_t j = index[at(v.position)]; j >= 0) group[size_t(j)] = uint32_t(k + 1);
                 static const core::ivec3 faces[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+                // A static collider's support joins by edges and corners too (aroundVoxel); a moving body's
+                // islands by faces.
+                const std::span<const core::ivec3> steps = rest == Rest::Anchored ? std::span<const core::ivec3>(aroundVoxel())
+                                                                                  : std::span<const core::ivec3>(faces);
                 std::vector<uint8_t> held(voxels.size(), 0);
                 std::vector<size_t> stack;
                 auto flood = [&] {
@@ -1453,7 +1481,7 @@ namespace projv::runtime {
                         size_t k = stack.back();
                         stack.pop_back();
                         reached.push_back(k);
-                        for (core::ivec3 f : faces) {
+                        for (core::ivec3 f : steps) {
                             core::ivec3 n = voxels[k].position + f;
                             if (!inside(n)) continue;
                             int32_t j = index[at(n)];
@@ -1838,6 +1866,9 @@ namespace projv::runtime {
                     d.velocity *= 0.995f;
                     d.angularVelocity *= 0.98f;
                 }
+                if (const float turning = glm::length(d.angularVelocity); turning > physics.debris.maxAngularSpeed)
+                    d.angularVelocity = physics.debris.maxAngularSpeed > 0.0f ? d.angularVelocity * (physics.debris.maxAngularSpeed / turning)
+                                                                              : core::vec3(0.0f);
                 if (glm::length(d.angularVelocity) > 1e-6f) {
                     const core::quat spin(0.0f, d.angularVelocity.x, d.angularVelocity.y, d.angularVelocity.z);
                     d.rotation = glm::normalize(d.rotation + (0.5f * dt) * (spin * d.rotation));
@@ -2678,6 +2709,8 @@ namespace projv::runtime {
         physics.debris.seconds = std::isfinite(config.debris.seconds) ? std::max(config.debris.seconds, 0.0f) : 20.0f;
         physics.debris.restitution = std::isfinite(config.debris.restitution) ? std::clamp(config.debris.restitution, 0.0f, 1.0f) : 0.25f;
         physics.debris.friction = std::isfinite(config.debris.friction) ? std::max(config.debris.friction, 0.0f) : 0.6f;
+        physics.debris.maxAngularSpeed =
+            std::isfinite(config.debris.maxAngularSpeed) ? std::max(config.debris.maxAngularSpeed, 0.0f) : 10.0f;
         {
             // Guards, clamped rather than refused: a bad value must not leave fracture unguarded.
             PhysicsConfig::FractureLimits want = config.fracture, &got = physics.fractureLimits;

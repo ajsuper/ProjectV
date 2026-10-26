@@ -111,6 +111,10 @@ Found after (2026-10-24, playing the marina: "bodies jittering back and forth, n
 - **Debris turns**: friction acts on the slip where its sphere meets the ground, its spin counted (a
   solid sphere), so debris that lands sliding rolls and tumbles; debris thrown by a break starts with a
   tumble (half its speed over its radius, at most 15 rad/s); a little rolling resistance lets it rest.
+- **Debris spins no faster than `DebrisConfig::maxAngularSpeed`** (10 rad/s by default; 0: it never
+  turns). 2026-10-25, playing the marina: "rotational velocity of the debris seems to have no limit
+  and it looks strange". Small debris that rolls truly spins fast (5 cm at 5 m/s: 100 rad/s); past
+  the limit it slides instead, and friction still brings it to rest.
 
 Left: networked breaks make no debris (a client could make its own from the dust a split carries);
 debris is a sphere to the world, so a long thin shard lands as a ball would; nothing hits debris
