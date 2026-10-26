@@ -222,6 +222,9 @@ if(NOT TARGET Jolt::Jolt)
     set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
     set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
     set(JPH_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    # Jolt's default on MSVC is the static C runtime (/MT); everything else here (bgfx, GLFW's DLL, the
+    # engine) uses the DLL runtime (/MD), and mixing them does not link. No effect off MSVC.
+    set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
     set(ENABLE_INSTALL ${PROJV_INSTALL} CACHE BOOL "" FORCE)
     # One patch to the submodule: a read-only accessor for the impulses the solver applied at each
     # contact, which breaking under load needs (runtime/physics/physics_world.h: contactLoads). Applied
