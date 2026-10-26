@@ -5,8 +5,8 @@ Namespace `projv::graphics`; `Input`, `Key` and `MouseButton` are in `projv`.
 
 | Belongs in graphics? | |
 |---|---|
-| ✅ `graphics::renderShaderToTargetBuffer()`, `graphics::passSceneToGPU()` | Rendering, GPU upload |
-| ❌ `graphics::createVoxelScene()` | `utils/` |
+| ✅ `graphics::renderConstructedRenderer()`, `graphics::createTexturesForScene()` | Rendering, GPU upload |
+| ❌ `graphics::loadComposeFromDisk()` | `utils/` |
 
 Explained in: [Rendering](../concepts/rendering.md), [Editing → Getting it to the GPU](../concepts/editing.md#getting-it-to-the-gpu).
 Formats: [renderer folder](formats/renderer-folder.md).
@@ -56,7 +56,7 @@ description into GPU objects, and keeping render targets sized.
 |---|---|
 | `constructRendererSpecification(spec, vertexShader)` | → `std::shared_ptr<ConstructedRenderer>` |
 | `resizeRenderTargets(textures, framebuffers, w, h)` | Bring relative targets to `scale × (w, h)`; true if any changed (drop history) |
-| `resolveTargetSize(textures, framebuffers, fboID, backBuffer)` | The size a pass writing `fboID` draws at |
+| `resolveTargetSize(textures, framebuffers, fboID, backBufferSize)` | The size a pass writing `fboID` draws at |
 | `constructTextures`, `constructFramebuffers`, `constructUniforms`, `constructShaders`, `constructRenderPasses`, `createShaderProgram`, `getTextureAttachments` | The steps |
 
 ## `graphics/perform_renderer.h`
@@ -67,7 +67,7 @@ renderer for one frame.
 | Name | What |
 |---|---|
 | `renderConstructedRenderer(renderInstance, renderer, &gpuData)` | Poll, upload uniforms, size targets to the window, run the passes, `bgfx::frame()` |
-| `performRenderPasses(toPrimary, renderer, renderInstance, w, h, view, proj, &gpuData)` | The passes alone: for drawing into a panel |
+| `performRenderPasses(renderToPrimary, renderer, renderInstance, w, h, view, proj, &gpuData)` | The passes alone: for drawing into a panel |
 | `updateUniforms(handles, values)` | Upload uniform values |
 
 ## `graphics/gpu_interface.h`

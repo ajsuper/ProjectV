@@ -5,9 +5,9 @@ Filling components procedurally. Concepts: [The scene](../concepts/scene.md), [V
 
 | You are making | Do this | Example |
 |---|---|---|
-| A prop, a body, a shape | `addComponent` (16-voxel chunk) + `queueVoxelAdd` + `updateScene` | [`17-physics-demos`](../../examples/17-physics-demos/) `voxels()` |
+| A prop, a body, a shape | `addComponent` (16-voxel chunk) + `queueVoxelAdd` + `updateScene` | [`17-physics`](../../examples/17-physics/) `voxels()` |
 | A floor, a wall, an arena, anything big and continuous | **The same.** It grows into one grid of 16-voxel cells | [`16-sandbox`](../../examples/16-sandbox/) `shape()` |
-| Many copies of one thing | Build it once, then `duplicateComponent` (geometry shared) | `17-physics-demos` `prototype()` + `place()` |
+| Many copies of one thing | Build it once, then `duplicateComponent` (geometry shared) | `17-physics` `prototype()` + `place()` |
 | Terrain streamed around the camera, built on worker threads | Brick map per chunk, install into a grid yourself | [`50-terrain-generator`](../../examples/50-terrain-generator/) |
 
 ## The normal route: a component and the edit queue
@@ -83,12 +83,16 @@ Copies share one blob (and one physics shape) until edited. Hide or delete the p
 ```cpp
 auto map = utils::createVoxelBrickMap(utils::computeBrickDims(64));
 utils::brickMapSetVoxel(*map, x, y, z, slot);                      // slots from internMaterial
-utils::updateChunkFromBrickMap(chunk, *map);                        // → chunk.geometryData
+utils::updateChunkFromBrickMap(chunk, *map);                        // → chunk.geometryData (a tree64)
 std::vector<uint8_t> ids;
 utils::bakeMaterialsFromBrickMap(chunk.geometryData, ids, *map);    // → material bytes
 int32_t blob = internChunkGeometry(scene, chunk, std::move(map));   // → the pool
 scene.geometryPool[blob].materialIDs = std::move(ids);
 ```
+
+The blob holds the tree until something asks for its tiles (the first upload, edit or collision shape),
+when `utils::blobTiles` builds the [tile table](../reference/formats/tile-table.md) and the tree is
+dropped. Code that builds tiles itself (a worker) installs them with `utils::setBlobTiles`.
 
 It then pushes the `ComponentRecord` and `Chunk` directly, which is only safe in an empty scene.
 Otherwise use `addComponent`, `reserveComponentSlot` + `placeComponent` and `allocateChunkSlot`, so
@@ -104,21 +108,22 @@ freed rows are reused and the root index stays right
  worker threads                                  main thread, each frame
  ┌──────────────────────────────┐   ready queue   ┌───────────────────────────────────────────┐
  │ createVoxelBrickMap           │ ─────────────▶  │ expandGridToInclude(grid, cell, ...)       │
- │ brickMapSetVoxel ...          │                 │ internChunkGeometry + blob.materialIDs     │
+ │ brickMapSetVoxel ...          │                 │ internChunkGeometry + setBlobTiles         │
  │ createChunk(header)           │                 │ chunk row → grid.cellToChunk[cell]         │
  │ updateChunkFromBrickMap       │                 │ requestChunkLOD(scene, h, wanted)          │
- │ bakeMaterialsFromBrickMap     │                 │ refine: replaceChunkGeometry(scene, h, ...)│
- │ internMaterial (thread-safe)  │                 │ flushSceneUpdates(scene, gpu)              │
+ │ bakeMaterialsFromBrickMap     │                 │ refine: replaceChunkTiles(scene, h, ...)   │
+ │ buildTileTable                │                 │ flushSceneUpdates(scene, gpu)              │
+ │ internMaterial (thread-safe)  │                 │                                            │
  └──────────────────────────────┘                 └───────────────────────────────────────────┘
 ```
 
 | Step | API | Note |
 |---|---|---|
-| Generate off-thread | brick map → `updateChunkFromBrickMap` → `bakeMaterialsFromBrickMap` | Touches no shared state except `internMaterial`, which locks `scene.materialPaletteMutex` |
-| Admit on the main thread | `internChunkGeometry`, set `gridIndex` / `cellIndex` / `componentHandle`, write `cellToChunk` | Mark `headerDirty` on a reused row. The example keeps its own free list; new code should use `allocateChunkSlot`. |
+| Generate off-thread | brick map → `updateChunkFromBrickMap` → `bakeMaterialsFromBrickMap` → `buildTileTable` | Touches no shared state except `internMaterial`, which locks `scene.materialPaletteMutex` |
+| Admit on the main thread | `internChunkGeometry` + `setBlobTiles`, set `gridIndex` / `cellIndex` / `componentHandle`, write `cellToChunk` | Mark `headerDirty` on a reused row. The example keeps its own free list; new code should use `allocateChunkSlot`. |
 | Grow the grid | `utils::expandGridToInclude(grid, cell, scene, gridIndex)` | `cell` is the **absolute** cell coordinate, not an index rebased on the grid |
 | Coarser far away | `requestChunkLOD(scene, h, resolution)` | `Coarsened`: done at upload. `NeedsRegeneration`: generate finer and install it. |
-| Finer close up | `replaceChunkGeometry(scene, h, geometry, materialIDs, resolution)` | Keeps the handle and cell: no pop while the new data is built |
+| Finer close up | `replaceChunkTiles(scene, h, tiles, resolution)` (`replaceChunkGeometry` for a tree) | Keeps the handle and cell: no pop while the new data is built |
 | Evict | `releaseBlob`, clear `cellToChunk`, kill the chunk | The GPU range is freed on the next flush |
 
 - **255 usable palette slots are shared by every chunk of the component.** Intern from a fixed

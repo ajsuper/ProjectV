@@ -2,7 +2,7 @@
 
 Concepts:
 [Physics](../concepts/physics.md). Working code: [`examples/16-sandbox`](../../examples/16-sandbox/)
-(prefabs that bounce and explode), [`examples/17-physics-demos`](../../examples/17-physics-demos/)
+(prefabs that bounce and explode), [`examples/17-physics`](../../examples/17-physics/)
 (eleven set pieces: stacks, walls, joints, a car, a trebuchet, materials).
 
 ## 1. Install it
@@ -47,10 +47,13 @@ next fixed step.
 | `friction`, `restitution` | 0.6, 0 | |
 | `linearDamping`, `angularDamping` | 0.05, 0.05 | |
 | `gravityFactor` | 1 | |
-| `layer` | `"moving"` | `"static"`, `"moving"`, `"debris"`, `"sensor"`, `"character"` |
+| `layer` | `"moving"` | `"static"`, `"moving"`, `"sensor"`, `"character"` |
 | `quality` | `"auto"` | `"auto"` (continuous under 1 m), `"discrete"`, `"continuous"` |
 | `material` | none | A physics material name: its density, friction and restitution win |
-| `breaksOnImpact` | false | Hits may fracture it (step 6) |
+| `breaksOnImpact` | false | Hits may fracture it (step 6; needs `installImpactFracture`) |
+| `minImpactSpeed`, `minImpactEnergy` | -1 (the world's), 0 | How fast / hard a hit must be to count as an impact / to break it |
+| `senses` | moving, character | On the `sensor` layer: the layers it reports (by name) |
+| `blockedByStatic` | none | Kinematic: `"stop"` or `"slide"` against static geometry |
 
 An unknown word (`"motion": "floaty"`) refuses the whole value: kept in the file, no body.
 
@@ -60,7 +63,8 @@ An unknown word (`"motion": "floaty"`) refuses the whole value: kept in the file
 |---|---|---|
 | `friction`, `restitution` | 0.6, 0 | |
 | `layer` | `"static"` | |
-| `splits` | false | Islands that lose contact with the component's y = 0 fall as bodies |
+| `splits` | false | Islands nothing holds up fall as bodies. What holds up: voxels of an `anchor` material, and with `anchorBase` the component's y = 0 and below |
+| `anchorBase` | false | The component's own y = 0 and below holds it up |
 | `material` | none | Friction and restitution from the library |
 | `breaksOnImpact` | false | |
 
@@ -156,7 +160,7 @@ Only voxels whose material has a `strength` break.
 runtime::fracture(world, hit->entity, hit->position, 4000.0f /* J */, camera.forward() * 3.0f);
 ```
 
-- **On impact**: `"breaksOnImpact": true`.
+- **On impact**: `"breaksOnImpact": true`, and `runtime::installImpactFracture(app)` once (the system that strikes; leave it out to write your own from `runtime::impacts()`).
 - **Carving** (a crater):
   ```cpp
   auto crater = runtime::voxelsInSphere(world, ground, centre, 3.0f);
@@ -165,15 +169,15 @@ runtime::fracture(world, hit->entity, hit->position, 4000.0f /* J */, camera.for
 - **Your own pattern**: `runtime::registerFracturePattern(world, "slabs", fn)`, then
   `"fracture": "slabs"`. Must be deterministic. See
   [`runtime/fracture.h`](../../include/runtime/fracture.h).
-- **Debris** is capped at `PhysicsConfig::maxDebris` (3000), oldest first.
+- **Pieces** are capped at `PhysicsConfig::maxPieces` (3000), oldest first. Small ones can be cheap debris, not bodies: `config.debris.maxVoxels = 64`.
 
 ## 7. React to what happened
 
 ```cpp
-app.events().on<BodySplit>([&](const BodySplit& e) {
+app.events().on<BodyBroken>([&](const BodyBroken& e) {       // inside the step: shape the pieces now
     for (Entity piece : e.pieces) app.world.emplace<MyGameTag>(piece);
+    if (e.cause == BreakCause::Strike || e.cause == BreakCause::Impact) playSound(e.at, e.energy);
 });
-app.events().on<BodyFractured>([&](const BodyFractured& e) { playSound(e.at, e.energy); });
 app.events().on<BodyEmptied>([&](const BodyEmptied& e)   { app.world.destroy(e.entity); });
 app.events().on<BodyLeftWorld>([&](const BodyLeftWorld&) { /* entity is already gone */ });
 app.events().on<JointBroke>([&](const JointBroke& e)     { /* e.force, e.torque */ });
@@ -188,7 +192,8 @@ runtime::PhysicsConfig config;
 config.settings.gravity = {0, -20, 0};
 config.settings.worldMin = core::vec3(-500);  config.settings.worldMax = core::vec3(500);
 config.settings.record = true;                    // for PhysicsWorld::replay
-config.maxDebris = 1000;
+config.maxPieces = 1000;
+config.debris.maxVoxels = 64;                     // small pieces are cheap debris, not bodies
 config.destroyBodiesThatLeaveTheWorld = true;
 runtime::installPhysics(app, config);
 ```
@@ -198,7 +203,7 @@ Settings: [Physics → Guards](../concepts/physics.md#guards-input-is-checked-ne
 ## 9. Check it
 
 ```bash
-DEMOS_SELFTEST=1 ./physics_demos      # in build/examples/physics_demos
+DEMOS_SELFTEST=1 ./physics      # in build/examples/physics
 ctest --preset dev
 ctest --preset soak                   # after physics changes
 ```

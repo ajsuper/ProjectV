@@ -17,7 +17,8 @@ myRenderer/
 
 ## 1. One pass to the window
 
-Start from [`examples/00-hello-voxel/helloRenderer`](../../examples/00-hello-voxel/). `resources.json`
+Start from [`examples/shared/basicRenderer`](../../examples/shared/basicRenderer/), the renderer
+[`examples/00-hello-voxel`](../../examples/00-hello-voxel/) draws with. `resources.json`
 (strict JSON, no comments):
 
 ```json
@@ -44,7 +45,7 @@ Start from [`examples/00-hello-voxel/helloRenderer`](../../examples/00-hello-vox
 - **`-1` is the window.** A pass writing the window uses `gl_FragColor`.
 - **Every pass key is required**, `multiPass` included.
 
-`main.frag`: [hello.frag](../../examples/00-hello-voxel/helloRenderer/helloShaders/hello.frag)
+`main.frag`: [basic.frag](../../examples/shared/basicRenderer/shaders/basic.frag)
 (`rayStartDirection` → `raySceneIntersect` → `fetchVoxelColor`).
 
 ## 2. Compile the shaders
@@ -87,9 +88,7 @@ SAMPLER2D(normal, 1);
 
 **Binding order**: each input framebuffer's textures in its `textureIDs` order, then the pass's
 `resourceTexturesIDs`. Slots matter, not sampler names; adding a texture to a framebuffer shifts every
-later slot (see the comment in
-[`tree64/shaders/accumulate.frag`](../../examples/30-renderers/renderers/tree64/shaders/accumulate.frag)
-records one such shift).
+later slot.
 
 ## 4. Accumulation: read your own output
 
@@ -112,8 +111,9 @@ void main() {
 }
 ```
 
-The program owns the reset (camera moved, `resizeRenderTargets` returned true). [`30-renderers/renderers/tree64`](../../examples/30-renderers/renderers/tree64/)
-is this pattern; [`taa`](../../examples/30-renderers/renderers/taa/) reprojects instead of resetting.
+The program owns the reset (camera moved, `resizeRenderTargets` returned true). [`pt-reference`](../../examples/30-renderers/renderers/pt-reference/shaders/accumulate.frag)
+is this pattern; [`restir-pt`](../../examples/30-renderers/renderers/restir-pt/) reprojects with motion
+vectors instead of resetting.
 
 ## 5. A texture from the CPU
 
@@ -187,6 +187,6 @@ renderer->dependencyGraph[2].enabled = false;                    // skip pass 2 
 | Empty scene | `Loaded N chunk(s)` in the log, and `fetchVoxelColor` only on a hit |
 
 Renderers to read, smallest first: [`00-hello-voxel`](../../examples/00-hello-voxel/),
-[`10-scene-previewer`](../../examples/10-scene-previewer/), the four in
+[`10-scene-previewer`](../../examples/10-scene-previewer/), the renderers in
 [`30-renderers`](../../examples/30-renderers/), then
 [`40-advanced-renderer`](../../examples/40-advanced-renderer/) (fourteen passes).

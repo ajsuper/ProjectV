@@ -25,6 +25,7 @@ MODULE_PAGES = {
     "utils": "docs/reference/utils.md",
     "data_structures": "docs/reference/data-structures.md",
     "runtime": "docs/reference/runtime.md",
+    "net": "docs/reference/net.md",
 }
 
 

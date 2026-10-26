@@ -1,6 +1,6 @@
 # Materials
 
-Every component owns a **palette** of up to 256 `Material` entries. Voxels store a slot in it, so
+Every component owns a **palette** of up to 255 `Material` entries. Voxels store a slot in it, so
 recolouring is a palette edit, not a geometry rewrite. Headers:
 [`data_structures/scene.h`](../../include/data_structures/scene.h) (`Material` and its packing),
 [`utils/material.h`](../../include/utils/material.h) (palette editing).

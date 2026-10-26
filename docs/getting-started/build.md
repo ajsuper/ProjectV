@@ -30,8 +30,12 @@ cd ProjectV
 git submodule update --init --recursive
 
 cmake --preset dev
-cmake --build --preset dev
+cmake --build --preset dev -j$(nproc)
 ```
+
+**Always build in parallel** (`-j$(nproc)`): the presets use the Makefile generator and set no job
+count, so a build without `-j` runs on one core. The first build is slow, since it compiles bgfx, bx, bimg
+and shaderc.
 
 ## Presets
 
@@ -39,10 +43,11 @@ cmake --build --preset dev
 |---|---|---|
 | `dev` | `build/` | Day to day. Submodule deps, `RelWithDebInfo`, examples and tests on. |
 | `release` | `build-release/` | Optimised, optional log categories compiled out (`PROJV_LOG_MINIMAL=ON`), Jolt asserts off. |
+| `clang` | `build-clang/` | `dev` with Clang: the golden physics recording must replay bit for bit on a second compiler (`ctest --preset clang`). |
 | `vcpkg` | `build-vcpkg/` | Every dependency through `find_package` from a vcpkg toolchain. Needs `VCPKG_ROOT`. |
 
 ```bash
-cmake --preset release && cmake --build --preset release
+cmake --preset release && cmake --build --preset release -j$(nproc)
 ```
 
 ## Targets

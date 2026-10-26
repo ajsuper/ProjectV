@@ -20,7 +20,7 @@ Scene
 │     geometryPoolIndex ──────────────┐
 ├── looseChunks[]  ChunkHandles the renderer walks one by one
 └── geometryPool[] GeometryBlob ◀─────┘   refcounted, shared by every chunk of the same voxels
-      geometry (tree64) · materialIDs · brickMap (while editing) · contentStamp
+      tile table + materials (or a tree64) · brickMap (authoring only) · contentStamp
 ```
 
 ## Components
@@ -38,7 +38,7 @@ One `ComponentRecord` per `compose.json` entry. All kinds have a name, local tra
 const ComponentRecord& c = scene.components[handle];
 c.name;  c.localId;  c.parent;  c.children;                 // identity and tree
 c.localPosition;  c.localRotation;  c.localScale;           // relative to parent; uniform scale
-c.materialPalette;                                          // up to 256 Material entries
+c.materialPalette;                                          // up to 255 Material entries
 ```
 
 A chunk component grows into a grid automatically when an edit runs past its edge

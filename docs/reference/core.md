@@ -7,7 +7,7 @@ Third-party: EnTT, glm. Namespaces: `projv` (application, world, time, events), 
 | Belongs in core? | |
 |---|---|
 | ✅ `app.addSystem(Stage::Update, "ai", think)` | Any program needs it |
-| ❌ `core::initializeWindow()` | Belongs in `graphics/` |
+| ❌ `core::loadComposeFromDisk()` | Belongs in `utils/` |
 
 Explained in: [The frame loop](../concepts/frame-loop.md), [Logging](../guides/logging.md).
 

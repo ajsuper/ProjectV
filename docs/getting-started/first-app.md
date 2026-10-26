@@ -25,16 +25,16 @@ See [the frame loop](../concepts/frame-loop.md).
 my_app/
 ├── CMakeLists.txt
 ├── main.cpp
-├── renderer/                  copy of examples/00-hello-voxel/helloRenderer
+├── renderer/                  copy of examples/shared/basicRenderer
 │   ├── render.json            the pass list
 │   ├── resources.json         uniforms, shaders, textures
-│   └── helloShaders/          hello.frag, vs_quad.sc, varying.def.sc
+│   └── shaders/               basic.frag, vs_quad.sc, varying.def.sc
 └── scene/                     any folder with a compose.json, e.g.
                                examples/10-scene-previewer/scenes/SmallVox
 ```
 
 `resources.json` shader paths are relative to the working directory: change
-`./helloRenderer/helloShaders/hello.bin` to `./renderer/helloShaders/hello.bin`.
+`./basicRenderer/shaders/basic.bin` to `./renderer/shaders/basic.bin`.
 
 ```cmake
 cmake_minimum_required(VERSION 3.20)
@@ -43,10 +43,10 @@ find_package(ProjectV CONFIG REQUIRED)
 
 add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE ProjectV::projectV)
-projv_compile_shaders(TARGET my_app SHADER_DIRS renderer/helloShaders)
+projv_compile_shaders(TARGET my_app SHADER_DIRS renderer/shaders)
 ```
 
-In-tree, use `projv_add_example(my_app SOURCES main.cpp SHADERS renderer/helloShaders ASSET_DIRS renderer scene)`,
+In-tree, use `projv_add_example(my_app SOURCES main.cpp SHADERS renderer/shaders ASSET_DIRS renderer scene)`,
 which also stages the assets beside the binary.
 
 ## 2. Startup: window, scene, renderer, upload
@@ -78,7 +78,7 @@ void startup(Application& app) {
 
     auto spec = graphics::loadRendererSpecification((here / "renderer").string() + "/");
     window.addRendererSpecification(1, spec);
-    auto vertexShader = graphics::loadShader((here / "renderer/helloShaders/vs_quad.bin").string());
+    auto vertexShader = graphics::loadShader((here / "renderer/shaders/vs_quad.bin").string());
     window.setActiveRenderer(
         graphics::constructRendererSpecification(window.getRendererSpecification(1), vertexShader));
 

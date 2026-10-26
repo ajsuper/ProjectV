@@ -7,9 +7,11 @@ Folders: [tests/README.md](../../tests/README.md). Coverage wishlist:
 |---|---|---|
 | Unit tests + layering + docs links | `ctest --preset dev` | CPU only |
 | Physics soak (2000 bodies, ten simulated minutes, ~30 s) | `ctest --preset soak` | After changing physics |
+| Real sockets: ENet, the multiplayer, party and playground examples as headless processes, a hundred bot clients | `ctest --preset net` | Localhost |
+| The tests on a second compiler (the golden recording must replay bit for bit) | `ctest --preset clang` | Clang |
 | One test case, verbose | `build/bin/projv_unit_tests -tc="*fixed step*" -s` | |
 | Sandbox self-test | `cd build/examples/sandbox && SANDBOX_SELFTEST=600 ./sandbox` | A display |
-| Physics demos self-test | `cd build/examples/physics_demos && DEMOS_SELFTEST=1 ./physics_demos` | A display |
+| Physics demos self-test | `cd build/examples/physics && DEMOS_SELFTEST=1 ./physics` | A display |
 | Manual harnesses | `cmake --preset dev -DPROJV_BUILD_MANUAL_TESTS=ON` | A display |
 
 ## The ctest tests
@@ -19,6 +21,7 @@ Folders: [tests/README.md](../../tests/README.md). Coverage wishlist:
 | `projv_unit_tests` | The doctest suite below |
 | `physics_soak` | The same binary, `-tc=soak*` with `PROJV_SOAK=1`; label `soak`, excluded from `dev` |
 | `layering` | A scan of includes: the voxel layer never includes EnTT or the runtime, only `src/runtime/physics/` includes Jolt ([`check_layering.cmake`](../../tests/unit/check_layering.cmake)) |
+| `net_sockets`, `multiplayer_selftest`, `multiplayer_scale`, `party_selftest`, `playground_selftest` | Real sockets on localhost; label `net`, excluded from `dev` (`ctest --preset net`) |
 | `docs` | Every docs link resolves, every page is reachable, every header is in its module page ([`check_links.py`](../../tools/docs/check_links.py)) |
 
 ## The unit suite
@@ -50,6 +53,15 @@ Folders: [tests/README.md](../../tests/README.md). Coverage wishlist:
 | `test_physics_character.cpp` | Characters: stairs, slopes, walls, jumping, pushing, moving ground |
 | `test_physics_net.cpp` | Recordings replay exactly, NetIds make peers agree, stamped commands, rewind |
 | `test_physics_reliability.cpp` | Fast small things, tall stacks, big piles, blow-ups, things flung out; the soak |
+| `test_physics_golden.cpp` | One committed session (`data/physics_golden.rec`, and `physics_golden_tiles.rec` on tile shapes) every build replays bit for bit; regenerate on purpose with `PROJV_WRITE_GOLDEN=1` |
+| `test_physics_contacts.cpp`, `test_physics_groups.cpp`, `test_physics_kinematic.cpp` | Contact and sensor events; collision groups and families; kinematic bodies that static geometry stops |
+| `test_physics_debris.cpp` | Cheap debris: falls, lands, rests in creases, goes after its seconds, turns no faster than its limit |
+| `test_physics_tiles.cpp` | Voxels colliding as their tile tables: no seams on a floor, nothing through a thin wall |
+| `test_physics_loading.cpp`, `test_physics_prediction.cpp` | Physics under world loading; what networking asks of the simulation (corrections, proxies, a character re-run alone) |
+| `test_tile_table.cpp`, `test_tile_collision.cpp`, `test_block_table.cpp` | Every voxel looked up through the table as the shader does and compared with the tree it was built from; collision boxes and rays against a plain grid |
+| `test_palette_overflow.cpp`, `test_color.cpp` | The 256th palette entry folded into its nearest; the sRGB 10-bit colour round trip |
+| `test_scene_loading.cpp`, `test_world_loading.cpp` | Blocks loading and unloading; entities coming and going with them |
+| `test_net.cpp`, `test_replication.cpp` | Bits on the wire and the loopback network; a server and clients in one process |
 
 ## Adding a test
 
@@ -91,7 +103,7 @@ Unattended runs that log `PASS` or `FAIL`.
 | Example | Run | Checks |
 |---|---|---|
 | [`16-sandbox`](../../examples/16-sandbox/) | `SANDBOX_SELFTEST=600 ./sandbox` (3000 is the better physics check) | Every body accounted for, the walker never sinks, popped voxels gone, no dropped contacts, and the recording replays bit-identically. `SANDBOX_RECORD=<path>` writes the recording. |
-| [`17-physics-demos`](../../examples/17-physics-demos/) | `DEMOS_SELFTEST=1 ./physics_demos` (`DEMOS_ONLY=9` or `2,11`: some) | Each demo does what it should; no dropped contacts, no non-finite bodies, nothing through the floor, the recording replays |
+| [`17-physics`](../../examples/17-physics/) | `DEMOS_SELFTEST=1 ./physics` (`DEMOS_ONLY=9` or `2,11`: some) | Each demo does what it should; no dropped contacts, no non-finite bodies, nothing through the floor, the recording replays |
 
 ## Manual harnesses
 

@@ -115,7 +115,7 @@ Entry points, query options and materials: [Shader library](../reference/shader-
 
 | Texture | Holds |
 |---|---|
-| `tree64Data` | Every blob's tree64 (and envelope), suballocated by `RangeAllocator` |
+| `tree64Data` | Every blob's voxels (its [tile table](../reference/formats/tile-table.md)) and envelope, suballocated by `RangeAllocator`. The name is from the tree64 it first held. |
 | `materialIDs` | Every blob's material bytes |
 | `materialPalette` | Every component's palette, one entry per texel; a chunk's header names its offset |
 | `headerData` | One `GPUChunkHeader` row per chunk: placement, ranges, LOD, content box |
@@ -128,9 +128,9 @@ Keeping it current: [Editing → Getting it to the GPU](editing.md#getting-it-to
 
 | Where | What |
 |---|---|
-| [`examples/00-hello-voxel/helloRenderer`](../../examples/00-hello-voxel/) | One pass, albedo plus a face tint |
+| [`examples/shared/basicRenderer`](../../examples/shared/basicRenderer/) | One pass: the voxel's colour under a fixed sun and sky |
 | [`examples/10-scene-previewer`](../../examples/10-scene-previewer/) | Albedo only: shows what is in a scene |
-| [`examples/30-renderers`](../../examples/30-renderers/) | Four renderers over one scene: accumulation, TAA, fast direct light, half-resolution reconstruction |
+| [`examples/30-renderers`](../../examples/30-renderers/) | Renderers over one scene: a path-traced reference, fast direct light, half-resolution reconstruction, ReSTIR PT, and the demos' voxel renderer |
 | [`examples/40-advanced-renderer`](../../examples/40-advanced-renderer/) | Fourteen passes: probe GI, animation, transparency, refraction |
 
 Writing one: [Write a renderer](../guides/write-a-renderer.md).

@@ -24,6 +24,13 @@ VoxelMaterial m = sh.materialValid ? sh.material : fetchVoxelMaterialFromHit(sh.
 vec3 position   = ray.origin + ray.direction * sh.hit.rayT;   // only valid without refraction
 ```
 
+## Companion includes
+
+| File | Holds | Plan |
+|---|---|---|
+| [`include/pjv_color.sc`](../../include/pjv_color.sc) | The colour convention: `pjvSrgbToLinear`/`pjvLinearToSrgb`, `pjvTonemapNeutral`, `pjvDisplay` (exposure → tone curve → sRGB → dither), `pjvGrade`, `pjvVignette`. `decodeMaterial` uses it, so every renderer gets **linear** albedo from sRGB-stored palettes. | [color-convention](../plans/color-convention.md) |
+| [`include/pjv_bsdf.sc`](../../include/pjv_bsdf.sc) | The surface model: a Lambertian diffuse lobe under a GGX specular lobe (`pjvBsdfEvaluate`, `pjvBsdfSample`, `pjvPowerHeuristic`, ...). A default material (glossiness 0, metallic 0) costs nothing and changes nothing. The editor's path tracer, `pt-reference` and `restir-pt` all shade through it. | [restir-pt](../plans/restir-pt.md) |
+
 ## Rules
 
 - **One march call site per shader.** A second inlined `raySceneIntersect` / `raySceneIntersectFrom`
@@ -47,7 +54,7 @@ vec3 position   = ray.origin + ray.direction * sh.hit.rayT;   // only valid with
 | 11 | `looseList` | Loose chunks + their BVH |
 | 12 | `gridInfo` | Grids |
 | 13 | `cellMap` | Grid cell → chunk |
-| 14 | `tree64Data` | Every tree64 (and envelopes) |
+| 14 | `tree64Data` | Every blob's voxels (its [tile table](formats/tile-table.md)) and envelopes. The name is from the tree64 it first held. |
 | 15 | `headerData` | One header row per chunk |
 
 All `USAMPLER2D`, read with `texelFetch`. Stages 0–8 are the pass's own inputs.

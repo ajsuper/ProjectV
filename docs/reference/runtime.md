@@ -1,7 +1,7 @@
 # runtime
 
 The one layer that sees both the voxel `Scene` and the entity `World`: the Scene bridge, authored
-entities and prefabs, network ids, physics and fracture. Functions are in `projv::runtime`; the
+entities and prefabs, network ids, world loading, replication, physics and fracture. Functions are in `projv::runtime`; the
 ECS component types (`Transform`, `RigidBody`, `NetId`, ...) are in `projv`.
 
 **Only `src/runtime/physics/` includes Jolt**, and no public header names a Jolt type (`layering`
@@ -54,31 +54,84 @@ components.
 | `assignNetId(world, entity)` | Authority only |
 | `entityForNetId(world, id)` | |
 
-## `runtime/physics.h`
+## `runtime/loading.h`
 
-[`include/runtime/physics.h`](../../include/runtime/physics.h): physics for entities.
+[`include/runtime/loading.h`](../../include/runtime/loading.h): world loading for a running program,
+`utils::SceneLoader`'s blocks plus the entities that go with them. Plan:
+[world-loading](../plans/world-loading.md).
 
 | Name | What |
 |---|---|
-| `installPhysics(app, config)` | `"physics"` in FixedUpdate, `"physics: present"` in PostUpdate before the bridge |
-| `PhysicsConfig` | `settings`, `collision`, `destroyBodiesThatLeaveTheWorld`, `maxDebris` |
-| `RigidBody` (`"physics.rigidbody"`) | Dynamic or kinematic; shape `Voxels`/`Sphere`/`Box`/`Capsule`, density/mass, friction, `material`, `breaksOnImpact` |
-| `StaticCollider` (`"physics.static"`) | Immovable voxels; `splits` makes unsupported pieces fall |
+| `openWorld(app, folder, config)` | Open a compose folder lazily (no voxels), install the bridge, add `"world loading"` to PreUpdate. Then `spawnEntities` as usual. |
+| `WorldLoadingConfig` | `loader` (`utils::LoaderConfig`), `policy` |
+| `setLoadRule`, `setViewers`, `worldLoader`, `hasWorldLoading` | The rule, the points the world is seen from, the loader |
+| `updateWorldLoading`, `settleWorld` | One pass now; load everything the rule wants before returning |
+| `LoadViewer`, `LoadBounds`, `LoadState` | Components: a viewer entity; a box for an unlinked entity; the rule's answer (`Active`/`Kept`) |
+| `EntityUnloading`, `EntityReloaded` | Events either side of an entity leaving and returning (new `Entity`, same `NetId`) |
+
+## `runtime/replication.h`
+
+[`include/runtime/replication.h`](../../include/runtime/replication.h): a session over a
+[`net::Transport`](net.md): entities the server makes reach every client by `NetId`, and the clients'
+input reaches the server. Plan: [networking](../plans/networking.md).
+
+| Name | What |
+|---|---|
+| `installServer(app, transport, ServerConfig)`, `installClient(app, transport, ClientConfig)` | Start a side. Policy is the game's: `spawnPlayer`, `applyInput`, `onMessage` |
+| `Replicated` | On a server entity: sent to every client; `omit` names components not sent |
+| `NetProxy` | A client's stand-in for anything it does not own, shown between snapshots |
+| `setLocalInput(world, move, jump)` | A client's input, each frame |
+| `sendToServer`, `sendToClient`, `sendToClients` | The game's own messages |
+| `setClientLoadRule` | What a client is sent: only what is near its player |
+| `sceneFilesHash(folder)` | The handshake's check that both sides have the same files |
+| `clientStats`, `SessionStats`, `ClientStats` | Bytes, mismatches, prediction corrections |
+| `ClientJoined`, `ClientLeft`, `JoinedServer`, `LeftServer` | Events |
+
+Voxel edits and breaks of entities with a `NetId` are replicated as what happened (`VoxelsEdited`,
+`BodyBroken`), in order, and a client that joins later gets the lot. A client simulates only what it
+owns.
+
+## `runtime/physics.h`
+
+[`include/runtime/physics.h`](../../include/runtime/physics.h): physics for entities. Every behaviour is
+asked for, not assumed.
+
+| Name | What |
+|---|---|
+| `installPhysics(app, config)` | `"physics"` in FixedUpdate, `"physics: present"` in PostUpdate before the bridge. Idempotent. |
+| `PhysicsConfig` | `settings`, `collision`, `destroyBodiesThatLeaveTheWorld`, `maxPieces`, `dustVoxels`, `debris` (`DebrisConfig`), `fracture` (`FractureLimits`) |
+| `RigidBody` (`"physics.rigidbody"`) | Dynamic or kinematic; shape `Voxels`/`Sphere`/`Box`/`Capsule`, density/mass, friction, restitution, `material`, `quality`, `breaksOnImpact`, `minImpactSpeed`, `minImpactEnergy`, `senses` (sensor layer), `blockedByStatic` |
+| `StaticCollider` (`"physics.static"`) | Immovable voxels; `splits` makes unsupported pieces fall, `anchorBase`, and the same impact and sensor fields |
 | `CharacterController` (`"physics.character"`) | A walking capsule |
 | `Joint` (`"physics.joint"`) | Fixed / point / hinge / slider / distance between two `NetId`s |
 | `ConstantVelocity` | A kinematic body that flies on by itself |
-| `PhysicsBody`, `PhysicsCharacter`, `PhysicsJoint`, `PhysicsVoxelPart`, `Debris` | The simulation's side; never saved |
+| `CollisionGroups`, `ContactReports` | Groups, ignores and a family; which contacts a body reports (`only`: group names) |
+| `FrozenMotion` | The motion a body had when world loading froze it, given back when it is active |
+| `PhysicsBody`, `PhysicsCharacter`, `PhysicsJoint`, `PhysicsVoxelPart`, `PhysicsHold`, `Debris` | The simulation's side; never saved |
+| `definePhysicsGroup`, `physicsGroup` | Collision group names ↔ bits |
 | `addImpulse`, `addAngularImpulse`, `addVelocity`, `setVelocity`, `teleport`, `setGravity` | Commands, applied at the next fixed step in issue order |
+| `holdBody`, `isHeld`, `driveBody`, `setBodyState` | Held still; driven to a pose each step (what a client does to a networked proxy); set outright |
 | `setCharacterInput`, `characterState` | Characters |
 | `connectBodies`, `setJointMotor`, `jointState` | Joints |
-| `editVoxels`, `voxelsInSphere`, `voxelComponentOf` | Voxel edits on a tick |
-| `fracture(world, entity, at, energy, push)` | Break a voxel body |
+| `editVoxels`, `applyVoxelEdit`, `acceptVoxelChanges`, `voxelsInSphere`, `voxelComponentOf` | Voxel edits on a tick |
+| `fracture(world, entity, strike)`, `fracture(world, entity, at, energy, push)`, `fractureWithin`, `canBreak` | Break a voxel body. `Strike`: `at`, `energy` or `reach`, `push`, `minimumBreak`, `shardSize`, `cause`, `striker`, `returnUnusedEnergy` |
+| `applyVoxelSplit` | Make a break's pieces from what a server sent (`VoxelSplit`), without a support pass |
+| `impacts(world)` → `BodyImpact` | The last step's collisions: point, normal, closing speed, energy, load share, impulse |
+| `contacts(world)` → `BodyContact`, `touching(world, entity)` | Contacts began/ended; what is on a plate |
+| `installImpactFracture(app, config)` | Adds `"physics: impact fracture"`: each impact on a `breaksOnImpact` body strikes it with the collision's energy (`ImpactFractureConfig`) |
 | `definePhysicsMaterial`, `loadPhysicsMaterials`, `physicsMaterial`, `physicsMaterialIndex` | The material library |
 | `submitCommand(PhysicsCommand)`, `nextPhysicsTick`, `lateCommands` | Commands from elsewhere, by `NetId` and tick |
-| `physicsStateHash`, `savePhysics`, `restorePhysics` | Compare and rewind |
+| `physicsStateHash`, `savePhysics`, `restorePhysics` | Compare and rewind (**not** across anything that makes or removes bodies) |
 | `castRay`, `castSphere`, `overlapSphere`, `overlapBox` → `QueryHit` | Queries, traced to the voxel |
-| `bodyPose`, `hasBody`, `physicsWorld(world)` | State; the raw `PhysicsWorld` |
-| `PhysicsBodyRefused`, `BodyLeftWorld`, `BodySplit`, `BodyFractured`, `BodyEmptied`, `JointBroke`, `SimulationSlow` | Events |
+| `bodyPose`, `hasBody`, `physicsWorld(world)`, `hasPhysics` | State; the raw `PhysicsWorld` |
+
+Events (`core::Events`): `PhysicsBodyRefused`, `BodyLeftWorld`, `BodyBroken` (`cause`: `Edit`,
+`Support`, `Strike`, `Impact`, `Replicated`; delivered **inside the step**, before the pieces' bodies
+exist, so a handler can shape them), `PiecesCleared`, `ContactBegan`, `ContactEnded`, `BodyEmptied`,
+`VoxelsEdited`, `JointBroke`, `SimulationSlow`. A break's pieces carry `Piece`.
+
+Concepts: [Physics](../concepts/physics.md). Plans: [cheap-debris](../plans/cheap-debris.md),
+[impact-loads](../plans/impact-loads.md), [voxel-collision-shape](../plans/voxel-collision-shape.md).
 
 ## `runtime/fracture.h`
 

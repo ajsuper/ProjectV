@@ -97,7 +97,7 @@ runtime::spawnEntities(app.world);                           // every entities.j
 - **Inner folders spawn first**; an outer file naming the same component adds to and overrides that
   entity (prefab overrides).
 - **Setup needing the entity** goes in `on_construct`, which runs after the link seeded `Transform`.
-- **Saving**: `runtime::saveEntities(world, documentNode, folder)`. An entity belongs to the file it
+- **Saving**: `runtime::saveEntities(world, document, folder)`. An entity belongs to the file it
   was spawned from (`Authored`), else to the file its linked component is an entry of. Linked
   entities' `Transform`s live in `compose.json`, not here.
 

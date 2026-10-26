@@ -20,11 +20,18 @@ Status: **proposal** (not agreed) · **approved** (not started) · **in progress
 | Plan | Status | What |
 |---|---|---|
 | [physics-jolt.md](physics-jolt.md) | in progress | Jolt physics from voxels, deterministic and networkable. M0–M6, joints, materials, fracture, debris and support built; fracture policy next |
+| [cheap-debris.md](cheap-debris.md) | built | A break's small pieces are not bodies: drawn, falling and bouncing against the static world |
+| [impact-loads.md](impact-loads.md) | in progress | What decides a break and how big it is: energy, load share, ragged rims. How big a break a big slow body buys is open |
+| [voxel-collision-shape.md](voxel-collision-shape.md) | Phases 1–3 built | Bodies collide as their tile tables, read in place. Phase 4 (the default) not started |
+| [teardown-physics.md](teardown-physics.md) | draft | Converted Teardown levels as physics scenes: props, holes, joints |
+| [world-loading.md](world-loading.md) | built (L0–L3) | One rule decides what is loaded: blocks, entities, physics under loading |
+| [networking.md](networking.md) | built (N0–N7) | Server-authoritative on the deterministic simulation: transport, replication, prediction, interest, a hundred clients |
 | [runtime-spine-entt.md](runtime-spine-entt.md) | built (P1–P4) | EnTT registry, stages and scheduler, `Time`, `Events`, the Scene bridge. P5 unscheduled |
 | [authored-entities.md](authored-entities.md) | built | Gameplay data saved as ECS components in `entities.json` |
 | [component-attachments.md](component-attachments.md) | built (AT0–AT2) | Program data that travels with components in `compose.json`; narrowed by authored-entities |
 | [slot-reuse.md](slot-reuse.md) | in progress | Generational components, recycled chunk rows, indexed roots. Steps 1–3 and 5 built; the editor conversion (4) open |
 | [animation.md](animation.md) | approved | Living scenes: per-voxel detail motion, envelopes, motion sets. Design agreed |
+| [voxel-storage-tiles.md](voxel-storage-tiles.md) | in progress | Tile tables replace the tree64 as a blob's voxels: render, edit, simulate, store. Phases 1–5 built; what is left is in its delivery log |
 
 ## Editing
 
@@ -61,6 +68,10 @@ differ, the README is what the code does.
 |---|---|---|
 | [render-target-sizing.md](render-target-sizing.md) | built | Render targets sized by rule (`sizeMode`), per-pass sizes |
 | [loose-chunk-bvh.md](loose-chunk-bvh.md) | partly built (H1, H3, H5) | A BVH over loose chunks for rendering, picking and physics |
+| [block-table-traversal.md](block-table-traversal.md) | done | Walking the tree64 without descending it (the dense block table) |
+| [voxel-renderer.md](voxel-renderer.md) | in progress (R0–R3, R5 built; R4, R6 open) | The `_demo` examples' renderer: rebuilt for speed, then feel, then looks |
+| [restir-pt.md](restir-pt.md) | delivered in part | ReSTIR PT: paths with materials, reused. Replaced `restir` in the gallery and the terrain generator |
+| [color-convention.md](color-convention.md) | K0–K2 built | One meaning for a stored colour (sRGB), one transform to the screen |
 | [region_tree64_layout.md](region_tree64_layout.md) | proposal | Column-based region allocator for the tree64 texture |
 | [shader_optimization/](shader_optimization/README.md) | stale | Twelve independent DDA shader experiments, written against the pre-Phase-10 shader (`voxelTypeData`, the old `docs/examples/` paths) |
 
@@ -77,6 +88,12 @@ The twelve shader experiments:
 [10 root empty check](shader_optimization/10_root_empty_check.md) ·
 [11 single-child fast path](shader_optimization/11_single_child_fastpath.md) ·
 [12 cache and prefetch](shader_optimization/12_cache_and_prefetch.md)
+
+## Content
+
+| Plan | Status | What |
+|---|---|---|
+| [biome-canyonlands.md](biome-canyonlands.md) | approved; C1, C2 built | The terrain generator's first biome: a Colorado Plateau canyon network |
 
 ## Infrastructure
 

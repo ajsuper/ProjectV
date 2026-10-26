@@ -11,8 +11,8 @@ if you want to keep it. Headers: [`utils/editing.h`](../../include/utils/editing
  queueVoxelAdd / queueVoxelRemove      per component, in component voxel space
             │   ComponentRecord::editQueue
             ▼
- utils::updateScene(scene)             CPU: fork shared blobs, edit the brick map,
-            │                          rebake tree64 + materialIDs, grow grids, mark blobs dirty
+ utils::updateScene(scene)             CPU: fork shared blobs, edit each tile table in place
+            │                          (applyTileEdits), grow grids, mark blobs dirty
             ▼
  graphics::flushSceneUpdates(scene, gpu)   GPU: upload dirty blobs, rewrite changed header rows
             │
@@ -44,11 +44,12 @@ graphics::flushSceneUpdates(scene, gpuData);
 ## What `updateScene` does
 
 - **Copy-on-write.** Shared blobs are forked first; a sole owner is edited in place.
-- **Brick maps on demand**, built from the tree64 on the first edit; tree64 and material bytes are
-  rebaked after.
+- **Tile tables edited in place.** `applyTileEdits` decodes and re-encodes only the 16³ blocks the
+  edits touch and carries the rest over as they are; a block that ends up solid and one material
+  becomes a tile. No brick map is built (a blob's authoring one is dropped).
 - **Growth.** An edit past a chunk component's edge turns it into a one-cell grid
   (`convertChunkToGrid`) and adds cells as needed (`expandGridToInclude`), in any direction.
-- **Content changes are announced.** Rebaked blobs get a new `contentStamp`, so physics rebuilds
+- **Content changes are announced.** Edited blobs get a new `contentStamp`, so physics rebuilds
   shapes and splits what was cut loose.
 
 ## Getting it to the GPU

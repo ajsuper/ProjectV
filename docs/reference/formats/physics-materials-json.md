@@ -34,6 +34,7 @@ it: [Physics](../../concepts/physics.md).
 | `fracture` | string | `"shatter"` | Fracture pattern: `shatter`, `splinter`, `crumble`, `seams`, or one registered with `registerFracturePattern` |
 | `shardSize` | m, > 0 | 0.5 | About how big a shard is |
 | `grain` | `[x, y, z]`, non-zero | `[0, 1, 0]` | The direction `splinter` runs along, in the component's local axes (normalised) |
+| `anchor` | boolean | false | Holds up what it is part of: in a `splits` static collider, a piece with a voxel of an anchor material stands whatever is cut away under it (bedrock, a foundation) |
 
 ## Rules
 
@@ -52,4 +53,4 @@ In code, without a file:
 runtime::definePhysicsMaterial(world, "ice", {.density = 917.0f, .friction = 0.01f});
 ```
 
-The bundled library: [`examples/17-physics-demos/physics_materials.json`](../../../examples/17-physics-demos/physics_materials.json).
+The bundled library: [`examples/17-physics/physics_materials.json`](../../../examples/17-physics/physics_materials.json).

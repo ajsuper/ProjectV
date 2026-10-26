@@ -1,6 +1,6 @@
 # Architecture
 
-Five modules in one library, with strict rules about which may see which.
+Six modules in one library, with strict rules about which may see which.
 
 ## Modules
 
@@ -9,17 +9,19 @@ include/                      namespace            sees
 ├── core/              ───▶   projv, projv::core   EnTT, glm, spdlog            (no voxels, no GPU)
 ├── data_structures/   ───▶   projv                core, bgfx types              (plain data)
 ├── utils/             ───▶   projv::utils         core, data_structures         (the voxel layer)
+├── net/               ───▶   projv::net           core                          (transport, wire format)
 ├── graphics/          ───▶   projv::graphics      everything below runtime      (window, GPU)
-└── runtime/           ───▶   projv::runtime       everything                    (entities, physics)
+└── runtime/           ───▶   projv::runtime       everything                    (entities, physics, sessions)
 ```
 
 | Module | What it is | Start with |
 |---|---|---|
 | **core** | The application, its loop and clock, events, maths, logging, paths. Knows nothing about voxels or the GPU. | [`core/application.h`](../../include/core/application.h) |
 | **data_structures** | The plain types the rest operate on: `Scene`, `Chunk`, `GeometryBlob`, `GPUData`, renderer specifications. | [`data_structures/scene.h`](../../include/data_structures/scene.h) |
-| **utils** | Everything voxel: compose I/O, the component tree, editing, materials, picking, animation, collision geometry. | [`utils/compose_io.h`](../../include/utils/compose_io.h) |
+| **utils** | Everything voxel: compose I/O, the component tree, tile tables, editing, materials, picking, animation, collision geometry, loading part of a scene. | [`utils/compose_io.h`](../../include/utils/compose_io.h) |
+| **net** | Moving bytes between machines: ENet and an in-process loopback behind one `Transport`, and the bit-level wire format. No EnTT, no runtime. | [`net/transport.h`](../../include/net/transport.h) |
 | **graphics** | Window, input, bgfx, renderer descriptions, uploading the scene, drawing. | [`graphics/render_instance.h`](../../include/graphics/render_instance.h) |
-| **runtime** | Entities linked to voxel components, authored entities, prefabs, network ids, physics. | [`runtime/scene_bridge.h`](../../include/runtime/scene_bridge.h) |
+| **runtime** | Entities linked to voxel components, authored entities, prefabs, network ids, world loading, replication (server and clients), physics. | [`runtime/scene_bridge.h`](../../include/runtime/scene_bridge.h) |
 
 Per-header detail: [Reference](../reference/README.md).
 
@@ -31,12 +33,13 @@ The compiler can't enforce them because EnTT is linked `PUBLIC`.
 - **`utils/` and `data_structures/` never include EnTT, `core/world.h`, `core/application.h`,
   `core/events.h` or `runtime/`**, so tools without a game loop can load, edit and save scenes.
 - **`runtime/` is the one layer that sees both** the voxel `Scene` and the entity `World`.
+- **`net/` follows the same rule** (no EnTT, no runtime), and **only `src/net/transport_enet.cpp` includes ENet**.
 - **Only `src/runtime/physics/` includes Jolt** (the `projv_physics` object library, built with
   Jolt's flags). No public header names a Jolt type.
 
 ```text
              ┌──────────────────────────── runtime ───────────────────────────┐
-             │  scene bridge · entities.json · prefabs · NetId · physics(Jolt)│
+             │  bridge · entities.json · prefabs · NetId · loading · physics   │
              └───────┬─────────────────────────────────────────────┬──────────┘
                      │ sees                                        │ sees
    ┌─────────────────▼─────────────────┐            ┌──────────────▼──────────┐

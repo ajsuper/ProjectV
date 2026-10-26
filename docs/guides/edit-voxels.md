@@ -126,5 +126,5 @@ auto crater = runtime::voxelsInSphere(world, entity, hitPoint, 2.0f);   // remov
 runtime::editVoxels(world, entity, crater);                              // applied at the next step
 ```
 
-Pieces cut loose become bodies (`BodySplit`). See
+Pieces cut loose become bodies (`BodyBroken`, `cause: Edit` or `Support`). See
 [Physics](../concepts/physics.md#editing-bodies) and [`16-sandbox`](../../examples/16-sandbox/)'s bombs.

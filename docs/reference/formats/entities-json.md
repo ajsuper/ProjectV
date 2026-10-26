@@ -62,10 +62,13 @@ Keys the engine registers:
 |---|---|---|---|
 | `projv.transform` | `Transform` | always | `position [x,y,z]`, `rotation [x,y,z,w]`, `scale`. Places an unlinked entity; overrides a linked one's component transform on spawn; **not saved for linked entities** (that lives in `compose.json`). |
 | `projv.netid` | `NetId` | `installNetIds` / `installPhysics` | `id` (non-zero) |
-| `physics.rigidbody` | `RigidBody` | `installPhysics` | `motion`, `shape`, `radius`, `halfExtents`, `halfHeight`, `density`, `mass`, `friction`, `restitution`, `linearDamping`, `angularDamping`, `gravityFactor`, `layer`, `quality`, `material`, `breaksOnImpact` |
-| `physics.static` | `StaticCollider` | `installPhysics` | `friction`, `restitution`, `layer`, `splits`, `material`, `breaksOnImpact` |
+| `physics.rigidbody` | `RigidBody` | `installPhysics` | `motion`, `shape`, `radius`, `halfExtents`, `halfHeight`, `density`, `mass`, `friction`, `restitution`, `linearDamping`, `angularDamping`, `gravityFactor`, `layer`, `quality`, `material`, `breaksOnImpact`, `quality`, `material`, `breaksOnImpact`, `minImpactSpeed`, `minImpactEnergy`, `senses`, `blockedByStatic` |
+| `physics.static` | `StaticCollider` | `installPhysics` | `friction`, `restitution`, `layer`, `splits`, `anchorBase`, `material`, `breaksOnImpact`, `minImpactSpeed`, `minImpactEnergy`, `senses` |
 | `physics.character` | `CharacterController` | `installPhysics` | `radius`, `height`, `maxSlopeDegrees`, `mass`, `strength`, `stepHeight`, `layer` |
 | `physics.joint` | `Joint` | `installPhysics` | Joint type, bodies by NetId, anchors, limits, motor, break thresholds |
+| `physics.groups` | `CollisionGroups` | `installPhysics` | `groups`, `ignores` (group names, `definePhysicsGroup`), `family` |
+| `physics.contacts` | `ContactReports` | `installPhysics` | `only`: group names; the body reports contacts with those |
+| `physics.frozen` | `FrozenMotion` | `installPhysics` | `linear`, `angular`: the motion world loading froze, given back when the body is active |
 
 Field meanings and defaults are on the structs in [`runtime/physics.h`](../../../include/runtime/physics.h).
 Some fields are omitted on save when they hold their default.
@@ -81,7 +84,7 @@ shares, instead of making a second entity. That is the prefab-override rule.
 
 ## Saving
 
-`runtime::saveEntities(world, documentNode, folder)` writes one folder's file. Every entity belongs
+`runtime::saveEntities(world, document, folder)` writes one folder's file. Every entity belongs
 to exactly one file:
 
 | Entity | Belongs to |

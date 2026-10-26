@@ -1,6 +1,6 @@
 # Tile tables: one voxel format for rendering, physics and disk
 
-Status: **in progress**, 2026-10-24, on branch `tile-tables`. Phases 0 and 0b (the lab) done; in the
+Status: **in progress**, 2026-10-24; merged to main (the `tile-tables` branch). Phases 0 and 0b (the lab) done; in the
 engine, Phases 1-5 done as far as the delivery log below says, and what is left is listed there.
 
 > Measured on Teardown levels (Tuxedo Labs) converted from a local install with `mesh_voxelizer

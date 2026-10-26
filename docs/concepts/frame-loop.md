@@ -97,7 +97,7 @@ Events the engine sends:
 | `CloseRequested` | platform | Window close. Ends the app while `app.closeOnRequest` (default true) |
 | `WindowResized` | platform | Framebuffer size changed |
 | `EntityLinked`, `ComponentDestroyed`, `ComponentTransformChanged` | Scene bridge | See [Entities](entities.md) |
-| `BodySplit`, `BodyFractured`, `BodyLeftWorld`, `JointBroke`, ... | physics | See [Physics](physics.md#events) |
+| `BodyBroken`, `PiecesCleared`, `ContactBegan`, `BodyLeftWorld`, `JointBroke`, ... | physics | See [Physics](physics.md#events) |
 
 ## Closing
 

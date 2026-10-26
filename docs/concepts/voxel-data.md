@@ -1,37 +1,64 @@
 # Voxel data
 
-What is inside a `GeometryBlob`: a **tree64** the GPU marches, a **material byte** per solid voxel,
-and, while it is being edited, a **brick map**. Headers:
-[`data_structures/voxel.h`](../../include/data_structures/voxel.h),
-[`utils/voxel_management.h`](../../include/utils/voxel_management.h). Byte layout:
-[tree64 format](../reference/formats/tree64.md).
+What is inside a `GeometryBlob`: a **tile table** the GPU marches and physics reads, and **material
+bytes**, one palette slot per solid voxel. A **tree64** and a **brick map** still exist as the older
+form and the authoring path. Headers: [`utils/tile_table.h`](../../include/utils/tile_table.h),
+[`utils/blob_voxels.h`](../../include/utils/blob_voxels.h),
+[`data_structures/voxel.h`](../../include/data_structures/voxel.h). Byte layouts:
+[tile table](../reference/formats/tile-table.md), [tree64](../reference/formats/tree64.md).
 
-## Three forms of the same voxels
+## Forms of the same voxels
 
 ```text
-                 edit (O(1) per voxel)
-   brick map  ◀───────────────────────┐
-  (64³ bricks, bitmask + slot map)    │ brickMapFromTree64   (lazily, on the first edit)
-       │                              │
-       │ updateChunkFromBrickMap      │
-       │ bakeMaterialsFromBrickMap    │
-       ▼                              │
-   tree64 + materialIDs  ─────────────┘          ← what .data stores and the GPU reads
-       │
-       │ createTexturesForScene / flushSceneUpdates
-       ▼
-   GPU textures (tree64Data, materialIDs, headerData, ...)
+                       edit in place (applyTileEdits: only the touched 16³ blocks)
+                          ┌──────────────┐
+   tile table + materials ◀──────────────┘          ← what .data v4 stores, the GPU reads,
+        ▲        │                                      physics collides as, edits change
+        │        │ createTexturesForScene / flushSceneUpdates
+        │        ▼
+        │   GPU textures (tree64Data, materialIDs, headerData, ...)
+        │
+        │ buildTileTable                treeFromTileTable
+   tree64 + materialIDs  ◀──────────────────────────────────  (v2–v3 files, envelopes, brick-map bakes)
+        ▲
+        │ updateChunkFromBrickMap / bakeMaterialsFromBrickMap
+   brick map   (the authoring path: generators and tools that place many voxels)
 ```
 
 | Form | Type | Good at | Lives |
 |---|---|---|---|
-| tree64 | `std::vector<uint32_t>` (`GeometryBlob::geometry`) | Ray marching, compact storage | Always |
-| material bytes | `std::vector<uint8_t>` (`GeometryBlob::materialIDs`) | One palette slot per solid voxel | Always |
-| brick map | `VoxelBrickMap` (`GeometryBlob::brickMap`) | Random writes | Only after an edit; derived, never saved |
+| tile table | `utils::TileTable` | Marching, in-place edits, collision, compact storage | The blob's stored form |
+| material bytes | `std::vector<uint8_t>` | One palette slot per solid voxel (a tile: one byte) | With the table |
+| tree64 | `std::vector<uint32_t>` | Old files, envelopes, the authoring path | Derived on demand |
+| brick map | `VoxelBrickMap` (`GeometryBlob::brickMap`) | Random writes while authoring | Derived, never saved |
+
+**Read and write a blob's voxels through [`utils/blob_voxels.h`](../reference/utils.md#utilsblob_voxelsh)**
+(`blobTiles`, `setBlobTiles`, `editBlobTiles`, `blobTree`, `setBlobTree`). A blob holds whichever form
+was written last and derives the other on demand, keyed by `contentStamp`; the blob's fields are the
+storage behind them, and reading one directly can return the form that was not written last.
+
+## Tile tables
+
+Three fixed levels: 64³ **regions**, 16³ **blocks**, 4³ **bricks**. Region and block entries are dense
+masks over the box the content spans, addressed straight from a voxel's coordinate, so no read waits
+on another. Each carries two 64-bit masks over its children: *occupied*, and *full* (entirely solid,
+all one material: a **tile**). A tile has nothing below it, a bit and a material byte; only partly
+filled bricks have leaves. Memory follows the surface, not the volume.
+
+```cpp
+const utils::TileTable& t = utils::blobTiles(blob);
+uint8_t slot;
+bool solid = utils::tileTableVoxel(t, {x, y, z}, &slot);
+
+utils::TileTable& edit = utils::editBlobTiles(blob, chunk.resolution);
+utils::applyTileEdits(edit, {{{x, y, z}, /*add*/ true, /*slot*/ 3}});
+```
 
 ## tree64
 
-A sparse tree with **64 children per node** (4 per axis).
+The form before tile tables, and still the form of `.data` v2–v3, envelopes and the brick-map path:
+a sparse tree with **64 children per node** (4 per axis). Its **leaves** are the tile table's leaves,
+bit for bit.
 
 ```text
 resolution 64 = 4³  →  3 levels
@@ -41,11 +68,8 @@ resolution 64 = 4³  →  3 levels
 ```
 
 - **A node is three `uint32_t`**: two words of child mask (64 bits) and one word of pointer + flags.
-- **Levels are stored root-first and contiguously**, and child pointers are relative. That is what
-  makes coarsening a truncation (see [LOD](#level-of-detail)).
-- **A leaf's third word carries a material offset**, a byte offset into `materialIDs`.
-- **A uniform leaf** (every solid voxel the same slot) stores one material byte instead of one per
-  voxel. On heightfield terrain ~96% of leaves are uniform.
+- **A leaf's third word carries a material offset**, a byte offset into the material bytes.
+- **A uniform leaf** (every solid voxel the same slot) stores one material byte instead of one per voxel.
 
 ```cpp
 tree64IsLeaf(data3);          // bit 0
@@ -74,15 +98,18 @@ lives in `compose.json`, so two components can instance one `.data` and be colou
 See [Materials](materials.md).
 
 ```text
-leaf data3 ──material offset──▶ materialIDs[offset + rank of the voxel among the leaf's set bits]
-                                 (uniform leaf: materialIDs[offset], for every voxel)
+leaf data3 ──material offset──▶ materials[offset + rank of the voxel among the leaf's set bits]
+                                 (uniform leaf: materials[offset], for every voxel; a tile: its own byte)
 ```
 
-Slot 255 is `INVALID_MATERIAL`; a component holds up to 256 entries (`MAX_MATERIALS_PER_COMPONENT`).
+Slot 255 is `INVALID_MATERIAL`, so a component holds **255 usable entries** (`MAX_PALETTE_ENTRIES`); a
+file's 256th entry is folded into its nearest on load.
 
 ## Brick maps
 
-The editable form: sparse 64³ bricks, each a bitmask plus a position → slot map.
+The authoring form: sparse 64³ bricks, each a bitmask plus a position → slot map. Generators and tools
+that place many voxels at once build one; ordinary edits (`updateScene`) go to the tile table directly
+and drop the blob's brick map.
 
 ```cpp
 auto map = utils::createVoxelBrickMap(utils::computeBrickDims(64));
@@ -90,13 +117,12 @@ utils::brickMapSetVoxel(*map, x, y, z, slot);         // O(1)
 utils::brickMapClearVoxel(*map, x, y, z);
 utils::brickMapHasVoxel(*map, x, y, z);
 
-utils::updateChunkFromBrickMap(chunk, *map);           // → chunk.geometryData (tree64)
+utils::updateChunkFromBrickMap(chunk, *map);           // → chunk.geometryData (a tree64, then buildTileTable)
 std::vector<uint8_t> materialIDs;
 utils::bakeMaterialsFromBrickMap(chunk.geometryData, materialIDs, *map);
 ```
 
-After the first edit the brick map stays on the blob; `updateScene` rebakes from it. See
-[Editing](editing.md).
+See [Editing](editing.md).
 
 ## Level of detail
 
@@ -104,11 +130,11 @@ Two independent knobs:
 
 | Knob | Set with | Changes | For |
 |---|---|---|---|
-| Storage LOD | `setBlobRenderLOD(scene, pool, lod)`, `requestChunkLOD(scene, chunk, res)` | How many levels of the tree are **uploaded**; each step is 4× coarser per axis | **VRAM**. Distant geometry resident at a fraction of the cost. |
+| Storage LOD | `setBlobRenderLOD(scene, pool, lod)`, `requestChunkLOD(scene, chunk, res)` | How many levels are **uploaded**; each step is 4× coarser per axis | **VRAM**. Distant geometry resident at a fraction of the cost. |
 | Traversal LOD | `RayQuery` fields in the shader (`pjvQueryLinearLOD`, `pjvQueryLODFootprint`) | How deep a ray descends, by distance | Shading detail |
 
 - **The CPU copy is always full resolution.** Storage LOD is applied at upload by
-  `downsampleTree64`; editing, saving and picking never see it.
+  `downsampleTileTable`; editing, saving and picking never see it.
 - **Storage LOD is not a frame-time fix.** It barely changes render cost. The warning, and what to
   look at instead, is at the top of `RayQuery` in
   [`include/pjv_utils_DDA.sc`](../../include/pjv_utils_DDA.sc).

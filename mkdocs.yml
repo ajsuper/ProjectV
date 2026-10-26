@@ -106,6 +106,7 @@ nav:
       - utils: reference/utils.md
       - data_structures: reference/data-structures.md
       - runtime: reference/runtime.md
+      - net: reference/net.md
       - Shader library: reference/shader-library.md
       - File formats:
           - reference/formats/README.md
@@ -123,12 +124,18 @@ nav:
       - 10 scene-previewer: examples/10-scene-previewer/README.md
       - 15 entities: examples/15-entities/README.md
       - 16 sandbox: examples/16-sandbox/README.md
-      - 17 physics-demos: examples/17-physics-demos/README.md
+      - 17 physics: examples/17-physics/README.md
+      - 18 world-loading: examples/18-world-loading/README.md
       - 20 mesh-voxelizer: examples/20-mesh-voxelizer/README.md
       - 30 renderers: examples/30-renderers/README.md
       - 40 advanced-renderer: examples/40-advanced-renderer/README.md
       - 50 terrain-generator: examples/50-terrain-generator/README.md
       - 60 scene-editor: examples/60-scene-editor/README.md
+      - 70 multiplayer: examples/70-multiplayer/README.md
+      - 80 voxel-mayhem-demo: examples/80-voxel-mayhem-demo/README.md
+      - 85 explosion-demo: examples/85-explosion-demo/README.md
+      - 90 party-demo: examples/90-party-demo/README.md
+      - 95 playground-demo: examples/95-playground-demo/README.md
   - Contributing:
       - contributing/README.md
       - Contributing: project/CONTRIBUTING.md

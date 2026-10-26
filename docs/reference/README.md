@@ -18,12 +18,13 @@ One page per module, the file formats, the shader library, the glossary.
 | [data_structures](data-structures.md) | `include/data_structures/`: `Scene`, `Chunk`, `GPUData`, renderer specs | `projv` |
 | [utils](utils.md) | `include/utils/`: compose I/O, the component tree, editing, materials, picking | `projv::utils` |
 | [graphics](graphics.md) | `include/graphics/`: window, input, renderers, GPU upload | `projv::graphics` (`projv` for `Input`) |
-| [runtime](runtime.md) | `include/runtime/`: Scene bridge, entities, prefabs, `NetId`, physics, fracture | `projv::runtime` (`projv` for components) |
+| [runtime](runtime.md) | `include/runtime/`: Scene bridge, entities, prefabs, `NetId`, world loading, replication, physics, fracture | `projv::runtime` (`projv` for components) |
+| [net](net.md) | `include/net/`: transports (ENet, loopback) and the wire format | `projv::net` |
 
 ## Also here
 
 | Page | What |
 |---|---|
-| [File formats](formats/README.md) | `compose.json`, `.data`, `entities.json`, `physics_materials.json`, renderer folders, tree64 |
+| [File formats](formats/README.md) | `compose.json`, `.data`, `entities.json`, `physics_materials.json`, renderer folders, tile table, tree64 |
 | [Shader library](shader-library.md) | `pjv_utils_DDA.sc`: bindings, queries, hits, materials |
 | [Glossary](glossary.md) | Engine terms |

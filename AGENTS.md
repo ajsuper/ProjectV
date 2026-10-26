@@ -214,7 +214,7 @@ Full version: `CONTRIBUTING.md`.
 | `examples/` | Twelve feature examples and four `_demo`s, numbered in reading order; `shared/` holds their renderers. See `examples/README.md`. |
 | `tests/unit/` | The automated suite (doctest, ctest). CPU only. |
 | `tests/manual/` | Harnesses that need a display. Not examples. See `tests/README.md`. |
-| `docs/` | The documentation, plain Markdown. `getting-started/`, `concepts/` (how it works), `guides/` (one task each), `reference/` (a page per module, plus `reference/formats/`: `.data`, compose.json, entities.json, physics materials, renderer folders, tree64), `contributing/`. |
+| `docs/` | The documentation, plain Markdown. `getting-started/`, `concepts/` (how it works), `guides/` (one task each), `reference/` (a page per module, plus `reference/formats/`: `.data`, compose.json, entities.json, physics materials, renderer folders, tile table, tree64), `contributing/`. |
 | `tools/docs/` | The docs site build (MkDocs hook, Doxygen config and comment filter) and the link checker. |
 | `docs/plans/` | Design notes, delivery logs, and `known-latent-issues.md` / `test-suite-notes.md`. Plans live here, in the repo -- never outside it -- and are kept current as work lands. |
 
