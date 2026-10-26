@@ -664,7 +664,7 @@ static void generateCanyonVoxels(const TerrainState& ts, projv::VoxelBrickMap& m
     namespace cl = canyonlands;
     const simple_terrain::Generator& gen = ts.gen;
     enum Region { Ground, Chinle, Wingate, Kayenta, Navajo };
-    struct Info { Region region = Ground; bool near = false, fresh = false, hard = false; float chute = 0.0f; int bed = 0; };
+    struct Info { Region region = Ground; bool nearWall = false, fresh = false, hard = false; float chute = 0.0f; int bed = 0; };
 
     for (int lz = 0; lz < res; ++lz) {
         const float wz = oz + float(lz) * vs;
@@ -698,7 +698,7 @@ static void generateCanyonVoxels(const TerrainState& ts, projv::VoxelBrickMap& m
                     const float base = cl::kWallFoot + cl::kWallBatter * (rel - cl::kChinleTop);
                     if (e > base + cl::kWingateDetailMax) return true;
                     if (e < base + cl::kWingateDetailMin) return false;
-                    info.near = true;
+                    info.nearWall = true;
                     return e > cl::wingateSetback(gen, along, rel, &info.fresh, &info.chute);
                 }
                 if (rel < cl::kKayentaTop) {
@@ -706,7 +706,7 @@ static void generateCanyonVoxels(const TerrainState& ts, projv::VoxelBrickMap& m
                     const float base = cl::kayentaBase(rel);
                     if (e > base + cl::kKayentaDetailMax) return true;
                     if (e < base + cl::kKayentaDetailMin - 1.0f) return false;
-                    info.near = true;
+                    info.nearWall = true;
                     return e > cl::kayentaSetback(gen, along, rel, &info.hard, &info.bed);
                 }
                 info.region = Navajo;
@@ -734,11 +734,11 @@ static void generateCanyonVoxels(const TerrainState& ts, projv::VoxelBrickMap& m
                                                                  : uint8_t(cl::Chinle + 1);
                             break;
                         case Wingate:
-                            slot = (top || info.near) ? cl::wingateColour(gen, along, (y - g) / k, e, top, info.fresh, info.chute, dither)
+                            slot = (top || info.nearWall) ? cl::wingateColour(gen, along, (y - g) / k, e, top, info.fresh, info.chute, dither)
                                                       : uint8_t(cl::Wingate + 2);
                             break;
                         case Kayenta:
-                            slot = (top || info.near) ? cl::kayentaColour(gen, along, (y - g) / k, top, info.hard, info.bed, dither)
+                            slot = (top || info.nearWall) ? cl::kayentaColour(gen, along, (y - g) / k, top, info.hard, info.bed, dither)
                                                       : uint8_t(cl::Kayenta + 1);
                             break;
                         case Navajo:

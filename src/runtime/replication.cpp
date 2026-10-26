@@ -335,9 +335,9 @@ namespace projv::runtime {
 
         utils::Presence judge(const utils::LoadPolicy& policy, const utils::LoadCandidate& c, std::span<const utils::Viewer> viewers) {
             if (policy.hint.radius > 0.0f) {
-                bool near = false;
-                for (const utils::Viewer& v : viewers) near = near || utils::distanceToBox(c.bounds, v.position) <= policy.hint.radius;
-                if (!near) return utils::Presence::Absent;
+                bool anyNear = false;
+                for (const utils::Viewer& v : viewers) anyNear = anyNear || utils::distanceToBox(c.bounds, v.position) <= policy.hint.radius;
+                if (!anyNear) return utils::Presence::Absent;
             }
             return policy.rule(c, viewers);
         }

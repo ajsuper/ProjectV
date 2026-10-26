@@ -272,10 +272,10 @@ namespace projv::utils {
                 if (o[a] < float(low[a]) || o[a] > float(high[a])) return false;
                 continue;
             }
-            float near = (float(low[a]) - o[a]) / d[a], far = (float(high[a]) - o[a]) / d[a];
-            if (near > far) std::swap(near, far);
-            if (near > t0) { t0 = near; entry = a; }
-            t1 = std::min(t1, far);
+            float tNear = (float(low[a]) - o[a]) / d[a], tFar = (float(high[a]) - o[a]) / d[a];
+            if (tNear > tFar) std::swap(tNear, tFar);
+            if (tNear > t0) { t0 = tNear; entry = a; }
+            t1 = std::min(t1, tFar);
         }
         if (t0 > t1) return false;
         const std::array<uint8_t, 64>& zo = zOrderOf();

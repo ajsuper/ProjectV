@@ -74,9 +74,9 @@ namespace projv::runtime {
             c.current = current;
             c.entity = static_cast<uint32_t>(e);
             if (policy.hint.radius > 0.0f) {
-                bool near = false;
-                for (const utils::Viewer& v : viewers) near = near || utils::distanceToBox(c.bounds, v.position) <= policy.hint.radius;
-                if (!near) return utils::Presence::Absent;
+                bool anyNear = false;
+                for (const utils::Viewer& v : viewers) anyNear = anyNear || utils::distanceToBox(c.bounds, v.position) <= policy.hint.radius;
+                if (!anyNear) return utils::Presence::Absent;
             }
             (void)loader;
             return policy.rule(c, viewers);

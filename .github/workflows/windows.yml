@@ -58,7 +58,8 @@ jobs:
           -DCMAKE_PREFIX_PATH="$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows"
 
       - name: Build
-        run: cmake --build --preset windows --target projv_unit_tests
+        # -k 0: keep going past a failed file, so one run lists every error rather than the first.
+        run: cmake --build --preset windows --target projv_unit_tests -- -k 0
 
       # glfw3.dll is beside vcpkg's other binaries, not the test.
       - name: Test

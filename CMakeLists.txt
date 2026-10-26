@@ -360,6 +360,10 @@ target_compile_features(projectV PUBLIC cxx_std_20)
 # set than the library silently gets different behaviour -- which is the situation the
 # example Makefiles were in, each defining its own -DPROJV_ENABLE_* by hand.
 target_compile_definitions(projectV PUBLIC ${PROJV_LOG_DEFS})
+if(WIN32)
+    # windows.h defines min, max, near and far as macros unless told not to, and drags in half of Win32.
+    target_compile_definitions(projectV PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 if(PROJV_USE_X11)
     target_compile_definitions(projectV PUBLIC PROJV_USE_X11)
 endif()
