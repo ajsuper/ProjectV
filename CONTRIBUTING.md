@@ -22,7 +22,8 @@ plan (docs/plans/)  ──▶  build in milestones  ──▶  tests + a demo  �
 - **Commits go to `main`.** Large or experimental work gets a branch (`runtime-spine`,
   `component-attachments`, `surface-voxels`). Parallel sessions get their own git worktree, so one
   doesn't trample another's working tree.
-- **There is no CI.** The checks below are run locally before committing.
+- **There is no CI for the code.** The checks below are run locally before committing. The one workflow,
+  `.github/workflows/docs.yml`, builds and publishes the documentation site.
 - **Defects found along the way** that are out of scope go in
   [`known-latent-issues.md`](docs/plans/known-latent-issues.md), not into an unrelated commit.
 

@@ -1,0 +1,88 @@
+# The documentation site: https://ajsuper.github.io/ProjectV/
+#
+# Builds the MkDocs site and the Doxygen API reference exactly as `cmake --build build --target docs`
+# does (tools/docs/, mkdocs.yml), and publishes it to GitHub Pages when main changes. A pull request
+# that touches the docs gets the same build and link check, without publishing.
+#
+# One-time setup, already done: Settings > Pages > Source: GitHub Actions.
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "docs/**"
+      - "mkdocs.yml"
+      - "tools/docs/**"
+      - "include/**"          # the Doxygen API reference is built from the headers
+      - "examples/**/*.md"    # the example READMEs are pages of the site
+      - "tests/README.md"
+      - "*.md"                # README, CONTRIBUTING, AGENTS, SOURCES, ...
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer push waits for the one running rather than cancelling it halfway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/docs/requirements.txt
+
+      - name: Install the tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends doxygen graphviz
+          python -m pip install -r tools/docs/requirements.txt
+
+      # Every link and anchor resolves, every page is reachable, every public header is in its module page.
+      - name: Check the docs
+        run: python tools/docs/check_links.py
+
+      - name: Build the API reference
+        run: |
+          mkdir -p build/docs/api
+          PROJV_DOXYGEN_OUT=build/docs/api PROJV_DOXYGEN_DOT=YES doxygen tools/docs/Doxyfile
+
+      # --strict: a broken link or a page missing from the nav fails the build instead of shipping.
+      - name: Build the site
+        env:
+          PROJV_API_HTML: build/docs/api/html
+          NO_MKDOCS_2_WARNING: "true"
+        run: mkdocs build --strict --config-file mkdocs.yml --site-dir build/docs/site
+
+      - uses: actions/configure-pages@v5
+        if: github.event_name != 'pull_request'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: build/docs/site
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

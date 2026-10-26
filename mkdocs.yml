@@ -9,6 +9,7 @@
 
 site_name: ProjectV
 site_description: A voxel game engine
+site_url: https://ajsuper.github.io/ProjectV/
 repo_url: https://github.com/ajsuper/Projectv
 repo_name: ajsuper/ProjectV
 edit_uri: edit/main/docs/

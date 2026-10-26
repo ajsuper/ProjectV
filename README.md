@@ -37,7 +37,8 @@ Everything is in [docs/](/docs/README.md): plain Markdown, readable with `cat` a
 | [Guides](/docs/guides/README.md) | One task each |
 | [Reference](/docs/reference/README.md) | Per-module API map, file formats, glossary |
 
-The same files build a searchable web site with the API reference:
+The same files are the searchable web site, with the API reference, at
+<https://ajsuper.github.io/ProjectV/> (rebuilt when `main` changes). To build it yourself:
 `cmake --build build --target docs`, then open `build/docs/site/index.html`.
 
 ### Goals of ProjectV

@@ -190,7 +190,8 @@ Full version: `CONTRIBUTING.md`.
 - **Parallel sessions use their own git worktree and branch.** Don't touch another session's
   uncommitted files.
 - **Before committing**: `ctest --preset dev`; after physics changes also `ctest --preset soak` and
-  `DEMOS_SELFTEST=1 ./physics_demos`. There is no CI.
+  `DEMOS_SELFTEST=1 ./physics`. There is no CI for the code; the only workflow publishes the docs
+  (`.github/workflows/docs.yml`).
 - **Out-of-scope defects** go in `docs/plans/known-latent-issues.md`, not into the current commit.
 
 ## Docs

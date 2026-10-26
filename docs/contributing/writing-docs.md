@@ -90,6 +90,19 @@ The API reference is [Doxygen](https://www.doxygen.nl/) over `include/`
 documentation by [`tools/docs/doxygen_filter.py`](../../tools/docs/doxygen_filter.py), so there is
 no `///` style to follow. Write the comment above the declaration as usual.
 
+### Publishing
+
+The site is at <https://ajsuper.github.io/ProjectV/>. [`.github/workflows/docs.yml`](../../.github/workflows/docs.yml)
+runs the link check, builds the Doxygen reference and the MkDocs site (`--strict`) exactly as the `docs`
+target does, and deploys it to GitHub Pages on every push to `main` that touches `docs/`, `mkdocs.yml`,
+`tools/docs/`, `include/`, a README, or the workflow itself. A pull request that touches them gets the
+same build and check without deploying, so a broken link fails the PR, not the site. **Run it by hand**
+from the Actions tab (*docs* > *Run workflow*), e.g. after a header comment changes nothing else would
+trigger. The site is public: a page is published the moment it reaches `main`.
+
+Repo setting, set once: *Settings > Pages > Source: GitHub Actions*. The site's address is `site_url` in
+[`mkdocs.yml`](../../mkdocs.yml); change it there if the repository moves.
+
 ### Adding a page
 
 1. Write it in the right folder.
