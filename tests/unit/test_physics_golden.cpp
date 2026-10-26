@@ -18,6 +18,7 @@
 
 #include "doctest/doctest.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <vector>
@@ -189,6 +190,20 @@ TEST_CASE("golden: the session it was recorded from is still the same session") 
         runtime::PhysicsLog golden;
         REQUIRE(runtime::PhysicsLog::loadFromFile(goldenPath(r).string(), golden));
         const runtime::PhysicsLog now = record(r);
+        // Where it first differs, and (PROJV_GOLDEN_OUT=<folder>) the recording this build made, to compare
+        // with the committed one: what a build on another compiler or OS is diagnosed from.
+        size_t firstDifference = 0;
+        const size_t common = std::min(now.bytes.size(), golden.bytes.size());
+        while (firstDifference < common && now.bytes[firstDifference] == golden.bytes[firstDifference]) firstDifference++;
+        CAPTURE(firstDifference);
+        CAPTURE(now.steps);
+        CAPTURE(golden.steps);
+        if (now.bytes != golden.bytes) {
+            if (const char* out = std::getenv("PROJV_GOLDEN_OUT")) {
+                std::filesystem::create_directories(out);
+                now.saveToFile((std::filesystem::path(out) / goldenPath(r).filename()).string());
+            }
+        }
         CHECK(now.bytes.size() == golden.bytes.size());
         CHECK(now.bytes == golden.bytes);
     }
