@@ -2,6 +2,10 @@
 
 Status: **delivered**, 2026-10-24 (phases 1 and 2; see "Delivered").
 
+> Measured on Teardown levels (Tuxedo Labs) converted from a local install with `mesh_voxelizer
+> --td-*`. They are not in the repo and may not be redistributed, so the numbers here are a record,
+> not something a checkout can rerun. Credit: `SOURCES.md`.
+
 Goal: a break that makes thousands of small pieces costs what the big pieces cost. A piece of a few
 dozen voxels is something to see fly and land, not something to stack, push or stand on -- Teardown's
 small debris is particles for this reason. So below a size, a piece is drawn as it is now (its voxels,
@@ -10,7 +14,7 @@ body, no shape, and nothing for the island pass, the rebuilds or the solver to d
 
 ## Why: West Point Marina's barrage (2026-10-24)
 
-`MAYHEM_MAP=westpointmarina MAYHEM_BENCH=barrage` (a blast every 0.4 s for 12 s; made repeatable for
+Voxel Mayhem on the converted level, `MAYHEM_BENCH=barrage` (a blast every 0.4 s for 12 s; made repeatable for
 this: shots on physics ticks, aimed by a generator of their own), the physics system's 780 steps:
 
 | | ms a step |

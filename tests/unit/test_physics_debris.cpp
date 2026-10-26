@@ -167,10 +167,10 @@ TEST_CASE("debris: resting debris falls again when the ground under it is cut aw
 TEST_CASE("debris: debris pressed into a corner it overlaps comes to rest, and gathers no speed") {
     // A shard's sphere sits at its voxels' centre, so one cut from a wall can start inside what is left
     // of it: it comes out, and rests in the corner. Debris met by two surfaces in one step slides along
-    // the crease between them or stops (stepDebris). What made that necessary -- debris in the marina's
+    // the crease between them or stops (stepDebris). What made that necessary -- debris in a big level's
     // grooves and corners gathering speed while it stood still, 60 m/s, never resting -- this does not
-    // reproduce (the code before passes it too); MAYHEM_BENCH=barrage with MAYHEM_BENCH_SETTLE=10 does:
-    // 205 debris of 1,300 still moving 10 s on, then none.
+    // reproduce (the code before passes it too): a barrage on that level left 205 debris of 1,300 still
+    // moving 10 s on, then none (docs/plans/cheap-debris.md).
     Fixture f(on());
     // A wall on the floor, its face at x = 2.
     utils::queueVoxelAdd(f.scene, f.floorComponent, fill({24, 2, 0}, {25, 5, 39}));

@@ -118,7 +118,7 @@ constexpr float WALK_SPEED = 7.0f, FLY_SPEED = 24.0f;
 constexpr float WALK_GRIP = 12.0f, AIR_GRIP = 1.5f, FLY_GRIP = 5.0f;
 constexpr uint32_t SMALL_DEBRIS_VOXELS = 3;   // walked through and aimed through
 // On a map (10 cm voxels, soft materials) a break makes thousands of shards, and each landing on the
-// map's detailed ground is what a step spent its time on (measured: a blast at the marina, 1,900 pieces,
+// map's detailed ground is what a step spent its time on (measured: a blast on a converted level, 1,900 pieces,
 // 64 ms of physics a frame). A piece this small or smaller is light debris there: it collides as one box
 // fitted to it, without continuous collision, and not with other debris.
 constexpr uint32_t MAP_DEBRIS_VOXELS = 64;
@@ -1754,8 +1754,8 @@ void onBrokenBody(World& world, const projv::BodyBroken& e) {
     // A strike's shards collide with each other from the start. They once passed through each other for
     // their first steps (a family) -- a third less physics in a cannon break's first half second -- but
     // those that fell into each other meanwhile were inside each other when it ended, wedged, pushed
-    // back and forth for good, and kept every piece touching them awake: 200 of the marina's, 10 s
-    // after its barrage (MAYHEM_BENCH_SETTLE), for any length of it; none without.
+    // back and forth for good, and kept every piece touching them awake: 200 on a converted level, 10 s
+    // after a barrage (MAYHEM_BENCH_SETTLE), for any length of it; none without.
     for (Entity piece : e.pieces)
         if (world.valid(piece)) markDebris(world, piece);
     if (world.valid(e.entity) && world.all_of<projv::Piece>(e.entity)) markDebris(world, e.entity);
@@ -2768,8 +2768,8 @@ void startup(projv::Application& app) {
     // The ground does not break: the dirt (the land and the sea floor) and the grass on it, as rock,
     // hard metal and hard masonry already do not (the imports give them no strength). What holds the
     // rest up is the dirt alone. The imports make every unbreakable material an anchor, but the maps
-    // build with them too -- Lee Chemicals' 27 m telephone poles are a third rock all the way up, so a
-    // pole cut at its foot stood on the rock in its own top. Grass holds nothing either, so a tree's
+    // build with them too -- a converted level's 27 m telephone poles are a third rock all the way up, so
+    // a pole cut at its foot stood on the rock in its own top. Grass holds nothing either, so a tree's
     // leaves still fall with its trunk.
     if (m.map) {
         auto redefine = [&](const char* name, bool anchor) {

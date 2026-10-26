@@ -27,7 +27,7 @@ SAMPLER2D(gPos, 2);
 uniform vec4 restirPost;   // x vignette strength (0 off), y grade on, z auto-exposure on, w seconds since last frame
 
 #define EXPOSURE_KEY      0.08   // the metered average that needs no correction: a sunlit outdoor view
-                                 // (Lee Chemicals from its default framing meters 0.064)
+                                 // (a sunlit converted level, framed by default, meters 0.064)
 #define EXPOSURE_STRENGTH 0.8
 #define EXPOSURE_MIN_EV  -2.0
 #define EXPOSURE_MAX_EV   3.0

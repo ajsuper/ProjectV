@@ -249,7 +249,8 @@ The cheap configuration, RTX 3070, 1273×669 (`--bench`), Lee Chemicals as below
 | SanMiguel, **restir-pt, cheap** | **3.4** | 0.76 | **1.25** (0.80 + 0.45) |
 
 The full configuration, 1273×1370: restir measured the same way, from the commit before.
-Lee Chemicals is a converted Teardown map, from above the factory (`--look 100,300,-500,450,50,150`).
+Lee Chemicals is a Teardown level (Tuxedo Labs) converted from a local install, seen from above the
+factory; it is not in the repo, so its rows are a record (credit: `SOURCES.md`).
 
 | | Frame | G-buffer | Paths (sample + spatial) |
 |---|---|---|---|

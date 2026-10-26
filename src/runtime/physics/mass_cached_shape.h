@@ -7,7 +7,7 @@
 // Why. Jolt asks every part of a compound for its mass properties whenever the compound is made, and a
 // compound sums its own parts' every time it is asked. A voxel shape is a compound of its boxes, and a
 // level's world is a compound of every chunk's voxel shape, so making the world's shape summed every
-// box in the world: 1.2M on West Point Marina, ~100 ms (counting their id bits walked them all again),
+// box in the world: 1.2M on a big converted level, ~100 ms (counting their id bits walked them all again),
 // and all of the cost of re-creating the world's
 // body after an edit (docs/plans/voxel-collision-shape.md). Jolt's shapes are final, so the cache is a
 // decorator of its own subtype, which collides, casts and answers queries by passing them to the inner

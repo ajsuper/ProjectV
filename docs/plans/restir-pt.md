@@ -4,6 +4,10 @@ Proposed 2026-10-22. Status: **delivered in part, 2026-10-22** -- `restir-pt` ha
 gallery and `pt-reference` its path tracers; see the delivery log at the end for what is done, what
 deviates from the design below, and what is not done.
 
+> Measured on Teardown levels (Tuxedo Labs) converted from a local install with `mesh_voxelizer
+> --td-*`. They are not in the repo and may not be redistributed, so the numbers here are a record,
+> not something a checkout can rerun. Credit: `SOURCES.md`.
+
 The gallery's `restir` renderer is ReSTIR GI: one diffuse bounce reused by reconnection, Lambertian
 everywhere. Two things it cannot do:
 

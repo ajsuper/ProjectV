@@ -2,6 +2,10 @@
 
 Proposed 2026-10-22. Status: **K0-K2 landed 2026-10-22** (with restir's post chain); K3-K5 open.
 
+> Measured on Teardown levels (Tuxedo Labs) converted from a local install with `mesh_voxelizer
+> --td-*`. They are not in the repo and may not be redistributed, so the numbers here are a record,
+> not something a checkout can rerun. Credit: `SOURCES.md`.
+
 Teardown levels converted by `mesh_voxelizer --td-*` look too high-contrast in `restir`. In every other
 renderer they look washed out. The cause is not the converter. ProjectV never says what a palette colour
 *means*, so each renderer guesses, and each display pass grades the result differently.

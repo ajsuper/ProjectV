@@ -2,6 +2,10 @@
 
 Status: **draft**, 2026-10-22. Nothing built yet.
 
+> The levels named here are Teardown's (Tuxedo Labs), read from a local install: the converter's
+> input, never in the repo. The checks below run on whatever levels the person running them owns;
+> the named ones are where each behaviour was found. Credit: `SOURCES.md`.
+
 Goal: a converted Teardown level that *plays* like the original. Doors hang on their hinges, gates
 slide, and West Point Marina's pipe run bends under load and snaps when its supports are shot
 away. The test cases are named in "Verification" below.
@@ -139,8 +143,9 @@ Converter: a new `teardown/joints.cpp`.
   joints; this does not need to wait for it.)
 - **B5. Report.** Joints written, by type; joints dropped (nothing within size); ropes written.
 
-Done when westpointmarina's doors and gates stay in their frames for a minute of simulation, and
-Hollowrock's cave doors swing when pushed and stop at their frames.
+Done when a converted level's doors and gates stay in their frames for a minute of simulation, and
+hinged doors swing when pushed and stop at their frames (found on West Point Marina and Hollowrock
+Island).
 
 ## Part C: engine joints that act like Teardown's
 
@@ -190,10 +195,10 @@ Options, to decide before Part B is tuned (Open question 1):
 1. **M1 (Part A).** Holes, group properties, prop bodies, NetIds. Re-convert all 21 levels. The
    overlap scan is clean; previews are rechecked. Converter only.
 2. **M2 (B1-B3, B5).** Joints exported. A playable check in 17-physics, or a small loader that runs
-   `installPhysics` on a converted folder: doors and gates hold in westpointmarina and hollowrock.
+   `installPhysics` on a converted folder: doors and gates hold.
 3. **M3 (C2).** Ball friction and spring in the engine, then the converter's `rotstrength` and
-   `rotspring` factors tuned against the marina pipe run: under its own weight with one support
-   removed, it sags and stays sagged.
+   `rotspring` factors tuned against a jointed pipe run (West Point Marina has one): under its own
+   weight with one support removed, it sags and stays sagged.
 4. **M4 (C1).** Voxel-bound joints. The pipe run snaps where its supports or joint voxels are shot
    away, and the loose length falls and stays jointed to its neighbour.
 5. **M5 (B4).** Ropes.
@@ -207,11 +212,10 @@ can go in either order.
   body's voxels inside static geometry, listed above 15%.
 - **Joint resolution report** per level: written, dropped, by type. Dropped joints are inspected by
   hand for one level.
-- **Scenes:**
-  - westpointmarina: the pipe run (group "pipes"), the gates (prismatic, motor tags) and the
-    fishing boat.
-  - hollowrockisland: the cave door.
-  - quilezsecurity: the most overlapping bodies (30) before M1.
+- **Scenes:** a converted level with each of these. Where they were found:
+  - a jointed pipe run, prismatic gates with motor tags, a boat: West Point Marina (group "pipes").
+  - a hinged door in a frame: Hollowrock Island's cave door.
+  - many overlapping bodies: Quilez Security (30 before M1).
 - **Engine tests** as listed under C1 and C2, in `tests/test_physics_joints*.cpp`.
 - Determinism: a converted level simulated for 600 steps twice gives identical state hashes.
 
@@ -235,4 +239,4 @@ can go in either order.
 
 Sources: TTFH's Teardown-Converter (github.com/TTFH/Teardown-Converter: `src/math_utils.cpp`
 `QuatToEuler`, `src/write_scene.cpp` `WriteJoint`, `src/entity.h` `Joint`), and the westpointmarina
-and hollowrockisland level files in the user's install.
+and hollowrockisland level files, read from a local install.

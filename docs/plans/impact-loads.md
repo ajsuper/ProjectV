@@ -4,6 +4,10 @@ Status: **in progress**, 2026-10-25. Delivered: continuous voxel bodies, the min
 the load share, the ragged rim. Open: how big a break a big slow body buys (below), sustained loads,
 kinematic pushers.
 
+> Measured on Teardown levels (Tuxedo Labs) converted from a local install with `mesh_voxelizer
+> --td-*`. They are not in the repo and may not be redistributed, so the numbers here are a record,
+> not something a checkout can rerun. Credit: `SOURCES.md`.
+
 ## Why: West Point Marina (2026-10-25)
 
 Played with the barrage: "bodies merge into one another and the solver jitters them"; "a big boat fell

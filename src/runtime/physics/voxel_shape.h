@@ -23,7 +23,7 @@
 // ScaledShape gives it its voxel size, as it does a compound of boxes. A sub-shape id names the first
 // voxel of the box a contact is on, when the bits it is given hold a voxel index (utils::tileCellShift:
 // a 256^3 chunk's takes 24, so a body of up to 256 of them); otherwise a coarser cell -- a body of every
-// chunk of a big level (West Point Marina's 4,140 leave 19 bits: bricks) -- and then a cell's boxes give
+// chunk of a big level (4,140 chunks leave 19 bits: bricks) -- and then a cell's boxes give
 // one contact between them, the deepest, since Jolt keeps one contact manifold per pair of ids.
 
 #include <array>

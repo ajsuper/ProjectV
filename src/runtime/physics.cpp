@@ -367,7 +367,7 @@ namespace projv::runtime {
         // there its cube, one that is gone the pieces it had. Destroying the old body wakes only
         // what these touch, not everything its bounds do: a level's world spans the level, and an
         // edit to one chunk of it woke every body resting anywhere on it (the steady 2-3 ms a step
-        // after each of West Point Marina's blasts). False when no chunk changed (a rebuild for
+        // after each blast on a big converted level). False when no chunk changed (a rebuild for
         // its values or materials), which wakes as before.
         bool changedChunkBoxes(const Scene& scene, const PhysicsBody& body, const Sources& now,
                                std::vector<WorldBox>& out) {
@@ -2065,7 +2065,7 @@ namespace projv::runtime {
             //     one. Only the bodies over a palette that changed since the last step are looked at --
             //     every body when the library did. A component not seen before is not a change: no body
             //     was made from it yet (every break makes some, and looking at every body for each was
-            //     10% of the physics a break costs on West Point Marina).
+            //     10% of the physics a break costs on a big converted level).
             if (scene) {
                 const bool library = physics.library.version != physics.seenLibrary;
                 physics.seenLibrary = physics.library.version;

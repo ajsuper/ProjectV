@@ -4,6 +4,10 @@ Status: **Phases 1-3 delivered** 2026-10-24 (see "Phase 1: delivered", "Phase 2:
 delivered"); Phase 4 (the default) not started. Follows from `voxel-storage-tiles.md` ("Related: physics
 that reads voxels directly") now that tile tables are every blob's voxels.
 
+> Measured on Teardown levels (Tuxedo Labs) converted from a local install with `mesh_voxelizer
+> --td-*`. They are not in the repo and may not be redistributed, so the numbers here are a record,
+> not something a checkout can rerun. Credit: `SOURCES.md`.
+
 Goal: a voxel body's collision *is* its tile table, read in place, as Teardown's is its voxels. Nothing
 is built when a body is made or edited, and nothing is approximated: no box decomposition, no box
 budget, no content-box fallback. Breaking West Point Marina costs what the break costs, not a rebuild
@@ -11,7 +15,7 @@ of the world's collision.
 
 ## Why: what the marina measures (2026-10-24, restir-pt + tile tables, 45bcdaf)
 
-`MAYHEM_MAP=westpointmarina MAYHEM_BENCH=blast MAYHEM_BENCH_SHOT=50,60,-140,69.2,29.4,-44.8`, the
+Voxel Mayhem on the converted level, `MAYHEM_BENCH=blast` with a fixed `MAYHEM_BENCH_SHOT`, the
 physics step timed by stage (temporary timers, removed):
 
 | | ms |
@@ -364,8 +368,8 @@ their shapes); Teardown's corners and edges, if a big flat piece face-down ever 
   self-test, every check).
 - **Determinism:** a recorded session with voxel shapes replays bit for bit, on GCC and Clang
   (`--preset clang`).
-- **The marina:** load, the blast step, the steady frame, before and after each phase, in the table
-  above.
+- **A big map** (`MAYHEM_MAP`, any converted level): load, the blast step, the steady frame, before and
+  after each phase, in the table above.
 
 ## Risks
 

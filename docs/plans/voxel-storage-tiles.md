@@ -3,6 +3,10 @@
 Status: **in progress**, 2026-10-24, on branch `tile-tables`. Phases 0 and 0b (the lab) done; in the
 engine, Phases 1-5 done as far as the delivery log below says, and what is left is listed there.
 
+> Measured on Teardown levels (Tuxedo Labs) converted from a local install with `mesh_voxelizer
+> --td-*`. They are not in the repo and may not be redistributed, so the numbers here are a record,
+> not something a checkout can rerun. Credit: `SOURCES.md`.
+
 Goal: replace the tree64 as the format voxels are stored, edited, simulated and drawn in, with one
 that (a) answers "what is at this voxel" in constant time without decoding anything, (b) edits in
 place, and (c) stays sparse for scenes that are **solid all the way through**, not just hollow shells,
