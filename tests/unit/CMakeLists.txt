@@ -60,6 +60,9 @@ add_executable(projv_unit_tests
     test_voxel_edits.cpp
 )
 target_link_libraries(projv_unit_tests PRIVATE projectV doctest::doctest)
+if(WIN32)
+    target_link_libraries(projv_unit_tests PRIVATE dbghelp)   # main.cpp's crash report
+endif()
 # Committed test data: the golden physics recording (test_physics_golden.cpp).
 target_compile_definitions(projv_unit_tests PRIVATE PROJV_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 target_compile_options(projv_unit_tests PRIVATE
