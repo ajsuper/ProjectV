@@ -119,7 +119,7 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 - **Physics is Jolt, and only `src/runtime/physics/` includes it** (the `layering` ctest enforces
   it). Those files build as the `projv_physics` object library with Jolt's SIMD flags and defines;
   no public header names a Jolt type. `runtime::PhysicsWorld` (`runtime/physics/physics_world.h`)
-  is the core. It must stay deterministic and restorable: no clocks, thread counts or unordered
+  is the core. It must stay deterministic and restorable: no clocks, thread counts, libm (`sin`, `cos`, `pow`, `exp`, `cbrt`: they differ in the last bit between glibc and the Windows C runtime; `physics.cpp` has its own `cubeRoot`) or unordered
   iteration in anything that feeds a step, and a Jolt upgrade is deliberate, with the physics
   tests run. Plan: `docs/plans/physics-jolt.md`. The submodule carries one patch, applied at configure
   time (`cmake/patches/jolt-applied-impulses.patch`: the solver's contact impulses, for impact load

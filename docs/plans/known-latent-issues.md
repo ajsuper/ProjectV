@@ -232,3 +232,14 @@ to copy. Fix: allocate through `allocateChunkSlot` and drop `freeChunkSlots`.
 `FORCE` (top-level `CMakeLists.txt`). Reconfiguring with `PROJV_LOG_MINIMAL=OFF` leaves them `OFF`.
 Workaround: pass the categories explicitly (`-DPROJV_LOG_INFO=ON ...`) or delete the cache. Fix:
 derive the effective set without writing the user-facing options.
+
+## 15. `ConstantVelocity`'s spin calls libm, which feeds a kinematic pose
+
+`runtime/physics.cpp` turns a kinematic body flying on a `ConstantVelocity` with
+`glm::angleAxis(turn, axis)` (about line 2454), which calls `sin` and `cos`. Those can differ in the
+last bit between glibc and the Windows C runtime, and the result is the pose given to Jolt each step,
+so a spinning body on Linux and on Windows would drift apart. The rule is that nothing feeding a step
+calls libm ([windows.md](windows.md), D4; the same cause was found in a strike's `cbrt` and fixed). Not
+hit by the golden recording, which has no spinning kinematic body, so nothing checks it. Fix: a
+quaternion from an angle built from `+ - * /` only (a Taylor series, or Jolt's deterministic `Sin`/`Cos`
+reached through `PhysicsWorld`), and a golden session that spins one.
