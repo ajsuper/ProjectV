@@ -82,7 +82,7 @@ Fourteen bundled `.data` files are still v1, about 250 MB:
 | `PathTracer/SponzaScene/model.data` | **The path tracer renders an empty scene.** All six renderers start, submit frames and show nothing. AdvancedRenderer, which loads the same scene, is empty for the same reason. |
 | `PathTracer/QuadSponza/sponza_{a,b,c,d}/model.data` | Same, for the four-instance scene. |
 | `edit_demo/SponzaScene/model.data` | Same. |
-| `MeshVoxelizer/trees/*` (8 assets) | Every bundled tree asset. |
+| ~~`MeshVoxelizer/trees/*` (8 assets)~~ | **Resolved:** removed. The terrain generator's trees are now grown by the scene editor's tree brush (`50-terrain-generator/biomes/<biome>/assets/`, current format). |
 | `ScenePreviewer/scenes/{Sibenik,LostEmpire}/model.data` | Already documented in that example's README. |
 | `ScenePreviewer/scenes/StonehillCastle/model.data` | Unreferenced leftover; that scene loads from its v2 components. |
 
@@ -177,8 +177,9 @@ stock `-O2`, a silent slowdown against what this code was developed and profiled
 ## 11. Two examples carried paths that did not survive the directory rename
 
 - `50-terrain-generator` looked for tree assets at `../MeshVoxelizer/trees`. Corrected to
-  `../mesh_voxelizer/trees` (the build-tree sibling). The assets themselves are version 1 and will
-  not load either way; the example warns clearly and renders bare terrain.
+  `../mesh_voxelizer/trees` (the build-tree sibling); the assets there were version 1 and did not
+  load. **Resolved:** the example now has its own trees (`50-terrain-generator/biomes/<biome>/assets/`, staged beside
+  the binary), grown by the scene editor's tree brush through `terrain_asset_baker`.
 - `30-renderers` had its camera hardcoded to `(1018, 413, -330)`, a position tuned for the Sponza
   scene. With `--scene` now accepting anything, that meant every other scene opened inside the
   geometry or in the void. **Resolved** by porting the automatic framing from `10-scene-previewer`.

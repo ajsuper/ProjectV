@@ -1,0 +1,363 @@
+{
+  "comment": "Written by terrain_tree_baker from tools/tree_designs.json. The terrain generator reads the species and their climate bands from here.",
+  "species": [
+    {
+      "abundance": 0.8,
+      "height": 91,
+      "humid": [
+        0.34,
+        0.14
+      ],
+      "kind": "conifer",
+      "label": "Columnar juniper",
+      "name": "juniper_column",
+      "temp": [
+        0.17,
+        0.1
+      ],
+      "voxels": 6085,
+      "width": 28
+    },
+    {
+      "abundance": 0.9,
+      "height": 90,
+      "humid": [
+        0.44,
+        0.15
+      ],
+      "kind": "conifer",
+      "label": "Larch",
+      "name": "larch_sparse",
+      "temp": [
+        0.18,
+        0.1
+      ],
+      "voxels": 4257,
+      "width": 49
+    },
+    {
+      "abundance": 1.0,
+      "height": 93,
+      "humid": [
+        0.52,
+        0.16
+      ],
+      "kind": "conifer",
+      "label": "Young spruce",
+      "name": "spruce_young",
+      "temp": [
+        0.22,
+        0.1
+      ],
+      "voxels": 8530,
+      "width": 45
+    },
+    {
+      "abundance": 1.0,
+      "height": 91,
+      "humid": [
+        0.6,
+        0.15
+      ],
+      "kind": "conifer",
+      "label": "Balsam fir",
+      "name": "fir_balsam",
+      "temp": [
+        0.25,
+        0.1
+      ],
+      "voxels": 5929,
+      "width": 41
+    },
+    {
+      "abundance": 1.2,
+      "height": 91,
+      "humid": [
+        0.5,
+        0.17
+      ],
+      "kind": "conifer",
+      "label": "Norway spruce",
+      "name": "spruce_norway",
+      "temp": [
+        0.29,
+        0.11
+      ],
+      "voxels": 10497,
+      "width": 58
+    },
+    {
+      "abundance": 0.8,
+      "height": 92,
+      "humid": [
+        0.32,
+        0.12
+      ],
+      "kind": "conifer",
+      "label": "Windswept pine",
+      "name": "pine_windswept",
+      "temp": [
+        0.3,
+        0.1
+      ],
+      "voxels": 5451,
+      "width": 49
+    },
+    {
+      "abundance": 0.7,
+      "height": 91,
+      "humid": [
+        0.62,
+        0.14
+      ],
+      "kind": "conifer",
+      "label": "Weeping spruce",
+      "name": "spruce_weeping",
+      "temp": [
+        0.33,
+        0.1
+      ],
+      "voxels": 8558,
+      "width": 38
+    },
+    {
+      "abundance": 0.9,
+      "height": 90,
+      "humid": [
+        0.64,
+        0.14
+      ],
+      "kind": "conifer",
+      "label": "Hemlock",
+      "name": "hemlock",
+      "temp": [
+        0.37,
+        0.1
+      ],
+      "voxels": 8511,
+      "width": 45
+    },
+    {
+      "abundance": 1.1,
+      "height": 92,
+      "humid": [
+        0.38,
+        0.14
+      ],
+      "kind": "conifer",
+      "label": "Scots pine",
+      "name": "pine_scots",
+      "temp": [
+        0.38,
+        0.11
+      ],
+      "voxels": 8374,
+      "width": 51
+    },
+    {
+      "abundance": 0.9,
+      "height": 89,
+      "humid": [
+        0.4,
+        0.14
+      ],
+      "kind": "conifer",
+      "label": "Umbrella pine",
+      "name": "pine_umbrella",
+      "temp": [
+        0.72,
+        0.1
+      ],
+      "voxels": 11689,
+      "width": 65
+    },
+    {
+      "abundance": 0.25,
+      "height": 90,
+      "humid": [
+        0.3,
+        0.12
+      ],
+      "kind": "bare",
+      "label": "Dead snag",
+      "name": "snag_dead",
+      "temp": [
+        0.2,
+        0.12
+      ],
+      "voxels": 2259,
+      "width": 27
+    },
+    {
+      "abundance": 0.35,
+      "height": 93,
+      "humid": [
+        0.32,
+        0.12
+      ],
+      "kind": "bare",
+      "label": "Oak in winter",
+      "name": "oak_winter",
+      "temp": [
+        0.4,
+        0.1
+      ],
+      "voxels": 3397,
+      "width": 65
+    },
+    {
+      "abundance": 1.0,
+      "height": 92,
+      "humid": [
+        0.52,
+        0.15
+      ],
+      "kind": "broadleaf",
+      "label": "Birch",
+      "name": "birch_slender",
+      "temp": [
+        0.42,
+        0.1
+      ],
+      "voxels": 2648,
+      "width": 40
+    },
+    {
+      "abundance": 0.9,
+      "height": 90,
+      "humid": [
+        0.44,
+        0.13
+      ],
+      "kind": "broadleaf",
+      "label": "Maple (autumn)",
+      "name": "maple_autumn",
+      "temp": [
+        0.45,
+        0.1
+      ],
+      "voxels": 16419,
+      "width": 61
+    },
+    {
+      "abundance": 0.8,
+      "height": 88,
+      "humid": [
+        0.4,
+        0.13
+      ],
+      "kind": "broadleaf",
+      "label": "Oak (autumn)",
+      "name": "oak_autumn",
+      "temp": [
+        0.49,
+        0.1
+      ],
+      "voxels": 8444,
+      "width": 56
+    },
+    {
+      "abundance": 1.1,
+      "height": 90,
+      "humid": [
+        0.5,
+        0.16
+      ],
+      "kind": "broadleaf",
+      "label": "Maple",
+      "name": "maple_round",
+      "temp": [
+        0.54,
+        0.11
+      ],
+      "voxels": 9141,
+      "width": 48
+    },
+    {
+      "abundance": 1.0,
+      "height": 92,
+      "humid": [
+        0.58,
+        0.15
+      ],
+      "kind": "broadleaf",
+      "label": "Lime",
+      "name": "lime_dense",
+      "temp": [
+        0.57,
+        0.11
+      ],
+      "voxels": 16508,
+      "width": 58
+    },
+    {
+      "abundance": 1.1,
+      "height": 93,
+      "humid": [
+        0.46,
+        0.15
+      ],
+      "kind": "broadleaf",
+      "label": "Oak",
+      "name": "oak_spreading",
+      "temp": [
+        0.6,
+        0.11
+      ],
+      "voxels": 5808,
+      "width": 48
+    },
+    {
+      "abundance": 0.7,
+      "height": 92,
+      "humid": [
+        0.54,
+        0.14
+      ],
+      "kind": "broadleaf",
+      "label": "Lombardy poplar",
+      "name": "poplar_column",
+      "temp": [
+        0.62,
+        0.1
+      ],
+      "voxels": 4237,
+      "width": 36
+    },
+    {
+      "abundance": 0.8,
+      "height": 90,
+      "humid": [
+        0.66,
+        0.12
+      ],
+      "kind": "broadleaf",
+      "label": "Weeping willow",
+      "name": "willow_weeping",
+      "temp": [
+        0.64,
+        0.11
+      ],
+      "voxels": 8446,
+      "width": 52
+    },
+    {
+      "abundance": 0.6,
+      "height": 90,
+      "humid": [
+        0.56,
+        0.14
+      ],
+      "kind": "broadleaf",
+      "label": "Cherry (blossom)",
+      "name": "cherry_blossom",
+      "temp": [
+        0.68,
+        0.1
+      ],
+      "voxels": 5922,
+      "width": 49
+    }
+  ],
+  "treeVoxelWorldSize": 2.8
+}

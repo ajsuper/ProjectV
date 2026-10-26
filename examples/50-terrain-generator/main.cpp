@@ -19,6 +19,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <mutex>
@@ -46,26 +47,18 @@
 #include "utils/voxel_management.h"
 #include "utils/material.h"
 
-#include "terrain_noise.hpp"
-#include "rock_detail.hpp"
+#include <nlohmann/json.hpp>
+
+#include "simple_terrain.hpp"
+#include "canyonlands.hpp"
 #include "tree_placement.hpp"
 
-#include "basic_renderer.h"
+#include "restir_pt.h"
 
 namespace fs = std::filesystem;
 
 static inline float lerpf(float a, float b, float t) { return a + t * (b - a); }
 static inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
-
-// Cheap integer hash -> [0,1), used for the per-voxel color speckle/dither in surfaceColor(). Not
-// used for shape/height (that's all terrain_noise's Perlin/Worley) -- purely a rendering-detail
-// trick to break up the flat quantized-lattice look with stable, seed-independent per-voxel noise.
-static inline float hash2f(int x, int z) {
-    uint32_t h = uint32_t(x) * 374761393u + uint32_t(z) * 668265263u;
-    h = (h ^ (h >> 13)) * 1274126177u;
-    h ^= h >> 16;
-    return float(h & 0xFFFFFFu) * (1.0f / float(0x1000000));
-}
 
 struct ivec3_hash { size_t operator()(const projv::core::ivec3& v) const { return size_t(v.x) * 73856093 ^ size_t(v.y) * 19349663 ^ size_t(v.z) * 83492791; } };
 
@@ -245,18 +238,11 @@ struct TerrainState {
     // World size of one voxel edge at LOD0, and so (times kChunkRes) the world footprint of a
     // chunk.
     //
-    // Up from 1.75, which is the cheapest possible way to see more world: every chunk covers more
-    // ground for exactly the same voxel count, the vertical stack gets shorter rather than taller
-    // (13 levels instead of 21, since chunks are proportionally taller too), and the view radius in
-    // world units grows without a single extra chunk. The world is built at a scale -- 174k-unit
-    // continents, 105k-unit mountain belts -- that the old 22k-unit view radius could not show; you
-    // were always inside one landform, never looking at one.
-    //
-    // What it costs is near-field detail, which is why this is 2.8 rather than the 3.5 first tried:
-    // 3.5 put rock bedding at only 4 voxels per bed and was visibly coarse up close. At 2.8 a bed
-    // is about 8 voxels again, matching what 1.75 gave. Trees keep their WORLD size regardless --
-    // treeVoxelWorldSize is pinned at 1.75 rather than derived from this, or they would have grown
-    // along with the grid.
+    // Up from 1.75, which is the cheapest way to see more world: every chunk covers more ground for
+    // the same voxel count, and the view radius in world units grows without a single extra chunk.
+    // What it costs is near-field detail, which is why it is 2.8 rather than the 3.5 first tried.
+    // Trees set their own world size (trees/trees.json); they are baked at one tree voxel per one
+    // of these, so they draw at full detail in the nearest ring.
     static constexpr float kVoxelScale = 2.8f;
     static constexpr float kChunkSize  = kChunkRes * kVoxelScale;
     // Voxel edge length for a chunk generated at the given ring's native resolution, keeping the
@@ -269,22 +255,18 @@ struct TerrainState {
     // so changing kVoxelScale does not leave us generating (and discarding) columns of empty sky:
     // taller chunks need proportionally fewer levels to cover the same world height.
     //
-    // The ceiling is terrain_noise's, which sampleTerrain also clamps to, so the two cannot drift
-    // apart -- a peak taller than the topmost chunk level does not get a flat top, it gets no
-    // chunks and therefore a hole. It went up by a factor of nearly three when mountains gained
-    // uplift belts, which is most of why the column prepass is now cached across a chunk stack
-    // (see columnsForChunk): a vertical stack is seventeen levels deep now rather than eight, and
-    // without the cache every one of them re-ran the full terrain prepass for the same columns.
-    static constexpr float kTerrainCeiling = terrain_noise::TERRAIN_CEILING;
-    // Deep enough for the abyssal plain (about 550 units below sea level), which the continent
-    // field now actually reaches -- it previously bottomed out just under the waterline. One level
-    // suffices now that a chunk is 896 units tall.
-    static constexpr int   kChunkYMin = -1;
+    // The ceiling comes from simple_terrain's own maximum, so the two cannot drift apart -- a peak
+    // taller than the topmost chunk level does not get a flat top, it gets no chunks and therefore
+    // a hole.
+    // The highest the ground reaches, plus room for the tallest tree standing on it.
+    // Room for the canyon terrain's tallest: a fold's raised side under thick strata and a dome.
+    static constexpr float kTerrainCeiling = std::max(simple_terrain::CEILING + 300.0f, 1900.0f);
+    // The ground never dips below simple_terrain::kMinHeight (less a stone column's jitter), so the
+    // world starts at y = 0.
+    static constexpr int   kChunkYMin = 0;
     static constexpr int   kChunkYMax = int((kTerrainCeiling + kChunkSize - 1.0f) / kChunkSize);
 
-    // Radius of the outermost ring, in chunks. 110 x 717 puts the horizon 79,000 world units out,
-    // against 22,400 originally -- around half a continent wavelength, so a mountain belt is now
-    // something you look AT rather than something you are inside.
+    // Radius of the outermost ring, in chunks: 150 x 717 puts the horizon over 100,000 world units out.
     //
     // Cost is chunk COUNT, which is what this was measured against rather than guessed: sweeping
     // the occupancy rule (terrain shell or water shell intersecting a slab) over the noise field
@@ -412,42 +394,47 @@ struct TerrainState {
     // so a full pool stays fed across a frame even if generation times are uneven.
     static constexpr size_t kMaxWorkQueueDepth = 1024;
 
-    // The global sea level. Rivers and lakes carry their own, higher, per-column water surface
-    // (TerrainSample::waterTop), so this is the floor of that value rather than the only water in
-    // the world. Owned by terrain_noise because that is where continental elevations are measured
-    // against it -- two copies of this number that disagree puts the coastline in the wrong place.
-    static constexpr float kWaterLevel = terrain_noise::SEA_LEVEL;
-
-    // Horizontal world-space stretch applied to the terrain noise: continents, mountain ranges and
-    // climate regions all come out this much wider, while heights are left alone.
-    //
-    // Horizontal-only is deliberate. Height was never what made the scattered trees read as
-    // oversized -- a 112-unit tree against a 2000-unit mountain is already negligible vertically.
-    // What made them look big was their *footprint* against the width of the landforms, and that is
-    // exactly what this fixes. It also happens to be free: the vertical chunk range is untouched, so
-    // the number of chunks generated per column (and the cost of probing the empty ones) does not
-    // move. Stretching the terrain vertically instead would roughly double both.
-    //
-    // A side effect worth knowing about: wider landforms are gentler, so noticeably more ground
-    // passes the tree slope test. Widening the terrain thickens the forests on its own.
-    static constexpr float kTerrainScale = 2.0f;
-    // Raise this to grow the peaks along with the width. It widens the chunk Y range
-    // (kChunkYMax scales with kTerrainCeiling), so it is not free.
-    static constexpr float kTerrainHeightScale = 1.0f;
-
-    terrain_noise::Generator noiseGen;
-    terrain_noise::BlendParams blendParams;
+    simple_terrain::Generator gen;
     // Random per run, unless TERRAIN_SEED pins it. Pin it for any before/after measurement: the
     // world's geometry density -- and with it both generation cost and GPU traversal cost -- varies
-    // enough between seeds to swamp the change being measured. Two runs of the same binary on
-    // different seeds differed by 3x here, which is larger than most of the wins in this file.
+    // between seeds enough to swamp most changes worth measuring.
     int seed = [] {
         if (const char* e = std::getenv("TERRAIN_SEED")) return int(std::strtol(e, nullptr, 10));
         return int(std::mt19937(std::random_device{}())());
     }();
 
+    // Palette slots for everything the generator writes, interned once at startup (before any
+    // worker runs), so a worker never touches the palette lock: see internTerrainMaterials.
+    struct Materials {
+        uint8_t grass[simple_terrain::kGrassShades] = {};
+        uint8_t rock[simple_terrain::RockSlotCount] = {};   // indexed by simple_terrain::RockSlot
+        uint8_t dirt = 0;
+        uint8_t blade[simple_terrain::kBladeShades] = {};
+    } materials;
+
     trees::TreeLibrary treeLib;
     trees::Params treeParams;
+    // Shrubs (the canyon's sagebrush): the same placer, its own library and a far denser lattice, so
+    // they fill in between the trees instead of competing with them for cells.
+    trees::TreeLibrary shrubLib;
+    trees::Params shrubParams;
+
+    // TERRAIN_LAB=assets: the asset lineup (docs/plans/biome-canyonlands.md, C1). Flat red sand at
+    // kLabGround, and every asset of the biome stood on it in rows -- no terrain, no placement rules --
+    // so each can be judged by itself under the real renderer.
+    bool lab = false;
+    // ...or TERRAIN_LAB=faces: the canyonlands face types as one cross-section (include/canyonlands.hpp)
+    // -- Chinle slope, Wingate wall, Kayenta ledges, Navajo domes -- along a straight escarpment, with
+    // fallen Wingate blocks on the slope. See generateCanyonVoxels.
+    bool labFaces = false;
+    // The canyonlands terrain (include/canyonlands.hpp): the default. TERRAIN_BIOME=alpine is the
+    // Perlin hills with conifers (include/simple_terrain.hpp). The faces lab draws with it too.
+    bool canyon = false;
+    static constexpr float kLabGround = 200.0f;
+    uint8_t labCanyon[canyonlands::SlotCount] = {};
+    trees::TreeLibrary labLib;
+    std::vector<trees::TreeInstance> labPlaced;
+    uint8_t labSand = 0;
 
     // Grid
     int gridIndex = -1;
@@ -620,16 +607,185 @@ struct TerrainState {
     static constexpr int kEditBatchTimeoutMs = 3000;
 };
 
-// Every terrain query goes through here, so the world-scale knobs above apply uniformly: sampling
-// the noise anywhere else in world coordinates would put that caller on a different landscape.
-static inline terrain_noise::TerrainSample sampleWorld(const TerrainState& ts, float wx, float wz,
-                                                       int detailOct, int erosionOct) {
-    terrain_noise::TerrainSample sample = terrain_noise::sampleTerrain(
-        ts.noiseGen, ts.blendParams,
-        wx / TerrainState::kTerrainScale, wz / TerrainState::kTerrainScale,
-        detailOct, erosionOct);
-    sample.height *= TerrainState::kTerrainHeightScale;
-    return sample;
+// The smooth ground height at a world XZ: what the slope is measured from, what trees stand on and
+// what the player walks on. Stone columns are voxelized a little above or below it (white noise; see
+// generateChunkVoxels), which nothing but the voxels needs to know about.
+// --- The faces lab (TERRAIN_LAB=faces) ----------------------------------------------------------
+//
+// The escarpment runs along X and faces +Z, toward the sun (which stands at +Z, see sunDir): `e`, the
+// distance into the plateau, is -z, less a slow wander of the wall line so it has embayments and
+// buttresses rather than ruling a straight line.
+static float labE(const TerrainState& ts, float x, float z) {
+    return -z - 30.0f * (ts.gen.rock3(x / 260.0f, 0.9f, 4.2f) - 0.5f) * 2.0f;
+}
+static float labWorldZ(const TerrainState& ts, float x, float e) {
+    return -(e + 30.0f * (ts.gen.rock3(x / 260.0f, 0.9f, 4.2f) - 0.5f) * 2.0f);
+}
+
+// One column of the canyon terrain: how far it stands into the plateau, where its strata sit, and its
+// wall coordinate (see canyonlands::wallAlong).
+struct CanyonColumn { float e, base, scale, along; };
+static float canyonE(const TerrainState& ts, float x, float z) {
+    return ts.labFaces ? labE(ts, x, z) : canyonlands::drainageDistance(ts.gen, x, z);
+}
+static CanyonColumn canyonColumn(const TerrainState& ts, float x, float z) {
+    CanyonColumn c;
+    c.e = canyonE(ts, x, z);
+    c.base = ts.labFaces ? TerrainState::kLabGround : canyonlands::strataBase(ts.gen, x, z);
+    c.scale = ts.labFaces ? 1.0f : canyonlands::strataScale(ts.gen, x, z);
+    if (ts.labFaces) { c.along = x; return c; }
+    const float ex = canyonE(ts, x + 3.0f, z) - c.e, ez = canyonE(ts, x, z + 3.0f) - c.e;
+    c.along = canyonlands::wallAlong(ts.gen, x, z, ex, ez, (ts.gen.rock3(x / 40.0f, 9.1f, z / 40.0f) - 0.5f) * 2.0f);
+    return c;
+}
+
+// The highest solid point of a column, near enough: the profile without the faces' detail, which
+// only ever sets rock back (bar the bulges, which the bounds' margin covers). For the camera,
+// placement, and the column bounds.
+static float canyonTop(const TerrainState& ts, float x, float z) {
+    namespace cl = canyonlands;
+    const CanyonColumn c = canyonColumn(ts, x, z);
+    const float g = c.base, e = c.e, k = c.scale;
+    if (e < 0.0f) return g + k * cl::floorHeight(ts.gen, x, z, e);
+    if (e < cl::kWallFoot + 2.0f) return g + k * cl::chinleHeight(ts.gen, c.along, e);
+    if (e < cl::wallRim()) return g + k * std::min(cl::kWingateTop, cl::kChinleTop + (e - cl::kWallFoot) / cl::kWallBatter);
+    if (e < cl::kayentaBase(cl::kKayentaTop)) return g + k * (cl::kWingateTop + (e - cl::wallRim()) / cl::kKayentaRun);
+    return g + k * (cl::kKayentaTop + std::max(0.0f, cl::navajoHeight(ts.gen, c.along, x, z, e)));
+}
+
+// One chunk of canyon terrain, voxel by voxel. Each stratum's base setback is tested first, and only
+// a voxel within its detail's reach of the face pays for the detail. At the nearest ring only a shell
+// under the lowest surface is filled, as the other terrain does; coarser rings fill to the floor.
+// How deep the nearest ring's shell goes under the lowest surface, in voxels (kFillDepth's role).
+static constexpr int kCanyonShell = 30;
+
+static void generateCanyonVoxels(const TerrainState& ts, projv::VoxelBrickMap& map, int res, float vs,
+                                 float ox, float oy, float oz, bool shellOnly, bool grass) {
+    namespace cl = canyonlands;
+    const simple_terrain::Generator& gen = ts.gen;
+    enum Region { Ground, Chinle, Wingate, Kayenta, Navajo };
+    struct Info { Region region = Ground; bool near = false, fresh = false, hard = false; float chute = 0.0f; int bed = 0; };
+
+    for (int lz = 0; lz < res; ++lz) {
+        const float wz = oz + float(lz) * vs;
+        for (int lx = 0; lx < res; ++lx) {
+            const float wx = ox + float(lx) * vs;
+            const CanyonColumn col = canyonColumn(ts, wx, wz);
+            const float e = col.e, g = col.base, along = col.along, k = col.scale;
+            float incision = 0.0f, navJoint = 1.0f;
+            // Heights are in the strata's own units (`rel`), scaled to the world by k: a region whose
+            // strata are thicker has every layer taller, walls steeper.
+            const float hCh = g + k * (e < 0.0f ? cl::floorHeight(gen, wx, wz, e, &incision)
+                                                : cl::chinleHeight(gen, along, e, &incision));
+            const float nav = cl::navajoHeight(gen, along, wx, wz, e, &navJoint);
+            const float navTop = nav >= 0.0f ? g + k * (cl::kKayentaTop + nav) : -1.0e9f;
+            const float colTop = std::max({hCh, navTop, e > cl::kWallFoot - cl::kBulge - 8.0f ? g + k * cl::kKayentaTop : 0.0f}) + 3.0f;
+            if (oy > colTop) continue;   // open sky over this column
+            // The lowest surface in the column is the slope's (everything above it stands back).
+            const int shellFloor = shellOnly ? int(std::floor((hCh - oy) / vs)) - kCanyonShell : 0;
+
+            auto solidAt = [&](float y, Info& info) -> bool {
+                const float rel = (y - g) / k;
+                info = Info{};
+                if (rel < cl::kChinleTop) {
+                    info.region = Chinle;
+                    // Deep under the wall nothing is cut: gullies and the undercut live at its foot.
+                    if (e > cl::kWallFoot + 25.0f) return true;
+                    return y < hCh;
+                }
+                if (rel < cl::kWingateTop) {
+                    info.region = Wingate;
+                    const float base = cl::kWallFoot + cl::kWallBatter * (rel - cl::kChinleTop);
+                    if (e > base + cl::kWingateDetailMax) return true;
+                    if (e < base + cl::kWingateDetailMin) return false;
+                    info.near = true;
+                    return e > cl::wingateSetback(gen, along, rel, &info.fresh, &info.chute);
+                }
+                if (rel < cl::kKayentaTop) {
+                    info.region = Kayenta;
+                    const float base = cl::kayentaBase(rel);
+                    if (e > base + cl::kKayentaDetailMax) return true;
+                    if (e < base + cl::kKayentaDetailMin - 1.0f) return false;
+                    info.near = true;
+                    return e > cl::kayentaSetback(gen, along, rel, &info.hard, &info.bed);
+                }
+                info.region = Navajo;
+                return y < navTop;
+            };
+
+            const int ix = int(std::floor(wx / 2.8f)), iz = int(std::floor(wz / 2.8f));
+            Info info;
+            bool aboveSolid = solidAt(oy + float(res) * vs, info);
+            const int topLy = std::min(res - 1, int(std::floor((colTop - oy) / vs)));
+            const int bottomLy = std::max(0, shellFloor);
+            for (int ly = topLy; ly >= bottomLy; --ly) {
+                const float y = oy + float(ly) * vs;
+                const bool solid = solidAt(y, info);
+                if (solid) {
+                    const bool top = !aboveSolid;
+                    const int iy = int(std::floor(y / 2.8f));
+                    const float dither = simple_terrain::hashUnit(ix * 31 + iy, iz - iy * 17, 991u) - 0.5f;
+                    uint8_t slot;
+                    switch (info.region) {
+                        case Chinle:
+                            if (e < 0.0f) slot = (top || y > hCh - 6.0f) ? cl::floorColour(gen, wx, wz, top, incision, dither)
+                                                                         : uint8_t(cl::Sand);
+                            else slot = (top || y > hCh - 14.0f) ? cl::chinleColour(gen, along, (y - g) / k, e, top, incision, dither)
+                                                                 : uint8_t(cl::Chinle + 1);
+                            break;
+                        case Wingate:
+                            slot = (top || info.near) ? cl::wingateColour(gen, along, (y - g) / k, e, top, info.fresh, info.chute, dither)
+                                                      : uint8_t(cl::Wingate + 2);
+                            break;
+                        case Kayenta:
+                            slot = (top || info.near) ? cl::kayentaColour(gen, along, (y - g) / k, top, info.hard, info.bed, dither)
+                                                      : uint8_t(cl::Kayenta + 1);
+                            break;
+                        case Navajo:
+                            slot = (top || y > navTop - 30.0f)
+                                       ? cl::navajoColour(gen, wx, (y - g) / k - cl::kKayentaTop, wz, top, navJoint, dither)
+                                       : uint8_t(cl::Navajo + 2);
+                            break;
+                        default: slot = cl::Sand; break;
+                    }
+                    projv::utils::brickMapSetVoxel(map, lx, ly, lz, ts.labCanyon[slot]);
+                }
+                aboveSolid = solid;
+            }
+
+            // Bunchgrass on the open ground, thinning up the slope, and on the Kayenta bench; none on
+            // the walls, the slickrock or in the arroyos. Nearest ring only: a blade is one voxel.
+            if (grass) {
+                float surface = -1.0e9f, density = 0.0f;
+                if (e < cl::kWallFoot * 0.7f && incision < 1.0f) {
+                    surface = hCh;
+                    const float t = std::max(0.0f, e) / cl::kWallFoot;
+                    density = 0.8f * cl::vegetation(gen, wx, wz) * (1.0f - 1.3f * t);
+                } else if (e > cl::kayentaBase(cl::kKayentaTop) + 4.0f && nav < 0.0f) {
+                    surface = g + k * cl::kKayentaTop;
+                    density = 0.6f * cl::vegetation(gen, wx, wz);
+                }
+                if (density > 0.0f) {
+                    bool dead = false;
+                    const int height = cl::grassAt(gen, wx, wz, density, dead);
+                    const int surfaceLy = int(std::floor((surface - oy) / vs));
+                    for (int b = 1; b <= height; ++b) {
+                        const int ly = surfaceLy + b;
+                        if (ly < 0) continue;
+                        if (ly >= res) break;
+                        const int step = height == 1 ? 1 : (b - 1) * 2 / (height - 1);
+                        projv::utils::brickMapSetVoxel(map, lx, ly, lz, ts.labCanyon[(dead ? cl::GrassDead : cl::GrassLive) + step]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static inline float groundHeight(const TerrainState& ts, float wx, float wz) {
+    if (ts.canyon) return canyonTop(ts, wx, wz);
+    if (ts.lab) return TerrainState::kLabGround;
+    return ts.gen.heightAt(wx, wz);
 }
 
 static projv::core::ivec3 worldToChunkCoord(projv::core::vec3 p) {
@@ -643,195 +799,29 @@ static int chunkCoordToLin(projv::core::ivec3 coord, const projv::SceneGrid& gri
     return cell.x + grid.dims.x * (cell.y + grid.dims.y * cell.z);
 }
 
+// How far below its surface a nearest-ring column is filled, in voxels. Nothing deeper can be seen;
+// the coarser rings fill to the bottom of the world (see kSolidFillToWorldBottom).
 static constexpr int kFillDepth = 30;
 
-// Palette budget. Material IDs are uint8_t everywhere (GeometryBlob::materialIDs, internMaterial,
-// the remap tables), and a component palette holds at most MAX_MATERIALS_PER_COMPONENT - 1 entries
-// (indices 0..254; 255 is INVALID_MATERIAL). That cap is *global* across every chunk we ever
-// generate, not per-chunk -- the component palette accumulates every distinct color the generator
-// emits. Overrun it and internMaterial's uint8_t return wraps, so voxels silently alias whatever
-// palette slot sits at (index & 255).
-//
-// Surface colors come out of a continuous 13-way climate blend, which is unbounded, so they are
-// snapped to a uniform kSurfaceLevels^3 RGB lattice. The lattice is cubic -- the same level set on
-// every channel -- so near-grey rock/snow/ice quantize to neutral greys instead of picking up a
-// color cast, and the levels span [0,255] inclusive so pure white snow stays exactly white.
-//
-// Budget: 216 lattice + 1 deep water + <=3 shallow-water shades + 1 water fill = <=221 of 255.
-// kSurfaceLevels = 7 would need 343 lattice entries on its own and blow the cap.
-static constexpr int kSurfaceLevels = 6;
-static_assert(kSurfaceLevels * kSurfaceLevels * kSurfaceLevels + 5
-                  <= int(projv::MAX_MATERIALS_PER_COMPONENT) - 1,
-              "quantized surface lattice plus the fixed water colors must fit the palette cap");
-
-// Snap one normalized channel to the nearest lattice level.
-static inline uint8_t quantizeSurfaceChannel(float v01) {
-    constexpr float kMaxLevel = float(kSurfaceLevels - 1);
-    float level = std::round(clampf(v01, 0.0f, 1.0f) * kMaxLevel);
-    return uint8_t(level * (255.0f / kMaxLevel) + 0.5f);
-}
-
-// `slope` is the terrain gradient (rise/run) at this column, from the height prepass in
-// generateChunkVoxels. It is what decides bare rock versus soil: without it every hillside gets the
-// same climate colour regardless of whether it is a meadow or a cliff.
-// `waterTop` is this column's own water surface -- sea level almost everywhere, but a river reach's
-// pool level inside a valley. Submerged ground is coloured relative to it rather than to sea level,
-// so a river bed reads as a river bed and not as ordinary hillside that happens to be wet.
-//
-// `river` is 0 outside a valley and 1 on its axis, used only for the bank strip.
-//
-// `bare` and `rc` come from the caller rather than being worked out here. Both are needed by the
-// column's geometry (the joint and bedding recess) before any colour is chosen, and both are needed
-// again by the subsurface fill below the surface voxel, so computing them here would be the second
-// of three identical evaluations of the same three Perlin fields per column.
-static projv::Color surfaceColor(float height, float t, float h, int worldY,
-                                  float wx, float wz, float slope, float waterTop, float river,
-                                  float bare, const rock::Column& rc,
-                                  const TerrainState& ts) {
-    int wl = int(waterTop);
-
-    // Submerged ground. Quantized onto the same lattice as everything else, which the palette
-    // budget above depends on: this used to return an ungated ramp keyed on absolute depth, and a
-    // ramp is an unbounded number of distinct colours. It cost nothing while the sea bed sat a few
-    // tens of units under the waterline, but the continent field now digs 950 units down and rivers
-    // put a second waterline anywhere up to the tree line, so the ramp would have spread over
-    // dozens of palette slots on top of the 216 the lattice already claims -- and overrunning the
-    // cap does not fail loudly, it wraps internMaterial's uint8_t and silently aliases voxels onto
-    // whatever colour sits at (index & 255).
-    if (worldY < wl) {
-        float df = clampf((float(wl) - float(worldY)) * (1.0f / 260.0f), 0.0f, 1.0f);
-        return projv::Color{quantizeSurfaceChannel(lerpf(0.28f, 0.06f, df)),
-                            quantizeSurfaceChannel(lerpf(0.36f, 0.10f, df)),
-                            quantizeSurfaceChannel(lerpf(0.52f, 0.30f, df))};
-    }
-
-    // Altitude is measured from SEA level, not from this column's water surface: a tarn near a
-    // summit is still alpine, and normalizing against its own pool would tell the snow line and the
-    // rock exposure that it is at sea level.
-    float altN = clampf((height - TerrainState::kWaterLevel) / terrain_noise::MAX_HEIGHT,
-                        0.0f, 1.0f);
-
-    // The rock end members now live in rock_detail.hpp so the surface and the shell beneath it are
-    // guaranteed to be reading the same stone.
-    using vec3 = projv::core::vec3;
-    vec3 rockColor = rock::baseColor(t, h);
-
-    // Simplified material affinities
-    struct Mat { projv::core::vec3 color; float tC, tW, hC, hW, aC, aW, rockBias, bias; };
-    const Mat mats[] = {
-        {{1.00f,0.84f,0.32f},  0.92f,0.18f, 0.05f,0.18f, 0.30f,4.0f, -0.5f,  0.08f}, // hot sand
-        {{0.92f,0.60f,0.16f},  0.74f,0.20f, 0.25f,0.20f, 0.30f,4.0f, -0.3f,  0.00f}, // savanna
-        {{0.74f,0.46f,0.18f},  0.62f,0.18f, 0.15f,0.18f, 0.30f,4.0f, -0.1f,  0.00f}, // scrub
-        {{0.30f,0.65f,0.20f},  0.50f,0.24f, 0.55f,0.24f, 0.30f,4.0f, -0.4f,  0.05f}, // grassland
-        {{0.10f,0.40f,0.08f},  0.44f,0.18f, 0.82f,0.20f, 0.30f,4.0f, -0.6f,  0.05f}, // forest
-        {{0.04f,0.28f,0.05f},  0.90f,0.16f, 0.93f,0.16f, 0.30f,4.0f, -0.6f,  0.08f}, // jungle
-        {{0.12f,0.34f,0.24f},  0.28f,0.18f, 0.75f,0.20f, 0.30f,4.0f, -0.4f,  0.05f}, // taiga
-        {{0.96f,0.98f,1.00f},  0.10f,0.22f, 0.40f,0.22f, 0.30f,4.0f, -0.1f,  0.00f}, // tundra
-        {{0.93f,0.96f,1.00f},  0.12f,0.22f, 0.07f,0.20f, 0.30f,4.0f,  0.0f,  0.00f}, // cold desert
-        {{1.00f,1.00f,1.00f},  0.50f,1.40f, 0.50f,1.40f, 0.30f,4.0f,  3.2f, -2.9f}, // rock
-        {{1.00f,1.00f,1.00f},  0.02f,0.28f, 0.72f,0.28f, 0.30f,4.0f, -0.7f,  0.50f}, // snow
-        {{0.82f,0.94f,1.00f},  0.00f,0.10f, 0.93f,0.14f, 0.30f,4.0f, -0.5f,  0.20f}, // glacial ice
-        {{0.88f,0.82f,0.60f},  0.55f,1.40f, 0.50f,1.40f, 0.004f,0.018f,-0.8f, -0.4f}, // beach
+// Interns every colour the generator writes, once, at startup -- named, so the palette reads as
+// what it is (terrain.grass.1 ..) -- and stores the slots in ts.materials. Workers then write IDs
+// straight from that table and never take the palette lock. The whole terrain is 25 entries, which
+// leaves the trees' 27 exact colours plenty of room in the component's 255.
+static void internTerrainMaterials(projv::Scene& scene, projv::ComponentRecord& comp, TerrainState& ts) {
+    using namespace simple_terrain;
+    auto intern = [&](const std::string& name, RGB c) {
+        return projv::utils::internMaterial(scene, comp, name, projv::packRGB10(c.r, c.g, c.b));
     };
-    constexpr int kRockMat = 9;
-    constexpr float kSharpness = 2.6f;
-
-    vec3 acc{0, 0, 0};
-    float total = 0.0f;
-    for (int i = 0; i < 13; ++i) {
-        const Mat& m = mats[i];
-        float dt = (t - m.tC) / m.tW;
-        float dh = (h - m.hC) / m.hW;
-        float da = (altN - m.aC) / m.aW;
-        float aff = std::exp(m.bias - kSharpness * (dt * dt + dh * dh + da * da));
-        acc += (i == kRockMat ? rockColor : m.color) * aff;
-        total += aff;
+    for (int i = 0; i < kGrassShades; ++i) ts.materials.grass[i] = intern("terrain.grass." + std::to_string(i + 1), kGrass[i]);
+    for (int i = 0; i < kRockShades; ++i) {
+        ts.materials.rock[RockCool + i] = intern("terrain.rock.cool." + std::to_string(i + 1), kRockCool[i]);
+        ts.materials.rock[RockWarm + i] = intern("terrain.rock.warm." + std::to_string(i + 1), kRockWarm[i]);
     }
-    vec3 col = total > 1e-6f ? acc * (1.0f / total) : vec3{0.5f, 0.5f, 0.5f};
-
-    // Bare rock. The climate blend above answers "what grows here"; this answers "can anything stay
-    // here at all", and on a steep face the answer is no. Overriding after the blend rather than
-    // adding another affinity term keeps it absolute: a cliff is rock in every biome, which is the
-    // single change that turns uniformly-coloured hillsides into terrain with cliffs in it.
-    // Bare rock, chosen per voxel by a dither rather than blended in.
-    //
-    // Cross-fading vegetation into stone sounds right and is wrong here: the two are far apart in
-    // hue, so a partial mix leaves all three channels mid-step, they round independently, and the
-    // transition band comes out a colour that is in neither -- green-into-blue-grey basalt produced
-    // a wide teal fringe. Dithering picks one or the other, so every voxel is a colour that was
-    // actually chosen, and the boundary reads as patchy soil clinging to rock, which is what a real
-    // slope looks like anyway.
-    if (bare > 0.001f && hash2f(int(wx * 3.0f), int(wz * 3.0f) + 4096) < bare) {
-        col = rock::color(rc, ts.noiseGen.rockNoise, wx, float(worldY), wz, /*detail=*/true);
-    }
-
-    // River banks. The strip between the water line and the top of the cut bank is washed gravel
-    // and silt: the current strips it every time the river is in spate, so whatever the climate
-    // grows on the slope above, it does not grow here.
-    //
-    // Dithered against the surrounding ground for the same reason bare rock is -- the bank colour
-    // and a green floodplain are far enough apart in hue that a blended fringe rounds to a colour
-    // that is in neither.
-    if (river > 0.20f) {
-        float aboveWater = height - waterTop;
-        float bank = rock::rsmooth(0.34f, 0.72f, river)
-                   * (1.0f - rock::rsmooth(9.0f, 30.0f, aboveWater));
-        if (bank > 0.001f && hash2f(int(wx * 3.0f) + 1531, int(wz * 3.0f) + 8623) < bank)
-            col = projv::core::vec3{0.78f, 0.74f, 0.62f};
-    }
-
-    float grey = col.x * 0.299f + col.y * 0.587f + col.z * 0.114f;
-    col = vec3{clampf(grey + (col.x - grey) * 1.0f, 0.0f, 1.0f),
-               clampf(grey + (col.y - grey) * 1.0f, 0.0f, 1.0f),
-               clampf(grey + (col.z - grey) * 1.0f, 0.0f, 1.0f)};
-
-    // Per-voxel micro-detail, purely cosmetic (stable hash of world xz, not a new noise field feeding
-    // shape/height): a small brightness speckle to read as rock/dirt grain instead of a flat fill,
-    // plus an ordered dither of about half a lattice step so the kSurfaceLevels quantization below
-    // reads as a smooth gradient instead of visible hard-edged color bands.
-    int hx = int(wx * 4.0f), hz = int(wz * 4.0f);
-    float speckle = (hash2f(hx, hz) - 0.5f) * 0.10f;               // +/-5% brightness
-    float ditherStep = 1.0f / float(kSurfaceLevels - 1);
-    float dither = (hash2f(hx + 7919, hz + 104729) - 0.5f) * ditherStep;
-    col = vec3{clampf(col.x * (1.0f + speckle) + dither, 0.0f, 1.0f),
-               clampf(col.y * (1.0f + speckle) + dither, 0.0f, 1.0f),
-               clampf(col.z * (1.0f + speckle) + dither, 0.0f, 1.0f)};
-
-    // Quantized to the lattice so the set of distinct surface colors stays inside the palette cap.
-    // The water returns above are left exact -- they are already only four colors in total.
-    return projv::Color{quantizeSurfaceChannel(col.x),
-                        quantizeSurfaceChannel(col.y),
-                        quantizeSurfaceChannel(col.z)};
-}
-
-// Depth-graded water color (world units below the water surface). Previously every water voxel --
-// shallow lake edge or open-ocean floor alike -- used one flat hardcoded blue, which read as a flat
-// color slab on any large body of water. Four shades (matching the palette budget comment above:
-// "1 deep water + <=3 shallow-water shades") gives lakes/coastlines a visible depth gradient instead.
-static projv::Color waterColorForDepth(float depthBelowSurface) {
-    // Pushed bluer/darker in G than a "natural" lake photo would suggest: this renderer's GI bounces
-    // ambient light off whatever's nearby (often green terrain/foliage) onto the water's diffuse
-    // term, which pulls the rendered result toward green/cyan. Biasing the albedo itself toward blue
-    // compensates so the final composited water reads blue instead of algae-green.
-    if (depthBelowSurface < 8.0f)  return projv::Color{45, 130, 195};  // shallow: lit, blue-cyan
-    if (depthBelowSurface < 30.0f) return projv::Color{25, 85, 175};   // mid
-    if (depthBelowSurface < 80.0f) return projv::Color{14, 50, 135};   // deep
-    return projv::Color{7, 22, 80};                                    // abyssal
-}
-
-// Detail/erosion octave counts to sample terrain at, keyed by storage LOD ring. The near ring
-// (LOD0) is the only one ever seen up close, so it gets more octaves than the original hardcoded
-// oct=2/eoct=4 -- including detailOct=3, which turns on the Worley-gully term in
-// terrain_noise::Generator::detailFn. The far rings (LOD1/LOD2) make up the large majority of
-// resident chunks by count (the view radius rings grow with area) but are only ever seen from a
-// distance where the extra octaves are invisible, so they drop below the original defaults instead
-// -- this is what actually pays for the LOD0 increase and nets out chunk generation faster overall.
-static void terrainOctavesForLOD(uint32_t lod, int& detailOct, int& erosionOct) {
-    switch (lod) {
-        case 0:  detailOct = 3; erosionOct = 6; break;
-        case 1:  detailOct = 2; erosionOct = 4; break;
-        default: detailOct = 1; erosionOct = 2; break;
-    }
+    ts.materials.rock[RockLichenY] = intern("terrain.rock.lichen.1", kLichenY);
+    ts.materials.rock[RockLichenR] = intern("terrain.rock.lichen.2", kLichenR);
+    ts.materials.rock[RockMoss] = intern("terrain.rock.moss", kMoss);
+    ts.materials.dirt = intern("terrain.dirt", kDirt);
+    for (int i = 0; i < kBladeShades; ++i) ts.materials.blade[i] = intern("grass.blade." + std::to_string(i + 1), kBlade[i]);
 }
 
 // Plants trees into a chunk's brick map, after the heightfield has filled it.
@@ -841,75 +831,84 @@ static void terrainOctavesForLOD(uint32_t lod, int& detailOct, int& erosionOct) 
 // position, so two threads generating adjacent chunks independently agree on every tree that
 // crosses between them. See tree_placement.hpp.
 //
-// The ground is sampled with LOD0's octave counts no matter which ring this chunk belongs to. A
-// coarser chunk's own surface is generated with fewer octaves and so sits a little differently, but
-// letting the trunk height follow that would plant the same tree at two heights either side of a
-// ring boundary. Params::embedVoxels sinks the trunk far enough to swallow the difference.
-// Trees are stamped at every LOD ring. A coarse ring reads a coarse mip of the same asset, so a
-// distant tree is the same object at the resolution that ring can represent -- 64 voxels tall in
-// the near ring, 16 in the middle, 4 in the far one -- rather than blinking into existence at a
-// ring boundary. Cost at the far rings is negligible: the coarse mip is ~60 voxels, and most
-// candidates are rejected by the patch field before they ever touch the terrain noise.
+// Trees are stamped at every LOD ring, each reading the mip of the asset built for that ring, so a
+// distant tree is the same object at the resolution that ring can draw rather than blinking into
+// existence at a ring boundary.
+//
+// The placer was written for a climate model; here its two fields are two broad noise regions.
+// "Temperature" picks which conifer grows (the species' bands in tools/tree_designs.json sit along
+// it), and "humidity" thins and thickens the stands. The climate gates themselves are opened wide
+// in startup, so only the forest-patch field, the region field and the slope test decide density.
 // `maxGroundH` is the highest terrain column in this chunk's footprint, from the shared prepass.
 static void stampTreesIntoChunk(projv::core::ivec3 coord, projv::VoxelBrickMap& map,
-                                TerrainState& ts, int res, float vs, uint32_t lod,
-                                float maxGroundH) {
-    (void)lod;
-    if (ts.treeLib.empty()) return;
+                                TerrainState& ts, int res, float vs, float maxGroundH,
+                                const std::vector<simple_terrain::Boulder>& boulders,
+                                const trees::TreeLibrary& lib, const trees::Params& params,
+                                float barePass = 1.0f) {
+    if (lib.empty()) return;
 
-    // Open sky: no tree rooted anywhere in the footprint reaches this slab. Worth testing before
-    // collectTrees rather than relying on its per-instance vertical reject, because collecting is
-    // the expensive half -- every candidate that survives the patch field costs a full terrain
-    // sample to find its ground. A vertical chunk stack is seventeen levels deep and only two or
-    // three of them hold any ground, so without this the tree pass runs, in full, for a dozen
-    // slabs of empty air above every column in the world.
+    // Open sky: no tree rooted anywhere in the footprint reaches this slab. Tested before
+    // collectTrees because collecting is the expensive half.
     if (float(coord.y) * TerrainState::kChunkSize
-            > maxGroundH + trees::canopyHeight(ts.treeLib, ts.treeParams)) return;
+            > maxGroundH + trees::canopyHeight(lib, params)) return;
 
-    int placeDetailOct, placeErosionOct;
-    terrainOctavesForLOD(0, placeDetailOct, placeErosionOct);
     auto sampleGround = [&](float x, float z) {
-        terrain_noise::TerrainSample s = sampleWorld(ts, x, z, placeDetailOct, placeErosionOct);
-        return trees::GroundSample{s.height, s.temp, s.humid, s.waterTop};
+        trees::GroundSample g;
+        g.height = groundHeight(ts, x, z);
+        g.temp = 0.14f + 0.28f * ts.gen.forestAt(x, z, 6000.0f);
+        g.humid = 0.25f + 0.50f * ts.gen.forestAt(x + 51731.0f, z - 23117.0f, 4000.0f);
+        g.waterTop = -1.0e9f;
+        return g;
     };
 
     float ox = float(coord.x) * TerrainState::kChunkSize;
     float oy = float(coord.y) * TerrainState::kChunkSize;
     float oz = float(coord.z) * TerrainState::kChunkSize;
-    float reach = trees::canopyReach(ts.treeLib, ts.treeParams);
+    float reach = trees::canopyReach(lib, params);
 
     // Look one canopy beyond the chunk in XZ: a tree rooted in a neighbour still drops voxels here.
     std::vector<trees::TreeInstance> planted;
-    trees::collectTrees(ts.treeLib, ts.treeParams,
+    trees::collectTrees(lib, params,
                         ox - reach, ox + TerrainState::kChunkSize + reach,
                         oz - reach, oz + TerrainState::kChunkSize + reach,
                         sampleGround, planted);
 
     for (const trees::TreeInstance& inst : planted) {
+        // Not out of a boulder: a trunk standing inside one is a tree growing through solid rock.
+        // `boulders` covers this chunk widened by a canopy, which is every trunk collected above.
+        bool onBoulder = false;
+        for (const simple_terrain::Boulder& bd : boulders) {
+            float dx = inst.worldX - bd.x, dz = inst.worldZ - bd.z, rr = bd.r * 1.2f;
+            if (dx * dx + dz * dz < rr * rr) { onBoulder = true; break; }
+        }
+        if (onBoulder) continue;
+        // The canyon's plants grow in clumps (canyonlands::vegetation): a candidate outside one is
+        // kept only `barePass` of the time -- a juniper rooted in a slickrock crack, a lone sage.
+        if (ts.canyon) {
+            float veg = canyonlands::vegetation(ts.gen, inst.worldX, inst.worldZ);
+            float roll = simple_terrain::hashUnit(int(inst.worldX), int(inst.worldZ), 673u);
+            if (roll > veg * 1.6f + barePass) continue;
+        }
         projv::core::vec3 lo, hi;
-        trees::treeWorldBounds(inst, ts.treeParams, lo, hi);
+        trees::treeWorldBounds(inst, params, lo, hi);
         // Vertical reject: most candidates are rooted far below or above this chunk's slab.
         if (hi.y < oy || lo.y > oy + TerrainState::kChunkSize) continue;
-        trees::stampTree(inst, ts.treeParams, map, coord, res, vs);
+        trees::stampTree(inst, params, map, coord, res, vs);
     }
 }
 
-// One terrain column: everything the voxel loop needs about a world XZ position, independent of
-// which chunk in the vertical stack is being filled.
+// One terrain column: its smooth ground height. Stone and its jitter are worked out from these in
+// the voxel loop, which has the neighbours it needs for the slope.
 struct ColumnSample {
     float height;
-    float temp;
-    float humid;
-    float waterTop;   // this column's own water surface: sea level, or a river reach's pool
-    float river;      // 0 outside a river valley .. 1 on its axis
 };
 
 // The prepass for one (chunkX, chunkZ) at one LOD ring: a (res+2)^2 grid of columns, plus the
-// bounds the marginal test needs.
+// bounds the marginal test needs (widened by the rock's reach and the boulders, which can stand above
+// the smooth height).
 struct ColumnBlock {
     int stride = 0;
     float minH = 0.0f, maxH = 0.0f;
-    float minWaterTop = 0.0f, maxWaterTop = 0.0f;
     std::vector<ColumnSample> cells;
 };
 
@@ -1061,25 +1060,24 @@ static std::shared_ptr<const ColumnBlock> columnsForChunk(const TerrainState& ts
     block->stride = stride;
     block->cells.resize(size_t(stride) * size_t(stride));
 
-    int detailOct, erosionOct;
-    terrainOctavesForLOD(lod, detailOct, erosionOct);
-
     float ox = float(cx) * TerrainState::kChunkSize;
     float oz = float(cz) * TerrainState::kChunkSize;
 
-    float minH = 1e30f, maxH = -1e30f, minWT = 1e30f, maxWT = -1e30f;
+    float minH = 1e30f, maxH = -1e30f;
     for (int j = 0; j < stride; ++j) {
         float wz = oz + float(j - 1) * vs;
         for (int i = 0; i < stride; ++i) {
             float wx = ox + float(i - 1) * vs;
-            terrain_noise::TerrainSample s = sampleWorld(ts, wx, wz, detailOct, erosionOct);
-            block->cells[size_t(j) * stride + i] = {s.height, s.temp, s.humid, s.waterTop, s.river};
-            minH = std::min(minH, s.height);   maxH = std::max(maxH, s.height);
-            minWT = std::min(minWT, s.waterTop); maxWT = std::max(maxWT, s.waterTop);
+            float h = groundHeight(ts, wx, wz);
+            block->cells[size_t(j) * stride + i] = {h};
+            minH = std::min(minH, h);
+            maxH = std::max(maxH, h);
         }
     }
-    block->minH = minH; block->maxH = maxH;
-    block->minWaterTop = minWT; block->maxWaterTop = maxWT;
+    // Widened by how far rock can move off the smooth height, and by a boulder's top: the bounds the
+    // empty/buried tests use have to contain every solid voxel.
+    block->minH = minH - simple_terrain::kRockReach;
+    block->maxH = maxH + simple_terrain::kRockReach + simple_terrain::kBoulderAbove;
 
     std::shared_ptr<const ColumnBlock> result = block;
     {
@@ -1117,16 +1115,6 @@ static std::shared_ptr<const ColumnBlock> columnsForChunk(const TerrainState& ts
     g_columnCacheCv.notify_all();
     return result;
 }
-
-// How deep below its surface water is actually filled, in voxels.
-//
-// Water is opaque here -- it is a coloured voxel, not a transparent medium -- so only the topmost
-// voxel of a body of water is ever visible, exactly as with ground (see kFillDepth, which does the
-// same job for rock). Filling to the sea bed mattered little when the sea bed sat just below the
-// waterline, but the continent field now digs abyssal plains 950 units down, and filling those
-// solid would spend the overwhelming majority of every ocean chunk's voxels on water nothing can
-// see.
-static constexpr int kWaterFillDepth = 40;
 
 // =============================================================================
 // Sphere edits
@@ -1220,7 +1208,7 @@ static uint32_t editVersionForChunk(projv::core::ivec3 coord) {
 // Worker-thread side.
 static uint32_t applySphereEdits(projv::Scene& scene, projv::ComponentRecord& comp,
                                  projv::core::ivec3 coord, projv::VoxelBrickMap& map,
-                                 int res, float vs,
+                                 int res, float vs, uint8_t rockID,
                                  const std::function<float(int, int)>& surfaceHeightAt) {
     if (g_editCount.load(std::memory_order_relaxed) == 0) return 0u;
 
@@ -1266,11 +1254,7 @@ static uint32_t applySphereEdits(projv::Scene& scene, projv::ComponentRecord& co
     // Thickness is in voxels, so it costs the same at every ring and stays thick enough to survive
     // the renderer coarsening the chunk by dropping tree levels.
     constexpr int kCarveWallThickness = 4;
-    const uint8_t rockID = projv::utils::internMaterial(
-        scene, comp, "",
-        projv::packColor(projv::Color{quantizeSurfaceChannel(0.42f),
-                                      quantizeSurfaceChannel(0.40f),
-                                      quantizeSurfaceChannel(0.38f)}));
+    // The carve's walls are plain rock (see the material table, interned at startup).
     if (rockID != projv::INVALID_MATERIAL) {
         for (const SphereEdit& e : edits) {
             if (e.isAdd) continue;   // an add brings its own material; only carves expose new wall
@@ -1459,289 +1443,211 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
     float oz = float(coord.z) * TerrainState::kChunkSize;
     float oy = float(coord.y) * TerrainState::kChunkSize;
 
-    int detailOct, erosionOct;
-    terrainOctavesForLOD(lod, detailOct, erosionOct);
-
-    // internMaterial is thread-safe but not free -- it locks scene.materialPaletteMutex and
-    // linear-scans the shared palette on every call. Terrain columns repeat a small, bounded set
-    // of colors (kSurfaceLevels^3 lattice + water) up to res^2 times per chunk, so this per-call
-    // cache collapses that down to one real intern (one lock) per *distinct* color actually seen
-    // in this chunk, instead of one per column.
-    std::unordered_map<uint32_t, uint8_t> colorCache;
-    auto internColor = [&](const std::string& name, uint32_t packedColor) -> uint8_t {
-        auto it = colorCache.find(packedColor);
-        if (it != colorCache.end()) return it->second;
-        uint8_t id = projv::utils::internMaterial(scene, comp, name, packedColor);
-        colorCache.emplace(packedColor, id);
-        return id;
-    };
-
-    // Column prepass, shared with every other chunk in this vertical stack. Rock exposure needs the
-    // terrain gradient, and a gradient needs neighbouring heights; the grid supplies both.
+    // Column prepass, shared with every other chunk in this vertical stack. The slope needs
+    // neighbouring heights; the skirted grid supplies them, across chunk seams too.
     std::shared_ptr<const ColumnBlock> columnBlock =
         columnsForChunk(ts, coord.x, coord.z, lod, res, vs);
     if (outPhases) outPhases->columns = phaseSplit();
     const ColumnBlock& cols = *columnBlock;
 
-    // Is this slab entirely underground -- solid rock, no surface anywhere in its footprint? Such a
-    // chunk has no detail to show at any resolution (it is one uniform block of stone until somebody
-    // digs into it), so it is held at a coarse ring no matter how close the camera gets. That clamp
-    // is what makes filling the world to its floor affordable at all; see TerrainState::buriedCoords.
-    // minH, not maxH: the test has to hold for EVERY column in the footprint before the chunk can be
-    // called featureless, and one column dipping into the slab is enough to make it a surface chunk.
+    // Entirely underground: solid stone, no surface anywhere in the footprint. Held at a coarse
+    // ring however close the camera gets (see TerrainState::buriedCoords).
     if (outBuried) *outBuried = (cols.minH >= oy + TerrainState::kChunkSize + vs);
     const int stride = cols.stride;
     auto columnAt = [&](int i, int j) -> const ColumnSample& {
         return cols.cells[size_t(j + 1) * stride + (i + 1)];
     };
 
-    // Does the terrain surface, or any water, come near this chunk's vertical slab at all? The
-    // prepass already holds the bounds, so this is a handful of comparisons.
-    //
-    // The margin is one coarse voxel on each side. That is the scale at which this ring's sampling
-    // can be wrong: a finer ring samples more columns AND more detail/erosion octaves
-    // (terrainOctavesForLOD), so a surface sitting just outside the slab here can cross into it
-    // there. Well clear of the slab on both sides, no amount of extra detail brings it back, so the
-    // chunk is empty at every ring and never needs re-checking.
+    // Does the surface come within a coarse voxel of this slab? Only meaningful when the chunk
+    // comes back empty; see ProcessedChunk::marginal.
     if (outMarginal) {
         const float lo = oy - vs;
         const float hi = oy + TerrainState::kChunkSize + vs;
-        // Water is bounded now rather than reaching down to the sea bed (see kWaterFillDepth), so
-        // "below the water line" is no longer enough to make a slab marginal -- it also has to be
-        // within the fill depth of some column's water surface. Without that bound every chunk in
-        // the 950-unit-deep abyss would be re-checked at every ring forever.
-        // The lower bound carries the subsurface shell, not just the surface: a column whose top
-        // stands above this slab still writes kFillDepth voxels downward, and that shell can reach
-        // into the slab (see the fill band in the column loop). Testing the bare surface here would
-        // mark such a slab "not near ground", and an empty verdict for it would then never be
-        // re-checked at a finer ring.
-        // With the fill running to the chunk floor there is no lower bound any more: every slab at
-        // or below the surface is solid, so "the surface reaches this slab's top" is the whole test.
-        bool nearGround = (TerrainState::kSolidFillToWorldBottom &&
-                           res <= TerrainState::resolutionForLOD(1))
-                              ? (cols.maxH >= lo)
-                              : (cols.maxH >= lo && cols.minH - float(kFillDepth) * vs < hi);
-        bool nearWater = (cols.maxWaterTop >= lo)
-                      && (cols.minWaterTop - float(kWaterFillDepth) * vs < hi)
-                      && (cols.minH < cols.maxWaterTop);
-        *outMarginal = nearGround || nearWater;
+        const bool solidFill = TerrainState::kSolidFillToWorldBottom &&
+                               res <= TerrainState::resolutionForLOD(1);
+        *outMarginal = solidFill ? (cols.maxH >= lo)
+                                 : (cols.maxH >= lo && cols.minH - float(kFillDepth) * vs < hi);
     }
 
+    using namespace simple_terrain;
+    const TerrainState::Materials& mat = ts.materials;
+    const float nearVoxel = TerrainState::voxelScaleForLOD(0);
+    const uint32_t seed = uint32_t(ts.seed);
+    // Grass blades are a nearest-ring detail: a blade is one voxel across, and a coarse ring's
+    // voxel is four or sixteen times wider than a blade could be.
+    const bool blades = lod == 0 && !ts.lab;
+    const bool solidFill = TerrainState::kSolidFillToWorldBottom &&
+                           res <= TerrainState::resolutionForLOD(1);
+
+    // Boulders that can reach this chunk -- or a tree that does, which is why the rectangle is widened
+    // by a canopy as well: a tree is not planted where a boulder sits (stampTreesIntoChunk).
+    const float boulderReach = kBoulderRMax * kBoulderLump;
+    const float treeReach = ts.treeLib.empty() ? 0.0f : trees::canopyReach(ts.treeLib, ts.treeParams);
+    std::vector<Boulder> boulders;
+    if (!ts.lab && !ts.canyon) collectBoulders(ts.gen, ox - boulderReach - treeReach, ox + TerrainState::kChunkSize + boulderReach + treeReach,
+                    oz - boulderReach - treeReach, oz + TerrainState::kChunkSize + boulderReach + treeReach, boulders);
+    std::vector<const Boulder*> nearby;
+
+    // The grass colour of a column: broad patches of tint (low-frequency noise) with a little speckle.
+    auto grassID = [&](float wx, float wz, int cx, int cz) {
+        float v = 0.15f + 0.6f * ts.gen.patchAt(wx, wz) + 0.25f * (hashUnit(cx, cz, seed + 13u) - 0.5f);
+        v = v < 0.0f ? 0.0f : v;
+        return mat.grass[std::min(kGrassShades - 1, int(v * kGrassShades))];
+    };
+    // Grass blades, on grass, in the nearest ring: one to three voxels standing on a surface voxel,
+    // densest in the lush patches, lightening toward the tip.
+    auto plantBlade = [&](int lx, int lz, int surfaceLy, float wx, float wz, int cx, int cz) {
+        if (!blades || surfaceLy < 0 || surfaceLy >= res) return;
+        float lush = ts.gen.patchAt(wx + 7919.0f, wz - 3571.0f);
+        if (hashUnit(cx, cz, seed + 17u) >= kBladeChance * (0.35f + 0.65f * lush)) return;
+        int height = 1 + int(hashUnit(cx, cz, seed + 19u) * float(kBladeMaxVoxels));
+        for (int k = 1; k <= height; ++k) {
+            int ly = surfaceLy + k;
+            if (ly >= res) break;
+            // Base to tip across the ramp; a one-voxel blade takes the middle shade.
+            int shade = height == 1 ? 1 : (k - 1) * (kBladeShades - 1) / (height - 1);
+            projv::utils::brickMapSetVoxel(map, lx, ly, lz, mat.blade[shade]);
+        }
+    };
+
+    // The faces lab draws its own cross-section; everything else is the terrain's column loop.
+    if (ts.canyon) generateCanyonVoxels(ts, map, res, vs, ox, oy, oz, !solidFill && !ts.labFaces, lod == 0);
+    else
     for (int lz = 0; lz < res; ++lz) {
         float wz = oz + float(lz) * vs;
         for (int lx = 0; lx < res; ++lx) {
             float wx = ox + float(lx) * vs;
-            const ColumnSample& sample = columnAt(lx, lz);
-            float worldH = sample.height;
+            const float h = columnAt(lx, lz).height;
 
-            // This column's own water surface. Everywhere but a river valley `waterTop` is sea
-            // level and this is exactly what it always was.
-            const float wt = sample.waterTop;
+            // Rise over run, from the smooth heights either side: 1.0 is a 45-degree slope.
+            float dhdx = (columnAt(lx + 1, lz).height - columnAt(lx - 1, lz).height) / (2.0f * vs);
+            float dhdz = (columnAt(lx, lz + 1).height - columnAt(lx, lz - 1).height) / (2.0f * vs);
+            float slope = std::sqrt(dhdx * dhdx + dhdz * dhdz);
 
-            // Waterfalls.
-            //
-            // A cliff, in a heightfield, is not a surface -- it is the GAP between two columns. So a
-            // river going over one gets water on the lip and water in the plunge pool and nothing
-            // whatever on the face between them, which is precisely the "water stops and reappears
-            // lower down" artefact. No amount of work in the per-point terrain sampler can fix it,
-            // because the sampler sees one column and the fall exists only in the relationship
-            // between two.
-            //
-            // Here that relationship is available: the prepass grid holds the neighbours. A channel
-            // column whose channel neighbour stands higher carries that neighbour's surface down
-            // its own face, so the water sheet follows the drop instead of stopping at the lip. It
-            // chains -- each column down a cascade lifts from the one above it -- so a long rapid
-            // comes out as continuous falling water rather than a row of disconnected puddles.
-            //
-            // Restricted to columns that are actually in a channel on BOTH sides, so it can only
-            // ever extend water along a river, never spill it onto a bank.
-            float surfaceTop = wt;
-            if (sample.river > 0.25f) {
-                const ColumnSample* nb[4] = {&columnAt(lx + 1, lz), &columnAt(lx - 1, lz),
-                                             &columnAt(lx, lz + 1), &columnAt(lx, lz - 1)};
-                for (const ColumnSample* n : nb)
-                    if (n->river > 0.25f && n->waterTop > surfaceTop) surfaceTop = n->waterTop;
-            }
-            const bool isFall = surfaceTop > wt + 0.5f;
+            // How rocky: the reach of the 3D rock term (geometry, continuous) and, dithered across the
+            // transition, whether the surface is coloured as rock or grass. Keyed on the nearest ring's
+            // column so every ring agrees where the rock is.
+            int cx = int(std::floor(wx / nearVoxel)), cz = int(std::floor(wz / nearVoxel));
+            const float rockiness = stoneness(slope);
+            const float reach = ts.lab ? 0.0f : rockReach(slope);
+            const bool stone = hashUnit(cx, cz, seed + 7u) < rockiness;
 
-            const int localWL = int(std::floor((surfaceTop - oy) / vs));
-            // A fall fills from the ground up, ignoring the still-water shell depth: the whole
-            // point is the vertical ribbon, and clipping it to 40 voxels would reinstate the gap
-            // this exists to close. Safe to leave uncapped because a channel is a few columns wide.
-            const int waterFloorLocal = isFall ? INT_MIN / 2 : localWL - kWaterFillDepth;
-
-            // Central differences in world units: rise over run, so 1.0 is a 45-degree slope.
-            float slope;
-            {
-                float dhdx = (columnAt(lx + 1, lz).height - columnAt(lx - 1, lz).height) / (2.0f * vs);
-                float dhdz = (columnAt(lx, lz + 1).height - columnAt(lx, lz - 1).height) / (2.0f * vs);
-                slope = std::sqrt(dhdx * dhdx + dhdz * dhdz);
+            nearby.clear();
+            for (const Boulder& bd : boulders) {
+                float dx = wx - bd.x, dz = wz - bd.z, rr = bd.r * kBoulderLump;
+                if (dx * dx + dz * dz < rr * rr) nearby.push_back(&bd);
             }
 
-            float altN0 = clampf((worldH - TerrainState::kWaterLevel) / terrain_noise::MAX_HEIGHT,
-                                 0.0f, 1.0f);
-            float bare = rock::exposure(slope, altN0, sample.temp, sample.humid);
+            // Below the band the column is solid whatever the 3D term says; the band is where it can
+            // be either. Everything is in this chunk's local voxels and clipped to the slab, so every
+            // chunk in the stack runs the same arithmetic and the pieces meet.
+            float bandTop = h, bandBottom = h;
+            if (reach > 0.5f) { bandTop = h + reach + kRockGrain + vs; bandBottom = h - reach - kRockGrain - vs; }
+            for (const Boulder* bd : nearby) bandTop = std::max(bandTop, bd->y + bd->r * bd->squash * kBoulderLump + vs);
+            const bool volumetric = reach > 0.5f || !nearby.empty();
 
-            // Resolved once per column, here, because all three consumers below need it: the
-            // geometry recess, the surface colour, and the subsurface fill.
-            rock::Column rc = rock::prepare(ts.noiseGen.microN, wx, wz,
-                                            sample.temp, sample.humid, altN0, slope);
+            // The side of a column below the band is a rock face too where its neighbours are lower,
+            // so it gets the rock's colour down to where the lowest neighbour's band covers it.
+            const float lowestNeighbour = std::min(
+                std::min(columnAt(lx + 1, lz).height, columnAt(lx - 1, lz).height),
+                std::min(columnAt(lx, lz + 1).height, columnAt(lx, lz - 1).height)) - kRockReach;
+            const int exposedFrom = int(std::floor((lowestNeighbour - oy) / vs)) - 1;
+            const int dirtDepth = int(std::ceil(8.0f / vs));   // ~8 world units of soil under grass
 
-            // Joints and bedding cut real geometry, not just colour: where a joint surfaces on bare
-            // rock, or a soft bed outcrops, the whole column is recessed. Applied to the HEIGHT
-            // before it is voxelized, and only above water. Chunk seams stay consistent because
-            // this is a pure function of world XZ, and because both chunks voxelize the carved
-            // height rather than the raw one.
-            //
-            // The recess is in world units, so every LOD ring cuts the same shape -- it used to be
-            // in voxels, which made a coarse ring gouge sixteen times deeper than a fine one at the
-            // same spot.
-            // Shelves standing PROUD of a bare face, the counterpart to the recess above (see
-            // rock::platformLift). Evaluated at the recessed height so the two agree about where the
-            // wall actually is, and kept as its own value because the shell below this column has to
-            // be deepened by the same amount: a shelf is only a shelf if it is solid all the way
-            // down to the rock it grows out of, and a lift with the standard fill depth would hang
-            // the top of a tall one in the air.
-            float platform = 0.0f;
-            if (worldH > wt + 4.0f) {
-                worldH -= rock::surfaceRecess(rc, ts.noiseGen.rockNoise, wx, worldH, wz, bare);
-                platform = rock::platformLift(rc, ts.noiseGen.microN, wx, worldH, wz, bare);
-                worldH += platform;
-            }
-
-            int topLocalY = int(std::floor((worldH - oy) / vs));
-            // Extra shell voxels this column needs purely to carry its shelf back down to the
-            // unlifted surface.
-            const int platformFill = int(std::ceil(platform / vs));
-
-            // Water occupies [max(ground, waterFloor) .. waterSurface], clipped to the slab.
-            auto fillWater = [&](int fromLocal) {
-                int top = std::min(localWL, res - 1);
-                int bottom = std::max(std::max(fromLocal, waterFloorLocal), 0);
-                for (int ly = bottom; ly <= top; ++ly) {
-                    float voxelWorldY = oy + float(ly) * vs;
-                    // Falling water is shallow water however tall the column is: it is a sheet in
-                    // free air, not a body with depth. Grading it by distance below the lip would
-                    // darken the bottom of every waterfall to abyssal blue.
-                    float depth = isFall ? 0.0f : (surfaceTop - voxelWorldY);
-                    // name="" (not "water"): internMaterial matches by NAME first when one is
-                    // given, so a shared name would collapse every depth shade below back onto
-                    // whichever color got interned first. "" falls through to the color-based
-                    // lookup, same as the plain surface-color path below.
-                    uint8_t wmatID = internColor("", projv::packColor(waterColorForDepth(depth)));
-                    projv::utils::brickMapSetVoxel(map, lx, ly, lz, wmatID);
+            if (!volumetric) {
+                // --- Plain ground: the heightfield, as it always was. -------------------------------
+                const int topLocalY = int(std::floor((h - oy) / vs));
+                if (topLocalY < 0) continue;   // ground is below this slab
+                const bool topInSlab = topLocalY < res;
+                if (topInSlab) {
+                    uint8_t id = stone ? mat.rock[rockSlot(ts.gen, wx, oy + float(topLocalY) * vs, wz, true, vs)]
+                                       : ts.lab ? ts.labSand : grassID(wx, wz, cx, cz);
+                    projv::utils::brickMapSetVoxel(map, lx, topLocalY, lz, id);
                 }
-            };
-
-            if (topLocalY < 0) {
-                // Ground is below this chunk; the slab can still hold the water above it.
-                if (worldH < surfaceTop) fillWater(0);
+                const int bottomFill = solidFill ? 0 : std::max(topLocalY - kFillDepth, 0);
+                const int fillTop = std::min(topLocalY, res);
+                for (int ly = bottomFill; ly < fillTop; ++ly) {
+                    uint8_t id;
+                    if (!stone && topLocalY - ly <= dirtDepth) id = mat.dirt;
+                    else if (ly >= exposedFrom) id = mat.rock[rockSlot(ts.gen, wx, oy + float(ly) * vs, wz, false, vs)];
+                    else id = mat.rock[RockCool + 1];
+                    projv::utils::brickMapSetVoxel(map, lx, ly, lz, id);
+                }
+                if (!stone && topInSlab) plantBlade(lx, lz, topLocalY, wx, wz, cx, cz);
                 continue;
             }
 
-            // A column whose surface is above this slab is NOT finished with this slab: the shell
-            // below that surface is kFillDepth voxels deep, and if the surface sits near the bottom
-            // of the chunk above, the rest of that shell belongs down here.
-            //
-            // Returning early on `topLocalY >= res` is what put horizontal gaps along chunk seams.
-            // The chunk above filled its shell down to its own local 0 and stopped; this chunk
-            // decided the column was none of its business and wrote nothing; and the voxels between
-            // the two -- the remainder of a shell that is 84 world units deep against a 717-unit
-            // chunk -- existed in neither. Looking into such a seam from the side, you see straight
-            // through the terrain, which is exactly the reported artefact. It shows up worst at
-            // corners only because that is where two seams meet and the odds of the surface landing
-            // near a boundary are highest.
-            //
-            // The fill band is therefore computed in this chunk's local coordinates from the
-            // column's true (possibly out-of-slab) top, then clipped to the slab. Every chunk in
-            // the stack runs the same arithmetic against the same world-space band, so the pieces
-            // meet exactly and no chunk needs to know anything about its neighbours.
-            const bool topInSlab = (topLocalY < res);
+            // --- Rock: a 3D band, voxel by voxel. ----------------------------------------------------
+            const int bandLo = int(std::floor((bandBottom - oy) / vs));
+            const int bandHi = int(std::floor((bandTop - oy) / vs));
+            // The whole band is below this slab: the slab is open air over this column.
+            if (bandHi < 0) continue;
 
-            projv::Color col = surfaceColor(sample.height, sample.temp, sample.humid,
-                                            int(worldH), wx, wz, slope, wt, sample.river,
-                                            bare, rc, ts);
-            if (topInSlab) {
-                uint32_t packed = projv::packColor(col);
-                uint8_t matID = internColor("", packed);
-                projv::utils::brickMapSetVoxel(map, lx, topLocalY, lz, matID);
-            }
-
-            // Fill below the surface. Previously this smeared the surface colour straight down,
-            // which meant a cliff face was a vertical stripe of whatever grew on top of it. Each
-            // voxel is now coloured from its own altitude instead, so bedding reads across a cut
-            // face -- which is the entire point of having strata at all.
-            // Solid all the way down. Previously this stopped kFillDepth voxels below the surface,
-            // which made the world a shell: dig into a hillside and you broke through into nothing,
-            // and every chunk more than ~84 units under the surface generated empty and was never
-            // resident at all. Filling to the chunk floor instead means a column's rock continues
-            // into the chunk below it, and that one into the one below that, down to kChunkYMin.
-            //
-            // This is only affordable because of the LOD clamp on buried chunks (see
-            // TerrainState::buriedCoords): a solid chunk is cheap in tree64 terms -- uniform leaves
-            // collapse to one material byte apiece -- but the brick map it is built through is not,
-            // and materialising a solid 256^3 would put 16.7M entries in the per-brick material
-            // hash maps, on the order of half a gigabyte for one chunk.
-            // Only at the coarse rings. Measured: filling a 256^3 chunk solid takes 4,349ms in this
-            // loop alone against 25ms for the shell, because it is 16.7M brickMapSetVoxel calls and
-            // 16.7M entries across the per-brick material hash maps. At 64^3 the same fill is 53ms
-            // and at 16^3 it is under a millisecond, which is the whole reason buried chunks are
-            // clamped away from LOD0 (see TerrainState::kBuriedLOD) -- the coarse rings are where
-            // the underground actually lives, and they can afford to be solid.
-            //
-            // A LOD0 chunk therefore still carries only its visible shell. That is correct for
-            // terrain, since nothing below kFillDepth is ever on screen; what it does not yet cover
-            // is a carve at LOD0 deep enough to cut through the shell, which needs rock kept around
-            // the sphere wall specifically rather than the whole volume filled.
-            const bool solidFill = TerrainState::kSolidFillToWorldBottom &&
-                                   res <= TerrainState::resolutionForLOD(1);
-            int bottomFill = solidFill ? 0
-                                       : std::max(topLocalY - (kFillDepth + platformFill), 0);
-            // Exclusive upper bound: the surface voxel itself is written above (when it is in this
-            // slab), and everything strictly below it down to bottomFill is shell.
-            const int fillTop = std::min(topLocalY, res);
-            if (bottomFill < fillTop) {
-                // `rc` was resolved once at the top of this column -- everything constant down the
-                // column, so the per-voxel loop below costs a hash rather than three Perlin lookups.
-
-                // Only voxels that something can actually see get the joint/lichen/scree work. A
-                // column's side is exposed exactly down to the lowest of its four neighbours' tops;
-                // everything below that is buried inside the shell. On flat ground that is one or
-                // two voxels per column, on a cliff it is the whole face -- so the cost lands
-                // precisely where the detail is visible. Without this the Worley lookups would run
-                // on all ~30 fill voxels of all 65k columns and dominate chunk generation.
-                float lowestNeighbour = std::min(
-                    std::min(columnAt(lx + 1, lz).height, columnAt(lx - 1, lz).height),
-                    std::min(columnAt(lx, lz + 1).height, columnAt(lx, lz - 1).height));
-                int exposedDownTo = int(std::floor((lowestNeighbour - oy) / vs)) - 1;
-
-                for (int ly = bottomFill; ly < fillTop; ++ly) {
-                    float voxelWorldY = oy + float(ly) * vs;
-                    // Soil gives way to bedrock with depth, dithered for the same reason as the
-                    // surface above: an interpolated soil/rock colour is a colour neither one is.
-                    float blend = rock::subsurfaceBlend(worldH - voxelWorldY, vs);
-                    projv::Color voxelCol = col;
-                    if (blend > 0.001f &&
-                        hash2f(int(wx * 3.0f) + ly * 131, int(wz * 3.0f) + 977) < blend) {
-                        projv::core::vec3 c = rock::color(rc, ts.noiseGen.rockNoise,
-                                                          wx, voxelWorldY, wz,
-                                                          /*detail=*/ly >= exposedDownTo);
-                        voxelCol = projv::Color{quantizeSurfaceChannel(c.x),
-                                                quantizeSurfaceChannel(c.y),
-                                                quantizeSurfaceChannel(c.z)};
-                    }
-                    projv::utils::brickMapSetVoxel(map, lx, ly, lz,
-                                                   internColor("", projv::packColor(voxelCol)));
+            // Below the band: solid fill (the shell's depth at the nearest ring, to the floor elsewhere).
+            {
+                const int bottomFill = solidFill ? 0 : std::max(bandLo - kFillDepth, 0);
+                for (int ly = bottomFill; ly < std::min(bandLo, res); ++ly) {
+                    uint8_t id = ly >= exposedFrom ? mat.rock[rockSlot(ts.gen, wx, oy + float(ly) * vs, wz, false, vs)]
+                                                   : mat.rock[RockCool + 1];
+                    projv::utils::brickMapSetVoxel(map, lx, ly, lz, id);
                 }
             }
 
-            // Water: fill from just above the ground up to this column's water surface.
-            if (worldH < surfaceTop && localWL >= 0) fillWater(topLocalY + 1);
+            // The band, top down, so each voxel knows whether the one above it is open (it is a top
+            // surface, and gets the "top" colour -- grass on a grass column, the sunlit rock tone and
+            // lichen on rock). A voxel's density is sampled at its lower corner, the same convention
+            // as the heightfield's floor((h - oy) / vs).
+            auto densityAt = [&](int ly, bool& boulderWins) {
+                const float y = oy + float(ly) * vs;
+                float d = terrainDensity(ts.gen, wx, y, wz, h, reach, nearVoxel);
+                boulderWins = false;
+                for (const Boulder* bd : nearby) {
+                    float db = boulderDensity(ts.gen, *bd, wx, y, wz);
+                    if (db > d) { d = db; boulderWins = true; }
+                }
+                return d;
+            };
+            const int top = std::min(bandHi, res - 1);
+            bool dummy = false;
+            bool aboveSolid = bandHi >= res ? densityAt(top + 1, dummy) > 0.0f : false;
+            int grassSurface = -1;
+            for (int ly = top; ly >= std::max(bandLo, 0); --ly) {
+                bool boulder = false;
+                const bool solid = densityAt(ly, boulder) > 0.0f;
+                if (solid) {
+                    const bool isTop = !aboveSolid;
+                    const float y = oy + float(ly) * vs;
+                    uint8_t id;
+                    if (boulder || stone) {
+                        id = mat.rock[rockSlot(ts.gen, wx, y, wz, isTop, vs)];
+                    } else if (isTop) {
+                        id = grassID(wx, wz, cx, cz);
+                        if (grassSurface < 0) grassSurface = ly;
+                    } else {
+                        id = (h - y) <= float(dirtDepth) * vs ? mat.dirt : mat.rock[rockSlot(ts.gen, wx, y, wz, false, vs)];
+                    }
+                    projv::utils::brickMapSetVoxel(map, lx, ly, lz, id);
+                }
+                aboveSolid = solid;
+            }
+            plantBlade(lx, lz, grassSurface, wx, wz, cx, cz);
         }
     }
 
     if (outPhases) outPhases->voxels = phaseSplit();
-    stampTreesIntoChunk(coord, map, ts, res, vs, lod, cols.maxH);
+    if (ts.lab) {
+        // The lineup: each asset stamped where startup laid it out.
+        for (const trees::TreeInstance& inst : ts.labPlaced) {
+            projv::core::vec3 lo, hi;
+            trees::treeWorldBounds(inst, ts.treeParams, lo, hi);
+            if (hi.x < ox || lo.x > ox + TerrainState::kChunkSize || hi.z < oz || lo.z > oz + TerrainState::kChunkSize ||
+                hi.y < oy || lo.y > oy + TerrainState::kChunkSize) continue;
+            trees::stampTree(inst, ts.treeParams, map, coord, res, vs);
+        }
+    } else {
+        stampTreesIntoChunk(coord, map, ts, res, vs, cols.maxH, boulders, ts.treeLib, ts.treeParams, 0.12f);
+        stampTreesIntoChunk(coord, map, ts, res, vs, cols.maxH, boulders, ts.shrubLib, ts.shrubParams, 0.03f);
+    }
     if (outPhases) outPhases->trees = phaseSplit();
 
     // Edits go on last, so they override the terrain rather than the other way round, and from in
@@ -1749,7 +1655,7 @@ static void generateChunkVoxels(projv::Scene& scene, projv::ComponentRecord& com
     // ground is -- see applySphereEdits. columnAt is the same skirted prepass grid the fill above
     // used, so a wall voxel and the terrain it is cut into agree about the surface exactly.
     uint32_t editVersion = applySphereEdits(
-        scene, comp, coord, map, res, vs,
+        scene, comp, coord, map, res, vs, ts.materials.rock[simple_terrain::RockCool + 2],
         [&](int lx, int lz) { return columnAt(lx, lz).height; });
     if (outEditVersion) *outEditVersion = editVersion;
     if (outPhases) outPhases->edits = phaseSplit();
@@ -2911,6 +2817,16 @@ static bool generatePendingChunks(projv::Scene& scene, TerrainState& ts) {
 // Application stages
 // =============================================================================
 
+// The renderer: the renderer gallery's restir-pt (examples/shared/restir_pt.h), at its defaults, fed
+// the camera and the sun each frame. Last frame's camera and sun are kept here for its histories.
+struct TerrainRestir {
+    restir_pt::Settings   settings;
+    restir_pt::SceneScale scene;
+    restir_pt::Frame      last;
+    bool has = false;
+    std::chrono::steady_clock::time_point lastTime = std::chrono::steady_clock::now();
+};
+
 void startup(projv::Application& app) {
     using namespace projv::core;
 
@@ -2925,7 +2841,8 @@ void startup(projv::Application& app) {
     projv::Scene& scene    = app.world.ctx().emplace<projv::Scene>();
     projv::GPUData& gpuData = app.world.ctx().emplace<projv::GPUData>();
     TerrainState& ts        = app.world.ctx().emplace<TerrainState>();
-    ts.noiseGen.reseed(uint32_t(ts.seed));
+    ts.gen.reseed(uint32_t(ts.seed));
+    projv::core::info("[TERRAIN] seed {} (TERRAIN_SEED pins it)", ts.seed);
 
     // --- Create terrain grid (centered on world origin, expands dynamically via expandGridToInclude) ---
     int r = ts.kViewRadius;
@@ -2955,87 +2872,306 @@ void startup(projv::Application& app) {
     ts.gridCompHandle = projv::ComponentHandle(compIdx);
     scene.grids[ts.gridIndex].componentHandle = ts.gridCompHandle;
 
-    // --- Load the voxelized tree assets and fold their colors into the terrain palette ---
+    internTerrainMaterials(scene, scene.components[ts.gridCompHandle], ts);
+    if (const char* lab = std::getenv("TERRAIN_LAB"); lab && (std::string(lab) == "assets" || std::string(lab) == "faces")) {
+        ts.lab = true;
+        ts.labFaces = std::string(lab) == "faces";
+        projv::ComponentRecord& comp = scene.components[ts.gridCompHandle];
+        ts.labSand = projv::utils::internMaterial(scene, comp, "lab.sand", projv::packRGB10(0.62f, 0.42f, 0.30f));
+    }
+    {
+        const char* biome = std::getenv("TERRAIN_BIOME");
+        const bool alpine = biome && std::string(biome) == "alpine";
+        ts.canyon = ts.labFaces || (!ts.lab && !alpine);
+        if (ts.canyon) {
+            projv::ComponentRecord& comp = scene.components[ts.gridCompHandle];
+            const simple_terrain::RGB* colours = canyonlands::slotColours();
+            for (int i = 0; i < canyonlands::SlotCount; ++i)
+                ts.labCanyon[i] = projv::utils::internMaterial(scene, comp, "canyon." + std::to_string(i),
+                                                               projv::packRGB10(colours[i].r, colours[i].g, colours[i].b));
+        }
+        projv::core::info("[TERRAIN] biome: {}", ts.lab ? "lab" : ts.canyon ? "canyonlands" : "alpine");
+    }
+
+    // Start above the ground at the origin, looking out over it.
+    CameraState& cam = app.world.ctx().get<CameraState>();
+    cam.position.y = groundHeight(ts, cam.position.x, cam.position.z) + 260.0f;
+    cam.prevPosition = cam.position;
+
+    // --- Load the tree assets and give their colors palette entries ---
     //
-    // Trees become terrain voxels, so they draw from the terrain component's single palette, which
-    // is already carrying the kSurfaceLevels^3 surface lattice plus the water shades. Rather than
-    // spend the ~34 slots that leaves on a second, tree-only palette, tree colors are snapped onto
-    // the *same* lattice the ground uses. That costs no new budget beyond what the static_assert
-    // above already guarantees fits (a tree can at worst light up lattice entries the terrain had
-    // not used yet), and it keeps foliage at exactly the color fidelity the rest of the world has.
+    // The trees are biomes/alpine/assets/<species>/ beside the binary: grown by the scene editor's
+    // tree generator (examples/60-scene-editor/brushes/trees.lua) through terrain_asset_baker, from
+    // biomes/alpine/designs.json. assets.json, which the baker writes, lists them with the climate
+    // band each one grows in, so adding or retuning a species is a change to the designs file and a
+    // rebake -- nothing here names a species.
+    //
+    // **Conifers only**, for now: the manifest's other species are skipped by kind. In the asset lab
+    // (TERRAIN_LAB=assets) it is every asset of biomes/canyonlands instead, laid out in rows.
+    //
+    // Trees become terrain voxels, so they draw from the terrain component's single palette, next to
+    // the ground's dozen entries. **Tree colors get entries of their own, exactly**: every species
+    // comes from one brush, so they share one set of hue-shifted ramps, 27 colours in all. The coarse
+    // mips average neighbouring voxels into colours no ramp holds; those take the nearest tree colour,
+    // so a distant tree stays in its own palette.
     //
     // This runs before the workers spawn, so every material ID a worker reads off a tree voxel is
     // already resolved and no worker ever interns for a tree.
     {
-        ts.treeParams.waterLevel = TerrainState::kWaterLevel;
-        // A tree's world size, NOT the terrain grid's voxel size. These were the same number while
-        // kVoxelScale was 1.75 and it was tempting to derive one from the other; doubling
-        // kVoxelScale showed why that was wrong, because it silently doubled every tree in the
-        // world along with it. stampTree already handles a mismatch properly -- it divides the two
-        // to pick a mip, so a coarser terrain grid just draws the same tree at lower resolution
-        // (see the decim/residual arithmetic there) -- which is exactly the intended behaviour and
-        // the reason the parameter exists separately at all.
-        ts.treeParams.treeVoxelWorldSize = 1.75f;
         ts.treeParams.seed = uint32_t(ts.seed);
+        // The placer's climate gates, opened: there is no climate model here, only the two broad
+        // region fields stampTreesIntoChunk passes as temperature and humidity (which pick the
+        // species and thin the stands), the forest-patch field, and the slope test.
+        ts.treeParams.waterLevel = -1.0e9f;
+        ts.treeParams.tempFrozen = -2.0f;  ts.treeParams.tempCool = -1.0f;
+        ts.treeParams.tempScorch = 10.0f;  ts.treeParams.tempInferno = 11.0f;
+        ts.treeParams.humidDry = 0.25f;    ts.treeParams.humidWet = 0.55f;
+        // A conifer here is ~50 voxels across at one tree voxel per terrain voxel, ~140 units: a
+        // cell a little under that closes the canopy where the patch field is at its peak.
+        ts.treeParams.cellSize = 120.0f;
+        ts.treeParams.patchSize = 2600.0f;
+        // Off the rock: the height change across the slope probe (+-cellSize/4) that stone starts
+        // at, so trees stand on the grass and the outcrops stay bare.
+        ts.treeParams.maxSlope = simple_terrain::kStoneSlope0 * ts.treeParams.cellSize * 0.5f;
+        if (ts.canyon) {
+            // Pinyon-juniper woodland is open: 10-60% canopy, small trees well apart.
+            ts.treeParams.cellSize = 85.0f;
+            ts.treeParams.maxDensity = 0.55f;
+            ts.treeParams.maxSlope = 0.6f * ts.treeParams.cellSize * 0.5f;
+        }
 
-        // Which climate each species claims. The names are the source OBJ's material names, which
-        // is all the asset pack gives us, so the bands below are assigned from what each one
-        // actually looks like once voxelized: narrow dark conifers to the cold end, broad light
-        // canopies to the temperate middle, the flat olive canopy and the leafy shrub to the warm
-        // wet end, and the orange autumn broadleaf to a drier cool-temperate band where it reads as
-        // seasonal rather than dead.
-        //
-        // The centres are spread across the range this terrain actually produces on plantable
-        // ground -- temperature ~0.1-0.8, humidity ~0.2-0.7 -- not across a nominal 0..1, or the
-        // species at the ends would never come up. Widths are wider than the ~0.08 spacing between
-        // centres so neighbouring bands interleave at their edges: a stand picks up strays from the
-        // next zone over instead of the map banding into eight hard stripes.
-        // Sibling path in the build tree: examples land side by side under build/examples/, and
-        // the voxelizer stages its tree assets beside its own binary. Optional -- the terrain is
-        // bare without them and says so.
-        const std::string treeFolder = "../mesh_voxelizer/trees";
-        const std::vector<trees::TreeSpecies> treeSpecies = {
-            // name        temp c/w      humid c/w     abundance
-            {"Bark___1",   0.20f, 0.13f, 0.45f, 0.18f, 1.20f},  // thin spire conifer — coldest
-            {"Bark___0",   0.30f, 0.13f, 0.46f, 0.18f, 1.10f},  // narrow green spire — subalpine
-            {"Bottom_T",   0.39f, 0.13f, 0.50f, 0.18f, 1.00f},  // tall dark conifer — cool
-            {"Walnut_L",   0.47f, 0.11f, 0.42f, 0.15f, 0.85f},  // orange autumn broadleaf — drier
-            {"Bark___S",   0.54f, 0.13f, 0.50f, 0.18f, 1.00f},  // spiky green — temperate
-            {"Mossy_Tr",   0.60f, 0.13f, 0.60f, 0.17f, 1.15f},  // broad light canopy — temperate wet
-            {"Sonnerat",   0.69f, 0.13f, 0.56f, 0.17f, 1.10f},  // flat olive canopy — warm
-            {"Oak_Leav",   0.75f, 0.13f, 0.62f, 0.17f, 0.90f},  // leafy shrub — warmest, wettest
-        };
+        const std::filesystem::path treeFolder = projv::core::executableDirectory() / "biomes" /
+                                                 ((ts.lab || ts.canyon) ? "canyonlands" : "alpine") / "assets";
+        std::vector<trees::TreeSpecies> treeSpecies;
+        std::vector<std::string> treeKinds;
+        {
+            std::ifstream manifestFile(treeFolder / "assets.json");
+            nlohmann::json manifest = nlohmann::json::parse(manifestFile, nullptr, false);
+            if (!manifest.is_discarded() && manifest.contains("species")) {
+                // A tree's world size, NOT the terrain grid's voxel size. These were the same
+                // number while kVoxelScale was 1.75 and it was tempting to derive one from the
+                // other; doubling kVoxelScale showed why that was wrong, because it silently
+                // doubled every tree in the world along with it. stampTree handles a mismatch by
+                // reading the mip built for that ring (below).
+                ts.treeParams.treeVoxelWorldSize = manifest.value("treeVoxelWorldSize", 1.75f);
+                for (const nlohmann::json& entry : manifest["species"]) {
+                    const std::string kind = entry.value("kind", std::string());
+                    // The lab shows everything; the canyon terrain plants its trees (boulders and
+                    // shrubs come with C4); the alpine terrain its conifers.
+                    if (!ts.lab && ts.canyon && kind != "juniper" && kind != "pinyon" && kind != "snag" && kind != "shrub") continue;
+                    if (!ts.lab && !ts.canyon && kind != "conifer") continue;
+                    trees::TreeSpecies species;
+                    species.name = entry.value("name", std::string());
+                    species.tempCenter = entry["temp"][0].get<float>();
+                    species.tempWidth = entry["temp"][1].get<float>();
+                    species.humidCenter = entry["humid"][0].get<float>();
+                    species.humidWidth = entry["humid"][1].get<float>();
+                    species.abundance = entry.value("abundance", 1.0f);
+                    // The canyon has no climate bands yet: every species everywhere, in proportion.
+                    if (ts.canyon) { species.tempWidth = 10.0f; species.humidWidth = 10.0f; }
+                    if (species.name.empty()) continue;
+                    treeSpecies.push_back(species);
+                    treeKinds.push_back(entry.value("kind", std::string()));
+                }
+            }
+        }
+
+        // One mip per LOD ring, at exactly the factor that ring draws a tree at: a 1.75-unit tree
+        // voxel on 2.8 / 11.2 / 44.8-unit terrain voxels is 2x / 6x / 26x. Built at those factors,
+        // every ring reads a mip whose colours were averaged for it; built at fixed 4x steps, the
+        // nearest ring fell back to the full-resolution tree and kept whichever of each 2x2x2 group
+        // was written last.
+        std::vector<int> mipDivisors;
+        for (uint32_t lod = 0; lod < 3; ++lod) {
+            int divisor = std::max(1, int(std::lround(TerrainState::voxelScaleForLOD(lod) /
+                                                      ts.treeParams.treeVoxelWorldSize)));
+            if (divisor > 1 && std::find(mipDivisors.begin(), mipDivisors.end(), divisor) == mipDivisors.end())
+                mipDivisors.push_back(divisor);
+        }
+        std::sort(mipDivisors.begin(), mipDivisors.end());
+
         projv::ComponentRecord& terrainComp = scene.components[ts.gridCompHandle];
-        if (trees::loadTreeLibrary(ts.treeLib, treeFolder, treeSpecies)) {
+        if (!treeSpecies.empty() &&
+            trees::loadTreeLibrary(ts.lab ? ts.labLib : ts.treeLib, treeFolder.string(), treeSpecies, mipDivisors)) {
+            trees::TreeLibrary& loaded = ts.lab ? ts.labLib : ts.treeLib;
+            // The full-resolution colors, which are the brush's ramps.
+            std::vector<uint32_t> baseColors;
+            for (const trees::TreeAsset& asset : loaded.assets) {
+                for (uint32_t color : asset.mips[0].sourceColors) {
+                    if (std::find(baseColors.begin(), baseColors.end(), color) == baseColors.end())
+                        baseColors.push_back(color);
+                }
+            }
+            // One short of the cap: 255 is INVALID_MATERIAL, the "no entry" byte.
             std::unordered_map<uint32_t, uint8_t> treeColorCache;
-            trees::resolveMaterials(ts.treeLib, [&](uint32_t packedColor) -> uint8_t {
-                projv::Color c = projv::unpackColor(packedColor);
-                projv::Color snapped{quantizeSurfaceChannel(float(c.r) / 255.0f),
-                                     quantizeSurfaceChannel(float(c.g) / 255.0f),
-                                     quantizeSurfaceChannel(float(c.b) / 255.0f)};
-                uint32_t key = projv::packColor(snapped);
-                auto it = treeColorCache.find(key);
+            for (uint32_t color : baseColors)
+                treeColorCache[color] = projv::utils::internMaterial(scene, terrainComp, "", color);
+            trees::resolveMaterials(loaded, [&](uint32_t packedColor) -> uint8_t {
+                auto it = treeColorCache.find(packedColor);
                 if (it != treeColorCache.end()) return it->second;
-                uint8_t id = projv::utils::internMaterial(scene, terrainComp, "", key);
-                treeColorCache.emplace(key, id);
+                // A mip's average: the nearest of the trees' own colours.
+                float r, g, b;
+                projv::unpackRGB10(packedColor, r, g, b);
+                float best = 1e9f;
+                uint8_t id = 0;
+                for (uint32_t color : baseColors) {
+                    float cr, cg, cb;
+                    projv::unpackRGB10(color, cr, cg, cb);
+                    float d = (cr - r) * (cr - r) + (cg - g) * (cg - g) + (cb - b) * (cb - b);
+                    if (d < best) { best = d; id = treeColorCache[color]; }
+                }
+                treeColorCache.emplace(packedColor, id);
                 return id;
             });
-            projv::core::info("[TREES] {} species loaded; terrain palette now {} entries",
-                              ts.treeLib.assets.size(), terrainComp.materialPalette.size());
+            projv::core::info("[TREES] {} species loaded ({} colours); terrain palette now {} entries",
+                              loaded.assets.size(), baseColors.size(), terrainComp.materialPalette.size());
+            if (ts.canyon && !ts.lab) {
+                // Shrubs to their own library and lattice.
+                std::vector<trees::TreeAsset> keep;
+                for (trees::TreeAsset& asset : ts.treeLib.assets) {
+                    size_t index = 0;
+                    while (index < treeSpecies.size() && treeSpecies[index].name != asset.name) ++index;
+                    if (index < treeKinds.size() && treeKinds[index] == "shrub") ts.shrubLib.assets.push_back(std::move(asset));
+                    else keep.push_back(std::move(asset));
+                }
+                ts.treeLib.assets = std::move(keep);
+                ts.shrubParams = ts.treeParams;
+                ts.shrubParams.seed = ts.treeParams.seed + 7919u;
+                ts.shrubParams.cellSize = 26.0f;
+                ts.shrubParams.maxDensity = 0.85f;
+                ts.shrubParams.patchSize = 700.0f;
+                ts.shrubParams.patchFloor = 0.25f;
+                ts.shrubParams.maxSlope = 0.5f * ts.shrubParams.cellSize * 0.5f;
+                projv::core::info("[TREES] canyon: {} tree species, {} shrubs", ts.treeLib.assets.size(), ts.shrubLib.assets.size());
+            }
+            if (ts.labFaces) {
+                // The talus: Wingate blocks on the Chinle, most likely right under the wall. Small
+                // blocks stop near it; big ones carry their momentum past the toe -- fall sorting, why a
+                // real apron coarsens outward. Turned and mirrored, sunk a fifth of their height.
+                namespace cl = canyonlands;
+                const float s = ts.treeParams.treeVoxelWorldSize;
+                const float g = TerrainState::kLabGround;
+                std::vector<const trees::TreeAsset*> blocks;
+                for (const trees::TreeAsset& a : loaded.assets)
+                    if (a.name.rfind("wingate", 0) == 0) blocks.push_back(&a);
+                std::sort(blocks.begin(), blocks.end(), [](const trees::TreeAsset* a, const trees::TreeAsset* b) {
+                    return (a->hi.y - a->lo.y) < (b->hi.y - b->lo.y);
+                });
+                struct Placed { float x, e, r; };
+                std::vector<Placed> placed;
+                const float cell = 20.0f;
+                using simple_terrain::hashUnit;
+                for (int ce = 0; ce < 11 && !blocks.empty(); ++ce) {
+                    for (int cxi = -22; cxi <= 22; ++cxi) {
+                        float x = (float(cxi) + hashUnit(cxi, ce, 11u)) * cell;
+                        float e = cl::kWallFoot - 6.0f - (float(ce) + hashUnit(cxi, ce, 13u)) * cell;
+                        float fromWall = cl::kWallFoot - e;
+                        if (hashUnit(cxi, ce, 17u) > 0.9f * std::exp(-fromWall / 70.0f) + 0.04f) continue;
+                        float outward = std::clamp(fromWall / 200.0f, 0.0f, 1.0f);
+                        size_t index = std::min(blocks.size() - 1,
+                            size_t(float(blocks.size()) * std::pow(hashUnit(cxi, ce, 19u), 2.4f - 1.8f * outward)));
+                        const trees::TreeAsset* a = blocks[index];
+                        float r = 0.5f * float(std::max(a->hi.x - a->lo.x, a->hi.z - a->lo.z) + 1) * s;
+                        bool clear = true;
+                        for (const Placed& q : placed)
+                            if ((q.x - x) * (q.x - x) + (q.e - e) * (q.e - e) < (q.r + r) * (q.r + r) * 0.55f) { clear = false; break; }
+                        if (!clear || e + r > cl::kWallFoot) continue;
+                        placed.push_back({x, e, r});
+                        trees::TreeInstance inst;
+                        inst.asset = a;
+                        inst.worldX = x;
+                        inst.worldZ = labWorldZ(ts, x, e);
+                        inst.rotation = uint8_t(hashUnit(cxi, ce, 23u) * 4.0f);
+                        inst.mirror = hashUnit(cxi, ce, 29u) < 0.5f;
+                        // Rest on the lowest ground under it (the slope falls away in front), sunk a fifth.
+                        float ground = g + std::min(cl::chinleHeight(ts.gen, x, e - r * 0.7f), cl::chinleHeight(ts.gen, x, e));   // the lab: along = x
+                        inst.baseWorldY = ground - 0.2f * float(a->hi.y - a->lo.y + 1) * s + float(ts.treeParams.embedVoxels) * s;
+                        ts.labPlaced.push_back(inst);
+                    }
+                }
+                // Junipers and sage on the toe and on the Kayenta bench, for scale.
+                const char* scale[] = {"juniper_a", "juniper_d", "sage_a", "sage_c", "pinyon_b", "juniper_e", "snag_a", "sage_b"};
+                const float bench = cl::kayentaBase(cl::kKayentaTop) + 0.5f * cl::kBenchMin + 6.0f;
+                const float at[][2] = {{-260, 25}, {150, 15}, {-120, 40}, {40, 30}, {-40, bench}, {260, bench}, {120, bench}, {330, 35}};
+                for (int i = 0; i < 8; ++i) {
+                    for (const trees::TreeAsset& a : loaded.assets) {
+                        if (a.name != scale[i]) continue;
+                        trees::TreeInstance inst;
+                        inst.asset = &a;
+                        inst.worldX = at[i][0];
+                        inst.worldZ = labWorldZ(ts, at[i][0], at[i][1]);
+                        inst.baseWorldY = canyonTop(ts, inst.worldX, inst.worldZ) + float(ts.treeParams.embedVoxels) * s;
+                        ts.labPlaced.push_back(inst);
+                    }
+                }
+                projv::core::info("[LAB] faces: {} blocks", placed.size());
+            } else if (ts.lab) {
+                // Rows by kind: trees, then shrubs, then boulders, each row left to right with a gap
+                // between neighbours, centred on x = 0.
+                const float s = ts.treeParams.treeVoxelWorldSize;
+                const std::vector<std::vector<std::string>> rows = {{"juniper", "pinyon", "snag"}, {"shrub"}, {"boulder"}};
+                float z = 0.0f;
+                for (const std::vector<std::string>& row : rows) {
+                    std::vector<const trees::TreeAsset*> members;
+                    for (const trees::TreeAsset& asset : loaded.assets) {
+                        size_t index = 0;
+                        while (index < treeSpecies.size() && treeSpecies[index].name != asset.name) ++index;
+                        if (index < treeKinds.size() &&
+                            std::find(row.begin(), row.end(), treeKinds[index]) != row.end())
+                            members.push_back(&asset);
+                    }
+                    if (members.empty()) continue;
+                    float width = 0.0f, depth = 0.0f;
+                    for (const trees::TreeAsset* a : members) {
+                        width += float(a->hi.x - a->lo.x + 1) * s + 30.0f;
+                        depth = std::max(depth, float(a->hi.z - a->lo.z + 1) * s);
+                    }
+                    float x = -width * 0.5f;
+                    for (const trees::TreeAsset* a : members) {
+                        trees::TreeInstance inst;
+                        inst.asset = a;
+                        inst.worldX = x + float(a->trunkX - a->lo.x) * s;
+                        inst.worldZ = z;
+                        // On the sand: the stamp sinks a tree embedVoxels into the ground.
+                        inst.baseWorldY = (std::floor(TerrainState::kLabGround / s) + 1.0f +
+                                           float(ts.treeParams.embedVoxels) + 0.01f) * s;
+                        ts.labPlaced.push_back(inst);
+                        x += float(a->hi.x - a->lo.x + 1) * s + 30.0f;
+                    }
+                    z += depth * 0.5f + 90.0f;
+                }
+                projv::core::info("[LAB] {} assets laid out", ts.labPlaced.size());
+            }
         } else {
-            projv::core::warn("[TREES] no tree assets found under '{}' - terrain will be bare. "
-                              "Generate them with: cd ../MeshVoxelizer && make && "
-                              "./mesh_voxelizer -f <model> -o trees/<name> -r 64",
-                              treeFolder);
+            projv::core::warn("[TREES] no tree assets under '{}' - terrain will be bare. Regrow them "
+                              "with terrain_asset_baker (examples/50-terrain-generator/tools).",
+                              treeFolder.string());
         }
     }
 
     // Create GPU textures (scene is empty — grid exists but no chunks yet)
     gpuData = projv::graphics::createTexturesForScene(scene);
 
-    // The feature examples' basic renderer (examples/shared/basicRenderer): the grid is marched like
-    // any other scene, and nothing about the look competes with the streaming for attention.
-    basic_renderer::install(renderInstance, projv::core::executableDirectory());
+    // ReSTIR PT (the renderer gallery's restir-pt, examples/shared/restir_pt.h): sun with a soft
+    // shadow, two bounces of sky and sun light through the materials, SSAO, ground fog, aerial haze,
+    // light shafts and a post. What makes voxels read as a place rather than as cubes is light -- Teardown's
+    // whole look rests on it -- and the flat one-pass renderer this example used to draw with had none.
+    {
+        std::error_code error;
+        std::filesystem::current_path(projv::core::executableDirectory(), error);   // its folders are relative
+        if (!restir_pt::install(renderInstance)) {
+            projv::core::error("terrain: restir-pt is not staged beside the binary; build renderer_gallery_shaders");
+            std::exit(1);
+        }
+        TerrainRestir& restir = app.world.ctx().emplace<TerrainRestir>();
+        restir.scene.finest = TerrainState::voxelScaleForLOD(0);
+        // A third of a surface's colour gone a couple of hills away (~3,300 units), nearly all of it by
+        // 20,000 -- which is also what hides where the far rings end. The haze thins over the ground's
+        // whole height.
+        restir.scene.fogLength = 8000.0f;
+        restir.scene.ground = 0.0f;
+        restir.scene.height = TerrainState::kTerrainCeiling;
+    }
 
     // Start worker threads — leave 2 cores for the render thread and main thread
     int numWorkers = std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 2);
@@ -3081,7 +3217,8 @@ void update(projv::Application& app) {
     projv::graphics::RenderInstance& ri = app.world.ctx().get<projv::graphics::RenderInstance>();
 
     // --- Mouse/keyboard input ---
-    static bool mouseCaptured = true;
+    // Not during an unattended capture (TERRAIN_CAPTURE): see render().
+    static bool mouseCaptured = std::getenv("TERRAIN_CAPTURE") == nullptr;
     static double lastMouseX = 0, lastMouseY = 0;
     static bool mouseInit = false;
 
@@ -3142,7 +3279,7 @@ void update(projv::Application& app) {
         static constexpr float kEyeHeight     =   40.0f;      // camera height above surface
         static constexpr float kWalkSpeed     =   80.0f;      // world units per second
 
-        float groundH = sampleWorld(ts, cam.position.x, cam.position.z, /*detailOct=*/3, /*erosionOct=*/6).height;
+        float groundH = groundHeight(ts, cam.position.x, cam.position.z);
         float targetY = groundH + kEyeHeight;
 
         if (cam.position.y > targetY + 1.0f) {
@@ -3213,9 +3350,7 @@ void update(projv::Application& app) {
         // Snapped to the surface-colour lattice for the same reason tree colours are (see startup):
         // the terrain palette is a fixed kSurfaceLevels^3 lattice plus water shades, and an
         // off-lattice colour would spend one of the handful of slots that leaves.
-        uint32_t packed = projv::packColor(projv::Color{quantizeSurfaceChannel(0.9f),
-                                                        quantizeSurfaceChannel(0.15f),
-                                                        quantizeSurfaceChannel(0.1f)});
+        uint32_t packed = projv::packRGB10(0.9f, 0.15f, 0.1f);
         placeSphereEdit(scene, ts, center,
                         kEditSphereRadiusVoxels * TerrainState::kVoxelScale, isAdd, packed);
     }
@@ -3234,9 +3369,7 @@ void update(projv::Application& app) {
         if (app.frameCount > 0 && app.frameCount % kAutoEditPeriod == 0) {
             vec3 look{cos(cam.pitch) * cos(cam.phi), sin(cam.pitch), cos(cam.pitch) * sin(cam.phi)};
             vec3 center = cam.position + look * (kEditSphereDistanceVoxels * TerrainState::kVoxelScale);
-            uint32_t packed = projv::packColor(projv::Color{quantizeSurfaceChannel(0.9f),
-                                                            quantizeSurfaceChannel(0.15f),
-                                                            quantizeSurfaceChannel(0.1f)});
+            uint32_t packed = projv::packRGB10(0.9f, 0.15f, 0.1f);
             placeSphereEdit(scene, ts, center, kEditSphereRadiusVoxels * TerrainState::kVoxelScale,
                             (app.frameCount / kAutoEditPeriod) % 2 == 1, packed);
         }
@@ -3511,9 +3644,113 @@ void render(projv::Application& app) {
     projv::GPUData& gpuData = app.world.ctx().get<projv::GPUData>();
     CameraState& cam = app.world.ctx().get<CameraState>();
 
+    // TERRAIN_CAPTURE=<file>: write a screenshot (bgfx's, a .tga beside the name) once the world
+    // has streamed in for TERRAIN_CAPTURE_SECONDS (default 20), then exit. TERRAIN_CAMERA=
+    // "x,z,above,yaw,pitch" places the camera `above` units over the ground at (x, z) first. With
+    // TERRAIN_SEED pinned, two runs capture the same view of the same world.
+    static const char* capturePath = std::getenv("TERRAIN_CAPTURE");
+    if (capturePath) {
+        static const auto captureStart = steady_clock::now();
+        static bool placed = false;
+        if (!placed) {
+            placed = true;
+            // An unattended capture: let go of the cursor, or whatever the mouse does turns the
+            // camera and two runs of the same command frame different views.
+            glfwSetInputMode(ri.window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            // TERRAIN_CAMERA=cliff: find the steepest ground within 2,000 units of the origin and
+            // look at it from below and a little way out, so a capture of the rock is of a cliff.
+            if (const char* spec = std::getenv("TERRAIN_CAMERA"); spec && std::string(spec) == "cliff") {
+                TerrainState& ts = app.world.ctx().get<TerrainState>();
+                float bestSlope = 0, bx = 0, bz = 0, gx = 1, gz = 0;
+                for (float z = -2000; z <= 2000; z += 40) {
+                    for (float x = -2000; x <= 2000; x += 40) {
+                        float dx = (groundHeight(ts, x + 4, z) - groundHeight(ts, x - 4, z)) / 8.0f;
+                        float dz = (groundHeight(ts, x, z + 4) - groundHeight(ts, x, z - 4)) / 8.0f;
+                        float slope = std::sqrt(dx * dx + dz * dz);
+                        if (slope > bestSlope) { bestSlope = slope; bx = x; bz = z; gx = dx / slope; gz = dz / slope; }
+                    }
+                }
+                // Downhill is -gradient: stand 220 units that way, at the ground there, looking back.
+                float cx = bx - gx * 220.0f, cz = bz - gz * 220.0f;
+                float targetY = groundHeight(ts, bx, bz);
+                cam.position = vec3(cx, groundHeight(ts, cx, cz) + 30.0f, cz);
+                cam.phi = std::atan2(bz - cz, bx - cx);
+                cam.pitch = std::atan2(targetY - cam.position.y, 220.0f) * 0.8f;
+                projv::core::info("[CAPTURE] cliff at ({:.0f}, {:.0f}), slope {:.2f}", bx, bz, bestSlope);
+            } else if (const char* spec = std::getenv("TERRAIN_CAMERA"); spec && std::string(spec) == "canyon" &&
+                       app.world.ctx().get<TerrainState>().canyon) {
+                // TERRAIN_CAMERA=canyon: stand on a main canyon's floor near its wall, looking along the
+                // canyon with the wall to one side.
+                TerrainState& ts = app.world.ctx().get<TerrainState>();
+                float bx = 0, bz = 0, best = 1e9f;
+                for (float z = -2500; z <= 2500; z += 30) {
+                    for (float x = -2500; x <= 2500; x += 30) {
+                        float e = canyonE(ts, x, z);
+                        float score = std::abs(e + 40.0f) + 0.02f * std::sqrt(x * x + z * z);
+                        if (score < best) { best = score; bx = x; bz = z; }
+                    }
+                }
+                float gx = canyonE(ts, bx + 5, bz) - canyonE(ts, bx - 5, bz);
+                float gz = canyonE(ts, bx, bz + 5) - canyonE(ts, bx, bz - 5);
+                float toWall = std::atan2(gz, gx);
+                cam.position = vec3(bx, groundHeight(ts, bx, bz) + 35.0f, bz);
+                cam.phi = toWall + 0.85f;
+                cam.pitch = 0.22f;
+                projv::core::info("[CAPTURE] canyon floor at ({:.0f}, {:.0f})", bx, bz);
+            } else if (const char* spec = std::getenv("TERRAIN_CAMERA")) {
+                float x = 0, z = 0, above = 260, yaw = cam.phi, pitch = cam.pitch;
+                std::sscanf(spec, "%f,%f,%f,%f,%f", &x, &z, &above, &yaw, &pitch);
+                TerrainState& ts = app.world.ctx().get<TerrainState>();
+                cam.position = vec3(x, groundHeight(ts, x, z) + above, z);
+                cam.phi = yaw;
+                cam.pitch = pitch;
+            }
+        }
+        static const float seconds = [] {
+            const char* e = std::getenv("TERRAIN_CAPTURE_SECONDS");
+            return e ? float(std::atof(e)) : 20.0f;
+        }();
+        static int stage = 0;
+        float elapsed = duration<float>(steady_clock::now() - captureStart).count();
+        if (stage == 0 && elapsed >= seconds) { bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capturePath); stage = 1; }
+        else if (stage >= 1 && ++stage > 10) app.closeRequested = true;
+    }
+
     vec3 camDir{cos(cam.pitch) * cos(cam.phi), sin(cam.pitch), cos(cam.pitch) * sin(cam.phi)};
+    // The sun: [ and ] lower and raise it. Low enough by default to throw long shadows across the hills.
+    static float sunAngle = 0.62f;
+    {
+        static auto lastSunTime = steady_clock::now();
+        const float sunDt = duration<float>(steady_clock::now() - lastSunTime).count();
+        lastSunTime = steady_clock::now();
+        if (glfwGetKey(ri.window, GLFW_KEY_LEFT_BRACKET) == GLFW_PRESS) sunAngle -= 0.4f * sunDt;
+        if (glfwGetKey(ri.window, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS) sunAngle += 0.4f * sunDt;
+        sunAngle = std::clamp(sunAngle, 0.05f, 1.55f);
+    }
+    const vec3 sunDir{std::cos(sunAngle) * -0.6402f, std::sin(sunAngle), std::cos(sunAngle) * 0.7682f};
+
     // The scene's changes were flushed in Update, on its own budget; this only draws.
-    basic_renderer::render(ri, gpuData, cam.position, camDir);
+    {
+        TerrainRestir& restir = app.world.ctx().get<TerrainRestir>();
+        restir_pt::Frame f;
+        f.position = cam.position;
+        f.direction = camDir;
+        f.sunDirection = sunDir;
+        f.prevPosition = restir.has ? restir.last.position : cam.position;
+        f.prevDirection = restir.has ? restir.last.direction : camDir;
+        f.sunMoved = restir.has && sunDir != restir.last.sunDirection;
+        f.moved = f.sunMoved || projv::core::length(f.position - f.prevPosition) > 1e-5f || projv::core::length(f.direction - f.prevDirection) > 1e-6f;
+        f.first = !restir.has;
+        f.count = restir.has ? restir.last.count + 1 : 0;
+        f.window = ri.getWindowResolution();
+        const auto frameTime = steady_clock::now();
+        f.seconds = duration<float>(frameTime - restir.lastTime).count();
+        restir.lastTime = frameTime;
+        restir_pt::upload(ri.getActiveRenderer(), f, restir.scene, restir.settings, &app.world);
+        restir.last = f;
+        restir.has = true;
+    }
+    projv::graphics::renderConstructedRenderer(ri, ri.getActiveRenderer(), &gpuData);
 
     static auto lastTime = high_resolution_clock::now();
     auto now = high_resolution_clock::now();

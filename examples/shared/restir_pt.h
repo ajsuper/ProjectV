@@ -1,8 +1,8 @@
 // The renderer gallery's restir-pt (examples/30-renderers/renderers/restir-pt/): its per-frame uniforms,
-// for every program that draws with it -- the gallery, with its keys and switches, and Voxel Mayhem, at
-// the defaults -- so they draw it the same way. ReSTIR GI at a sixteenth (or a quarter) of the window's
-// pixels, a G-buffer at half resolution each way rebuilt to the window by the voxel renderer's
-// reconstruction, then a temporal resolve and the post (its README).
+// for every program that draws with it -- the gallery, with its keys and switches, and Voxel Mayhem and
+// the terrain generator, at the defaults -- so they draw it the same way. ReSTIR GI at a sixteenth (or a
+// quarter) of the window's pixels, a G-buffer at half resolution each way rebuilt to the window by the
+// voxel renderer's reconstruction, then a temporal resolve and the post (its README).
 //
 //     restir_pt::install(renderInstance, slot);            // at startup, from the binary's directory
 //     restir_pt::upload(renderer, frame, scene, settings, &world);   // each frame
@@ -84,9 +84,10 @@ namespace restir_pt {
     };
 
     // The scene's scale: the finest voxel (what surfaces are offset by), and its size, lowest point and
-    // height (the fog's and the haze's).
+    // height (the fog's and the haze's). fogLength 0: from the radius (below); a scene that streams
+    // without end (the terrain) names its own.
     struct SceneScale {
-        float finest = 1.0f, radius = 100.0f, ground = 0.0f, height = 0.0f;
+        float finest = 1.0f, radius = 100.0f, ground = 0.0f, height = 0.0f, fogLength = 0.0f;
     };
 
     struct Frame {
@@ -147,8 +148,8 @@ namespace restir_pt {
         vec4 renderParams{0.0f, 0.0f, s.bypass ? 1.0f : 0.0f, 0.0f};
         // SSAO six of the finest voxels round, and how far it darkens the indirect light; the sun's penumbra per
         // unit of blocker distance (the disc's full width); the fog's length, 1.6 scene radii held to 300..3000
-        // units (30..300 m of Teardown-scale voxels).
-        const float fogLength = std::clamp(1.6f * scene.radius, 300.0f, 3000.0f);
+        // units (30..300 m at 10 units a metre), unless the scene names one.
+        const float fogLength = scene.fogLength > 0.0f ? scene.fogLength : std::clamp(1.6f * scene.radius, 300.0f, 3000.0f);
         // The SSAO and the fog are the final render's, not the path tracer's.
         const bool finalRender = s.post.on;
         vec4 look{6.0f * finest, finalRender ? s.ssao : 0.0f, s.softShadow ? 2.0f * std::tan(SUN_HALF_ANGLE) : 0.0f, s.farAO ? 1.0f : 0.0f};

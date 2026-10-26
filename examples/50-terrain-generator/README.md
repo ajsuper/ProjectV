@@ -76,21 +76,127 @@ fills in over the first few seconds.
 | `1` | Fly camera (default) |
 | `2` | Player camera — gravity and terrain collision; `Space` jumps |
 | `E` | Place a sphere of voxels 500 units ahead of the camera |
+| `[` / `]` | Lower / raise the sun |
 | `Q` | Carve the same sphere out of the terrain |
 
 `E` and `Q` are the interesting ones: they are the engine's editing API
 (`queueVoxelAdd`/`queueVoxelRemove` → `updateScene`) applied to geometry that was generated rather
 than loaded, on a grid that may have to expand to accept the edit.
 
+## The terrain
+
+Rebuilt from scratch to start simple (`include/simple_terrain.hpp`):
+
+- **Height:** one fBm Perlin field (`noise.hpp`, five octaves, ~3,200-unit base wavelength), raised
+  to a power so valleys are broad and hills stand up out of them. ~1,150 units of relief.
+- **Rock is 3D.** Each voxel is solid where a density is positive: `(h - y) + reach * rockShape(x, y, z)`.
+  On flat meadow `reach` is 0 and that is the heightfield; it rises to 42 units (~15 voxels) wherever the
+  ground is rock (from ~35 degrees), and half that on steep grass. `rockShape` is mostly the rock's beds,
+  each standing out or set back by its own amount and varied along the face, plus broad warped masses --
+  so cliffs are shelves of rock over undercuts, with real overhangs, and steep grassy hillsides have
+  outcrops under their turf. Only columns the 3D term or a boulder touches do per-voxel work, in a band
+  around the surface; open ground keeps the plain heightfield.
+- **Boulders:** lumpy, partly buried ellipsoids, merged into the ground with the same density test.
+  Rare out in meadows, gathered on the gentle ground at the foot of cliffs, never on a slope. Trees are
+  not planted where one sits.
+- **Rock colour** is a 3D function on every voxel that can be seen: warm and cool regions, a tone per
+  bed (matching the shelves), large Worley blocks with joint lines, broad mottling, rain streaks on
+  faces, lichen and moss in patches on the tops.
+- **Grass** tinted in broad patches by a low-frequency noise, a few voxels of dirt under it, and
+  **grass blades** on top in the nearest ring: one to three voxels, densest in the lush patches,
+  lighter toward the tip. (A coarser ring's voxel is wider than any blade, so they stop there.)
+- **Conifers** (below).
+
+The palette is twelve named entries (`terrain.grass.*`, `terrain.stone.*`, `terrain.dirt`,
+`grass.blade.*`), interned once at startup, so a worker never takes the palette lock.
+`TERRAIN_SEED` pins the world; `TERRAIN_CAPTURE=<file>` saves a screenshot after
+`TERRAIN_CAPTURE_SECONDS` (default 20) and exits, with `TERRAIN_CAMERA="x,z,above,yaw,pitch"` to place
+the camera first -- or `TERRAIN_CAMERA=cliff`, which finds the steepest ground near the origin and
+frames it from below.
+
+## Trees
+
+`trees/` holds 21 species, each about 90 voxels tall, **grown by the scene editor's tree generator**
+(`../60-scene-editor/brushes/trees.lua`) and stored in the current format, one compose asset per
+species: `biomes/alpine/assets/<name>/compose.json` (with its palette) and `model.data`. The terrain plants the ten
+**conifers** (spruces, firs, hemlock, larch, juniper, three pines); the broadleaf and bare species are
+baked too but skipped by kind for now.
+
+They are stamped into the terrain's own voxels during chunk generation, not placed as components:
+see `include/tree_placement.hpp`. Placement is a pure function of world position, so neighbouring
+chunks on different threads agree on every tree that straddles them. Two broad noise regions stand
+in for the placer's climate fields: one picks which conifer grows (along the species' bands in
+`biomes/alpine/designs.json`), the other thins and thickens the stands, and a forest-patch field opens
+clearings. Trees keep off the rock: the slope test rejects anything steep enough to be stone.
+
+One tree voxel is one terrain voxel (2.8 units), so a conifer is drawn at full detail in the nearest
+ring and stands about 250 units -- ten metres or so against the 40-unit eye height. Each farther
+ring reads a copy averaged for exactly its voxel size (4x and 16x).
+
+**Tree colours keep their own palette entries**: every species comes from one brush, so they share
+27 hue-shifted colours, interned exactly beside the ground's twelve.
+
+### Biomes and their assets
+
+Assets live per biome, `biomes/<biome>/`: `designs.json` (for each asset, a brush and its parameters)
+and `assets/` (the baked compose assets plus `assets.json`, the manifest this example reads -- nothing
+in `main.cpp` names a species). `alpine` holds the conifers the terrain plants today; `canyonlands` is
+the first biome of the plan in `docs/plans/biome-canyonlands.md`: Utah junipers, pinyons, dead
+junipers, sagebrush (the Trees brush) and Wingate, Navajo and Kayenta boulders (`rocks.lua`).
+
+`terrain_asset_baker` grows every design with the editor's brush code (no shape logic of its own) and
+adjusts its height until it is the design's `targetHeight`:
+
+```bash
+cmake --build --preset dev --target terrain_asset_baker -j$(nproc)
+cd build/examples/terrain_generator && ./terrain_asset_baker canyonlands   # rewrites biomes/canyonlands/assets/
+```
+
+Rebuild `terrain_generator` afterwards to stage the new assets beside it. The baker needs the scene
+editor's Lua submodule; without it the target is skipped and the committed assets are used as is.
+
+`TERRAIN_LAB=assets` replaces the terrain with flat red sand and stands every canyonlands asset on it
+in rows -- trees, then shrubs, then boulders -- to judge them one by one under the real renderer:
+
+```bash
+TERRAIN_LAB=assets TERRAIN_CAMERA="-400,-260,110,1.5708,-0.25" ./terrain_generator   # the junipers
+```
+
+`TERRAIN_LAB=faces` is the canyonlands rock faces as one cross-section (`include/canyonlands.hpp`):
+a banded Chinle slope cut by gullies, a jointed Wingate wall with spall scars, wandering and forking
+cracks and pour-off chutes that the gullies run down from, Kayenta ledges and bench, Navajo domes --
+with Wingate blocks fallen on the slope and a few junipers for scale:
+
+```bash
+TERRAIN_LAB=faces TERRAIN_CAMERA="0,260,110,-1.5708,0.30" ./terrain_generator
+```
+
+### The canyonlands terrain
+
+The default terrain is the canyonlands biome (`include/canyonlands.hpp`, plan:
+`docs/plans/biome-canyonlands.md`); `TERRAIN_BIOME=alpine` brings back the Perlin hills and conifers.
+Every column has `e`, its distance into the plateau from the nearest canyon (a network of warped Worley
+edges at three scales), and rock is solid where `e` exceeds the strata's setback at that height --
+Chinle slope, Wingate wall, Kayenta ledges, Navajo domes. `TERRAIN_CAMERA=canyon` stands on a canyon
+floor beside a wall.
+
 ## Renderer
 
-The feature examples' [basic renderer](../shared/basicRenderer/), set up by
-[`basic_renderer.h`](../shared/basic_renderer.h): one ray a pixel, the voxels' colours under a fixed
-sun. The engine's march walks the grid with no help from the renderer, so the same one-pass shader that
-draws a single chunk in Hello Voxel draws this whole streamed world. The example uploads the scene's
-changes in Update, on its own budget, so it calls `basic_renderer::render` (draw without the flush).
-With nothing else to the look, the renderer barely shows up in the frame time, and generation is what
-you measure.
+**ReSTIR PT**, the renderer gallery's [`restir-pt`](../30-renderers/renderers/restir-pt/) at its
+defaults (its uniforms: [`restir_pt.h`](../shared/restir_pt.h), shared with the gallery and Voxel
+Mayhem; the gallery's shader target compiles it and the build stages it beside the binary as
+`renderers/restir-pt/`): a soft sun shadow, two bounces of sun and sky light through the materials traced
+for a sixteenth of the pixels and shared between pixels and frames, SSAO, ground fog, aerial haze, light
+shafts, and a post (auto-exposure, grade, vignette, bloom, motion blur, a slight depth of field). `[` and
+`]` lower and raise the sun.
+
+It replaced the feature examples' one-pass basic renderer, which made generation the only thing in the
+frame time but drew every voxel as a flat-lit cube. Research into why Teardown's voxels look the way
+they do comes back to light, not colour -- soft shadows, AO at two scales and bounce light on one byte of
+palette per voxel -- and under real light the terrain's rock and the trees read as rock and trees. The
+fog (`SceneScale::fogLength`, 8,000 units, where the gallery derives it from the scene's size) also
+hides where the far LOD rings end. The example uploads the scene's changes in Update, on its own budget,
+so the render stage only calls `restir_pt::upload` and draws.
 
 ## Measuring it
 
@@ -110,7 +216,8 @@ watching are `generateChunkVoxels` (worker cost), `updateChunkFromBrickMap` (tre
 | **Core math** | Camera basis, collision, noise sampling |
 | **Logging** | `info`/`perf` — the streaming and upload statistics |
 | **Voxel management** | `createVoxelBrickMap`, `brickMapSetVoxel`, `updateChunkFromBrickMap`, `internChunkGeometry` |
-| **Material** | `internMaterial` — per-component palettes for surface materials |
+| **Material** | `internMaterial` — per-component palettes for surface materials and tree colours |
+| **Compose I/O** | `readDataFile`, `parseComposeJson` — the tree assets; `saveComposeToDisk` in the baker |
 | **Editing** | `queueVoxelAdd`, `queueVoxelRemove`, `updateScene`, `expandGridToInclude` |
 | **Scene query** | Grid cell lookup, component transforms |
 | **GPU interface** | `createTexturesForScene`, `flushSceneUpdates`, `updateChunkHeader` — incremental upload is the load-bearing one |
@@ -120,5 +227,5 @@ watching are `generateChunkVoxels` (worker cost), `updateChunkFromBrickMap` (tre
 
 - [bgfx](https://github.com/bkaradzic/bgfx) and [GLFW](https://www.glfw.org/) (via ProjectV)
 
-Noise is generated in-tree (`include/terrain_noise.hpp`, `include/noise.hpp`); nothing is pulled in
-for it.
+Perlin noise is [siv::PerlinNoise](https://github.com/Reputeless/PerlinNoise), vendored as
+`include/noise.hpp`.

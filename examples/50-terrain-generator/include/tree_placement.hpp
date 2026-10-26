@@ -8,7 +8,7 @@
 // tree64, uses the terrain component's material palette, and is edited/streamed/LOD'd by exactly
 // the machinery that already handles the ground. Nothing downstream knows a tree is a tree.
 //
-// The one hard requirement that follows from that is determinism. A tree is 64 voxels across, wider
+// The one hard requirement that follows from that is determinism. A tree is ~50 voxels across, wider
 // than nothing and narrower than a chunk, so a single tree routinely straddles a chunk boundary --
 // and neighbouring chunks are generated independently, on different threads, in any order, possibly
 // at different LODs. Placement is therefore a pure function of world position: every chunk hashes
@@ -40,7 +40,7 @@ struct TreeVoxel {
 // Where a species grows. Temperature and humidity are the terrain's own climate fields (both
 // roughly 0..1), so a species is described by the climate it prefers and how fussy it is about it.
 // A species is picked for a spot in proportion to how well the local climate matches, which is what
-// makes a region come out as one recognisable forest type rather than a fruit salad of all eight.
+// makes a region come out as one recognisable forest type rather than a fruit salad of every species.
 struct TreeSpecies {
     std::string name;
     float tempCenter = 0.5f, tempWidth = 0.30f;
@@ -48,12 +48,13 @@ struct TreeSpecies {
     float abundance = 1.0f;  // relative weight at its own climate optimum
 };
 
-// One resolution level of a tree asset. mips[0] is the asset as voxelized; each further level is
-// 4x coarser per axis, which is exactly the step between the terrain's LOD rings.
+// One resolution level of a tree asset. mips[0] is the asset as baked; each further level is the
+// asset collapsed by exactly the factor one of the terrain's LOD rings draws it at (see
+// loadTreeLibrary's `mipDivisors`), so every ring reads a mip made for it.
 //
 // Precomputing these rather than decimating on the fly buys two things. It is far cheaper -- a
-// distant chunk iterates the ~60 voxels of the coarse mip instead of walking all ~37,000 of the
-// full-resolution tree only to collapse them onto the same 60 -- and it is the only way to get the
+// distant chunk iterates the few dozen voxels of the coarse mip instead of walking all ~10,000 of the
+// full-resolution tree only to collapse them onto the same few dozen -- and it is the only way to get the
 // colour right: collapsing on the fly leaves whichever voxel happened to be written last, so a
 // distant tree could come out trunk-brown. A mip averages the voxels that merge, which is what a
 // texture mip does and what the eye expects at that distance.
@@ -100,17 +101,17 @@ struct TreeLibrary {
     bool empty() const { return assets.empty(); }
 };
 
-// Collapses a tree by `divisor` per axis, averaging the colours of every voxel that merges into a
-// cell. Occupancy is a plain OR: a cell survives if anything at all was in it, so a coarse tree
-// keeps its silhouette instead of dissolving into holes the way point-sampling would leave it.
-inline void buildMips(TreeAsset& asset, int levels) {
+// Collapses a tree by each of `divisors` per axis (ascending, all > 1), averaging the colours of
+// every voxel that merges into a cell. Occupancy is a plain OR: a cell survives if anything at all
+// was in it, so a coarse tree keeps its silhouette instead of dissolving into holes the way
+// point-sampling would leave it.
+inline void buildMips(TreeAsset& asset, const std::vector<int>& divisors) {
     // Reserve before taking `base`: each level push_backs into the same vector, and a reallocation
     // partway through would leave that reference dangling.
-    asset.mips.reserve(size_t(levels > 1 ? levels : 1));
+    asset.mips.reserve(divisors.size() + 1);
     const TreeMip& base = asset.mips[0];
-    for (int level = 1; level < levels; ++level) {
-        int divisor = 1;
-        for (int i = 0; i < level; ++i) divisor *= 4;
+    for (int divisor : divisors) {
+        if (divisor <= 1) continue;
 
         std::unordered_map<uint32_t, std::array<uint64_t, 4>> cells;  // key -> {n, sumR, sumG, sumB}
         for (size_t i = 0; i < base.voxels.size(); ++i) {
@@ -151,16 +152,18 @@ inline void buildMips(TreeAsset& asset, int levels) {
     }
 }
 
-// Reads the .data containers the MeshVoxelizer example produces (one 64^3 block per tree), decodes
-// their geometry into flat voxel lists, and builds the coarse mips. Colors are kept raw here;
-// resolveMaterials() below is what turns them into palette slots, because that has to happen
-// against a live Scene.
+// Reads the tree assets terrain_asset_baker writes (biomes/<biome>/assets/<name>/model.data + compose.json, the
+// trunk at (128, 0, 128) and every voxel inside 0..255), decodes their geometry into flat voxel
+// lists, and builds the coarse mips -- one per entry of `mipDivisors`, which the caller derives from
+// the factors its LOD rings draw a tree at. Colors are kept raw here; resolveMaterials() below is
+// what turns them into palette slots, because that has to happen against a live Scene.
 //
 // A .data stores geometry plus one material byte per voxel, and the palette those bytes index sits
 // in the folder's compose.json -- so both files are read, and the tree64 is walked back into a brick
 // map to recover the voxel positions the container does not store explicitly.
 inline bool loadTreeLibrary(TreeLibrary& lib, const std::string& folder,
-                            const std::vector<TreeSpecies>& species, int mipLevels = 3) {
+                            const std::vector<TreeSpecies>& species,
+                            const std::vector<int>& mipDivisors = {4, 16}) {
     for (const TreeSpecies& spec : species) {
         const std::string& name = spec.name;
         std::string path = folder + "/" + name + "/model.data";
@@ -252,7 +255,7 @@ inline bool loadTreeLibrary(TreeLibrary& lib, const std::string& folder,
 
         base.lo = asset.lo; base.hi = asset.hi;
         base.trunkX = asset.trunkX; base.trunkZ = asset.trunkZ;
-        buildMips(asset, mipLevels);
+        buildMips(asset, mipDivisors);
 
         std::string mipSizes;
         for (const TreeMip& m : asset.mips)
@@ -284,8 +287,8 @@ inline void resolveMaterials(TreeLibrary& lib, InternFn&& internColor) {
 
 struct Params {
     // World size of one candidate cell. At most one tree per cell, so this sets the spacing floor.
-    // Set below one tree width (a tree is 64 * treeVoxelWorldSize ~= 112 units across) so that a
-    // fully-stocked patch overlaps into closed canopy rather than a regular orchard grid.
+    // Set below one tree width (a ~50-voxel-wide crown is ~90 units across at 1.75 a voxel) so that
+    // a fully-stocked patch overlaps into closed canopy rather than a regular orchard grid.
     float cellSize = 84.0f;
     // Fraction of cells that grow a tree where the climate is ideal and the patch field is at its
     // peak. Everything below scales this down; nothing scales it up.
@@ -322,12 +325,8 @@ struct Params {
     float treeVoxelWorldSize = 1.75f;
     float waterLevel = 400.0f;
     float minAltitudeAboveWater = 6.0f;   // keep trunks out of the shallows
-    // Backstop only. The real tree line is climatic and comes from climateStocking against a
-    // temperature that now falls with altitude (see the lapse rate in terrain_noise::sampleTerrain),
-    // which puts it at a different height in a cold belt than in a warm one -- as it should be.
-    // This is just a hard cap so nothing turns up on a summit. It was 1500, set when that was near
-    // the top of the world; leaving it there once peaks reached 5000+ would have cut every forest
-    // off at a flat contour line straight across the mountains.
+    // Backstop only: a hard cap so nothing turns up on a summit. Any real tree line belongs in the
+    // caller's ground sample (its temperature and humidity), not here.
     float treeLineAltitude = 6000.0f;
     // Max height change (world units) across a probe of ±cellSize/4 before the ground is called too
     // steep to hold a tree. Stops trees growing out of cliff faces at right angles.
@@ -344,6 +343,10 @@ struct TreeInstance {
     const TreeAsset* asset = nullptr;
     float worldX = 0.0f, worldZ = 0.0f;
     float baseWorldY = 0.0f;
+    // Quarter turns about the trunk axis, and a mirror across X before them: eight orientations of
+    // one asset, so a pile of the same few boulders does not read as copies. Trees leave both 0.
+    uint8_t rotation = 0;
+    bool mirror = false;
 };
 
 namespace detail {
@@ -422,7 +425,7 @@ inline float speciesAffinity(const TreeSpecies& s, float temp, float humid) {
 //   2. the local climate, which decides how thoroughly this latitude stocks itself at all,
 //   3. altitude -- out of the water, below the tree line,
 //   4. slope -- no trees growing sideways out of cliffs.
-// Species is then drawn from the eight, weighted by how well each one likes the local climate.
+// Species is then drawn from the library, weighted by how well each one likes the local climate.
 //
 // `sampleGround(x, z)` must be LOD-independent -- the same function for every chunk -- or the same
 // tree would be planted at two different heights in two neighbouring chunks.
@@ -445,8 +448,9 @@ inline void collectTrees(const TreeLibrary& lib, const Params& p,
     int cellZ0 = int(std::floor(minZ / p.cellSize));
     int cellZ1 = int(std::floor(maxZ / p.cellSize));
 
-    float affinity[16];
-    const size_t speciesCount = lib.assets.size() < 16 ? lib.assets.size() : 16;
+    constexpr size_t kMaxSpecies = 32;
+    float affinity[kMaxSpecies];
+    const size_t speciesCount = lib.assets.size() < kMaxSpecies ? lib.assets.size() : kMaxSpecies;
 
     for (int cz = cellZ0; cz <= cellZ1; ++cz) {
         for (int cx = cellX0; cx <= cellX1; ++cx) {
@@ -519,10 +523,17 @@ inline void treeWorldBounds(const TreeInstance& inst, const Params& p,
                             projv::core::vec3& lo, projv::core::vec3& hi) {
     const TreeAsset& a = *inst.asset;
     float s = p.treeVoxelWorldSize;
-    lo.x = inst.worldX + float(a.lo.x - a.trunkX) * s;
-    hi.x = inst.worldX + float(a.hi.x - a.trunkX + 1) * s;
-    lo.z = inst.worldZ + float(a.lo.z - a.trunkZ) * s;
-    hi.z = inst.worldZ + float(a.hi.z - a.trunkZ + 1) * s;
+    if (inst.rotation != 0 || inst.mirror) {
+        // Turned: the widest reach either way, on both axes.
+        int r = std::max(std::max(a.trunkX - a.lo.x, a.hi.x - a.trunkX), std::max(a.trunkZ - a.lo.z, a.hi.z - a.trunkZ)) + 1;
+        lo.x = inst.worldX - float(r) * s; hi.x = inst.worldX + float(r) * s;
+        lo.z = inst.worldZ - float(r) * s; hi.z = inst.worldZ + float(r) * s;
+    } else {
+        lo.x = inst.worldX + float(a.lo.x - a.trunkX) * s;
+        hi.x = inst.worldX + float(a.hi.x - a.trunkX + 1) * s;
+        lo.z = inst.worldZ + float(a.lo.z - a.trunkZ) * s;
+        hi.z = inst.worldZ + float(a.hi.z - a.trunkZ + 1) * s;
+    }
     lo.y = inst.baseWorldY - float(p.embedVoxels) * s;
     hi.y = lo.y + float(a.hi.y - a.lo.y + 1) * s;
 }
@@ -554,7 +565,7 @@ inline float canopyHeight(const TreeLibrary& lib, const Params& p) {
 // mip instead, so the tree keeps the same physical size at every resolution -- which is the whole
 // reason treeVoxelWorldSize is fixed rather than derived from the chunk. `residual` covers the case
 // where the ring's step is not exactly one of the prebuilt mip levels; it is 1 whenever they line
-// up, which for the terrain's 4x rings they always do.
+// up, which they always do when the caller builds the mips from its rings' own factors (main.cpp).
 inline void stampTree(const TreeInstance& inst, const Params& p, projv::VoxelBrickMap& map,
                       projv::core::ivec3 chunkCoord, int res, float voxelScale) {
     const TreeAsset& a = *inst.asset;
@@ -574,9 +585,17 @@ inline void stampTree(const TreeInstance& inst, const Params& p, projv::VoxelBri
     int baseZ = chunkCoord.z * res;
 
     for (const TreeVoxel& v : mip.voxels) {
-        int tx = gx + detail::floorDiv(int(v.x) - mip.trunkX, residual);
+        int dx = int(v.x) - mip.trunkX, dz = int(v.z) - mip.trunkZ;
+        if (inst.mirror) dx = -dx;
+        switch (inst.rotation & 3u) {
+            case 1: { int t = dx; dx = -dz; dz = t; break; }
+            case 2: dx = -dx; dz = -dz; break;
+            case 3: { int t = dx; dx = dz; dz = -t; break; }
+            default: break;
+        }
+        int tx = gx + detail::floorDiv(dx, residual);
         int ty = gy + detail::floorDiv(int(v.y) - mip.lo.y, residual);
-        int tz = gz + detail::floorDiv(int(v.z) - mip.trunkZ, residual);
+        int tz = gz + detail::floorDiv(dz, residual);
 
         int lx = tx - baseX;
         if (lx < 0 || lx >= res) continue;

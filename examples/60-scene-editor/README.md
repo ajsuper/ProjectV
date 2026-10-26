@@ -38,12 +38,18 @@ Lua lives in *this example's* `external/` rather than the engine's: nothing in t
 
 With no argument it opens the previewer's bundled `StonehillCastle` if it is there, so the editor starts on something rather than an empty panel. Either way **File ▸ Load Scene…** switches scenes.
 
+Two navigation modes, chosen in **View ▸ Navigation** and saved in `imgui.ini`. The left button stays the active tool's in both.
+
+| Input | Fly (default) | Orbit (no middle button needed) |
+|-------|---------------|---------------------------------|
+| Right-mouse drag | Look (cursor captured) | Pan |
+| `W`/`S`, `A`/`D`, `R`/`F` | Forward/back, strafe, up/down — while right is held | — |
+| `Alt` + left drag | — | Orbit the focus. `Alt`+click without a drag still samples a material, on release |
+| Middle-mouse drag | Pan | Orbit the focus |
+
 | Input | Action |
 |-------|--------|
-| Right-mouse drag in Viewport | Fly the camera (cursor is captured for the duration) |
-| `W`/`S`, `A`/`D`, `R`/`F` | Forward/back, strafe, up/down — while flying |
-| Middle-mouse drag | Pan — the scene follows the cursor across the image plane |
-| Scroll wheel | Get closer: dolly under perspective, zoom under orthographic |
+| Scroll wheel / two-finger scroll | Get closer: dolly under perspective, zoom under orthographic |
 | `Ctrl` + scroll wheel | Movement speed for the fly-through |
 | `H` | Re-frame the camera on the scene |
 | Left-click in Viewport | Whatever the active tool says — see Tools below |
@@ -67,21 +73,24 @@ Panels dock, tear off, and tab by dragging their title bars. The layout is saved
 
 ### The layout
 
-Two columns and a strip, which is the shape editors of this kind converge on for a reason — the left column answers *what exists*, the right one *what is being done to it*:
+Two columns around a full-height viewport — the left column answers *what exists*, the right one *what is being done to it*:
 
 ```
 ┌─────────────┬──────────────────────────────────┬─────────────────┐
-│ ASSETS      │  StonehillCastle › keep › model  │ INSPECTOR       │
-│   what is   │  ┌──┐                            │ TOOL            │
-│   in the    │  │QW│        viewport            │ PALETTE         │
-│   open one  │  │ER│                            │                 │
-├─────────────┤  └──┘                            │                 │
-│ LIBRARY     │      [AO] [normals] [sun]        │                 │
-│   what      ├──────────────────────────────────┴─────────────────┤
-│   could be  │ HISTORY                                            │
-└─────────────┴────────────────────────────────────────────────────┘
+│ ASSETS      │  StonehillCastle › keep › model  │ TOOL            │
+│   what is   │  ┌──┐                            │   settings      │
+│   in the    │  │QW│        viewport            ├─────────────────┤
+│   open one  │  │ER│                            │ INSPECTOR       │
+├─────────────┤  └──┘                            │   shape, xform  │
+│ LIBRARY |   │                                  ├─────────────────┤
+│ HISTORY     │      [AO] [normals] [sun]        │ PALETTE         │
+└─────────────┴──────────────────────────────────┴─────────────────┘
   1.4 ms (700 fps) | 2663 x 1303 | 6 chunks, 2 components | Select | …
 ```
+
+History is a tab beside the Library: it is looked at now and then, and as a strip under the scene it
+cost the viewport a fifth of its height all the time. A layout saved by an older build is replaced
+once (`DOCK_LAYOUT_VERSION`); after that **View ▸ Reset Layout** restores this one.
 
 The right-hand three are **stacked, not tabbed**, and that is the point: they are not alternatives. Sculpting wants a brush, a colour, and the target's transform in view at once, and while they shared one dock node the tool panel had to carry its own duplicate copy of the palette grid — two places showing "the current colour", which is how you end up sculpting in a colour you were not looking at.
 
@@ -92,7 +101,7 @@ The right-hand three are **stacked, not tabbed**, and that is the point: they ar
 | **Viewport** | The scene, rendered at exactly the panel's pixel size, with the breadcrumb, the tool strip, the render toggles and the navigator floating over it |
 | **Assets** | The contents of the asset you have open, one level deep, in order: its op, drag to reorder, click to select, the arrow to look inside, `open` to go in. Above it the breadcrumb you came down; below it what the contents resolve to, and Add / Save / Bake |
 | **Library** | A disk browser over the folders assets live in: navigate, see which hold a `compose.json`, list what is inside one without loading it, open it, or bring it into the asset already open as a Copy, a Bake or a Link |
-| **Inspector** | The selected component: kind, source, voxel count, local and world transform |
+| **Inspector** | The selected component. **Shape** (a generated shape's size in voxels, hollow, wall) first, then **Transform** (position, rotation, grid, scale), then a collapsed **Details** (handle, kind, source, voxel count, resolution, world transform) |
 | **Tool** | The active tool's settings. Title and contents follow the tool — a setting the current brush or shape cannot use is **absent**, not greyed out, since a disabled control still reads as part of the tool and still has to be ruled out |
 | **Palette** | The selected component's materials as a grid of swatches — edit colours, add and remove entries, see where each is used |
 | **History** | Every edit made, with undo/redo and click-to-jump |
@@ -274,7 +283,7 @@ The tool is what a left-click inside the viewport means. Without one, every new 
 | Tool | | Left-click does |
 |------|---|-----------------|
 | **Select** | `Ctrl+Q` | Selects the component owning the voxel under the cursor. Clicking past everything clears the selection |
-| **Move** | `Ctrl+W` | The transform gizmo: three arrows to translate, three rings to rotate. Clicking away from a handle still selects |
+| **Move** | `Ctrl+W` | The transform gizmo: three arrows to translate, three rings to rotate, and on a generated shape a square on each face to resize it. Clicking away from a handle still selects |
 | **Sculpt** | `Ctrl+E` | Drag to add or remove voxels with a Sphere or Cube brush, to Smooth or Bump a surface, or to Extrude a whole face. `Alt`+click samples instead |
 | **Paint** | `Ctrl+R` | Drag to repaint voxels with the palette's current entry, in one of five shapes (the two fills run once per click). `Alt`+click samples instead |
 | **Place** | `Ctrl+T` | Drops one of seven primitives into the **open asset**, on the surface under the cursor or `Place distance` down the ray when there is nothing there. With nothing open the first one creates an asset and opens it. Clicking an item grabs it instead, and the panel's fields then edit *that* item |
@@ -582,10 +591,11 @@ That replaced four separate mechanisms that all existed to answer *which contain
 3. **Repeat.** Every later click adds an item at the current kind and size, into the same asset. Drop the pillar, drop the arch, drop the sphere you mean to carve with — no commit in between, no target question, no mode.
 4. **Look at the result.** The viewport shows the **resolved** asset: its contents folded together in its lattice, rebuilt when everything settles. **Show sources** switches to seeing the shapes themselves. The default is the result, because the result is what is being made.
 5. **Arrange.** The gizmo, the arrow keys, the Inspector's numeric fields. An item is an ordinary component, so all three are the ordinary ones.
-6. **Boolean.** The contents list *is* the stack: one row per item in evaluation order, each with its op, drag to reorder.
-7. **Copy.** Bring another asset in from the Library as a Copy, a Bake or a Link. Once it is in, it is an ordinary component of the open asset and every adjustment after that happens in final context — which is why there is no prefab-edit mode and no need for one.
-8. **Bake.** To one Data, or into another component.
-9. **Sculpt.** The baked result is an ordinary component and every tool already applies.
+6. **Resize.** Drag a coloured square on one of the shape's faces (Move or Place tool): that face follows the cursor a voxel at a time and the opposite face stays put; hold `Shift` to grow both. Or type the size into the Inspector's **Size**. Either way the shape is rebuilt from its recipe, never resampled. The transform's Scale is not offered on a shape — it stretches voxels rather than adding them, and a shape is rebuilt at scale 1.
+7. **Boolean.** The contents list *is* the stack: one row per item in evaluation order, each with its op, drag to reorder.
+8. **Copy.** Bring another asset in from the Library as a Copy, a Bake or a Link. Once it is in, it is an ordinary component of the open asset and every adjustment after that happens in final context — which is why there is no prefab-edit mode and no need for one.
+9. **Bake.** To one Data, or into another component.
+10. **Sculpt.** The baked result is an ordinary component and every tool already applies.
 
 #### Ops
 
@@ -598,11 +608,15 @@ That replaced four separate mechanisms that all existed to answer *which contain
 | **Subtract** | `-` | Takes the item's cells out. A sphere subtracted is a crater |
 | **Intersect** | `&` | Keeps only the cells the item and the result share. The result's colours survive |
 
-#### The Place panel edits the selection, or the next shape — never both
+#### The Place panel edits the next shape; the Inspector edits the placed one
 
 Two sets of values, and it matters that they are two. `editor.shape*` is the **template** a new shape
-is made from; a placed shape's recipe (kind, dimensions, hollow, wall) lives on **its own `Part`** and
-is what the panel edits while it is selected.
+is made from, and it is all the Place panel's **Next shape** section edits. A placed shape's recipe
+(kind, dimensions, hollow, wall) lives on **its own `Part`** and is edited in the Inspector's
+**Shape** section and by the gizmo's face squares. The panel used to edit the selection instead of
+the template whenever something was selected, under a heading that swapped from "Next shape" to
+"Editing" — one set of fields meaning two things depending on a click elsewhere, which is what made
+resizing a placed shape hard to find. Both sets are drawn by one function (`drawShapeRecipeFields`).
 
 They used to be one set, and that was a defect rather than an untidiness. The fields kept the last
 selection's numbers, so clicking a second shape and nudging anything resized *that* shape to the
@@ -614,8 +628,8 @@ rather than "apply the tool panel to this shape".
 it is discarding one object and making another, and offering it inline as a dropdown makes an
 irreversible substitution look like a setting. Placing a sphere is the way to have a sphere.
 
-The op radio follows the same rule and says which it is on: **Combines as** when something in the
-open asset is selected (editing that component's `op`, the same value the contents row shows — one
+The op radio is the exception and says which it is on: **Combines as** (under a **Selected** heading)
+when something in the open asset is selected (editing that component's `op`, the same value the contents row shows — one
 value in two places, not two values), **Drops in as** when nothing is. The snap controls, `Place
 distance` and the material row are template-only either way, because none of them is a property of a
 shape that already exists — free placement, which *is* one, lives on the component and is shown in
@@ -1185,7 +1199,7 @@ Any Compose folder works, not just the bundled ones:
 
 ```
 ../10-scene-previewer/scenes/Sibenik        # a bundled scene
-../20-mesh-voxelizer/trees/Oak_Leav         # a 64^3 asset
+../50-terrain-generator/biomes/alpine/assets/oak_spreading  # a tree asset (grown by the Trees brush)
 ../30-renderers/SponzaScene/              # the Sponza atrium
 ```
 
@@ -1296,6 +1310,9 @@ return {
     -- that is already there.
     materials = {
         { name = "rock", steps = 12, color = { 0.60, 0.58, 0.54 }, colorTo = { 0.10, 0.10, 0.09 } },
+        -- Or stop by stop, which is how a ramp hue-shifts (cool shadows, warm lights); `colors` sets
+        -- the step count. A straight color..colorTo line can only change value.
+        -- { name = "needle", colors = { { 0.04, 0.10, 0.10 }, { 0.11, 0.26, 0.17 }, { 0.34, 0.47, 0.22 } } },
     },
 
     apply = function(ctx, p)
@@ -1349,6 +1366,12 @@ Two settings are read by the **editor** rather than by the script, by name — s
 |---|---|
 | `spacing` | how far apart sites are, in voxels. One placement per cell at most |
 | `density` | what fraction of those cells are taken, 0–1 |
+| `force` | bool. One placement on the surface voxel under the cursor: no lattice, no `density` roll, `ctx.force = true` so the script skips its own site tests, and the fit test relaxed to *skip* occupied cells rather than refuse the whole placement. A drag plants one per `spacing` |
+
+**A refusal can say why:** `return nil, "too steep"`. The editor tallies the reasons per dab, so a dab
+that plants nothing reports *"Planted nothing: 12 site(s) -- 9 no headroom, 3 too steep"* rather than
+a bare count; the host's own fit test is counted as "something in the way". Without this, a brush with
+eight ways to decline looked broken whenever it declined.
 
 `spacing` is the lattice's cell size, which is an *average* spacing rather than a hard minimum: two sites in neighbouring cells can land against each other if one jitters to its high edge and the other to its low one. What cannot happen is two in one cell.
 
@@ -1357,6 +1380,50 @@ Two settings are read by the **editor** rather than by the script, by name — s
 One rule the host enforces that the lattice cannot: **nothing is ever planted on what this stroke has already planted.** A blade of grass is itself a solid voxel with air above it, so without that, a second dab finds every blade tip and grows another blade out of it — a tower per site, taller every pass. The stroke journal is the record of what the stroke made, which makes it exactly the right question to ask.
 
 #### `trees`, and why a tree is the real test of all this
+
+**What it grows on: any solid surface.** There is no material requirement -- stone, dirt, sand and
+painted grass ground all take a tree. It will not stand *on* undergrowth (grass blades, flowers, moss)
+and grows through it instead. **Only on material** restricts it by palette-entry name, like the paint
+brushes' filter. What refuses a site is its shape (slope, enclosure, footing) and room, and the status
+line says which; **Force** skips all of it.
+
+**The conifer follows Massart's architectural model** (`growConifer`), the one spruces, firs and
+araucarias grow by: a straight monopodial trunk, and at each growth spurt a *tier* of 4-8
+near-horizontal limbs, rotated from the last by the golden angle. Side shoots alternate left and right
+**in the limb's own plane**, so a limb with its shoots is a flat frond, and the needles sit on the
+fronds as lopsided sprays (thin over the top, so the wood is hidden; a deeper hang below). That gives
+the layered look: shelves of needles with dark gaps between them where the limbs and the trunk show.
+Other details: the inner third of each limb is bare (needles shed in the shade), small limbs between
+the tiers on big trees, dead stubs on the bare lower trunk, and a leader at the top.
+
+| Control | On a conifer |
+|---|---|
+| **Branch angle** | -1 hanging (juniper, weeping spruce: steeply down, no upturn, shoots like a curtain) · 0 level with a sag and an upturned tip (spruce, fir) · +1 swept up, needles in round tufts toward the ends, crown rounding off with size (a big pine) |
+| **Branch reach** | How deep the sag is, within that |
+| **Needle fullness** | Low shows the limbs through the tiers; high is a dense young fir |
+| **Lumpiness** / **Raggedness** | How irregular the limb spacing is / how frayed the spray edges are |
+
+Two earlier versions missed it from opposite sides. Needle lobes hung on drooping sticks came out as a
+shaggy blob, because lobes are round and a stack of round things is round. Solid needle tiers got the
+silhouette but had no branches at all.
+
+**Nothing may read as its primitive at size.** What looks fine at 20 voxels shows its construction at
+100: a trunk drawn as discs is a cylinder, a spray drawn as an ellipsoid is an oval, a crown of
+smoothly shrinking tiers is a triangle. So the trunk's cross-section is warped by noise and cut with
+wandering furrows; a big spray is three to five small clumps with noise-warped rims; limb lengths vary
+and now and then break short; a big tree's top is a scatter of uneven clumps, not a cone. The trunk's
+noise depends only on angle and height, so it is computed per angle slice per level rather than per
+voxel -- at the largest sizes that is what keeps one tree inside the 2-second call limit.
+
+**No ramp is chosen by `floor(v * steps)` alone** (`ditheredStep`). On a trunk `v` is the height, and
+a straight floor draws every step change as a perfect horizontal ring -- the bark came out as painted
+bands. The step is dithered by a hash plus a smooth noise, so neighbouring steps interleave in patches
+across a band; bark also takes its value from tall, thin "plate" noise and darkens in its furrows.
+
+**The palette is hue-shifted** (`MATERIALS`): needles run from teal-black in the shade under a tier to
+a warm yellow-green where the sun catches the top of a spray, and the bark from a cool purple-grey to
+a warm grey-brown. The ramps are given stop by stop (`colors`), since a straight `color`..`colorTo`
+line can only change value.
 
 A blade of grass is three voxels and fits almost anywhere; the fit machinery barely matters to it. A tree is a trunk and a canopy that may be a thousand voxels across, and the interesting question stops being what it looks like and becomes *is there room for it here*. `brushes/trees.lua` asks three times, cheapest first, because most sites are rejected and the cheap tests are what keep a dab affordable:
 
@@ -1367,6 +1434,39 @@ A blade of grass is three voxels and fits almost anywhere; the fit machinery bar
 `clearance` is the one check the editor cannot do on the brush's behalf: the editor knows what a placement *occupies*, not what it wants left alone around it.
 
 Broadleaf, conifer and bare are checkboxes like the grass brush's flowers, and blossom is a fourth that speckles a broadleaf canopy. Trunks lean on the same quadratic arc the grass blades use, with the elbow filled in so a leaning trunk cannot come apart into floating segments.
+
+**Tuned for trees about 100 voxels tall.** The defaults are Tree height 100, Crown radius 28 and
+Spacing 36, and the proportions are set for that size: a trunk is a fortieth of the height in radius
+for a conifer (about 5 voxels across at 100 tall) and a thirtieth for a broadleaf (about 7). It used to
+be a ninth, which at 100 tall is a log 22 voxels across. Conifer limbs are one or two voxels where they
+leave the trunk and a single voxel for most of their length. Below about 30 tall there is too little
+room for any of the branch structure to show. `BRUSHTEST` pins the brush to a sapling for its own run
+(its test block is 21 voxels), so the defaults can be whatever suits real use.
+
+**Broadleaf and bare trees grow by space colonization** (`growBroadleaf`; Runions, Lane &
+Prusinkiewicz 2007). The crown's envelope is seeded with attraction points, denser toward the outside
+where the light is. Each step, every point pulls on its nearest branch node within the radius of
+influence, each pulled node grows one step toward the average of its points (plus a tropism: up toward
+the light, harder with Branch reach, or down for Weeping), and a point is consumed once a branch comes
+within the kill distance. Unlike a recursive branching rule, this makes **branches avoid each other**:
+gaps open between limbs and the crown fills its shape the way a real one fills the light.
+
+* **Crown shape** is the envelope (Weber & Penn's crown-radius-by-height idea): Round, Spreading (an
+  open-grown oak), Columnar (a poplar), Weeping (a willow: tropism down, plus curtains of leaves).
+* **Branch density** is the kill distance: 1 a few bold limbs, 4 a dense mass of twigs.
+* **Thickness is the pipe model**: a branch carries the cross-sections of everything above it,
+  r^2.5 = r1^2.5 + r2^2.5, so a limb is exactly as thick as what it holds up. Remapped so the trunk is
+  the asked-for width and the twigs one voxel.
+* The paper's **smoothing pass** takes the kinks out of the fixed-length steps.
+* **Leaves** are clumps on twigs within two nodes of a tip, thinned in the crown's shaded interior,
+  built like the conifer's sprays (big clumps from small ones, warped rims, top-lit, dithered) and shaded
+  per crown as well, lighter toward its top and outside. **Season** swaps the leaf ramp for autumn's
+  reds and golds, each clump taking its own stretch of it; **Leaf clump size** opens or closes the crown.
+* A **bare** tree is the same tree with no leaves and a finer twig density.
+
+The node search is incremental: a point's nearest node can only change when a node is added, so each
+new node is offered to the points in the grid cells around it once, rather than every point searching
+every node every step. Growth order is sorted, never table order, so a site always grows the same tree.
 
 ### Why a brush returns an index and not a colour
 

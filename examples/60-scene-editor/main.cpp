@@ -25,9 +25,9 @@
 // starts on something rather than a black panel. Either way File ▸ Load Scene… switches scenes.
 //
 // Controls:
-//   Right-mouse drag in Viewport — fly the camera (cursor is captured for the duration)
-//   W/S, A/D, R/F               — forward/back, strafe, up/down (while flying)
-//   Middle-mouse drag           — pan: the scene follows the cursor across the image plane
+//   View ▸ Navigation picks Fly or Orbit (see NavigationMode).
+//   Fly:   right-drag looks (cursor captured), W/S, A/D, R/F fly while it is held; middle-drag pans
+//   Orbit: Alt+left-drag or middle-drag orbits the focus; right-drag pans
 //   Scroll wheel                — get closer: dolly under perspective, zoom under orthographic
 //   Ctrl+scroll                 — movement speed for the fly-through
 //   H                           — re-frame the camera on the scene
@@ -46,6 +46,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -212,6 +213,28 @@ static const char* cameraProjectionHint(CameraProjection projection) {
 // The vertical FOV the perspective ray generator uses, shared with albedo.frag's FOV. Every screen
 // projection in this file has to agree with the shader about it or the overlays drift off the image.
 static constexpr float CAMERA_VERTICAL_FOV_DEGREES = 60.0f;
+
+// Which mouse gestures move the camera. The left button is the active tool's in both, so neither may
+// put navigation on it bare.
+//
+//   Fly     right-drag looks (cursor captured) and W/A/S/D/R/F move while it is held; middle-drag pans.
+//   Orbit   Alt+left-drag or middle-drag turns about the orbit focus; right-drag pans. Made for a
+//           laptop: everything but the wheel is reachable with two buttons, and the trackpad's
+//           two-finger scroll arrives as the wheel. Alt+click without a drag still samples a material
+//           in the tools that do that.
+//
+// Both share the wheel (dolly or ortho zoom), H, and the navigator.
+enum class NavigationMode {
+    Fly,
+    Orbit
+};
+
+// How far an Alt+left press may wander and still be a click (a material sample) rather than an orbit.
+static constexpr float ORBIT_CLICK_SLOP_PIXELS = 5.0f;
+
+static const char* navigationModeLabel(NavigationMode mode) {
+    return mode == NavigationMode::Orbit ? "Orbit" : "Fly";
+}
 
 // Isometric's angle: yaw a half-turn off the X axis so the camera looks down the +X/+Z diagonal, and
 // the pitch whose tangent is 1/sqrt(2) -- the elevation at which the three world axes project 120
@@ -1429,6 +1452,13 @@ struct EditorState {
     bool cameraIsPanning = false;       // Middle mouse held inside the viewport.
     bool cameraIsOrbiting = false;      // Dragging the navigator cube.
 
+    NavigationMode navigationMode = NavigationMode::Fly;   // Saved in imgui.ini; see registerEditorIniHandler.
+    // Orbit mode's turn: Alt+left or middle held, pressed inside the viewport. Separate from
+    // cameraIsOrbiting, which belongs to the cube and is cleared by the cube's own deactivation.
+    bool viewportOrbitActive = false;
+    bool viewportOrbitByAlt = false;    // Started with Alt+left, so a release without a drag is a sample.
+    bool viewportOrbitDragged = false;  // Moved past the click slop since the press.
+
     // --- Viewport panel ---
     // The size the panel had when it was last laid out, in framebuffer pixels. The render targets are
     // resized to match at the top of the *next* frame — see the note in renderEditor().
@@ -1640,6 +1670,7 @@ struct EditorState {
     // --- Interface ---
     bool dockLayoutBuilt = false;
     bool resetDockLayoutRequested = false;
+    int savedDockLayoutVersion = 0;   // From imgui.ini; an older layout is replaced once. See DOCK_LAYOUT_VERSION.
     bool loadSceneDialogOpen = false;
     std::string browserDirectory = DEFAULT_SCENE_DIRECTORY;
     std::string browserSelection;       // Folder highlighted in the browser, if any.
@@ -1777,6 +1808,14 @@ struct EditorState {
     // the anchor is: an Alt-drag *sets* the flag, so reading it live would have every frame after
     // the first see the value this drag just wrote and record an undo that cannot clear it.
     bool gizmoDragStartFree = false;
+    // A resize handle's drag (handles 6..11, on a generated shape's faces): the size and centre the
+    // shape had at the press, and the face line the cursor is measured along. Frozen for the reason the
+    // anchor is -- the face moves with the drag.
+    int resizeStartDimensions[3] = {0, 0, 0};
+    projv::core::vec3 resizeStartCentre = projv::core::vec3(0.0f);   // Parent-local.
+    projv::core::vec3 resizeFaceStartWorld = projv::core::vec3(0.0f);
+    projv::core::vec3 resizeAxisWorld = projv::core::vec3(1.0f, 0.0f, 0.0f);
+    float resizeVoxelWorld = 1.0f;   // World length of one voxel along the axis.
 
     // --- Viewport interaction ---
     // Screen rectangle the scene image occupies, so a click in it can be turned back into a ray.
@@ -2253,6 +2292,11 @@ struct EditorState {
     // brush declined and every placement refused for want of room, which on ordinary ground is most
     // of them.
     std::vector<projv::core::ivec3> brushPreviewScatterPlanted;
+    // Sites a Force dab has planted in the current stroke, so a drag lays a row spaced by Spacing
+    // rather than a tree on every frame the cursor moves. Cleared whenever the stroke journal is
+    // empty -- which is what a new stroke or preview starts with -- rather than at each of the places
+    // a stroke can begin.
+    std::vector<projv::core::ivec3> brushForcedSites;
 
     // --- Assigning a palette entry to a brush role ---
     //
@@ -3108,7 +3152,8 @@ static float viewportWorldUnitsPerScreenPixel(const EditorState& editor) {
     return (2.0f * scale * cameraFocusDepth(editor)) / imageHeight;
 }
 
-// Middle-mouse pan: the scene follows the cursor, sideways and up/down across the image plane.
+// Pan: the scene follows the cursor, sideways and up/down across the image plane. On the middle
+// button in Fly mode and the right button in Orbit mode (see NavigationMode).
 //
 // It is the third of the three things a 3D view has to be able to do (look, pan, and get closer), and
 // the only one the fly-through cannot express -- W/A/S/D moves along the *world's* horizontal, so
@@ -3119,17 +3164,20 @@ static float viewportWorldUnitsPerScreenPixel(const EditorState& editor) {
 // Deliberately not cursor-captured, unlike the fly-through. A pan is a short, aimed gesture that ends
 // where the user meant it to, so warping the cursor back at the end would undo exactly the feedback
 // they were working from; and without capture ImGui's own hover state stays honest throughout.
-static bool updateCameraPan(EditorState& editor) {
+static bool updateCameraPan(EditorState& editor, ImGuiMouseButton button) {
     using namespace projv::core;
 
     if (!editor.cameraIsPanning) {
-        if (!editor.viewportHovered || editor.cameraIsFlying || editor.cameraIsOrbiting) return false;
-        if (!ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) return false;
+        if (!editor.viewportHovered || editor.cameraIsFlying || editor.cameraIsOrbiting ||
+            editor.viewportOrbitActive) {
+            return false;
+        }
+        if (!ImGui::IsMouseClicked(button)) return false;
         editor.cameraIsPanning = true;
         return false;   // The press itself moves nothing; the drag frames after it do.
     }
 
-    if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+    if (!ImGui::IsMouseDown(button)) {
         editor.cameraIsPanning = false;
         return false;
     }
@@ -3190,6 +3238,115 @@ static bool updateCameraZoom(EditorState& editor, float notches) {
     return true;
 }
 
+// Orbit mode's turn about the focus. The press is claimed inside the Viewport panel (Alt+left has to be
+// taken before the tools see it -- see claimViewportOrbit); this is the drag that follows it.
+//
+// The focus is re-seated on the view axis at the press, at the depth it already had. Fly mode, a pan, or
+// a pick can all leave it off-centre, and turning about a point that is not under the middle of the
+// image would jump the view on the first pixel of the drag.
+static bool updateCameraOrbit(EditorState& editor) {
+    if (!editor.viewportOrbitActive) return false;
+
+    ImGuiMouseButton button = editor.viewportOrbitByAlt ? ImGuiMouseButton_Left : ImGuiMouseButton_Middle;
+    if (!ImGui::IsMouseDown(button)) {
+        editor.viewportOrbitActive = false;
+        return false;
+    }
+
+    ImVec2 movement = ImGui::GetIO().MouseDelta;
+    if (movement.x == 0.0f && movement.y == 0.0f) return false;
+    if (!editor.viewportOrbitDragged) {
+        if (!ImGui::IsMouseDragging(button, ORBIT_CLICK_SLOP_PIXELS)) return false;
+        editor.viewportOrbitDragged = true;
+        editor.orbitFocus = editor.cameraPosition +
+                            glm::normalize(computeCameraDirection(editor)) * cameraFocusDepth(editor);
+    }
+
+    // Same sign convention as the fly-through's look and the cube's orbit: drag right and the subject
+    // turns to show its left side.
+    const float ORBIT_SENSITIVITY = 0.006f;   // Radians per pixel.
+    editor.cameraYaw += movement.x * ORBIT_SENSITIVITY;
+    editor.cameraPitch = std::clamp(editor.cameraPitch - movement.y * ORBIT_SENSITIVITY, -1.55f, 1.55f);
+    aimCameraAtFocus(editor, computeCameraDirection(editor));
+    return true;
+}
+
+// Orbit mode's Alt+left press, taken here -- inside the Viewport panel, before the gizmo and the tools
+// read the click -- because updateCamera runs after the interface and would be a frame late to stop a
+// selection or a stroke starting under the orbit.
+//
+// Alt+click is also the material sample in every tool that writes materials, so a press released
+// without passing the slop is handed to the picker on release instead of on press. That is the one
+// cost of Orbit mode: the sample lands when the button comes up.
+static void claimViewportOrbit(EditorState& editor, bool imageHovered) {
+    if (editor.navigationMode != NavigationMode::Orbit) return;
+
+    if (!editor.viewportOrbitActive) {
+        if (!imageHovered || editor.cameraIsPanning || !ImGui::GetIO().KeyAlt) return;
+        if (!ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return;
+        editor.viewportOrbitActive = true;
+        editor.viewportOrbitByAlt = true;
+        editor.viewportOrbitDragged = false;
+        return;
+    }
+
+    if (!editor.viewportOrbitByAlt || ImGui::IsMouseDown(ImGuiMouseButton_Left)) return;
+    // Released. updateCameraOrbit would clear the flag too, but the sample needs the cursor position of
+    // this frame and the decision made before the tools below look at imageHovered.
+    editor.viewportOrbitActive = false;
+    bool samples = editor.activeTool != EditorTool::Select && editor.activeTool != EditorTool::Move;
+    if (!editor.viewportOrbitDragged && samples) {
+        ImVec2 mouse = ImGui::GetIO().MousePos;
+        float imageWidth = std::max(1.0f, editor.viewportImageMax.x - editor.viewportImageMin.x);
+        float imageHeight = std::max(1.0f, editor.viewportImageMax.y - editor.viewportImageMin.y);
+        editor.pickUV = { (mouse.x - editor.viewportImageMin.x) / imageWidth,
+                          (mouse.y - editor.viewportImageMin.y) / imageHeight };
+        editor.pendingPick = PickPurpose::SampleMaterial;
+    }
+}
+
+// Drops any gesture the old mode had in flight: a pan on the button the new mode gives to something
+// else, or an orbit the new mode has no release handling for. A live fly-through is left alone -- its
+// release code runs whatever the mode, and it owns the captured cursor.
+static void setNavigationMode(EditorState& editor, NavigationMode mode) {
+    if (editor.navigationMode == mode) return;
+    editor.navigationMode = mode;
+    editor.cameraIsPanning = false;
+    editor.viewportOrbitActive = false;
+    editor.statusMessage = std::string("Navigation: ") + navigationModeLabel(mode);
+    ImGui::MarkIniSettingsDirty();
+}
+
+// Per-user preferences rather than per-scene, so they live in imgui.ini beside the dock layout instead
+// of in a scene file: the navigation mode, and which version of the default layout the saved one is.
+//
+//   [SceneEditor][Settings]
+//   Mode=Orbit
+//   Layout=2
+static void registerEditorIniHandler(EditorState& editor) {
+    ImGuiSettingsHandler handler;
+    handler.TypeName = "SceneEditor";
+    handler.TypeHash = ImHashStr("SceneEditor");
+    handler.UserData = &editor;
+    handler.ReadOpenFn = [](ImGuiContext*, ImGuiSettingsHandler*, const char* name) -> void* {
+        bool ours = std::strcmp(name, "Settings") == 0 || std::strcmp(name, "Navigation") == 0;
+        return ours ? (void*)1 : nullptr;
+    };
+    handler.ReadLineFn = [](ImGuiContext*, ImGuiSettingsHandler* h, void*, const char* line) {
+        auto& state = *static_cast<EditorState*>(h->UserData);
+        int version = 0;
+        if (std::sscanf(line, "Layout=%d", &version) == 1) state.savedDockLayoutVersion = version;
+        if (std::strcmp(line, "Mode=Orbit") == 0) state.navigationMode = NavigationMode::Orbit;
+        else if (std::strcmp(line, "Mode=Fly") == 0) state.navigationMode = NavigationMode::Fly;
+    };
+    handler.WriteAllFn = [](ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* out) {
+        const auto& state = *static_cast<const EditorState*>(h->UserData);
+        out->appendf("[SceneEditor][Settings]\nMode=%s\nLayout=%d\n\n",
+                     navigationModeLabel(state.navigationMode), state.savedDockLayoutVersion);
+    };
+    ImGui::AddSettingsHandler(&handler);
+}
+
 // Fly-through camera, active only while the right mouse button is held inside the Viewport panel.
 // Gating on the panel is what lets the same mouse serve both the interface and the camera: a drag
 // that starts over a dock panel belongs to ImGui, one that starts over the scene belongs to us.
@@ -3204,7 +3361,10 @@ static bool updateCamera(GLFWwindow* window, EditorState& editor) {
     ImGuiIO& io = ImGui::GetIO();
     bool cameraMoved = false;
 
-    if (!editor.cameraIsFlying && editor.viewportHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    bool flyMode = editor.navigationMode == NavigationMode::Fly;
+
+    if (flyMode && !editor.cameraIsFlying && editor.viewportHovered &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         editor.cameraIsFlying = true;
         glfwGetCursorPos(window, &editor.cursorAnchorX, &editor.cursorAnchorY);
         editor.lastCursorX = editor.cursorAnchorX;
@@ -3234,7 +3394,16 @@ static bool updateCamera(GLFWwindow* window, EditorState& editor) {
 
     // Runs whether or not the fly-through is live, and before the early return below: a pan is its own
     // gesture on its own button, not a mode you have to enter first.
-    cameraMoved |= updateCameraPan(editor);
+    cameraMoved |= updateCameraPan(editor, flyMode ? ImGuiMouseButton_Middle : ImGuiMouseButton_Right);
+    if (!flyMode) {
+        if (!editor.viewportOrbitActive && !editor.cameraIsPanning && !editor.cameraIsOrbiting &&
+            editor.viewportHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
+            editor.viewportOrbitActive = true;
+            editor.viewportOrbitByAlt = false;
+            editor.viewportOrbitDragged = false;
+        }
+        cameraMoved |= updateCameraOrbit(editor);
+    }
 
     if (!editor.cameraIsFlying) {
         // H re-frames on the scene, for when navigation has left the subject behind. Ignored while a
@@ -3311,12 +3480,16 @@ static const char* TOOL_PANEL_ID = "Tool###ToolPanel";
 //   left    what exists — the open asset's contents on top, the library of things that could be
 //           brought into it underneath. Navigation and organisation.
 //   centre  the scene itself, with the tool strip and the breadcrumb that says what is being edited.
-//   right   what is being done to the selection, stacked rather than tabbed: the Inspector's
-//           transform, the active tool's settings, and the palette. Those three are not alternatives
-//           — sculpting wants a brush, a colour, and the target's transform in view at once — and
-//           tabbing them is what forced the tool panel to carry its own copy of the palette grid.
-//   bottom  the edit history. The numbers that used to share it now live in the status bar, which is
-//           what a line of read-only counters actually deserves.
+//   right   what is being done, stacked rather than tabbed: the active tool's settings on top (it is
+//           what you work in), the Inspector's description of the selection, and the palette. Those
+//           three are not alternatives -- sculpting wants a brush, a colour, and the target in view at
+//           once -- and tabbing them is what forced the tool panel to carry its own palette grid.
+//   History is a tab beside the Library rather than a strip under the scene: it is looked at now and
+//   then, and the strip cost the viewport a fifth of its height all the time.
+//
+// Bump DOCK_LAYOUT_VERSION when this changes, and a saved layout from before is replaced once.
+static constexpr int DOCK_LAYOUT_VERSION = 2;
+
 static void buildDefaultDockLayout(ImGuiID dockspaceID, ImVec2 dockspaceSize) {
     ImGui::DockBuilderRemoveNode(dockspaceID);
     ImGui::DockBuilderAddNode(dockspaceID, ImGuiDockNodeFlags_DockSpace);
@@ -3325,17 +3498,16 @@ static void buildDefaultDockLayout(ImGuiID dockspaceID, ImVec2 dockspaceSize) {
     ImGuiID centerNode = dockspaceID;
     ImGuiID leftNode = ImGui::DockBuilderSplitNode(centerNode, ImGuiDir_Left, 0.20f, nullptr, &centerNode);
     ImGuiID rightNode = ImGui::DockBuilderSplitNode(centerNode, ImGuiDir_Right, 0.25f, nullptr, &centerNode);
-    ImGuiID bottomNode = ImGui::DockBuilderSplitNode(centerNode, ImGuiDir_Down, 0.22f, nullptr, &centerNode);
 
     // Left column: what is in the open asset, above the disk it could come from. Two panels, not
     // three -- the Assembly panel that used to sit between them described a container that may or
     // may not have existed, and the space it took is now the contents list's.
     ImGuiID libraryNode = ImGui::DockBuilderSplitNode(leftNode, ImGuiDir_Down, 0.40f, nullptr, &leftNode);
 
-    // Right column, split twice from the bottom up so the fractions are of the whole column: palette
-    // 30%, tool 35%, inspector the remaining 35%.
-    ImGuiID paletteNode = ImGui::DockBuilderSplitNode(rightNode, ImGuiDir_Down, 0.30f, nullptr, &rightNode);
-    ImGuiID toolNode = ImGui::DockBuilderSplitNode(rightNode, ImGuiDir_Down, 0.50f, nullptr, &rightNode);
+    // Right column: palette 28% at the bottom, then the rest split tool-over-inspector, the tool
+    // getting the larger share (about 40% of the column) because its settings are the longest list.
+    ImGuiID paletteNode = ImGui::DockBuilderSplitNode(rightNode, ImGuiDir_Down, 0.28f, nullptr, &rightNode);
+    ImGuiID toolNode = ImGui::DockBuilderSplitNode(rightNode, ImGuiDir_Up, 0.55f, nullptr, &rightNode);
 
     ImGui::DockBuilderDockWindow("Viewport", centerNode);
     ImGui::DockBuilderDockWindow("Assets", leftNode);
@@ -3343,7 +3515,7 @@ static void buildDefaultDockLayout(ImGuiID dockspaceID, ImVec2 dockspaceSize) {
     ImGui::DockBuilderDockWindow("Inspector", rightNode);
     ImGui::DockBuilderDockWindow(TOOL_PANEL_ID, toolNode);
     ImGui::DockBuilderDockWindow("Palette", paletteNode);
-    ImGui::DockBuilderDockWindow("History", bottomNode);
+    ImGui::DockBuilderDockWindow("History", libraryNode);
     ImGui::DockBuilderFinish(dockspaceID);
 }
 
@@ -4604,6 +4776,51 @@ static float choiceSegmentWidth() {
     return std::max(1.0f, (ImGui::GetContentRegionAvail().x - spacing) * 0.5f);
 }
 
+static float suggestedVoxelScale(const projv::Scene& scene, const EditorState& editor);
+static float componentVoxelScale(const projv::Scene& scene, projv::ComponentHandle handle);
+
+// A property row: the name in a fixed left column, the control filling the rest. The panels used to
+// put the name *after* a full-width field, where the panel's own edge clipped it off -- three bare
+// number boxes with no way to tell Position from Rotation.
+static void beginPropertyRow(const char* label, const char* tooltip = nullptr) {
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%s", label);
+    if (tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
+    float column = ImGui::CalcTextSize("Rotation").x + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+    ImGui::SameLine(column);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+}
+
+// A generated shape's recipe: size in voxels, hollow, wall. One set of controls for both places a
+// recipe is edited -- the Place tool's template for the next shape and the Inspector's selected
+// shape -- so the two cannot drift apart. True when anything changed; rebuilding is the caller's.
+static bool drawShapeRecipeFields(int* dimensions, bool* hollow, int* wallThickness, float voxelScale) {
+    bool changed = false;
+    beginPropertyRow("Size", "Width, height and depth, in voxels.\n\n"
+                             "On a placed shape you can also drag the coloured squares on its faces\n"
+                             "in the viewport (Move or Place tool). Hold Shift to grow both sides.");
+    if (ImGui::DragInt3("##shapeSize", dimensions, 0.3f, 1, PART_MAX_DIMENSION, "%d vx")) changed = true;
+    for (int axis = 0; axis < 3; axis++) dimensions[axis] = std::clamp(dimensions[axis], 1, PART_MAX_DIMENSION);
+    if (voxelScale > 0.0f) {
+        float column = ImGui::CalcTextSize("Rotation").x + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+        ImGui::SetCursorPosX(column);
+        ImGui::TextDisabled("%.2f x %.2f x %.2f world units", float(dimensions[0]) * voxelScale,
+                            float(dimensions[1]) * voxelScale, float(dimensions[2]) * voxelScale);
+    }
+
+    if (ImGui::Checkbox("Hollow", hollow)) changed = true;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keep only a shell of the shape, so it can be walked into.");
+    if (*hollow) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("Wall");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::DragInt("##shapeWall", wallThickness, 0.15f, 1, 32, "%d vx")) changed = true;
+        *wallThickness = std::clamp(*wallThickness, 1, 32);
+    }
+    return changed;
+}
+
 static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
     ImGui::Begin("Inspector");
 
@@ -4614,59 +4831,59 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
         return;
     }
 
-    // A part gets the whole ordinary Inspector -- name, transform, numeric fields -- because it is
-    // an ordinary component. All that is added is the line saying which stack it is in, so the
-    // panel's answer to "what am I looking at" stays complete.
-    const Part* inspectedPart = findPart(editor, editor.selectedComponent);
-    if (inspectedPart && ownerOf(scene, editor.selectedComponent) < scene.components.size()) {
-        ImGui::TextDisabled("Part of %s  (%s)",
-                            scene.components[ownerOf(scene, editor.selectedComponent)].name.c_str(),
-                            BooleanOpLabel(opOf(scene, editor.selectedComponent)));
-        if (inspectedPart->procedural) {
-            ImGui::TextDisabled("%s %d x %d x %d", ShapeKindLabel(inspectedPart->kind),
-                                inspectedPart->dimensions[0], inspectedPart->dimensions[1],
-                                inspectedPart->dimensions[2]);
+    // What it is, first: its name, where it lives, and -- for a part -- which stack it is in and how
+    // it combines there.
+    {
+        const projv::ComponentRecord& named = scene.components[editor.selectedComponent];
+        ImGui::Text("%s", named.name.c_str());
+        const Part* namedPart = findPart(editor, editor.selectedComponent);
+        if (namedPart && ownerOf(scene, editor.selectedComponent) < scene.components.size()) {
+            ImGui::TextDisabled("%s in %s  (%s)",
+                                namedPart->procedural ? ShapeKindLabel(namedPart->kind) : "Part",
+                                scene.components[ownerOf(scene, editor.selectedComponent)].name.c_str(),
+                                BooleanOpLabel(opOf(scene, editor.selectedComponent)));
+        } else {
+            ImGui::TextDisabled("%s", projv::utils::getComponentPath(scene, editor.selectedComponent).c_str());
         }
-        ImGui::Separator();
+    }
+
+    // --- Shape: the answer to "how do I make this bigger" -----------------------------------------
+    //
+    // A generated shape's size is its recipe, in voxels -- not the transform's Scale, which stretches
+    // the voxels themselves and which a part does not have (it is rebuilt at scale 1). It used to be
+    // reachable only from the Place tool's panel, below the fold, under "Editing"; it is here now, at
+    // the top of the panel that describes the selection, whatever tool is up.
+    if (Part* shapePart = findPart(editor, editor.selectedComponent)) {
+        ImGui::SeparatorText("Shape");
+        if (shapePart->procedural) {
+            float voxelScale = componentVoxelScale(scene, editor.selectedComponent);
+            if (drawShapeRecipeFields(shapePart->dimensions, &shapePart->hollow, &shapePart->wallThickness,
+                                      voxelScale)) {
+                regeneratePart(scene, editor, editor.selectedComponent);
+                // Regenerating may move the part to a new component (a resize past its resolution),
+                // and the selection follows it. Nothing below may hold the old handle.
+                if (editor.selectedComponent >= scene.components.size()) {
+                    ImGui::End();
+                    return;
+                }
+            }
+        } else {
+            ImGui::TextWrapped("Lifted or imported rather than generated, so there is no recipe to "
+                               "rebuild at a new size.");
+        }
     }
 
     projv::ComponentRecord& component = scene.components[editor.selectedComponent];
     projv::core::vec3 worldPosition = projv::utils::getComponentWorldPosition(scene, editor.selectedComponent);
     projv::core::quat worldRotation = projv::utils::getComponentWorldRotation(scene, editor.selectedComponent);
+    bool isPart = findPart(editor, editor.selectedComponent) != nullptr;
 
-    ImGui::Text("%s", component.name.c_str());
-    ImGui::TextDisabled("%s", projv::utils::getComponentPath(scene, editor.selectedComponent).c_str());
-    ImGui::Separator();
-
-    ImGui::Text("Handle       %u", editor.selectedComponent);
-    ImGui::Text("Kind         %s", component.kind == projv::ComponentKind::Asset ? "Asset"
-                                 : component.kind == projv::ComponentKind::Grid ? "Grid" : "Chunk");
-    if (!component.sourcePath.empty()) {
-        ImGui::TextWrapped("Source       %s", component.sourcePath.c_str());
-    }
-    if (component.kind != projv::ComponentKind::Asset) {
-        ImGui::Text("Voxels       %u", editor.selectedVoxelCount);
-        // Read-only, and not merely because there is no setter: resolution fixes the tree64 depth and
-        // voxelScale fixes the world size of a cell, so changing either after the fact is a resample
-        // of the whole volume. Both are chosen once, at creation. See utils::addComponent.
-        if (component.kind == projv::ComponentKind::Chunk &&
-            component.chunkHandle < scene.chunks.size()) {
-            const projv::Chunk& chunk = scene.chunks[component.chunkHandle];
-            ImGui::Text("Resolution   %u", chunk.header.resolution);
-            ImGui::Text("Voxel scale  %.3f", chunk.header.voxelScale);
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Fixed when the component was created - changing either would\n"
-                                  "resample the volume rather than edit it.");
-            }
-        }
-    }
-    // Same set the yellow viewport outline is drawn around -- one .data box for a Chunk, one per
-    // live cell for a Grid, every leaf beneath an Asset folder.
+    // Read before the transform rows: the pivot the rotation and scale fields turn about comes out of
+    // the same cache the viewport outline is drawn from.
     refreshSelectionCaches(scene, editor);
-    ImGui::Text("Boxes        %zu", editor.selectionOutlineChunks.size());
 
-    ImGui::Separator();
-    ImGui::TextDisabled("Local transform");
+    ImGui::SeparatorText("Transform");
+
 
     // Rotation is edited as Euler degrees; refreshed from the quaternion only on a selection change
     // (see the field's comment in EditorState) so a live drag isn't fighting a per-frame rebuild.
@@ -4684,7 +4901,7 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
     EditorState* editorPointer = &editor;
     projv::ComponentHandle handle = editor.selectedComponent;
 
-    ImGui::SetNextItemWidth(-1.0f);
+    beginPropertyRow("Position", "Relative to the parent, in world units.");
     projv::core::vec3 pos = component.localPosition;
     if (ImGui::DragFloat3("##localPos", &pos.x, 0.05f, 0.0f, 0.0f, "%.3f")) {
         projv::core::vec3 previousPos = component.localPosition;
@@ -4700,8 +4917,6 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
                                                      scenePointer->components[handle].localScale); };
         editor.history.record(std::move(record), ImGui::GetTime());
     }
-    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-    ImGui::TextDisabled("Position");
 
     // --- What these numbers get rounded to, said where the rounding happens -----------------------
     //
@@ -4735,7 +4950,7 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
         }
     }
 
-    ImGui::SetNextItemWidth(-1.0f);
+    beginPropertyRow("Rotation", "Degrees about X, Y and Z.");
     if (ImGui::DragFloat3("##localRot", editor.inspectorEulerDegrees, 0.5f, 0.0f, 0.0f, "%.1f")) {
         projv::core::quat previousRot = component.localRotation;
         projv::core::vec3 previousPos = component.localPosition;
@@ -4760,8 +4975,6 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
                                                      newRot, scenePointer->components[handle].localScale); };
         editor.history.record(std::move(record), ImGui::GetTime());
     }
-    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-    ImGui::TextDisabled("Rotation (deg)");
 
     // --- Free placement: the way out of the grid, and the way back ------------------------------
     //
@@ -4781,7 +4994,9 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
     // disagreed, since a component can be free while the document grid is on. This pair says what the
     // *component* does; the viewport's grid bar says what the *document* does. Different words for
     // different scopes is the whole fix.
-    float segmentWidth = choiceSegmentWidth();
+    beginPropertyRow("Grid");
+    float segmentWidth = std::max(choiceSegmentWidth(),
+                                  (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemInnerSpacing.x) * 0.5f);
 
     if (drawChoiceSegment("Follows grid", !isFree, segmentWidth)) {
         // Reached only from the free state, so there is always a real move to make and record: clearing
@@ -4834,29 +5049,33 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
     // anonymous number fields cannot say what they are, and these two segments already do.
 
 
-    ImGui::SetNextItemWidth(-1.0f);
+    // Not offered on a part: a part is rebuilt at scale 1 every time its recipe changes, so a scale
+    // here would be undone by the next resize -- and it is not what "make it bigger" means for a
+    // shape anyway. Its Size, above, is.
     float scale = component.localScale;
-    // Uniform scale only (v0.0) -- matches ComponentRecord::localScale and the compose.json loader,
-    // which rejects a non-uniform scale on a data leaf outright.
-    if (ImGui::DragFloat("##localScale", &scale, 0.01f, 0.001f, 1000.0f, "%.3f")) {
-        float previousScale = component.localScale;
-        projv::core::vec3 previousPos = component.localPosition;
-        projv::core::vec3 newPos = usePivot
-            ? pivotCompensatedPosition(previousPos, component.localRotation, previousScale,
-                                       editor.inspectorPivotLocal, component.localRotation, scale)
-            : previousPos;
-        applyComponentTransform(&scene, &editor, handle, newPos, component.localRotation, scale);
-        projv::editor::EditRecord record;
-        record.label = "Scale " + component.name;
-        record.coalesceKey = "transform:scale:" + std::to_string(handle);
-        record.undo = [=] { applyComponentTransform(scenePointer, editorPointer, handle, previousPos,
-                                                     scenePointer->components[handle].localRotation, previousScale); };
-        record.redo = [=] { applyComponentTransform(scenePointer, editorPointer, handle, newPos,
-                                                     scenePointer->components[handle].localRotation, scale); };
-        editor.history.record(std::move(record), ImGui::GetTime());
+    if (!isPart) {
+        beginPropertyRow("Scale", "Uniform. Stretches the voxels themselves -- one voxel becomes a\n"
+                                  "bigger cube -- rather than adding voxels.");
+        // Uniform scale only (v0.0) -- matches ComponentRecord::localScale and the compose.json loader,
+        // which rejects a non-uniform scale on a data leaf outright.
+        if (ImGui::DragFloat("##localScale", &scale, 0.01f, 0.001f, 1000.0f, "%.3f")) {
+            float previousScale = component.localScale;
+            projv::core::vec3 previousPos = component.localPosition;
+            projv::core::vec3 newPos = usePivot
+                ? pivotCompensatedPosition(previousPos, component.localRotation, previousScale,
+                                           editor.inspectorPivotLocal, component.localRotation, scale)
+                : previousPos;
+            applyComponentTransform(&scene, &editor, handle, newPos, component.localRotation, scale);
+            projv::editor::EditRecord record;
+            record.label = "Scale " + component.name;
+            record.coalesceKey = "transform:scale:" + std::to_string(handle);
+            record.undo = [=] { applyComponentTransform(scenePointer, editorPointer, handle, previousPos,
+                                                         scenePointer->components[handle].localRotation, previousScale); };
+            record.redo = [=] { applyComponentTransform(scenePointer, editorPointer, handle, newPos,
+                                                         scenePointer->components[handle].localRotation, scale); };
+            editor.history.record(std::move(record), ImGui::GetTime());
+        }
     }
-    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-    ImGui::TextDisabled("Scale");
 
     // Reported, not offered. The checkbox that was here was the second of two over one bool -- the Move
     // panel had the other -- and it belongs with the grid on the viewport bar, where it is one control
@@ -4871,14 +5090,8 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
                           "minimum corner -- it is the raw transform and Position stays put.");
     }
 
-    ImGui::Separator();
-    ImGui::TextDisabled("World transform (read-only)");
-    ImGui::Text("Position  %.2f, %.2f, %.2f", worldPosition.x, worldPosition.y, worldPosition.z);
-    ImGui::Text("Rotation  %.3f, %.3f, %.3f, %.3f",
-                worldRotation.w, worldRotation.x, worldRotation.y, worldRotation.z);
-
-    ImGui::Separator();
-    if (ImGui::Button("Look at this component")) {
+    ImGui::Spacing();
+    if (ImGui::Button("Look at it")) {
         // Keep the current viewing angle and distance, and slide the camera so the component sits
         // where the camera is already pointing.
         projv::core::vec3 viewDirection = computeCameraDirection(editor);
@@ -4886,6 +5099,8 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
         editor.cameraPosition = worldPosition - viewDirection * distance;
         editor.cameraMovedByInterface = true;
     }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Slide the camera so this sits in the middle of the view.");
+    ImGui::SameLine();
     if (ImGui::Button("Reset transform")) {
         // Captured before the reset overwrites them -- component is a live reference into
         // scene.components[handle], so this order matters.
@@ -4901,6 +5116,38 @@ static void drawInspectorPanel(projv::Scene& scene, EditorState& editor) {
         record.redo = [=] { applyComponentTransform(scenePointer, editorPointer, handle, projv::core::vec3(0.0f),
                                                      projv::core::quat(1.0f, 0.0f, 0.0f, 0.0f), 1.0f); };
         editor.history.record(std::move(record), ImGui::GetTime());
+    }
+
+    // Engine-facing facts: useful when something is being diagnosed, noise the rest of the time.
+    if (ImGui::CollapsingHeader("Details")) {
+        ImGui::Text("Handle       %u", editor.selectedComponent);
+        ImGui::Text("Kind         %s", component.kind == projv::ComponentKind::Asset ? "Asset"
+                                     : component.kind == projv::ComponentKind::Grid ? "Grid" : "Chunk");
+        if (!component.sourcePath.empty()) {
+            ImGui::TextWrapped("Source       %s", component.sourcePath.c_str());
+        }
+        if (component.kind != projv::ComponentKind::Asset) {
+            ImGui::Text("Voxels       %u", editor.selectedVoxelCount);
+            // Read-only, and not merely because there is no setter: resolution fixes the tree64 depth and
+            // voxelScale fixes the world size of a cell, so changing either after the fact is a resample
+            // of the whole volume. Both are chosen once, at creation. See utils::addComponent.
+            if (component.kind == projv::ComponentKind::Chunk &&
+                component.chunkHandle < scene.chunks.size()) {
+                const projv::Chunk& chunk = scene.chunks[component.chunkHandle];
+                ImGui::Text("Resolution   %u", chunk.header.resolution);
+                ImGui::Text("Voxel scale  %.3f", chunk.header.voxelScale);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Fixed when the component was created - changing either would\n"
+                                      "resample the volume rather than edit it.");
+                }
+            }
+        }
+        // Same set the yellow viewport outline is drawn around -- one .data box for a Chunk, one per
+        // live cell for a Grid, every leaf beneath an Asset folder.
+        ImGui::Text("Boxes        %zu", editor.selectionOutlineChunks.size());
+        ImGui::Text("World pos    %.2f, %.2f, %.2f", worldPosition.x, worldPosition.y, worldPosition.z);
+        ImGui::Text("World rot    %.3f, %.3f, %.3f, %.3f",
+                    worldRotation.w, worldRotation.x, worldRotation.y, worldRotation.z);
     }
 
     ImGui::End();
@@ -5379,14 +5626,6 @@ static void drawAssetsPanel(projv::Scene& scene, EditorState& editor) {
         ImGui::TextDisabled("- %zu folded, %s voxel(s)", contributing,
                             formatCompactCount(uint32_t(std::min<size_t>(voxels, 0xFFFFFFFFu))).c_str());
     }
-    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemSpacing.x * 2.0f);
-    if (ImGui::Checkbox("Isolate", &editor.isolateOpen)) {
-        editor.isolationDirty = true;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Draw only what is inside the open asset. Working on one tower of a\n"
-                          "cathedral should not mean rendering the cathedral.");
-    }
 
     RowRequests requests;
     projv::ComponentHandle removeRequest = projv::INVALID_COMPONENT_HANDLE;
@@ -5658,6 +5897,16 @@ static void drawAssetsPanel(projv::Scene& scene, EditorState& editor) {
                           "The result is the default, because the result is what is being made --\n"
                           "but the shapes are what is being arranged.");
     }
+    // Beside Show sources rather than on the item-count line, where a narrow panel clipped it: both
+    // are "what does the viewport draw" switches.
+    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemSpacing.x * 2.0f);
+    if (ImGui::Checkbox("Isolate", &editor.isolateOpen)) {
+        editor.isolationDirty = true;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Draw only what is inside the open asset. Working on one tower of a\n"
+                          "cathedral should not mean rendering the cathedral.");
+    }
 
     // --- Add -----------------------------------------------------------------------------------
     if (ImGui::Button("Add")) ImGui::OpenPopup("##addItem");
@@ -5776,8 +6025,8 @@ static void drawAssetsPanel(projv::Scene& scene, EditorState& editor) {
 
     ImGui::BeginDisabled(!canBakeInto);
     std::string intoLabel = target < scene.components.size()
-                          ? "Into  " + scene.components[target].name
-                          : std::string("Into...");
+                          ? "Bake into " + scene.components[target].name
+                          : std::string("Bake into...");
     if (ImGui::Button(intoLabel.c_str())) {
         bakeNodeInto(scene, editor, *resolve, target, editor.bakeOp);
     }
@@ -5787,25 +6036,23 @@ static void drawAssetsPanel(projv::Scene& scene, EditorState& editor) {
             ? "Write the resolved form into that component with the op beside this button."
             : "Select the component to write into, in this list or in the viewport.");
     }
+    // The op as a named dropdown: three bare radio dots captioned + - & said nothing until hovered.
     ImGui::SameLine();
     ImGui::BeginDisabled(!canBakeInto);
-    for (int index = 1; index < BOOLEAN_OP_COUNT; index++) {   // Skip None: a bake always resolves.
-        BooleanOp candidate = static_cast<BooleanOp>(index);
-        if (index > 1) ImGui::SameLine(0.0f, 2.0f);
-        if (ImGui::RadioButton(BooleanOpGlyph(candidate), editor.bakeOp == candidate)) {
-            editor.bakeOp = candidate;
+    ImGui::TextDisabled("as");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    std::string bakePreview = std::string(BooleanOpGlyph(editor.bakeOp)) + " " + BooleanOpLabel(editor.bakeOp);
+    if (ImGui::BeginCombo("##bakeOp", bakePreview.c_str())) {
+        for (int index = 1; index < BOOLEAN_OP_COUNT; index++) {   // Skip None: a bake always resolves.
+            BooleanOp candidate = static_cast<BooleanOp>(index);
+            std::string label = std::string(BooleanOpGlyph(candidate)) + " " + BooleanOpLabel(candidate);
+            if (ImGui::Selectable(label.c_str(), editor.bakeOp == candidate)) editor.bakeOp = candidate;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", BooleanOpHint(candidate));
         }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("%s", BooleanOpHint(candidate));
-        }
+        ImGui::EndCombo();
     }
     ImGui::EndDisabled();
-
-    if (resolve && resolve->resultWalkCells > 0) {
-        ImGui::TextDisabled("Last resolve walked %s cell(s).",
-                            formatCompactCount(uint32_t(std::min<size_t>(resolve->resultWalkCells,
-                                                                         0xFFFFFFFFu))).c_str());
-    }
 
     ImGui::EndChild();
 
@@ -7311,7 +7558,8 @@ static void drawMoveToolSettings(projv::Scene& scene, EditorState& editor) {
     ImGui::Checkbox("Show gizmo", &editor.gizmoEnabled);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Three arrows to translate along the world axes and three rings to rotate\n"
-                          "about them, drawn at the selection's pivot.");
+                          "about them, drawn at the selection's pivot. A generated shape also gets\n"
+                          "a square on each face: drag one to resize (Shift: both sides).");
     }
 
     // "Pivot at center" used to be here *and* in the Inspector, two checkboxes over one bool. It is on
@@ -7646,134 +7894,48 @@ static void drawPlaceToolSettings(projv::Scene& scene, EditorState& editor) {
     projv::ComponentHandle node = activeStackNode(scene, editor);
     Resolve* resolve = findResolve(editor, node);
 
-    // Where it will land, said by the tool that will land it. The panel used to name a container
-    // the user had no way to choose from here, which made it a status line about somebody else's
-    // state; now it names the open asset, and the Assets panel is where you change it.
-    ImGui::TextDisabled("Into");
+    // Where it will land, said by the tool that will land it. The Assets panel is where it changes.
     if (node < scene.components.size()) {
-        ImGui::TextWrapped("%s", scene.components[node].name.c_str());
-        ImGui::TextDisabled("%zu item(s)", scene.components[node].children.size());
+        ImGui::TextDisabled("Into");
+        ImGui::SameLine();
+        ImGui::Text("%s", scene.components[node].name.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%zu item(s))", scene.components[node].children.size());
     } else {
-        ImGui::TextWrapped("Nothing open - the first shape you place\ncreates an asset to hold it.");
+        ImGui::TextWrapped("Nothing open - the first shape you place creates an asset to hold it.");
     }
 
-    ImGui::Separator();
-
-    // --- The shape: the selection's own, or the template for the next one -----------------------
+    // --- The next shape -------------------------------------------------------------------------
     //
-    // **Two sets of values, never one.** `editor.shape*` is the template a *new* shape is made from;
-    // a placed shape's recipe lives on its own Part and is what this panel edits while it is
-    // selected. Sharing one set was a real defect rather than an untidiness: the fields kept the
-    // last selection's numbers, so clicking a second shape and nudging anything resized that shape
-    // to the first one's dimensions -- which reads as the editor randomly resizing things.
-    //
-    // And **the kind is not editable on a placed shape.** A box is a box; "make this box a sphere"
-    // is not a resize, it is discarding one object and making another, and offering it inline as a
-    // dropdown makes an irreversible substitution look like a setting. Placing a sphere is the way
-    // to have a sphere.
-    Part* editedPart = findPart(editor, editor.selectedComponent);
-    bool editingPlaced = editedPart != nullptr && editedPart->procedural;
-    bool editingLifted = editedPart != nullptr && !editedPart->procedural;
-
-    if (editingPlaced) {
-        ImGui::TextDisabled("Editing");
-        ImGui::TextWrapped("%s", scene.components[editor.selectedComponent].name.c_str());
-    } else {
-        ImGui::TextDisabled("Next shape");
-    }
-
-    bool sizeChanged = false;
-
-    ImGui::Spacing();
-    ImGui::TextDisabled("Shape");
-    if (editingPlaced) {
-        ImGui::Text("%s", ShapeKindLabel(editedPart->kind));
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Fixed when it was placed. Changing a shape's kind is not a resize --\n"
-                              "it is a different object -- so it is done by placing a new one.");
+    // **Only the template, never the selection.** This panel used to edit whichever shape was
+    // selected, under an "Editing" heading that swapped in for "Next shape" -- one set of fields that
+    // meant two different things depending on a click elsewhere, which is what made resizing a placed
+    // shape so hard to find. A placed shape's size is in the Inspector now, and on the square handles
+    // on its faces; this is what the next click drops.
+    ImGui::SeparatorText("Next shape");
+    beginPropertyRow("Shape");
+    if (ImGui::BeginCombo("##shapeKind", ShapeKindLabel(editor.shapeKind))) {
+        for (int i = 0; i < SHAPE_KIND_COUNT; i++) {
+            ShapeKind kind = static_cast<ShapeKind>(i);
+            if (ImGui::Selectable(ShapeKindLabel(kind), editor.shapeKind == kind)) editor.shapeKind = kind;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", ShapeKindHint(kind));
         }
-        ImGui::TextDisabled("%s", ShapeKindHint(editedPart->kind));
-    } else {
-        ImGui::SetNextItemWidth(-1.0f);
-        if (ImGui::BeginCombo("##shapeKind", ShapeKindLabel(editor.shapeKind))) {
-            for (int i = 0; i < SHAPE_KIND_COUNT; i++) {
-                ShapeKind kind = static_cast<ShapeKind>(i);
-                if (ImGui::Selectable(ShapeKindLabel(kind), editor.shapeKind == kind)) {
-                    editor.shapeKind = kind;
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", ShapeKindHint(kind));
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::TextDisabled("%s", ShapeKindHint(editor.shapeKind));
+        ImGui::EndCombo();
     }
-
-    // One set of controls over whichever recipe is in play. Aliased rather than copied, because a
-    // copy is what has to be kept in step and what drifted.
-    int* dimensions   = editingPlaced ? editedPart->dimensions      : editor.shapeDimensions;
-    bool* hollow      = editingPlaced ? &editedPart->hollow         : &editor.shapeHollow;
-    int* wallThickness = editingPlaced ? &editedPart->wallThickness : &editor.shapeWallThickness;
-
-    // Voxels, not world units, for the reason the Paint panel already gives: a size in world units
-    // means a different number of voxels per component, depending on each one's voxelScale. The
-    // world size is spelled out underneath for the one number a user pictures.
-    ImGui::Spacing();
-    static const char* AXIS_LABELS[3] = { "Width", "Height", "Depth" };
-    static const char* AXIS_IDS[3] = { "##shapeW", "##shapeH", "##shapeD" };
-    ImGui::BeginDisabled(editingLifted);
-    for (int axis = 0; axis < 3; axis++) {
-        ImGui::SetNextItemWidth(fieldWidthBeside("Height (voxels)"));
-        if (ImGui::DragInt(AXIS_IDS[axis], &dimensions[axis], 0.3f, 1, PART_MAX_DIMENSION)) {
-            sizeChanged = true;
-        }
-        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-        ImGui::TextDisabled("%s (voxels)", AXIS_LABELS[axis]);
-        dimensions[axis] = std::clamp(dimensions[axis], 1, PART_MAX_DIMENSION);
-    }
-
-    ImGui::Spacing();
-    if (ImGui::Checkbox("Hollow", hollow)) sizeChanged = true;
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Keep only a shell of the shape, so it can be walked into.");
-    }
-    if (*hollow) {
-        ImGui::SetNextItemWidth(fieldWidthBeside("Wall (voxels)"));
-        if (ImGui::DragInt("##shapeWall", wallThickness, 0.15f, 1, 32)) sizeChanged = true;
-        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-        ImGui::TextDisabled("Wall (voxels)");
-        *wallThickness = std::clamp(*wallThickness, 1, 32);
-    }
-    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", ShapeKindHint(editor.shapeKind));
 
     float voxelScale = resolve ? resolve->voxelScale : suggestedVoxelScale(scene, editor);
-    if (voxelScale > 0.0f && !editingLifted) {
-        ImGui::TextDisabled("World size %.2f x %.2f x %.2f",
-                            float(dimensions[0]) * voxelScale,
-                            float(dimensions[1]) * voxelScale,
-                            float(dimensions[2]) * voxelScale);
-    }
+    drawShapeRecipeFields(editor.shapeDimensions, &editor.shapeHollow, &editor.shapeWallThickness, voxelScale);
 
-    // Last, and **after every read of `editedPart` above**: crossing a resolution boundary moves the
-    // recipe to a new component and leaves that pointer dangling. Nothing below touches it.
-    if (sizeChanged && editingPlaced) {
-        regeneratePart(scene, editor, editor.selectedComponent);
-        editedPart = nullptr;
-    }
-    if (editingLifted) {
-        ImGui::TextDisabled("Lifted or imported, not generated - there is no\nprimitive to rebuild, "
-                            "so it does not resize.");
-    }
+    beginPropertyRow("Distance", "How far down the ray a shape lands when you click past everything --\n"
+                                 "the only way to put the first shape of an asset into empty space.");
+    ImGui::DragFloat("##shapePlaceDistance", &editor.shapePlaceDistance, 0.5f, 1.0f, 1000.0f, "%.1f");
 
-    // Snapping used to live here -- the checkbox, the step, the grid size, "Square to world" and the
-    // mass pull. It governs every transform in the editor, not just the ones this tool makes, so it
-    // is on the viewport's grid bar now. See drawViewportGridBar for why.
-
-    // --- The op: the selection's own, or the template's, on the same rule as the shape -----------
+    // --- The op: the selection's own, or the template's ------------------------------------------
     //
     // When something in the open asset is selected this edits *that component's* `op` -- the same
     // value the Assets panel's row combo shows, so the two agree by being one value rather than by
     // being kept in step. With nothing selected it is what the next placed shape drops in as.
-    ImGui::Separator();
     projv::ComponentHandle opTarget = projv::INVALID_COMPONENT_HANDLE;
     if (resolve && editor.selectedComponent < scene.components.size() &&
         ownerOf(scene, editor.selectedComponent) == node &&
@@ -7784,8 +7946,16 @@ static void drawPlaceToolSettings(projv::Scene& scene, EditorState& editor) {
                                                               : editor.shapeOp;
     BooleanOp chosen = op;
 
+    if (opTarget != projv::INVALID_COMPONENT_HANDLE) {
+        ImGui::SeparatorText("Selected");
+        ImGui::Text("%s", scene.components[opTarget].name.c_str());
+        if (findPart(editor, opTarget)) {
+            ImGui::TextDisabled("Resize it in the Inspector, or drag the\nsquares on its faces in the viewport.");
+        }
+    }
+    ImGui::Spacing();
     ImGui::TextDisabled("%s", opTarget != projv::INVALID_COMPONENT_HANDLE ? "Combines as"
-                                                                         : "Drops in as");
+                                                                         : "Next shape drops in as");
     for (int index = 1; index < BOOLEAN_OP_COUNT; index++) {   // Union/Subtract/Intersect...
         BooleanOp candidate = static_cast<BooleanOp>(index);
         if (index > 1) ImGui::SameLine();
@@ -7806,17 +7976,6 @@ static void drawPlaceToolSettings(projv::Scene& scene, EditorState& editor) {
         } else {
             editor.shapeOp = chosen;   // The template for the next placement. Nothing to promote.
         }
-    }
-
-    ImGui::Spacing();
-    ImGui::SetNextItemWidth(fieldWidthBeside("Place distance"));
-    ImGui::DragFloat("##shapePlaceDistance", &editor.shapePlaceDistance, 0.5f, 1.0f, 1000.0f, "%.1f");
-    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-    ImGui::TextDisabled("Place distance");
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("How far down the ray a primitive lands when you click past everything --\n"
-                          "the same fallback the Sculpt brush has, and the only way to put the first\n"
-                          "shape of an asset into empty space.");
     }
 
     ImGui::Separator();
@@ -8079,7 +8238,9 @@ static void drawToolPanel(projv::Scene& scene, EditorState& editor) {
     }
     ImGui::PopID();
 
-    ImGui::TextDisabled("%s", editorToolHint(editor.activeTool));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("%s", editorToolHint(editor.activeTool));
+    ImGui::PopStyleColor();
     ImGui::Separator();
 
     switch (editor.activeTool) {
@@ -14433,7 +14594,9 @@ namespace gizmo {
     constexpr float RING_RADIUS_PIXELS  = 96.0f;
     constexpr float GRAB_RADIUS_PIXELS  = 9.0f;
     constexpr int   RING_SEGMENTS       = 64;
-    constexpr int   HANDLE_COUNT        = 6;
+    constexpr int   HANDLE_COUNT        = 12;   // 3 arrows, 3 rings, 6 resize squares.
+    constexpr int   FIRST_RESIZE_HANDLE = 6;    // + axis * 2 + (positive face ? 1 : 0).
+    constexpr float RESIZE_HALF_PIXELS  = 6.0f;
 
     // A ring seen close to edge-on projects to a sliver, and the ray-plane intersection its drag
     // depends on blows up as the plane turns parallel to the view. Below this |cos| between the view
@@ -14537,6 +14700,14 @@ struct GizmoLayout {
     std::vector<ImVec2> ringScreen[3];          // Projected polyline, empty where off-screen.
     float  worldRadius = 1.0f;
     float  arrowWorldLength = 1.0f;
+
+    // Resize squares, one per face of a generated shape's box. Absent for anything that cannot be
+    // rebuilt at a new size (a lifted region, an imported asset, a plain component).
+    bool   resizeVisible[6] = {false, false, false, false, false, false};
+    ImVec2 resizeScreen[6];
+    projv::core::vec3 resizeFaceWorld[6];
+    projv::core::vec3 resizeAxisWorld[3];        // The shape's own axes, which turn with it.
+    float  resizeVoxelWorld[3] = {1.0f, 1.0f, 1.0f};
 };
 
 static GizmoLayout buildGizmoLayout(const EditorState& editor, projv::core::vec3 anchor,
@@ -14596,6 +14767,16 @@ static GizmoLayout buildGizmoLayout(const EditorState& editor, projv::core::vec3
 static int hitTestGizmo(const GizmoLayout& layout, ImVec2 mouse) {
     int best = -1;
     float bestDistance = gizmo::GRAB_RADIUS_PIXELS;
+
+    // The squares first: they sit out on the shape's faces, away from the crowded middle, and a face
+    // square that lies under a ring would otherwise be unreachable.
+    for (int i = 0; i < 6; i++) {
+        if (!layout.resizeVisible[i]) continue;
+        float dx = std::abs(mouse.x - layout.resizeScreen[i].x);
+        float dy = std::abs(mouse.y - layout.resizeScreen[i].y);
+        float reach = gizmo::RESIZE_HALF_PIXELS + 3.0f;
+        if (dx <= reach && dy <= reach) return gizmo::FIRST_RESIZE_HANDLE + i;
+    }
 
     for (int axis = 0; axis < 3; axis++) {
         if (!layout.arrowVisible[axis]) continue;
@@ -14667,6 +14848,104 @@ static void drawGizmo(ImDrawList* drawList, const GizmoLayout& layout, int hover
     }
 
     drawList->AddCircleFilled(layout.centerScreen, 4.0f, IM_COL32(240, 240, 240, 230));
+
+    for (int i = 0; i < 6; i++) {
+        if (!layout.resizeVisible[i]) continue;
+        int handle = gizmo::FIRST_RESIZE_HANDLE + i;
+        bool lit = emphasised == handle;
+        ImU32 color = lit ? highlightColor : axisColors[i / 2];
+        if (active >= 0 && !lit) color = (color & 0x00FFFFFFu) | 0x50000000u;
+        float half = gizmo::RESIZE_HALF_PIXELS + (lit ? 1.5f : 0.0f);
+        ImVec2 c = layout.resizeScreen[i];
+        drawList->AddRectFilled(ImVec2(c.x - half, c.y - half), ImVec2(c.x + half, c.y + half), color, 1.5f);
+        drawList->AddRect(ImVec2(c.x - half, c.y - half), ImVec2(c.x + half, c.y + half),
+                          IM_COL32(15, 15, 20, 220), 1.5f, 0, 1.5f);
+    }
+}
+
+// Places the resize squares on a generated shape's six faces. The box is the part's content box --
+// the voxels it actually holds -- in the component's own frame, so the squares turn with the shape.
+static void layoutResizeHandles(const projv::Scene& scene, const EditorState& editor,
+                                projv::ComponentHandle handle, projv::core::vec3 cameraDirection,
+                                GizmoLayout& layout) {
+    using namespace projv::core;
+    const Part* part = findPart(editor, handle);
+    if (!part || !part->procedural || part->contentMax.x < part->contentMin.x) return;
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, handle);
+    if (!space.valid) return;
+
+    mat4 world = projv::utils::getComponentWorldMatrix(scene, handle);
+    vec3 boxMin = (vec3(part->contentMin) - vec3(space.coordOrigin)) * space.voxelSize;
+    vec3 boxMax = (vec3(part->contentMax) + vec3(1.0f) - vec3(space.coordOrigin)) * space.voxelSize;
+    vec3 centre = (boxMin + boxMax) * 0.5f;
+
+    for (int axis = 0; axis < 3; axis++) {
+        vec3 column = vec3(world[axis]);
+        float length = glm::length(column);
+        if (length < 1.0e-8f) return;
+        layout.resizeAxisWorld[axis] = column / length;
+        layout.resizeVoxelWorld[axis] = length * space.voxelSize;
+        for (int side = 0; side < 2; side++) {
+            vec3 face = centre;
+            face[axis] = side ? boxMax[axis] : boxMin[axis];
+            int index = axis * 2 + side;
+            layout.resizeFaceWorld[index] = vec3(world * vec4(face, 1.0f));
+            layout.resizeVisible[index] =
+                worldToViewportPixel(layout.resizeFaceWorld[index], editor.cameraPosition, cameraDirection,
+                                     editor.viewportImageMin, editor.viewportImageMax,
+                                     layout.resizeScreen[index], cameraOrthoHeight(editor));
+        }
+    }
+}
+
+// Rebuilds the selected generated shape at `size` voxels along `axis`, from the size and centre it had
+// when the gesture began. One-sided (the face on the `sign` side moves, the other stays put) unless
+// `symmetric`. Follows the selection, because a resize past the part's resolution hands it a new
+// component and the selection moves with it.
+static void resizeSelectedPart(projv::Scene& scene, EditorState& editor, const int startDimensions[3],
+                               projv::core::vec3 startCentre, int axis, float sign, int size,
+                               bool symmetric) {
+    using namespace projv::core;
+    Part* part = findPart(editor, editor.selectedComponent);
+    if (!part || !part->procedural) return;
+    if (part->dimensions[axis] == size) return;
+
+    for (int i = 0; i < 3; i++) part->dimensions[i] = startDimensions[i];
+    part->dimensions[axis] = size;
+    quat rotation = scene.components[editor.selectedComponent].localRotation;
+    regeneratePart(scene, editor, editor.selectedComponent);   // May hand the part a new component.
+
+    part = findPart(editor, editor.selectedComponent);
+    ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, editor.selectedComponent);
+    if (!part || !space.valid) return;
+    vec3 localAxis(0.0f);
+    localAxis[axis] = 1.0f;
+    vec3 centre = startCentre;
+    if (!symmetric) {
+        centre += glm::mat3_cast(rotation) * localAxis *
+                  (sign * float(size - startDimensions[axis]) * 0.5f * space.voxelSize);
+    }
+    centrePartAt(scene, editor, *part, centre, rotation);
+}
+
+// One frame of a resize drag: the dragged face follows the cursor a whole voxel at a time and the
+// opposite face stays where it is. Shift grows both faces at once, about the centre. Rebuilt exactly
+// from the recipe (regeneratePart), so a resize is never a resample.
+static void advanceResizeDrag(projv::Scene& scene, EditorState& editor, int index,
+                              projv::core::vec3 rayOrigin, projv::core::vec3 rayDirection) {
+    using namespace projv::core;
+    int axis = index / 2;
+    float sign = (index % 2) ? 1.0f : -1.0f;
+    float t = 0.0f;
+    if (!closestPointOnAxis(editor.resizeFaceStartWorld, editor.resizeAxisWorld, rayOrigin, rayDirection, t)) {
+        return;
+    }
+    bool symmetric = ImGui::GetIO().KeyShift;
+    int step = int(std::lround((t - editor.gizmoDragStartAxisT) * sign / editor.resizeVoxelWorld));
+    int startSize = editor.resizeStartDimensions[axis];
+    int size = std::clamp(startSize + (symmetric ? step * 2 : step), 1, PART_MAX_DIMENSION);
+    resizeSelectedPart(scene, editor, editor.resizeStartDimensions, editor.resizeStartCentre,
+                       axis, sign, size, symmetric);
 }
 
 // Runs the gizmo for one frame: places it, hit tests it, advances any drag, and draws it. Returns
@@ -14742,6 +15021,7 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
         editor.gizmoHoveredHandle = -1;
         return false;
     }
+    layoutResizeHandles(scene, editor, handle, cameraDirection, layout);
 
     ImVec2 mouse = ImGui::GetIO().MousePos;
     // Hover is frozen for the duration of a drag: the cursor routinely leaves both the handle and the
@@ -14767,7 +15047,28 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
         int candidate = editor.gizmoHoveredHandle;
         bool started = false;
 
-        if (candidate < 3) {
+        if (candidate >= gizmo::FIRST_RESIZE_HANDLE) {
+            int index = candidate - gizmo::FIRST_RESIZE_HANDLE;
+            int axis = index / 2;
+            float t = 0.0f;
+            const Part* part = findPart(editor, handle);
+            ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, handle);
+            if (part && space.valid &&
+                closestPointOnAxis(layout.resizeFaceWorld[index], layout.resizeAxisWorld[axis],
+                                   rayOrigin, rayDirection, t)) {
+                editor.gizmoDragStartAxisT = t;
+                editor.resizeFaceStartWorld = layout.resizeFaceWorld[index];
+                editor.resizeAxisWorld = layout.resizeAxisWorld[axis];
+                editor.resizeVoxelWorld = std::max(layout.resizeVoxelWorld[axis], 1.0e-6f);
+                for (int i = 0; i < 3; i++) editor.resizeStartDimensions[i] = part->dimensions[i];
+                // The same centre regeneratePart keeps, so a drag that comes back to where it started
+                // puts the shape back exactly.
+                editor.resizeStartCentre = component.localPosition +
+                    glm::mat3_cast(component.localRotation) *
+                    ((vec3(part->contentMin) + vec3(part->contentMax) + vec3(1.0f)) * 0.5f * space.voxelSize);
+                started = true;
+            }
+        } else if (candidate < 3) {
             float t = 0.0f;
             if (closestPointOnAxis(anchor, layout.axes[candidate], rayOrigin, rayDirection, t)) {
                 editor.gizmoDragStartAxisT = t;
@@ -14802,6 +15103,11 @@ static bool updateAndDrawTransformGizmo(projv::Scene& scene, EditorState& editor
             editor.gizmoActiveHandle = -1;
         } else {
             int active = editor.gizmoActiveHandle;
+            if (active >= gizmo::FIRST_RESIZE_HANDLE) {
+                advanceResizeDrag(scene, editor, active - gizmo::FIRST_RESIZE_HANDLE, rayOrigin, rayDirection);
+                drawGizmo(ImGui::GetWindowDrawList(), layout, editor.gizmoHoveredHandle, editor.gizmoActiveHandle);
+                return true;
+            }
             projv::Scene* scenePointer = &scene;
             EditorState* editorPointer = &editor;
             vec3 previousPosition = editor.gizmoDragStartPosition;
@@ -16099,7 +16405,10 @@ static void drawViewportBreadcrumb(projv::Scene& scene, EditorState& editor) {
                            editorToolShortcut(editor.activeTool);
     float toolWidth = ImGui::CalcTextSize(toolText.c_str()).x;
     float available = ImGui::GetWindowWidth() - toolWidth - style.ItemSpacing.x * 2.0f;
-    if (available > ImGui::GetCursorPosX()) {
+    // Against the right edge of the breadcrumb's last item, not the layout cursor: after an item the
+    // cursor has already wrapped to the next line, so testing it let the two overlap on a narrow panel.
+    float breadcrumbRight = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+    if (available > breadcrumbRight + style.ItemSpacing.x * 2.0f) {
         ImGui::SameLine(available);
         ImGui::TextDisabled("%s", toolText.c_str());
     }
@@ -16482,6 +16791,8 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
         // cursor is "over the scene" with the left button held. That is a selection, or the start of a
         // sculpt stroke, on top of the orbit.
         if (editor.cameraIsOrbiting) imageHovered = false;
+        claimViewportOrbit(editor, imageHovered);
+        if (editor.viewportOrbitActive) imageHovered = false;
 
         // The selected component's .data box(es), outlined in yellow. Cache is invalidated by the
         // Assets panel and by loading a new scene; recomputing it is a tree walk, not
@@ -17940,6 +18251,8 @@ static double brushParamValueOr(const projv::editor::BrushDefinition& brush, con
             case projv::editor::BrushParamType::Int:
             case projv::editor::BrushParamType::Seed:
                 return brush.values[i].number;
+            case projv::editor::BrushParamType::Bool:
+                return brush.values[i].boolean ? 1.0 : 0.0;
             default:
                 return fallback;
         }
@@ -18054,7 +18367,7 @@ static void runBrushScatterDab(projv::Scene& scene, EditorState& editor,
     std::vector<uint32_t> addColors;
     std::vector<projv::editor::BrushPlacementVoxel> placement;
 
-    size_t sites = 0, planted = 0, rejected = 0;
+    size_t sites = 0, planted = 0;
     bool truncated = false;
     editor.brushPreviewScatterSites.clear();
     editor.brushPreviewScatterPlanted.clear();
@@ -18064,6 +18377,142 @@ static void runBrushScatterDab(projv::Scene& scene, EditorState& editor,
         ivec3(1, 0, 0), ivec3(-1, 0, 0), ivec3(0, 1, 0),
         ivec3(0, -1, 0), ivec3(0, 0, 1), ivec3(0, 0, -1)
     };
+
+    // What the script is told about one site. Shared by the lattice and the forced path, so a forced
+    // tree sees exactly the context the lattice would have given it.
+    auto siteContext = [&](ivec3 coord, int at, float nx, float ny, float nz, float distanceSquared) {
+        projv::editor::BrushContext context;
+        context.x = coord.x;
+        context.y = coord.y;
+        context.z = coord.z;
+        context.solid = true;
+        context.nx = nx;
+        context.ny = ny;
+        context.nz = nz;
+        if (wantsWorld) {
+            projv::core::vec3 world = componentVoxelToWorld(space, coord);
+            context.wx = world.x;
+            context.wy = world.y;
+            context.wz = world.z;
+        }
+        if (wantsMaterial) {
+            uint8_t slot = field.slot[size_t(at)];
+            context.slot = int(slot);
+            uint32_t packed = componentVoxelColor(scene, component, slot);
+            projv::unpackRGB10(packed, context.r, context.g, context.b);
+            context.materialName = slot < record.materialPalette.size()
+                                 ? record.materialPalette[slot].name.c_str() : nullptr;
+        }
+        if (!field.depth.empty()) context.depth = field.depthAt(coord);
+        if (wantsCrevice) context.crevice = brushCreviceAt(field, coord);
+        if (wantsDistance) {
+            context.distance = radius > 0.0f ? std::sqrt(distanceSquared) / radius : 0.0f;
+        }
+        return context;
+    };
+    auto exposedAt = [&](ivec3 coord) {
+        for (const ivec3& step : FACE_NEIGHBOURS) {
+            if (!field.solidAt(coord + step)) return true;
+        }
+        return false;
+    };
+
+    // Why sites came back empty, by reason. A script refuses with `return nil, "reason"`; the host's
+    // own fit test is "something in the way".
+    std::map<std::string, size_t> refusals;
+
+    // --- Force: one placement, exactly here --------------------------------------------------------
+    //
+    // The lattice answers "where should things grow across this patch", which is the right question
+    // for a field of grass and the wrong one for "put a tree on that rock": a click lands on a site only
+    // if the brush happens to cover one, and every test after that can say no without saying why. This
+    // path asks the other question. The site is the surface voxel under the cursor (or the nearest one
+    // within the dab), the script is told ctx.force so it skips its own site tests, and the fit test
+    // writes the cells that are free and leaves the rest -- a tree grown into a wall keeps the wall.
+    if (brushParamValueOr(brush, projv::editor::BRUSH_FORCE_PARAM, 0.0) > 0.5) {
+        if (editor.brushStrokeJournal.empty()) editor.brushForcedSites.clear();
+
+        ivec3 site(0);
+        int siteAt = -1;
+        float best = std::numeric_limits<float>::max();
+        for (int dz = -extent; dz <= extent; dz++) {
+            for (int dy = -extent; dy <= extent; dy++) {
+                for (int dx = -extent; dx <= extent; dx++) {
+                    float distanceSquared = float(dx * dx + dy * dy + dz * dz);
+                    if (distanceSquared > radiusSquared || distanceSquared >= best) continue;
+                    ivec3 coord = centre + ivec3(dx, dy, dz);
+                    int at = field.index(coord);
+                    if (at < 0 || !field.solid[size_t(at)]) continue;
+                    if (editor.brushStrokeJournal.count(packVoxelKey(coord)) != 0) continue;
+                    if (!exposedAt(coord)) continue;
+                    best = distanceSquared;
+                    site = coord;
+                    siteAt = at;
+                }
+            }
+        }
+        if (siteAt < 0) {
+            editor.brushStatus = "Force: no open surface under the cursor to plant on.";
+            projv::editor::brushSetSolidQuery(brush, projv::editor::BrushSolidQuery());
+            return;
+        }
+        for (const ivec3& earlier : editor.brushForcedSites) {
+            ivec3 d = earlier - site;
+            if (d.x * d.x + d.y * d.y + d.z * d.z < spacing * spacing) {
+                projv::editor::brushSetSolidQuery(brush, projv::editor::BrushSolidQuery());
+                return;   // A drag: the next one goes a Spacing further on.
+            }
+        }
+
+        float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+        brushNormalAt(field, site, nx, ny, nz);
+        projv::editor::BrushContext context = siteContext(site, siteAt, nx, ny, nz, best);
+        context.force = true;
+        std::string reason;
+        bool grew = projv::editor::brushEvaluateScatter(invocation, context, placement, &reason);
+        projv::editor::brushSetSolidQuery(brush, projv::editor::BrushSolidQuery());
+        editor.brushPreviewCalls += invocation.callCount();
+        if (!grew) {
+            editor.brushStatus = invocation.failed()
+                ? "The brush raised an error -- see Output."
+                : "Force: the brush made nothing here" + (reason.empty() ? std::string(".") : ": " + reason + ".");
+            return;
+        }
+
+        size_t skipped = 0;
+        for (const projv::editor::BrushPlacementVoxel& voxel : placement) {
+            ivec3 target = site + ivec3(voxel.dx, voxel.dy, voxel.dz);
+            if (target == site) continue;
+            uint64_t key = packVoxelKey(target);
+            if (editor.brushStrokeJournal.count(key) != 0) continue;
+            if (size_t(voxel.materialIndex) >= editor.brushPreviewColors.size() ||
+                size_t(voxel.materialIndex) >= editor.brushPreviewSlots.size()) continue;
+            if (blocked(target)) { skipped++; continue; }
+
+            EditorState::StrokeVoxel remembered;
+            remembered.coord = target;
+            uint8_t slot = 0;
+            remembered.wasSolid = queryComponentVoxel(scene, space, target, slot);
+            if (remembered.wasSolid) remembered.oldColor = componentVoxelColor(scene, component, slot);
+            editor.brushStrokeJournal.emplace(key, remembered);
+            addCoords.push_back(target);
+            addColors.push_back(editor.brushPreviewColors[size_t(voxel.materialIndex)]);
+        }
+        editor.brushForcedSites.push_back(site);
+        editor.brushPreviewScatterSites.push_back(site);
+        editor.brushPreviewScatterPlanted.push_back(site);
+        if (addCoords.empty()) {
+            editor.brushStatus = "Force: every cell of it was already taken.";
+            return;
+        }
+        editor.brushPreviewComponent = component;
+        editor.brushPreviewWrites += addCoords.size();
+        applyVoxelSculpt(&scene, &editor, component, addCoords, addColors, true);
+        editor.brushStatus = "Forced one here: " + std::to_string(addCoords.size()) + " voxel(s)" +
+                             (skipped > 0 ? ", " + std::to_string(skipped) + " left out where something already was."
+                                          : ".");
+        return;
+    }
 
     for (int dz = -extent; dz <= extent && !truncated; dz++) {
         for (int dy = -extent; dy <= extent && !truncated; dy++) {
@@ -18121,37 +18570,15 @@ static void runBrushScatterDab(projv::Scene& scene, EditorState& editor,
                 // infer them from the shapes that grew out of them.
                 editor.brushPreviewScatterSites.push_back(coord);
 
-                projv::editor::BrushContext context;
-                context.x = coord.x;
-                context.y = coord.y;
-                context.z = coord.z;
-                context.solid = true;
-                context.nx = nx;
-                context.ny = ny;
-                context.nz = nz;
-                if (wantsWorld) {
-                    projv::core::vec3 world = componentVoxelToWorld(space, coord);
-                    context.wx = world.x;
-                    context.wy = world.y;
-                    context.wz = world.z;
-                }
-                if (wantsMaterial) {
-                    uint8_t slot = field.slot[size_t(at)];
-                    context.slot = int(slot);
-                    uint32_t packed = componentVoxelColor(scene, component, slot);
-                    projv::unpackRGB10(packed, context.r, context.g, context.b);
-                    context.materialName = slot < record.materialPalette.size()
-                                         ? record.materialPalette[slot].name.c_str() : nullptr;
-                }
-                if (!field.depth.empty()) context.depth = field.depthAt(coord);
-                if (wantsCrevice) context.crevice = brushCreviceAt(field, coord);
-                if (wantsDistance) {
-                    context.distance = radius > 0.0f ? std::sqrt(distanceSquared) / radius : 0.0f;
-                }
+                projv::editor::BrushContext context = siteContext(coord, at, nx, ny, nz, distanceSquared);
 
-                if (!projv::editor::brushEvaluateScatter(invocation, context, placement)) {
+                std::string reason;
+                if (!projv::editor::brushEvaluateScatter(invocation, context, placement, &reason)) {
                     if (invocation.failed()) break;
-                    continue;   // Nothing grows here, which is the ordinary answer.
+                    // Nothing grows here, which is the ordinary answer -- but counted by why, so a dab
+                    // that plants nothing can say which test it kept failing.
+                    refusals[reason.empty() ? std::string("declined by the brush") : reason]++;
+                    continue;
                 }
 
                 // **The fit test, and it is all-or-nothing.** A placement whose every cell is free is
@@ -18169,7 +18596,10 @@ static void runBrushScatterDab(projv::Scene& scene, EditorState& editor,
                         break;
                     }
                 }
-                if (!fits) { rejected++; continue; }
+                if (!fits) {
+                    refusals["something in the way"]++;
+                    continue;
+                }
 
                 for (const projv::editor::BrushPlacementVoxel& voxel : placement) {
                     ivec3 target = coord + ivec3(voxel.dx, voxel.dy, voxel.dz);
@@ -18216,12 +18646,30 @@ static void runBrushScatterDab(projv::Scene& scene, EditorState& editor,
     if (invocation.failed()) {
         editor.brushStatus = "The brush raised an error -- see Output.";
     }
+    // "2 too steep, 1 something in the way" -- most frequent first.
+    auto refusalSummary = [&refusals]() {
+        std::vector<std::pair<std::string, size_t>> ordered(refusals.begin(), refusals.end());
+        std::stable_sort(ordered.begin(), ordered.end(),
+                         [](const auto& a, const auto& b) { return a.second > b.second; });
+        std::string text;
+        for (const auto& entry : ordered) {
+            if (!text.empty()) text += ", ";
+            text += std::to_string(entry.second) + " " + entry.first;
+        }
+        return text;
+    };
+
     if (addCoords.empty()) {
         if (!invocation.failed()) {
+            bool forceable = false;
+            for (const projv::editor::BrushParam& param : brush.params) {
+                if (param.name == projv::editor::BRUSH_FORCE_PARAM) forceable = true;
+            }
+            std::string hint = forceable ? " Turn on Force to plant one exactly where you click." : "";
             editor.brushStatus = sites == 0
-                ? "No room for a site here: nothing on the surface at this spacing."
-                : ("Planted nothing: " + std::to_string(sites) + " site(s), " +
-                   std::to_string(rejected) + " refused for want of room.");
+                ? "No site under the brush: there is one per " + std::to_string(spacing) +
+                  "-voxel Spacing cell and Coverage skips some. Widen the brush or lower Spacing." + hint
+                : "Planted nothing: " + std::to_string(sites) + " site(s) -- " + refusalSummary() + "." + hint;
         }
         return;
     }
@@ -18231,8 +18679,7 @@ static void runBrushScatterDab(projv::Scene& scene, EditorState& editor,
     applyVoxelSculpt(&scene, &editor, component, addCoords, addColors, true);
 
     editor.brushStatus = "Planted " + std::to_string(planted) + " of " + std::to_string(sites) +
-                         " site(s)" +
-                         (rejected > 0 ? ", " + std::to_string(rejected) + " with no room" : "") + ".";
+                         " site(s)" + (refusals.empty() ? std::string() : "; " + refusalSummary()) + ".";
 }
 
 // =============================================================================
@@ -19801,6 +20248,31 @@ static void runBrushSelfTest(projv::Scene& scene, EditorState& editor) {
         check(brush->loadError.empty(), "brush '" + brush->id + "' loads");
     }
 
+    // **The trees brush is pinned to a sapling for the length of the test.** Its defaults are tuned
+    // for trees ~100 voxels tall planted 36 apart, and the test's subject is a 21-voxel block with 26
+    // of sky over it -- at the defaults there is no lattice site on it at all, and a tree that did find
+    // one would be refused for headroom. What is being tested is the scatter machinery (sites, fit,
+    // journal, revert), which a small tree exercises exactly as well. Restored on the way out by the
+    // destructor, whatever path leaves this function, so the user's settings are never left changed.
+    struct PinnedParams {
+        std::vector<std::pair<projv::editor::BrushParamValue*, double>> saved;
+        void pin(projv::editor::BrushDefinition& brush, const char* name, double value) {
+            for (size_t i = 0; i < brush.params.size() && i < brush.values.size(); i++) {
+                if (brush.params[i].name != name) continue;
+                saved.emplace_back(&brush.values[i], brush.values[i].number);
+                brush.values[i].number = value;
+            }
+        }
+        ~PinnedParams() {
+            for (auto& entry : saved) entry.first->number = entry.second;
+        }
+    } pinned;
+    if (projv::editor::BrushDefinition* trees = editor.brushLibrary.find("trees")) {
+        pinned.pin(*trees, "height", 14.0);
+        pinned.pin(*trees, "canopy", 5.0);
+        pinned.pin(*trees, "spacing", 6.0);
+    }
+
     // Somewhere empty inside an existing component to build a test subject, found exactly the way the
     // operator test finds its room and for the same reason: a slab parked off in space would make a
     // Grid expand to reach it and leave a shell of empty cells behind for good.
@@ -20211,6 +20683,45 @@ static void runBrushSelfTest(projv::Scene& scene, EditorState& editor) {
                   " in the open, " + std::to_string(underCeiling) + " under a " +
                   std::to_string(CEILING_GAP) + "-voxel ceiling)");
 
+            // **A refusal says why.** The trees brush tests headroom itself and names it; a dab that
+            // planted nothing used to report only a count, which is how "it won't place and I don't
+            // know why" happened.
+            if (brush.id == "trees" && underCeiling == 0) {
+                check(editor.brushStatus.find("no headroom") != std::string::npos,
+                      brush.id + ": the status names the refusal (\"" + editor.brushStatus + "\")");
+            }
+
+            // **Force plants one, here, whatever the site tests say.** Under the same ceiling: exactly
+            // one site, voxels written, and none of them inside the ceiling it grew into.
+            size_t forceParam = brush.params.size();
+            for (size_t i = 0; i < brush.params.size() && i < brush.values.size(); i++) {
+                if (brush.params[i].name == projv::editor::BRUSH_FORCE_PARAM) forceParam = i;
+            }
+            if (forceParam < brush.params.size()) {
+                revertBrushPreview(scene, editor);
+                bool wasForced = brush.values[forceParam].boolean;
+                brush.values[forceParam].boolean = true;
+                editor.brushPreviewComponent = projv::INVALID_COMPONENT_HANDLE;
+                editor.brushStrokeJournal.clear();
+                editor.brushPreviewWrites = 0;
+                runBrushScatterDab(scene, editor, brush, component, scatterCentre);
+                size_t forcedSites = editor.brushPreviewScatterPlanted.size();
+                size_t forcedWrites = editor.brushPreviewWrites;
+                bool ceilingIntact = true;
+                for (const ivec3& cell : ceiling) {
+                    uint8_t slot = 0;
+                    if (!queryComponentVoxel(scene, space, cell, slot) ||
+                        componentVoxelColor(scene, component, slot) != baseColor) {
+                        ceilingIntact = false;
+                    }
+                }
+                brush.values[forceParam].boolean = wasForced;
+                check(forcedSites == 1 && forcedWrites > 0 && ceilingIntact,
+                      brush.id + ": Force plants one under the ceiling (" + std::to_string(forcedSites) +
+                      " site(s), " + std::to_string(forcedWrites) + " voxel(s), ceiling " +
+                      (ceilingIntact ? "intact" : "DAMAGED") + ")");
+            }
+
             revertBrushPreview(scene, editor);
             applyVoxelSculpt(&scene, &editor, component, ceiling, std::vector<uint32_t>(), false);
 
@@ -20596,6 +21107,11 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
     // A dockspace with no node behind it is a first run (or a reset): there is no imgui.ini layout to
     // restore, so the default one is built.
     if (!editor.dockLayoutBuilt || editor.resetDockLayoutRequested) {
+        if (editor.savedDockLayoutVersion < DOCK_LAYOUT_VERSION) {
+            editor.resetDockLayoutRequested = true;
+            editor.savedDockLayoutVersion = DOCK_LAYOUT_VERSION;
+            ImGui::MarkIniSettingsDirty();
+        }
         if (ImGui::DockBuilderGetNode(dockspaceID) == nullptr || editor.resetDockLayoutRequested) {
             buildDefaultDockLayout(dockspaceID, mainViewport->WorkSize);
         }
@@ -20700,6 +21216,22 @@ static void drawEditorInterface(projv::Application& app, projv::Scene& scene, pr
             }
             if (ImGui::MenuItem("Reset Layout")) {
                 editor.resetDockLayoutRequested = true;
+            }
+            ImGui::Separator();
+            if (ImGui::BeginMenu("Navigation")) {
+                for (NavigationMode mode : { NavigationMode::Fly, NavigationMode::Orbit }) {
+                    if (ImGui::MenuItem(navigationModeLabel(mode), nullptr, editor.navigationMode == mode)) {
+                        setNavigationMode(editor, mode);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(mode == NavigationMode::Fly
+                            ? "Right-drag looks, W/A/S/D/R/F fly while it is held.\n"
+                              "Middle-drag pans. Wheel dollies."
+                            : "Alt+left-drag (or middle-drag) orbits the focus.\n"
+                              "Right-drag pans. Wheel or two-finger scroll dollies.");
+                    }
+                }
+                ImGui::EndMenu();
             }
             ImGui::Separator();
             // A floating window rather than a dock panel: it is a handful of read-only numbers that
@@ -22924,6 +23456,47 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
         if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
     }
 
+    // --- 1b. Face resize: the dragged face moves, the opposite one stays -----------------------
+    // What the viewport's resize squares do. Grows an 8^3 box's +X face to 13 (past its resolution,
+    // so the part moves to a new component on the way) and then its -X face back by 3: the fold's
+    // X extent must move only on the side that was dragged, each time.
+    {
+        Resolve* resolve = makeStack(1.0f);
+        bool ok = false;
+        int before[2] = {0, 0}, grown[2] = {0, 0}, shrunk[2] = {0, 0};
+        auto xExtent = [&](int out[2]) {
+            Fold fold = foldOf(*resolve);
+            if (!fold.valid || fold.coords.empty()) return false;
+            out[0] = out[1] = fold.coords[0].x;
+            for (const ivec3& c : fold.coords) { out[0] = std::min(out[0], c.x); out[1] = std::max(out[1], c.x); }
+            return true;
+        };
+        auto partCentre = [&]() {
+            const Part* part = findPart(editor, editor.selectedComponent);
+            ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, editor.selectedComponent);
+            const projv::ComponentRecord& record = scene.components[editor.selectedComponent];
+            return record.localPosition + glm::mat3_cast(record.localRotation) *
+                   ((vec3(part->contentMin) + vec3(part->contentMax) + vec3(1.0f)) * 0.5f * space.voxelSize);
+        };
+        if (resolve) {
+            editor.selectedComponent = addBox(*resolve, 8, vec3(0.0f), BooleanOp::Union);
+            if (findPart(editor, editor.selectedComponent) && xExtent(before)) {
+                int start[3] = {8, 8, 8};
+                resizeSelectedPart(scene, editor, start, partCentre(), 0, 1.0f, 13, false);
+                bool a = xExtent(grown);
+                int start2[3] = {13, 8, 8};
+                resizeSelectedPart(scene, editor, start2, partCentre(), 0, -1.0f, 10, false);
+                bool b = xExtent(shrunk);
+                ok = a && b && grown[0] == before[0] && grown[1] == before[1] + 5 &&
+                     shrunk[1] == grown[1] && shrunk[0] == grown[0] + 3;
+            }
+        }
+        projv::core::info("ASSEMBLYTEST: face resize x[{},{}] -> +X to 13 [{},{}] -> -X to 10 [{},{}] | {}",
+                          before[0], before[1], grown[0], grown[1], shrunk[0], shrunk[1], ok ? "PASS" : "FAIL");
+        if (resolve) destroyAssetNode(scene, editor, resolve->node, false);
+        editor.selectedComponent = projv::INVALID_COMPONENT_HANDLE;
+    }
+
     // --- 2. Subtract: exactly the overlap removed ---------------------------------------------
     // Two 8^3 boxes offset by 4 on one axis overlap in a 4x8x8 slab: 256 cells. Subtracting the
     // second must leave 512 - 256, and nothing outside the first box may survive.
@@ -24901,6 +25474,17 @@ struct EditorBench {
 };
 static EditorBench g_editorBench;
 
+// EDITOR_UI_SHOT=<file.tga>: a screenshot of the whole window -- interface and all, which the bench
+// capture (viewport image only) cannot give -- on frame EDITOR_UI_SHOT_FRAME (default 90), then exit.
+// EDITOR_UI_SHOT_PLACE=1 places a primitive in front of the camera first and leaves it selected, so the
+// panels a shape brings up can be looked at without a click.
+struct EditorUiShot {
+    std::string path;
+    int frame = 90;
+    bool place = false;
+};
+static EditorUiShot g_editorUiShot;
+
 // Returns true once the run is complete and the editor should exit.
 static bool recordEditorBenchFrame(int frameIndex, int viewportWidth, int viewportHeight) {
     EditorBench& bench = g_editorBench;
@@ -24973,6 +25557,7 @@ void startup(projv::Application& app) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    registerEditorIniHandler(editor);
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -25011,6 +25596,11 @@ void startup(projv::Application& app) {
     // Which tab the editor opens on. Edit unless asked otherwise -- Render mode is a place you go to
     // look at a shot you have already framed, not a place to start. The switch exists because
     // Render mode is reached by clicking, and a screenshot or a smoke test has no way to click.
+    if (const char* uiShot = std::getenv("EDITOR_UI_SHOT")) {
+        g_editorUiShot.path = uiShot;
+        if (const char* frame = std::getenv("EDITOR_UI_SHOT_FRAME")) g_editorUiShot.frame = std::max(40, std::atoi(frame));
+        g_editorUiShot.place = std::getenv("EDITOR_UI_SHOT_PLACE") != nullptr;
+    }
     if (const char* benchFrames = std::getenv("EDITOR_BENCH")) {
         g_editorBench.frames = std::max(0, std::atoi(benchFrames));
         if (const char* benchPath = std::getenv("EDITOR_BENCH_PATH")) g_editorBench.path = benchPath;
@@ -25793,6 +26383,14 @@ void render(projv::Application& app) {
                    0, 0, uint16_t(bench.captureWidth), uint16_t(bench.captureHeight));
         bench.captureReadyFrame = bgfx::readTexture(bench.captureTexture, bench.capturePixels.data());
         bench.captureState = 2;
+    }
+
+    if (!g_editorUiShot.path.empty() && editor.sceneLoaded) {
+        const EditorUiShot& shot = g_editorUiShot;
+        int frame = int(app.frameCount);
+        if (shot.place && frame == shot.frame - 30) placePrimitiveFromCamera(scene, editor);
+        if (frame == shot.frame) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, shot.path.c_str());
+        if (frame == shot.frame + 10) app.closeRequested = true;
     }
 
     uint32_t completedFrame = bgfx::frame();

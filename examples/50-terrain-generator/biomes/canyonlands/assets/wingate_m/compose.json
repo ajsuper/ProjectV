@@ -1,0 +1,122 @@
+{
+  "components": [
+    {
+      "id": 1,
+      "mutability": "locked",
+      "name": "model",
+      "palette": [
+        {
+          "color": [1023, 1023, 1023],
+          "name": "default"
+        },
+        {
+          "color": [368, 153, 92],
+          "name": "rock.wingate.1"
+        },
+        {
+          "color": [491, 215, 123],
+          "name": "rock.wingate.2"
+        },
+        {
+          "color": [614, 297, 164],
+          "name": "rock.wingate.3"
+        },
+        {
+          "color": [716, 379, 215],
+          "name": "rock.wingate.4"
+        },
+        {
+          "color": [798, 481, 297],
+          "name": "rock.wingate.5"
+        },
+        {
+          "color": [870, 593, 409],
+          "name": "rock.wingate.6"
+        },
+        {
+          "color": [205, 113, 82],
+          "name": "rock.varnish.1"
+        },
+        {
+          "color": [286, 164, 113],
+          "name": "rock.varnish.2"
+        },
+        {
+          "color": [368, 215, 143],
+          "name": "rock.varnish.3"
+        },
+        {
+          "color": [614, 430, 307],
+          "name": "rock.navajo.1"
+        },
+        {
+          "color": [726, 532, 379],
+          "name": "rock.navajo.2"
+        },
+        {
+          "color": [818, 634, 471],
+          "name": "rock.navajo.3"
+        },
+        {
+          "color": [880, 726, 563],
+          "name": "rock.navajo.4"
+        },
+        {
+          "color": [921, 808, 655],
+          "name": "rock.navajo.5"
+        },
+        {
+          "color": [951, 880, 747],
+          "name": "rock.navajo.6"
+        },
+        {
+          "color": [757, 409, 256],
+          "name": "rock.navajoband.1"
+        },
+        {
+          "color": [839, 501, 317],
+          "name": "rock.navajoband.2"
+        },
+        {
+          "color": [900, 593, 399],
+          "name": "rock.navajoband.3"
+        },
+        {
+          "color": [266, 143, 133],
+          "name": "rock.kayenta.1"
+        },
+        {
+          "color": [368, 194, 174],
+          "name": "rock.kayenta.2"
+        },
+        {
+          "color": [471, 256, 215],
+          "name": "rock.kayenta.3"
+        },
+        {
+          "color": [532, 338, 317],
+          "name": "rock.kayenta.4"
+        },
+        {
+          "color": [593, 368, 297],
+          "name": "rock.kayenta.5"
+        },
+        {
+          "color": [675, 471, 409],
+          "name": "rock.kayenta.6"
+        },
+        {
+          "color": [818, 512, 153],
+          "name": "rock.lichen"
+        }
+      ],
+      "position": [0.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0],
+      "scale": 1.0,
+      "source": "model.data",
+      "type": "data"
+    }
+  ],
+  "name": "wingate_m",
+  "version": 1
+}
