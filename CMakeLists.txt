@@ -431,6 +431,11 @@ target_compile_options(projv_physics PRIVATE
 target_link_libraries(projv_physics PRIVATE
     Jolt::Jolt bgfx::bgfx bgfx::bx ${PROJV_GLM_TARGET} ${PROJV_SPDLOG_TARGET} nlohmann_json::nlohmann_json EnTT::EnTT)
 target_sources(projectV PRIVATE $<TARGET_OBJECTS:projv_physics>)
+# The runtime code that decides what the simulation is given (a strike's shards, the island pass, commands) follows
+# the same rule: no fused multiply-add, so a compiler that fuses by default (GCC and Clang on ARM, or with -mfma)
+# makes the same numbers as one that does not. MSVC does not contract under /fp:precise.
+set_source_files_properties(src/runtime/physics.cpp src/runtime/fracture.cpp PROPERTIES
+    COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>")
 # Link only: Jolt's compile flags and defines stay on projv_physics.
 target_link_libraries(projectV PRIVATE $<LINK_ONLY:Jolt::Jolt>)
 

@@ -28,6 +28,23 @@
 
 namespace projv::runtime {
     namespace {
+        // The cube root of a strike's reach (energy over strength): the same on every platform. libm's cbrt is
+        // not -- glibc's and the Windows C runtime's differ in the last bit for some inputs -- and the reach sets
+        // how a strike's push falls off, so how fast every shard of it starts: a bit's difference there is a
+        // different recording of the same session (tests/unit/test_physics_golden.cpp found it, on MSVC). Only
+        // + - * / and frexp/ldexp (exact), which IEEE 754 defines to the bit.
+        float cubeRoot(float x) {
+            if (!(x > 0.0f) || std::isinf(x)) return x > 0.0f ? x : 0.0f;
+            int exponent = 0;
+            const float mantissa = std::frexp(x, &exponent);                 // x = mantissa * 2^exponent, [0.5, 1)
+            int third = exponent >= 0 ? exponent / 3 : -((2 - exponent) / 3); // floor(exponent / 3)
+            const int rest = exponent - 3 * third;                             // 0, 1 or 2
+            const float scaled = std::ldexp(mantissa, rest);                   // [0.5, 4)
+            float y = 1.0f;
+            for (int i = 0; i < 12; i++) y = y - (y * y * y - scaled) / (3.0f * y * y);   // Newton, quadratic: settled well before 12
+            return std::ldexp(y, third);
+        }
+
         // ---- The physics resource, in world.ctx() ---------------------------------------------
 
         // A command as queued: the public one, plus the local entity when it was issued here (an
@@ -850,7 +867,7 @@ namespace projv::runtime {
             const float shardMetres = strike.shardSize > 0.0f ? strike.shardSize : material.shardSize;
             float reach = 0.0f;
             if (strike.reach > 0.0f) reach = strike.reach / metres;
-            else if (strike.energy > 0.0f) reach = std::cbrt(3.0f * strike.energy / (4.0f * 3.14159265f * material.strength)) / metres;
+            else if (strike.energy > 0.0f) reach = cubeRoot(3.0f * strike.energy / (4.0f * 3.14159265f * material.strength)) / metres;
             else return false;
             if (reach > limits.maxReachVoxels) {
                 core::trace("physics: fracture of entity {}: reach {} voxels capped at {}", static_cast<uint32_t>(entity), reach,
@@ -884,7 +901,7 @@ namespace projv::runtime {
             auto reachIn = [&](uint16_t m) {
                 auto [it, fresh] = ownReach.try_emplace(m, reach);
                 if (fresh && strike.reach <= 0.0f)
-                    it->second = std::min(std::cbrt(3.0f * strike.energy / (4.0f * 3.14159265f * sim.material(m).strength)) / metres,
+                    it->second = std::min(cubeRoot(3.0f * strike.energy / (4.0f * 3.14159265f * sim.material(m).strength)) / metres,
                                           limits.maxReachVoxels);
                 return it->second;
             };
