@@ -3,6 +3,7 @@
 #define PROJECTV_TILE_TABLE_INL_H
 
 #include <algorithm>
+#include <bit>
 
 #include "utils/voxel_math.h"
 
@@ -83,7 +84,7 @@ namespace projv::utils {
         };
         auto rank = [](uint32_t high32, uint32_t low32, uint32_t z) -> uint32_t {
             const uint64_t mask = (uint64_t(high32) << 32) | low32;
-            return z == 0 ? 0u : uint32_t(__builtin_popcountll(mask >> (64u - z)));
+            return z == 0 ? 0u : uint32_t(std::popcount(mask >> (64u - z)));
         };
         auto z4 = [](core::ivec3 l) { return uint32_t(computeLocalZOrder(l) & 63u); };
         auto slotAt = [&](size_t i) { return i < t.materials.size() ? t.materials[i] : uint8_t(0); };

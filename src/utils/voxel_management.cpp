@@ -1,6 +1,7 @@
 #include "utils/voxel_management.h"
 #include "utils/material.h"
 #include "data_structures/nodeStructure.h"
+#include <bit>
 #include <numeric>
 
 namespace projv {
@@ -467,8 +468,8 @@ namespace projv::utils {
             uint32_t count = levelCount.back();
             uint32_t children = 0;
             for (uint32_t n = start; n < start + count; ++n) {
-                children += static_cast<uint32_t>(__builtin_popcount(geometry[n * 3]));
-                children += static_cast<uint32_t>(__builtin_popcount(geometry[n * 3 + 1]));
+                children += static_cast<uint32_t>(std::popcount(geometry[n * 3]));
+                children += static_cast<uint32_t>(std::popcount(geometry[n * 3 + 1]));
             }
             uint32_t nextStart = start + count;
             if (children == 0 || nextStart + children > nodeCount) {
@@ -534,7 +535,7 @@ namespace projv::utils {
             // sibling rank produces, which is what makes childBase + rank the right child.
             uint64_t bits = (static_cast<uint64_t>(mask1) << 32) | static_cast<uint64_t>(mask2);
             while (bits) {
-                int leadingZeros = __builtin_clzll(bits);
+                int leadingZeros = std::countl_zero(bits);
                 size_t child = childBase + rank;
                 uint8_t matID = (child < nodeCount) ? repr[child] : 0;
                 outMaterialIDs.push_back(matID);

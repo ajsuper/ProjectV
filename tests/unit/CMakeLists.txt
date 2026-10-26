@@ -73,31 +73,33 @@ add_test(NAME projv_unit_tests COMMAND projv_unit_tests)
 add_test(NAME physics_soak COMMAND projv_unit_tests -tc=soak*)
 set_tests_properties(physics_soak PROPERTIES ENVIRONMENT "PROJV_SOAK=1" LABELS soak TIMEOUT 3600)
 
+# The example self-tests below are bash scripts, so they are left out on Windows.
+
 # Real sockets on localhost (ENet). Not in the default run either: `ctest --preset net`.
 add_test(NAME net_sockets COMMAND projv_unit_tests -tc=enet* --no-skip)
 set_tests_properties(net_sockets PROPERTIES LABELS net TIMEOUT 60)
 # The multiplayer example as three processes (a server, two headless clients) on localhost.
-if(TARGET mp_server AND TARGET mp_client)
+if(NOT WIN32 AND TARGET mp_server AND TARGET mp_client)
     add_test(NAME multiplayer_selftest
              COMMAND ${PROJECT_SOURCE_DIR}/examples/70-multiplayer/selftest.sh ${CMAKE_BINARY_DIR})
     set_tests_properties(multiplayer_selftest PROPERTIES LABELS net TIMEOUT 120)
 endif()
 # A hundred bot clients against one server, as real sockets (examples/70-multiplayer/scale.sh).
-if(TARGET mp_server AND TARGET mp_bots)
+if(NOT WIN32 AND TARGET mp_server AND TARGET mp_bots)
     add_test(NAME multiplayer_scale
              COMMAND ${PROJECT_SOURCE_DIR}/examples/70-multiplayer/scale.sh ${CMAKE_BINARY_DIR} 100)
     set_tests_properties(multiplayer_scale PROPERTIES LABELS net TIMEOUT 180)
 endif()
 
 # The party game as four processes (a server; three clients wandering, shoving, building, bombing).
-if(TARGET party_demo_server AND TARGET party_demo)
+if(NOT WIN32 AND TARGET party_demo_server AND TARGET party_demo)
     add_test(NAME party_selftest
              COMMAND ${PROJECT_SOURCE_DIR}/examples/90-party-demo/selftest.sh ${CMAKE_BINARY_DIR})
     set_tests_properties(party_selftest PROPERTIES LABELS net TIMEOUT 300)
 endif()
 
 # The playground as three processes (a server; two clients using every tool on the castle).
-if(TARGET playground_demo_server AND TARGET playground_demo)
+if(NOT WIN32 AND TARGET playground_demo_server AND TARGET playground_demo)
     add_test(NAME playground_selftest
              COMMAND ${PROJECT_SOURCE_DIR}/examples/95-playground-demo/selftest.sh ${CMAKE_BINARY_DIR})
     set_tests_properties(playground_selftest PROPERTIES LABELS net TIMEOUT 180)

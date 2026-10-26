@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <map>
 #include <tuple>
 
@@ -26,7 +27,7 @@ namespace projv::utils {
         uint32_t rankBefore(uint32_t high, uint32_t low, uint32_t z) {
             uint64_t mask = (uint64_t(high) << 32) | uint64_t(low);
             if (z == 0) return 0;
-            return uint32_t(__builtin_popcountll(mask >> (64u - z)));
+            return uint32_t(std::popcount(mask >> (64u - z)));
         }
 
         // The header's packing: 10 bits an axis.
@@ -172,7 +173,7 @@ namespace projv::utils {
             bool oneSlot = true;
             uint8_t slots[64];
             for (const Brick& b : bricks) {
-                const uint32_t count = uint32_t(__builtin_popcount(b.high) + __builtin_popcount(b.low));
+                const uint32_t count = uint32_t(std::popcount(b.high) + std::popcount(b.low));
                 if (count == 0) continue;
                 const uint32_t offset = tree64LeafMatOffset(b.data3);
                 const bool flagged = tree64LeafIsUniform(b.data3);
@@ -221,17 +222,17 @@ namespace projv::utils {
             const uint32_t* block = &t.texels[(L.blockMasks + size_t(bl)) * 4];
             const uint32_t* start = &t.texels[L.blockStarts * 4 + size_t(bl) * 2];
             d.occupied[0] = block[0]; d.occupied[1] = block[1]; d.full[0] = block[2]; d.full[1] = block[3];
-            const uint32_t fulls = uint32_t(__builtin_popcount(block[2]) + __builtin_popcount(block[3]));
+            const uint32_t fulls = uint32_t(std::popcount(block[2]) + std::popcount(block[3]));
             for (uint32_t k = 0; k < fulls; ++k) {
                 const size_t i = size_t(start[1]) + k;
                 d.fullMaterials.push_back(i < t.materials.size() ? t.materials[i] : 0);
             }
-            const uint32_t partials = uint32_t(__builtin_popcount(block[0] & ~block[2]) + __builtin_popcount(block[1] & ~block[3]));
+            const uint32_t partials = uint32_t(std::popcount(block[0] & ~block[2]) + std::popcount(block[1] & ~block[3]));
             for (uint32_t k = 0; k < partials; ++k) {
                 const uint32_t* l = &t.texels[(size_t(t.leafStart) + start[0] + k) * 4];
                 const bool uniform = tree64LeafIsUniform(l[2]);
                 const uint32_t offset = tree64LeafMatOffset(l[2]);
-                const uint32_t count = uniform ? 1u : uint32_t(__builtin_popcount(l[0]) + __builtin_popcount(l[1]));
+                const uint32_t count = uniform ? 1u : uint32_t(std::popcount(l[0]) + std::popcount(l[1]));
                 d.leaves.insert(d.leaves.end(), {l[0], l[1], encodeLeafNode(uint32_t(d.leafMaterials.size()), uniform), 0u});
                 for (uint32_t m = 0; m < count; ++m) {
                     const size_t i = size_t(offset) + m;
@@ -682,7 +683,7 @@ namespace projv::utils {
             return false;
         if (t.leafStart != L.leafStart || t.texels.size() / 4 < t.leafStart) return false;
         const uint64_t leaves = t.texels.size() / 4 - t.leafStart, materials = t.materials.size();
-        auto pop = [](uint32_t a, uint32_t b) { return uint64_t(__builtin_popcount(a) + __builtin_popcount(b)); };
+        auto pop = [](uint32_t a, uint32_t b) { return uint64_t(std::popcount(a) + std::popcount(b)); };
         for (int rz = 0; rz < L.regionDims.z; ++rz)
             for (int ry = 0; ry < L.regionDims.y; ++ry)
                 for (int rx = 0; rx < L.regionDims.x; ++rx) {
@@ -719,11 +720,11 @@ namespace projv::utils {
         const TileLayout L = tileTableLayout(t);
         for (size_t rl = 0; rl < L.regionCount; ++rl) {
             const uint32_t* region = &t.texels[(L.regionMasks + rl) * 4];
-            t.fullBlocks += uint32_t(__builtin_popcount(region[2]) + __builtin_popcount(region[3]));
+            t.fullBlocks += uint32_t(std::popcount(region[2]) + std::popcount(region[3]));
         }
         for (size_t bl = 0; bl < L.blockCount; ++bl) {
             const uint32_t* block = &t.texels[(L.blockMasks + bl) * 4];
-            t.fullBricks += uint32_t(__builtin_popcount(block[2]) + __builtin_popcount(block[3]));
+            t.fullBricks += uint32_t(std::popcount(block[2]) + std::popcount(block[3]));
         }
         t.partialBricks = uint32_t(t.texels.size() / 4 - std::min<size_t>(t.texels.size() / 4, t.leafStart));
     }
@@ -732,7 +733,7 @@ namespace projv::utils {
         if (t.texels.empty()) return 0;
         uint64_t total = uint64_t(t.fullBlocks) * 4096 + uint64_t(t.fullBricks) * 64;
         for (size_t i = size_t(t.leafStart) * 4; i + 1 < t.texels.size(); i += 4)
-            total += uint64_t(__builtin_popcount(t.texels[i]) + __builtin_popcount(t.texels[i + 1]));
+            total += uint64_t(std::popcount(t.texels[i]) + std::popcount(t.texels[i + 1]));
         return total;
     }
 

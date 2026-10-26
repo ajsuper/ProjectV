@@ -37,6 +37,12 @@ namespace projv::graphics {
 #if defined(__APPLE__)
             platformData.nwh = glfwGetCocoaWindow(window);
             platformData.type = bgfx::NativeWindowHandleType::Default;
+#elif defined(_WIN32)
+            platformData.nwh = glfwGetWin32Window(window);
+            platformData.type = bgfx::NativeWindowHandleType::Default;
+            if (platformData.nwh == NULL) {
+                core::error("ERROR: GLFW native window handle returned NULL.");
+            }
 #elif defined(__linux__)
     #if defined(PROJV_USE_X11)
             platformData.ndt = glfwGetX11Display();
@@ -59,7 +65,9 @@ namespace projv::graphics {
         bgfx::Init bgfxInit;
 #if defined(__APPLE__)
         bgfxInit.type = bgfx::RendererType::Metal;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(_WIN32)
+        // The same SPIR-V shaders on Windows as on Linux (cmake/ProjectVShaders.cmake): one shader
+        // backend, not a second one in HLSL.
         bgfxInit.type = bgfx::RendererType::Vulkan;
 #endif
         bgfxInit.resolution.width = width;

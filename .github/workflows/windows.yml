@@ -1,0 +1,67 @@
+# Windows, built and tested on GitHub's runner: the way the code is checked on a platform nobody
+# develops on. Plan: docs/plans/windows.md.
+#
+# NOT YET A GATE (continue-on-error): until the build is green it is the list of what breaks. Once it
+# is, delete `continue-on-error` and it blocks pull requests like any check. Scope so far: the library
+# and the unit tests (CPU only; a runner has no GPU). Drawing is tried by hand on a Windows machine.
+name: windows
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "include/**"
+      - "src/**"
+      - "tests/**"
+      - "cmake/**"
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - ".github/workflows/windows.yml"
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  msvc:
+    runs-on: windows-latest
+    continue-on-error: true   # see the top: remove when green
+    timeout-minutes: 90
+    steps:
+      # Files exactly as committed: the golden physics recording and the .data files are binary.
+      - name: No line-ending conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      # Only external/: the dependencies the library and tests need. The examples' own submodules
+      # (Assimp, Lua, ...) are for the examples, which this does not build yet.
+      - name: Dependencies (submodules)
+        run: git submodule update --init --recursive --depth 1 external
+
+      - name: GLFW
+        run: vcpkg install glfw3:x64-windows
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        run: >
+          cmake --preset windows
+          -DCMAKE_PREFIX_PATH="$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows"
+
+      - name: Build
+        run: cmake --build --preset windows --target projv_unit_tests
+
+      # glfw3.dll is beside vcpkg's other binaries, not the test.
+      - name: Test
+        run: |
+          $env:PATH = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin;$env:PATH"
+          ctest --preset windows

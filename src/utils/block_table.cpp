@@ -1,6 +1,7 @@
 #include "utils/block_table.h"
 
 #include <algorithm>
+#include <bit>
 
 #include "data_structures/voxel.h"
 #include "utils/voxel_math.h"
@@ -27,7 +28,7 @@ namespace projv::utils {
         uint32_t rankBefore(uint32_t high, uint32_t low, uint32_t z) {
             uint64_t mask = (uint64_t(high) << 32) | uint64_t(low);
             if (z == 0) return 0;
-            return uint32_t(__builtin_popcountll(mask >> (64u - z)));
+            return uint32_t(std::popcount(mask >> (64u - z)));
         }
     }
 

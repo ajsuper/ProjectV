@@ -16,6 +16,7 @@
 // arrives at the same trees. Nothing is stored between chunks and no chunk can see its neighbours.
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -209,7 +210,7 @@ inline bool loadTreeLibrary(TreeLibrary& lib, const std::string& folder,
                     uint64_t rowBits = brick->mask[row];
                     while (rowBits != 0) {
                         // Tree64 convention: bit 63 is Z-order position 0 within the row.
-                        int leadingZeros = __builtin_clzll(rowBits);
+                        int leadingZeros = std::countl_zero(rowBits);
                         rowBits &= ~(1ull << (63 - leadingZeros));
                         uint32_t localZOrder = row * 64 + uint32_t(leadingZeros);
 

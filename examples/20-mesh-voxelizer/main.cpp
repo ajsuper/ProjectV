@@ -39,6 +39,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <iostream>
 #include <mutex>
 #include <numeric>
@@ -1095,7 +1096,7 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
         for (uint32_t bz = 0; bz < brickMap->totalBricks; ++bz) {
             if (!brickMap->bricks[bz]) continue;
             for (uint32_t row = 0; row < projv::BRICK_MASK_ROWS; ++row)
-                chunkVoxels += __builtin_popcountll(brickMap->bricks[bz]->mask[row]);
+                chunkVoxels += std::popcount(brickMap->bricks[bz]->mask[row]);
         }
         threadOutput.voxels += chunkVoxels;
 
@@ -1301,7 +1302,7 @@ void voxelizeMinecraftWorld(std::filesystem::path worldPath, const minecraft::Im
         for (uint32_t brickIndex = 0; brickIndex < brickMap->totalBricks; brickIndex++) {
             if (!brickMap->bricks[brickIndex]) continue;
             for (uint32_t row = 0; row < projv::BRICK_MASK_ROWS; row++)
-                chunkVoxels += __builtin_popcountll(brickMap->bricks[brickIndex]->mask[row]);
+                chunkVoxels += std::popcount(brickMap->bricks[brickIndex]->mask[row]);
         }
         if (chunkVoxels == 0) continue;
         totalVoxels += chunkVoxels;

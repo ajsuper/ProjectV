@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 
@@ -22,7 +23,7 @@ namespace projv::utils {
         int linearOf(core::ivec3 l) { return l.x + 4 * l.y + 16 * l.z; }
         uint64_t mask64(uint32_t high, uint32_t low) { return (uint64_t(high) << 32) | low; }
         bool has(uint64_t mask, uint32_t z) { return (mask >> (63u - z)) & 1ull; }
-        uint32_t rankBefore(uint64_t mask, uint32_t z) { return z == 0 ? 0u : uint32_t(__builtin_popcountll(mask >> (64u - z))); }
+        uint32_t rankBefore(uint64_t mask, uint32_t z) { return z == 0 ? 0u : uint32_t(std::popcount(mask >> (64u - z))); }
         uint8_t slotAt(const TileTable& t, size_t i) { return i < t.materials.size() ? t.materials[i] : uint8_t(0); }
 
         // One 16^3 block as the table holds it.

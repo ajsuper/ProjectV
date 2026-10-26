@@ -20,7 +20,7 @@ sudo dnf install gcc-c++ cmake git glfw-devel wayland-devel     # Fedora
 |---|---|
 | Linux | Primary. Wayland by default; `-DPROJV_USE_X11=ON` for X11. Vulkan backend. |
 | macOS | Works, Metal backend, less exercised. |
-| Windows | **Does not run.** `src/graphics/render_instance.cpp` never selects a renderer backend for it, so `bgfx::init` gets an unset type. |
+| Windows | **In progress** ([plan](../plans/windows.md)): MSVC and Vulkan. CI builds and tests it (`.github/workflows/windows.yml`); drawing has not been tried on a real GPU yet. |
 
 ## First build
 

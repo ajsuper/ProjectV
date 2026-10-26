@@ -5,8 +5,13 @@
 #include <algorithm>
 #include <string>
 
-#ifdef __linux__
+#if defined(__linux__)
 #include <pthread.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 namespace projv::runtime {
@@ -69,9 +74,12 @@ namespace projv::runtime {
     void JobPool::FreeJob(Job* job) { jobs.DestructObject(job); }
 
     void JobPool::work(int index) {
-#ifdef __linux__
+#if defined(__linux__)
         std::string name = "physics " + std::to_string(index + 1);
         pthread_setname_np(pthread_self(), name.c_str());
+#elif defined(_WIN32)
+        const std::wstring name = L"physics " + std::to_wstring(index + 1);
+        SetThreadDescription(GetCurrentThread(), name.c_str());
 #else
         (void)index;
 #endif

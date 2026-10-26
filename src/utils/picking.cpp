@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -30,7 +31,7 @@ namespace projv::utils {
             // The `childPos` most significant bits are the children ahead of this one. Shifting a
             // 64-bit value by 64 is undefined, which is exactly the childPos == 0 case above.
             uint64_t beforeMask = ~0ull << (64u - childPos);
-            return uint32_t(__builtin_popcountll(occupancy & beforeMask));
+            return uint32_t(std::popcount(occupancy & beforeMask));
         }
 
         // Slab test against an axis-aligned box, returning the entry and exit distances along the

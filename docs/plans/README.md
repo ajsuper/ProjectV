@@ -89,6 +89,12 @@ The twelve shader experiments:
 [11 single-child fast path](shader_optimization/11_single_child_fastpath.md) ·
 [12 cache and prefetch](shader_optimization/12_cache_and_prefetch.md)
 
+## Platforms
+
+| Plan | Status | What |
+|---|---|---|
+| [windows.md](windows.md) | in progress (W0) | Building, testing (on CI) and drawing on Windows: MSVC, Vulkan, a hand check on a real GPU |
+
 ## Content
 
 | Plan | Status | What |

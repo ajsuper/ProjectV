@@ -38,6 +38,19 @@
             }
         },
         {
+            "name": "windows",
+            "inherits": "dev",
+            "displayName": "Windows (MSVC, Ninja)",
+            "description": "The dev build on Windows: Ninja with the MSVC compiler, run from a Developer Command Prompt (or after vcvars64.bat). Vendored dependencies except GLFW, which find_package takes from CMAKE_PREFIX_PATH (vcpkg install glfw3:x64-windows). Library and unit tests only until the examples build there. Plan: docs/plans/windows.md.",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-windows",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "cl",
+                "CMAKE_CXX_COMPILER": "cl",
+                "PROJV_BUILD_EXAMPLES": "OFF"
+            }
+        },
+        {
             "name": "vcpkg",
             "displayName": "vcpkg (installable)",
             "description": "Resolves every dependency through find_package from a vcpkg toolchain, which is the configuration that can actually be installed and exported. Requires VCPKG_ROOT to be set.",
@@ -53,12 +66,15 @@
         { "name": "dev",     "configurePreset": "dev" },
         { "name": "release", "configurePreset": "release" },
         { "name": "clang",   "configurePreset": "clang" },
+        { "name": "windows", "configurePreset": "windows" },
         { "name": "vcpkg",   "configurePreset": "vcpkg" }
     ],
     "testPresets": [
         { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true },
           "filter": { "exclude": { "label": "soak|net" } } },
         { "name": "clang", "configurePreset": "clang", "output": { "outputOnFailure": true },
+          "filter": { "exclude": { "label": "soak|net" } } },
+        { "name": "windows", "configurePreset": "windows", "output": { "outputOnFailure": true },
           "filter": { "exclude": { "label": "soak|net" } } },
         { "name": "net", "configurePreset": "dev", "output": { "outputOnFailure": true },
           "filter": { "include": { "label": "net" } } },

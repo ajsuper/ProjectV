@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <bit>
 #include "utils/blob_voxels.h"
 #include "utils/material.h"
 #include "core/log.h"
@@ -375,7 +376,7 @@ void bakeMaterialsFromBrickMap(std::vector<uint32_t>& geometry,
         if (!map.bricks[bz]) continue;
         for (uint32_t row = 0; row < BRICK_MASK_ROWS; ++row) {
             estimatedVoxels += static_cast<size_t>(
-                __builtin_popcountll(map.bricks[bz]->mask[row]));
+                std::popcount(map.bricks[bz]->mask[row]));
         }
     }
     materialIDs.reserve(estimatedVoxels);
@@ -423,7 +424,7 @@ void bakeMaterialsFromBrickMap(std::vector<uint32_t>& geometry,
         bool haveFirst = false;
 
         while (rowBits) {
-            int leadingZeros = __builtin_clzll(rowBits);
+            int leadingZeros = std::countl_zero(rowBits);
             uint32_t localZOrder = static_cast<uint32_t>(cursorRow) * 64 + leadingZeros;
 
             auto mit = brick.materials.find(localZOrder);
