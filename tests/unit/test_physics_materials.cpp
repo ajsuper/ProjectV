@@ -78,15 +78,15 @@ namespace {
         // A 20 m floor of half-metre voxels, top at y = 0: its z < 0 half one palette entry, its
         // z >= 0 half another -- the same grey both, so they look alike -- naming `near` and `far`.
         ComponentHandle floorComponent = INVALID_COMPONENT_HANDLE;
-        Entity floor(const std::string& near, const std::string& far) {
+        Entity floor(const std::string& nearby, const std::string& farther) {
             std::vector<projv::PendingVoxelOp> ops;
             fill(ops, {0, 0, 0}, {39, 1, 19}, GREY);
             fill(ops, {0, 0, 20}, {39, 1, 39}, GREEN);
             floorComponent = chunkOf(scene, ops, vec3(-10, -1, -10), 0.5f);
             uint8_t a = slotOf(scene, floorComponent, GREY), b = slotOf(scene, floorComponent, GREEN);
             REQUIRE(utils::setMaterialColor(scene, floorComponent, b, GREY));   // alike in look...
-            REQUIRE(utils::setMaterialPhysics(scene, floorComponent, a, near)); // ...not in what they are made of
-            REQUIRE(utils::setMaterialPhysics(scene, floorComponent, b, far));
+            REQUIRE(utils::setMaterialPhysics(scene, floorComponent, a, nearby)); // ...not in what they are made of
+            REQUIRE(utils::setMaterialPhysics(scene, floorComponent, b, farther));
             Entity e = runtime::spawnComponent(app.world, floorComponent);
             app.world.emplace<projv::StaticCollider>(e);
             return e;

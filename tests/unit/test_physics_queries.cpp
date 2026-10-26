@@ -37,11 +37,11 @@ namespace {
 
 TEST_CASE("a ray finds the nearest body, its distance and its face's normal") {
     PhysicsWorld physics;
-    BodyId near = staticBox(physics, vec3(0, 0, 5), vec3(1));
-    BodyId far = staticBox(physics, vec3(0, 0, 12), vec3(1));
+    BodyId nearby = staticBox(physics, vec3(0, 0, 5), vec3(1));
+    BodyId farther = staticBox(physics, vec3(0, 0, 12), vec3(1));
     auto hit = physics.castRay(vec3(0, 0, 0), vec3(0, 0, 1), 100.0f);
     REQUIRE(hit);
-    CHECK(hit->body == near);
+    CHECK(hit->body == nearby);
     CHECK(hit->distance == doctest::Approx(4.0f).epsilon(1e-3));
     CHECK(hit->normal.z == doctest::Approx(-1.0f).epsilon(1e-3));
     CHECK(hit->position.z == doctest::Approx(4.0f).epsilon(1e-3));
@@ -49,8 +49,8 @@ TEST_CASE("a ray finds the nearest body, its distance and its face's normal") {
     CHECK_FALSE(physics.castRay(vec3(0, 0, 0), vec3(0, 0, 1), 3.5f));    // too short
     CHECK_FALSE(physics.castRay(vec3(0, 0, 0), vec3(0, 1, 0), 100.0f));  // misses
     QueryFilter skip;
-    skip.ignore = near;
-    CHECK(physics.castRay(vec3(0, 0, 0), vec3(0, 0, 1), 100.0f, skip)->body == far);
+    skip.ignore = nearby;
+    CHECK(physics.castRay(vec3(0, 0, 0), vec3(0, 0, 1), 100.0f, skip)->body == farther);
     QueryFilter onlyMoving;
     onlyMoving.layers = QueryFilter::only(PhysicsLayer::Moving);
     CHECK_FALSE(physics.castRay(vec3(0, 0, 0), vec3(0, 0, 1), 100.0f, onlyMoving));

@@ -256,9 +256,9 @@ TEST_CASE("the reach follows the energy, and what has no strength does not break
 
     // Nor does a strike that misses by more than three voxels.
     Fixture g;
-    Entity far = g.wall();
+    Entity farther = g.wall();
     g.frames(2);
-    runtime::fracture(g.app.world, far, vec3(0, 3, -2), Fixture::energyFor(2.0f));
+    runtime::fracture(g.app.world, farther, vec3(0, 3, -2), Fixture::energyFor(2.0f));
     g.frames(2);
     CHECK(g.fractures.empty());
 }
@@ -456,15 +456,15 @@ TEST_CASE("the built-in patterns leave the rim: all goes near the strike, much o
             CAPTURE(directed);
             runtime::FractureRandom random(42);
             std::vector<int32_t> out = pattern(in, random);
-            size_t near = 0, nearBroken = 0, rim = 0, rimBroken = 0;
+            size_t nearby = 0, nearBroken = 0, rim = 0, rimBroken = 0;
             for (size_t i = 0; i < out.size(); i++) {
                 vec3 offset = vec3(voxels[i].position) + 0.5f - in.at;
                 float d = directed ? glm::length(glm::vec2(offset.x, offset.y)) : glm::length(offset);
                 if (glm::length(offset) > in.reach) continue;
-                if (d < 0.25f * in.reach && glm::length(offset) < 0.6f * in.reach) { near++; nearBroken += out[i] >= 0; }
+                if (d < 0.25f * in.reach && glm::length(offset) < 0.6f * in.reach) { nearby++; nearBroken += out[i] >= 0; }
                 if (d > 0.8f * in.reach) { rim++; rimBroken += out[i] >= 0; }
             }
-            CHECK(nearBroken == near);
+            CHECK(nearBroken == nearby);
             CHECK(float(rimBroken) < 0.75f * float(rim));
         }
     }
@@ -862,9 +862,9 @@ TEST_CASE("fracture's guards are the game's to set, and stay guards") {
     CHECK(capped.first == 2);
     CHECK(capped.second < plain.second);
     // A reach of at most two voxels, half a metre.
-    runtime::PhysicsConfig::FractureLimits near;
-    near.maxReachVoxels = 2.0f;
-    const auto small = strike(near, vec3(0, 3, 0), 1.5f);
+    runtime::PhysicsConfig::FractureLimits nearby;
+    nearby.maxReachVoxels = 2.0f;
+    const auto small = strike(nearby, vec3(0, 3, 0), 1.5f);
     CHECK(small.second > 0);
     CHECK(small.second * 4 < plain.second);
     // A metre off the wall (four voxels) misses at three, and strikes at ten -- the reach still

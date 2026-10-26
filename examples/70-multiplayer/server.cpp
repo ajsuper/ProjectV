@@ -119,11 +119,11 @@ int main(int argc, char** argv) {
             auto hit = projv::runtime::castRay(world, eye, aim, 80.0f, 0xffffffffu, player);
             if (!hit) return;
             if (projv::runtime::canBreak(world, hit->entity)) projv::runtime::fracture(world, hit->entity, hit->position, 4.0e5f, aim * 6.0f);
-            for (projv::Entity near : projv::runtime::overlapSphere(world, hit->position, 4.0f)) {
-                if (!world.all_of<projv::RigidBody>(near)) continue;
-                const vec3 away = projv::runtime::bodyPose(world, near).position - hit->position;
+            for (projv::Entity nearby : projv::runtime::overlapSphere(world, hit->position, 4.0f)) {
+                if (!world.all_of<projv::RigidBody>(nearby)) continue;
+                const vec3 away = projv::runtime::bodyPose(world, nearby).position - hit->position;
                 const float d = std::max(glm::length(away), 0.5f);
-                projv::runtime::addVelocity(world, near, away / d * (8.0f / d) + vec3(0, 3, 0));
+                projv::runtime::addVelocity(world, nearby, away / d * (8.0f / d) + vec3(0, 3, 0));
             }
         }
     };

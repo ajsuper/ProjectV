@@ -831,14 +831,14 @@ namespace projv::runtime {
 
             // What was struck: the voxel nearest the point.
             const PhysicsConfig::FractureLimits& limits = physics.fractureLimits;
-            std::vector<FractureVoxel> near = voxelsNear(scene, source, at, limits.searchVoxels);
-            if (near.empty()) {
+            std::vector<FractureVoxel> nearby = voxelsNear(scene, source, at, limits.searchVoxels);
+            if (nearby.empty()) {
                 core::trace("physics: fracture of entity {}: no voxel within {} of the strike", static_cast<uint32_t>(entity),
                             limits.searchVoxels);
                 return false;
             }
-            const FractureVoxel* struck = &near.front();
-            for (const FractureVoxel& v : near)
+            const FractureVoxel* struck = &nearby.front();
+            for (const FractureVoxel& v : nearby)
                 if (glm::distance(core::vec3(v.position) + 0.5f, at) < glm::distance(core::vec3(struck->position) + 0.5f, at))
                     struck = &v;
             const uint16_t struckMaterial = materialOf(struck->slot);

@@ -403,9 +403,9 @@ namespace projv::runtime {
             reachB.Translate(scale2 * b->centre);
             core::ivec3 low, high;
             voxelRange(reachB, scale2, low, high);
-            std::vector<utils::TileBox>& near = scratch(1);
-            b->boxesIn(low, high, near);
-            if (near.empty()) return;
+            std::vector<utils::TileBox>& nearby = scratch(1);
+            b->boxesIn(low, high, nearby);
+            if (nearby.empty()) return;
             // a's boxes where b reaches, in a's space.
             const JPH::Mat44 twoToOne = transform1.InversedRotationTranslation() * transform2;
             JPH::AABox reachA = b->GetLocalBounds().Scaled(scale2);
@@ -419,8 +419,8 @@ namespace projv::runtime {
             pairs.SetContext(collector.GetContext());
             JPH::CollideShapeCollector& into = a->cellShift == 0 && b->cellShift == 0 ? collector : pairs;
             std::vector<JPH::AABox> nearBounds;
-            nearBounds.reserve(near.size());
-            for (const utils::TileBox& n : near) nearBounds.push_back(own(n, *b, scale2));
+            nearBounds.reserve(nearby.size());
+            for (const utils::TileBox& n : nearby) nearBounds.push_back(own(n, *b, scale2));
             for (const utils::TileBox& box : boxes) {
                 if (collector.ShouldEarlyOut()) break;
                 CellBox cellA(box, a->materials[box.slot].GetPtr());
@@ -428,12 +428,12 @@ namespace projv::runtime {
                 inB.ExpandBy(JPH::Vec3::sReplicate(margin));
                 const JPH::Mat44 boxTransform = transform1 * JPH::Mat44::sTranslation(scale1 * (cellA.centre - a->centre));
                 const JPH::SubShapeIDCreator idA = a->cellId(creator1, box.low);
-                for (size_t k = 0; k < near.size(); k++) {
+                for (size_t k = 0; k < nearby.size(); k++) {
                     if (!inB.Overlaps(nearBounds[k])) continue;
-                    CellBox cellB(near[k], b->materials[near[k].slot].GetPtr());
+                    CellBox cellB(nearby[k], b->materials[nearby[k].slot].GetPtr());
                     JPH::CollisionDispatch::sCollideShapeVsShape(&cellA.shape, &cellB.shape, scale1, scale2, boxTransform,
                                                                  transform2 * JPH::Mat44::sTranslation(scale2 * (cellB.centre - b->centre)),
-                                                                 idA, b->cellId(creator2, near[k].low), settings, into, filter);
+                                                                 idA, b->cellId(creator2, nearby[k].low), settings, into, filter);
                 }
             }
             for (const JPH::CollideShapeResult& r : pairs.results) collector.AddHit(r);
@@ -454,12 +454,12 @@ namespace projv::runtime {
             inVoxels.Translate(scale * b->centre);
             core::ivec3 low, high;
             voxelRange(inVoxels, scale, low, high);
-            std::vector<utils::TileBox>& near = scratch(1);
-            b->boxesIn(low, high, near);
-            if (near.empty()) return;
+            std::vector<utils::TileBox>& nearby = scratch(1);
+            b->boxesIn(low, high, nearby);
+            if (nearby.empty()) return;
             std::vector<JPH::AABox> nearBounds;
-            nearBounds.reserve(near.size());
-            for (const utils::TileBox& n : near) nearBounds.push_back(own(n, *b, scale));
+            nearBounds.reserve(nearby.size());
+            for (const utils::TileBox& n : nearby) nearBounds.push_back(own(n, *b, scale));
             std::vector<utils::TileBox>& boxes = scratch(0);
             a->boxesIn(core::ivec3(0), core::ivec3(int(a->tiles->resolution) - 1), boxes);
             for (const utils::TileBox& box : boxes) {
@@ -471,14 +471,14 @@ namespace projv::runtime {
                                          sweep.mCenterOfMassStart * JPH::Mat44::sTranslation(sweep.mScale * (cellA.centre - a->centre)),
                                          sweep.mDirection);
                 const JPH::SubShapeIDCreator idA = a->cellId(creator1, box.low);
-                for (size_t k = 0; k < near.size(); k++) {
+                for (size_t k = 0; k < nearby.size(); k++) {
                     if (collector.ShouldEarlyOut()) break;
                     if (!mine.Overlaps(nearBounds[k])) continue;
-                    CellBox cellB(near[k], b->materials[near[k].slot].GetPtr());
+                    CellBox cellB(nearby[k], b->materials[nearby[k].slot].GetPtr());
                     const JPH::Mat44 local = JPH::Mat44::sTranslation(scale * (cellB.centre - b->centre));
                     JPH::CollisionDispatch::sCastShapeVsShapeLocalSpace(one.PostTransformed(local.InversedRotationTranslation()), settings,
                                                                         &cellB.shape, scale, filter, transform2 * local, idA,
-                                                                        b->cellId(creator2, near[k].low), collector);
+                                                                        b->cellId(creator2, nearby[k].low), collector);
                 }
             }
         }

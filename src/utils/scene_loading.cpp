@@ -663,10 +663,10 @@ namespace projv::utils {
         const size_t n = blocks_.size();
         const size_t slice = (n + config_.recheckUpdates - 1) / config_.recheckUpdates;
         if (policy_.hint.radius > 0.0f) {
-            std::vector<std::pair<BlockId, bool>> near;
-            nearBlocks(near);
+            std::vector<std::pair<BlockId, bool>> nearby;
+            nearBlocks(nearby);
             // Just come within range (or everything, on a full pass): asked now.
-            for (auto [id, newly] : near) {
+            for (auto [id, newly] : nearby) {
                 if (fullPass_ || newly) evaluate(scene, id);
             }
             // Gone out of range: Absent now, without asking.
@@ -684,7 +684,7 @@ namespace projv::utils {
                 else want_[id] = Presence::Absent;
             }
             prevNear_.clear();
-            for (auto [id, newly] : near) prevNear_.push_back(id);
+            for (auto [id, newly] : nearby) prevNear_.push_back(id);
         } else if (fullPass_) {
             for (BlockId id = 0; id < n; id++) evaluate(scene, id);
         } else {

@@ -16584,7 +16584,7 @@ static void drawRegionOverlay(const projv::Scene& scene, EditorState& editor, bo
     editor.regionHoverValid = false;
     if (editor.regionCornerPending && editor.regionCornerComponent < scene.components.size()) {
         ComponentVoxelSpace space = resolveComponentVoxelSpace(scene, editor.regionCornerComponent);
-        ivec3 far = editor.regionCornerA;
+        ivec3 farther = editor.regionCornerA;
 
         if (imageHovered && !editor.cameraIsFlying) {
             vec2 resolution(float(editor.viewportWidth), float(editor.viewportHeight));
@@ -16594,13 +16594,13 @@ static void drawRegionOverlay(const projv::Scene& scene, EditorState& editor, bo
             ivec3 hovered;
             if (pick.hit && pick.component == editor.regionCornerComponent &&
                 pickToComponentVoxelCoord(scene, pick, hovered)) {
-                far = hovered;
+                farther = hovered;
                 editor.regionHoverCoord = hovered;
                 editor.regionHoverValid = true;
             }
         }
-        drawVoxelBoxOutline(drawList, editor, space, projv::core::min(editor.regionCornerA, far),
-                            projv::core::max(editor.regionCornerA, far), PENDING, 2.0f);
+        drawVoxelBoxOutline(drawList, editor, space, projv::core::min(editor.regionCornerA, farther),
+                            projv::core::max(editor.regionCornerA, farther), PENDING, 2.0f);
         return;
     }
 

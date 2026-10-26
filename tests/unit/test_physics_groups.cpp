@@ -147,13 +147,13 @@ TEST_CASE("groups: a character walks through what it ignores, and is stopped by 
 
 TEST_CASE("groups: a query skips the groups it is told to") {
     PhysicsWorld physics;
-    BodyDesc near = crateAt({0, 0, 3}, {.groups = A});
-    near.motion = MotionType::Static;
-    near.layer = PhysicsLayer::Static;
-    BodyDesc far = crateAt({0, 0, 6});
-    far.motion = MotionType::Static;
-    far.layer = PhysicsLayer::Static;
-    BodyId a = physics.createBody(near), b = physics.createBody(far);
+    BodyDesc nearby = crateAt({0, 0, 3}, {.groups = A});
+    nearby.motion = MotionType::Static;
+    nearby.layer = PhysicsLayer::Static;
+    BodyDesc farther = crateAt({0, 0, 6});
+    farther.motion = MotionType::Static;
+    farther.layer = PhysicsLayer::Static;
+    BodyId a = physics.createBody(nearby), b = physics.createBody(farther);
     physics.step(DT);
     auto hit = physics.castRay({0, 0, 0}, {0, 0, 1}, 20.0f);
     REQUIRE(hit);

@@ -1710,10 +1710,10 @@ constexpr float BLAST_ENERGY = 80000.0f, BLAST_REACH = 3.5f;   // J at the centr
 
 void detonate(World& world, Demos& demos) {
     const vec3 at = demos.blastAt;
-    std::vector<Entity> near;
+    std::vector<Entity> nearby;
     for (Entity e : world.view<projv::RigidBody>())
-        if (glm::length(runtime::bodyPose(world, e).position - at) < BLAST_REACH) near.push_back(e);
-    for (Entity e : near) {
+        if (glm::length(runtime::bodyPose(world, e).position - at) < BLAST_REACH) nearby.push_back(e);
+    for (Entity e : nearby) {
         vec3 middle = runtime::bodyPose(world, e).centerOfMass;
         float falloff = 1.0f - glm::length(middle - at) / BLAST_REACH;
         runtime::Strike strike;

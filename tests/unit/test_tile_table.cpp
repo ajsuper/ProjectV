@@ -4,6 +4,7 @@
 
 #include "doctest/doctest.h"
 
+#include <bit>
 #include <filesystem>
 #include <random>
 #include <vector>
@@ -57,7 +58,7 @@ namespace {
         uint32_t offset = projv::tree64LeafMatOffset(data3);
         if (!projv::tree64LeafIsUniform(data3)) {
             const uint64_t mask = (uint64_t(high) << 32) | low;
-            offset += z == 0 ? 0u : uint32_t(__builtin_popcountll(mask >> (64u - z)));
+            offset += z == 0 ? 0u : uint32_t(std::popcount(mask >> (64u - z)));
         }
         return offset < tree.materialIDs.size() ? tree.materialIDs[offset] : -2;
     }
