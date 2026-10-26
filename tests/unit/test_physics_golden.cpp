@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <vector>
 
 #include "core/application.h"
@@ -201,7 +202,11 @@ TEST_CASE("golden: the session it was recorded from is still the same session") 
         if (now.bytes != golden.bytes) {
             if (const char* out = std::getenv("PROJV_GOLDEN_OUT")) {
                 std::filesystem::create_directories(out);
-                now.saveToFile((std::filesystem::path(out) / goldenPath(r).filename()).string());
+                const std::filesystem::path name = std::filesystem::path(out) / goldenPath(r).filename();
+                now.saveToFile(name.string());
+                std::ofstream note(name.string() + ".txt");
+                note << "first differing byte " << firstDifference << " of " << now.bytes.size() << " (committed: "
+                     << golden.bytes.size() << "), steps " << now.steps << " (committed: " << golden.steps << ")\n";
             }
         }
         CHECK(now.bytes.size() == golden.bytes.size());
