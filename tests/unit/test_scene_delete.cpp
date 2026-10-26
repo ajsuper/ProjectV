@@ -145,6 +145,7 @@ TEST_CASE("a deleted component is not saved") {
     REQUIRE(utils::saveComposeToDisk(scene, INVALID_COMPONENT_HANDLE, folder.string()));
     std::ifstream in(folder / "compose.json");
     nlohmann::json doc = nlohmann::json::parse(in);
+    in.close();   // Windows will not delete a file that is open
     REQUIRE(doc["components"].size() == 1);
     CHECK(doc["components"][0]["name"] == "Kept");
     std::filesystem::remove_all(folder);

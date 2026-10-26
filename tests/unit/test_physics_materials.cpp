@@ -355,6 +355,7 @@ TEST_CASE("a palette entry's physics material is saved in compose.json, and only
     REQUIRE(utils::writeComposeJson((folder / "again.json").string(), doc));
     std::ifstream in(folder / "again.json");
     nlohmann::json written = nlohmann::json::parse(in);
+    in.close();   // Windows will not delete a file that is open
     const auto& palette = written["components"][0]["palette"];
     CHECK(palette[0]["physics"] == "stone");
     CHECK_FALSE(palette[2].contains("physics"));
