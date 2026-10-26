@@ -8,7 +8,7 @@ five native sculpt brushes are still an enum rather than registry entries, and s
 rather than placing instances.
 
 Read this for why the pieces are shaped the way they are. The built behaviour is documented in
-[`docs/examples/SceneEditor/README.md`](../examples/SceneEditor/README.md) under *The Brush Lab*;
+[`examples/60-scene-editor/README.md`](../../examples/60-scene-editor/README.md#the-brush-lab) under *The Brush Lab*;
 where the two differ, the README is what the code does.
 
 ## Goal

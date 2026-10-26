@@ -13,7 +13,7 @@
 
 // Component attachments: data a program attaches to scene components and saves with them, which the
 // engine stores, copies and writes back without interpreting. See AttachmentStore in scene.h for
-// what the storage holds, and docs/data_structures/compose_data_structure.md for the file format.
+// what the storage holds, and docs/reference/formats/compose-json.md for the file format.
 //
 // **For data about the voxel structure, written by tools** -- the scene editor's boolean ops, a
 // primitive's parameters. What a running program *does* with an asset is an entity's ECS components,

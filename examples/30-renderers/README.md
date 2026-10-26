@@ -28,7 +28,7 @@ worked examples of it, at every scale from four passes to ten.
 
 ## The renderers
 
-| Renderer | GI | Noise strategy | Notes |
+| Renderer | Lighting | Noise strategy | Notes |
 |---|---|---|---|
 | [pt-reference](renderers/pt-reference/) | two-bounce path trace through the materials | accumulate; hard reset on camera or sun move | The reference: exact, slow, converges while parked. What the others are measured against. The default. |
 | [fast](renderers/fast/) | none — direct + RTAO | deterministic; TAA for AA only | Cheapest. Nothing to converge because nothing is random. |
@@ -61,7 +61,7 @@ the cascade maths — so they stay in step with each other and with the engine.
 
 ```bash
 cd build/examples/renderer_gallery
-./renderer_gallery --renderer world-cascade
+./renderer_gallery --renderer fast
 ```
 
 ```
@@ -109,7 +109,7 @@ frame, and says so at startup:
 Until it is re-voxelized, point `--scene` at something that loads:
 
 ```bash
-./renderer_gallery --renderer world-cascade --scene ../scene_previewer/scenes/SmallVox
+./renderer_gallery --renderer fast --scene ../scene_previewer/scenes/SmallVox
 ```
 
 See [docs/plans/known-latent-issues.md](../../docs/plans/known-latent-issues.md) for the full list

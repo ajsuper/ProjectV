@@ -1,0 +1,141 @@
+# The ProjectV docs site. The pages are the Markdown under docs/ (plus the example READMEs,
+# pulled in by tools/docs/mkdocs_hooks.py); nothing here is content.
+#
+#   cmake --build build --target docs         build it  -> build/docs/site/index.html
+#   cmake --build build --target docs-serve   serve it, rebuilt on save
+#
+# Adding a page: write it under docs/, link it from its section's index, add it to `nav` below.
+# The `docs` ctest fails on a page nothing links to.
+
+site_name: ProjectV
+site_description: A voxel game engine
+repo_url: https://github.com/ajsuper/Projectv
+repo_name: ajsuper/ProjectV
+edit_uri: edit/main/docs/
+docs_dir: docs
+strict: true
+
+hooks:
+  - tools/docs/mkdocs_hooks.py
+
+validation:
+  nav:
+    omitted_files: info
+    not_found: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: info
+    unrecognized_links: info
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - navigation.tracking
+    - toc.follow
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: deep orange
+      toggle: { icon: material/weather-night, name: Dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue grey
+      accent: deep orange
+      toggle: { icon: material/weather-sunny, name: Light mode }
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - Home: README.md
+  - Getting started:
+      - getting-started/README.md
+      - Build: getting-started/build.md
+      - Your first app: getting-started/first-app.md
+  - Concepts:
+      - concepts/README.md
+      - Architecture: concepts/architecture.md
+      - The frame loop: concepts/frame-loop.md
+      - The scene: concepts/scene.md
+      - Voxel data: concepts/voxel-data.md
+      - Materials: concepts/materials.md
+      - Editing: concepts/editing.md
+      - Rendering: concepts/rendering.md
+      - Entities: concepts/entities.md
+      - Physics: concepts/physics.md
+      - Where data goes: concepts/where-data-goes.md
+  - Guides:
+      - guides/README.md
+      - Load, show and save a scene: guides/load-a-scene.md
+      - Build voxels in code: guides/voxels-in-code.md
+      - Edit voxels: guides/edit-voxels.md
+      - Gameplay components: guides/gameplay-components.md
+      - Add physics: guides/add-physics.md
+      - Write a renderer: guides/write-a-renderer.md
+      - Logging: guides/logging.md
+      - Testing: guides/testing.md
+  - Reference:
+      - reference/README.md
+      - API reference (Doxygen): api/index.html
+      - core: reference/core.md
+      - graphics: reference/graphics.md
+      - utils: reference/utils.md
+      - data_structures: reference/data-structures.md
+      - runtime: reference/runtime.md
+      - Shader library: reference/shader-library.md
+      - File formats:
+          - reference/formats/README.md
+          - compose.json: reference/formats/compose-json.md
+          - .data: reference/formats/data-file.md
+          - entities.json: reference/formats/entities-json.md
+          - physics_materials.json: reference/formats/physics-materials-json.md
+          - Renderer folder: reference/formats/renderer-folder.md
+          - tile table: reference/formats/tile-table.md
+          - tree64: reference/formats/tree64.md
+      - Glossary: reference/glossary.md
+  - Examples:
+      - examples/README.md
+      - 00 hello-voxel: examples/00-hello-voxel/README.md
+      - 10 scene-previewer: examples/10-scene-previewer/README.md
+      - 15 entities: examples/15-entities/README.md
+      - 16 sandbox: examples/16-sandbox/README.md
+      - 17 physics-demos: examples/17-physics-demos/README.md
+      - 20 mesh-voxelizer: examples/20-mesh-voxelizer/README.md
+      - 30 renderers: examples/30-renderers/README.md
+      - 40 advanced-renderer: examples/40-advanced-renderer/README.md
+      - 50 terrain-generator: examples/50-terrain-generator/README.md
+      - 60 scene-editor: examples/60-scene-editor/README.md
+  - Contributing:
+      - contributing/README.md
+      - Contributing: project/CONTRIBUTING.md
+      - Coding style: project/CODING_STYLE.md
+      - Writing docs: contributing/writing-docs.md
+      - Tests: tests/README.md
+      - Agent notes: project/AGENTS.md
+      - Sources: project/SOURCES.md
+      - Code of conduct: project/CODE_OF_CONDUCT.md
+  - Plans: plans/README.md

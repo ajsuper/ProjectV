@@ -34,3 +34,7 @@ examples/10-scene-previewer/scenes/SanMiguel-32768/
 
 # Ignore RenderDoc captures
 *.rdc
+
+# The docs site when built by hand with `mkdocs build`, and Python caches
+site/
+__pycache__/

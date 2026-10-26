@@ -1,0 +1,72 @@
+# Doxygen configuration for the ProjectV API reference.
+#
+# Built by `cmake --build build --target docs`, which runs it from the repository root and
+# then builds the site, which copies the output in at api/. By hand, from the repository root:
+#
+#     PROJV_DOXYGEN_OUT=build/docs/api doxygen tools/docs/Doxyfile
+#
+# The headers' plain // comments are read as documentation by doxygen_filter.py.
+
+PROJECT_NAME           = ProjectV
+PROJECT_BRIEF          = "Voxel game engine: API reference"
+OUTPUT_DIRECTORY       = $(PROJV_DOXYGEN_OUT)
+CREATE_SUBDIRS         = NO
+
+INPUT                  = include tools/docs/api_mainpage.md
+FILE_PATTERNS          = *.h *.md
+RECURSIVE              = YES
+EXCLUDE_SYMBOLS        = detail *::detail *::detail::*
+USE_MDFILE_AS_MAINPAGE = tools/docs/api_mainpage.md
+INPUT_FILTER           = "python3 tools/docs/doxygen_filter.py"
+FILTER_SOURCE_FILES    = NO
+
+FULL_PATH_NAMES        = YES
+STRIP_FROM_PATH        = include
+STRIP_FROM_INC_PATH    = include
+JAVADOC_AUTOBRIEF      = YES
+MARKDOWN_SUPPORT       = YES
+AUTOLINK_SUPPORT       = YES
+BUILTIN_STL_SUPPORT    = YES
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+EXTRACT_PRIVATE        = NO
+HIDE_UNDOC_RELATIONS   = NO
+SHOW_INCLUDE_FILES     = YES
+SORT_MEMBER_DOCS       = NO
+INLINE_SOURCES         = NO
+SOURCE_BROWSER         = YES
+REFERENCED_BY_RELATION = NO
+REFERENCES_RELATION    = NO
+VERBATIM_HEADERS       = YES
+
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = NO
+PREDEFINED             = PROJV_ENABLE_TRACE PROJV_ENABLE_PERF PROJV_ENABLE_EDIT \
+                         PROJV_ENABLE_RENDER PROJV_ENABLE_INFO PROJV_ENABLE_WARN PROJV_ENABLE_ERROR \
+                         __linux__
+
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = NO
+WARN_NO_PARAMDOC       = NO
+WARN_IF_INCOMPLETE_DOC = NO
+
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+HTML_COLORSTYLE        = LIGHT
+HTML_EXTRA_STYLESHEET  = tools/docs/doxygen-awesome/doxygen-awesome.css \
+                         tools/docs/doxygen-awesome/doxygen-awesome-sidebar-only.css
+SEARCHENGINE           = YES
+GENERATE_LATEX         = NO
+GENERATE_XML           = NO
+
+HAVE_DOT               = $(PROJV_DOXYGEN_DOT)
+CLASS_GRAPH            = YES
+COLLABORATION_GRAPH    = NO
+INCLUDE_GRAPH          = NO
+INCLUDED_BY_GRAPH      = NO
+DOT_IMAGE_FORMAT       = svg

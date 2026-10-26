@@ -1,0 +1,6 @@
+# The web build of docs/. Pinned so the site renders the same on every machine.
+#   python3 -m venv build/docs-venv && build/docs-venv/bin/pip install -r tools/docs/requirements.txt
+# or let CMake do it: cmake --build build --target docs
+mkdocs==1.6.1
+mkdocs-material==9.7.7
+pymdown-extensions==12.3

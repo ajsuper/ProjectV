@@ -2,7 +2,7 @@
 
 **Stage 1 implemented.** The live brush half — the frame, the mirror group, the sculpt and paint
 hooks, the overlay and both self-tests — is built and documented in
-[`docs/examples/SceneEditor/README.md`](../examples/SceneEditor/README.md) under *Symmetry*. Where
+[`examples/60-scene-editor/README.md`](../../examples/60-scene-editor/README.md#symmetry) under *Symmetry*. Where
 the two differ, the README is what the code does. Stages 2 onward below are design only.
 
 The workflow this is built for, stated the way the user stated it:

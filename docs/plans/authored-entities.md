@@ -41,7 +41,7 @@ The voxel layer still never sees EnTT. entities.json is read and written only by
 - `Scene::documentPath` records the top-level folder. An Asset made by `instantiateComposeInto`
   records its folder in `sourcePath`, as nested assets already did.
 
-**`entities.json`** (runtime). Format reference: `docs/data_structures/entities_data_structure.md`.
+**`entities.json`** (runtime). Format reference: [`docs/reference/formats/entities-json.md`](../reference/formats/entities-json.md).
 - An entity's `"link"` is a component id in the same folder, `"document"` (the node the folder
   becomes when nested or grafted), or absent (a standalone entity).
 - `"components"` are ECS components written by `runtime::ComponentTraits<T>`, registered with

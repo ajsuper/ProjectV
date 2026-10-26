@@ -206,7 +206,7 @@ and only the move members remain to keep in sync.
    into the place it now belongs. Files are rewritten in the new form only on their next save.
    This is the one place the engine names an editor key, it is marked as a migration, and it can
    be removed once the bundled scenes have been re-saved.
-4. Update `docs/data_structures/compose_data_structure.md`: remove `op` and its Boolean ops
+4. Update `docs/data_structures/compose_data_structure.md` (now `docs/reference/formats/compose-json.md`): remove `op` and its Boolean ops
    section, document `attachments`, and point to the editor README for what `projv.editor.csg`
    means.
 

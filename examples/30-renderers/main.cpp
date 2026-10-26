@@ -403,7 +403,7 @@ static std::vector<RendererModule> buildRendererRegistry() {
 }
 
 // Command line. Selection is a flag rather than a prompt so the gallery can be driven by a
-// script -- a benchmark across all seven renderers should not need someone at the keyboard.
+// script -- a benchmark across all four renderers should not need someone at the keyboard.
 struct Options {
     std::string rendererId = "pt-reference";
     std::string scenePath;                // Empty: use the bundled scene beside the binary.
@@ -472,7 +472,7 @@ static bool parseCommandLine(int argc, char** argv, const std::vector<RendererMo
 }
 
 // Index of the named renderer, or -1. Names a wrong id loudly rather than silently falling back:
-// a benchmark that quietly measured the default renderer seven times would be worse than an error.
+// a benchmark that quietly measured the default renderer four times would be worse than an error.
 static int findRenderer(const std::vector<RendererModule>& registry, const std::string& id) {
     for (size_t i = 0; i < registry.size(); ++i) {
         if (registry[i].id == id) return static_cast<int>(i);

@@ -36,7 +36,7 @@ disk already holds, so **no data migration is needed**. Ten bits of sRGB beat te
 black, where the eye needs the precision: the first step is 1/13 200 linear instead of 1/1023.
 
 - `packColor` rounds `c * 1023 / 255` (white = 1023); `unpackColor` inverts it.
-- `docs/data_structures/compose_data_structure.md` documents the encoding.
+- `docs/reference/formats/compose-json.md` documents the encoding.
 - Emissive *strength* stays linear and separate, as it is now.
 
 **C2. Shading is linear, and decoding happens once, in the engine.** `decodeMaterial` applies the sRGB EOTF

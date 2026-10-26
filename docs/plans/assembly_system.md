@@ -8,7 +8,7 @@ container, and its contents in order are the stack. Read this for how the CSG wo
 `asset_model.md` for what owns it.
 
 The built version is documented in
-[`docs/examples/SceneEditor/README.md`](../examples/SceneEditor/README.md) under *Assets: the Place
+[`examples/60-scene-editor/README.md`](../../examples/60-scene-editor/README.md#assets-the-place-and-region-tools) under *Assets: the Place
 and Region tools*, and lives in that example's `main.cpp`. Where the two differ, the README is what
 the code does.
 

@@ -87,7 +87,7 @@ Options: `PROJV_PHYSICS_ASSERTS` (Jolt's asserts; off in `release`), `PROJV_BUIL
 and the seven `PROJV_LOG_<CATEGORY>` switches. They are `PUBLIC` on the target, so consumers
 inherit them.
 
-Full build documentation, including platform notes and troubleshooting: `docs/BUILDING.md`.
+Full build documentation, including platform notes and troubleshooting: `docs/getting-started/build.md`.
 
 `20-mesh-voxelizer` and `60-scene-editor` need their submodules; without them the configure step
 skips each with a message naming what to check out.
@@ -147,7 +147,7 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   written by tools (editor boolean ops, primitive parameters): an attachment (`utils/attachments.h`),
   saved in compose.json. What a running program *does* (physics, spawners, gameplay): ECS components
   on authored entities, saved as themselves in `entities.json` beside compose.json
-  (`runtime/entities.h`, `docs/data_structures/entities_data_structure.md`).
+  (`runtime/entities.h`, `docs/reference/formats/entities-json.md`).
 - Components have a persistent `localId` (the entry's `"id"`), unique among siblings. Entity files
   link by it; never persist a `ComponentHandle`.
 - Chunk handle = index into `Scene.chunks` (stable).
@@ -177,6 +177,34 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
   are `Debris`, not bodies -- drawn, falling and bouncing against static bodies, never in the solver
   or a query. Voxel Mayhem's maps use it (64 voxels). Plan: `docs/plans/cheap-debris.md`.
 
+## Workflow
+
+Full version: `CONTRIBUTING.md`.
+
+- **Plans first.** Work bigger than a fix starts from a plan in `docs/plans/` (decisions numbered with
+  reasons, milestones, open questions), agreed before code. Update its status and "as built" as
+  milestones land.
+- **One commit per milestone or fix, on `main`**, with its tests and demo in the same commit.
+  Subject `Area: what is true now` (`Physics: breaking on impact is asked for, not assumed`), a
+  body saying what and why, and a `Co-Authored-By` trailer.
+- **Parallel sessions use their own git worktree and branch.** Don't touch another session's
+  uncommitted files.
+- **Before committing**: `ctest --preset dev`; after physics changes also `ctest --preset soak` and
+  `DEMOS_SELFTEST=1 ./physics_demos`. There is no CI.
+- **Out-of-scope defects** go in `docs/plans/known-latent-issues.md`, not into the current commit.
+
+## Docs
+
+- The docs are Markdown under `docs/`; start at `docs/README.md`. Style and layout:
+  `docs/contributing/writing-docs.md` (terse, tables, snippets, text diagrams; links are paths
+  relative to the file).
+- `ctest --preset dev -R docs` checks every link and anchor, that every page is reachable from
+  `docs/README.md`, and that every header is named in its module page.
+- **A new public header needs a row in its `docs/reference/<module>.md`.** A change in behaviour a
+  page describes updates that page.
+- `cmake --build build --target docs` builds the web site and the Doxygen API reference.
+- Plans live in `docs/plans/`, indexed in `docs/plans/README.md`, with their status kept current.
+
 ## Where things are
 
 | Path | What |
@@ -186,7 +214,8 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 | `examples/` | Twelve feature examples and four `_demo`s, numbered in reading order; `shared/` holds their renderers. See `examples/README.md`. |
 | `tests/unit/` | The automated suite (doctest, ctest). CPU only. |
 | `tests/manual/` | Harnesses that need a display. Not examples. See `tests/README.md`. |
-| `docs/data_structures/` | Format references: the `.data` container, compose scenes, entities, tree64, renderers. |
+| `docs/` | The documentation, plain Markdown. `getting-started/`, `concepts/` (how it works), `guides/` (one task each), `reference/` (a page per module, plus `reference/formats/`: `.data`, compose.json, entities.json, physics materials, renderer folders, tree64), `contributing/`. |
+| `tools/docs/` | The docs site build (MkDocs hook, Doxygen config and comment filter) and the link checker. |
 | `docs/plans/` | Design notes, delivery logs, and `known-latent-issues.md` / `test-suite-notes.md`. Plans live here, in the repo -- never outside it -- and are kept current as work lands. |
 
 Two documents worth reading before changing engine behaviour:

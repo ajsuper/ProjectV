@@ -11,7 +11,7 @@
 #include "data_structures/scene.h" // for projv::Mutability (runtime home)
 
 // In-memory representations for the Compose scene-graph system.
-// See docs/data_structures/compose_data_structure.md for the on-disk formats.
+// See docs/reference/formats/compose-json.md and data-file.md for the on-disk formats.
 namespace projv {
     // Mutability lives in scene.h (runtime data home); ComposeComponent below references it.
 

@@ -214,3 +214,21 @@ works but is not necessary.
 Seen in this repository after a build was killed with `pkill`: three objects were truncated
 (`compose_io.cpp.o` and two Lua translation units), and the resulting `libprojectV.a` was missing
 every symbol from `compose_io.cpp` while containing 173 other `projv::utils::` symbols.
+
+---
+
+## 13. `50-terrain-generator` keeps its own chunk free list
+
+Found while writing the docs (2026-10-15). The streamer creates chunk rows with
+`scene.chunks.push_back` and recycles them through its own `freeChunkSlots`
+(`examples/50-terrain-generator/main.cpp`, around line 2583), instead of `utils::allocateChunkSlot`
+and `Scene::slots`. It works because nothing else in that example frees chunk rows, but it skips the
+engine's free list and its `headerDirty`/`chunkID` setup, and it is the pattern AGENTS.md says not
+to copy. Fix: allocate through `allocateChunkSlot` and drop `freeChunkSlots`.
+
+## 14. Turning `PROJV_LOG_MINIMAL` off does not bring the categories back
+
+`PROJV_LOG_MINIMAL=ON` writes `PROJV_LOG_TRACE/PERF/EDIT/RENDER/INFO` into the cache as `OFF` with
+`FORCE` (top-level `CMakeLists.txt`). Reconfiguring with `PROJV_LOG_MINIMAL=OFF` leaves them `OFF`.
+Workaround: pass the categories explicitly (`-DPROJV_LOG_INFO=ON ...`) or delete the cache. Fix:
+derive the effective set without writing the user-facing options.
