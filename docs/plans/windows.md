@@ -43,7 +43,7 @@ For when the Windows machine is available. Build, then run each from its own dir
 
 1. `cmake --preset windows -DPROJV_BUILD_EXAMPLES=ON` then `cmake --build --preset windows`, from a
    Developer Command Prompt for VS, with `-DCMAKE_PREFIX_PATH` at vcpkg's `installed/x64-windows`.
-2. `hello_voxel`: a window, a shape, mouse look. Resize it. Close it with the button and with Esc.
+2. `hello_voxel`: a window, a shape, mouse look (Esc frees the cursor; it does not quit). Resize it. Close it with the window button.
 3. `renderer_gallery --renderer restir-pt` and `--renderer fast`: the images match Linux's by eye.
 4. `voxel_mayhem_demo` with `MAYHEM_SELFTEST=1`, then play it a minute (fire, break, walk).
 5. `terrain_generator`: terrain streams in, the sun keys work.

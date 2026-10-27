@@ -90,11 +90,11 @@ jobs:
           path: build-windows/golden-out
           if-no-files-found: ignore
 
-  # Every example, and the shaders they draw with. Not a gate yet (continue-on-error): until it is green it is
-  # the list of what breaks, as the unit-test job was. Nothing runs here: a runner has no GPU. Plan: W3.
+  # Every example, and the shaders they draw with, built with MSVC; and the ones the hand check uses, packaged as
+  # an artifact to download and run on a Windows machine with a GPU (docs/plans/windows.md, W3 and W4). Nothing
+  # runs here: a runner has no GPU.
   examples:
     runs-on: windows-latest
-    continue-on-error: true
     timeout-minutes: 120
     steps:
       - name: No line-ending conversion
@@ -121,3 +121,31 @@ jobs:
       # -k 0: keep going past a failed file, so one run lists every error.
       - name: Build
         run: cmake --build --preset windows-examples -- -k 0
+
+      # A folder per program, runnable on a machine with nothing installed: GLFW's DLL and the Visual C++
+      # runtime (app-local, which Microsoft allows) beside each. Only the programs the hand check uses.
+      - name: Package
+        shell: pwsh
+        run: |
+          $programs = 'hello_voxel', 'renderer_gallery', 'voxel_mayhem_demo', 'terrain_generator', 'sandbox', 'physics'
+          $out = 'dist/projectv-windows'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $glfw = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/glfw3.dll"
+          $runtime = Get-ChildItem "$env:VCToolsRedistDir/x64/Microsoft.VC*.CRT/*.dll"
+          foreach ($name in $programs) {
+            $source = "build-windows-examples/examples/$name"
+            $dest = "$out/$name"
+            robocopy $source $dest /E /XD CMakeFiles /XF *.cmake *.ninja* *.obj *.ilk *.exp *.lib *.pdb /NFL /NDL /NJH /NJS /NP | Out-Null
+            Copy-Item $glfw $dest
+            Copy-Item $runtime $dest
+          }
+          Copy-Item .github/windows-package/README.txt $out/README.txt
+          "ProjectV $env:GITHUB_SHA ($env:GITHUB_REF_NAME), built $(Get-Date -Format u)" | Set-Content $out/VERSION.txt
+          Get-ChildItem $out -Directory | ForEach-Object { '{0,-20} {1,8:N0} MB' -f $_.Name, ((Get-ChildItem $_.FullName -Recurse -File | Measure-Object Length -Sum).Sum / 1MB) }
+          $global:LASTEXITCODE = 0   # robocopy's 1-7 mean "copied something"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: projectv-windows
+          path: dist/projectv-windows
+          retention-days: 14
