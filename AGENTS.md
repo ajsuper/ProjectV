@@ -192,6 +192,10 @@ Full version: `CONTRIBUTING.md`.
 - **Before committing**: `ctest --preset dev`; after physics changes also `ctest --preset soak` and
   `DEMOS_SELFTEST=1 ./physics`. There is no CI for the code; the only workflow publishes the docs
   (`.github/workflows/docs.yml`).
+- **Ask the user for camera positions and for how things feel.** If you are struggling to find a camera
+  position that shows something, or need to judge how a change looks or feels (a renderer's look, a
+  control's feel), ask the user to do it rather than burning turns on it. In the renderer gallery, C
+  prints the camera's pose as the `--look` (and `GALLERY_SUN`) that puts it back, for `--capture`.
 - **Out-of-scope defects** go in `docs/plans/known-latent-issues.md`, not into the current commit.
 
 ## Docs
