@@ -48,12 +48,14 @@
 //   T            — TAA on / off (voxel)
 //   Q            — reconstruction bypassed: point-sample the render resolution (reconstruction, restir-pt)
 //   G            — the image / indirect light / direct light / ambient occlusion / indirect diffuse /
-//                  indirect specular (restir-pt)
+//                  indirect specular / light shafts (restir-pt)
 //   J            — ReSTIR reuse on / off (restir-pt)
 //   P            — the final render / the raw path-traced image (restir-pt): off drops the post, the fog, the
 //                  light shafts and the SSAO. Within it: V vignette, B colour grade, E auto-exposure, K depth
 //                  of field, N bloom, M motion blur, O distance fog, L light shafts
 //   U            — soft sun shadow on / off (restir-pt)
+//   I            — blurred normals on / off: softer voxel edges (restir-pt; RESTIR_NORMAL_BLUR=w their width)
+//   C            — print where the camera stands, as the --look (and GALLERY_SUN) that puts it back
 
 #include <algorithm>
 #include <chrono>
@@ -214,6 +216,8 @@ static bool g_restirShafts = true;   // L, part of the final render (P)
 static bool g_restirSoftShadow = true;
 static bool g_restirAir = true;      // RESTIR_AIR=0: no aerial haze (nor its shafts), for comparing
 static bool g_restirFarAO = true;    // RESTIR_FAR_AO=0: no far-field SSAO scale, for comparing
+static bool g_restirSoftNormals = true;   // I: the blurred normals (restir_pt::NORMAL_BLUR); RESTIR_NORMAL_BLUR=w its width
+static float g_restirNormalBlur = restir_pt::NORMAL_BLUR;
 // The constants are restir_pt's (examples/shared/restir_pt.h), where its uniforms are worked out for
 // every program that draws with it.
 static constexpr float RESTIR_SSAO = restir_pt::SSAO;
@@ -237,7 +241,7 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     // RESTIR_UNTOLD=1 moves the sun without telling the renderer -- no history starts over -- as a game's
     // light changes: what only validation can catch. RESTIR_JITTER=0: the old four window-pixel centres.
     // RESTIR_TEMPORAL=0 / RESTIR_SPATIAL=0: one half of the reuse alone; RESTIR_RAW=1: no GI accumulation
-    // and no image history; RESTIR_BOUNCES=n: the paths' length.
+    // and no image history; RESTIR_BOUNCES=n: the paths' length; RESTIR_EXPOSURE=0: a fixed exposure.
     static bool untold = false;
     static float validation = 0.0f;
     static float ssao = RESTIR_SSAO;
@@ -254,7 +258,9 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
         if (const char* v = std::getenv("RESTIR_FAR_AO")) g_restirFarAO = std::atoi(v) != 0;
         if (const char* v = std::getenv("RESTIR_BLOOM")) g_restirPost.bloom = std::atoi(v) != 0;
         if (const char* v = std::getenv("RESTIR_MBLUR")) g_restirPost.motionBlur = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_EXPOSURE")) g_restirPost.exposure = std::atoi(v) != 0;
         if (const char* v = std::getenv("RESTIR_SOFT")) g_restirSoftShadow = std::atoi(v) != 0;
+        if (const char* v = std::getenv("RESTIR_NORMAL_BLUR")) g_restirNormalBlur = float(std::atof(v));
         return true;
     }();
     (void)fromEnv;
@@ -281,6 +287,7 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
                      g_restirPost.bloom, g_restirPost.motionBlur};
     settings.fog = g_restirFog;
     settings.shafts = g_restirShafts;
+    settings.normalBlur = g_restirSoftNormals ? g_restirNormalBlur : 0.0f;
     settings.softShadow = g_restirSoftShadow;
     settings.air = g_restirAir;
     settings.farAO = g_restirFarAO;
@@ -973,12 +980,13 @@ void render(projv::Application& app) {
             {GLFW_KEY_O, &g_restirFog, "distance fog", false},
             {GLFW_KEY_L, &g_restirShafts, "light shafts", false},
             {GLFW_KEY_U, &g_restirSoftShadow, "soft sun shadow", false},
+            {GLFW_KEY_I, &g_restirSoftNormals, "blurred normals", false},
         };
         for (PostKey& k : postKeys) {
             bool down = glfwGetKey(renderInstance.window, k.key) == GLFW_PRESS;
             if (down && !k.prev) {
                 *k.flag = !*k.flag;
-                const bool partOfPost = k.flag != &g_restirPost.on && k.flag != &g_restirSoftShadow;
+                const bool partOfPost = k.flag != &g_restirPost.on && k.flag != &g_restirSoftShadow && k.flag != &g_restirSoftNormals;
                 projv::core::info("ReSTIR {}: {}{}", k.name, *k.flag ? "on" : "off",
                                   partOfPost && !g_restirPost.on ? " (the final render is off: P)" : "");
             }
@@ -987,7 +995,7 @@ void render(projv::Application& app) {
         if (g && !prevG) {
             g_restirView = (g_restirView + 1) % RESTIR_VIEWS;
             static const char* views[] = {"the image", "indirect light only", "direct light only", "ambient occlusion",
-                                          "indirect diffuse only", "indirect specular only"};
+                                          "indirect diffuse only", "indirect specular only", "the light shafts only"};
             projv::core::info("ReSTIR view: {}", views[g_restirView]);
         }
         if (j && !prevJ) {
@@ -1005,6 +1013,19 @@ void render(projv::Application& app) {
         float rightPhi = cameraPhi - 3.14159265f / 2.0f;
         cameraPosition -= projv::core::vec3(projv::core::cos(rightPhi), 0.0f, projv::core::sin(rightPhi)) * (framing.moveSpeed * 0.5f);
         cameraMoved = true;
+    }
+
+    // C prints where the camera stands as the arguments that put it back there (--look, and the sun's
+    // GALLERY_SUN), so a view found by hand can be captured unattended.
+    {
+        static bool prevC = false;
+        bool c = glfwGetKey(renderInstance.window, GLFW_KEY_C) == GLFW_PRESS;
+        if (c && !prevC) {
+            projv::core::vec3 at = cameraPosition + cameraDirection * 10.0f;
+            projv::core::info("GALLERY_SUN={} --look {:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}", g_sunScrollAccum,
+                              cameraPosition.x, cameraPosition.y, cameraPosition.z, at.x, at.y, at.z);
+        }
+        prevC = c;
     }
 
     // H re-frames on the scene, for when navigation has left the subject behind.
@@ -1029,7 +1050,11 @@ void render(projv::Application& app) {
     // around in a fixed vertical plane. The angle is unbounded (no clamp) so it never stops; sunDir
     // = cos(theta)*azimuth + sin(theta)*up is unit-length for a unit azimuth, so no renormalize. A
     // sun change counts as "moved" so the temporal history refreshes to the new lighting.
-    static double prevSunScroll = 0.0;
+    // GALLERY_SUN=n starts the sun n scroll notches from its default (C prints it).
+    static double prevSunScroll = [] {
+        if (const char* v = std::getenv("GALLERY_SUN")) g_sunScrollAccum = std::atof(v);
+        return g_sunScrollAccum;
+    }();
     // GALLERY_SUN_STEP_AT=n lowers the sun three notches (~14 degrees) at frame n: with --capture and
     // GALLERY_CAPTURE_AT, how fast the image follows a change of light.
     static const int sunStepAt = std::getenv("GALLERY_SUN_STEP_AT") ? std::atoi(std::getenv("GALLERY_SUN_STEP_AT")) : -1;

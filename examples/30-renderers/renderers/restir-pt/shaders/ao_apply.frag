@@ -12,7 +12,7 @@ $input v_texcoord0
 //
 // The views (G, restirDenoise.z): 0 the image, 1 the indirect light alone, 2 the direct alone (the sun
 // included), 3 the ambient occlusion alone, 4 and 5 the indirect diffuse and specular alone (the composite
-// hands on only that one as the indirect light). Only the image is fogged and has the shafts.
+// hands on only that one as the indirect light), 6 the light shafts alone. Only the image is fogged and has the shafts.
 //
 // Inputs: 0 litDirect, 1 litIndirect (composite), 2 ao (g: the distance, < 0 sky), 3 sunLight; 4 shafts,
 // 5 shaftDepth, 6 gAlbedo (resources).
@@ -40,10 +40,25 @@ SAMPLER2D(gAlbedo, 6);
 // along the streak, not across it, so the shadows' edges stay. The march stops at the first tap whose view
 // ray is clearly shorter than this one's -- something stands in front there, and the little air in front of
 // it says nothing about the air in front of this pixel -- and a tap that sees further counts only the share
-// of its air this pixel has (t / tq), so the sky's long column does not brighten a mountain in front of it.
+// of its air this pixel has (restirShaftReach(t) / restirShaftReach(tq)), so the sky's long column does not
+// brighten a mountain in front of it. That share is the hazes' weights, not t / tq: the near haze is all
+// within a few dozen voxels, so past that a longer ray has no more of it, and t / tq made a tap seeing the
+// sky count as nothing -- lit air with the sky beyond it came out darker than a shadow, whose march stops at
+// what casts it.
 #define RESTIR_SHAFT_TAPS 16
 #define RESTIR_SHAFT_SPAN 0.2      // the march's longest reach, as a share of the screen's height
 #define RESTIR_SHAFT_DECAY 0.93    // each tap's weight against the one before
+uniform vec4 restirShafts;      // shafts.frag's: x the near haze's strength, y its lambda
+uniform vec4 restirShaftsAir;   // x the aerial haze's strength, y its lambda (0: none), z its onset length
+// What the hazes can scatter along a view ray t long (shafts.frag's W_near + W_air), the air's onset averaged
+// over the ray (min(s / onset, 2) about halves at the ray's middle).
+float restirShaftReach(float t) {
+    float near = restirShafts.x * (1.0 - exp(-restirShafts.y * t));
+    float air = restirShaftsAir.y > 0.0
+              ? restirShaftsAir.x * (1.0 - exp(-restirShaftsAir.y * t)) * min(0.5 * t / max(restirShaftsAir.z, 1e-3), 2.0)
+              : 0.0;
+    return near + air;
+}
 vec3 restirShaftsHere(ivec2 p, float t) {
     float stride = restirJitter.z;
     vec2 res = vec2(textureSize(shafts, 0));
@@ -79,6 +94,7 @@ vec3 restirShaftsHere(ivec2 p, float t) {
 
     vec3 radial = centre;
     float weights = 1.0;
+    float reachHere = restirShaftReach(t);
     float w = 1.0;
     for (int i = 1; i <= RESTIR_SHAFT_TAPS; i++) {
         vec2 q = here + direction * (step * (float(i) - 1.0 + offset));
@@ -87,7 +103,7 @@ vec3 restirShaftsHere(ivec2 p, float t) {
         float tq = texelFetch(shaftDepth, g, 0).x;
         if (tq < 0.8 * t) break;
         w *= RESTIR_SHAFT_DECAY;
-        radial += texelFetch(shafts, g, 0).rgb * (w * min(t / max(tq, 1e-3), 1.0));
+        radial += texelFetch(shafts, g, 0).rgb * (w * min(reachHere / max(restirShaftReach(tq), 1e-6), 1.0));
         weights += w;
     }
     return radial / weights;
@@ -123,9 +139,11 @@ void main() {
     float lit = smoothstep(0.0, 0.5, received / max(restirLum(pathAir(d)), 1e-4));
     lit = max(lit, smoothstep(0.0, 1.0, t * (restirHaze.x + restirAir.x) / 0.6));   // t over the fog's length
     colour = restirFog(colour, d, t, lit);
-    colour += restirShaftsHere(p, t < 0.0 ? 1.0e4 : t);   // all zero when they are off (L, P)
+    vec3 shaftLight = restirShaftsHere(p, t < 0.0 ? 1.0e4 : t);   // all zero when they are off (L, P)
+    colour += shaftLight;
     if (restirView(RESTIR_VIEW_INDIRECT) || restirView(RESTIR_VIEW_DIFFUSE) || restirView(RESTIR_VIEW_SPECULAR)) colour = indirect * shade;
     else if (restirView(RESTIR_VIEW_DIRECT)) colour = direct;
     else if (restirView(RESTIR_VIEW_AO)) colour = vec3(shade, shade, shade);
+    else if (restirView(RESTIR_VIEW_SHAFTS)) colour = shaftLight;
     gl_FragColor = vec4(colour, 1.0);
 }

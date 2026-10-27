@@ -18,8 +18,12 @@ $input v_texcoord0
 //   * a still pixel that showed something moving last frame (the history's length is stored negative for
 //     a pixel that moved) is what a moving thing just uncovered: its history is the thing, so it is clamped
 //     too, and cut to 4 frames. Without this a body crossing a still view left a trail behind it.
+//   * water and mirrors: what they show moves with neither the camera nor the surface (the waves move under
+//     a still view; a reflection slides across its mirror as the camera does), so their history follows
+//     the surface's motion only roughly. It is always clamped, and held to 4 frames on water (8 on a mirror
+//     while the camera moves): the waves stay sharp, and a reflection does not trail.
 
-// Inputs: 0 reconstructed; 1-7 the G-buffer (gPos 1, gMotion 7); 8 resolved (last frame, this pass's own output).
+// Inputs: 0 reconstructed; 1-7 the G-buffer (gPos 1, gDirect 4, gMotion 7); 8 resolved (last frame, this pass's own output).
 // Output: rgb the colour, a its history length in frames (negative: something moved under it this frame,
 // the camera still).
 
@@ -28,6 +32,7 @@ $input v_texcoord0
 
 SAMPLER2D(reconstructed, 0);
 SAMPLER2D(gPos, 1);
+SAMPLER2D(gDirect, 4);
 SAMPLER2D(gMotion, 7);
 SAMPLER2D(resolved, 8);
 
@@ -60,12 +65,15 @@ void main() {
             }
         }
     bool moved = frameCount.y > 0.5 || length(motion * res) > 0.01;
+    float packed = texelFetch(gDirect, texel, 0).a;
+    bool water = restirIsWater(packed);
+    bool mirror = water || restirUnpackMaterial(packed).x >= RESTIR_MIRROR_GLOSSINESS;
     bool uncovered = false;
     if (!moved) {
         vec4 h = texelFetch(resolved, at, 0);
         historyColour = h.rgb;
         historyLength = abs(h.a);
-        uncovered = h.a < 0.0;
+        uncovered = h.a < 0.0 || water;
     }
     if (uncovered) {
         historyLength = min(historyLength, 4.0);
@@ -95,7 +103,7 @@ void main() {
         }
         if (weight > 1e-3) {
             historyColour /= weight;
-            historyLength = min(historyLength / weight, 16.0);
+            historyLength = min(historyLength / weight, water ? 4.0 : mirror ? 8.0 : 16.0);
             vec3 lo = current;
             vec3 hi = current;
             for (int y = -1; y <= 1; y++)

@@ -18,8 +18,8 @@ $input v_texcoord0
 //   0 gPos     xyz the hit, w distance (< 0 sky)
 //   1 gNormal  xyz the face's normal, w the sun's blocker: its distance along the shadow ray, -1 none
 //   2 gAlbedo  rgb albedo, a the sun's visibility (1 seen, 0 blocked or facing away)
-//   3 gDirect  rgb emission; the sky's radiance for a miss. a the material: restirPackMaterial (RGBA32F, so
-//              its sixteen bits are exact)
+//   3 gDirect  rgb emission; the sky's radiance for a miss. a the material: restirPackMaterial, plus
+//              RESTIR_WATER_BIT for water (RGBA32F, so its seventeen bits are exact)
 //   4 gFace    xyz the face's centre, w the voxel's edge (0 sky)
 //   5 gRot     the chunk's rotation
 //   6 gMotion  xy where the hit was on screen last frame minus where it is now (uv; jitter-free: both are
@@ -61,7 +61,8 @@ void main() {
             position = vec4(cameraPos.xyz + direction * hit.t, hit.t);
             albedo = hit.albedo;
             direct = hit.emission;
-            material = restirPackMaterial(hit.glossiness, hit.metallic);
+            material = restirPackMaterial(hit.glossiness, hit.metallic)
+                     + (restirIsWaterMaterial(hit.transparency, hit.glossiness) ? RESTIR_WATER_BIT : 0.0);
             face = hit.face;
             rotation = hit.rotation;
             previous = hit.previous;

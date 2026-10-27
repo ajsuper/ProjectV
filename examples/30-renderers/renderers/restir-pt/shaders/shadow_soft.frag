@@ -19,7 +19,8 @@ $input v_texcoord0
 //
 // Output: rgb the sun's light leaving the surface towards the camera (BSDF x sun x cosine x visibility), a 0.
 // Inputs: 0-5 the G-buffer (gPos 0, gNormal 1 -- w the blocker distance, gAlbedo 2 -- a the visibility,
-// gDirect 3 -- a the material).
+// gDirect 3 -- a the material); 7 gSoftNormal (resource): the blurred normal the light is shaded with
+// (normal_blur.frag) -- the shadow's plane and normal tests keep the G-buffer's.
 
 #include <bgfx_shader.sh>
 #include "restir_common.sc"
@@ -28,6 +29,7 @@ SAMPLER2D(gPos, 0);
 SAMPLER2D(gNormal, 1);
 SAMPLER2D(gAlbedo, 2);
 SAMPLER2D(gDirect, 3);
+SAMPLER2D(gSoftNormal, 7);
 
 #define SOFT_SEARCH_TAPS 16
 #define SOFT_FILTER_TAPS 24
@@ -49,13 +51,14 @@ void main() {
     vec3 P = surface.xyz;
     vec3 N = normalize(nb.xyz);
     vec3 toSun = normalize(SUN_DIR);
-    float facing = max(dot(N, toSun), 0.0);
+    vec3 shadingN = normalize(texelFetch(gSoftNormal, p, 0).xyz + vec3(0.0, 1e-6, 0.0));
+    float facing = max(dot(shadingN, toSun), 0.0);
     vec2 material = restirUnpackMaterial(texelFetch(gDirect, p, 0).a);
     PjvBsdf bsdf = pjvBsdf(ab.rgb, material.x, material.y);
     bsdf.alpha = sqrt(bsdf.alpha * bsdf.alpha + 0.25 * PATH_SUN_HALF_ANGLE * PATH_SUN_HALF_ANGLE);
     vec3 f;
     float pdf;
-    pjvBsdfEvaluate(bsdf, N, normalize(cameraPos.xyz - P), toSun, f, pdf);
+    pjvBsdfEvaluate(bsdf, shadingN, normalize(cameraPos.xyz - P), toSun, f, pdf);
     vec3 sunLit = f * SUN_COLOR * facing;
     if (facing <= 0.0 || restirLook.z <= 0.0) { gl_FragColor = vec4(sunLit * ab.a, 0.0); return; }
 

@@ -24,6 +24,7 @@ of. Plan and delivery log: `docs/plans/restir-pt.md`. Its reference is [pt-refer
 | # | Pass | Resolution | What it does |
 |---|---|---|---|
 | 1 | `gbuffer` | ½ × ½ | Camera ray and one sun shadow ray (at the sun's centre: no noise), handing on the sun's visibility and its blocker's distance, the material (glossiness, metallic), and the hit face and chunk rotation for the reconstruction |
+| 1b | `normal_blur` | ½ × ½ | The shading normal: outside voxel edges bevelled (the normals of points within a tenth of a voxel's edge in the world, below this face's plane, half mixed in), and water's waves (flow noise). Only the shading reads it |
 | 2 | `surface` | ¼ × ¼ | Each GI pixel's visible point — one render texel of its block, a different one each frame — packed into two texels, so the path passes read two inputs rather than the G-buffer's six |
 | 3 | `sample` | ¼ × ¼ | A new path from the visible point; last frame's reservoir for the same surface, its path validated (a quarter of them a frame) and shifted here: temporal reuse |
 | 4 | `spatial` | ¼ × ¼ | Five neighbours' paths shifted here: spatial reuse, and a visibility ray for a borrowed reconnection. Resolves to the indirect diffuse light (divided by the diffuse albedo) and specular (divided by the lobe's directional albedo); hands its reservoirs on as next frame's temporal history |
@@ -31,6 +32,7 @@ of. Plan and delivery log: `docs/plans/restir-pt.md`. Its reference is [pt-refer
 | 6–9 | `atrous1/2/4/8` | ¼ × ¼ | À-trous filter at steps 1, 2, 4 and 8, both lobes, edge-stopped by normal and plane; the diffuse by a loose luminance test against its 3×3 mean, the specular by the lobe's reach instead |
 | 10 | `ssao` | ½ × ½ | Subtle screen-space AO, in a fixed 4×4 rotation pattern |
 | 10b | `shadow_soft` | ½ × ½ | The sun through the BSDF — diffuse and highlight — with a soft shadow (PCSS-style, in screen space). The lobe is widened by the sun's disc, so a mirror shows a sun the disc's size |
+| 10c | `reflect` | ½ × ½ | Mirrors and water: one ray reflected about the shading normal; what it finds is lit from last frame's image where this frame shows it, else by the ray's own estimate (albedo, the sun through a shadow ray, the sky) |
 | 11 | `composite` | ½ × ½ | Edge-aware upsample of both lobes; the diffuse times the texel's diffuse albedo, the specular times its specular albedo: the demodulation put back at full resolution |
 | 12 | `ao_apply` | ½ × ½ | The SSAO on the indirect light, the sun's light added, the distance fog, the views (G) |
 | 13 | `reconstruct` | window | The voxel renderer's reconstruction, copied: voxel by voxel, antialiased |
@@ -56,17 +58,28 @@ textures.
 | secondary rays | exact | coarse past 64 / 16 voxels | restir's; costs the material room about a fifth of its indirect light |
 | random replay | `RESTIR_REPLAY 1` | compiled out | never used under the cap; its state on every ray cost occupancy. The spatial pass traces one visibility ray |
 | validation | `RESTIR_VALIDATE 1` (and `RESTIR_VALIDATE=1`) | compiled out | measured no benefit |
-| mirrors | the paths | screen-space reflection | the cap blurs them |
+| mirrors | the paths | a traced reflection ray (`reflect`) | the cap blurs them |
 
 The camera ray keeps the real glossiness: the sun's highlight (`shadow_soft`) and the mirror test use it,
 and the composite multiplies the paths' specular back by the capped lobe's albedo, as the paths saw it.
 
-**Mirrors** (`composite.frag`): the view ray reflected about the texel's normal, marched through the
-G-buffer in 32 geometric steps out to 1.5x the surface's distance, refined by bisection; a hit's light is
-read from last frame's image through last frame's camera, faded towards the screen's edges. Where it
-misses -- off the screen, which is most of what a mirror facing the camera shows, behind a surface, a back
-face -- the paths' blurred reflection stays. So a mirror reflects what is on screen sharply and the rest
-softly.
+**Mirrors and water** (`reflect.frag`): one ray, reflected about the shading normal, finds what is
+reflected. Where this frame's G-buffer shows that same point (within a voxel), its light is last frame's
+image there, read bilinearly through last frame's camera -- shadows and GI included; off the screen or
+hidden, the ray's own estimate stands in (emission, plus the albedo under the sun through one shadow ray and
+the sky above), blended in towards the screen's edges. A miss is the sky and its clouds. Each texel's answer
+is its own ray's, so it holds still as the camera moves: the screen-space march it replaced (32 steps
+through the G-buffer, then the paths' blur where it missed) turned on a texel of depth, and flickered. Two
+rays a mirror texel, none elsewhere. The resolve keeps 8 frames on a mirror while the camera moves.
+
+**Water** is a see-through material polished almost to a mirror (transparency over 0.3, glossiness 0.85
+and up: the Teardown importer's water; its glass is half as glossy), marked in the G-buffer's material
+word. Its upward faces shade with flow noise (Perlin and Neyret 2001): six octaves of gradient noise, 60
+down to 2 of the finest voxels, whose lattice gradients each turn on the spot at their own rate and sense
+(deep water's `sqrt(g k)` for the octave's size), so the surface churns with no current and no two
+states it swings between; each finer octave rides the coarser ones' slope. Octaves under four texels fade
+out. The paths keep the flat face (the waves would break their history), and the resolve keeps 4 frames,
+so the waves stay sharp. Still drawn solid.
 
 ## Final render, and light shafts
 
@@ -81,8 +94,13 @@ coarse shadow ray per GI pixel per frame, from a point on its view ray drawn fro
 (`exp(-s / 48 finest voxels)`: open sunlit air is a light haze, not glare), so the estimate's only noise is
 whether that point sees the sun. Henyey-Greenstein phase, g = 0.6: shafts glow most looking towards the
 sun. Accumulated over 16 frames through last frame's camera, and upsampled in `ao_apply` with a 4x4 tent
-weighted by view-ray length, so a shaft does not bleed over what stands in front of it. Added after the
-fog. 0.04 ms on Lee Chemicals. Tuning: `RESTIR_SHAFT_*` in main.cpp (strength, falloff, phase, history).
+weighted by view-ray length, so a shaft does not bleed over what stands in front of it, then a radial blur
+towards the sun. A tap of that blur that sees further than this pixel counts only the share of its air this
+pixel has -- the hazes' weights over the two lengths, not t / tq: the near haze is all within a few dozen
+voxels, and t / tq made a tap seeing the sky count as nothing, so lit air with the sky beyond it came out
+darker than the shadow behind a wall (whose march stops at the wall). Added after the fog. 0.04 ms on Lee
+Chemicals. Tuning: `SHAFT_*` and `AIR_SHAFT_STRENGTH` in `examples/shared/restir_pt.h`. G's seventh view
+shows the shafts alone.
 Emissive voxels cast no shafts.
 
 ## Paths, and how they are shared
@@ -223,11 +241,13 @@ pixels changing between still frames to none.
 
 | Key | |
 |---|---|
-| **G** | The image / indirect light / direct light / ambient occlusion / indirect diffuse / indirect specular |
+| **G** | The image / indirect light / direct light / ambient occlusion / indirect diffuse / indirect specular / light shafts |
 | **J** | ReSTIR reuse on/off: off is each GI pixel's one fresh path, denoised — the A/B for what reuse buys |
 | **Q** | The reconstruction bypassed: the render resolution point-sampled |
 | **P** | The final render / the raw path trace: the post (V, B, E, K), the fog (O), the light shafts (L), the SSAO |
 | **U** | The soft sun shadow |
+| **I** | The bevelled normals (`normal_blur`); `RESTIR_NORMAL_BLUR=w` their width, in voxel edges |
+| **C** | Print the camera's pose as the `--look` (and `GALLERY_SUN`) that puts it back, for `--capture` |
 
 For measuring: `GALLERY_STEP_AT=n` sidesteps the camera at frame n (what it uncovers), `RESTIR_RAW=1`
 shows each frame's estimate alone (no GI accumulation, no image history), `RESTIR_TEMPORAL=0`,
@@ -236,7 +256,8 @@ centres instead of the TAA's Halton jitter; `GALLERY_BYPASS=1` starts with the r
 
 For `--capture`: `RESTIR_VIEW=n`, and `RESTIR_POST=0` (the raw path trace), `RESTIR_FOG=0`, `RESTIR_SHAFTS=0`, `RESTIR_SOFT=0`, `RESTIR_SSAO=0`,
 `RESTIR_REUSE=0`, `RESTIR_VALIDATE=0`, `RESTIR_ATROUS=0` each start with that part off; `RESTIR_UNTOLD=1`
-hides the sun's moves from the renderer (with `GALLERY_SUN_STEP_AT`).
+hides the sun's moves from the renderer (with `GALLERY_SUN_STEP_AT`); `RESTIR_EXPOSURE=0` a fixed exposure, to
+compare captures; `GALLERY_SUN=n` the sun n scroll notches from its default.
 
 ## Cost
 

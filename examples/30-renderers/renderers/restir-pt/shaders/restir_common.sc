@@ -5,7 +5,8 @@
 // path resolution, half that again (a sixteenth of the window's pixels; --restir-gi 2: a quarter).
 //    1 gbuffer        render     camera ray + sun shadow ray: position, normal, albedo, material, emission,
 //                                the sun's visibility and blocker, the face and rotation for the reconstruction
-//    2 surface        GI         each GI pixel's visible point: one render texel of its block, compacted
+//    1b normal_blur   render     the shading normal: outside edges bevelled, water's waves
+//    2 surface       GI         each GI pixel's visible point: one render texel of its block, compacted
 //    3 sample         GI         a new path from it (three bounces, BSDF-sampled, NEE to the sun), the
 //                                history's path validated (a quarter a frame) and shifted here: temporal reuse
 //    4 spatial        GI         five neighbours' paths shifted here: spatial reuse; resolves to the diffuse
@@ -14,6 +15,7 @@
 //    6-9 atrous*      GI         a-trous filter, steps 1, 2, 4, 8, both lobes; the specular by its roughness
 //   10 ssao           render     screen-space ambient occlusion, in a fixed 4x4 pattern
 //   10b shadow_soft   render     the sun through the BSDF (highlight included), its shadow softened
+//   10c reflect       render     mirrors and water: a reflection ray, lit from last frame's image where on screen
 //   11 composite      render     edge-aware upsample of both: direct; diffuse x albedo + specular x its albedo
 //   12 ao_apply       render     the SSAO on the indirect light, the sun, the fog; the views (G)
 //   13 reconstruct    window     the voxel renderer's reconstruction: voxel by voxel, antialiased
@@ -68,6 +70,7 @@ uniform vec4 restirSettings;  // x the G-buffer's trace loop bound (a uniform, s
 #define RESTIR_VIEW_AO       3
 #define RESTIR_VIEW_DIFFUSE  4
 #define RESTIR_VIEW_SPECULAR 5
+#define RESTIR_VIEW_SHAFTS   6
 bool restirView(int view) { return abs(restirDenoise.z - float(view)) < 0.5; }
 
 // PCG hash (Jarzynski & Olano), one state word per pixel.
@@ -145,6 +148,14 @@ vec2 restirUnpackMaterial(float f) {
     uint u = uint(f);
     return vec2(float((u >> 8u) & 255u), float(u & 255u)) / 255.0;
 }
+
+// Water: a see-through material polished almost to a mirror -- the Teardown importer's (transparency 0.55,
+// glossiness 0.9); its glass is half as glossy. The G-buffer marks it in the bit above the material's
+// sixteen (restirUnpackMaterial ignores it), and it shades with waves (normal_blur) and reflects a ray
+// (reflect.frag) rather than drawing as a flat mirror.
+#define RESTIR_WATER_BIT 65536.0
+bool restirIsWaterMaterial(float transparency, float glossiness) { return transparency > 0.3 && glossiness >= 0.85; }
+bool restirIsWater(float packed) { return ((uint(packed) >> 16u) & 1u) != 0u; }
 
 // The surface pass's two texels: surf0 = (x1, t1; t1 < 0 none), surf1 = (oct n1, material, albedo).
 struct RestirSurface {

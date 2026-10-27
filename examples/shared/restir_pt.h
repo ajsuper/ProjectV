@@ -55,7 +55,11 @@ namespace restir_pt {
     constexpr float AIR_DEPTH = 2.0f;
     constexpr float AIR_HEIGHT = 0.5f;
     constexpr float AIR_SHAFT_STRENGTH = 0.12f;
-    constexpr int   VIEWS = 6;
+    // The normals' blur (normal_blur.frag): its width in voxel edges -- how far from an edge the shading
+    // turns from one face to the next; outside edges only, and only half way (normal_blur.frag's
+    // NORMAL_BLUR_STRENGTH). A tenth of an edge: a thin bevel that catches the light, the faces left flat.
+    constexpr float NORMAL_BLUR = 0.1f;
+    constexpr int   VIEWS = 7;
     // Rays a GI pixel may trace in the sample pass (a new path: 4; validating the history's suffix: 3;
     // shifting it here: 4 if it must be replayed) and in the spatial pass (its own path and five neighbours',
     // replayed only where a reconnection was too close to make, and a visibility ray). The paths see every
@@ -78,6 +82,7 @@ namespace restir_pt {
         struct Post { bool on = true, vignette = true, grade = true, exposure = true, dof = true, bloom = true, motionBlur = true; } post;
         bool  fog = true, shafts = true, softShadow = true, air = true, farAO = true;
         float ssao = SSAO;          // 0: no SSAO
+        float normalBlur = NORMAL_BLUR;   // 0: the voxels' own hard normals
         float validation = 0.0f;    // the paths' validation (VALIDATION): off, it bought nothing measurable
         float bounces = float(PATH_BOUNCES);
         int   stride = 4;           // GI for one window pixel in stride x stride (4 or 2)
@@ -169,6 +174,11 @@ namespace restir_pt {
         const float airAtCamera = airDensity * std::exp(-std::max(frame.position.y - scene.ground, 0.0f) / airHeight);
         vec4 shaftsAir{AIR_SHAFT_STRENGTH, airAtCamera, fogLength, 0.0f};
         setUniformToValue(renderer, "restirShaftsAir", shaftsAir);
+        // y: the clock the water's waves move by (seconds, wrapped every hour so a float keeps its precision).
+        static float clock = 0.0f;
+        clock = std::fmod(clock + frame.seconds, 3600.0f);
+        vec4 normals{s.normalBlur, clock, 0.0f, 0.0f};
+        setUniformToValue(renderer, "restirNormals", normals);
 
         vec4 cameraPos{frame.position, 1.0f}, cameraDir{frame.direction, 0.0f};
         vec4 prevCameraPos{frame.prevPosition, 1.0f}, prevCameraDir{frame.prevDirection, 0.0f};

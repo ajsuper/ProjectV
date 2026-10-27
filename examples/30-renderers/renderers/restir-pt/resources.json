@@ -19,7 +19,8 @@
         {"name": "restirShafts", "type": "vec4"},
         {"name": "restirHaze", "type": "vec4"},
         {"name": "restirAir", "type": "vec4"},
-        {"name": "restirShaftsAir", "type": "vec4"}
+        {"name": "restirShaftsAir", "type": "vec4"},
+        {"name": "restirNormals", "type": "vec4"}
     ],
     "shaders": [
         {"shaderID": 1, "path": "./renderers/restir-pt/shaders/gbuffer.bin"},
@@ -51,7 +52,9 @@
         {"shaderID": 35, "path": "./renderers/restir-pt/shaders/bloom_up4.bin"},
         {"shaderID": 36, "path": "./renderers/restir-pt/shaders/bloom_up3.bin"},
         {"shaderID": 37, "path": "./renderers/restir-pt/shaders/bloom_up2.bin"},
-        {"shaderID": 38, "path": "./renderers/restir-pt/shaders/bloom_up1.bin"}
+        {"shaderID": 38, "path": "./renderers/restir-pt/shaders/bloom_up1.bin"},
+        {"shaderID": 23, "path": "./renderers/restir-pt/shaders/normal_blur.bin"},
+        {"shaderID": 24, "path": "./renderers/restir-pt/shaders/reflect.bin"}
     ],
     "textures": [
         {"texID": 1, "name": "gPos", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
@@ -109,7 +112,9 @@
         {"texID": 105, "name": "bloomUp4", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.0625, "origin": "CreateNew"},
         {"texID": 106, "name": "bloomUp3", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.125, "origin": "CreateNew"},
         {"texID": 107, "name": "bloomUp2", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.25, "origin": "CreateNew"},
-        {"texID": 108, "name": "bloomUp1", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"}
+        {"texID": 108, "name": "bloomUp1", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
+        {"texID": 110, "name": "gSoftNormal", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
+        {"texID": 111, "name": "reflection", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"}
     ],
     "framebuffers": [
         {"fboID": 1, "textureIDs": [1, 2, 3, 4, 5, 6, 9]},
@@ -140,6 +145,8 @@
         {"fboID": 26, "textureIDs": [106]},
         {"fboID": 27, "textureIDs": [107]},
         {"fboID": 28, "textureIDs": [108]},
-        {"fboID": 29, "textureIDs": [83]}
+        {"fboID": 29, "textureIDs": [83]},
+        {"fboID": 30, "textureIDs": [110]},
+        {"fboID": 31, "textureIDs": [111]}
     ]
 }

@@ -10,18 +10,15 @@ $input v_texcoord0
 // thin edge) widens to the 4x4 round it, then falls back to the nearest. They are kept apart for
 // ao_apply, which darkens only the indirect.
 //
-// Mirrors (glossiness RESTIR_MIRROR_GLOSSINESS and up) take their specular from the screen instead: the
-// paths see them with their glossiness capped, so what the paths bring is a blurred reflection. A ray
-// reflected about the texel's normal is marched through the G-buffer (geometric steps, then a bisection);
-// where it meets a surface, that point's light is read from last frame's image, carried through last
-// frame's camera. Off the screen, behind something, or facing away, it fades back to the paths' blurred
+// Mirrors (glossiness RESTIR_MIRROR_GLOSSINESS and up) and water take their specular from reflect.frag
+// instead: the paths see them with their glossiness capped, so what the paths bring is a blurred
 // reflection. The sun's own highlight on a mirror is the direct light's (shadow_soft.frag), as before.
 //
 // The views (G): 4 shows the indirect diffuse alone, 5 the indirect specular, as the indirect light.
 //
 // Inputs, each bound by itself (resourceTexturesIDs): 0 giDiffFinal, 1 giSpecFinal (the last a-trous
-// level), 2 surf0, 3 surf1 (the GI pixels' surfaces), 4 gPos, 5 gNormal, 6 gAlbedo, 7 gDirect, 8 resolved
-// (last frame's image, window resolution: what the reflection shows).
+// level), 2 surf0, 3 surf1 (the GI pixels' surfaces), 4 gPos, 5 gNormal, 6 gAlbedo, 7 gDirect, 8 reflection
+// (reflect.frag: a mirror's specular, a 1 where it replaces the paths').
 // Outputs: litDirect, litIndirect.
 
 #include <bgfx_shader.sh>
@@ -35,59 +32,7 @@ SAMPLER2D(gPos, 4);
 SAMPLER2D(gNormal, 5);
 SAMPLER2D(gAlbedo, 6);
 SAMPLER2D(gDirect, 7);
-SAMPLER2D(resolved, 8);
-
-#define SSR_STEPS 32
-#define SSR_REFINE 5
-
-// Where the reflected ray from P along R meets the screen's surfaces: rgb the light there (last frame's),
-// a how much to trust it (0: missed).
-vec4 restirReflection(vec3 P, vec3 R, float t) {
-    vec2 res = passTargetRes.xy;
-    float finest = 20.0 * restirSettings.y;
-    float reach = 1.5 * t + 64.0 * finest;
-    float first = 0.5 * finest;
-    float growth = pow(reach / first, 1.0 / float(SSR_STEPS - 1));
-    float before = 0.0;
-    float along = first;
-    float hitAt = -1.0;
-    for (int i = 0; i < SSR_STEPS; i++) {
-        vec3 Q = P + R * along;
-        bool inFront;
-        vec2 uv = restirWorldToUV(Q, cameraPos.xyz, cameraDir.xyz, res, inFront);
-        if (!inFront || uv.x < 0.0 || uv.y < 0.0 || uv.x >= 1.0 || uv.y >= 1.0) break;
-        vec4 g = texelFetch(gPos, ivec2(uv * res), 0);
-        float depth = length(Q - cameraPos.xyz);
-        // Behind what the screen shows there, by no more than the step (a surface's thickness): a hit.
-        if (g.w >= 0.0 && depth > g.w && depth - g.w < (along - before) * 1.5 + 2.0 * finest) { hitAt = along; break; }
-        before = along;
-        along *= growth;
-    }
-    if (hitAt < 0.0) return vec4(0.0, 0.0, 0.0, 0.0);
-    float lo = before;
-    float hi = hitAt;
-    for (int i = 0; i < SSR_REFINE; i++) {
-        float mid = 0.5 * (lo + hi);
-        bool inFront;
-        vec2 uv = restirWorldToUV(P + R * mid, cameraPos.xyz, cameraDir.xyz, res, inFront);
-        vec4 g = texelFetch(gPos, ivec2(clamp(uv, 0.0, 0.999) * res), 0);
-        if (g.w >= 0.0 && length(P + R * mid - cameraPos.xyz) > g.w) hi = mid;
-        else lo = mid;
-    }
-    bool inFront;
-    vec2 uv = restirWorldToUV(P + R * hi, cameraPos.xyz, cameraDir.xyz, res, inFront);
-    ivec2 at = ivec2(clamp(uv, 0.0, 0.999) * res);
-    vec4 hit = texelFetch(gPos, at, 0);
-    if (hit.w < 0.0 || dot(texelFetch(gNormal, at, 0).xyz, R) > 0.0) return vec4(0.0, 0.0, 0.0, 0.0);   // a back face
-    vec2 then = restirWorldToUV(hit.xyz, prevCameraPos.xyz, prevCameraDir.xyz, res, inFront);
-    if (!inFront || then.x < 0.0 || then.y < 0.0 || then.x >= 1.0 || then.y >= 1.0) return vec4(0.0, 0.0, 0.0, 0.0);
-    vec2 size = vec2(textureSize(resolved, 0));
-    vec3 light = texelFetch(resolved, ivec2(then * size), 0).rgb;
-    // Fade out towards the screen's edges, where the next ray would leave it.
-    vec2 edge = min(uv, 1.0 - uv);
-    float trust = smoothstep(0.0, 0.08, min(edge.x, edge.y));
-    return vec4(light, trust);
-}
+SAMPLER2D(reflection, 8);
 
 bool restirMatches(ivec2 g, vec3 P, vec3 N, float t) {
     vec4 gs = texelFetch(surf0, g, 0);
@@ -149,11 +94,8 @@ void main() {
     PjvBsdf paths = pjvBsdf(albedo, min(material.x, RESTIR_GI_MAX_GLOSSINESS), material.y);
     vec3 diffuse = paths.diffuseAlbedo * (sumD / total);
     vec3 specular = pjvSpecularAlbedo(paths, dot(N, V)) * (sumS / total);
-    if (material.x >= RESTIR_MIRROR_GLOSSINESS) {
-        vec4 reflection = restirReflection(P + N * restirSettings.y, reflect(-V, N), t);
-        PjvBsdf mirror = pjvBsdf(albedo, material.x, material.y);
-        specular = mix(specular, pjvSpecularAlbedo(mirror, dot(N, V)) * reflection.rgb, reflection.a);
-    }
+    vec4 mirrored = texelFetch(reflection, q, 0);
+    specular = mix(specular, mirrored.rgb, mirrored.a);
     vec3 indirect = diffuse + specular;
     if (restirView(RESTIR_VIEW_DIFFUSE)) indirect = diffuse;
     else if (restirView(RESTIR_VIEW_SPECULAR)) indirect = specular;

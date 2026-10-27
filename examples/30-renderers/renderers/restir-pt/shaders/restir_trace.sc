@@ -44,6 +44,7 @@ struct RestirHit {
     vec3  emission;   // radiance
     float glossiness;
     float metallic;
+    float transparency;
     vec4  face;       // camera rays only: the hit face's centre, w = the voxel's edge (0: no hit)
     vec4  rotation;   // camera rays only: the chunk's rotation (the voxel's own axes)
     vec3  previous;   // camera rays, with RESTIR_MOTION: where the hit point was last frame (its chunk's motion)
@@ -95,6 +96,7 @@ RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) 
     h.emission = vec3(0.0, 0.0, 0.0);
     h.glossiness = 0.0;
     h.metallic = 0.0;
+    h.transparency = 0.0;
     h.face = vec4(0.0, 0.0, 0.0, 0.0);
     h.rotation = vec4(0.0, 0.0, 0.0, 1.0);
     h.previous = origin + direction * 1.0e4;   // a miss: a point far along the ray (moves with the camera only)
@@ -111,6 +113,7 @@ RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) 
         // and the screen-space reflection.
         h.glossiness = kind == RESTIR_KIND_CAMERA ? material.glossiness : min(material.glossiness, RESTIR_GI_MAX_GLOSSINESS);
         h.metallic = material.metallic;
+        h.transparency = material.transparency;
     }
     if (kind == RESTIR_KIND_CAMERA) {
         // What the reconstruction needs to know the whole voxel: its face's centre, its edge, and its
