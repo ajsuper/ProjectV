@@ -58,8 +58,10 @@ if(EXISTS "${TEARDOWN_LUA_DIR}/lua.h")
     list(FILTER TEARDOWN_LUA_SOURCES EXCLUDE REGEX "/(lua|onelua|ltests)\\.c$")
     add_library(mesh_voxelizer_lua STATIC ${TEARDOWN_LUA_SOURCES})
     target_include_directories(mesh_voxelizer_lua PUBLIC "${TEARDOWN_LUA_DIR}")
-    target_compile_definitions(mesh_voxelizer_lua PRIVATE LUA_USE_POSIX)
-    target_compile_options(mesh_voxelizer_lua PRIVATE -w) # Third-party C; not our warnings to fix.
+    if(NOT WIN32)
+        target_compile_definitions(mesh_voxelizer_lua PRIVATE LUA_USE_POSIX)   # Lua's POSIX build (not on Windows: it wants unistd.h)
+    endif()
+    target_compile_options(mesh_voxelizer_lua PRIVATE $<IF:$<C_COMPILER_ID:MSVC>,/w,-w>) # Third-party C; not our warnings to fix.
     set(TEARDOWN_LUA_LIBRARY mesh_voxelizer_lua)
 else()
     message(STATUS "mesh_voxelizer: Lua not found at ${TEARDOWN_LUA_DIR}; Teardown voxscripts will be skipped")

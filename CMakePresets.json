@@ -51,6 +51,14 @@
             }
         },
         {
+            "name": "windows-examples",
+            "inherits": "windows",
+            "displayName": "Windows with the examples",
+            "description": "The windows preset with the examples built (and their shaders compiled by shaderc for the windows platform). Needs the examples' submodules: git submodule update --init --recursive.",
+            "binaryDir": "${sourceDir}/build-windows-examples",
+            "cacheVariables": { "PROJV_BUILD_EXAMPLES": "ON" }
+        },
+        {
             "name": "vcpkg",
             "displayName": "vcpkg (installable)",
             "description": "Resolves every dependency through find_package from a vcpkg toolchain, which is the configuration that can actually be installed and exported. Requires VCPKG_ROOT to be set.",
@@ -67,6 +75,7 @@
         { "name": "release", "configurePreset": "release" },
         { "name": "clang",   "configurePreset": "clang" },
         { "name": "windows", "configurePreset": "windows" },
+        { "name": "windows-examples", "configurePreset": "windows-examples" },
         { "name": "vcpkg",   "configurePreset": "vcpkg" }
     ],
     "testPresets": [

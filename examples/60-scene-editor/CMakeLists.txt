@@ -17,7 +17,8 @@ target_link_libraries(scene_editor_imgui PUBLIC ${PROJV_GLFW_TARGET})
 #
 # LUA_USE_POSIX rather than LUA_USE_LINUX, deliberately: the Linux preset adds LUA_USE_DLOPEN,
 # which hands a brush script package.loadlib and with it the ability to load arbitrary native
-# code. A brush is data, and should not be able to do that.
+# code. A brush is data, and should not be able to do that. (On Windows Lua's DLL loading is off unless
+# LUA_USE_WINDOWS is defined, which it is not, so the same holds.)
 #
 # Globbed rather than listed so a Lua point release does not need this file edited, minus the
 # three sources that are not part of the library: lua.c is the standalone interpreter's main(),
@@ -27,8 +28,10 @@ list(FILTER LUA_SOURCES EXCLUDE REGEX "/(lua|onelua|ltests)\\.c$")
 
 add_library(scene_editor_lua STATIC ${LUA_SOURCES})
 target_include_directories(scene_editor_lua PUBLIC "${LUA_DIR}")
-target_compile_definitions(scene_editor_lua PRIVATE LUA_USE_POSIX)
-target_compile_options(scene_editor_lua PRIVATE -w) # Third-party C; not our warnings to fix.
+if(NOT WIN32)
+    target_compile_definitions(scene_editor_lua PRIVATE LUA_USE_POSIX)   # Lua's POSIX build (not on Windows: it wants unistd.h)
+endif()
+target_compile_options(scene_editor_lua PRIVATE $<IF:$<C_COMPILER_ID:MSVC>,/w,-w>) # Third-party C; not our warnings to fix.
 
 projv_add_example(scene_editor
     SOURCES    main.cpp imgui_impl_bgfx.cpp edit_history.cpp brush.cpp

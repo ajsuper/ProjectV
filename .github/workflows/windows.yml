@@ -87,3 +87,35 @@ jobs:
           name: golden-recordings
           path: build-windows/golden-out
           if-no-files-found: ignore
+
+  # Every example, and the shaders they draw with. Not a gate yet (continue-on-error): until it is green it is
+  # the list of what breaks, as the unit-test job was. Nothing runs here: a runner has no GPU. Plan: W3.
+  examples:
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 120
+    steps:
+      - name: No line-ending conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      # external/ and the examples' own: Assimp (the mesh voxelizer) and Lua (the scene editor, the terrain baker).
+      - name: Dependencies (submodules)
+        run: git submodule update --init --recursive --depth 1 external examples/20-mesh-voxelizer/external examples/60-scene-editor/external
+
+      - name: GLFW
+        run: vcpkg install glfw3:x64-windows
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        run: >
+          cmake --preset windows-examples
+          -DCMAKE_PREFIX_PATH="$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows"
+
+      # -k 0: keep going past a failed file, so one run lists every error.
+      - name: Build
+        run: cmake --build --preset windows-examples -- -k 0

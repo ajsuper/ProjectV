@@ -26,8 +26,10 @@ if(EXISTS "${TREE_EDITOR_DIR}/external/lua/lua.h")
     list(FILTER TREE_LUA_SOURCES EXCLUDE REGEX "/(lua|onelua|ltests)\\.c$")
     add_library(terrain_asset_baker_lua STATIC ${TREE_LUA_SOURCES})
     target_include_directories(terrain_asset_baker_lua PUBLIC "${TREE_EDITOR_DIR}/external/lua")
-    target_compile_definitions(terrain_asset_baker_lua PRIVATE LUA_USE_POSIX)
-    target_compile_options(terrain_asset_baker_lua PRIVATE -w) # Third-party C; not our warnings to fix.
+    if(NOT WIN32)
+        target_compile_definitions(terrain_asset_baker_lua PRIVATE LUA_USE_POSIX)   # Lua's POSIX build (not on Windows: it wants unistd.h)
+    endif()
+    target_compile_options(terrain_asset_baker_lua PRIVATE $<IF:$<C_COMPILER_ID:MSVC>,/w,-w>) # Third-party C; not our warnings to fix.
 
     add_executable(terrain_asset_baker tools/bake_assets.cpp "${TREE_EDITOR_DIR}/brush.cpp")
     target_include_directories(terrain_asset_baker PRIVATE "${TREE_EDITOR_DIR}")
