@@ -137,7 +137,7 @@ bool triAABBIntersect(const Triangle& tri, const AABB& box) {
 struct Texture {
     unsigned char *image = nullptr;
     ivec2 size{0, 0};
-    uint channels = 0;
+    uint32_t channels = 0;
 };
 
 // Decodes an imported texture into RGBA8 pixels. The importer hands back either a file on disk or
@@ -790,8 +790,8 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
     // so a chunk smaller than one BRICK_SIZE^3 brick would leave the tree the wrong depth. 64 is
     // therefore the smallest chunk this can emit, and small models get a single 64^3 chunk instead
     // of being padded out to a mostly-empty 256^3 one.
-    uint chunkResolution = (voxelizationResolution <= 64) ? 64u : 256u;
-    uint numberOfChunksPerAxis = uint(std::ceil(voxelizationResolution / float(chunkResolution)));
+    uint32_t chunkResolution = (voxelizationResolution <= 64) ? 64u : 256u;
+    uint32_t numberOfChunksPerAxis = uint32_t(std::ceil(voxelizationResolution / float(chunkResolution)));
     float voxelScale = 1.0f;                                    // Each voxel is exactly 1 world unit.
     float chunkScale = voxelScale * float(chunkResolution);     // World units per chunk.
     float totalWorldSize = numberOfChunksPerAxis * chunkScale;  // World span of the grid along the largest axis.
@@ -823,7 +823,7 @@ void voxelizeModel(std::filesystem::path modelPath, std::filesystem::path assetD
         }
     }
 
-    uint totalChunks = numberOfChunksPerAxis * numberOfChunksPerAxis * numberOfChunksPerAxis;
+    uint32_t totalChunks = numberOfChunksPerAxis * numberOfChunksPerAxis * numberOfChunksPerAxis;
 
     info("Voxelizing: {} chunk(s) ({} per axis), voxel size: {:.5f}", totalChunks, numberOfChunksPerAxis, voxelScale);
 
@@ -1254,11 +1254,11 @@ void voxelizeMinecraftWorld(std::filesystem::path worldPath, const minecraft::Im
 
     // One block is one voxel, so the grid is just the selection rounded up to whole chunks.
     int largestExtent = std::max({extents.x, extents.y, extents.z});
-    uint chunkResolution = (largestExtent <= 64) ? 64u : 256u;
-    uint numberOfChunksPerAxis = uint(std::ceil(largestExtent / float(chunkResolution)));
+    uint32_t chunkResolution = (largestExtent <= 64) ? 64u : 256u;
+    uint32_t numberOfChunksPerAxis = uint32_t(std::ceil(largestExtent / float(chunkResolution)));
     float voxelScale = 1.0f;
     float chunkScale = voxelScale * float(chunkResolution);
-    uint totalChunks = numberOfChunksPerAxis * numberOfChunksPerAxis * numberOfChunksPerAxis;
+    uint32_t totalChunks = numberOfChunksPerAxis * numberOfChunksPerAxis * numberOfChunksPerAxis;
 
     info("Voxelizing: up to {} chunk(s) ({} per axis, {}^3 each)", totalChunks, numberOfChunksPerAxis,
         chunkResolution);

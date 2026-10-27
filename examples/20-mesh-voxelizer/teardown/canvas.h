@@ -17,6 +17,14 @@ namespace teardown {
 
 class Canvas {
 public:
+    // Move-only. Its bricks are unique_ptrs, and MSVC's unordered_map has a move constructor that may throw (libstdc++'s
+    // does not), so a std::vector<Canvas> growing would fall back to the copy constructor, which cannot exist.
+    Canvas() = default;
+    Canvas(Canvas&&) = default;
+    Canvas& operator=(Canvas&&) = default;
+    Canvas(const Canvas&) = delete;
+    Canvas& operator=(const Canvas&) = delete;
+
     static constexpr int B = 8, B3 = B * B * B;
     struct Brick {
         MatId v[B3] = {};

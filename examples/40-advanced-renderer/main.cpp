@@ -1141,11 +1141,11 @@ static void setRenderScale(projv::graphics::RenderInstance& renderInstance, Fram
         return;
     }
 
-    std::unordered_map<uint, float>& liveScales =
+    std::unordered_map<uint32_t, float>& liveScales =
         activeRenderer->resources.textures.relativeTextureScales;
-    for (std::unordered_map<uint, float>::iterator it = liveScales.begin(); it != liveScales.end();
+    for (std::unordered_map<uint32_t, float>::iterator it = liveScales.begin(); it != liveScales.end();
          ++it) {
-        std::unordered_map<uint, float>::const_iterator declared =
+        std::unordered_map<uint32_t, float>::const_iterator declared =
             state.declaredTextureScales.find(it->first);
         if (declared == state.declaredTextureScales.end()) continue;
         it->second = declared->second * renderScale;

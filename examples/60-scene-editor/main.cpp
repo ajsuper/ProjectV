@@ -3126,7 +3126,7 @@ static void editorLightRig(const EditorState& editor,
 // renderers' resources.json -- Render mode's numbering follows the editor renderer's for exactly
 // this reason, so one accessor serves both tabs.
 static bgfx::TextureHandle getViewportTexture(const std::shared_ptr<projv::ConstructedRenderer>& renderer) {
-    const std::unordered_map<uint, bgfx::TextureHandle>& handles = renderer->resources.textures.textureHandles;
+    const std::unordered_map<uint32_t, bgfx::TextureHandle>& handles = renderer->resources.textures.textureHandles;
     auto it = handles.find(3);
     return it == handles.end() ? bgfx::TextureHandle(BGFX_INVALID_HANDLE) : it->second;
 }
@@ -24996,7 +24996,7 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
     // transform edit, where rebakeSubtree walks cellToChunk and moves geometry that no longer knows
     // where it lives.
     {
-        const int FAR = 200;   // Comfortably outside the resolution below, on one axis.
+        const int FAR_CELLS = 200;   // Comfortably outside the resolution below, on one axis.
         projv::ComponentHandle source = projv::utils::addComponent(
             scene, projv::ComponentKind::Chunk, uniqueComponentName(scene, "GridDup"),
             projv::INVALID_COMPONENT_HANDLE, 64, 1.0f);
@@ -25009,7 +25009,7 @@ static void runAssemblySelfTest(projv::Scene& scene, EditorState& editor) {
         if (source != projv::INVALID_COMPONENT_HANDLE) {
             created.push_back(source);
             applyVoxelSculpt(&scene, &editor, source,
-                             { ivec3(0, 0, 0), ivec3(FAR, 0, 0) }, { 0xFFFFFFFFu, 0xFFFFFFFFu }, true);
+                             { ivec3(0, 0, 0), ivec3(FAR_CELLS, 0, 0) }, { 0xFFFFFFFFu, 0xFFFFFFFFu }, true);
 
             became = scene.components[source].kind == projv::ComponentKind::Grid;
             sourceGrid = scene.components[source].gridIndex;

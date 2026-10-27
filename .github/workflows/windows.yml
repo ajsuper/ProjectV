@@ -13,6 +13,8 @@ on:
       - "include/**"
       - "src/**"
       - "tests/**"
+      - "examples/**"
+      - "!examples/**/*.md"   # a README is not a build
       - "cmake/**"
       - "CMakeLists.txt"
       - "CMakePresets.json"
