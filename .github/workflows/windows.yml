@@ -1,9 +1,9 @@
 # Windows, built and tested on GitHub's runner: the way the code is checked on a platform nobody
 # develops on. Plan: docs/plans/windows.md.
 #
-# NOT YET A GATE (continue-on-error): until the build is green it is the list of what breaks. Once it
-# is, delete `continue-on-error` and it blocks pull requests like any check. Scope so far: the library
-# and the unit tests (CPU only; a runner has no GPU). Drawing is tried by hand on a Windows machine.
+# A check like the others: a failure fails the run. (Make it required for merging in the repository's
+# branch protection.) Scope so far: the library and the unit tests, the sockets and the soak (CPU only;
+# a runner has no GPU). Drawing is tried by hand on a Windows machine.
 name: windows
 
 on:
@@ -31,7 +31,6 @@ concurrency:
 jobs:
   msvc:
     runs-on: windows-latest
-    continue-on-error: true   # see the top: remove when green
     timeout-minutes: 90
     steps:
       # Files exactly as committed: the golden physics recording and the .data files are binary.
@@ -69,19 +68,17 @@ jobs:
           $env:PATH = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin;$env:PATH"
           ctest --preset windows
 
-      # A character-controller test crashes about half of the runs, in a different test each time, with nothing
-      # to say why (docs/plans/windows.md). Run them over and over, and print every crash report (main.cpp's:
-      # the exception, where, a stack), so one CI run is enough to see it.
-      - name: Hunt the character crash
-        if: always()
+      # Real sockets on localhost (ENet over Winsock), and the physics soak: ten simulated minutes, 2000 bodies.
+      # The bash self-tests of the examples are not run here (tests/unit/CMakeLists.txt).
+      - name: Test (sockets)
         run: |
           $env:PATH = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin;$env:PATH"
-          $failed = 0
-          for ($i = 1; $i -le 25; $i++) {
-            $out = & build-windows/bin/projv_unit_tests.exe "-tc=*character*,groups*,physics loading*,*walk*" 2>&1 | Out-String
-            if ($LASTEXITCODE -ne 0) { $failed++; Write-Host "run $i failed (exit $LASTEXITCODE)"; Write-Host ($out -split "`n" | Select-String "CRASH|TEST CASE|ERROR" | Out-String) }
-          }
-          Write-Host "$failed of 25 runs failed"
+          ctest --preset windows-net
+
+      - name: Test (physics soak)
+        run: |
+          $env:PATH = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin;$env:PATH"
+          ctest --preset windows-soak
 
       # The recordings this build made, for comparing with tests/unit/data/ (only there if they differ).
       - uses: actions/upload-artifact@v4
