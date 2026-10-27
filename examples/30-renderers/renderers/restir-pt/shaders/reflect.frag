@@ -5,7 +5,7 @@ $input v_texcoord0
 // and up) and water reflect. The paths see every surface with its glossiness capped, so what they bring a
 // mirror is a blurred reflection; this replaces it.
 //
-// One ray, reflected about the shading normal (gSoftNormal: the waves, on water), finds what is reflected.
+// One ray, reflected about the shading normal (gSoftNormal: the waves, on water, low-passed over the texel), finds what is reflected.
 // Its light then comes from one of two places:
 //   * the screen, where that point is on it: last frame's image (resolved), read bilinearly where the point
 //     was last frame -- the real light, shadows and GI included. The point counts as on screen when this

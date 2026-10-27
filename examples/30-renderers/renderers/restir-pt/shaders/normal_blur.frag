@@ -10,13 +10,13 @@ $input v_texcoord0
 // left out, so a corner stays crisp. Points farther than the width in the world count for nothing, however
 // near on screen: what stands in front of or behind this one is another surface.
 //
-// Water (RESTIR_WATER_BIT) is not blurred: its upward faces take the normal of a moving sea instead --
-// restirWaves, flow noise over the world's x and z.
+// Water (RESTIR_WATER_BIT) is not blurred this way: its upward faces take the normal of a moving sea instead --
+// restirWaves, flow noise over the world's x and z, low-passed over the texel's footprint.
 //
 // Only the shading reads it: the sun (shadow_soft) and the paths' first vertex (surface). The tests for "the
 // same surface" (the denoise, the soft shadow's plane, the reconstruction) keep the G-buffer's own normal.
 //
-// Inputs: 0-6 the G-buffer (gPos 0, gNormal 1, gDirect 3, gFace 4). Output: gSoftNormal (xyz, unit; w 0).
+// Inputs: 0-6 the G-buffer (gPos 0, gNormal 1, gDirect 3, gFace 4). Output: gSoftNormal (xyz, unit; w the slope variance the waves' faded octaves took with them, water only).
 
 #include <bgfx_shader.sh>
 #include "restir_common.sc"
@@ -70,24 +70,56 @@ vec3 restirFlowNoise(vec2 p, float rate, float time) {
     return vec3(value, d);
 }
 
-// The water's surface normal at world point P, `texel` world units a render texel wide there. An octave
-// shorter than about four texels is faded out, so the distance does not shimmer.
-vec3 restirWaves(vec3 P, float texel) {
+// The slope of the water at world xz point `xz`, with octaves shorter than `footprint` (world units: how much
+// water one render texel covers along its longest side) faded out -- gone under 8 footprints, whole over 20.
+// `lost` gets the slope variance of what faded, per axis.
+vec2 restirWaveSlope(vec2 xz, float footprint, out float lost) {
     float finest = restirSettings.y * 20.0;
     float g = 98.0 * finest;
     float time = restirNormals.y;
     vec2 slope = vec2(0.0, 0.0);
+    lost = 0.0;
     for (int o = 0; o < 6; o++) {
         float wavelength = finest * 60.0 * pow(0.5, float(o));
         float k = 6.2831853 / wavelength;
         float rate = 0.3 * sqrt(g * k);
         // The octave's own offset, so octaves do not share a lattice; then the pseudo-advection.
-        vec2 p = P.xz / wavelength + vec2(float(o) * 13.7, float(o) * 7.3) - slope * 1.5;
+        vec2 p = xz / wavelength + vec2(float(o) * 13.7, float(o) * 7.3) - slope * 1.5;
         vec3 n = restirFlowNoise(p, rate, time);
-        float steepness = 0.16 * smoothstep(4.0, 10.0, wavelength / texel);
-        slope += n.yz * steepness;   // height (steepness * wavelength) n: its slope is steepness * dn/dp
+        float fade = smoothstep(8.0, 20.0, wavelength / footprint);
+        slope += n.yz * (0.16 * fade);
+        lost += (1.0 - fade) * 0.16 * 0.16 * 0.25;   // the octave's slope variance per axis (|dn/dp| about 0.7)
     }
-    return normalize(vec3(-slope.x, 1.0, -slope.y));
+    return slope;
+}
+
+// The water's surface normal at world point P, `texel` world units a render texel wide there, seen along V.
+// A low-pass over the texel's footprint on the water: at a grazing angle a texel covers 1/V.y times more
+// water along the view than across it, and one sample of a wave shorter than that shimmers (the sun's glint,
+// a near-mirror lobe, worst). So the slope is averaged over that ellipse (a fixed spiral, the same every
+// frame), and the octaves it cannot hold fade against its long side. `lost` is the slope variance of the
+// faded octaves, which shadow_soft widens the sun's glint lobe by.
+#define WATER_TAPS 8
+#define WATER_BLUR_SCALE 0.2   // the footprint's share used: 0.2 starts the blur 5x further out
+vec3 restirWaves(vec3 P, float texel, vec3 V, out float lost) {
+    float stretch = 1.0 / max(V.y, 0.06);
+    vec2 along = normalize(V.xz + vec2(1e-5, 0.0));
+    vec2 across = vec2(-along.y, along.x);
+    texel *= WATER_BLUR_SCALE;
+    float footprint = texel * stretch;
+    vec2 sum = vec2(0.0, 0.0);
+    lost = 0.0;
+    for (int i = 0; i < WATER_TAPS; i++) {
+        float r = sqrt((float(i) + 0.5) / float(WATER_TAPS));
+        float a = float(i) * 2.39996323;
+        vec2 d = (across * (cos(a) * texel) + along * (sin(a) * footprint)) * r;
+        float l;
+        sum += restirWaveSlope(P.xz + d, footprint, l);
+        lost += l;
+    }
+    sum *= 1.0 / float(WATER_TAPS);
+    lost *= 1.0 / float(WATER_TAPS);
+    return normalize(vec3(-sum.x, 1.0, -sum.y));
 }
 
 #define NORMAL_BLUR_STRENGTH 0.5    // how far towards the blurred normal: half, so an edge's two faces meet at
@@ -103,7 +135,9 @@ void main() {
     if (surface.w < 0.0 || edge <= 0.0) { gl_FragColor = vec4(N, 0.0); return; }
     float texel = max(restirSettings.w * surface.w, 1.0e-6);
     if (restirIsWater(texelFetch(gDirect, p, 0).a)) {
-        gl_FragColor = vec4(N.y > 0.5 ? restirWaves(surface.xyz, texel) : N, 0.0);
+        float lost = 0.0;
+        vec3 waves = N.y > 0.5 ? restirWaves(surface.xyz, texel, normalize(cameraPos.xyz - surface.xyz), lost) : N;
+        gl_FragColor = vec4(waves, lost);
         return;
     }
     if (restirNormals.x <= 0.0) { gl_FragColor = vec4(N, 0.0); return; }

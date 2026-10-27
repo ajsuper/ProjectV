@@ -20,7 +20,7 @@ $input v_texcoord0
 //     too, and cut to 4 frames. Without this a body crossing a still view left a trail behind it.
 //   * water and mirrors: what they show moves with neither the camera nor the surface (the waves move under
 //     a still view; a reflection slides across its mirror as the camera does), so their history follows
-//     the surface's motion only roughly. It is always clamped, and held to 4 frames on water (8 on a mirror
+//     the surface's motion only roughly. It is always clamped, and held to 8 frames on water (8 on a mirror
 //     while the camera moves): the waves stay sharp, and a reflection does not trail.
 
 // Inputs: 0 reconstructed; 1-7 the G-buffer (gPos 1, gDirect 4, gMotion 7); 8 resolved (last frame, this pass's own output).
@@ -76,7 +76,7 @@ void main() {
         uncovered = h.a < 0.0 || water;
     }
     if (uncovered) {
-        historyLength = min(historyLength, 4.0);
+        historyLength = min(historyLength, water ? 8.0 : 4.0);
         vec3 lo = current;
         vec3 hi = current;
         for (int y = -1; y <= 1; y++)
@@ -103,7 +103,7 @@ void main() {
         }
         if (weight > 1e-3) {
             historyColour /= weight;
-            historyLength = min(historyLength / weight, water ? 4.0 : mirror ? 8.0 : 16.0);
+            historyLength = min(historyLength / weight, water ? 8.0 : mirror ? 8.0 : 16.0);
             vec3 lo = current;
             vec3 hi = current;
             for (int y = -1; y <= 1; y++)

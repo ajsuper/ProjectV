@@ -55,7 +55,9 @@ void main() {
     float facing = max(dot(shadingN, toSun), 0.0);
     vec2 material = restirUnpackMaterial(texelFetch(gDirect, p, 0).a);
     PjvBsdf bsdf = pjvBsdf(ab.rgb, material.x, material.y);
-    bsdf.alpha = sqrt(bsdf.alpha * bsdf.alpha + 0.25 * PATH_SUN_HALF_ANGLE * PATH_SUN_HALF_ANGLE);
+    // Water's waves too short for a texel to hold (gSoftNormal.w) roughen the lobe: slope variance s2 is a GGX alpha^2 of 2 s2.
+    float lostSlope = texelFetch(gSoftNormal, p, 0).w;
+    bsdf.alpha = sqrt(bsdf.alpha * bsdf.alpha + 0.25 * PATH_SUN_HALF_ANGLE * PATH_SUN_HALF_ANGLE + 2.0 * lostSlope);
     vec3 f;
     float pdf;
     pjvBsdfEvaluate(bsdf, shadingN, normalize(cameraPos.xyz - P), toSun, f, pdf);

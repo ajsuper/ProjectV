@@ -78,8 +78,13 @@ word. Its upward faces shade with flow noise (Perlin and Neyret 2001): six octav
 down to 2 of the finest voxels, whose lattice gradients each turn on the spot at their own rate and sense
 (deep water's `sqrt(g k)` for the octave's size), so the surface churns with no current and no two
 states it swings between; each finer octave rides the coarser ones' slope. Octaves under four texels fade
-out. The paths keep the flat face (the waves would break their history), and the resolve keeps 4 frames,
-so the waves stay sharp. Still drawn solid.
+out. The normal is low-passed over the texel's footprint on the water: at a grazing angle a texel covers
+`1/V.y` times more water along the view than across it, so the slope is averaged over that ellipse (8 fixed
+taps) and octaves shorter than 8 footprints fade out (whole at 20); the footprint is scaled by 0.2
+(`WATER_BLUR_SCALE`), so the blur starts 5x further out than a texel's own width. The slope variance they took is carried
+in `gSoftNormal.w` and widens the sun's glint lobe (`shadow_soft`), so the distant sea is a soft glitter
+path rather than sparks. The paths keep the flat face (the waves would break
+their history), and the resolve keeps 8 frames. Still drawn solid.
 
 ## Final render, and light shafts
 
