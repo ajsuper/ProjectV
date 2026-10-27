@@ -3,7 +3,9 @@
 
 #include "doctest/doctest.h"
 
+#include <atomic>
 #include <cmath>
+#include <thread>
 #include <vector>
 
 #include "runtime/physics/physics_world.h"
@@ -415,4 +417,30 @@ TEST_CASE("a simulation with voxel bodies is deterministic and restorable") {
         a.step(DT);
         REQUIRE(a.stateHash() == hashes[size_t(i)]);
     }
+}
+
+TEST_CASE("workers starved of the CPU do not run the job pool out of slots") {
+    // A job the stepping thread ran itself still holds its slot until a worker pops it from the queue, so
+    // workers that fall behind leave it full of finished jobs; the pool then asserted "No jobs available!"
+    // (a crash in a build with asserts on: a Windows CI run, 1 in 25 here and 2 of 3 whole suites). It now
+    // pops them itself (JobPool::CreateJob). This is a stress, not a proof: busy threads compete with the
+    // workers, and on Linux's scheduler they still run, so it passed before the fix there. The exact
+    // situation (one worker stuck in a long job, the rest of the work run by the stepping thread) crashed
+    // every time before the fix and never after, in a harness that includes job_pool.h, which a test cannot
+    // (Jolt's configuration is the physics library's alone: the layering test).
+    PhysicsSettings settings;
+    settings.threads = 7;
+    PhysicsWorld physics(settings);
+    buildPile(physics);
+
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> hogs;
+    const unsigned count = std::max(2u, 3 * std::thread::hardware_concurrency());
+    for (unsigned i = 0; i < count; i++) hogs.emplace_back([&stop] { while (!stop.load(std::memory_order_relaxed)) {} });
+
+    for (int i = 0; i < 4000; i++) physics.step(DT);   // reaching the end is the test: no assert, no hang
+
+    stop = true;
+    for (std::thread& t : hogs) t.join();
+    CHECK(physics.stats().nonFiniteRecoveries == 0);
 }

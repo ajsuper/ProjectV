@@ -44,10 +44,14 @@ namespace projv::runtime {
     JPH::JobHandle JobPool::CreateJob(const char* name, JPH::ColorArg color, const JobFunction& function,
                                       JPH::uint32 dependencies) {
         JPH::uint32 index = jobs.ConstructObject(name, color, this, function, dependencies);
-        // Out of jobs means maxJobs is too small for the step; Jolt's pool asserts and retries too.
+        // Out of slots. A job a barrier's waiting thread has already run still holds its slot until a worker
+        // pops it from the queue and lets go, so workers that fall behind -- starved of the CPU, or held in a
+        // long job -- leave the queue full of finished jobs: a step ends, the next begins, and nothing is free.
+        // (Jolt's pool asserts here, and a build with asserts on stops: found by a Windows CI run.) Pop and
+        // release them on this thread, as a worker would; only when the queue is empty are the slots held by
+        // jobs still running, and then waiting for them is all there is to do.
         while (index == JPH::FixedSizeFreeList<Job>::cInvalidObjectIndex) {
-            JPH_ASSERT(false, "No jobs available!");
-            std::this_thread::yield();
+            if (!runQueuedJob()) std::this_thread::yield();
             index = jobs.ConstructObject(name, color, this, function, dependencies);
         }
         Job* job = &jobs.Get(index);
@@ -72,6 +76,20 @@ namespace projv::runtime {
     }
 
     void JobPool::FreeJob(Job* job) { jobs.DestructObject(job); }
+
+    bool JobPool::runQueuedJob() {
+        Job* job;
+        {
+            std::lock_guard guard(lock);
+            if (count == 0) return false;
+            job = ring[head];
+            head = (head + 1) % ring.size();
+            count--;
+        }
+        job->Execute();   // a job already run does nothing
+        job->Release();
+        return true;
+    }
 
     void JobPool::work(int index) {
 #if defined(__linux__)

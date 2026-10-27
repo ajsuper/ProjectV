@@ -44,6 +44,9 @@ namespace projv::runtime {
 
     private:
         void work(int index);
+        // Takes the oldest queued job, runs it and lets go of the queue's reference, as a worker does; false
+        // when the queue is empty. What CreateJob does when it is out of slots.
+        bool runQueuedJob();
 
         JPH::FixedSizeFreeList<Job> jobs;
         // A ring as long as the most jobs that can exist at once: each job is queued at most once,
