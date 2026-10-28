@@ -47,6 +47,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_random.sc>     // pjvHashSeed, pjvHalton, pjvInterleavedGradientNoise
 #include <pjv_utils_DDA.sc>
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
@@ -220,19 +221,6 @@ float sunTransmittance(vec3 p, vec3 n, float voxelSize, inout uint seed) {
     }
 }
 
-// Van der Corput / Halton for the sub-pixel jitter (base 2 and 3) that feeds the TAA pass.
-float halton(int i, int base) {
-    float f = 1.0;
-    float r = 0.0;
-    for (int k = 0; k < 16; k++) {
-        if (i <= 0) break;
-        f /= float(base);
-        r += f * float(i - (i / base) * base);
-        i /= base;
-    }
-    return r;
-}
-
 void main() {
     // Sub-pixel jitter of the primary ray: the AA sample offset that taa.frag resolves into
     // anti-aliased edges. +-0.5px Halton so each frame samples a different point within the pixel.
@@ -248,7 +236,7 @@ void main() {
     // -- which coverage cannot recover because no ray ever hit it. What it costs is that every pixel's
     // value changes every frame, and anything that cannot converge then shimmers.
     int  frame  = int(frameCount.x);
-    vec2 jitter = (vec2(halton(frame + 1, 2), halton(frame + 1, 3)) - 0.5) * renderParams.w;
+    vec2 jitter = (vec2(pjvHalton(frame + 1, 2), pjvHalton(frame + 1, 3)) - 0.5) * renderParams.w;
     vec2 uvJit  = v_texcoord0 + jitter / passTargetRes.xy;
 
     Ray ray;
@@ -368,7 +356,7 @@ void main() {
     // because it distributes far better over a small neighbourhood, and whether the dissolve reads as
     // a gradient or as clumps is decided entirely by that.
     vec2  lodPixel = floor(v_texcoord0 * passTargetRes.xy);
-    float lodNoise = fract(52.9829189 * fract(0.06711056 * lodPixel.x + 0.00583715 * lodPixel.y));
+    float lodNoise = pjvInterleavedGradientNoise(lodPixel);
     // exp2 of a negative, so crossovers spread UNIFORMLY IN LOG distance -- the same way the level
     // boundaries themselves are spaced, which makes the dissolve even across the gap instead of
     // bunching at one end.
@@ -527,7 +515,6 @@ void main() {
     // filters the indirect term too, so a surface seen through green glass is green in its bounce
     // light as well as in its direct light. Exactly one on an opaque scene.
     vec3 albedo = material.albedo * (1.0 - material.metallic) * layerTransmittance;
-
 
     // Direct sun, soft-shadowed against the sun disk. Kept out of the GI's temporal accumulation on
     // purpose: this is the crisp half of the image and compose adds it back after the indirect term

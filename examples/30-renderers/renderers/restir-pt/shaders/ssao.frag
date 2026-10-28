@@ -17,6 +17,7 @@ $input v_texcoord0
 // Inputs: 0-5 the G-buffer (gPos, gNormal, ...). Output: ao (r the unoccluded share, g distance; < 0 sky).
 
 #include <bgfx_shader.sh>
+#include <pjv_random.sc>     // pjvInterleavedGradientNoise
 #include "restir_common.sc"
 
 SAMPLER2D(gPos, 0);
@@ -57,7 +58,7 @@ void main() {
     vec3 N = normalize(texelFetch(gNormal, p, 0).xyz);
     // A world unit's width in texels here.
     float perUnit = 1.0 / max(restirSettings.w * surface.w, 1e-6);
-    float turn = 6.2831853 * fract(52.9829189 * fract(dot(vec2(p), vec2(0.06711056, 0.00583715))) + frameCount.x * 0.618034);
+    float turn = 6.2831853 * fract(pjvInterleavedGradientNoise(vec2(p)) + frameCount.x * 0.618034);
     float contact = 0.5 * restirLook.x;
     float around = 2.0 * restirLook.x;
     float open = restirObscurance(P, N, contact, min(contact * perUnit, RESTIR_AO_MAX_PIXELS), turn, p) *

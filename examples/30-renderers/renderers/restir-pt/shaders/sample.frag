@@ -52,10 +52,10 @@ void main() {
     vec3 wo1 = normalize(cameraPos.xyz - s.x);
 
     uint seed = uint(p.x) * 7919u + uint(p.y) * 104729u + uint(frameCount.x) * 15485863u;
-    restirPcg(seed);
+    pjvPcg(seed);
     seed = seed & 0xFFFFFu;   // what the reservoir keeps of it
     uint rng = seed * 2654435761u + 7u;
-    restirPcg(rng);
+    pjvPcg(rng);
 
     // The history, if this surface was seen last frame. Not on the first frame, nor when the sun moved: a
     // reservoir's path carries the light it saw, which a new sun has made wrong.
@@ -162,7 +162,7 @@ void main() {
                 float weight = target * W;
                 wSum += weight;
                 M += 1.0;
-                if (weight > 0.0 && restirRandom(rng) * wSum < weight) {
+                if (weight > 0.0 && pjvRandomUnit24(rng) * wSum < weight) {
                     winner = 2;
                     selected = target;
                 }
@@ -234,7 +234,7 @@ void main() {
             float weightH = denominator > 0.0 ? mh * hOwn / denominator * hHere * h.W : 0.0;
             wSum += weightH;
             M += mh;
-            if (weightH > 0.0 && restirRandom(rng) * wSum < weightH) {
+            if (weightH > 0.0 && pjvRandomUnit24(rng) * wSum < weightH) {
                 winner = 1;
                 selected = hHere / max(hNow.jacobian, 1e-12);
                 historyQ = hNow.q;

@@ -59,6 +59,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_random.sc>     // pjvInterleavedGradientNoise
 
 SAMPLER2D(gPos,    0);   // FBO1[0]: xyz world pos, a = camDist (a < 0 => sky)
 
@@ -123,14 +124,6 @@ float skyAt(vec2 uv) {
     return texture2D(gPos, snapped).a < 0.0 ? 1.0 : 0.0;
 }
 
-// Interleaved gradient noise, as display.frag uses for its debanding, and frame-independent for the
-// same reason. Here it offsets each pixel's march by a fraction of one step, so the taps of
-// neighbouring pixels interleave and the concentric rings a fixed pattern would produce dissolve
-// into a texture too fine to see.
-float godrayDither(vec2 pixel) {
-    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
-}
-
 void main() {
     // The sun's screen position. worldToUV divides through by the depth along the view axis, so any
     // point on the ray gives the same answer and a point one unit along SUN_DIR is the cheapest one
@@ -184,7 +177,10 @@ void main() {
     // independent of GODRAY_SAMPLES and GODRAY_DECAY -- change either and the picture does not
     // change brightness, which is what makes them tunable separately from the gain.
     vec2  delta = (uv - sunUV) * (GODRAY_DENSITY / float(GODRAY_SAMPLES));
-    vec2  p     = uv - delta * godrayDither(gl_FragCoord.xy);
+    // Interleaved gradient noise, frame-independent as display.frag's debanding is: it offsets each
+    // pixel's march by a fraction of one step, so the taps of neighbouring pixels interleave and the
+    // concentric rings a fixed pattern would produce dissolve into a texture too fine to see.
+    vec2  p     = uv - delta * pjvInterleavedGradientNoise(gl_FragCoord.xy);
     float decay = 1.0;
     float lit   = 0.0;
     float total = 0.0;

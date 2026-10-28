@@ -58,7 +58,7 @@ void main() {
     }
     vec3 wo1 = normalize(cameraPos.xyz - s.x);
     uint rng = uint(p.x) * 73856093u + uint(p.y) * 19349663u + uint(frameCount.x) * 83492791u;
-    restirPcg(rng);
+    pjvPcg(rng);
 
     float wSum = 0.0;
     float M = 0.0;
@@ -94,8 +94,8 @@ void main() {
     float reachOut = fresh ? radius * 2.0 : radius;
     for (int k = 0; k < 2 * (RESTIR_GBH_MAX - 1); k++) {
         if (count > wanted) break;
-        float a = 2.0 * RESTIR_PI * restirRandom(rng);
-        float d = reachOut * sqrt(restirRandom(rng));
+        float a = 2.0 * RESTIR_PI * pjvRandomUnit24(rng);
+        float d = reachOut * sqrt(pjvRandomUnit24(rng));
         ivec2 q = clamp(p + ivec2(round(vec2(cos(a), sin(a)) * d)), ivec2(0, 0), size - ivec2(1, 1));
         RestirSurface o = restirSurface(texelFetch(surf0, q, 0), texelFetch(surf1, q, 0));
         if ((q.x == p.x && q.y == p.y) || o.t < 0.0 || dot(o.n, s.n) <= 0.9 || abs(o.t - s.t) >= 0.1 * s.t) continue;
@@ -129,7 +129,7 @@ void main() {
         if (i == 0) own = shiftedHere;
         float weight = all > 0.0 ? mine / all * here * y.W : 0.0;
         wSum += weight;
-        if (weight > 0.0 && restirRandom(rng) * wSum < weight) {
+        if (weight > 0.0 && pjvRandomUnit24(rng) * wSum < weight) {
             selected = here / max(shiftedHere.jacobian, 1e-12);   // the target itself, without |J|
             win = shiftedHere;
             winAt = at[i];
@@ -169,7 +169,7 @@ void main() {
             // the result (1/M weights; pairwise MIS is not done).
             if (job == 0 || weight > 0.0) M += shifting.M;
             wSum += weight;
-            if (weight > 0.0 && restirRandom(rng) * wSum < weight) {
+            if (weight > 0.0 && pjvRandomUnit24(rng) * wSum < weight) {
                 selected = target;
                 win = shifted;
                 winAt = at;
@@ -178,8 +178,8 @@ void main() {
             job += 1;
             for (int k = 0; k < RESTIR_SPATIAL_SAMPLES; k++) {
                 if (job > samples) break;
-                float a = 2.0 * RESTIR_PI * restirRandom(rng);
-                float d = radius * sqrt(restirRandom(rng));
+                float a = 2.0 * RESTIR_PI * pjvRandomUnit24(rng);
+                float d = radius * sqrt(pjvRandomUnit24(rng));
                 ivec2 q = clamp(p + ivec2(round(vec2(cos(a), sin(a)) * d)), ivec2(0, 0), size - ivec2(1, 1));
                 RestirSurface o = restirSurface(texelFetch(surf0, q, 0), texelFetch(surf1, q, 0));
                 Reservoir n = restirLoad(q);

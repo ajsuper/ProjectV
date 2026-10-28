@@ -56,6 +56,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_filter.sc>     // pjvTexelTent
 
 SAMPLER2D(composedHDR, 0);
 SAMPLER2D(gNormal,     2);   // xyz face normal
@@ -154,11 +155,6 @@ bool voxelSample(vec2 uv, vec4 face, vec3 rayDir, vec3 camRight, vec3 camUp, flo
     return outCoverage > 0.0;
 }
 
-float texelTent(vec2 tapCentre, vec2 srcPos) {
-    vec2 d = abs(tapCentre - srcPos);
-    return max(0.0, 1.0 - d.x) * max(0.0, 1.0 - d.y);
-}
-
 void main() {
     vec2 srcRes = passInputRes[0].xy;
     vec2 srcTexel = passInputRes[0].zw;
@@ -194,13 +190,13 @@ void main() {
         // gFace's w, the voxel's size, is 0 for the sky: one fetch tells both.
         vec4 face = texture2D(gFace, uv);
         if (face.w <= 0.0) {
-            float w = max(texelTent(tap, srcPos), 1e-6);
+            float w = max(pjvTexelTent(tap, srcPos), 1e-6);
             skySum += texture2D(composedHDR, uv).rgb * w;
             skyWeight += w;
             continue;
         }
         {
-            float w = max(texelTent(tap, srcPos), 1e-6);
+            float w = max(pjvTexelTent(tap, srcPos), 1e-6);
             geometrySum += texture2D(composedHDR, uv).rgb * w;
             geometryWeight += w;
         }
@@ -208,7 +204,7 @@ void main() {
         int faceId;
         if (!voxelSample(uv, face, rayDir, camRight, camUp, theta, t, coverage, centre, size, q, faceId)) continue;
         vec3 colour = texture2D(composedHDR, uv).rgb;
-        float cw = max(coverage * texelTent(tap, srcPos), 1e-6);
+        float cw = max(coverage * pjvTexelTent(tap, srcPos), 1e-6);
         int bit = 1 << faceId;
 
         // A voxel already held takes this texel's colour, and this face's coverage if it is one not

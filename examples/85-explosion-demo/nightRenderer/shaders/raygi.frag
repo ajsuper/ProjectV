@@ -19,6 +19,8 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_random.sc>     // pjvInterleavedGradientNoise
+#include <pjv_sampling.sc>   // pjvSampleCosineHemisphere
 #define PJV_NO_ANIMATION
 #include <pjv_utils_DDA.sc>
 #include <grr_common.sc>
@@ -42,13 +44,10 @@ bool isMiss(SceneIntersectData h) {
     return h.foundBox.size < 0.0 || h.rayT <= 0.0 || dot(h.normal, h.normal) < 0.5;
 }
 
-float ign(vec2 pixel) { return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715)))); }
-
 vec3 cosineDir(float u, float v, vec3 n) {
-    float r = sqrt(u), phi = 6.2831853 * v;
     vec3 t = abs(n.y) > 0.999 ? vec3(1.0, 0.0, 0.0) : normalize(cross(vec3(0.0, 1.0, 0.0), n));
     vec3 b = cross(n, t);
-    return normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - u)));
+    return normalize(mat3(t, b, n) * pjvSampleCosineHemisphere(vec2(u, v)));
 }
 
 void main() {
@@ -62,8 +61,8 @@ void main() {
 
     // R2 over frames, from a per-pixel start: each pixel walks its own even sequence of directions.
     float frame = mod(frameParams.x, 1024.0);
-    float u = fract(ign(pixel) + frame * 0.7548777);
-    float v = fract(ign(pixel + vec2(31.0, 17.0)) + frame * 0.5698403);
+    float u = fract(pjvInterleavedGradientNoise(pixel) + frame * 0.7548777);
+    float v = fract(pjvInterleavedGradientNoise(pixel + vec2(31.0, 17.0)) + frame * 0.5698403);
     vec3 dir = cosineDir(u, v, N);
 
     Ray ray;

@@ -19,6 +19,7 @@ $input v_texcoord0
 // Output: litHDR.
 
 #include <bgfx_shader.sh>
+#include <pjv_random.sc>     // pjvInterleavedGradientNoise
 #include "restir_common.sc"
 
 SAMPLER2D(litDirect, 0);
@@ -90,7 +91,7 @@ vec3 restirShaftsHere(ivec2 p, float t) {
     if (reach < 1.0) return centre;
     vec2 direction = toward / reach;
     float step = min(reach, RESTIR_SHAFT_SPAN * res.y) / float(RESTIR_SHAFT_TAPS);
-    float offset = fract(52.9829189 * fract(dot(vec2(p), vec2(0.06711056, 0.00583715))) + frameCount.x * 0.618034);
+    float offset = fract(pjvInterleavedGradientNoise(vec2(p)) + frameCount.x * 0.618034);
 
     vec3 radial = centre;
     float weights = 1.0;

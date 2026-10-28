@@ -44,6 +44,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_random.sc>     // pjvInterleavedGradientNoise
 
 SAMPLER2D(gPos, 0);
 
@@ -99,13 +100,6 @@ uniform vec4 volParams;
 // deliberate departure from the fog's medium rather than an oversight -- a real atmosphere scatters
 // by more than one mechanism and is nowhere near as forward-peaked as a single Mie lobe at 0.62.
 #define VOL_PHASE_G 0.35
-
-// Interleaved gradient noise, frame-independent, as everywhere else in this renderer. It offsets the
-// stratified samples so neighbouring pixels sample different points along their rays -- which is what
-// gives the blur something to average rather than a coherent pattern to smear.
-float volDither(vec2 pixel) {
-    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
-}
 
 // Can the sun reach this point in the air? No surface, so no normal and no origin bias to apply --
 // the sample point is already in open space by construction.
@@ -168,7 +162,9 @@ void main() {
     }
 
     float H      = max(fogParams.y, 1e-4);
-    float offset = volDither(gl_FragCoord.xy);
+    // Interleaved gradient noise, frame-independent: neighbouring pixels sample different points along
+    // their rays, which gives the blur something to average rather than a coherent pattern to smear.
+    float offset = pjvInterleavedGradientNoise(gl_FragCoord.xy);
 
     // ---- A RATIO ESTIMATOR, WHICH IS WHY THIS CANNOT PRODUCE FIREFLIES -------------------------
     // The obvious estimator sums density * transmittance * visibility and multiplies by the segment

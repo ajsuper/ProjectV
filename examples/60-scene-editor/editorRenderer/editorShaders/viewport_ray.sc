@@ -14,24 +14,11 @@
 #define FOV 60.0
 #endif
 
-// Van der Corput / Halton for the sub-pixel jitter (base 2 and 3). Same sequence
-// the fast renderer uses, so edges converge at the same rate.
-float halton(int i, int base) {
-    float f = 1.0;
-    float r = 0.0;
-    for (int k = 0; k < 16; k++) {
-        if (i <= 0) break;
-        f /= float(base);
-        r += f * float(i - (i / base) * base);
-        i /= base;
-    }
-    return r;
-}
-
-// This frame's sub-pixel jitter, in pixels of whichever target the caller is writing.
+// This frame's sub-pixel jitter, in pixels of whichever target the caller is writing: Halton in bases
+// 2 and 3 (pjvHalton), the same sequence the fast renderer uses, so edges converge at the same rate.
 vec2 viewportJitter() {
     int frame = int(frameCount.x);
-    return vec2(halton(frame + 1, 2), halton(frame + 1, 3)) - 0.5;
+    return vec2(pjvHalton(frame + 1, 2), pjvHalton(frame + 1, 3)) - 0.5;
 }
 
 // The primary ray, under whichever projection the editor has selected.

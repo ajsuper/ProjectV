@@ -1,6 +1,8 @@
 #ifndef PJV_COLOR_SC
 #define PJV_COLOR_SC
 
+#include <pjv_random.sc>   // pjvInterleavedGradientNoise, for the dither
+
 // =============================================================================
 // pjv_color.sc -- ProjectV's colour convention, in one place (docs/plans/color-convention.md)
 // =============================================================================
@@ -55,7 +57,7 @@ vec3 pjvTonemapNeutral(vec3 c) {
 // Half a quantum of noise either way, hashed from the pixel (interleaved gradient noise), so a still
 // frame stays still. Not a look: an 8-bit target bands a smooth sky or fog ramp without it.
 vec3 pjvDither(vec3 encoded, vec2 fragCoord) {
-    float noise = fract(52.9829189 * fract(dot(fragCoord, vec2(0.06711056, 0.00583715))));
+    float noise = pjvInterleavedGradientNoise(fragCoord);
     return encoded + vec3(noise - 0.5, noise - 0.5, noise - 0.5) / 255.0;
 }
 

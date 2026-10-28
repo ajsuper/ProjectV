@@ -71,6 +71,14 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_math.sc>       // pjvBasisAround
+// pjvRandomUnit and pjvHashSeed: the same generator and the same (pixel, frame) hash gi.frag seeds
+// from, which is safe to reuse rather than something to decorrelate from: the two halves of the split
+// no longer estimate any term in common -- that is the whole content of the split -- so there is no
+// shared estimator whose noise could correlate. They also run on different pixel grids, this one at
+// full resolution and that one at a quarter of it.
+#include <pjv_random.sc>     // pjvRandomUnit, pjvHashSeed, pjvInterleavedGradientNoise
+#include <pjv_sampling.sc>   // pjvSampleUniformCone
 
 // The direct sun ray sees THROUGH transparent voxels rather than treating them as opaque, so a window
 // does not cast the shadow of a wall. Matched to gi.frag's budget, not Render mode's much larger one:
@@ -235,39 +243,13 @@ vec3 sunRadianceColor() {
     return tint * intensity;
 }
 
-// PCG, one round. The same generator and the same (pixel, frame) hash gi.frag seeds from, which is
-// safe to reuse rather than something to decorrelate from: the two halves of the split no longer
-// estimate any term in common -- that is the whole content of the split -- so there is no shared
-// estimator whose noise could correlate. They also run on different pixel grids, this one at full
-// resolution and that one at a quarter of it.
-float randomUnit(inout uint seed) {
-    seed = seed * 747796405u + 2891336453u;
-    uint word = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
-    return float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
-}
-
-uint hashSeed(uvec3 v) {
-    uint h = v.x * 1973u + v.y * 9277u + v.z * 26699u;
-    h = (h ^ (h >> 15u)) * 2246822519u;
-    h = (h ^ (h >> 13u)) * 3266489917u;
-    return h ^ (h >> 16u);
-}
-
-mat3 basisAround(vec3 n) {
-    vec3 tangent = abs(n.z) < 0.999 ? normalize(cross(vec3(0.0, 0.0, 1.0), n))
-                                    : normalize(cross(vec3(0.0, 1.0, 0.0), n));
-    return mat3(tangent, cross(n, tangent), n);
-}
-
 // A direction inside the sun's cone, uniformly. This is what makes the shadow's edge as soft as the
 // sun is wide, and why widening sunDir.w softens every shadow without changing the exposure.
 vec3 sampleSunCone(inout uint seed) {
-    vec3 axis = normalize(sunDir.xyz);
-    float cosMax = cos(sunDir.w);
-    float cosTheta = mix(cosMax, 1.0, randomUnit(seed));
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    float phi = 2.0 * PI * randomUnit(seed);
-    return normalize(basisAround(axis) * vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+    float u1 = pjvRandomUnit(seed);
+    float u2 = pjvRandomUnit(seed);
+    return normalize(pjvBasisAround(normalize(sunDir.xyz)) *
+           pjvSampleUniformCone(vec2(u1, u2), cos(sunDir.w)));
 }
 
 // The sun's contribution at this pixel, DEMODULATED the same way gi.frag's output is -- irradiance
@@ -287,7 +269,7 @@ vec3 directSunLight(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
     // accumulate pass averages away. Rebuilt from the UV because bgfx does not expose gl_FragCoord
     // to a fragment shader on the SPIR-V path.
     ivec2 pixel = ivec2(uv * passTargetRes.xy);
-    uint seed = hashSeed(uvec3(uint(pixel.x), uint(pixel.y), uint(frameCount.x)));
+    uint seed = pjvHashSeed(uvec3(uint(pixel.x), uint(pixel.y), uint(frameCount.x)));
 
     vec3 lightDirection = sampleSunCone(seed);
     float cosLight = dot(normal, lightDirection);
@@ -364,12 +346,6 @@ vec3 directSunLight(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
 // pay it.
 #define SHADOW_MAX_STEPS 256u
 
-// Interleaved gradient noise (Jimenez 2014). One rotation per pixel, decorrelated
-// from its neighbours, and cheap enough to be free next to the taps it drives.
-float interleavedGradientNoise(vec2 pixel) {
-    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
-}
-
 // Occlusion at a point, from the depths of its screen-space neighbourhood: 1.0 is
 // unoccluded, 0.0 fully enclosed.
 //
@@ -406,7 +382,7 @@ float ambientOcclusion(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
     // frame term is what the accumulate pass averages away. The pixel coordinate is
     // rebuilt from the UV rather than read from gl_FragCoord, which bgfx does not
     // expose to a fragment shader on the HLSL/SPIR-V path.
-    float rotation = interleavedGradientNoise(uv * passTargetRes.xy + frameCount.x * 5.588238) * TAU;
+    float rotation = pjvInterleavedGradientNoise(uv * passTargetRes.xy + frameCount.x * 5.588238) * TAU;
     // The render targets are created without a clamp sampler, so a tap off the edge
     // of the screen would wrap around and occlude against the opposite side.
     vec2 uvMin = texelSize * 0.5;

@@ -81,6 +81,11 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_math.sc>       // pjvBasisAround
+// pjvRandomUnit and pjvHashSeed: Render mode's generator, so the two modes make the same stochastic
+// decisions from the same seed -- which is what keeps a stochastically-alpha'd glass surface from
+// resolving to two different images in the two tabs.
+#include <pjv_random.sc>     // pjvRandomUnit, pjvHashSeed
 
 // Raised well above the shared default of 16, and defined BEFORE the include so it overrides the
 // #ifndef in pjv_utils_DDA.sc for this shader only.
@@ -171,33 +176,9 @@ bool refractDebug() { return refractDebugMode() == 1; }
 // first. Well above any weight a sample away from grazing produces, so it only ever catches the tail.
 #define SPECULAR_WEIGHT_CLAMP 4.0
 
-
 vec3 backgroundColor(vec3 direction) {
     float height = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
     return pjvSrgbToLinear(mix(BACKGROUND_BOTTOM, BACKGROUND_TOP, height));   // picked as sRGB; the display encodes
-}
-
-// PCG, one round. Matches Render mode's generator, so the two modes make the same stochastic
-// decisions from the same seed -- which is what keeps a stochastically-alpha'd glass surface from
-// resolving to two different images in the two tabs.
-float randomUnit(inout uint seed) {
-    seed = seed * 747796405u + 2891336453u;
-    uint word = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
-    return float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
-}
-
-uint hashSeed(uvec3 v) {
-    uint h = v.x * 1973u + v.y * 9277u + v.z * 26699u;
-    h = (h ^ (h >> 15u)) * 2246822519u;
-    h = (h ^ (h >> 13u)) * 3266489917u;
-    return h ^ (h >> 16u);
-}
-
-// An orthonormal basis around n, for turning a local-space sample into a world one.
-mat3 basisAround(vec3 n) {
-    vec3 tangent = abs(n.z) < 0.999 ? normalize(cross(vec3(0.0, 0.0, 1.0), n))
-                                    : normalize(cross(vec3(0.0, 1.0, 0.0), n));
-    return mat3(tangent, cross(n, tangent), n);
 }
 
 // --- The specular lobe --------------------------------------------------------
@@ -231,13 +212,13 @@ float alphaFromGlossiness(float glossiness) {
 
 // A half vector from the GGX distribution, for the reflection ray's direction.
 vec3 sampleGGXHalfVector(vec3 n, float alpha, inout uint seed) {
-    float u1 = randomUnit(seed);
-    float u2 = randomUnit(seed);
+    float u1 = pjvRandomUnit(seed);
+    float u2 = pjvRandomUnit(seed);
     float phi = 2.0 * PI * u1;
     float a2 = alpha * alpha;
     float cosTheta = sqrt(clamp((1.0 - u2) / (1.0 + (a2 - 1.0) * u2), 0.0, 1.0));
     float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    return basisAround(n) * vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+    return pjvBasisAround(n) * vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
 }
 
 // What the surface reflects towards the camera, from one stochastic sample of its specular lobe.
@@ -308,7 +289,6 @@ vec3 specularPreview(vec3 position, vec3 normal, vec3 viewDirection, VoxelMateri
     return weight * (reflected.albedo + reflected.emission);
 }
 
-
 // The primary query every viewport pass uses -- this one, albedo_low.frag's reduced-resolution trace
 // and reconstruct.frag's fallback -- so a pixel the reconstruction re-traces gets exactly the ray this
 // pass would have cast.
@@ -324,7 +304,6 @@ RayQuery viewportPrimaryQuery() {
     rayQuery.distanceToFinishLOD = 10000;
     return rayQuery;
 }
-
 
 // albedo_low.frag and reconstruct.frag include this file for everything above and bring their own main.
 #if !defined(EDITOR_ALBEDO_NO_MAIN)
@@ -350,7 +329,7 @@ void main() {
     // coordinate is rebuilt from the UNJITTERED uv rather than from gl_FragCoord, which bgfx does
     // not expose to a fragment shader on the HLSL/SPIR-V path.
     ivec2 pixel = ivec2(v_texcoord0 * passTargetRes.xy);
-    uint  seed = hashSeed(uvec3(uint(pixel.x), uint(pixel.y), uint(frame)));
+    uint  seed = pjvHashSeed(uvec3(uint(pixel.x), uint(pixel.y), uint(frame)));
 
     SceneIntersectData sceneHit;
     // The ray the hit was found on. Identical to `ray` on every path that does not refract.

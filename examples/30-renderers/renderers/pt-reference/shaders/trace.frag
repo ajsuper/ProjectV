@@ -16,6 +16,7 @@ $input v_texcoord0
 // Output: rgb the path's radiance, a 1 where the camera ray hit something.
 
 #include <bgfx_shader.sh>
+#include <pjv_random.sc>     // pjvPcg, pjvRandomUnit24
 
 #define PJV_NO_ANIMATION   // the gallery's scenes do not move
 #include <pjv_utils_DDA.sc>
@@ -29,13 +30,6 @@ uniform vec4 ptSettings;      // x the loop's bound (rays), y the surface offset
 
 #define REF_FOV 60.0
 #define REF_STEPS 512u
-
-uint refPcg(inout uint state) {
-    state = state * 747796405u + 2891336453u;
-    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-float refRandom(inout uint state) { return float(refPcg(state) >> 8u) * (1.0 / 16777216.0); }
 
 struct RefHit {
     bool hit;
@@ -62,9 +56,9 @@ RefHit refTrace(vec3 origin, vec3 direction, bool shadow, float maxDistance) {
 void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     uint seed = uint(pixel.x) * 1973u + uint(pixel.y) * 9277u + uint(frameCount.x) * 26699u;
-    refPcg(seed);
-    refPcg(seed);
-    vec2 jitter = vec2(refRandom(seed), refRandom(seed)) - 0.5;
+    pjvPcg(seed);
+    pjvPcg(seed);
+    vec2 jitter = vec2(pjvRandomUnit24(seed), pjvRandomUnit24(seed)) - 0.5;
     vec3 direction = rayStartDirection(v_texcoord0 + jitter * passTargetRes.zw, passTargetRes.xy, cameraPos.xyz,
                                        normalize(cameraDir.xyz), REF_FOV);
 
@@ -105,7 +99,7 @@ void main() {
             radiance += throughput * hit.material.emission;
             surface = pjvBsdf(hit.material.albedo, hit.material.glossiness, hit.material.metallic);
             // Next-event estimation: a point of the disc, weighted against the BSDF finding it.
-            vec3 toSun = pathSampleSun(refRandom(seed), refRandom(seed));
+            vec3 toSun = pathSampleSun(pjvRandomUnit24(seed), pjvRandomUnit24(seed));
             float cosSun = dot(n, toSun);
             bounce = true;
             if (cosSun > 0.0) {
@@ -130,9 +124,9 @@ void main() {
         if (!bounce) continue;
         // The next path ray: one lobe sampled, weighted by the combined value and pdf.
         if (vertex >= vertices) break;
-        float uLobe = refRandom(seed);
-        float u1 = refRandom(seed);
-        float u2 = refRandom(seed);
+        float uLobe = pjvRandomUnit24(seed);
+        float u1 = pjvRandomUnit24(seed);
+        float u2 = pjvRandomUnit24(seed);
         vec3 next = pjvBsdfSample(surface, n, wo, uLobe, u1, u2);
         float cosNext = dot(n, next);
         if (cosNext <= 0.0) break;

@@ -22,6 +22,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_random.sc>     // pjvBayer4
 #include <grr_common.sc>
 
 SAMPLER2D(gPos,    0);
@@ -44,13 +45,6 @@ uniform vec4 renderParams;   // y = AO on
 // A point must rise this far above the tangent plane (in voxels) to count: the voxel faces' own steps.
 #define BIAS_VOXELS           0.05
 #define SPIRAL_TURNS          7.0
-
-float bayer4(vec2 pixel) {
-    ivec2 p = ivec2(mod(pixel, 4.0));
-    int fine   = 2 * ((p.x ^ p.y) & 1) + (p.y & 1);
-    int coarse = 2 * (((p.x ^ p.y) >> 1) & 1) + ((p.y >> 1) & 1);
-    return float(4 * fine + coarse);
-}
 
 // Over `count` points in a spiral of `radius` world units (radiusPixels on screen) round the pixel: the
 // occlusion they make, 0 open .. 1.
@@ -92,8 +86,8 @@ void main() {
     float bias = max(BIAS_VOXELS * texture2D(gFace, v_texcoord0).w, pixelWorld * 0.05);
     vec2 pixel = floor(v_texcoord0 * passTargetRes.xy);
     vec2 centre = (pixel + 0.5) * passTargetRes.zw;
-    float turn = (bayer4(pixel) + 0.5) / 16.0;
-    float jitter = fract(bayer4(pixel.yx) * 0.618034 + 0.25);
+    float turn = (pjvBayer4(pixel) + 0.5) / 16.0;
+    float jitter = fract(pjvBayer4(pixel.yx) * 0.618034 + 0.25);
 
     float contactRadius = CONTACT_RADIUS_VOXELS * voxel, wideRadius = WIDE_RADIUS_VOXELS * voxel;
     float contactPixels = min(contactRadius / pixelWorld, MAX_RADIUS_PIXELS);

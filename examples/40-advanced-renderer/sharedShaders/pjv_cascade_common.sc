@@ -9,6 +9,7 @@
 // =============================================================================
 
 #include <pjv_sun_sky.sc>
+#include <pjv_math.sc>   // pjvOctDecode
 
 // Engine-set, once per PASS rather than once per renderer: (w, h, 1/w, 1/h) of the framebuffer this
 // pass is writing into. It is not declared in resources.json -- a shader gets it just by declaring
@@ -199,12 +200,7 @@ float geomWeight(vec3 P, vec3 N, vec3 probeP, vec3 probeN, float probeValid) {
 // mapping at every cascade makes a cascade-c direction's four children in c+1 be exactly
 // the 2x2 sub-tile, so merging is a clean angular refinement.
 vec3 octDecode(vec2 f) {
-    f = f * 2.0 - 1.0;
-    vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
-    float t = clamp(-n.z, 0.0, 1.0);
-    n.x += (n.x >= 0.0) ? -t : t;
-    n.y += (n.y >= 0.0) ? -t : t;
-    return normalize(n);
+    return pjvOctDecode(f * 2.0 - 1.0);
 }
 
 // Direction for tile coord (dx,dy) within a Tc x Tc tile, rotated per frame by a sub-tile

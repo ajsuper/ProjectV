@@ -23,6 +23,7 @@ $input v_texcoord0
 // (normal_blur.frag) -- the shadow's plane and normal tests keep the G-buffer's.
 
 #include <bgfx_shader.sh>
+#include <pjv_random.sc>     // pjvInterleavedGradientNoise
 #include "restir_common.sc"
 
 SAMPLER2D(gPos, 0);
@@ -68,8 +69,7 @@ void main() {
     float texel = max(restirSettings.w * surface.w, 1.0e-4);           // a render texel's width here
     float finest = restirSettings.y * 20.0;                             // the finest voxel's edge
     float plane = finest * 1.5 + texel;                                 // "the same surface", along N
-    float turn = 6.2831853 * fract(52.9829189 * fract(dot(vec2(p), vec2(0.06711056, 0.00583715)))
-                                   + frameCount.x * 0.618034);
+    float turn = 6.2831853 * fract(pjvInterleavedGradientNoise(vec2(p)) + frameCount.x * 0.618034);
 
     // 1. The blockers within reach.
     float blockers = ab.a < 0.5 && nb.w > 0.0 ? nb.w : 0.0;

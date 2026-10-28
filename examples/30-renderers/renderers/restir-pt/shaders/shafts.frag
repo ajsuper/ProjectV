@@ -30,6 +30,7 @@ $input v_texcoord0
 // Outputs: shafts (rgb the in-scattered light, a its history length), shaftDepth (t; 1e4 the sky).
 
 #include <bgfx_shader.sh>
+#include <pjv_random.sc>     // pjvInterleavedGradientNoise
 #include "restir_trace.sc"
 
 SAMPLER2D(shafts, 0);
@@ -58,8 +59,8 @@ void main() {
 
     // A point drawn from the falloff (truncated at t), stratified: interleaved gradient noise per pixel,
     // turned by the golden ratio each frame.
-    float u = fract(52.9829189 * fract(dot(vec2(p), vec2(0.06711056, 0.00583715))) + frameCount.x * 0.618034);
-    float pick = fract(52.9829189 * fract(dot(vec2(p), vec2(0.00583715, 0.06711056))) + frameCount.x * 0.7548777);
+    float u = fract(pjvInterleavedGradientNoise(vec2(p)) + frameCount.x * 0.618034);
+    float pick = fract(pjvInterleavedGradientNoise((vec2(p)).yx) + frameCount.x * 0.7548777);
     float nearWeight = restirShafts.x * (1.0 - exp(-restirShafts.y * t));
     float airWeight = restirShaftsAir.y > 0.0 ? restirShaftsAir.x * (1.0 - exp(-restirShaftsAir.y * t)) : 0.0;
     float total = nearWeight + airWeight;

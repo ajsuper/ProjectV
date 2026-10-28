@@ -80,6 +80,9 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_math.sc>       // pjvBasisAround
+#include <pjv_random.sc>     // pjvRandomUnit, pjvHashSeed
+#include <pjv_sampling.sc>   // pjvSampleCosineHemisphere, pjvSampleUniformCone
 
 // Transparent voxels are seen through rather than treated as opaque, so a window does not black out
 // the light behind it. A smaller budget than the primary march's: this is indirect light, and the
@@ -166,45 +169,22 @@ vec3 skyGradient(vec3 direction) {
 
 // --- Sampling ----------------------------------------------------------------------
 
-float randomUnit(inout uint seed) {
-    seed = seed * 747796405u + 2891336453u;
-    uint word = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
-    return float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
-}
-
-uint hashSeed(uvec3 v) {
-    uint h = v.x * 1973u + v.y * 9277u + v.z * 26699u;
-    h = (h ^ (h >> 15u)) * 2246822519u;
-    h = (h ^ (h >> 13u)) * 3266489917u;
-    return h ^ (h >> 16u);
-}
-
-mat3 basisAround(vec3 n) {
-    vec3 tangent = abs(n.z) < 0.999 ? normalize(cross(vec3(0.0, 0.0, 1.0), n))
-                                    : normalize(cross(vec3(0.0, 1.0, 0.0), n));
-    return mat3(tangent, cross(n, tangent), n);
-}
-
 // Cosine-weighted over the hemisphere, by Malley's method. Cosine-weighted because the cosine is in
 // the estimator anyway: sampling it out of the pdf is what leaves the throughput below as a bare
 // albedo multiply with no per-sample weight at all.
 vec3 cosineHemisphere(vec3 n, inout uint seed) {
-    float u1 = randomUnit(seed);
-    float u2 = randomUnit(seed);
-    float radius = sqrt(u1);
-    float phi = 2.0 * PI * u2;
-    return basisAround(n) * vec3(radius * cos(phi), radius * sin(phi), sqrt(max(0.0, 1.0 - u1)));
+    float u1 = pjvRandomUnit(seed);
+    float u2 = pjvRandomUnit(seed);
+    return pjvBasisAround(n) * pjvSampleCosineHemisphere(vec2(u1, u2));
 }
 
 // A direction inside the sun's cone, uniformly. This is what makes the shadow's edge as soft as the
 // sun is wide, and it is why widening sunDir.w softens every shadow without changing the exposure.
 vec3 sampleSunCone(inout uint seed) {
-    vec3 axis = normalize(sunDir.xyz);
-    float cosMax = cos(sunDir.w);
-    float cosTheta = mix(cosMax, 1.0, randomUnit(seed));
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    float phi = 2.0 * PI * randomUnit(seed);
-    return normalize(basisAround(axis) * vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+    float u1 = pjvRandomUnit(seed);
+    float u2 = pjvRandomUnit(seed);
+    return normalize(pjvBasisAround(normalize(sunDir.xyz)) *
+           pjvSampleUniformCone(vec2(u1, u2), cos(sunDir.w)));
 }
 
 RayQuery walkQuery(uint maxSteps) {
@@ -271,7 +251,7 @@ void main() {
     // away over the frames since the camera last moved. The pixel coordinate comes from the UV
     // rather than gl_FragCoord, which bgfx does not expose to a fragment shader on the SPIR-V path.
     ivec2 pixel = ivec2(v_texcoord0 * passTargetRes.xy);
-    uint seed = hashSeed(uvec3(uint(pixel.x), uint(pixel.y), uint(frameCount.x)));
+    uint seed = pjvHashSeed(uvec3(uint(pixel.x), uint(pixel.y), uint(frameCount.x)));
 
     int bounces = int(clamp(renderParams.x, 0.0, float(PREVIEW_BOUNCE_LIMIT)));
 

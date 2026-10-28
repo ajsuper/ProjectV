@@ -36,7 +36,7 @@ SAMPLER2D(reflection, 8);
 
 bool restirMatches(ivec2 g, vec3 P, vec3 N, float t) {
     vec4 gs = texelFetch(surf0, g, 0);
-    return gs.w >= 0.0 && restirSameSurface(gs.xyz, restirOctDecode(texelFetch(surf1, g, 0).xy), P, N, t);
+    return gs.w >= 0.0 && restirSameSurface(gs.xyz, pjvOctDecode(texelFetch(surf1, g, 0).xy), P, N, t);
 }
 
 void main() {

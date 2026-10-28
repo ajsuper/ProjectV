@@ -46,6 +46,13 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_math.sc>       // pjvBasisAround
+// pjvRandomUnit: white noise rather than the blue-noise LUT the PathTracer example loads: blue noise
+// buys perceptual quality at a handful of samples, and this mode is built around converging over
+// hundreds. Both reach the same answer, and this one is one texture and one image file fewer for the
+// editor to carry.
+#include <pjv_random.sc>     // pjvRandomUnit, pjvHashSeed, pjvHalton
+#include <pjv_sampling.sc>   // pjvSampleUniformCone
 
 // Raised well above the shared default, and defined BEFORE the include so it overrides the
 // #ifndef in pjv_utils_DDA.sc for this shader only -- the other examples keep the cheap bound.
@@ -204,47 +211,13 @@ float sunSolidAngle() {
 // Sampling
 // =============================================================================
 
-// PCG, one round. White noise rather than the blue-noise LUT the PathTracer example
-// loads: blue noise buys perceptual quality at a handful of samples, and this mode is
-// built around converging over hundreds. Both reach the same answer, and this one is
-// one texture and one image file fewer for the editor to carry.
-float randomUnit(inout uint seed) {
-    seed = seed * 747796405u + 2891336453u;
-    uint word = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
-    return float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
-}
-
-uint hashSeed(uvec3 v) {
-    uint h = v.x * 1973u + v.y * 9277u + v.z * 26699u;
-    h = (h ^ (h >> 15u)) * 2246822519u;
-    h = (h ^ (h >> 13u)) * 3266489917u;
-    return h ^ (h >> 16u);
-}
-
-// Van der Corput, for the sub-pixel jitter. The whole image shares one offset per
-// frame, so the jitter is a stratified sequence over the frames the accumulation
-// averages rather than independent noise per pixel -- which is what turns a voxel's
-// axis-aligned silhouette into a clean edge in a few dozen frames instead of a few
-// hundred.
-float halton(int index, int base) {
-    float f = 1.0;
-    float r = 0.0;
-    for (int k = 0; k < 16; k++) {
-        if (index <= 0) break;
-        f /= float(base);
-        r += f * float(index - (index / base) * base);
-        index /= base;
-    }
-    return r;
-}
-
 // Uniform over a unit disk, by Shirley's concentric mapping. The obvious
 // polar construction -- r = u1, theta = 2*pi*u2 -- clumps samples at the centre; taking the
 // square root fixes the density but distorts the stratification. Concentric does neither, which
 // matters here because the disk is the camera's aperture and any structure left in it prints
 // itself onto every out-of-focus highlight in the image.
 vec2 sampleConcentricDisk(inout uint seed) {
-    vec2 offset = vec2(randomUnit(seed), randomUnit(seed)) * 2.0 - 1.0;
+    vec2 offset = vec2(pjvRandomUnit(seed), pjvRandomUnit(seed)) * 2.0 - 1.0;
     if (offset.x == 0.0 && offset.y == 0.0) return vec2(0.0, 0.0);
 
     float radius;
@@ -272,13 +245,10 @@ float phaseHenyeyGreenstein(float cosTheta, float g) {
 
 // Uniform over the sun's cone. pdf = 1 / sunSolidAngle().
 vec3 sampleSunCone(inout uint seed) {
-    float u1 = randomUnit(seed);
-    float u2 = randomUnit(seed);
-    float cosTheta = mix(cos(sunDir.w), 1.0, u1);
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    float phi = 2.0 * PI * u2;
+    float u1 = pjvRandomUnit(seed);
+    float u2 = pjvRandomUnit(seed);
     return pjvBasisAround(normalize(sunDir.xyz)) *
-           vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+           pjvSampleUniformCone(vec2(u1, u2), cos(sunDir.w));
 }
 
 // =============================================================================
@@ -393,12 +363,15 @@ void main() {
     // Per-pixel, per-frame. The pixel term decorrelates neighbours (so noise is noise
     // rather than a pattern) and the frame term is what the accumulation averages away.
     ivec2 pixel = ivec2(v_texcoord0 * passTargetRes.xy);
-    uint seed = hashSeed(uvec3(uint(pixel.x), uint(pixel.y), uint(frame)));
+    uint seed = pjvHashSeed(uvec3(uint(pixel.x), uint(pixel.y), uint(frame)));
 
-    // Halton for the frame's shared offset, plus a per-pixel Cranley-Patterson rotation
-    // so the shared sequence does not print itself onto the image as a moving grid.
-    vec2 jitter = fract(vec2(halton(frame + 1, 2), halton(frame + 1, 3)) +
-                        vec2(randomUnit(seed), randomUnit(seed))) - 0.5;
+    // Halton for the frame's shared offset. The whole image shares one offset per frame, so the
+    // jitter is a stratified sequence over the frames the accumulation averages rather than
+    // independent noise per pixel -- which is what turns a voxel's axis-aligned silhouette into a
+    // clean edge in a few dozen frames instead of a few hundred. Plus a per-pixel Cranley-Patterson
+    // rotation so the shared sequence does not print itself onto the image as a moving grid.
+    vec2 jitter = fract(vec2(pjvHalton(frame + 1, 2), pjvHalton(frame + 1, 3)) +
+                        vec2(pjvRandomUnit(seed), pjvRandomUnit(seed))) - 0.5;
     vec2 uv = v_texcoord0 + jitter / passTargetRes.xy;
 
     Ray ray = primaryRay(uv, seed);
@@ -582,13 +555,13 @@ void main() {
         vec3 nextDirection;
         // (pjvBsdfSample, open-coded: the lobe's draw is taken only when there is a choice to make,
         // which keeps a default material's random sequence what it always was.)
-        if (surface.specularProbability > 0.0 && randomUnit(seed) < surface.specularProbability) {
-            float u1 = randomUnit(seed);
-            float u2 = randomUnit(seed);
+        if (surface.specularProbability > 0.0 && pjvRandomUnit(seed) < surface.specularProbability) {
+            float u1 = pjvRandomUnit(seed);
+            float u2 = pjvRandomUnit(seed);
             nextDirection = reflect(-viewDirection, pjvSampleGgxHalf(normal, surface.alpha, u1, u2));
         } else {
-            float u1 = randomUnit(seed);
-            float u2 = randomUnit(seed);
+            float u1 = pjvRandomUnit(seed);
+            float u2 = pjvRandomUnit(seed);
             nextDirection = pjvSampleCosine(normal, u1, u2);
         }
 
@@ -655,7 +628,7 @@ void main() {
         radiance *= exp(-extinction * segmentLength);
 
         if (segmentLength > 0.0) {
-            float distanceAlongRay = randomUnit(seed) * segmentLength;
+            float distanceAlongRay = pjvRandomUnit(seed) * segmentLength;
             // pdf of that uniform choice is 1 / segmentLength, so dividing by it is multiplying by
             // segmentLength. Written out because it is the one place the estimator's weight lives.
             float distancePdf = 1.0 / segmentLength;

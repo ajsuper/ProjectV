@@ -21,6 +21,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_random.sc>     // pjvInterleavedGradientNoise
 #include <grr_common.sc>
 
 SAMPLER2D(gPos,      0);
@@ -192,7 +193,7 @@ void main() {
     }
     float steps = clamp(smokeShape.w, 8.0, float(MAX_STEPS));
     float stepLength = max((tExit - tEnter) / steps, smokeBox.w * 0.3);
-    float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    float jitter = pjvInterleavedGradientNoise(gl_FragCoord.xy);
     float t = tEnter + stepLength * jitter;
 
     vec3 moon = normalize(sunDir.xyz);

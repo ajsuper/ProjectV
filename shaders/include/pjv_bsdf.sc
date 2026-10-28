@@ -30,6 +30,7 @@
 // Random numbers come in as arguments, so a caller keeps its own generator and its own draw order.
 
 #include <pjv_color.sc>   // pjvLuminance
+#include <pjv_math.sc>    // pjvBasisAround
 
 #define PJV_BSDF_PI 3.14159265359
 
@@ -144,13 +145,6 @@ void pjvBsdfEvaluateSplit(PjvBsdf s, vec3 normal, vec3 wo, vec3 wi, out vec3 dif
     specular = f * (d * g / max(4.0 * cosView * cosLight, 1e-6));
     diffuseFactor = (vec3(1.0, 1.0, 1.0) - f) / PJV_BSDF_PI;
     pdf = mix(diffusePdf, d * cosHalf / (4.0 * viewDotHalf), s.specularProbability);
-}
-
-// An orthonormal basis around n, for turning a local-space sample into a world one.
-mat3 pjvBasisAround(vec3 n) {
-    vec3 tangent = abs(n.z) < 0.999 ? normalize(cross(vec3(0.0, 0.0, 1.0), n))
-                                    : normalize(cross(vec3(0.0, 1.0, 0.0), n));
-    return mat3(tangent, cross(n, tangent), n);
 }
 
 // Cosine-weighted over the hemisphere about n: pdf cos / pi, which cancels the Lambertian BRDF's own.

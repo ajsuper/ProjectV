@@ -3,6 +3,7 @@
 
 #include <pjv_color.sc>   // stored colours are sRGB-encoded; decodeMaterial hands out linear ones
 #include <pjv_engine.sc>  // pjvAnimTime, pjvMotionSets
+#include <pjv_random.sc>  // pjvRandomUnit, pjvHash13/23, pjvValueNoise
 
 #define MAX_STACK_SIZE 12
 #define RENDER_MODE 3 //1-8
@@ -124,34 +125,9 @@ float pjvAnimSeconds() { return pjvAnimTime.x; }
 // segments. That does not read as motion blur; it reads as a bug. Hence a field smooth over tens of
 // voxels, and hence NOT a per-voxel position hash -- a hash has no scale, so neighbours are
 // independent, and independent neighbours under a quantiser is torn geometry by construction.
-// The lattice hash. Deliberately transcendental-free: the sin()-based version this replaced ran four
-// sines per corner set and the field is evaluated up to nine times per candidate cell, which measured
-// as the dominant cost of the whole resolve -- not the tree descents, which is where the cost was
-// assumed to be. Multiply-and-fract is a few ALU ops and the field is noise either way.
-float pjvHash13(vec3 p) {
-    p = fract(p * 0.1031);
-    p += dot(p, p.yzx + 33.33);
-    return fract((p.x + p.y) * p.z);
-}
-
-float pjvValueNoise(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);   // smoothstep: C1, which is what keeps the gradient small
-    float c000 = pjvHash13(i + vec3(0.0, 0.0, 0.0));
-    float c100 = pjvHash13(i + vec3(1.0, 0.0, 0.0));
-    float c010 = pjvHash13(i + vec3(0.0, 1.0, 0.0));
-    float c110 = pjvHash13(i + vec3(1.0, 1.0, 0.0));
-    float c001 = pjvHash13(i + vec3(0.0, 0.0, 1.0));
-    float c101 = pjvHash13(i + vec3(1.0, 0.0, 1.0));
-    float c011 = pjvHash13(i + vec3(0.0, 1.0, 1.0));
-    float c111 = pjvHash13(i + vec3(1.0, 1.0, 1.0));
-    float x00 = mix(c000, c100, f.x);
-    float x10 = mix(c010, c110, f.x);
-    float x01 = mix(c001, c101, f.x);
-    float x11 = mix(c011, c111, f.x);
-    return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z) * 2.0 - 1.0;   // -1..1
-}
+// The field is pjvValueNoise (pjv_random.sc), over a transcendental-free lattice hash: the sin()-based
+// one it replaced ran four sines per corner set and the field is evaluated up to nine times per
+// candidate cell, which measured as the dominant cost of the whole resolve.
 
 // TWO independent noise values from ONE lattice, and it costs what one costs.
 //
@@ -159,13 +135,7 @@ float pjvValueNoise(vec3 p) {
 // twice pays for two sets of eight corner hashes and two trilinear blends. Nearly all of that is
 // shared: the lattice cell, the smoothstep weights and the mix tree are identical, and only the hash
 // differs. A hash that emits two decorrelated floats instead of one therefore halves the whole
-// function, which is the single hottest thing in the advection trace.
-vec2 pjvHash23(vec3 p) {
-    vec3 q = fract(p * vec3(0.1031, 0.1030, 0.0973));
-    q += dot(q, q.yxz + 33.33);
-    return fract(vec2((q.x + q.y) * q.z, (q.x + q.z) * q.y));
-}
-
+// function, which is the single hottest thing in the advection trace. The hash is pjvHash23.
 vec2 pjvValueNoise2(vec3 p) {
     vec3 i = floor(p);
     vec3 f = fract(p);
@@ -1203,9 +1173,7 @@ vec3 mediumAbsorption(VoxelMaterial m, float segmentLength, float voxelSize) {
 // One round of PCG, so the peel can make the stochastic interface decision below. Named apart from any
 // renderer's own generator on purpose; a caller passes its own seed in and gets it advanced.
 float peelRandom(inout uint seed) {
-    seed = seed * 747796405u + 2891336453u;
-    uint word = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
-    return float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
+    return pjvRandomUnit(seed);
 }
 
 // Whether two hits are the same material, continuing through one body rather than meeting a new

@@ -74,6 +74,8 @@
 #ifndef PJV_PROBE_SC
 #define PJV_PROBE_SC
 
+#include <pjv_sampling.sc>   // pjvSampleCosineHemisphere
+
 // ---- Ray budget -------------------------------------------------------------
 // Rays cast per face per FRAME. The effective sample count is this times accumulate's age, so the
 // knob to reach for when the GI looks noisy is usually STILL_MAX_AGE over there, not this one --
@@ -192,15 +194,13 @@ vec2 pjvProbeStratum(ivec2 probeTexel) {
 // plain mean: the pdf is cos/PI, the integrand carries a cos, and the two cancel, so no per-sample
 // weight has to be tracked and one dark ray cannot be scaled up into a firefly by a small pdf.
 vec3 pjvProbeCosineDir(vec3 N, vec2 u) {
-    float r   = sqrt(u.x);
-    float phi = 2.0 * PI * u.y;
     // Any tangent will do as long as it is not parallel to N; picking the axis N is LEAST aligned
     // with keeps the cross product well conditioned. Voxel normals are exactly axis-aligned, which is
     // the degenerate case a naive fixed up-vector gets wrong.
     vec3 t  = abs(N.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
     vec3 tx = normalize(cross(t, N));
     vec3 ty = cross(N, tx);
-    return normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + N * sqrt(max(0.0, 1.0 - u.x)));
+    return normalize(mat3(tx, ty, N) * pjvSampleCosineHemisphere(u));
 }
 
 // ---- Shading a gather hit ---------------------------------------------------

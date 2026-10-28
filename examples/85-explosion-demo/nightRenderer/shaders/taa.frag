@@ -26,6 +26,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_filter.sc>     // pjvCatmullRomTaps
 #include <grr_common.sc>
 
 SAMPLER2D(curColor,  0);
@@ -55,17 +56,9 @@ vec3 fromYCoCg(vec3 c) {
 
 // The 9-tap Catmull-Rom as five bilinear fetches. Can ring slightly; the clip after it catches that.
 vec3 sampleCatmullRom(vec2 uv, vec2 res) {
-    vec2 samplePos = uv * res;
-    vec2 texPos1 = floor(samplePos - 0.5) + 0.5;
-    vec2 f = samplePos - texPos1;
-    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
-    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
-    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
-    vec2 w3 = f * f * (-0.5 + 0.5 * f);
-    vec2 w12 = w1 + w2;
-    vec2 tc0 = (texPos1 - 1.0) / res;
-    vec2 tc3 = (texPos1 + 2.0) / res;
-    vec2 tc12 = (texPos1 + w2 / w12) / res;
+    PjvCatmullRomTaps t = pjvCatmullRomTaps(uv, res);
+    vec2 tc0 = t.tc0, tc12 = t.tc12, tc3 = t.tc3;
+    vec2 w0 = t.w0, w12 = t.w12, w3 = t.w3;
     vec3 r = texture2D(histColor, vec2(tc12.x, tc0.y)).rgb * (w12.x * w0.y)
            + texture2D(histColor, vec2(tc0.x, tc12.y)).rgb * (w0.x * w12.y)
            + texture2D(histColor, vec2(tc12.x, tc12.y)).rgb * (w12.x * w12.y)

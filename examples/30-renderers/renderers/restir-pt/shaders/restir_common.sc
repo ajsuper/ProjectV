@@ -1,4 +1,4 @@
-// restir_common.sc -- what every pass of the restir-pt renderer shares: its uniforms, a hash RNG, the
+// restir_common.sc -- what every pass of the restir-pt renderer shares: its uniforms, the
 // camera's inverse, the packings, and the ReSTIR PT reservoir -- a path, not a point -- with its layout.
 //
 // THE PIPELINE (render.json). "render" is the render resolution, half the window each way; "GI" is the
@@ -29,6 +29,8 @@
 #define RESTIR_COMMON_SC
 
 #include <pjv_path_light.sc>   // the sun and sky pt-reference renders by, and pjv_bsdf.sc
+#include <pjv_math.sc>         // pjvOctEncode/Decode
+#include <pjv_random.sc>       // pjvPcg, pjvRandomUnit24: one PCG state word per pixel
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 cameraPos;
@@ -73,17 +75,6 @@ uniform vec4 restirSettings;  // x the G-buffer's trace loop bound (a uniform, s
 #define RESTIR_VIEW_SHAFTS   6
 bool restirView(int view) { return abs(restirDenoise.z - float(view)) < 0.5; }
 
-// PCG hash (Jarzynski & Olano), one state word per pixel.
-uint restirPcg(inout uint state) {
-    state = state * 747796405u + 2891336453u;
-    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
-float restirRandom(inout uint state) {
-    return float(restirPcg(state) >> 8u) * (1.0 / 16777216.0);
-}
-
 // Where world point P lands on screen (uv, top-left origin) for a camera at `position` looking along
 // `forward` -- the inverse of the engine's rayStartDirection, basis and flip included.
 vec2 restirWorldToUV(vec3 P, vec3 position, vec3 forward, vec2 res, out bool inFront) {
@@ -105,32 +96,18 @@ void restirBasis(vec3 n, out vec3 t, out vec3 b) {
     b = cross(n, t);
 }
 
-// Octahedral normal encoding (two floats in -1..1).
-vec2 restirOctWrap(vec2 v) {
-    return (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
-}
-vec2 restirOctEncode(vec3 n) {
-    n /= abs(n.x) + abs(n.y) + abs(n.z);
-    return n.z >= 0.0 ? n.xy : restirOctWrap(n.xy);
-}
-vec3 restirOctDecode(vec2 e) {
-    vec3 n = vec3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
-    if (n.z < 0.0) n.xy = restirOctWrap(n.xy);
-    return normalize(n);
-}
-
 // Packings into one float each. A float32 holds every integer below 2^24 exactly, so up to 24 bits of
 // fields go in as an integer: no bit casts, nothing a render target could flush or canonicalise.
 //   a unit vector     octahedral, 12 bits a coordinate (0.05 degrees)
 //   a colour 0..1     8 bits a channel, square-root encoded (dark albedo keeps its steps)
 //   a material        glossiness and metallic, 8 bits each (as decodeMaterial reads them)
 float restirPackDir(vec3 n) {
-    uvec2 q = uvec2(clamp(restirOctEncode(n) * 0.5 + 0.5, 0.0, 1.0) * 4095.0 + 0.5);
+    uvec2 q = uvec2(clamp(pjvOctEncode(n) * 0.5 + 0.5, 0.0, 1.0) * 4095.0 + 0.5);
     return float(q.x * 4096u + q.y);
 }
 vec3 restirUnpackDir(float f) {
     uint u = uint(f);
-    return restirOctDecode(vec2(float(u >> 12u), float(u & 4095u)) / 4095.0 * 2.0 - 1.0);
+    return pjvOctDecode(vec2(float(u >> 12u), float(u & 4095u)) / 4095.0 * 2.0 - 1.0);
 }
 float restirPackColour(vec3 c) {
     uvec3 q = uvec3(sqrt(clamp(c, 0.0, 1.0)) * 255.0 + 0.5);
@@ -170,7 +147,7 @@ RestirSurface restirSurface(vec4 a, vec4 b) {
     RestirSurface s;
     s.x = a.xyz;
     s.t = a.w;
-    s.n = restirOctDecode(b.xy);
+    s.n = pjvOctDecode(b.xy);
     vec2 m = restirUnpackMaterial(b.z);
     s.glossiness = m.x;
     s.metallic = m.y;

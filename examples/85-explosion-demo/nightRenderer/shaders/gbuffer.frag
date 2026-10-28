@@ -35,6 +35,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_random.sc>     // pjvHalton
 // Nothing in this renderer animates, so the engine's animated march -- a second tree march inlined
 // into every scene query -- is left out of the shader. Its size alone costs occupancy.
 #define PJV_NO_ANIMATION
@@ -177,17 +178,6 @@ uniform vec4 renderParams;
 // The primary ray takes no LOD at all: at a reduced render scale "a node smaller than a render pixel"
 // is several output pixels, and the merged blocks read as a visible change of detail with distance.
 
-float halton(int index, int base) {
-    float f = 1.0, r = 0.0;
-    for (int k = 0; k < 8; k++) {
-        if (index <= 0) break;
-        f /= float(base);
-        r += f * float(index - (index / base) * base);
-        index /= base;
-    }
-    return r;
-}
-
 bool isMiss(SceneIntersectData h) {
     return h.foundBox.size < 0.0 || h.rayT <= 0.0 || dot(h.normal, h.normal) < 0.5;
 }
@@ -196,7 +186,7 @@ void main() {
     // Sub-pixel jitter for TAA, off unless E turns it on (frameParams.y is then 1).
     int frame = int(frameParams.x);
     int phase = frame - (frame / 16) * 16 + 1;
-    vec2 jitter = (vec2(halton(phase, 2), halton(phase, 3)) - 0.5) * frameParams.y;
+    vec2 jitter = (vec2(pjvHalton(phase, 2), pjvHalton(phase, 3)) - 0.5) * frameParams.y;
 
     Ray ray;
     ray.origin = cameraPos.xyz;

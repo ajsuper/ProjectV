@@ -33,5 +33,5 @@ void main() {
     // The material as the paths see it: glossiness capped (restir_common.sc).
     vec2 material = restirUnpackMaterial(texelFetch(gDirect, q, 0).a);
     float packed = restirPackMaterial(min(material.x, RESTIR_GI_MAX_GLOSSINESS), material.y);
-    gl_FragData[1] = vec4(restirOctEncode(n), packed, restirPackColour(texelFetch(gAlbedo, q, 0).rgb));
+    gl_FragData[1] = vec4(pjvOctEncode(n), packed, restirPackColour(texelFetch(gAlbedo, q, 0).rgb));
 }

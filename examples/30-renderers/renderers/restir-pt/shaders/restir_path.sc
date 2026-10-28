@@ -58,7 +58,7 @@ int ptLastVertex() { return 1 + int(restirPath.x); }
 
 uint ptVertexStream(uint seed, int vertex) {
     uint s = seed * 2654435761u + uint(vertex) * 374761393u + 1013904223u;
-    restirPcg(s);
+    pjvPcg(s);
     return s;
 }
 
@@ -125,11 +125,11 @@ void ptSampleNext(inout PtWalk w) {
         return;
     }
     uint s = ptVertexStream(w.seed, w.vertex);
-    restirRandom(s);   // the sun's two
-    restirRandom(s);
-    float uLobe = restirRandom(s);
-    float u1 = restirRandom(s);
-    float u2 = restirRandom(s);
+    pjvRandomUnit24(s);   // the sun's two
+    pjvRandomUnit24(s);
+    float uLobe = pjvRandomUnit24(s);
+    float u1 = pjvRandomUnit24(s);
+    float u2 = pjvRandomUnit24(s);
     vec3 d;
     if (w.atRc) {
         // Cosine-weighted, not from the BSDF: the light found along wk is then reflected towards ANY
@@ -181,8 +181,8 @@ void ptAfterVertex(inout PtWalk w) {
 // BSDF for the new incoming direction).
 void ptSunAtVertex(inout PtWalk w) {
     uint s = ptVertexStream(w.seed, w.vertex);
-    float u1 = restirRandom(s);
-    float u2 = restirRandom(s);
+    float u1 = pjvRandomUnit24(s);
+    float u2 = pjvRandomUnit24(s);
     vec3 toSun = pathSampleSun(u1, u2);
     float c = dot(w.n, toSun);
     if (c > 0.0 && restirLum(SUN_COLOR) > 0.0) {

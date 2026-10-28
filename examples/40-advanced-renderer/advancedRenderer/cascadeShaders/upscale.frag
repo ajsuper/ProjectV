@@ -25,6 +25,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_filter.sc>     // pjvTexelTent
 
 // Slot order is declaration order across this pass's input framebuffers (render.json). FBO8 supplies
 // composeHDR at 0, then FBO1's six G-buffer attachments take 1..6. gAlbedo (3), gDirect (4) and gKey
@@ -280,17 +281,14 @@ bool voxelSample(vec2 srcUV, vec3 rayOrigin, vec3 rayDir, vec3 camRight, vec3 ca
 }
 
 // ---- WHERE THE OUTPUT PIXEL SITS IN THE SOURCE GRID, AS A WEIGHT --------------------------------
-// The standard bilinear tent, in source-texel units: 1 at a texel's own centre, falling to 0 one texel
-// away on each axis. Used ONLY to weight colour between texels already established to describe the
-// same surface, which is what makes it safe here -- see the note at cw in main().
+// pjvTexelTent (pjv_filter.sc): the standard bilinear tent, in source-texel units: 1 at a texel's
+// own centre, falling to 0 one texel away on each axis. Used ONLY to weight colour between texels
+// already established to describe the same surface, which is what makes it safe here -- see the note
+// at cw in main().
 //
 // A tent rather than a Gaussian because it is exactly bilinear, so at 1:1, where each output pixel
 // lands on a texel centre, it returns 1 for that texel and 0 for every other and this whole mechanism
 // degenerates to the plain fetch the full-resolution path already had. Nothing at scale 1.0 changes.
-float texelTent(vec2 tapCentre, vec2 srcPos) {
-    vec2 d = abs(tapCentre - srcPos);
-    return max(0.0, 1.0 - d.x) * max(0.0, 1.0 - d.y);
-}
 
 void main() {
     // RUNS AT EVERY SCALE, including 1.0, and that is not an oversight.
@@ -412,7 +410,7 @@ void main() {
             // came out as bands one source texel wide. Weighting cannot pull any voxel colour in here
             // -- only sky taps reach this branch -- so this is purely a smoother estimate of the same
             // quantity. Floored like cw so a lone distant sky tap still counts for something.
-            float skyW = max(texelTent(centreTexel + vec2(float(i), float(j)) + 0.5, srcPos), 1e-6);
+            float skyW = max(pjvTexelTent(centreTexel + vec2(float(i), float(j)) + 0.5, srcPos), 1e-6);
             skySum   += texture2D(composedHDR, candidateUV).rgb * skyW;
             skyWeight += skyW;
             continue;
@@ -454,7 +452,7 @@ void main() {
         // carry its colour. With one tap the floor cancels exactly; with several the tent dominates it.
         vec3  col = texture2D(composedHDR, candidateUV).rgb;
         float cw  = max(max(recorded, 1e-4) *
-                        texelTent(centreTexel + vec2(float(i), float(j)) + 0.5, srcPos), 1e-6);
+                        pjvTexelTent(centreTexel + vec2(float(i), float(j)) + 0.5, srcPos), 1e-6);
 
         // ---- A FACE ALREADY HELD MUST NOT TAKE THE OTHER SLOT TOO --------------------------------
         // This is the red line along every voxel boundary, and it is a bookkeeping bug rather than a

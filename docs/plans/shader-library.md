@@ -1,6 +1,6 @@
 # Shader library and an engine basic renderer
 
-Status: **in progress**: S0 built 2026-10-28; S1 next. Approved 2026-10-27 (open questions answered:
+Status: **in progress**: S0 and S1 built 2026-10-28; S2 next. Approved 2026-10-27 (open questions answered:
 tolerance D5, `projv::cam` removed D4, embedded engine shaders D3, S5 in scope with modularity first D8). Comes before
 [ui.md](ui.md), whose passes (blur, composite) are built from it.
 
@@ -195,8 +195,17 @@ changes the order of the uniforms and so their register offsets and SPIR-V ids.
 - four are bit-identical;
 - restir-pt's largest difference is 1/255, with mean 0.0000%.
 
-Captures at user-picked poses, for the baseline later milestones are compared against, are still to be
-taken.
+**Baseline views** (picked 2026-10-28). Each milestone captures every gallery renderer at these
+views and compares the captures with `projv_imgdiff`:
+
+| Scene | Command (from `build/examples/renderer_gallery`) |
+|---|---|
+| Material room: glossy floor, metal, mirror, colour bleed | `GALLERY_SUN=19.0125 GALLERY_CAPTURE_AT=300 ./renderer_gallery --scene material-room --renderer <r> --look 12.68,2.63,3.31,5.64,2.11,10.39 --capture <prefix>` |
+
+SanMiguel, the default scene, is not used: its materials are plain, with no water and no
+reflections. Water, sky and fog are tested separately, in Teardown scenes and in the terrain
+generator. The terrain generator first needs a key that prints the current view and captures by
+frame rather than by time.
 
 Largest shaders (the table the later milestones are measured against):
 
@@ -209,6 +218,59 @@ Largest shaders (the table the later milestones are measured against):
 | `30-renderers/restir-pt/.../sample.bin` | 209.7 |
 | `40-advanced-renderer/.../probe.bin` | 190.3 |
 | **all 99** | 5903.2 |
+
+**S1** (2026-10-28).
+
+New library files:
+- `pjv_math.sc`: `PJV_PI`, `PJV_TWO_PI`, `pjvBasisAround` (moved from `pjv_bsdf.sc`), and the
+  octahedral `pjvOctEncode`/`pjvOctDecode`.
+- `pjv_random.sc`:
+  - `pjvPcg`, then `pjvRandomUnit` (the 32-bit scaling) and `pjvRandomUnit24` (the 24-bit one);
+  - `pjvHashSeed`;
+  - `pjvHash13`/`pjvHash23`/`pjvValueNoise`, moved from `pjv_utils_DDA.sc`;
+  - `pjvInterleavedGradientNoise`, `pjvBayer4`, `pjvHalton`.
+- `pjv_sampling.sc`: `pjvSampleCosineHemisphere` and `pjvSampleUniformCone`, both in local space.
+- `pjv_filter.sc`: `pjvTexelTent` and `pjvCatmullRomTaps`.
+
+The 24-bit and 32-bit PCG forms both stay. They give different values, and each renderer keeps the one
+it had: restir-pt and pt-reference use the 24-bit form; the editor, the advanced renderer and the DDA's
+peel use the 32-bit one.
+
+Replaced:
+- PCG, 8 copies. Most were spelled out; the two in pt-reference and restir-pt were named `refPcg` and
+  `restirPcg`.
+- `hashSeed` ×5, `basisAround` ×4, `texelTent` ×5, `bayer4` ×2, `halton` ×4, `sampleCatmullRom` ×2.
+- Interleaved gradient noise in 11 files: 3 as functions, the rest inline. Where restir-pt adds a
+  frame offset inside the outer `fract`, it is now `fract(pjvInterleavedGradientNoise(p) + offset)`.
+  That is the same value except for float rounding, and moves four restir-pt shaders by +0.1-0.3%.
+- The octahedral codecs, in restir-pt and the cascade code.
+- The four sun-cone and three cosine samplers. Their bodies now call the library, and each keeps its
+  own basis. The night renderer's tangent comes from +y and the probe's from the least-aligned axis;
+  changing either would change the noise pattern.
+
+Left as they are:
+- The one-off hashes (`fract(sin)` ones, `pathHash`, `grrHash3`, `smokeHash`). Each uses its own
+  constants, so they are separate functions, not copies.
+- `geomWeight`. Its exponent and `PLANE_LEAK_SCALE` are policy.
+- The copies of `pjv_cascade_common.sc` and `pjv_sun_sky.sc` in `30-renderers` and
+  `40-advanced-renderer`. Example sharing examples is outside this plan; each now calls the library.
+- Gaussian and separable-blur weights. Nothing in the tree has them yet; they arrive with the UI's
+  blur (ui.md U4).
+
+**Sizes.** 93 of 99 compiled shaders are the same size. The six that changed are within ±0.3%
+(probe, raygi, and four restir-pt passes). The total is unchanged at 5903.2 kB.
+
+**Captures.** All five gallery renderers at the baseline view pass against the S1 "before" set:
+- four are bit-identical;
+- restir-pt has mean 0.0016%, largest 13/255, the same as its run-to-run noise (0.0005%, 13/255).
+
+The ESSL 300 output of the small shaders, which bgfx's GLSL optimiser inlines completely, is identical
+for 54 of 83. The big traversal shaders pass through the optimiser unchanged, so this check says
+nothing about them.
+
+**Not yet captured:** the scene editor (`gi`, `shade`, `albedo`, `path_trace`), the advanced renderer
+and the explosion demo's night renderer. They compile and their sizes are unchanged, but their images
+have not been compared.
 
 ## Open questions
 

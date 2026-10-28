@@ -158,38 +158,20 @@ vec3 skyColor(vec3 dir) {
 // is and not one pixel wide. A pass that wants a hard shadow simply traces along SUN_DIR and never
 // calls any of this.
 
-// PCG-style hash step. One multiply-xorshift per call, which is what keeps a per-pixel stream cheap
-// enough to draw from inside a shading loop.
-float pjvRandomUnit(inout uint seed) {
-    seed = seed * 747796405u + 2891336453u;
-    uint word = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
-    return float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
-}
-
-// Seed from (pixel x, pixel y, frame). The pixel terms decorrelate neighbours so the penumbra reads
-// as noise a temporal mean can remove rather than as a pattern it cannot; the frame term is what the
-// TAA pass averages away over the frames since the camera last moved.
-uint pjvHashSeed(uvec3 v) {
-    uint h = v.x * 1973u + v.y * 9277u + v.z * 26699u;
-    h = (h ^ (h >> 15u)) * 2246822519u;
-    h = (h ^ (h >> 13u)) * 3266489917u;
-    return h ^ (h >> 16u);
-}
-
-mat3 pjvBasisAround(vec3 n) {
-    vec3 tangent = abs(n.z) < 0.999 ? normalize(cross(vec3(0.0, 0.0, 1.0), n))
-                                    : normalize(cross(vec3(0.0, 1.0, 0.0), n));
-    return mat3(tangent, cross(n, tangent), n);
-}
+// The stream is pjvRandomUnit, seeded by pjvHashSeed from (pixel x, pixel y, frame). The pixel terms
+// decorrelate neighbours so the penumbra reads as noise a temporal mean can remove rather than as a
+// pattern it cannot; the frame term is what the TAA pass averages away over the frames since the
+// camera last moved.
+#include <pjv_math.sc>       // pjvBasisAround
+#include <pjv_random.sc>     // pjvRandomUnit
+#include <pjv_sampling.sc>   // pjvSampleUniformCone
 
 // A direction inside the sun's cone, uniformly. Uniform over the cone (not over its projection) is
 // the right measure here because the estimator that uses it divides by the same solid angle, which
 // is why widening SUN_ANGULAR softens every shadow without changing the image's exposure.
 vec3 pjvSampleSunCone(inout uint seed) {
-    vec3  axis     = normalize(SUN_DIR);
-    float cosMax   = cos(SUN_ANGULAR);
-    float cosTheta = mix(cosMax, 1.0, pjvRandomUnit(seed));
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    float phi      = 6.28318530718 * pjvRandomUnit(seed);
-    return normalize(pjvBasisAround(axis) * vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta));
+    float u1 = pjvRandomUnit(seed);
+    float u2 = pjvRandomUnit(seed);
+    return normalize(pjvBasisAround(normalize(SUN_DIR)) *
+           pjvSampleUniformCone(vec2(u1, u2), cos(SUN_ANGULAR)));
 }

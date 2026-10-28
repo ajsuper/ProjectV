@@ -68,7 +68,7 @@ void main() {
             vec4 qsp = RESTIR_SPECULAR(q);
             float kx = x == 0 ? 0.375 : (abs(x) == 1 ? 0.25 : 0.0625);
             float ky = y == 0 ? 0.375 : (abs(y) == 1 ? 0.25 : 0.0625);
-            float wn = fine ? pow(max(dot(restirOctDecode(qm.xy), s.n), 0.0), 32.0) : 1.0;
+            float wn = fine ? pow(max(dot(pjvOctDecode(qm.xy), s.n), 0.0), 32.0) : 1.0;
             float wz = exp(-abs(dot(qs.xyz - s.x, s.n)) / sigmaZ);
             float wd = kx * ky * wn * wz * exp(-abs(restirLum(qd.rgb) - ld) / sigmaD);
             float offset = length(vec2(float(x), float(y))) * float(RESTIR_STEP);
