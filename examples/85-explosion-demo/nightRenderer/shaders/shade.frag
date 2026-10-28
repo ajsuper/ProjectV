@@ -33,7 +33,7 @@ SAMPLER2D(aoRaw,   6);
 SAMPLER2D(giRaw,   7);
 SAMPLER2D(rayGI,   8);
 
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 renderParams;   // x = shadows, y = AO, w = debug view (2 = AO only, 4 = bounce only)
 uniform vec4 giParams;       // x = screen-space bounce strength (0: off), y = ray GI on
 

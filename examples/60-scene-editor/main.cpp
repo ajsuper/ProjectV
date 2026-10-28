@@ -61,6 +61,7 @@
 #include "core/log.h"
 #include "graphics/render_instance.h"
 #include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -2974,7 +2975,7 @@ static void setupViewportPrograms(const projv::RendererSpecification& specificat
             projv::core::warn("Viewport: {} not found, using the full shader in its place.", path);
             return BGFX_INVALID_HANDLE;
         }
-        bgfx::ShaderHandle vertex = projv::graphics::loadShader("./editorRenderer/editorShaders/vs_quad.bin");
+        bgfx::ShaderHandle vertex = projv::graphics::loadEngineShader("vs_quad");
         bgfx::ShaderHandle fragment = projv::graphics::loadShader(path);
         return bgfx::createProgram(vertex, fragment, true);
     };
@@ -25534,7 +25535,7 @@ void startup(projv::Application& app) {
     renderInstance.addRendererSpecification(1, rendererSpecification);
 
     bgfx::ShaderHandle vertexShader =
-        projv::graphics::loadShader("./editorRenderer/editorShaders/vs_quad.bin");
+        projv::graphics::loadEngineShader("vs_quad");
     EditorRenderers& renderers = app.world.ctx().emplace<EditorRenderers>();
     renderers.viewport =
         projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader);
@@ -25550,7 +25551,7 @@ void startup(projv::Application& app) {
         projv::graphics::loadRendererSpecification("./renderRenderer/");
     renderInstance.addRendererSpecification(2, renderModeSpecification);
     bgfx::ShaderHandle renderModeVertexShader =
-        projv::graphics::loadShader("./editorRenderer/editorShaders/vs_quad.bin");
+        projv::graphics::loadEngineShader("vs_quad");
     renderers.pathTrace =
         projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(2),
                                                         renderModeVertexShader);

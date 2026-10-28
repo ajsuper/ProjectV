@@ -35,6 +35,7 @@
 #include "graphics/render_instance.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 
@@ -54,7 +55,6 @@ namespace {
     // Making renderer folders relocatable is its own change; this test just obeys the rule.
     const char* kExampleDir      = "../../examples/shared";
     const char* kRendererDir     = "./basicRenderer/";
-    const char* kVertexShaderBin = "./basicRenderer/shaders/vs_quad.bin";
 
     void startup(projv::Application& app) {
         std::error_code chdirError;
@@ -75,7 +75,7 @@ namespace {
         projv::RendererSpecification spec =
             projv::graphics::loadRendererSpecification(kRendererDir);
         ri.addRendererSpecification(1, spec);
-        bgfx::ShaderHandle vsh = projv::graphics::loadShader(kVertexShaderBin);
+        bgfx::ShaderHandle vsh = projv::graphics::loadEngineShader("vs_quad");
         ri.setActiveRenderer(projv::graphics::constructRendererSpecification(
             ri.getRendererSpecification(1), vsh));
 

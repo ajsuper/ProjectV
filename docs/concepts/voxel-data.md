@@ -137,7 +137,7 @@ Two independent knobs:
   `downsampleTileTable`; editing, saving and picking never see it.
 - **Storage LOD is not a frame-time fix.** It barely changes render cost. The warning, and what to
   look at instead, is at the top of `RayQuery` in
-  [`include/pjv_utils_DDA.sc`](../../include/pjv_utils_DDA.sc).
+  [`shaders/include/pjv_utils_DDA.sc`](../../shaders/include/pjv_utils_DDA.sc).
 - **A shared blob uploads once**, at the finest LOD any of its chunks asked for. Each chunk still
   caps its own traversal (`traversalLOD` in its GPU header).
 - **Finer than stored needs new geometry**: `requestChunkLOD` returns `NeedsRegeneration`; generate

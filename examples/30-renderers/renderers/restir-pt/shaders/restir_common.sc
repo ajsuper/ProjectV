@@ -30,7 +30,7 @@
 
 #include <pjv_path_light.sc>   // the sun and sky pt-reference renders by, and pjv_bsdf.sc
 
-uniform vec4 passTargetRes;   // engine-set: xy = this pass's target size, zw = 1 / size
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
 uniform vec4 prevCameraPos;   // last frame's camera, for every temporal pass

@@ -62,7 +62,8 @@
 SAMPLER2D(lowMaterial, 0);   // (albedo.rgb, (headerIndex + 1) * 8 + face), 0 = miss. See albedo_low.frag.
 SAMPLER2D(lowSurface,  1);   // (voxel centre, edge length), world space.
 
-uniform vec4 passInputRes[8];       // [0] is the coarse G-buffer's (w, h, 1/w, 1/h).
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
+// passInputRes: [0] is the coarse G-buffer's (w, h, 1/w, 1/h).
 uniform vec4 reconstructParams;     // x = debug view, y = TRUST_SPACINGS override (0 = default).
 
 #define TRUST_SPACINGS_DEFAULT 1.5

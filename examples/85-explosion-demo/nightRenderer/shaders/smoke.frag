@@ -26,7 +26,7 @@ $input v_texcoord0
 SAMPLER2D(gPos,      0);
 SAMPLER2D(smokeGrid, 6);
 
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 smokeBox;        // xyz the grid's min corner (world), w the cell's edge (m)
 uniform vec4 smokeGridInfo;   // x cells per axis, y tiles per atlas row, z atlas width, w atlas height
 uniform vec4 smokeParams;     // x seconds, y extinction per unit density, z on, w fire emission strength

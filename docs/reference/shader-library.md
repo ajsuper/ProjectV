@@ -1,7 +1,11 @@
 # Shader library
 
-[`include/pjv_utils_DDA.sc`](../../include/pjv_utils_DDA.sc): the engine's GLSL (bgfx shaderc) for
-marching rays through the voxel scene. Its comments are the full reference; this is the map.
+[`shaders/include/`](../../shaders/include/pjv_engine.sc) is the engine's shader include root, on every
+shader's path through `projv_compile_shaders` (installed as `<prefix>/include/projv/shaders`).
+Mechanisms only: a file takes what it needs as arguments or reads an engine-owned uniform, and holds
+no look ([plan](../plans/shader-library.md)). Its centre is
+[`pjv_utils_DDA.sc`](../../shaders/include/pjv_utils_DDA.sc), the engine's GLSL (bgfx shaderc) for
+marching rays through the voxel scene; its comments are the full reference, this is the map.
 
 ```glsl
 #include <bgfx_shader.sh>
@@ -28,8 +32,9 @@ vec3 position   = ray.origin + ray.direction * sh.hit.rayT;   // only valid with
 
 | File | Holds | Plan |
 |---|---|---|
-| [`include/pjv_color.sc`](../../include/pjv_color.sc) | The colour convention: `pjvSrgbToLinear`/`pjvLinearToSrgb`, `pjvTonemapNeutral`, `pjvDisplay` (exposure → tone curve → sRGB → dither), `pjvGrade`, `pjvVignette`. `decodeMaterial` uses it, so every renderer gets **linear** albedo from sRGB-stored palettes. | [color-convention](../plans/color-convention.md) |
-| [`include/pjv_bsdf.sc`](../../include/pjv_bsdf.sc) | The surface model: a Lambertian diffuse lobe under a GGX specular lobe (`pjvBsdfEvaluate`, `pjvBsdfSample`, `pjvPowerHeuristic`, ...). A default material (glossiness 0, metallic 0) costs nothing and changes nothing. The editor's path tracer, `pt-reference` and `restir-pt` all shade through it. | [restir-pt](../plans/restir-pt.md) |
+| [`shaders/include/pjv_engine.sc`](../../shaders/include/pjv_engine.sc) | Every engine-owned uniform, declared once: `passTargetRes`, `passInputRes[8]`, `pjvAnimTime`, `pjvMotionSets[48]`. Include it rather than declaring them. | [shader-library](../plans/shader-library.md) |
+| [`shaders/include/pjv_color.sc`](../../shaders/include/pjv_color.sc) | The colour convention: `pjvSrgbToLinear`/`pjvLinearToSrgb`, `pjvTonemapNeutral`, `pjvDisplay` (exposure → tone curve → sRGB → dither), `pjvGrade`, `pjvVignette`. `decodeMaterial` uses it, so every renderer gets **linear** albedo from sRGB-stored palettes. | [color-convention](../plans/color-convention.md) |
+| [`shaders/include/pjv_bsdf.sc`](../../shaders/include/pjv_bsdf.sc) | The surface model: a Lambertian diffuse lobe under a GGX specular lobe (`pjvBsdfEvaluate`, `pjvBsdfSample`, `pjvPowerHeuristic`, ...). A default material (glossiness 0, metallic 0) costs nothing and changes nothing. The editor's path tracer, `pt-reference` and `restir-pt` all shade through it. | [restir-pt](../plans/restir-pt.md) |
 
 ## Rules
 
@@ -44,6 +49,14 @@ vec3 position   = ray.origin + ray.direction * sh.hit.rayT;   // only valid with
   from the world position shades voxels with their neighbour's colour on moved chunks.
 - **Build queries with a constructor.** A hand-made `RayQuery` fails the `magic` check, gets its
   newer fields clamped, and stops with `PJV_STOP_BAD_QUERY`.
+
+## Checks
+
+| Check | What |
+|---|---|
+| `ctest -R shader_library` | Every file compiles alone and together (SPIR-V, GLSL 440, Metal); no `uniform` outside `pjv_engine.sc`; every file-scope symbol `pjv`/`Pjv`/`PJV`. `pjv_utils_DDA.sc` is compiled but not scanned until it is split |
+| `tools/shader_sizes.py [--save f] [--against f]` | Every compiled shader's size (renderer `.bin`s and the embedded engine shaders), or the change since a saved table |
+| `projv_imgdiff before after [--diff out]` | Two captures (or two folders of them) within the tolerance: mean ≤ 0.1%, ≤ 0.1% of pixels off by more than 2/255; the largest difference reported |
 
 ## Bindings
 
@@ -62,8 +75,8 @@ All `USAMPLER2D`, read with `texelFetch`. Stages 0–8 are the pass's own inputs
 | Uniform | Set by | Holds |
 |---|---|---|
 | `tree64Dims`, `voxelTypeDims`, `paletteDims` | engine | Scene texture sizes |
-| `pjvMotionSets[48]` | engine (`GPUData::animation`) | 16 motion sets × 3 vec4 |
-| `pjvAnimTime` | engine | `(seconds, 0, 0, 0)` |
+| `pjvMotionSets[48]` | engine (`GPUData::animation`); declared in `pjv_engine.sc` | 16 motion sets × 3 vec4 |
+| `pjvAnimTime` | engine; declared in `pjv_engine.sc` | `(seconds, 0, 0, 0)` |
 
 ## Entry points
 

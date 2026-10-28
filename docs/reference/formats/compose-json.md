@@ -104,7 +104,7 @@ nearest colour on load, its voxels moved there, with a warning; entries past 256
 
 - **Colours are 10 bits per channel, sRGB-encoded**: what a colour picker, a texture or a `.vox`
   palette holds, stored as authored. An 8-bit `v` is `round(v × 1023 / 255)` (`packColor`). Renderers
-  decode to linear in `decodeMaterial` (`include/pjv_color.sc`), shade linear, and encode once at
+  decode to linear in `decodeMaterial` (`shaders/include/pjv_color.sc`), shade linear, and encode once at
   display. Files written before 2026-10-22 hold `v × 4` (white 1020) and load unchanged. Plan:
   [color-convention.md](../../plans/color-convention.md).
 - **The writer omits every property at its default**, so a colour-only palette writes only `name`

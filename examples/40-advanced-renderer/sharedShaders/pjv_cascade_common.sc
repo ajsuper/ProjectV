@@ -24,11 +24,10 @@
 // Every target in this renderer is scale 1.0, so all ten passes currently see the same numbers.
 // Reading them from the pass rather than from the window is what keeps changing that a one-line
 // edit in resources.json instead of a hunt for the shaders that assumed otherwise.
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 // Engine-set per BOUND INPUT, indexed by the sampler slot the engine bound it to, so
 // passInputRes[2] describes whatever texture SAMPLER2D(..., 2) names. 8 must equal
 // PROJV_MAX_PASS_INPUTS in constructedRenderer.h -- the engine sets exactly that many.
-uniform vec4 passInputRes[8];
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
 uniform vec4 frameCount;

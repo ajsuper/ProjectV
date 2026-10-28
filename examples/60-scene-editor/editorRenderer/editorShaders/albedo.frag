@@ -115,7 +115,7 @@ $input v_texcoord0
 // figure, for the reason above.
 #define TRANSPARENT_LAYERS 64u
 
-uniform vec4 passTargetRes;   // Engine-set: (w, h, 1/w, 1/h) of THIS pass's target.
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
 uniform vec4 frameCount;   // x = frame index

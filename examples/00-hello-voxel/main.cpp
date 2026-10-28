@@ -46,6 +46,7 @@
 #include "core/math.h"
 #include "core/paths.h"
 #include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/input.h"
 #include "graphics/manage_resources.h"
@@ -240,9 +241,8 @@ void startup(projv::Application& app) {
         projv::graphics::loadRendererSpecification(rendererDirectory);
     renderInstance.addRendererSpecification(1, specification);
 
-    const std::string vertexShaderPath =
-        (assetDirectory() / "basicRenderer/shaders/vs_quad.bin").string();
-    bgfx::ShaderHandle vertexShader = projv::graphics::loadShader(vertexShaderPath);
+    // The fullscreen quad every pass draws: an engine shader, compiled into the library.
+    bgfx::ShaderHandle vertexShader = projv::graphics::loadEngineShader("vs_quad");
 
     renderInstance.setActiveRenderer(projv::graphics::constructRendererSpecification(
         renderInstance.getRendererSpecification(1), vertexShader));

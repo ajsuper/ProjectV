@@ -59,7 +59,7 @@ $input v_texcoord0
 
 SAMPLER2D(prevPoses, 0);   // per header slot: (position, 1 if known), (rotation)
 
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 prevCameraPos;
 uniform vec4 prevCameraDir;
 // xy = this frame's sub-texel jitter, in render texels (0 with TAA off)

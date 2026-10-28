@@ -43,8 +43,7 @@ SAMPLER2D(gPos,      1);
 SAMPLER2D(gMotion,   4);
 SAMPLER2D(histColor, 7);
 
-uniform vec4 passTargetRes;
-uniform vec4 passInputRes[8];
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 frameParams;    // x = frame, z = TAA on
 uniform vec4 renderParams;   // z = reconstruction bypass (the TAA steps aside too, so the A/B is raw)
 uniform vec4 jitterParams;   // xy: where this frame's texels were traced, off their centres, in texels

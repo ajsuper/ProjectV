@@ -91,9 +91,9 @@ SAMPLER2D(previewDistance, 4);
 SAMPLER2D(giLight,         5);
 
 // 8 must equal PROJV_MAX_PASS_INPUTS in constructedRenderer.h -- the engine sets that many.
-uniform vec4 passInputRes[8];  // Per input slot; [5] is the traced light.
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
+// passInputRes: Per input slot; [5] is the traced light.
 
-uniform vec4 passTargetRes;   // Engine-set: (w, h, 1/w, 1/h) of THIS pass's target.
 uniform vec4 cameraPos;
 uniform vec4 frameCount;     // x = frame index
 uniform vec4 cameraDir;      // For viewport_ray.sc: the occlusion taps rebuild their rays.

@@ -10,7 +10,7 @@ $input v_texcoord0
 // the Viewport panel.) The lit renderers tone-map here because they produce
 // open-ended HDR radiance; this one produces reflectance, which is already in
 // [0, 1]: the palette's colour, decoded to linear by decodeMaterial (the colour
-// convention, include/pjv_color.sc). Encoding it again is the exact inverse, so
+// convention, shaders/include/pjv_color.sc). Encoding it again is the exact inverse, so
 // an unlit voxel shows the colour that is in the file, to the bit.
 //
 // A tone curve would desaturate and lift it -- the previewer would no longer be
@@ -89,7 +89,7 @@ void main() {
         }
     }
 
-    // The palette reaches the shaders decoded to linear (include/pjv_color.sc), so the preview encodes on
+    // The palette reaches the shaders decoded to linear (shaders/include/pjv_color.sc), so the preview encodes on
     // the way out: an unlit albedo comes back to exactly the colour stored.
     color = pjvLinearToSrgb(color);
 

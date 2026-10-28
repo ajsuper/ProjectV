@@ -160,7 +160,7 @@ bool traceEmbers(vec3 o, vec3 d, float tLimit, out float tHit, out vec3 nHit, ou
     return found;
 }
 
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 // x = frame index, y = jitter amplitude in render pixels (0 = none), z = TAA on, w = camera moved
 uniform vec4 frameParams;
 // x = shadows on, y = AO on, z = reconstruction bypass, w = debug view

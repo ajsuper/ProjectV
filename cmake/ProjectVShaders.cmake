@@ -57,8 +57,8 @@ function(projv_compile_shaders)
         set(profile spirv)
     endif()
 
-    # Include roots. bgfx's own bgfx_shader.sh, then the engine's shader library so
-    # pjv_utils_DDA.sc resolves, then whatever the caller adds.
+    # Include roots. bgfx's own bgfx_shader.sh, then the engine's shader library (shaders/include/)
+    # so pjv_engine.sc and the rest resolve, then whatever the caller adds.
     set(includeFlags "")
     _projv_bgfx_shader_include(bgfxShaderInclude)
     if(bgfxShaderInclude)
@@ -99,7 +99,7 @@ function(projv_compile_shaders)
         endif()
         # A fragment shader may also include a sibling .frag -- a variant is a few #defines in front
         # of another shader (see the scene editor's albedo_lean.frag) -- and the engine's own shader
-        # library (pjv_utils_DDA.sc) is included by nearly everything. Neither showed up as a
+        # library (shaders/include/) is included by nearly everything. Neither showed up as a
         # dependency, so editing either left stale binaries that the next run quietly loaded.
         list(APPEND sharedIncludes ${fragmentShaders})
         list(APPEND sharedIncludes ${includeDirSources})
@@ -201,9 +201,10 @@ function(_projv_bgfx_shader_include outVar)
         "projv_compile_shaders: could not locate bgfx_shader.sh. Shaders will fail to compile.")
 endfunction()
 
-# The engine's own shader library -- pjv_utils_DDA.sc. It ships inside the same directory the
-# C++ headers are found through, so ask the target rather than guessing: that is include/ in a
-# build tree and <prefix>/include/projv in an install tree, and the target knows which.
+# The engine's shader library (shaders/include/: pjv_engine.sc, pjv_color.sc, pjv_utils_DDA.sc, ...).
+# Found beside the C++ headers the target exports, so ask the target rather than guessing: those are
+# include/ in a build tree, whose sibling shaders/include/ is the library, and <prefix>/include/projv
+# in an install tree, which carries it as shaders/.
 function(_projv_engine_shader_include outVar)
     set(${outVar} "" PARENT_SCOPE)
 
@@ -215,18 +216,18 @@ function(_projv_engine_shader_include outVar)
                 # Strip the $<BUILD_INTERFACE:...> / $<INSTALL_INTERFACE:...> wrappers a build-tree
                 # target carries; an imported target's are already resolved to plain paths.
                 string(REGEX REPLACE "^\\$<[A-Z_]+:(.+)>$" "\\1" dir "${dir}")
-                list(APPEND candidates "${dir}")
+                list(APPEND candidates "${dir}/../shaders/include" "${dir}/shaders")
             endforeach()
         endif()
     endif()
     # Fallbacks for a caller that has not imported the target yet.
     list(APPEND candidates
-        "${CMAKE_CURRENT_LIST_DIR}/../include"
-        "${CMAKE_CURRENT_LIST_DIR}/../../../include/projv"
+        "${CMAKE_CURRENT_LIST_DIR}/../shaders/include"
+        "${CMAKE_CURRENT_LIST_DIR}/../../../include/projv/shaders"
     )
 
     foreach(candidate IN LISTS candidates)
-        if(EXISTS "${candidate}/pjv_utils_DDA.sc")
+        if(EXISTS "${candidate}/pjv_engine.sc")
             get_filename_component(resolved "${candidate}" ABSOLUTE)
             set(${outVar} "${resolved}" PARENT_SCOPE)
             return()
@@ -235,5 +236,5 @@ function(_projv_engine_shader_include outVar)
 
     message(WARNING
         "projv_compile_shaders: could not locate the engine's shader library "
-        "(pjv_utils_DDA.sc). Any shader that includes it will fail to compile.")
+        "(pjv_engine.sc). Any shader that includes it will fail to compile.")
 endfunction()

@@ -23,6 +23,7 @@
 #include "core/math.h"
 #include "core/world.h"
 #include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -119,7 +120,7 @@ namespace voxel_renderer {
     inline void install(projv::World& world, projv::graphics::RenderInstance& renderInstance, const std::filesystem::path& here,
                         const std::string& folder = "voxelRenderer") {
         renderInstance.addRendererSpecification(1, specification(world, here, folder));
-        bgfx::ShaderHandle vertexShader = projv::graphics::loadShader((here / folder / "shaders/vs_quad.bin").string());
+        bgfx::ShaderHandle vertexShader = projv::graphics::loadEngineShader("vs_quad");
         renderInstance.setActiveRenderer(
             projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader));
     }

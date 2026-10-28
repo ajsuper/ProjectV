@@ -10,7 +10,6 @@ myRenderer/
 ├── resources.json      uniforms, shaders, textures, framebuffers
 ├── render.json         the passes, in order
 └── shaders/
-    ├── vs_quad.sc      the full-screen-quad vertex shader (copy one from an example)
     ├── varying.def.sc
     ├── main.frag  →  main.bin      compiled by projv_compile_shaders()
     └── post.frag  →  post.bin

@@ -308,6 +308,7 @@ add_library(projectV STATIC
     src/core/time.cpp
 
     src/graphics/disk_io.cpp
+    src/graphics/engine_shaders.cpp
     src/graphics/gpu_interface.cpp
     src/graphics/manage_resources.cpp
     src/graphics/perform_renderer.cpp
@@ -451,6 +452,8 @@ if(APPLE)
 endif()
 
 include(ProjectVShaders)
+include(ProjectVEngineShaders)
+projv_embed_engine_shaders(TARGET projectV SHADER_DIR shaders/engine INCLUDE_DIR shaders/include)
 
 if(PROJV_BUILD_EXAMPLES)
     add_subdirectory(examples)
@@ -467,6 +470,15 @@ endif()
 option(PROJV_BUILD_MANUAL_TESTS "Build the manual (windowed) test harnesses" OFF)
 if(PROJV_BUILD_MANUAL_TESTS)
     add_subdirectory(tests/manual)
+endif()
+
+# Tools for checking renderer changes (docs/plans/shader-library.md): projv_imgdiff compares captures.
+# It reads images with the stb_image that bgfx's bimg vendors, so it needs the submodule build.
+set(PROJV_STB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/bgfx.cmake/bimg/3rdparty/stb")
+if((PROJV_BUILD_TESTS OR PROJV_BUILD_EXAMPLES) AND EXISTS "${PROJV_STB_DIR}/stb_image.h")
+    add_executable(projv_imgdiff tools/imgdiff/main.cpp)
+    target_include_directories(projv_imgdiff PRIVATE "${PROJV_STB_DIR}")
+    target_compile_features(projv_imgdiff PRIVATE cxx_std_20)
 endif()
 
 # Documentation: the `docs` target (web site + API reference) and the `docs` link-check test.
@@ -497,15 +509,15 @@ if(PROJV_INSTALL)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
 
-    # Headers, plus pjv_utils_DDA.sc -- the engine's shader-side voxel traversal -- and pjv_color.sc,
-    # the colour convention it decodes palettes by. They are shader includes living in the C++
-    # include tree, and they have to ship: every renderer in the tree includes them, so shaderc
-    # needs <prefix>/include/projv on its -i path.
     install(DIRECTORY include/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/projv
-        FILES_MATCHING
-            PATTERN "*.h"
-            PATTERN "*.sc"
+        FILES_MATCHING PATTERN "*.h"
+    )
+    # The shader library (shaders/include/): every renderer includes it, so it ships, and
+    # projv_compile_shaders finds it at <prefix>/include/projv/shaders.
+    install(DIRECTORY shaders/include/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/projv/shaders
+        FILES_MATCHING PATTERN "*.sc"
     )
 
     # A vendored EnTT has no install of its own, so it gets one here: its headers, and a config

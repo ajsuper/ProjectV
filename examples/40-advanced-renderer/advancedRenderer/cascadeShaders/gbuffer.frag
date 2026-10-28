@@ -49,7 +49,7 @@ $input v_texcoord0
 #include <bgfx_shader.sh>
 #include <pjv_utils_DDA.sc>
 
-uniform vec4 passTargetRes;   // Engine-set: (w, h, 1/w, 1/h) of THIS pass's target.
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
 uniform vec4 frameCount;

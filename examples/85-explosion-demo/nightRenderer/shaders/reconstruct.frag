@@ -54,8 +54,7 @@ SAMPLER2D(gNormal,     2);   // xyz face normal
 SAMPLER2D(gFace,       5);   // xyz face centre, w = voxel edge
 SAMPLER2D(gRot,        6);   // the chunk's rotation, xyzw
 
-uniform vec4 passTargetRes;
-uniform vec4 passInputRes[8];
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
 // z: bypass -- point-sample the render-resolution frame, what the frame is without this pass.

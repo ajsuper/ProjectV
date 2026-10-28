@@ -143,6 +143,7 @@
 #include "core/log.h"
 #include "graphics/render_instance.h"
 #include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -169,7 +170,6 @@ static const char* DEFAULT_SCENE_PATH = "../scene_previewer/scenes/SmallerVox/";
 // The renderer's own files. Both paths inside resources.json are relative to the working directory,
 // so this example is run from its own folder.
 static const char* RENDERER_DIRECTORY = "./advancedRenderer/";
-static const char* VERTEX_SHADER_PATH = "./advancedRenderer/cascadeShaders/vs_quad.bin";
 
 // Must match FOV in the shaders (pjv_cascade_common.sc and gbuffer.frag). The framing below places
 // the camera by it, and the CPU has no other way to learn it -- the projection lives in the shader.
@@ -366,7 +366,7 @@ struct AnimControls {
 // =============================================================================
 // The whole of this example's side of it: name which materials move, describe the field as motion-
 // table rows, bake, and set the clock each frame. There is no shader here for the field, the
-// envelope, the resolve or the flame -- all four are in include/pjv_utils_DDA.sc, reached through a
+// envelope, the resolve or the flame -- all four are in shaders/include/pjv_utils_DDA.sc, reached through a
 // RayQuery flag.
 //
 // That is worth stating as a size rather than a principle. What used to be under this banner was
@@ -1305,7 +1305,7 @@ void startup(projv::Application& app) {
     applyRenderScale(rendererSpec, state.renderScale);
     renderInstance.addRendererSpecification(1, rendererSpec);
 
-    bgfx::ShaderHandle vertexShader = projv::graphics::loadShader(VERTEX_SHADER_PATH);
+    bgfx::ShaderHandle vertexShader = projv::graphics::loadEngineShader("vs_quad");
     std::shared_ptr<projv::ConstructedRenderer> constructedRenderer =
         projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1),
                                                         vertexShader);

@@ -61,7 +61,7 @@ $input v_texcoord0
 #include <pjv_utils_DDA.sc>
 #include <pjv_bsdf.sc>   // the material model: GGX over Lambert, shared with the renderer gallery
 
-uniform vec4 passTargetRes;   // Engine-set: (w, h, 1/w, 1/h) of THIS pass's target.
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
 // x = frame index, y = 1.0 on a frame the camera moved, z = the frame it last moved on.

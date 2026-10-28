@@ -368,7 +368,7 @@ sharedShaders/pjv_atmosphere.sc           the fog's optical depth, shared with t
 sharedShaders/pjv_anim_controls.sc        two uniforms — what is left of the animation prototypes
 ```
 
-The voxel traversal itself is not here — it is the engine's, at `include/pjv_utils_DDA.sc`, which every renderer in the tree includes. That is what keeps them all in step with a traversal change.
+The voxel traversal itself is not here — it is the engine's, at `shaders/include/pjv_utils_DDA.sc`, which every renderer in the tree includes. That is what keeps them all in step with a traversal change.
 
 **And neither is the animation, any more.** This example was where the envelope animation system was
 prototyped, through five versions, and what stood here was 2,720 lines of shader across

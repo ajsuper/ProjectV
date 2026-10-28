@@ -59,7 +59,7 @@ SAMPLER2D(traceNormal,   1);
 SAMPLER2D(tracePosition, 2);
 SAMPLER2D(taaColor,      3);
 
-uniform vec4 passTargetRes;   // Engine-set: (w, h, 1/w, 1/h) of THIS pass's target.
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 // x = frame index, y = 1.0 on a frame the camera moved, z = the frame it last moved on,
 // w = 1.0 when there is no usable history at all and this frame must be taken whole. That last one
 // is not the same statement as "the camera moved": it is raised on the first frame, on a tab switch

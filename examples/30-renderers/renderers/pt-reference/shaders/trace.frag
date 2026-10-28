@@ -21,7 +21,7 @@ $input v_texcoord0
 #include <pjv_utils_DDA.sc>
 #include <pjv_path_light.sc>
 
-uniform vec4 passTargetRes;   // engine-set: xy this pass's target size, zw 1 / size
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 cameraPos;
 uniform vec4 cameraDir;
 uniform vec4 frameCount;      // x the frame index

@@ -39,7 +39,7 @@ worked examples of it, at every scale from four passes to ten.
 `pt-reference` replaced the gallery's two older path tracers, `tree64` and `taa`, and `restir-pt` replaced
 `restir` (ReSTIR GI), all on 2026-10-22: neither old path tracer knew about materials, and a reference
 must shade what it checks the way the renderer it checks does. The material model all of them share is
-the engine's `include/pjv_bsdf.sc`.
+the engine's `shaders/include/pjv_bsdf.sc`.
 
 `--scene material-room` opens a room built in main.cpp for comparing materials: a checkered glossy floor,
 a metal wall, a mirror panel, a red wall, a skylight and a window, a semi-glossy block, a white cube and a

@@ -28,7 +28,7 @@ SAMPLER2D(gAmbient, 2);
 SAMPLER2D(gDirect,  3);
 
 // Engine-set: (w, h, 1/w, 1/h) of this pass's target -- the RENDER resolution here.
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 
 // Penumbra width, in render pixels. Wider is softer; too wide and contact shadows lose their
 // footing. 2.5 is about one output pixel at half render scale.

@@ -66,7 +66,7 @@ differ, the README is what the code does.
 
 | Plan | Status | What |
 |---|---|---|
-| [shader-library.md](shader-library.md) | approved | Shared shader mechanisms (camera, sampling, filters, reflection models, atmospherics) and the basic renderer, in the engine |
+| [shader-library.md](shader-library.md) | in progress (S0 built) | Shared shader mechanisms (camera, sampling, filters, reflection models, atmospherics) and the basic renderer, in the engine |
 | [render-target-sizing.md](render-target-sizing.md) | built | Render targets sized by rule (`sizeMode`), per-pass sizes |
 | [loose-chunk-bvh.md](loose-chunk-bvh.md) | partly built (H1, H3, H5) | A BVH over loose chunks for rendering, picking and physics |
 | [block-table-traversal.md](block-table-traversal.md) | done | Walking the tree64 without descending it (the dense block table) |

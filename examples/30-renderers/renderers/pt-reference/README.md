@@ -21,7 +21,7 @@ reference that disagrees with the renderer it checks about what a surface is can
 
 ## What it shares, and with whom
 
-- **The material model** is the engine's `include/pjv_bsdf.sc`: GGX over Lambert, from the palette's
+- **The material model** is the engine's `shaders/include/pjv_bsdf.sc`: GGX over Lambert, from the palette's
   glossiness and metallic. The scene editor's Render tab and `restir-pt` shade through the same file.
   Glossiness 0 and metallic 0 is exactly Lambertian, so every scene written before materials looks as it
   always did.

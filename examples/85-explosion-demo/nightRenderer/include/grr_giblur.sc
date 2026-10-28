@@ -10,7 +10,7 @@
 #ifndef GRR_GIBLUR_SC
 #define GRR_GIBLUR_SC
 
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 giParams;   // y = ray GI on
 
 void main() {

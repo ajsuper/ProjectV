@@ -46,8 +46,7 @@ $input v_texcoord0
 
 SAMPLER2D(bloomDown, 0);
 
-uniform vec4 passTargetRes;
-uniform vec4 passInputRes[8];
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 
 // Gaussian width, in texels of the INPUT (quarter resolution). One of those is four output pixels, so
 // this covers roughly fifty pixels of the final image -- wide, but no longer the only thing there is,

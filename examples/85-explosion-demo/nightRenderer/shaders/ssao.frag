@@ -37,7 +37,7 @@ SAMPLER2D(gNormal, 1);
 SAMPLER2D(gAlbedo, 2);
 SAMPLER2D(gLight,  3);
 
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 renderParams;   // y = AO on
 uniform vec4 giParams;       // x = bounce strength (0: off)
 

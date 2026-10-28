@@ -63,9 +63,9 @@ SAMPLER2D(previewGlow,     3);
 SAMPLER2D(giRaw,           5);   // After FBO 1's five targets, previewDistance the fifth.
 SAMPLER2D(giLight,         6);
 
-uniform vec4 passTargetRes;   // (w, h, 1/w, 1/h) of THIS pass's target.
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 // 8 must equal PROJV_MAX_PASS_INPUTS in constructedRenderer.h -- the engine sets that many.
-uniform vec4 passInputRes[8];  // Per input slot; [2] is previewPosition, at full resolution.
+// passInputRes: Per input slot; [2] is previewPosition, at full resolution.
 // x = frame index, y = the camera moved this frame, z = the frame it last moved on,
 // w = nonzero when there is no usable history at all (first frame, a resize, a scene load).
 uniform vec4 frameCount;

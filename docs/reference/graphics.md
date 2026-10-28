@@ -47,6 +47,28 @@ bgfx, and the active renderer.
 | `validateFrameBufferAttachmentSizes` | Throws if one framebuffer's attachments disagree on size |
 | `readFile(path)` | |
 
+## `graphics/engine_shaders.h`
+
+[`include/graphics/engine_shaders.h`](../../include/graphics/engine_shaders.h): the engine's own
+shaders ([`shaders/engine/`](../../shaders/engine/vs_quad.sc)), compiled into the library per profile.
+Nothing is staged or read from disk.
+
+| Name | What |
+|---|---|
+| `loadEngineShader(name)` | → `bgfx::ShaderHandle` for the running renderer; `BGFX_INVALID_HANDLE` (logged) if absent |
+| `engineShader(name)`, `engineShader(name, rendererType)` | The bytes; empty if absent |
+
+| Shader | What |
+|---|---|
+| `vs_quad` | The fullscreen quad every pass draws: the vertex shader for `constructRendererSpecification` |
+
+```cpp
+auto renderer = graphics::constructRendererSpecification(spec, graphics::loadEngineShader("vs_quad"));
+```
+
+Profiles: `PROJV_ENGINE_SHADER_PROFILES` (`spirv` off Apple, `metal` on it), what
+`RenderInstance` starts bgfx on.
+
 ## `graphics/manage_resources.h`
 
 [`include/graphics/manage_resources.h`](../../include/graphics/manage_resources.h): turning a

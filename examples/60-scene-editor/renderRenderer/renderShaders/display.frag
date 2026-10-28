@@ -10,7 +10,7 @@ $input v_texcoord0
 // a pixel means. The Viewport's display pass is a straight copy and says so at
 // length: that renderer's output is stored reflectance, already in [0, 1], and
 // tone mapping it would mean the editor is no longer showing the colour that is in
-// the file. (Both encode to sRGB on the way out: include/pjv_color.sc.)
+// the file. (Both encode to sRGB on the way out: shaders/include/pjv_color.sc.)
 //
 // This renderer's output is radiance. It is open-ended -- a sunlit white voxel and
 // the sun disk behind it differ by four orders of magnitude -- so it has to be
@@ -57,7 +57,7 @@ uniform vec4 gradeTint;
 // Engine-set per pass: (w, h, 1/w, 1/h) of the target THIS pass writes. The aberration offsets and
 // the edge clamp below are in this pass's own texels, which is why they take the target's size and
 // not the traced image's -- the two differ as soon as the trace runs at a fraction of the display.
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 
 
 // Transverse chromatic aberration: a real lens does not bring every wavelength to the same

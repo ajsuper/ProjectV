@@ -55,6 +55,7 @@ add_executable(projv_unit_tests
     test_scene_bridge.cpp
     test_scene_delete.cpp
     test_scene_loading.cpp
+    test_shaders.cpp
     test_world_loading.cpp
     test_time.cpp
     test_voxel_edits.cpp
@@ -111,3 +112,16 @@ endif()
 # Not a compile: a scan of the voxel layer's includes. See check_layering.cmake.
 add_test(NAME layering
          COMMAND ${CMAKE_COMMAND} -DPROJV_ROOT=${PROJECT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/check_layering.cmake)
+
+# The shader library: each file compiles alone and together on every profile, and declares no uniform
+# and no unprefixed symbol. See check_shader_library.cmake.
+_projv_find_shaderc(PROJV_TEST_SHADERC)
+_projv_bgfx_shader_include(PROJV_TEST_BGFX_SHADER_INCLUDE)
+add_test(NAME shader_library
+         COMMAND ${CMAKE_COMMAND}
+                 -DSHADERC=${PROJV_TEST_SHADERC}
+                 -DBGFX_SHADER_INCLUDE=${PROJV_TEST_BGFX_SHADER_INCLUDE}
+                 -DLIBRARY=${PROJECT_SOURCE_DIR}/shaders/include
+                 -DVARYING=${PROJECT_SOURCE_DIR}/shaders/engine/varying.def.sc
+                 -DWORK=${CMAKE_CURRENT_BINARY_DIR}/shader_library
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/check_shader_library.cmake)

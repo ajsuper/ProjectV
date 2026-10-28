@@ -26,7 +26,7 @@ $input v_texcoord0
 SAMPLER2D(gPos,    0);
 SAMPLER2D(gNormal, 1);
 
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 frameParams;   // x = frame
 uniform vec4 giParams;      // y = ray GI on
 

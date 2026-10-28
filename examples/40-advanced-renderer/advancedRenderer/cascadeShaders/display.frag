@@ -17,7 +17,7 @@ $input v_texcoord0
 //               ->  pjvGrade: TINT, CONTRAST, SATURATION   (linear; contrast is a power about middle
 //                                                   grey, so it cannot crush shadows to black)
 //               ->  pjvDisplay                      (the engine's neutral tone curve, the sRGB curve, a
-//                                                   dither: include/pjv_color.sc)
+//                                                   dither: shaders/include/pjv_color.sc)
 //
 // Every knob is a #define right here. Recompile the renderer (compAdvanced.sh) after editing.
 //
@@ -100,7 +100,7 @@ uniform vec4 renderParams;
 // The resolution of each bound input, so the magnifying fetches below know what grid they are
 // reconstructing from. Slots follow the bind order: 2 godrays, 3 bloomTight, 4 bloomWide,
 // 5 volumetric.
-uniform vec4 passInputRes[8];
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 
 // .y is the `/` diagnostic cycle. Mode 5 exists because every earlier mode marked the G-BUFFER, and
 // the half-resolution shaft terms are added HERE -- after compose, after taa -- so a defect in them

@@ -14,6 +14,7 @@
 
 #include "core/math.h"
 #include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -29,7 +30,7 @@ namespace basic_renderer {
         projv::RendererSpecification specification =
             projv::graphics::loadRendererSpecification((here / "basicRenderer").string() + "/");
         renderInstance.addRendererSpecification(1, specification);
-        bgfx::ShaderHandle vertexShader = projv::graphics::loadShader((here / "basicRenderer/shaders/vs_quad.bin").string());
+        bgfx::ShaderHandle vertexShader = projv::graphics::loadEngineShader("vs_quad");
         renderInstance.setActiveRenderer(
             projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader));
     }

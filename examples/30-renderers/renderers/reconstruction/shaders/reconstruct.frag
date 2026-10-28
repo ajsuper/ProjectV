@@ -36,8 +36,7 @@ SAMPLER2D(gFace,       5);   // xyz voxel FACE CENTRE, w = voxel edge size
 
 // Engine-set: (w, h, 1/w, 1/h). The target is the output resolution; input 0 is the render-resolution
 // frame being magnified. Comparing them is how this decides whether there is anything to reconstruct.
-uniform vec4 passTargetRes;
-uniform vec4 passInputRes[8];
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 // The camera the G-buffer was rendered with, so the ray rebuilt here and the ray that filled the
 // G-buffer agree.
 uniform vec4 cameraPos;

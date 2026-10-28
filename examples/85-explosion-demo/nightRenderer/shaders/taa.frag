@@ -32,8 +32,7 @@ SAMPLER2D(curColor,  0);
 SAMPLER2D(gPos,      1);
 SAMPLER2D(histColor, 7);
 
-uniform vec4 passTargetRes;
-uniform vec4 passInputRes[8];
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 prevCameraPos;
 uniform vec4 prevCameraDir;
 uniform vec4 frameParams;    // x = frame, z = TAA on, w = camera moved this frame

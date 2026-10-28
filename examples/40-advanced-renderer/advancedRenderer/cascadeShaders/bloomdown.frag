@@ -38,8 +38,7 @@ $input v_texcoord0
 SAMPLER2D(upscaledColor, 0);
 SAMPLER2D(gPos,     1);
 
-uniform vec4 passTargetRes;
-uniform vec4 passInputRes[8];
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 // x = the debug view selector. The bright-pass must not run on a debug view: those are
 // CLASSIFICATIONS drawn as colour, and blooming them would smear one category into the next.
 uniform vec4 renderParams;

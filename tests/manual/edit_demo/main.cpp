@@ -35,6 +35,7 @@
 #include "core/log.h"
 #include "graphics/render_instance.h"
 #include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -407,8 +408,7 @@ void startup(projv::Application& app) {
         "./renderers/fast/");
     renderInstance.addRendererSpecification(1, rendererSpec);
 
-    bgfx::ShaderHandle vsh = projv::graphics::loadShader(
-        "./renderers/fast/shaders/vs_quad.bin");
+    bgfx::ShaderHandle vsh = projv::graphics::loadEngineShader("vs_quad");
     std::shared_ptr<projv::ConstructedRenderer> constructedRenderer =
         projv::graphics::constructRendererSpecification(
             renderInstance.getRendererSpecification(1), vsh);

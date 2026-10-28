@@ -1,4 +1,8 @@
+#ifndef PJV_UTILS_DDA_SC
+#define PJV_UTILS_DDA_SC
+
 #include <pjv_color.sc>   // stored colours are sRGB-encoded; decodeMaterial hands out linear ones
+#include <pjv_engine.sc>  // pjvAnimTime, pjvMotionSets
 
 #define MAX_STACK_SIZE 12
 #define RENDER_MODE 3 //1-8
@@ -39,8 +43,8 @@ uniform vec4 paletteDims;
 // The motion table
 // =============================================================================
 //
-// Engine-owned, exactly as passTargetRes is: not declared in any resources.json, set before every
-// pass, and available to a shader that declares it. Two vec4 per motion set, sixteen sets:
+// Engine-owned, exactly as passTargetRes is, and declared with it in pjv_engine.sc. Laid out per
+// motion set:
 //
 //   [2i+0] = (kind, amplitude in VOXELS, spatial frequency, speed)
 //   [2i+1] = (direction.xyz, turbulence)
@@ -49,8 +53,6 @@ uniform vec4 paletteDims;
 // what makes this a mechanism rather than a menu: grass sway, leaf flutter, a rising flame and a
 // water surface are one traversal and four rows, not four code paths. An all-zero table -- what
 // every renderer that never configures one gets -- means nothing animates.
-uniform vec4 pjvMotionSets[48];   // three per set, sixteen sets -- see PROJV_MOTION_SET_VEC4S
-uniform vec4 pjvAnimTime;    // (seconds, 0, 0, 0)
 
 #define PJV_MOTION_NONE   0u
 #define PJV_MOTION_SWAY   1u
@@ -4457,3 +4459,5 @@ vec3 raySceneTransmittance(Ray ray, RayQuery rayQuery) {
     if (r.stopReason == PJV_STOP_OPAQUE) return vec3(0.0);
     return r.transmittance;
 }
+
+#endif

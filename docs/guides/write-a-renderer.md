@@ -11,7 +11,6 @@ myRenderer/
 ├── resources.json       uniforms, shaders, textures, framebuffers
 └── shaders/
     ├── varying.def.sc   copy from an example
-    ├── vs_quad.sc       copy from an example
     └── *.frag           one per pass
 ```
 

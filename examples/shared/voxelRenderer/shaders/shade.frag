@@ -33,7 +33,7 @@ SAMPLER2D(aoRaw,   6);
 SAMPLER2D(giPacked, 7);
 #include <grr_gi.sc>
 
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 renderParams;   // x = shadows, y = AO, w = debug view (2 AO only, 3 sun visibility, 4 motion, 7 GI only)
 
 #define SHADOW_RING_TAPS   8

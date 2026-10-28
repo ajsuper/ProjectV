@@ -74,6 +74,7 @@
 #include "core/paths.h"
 #include "graphics/render_instance.h"
 #include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -122,7 +123,6 @@ struct RendererModule {
     std::string id;               // What --renderer takes; matches the folder name.
     std::string description;      // One line, shown by --list.
     std::string directory;        // Folder holding render.json / resources.json.
-    std::string vertexShaderPath; // Compiled vertex shader for its passes.
     // Uploads this renderer's per-frame uniforms. Must set every uniform the
     // renderer's resources.json declares (and may ignore the rest).
     std::function<void(std::shared_ptr<projv::ConstructedRenderer>, const FrameContext&)> uploadUniforms;
@@ -360,14 +360,12 @@ static std::vector<RendererModule> buildRendererRegistry() {
         "pt-reference",
         "Reference path tracer: two bounces through the materials, accumulated while still. What the others are measured against.",
         "./renderers/pt-reference/",
-        "./renderers/pt-reference/shaders/vs_quad.bin",
         uploadReferenceUniforms
     });
     registry.push_back({
         "fast",
         "Direct sun plus screen-space AO, anti-aliased by TAA. The cheapest renderer here.",
         "./renderers/fast/",
-        "./renderers/fast/shaders/vs_quad.bin",
         uploadReprojectionUniforms
     });
 
@@ -381,7 +379,6 @@ static std::vector<RendererModule> buildRendererRegistry() {
         "reconstruction",
         "Traces at half resolution and reconstructs to full from voxel face identity. Q toggles it.",
         "./renderers/reconstruction/",
-        "./renderers/reconstruction/shaders/vs_quad.bin",
         uploadReconstructionUniforms
     });
 
@@ -392,7 +389,6 @@ static std::vector<RendererModule> buildRendererRegistry() {
         "restir-pt",
         "ReSTIR PT at a sixteenth of the pixels, through the materials; a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, P final render / raw path trace (V, B, E, K, N bloom, M motion blur, O fog, L light shafts), U soft shadow.",
         "./renderers/restir-pt/",
-        "./renderers/restir-pt/shaders/vs_quad.bin",
         uploadRestirUniforms
     });
 
@@ -401,7 +397,6 @@ static std::vector<RendererModule> buildRendererRegistry() {
         "voxel",
         "The examples' game renderer: G-buffer, AO and bounce, ray-traced GI, reconstruction, TAA. T toggles TAA.",
         "./voxelRenderer/",
-        "./voxelRenderer/shaders/vs_quad.bin",
         uploadVoxelUniforms,
         installVoxelRenderer
     });
@@ -766,7 +761,7 @@ void startup(projv::Application& app) {
                 texture.scale = 1.0f / float(g_restirStride);
     renderInstance.addRendererSpecification(1, rendererSpec);
 
-    bgfx::ShaderHandle vsh = projv::graphics::loadShader(selectedRenderer.vertexShaderPath);
+    bgfx::ShaderHandle vsh = projv::graphics::loadEngineShader("vs_quad");
     std::shared_ptr<projv::ConstructedRenderer> constructedRenderer = projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vsh);
 
     // Load the blue-noise LUT used by the path tracers for sample decorrelation -- into texture 1, for

@@ -111,7 +111,7 @@ Emissive voxels cast no shafts.
 ## Paths, and how they are shared
 
 From the visible point x1 a path takes up to three bounces (x2 … x4), each direction sampled from the
-BSDF (`include/pjv_bsdf.sc`, shared with pt-reference and the scene editor), with next-event estimation
+BSDF (`shaders/include/pjv_bsdf.sc`, shared with pt-reference and the scene editor), with next-event estimation
 to the sun at every vertex after x1, MIS-weighted against the bounce finding it, and emission wherever it
 meets it. x1's own sun is the direct light's (`shadow_soft`). What a path carries is kept with x1's BSDF
 left out, so whichever pixel reuses it multiplies its own in — and splits it into diffuse and specular.
@@ -216,7 +216,7 @@ for specular.
   resolve's history averages them -- supersampling while still, and a voxel thinner than a texel is found
   part of the time instead of always or never. (Before, each texel cycled through the four window-pixel
   centres it covers: a still view repeated the same four points, and the distance aliased.)
-- **Colour** follows the engine's convention (`include/pjv_color.sc`, `docs/plans/color-convention.md`).
+- **Colour** follows the engine's convention (`shaders/include/pjv_color.sc`, `docs/plans/color-convention.md`).
 - **The post** (`display.frag`, on by default; P turns it all off), each part in linear light before the
   tone curve, each the identity when off:
 

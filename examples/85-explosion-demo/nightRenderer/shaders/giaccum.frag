@@ -21,7 +21,7 @@ SAMPLER2D(gNormal,   2);
 SAMPLER2D(giHist,    7);
 SAMPLER2D(giHistPos, 8);
 
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 prevCameraPos;
 uniform vec4 prevCameraDir;
 

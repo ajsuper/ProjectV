@@ -28,7 +28,7 @@ SAMPLER2D(gPos,    0);
 SAMPLER2D(gNormal, 1);
 SAMPLER2D(gFace,   4);   // w = the voxel's edge
 
-uniform vec4 passTargetRes;
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 renderParams;   // y = AO on
 
 #define CONTACT_SAMPLES 8

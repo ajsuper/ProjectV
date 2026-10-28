@@ -7,7 +7,7 @@ $input v_texcoord0
 //
 //   exposure (lightParams.z) -> vignette -> grade (pjvGrade: contrast, saturation) -> pjvDisplay
 //
-// All in linear light, before the engine's neutral transform (include/pjv_color.sc). The grade is this
+// All in linear light, before the engine's neutral transform (shaders/include/pjv_color.sc). The grade is this
 // renderer's look; its contrast is a power about middle grey, so it cannot crush the shadows to black.
 //
 // The dither is not a look: the sky and the fog are smooth ramps over hundreds of pixels, and eight bits

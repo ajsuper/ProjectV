@@ -43,9 +43,9 @@ SAMPLER2D(previewNormal,    1);
 SAMPLER2D(previewPosition,  2);
 SAMPLER2D(giLight,          5);   // After FBO 1's five targets, previewDistance the fifth.
 
-uniform vec4 passTargetRes;                        // (w, h, 1/w, 1/h) of THIS pass's target.
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 // 8 must equal PROJV_MAX_PASS_INPUTS in constructedRenderer.h -- the engine sets that many.
-uniform vec4 passInputRes[8];  // Per input slot; [1] and [2] are the G-buffer.
+// passInputRes: Per input slot; [1] and [2] are the G-buffer.
 // x = advanced preview. This pass filters the path traced light, so it is gated on the toggle that
 // produces it rather than on one of shade.frag's four readability aids.
 uniform vec4 previewSettings;

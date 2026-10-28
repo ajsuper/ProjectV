@@ -42,6 +42,7 @@
 #include "core/paths.h"
 #include "game.h"
 #include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/input.h"
 #include "graphics/manage_resources.h"
@@ -494,7 +495,7 @@ namespace {
         spec.dependencyGraph.renderPasses.push_back(pass);
 
         renderInstance.addRendererSpecification(1, spec);
-        bgfx::ShaderHandle vertexShader = projv::graphics::loadShader((here / "voxelRenderer/shaders/vs_quad.bin").string());
+        bgfx::ShaderHandle vertexShader = projv::graphics::loadEngineShader("vs_quad");
         renderInstance.setActiveRenderer(projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader));
     }
 

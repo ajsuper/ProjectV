@@ -22,7 +22,7 @@ Scene ──createTexturesForScene──▶ GPUData (scene textures) ───�
 ```cpp
 auto spec = graphics::loadRendererSpecification("renderer/");
 renderInstance.addRendererSpecification(1, spec);
-auto vs = graphics::loadShader("renderer/shaders/vs_quad.bin");
+auto vs = graphics::loadEngineShader("vs_quad");   // the fullscreen quad: an engine shader
 renderInstance.setActiveRenderer(
     graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vs));
 

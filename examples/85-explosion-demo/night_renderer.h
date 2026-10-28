@@ -18,6 +18,7 @@
 #include "core/math.h"
 #include "core/world.h"
 #include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -193,7 +194,7 @@ namespace night_renderer {
             if (texture.sizeMode == projv::TextureSizeMode::Relative && texture.name != "reconstructed" && texture.name != "taaColor")
                 texture.scale *= look.renderScale;
         renderInstance.addRendererSpecification(1, specification);
-        bgfx::ShaderHandle vertexShader = projv::graphics::loadShader((here / "nightRenderer/shaders/vs_quad.bin").string());
+        bgfx::ShaderHandle vertexShader = projv::graphics::loadEngineShader("vs_quad");
         renderInstance.setActiveRenderer(
             projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader));
 

@@ -28,7 +28,7 @@ my_app/
 ├── renderer/                  copy of examples/shared/basicRenderer
 │   ├── render.json            the pass list
 │   ├── resources.json         uniforms, shaders, textures
-│   └── shaders/               basic.frag, vs_quad.sc, varying.def.sc
+│   └── shaders/               basic.frag, varying.def.sc
 └── scene/                     any folder with a compose.json, e.g.
                                examples/10-scene-previewer/scenes/SmallVox
 ```
@@ -55,6 +55,7 @@ which also stages the assets beside the binary.
 #include "core/application.h"
 #include "core/paths.h"
 #include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/input.h"
 #include "graphics/manage_resources.h"
@@ -78,7 +79,7 @@ void startup(Application& app) {
 
     auto spec = graphics::loadRendererSpecification((here / "renderer").string() + "/");
     window.addRendererSpecification(1, spec);
-    auto vertexShader = graphics::loadShader((here / "renderer/shaders/vs_quad.bin").string());
+    auto vertexShader = graphics::loadEngineShader("vs_quad");   // the fullscreen quad, built into the engine
     window.setActiveRenderer(
         graphics::constructRendererSpecification(window.getRendererSpecification(1), vertexShader));
 

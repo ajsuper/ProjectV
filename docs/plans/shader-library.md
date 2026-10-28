@@ -1,7 +1,7 @@
 # Shader library and an engine basic renderer
 
-Status: **approved**, 2026-10-27 (open questions answered: tolerance D5, `projv::cam` removed D4,
-embedded engine shaders D3, S5 in scope with modularity first D8). Not started. Comes before
+Status: **in progress**: S0 built 2026-10-28; S1 next. Approved 2026-10-27 (open questions answered:
+tolerance D5, `projv::cam` removed D4, embedded engine shaders D3, S5 in scope with modularity first D8). Comes before
 [ui.md](ui.md), whose passes (blur, composite) are built from it.
 
 Goal: what every renderer re-derives -- the camera, random numbers, sampling, filtering, reflection
@@ -158,6 +158,57 @@ G-buffer). So:
 | **S5** | `pjv_utils_DDA.sc` split by subject, then deleted; the feature gates (D8.2); each shader defines the gates it uses; `WORLD_SCALE` and `RENDER_MODE` leave the library | captures within D5; sizes fall; timings no worse, better where a shader shed features |
 
 Then [ui.md](ui.md) starts, on S0's embedded engine shaders and S1's filters.
+
+## As built
+
+**S0** (2026-10-28).
+
+- `include/*.sc` moved to `shaders/include/`, installed as `<prefix>/include/projv/shaders`, and found
+  there by `projv_compile_shaders`.
+- `pjv_engine.sc` declares `passTargetRes`, `passInputRes[8]`, `pjvAnimTime` and `pjvMotionSets[48]`.
+  It replaces 48 declarations in renderer shaders and two in `pjv_utils_DDA.sc`, which now has an
+  include guard.
+- The scene's samplers and texture sizes (`tree64Data`, `tree64Dims`, ...) are engine-owned too, but
+  they stay in `pjv_utils_DDA.sc` until S5 moves them to `pjv_scene.sc`.
+- `shaders/engine/vs_quad.sc` is compiled into the library by `cmake/ProjectVEngineShaders.cmake`
+  (`--bin2c`; `PROJV_ENGINE_SHADER_PROFILES`, spirv off Apple and metal on it).
+  `graphics::loadEngineShader("vs_quad")` / `engineShader(name[, type])` read it from
+  `graphics/engine_shaders.h`.
+- The 11 copies of `vs_quad.sc` are deleted. All 14 call sites (examples, demos, manual tests) use the
+  embedded shader. Renderer folders no longer carry a vertex shader.
+- Tools:
+  - `tools/shader_sizes.py` (`--save`, `--against`, `--root` for a baseline worktree).
+  - `projv_imgdiff` (`tools/imgdiff/`; the measure is in `imgdiff.h`, unit-tested).
+- `ctest -R shader_library` (D7) compiles every library file alone and together on SPIR-V, GLSL 440
+  and Metal, and scans for stray uniforms and unprefixed symbols. `pjv_utils_DDA.sc` is exempt from
+  the scan until S5.
+  - Only Metal rejects an undefined name in an unused function; the other two profiles drop the
+    function first. That is why Metal is in the list.
+  - HLSL needs the Windows compiler and is not checked.
+
+**Sizes.** No renderer shader changed size (98 compared, total 5902.2 kB); the engine's `vs_quad`
+(0.9 kB) replaces 11 copies. 69 binaries differ in their bytes, because moving the declarations
+changes the order of the uniforms and so their register offsets and SPIR-V ids.
+
+**Captures.** The new binary captured all five gallery renderers at frame 300 (default framing,
+840x1072), once with the new shaders and once with the HEAD shaders swapped in. All pass D5:
+- four are bit-identical;
+- restir-pt's largest difference is 1/255, with mean 0.0000%.
+
+Captures at user-picked poses, for the baseline later milestones are compared against, are still to be
+taken.
+
+Largest shaders (the table the later milestones are measured against):
+
+| Shader | kB |
+|---|---:|
+| `40-advanced-renderer/.../gbuffer.bin` | 1219.2 |
+| `60-scene-editor/renderRenderer/.../path_trace.bin` | 606.4 |
+| `60-scene-editor/editorRenderer/.../albedo.bin` | 530.6 |
+| `60-scene-editor/editorRenderer/.../gi.bin` | 259.1 |
+| `30-renderers/restir-pt/.../sample.bin` | 209.7 |
+| `40-advanced-renderer/.../probe.bin` | 190.3 |
+| **all 99** | 5903.2 |
 
 ## Open questions
 

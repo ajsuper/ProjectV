@@ -20,6 +20,7 @@
 #include "core/math.h"
 #include "core/world.h"
 #include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
@@ -115,7 +116,7 @@ namespace restir_pt {
             return false;
         }
         renderInstance.addRendererSpecification(slot, projv::graphics::loadRendererSpecification("./renderers/restir-pt/"));
-        bgfx::ShaderHandle vs = projv::graphics::loadShader("./renderers/restir-pt/shaders/vs_quad.bin");
+        bgfx::ShaderHandle vs = projv::graphics::loadEngineShader("vs_quad");
         renderInstance.setActiveRenderer(projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(slot), vs));
         return true;
     }

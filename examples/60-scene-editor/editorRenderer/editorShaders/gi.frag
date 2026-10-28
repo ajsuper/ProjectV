@@ -93,9 +93,9 @@ SAMPLER2D(previewNormal,   1);
 SAMPLER2D(previewPosition, 2);
 SAMPLER2D(previewGlow,     3);
 
-uniform vec4 passTargetRes;                        // (w, h, 1/w, 1/h) of THIS pass's target.
+#include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 // 8 must equal PROJV_MAX_PASS_INPUTS in constructedRenderer.h -- the engine sets that many.
-uniform vec4 passInputRes[8];  // Per input slot; [1] and [2] are the G-buffer.
+// passInputRes: Per input slot; [1] and [2] are the G-buffer.
 uniform vec4 frameCount;
 // x = advanced preview. Zero writes black and stops: with the toggle off shade.frag must see no
 // light at all, so that the four readability aids are exactly what they always were.
