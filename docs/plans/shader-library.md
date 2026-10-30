@@ -268,9 +268,17 @@ The ESSL 300 output of the small shaders, which bgfx's GLSL optimiser inlines co
 for 54 of 83. The big traversal shaders pass through the optimiser unchanged, so this check says
 nothing about them.
 
-**Not yet captured:** the scene editor (`gi`, `shade`, `albedo`, `path_trace`), the advanced renderer
-and the explosion demo's night renderer. They compile and their sizes are unchanged, but their images
-have not been compared.
+**Programs outside the gallery** (2026-10-30). Each was captured with the S1 shaders, then with the S0
+binaries swapped into its staged folders, and every pair is bit-identical:
+
+| Program | Capture |
+|---|---|
+| Advanced renderer | `ADVANCED_CAPTURE`, frame 240 |
+| Explosion demo, city map, graphics 3, night renderer | `EXPLOSION_RECORD=30`, frames at 2.0 s, before the detonation |
+| Scene editor viewport (albedo, shade, GI) | `EDITOR_BENCH=60`, `EDITOR_BENCH_SIZE=960x600`, SanMiguel |
+| Scene editor Render mode (path_trace) | `EDITOR_SAVE_RENDER=150`, SanMiguel |
+
+Sibenik cannot be used: its `.data` is version 1, which the loader rejects.
 
 ## Open questions
 
