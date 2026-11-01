@@ -219,6 +219,7 @@ Full version: `CONTRIBUTING.md`.
 | `cmake/` | `ProjectVConfig.cmake.in`, plus the `projv_compile_shaders()` and `projv_add_example()` helpers. |
 | `examples/` | Twelve feature examples and four `_demo`s, numbered in reading order; `shared/` holds their renderers. See `examples/README.md`. |
 | `tests/unit/` | The automated suite (doctest, ctest). CPU only. |
+| `prototypes/` | Throwaway experiments to see an idea before it has a plan (`-DPROJV_BUILD_PROTOTYPES=ON`). Not examples, not engine code. See `prototypes/README.md`. |
 | `tests/manual/` | Harnesses that need a display. Not examples. See `tests/README.md`. |
 | `docs/` | The documentation, plain Markdown. `getting-started/`, `concepts/` (how it works), `guides/` (one task each), `reference/` (a page per module, plus `reference/formats/`: `.data`, compose.json, entities.json, physics materials, renderer folders, tile table, tree64), `contributing/`. |
 | `tools/docs/` | The docs site build (MkDocs hook, Doxygen config and comment filter) and the link checker. |
