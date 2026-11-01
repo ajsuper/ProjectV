@@ -483,6 +483,27 @@ sun being normalised on the CPU.
 multiplayer `selftest.sh` and a windowed client. Hello Voxel and entities run with no errors, and
 `exit_path a` and `b` pass.
 
+**S5** (in progress, 2026-11-01). Four steps, each its own commit: split, gates, includes, prefix.
+
+*Split.* `pjv_utils_DDA.sc` (4,419 lines) is now three files and a temporary umbrella:
+- `pjv_motion.sc` (the motion table, the sway and advection fields);
+- `pjv_material.sc` (the palette and material bytes, `VoxelMaterial`, `decodeMaterial`);
+- `pjv_scene.sc` (everything else: the scene's textures, `RayQuery`, the march, the animated march,
+  the peel, `raySceneIntersect`, `fetchVoxel*`).
+
+`pjv_utils_DDA.sc` includes `pjv_camera.sc` and `pjv_scene.sc`, and keeps `WORLD_SCALE` until its users
+define it. The tree walk's leftovers went with the split, about 500 lines that nothing referenced: the
+move LUT, the node stack, `inverseZOrderIndex`, `calculateZOrderIndex`, the box-from-parent helpers,
+the ray-box exits, `tree64s`, `headersLength`, `rayStartDirection`, `returnStruct`, `Voxel`,
+`RENDER_MODE`, `MAX_STACK_SIZE` and `VOXEL_TYPEDATA_SLICES`.
+- The scene's samplers stay in `pjv_scene.sc` and `pjv_material.sc`, not `pjv_engine.sc`. Every pass
+  includes the engine file, and the advanced renderer's `accumulate.frag` binds its own texture at
+  stage 9.
+- Sizes: 99 of 100 shaders unchanged; restir-pt's `shafts` moved by bytes. The traversal shaders'
+  bytes differ at equal size, because the samplers are now declared in a different order.
+- Captures: pt-reference, fast, reconstruction and voxel at the baseline view are bit-identical to
+  c664a39.
+
 ## Open questions
 
 None open. Answered 2026-10-27: tolerance (D5), `projv::cam` (D4), embedded (D3), S5 in scope (D8).

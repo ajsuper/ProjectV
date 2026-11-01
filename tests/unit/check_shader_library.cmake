@@ -8,13 +8,13 @@
 # 2. A scan: no `uniform` or sampler outside pjv_engine.sc, and every symbol a file defines at file
 #    scope -- function, struct, #define -- starts with pjv / PJV (or is the file's include guard).
 #
-# pjv_utils_DDA.sc is exempt from the scan until S5 splits it: it declares the scene's samplers and
-# predates the prefix. It is still compiled.
+# pjv_utils_DDA.sc and the three files S5 split it into are exempt from the scan until S5 prefixes
+# them: they declare the scene's samplers and predate the prefix. They are still compiled.
 
 # A script run with -P sets no policy version, and if(... IN_LIST ...) needs one.
 cmake_minimum_required(VERSION 3.20)
 
-set(scanExempt pjv_utils_DDA.sc)
+set(scanExempt pjv_utils_DDA.sc pjv_scene.sc pjv_material.sc pjv_motion.sc)
 set(profiles "spirv:linux" "440:linux" "metal:osx")
 
 file(GLOB libraryFiles "${LIBRARY}/*.sc")

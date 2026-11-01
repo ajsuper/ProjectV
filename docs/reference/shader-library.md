@@ -3,13 +3,20 @@
 [`shaders/include/`](../../shaders/include/pjv_engine.sc) is the engine's shader include root, on every
 shader's path through `projv_compile_shaders` (installed as `<prefix>/include/projv/shaders`).
 Mechanisms only: a file takes what it needs as arguments or reads an engine-owned uniform, and holds
-no look ([plan](../plans/shader-library.md)). Its centre is
-[`pjv_utils_DDA.sc`](../../shaders/include/pjv_utils_DDA.sc), the engine's GLSL (bgfx shaderc) for
-marching rays through the voxel scene; its comments are the full reference, this is the map.
+no look ([plan](../plans/shader-library.md)). Its centre is the scene query, the engine's GLSL (bgfx
+shaderc) for marching rays through the voxel scene; its comments are the full reference, this is the
+map.
+
+| File | Holds |
+|---|---|
+| [`pjv_scene.sc`](../../shaders/include/pjv_scene.sc) | The scene's textures, `RayQuery`, the march, `raySceneIntersect` and the `fetchVoxel*` lookups |
+| [`pjv_material.sc`](../../shaders/include/pjv_material.sc) | The palette and material bytes, `VoxelMaterial`, `decodeMaterial` |
+| [`pjv_motion.sc`](../../shaders/include/pjv_motion.sc) | The motion table, its sway and advection fields, `pjvAnimSeconds` |
+| [`pjv_utils_DDA.sc`](../../shaders/include/pjv_utils_DDA.sc) | Temporary: all of the above, `pjv_camera.sc` and `WORLD_SCALE`, until every shader includes only what it uses |
 
 ```glsl
 #include <bgfx_shader.sh>
-#include <pjv_utils_DDA.sc>        // on shaderc's include path via projv_compile_shaders
+#include <pjv_scene.sc>            // on shaderc's include path via projv_compile_shaders
 ```
 
 ## A complete primary ray
@@ -61,7 +68,7 @@ vec3 position   = ray.origin + ray.direction * sh.hit.rayT;   // only valid with
 
 | Check | What |
 |---|---|
-| `ctest -R shader_library` | Every file compiles alone and together (SPIR-V, GLSL 440, Metal); no `uniform` outside `pjv_engine.sc`; every file-scope symbol `pjv`/`Pjv`/`PJV`. `pjv_utils_DDA.sc` is compiled but not scanned until it is split |
+| `ctest -R shader_library` | Every file compiles alone and together (SPIR-V, GLSL 440, Metal); no `uniform` outside `pjv_engine.sc`; every file-scope symbol `pjv`/`Pjv`/`PJV`. `pjv_utils_DDA.sc`, `pjv_scene.sc`, `pjv_material.sc` and `pjv_motion.sc` are compiled but not scanned until they are prefixed |
 | `tools/shader_sizes.py [--save f] [--against f]` | Every compiled shader's size (renderer `.bin`s and the embedded engine shaders), or the change since a saved table |
 | `projv_imgdiff before after [--diff out]` | Two captures (or two folders of them) within the tolerance: mean ≤ 0.1%, ≤ 0.1% of pixels off by more than 2/255; the largest difference reported |
 
@@ -89,7 +96,6 @@ All `USAMPLER2D`, read with `texelFetch`. Stages 0–8 are the pass's own inputs
 
 | Function | Returns | Use |
 |---|---|---|
-| `rayStartDirection(uv, res, camPos, camDir, fovDeg)` | `vec3` | A camera ray for a pixel (matches `utils::rayDirectionThroughImage`) |
 | `raySceneIntersect(ray, query)` | `SceneHit` | **The** scene query: transparency, refraction, animation per the query |
 | `raySceneIntersectFrom(ray, query, tMin)` | `SceneIntersectData` | Nearest solid voxel beyond `tMin`, geometry only (probes) |
 | `fetchVoxelMaterialFromHit(hit)` | `VoxelMaterial` | Material of a hit: two fetches, no descent |
