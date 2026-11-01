@@ -31,6 +31,7 @@ namespace projv::graphics {
 #endif
         glfwInit();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        glfwWindowHint(GLFW_RESIZABLE, resizable ? GLFW_TRUE : GLFW_FALSE);
         GLFWwindow *window = glfwCreateWindow(width, height, name.c_str(), NULL, NULL);
 
         bgfx::PlatformData platformData;

@@ -31,6 +31,7 @@
 // Measuring (unattended; the window opens and closes by itself):
 //   --bench            each pass's GPU time over frames 120..360, printed, then exit
 //   --capture <prefix> saves frames 300, 301 and 302 as <prefix>-<frame>.tga, then exits
+//                      (--capture and --bench open a fixed 1280x720 window, so runs compare)
 //   --look x,y,z,tx,ty,tz   stands the camera at x,y,z looking at tx,ty,tz (default: the framing)
 //   --pan <rad>        turns the camera this much a frame (a moving-camera measurement)
 //   --voxel-folder <f> which staged folder the voxel renderer loads (default: voxelRenderer)
@@ -707,7 +708,12 @@ static std::string    g_scenePath;
 void startup(projv::Application& app) {
 
     projv::graphics::RenderInstance& renderInstance = app.world.ctx().emplace<projv::graphics::RenderInstance>();
-    renderInstance.initialize(1920, 1080, ("ProjectV — " + g_selectedRenderer.id).c_str());
+    // Unattended runs are measurements: a fixed-size window, so two runs render the same pixels
+    // whatever the desktop's layout is doing.
+    const bool unattendedRun = g_measure.bench || !g_measure.capture.empty();
+    renderInstance.resizable = !unattendedRun;
+    renderInstance.initialize(unattendedRun ? 1280 : 1920, unattendedRun ? 720 : 1080,
+                              ("ProjectV — " + g_selectedRenderer.id).c_str());
 
     // Capture the cursor so mouse motion drives the camera (FPS-style mouse look).
     glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);

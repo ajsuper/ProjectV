@@ -66,6 +66,14 @@ namespace projv::graphics {
             bool pollEventsInRender = true;
 
             /**
+            * Whether the window may be resized, read by initialize. True by default. False asks the
+            * window manager for exactly the size given -- a tiling one floats a fixed-size window
+            * rather than fitting it into the layout -- so unattended captures and benchmarks render at
+            * the same size every run.
+            */
+            bool resizable = true;
+
+            /**
             * Initializes our window and bgfx.
             * @param width The width of the window.
             * @param height The height of the window.

@@ -23,6 +23,7 @@ bgfx, and the active renderer.
 | `addRendererSpecification(id, spec)`, `getRendererSpecification(id)`, `removeRendererSpecification(id)` | Keep renderer descriptions by id |
 | `setActiveRenderer(constructed)`, `getActiveRenderer()` | The one `ConstructedRenderer` in use |
 | `window`, `shouldClose`, `pollEventsInRender` | The GLFW window; close flag; whether rendering polls events |
+| `resizable` | Set before `initialize`; false asks for exactly the size given (a tiling window manager floats it), for captures and benchmarks |
 
 ## `graphics/input.h`
 
