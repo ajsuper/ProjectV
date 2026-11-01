@@ -1,5 +1,5 @@
 // =============================================================================
-// pjv_atmosphere.sc  --  The air between the eye and everything else.
+// pjv_cascade_atmosphere.sc  --  The air between the eye and everything else.
 //
 // One description of the participating medium, shared by the two passes that need it. It started
 // inside compose.frag, which is still its main consumer; it moved out here when godrays.frag turned
@@ -12,6 +12,8 @@
 // Requires pjv_sun_sky.sc (SUN_DIR, SUN_COLOR, pjvSkyBase, pjvMiePhase) and pjv_camera.sc, both of which
 // arrive with pjv_cascade_common.sc. Include this AFTER that.
 // =============================================================================
+
+#include <pjv_atmosphere.sc>   // pjvHeightLayerOpticalDepth, pjvPhaseSchlick
 
 // x = extinction coefficient per world unit, AT the reference height z. Zero switches the whole
 //     effect off -- fog, inscatter and shafts together -- and the branches below return early.
@@ -52,7 +54,8 @@ uniform vec4 fogParams;
 //     tau = d * exp(-(C.y - y0)/H) * (1 - exp(-D.y*t/H)) / (D.y/H)
 //
 // with the removable singularity at D.y = 0 (a horizontal ray, constant density) handled as d*t.
-// That closed form is the entire cost of this effect: two exp() calls and a divide.
+// That closed form (pjv_atmosphere.sc's pjvHeightLayerOpticalDepth) is the entire cost of this effect:
+// two exp() calls and a divide.
 float fogOpticalDepth(vec3 origin, vec3 dir, float dist) {
     if (fogParams.x <= 0.0) return 0.0;
 
@@ -63,11 +66,10 @@ float fogOpticalDepth(vec3 origin, vec3 dir, float dist) {
     // the reference density, which is opaque within a fraction of a voxel.
     float atEye = exp(clamp(-(origin.y - fogParams.z) / H, -30.0, 6.0));
 
-    float b = dir.y / H;
-    // The same guard on the other exponent, for a ray pointing steeply down over a long distance.
-    float integral = abs(b) < 1e-5 ? dist : (1.0 - exp(min(-b * dist, 30.0))) / b;
-
-    return clamp(fogParams.x * atEye * integral, 0.0, 40.0);
+    // The same guard on the other exponent, for a ray pointing steeply down over a long distance -- and
+    // at 30, the eye's clamp, so a camera far above the haze sees it as before.
+    float rise = max(pjvHeightLayerRise(dir.y, dist, H), -30.0);
+    return clamp(pjvHeightLayerOpticalDepth(fogParams.x * atEye, rise, dist), 0.0, 40.0);
 }
 
 // How much of this view ray is air that could scatter something at the eye. 0 at the near plane,
@@ -114,7 +116,7 @@ float fogInscatterFraction(vec3 dir, float dist) {
 // shafts are added on top of this rather than replacing it.
 vec3 fogInscatteredColor(vec3 dir) {
     vec3 haze = mix(SKY_HORIZON, SKY_ZENITH, clamp(dir.y, 0.0, 1.0));
-    return haze + SUN_COLOR * (fogParams.w * pjvMiePhase(dot(dir, SUN_DIR), FOG_PHASE_G));
+    return haze + SUN_COLOR * (fogParams.w * pjvPhaseSchlick(dot(dir, SUN_DIR), FOG_PHASE_G));
 }
 
 // Beer-Lambert: what survives the trip, plus what the air added along the way.

@@ -33,7 +33,7 @@ $input v_texcoord0
 //     density(x) * transmittance(eye -> x) * visibility(x)
 //
 // which is the inscattering integrand; multiplied by the segment length it is an unbiased estimate of
-// the integral. density and transmittance come from pjv_atmosphere.sc, so this and the fog agree
+// the integral. density and transmittance come from pjv_cascade_atmosphere.sc, so this and the fog agree
 // about the medium by construction -- the same reason godrays.frag reads them.
 //
 // DETERMINISTIC. The stratum offset is hashed from the pixel and NOT the frame, like everything else
@@ -54,7 +54,7 @@ SAMPLER2D(gPos, 0);
 #define CASCADE_SCREEN_RES passTargetRes.xy
 #define CASCADE_ATLAS_RES  passTargetRes.xy
 #include <pjv_cascade_common.sc>
-#include <pjv_atmosphere.sc>
+#include <pjv_cascade_atmosphere.sc>
 // The animation controls only. This pass's shadow ray does not ask for animation -- see volSunVisible
 // -- so it needs no envelope, no field and no resolve.
 #include <pjv_anim_controls.sc>
@@ -216,7 +216,7 @@ void main() {
 
     // Same scattering strength the fog uses, so the shafts belong to the same medium -- but a gentler
     // phase lobe, for the reason set out at VOL_PHASE_G.
-    float phase = pjvMiePhase(dot(dir, SUN_DIR), VOL_PHASE_G);
+    float phase = pjvPhaseSchlick(dot(dir, SUN_DIR), VOL_PHASE_G);
 
     // ---- ALPHA CARRIES THE DEPTH THIS PIXEL WAS COMPUTED AT -----------------------------------
     // display.frag magnifies this buffer from half resolution and ADDS it to the full-resolution

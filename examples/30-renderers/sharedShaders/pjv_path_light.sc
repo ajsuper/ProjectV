@@ -17,6 +17,7 @@
 
 #include <pjv_sun_sky.sc>
 #include <pjv_bsdf.sc>   // pjvBasisAround
+#include <pjv_atmosphere.sc>   // pjvPhaseHenyeyGreenstein
 
 #define PATH_SUN_HALF_ANGLE 0.02
 #define PATH_PI 3.14159265359
@@ -33,11 +34,6 @@ bool pathInSun(vec3 d) { return dot(d, normalize(SUN_DIR)) >= cos(PATH_SUN_HALF_
 // the sunset's warmth gathered towards the sun while it is low, the sun's aureole (forward scattering
 // round the disc), and below the horizon the haze carrying on, darkening, rather than a black ground --
 // a level's floor ends somewhere, and the camera sees past it.
-
-float pathPhase(float c, float g) {
-    float gg = g * g;
-    return (1.0 - gg) / (4.0 * PATH_PI * pow(max(1.0 + gg - 2.0 * g * c, 1e-4), 1.5));
-}
 
 // The horizon's colour in direction d (only its azimuth counts): the haze the far distance melts into.
 vec3 pathHorizon(vec3 d) {
@@ -61,7 +57,7 @@ vec3 pathSky(vec3 d) {
     vec3 sky = mix(zenith, horizon, band);
     if (d.y < 0.0) sky = mix(horizon, horizon * 0.35, smoothstep(0.0, 0.4, -d.y));
     // The aureole: the haze scattering sunlight forwards, brightest round the disc, strongest low down.
-    sky += SUN_COLOR * (0.012 * pathPhase(dot(d, normalize(SUN_DIR)), 0.8) * (0.4 + 0.6 * band));
+    sky += SUN_COLOR * (0.012 * pjvPhaseHenyeyGreenstein(dot(d, normalize(SUN_DIR)), 0.8) * (0.4 + 0.6 * band));
     return sky;
 }
 

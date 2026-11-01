@@ -1,6 +1,6 @@
 # Shader library and an engine basic renderer
 
-Status: **in progress**: S0 and S1 built 2026-10-28, S2 2026-10-30; S3 next. Approved 2026-10-27 (open questions answered:
+Status: **in progress**: S0 and S1 built 2026-10-28, S2 2026-10-30, S3 2026-11-01; S4 next. Approved 2026-10-27 (open questions answered:
 tolerance D5, `projv::cam` removed D4, embedded engine shaders D3, S5 in scope with modularity first D8). Comes before
 [ui.md](ui.md), whose passes (blur, composite) are built from it.
 
@@ -347,6 +347,58 @@ announced). And an orthographic editor capture, since the bench views are perspe
 
 The manual tests `editing_p1` and `edit_demo` were found not to compile, for reasons that predate this
 plan: known-latent-issues #16.
+
+**S3** (2026-11-01).
+
+*Library:*
+- `pjv_microfacet.sc`: Lambert, GGX D, Smith G1 and height-correlated G, Schlick and exact dielectric
+  Fresnel, the cosine and GGX-half samplers, and the power heuristic. The terms that were in
+  `pjv_bsdf.sc` moved unchanged, and `pjv_bsdf.sc` is now the engine material built on them.
+  `PJV_BSDF_PI` gave way to `PJV_PI`.
+- `pjv_atmosphere.sc`: the isotropic, Rayleigh, Henyey-Greenstein, Schlick and Cornette-Shanks phase
+  functions; Beer-Lambert; `pjvExpMean`; exponential height layers (density, rise, optical depth);
+  distance fog; ray-sphere.
+- Not added: the single-scatter in-scatter integral. No renderer has one, and its sample count and
+  density profile are a renderer's to pick. It is written when one asks for it.
+
+*Moved onto it:*
+- Phase functions:
+  - the advanced renderer's `pjvMiePhase` is Schlick's approximation, not HG, and is now
+    `pjvPhaseSchlick`;
+  - pt-reference's `pathPhase`, restir-pt's `restirPhase` and the editor's `phaseHenyeyGreenstein` are
+    now `pjvPhaseHenyeyGreenstein`. The editor's extra outer clamp could not take effect at its
+    g ≤ 0.95.
+- The editor's preview lobe in `albedo.frag` (its copies of `smithG1`, `fresnelSchlick`,
+  `alphaFromGlossiness`, `sampleGGXHalfVector`) is now `pjv_bsdf.sc`'s.
+- The height fogs: the voxel and night renderers' `grrFogOpticalDepth`, the advanced renderer's
+  `fogOpticalDepth`, and restir-pt's `restirLayerDepth`.
+  - Each keeps its own density, colour, eye clamp and rise floor (−40, −30, −20).
+  - Those two bounds go together. With the library flooring the rise at −40 for everyone, the advanced
+    renderer's −30 eye clamp no longer matched, so the bounds are the caller's.
+
+*Renamed:* the advanced renderer's own `pjv_atmosphere.sc` is now `pjv_cascade_atmosphere.sc`. The
+engine's include root is searched first, so the library's file of that name would have shadowed it.
+
+*Sizes:* 95 of 99 unchanged; volumetric, compose and godrays +0.2 to +0.8%.
+
+*Captures:* everything is bit-identical to S2, except restir-pt (largest 1/255, 0.0008% mean):
+- the gallery's five renderers at the baseline view, now in a fixed 1280×720 window;
+- the advanced renderer;
+- the explosion demo;
+- the editor viewport and Render mode.
+
+*Making captures repeatable.* Three changes, each its own commit:
+- `RenderInstance::resizable`: the gallery, the advanced renderer and the editor capture in a
+  fixed-size window. The desktop's tiling had produced 840×1072, 840×520 and 953×326 on successive
+  runs.
+- An unattended gallery run, and an advanced-renderer capture, take no input. A click or a mouse
+  movement over the window had turned the camera mid-capture. That produced two false failures here
+  (3.8% and 0.36% mean), both traced to input.
+
+*S2, settled:* S1 to S2 on the explosion demo is 0.12% of pixels over 2/255, against a 0.1% limit;
+the mean is 0.006%. The pixels are isolated, on the window frames' voxel edges. The cause is the field
+of view becoming a uniform, so its tangent is computed at run time instead of folded at compile time.
+The next commit uploads the tangent instead.
 
 ## Open questions
 

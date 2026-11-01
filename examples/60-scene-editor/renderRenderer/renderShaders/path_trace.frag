@@ -53,6 +53,7 @@ $input v_texcoord0
 // editor to carry.
 #include <pjv_random.sc>     // pjvRandomUnit, pjvHashSeed, pjvHalton
 #include <pjv_sampling.sc>   // pjvSampleUniformCone
+#include <pjv_atmosphere.sc>   // pjvPhaseHenyeyGreenstein: haze throws sunlight onward, which is why god rays are brightest towards the sun
 
 // Raised well above the shared default, and defined BEFORE the include so it overrides the
 // #ifndef in pjv_utils_DDA.sc for this shader only -- the other examples keep the cheap bound.
@@ -228,17 +229,6 @@ vec2 sampleConcentricDisk(inout uint seed) {
         theta = (PI / 2.0) - (PI / 4.0) * (offset.x / offset.y);
     }
     return radius * vec2(cos(theta), sin(theta));
-}
-
-// Henyey-Greenstein phase function: how much light scattering off a particle continues in a given
-// direction. g > 0 is forward scattering, which is the whole reason god rays exist -- the haze in
-// front of a shaft of sunlight throws most of that light onward towards the camera, so the shaft is
-// far brighter looking towards the sun than away from it. g = 0 is isotropic and gives flat,
-// directionless fog.
-float phaseHenyeyGreenstein(float cosTheta, float g) {
-    float gg = g * g;
-    float denominator = 1.0 + gg - 2.0 * g * cosTheta;
-    return (1.0 - gg) / (4.0 * PI * max(pow(max(denominator, 1e-4), 1.5), 1e-4));
 }
 
 // Uniform over the sun's cone. pdf = 1 / sunSolidAngle().
@@ -621,8 +611,8 @@ void main() {
             float scattering = extinction;
 
             vec3 lightDirection = sampleSunCone(seed);
-            float phase = phaseHenyeyGreenstein(dot(primaryDirection, lightDirection),
-                                                clamp(volumeParams.y, -0.95, 0.95));
+            float phase = pjvPhaseHenyeyGreenstein(dot(primaryDirection, lightDirection),
+                                                   clamp(volumeParams.y, -0.95, 0.95));
 
             vec3 sunIrradiance = sunRadianceColor();
             if (dot(sunIrradiance, sunIrradiance) > 0.0) {

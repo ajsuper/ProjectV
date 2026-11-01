@@ -6,7 +6,7 @@
 // =============================================================================
 //
 // A voxel's material (decodeMaterial: albedo, glossiness, metallic) as a BSDF: a Lambertian diffuse
-// lobe under a GGX microfacet specular lobe.
+// lobe under a GGX microfacet specular lobe, built from pjv_microfacet.sc's terms.
 //
 //   roughness   alpha = max(1 - glossiness, 0.03)^2
 //   diffuse     albedo * (1 - metallic) / pi, times (1 - F)
@@ -30,9 +30,7 @@
 // Random numbers come in as arguments, so a caller keeps its own generator and its own draw order.
 
 #include <pjv_color.sc>   // pjvLuminance
-#include <pjv_math.sc>    // pjvBasisAround
-
-#define PJV_BSDF_PI 3.14159265359
+#include <pjv_microfacet.sc>   // the terms: GGX D, Smith G1, Schlick F, the samplers
 
 // A material's lobes, set up once per surface.
 struct PjvBsdf {
@@ -68,25 +66,6 @@ PjvBsdf pjvBsdf(vec3 albedo, float glossiness, float metallic) {
     return s;
 }
 
-// GGX / Trowbridge-Reitz normal distribution.
-float pjvGgxDistribution(float cosHalf, float alpha) {
-    float a2 = alpha * alpha;
-    float d = cosHalf * cosHalf * (a2 - 1.0) + 1.0;
-    return a2 / max(PJV_BSDF_PI * d * d, 1e-9);
-}
-
-// One direction's term of the separable Smith masking-shadowing function for GGX.
-float pjvSmithG1(float cosTheta, float alpha) {
-    float a2 = alpha * alpha;
-    return 2.0 * cosTheta / max(cosTheta + sqrt(a2 + (1.0 - a2) * cosTheta * cosTheta), 1e-9);
-}
-
-vec3 pjvFresnelSchlick(float cosTheta, vec3 f0) {
-    float m = clamp(1.0 - cosTheta, 0.0, 1.0);
-    float m2 = m * m;
-    return f0 + (vec3(1.0, 1.0, 1.0) - f0) * (m2 * m2 * m);
-}
-
 // The surface's response to light arriving along wi and leaving along wo, and the density pjvBsdfSample
 // has for wi. Zero below either horizon.
 void pjvBsdfEvaluate(PjvBsdf s, vec3 normal, vec3 wo, vec3 wi, out vec3 bsdf, out float pdf) {
@@ -96,8 +75,8 @@ void pjvBsdfEvaluate(PjvBsdf s, vec3 normal, vec3 wo, vec3 wi, out vec3 bsdf, ou
     float cosView = dot(normal, wo);
     if (cosLight <= 0.0 || cosView <= 0.0) return;
 
-    vec3 diffuse = s.diffuseAlbedo / PJV_BSDF_PI;
-    float diffusePdf = cosLight / PJV_BSDF_PI;
+    vec3 diffuse = s.diffuseAlbedo / PJV_PI;
+    float diffusePdf = cosLight / PJV_PI;
     if (s.specularProbability <= 0.0) {
         // Rule 1: the untouched material, byte for byte Lambertian.
         bsdf = diffuse;
@@ -130,9 +109,9 @@ void pjvBsdfEvaluateSplit(PjvBsdf s, vec3 normal, vec3 wo, vec3 wi, out vec3 dif
     float cosView = dot(normal, wo);
     if (cosLight <= 0.0 || cosView <= 0.0) return;
 
-    float diffusePdf = cosLight / PJV_BSDF_PI;
+    float diffusePdf = cosLight / PJV_PI;
     if (s.specularProbability <= 0.0) {
-        diffuseFactor = vec3(1.0, 1.0, 1.0) / PJV_BSDF_PI;
+        diffuseFactor = vec3(1.0, 1.0, 1.0) / PJV_PI;
         pdf = diffusePdf;
         return;
     }
@@ -143,25 +122,8 @@ void pjvBsdfEvaluateSplit(PjvBsdf s, vec3 normal, vec3 wo, vec3 wi, out vec3 dif
     float g = pjvSmithG1(cosView, s.alpha) * pjvSmithG1(cosLight, s.alpha);
     vec3 f = pjvFresnelSchlick(viewDotHalf, s.f0);
     specular = f * (d * g / max(4.0 * cosView * cosLight, 1e-6));
-    diffuseFactor = (vec3(1.0, 1.0, 1.0) - f) / PJV_BSDF_PI;
+    diffuseFactor = (vec3(1.0, 1.0, 1.0) - f) / PJV_PI;
     pdf = mix(diffusePdf, d * cosHalf / (4.0 * viewDotHalf), s.specularProbability);
-}
-
-// Cosine-weighted over the hemisphere about n: pdf cos / pi, which cancels the Lambertian BRDF's own.
-vec3 pjvSampleCosine(vec3 n, float u1, float u2) {
-    float phi = 2.0 * PJV_BSDF_PI * u1;
-    float cosTheta = sqrt(1.0 - u2);
-    float sinTheta = sqrt(u2);
-    return pjvBasisAround(n) * vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
-}
-
-// A half vector from the GGX distribution (density D cos_h), for the specular lobe.
-vec3 pjvSampleGgxHalf(vec3 n, float alpha, float u1, float u2) {
-    float phi = 2.0 * PJV_BSDF_PI * u1;
-    float a2 = alpha * alpha;
-    float cosTheta = sqrt(clamp((1.0 - u2) / (1.0 + (a2 - 1.0) * u2), 0.0, 1.0));
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    return pjvBasisAround(n) * vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
 }
 
 // A direction for light leaving along wo to have come from: one lobe, picked by uLobe against
@@ -172,12 +134,6 @@ vec3 pjvBsdfSample(PjvBsdf s, vec3 normal, vec3 wo, float uLobe, float u1, float
     if (s.specularProbability > 0.0 && uLobe < s.specularProbability)
         return reflect(-wo, pjvSampleGgxHalf(normal, s.alpha, u1, u2));
     return pjvSampleCosine(normal, u1, u2);
-}
-
-// Power heuristic, beta 2: one strategy's MIS weight against another's.
-float pjvPowerHeuristic(float pdfA, float pdfB) {
-    float a = pdfA * pdfA;
-    return a / max(a + pdfB * pdfB, 1e-9);
 }
 
 // The specular lobe's directional albedo -- how much of uniform incident light it reflects towards wo --

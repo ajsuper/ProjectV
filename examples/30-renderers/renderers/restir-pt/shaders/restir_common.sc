@@ -32,6 +32,7 @@
 #include <pjv_math.sc>         // pjvOctEncode/Decode
 #include <pjv_random.sc>       // pjvPcg, pjvRandomUnit24: one PCG state word per pixel
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
+#include <pjv_atmosphere.sc>  // the height layers' optical depth, in closed form
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 uniform vec4 frameCount;      // x = frame index, y = 1 when the camera or the sun moved this frame, z = 1 when the sun did
@@ -166,9 +167,8 @@ float restirLayerDepth(vec4 layer, vec3 d, float t) {
     if (layer.x <= 0.0) return 0.0;
     float H = max(layer.z, 1e-3);
     float above = max(pjvViewPosition().y - layer.y, -4.0 * H);
-    float rise = max(d.y * t / H, -20.0);
-    float alongRay = abs(rise) > 1e-3 ? (1.0 - exp(-rise)) / rise : 1.0 - 0.5 * rise;
-    return layer.x * exp(-above / H) * t * alongRay;
+    float rise = max(pjvHeightLayerRise(d.y, t, H), -20.0);
+    return pjvHeightLayerOpticalDepth(layer.x * exp(-above / H), rise, t);
 }
 
 // Two layers: the ground fog (restirHaze), dense low down and gone a short way up, and the aerial haze

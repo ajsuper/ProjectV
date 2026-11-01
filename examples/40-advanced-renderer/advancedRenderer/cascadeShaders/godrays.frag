@@ -10,7 +10,7 @@ $input v_texcoord0
 // attempt read as either speckle or blocks. Shafts are different in kind: they are a directional
 // march whose structure IS the effect, so they belong here and look right here.
 //
-// The fog in pjv_atmosphere.sc adds inscattered sunlight along every view ray as if the sun reached
+// The fog in pjv_cascade_atmosphere.sc adds inscattered sunlight along every view ray as if the sun reached
 // every parcel of air on it. It does not: the air behind a tree is in the tree's shadow, and the air
 // between its leaves is not. The visible consequence of that difference is the shaft -- the bright
 // wedge of lit air next to a dark one -- and it is entirely absent from an unshadowed fog term,
@@ -69,7 +69,7 @@ SAMPLER2D(gPos,    0);   // FBO1[0]: xyz world pos, a = camDist (a < 0 => sky)
 #define CASCADE_SCREEN_RES passTargetRes.xy
 #define CASCADE_ATLAS_RES  passTargetRes.xy
 #include <pjv_cascade_common.sc>
-#include <pjv_atmosphere.sc>
+#include <pjv_cascade_atmosphere.sc>
 
 // Shared with volumetric.frag, which is the other half of this effect. Only .w is read here -- the
 // GOD-RAY INSCATTER STRENGTH -- and the uniform is already uploaded every frame, so taking it is

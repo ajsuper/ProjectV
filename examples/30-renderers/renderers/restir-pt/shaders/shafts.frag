@@ -32,6 +32,7 @@ $input v_texcoord0
 #include <bgfx_shader.sh>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_random.sc>     // pjvInterleavedGradientNoise
+#include <pjv_atmosphere.sc>   // pjvPhaseHenyeyGreenstein
 #include "restir_trace.sc"
 
 SAMPLER2D(shafts, 0);
@@ -40,11 +41,6 @@ SAMPLER2D(surf0, 2);
 
 uniform vec4 restirShafts;   // x strength (0: off), y lambda (1 / falloff distance), z phase g, w history cap
 uniform vec4 restirShaftsAir; // x the aerial haze's strength, y its lambda (0: none), z its onset length
-
-float restirPhase(float c, float g) {
-    float gg = g * g;
-    return (1.0 - gg) / (4.0 * RESTIR_PI * pow(max(1.0 + gg - 2.0 * g * c, 1e-4), 1.5));
-}
 
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
@@ -73,7 +69,7 @@ void main() {
     // onset length, so the open air just in front of the camera is clear rather than a sunlit veil.
     float onset = lambda == restirShafts.y ? 1.0 : min(s / max(restirShaftsAir.z, 1e-3), 2.0);
     vec3 light = hit.hit ? vec3(0.0, 0.0, 0.0)
-                         : SUN_COLOR * (restirPhase(dot(view, toSun), restirShafts.z) * total * onset);
+                         : SUN_COLOR * (pjvPhaseHenyeyGreenstein(dot(view, toSun), restirShafts.z) * total * onset);
 
     // History, through last frame's camera, unless the sun moved (told) or this is the first frame.
     vec2 res = passTargetRes.xy;

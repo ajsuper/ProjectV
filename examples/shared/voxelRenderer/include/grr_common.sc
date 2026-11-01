@@ -10,6 +10,7 @@
 #define GRR_COMMON_SC
 
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
+#include <pjv_atmosphere.sc>  // the height fog's optical depth, in closed form
 
 #define GRR_PI  3.14159265
 
@@ -128,13 +129,10 @@ vec3 grrAmbient(vec3 n) {
 float grrFogOpticalDepth(vec3 origin, vec3 dir, float dist) {
     if (fogParams.x <= 0.0) return 0.0;
     float H = max(fogParams.y, 1e-3);
-    float densityAtEye = fogParams.x * exp(-(origin.y - fogParams.z) / H);
-    // Floored so a long ray DOWN into the fog cannot overflow exp(); it is fully fogged long before.
-    float k = max(dir.y * dist / H, -40.0);
-    // (1 - e^-k) / k is the mean of the density along the ray relative to the eye's; it tends to 1 for a
-    // level ray, where the plain form would divide zero by zero.
-    float meanFactor = abs(k) > 1e-4 ? (1.0 - exp(-k)) / k : 1.0 - 0.5 * k;
-    return densityAtEye * dist * meanFactor;
+    float densityAtEye = pjvHeightLayerDensity(origin.y, fogParams.x, fogParams.z, H);
+    // The rise floored so a long ray DOWN into the fog cannot overflow exp(); it is fully fogged long before.
+    float rise = max(pjvHeightLayerRise(dir.y, dist, H), -40.0);
+    return pjvHeightLayerOpticalDepth(densityAtEye, rise, dist);
 }
 
 vec3 grrFogColor(vec3 dir) {

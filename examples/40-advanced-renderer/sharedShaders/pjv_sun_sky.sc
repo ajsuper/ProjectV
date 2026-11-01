@@ -20,6 +20,11 @@
 // The SUN_DIR / SUN_COLOR / SKY_* names are preserved as macros so existing consumers are unchanged.
 // =============================================================================
 
+#include <pjv_math.sc>         // pjvBasisAround
+#include <pjv_random.sc>       // pjvRandomUnit: the sun cone's stream (below)
+#include <pjv_sampling.sc>     // pjvSampleUniformCone
+#include <pjv_atmosphere.sc>   // pjvPhaseSchlick: the aureole here and the fog's inscatter, one haze
+
 uniform vec4 sunDir;   // xyz = normalized sun direction; w = the sun disk's angular radius (rad).
 // x = spare (the editor puts its bounce count here), y = sun intensity, z = sky intensity,
 // w = spare (the editor's firefly clamp -- this renderer's gather has no unbounded path to clamp).
@@ -89,25 +94,6 @@ vec3 pjvSkyGround() {
 #define SKY_HORIZON pjvSkyHorizon()
 #define SKY_GROUND  pjvSkyGround()
 
-// ---- Forward scattering ------------------------------------------------------------------------
-// The Schlick approximation to Henyey-Greenstein: one multiply-add and one divide, against HG's
-// pow(x, 1.5). Both describe the same thing -- how strongly a hazy medium throws light FORWARD, i.e.
-// back toward an eye looking at the light source -- and at the eccentricities used here the two are
-// indistinguishable by eye.
-//
-// It is in this file, rather than beside either of its callers, because both of them are describing
-// the same atmosphere: the aureole below is what the haze does to the sky, and the inscatter in
-// compose.frag's fog is what the same haze does between the eye and a surface. One function keeps
-// them from drifting apart.
-//
-// g in [0,1): 0 is isotropic, 0.9 is a needle. Normalised over the sphere, so the integral is 1 at
-// any g and raising g concentrates the lobe rather than adding energy.
-float pjvMiePhase(float cosTheta, float g) {
-    float k = 1.55 * g - 0.55 * g * g * g;
-    float d = 1.0 - k * cosTheta;
-    return (1.0 - k * k) / (12.566370614 * max(d * d, 1e-4));
-}
-
 // The aureole -- the bright, warm halo the sky wears around the sun, out to twenty or thirty degrees.
 // Real, cheap, and it does three things at once:
 //   * the sun stops being a hard disk pasted on a flat gradient;
@@ -124,7 +110,7 @@ float pjvMiePhase(float cosTheta, float g) {
 #define SUN_GLOW_STRENGTH  0.065
 #define SUN_GLOW_G         0.80
 vec3 pjvSunAureole(vec3 dir) {
-    return SUN_COLOR * (SUN_GLOW_STRENGTH * pjvMiePhase(dot(dir, SUN_DIR), SUN_GLOW_G));
+    return SUN_COLOR * (SUN_GLOW_STRENGTH * pjvPhaseSchlick(dot(dir, SUN_DIR), SUN_GLOW_G));
 }
 
 // Radiance of the bare atmosphere in a given direction -- no sun disk and no aureole, just the
@@ -162,9 +148,6 @@ vec3 skyColor(vec3 dir) {
 // decorrelate neighbours so the penumbra reads as noise a temporal mean can remove rather than as a
 // pattern it cannot; the frame term is what the TAA pass averages away over the frames since the
 // camera last moved.
-#include <pjv_math.sc>       // pjvBasisAround
-#include <pjv_random.sc>     // pjvRandomUnit
-#include <pjv_sampling.sc>   // pjvSampleUniformCone
 
 // A direction inside the sun's cone, uniformly. Uniform over the cone (not over its projection) is
 // the right measure here because the estimator that uses it divides by the same solid angle, which

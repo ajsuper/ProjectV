@@ -364,7 +364,7 @@ sharedShaders/pjv_sun_sky.sc              the light rig (sun colour, sky gradien
 sharedShaders/pjv_cascade_common.sc       cascade parameterization, octahedral directions, projection
 sharedShaders/pjv_face_key.sc             what "the same voxel face" means, in one place
 sharedShaders/pjv_probe.sc                the world-space probe gather
-sharedShaders/pjv_atmosphere.sc           the fog's optical depth, shared with the god rays
+sharedShaders/pjv_cascade_atmosphere.sc           the fog's optical depth, shared with the god rays
 sharedShaders/pjv_anim_controls.sc        two uniforms — what is left of the animation prototypes
 ```
 

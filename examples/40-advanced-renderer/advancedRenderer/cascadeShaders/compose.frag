@@ -99,9 +99,9 @@ int composeDebugMode() { return animDebugMode(); }
 // arrives here in two pieces. Already pulled in by pjv_cascade_common.sc above, so not included again.
 // fogParams, fogOpticalDepth and applyFog. Shared with godrays.frag, which needs the same optical
 // depth -- see the header of that file for why the two must agree.
-#include <pjv_atmosphere.sc>
+#include <pjv_cascade_atmosphere.sc>
 
-// The fog itself moved to sharedShaders/pjv_atmosphere.sc when godrays.frag turned up needing the
+// The fog itself moved to sharedShaders/pjv_cascade_atmosphere.sc when godrays.frag turned up needing the
 // same optical depth. Nothing about it changed in the move; see that file for the model and for why
 // the two passes must share one description of the air rather than each carrying its own.
 

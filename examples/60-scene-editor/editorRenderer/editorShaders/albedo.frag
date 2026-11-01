@@ -81,11 +81,11 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
-#include <pjv_math.sc>       // pjvBasisAround
 // pjvRandomUnit and pjvHashSeed: Render mode's generator, so the two modes make the same stochastic
 // decisions from the same seed -- which is what keeps a stochastically-alpha'd glass surface from
 // resolving to two different images in the two tabs.
 #include <pjv_random.sc>     // pjvRandomUnit, pjvHashSeed
+#include <pjv_bsdf.sc>       // pjvBsdfAlpha; and pjv_microfacet.sc: pjvSampleGgxHalf, pjvSmithG1, pjvFresnelSchlick
 
 // Raised well above the shared default of 16, and defined BEFORE the include so it overrides the
 // #ifndef in pjv_utils_DDA.sc for this shader only.
@@ -179,43 +179,9 @@ vec3 backgroundColor(vec3 direction) {
 
 // --- The specular lobe --------------------------------------------------------
 //
-// All four functions below are the same ones Render mode's path_trace.frag uses, and that is not a
-// copy for convenience: the point of this preview is to show what the Render tab will do with a
-// material, so the two have to agree about the lobe's shape. A different roughness curve or a
-// different Fresnel here would make the preview a picture of a material nobody is going to render.
-
-// One direction's term of the separable Smith masking-shadowing function for GGX.
-float smithG1(float cosTheta, float alpha) {
-    float a2 = alpha * alpha;
-    return 2.0 * cosTheta /
-           max(cosTheta + sqrt(a2 + (1.0 - a2) * cosTheta * cosTheta), 1e-9);
-}
-
-vec3 fresnelSchlick(float cosTheta, vec3 f0) {
-    float m = clamp(1.0 - cosTheta, 0.0, 1.0);
-    float m2 = m * m;
-    return f0 + (vec3(1.0) - f0) * (m2 * m2 * m);
-}
-
-// GGX roughness from the stored glossiness. The perceptual roughness is floored rather
-// than allowed to reach zero: a true mirror is a delta lobe, which this estimator cannot
-// sample, and an alpha of zero makes the distribution divide by zero. At the floor the
-// lobe is tight enough to read as a mirror and still has finite density.
-float alphaFromGlossiness(float glossiness) {
-    float perceptual = clamp(1.0 - glossiness, 0.03, 1.0);
-    return perceptual * perceptual;
-}
-
-// A half vector from the GGX distribution, for the reflection ray's direction.
-vec3 sampleGGXHalfVector(vec3 n, float alpha, inout uint seed) {
-    float u1 = pjvRandomUnit(seed);
-    float u2 = pjvRandomUnit(seed);
-    float phi = 2.0 * PI * u1;
-    float a2 = alpha * alpha;
-    float cosTheta = sqrt(clamp((1.0 - u2) / (1.0 + (a2 - 1.0) * u2), 0.0, 1.0));
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    return pjvBasisAround(n) * vec3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
-}
+// The same terms Render mode's path_trace.frag shades with, from the engine's pjv_bsdf.sc and
+// pjv_microfacet.sc: the point of this preview is to show what the Render tab will do with a material,
+// so the two have to agree about the lobe's shape.
 
 // What the surface reflects towards the camera, from one stochastic sample of its specular lobe.
 // Zero for a material that has no such lobe, which is every palette entry written before materials
@@ -235,9 +201,11 @@ vec3 specularPreview(vec3 position, vec3 normal, vec3 viewDirection, VoxelMateri
     if (max(dielectricF0, m.metallic) <= 0.0) return vec3(0.0);
 
     vec3  f0 = mix(vec3(dielectricF0), m.albedo, m.metallic);
-    float alpha = alphaFromGlossiness(m.glossiness);
+    float alpha = pjvBsdfAlpha(m.glossiness);
 
-    vec3 halfVector = sampleGGXHalfVector(normal, alpha, seed);
+    float u1 = pjvRandomUnit(seed);
+    float u2 = pjvRandomUnit(seed);
+    vec3 halfVector = pjvSampleGgxHalf(normal, alpha, u1, u2);
     vec3 lightDirection = reflect(-viewDirection, halfVector);
 
     float cosLight = dot(normal, lightDirection);
@@ -254,8 +222,8 @@ vec3 specularPreview(vec3 position, vec3 normal, vec3 viewDirection, VoxelMateri
     // Fresnel times the masking term and no D term at all -- the same estimator Render mode's
     // evaluateSurface builds the long way round, written out because there is only one lobe here to
     // weigh and nothing to weigh it against.
-    vec3 weight = fresnelSchlick(viewDotHalf, f0) *
-                  (smithG1(cosView, alpha) * smithG1(cosLight, alpha) * viewDotHalf /
+    vec3 weight = pjvFresnelSchlick(viewDotHalf, f0) *
+                  (pjvSmithG1(cosView, alpha) * pjvSmithG1(cosLight, alpha) * viewDotHalf /
                    max(cosView * cosHalf, 1e-4));
     weight = min(weight, vec3(SPECULAR_WEIGHT_CLAMP));
 
