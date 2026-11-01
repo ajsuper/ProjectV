@@ -178,6 +178,11 @@ namespace projv::graphics {
         constructedRenderer.resources.passInputRes = bgfx::createUniform("passInputRes", bgfx::UniformType::Vec4, PROJV_MAX_PASS_INPUTS);
         constructedRenderer.resources.pjvMotionSets = bgfx::createUniform("pjvMotionSets", bgfx::UniformType::Vec4, PROJV_MOTION_SET_VEC4S);
         constructedRenderer.resources.pjvAnimTime = bgfx::createUniform("pjvAnimTime", bgfx::UniformType::Vec4);
+        static const char* cameraUniformNames[7] = {"pjvCameraPos", "pjvCameraDir", "pjvCameraLens", "pjvCameraJitter",
+                                                    "pjvPrevCameraPos", "pjvPrevCameraDir", "pjvPrevCameraLens"};
+        for (int i = 0; i < 7; i++) {
+            constructedRenderer.resources.pjvCamera[i] = bgfx::createUniform(cameraUniformNames[i], bgfx::UniformType::Vec4);
+        }
         const Resources &resources = renderer.resources;
         const std::vector<RenderPass> &renderPasses = renderer.dependencyGraph.renderPasses;
 

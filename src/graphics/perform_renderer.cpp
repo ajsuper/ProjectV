@@ -1,4 +1,5 @@
 #include "graphics/perform_renderer.h"
+#include "graphics/camera.h"
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -30,6 +31,10 @@ namespace projv::graphics {
         static bool renderGraphLogged = false;
 #endif
         const core::ivec2 backBufferSize(backBufferWidth, backBufferHeight);
+        // The camera, and the one this renderer last drew from (itself, the first time).
+        const std::array<core::vec4, 7> camera = cameraUniformValues(
+            constructedRenderer->camera,
+            constructedRenderer->hasDrawnCamera ? constructedRenderer->drawnCamera : constructedRenderer->camera);
 
         for (size_t i = 0; i < constructedRenderer->dependencyGraph.size(); i++) {
             BGFXDependencyGraph &renderPass = constructedRenderer->dependencyGraph[i];
@@ -64,6 +69,9 @@ namespace projv::graphics {
                 1.0f / float(std::max(targetSize.y, 1))
             };
             bgfx::setUniform(constructedRenderer->resources.passTargetRes, passTargetRes);
+            for (int c = 0; c < 7; c++) {
+                bgfx::setUniform(constructedRenderer->resources.pjvCamera[c], glm::value_ptr(camera[c]));
+            }
 
             // The animation motion table and the current time. Uploaded unconditionally so a shader
             // that declares them always reads something defined -- an all-zero table means "nothing
@@ -284,6 +292,8 @@ namespace projv::graphics {
             bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);  
             bgfx::submit(renderPass.renderPassID, renderPass.shaderProgram);
         }
+        constructedRenderer->drawnCamera = constructedRenderer->camera;
+        constructedRenderer->hasDrawnCamera = true;
 #if defined(PROJV_ENABLE_RENDER)
         renderGraphLogged = true;
 #endif
