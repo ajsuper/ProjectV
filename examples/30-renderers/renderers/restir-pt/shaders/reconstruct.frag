@@ -161,7 +161,7 @@ void main() {
     vec3 rayDir = rayDirection(v_texcoord0, passTargetRes.xy);
     PjvCameraBasis basis = pjvCameraBasis(pjvViewDirection());
     vec3 forward = basis.forward, camRight = basis.right, camUp = basis.up;
-    float theta = (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;   // one output pixel, in radians
+    float theta = (2.0 * pjvViewTanHalfFov()) / passTargetRes.y;   // one output pixel, in radians
 
     // Three layers, nearest first: depth t, coverage a, colour sum c and its weight w, the voxel's
     // centre v, size s and rotation q, and which of its faces f (a bit each) are counted in a.

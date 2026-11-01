@@ -59,7 +59,7 @@ the same arithmetic as [`pjv_camera.sc`](shader-library.md) on the GPU.
 | `cameraBasis(forward)` | `{forward, right, up}`: no roll; world up +y, or +z within 0.999 of vertical |
 | `cameraRayOrigin`, `cameraRayDirection(camera, uv, resolution)` | The ray through a pixel (uv top-left origin); orthographic rays start on the plane `orthographicBackoff` behind the camera |
 | `cameraWorldToUV(camera, point, resolution, &inFront)` | Where a point lands: the ray's inverse |
-| `cameraUniformValues(camera, previous)` | The seven `pjvCamera*` uniforms' values, in order |
+| `cameraUniformValues(camera, previous)` | The seven `pjvCamera*` uniforms' values, in order; `pjvCameraLens.w` is `tan(fov / 2)`, in double precision |
 
 ```cpp
 projv::CameraView view;

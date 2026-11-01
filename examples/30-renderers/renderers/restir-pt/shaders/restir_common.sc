@@ -75,7 +75,7 @@ bool restirView(int view) { return abs(restirDenoise.z - float(view)) < 0.5; }
 // Where world point P lands on screen (uv, top-left origin) for a camera at `position` looking along
 // `forward` -- the inverse of the engine's rayStartDirection, basis and flip included.
 vec2 restirWorldToUV(vec3 P, vec3 position, vec3 forward, vec2 res, out bool inFront) {
-    return pjvPerspectiveUV(P, res, position, forward, pjvViewFov(), inFront);
+    return pjvPerspectiveUV(P, res, position, forward, pjvViewTanHalfFov(), inFront);
 }
 
 // An orthonormal basis round unit n.

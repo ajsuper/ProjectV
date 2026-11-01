@@ -1544,7 +1544,7 @@ uint calculateZOrderIndex4(uint x, uint y, uint z){
 //Calculate the starting ray direction for the inital ray trace
 vec3 rayStartDirection(vec2 uv, vec2 res, vec3 cameraPosition, vec3 cameraDirection, float fov){
     // pjv_camera.sc's projection; cameraPosition is unused, kept for existing callers.
-    return pjvPerspectiveRay(uv, res, cameraDirection, fov);
+    return pjvPerspectiveRay(uv, res, cameraDirection, pjvTanHalfFov(fov));
 }
 
 uint calculateZOrderIntoBox(uint branchingFactor, vec3 intersectionOnBox, BoxAABB box) {

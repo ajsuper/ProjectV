@@ -365,7 +365,7 @@ float ambientOcclusion(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
         radiusPixels = worldRadius * passTargetRes.y / max(pjvViewOrthographicHeight(), 0.0001);
     } else {
         float distanceToCamera = max(length(position - pjvViewPosition()), 0.0001);
-        float projectionScale = passTargetRes.y * 0.5 / tan(radians(pjvViewFov() * 0.5));
+        float projectionScale = passTargetRes.y * 0.5 / pjvViewTanHalfFov();
         radiusPixels = worldRadius * projectionScale / distanceToCamera;
     }
     if (radiusPixels < AO_MIN_RADIUS_PIXELS) {

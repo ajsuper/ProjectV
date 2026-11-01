@@ -21,7 +21,7 @@ uniform vec4 pjvMotionSets[48];
 // graphics::setCamera). Read through pjv_camera.sc rather than directly.
 uniform vec4 pjvCameraPos;        // xyz position; w vertical field of view, degrees
 uniform vec4 pjvCameraDir;        // xyz forward, need not be unit; w orthographic height (0: perspective)
-uniform vec4 pjvCameraLens;       // x orthographic backoff, y near, z far
+uniform vec4 pjvCameraLens;       // x orthographic backoff, y near, z far, w tan(field of view / 2)
 uniform vec4 pjvCameraJitter;     // xy this frame's sub-pixel jitter, zw the previous frame's (pixels)
 uniform vec4 pjvPrevCameraPos;
 uniform vec4 pjvPrevCameraDir;

@@ -57,8 +57,7 @@ void main() {
     pjvPcg(seed);
     pjvPcg(seed);
     vec2 jitter = vec2(pjvRandomUnit24(seed), pjvRandomUnit24(seed)) - 0.5;
-    vec3 direction = rayStartDirection(v_texcoord0 + jitter * passTargetRes.zw, passTargetRes.xy, pjvViewPosition(),
-                                       normalize(pjvViewDirection()), pjvViewFov());
+    vec3 direction = pjvViewRayDirection(v_texcoord0 + jitter * passTargetRes.zw, passTargetRes.xy);
 
     float sunPdf = 1.0 / pathSunSolidAngle();
     vec3 radiance = vec3(0.0, 0.0, 0.0);

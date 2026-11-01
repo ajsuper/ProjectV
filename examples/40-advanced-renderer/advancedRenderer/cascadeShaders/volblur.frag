@@ -112,7 +112,7 @@ void main() {
     if (abs(zSun) > VOL_PARALLEL_EPS) {
         bool unused;
         vec2 vpUV = worldToUV(pjvViewPosition() + SUN_DIR * (zSun > 0.0 ? 1.0 : -1.0),
-                              pjvViewPosition(), pjvViewDirection(), res, pjvViewFov(), unused);
+                              pjvViewPosition(), pjvViewDirection(), res, pjvViewTanHalfFov(), unused);
         // In PIXELS, so the kernel is not stretched by the aspect ratio.
         axis = (uv - vpUV) * res;
     } else {

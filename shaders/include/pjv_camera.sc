@@ -32,12 +32,20 @@ PjvCameraBasis pjvCameraBasis(vec3 direction) {
 }
 
 // --- Any camera ---------------------------------------------------------------
+//
+// A perspective projection is given by tanHalfFov, tan(vertical field of view / 2): pjvTanHalfFov for a
+// field of view in degrees, or pjvViewTanHalfFov for the engine camera's, which the CPU computes in
+// double precision -- the value a constant field of view folds to at compile time.
 
-// A perspective ray's direction through uv, for a vertical field of view in degrees.
-vec3 pjvPerspectiveRay(vec2 uv, vec2 res, vec3 direction, float verticalFovDegrees) {
+float pjvTanHalfFov(float verticalFovDegrees) {
+    return tan(radians(verticalFovDegrees * 0.5));
+}
+
+// A perspective ray's direction through uv.
+vec3 pjvPerspectiveRay(vec2 uv, vec2 res, vec3 direction, float tanHalfFov) {
     vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
     float aspectRatio = res.x / res.y;
-    float scale = tan(radians(verticalFovDegrees * 0.5));
+    float scale = tanHalfFov;
     PjvCameraBasis b = pjvCameraBasis(direction);
     return normalize(b.right * (ndc.x * scale * aspectRatio) + b.up * (ndc.y * scale) + b.forward);
 }
@@ -53,12 +61,12 @@ vec3 pjvOrthographicOrigin(vec2 uv, vec2 res, vec3 position, vec3 direction, flo
 }
 
 // Where a world point lands (uv), under perspective: the inverse of pjvPerspectiveRay.
-vec2 pjvPerspectiveUV(vec3 P, vec2 res, vec3 position, vec3 direction, float verticalFovDegrees, out bool inFront) {
+vec2 pjvPerspectiveUV(vec3 P, vec2 res, vec3 position, vec3 direction, float tanHalfFov, out bool inFront) {
     PjvCameraBasis b = pjvCameraBasis(direction);
     vec3 d = P - position;
     float z = dot(d, b.forward);
     inFront = z > 1e-4;
-    float scale = tan(radians(verticalFovDegrees * 0.5));
+    float scale = tanHalfFov;
     vec2 ndc = vec2(dot(d, b.right) / (z * scale * (res.x / res.y)), dot(d, b.up) / (z * scale));
     return vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
 }
@@ -78,13 +86,15 @@ vec2 pjvOrthographicUV(vec3 P, vec2 res, vec3 position, vec3 direction, float he
 
 vec3  pjvViewPosition()  { return pjvCameraPos.xyz; }
 vec3  pjvViewDirection() { return pjvCameraDir.xyz; }   // as set, not normalised
-float pjvViewFov()       { return pjvCameraPos.w; }
+float pjvViewFov()       { return pjvCameraPos.w; }   // degrees
+float pjvViewTanHalfFov() { return pjvCameraLens.w; }
 bool  pjvViewIsOrthographic() { return pjvCameraDir.w > 0.0; }
 float pjvViewOrthographicHeight() { return pjvCameraDir.w; }
 
 vec3  pjvPrevViewPosition()  { return pjvPrevCameraPos.xyz; }
 vec3  pjvPrevViewDirection() { return pjvPrevCameraDir.xyz; }
 float pjvPrevViewFov()       { return pjvPrevCameraPos.w; }
+float pjvPrevViewTanHalfFov() { return pjvPrevCameraLens.w; }
 
 // The engine camera's ray through uv, perspective or orthographic.
 vec3 pjvViewRayOrigin(vec2 uv, vec2 res) {
@@ -94,7 +104,7 @@ vec3 pjvViewRayOrigin(vec2 uv, vec2 res) {
 
 vec3 pjvViewRayDirection(vec2 uv, vec2 res) {
     if (pjvCameraDir.w > 0.0) return normalize(pjvCameraDir.xyz);
-    return pjvPerspectiveRay(uv, res, pjvCameraDir.xyz, pjvCameraPos.w);
+    return pjvPerspectiveRay(uv, res, pjvCameraDir.xyz, pjvCameraLens.w);
 }
 
 // Where a world point was in the previous frame's image, under the projection that frame had: what a
@@ -104,7 +114,7 @@ vec2 pjvPrevViewUV(vec3 P, vec2 res, out bool inFront) {
         return pjvOrthographicUV(P, res, pjvPrevCameraPos.xyz, pjvPrevCameraDir.xyz, pjvPrevCameraDir.w,
                                  pjvPrevCameraLens.x, inFront);
     }
-    return pjvPerspectiveUV(P, res, pjvPrevCameraPos.xyz, pjvPrevCameraDir.xyz, pjvPrevCameraPos.w, inFront);
+    return pjvPerspectiveUV(P, res, pjvPrevCameraPos.xyz, pjvPrevCameraDir.xyz, pjvPrevCameraLens.w, inFront);
 }
 
 #endif

@@ -54,7 +54,7 @@ vec4 gatherRay(vec3 P, vec3 dir, int c) {
         vec3  S = P + dir * t;
 
         bool valid;
-        vec2 uv = worldToUV(S, pjvViewPosition(), pjvViewDirection(), windowRes.xy, pjvViewFov(), valid);
+        vec2 uv = worldToUV(S, pjvViewPosition(), pjvViewDirection(), windowRes.xy, pjvViewTanHalfFov(), valid);
         if (!valid) return vec4(0.0, 0.0, 0.0, 1.0);   // left the screen -> continue upward
 
         vec4 g = texture2D(gPos, uv);

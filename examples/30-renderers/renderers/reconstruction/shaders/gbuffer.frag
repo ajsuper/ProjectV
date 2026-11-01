@@ -50,8 +50,7 @@ void main() {
     // this demo has no temporal pass at all, so it simply stays deterministic.
     Ray ray;
     ray.origin    = pjvViewPosition();
-    ray.direction = rayStartDirection(v_texcoord0, windowRes.xy, pjvViewPosition(),
-                                      normalize(pjvViewDirection()), pjvViewFov());
+    ray.direction = pjvViewRayDirection(v_texcoord0, windowRes.xy);
 
     RayQuery q = pjvPrimaryQuery(100u);
     q.maxRaySteps = 256u;

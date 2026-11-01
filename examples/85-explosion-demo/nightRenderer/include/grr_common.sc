@@ -32,13 +32,13 @@ void grrCameraBasis(vec3 direction, out vec3 forward, out vec3 right, out vec3 u
 
 // The ray through screen position uv -- the same map as the engine's rayStartDirection.
 vec3 grrCameraRay(vec2 uv, vec2 res, vec3 direction) {
-    return pjvPerspectiveRay(uv, res, direction, pjvViewFov());
+    return pjvPerspectiveRay(uv, res, direction, pjvViewTanHalfFov());
 }
 
 // Its inverse: where on screen a world point lands, for a camera at camPos looking along camDir.
 vec2 grrWorldToUV(vec3 P, vec3 camPos, vec3 camDir, vec2 res, out bool valid) {
     bool inFront;
-    vec2 uv = pjvPerspectiveUV(P, res, camPos, camDir, pjvViewFov(), inFront);
+    vec2 uv = pjvPerspectiveUV(P, res, camPos, camDir, pjvViewTanHalfFov(), inFront);
     if (!inFront) { valid = false; return vec2(-1.0, -1.0); }
     valid = all(greaterThanEqual(uv, vec2(0.0, 0.0))) && all(lessThanEqual(uv, vec2(1.0, 1.0)));
     return uv;

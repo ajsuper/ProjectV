@@ -100,7 +100,7 @@ bool sameSurface(vec3 centreA, float sizeA, vec3 centreB, float sizeB) {
 // EXACTLY the forward map gbuffer.frag used, or the face test below is testing a different ray than
 // the one that produced the G-buffer.
 vec3 upscaleRayDirection(vec2 uv, vec2 res, vec3 camPos, vec3 camDirection) {
-    return pjvPerspectiveRay(uv, res, camDirection, pjvViewFov());
+    return pjvPerspectiveRay(uv, res, camDirection, pjvViewTanHalfFov());
 }
 
 // The overlap of two intervals, as a fraction of the second one: a slab of half-width `half` whose
@@ -345,7 +345,7 @@ void main() {
     // pixel count, leaving 2*tan(fov/2)/height per pixel on both axes.
     PjvCameraBasis basis = pjvCameraBasis(pjvViewDirection());
     vec3 forward = basis.forward, camRight = basis.right, camUp = basis.up;
-    float theta   = (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;
+    float theta   = (2.0 * pjvViewTanHalfFov()) / passTargetRes.y;
 
     // The two front-most faces with any coverage, kept in depth order. Two layers is enough for
     // the cases that matter and for the one the corners are made of: a silhouette is one face over
@@ -683,7 +683,7 @@ void main() {
         #define FACES_PER_VOXEL 3.0
         // Recomputed locally: the reconstruction's own copies are scoped to the block below.
         vec2  snapUV = (floor(v_texcoord0 * passInputRes[0].xy) + 0.5) * passInputRes[0].zw;
-        float rad    = (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;
+        float rad    = (2.0 * pjvViewTanHalfFov()) / passTargetRes.y;
         vec4  nf = texture2D(gFace, snapUV);
         float nd = texture2D(gPos, snapUV).a;
         vec3 view;

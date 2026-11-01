@@ -20,7 +20,7 @@ void main() {
     if (pos.w < 0.0 || giParams.y < 0.5) { gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); return; }
     vec3 N = normalize(texture2D(gNormal, uv).xyz);
     // How far off the plane a tap may lie: a few pixels' worth at this distance.
-    float pixelWorld = pos.w * (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;
+    float pixelWorld = pos.w * (2.0 * pjvViewTanHalfFov()) / passTargetRes.y;
     float tolerance = pixelWorld * GIBLUR_STRIDE * 1.5 + 0.02;
 
     vec4 centre = texture2D(giIn, (pixel + 0.5) * passTargetRes.zw);

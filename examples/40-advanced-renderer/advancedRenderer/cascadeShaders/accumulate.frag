@@ -217,7 +217,7 @@ SAMPLER2D(gKey,     9);
 // World size of one output pixel at a given depth -- the scale that decides which of the two regimes
 // above a pixel is in, and the same quantity taa.frag and upscale.frag measure themselves against.
 float pixelFootprint(float curDepth) {
-    return curDepth * (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;
+    return curDepth * (2.0 * pjvViewTanHalfFov()) / passTargetRes.y;
 }
 
 // How completely the source grid resolves a voxel of this size at this depth: 0 sub-pixel, 1 several
@@ -259,7 +259,7 @@ float geometryResolved(float voxelSize, float curDepth) {
 // neighbourhood by its caller, which bounds whatever it does let through.
 bool sameSpot(vec4 hPos, vec3 curP, float voxelSize, float curDepth, float tolVoxels) {
     if (hPos.a < 0.0) return false;                       // that texel was sky
-    float footprint = curDepth * (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;
+    float footprint = curDepth * (2.0 * pjvViewTanHalfFov()) / passTargetRes.y;
     float tol = max(tolVoxels * max(voxelSize, 1e-4), SPOT_TOL_PIXELS * footprint);
     return distance(hPos.xyz, curP) < tol;
 }
@@ -478,7 +478,7 @@ void main() {
             // moving surfaces it is meant to help. The moving history is already short.
             bool valid;
             vec2 pUV = worldToUV(curP, pjvPrevViewPosition(), pjvPrevViewDirection(),
-                                 passTargetRes.xy, pjvViewFov(), valid);
+                                 passTargetRes.xy, pjvPrevViewTanHalfFov(), valid);
             if (valid) {
                 vec2 baseUV = (floor(pUV * passTargetRes.xy) + 0.5) * passTargetRes.zw;
 

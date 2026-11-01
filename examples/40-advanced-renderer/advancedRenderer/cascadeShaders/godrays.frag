@@ -135,7 +135,7 @@ void main() {
     float facing  = dot(forward, SUN_DIR);
     bool  unused;
     vec2  sunUV   = worldToUV(pjvViewPosition() + SUN_DIR, pjvViewPosition(), pjvViewDirection(),
-                              passTargetRes.xy, pjvViewFov(), unused);
+                              passTargetRes.xy, pjvViewTanHalfFov(), unused);
 
     vec2 uv = v_texcoord0;
 

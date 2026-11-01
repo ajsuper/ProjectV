@@ -239,8 +239,7 @@ void main() {
 
     Ray ray;
     ray.origin = pjvViewPosition();
-    ray.direction = rayStartDirection(uvJit, passTargetRes.xy, pjvViewPosition(),
-                                      normalize(pjvViewDirection()), pjvViewFov());
+    ray.direction = pjvViewRayDirection(uvJit, passTargetRes.xy);
 
     // Per pixel and per frame. Feeds the sun-cone sample far below AND the peel's stochastic
     // interface decision, which is why it is declared up here rather than beside its first use --
@@ -347,7 +346,7 @@ void main() {
 #if PRIMARY_LOD_ENABLE
     // Where one LOD-0 voxel projects to exactly one pixel. Derived from the live resolution, so it
     // retunes itself with the window and the render scale.
-    float voxelsPerPixelPerUnit = (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;
+    float voxelsPerPixelPerUnit = (2.0 * pjvViewTanHalfFov()) / passTargetRes.y;
     float crossoverDistance     = PRIMARY_LOD_BIAS / max(voxelsPerPixelPerUnit, 1e-9);
 
     // Interleaved gradient noise, on the UNJITTERED pixel so it is frame-invariant. Chosen over a hash

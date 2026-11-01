@@ -86,7 +86,7 @@ float projectedPixels(float size, float t, vec3 direction) {
         return size * passTargetRes.y / max(pjvViewOrthographicHeight(), 1e-6);
     }
     float depth = max(t * dot(direction, normalize(pjvViewDirection())), 1e-6);
-    return size * (passTargetRes.y * 0.5 / tan(radians(pjvViewFov() * 0.5))) / depth;
+    return size * (passTargetRes.y * 0.5 / pjvViewTanHalfFov()) / depth;
 }
 
 // The five targets albedo.frag writes, in its layout. Built by value and written once at the end of

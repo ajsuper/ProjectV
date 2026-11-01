@@ -64,7 +64,12 @@ namespace projv::graphics {
     std::array<core::vec4, 7> cameraUniformValues(const CameraView& camera, const CameraView& previous) {
         auto pos = [](const CameraView& c) { return core::vec4(c.position, c.verticalFovDegrees); };
         auto dir = [](const CameraView& c) { return core::vec4(c.forward, c.orthographicHeight); };
-        auto lens = [](const CameraView& c) { return core::vec4(c.orthographicBackoff, c.nearPlane, c.farPlane, 0.0f); };
+        // w: tan(fov / 2), in double precision -- what a shader's constant field of view folded to at compile
+        // time, so a renderer that used one draws the same pixels; and no tan() per pixel.
+        auto lens = [](const CameraView& c) {
+            const double tanHalfFov = std::tan(double(c.verticalFovDegrees) * 3.14159265358979323846 / 360.0);
+            return core::vec4(c.orthographicBackoff, c.nearPlane, c.farPlane, float(tanHalfFov));
+        };
         return {pos(camera), dir(camera), lens(camera),
                 core::vec4(camera.jitter, previous.jitter),
                 pos(previous), dir(previous), lens(previous)};

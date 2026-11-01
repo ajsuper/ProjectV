@@ -400,6 +400,19 @@ the mean is 0.006%. The pixels are isolated, on the window frames' voxel edges. 
 of view becoming a uniform, so its tangent is computed at run time instead of folded at compile time.
 The next commit uploads the tangent instead.
 
+*FOV tangent* (2026-11-01). `pjvCameraLens.w` now holds `tan(fov / 2)`, computed on the CPU in double
+precision. `pjv_camera.sc`'s perspective functions take that tangent (`pjvTanHalfFov(degrees)` for any
+other camera), and every renderer reads `pjvViewTanHalfFov()`/`pjvPrevViewTanHalfFov()` instead of
+computing `tan(radians(pjvViewFov() * 0.5))` per pixel. The old `rayStartDirection(..., pjvViewFov())`
+calls are now `pjvViewRayDirection`.
+- Against S1, from before the FOV was a uniform:
+  - the editor viewport is bit-identical again;
+  - the explosion demo is back inside D5: 0.045% of pixels over 2/255, where it was 0.12%.
+- Against S3, everything passes: the gallery (restir-pt mean 0.021%), the advanced renderer and the
+  editor's Render mode.
+- Total size 5915.9 kB, against 5916.4. S2's growth was mostly the uniforms and the basis struct, not
+  the tan.
+
 ## Open questions
 
 None open. Answered 2026-10-27: tolerance (D5), `projv::cam` (D4), embedded (D3), S5 in scope (D8).

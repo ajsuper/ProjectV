@@ -36,7 +36,7 @@ SAMPLER2D(prevPoses, 0);
 
 void main() {
     vec2 uv = v_texcoord0 + jitterParams.xy * passTargetRes.zw;
-    vec3 direction = rayStartDirection(uv, passTargetRes.xy, pjvViewPosition(), normalize(pjvViewDirection()), pjvViewFov());
+    vec3 direction = pjvViewRayDirection(uv, passTargetRes.xy);
     vec3 toSun = normalize(SUN_DIR);
 
     vec3 origin = pjvViewPosition();

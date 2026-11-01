@@ -34,8 +34,7 @@ vec3 sky(vec3 direction) {
 void main() {
     Ray ray;
     ray.origin    = pjvViewPosition();
-    ray.direction = rayStartDirection(
-        v_texcoord0, windowRes.xy, pjvViewPosition(), normalize(pjvViewDirection()), pjvViewFov());
+    ray.direction = pjvViewRayDirection(v_texcoord0, windowRes.xy);
 
     // A query carries the march's budget and level-of-detail policy. The march
     // stops at the first hit, so a large budget costs only the rays that need it:

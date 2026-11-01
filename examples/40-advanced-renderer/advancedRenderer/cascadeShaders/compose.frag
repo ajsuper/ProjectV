@@ -469,7 +469,7 @@ float ambientOcclusion(vec2 uv, vec3 P, vec3 N, float camDist, float voxelSize) 
 #if AO_ENABLE
     float radiusWorld = AO_RADIUS_VOXELS * max(voxelSize, 1e-4);
     // World units per pixel at this depth -- the same footprint the temporal gates measure against.
-    float pixelWorld  = max(camDist * (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y, 1e-6);
+    float pixelWorld  = max(camDist * (2.0 * pjvViewTanHalfFov()) / passTargetRes.y, 1e-6);
     float radiusPixels = min(radiusWorld / pixelWorld, AO_MAX_PIXELS);
     // Under about a pixel there is no neighbourhood left to sample and every tap would read this same
     // texel, which sums to zero occlusion anyway -- return early rather than pay 16 fetches for it.
@@ -635,7 +635,7 @@ vec3 filteredIndirect(vec2 uv, vec3 P, vec3 N, float camDist, float voxelSize) {
     // This is the deliberate trade: blur the far-field indirect term to buy temporal stability. It is
     // cheap to take because the term is low frequency by construction -- direct sun, emission and
     // albedo are all kept out of it upstream and stay per-pixel sharp.
-    float pixelWorld  = max(camDist * (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y, 1e-6);
+    float pixelWorld  = max(camDist * (2.0 * pjvViewTanHalfFov()) / passTargetRes.y, 1e-6);
     float subPixel    = 1.0 - smoothstep(0.75, 2.0, voxelSize / pixelWorld);
 
     float stride = mix(1.0, FILTER_MAX_STRIDE, max(t, subPixel));

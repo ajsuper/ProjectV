@@ -134,13 +134,7 @@ void main() {
 
     Ray ray;
     ray.origin = pjvViewPosition();
-    ray.direction = rayStartDirection(
-        uvJit,
-        windowRes.xy,
-        pjvViewPosition(),
-        normalize(pjvViewDirection()),
-        pjvViewFov()
-    );
+    ray.direction = pjvViewRayDirection(uvJit, windowRes.xy);
 
     Hit primary = traceScene(ray, 256u);
 

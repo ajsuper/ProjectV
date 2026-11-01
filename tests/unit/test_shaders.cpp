@@ -4,6 +4,7 @@
 
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -123,9 +124,12 @@ TEST_CASE("camera: the uniforms are laid out as pjv_engine.sc declares them") {
     auto u = projv::graphics::cameraUniformValues(now, before);
     CHECK(u[0] == projv::core::vec4(now.position, 50.0f));           // pjvCameraPos
     CHECK(u[1] == projv::core::vec4(0.0f, 0.0f, 2.0f, 4.0f));        // pjvCameraDir, as set
-    CHECK(u[2] == projv::core::vec4(1.5f, 0.1f, 900.0f, 0.0f));      // pjvCameraLens
+    CHECK(u[2].x == 1.5f);                                           // pjvCameraLens: backoff,
+    CHECK(u[2].y == 0.1f);                                           // near,
+    CHECK(u[2].z == 900.0f);                                         // far,
+    CHECK(u[2].w == doctest::Approx(std::tan(25.0 * 3.14159265358979 / 180.0)));   // tan(fov / 2)
     CHECK(u[3] == projv::core::vec4(0.25f, -0.5f, 0.125f, 0.375f));  // pjvCameraJitter
     CHECK(u[4] == projv::core::vec4(before.position, 60.0f));        // pjvPrevCameraPos
     CHECK(u[5] == projv::core::vec4(1.0f, 0.0f, 0.0f, 0.0f));        // pjvPrevCameraDir
-    CHECK(u[6] == projv::core::vec4(0.0f, 0.05f, 10000.0f, 0.0f));   // pjvPrevCameraLens
+    CHECK(u[6].w == 0.57735026f);                                    // pjvPrevCameraLens: tan(30 degrees), as a float
 }

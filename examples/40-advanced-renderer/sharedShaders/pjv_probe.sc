@@ -244,7 +244,7 @@ bool pjvProbeSunVisible(vec3 p, vec3 n) {
 bool pjvProbeSecondBounce(vec3 hitP, float voxelSize, out vec3 indirect) {
     indirect = vec3(0.0);
     bool valid;
-    vec2 uv = worldToUV(hitP, pjvViewPosition(), pjvViewDirection(), passInputRes[0].xy, pjvViewFov(), valid);
+    vec2 uv = worldToUV(hitP, pjvViewPosition(), pjvViewDirection(), passInputRes[0].xy, pjvViewTanHalfFov(), valid);
     if (!valid) return false;
 
     // Is the surface the camera sees here the surface the ray hit? Point-sampled: a bilinear read
