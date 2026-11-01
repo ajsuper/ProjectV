@@ -1179,6 +1179,9 @@ static const size_t PASS_NAME_COUNT = sizeof(PASS_NAMES) / sizeof(PASS_NAMES[0])
 void startup(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance =
         app.world.ctx().emplace<projv::graphics::RenderInstance>();
+    // A capture (ADVANCED_CAPTURE) is compared with another build's: a fixed-size window, so both are the
+    // same pixels whatever the desktop's layout is doing.
+    renderInstance.resizable = std::getenv("ADVANCED_CAPTURE") == nullptr;
     renderInstance.initialize(1920, 1080, "ProjectV Advanced Renderer");
 
     // Capture the cursor so mouse motion drives the camera (FPS-style mouse look).
@@ -1538,7 +1541,7 @@ static void uploadFrameUniforms(const std::shared_ptr<projv::ConstructedRenderer
     setUniformToValue(renderer, "featureToggles", featureToggles);
 
     // x = extinction per world unit at the floor, y = the height it thins over, z = that floor,
-    // w = sun inscatter strength. Read by compose.frag through the shared pjv_atmosphere.sc; see the
+    // w = sun inscatter strength. Read by compose.frag through the shared pjv_cascade_atmosphere.sc; see the
     // uniform's note there for what each component means to the closed-form integral. The inscatter
     // is scaled alongside the density so that turning the fog down does not leave a sun glow hanging
     // in clear air.

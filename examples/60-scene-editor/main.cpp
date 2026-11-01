@@ -25530,6 +25530,9 @@ static bool recordEditorBenchFrame(int frameIndex, int viewportWidth, int viewpo
 void startup(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance =
         app.world.ctx().emplace<projv::graphics::RenderInstance>();
+    // The bench and the saved render are compared between builds: a fixed-size window, so the panels,
+    // and Render mode's image with them, are the same size every run.
+    renderInstance.resizable = std::getenv("EDITOR_BENCH") == nullptr && std::getenv("EDITOR_SAVE_RENDER") == nullptr;
     renderInstance.initialize(1600, 900, "ProjectV Scene Editor");
 
     // Installed before ImGui's callbacks so ImGui chains into it rather than replacing it.
