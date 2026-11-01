@@ -2,13 +2,13 @@ $input v_color0
 $input v_texcoord0
 
 // =============================================================================
-// basic.frag -- the whole renderer every feature example draws with.
+// basic.frag -- Hello Voxel's whole renderer.
 //
 // One primary ray per pixel, straight to the back buffer: the voxel's stored
 // colour, lit by one fixed sun with plain N.L and a little light from the sky so
 // faces turned away still read. No shadows, no AO, no anti-aliasing, no history.
-// The examples are about what the engine does, not how it looks; the _demo
-// examples and examples/30-renderers are where the looks are.
+// It is the engine's basic renderer (shaders/engine/basic.frag) with its look
+// written in, as a renderer folder: the starting point for one of your own.
 //
 // Everything specific to ProjectV is in the two calls below. rayStartDirection
 // turns a pixel into a camera ray, and raySceneIntersect marches it through the
@@ -21,9 +21,6 @@ $input v_texcoord0
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_color.sc>
 
-uniform vec4 windowRes;     // xy: the window, in pixels
-uniform vec4 viewOptions;   // x: draw a crosshair (1) or not (0)
-
 #define SUN normalize(vec3(0.35, 0.85, 0.4))
 
 vec3 sky(vec3 direction) {
@@ -34,7 +31,7 @@ vec3 sky(vec3 direction) {
 void main() {
     Ray ray;
     ray.origin    = pjvViewPosition();
-    ray.direction = pjvViewRayDirection(v_texcoord0, windowRes.xy);
+    ray.direction = pjvViewRayDirection(v_texcoord0, passTargetRes.xy);   // passTargetRes: the engine's, this pass's size
 
     // A query carries the march's budget and level-of-detail policy. The march
     // stops at the first hit, so a large budget costs only the rays that need it:
@@ -63,14 +60,6 @@ void main() {
     }
 
     colour = pjvDisplay(colour, 1.0, gl_FragCoord.xy);   // linear light out to the screen
-
-    // Crosshair: two short bars through the centre, inverted against what is behind.
-    if (viewOptions.x > 0.5) {
-        vec2 offset = abs(v_texcoord0 * windowRes.xy - windowRes.xy * 0.5);
-        bool bar = (offset.x < 1.0 && offset.y < 9.0 && offset.y > 3.0) ||
-                   (offset.y < 1.0 && offset.x < 9.0 && offset.x > 3.0);
-        if (bar) colour = vec3(1.0, 1.0, 1.0) - colour * 0.8;
-    }
 
     gl_FragColor = vec4(colour, 1.0);
 }

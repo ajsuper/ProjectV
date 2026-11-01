@@ -16,7 +16,7 @@
 //   6. turn the description into GPU objects     constructRendererSpecification
 //   7. upload the voxels                         createTexturesForScene
 //
-// Then each frame: move the camera from Input and Time (Update), set the uniforms the shaders read,
+// Then each frame: move the camera from Input and Time (Update), set the camera on the renderer,
 // and call renderConstructedRenderer (Render).
 //
 // Two things worth copying into every application of your own:
@@ -235,9 +235,9 @@ void startup(projv::Application& app) {
     // The renderer is described by data, not code: render.json is the pass order, resources.json
     // names the shaders, textures and framebuffers. Paths inside resources.json are relative to
     // the working directory, which is why the folder is passed as a path from here. This one is
-    // examples/shared/basicRenderer, the one-pass renderer every feature example draws with; the
-    // others call basic_renderer.h, which does exactly what this function and render() do.
-    const std::string rendererDirectory = (assetDirectory() / "basicRenderer").string() + "/";
+    // the engine's basic renderer written out as a folder; the other feature examples call
+    // graphics::installBasicRenderer, which does what this function and render() do.
+    const std::string rendererDirectory = (assetDirectory() / "renderer").string() + "/";
     projv::RendererSpecification specification =
         projv::graphics::loadRendererSpecification(rendererDirectory);
     renderInstance.addRendererSpecification(1, specification);
@@ -276,24 +276,18 @@ void render(projv::Application& app) {
     auto& gpuData = app.world.ctx().get<projv::GPUData>();
     auto& camera  = app.world.ctx().get<Camera>();
 
-    // Deliberately not const: setUniformToValue is a template that dispatches on the deduced type,
-    // and a const vec3 is not one of the types it knows about. Passing one gets you
-    // "Typename T for data is unknown" at runtime and a uniform that never reaches the shader.
-    projv::core::vec3 direction{
+    // The camera is the engine's: set it on the renderer, and the driver uploads it before every
+    // pass for pjv_camera.sc to read. This renderer has no uniforms of its own; one that did would
+    // set them here with setUniformToValue.
+    auto renderer = renderInstance.getActiveRenderer();
+    projv::CameraView view;
+    view.position = camera.position;
+    view.forward = {
         std::cos(camera.pitch) * std::cos(camera.yaw),
         std::sin(camera.pitch),
         std::cos(camera.pitch) * std::sin(camera.yaw)
     };
-
-    projv::core::vec2 resolution = renderInstance.getWindowResolution();
-    projv::core::vec4 viewOptions{0.0f};   // x: a crosshair, which nothing here aims
-    auto renderer = renderInstance.getActiveRenderer();
-    projv::CameraView view;
-    view.position = camera.position;
-    view.forward = direction;
     projv::graphics::setCamera(*renderer, view);
-    projv::graphics::setUniformToValue(renderer, "windowRes", resolution);
-    projv::graphics::setUniformToValue(renderer, "viewOptions", viewOptions);
 
     projv::graphics::renderConstructedRenderer(renderInstance, renderer, &gpuData);
 }

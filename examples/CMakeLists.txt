@@ -2,7 +2,7 @@
 # the helper lives in cmake/ProjectVExample.cmake alongside the shader rule it uses.
 #
 # Two kinds. Feature examples (00-70) each teach one part of the engine and draw with the basic
-# renderer (shared/basicRenderer), unless rendering is what they teach. Demos (80 and up, `_demo`)
+# renderer (graphics/basic_renderer.h, in the engine), unless rendering is what they teach. Demos (80 and up, `_demo`)
 # put many features together to show what the engine can do, and draw with the full renderers.
 # The numbering is the order they are meant to be read, not a priority.
 include(ProjectVExample)

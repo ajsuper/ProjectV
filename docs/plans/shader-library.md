@@ -1,6 +1,6 @@
 # Shader library and an engine basic renderer
 
-Status: **in progress**: S0 and S1 built 2026-10-28, S2 2026-10-30, S3 2026-11-01; S4 next. Approved 2026-10-27 (open questions answered:
+Status: **in progress**: S0 and S1 built 2026-10-28, S2 2026-10-30, S3 and S4 2026-11-01; S5 next. Approved 2026-10-27 (open questions answered:
 tolerance D5, `projv::cam` removed D4, embedded engine shaders D3, S5 in scope with modularity first D8). Comes before
 [ui.md](ui.md), whose passes (blur, composite) are built from it.
 
@@ -412,6 +412,56 @@ calls are now `pjvViewRayDirection`.
   editor's Render mode.
 - Total size 5915.9 kB, against 5916.4. S2's growth was mostly the uniforms and the basis struct, not
   the tan.
+
+**S4** (2026-11-01).
+
+*Built:*
+- `shaders/engine/basic.frag`, embedded beside `vs_quad` (spirv 88.4 kB). Its look is seven uniforms of
+  its own (`pjvBasicSun`, `...SunColour`, `...AmbientAbove`/`Below`, `...SkyAbove`/`Below`,
+  `...Options`); the resolution is `passTargetRes`, not a `windowRes` the program sets.
+- `graphics/basic_renderer.h`:
+  - `installBasicRenderer(app, renderInstance, options)`: creates it, makes it active, and adds the
+    Render system `"basic renderer"`, which flushes the `Scene` into the `GPUData` and draws;
+  - `BasicRendererOptions` (the defaults are the old look) and the `BasicRenderer` ctx resource;
+  - `createBasicRenderer` and `drawBasicRenderer`, for a program that draws by hand.
+- `constructShaders` takes a `Shader` with no path as its contents, so a `RendererSpecification` can
+  be built in memory. That is how `createBasicRenderer` builds one: no folder, no JSON.
+
+*Where it differs from D6:*
+- **The crosshair stays**, as `BasicRendererOptions::crosshair`, until a program can draw its own. The
+  sandbox, physics and multiplayer client aim with it, and there is no UI layer yet. It goes in
+  [ui.md](ui.md) U5. Asked 2026-11-01.
+- **The camera comes from a `CameraView` in `world.ctx()`**, which the system copies to the renderer
+  with `setCamera`. That is D4's first idea, which S2 moved off the driver: the driver still takes the
+  camera per renderer, and only this system reads the ctx.
+- **Hello Voxel keeps a renderer folder**, `examples/00-hello-voxel/renderer`, since it teaches the
+  folder. It is the shared folder moved there, without the crosshair or any uniforms of its own. It is
+  what the guides now say to copy.
+
+*Switched:* the scene previewer, entities, sandbox, physics, world loading and the multiplayer client.
+Each one's Render system now sets the `CameraView`, ordered `{.before = "basic renderer"}`. The
+previewer's bench is a separate system, `{.after = "basic renderer"}`. The `exit_path` manual test
+uses `createBasicRenderer` and no longer changes directory to find a folder.
+`examples/shared/basicRenderer` and `basic_renderer.h` are deleted.
+
+*Docs:* [Draw a scene](../guides/draw-a-scene.md) (new), `graphics/basic_renderer.h` in
+[graphics](../reference/graphics.md), and the pages that pointed at the shared folder: first app,
+write a renderer, rendering, the renderer-folder format, and the examples' READMEs.
+
+*Fixed on the way:* `ctest -R shader_library` had failed since S0 on this machine (CMake 3.31). Run with
+`-P`, the script set no policy version, so `if(... IN_LIST ...)` was an error. Its own commit.
+
+*Sizes:* the engine gains `basic_spirv`, 88.4 kB, and the shared `basic.bin` (87.7) is gone. Hello
+Voxel's copy is 86.8 kB. The other 98 shaders are unchanged.
+
+*Captures:* the sandbox, `SANDBOX_MEASURE=100` with `SANDBOX_CAPTURE` (a still scene, with the
+crosshair), passes against HEAD: mean 0.0000%, largest 1/255. Two runs of HEAD are bit-identical. The
+1/255 comes from the ambient term, now a mix of two colours rather than `0.3 + 0.1 * n.y`, and from the
+sun being normalised on the CPU.
+
+*Checked:* `DEMOS_SELFTEST=1 ./physics` passes, as do `WORLD_LOADING_SELFTEST`, `PREVIEW_BENCH`, the
+multiplayer `selftest.sh` and a windowed client. Hello Voxel and entities run with no errors, and
+`exit_path a` and `b` pass.
 
 ## Open questions
 

@@ -4,8 +4,8 @@ Sixteen programs of two kinds. Each one is a complete application, not a snippet
 README explaining how to run it, why it exists and what it does differently from its neighbours.
 
 - **Feature examples** (`00`–`70`) each teach one part of the engine, and reading them in order teaches
-  the engine. They draw with the **basic renderer** ([`shared/basicRenderer`](shared/basicRenderer/),
-  set up by [`shared/basic_renderer.h`](shared/basic_renderer.h)): one ray a pixel, the voxel's colour
+  the engine. They draw with the engine's **basic renderer** ([Draw a scene](../docs/guides/draw-a-scene.md);
+  Hello Voxel writes it out as a folder): one ray a pixel, the voxel's colour
   under a fixed sun, and nothing else. The image is plain, so what you see is the feature. The exceptions
   are the examples whose subject is rendering: [30-renderers](30-renderers/),
   [40-advanced-renderer](40-advanced-renderer/), and the scene editor's viewport.

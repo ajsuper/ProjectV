@@ -145,7 +145,7 @@ same back buffer it writes, and U0 settles which conversion (if any) the UI shad
 | **U2** | Engine panels: physics, networking, renderer, entity inspector | `physics`, `mp_client` and `renderer_gallery` show them |
 | **U3** | User layer: RmlUi and FreeType as submodules and vcpkg ports; the render interface with geometry, textures, scissor, clip masks and transforms; data models, `UiAction`, hot reload | headless tests (D11) |
 | **U4** | The render interface's layers and filters: blur, `backdrop-filter`, drop shadows, shader decorators. A dedicated example, `72-user-interface`: a polished, animated UI over a live scene -- frosted panels, a main menu, settings bound to values, a HUD -- its look entirely in its `ui/` folder | the example; its look checked by the user |
-| **U5** | The party and playground HUDs rebuilt as documents, `hud.frag` and its uniforms deleted; a pause menu and settings in both | `selftest.sh` for both; look checked by the user |
+| **U5** | The party and playground HUDs rebuilt as documents, `hud.frag` and its uniforms deleted; a pause menu and settings in both. The basic renderer's `crosshair` option goes ([shader-library.md](shader-library.md) S4): the sandbox, physics and multiplayer client draw their own | `selftest.sh` for both; look checked by the user |
 | **U6** | Gamepad navigation (needs gamepads in `Input` first); a document rendered to a texture, for in-world screens; MSDF text if those need it | each with an example |
 
 Docs with each milestone: `docs/reference/ui.md` (a row per public header), a concept page

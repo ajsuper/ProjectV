@@ -161,6 +161,6 @@ A `shaderID` or `texID` ≤ 0 is logged as an error but not refused.
 
 | Renderer | Shows |
 |---|---|
-| [`examples/shared/basicRenderer`](../../../examples/shared/basicRenderer/) | One pass, no textures |
+| [`examples/00-hello-voxel/renderer`](../../../examples/00-hello-voxel/renderer/) | One pass, no textures, no uniforms of its own |
 | [`examples/30-renderers/renderers/restir-pt`](../../../examples/30-renderers/renderers/restir-pt/) | G-buffer, reservoirs, history ping-pong, denoise, post |
 | [`examples/40-advanced-renderer/advancedRenderer`](../../../examples/40-advanced-renderer/) | Fourteen passes |

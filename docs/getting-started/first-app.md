@@ -2,7 +2,8 @@
 
 The smallest program that loads a scene and draws it.
 [`examples/00-hello-voxel`](../../examples/00-hello-voxel/) is the same program with voxels built in
-memory.
+memory. It sets the renderer up by hand, to show every step; a program that only wants to see its scene
+can skip the renderer folder and call `installBasicRenderer` ([Draw a scene](../guides/draw-a-scene.md)).
 
 ## The shape of every ProjectV program
 
@@ -11,7 +12,7 @@ main()
  └─ Application app
      ├─ addSystem(Startup,  ...)   window, scene, renderer, GPU upload    (once)
      ├─ addSystem(Update,   ...)   gameplay: camera, input                (every frame)
-     ├─ addSystem(Render,   ...)   set uniforms, draw                     (every frame)
+     ├─ addSystem(Render,   ...)   set the camera, draw                   (every frame)
      ├─ addSystem(Shutdown, ...)   free GPU data                          (once)
      └─ run()
 ```
@@ -25,7 +26,7 @@ See [the frame loop](../concepts/frame-loop.md).
 my_app/
 ├── CMakeLists.txt
 ├── main.cpp
-├── renderer/                  copy of examples/shared/basicRenderer
+├── renderer/                  copy of examples/00-hello-voxel/renderer
 │   ├── render.json            the pass list
 │   ├── resources.json         uniforms, shaders, textures
 │   └── shaders/               basic.frag, varying.def.sc
@@ -33,8 +34,8 @@ my_app/
                                examples/10-scene-previewer/scenes/SmallVox
 ```
 
-`resources.json` shader paths are relative to the working directory: change
-`./basicRenderer/shaders/basic.bin` to `./renderer/shaders/basic.bin`.
+`resources.json` shader paths are relative to the working directory: `./renderer/shaders/basic.bin`
+works when the program runs from the folder that holds `renderer/`.
 
 ```cmake
 cmake_minimum_required(VERSION 3.20)
@@ -114,7 +115,7 @@ void update(Application& app) {
 
 `Input` is filled in PreUpdate. Mouse look: [`examples/00-hello-voxel/main.cpp`](../../examples/00-hello-voxel/main.cpp).
 
-## 4. Render: uniforms, then draw
+## 4. Render: the camera, then draw
 
 ```cpp
 void render(Application& app) {
@@ -122,18 +123,17 @@ void render(Application& app) {
     auto& camera = app.world.ctx().get<Camera>();
     auto renderer = window.getActiveRenderer();
 
-    core::vec2 resolution = window.getWindowResolution();
     CameraView view;
     view.position = camera.position;
     view.forward = camera.direction;
-    graphics::setCamera(*renderer, view);
-    graphics::setUniformToValue(renderer, "windowRes", resolution);
+    graphics::setCamera(*renderer, view);   // uploaded by the driver before every pass
 
     graphics::renderConstructedRenderer(window, renderer, &app.world.ctx().get<GPUData>());
 }
 ```
 
 !!! warning "Pass non-const values to `setUniformToValue`"
+    A renderer's own uniforms (none in this one) are set with `setUniformToValue(renderer, name, value)`.
     It picks the upload by the deduced type. A `const vec3` matches nothing, logs
     `Typename T for data is unknown` and the uniform never reaches the shader. Copy to a local
     first.

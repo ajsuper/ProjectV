@@ -1,6 +1,6 @@
 // ProjectV Scene Previewer
-// A minimal, fast viewer for any Compose scene folder. It draws with the feature examples' basic
-// renderer (examples/shared/basicRenderer): one primary ray per pixel, the colour stored in the
+// A minimal, fast viewer for any Compose scene folder. It draws with the engine's basic renderer
+// (graphics/basic_renderer.h): one primary ray per pixel, the colour stored in the
 // material palette under one fixed sun -- no shadows, no ambient occlusion, no global illumination.
 //
 // What remains is the answer to "what is actually in this scene": with nothing but N.L on top of
@@ -43,7 +43,7 @@
 #include "graphics/type_mapping.h"
 #include "core/paths.h"
 #include "utils/compose_io.h"
-#include "basic_renderer.h"
+#include "graphics/basic_renderer.h"
 
 #include <bgfx/bgfx.h>
 #include <chrono>
@@ -231,7 +231,7 @@ void startup(projv::Application& app) {
     projv::core::info("Framed camera at ({:.1f}, {:.1f}, {:.1f}), move speed {:.2f}/frame",
         framing.position.x, framing.position.y, framing.position.z, framing.moveSpeed);
 
-    basic_renderer::install(renderInstance, projv::core::executableDirectory());
+    projv::graphics::installBasicRenderer(app, renderInstance);
     // Per-view GPU timestamps are only collected with the profiler on.
     if (g_bench.frames > 0) bgfx::setDebug(BGFX_DEBUG_PROFILER);
     gpuData = projv::graphics::createTexturesForScene(scene);
@@ -264,11 +264,10 @@ void update(projv::Application& app) {
 #endif
 }
 
-// Render: handle camera input, then draw.
-void render(projv::Application& app) {
+// Before the basic renderer draws: handle camera input, and set the view it draws from.
+void camera(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance =
         app.world.ctx().get<projv::graphics::RenderInstance>();
-    projv::GPUData& gpuData = app.world.ctx().get<projv::GPUData>();
     CameraFraming& framing  = app.world.ctx().get<CameraFraming>();
 
     // Camera state, seeded from the automatic framing on the first frame.
@@ -374,9 +373,15 @@ void render(projv::Application& app) {
         cameraPitch = framing.pitch;
     }
 
-    projv::core::vec2 windowResolution = renderInstance.getWindowResolution();
-    basic_renderer::draw(renderInstance, gpuData, app.world.ctx().get<projv::Scene>(), cameraPosition, cameraDirection);
+    auto& view = app.world.ctx().get<projv::CameraView>();
+    view.position = cameraPosition;
+    view.forward = cameraDirection;
+}
 
+// After the basic renderer has drawn: PREVIEW_BENCH's frame timings.
+void bench(projv::Application& app) {
+    projv::core::vec2 windowResolution =
+        app.world.ctx().get<projv::graphics::RenderInstance>().getWindowResolution();
     if (g_bench.frames > 0 &&
         recordBenchFrame(app.frameCount, int(windowResolution.x), int(windowResolution.y))) {
         app.closeRequested = true;
@@ -396,7 +401,8 @@ int main(int argc, char** argv) {
     projv::Application app;
     app.addSystem(projv::Stage::Startup, "startup", startup);
     app.addSystem(projv::Stage::Update, "update", update);
-    app.addSystem(projv::Stage::Render, "render", render);
+    app.addSystem(projv::Stage::Render, "camera", camera, {.before = "basic renderer"});
+    app.addSystem(projv::Stage::Render, "bench", bench, {.after = "basic renderer"});
     app.run();
     return 0;
 }

@@ -44,8 +44,8 @@
 #include "graphics/input.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
+#include "graphics/basic_renderer.h"
 #include "graphics/render_instance.h"
-#include "basic_renderer.h"
 #include "runtime/entities.h"
 #include "runtime/scene_bridge.h"
 #include "utils/compose_io.h"
@@ -247,23 +247,21 @@ void startup(projv::Application& app) {
     app.world.on_construct<Orbit>().connect<&startOrbit>();
     projv::runtime::spawnEntities(app.world);
 
-    basic_renderer::install(renderInstance, here);
+    // The engine's basic renderer: each frame it uploads what the bridge rewrote and draws from the
+    // CameraView in world.ctx().
+    projv::graphics::installBasicRenderer(app, renderInstance);
 
     app.world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
     projv::core::info("Entities: {} entities, {} component(s) in the scene.",
                       app.world.view<projv::VoxelComponent>().size(), scene.components.size());
 }
 
-void render(projv::Application& app) {
-    auto& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
-    auto& scene = app.world.ctx().get<projv::Scene>();
-    auto& gpuData = app.world.ctx().get<projv::GPUData>();
+void view(projv::Application& app) {
     const auto& camera = app.world.ctx().get<Camera>();
-
-    projv::core::vec3 direction{std::cos(camera.pitch) * std::cos(camera.yaw), std::sin(camera.pitch),
-                                std::cos(camera.pitch) * std::sin(camera.yaw)};
-    // The bridge has rewritten the moved chunks' headers on the CPU; draw flushes them to the GPU first.
-    basic_renderer::draw(renderInstance, gpuData, scene, camera.position, direction);
+    auto& view = app.world.ctx().get<projv::CameraView>();
+    view.position = camera.position;
+    view.forward = {std::cos(camera.pitch) * std::cos(camera.yaw), std::sin(camera.pitch),
+                    std::cos(camera.pitch) * std::sin(camera.yaw)};
 }
 
 void shutdown(projv::Application& app) {
@@ -278,7 +276,7 @@ int main(int argc, char** argv) {
     app.addSystem(projv::Stage::Update,   "camera",  cameraSystem);
     app.addSystem(projv::Stage::Update,   "spin",    spinSystem);
     app.addSystem(projv::Stage::Update,   "orbit",   orbitSystem);
-    app.addSystem(projv::Stage::Render,   "render",  render);
+    app.addSystem(projv::Stage::Render,   "view",    view, {.before = "basic renderer"});
     app.addSystem(projv::Stage::Shutdown, "shutdown", shutdown);
     app.run();
     return 0;

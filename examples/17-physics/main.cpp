@@ -55,8 +55,8 @@
 //   right-drag hold and drag the body under the crosshair (the wheel: nearer / farther)
 //   Esc        release the cursor (a click recaptures it)
 //
-// It draws with the feature examples' basic renderer (examples/shared/basicRenderer, through
-// basic_renderer.h): the voxels' colours under a fixed sun, and a crosshair.
+// It draws with the engine's basic renderer (graphics/basic_renderer.h): the voxels' colours under a
+// fixed sun, and a crosshair.
 //
 //   DEMOS_SELFTEST=1 ./physics    runs every demo unattended and checks it
 //   (DEMOS_ONLY=9 or DEMOS_ONLY=2,10: just those)
@@ -82,8 +82,8 @@
 #include "graphics/input.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
+#include "graphics/basic_renderer.h"
 #include "graphics/render_instance.h"
-#include "basic_renderer.h"
 #include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
 #include "utils/collision_geometry.h"
@@ -2821,7 +2821,7 @@ void startup(projv::Application& app) {
         }
     });
 
-    basic_renderer::install(renderInstance, here);
+    projv::graphics::installBasicRenderer(app, renderInstance, {.crosshair = true});
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
     demos.unattended = unattended;
@@ -2839,11 +2839,8 @@ void startup(projv::Application& app) {
     else startDemo(world, 1);
 }
 
-void render(projv::Application& app) {
+void view(projv::Application& app) {
     World& world = app.world;
-    auto& renderInstance = world.ctx().get<projv::graphics::RenderInstance>();
-    auto& scene = world.ctx().get<projv::Scene>();
-    auto& gpuData = world.ctx().get<projv::GPUData>();
     const auto& camera = world.ctx().get<Camera>();
     vec3 position = camera.position, direction = camera.forward();
     // Demo 9's shake: drawn only -- aiming, clicks and the walker use the steady camera. Sums of
@@ -2862,7 +2859,9 @@ void render(projv::Application& app) {
         shaken.pitch += amount * SHAKE_TURN * noise(5.0f);
         direction = shaken.forward();
     }
-    basic_renderer::draw(renderInstance, gpuData, scene, position, direction, {.crosshair = true});
+    auto& view = world.ctx().get<projv::CameraView>();
+    view.position = position;
+    view.forward = direction;
 }
 
 void shutdown(projv::Application& app) { projv::graphics::destroyGPUData(app.world.ctx().get<projv::GPUData>()); }
@@ -2879,7 +2878,7 @@ int main() {
     app.addSystem(projv::Stage::Update,      "self-test", selfTest);
     app.addSystem(projv::Stage::Update,      "title bar", titleBar);
     app.addSystem(projv::Stage::PostUpdate,  "follow camera", followCamera, {.after = "physics: present"});
-    app.addSystem(projv::Stage::Render,      "render",    render);
+    app.addSystem(projv::Stage::Render,      "view",      view, {.before = "basic renderer"});
     app.addSystem(projv::Stage::Shutdown,    "shutdown",  shutdown);
     app.run();
     return 0;

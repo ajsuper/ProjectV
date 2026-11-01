@@ -40,8 +40,8 @@
 #include "graphics/input.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
+#include "graphics/basic_renderer.h"
 #include "graphics/render_instance.h"
-#include "basic_renderer.h"
 #include "runtime/loading.h"
 #include "runtime/physics.h"
 #include "utils/compose_io.h"
@@ -283,23 +283,21 @@ void startup(projv::Application& app) {
     config.policy = projv::utils::loadNear(96.0f, 192.0f);
     if (!projv::runtime::openWorld(app, folder.string(), config)) std::exit(1);
 
-    basic_renderer::install(renderInstance, here);
+    // The engine's basic renderer. Blocks that arrived are new chunks, blocks that went are freed ones:
+    // each frame it uploads both, then draws from the CameraView in world.ctx().
+    projv::graphics::installBasicRenderer(app, renderInstance);
 
     auto& scene = app.world.ctx().get<projv::Scene>();
     app.world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
     projv::core::info("World loading: {} blocks in the world, none loaded yet", projv::runtime::worldLoader(app.world).blocks().size());
 }
 
-void render(projv::Application& app) {
-    auto& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
-    auto& scene = app.world.ctx().get<projv::Scene>();
-    auto& gpuData = app.world.ctx().get<projv::GPUData>();
+void view(projv::Application& app) {
     const auto& camera = app.world.ctx().get<Camera>();
-
-    vec3 direction{std::cos(camera.pitch) * std::cos(camera.yaw), std::sin(camera.pitch),
-                   std::cos(camera.pitch) * std::sin(camera.yaw)};
-    // Blocks that arrived are new chunks; blocks that went are freed ones. draw uploads both.
-    basic_renderer::draw(renderInstance, gpuData, scene, camera.position, direction);
+    auto& view = app.world.ctx().get<projv::CameraView>();
+    view.position = camera.position;
+    view.forward = {std::cos(camera.pitch) * std::cos(camera.yaw), std::sin(camera.pitch),
+                    std::cos(camera.pitch) * std::sin(camera.yaw)};
 }
 
 void shutdown(projv::Application& app) {
@@ -389,7 +387,7 @@ int main(int argc, char** argv) {
     app.addSystem(projv::Stage::Startup,  "startup", startup);
     app.addSystem(projv::Stage::Update,   "camera",  cameraSystem);
     app.addSystem(projv::Stage::Update,   "stats",   statsSystem);
-    app.addSystem(projv::Stage::Render,   "render",  render);
+    app.addSystem(projv::Stage::Render,   "view",    view, {.before = "basic renderer"});
     app.addSystem(projv::Stage::Shutdown, "shutdown", shutdown);
     app.run();
     return 0;

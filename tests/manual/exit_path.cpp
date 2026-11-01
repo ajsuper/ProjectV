@@ -26,58 +26,30 @@
 
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
 #include <string>
-#include <system_error>
 
 #include "core/application.h"
-#include "core/paths.h"
+#include "graphics/basic_renderer.h"
 #include "graphics/render_instance.h"
 #include "graphics/perform_renderer.h"
-#include "graphics/disk_io.h"
-#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
-#include "graphics/manage_resources.h"
 
 namespace {
     bool g_shutdownRan = false;
     int  g_framesBeforeClose = 10;
 
-    // Borrows the feature examples' basic renderer (examples/shared/basicRenderer) so the test drives a real ConstructedRenderer
-    // through the real submit path rather than a stand-in. The scene is left empty: this test
-    // is about the loop, not about what is drawn.
-    //
-    // The renderer has to be loaded with the working directory set to the folder that holds it.
-    // Its resources.json names shader binaries as "./basicRenderer/shaders/basic.bin"
-    // -- paths inside the data, resolved against the process CWD -- so pointing the loader at
-    // the folder from elsewhere finds the JSON and then fails on every shader it names.
-    // executableDirectory() does not help here: the coupling is in the scene data, not the call.
-    // Making renderer folders relocatable is its own change; this test just obeys the rule.
-    const char* kExampleDir      = "../../examples/shared";
-    const char* kRendererDir     = "./basicRenderer/";
+    // Draws with the engine's basic renderer, so the test drives a real ConstructedRenderer through
+    // the real submit path rather than a stand-in. The scene is left empty: this test is about the
+    // loop, not about what is drawn.
 
     void startup(projv::Application& app) {
-        std::error_code chdirError;
-        std::filesystem::current_path(
-            projv::core::executableDirectory() / kExampleDir, chdirError);
-        if (chdirError) {
-            std::fprintf(stderr, "FAIL: cannot enter %s: %s\n",
-                         kExampleDir, chdirError.message().c_str());
-            std::exit(5);
-        }
-
         auto& ri = app.world.ctx().emplace<projv::graphics::RenderInstance>();
         ri.initialize(320, 240, "ProjectV exit-path test");
 
         auto& scene   = app.world.ctx().emplace<projv::Scene>();
         auto& gpuData = app.world.ctx().emplace<projv::GPUData>();
 
-        projv::RendererSpecification spec =
-            projv::graphics::loadRendererSpecification(kRendererDir);
-        ri.addRendererSpecification(1, spec);
-        bgfx::ShaderHandle vsh = projv::graphics::loadEngineShader("vs_quad");
-        ri.setActiveRenderer(projv::graphics::constructRendererSpecification(
-            ri.getRendererSpecification(1), vsh));
+        ri.setActiveRenderer(projv::graphics::createBasicRenderer());
 
         gpuData = projv::graphics::createTexturesForScene(scene);
     }
@@ -114,7 +86,8 @@ namespace {
     void render(projv::Application& app) {
         auto& ri = app.world.ctx().get<projv::graphics::RenderInstance>();
         auto& gpuData = app.world.ctx().get<projv::GPUData>();
-        projv::graphics::renderConstructedRenderer(ri, ri.getActiveRenderer(), &gpuData);
+        // drawBasicRenderer ends in renderConstructedRenderer.
+        projv::graphics::drawBasicRenderer(ri, ri.getActiveRenderer(), gpuData, projv::CameraView{});
     }
 
     void shutdown(projv::Application&) {

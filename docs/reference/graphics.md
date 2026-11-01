@@ -68,10 +68,29 @@ view.forward = direction;           // need not be unit length
 graphics::setCamera(*renderer, view);
 ```
 
+## `graphics/basic_renderer.h`
+
+[`include/graphics/basic_renderer.h`](../../include/graphics/basic_renderer.h): the engine's basic
+renderer, a way to see a scene without writing one. One ray a pixel, the voxel's colour under a sun and
+sky; its shader is embedded (`basic`, below). Guide: [Draw a scene](../guides/draw-a-scene.md).
+
+| Name | What |
+|---|---|
+| `installBasicRenderer(app, renderInstance, options)` | Creates it, makes it active, emplaces `BasicRenderer` and a `CameraView`, and adds the Render system `"basic renderer"`: flush the `Scene` into the `GPUData`, draw from the `CameraView` (all `world.ctx()`) |
+| `BasicRendererOptions` | The look: `sunDirection`, `sunColour`, `ambientAbove`/`Below`, `skyAbove`/`Below` (sRGB), `crosshair` (until programs draw UI) |
+| `BasicRenderer` | The `world.ctx()` resource: `renderer`, `options` (change any time) |
+| `createBasicRenderer()` | → `std::shared_ptr<ConstructedRenderer>`, or nullptr (logged); bgfx must be up |
+| `drawBasicRenderer(renderInstance, renderer, gpu, view, options)` | One frame, submitted; uploads nothing |
+
+```cpp
+graphics::installBasicRenderer(app, window, {.crosshair = true});
+app.world.ctx().get<CameraView>() = view;   // each frame
+```
+
 ## `graphics/engine_shaders.h`
 
 [`include/graphics/engine_shaders.h`](../../include/graphics/engine_shaders.h): the engine's own
-shaders ([`shaders/engine/`](../../shaders/engine/vs_quad.sc)), compiled into the library per profile.
+shaders ([`shaders/engine/`](../../shaders/engine/basic.frag)), compiled into the library per profile.
 Nothing is staged or read from disk.
 
 | Name | What |
@@ -82,6 +101,7 @@ Nothing is staged or read from disk.
 | Shader | What |
 |---|---|
 | `vs_quad` | The fullscreen quad every pass draws: the vertex shader for `constructRendererSpecification` |
+| `basic` | The basic renderer's fragment shader ([`basic_renderer.h`](#graphicsbasic_rendererh)) |
 
 ```cpp
 auto renderer = graphics::constructRendererSpecification(spec, graphics::loadEngineShader("vs_quad"));

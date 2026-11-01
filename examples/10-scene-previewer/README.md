@@ -1,6 +1,6 @@
 # 10 — Scene Previewer
 
-A minimal, fast viewer for any Compose scene folder. It draws with the feature examples' [basic renderer](../shared/basicRenderer/): one primary ray per pixel, and the colour stored in the material palette under one fixed sun. No shadow ray, no ambient occlusion, no global illumination.
+A minimal, fast viewer for any Compose scene folder. It draws with the engine's [basic renderer](../../docs/guides/draw-a-scene.md): one primary ray per pixel, and the colour stored in the material palette under one fixed sun. No shadow ray, no ambient occlusion, no global illumination.
 
 ## Why
 
@@ -96,8 +96,8 @@ Both are reported at startup, along with the chunk and component counts:
 
 ## Renderer
 
-One pass: [`examples/shared/basicRenderer`](../shared/basicRenderer/), staged beside the binary as
-`basicRenderer/` and set up by [`basic_renderer.h`](../shared/basic_renderer.h). It is the renderer every
+One pass: the engine's basic renderer, compiled into the library and installed with
+`graphics::installBasicRenderer` ([guide](../../docs/guides/draw-a-scene.md)). It is the renderer every
 feature example uses. It fires one ray per pixel through the voxel DDA (`pjv_utils_DDA.sc`) and shades
 `fetchVoxelColor` by a fixed sun (N·L) and a little sky light, so every face is readable. There is no
 anti-aliasing and no tone map, so a lit face shows the palette colour almost unchanged.
@@ -111,7 +111,7 @@ anti-aliasing and no tone map, so a lit face shows the palette colour almost unc
 | **Logging** | `info`/`warn`/`perf` via the spdlog wrapper for the scene report and frame profiling |
 | **Compose I/O** | `loadComposeFromDisk` — opens any Compose scene folder |
 | **GPU Interface** | `createTexturesForScene`, `GPUData` — uploads the voxel scene to the GPU |
-| **Render Instance** | Window creation, window resolution query; the renderer through `basic_renderer.h` |
+| **Render Instance** | Window creation, window resolution query; the renderer through `installBasicRenderer`; a bench system ordered after it |
 | **Scene** | `Scene::chunks`, `ChunkHeader::position` / `scale` — read directly for automatic framing |
 
 ## Third-Party Dependencies

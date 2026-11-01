@@ -47,7 +47,7 @@ cd build/examples/playground_demo   && ./playground_demo    # a sandbox to break
 
 Examples live in `examples/`, numbered in reading order (`00-hello-voxel` .. `95-playground-demo`).
 Two kinds: **feature examples** (`00`-`70`) teach one part of the engine and draw with
-`examples/shared/basicRenderer` (one pass: albedo under a fixed sun; `shared/basic_renderer.h`), unless
+the engine's basic renderer (one pass: albedo under a fixed sun; `graphics::installBasicRenderer`, `graphics/basic_renderer.h`), unless
 rendering is what they teach (`30-renderers`, `40-advanced-renderer`, the scene editor's viewport), or the
 look is the point (`50-terrain-generator` draws with the gallery's restir-pt, its uniforms in
 `shared/restir_pt.h`).

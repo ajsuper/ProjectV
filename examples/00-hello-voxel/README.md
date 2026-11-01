@@ -103,7 +103,7 @@ its renderer folder. `projv::core::executableDirectory()` is the one piece of in
 application cannot compute for itself; everything after it is ordinary path composition:
 
 ```cpp
-const auto assets = projv::core::executableDirectory() / "basicRenderer";
+const auto assets = projv::core::executableDirectory() / "renderer";
 ```
 
 There is no global "asset root" in the engine and nothing to configure — several roots are just
@@ -111,21 +111,23 @@ several paths.
 
 ## The renderer
 
-`basicRenderer/` is [`examples/shared/basicRenderer`](../shared/basicRenderer/), the renderer every
-feature example draws with. The build stages it next to the binary. It is one pass, straight to the back
-buffer. `render.json` is the pass order: a single entry with `frameBufferOutputID: -1`, meaning the window.
-`resources.json` names the shader and declares the four uniforms it reads. There are no render
-targets and no framebuffers, which makes this the smallest renderer the engine can be given.
+`renderer/` is the engine's basic renderer written out as a renderer folder, the form every renderer of
+your own takes. The build compiles its shader and stages it next to the binary. It is one pass, straight to
+the back buffer. `render.json` is the pass order: a single entry with `frameBufferOutputID: -1`, meaning the
+window. `resources.json` names the shader. It declares no uniforms: the camera and the pass's size are the
+engine's (`pjv_engine.sc`), uploaded for every renderer. There are no render targets and no framebuffers,
+which makes this the smallest renderer the engine can be given.
 
-`shaders/basic.frag` is the whole renderer. It builds a camera ray with `rayStartDirection`, marches it with
-`raySceneIntersect`, and shades `fetchVoxelColor` with one fixed sun (plain N·L) plus a little sky
-light. Both calls come from `pjv_utils_DDA.sc`, the engine's shader library, which the build puts on
-shaderc's include path automatically. There are no shadows, no AO and no anti-aliasing. The looks are in the
-`_demo` examples, and the techniques are in [30-renderers](../30-renderers/) and
+`shaders/basic.frag` is the whole renderer. It builds a camera ray with `pjvViewRayDirection`, marches it
+with `raySceneIntersect`, and shades `fetchVoxelColor` with one fixed sun (plain N·L) plus a little sky
+light. They come from the engine's shader library (`pjv_camera.sc`, `pjv_utils_DDA.sc`), which the build
+puts on shaderc's include path automatically. There are no shadows, no AO and no anti-aliasing. The looks
+are in the `_demo` examples, and the techniques are in [30-renderers](../30-renderers/) and
 [40-advanced-renderer](../40-advanced-renderer/).
 
 This example sets the renderer up by hand, so the whole startup sequence is visible. The other feature
-examples call [`basic_renderer.h`](../shared/basic_renderer.h), which does the same in two calls.
+examples draw with the same renderer from the engine, `graphics::installBasicRenderer`
+([guide](../../docs/guides/draw-a-scene.md)), which does it in one call.
 
 ## ProjectV features used
 

@@ -31,10 +31,10 @@
 #include <thread>
 
 #include "arena.h"
-#include "basic_renderer.h"
 #include "core/application.h"
 #include "core/log.h"
 #include "core/paths.h"
+#include "graphics/basic_renderer.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/input.h"
 #include "graphics/manage_resources.h"
@@ -330,28 +330,26 @@ namespace {
 
         if (options.headless) return;
         auto& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
-        // The feature examples' basic renderer (examples/shared/basicRenderer): the voxels' colours under
-        // a fixed sun. This example is about the network; the party and playground demos draw better.
-        basic_renderer::install(renderInstance, here);
+        // The engine's basic renderer: the voxels' colours under a fixed sun, and a crosshair for what a
+        // throw or a blast aims at. This example is about the network; the party and playground demos
+        // draw better. Players, crates and rubble come and go as chunks: it uploads them, and where
+        // they moved to, each frame.
+        projv::graphics::installBasicRenderer(app, renderInstance, {.crosshair = true});
         app.world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
     }
 
-    void render(projv::Application& app) {
+    void view(projv::Application& app) {
         if (options.headless) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
             return;
         }
-        auto& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
-        auto& scene = app.world.ctx().get<projv::Scene>();
-        auto& gpuData = app.world.ctx().get<projv::GPUData>();
         const auto& camera = app.world.ctx().get<Camera>();
-        // Behind and above your own player, looking where the camera faces. Players, crates and rubble
-        // come and go as chunks: draw uploads them, and where they moved to.
+        // Behind and above your own player, looking where the camera faces.
         vec3 direction{std::cos(camera.pitch) * std::cos(camera.yaw), std::sin(camera.pitch),
                        std::cos(camera.pitch) * std::sin(camera.yaw)};
-        vec3 eye = ownPosition(app.world) + vec3(0.0f, 1.6f, 0.0f) - direction * 7.0f;
-        // A crosshair: what a throw or a blast aims at.
-        basic_renderer::draw(renderInstance, gpuData, scene, eye, direction, {.crosshair = true});
+        auto& view = app.world.ctx().get<projv::CameraView>();
+        view.position = ownPosition(app.world) + vec3(0.0f, 1.6f, 0.0f) - direction * 7.0f;
+        view.forward = direction;
     }
 
     void shutdown(projv::Application& app) {
@@ -391,7 +389,7 @@ int main(int argc, char** argv) {
     app.addSystem(projv::Stage::Update,   "play",    playSystem);
     app.addSystem(projv::Stage::Update,   "watch",   watchSystem);
     app.addSystem(projv::Stage::Update,   "effects", effectsSystem);
-    app.addSystem(projv::Stage::Render,   "render",  render);
+    app.addSystem(projv::Stage::Render,   "view",    view, {.before = "basic renderer"});
     app.addSystem(projv::Stage::Shutdown, "shutdown", shutdown);
     app.run();
     return exitCode;

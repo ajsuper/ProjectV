@@ -16,13 +16,14 @@ myRenderer/
 
 ## 1. One pass to the window
 
-Start from [`examples/shared/basicRenderer`](../../examples/shared/basicRenderer/), the renderer
-[`examples/00-hello-voxel`](../../examples/00-hello-voxel/) draws with. `resources.json`
+Start from [`examples/00-hello-voxel/renderer`](../../examples/00-hello-voxel/renderer/), the
+engine's basic renderer written out as a folder. To only see a scene, no folder is needed:
+[Draw a scene](draw-a-scene.md). `resources.json`
 (strict JSON, no comments):
 
 ```json
 {
-  "uniforms": [ {"name": "windowRes", "type": "vec4"} ],
+  "uniforms": [ {"name": "sunDirection", "type": "vec4"} ],
   "shaders":  [ {"shaderID": 1, "path": "./myRenderer/shaders/main.bin"} ],
   "textures": [],
   "framebuffers": []
@@ -45,7 +46,7 @@ Start from [`examples/shared/basicRenderer`](../../examples/shared/basicRenderer
   reads it through `pjv_camera.sc` (`pjvViewRayOrigin`/`pjvViewRayDirection`, and `pjvPrevViewUV` to
   reproject into the frame before).
 
-`main.frag`: [basic.frag](../../examples/shared/basicRenderer/shaders/basic.frag)
+`main.frag`: [basic.frag](../../examples/00-hello-voxel/renderer/shaders/basic.frag)
 (`pjvViewRayDirection` → `raySceneIntersect` → `fetchVoxelColor`).
 
 ## 2. Compile the shaders

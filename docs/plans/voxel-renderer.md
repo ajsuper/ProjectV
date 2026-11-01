@@ -2,7 +2,8 @@
 
 The `_demo` examples' renderer (`examples/shared/voxelRenderer`, set up by `examples/shared/voxel_renderer.h`):
 Voxel Mayhem, Playground and Party, plus the gallery (`renderer_gallery --renderer voxel`). Multiplayer used it
-until 2026-10-20. Since then the feature examples draw with `examples/shared/basicRenderer`.
+until 2026-10-20. Since then the feature examples draw with the basic renderer, in the engine since 2026-11-01
+([shader-library.md](shader-library.md) S4).
 Explosion runs a fork (`85-explosion-demo/nightRenderer`). Started 2026-10-20.
 
 Priorities, in order: **1 performance, 2 a polished feel** (responsive, no ghosting or smearing on

@@ -58,8 +58,8 @@
 #include "graphics/input.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
+#include "graphics/basic_renderer.h"
 #include "graphics/render_instance.h"
-#include "basic_renderer.h"
 #include "runtime/entities.h"
 #include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
@@ -728,7 +728,9 @@ void startup(projv::Application& app) {
         }
     });
 
-    basic_renderer::install(renderInstance, here);
+    // The engine's basic renderer, with a crosshair to aim the throws and pops. Each frame it uploads
+    // new prefabs' geometry, moved bodies' headers and deleted components in one flush, then draws.
+    projv::graphics::installBasicRenderer(app, renderInstance, {.crosshair = true});
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
     projv::core::info("Sandbox: {} spawner(s) found in the arena. Left click throws, right click pops.",
@@ -747,15 +749,11 @@ void startup(projv::Application& app) {
     if (world.ctx().contains<SelfTest>()) projv::graphics::setCursorCaptured(app, renderInstance, false);
 }
 
-void render(projv::Application& app) {
-    World& world = app.world;
-    auto& renderInstance = world.ctx().get<projv::graphics::RenderInstance>();
-    auto& scene = world.ctx().get<projv::Scene>();
-    auto& gpuData = world.ctx().get<projv::GPUData>();
-    const auto& camera = world.ctx().get<Camera>();
-
-    // New prefabs' geometry, moved bodies' headers, and deleted components go up in draw's one flush.
-    basic_renderer::draw(renderInstance, gpuData, scene, camera.position, camera.forward(), {.crosshair = true});
+void view(projv::Application& app) {
+    const auto& camera = app.world.ctx().get<Camera>();
+    auto& view = app.world.ctx().get<projv::CameraView>();
+    view.position = camera.position;
+    view.forward = camera.forward();
 }
 
 void shutdown(projv::Application& app) {
@@ -908,7 +906,7 @@ int main(int argc, char** argv) {
     app.addSystem(projv::Stage::Update,      "title bar", titleBar);
     app.addSystem(projv::Stage::PostUpdate,  "follow walker", followWalker, {.after = "physics: present"});
     app.addSystem(projv::Stage::Update,      "self-test", selfTestSystem);
-    app.addSystem(projv::Stage::Render,      "render",    render);
+    app.addSystem(projv::Stage::Render,      "view",      view, {.before = "basic renderer"});
     app.addSystem(projv::Stage::Shutdown,    "shutdown",  shutdown);
     app.run();
     return 0;

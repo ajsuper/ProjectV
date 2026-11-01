@@ -141,8 +141,14 @@ namespace projv::graphics {
     std::unordered_map<uint32_t, bgfx::ShaderHandle> constructShaders(const std::vector<Shader>& shaders) {
         std::unordered_map<uint32_t, bgfx::ShaderHandle> constructedShaderHandles;
         for (size_t i = 0; i < shaders.size(); i++) {
-            Shader shader = shaders[i];
-            constructedShaderHandles[shader.shaderID] = loadShader(shader.filePath);
+            const Shader& shader = shaders[i];
+            // A shader with no path is its contents: one built in memory, such as an engine shader.
+            if (shader.filePath.empty()) {
+                constructedShaderHandles[shader.shaderID] = bgfx::createShader(
+                    bgfx::copy(shader.shaderFileContents.data(), uint32_t(shader.shaderFileContents.size())));
+            } else {
+                constructedShaderHandles[shader.shaderID] = loadShader(shader.filePath);
+            }
         }
         return constructedShaderHandles;
     }

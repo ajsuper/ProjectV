@@ -132,7 +132,8 @@ Keeping it current: [Editing → Getting it to the GPU](editing.md#getting-it-to
 
 | Where | What |
 |---|---|
-| [`examples/shared/basicRenderer`](../../examples/shared/basicRenderer/) | One pass: the voxel's colour under a fixed sun and sky |
+| [`graphics/basic_renderer.h`](../../include/graphics/basic_renderer.h) | The engine's: one pass, the voxel's colour under a sun and sky; no folder ([Draw a scene](../guides/draw-a-scene.md)) |
+| [`examples/00-hello-voxel/renderer`](../../examples/00-hello-voxel/renderer/) | The same, as a folder to start your own from |
 | [`examples/10-scene-previewer`](../../examples/10-scene-previewer/) | Albedo only: shows what is in a scene |
 | [`examples/30-renderers`](../../examples/30-renderers/) | Renderers over one scene: a path-traced reference, fast direct light, half-resolution reconstruction, ReSTIR PT, and the demos' voxel renderer |
 | [`examples/40-advanced-renderer`](../../examples/40-advanced-renderer/) | Fourteen passes: probe GI, animation, transparency, refraction |

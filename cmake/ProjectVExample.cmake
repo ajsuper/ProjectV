@@ -13,7 +13,7 @@
 #       ASSET_FILES  LDR_RGBA_7.png                     # optional
 #       INCLUDE_DIRS include                            # optional
 #       LIBRARIES    ...                                # optional extra deps
-#       RENDERER     ../shared/basicRenderer            # optional: renderer folder(s) several examples share
+#       RENDERER     ../shared/voxelRenderer            # optional: renderer folder(s) several examples share
 #   )
 #
 # A shared RENDERER folder holds render.json, resources.json, shaders/ and, if it has any, include/

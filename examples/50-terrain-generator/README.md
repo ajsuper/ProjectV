@@ -221,7 +221,7 @@ watching are `generateChunkVoxels` (worker cost), `updateChunkFromBrickMap` (tre
 | **Editing** | `queueVoxelAdd`, `queueVoxelRemove`, `updateScene`, `expandGridToInclude` |
 | **Scene query** | Grid cell lookup, component transforms |
 | **GPU interface** | `createTexturesForScene`, `flushSceneUpdates`, `updateChunkHeader` — incremental upload is the load-bearing one |
-| **Render instance** | Window creation; the renderer through `basic_renderer.h` |
+| **Render instance** | Window creation; the renderer through `restir_pt.h` |
 
 ## Third-party dependencies
 

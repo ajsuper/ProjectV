@@ -175,8 +175,8 @@ geometry blob on the GPU and one collision shape in the physics until a blast ed
 
 ## Rendering
 
-The feature examples' [basic renderer](../shared/basicRenderer/), set up by
-[`basic_renderer.h`](../shared/basic_renderer.h): one ray a pixel, the voxels' colours under a fixed
+The engine's [basic renderer](../../docs/guides/draw-a-scene.md), installed with
+`graphics::installBasicRenderer`: one ray a pixel, the voxels' colours under a fixed
 sun, and a crosshair to aim with. The example is about what the bodies do, so there are no shadows and
 no AO. [80-voxel-mayhem-demo](../80-voxel-mayhem-demo/) shows the same physics under a full renderer.
 

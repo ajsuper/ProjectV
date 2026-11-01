@@ -1,0 +1,8 @@
+{
+    "uniforms": [],
+    "shaders": [
+        {"shaderID": 1, "path": "./renderer/shaders/basic.bin"}
+    ],
+    "textures": [],
+    "framebuffers": []
+}

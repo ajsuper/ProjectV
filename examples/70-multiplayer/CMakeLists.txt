@@ -6,8 +6,6 @@ projv_add_example(mp_server
 )
 projv_add_example(mp_client
     SOURCES      client.cpp
-    RENDERER     ../shared/basicRenderer
-    INCLUDE_DIRS ../shared
     ASSET_DIRS   arena
 )
 projv_add_example(mp_bots
