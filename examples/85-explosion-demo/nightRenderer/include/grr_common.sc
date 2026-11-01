@@ -30,7 +30,7 @@ void grrCameraBasis(vec3 direction, out vec3 forward, out vec3 right, out vec3 u
     up = basis.up;
 }
 
-// The ray through screen position uv -- the same map as the engine's rayStartDirection.
+// The ray through screen position uv -- the same map as the engine's pjvPerspectiveRay.
 vec3 grrCameraRay(vec2 uv, vec2 res, vec3 direction) {
     return pjvPerspectiveRay(uv, res, direction, pjvViewTanHalfFov());
 }

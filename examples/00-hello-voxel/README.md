@@ -120,7 +120,7 @@ which makes this the smallest renderer the engine can be given.
 
 `shaders/basic.frag` is the whole renderer. It builds a camera ray with `pjvViewRayDirection`, marches it
 with `raySceneIntersect`, and shades `fetchVoxelColor` with one fixed sun (plain N·L) plus a little sky
-light. They come from the engine's shader library (`pjv_camera.sc`, `pjv_utils_DDA.sc`), which the build
+light. They come from the engine's shader library (`pjv_camera.sc`, `pjv_scene.sc`), which the build
 puts on shaderc's include path automatically. There are no shadows, no AO and no anti-aliasing. The looks
 are in the `_demo` examples, and the techniques are in [30-renderers](../30-renderers/) and
 [40-advanced-renderer](../40-advanced-renderer/).

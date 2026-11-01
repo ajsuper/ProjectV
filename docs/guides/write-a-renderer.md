@@ -57,7 +57,7 @@ projv_compile_shaders(TARGET my_app SHADER_DIRS myRenderer/shaders INCLUDE_DIRS 
 ```
 
 `vs_*.sc` → vertex, `*.frag` → fragment, `.bin` beside each; other `.sc` files are includes.
-The engine's shader library (`shaders/include/`: `pjv_camera.sc`, `pjv_utils_DDA.sc`, ...) and
+The engine's shader library (`shaders/include/`: `pjv_camera.sc`, `pjv_scene.sc`, ...) and
 `bgfx_shader.sh` are always on the path. In-repo:
 `projv_add_example(... SHADERS dir SHADER_INCLUDE_DIRS dir)`.
 

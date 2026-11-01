@@ -14,7 +14,7 @@ uniform vec4 passInputRes[8];     // per input slot, as passTargetRes; zero for 
 uniform vec4 pjvAnimTime;         // (seconds, 0, 0, 0)
 
 // The motion table: three vec4 per set, sixteen sets (PROJV_MOTION_SET_VEC4S). Laid out and read in
-// pjv_utils_DDA.sc; all zero (nothing moves) unless the program configures it.
+// pjv_motion.sc; all zero (nothing moves) unless the program configures it.
 uniform vec4 pjvMotionSets[48];
 
 // The camera this pass draws from, and the one its renderer last drew from (CameraView,

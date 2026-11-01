@@ -82,7 +82,7 @@ Declare them in the shader; not listed in `resources.json`:
 |---|---|
 | `passTargetRes` | `(w, h, 1/w, 1/h)` of this pass's target. Use it, not a renderer-wide `windowRes`, for per-pixel maths. |
 | `passInputRes[8]` | The same for each bound input, by sampler slot |
-| `tree64Dims`, `voxelTypeDims`, `paletteDims` | Sizes of the scene textures (used by `pjv_utils_DDA.sc`) |
+| `tree64Dims`, `voxelTypeDims`, `paletteDims` | Sizes of the scene textures (used by `pjv_scene.sc`) |
 | `pjvMotionSets[48]`, `pjvAnimTime` | The animation table and time (`GPUData::animation`) |
 
 Your own uniforms are `vec4`/`mat3`/`mat4` in `resources.json`, set with `setUniformToValue`
@@ -94,7 +94,7 @@ previous frame, and read in a shader through `pjv_camera.sc`.
 
 ```glsl
 #include <bgfx_shader.sh>
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 #include <pjv_camera.sc>            // the engine camera
 
 void main() {

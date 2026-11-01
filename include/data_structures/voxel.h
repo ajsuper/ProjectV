@@ -39,7 +39,7 @@ namespace projv{
     // truncating the tail and re-stamping the new last level as leaves. One step therefore drops
     // exactly one level = 4x coarser per axis -- never 2x. The shader derives its descent depth
     // from the header's resolution as `treeLevels = log2(resolution)/2.0` with an implicit
-    // truncation (pjv_utils_DDA.sc), so resolution must stay an exact power of 4: a 64^3 chunk
+    // truncation (pjv_scene.sc), so resolution must stay an exact power of 4: a 64^3 chunk
     // goes 64 -> 16 -> 4. Resolution 32 would truncate to 2 levels and be traversed as if it were
     // 16^3, reading the tree at the wrong depth.
     //

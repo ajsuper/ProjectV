@@ -88,7 +88,7 @@ $input v_texcoord0
 #include <pjv_bsdf.sc>       // pjvBsdfAlpha; and pjv_microfacet.sc: pjvSampleGgxHalf, pjvSmithG1, pjvFresnelSchlick
 
 // Raised well above the shared default of 16, and defined BEFORE the include so it overrides the
-// #ifndef in pjv_utils_DDA.sc for this shader only.
+// #ifndef in pjv_scene.sc for this shader only.
 //
 // What decides how many transparent voxels a ray crosses is ANGLE, not thickness: a ray entering a
 // two-voxel slab at 45 degrees already crosses three or four, and at grazing incidence dozens. So a
@@ -116,7 +116,7 @@ $input v_texcoord0
 // The traversal features this pass asks for (pjv_scene.sc's gates).
 #define PJV_SCENE_TRANSPARENCY
 #define PJV_SCENE_REFRACTION
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 
 // Transparent layers the primary ray may see through. One fewer than the iteration bound above, so
 // the opaque surface behind the last layer still has an iteration left to resolve in. Render mode's

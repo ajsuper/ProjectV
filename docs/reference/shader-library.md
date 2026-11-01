@@ -12,7 +12,6 @@ map.
 | [`pjv_scene.sc`](../../shaders/include/pjv_scene.sc) | The scene's textures, `RayQuery`, the march, `raySceneIntersect` and the `fetchVoxel*` lookups |
 | [`pjv_material.sc`](../../shaders/include/pjv_material.sc) | The palette and material bytes, `VoxelMaterial`, `decodeMaterial` |
 | [`pjv_motion.sc`](../../shaders/include/pjv_motion.sc) | The motion table, its sway and advection fields, `pjvAnimSeconds` |
-| [`pjv_utils_DDA.sc`](../../shaders/include/pjv_utils_DDA.sc) | Temporary: all of the above, `pjv_camera.sc` and `WORLD_SCALE`, until every shader includes only what it uses |
 
 ```glsl
 #include <bgfx_shader.sh>
@@ -68,7 +67,7 @@ vec3 position   = ray.origin + ray.direction * sh.hit.rayT;   // only valid with
 
 | Check | What |
 |---|---|
-| `ctest -R shader_library` | Every file compiles alone and together (SPIR-V, GLSL 440, Metal); no `uniform` outside `pjv_engine.sc`; every file-scope symbol `pjv`/`Pjv`/`PJV`. `pjv_utils_DDA.sc`, `pjv_scene.sc`, `pjv_material.sc` and `pjv_motion.sc` are compiled but not scanned until they are prefixed |
+| `ctest -R shader_library` | Every file compiles alone and together (SPIR-V, GLSL 440, Metal); no `uniform` outside `pjv_engine.sc`; every file-scope symbol `pjv`/`Pjv`/`PJV`. `pjv_scene.sc`, `pjv_material.sc` and `pjv_motion.sc` are compiled but not scanned until they are prefixed. `pjv_scene.sc` is also compiled with every gate on |
 | `tools/shader_sizes.py [--save f] [--against f]` | Every compiled shader's size (renderer `.bin`s and the embedded engine shaders), or the change since a saved table |
 | `projv_imgdiff before after [--diff out]` | Two captures (or two folders of them) within the tolerance: mean ≤ 0.1%, ≤ 0.1% of pixels off by more than 2/255; the largest difference reported |
 

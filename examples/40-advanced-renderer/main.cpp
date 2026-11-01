@@ -367,7 +367,7 @@ struct AnimControls {
 // =============================================================================
 // The whole of this example's side of it: name which materials move, describe the field as motion-
 // table rows, bake, and set the clock each frame. There is no shader here for the field, the
-// envelope, the resolve or the flame -- all four are in shaders/include/pjv_utils_DDA.sc, reached through a
+// envelope, the resolve or the flame -- all four are in shaders/include/pjv_scene.sc, reached through a
 // RayQuery flag.
 //
 // That is worth stating as a size rather than a principle. What used to be under this banner was

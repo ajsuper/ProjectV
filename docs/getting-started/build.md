@@ -92,7 +92,7 @@ scene = projv::utils::loadComposeFromDisk((assets / "scenes/Castle").string());
 
 `projv_compile_shaders()` ([`cmake/ProjectVShaders.cmake`](../../cmake/ProjectVShaders.cmake)) runs
 bgfx's `shaderc` over `vs_*.sc` and `*.frag`, writing each `.bin` beside its source, with
-`pjv_utils_DDA.sc` and bgfx's headers on the include path.
+`pjv_scene.sc` and bgfx's headers on the include path.
 
 ```cmake
 projv_compile_shaders(TARGET my_app SHADER_DIRS myRenderer/shaders)

@@ -530,10 +530,20 @@ envelope view), all off by default.
   - Shaders whose queries were constant (`pjvPrimaryQuery` with no options) had it folded away
     already, and shrink 1-3% (the basic renderer, the gallery's G-buffers, the night renderer).
   - The advanced G-buffer, which asks for everything, is -0.4%.
-- Captures, against c664a39, with your local `RESTIR_GI_MAX_GLOSSINESS` change applied to both:
+- Captures, against c664a39, with the working tree's uncommitted `RESTIR_GI_MAX_GLOSSINESS` 0.9 in both:
   - bit-identical: the gallery's five renderers at the baseline view, the sandbox's still scene, the
     editor viewport and Render mode;
   - the advanced renderer, largest difference 1/255.
+
+*Includes.* `pjv_utils_DDA.sc` is deleted.
+- The 20 files that included it now include `pjv_scene.sc`. Every one marches rays, so none gets
+  less than the traversal, and since S2 each includes `pjv_camera.sc` itself.
+- `WORLD_SCALE` has left the library. The cascade files already defined it, and the fast
+  renderer's G-buffer, its one other user, defines its own.
+- Comments and docs that named the file or `rayStartDirection` now name `pjv_scene.sc` or
+  `pjvPerspectiveRay`.
+- Sizes are unchanged from the gates step: the umbrella added only `pjv_camera.sc` and
+  `WORLD_SCALE`, and nothing else changed.
 
 ## Open questions
 

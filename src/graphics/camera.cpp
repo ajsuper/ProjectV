@@ -4,7 +4,7 @@
 
 namespace projv::graphics {
     CameraBasis cameraBasis(core::vec3 forward) {
-        // Line for line pjv_camera.sc's pjvCameraBasis, and so rayStartDirection's and
+        // Line for line pjv_camera.sc's pjvCameraBasis, and so pjvPerspectiveRay's and
         // utils::rayDirectionThroughImage's.
         CameraBasis basis;
         basis.forward = glm::normalize(forward);

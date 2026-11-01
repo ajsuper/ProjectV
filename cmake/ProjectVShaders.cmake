@@ -201,7 +201,7 @@ function(_projv_bgfx_shader_include outVar)
         "projv_compile_shaders: could not locate bgfx_shader.sh. Shaders will fail to compile.")
 endfunction()
 
-# The engine's shader library (shaders/include/: pjv_engine.sc, pjv_color.sc, pjv_utils_DDA.sc, ...).
+# The engine's shader library (shaders/include/: pjv_engine.sc, pjv_color.sc, pjv_scene.sc, ...).
 # Found beside the C++ headers the target exports, so ask the target rather than guessing: those are
 # include/ in a build tree, whose sibling shaders/include/ is the library, and <prefix>/include/projv
 # in an install tree, which carries it as shaders/.

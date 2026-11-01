@@ -56,7 +56,7 @@ $input v_texcoord0
 #include <pjv_atmosphere.sc>   // pjvPhaseHenyeyGreenstein: haze throws sunlight onward, which is why god rays are brightest towards the sun
 
 // Raised well above the shared default, and defined BEFORE the include so it overrides the
-// #ifndef in pjv_utils_DDA.sc for this shader only -- the other examples keep the cheap bound.
+// #ifndef in pjv_scene.sc for this shader only -- the other examples keep the cheap bound.
 //
 // The old budget of 4 was sized by thinking about thickness, which is the wrong variable: what
 // decides how many transparent voxels a ray crosses is ANGLE. A ray entering a two-voxel slab at 45
@@ -69,7 +69,7 @@ $input v_texcoord0
 // The traversal features this path tracer asks for (pjv_scene.sc's gates).
 #define PJV_SCENE_TRANSPARENCY
 #define PJV_SCENE_REFRACTION
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_bsdf.sc>   // the material model: GGX over Lambert, shared with the renderer gallery
 

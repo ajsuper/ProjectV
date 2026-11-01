@@ -53,7 +53,7 @@ $input v_texcoord0
 #define PJV_SCENE_REFRACTION
 #define PJV_SCENE_ANIMATION
 #define PJV_SCENE_MATERIAL
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set

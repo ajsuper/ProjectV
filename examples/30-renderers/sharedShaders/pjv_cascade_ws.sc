@@ -16,12 +16,12 @@
 // change in this 2D-texture pass framework and buys little for a primary-view diffuse GI.
 //
 // Each thin cascadeN.frag declares gPos/gNormal (+ upperCascade unless top), includes the
-// voxel DDA (pjv_utils_DDA.sc) and then this file, sets CASCADE_INDEX (+ IS_TOP for the
+// voxel DDA (pjv_scene.sc) and then this file, sets CASCADE_INDEX (+ IS_TOP for the
 // last cascade), and writes computeCascadeTexel().
 //
 // Requires (declared/included by the thin file BEFORE this include):
 //   SAMPLER2D gPos, gNormal (+ upperCascade unless IS_TOP)
-//   #include <pjv_utils_DDA.sc>   (Ray/RayQuery/raySceneIntersect/fetchVoxelData + scene)
+//   #include <pjv_scene.sc>   (Ray/RayQuery/raySceneIntersect/fetchVoxelData + scene)
 // pjv_cascade_common.sc (below) brings the cascade math, constants and pjv_sun_sky.
 // =============================================================================
 

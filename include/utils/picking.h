@@ -103,7 +103,7 @@ namespace projv::utils {
 
     /**
      * Builds the world-space ray through a point on a rendered image, matching the ray generation in
-     * pjv_utils_DDA.sc (rayStartDirection) exactly — so what the editor picks is what the viewport
+     * pjv_camera.sc (pjvPerspectiveRay) exactly — so what the editor picks is what the viewport
      * drew under the cursor.
      *
      * @param uv Position within the image, [0,1] from its top-left corner.

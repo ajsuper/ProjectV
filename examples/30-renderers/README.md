@@ -53,7 +53,7 @@ cmake --build --preset dev --target renderer_gallery
 ```
 
 That builds every renderer's shaders too. All of them share the engine's voxel DDA
-(`pjv_utils_DDA.sc`, on the shader include path automatically) and this example's own
+(`pjv_scene.sc`, on the shader include path automatically) and this example's own
 `sharedShaders/` — the sun/sky model (with `pjv_path_light.sc`, the path tracers' version of it) and
 the cascade maths — so they stay in step with each other and with the engine.
 

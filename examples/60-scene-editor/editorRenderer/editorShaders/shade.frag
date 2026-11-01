@@ -65,7 +65,7 @@ $input v_texcoord0
 //                 texture of every input framebuffer in order, so FBO 1's fourth
 //                 attachment is what pushed the light buffer from 3 to 4.
 //                 The shadow ray additionally reads the scene itself, through the
-//                 samplers pjv_utils_DDA.sc declares at slots 9-15; the engine binds
+//                 samplers pjv_scene.sc and pjv_material.sc declare at slots 9-15; the engine binds
 //                 those for every pass, so nothing in render.json changes for it.
 // Output (FBO 4): shadedColor.
 // =============================================================================
@@ -88,7 +88,7 @@ $input v_texcoord0
 // Must be defined BEFORE the include to override the header's #ifndef default.
 #define MAX_PEEL_ITERATIONS 9
 #define PJV_SCENE_TRANSPARENCY   // shadow rays see through glass (pjv_scene.sc's gates)
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #define TRANSPARENT_LAYERS 8u
 
@@ -360,7 +360,7 @@ float ambientOcclusion(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
     // term at all -- so distant geometry keeps its occlusion instead of losing it to a
     // radius that shrank away. Under perspective it is pixels covered by a unit length
     // one unit from the camera, under the same vertical-FOV convention
-    // rayStartDirection builds the primary ray with.
+    // pjvPerspectiveRay builds the primary ray with.
     float radiusPixels;
     if (pjvViewIsOrthographic()) {
         radiusPixels = worldRadius * passTargetRes.y / max(pjvViewOrthographicHeight(), 0.0001);

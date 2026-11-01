@@ -105,7 +105,7 @@ namespace projv::utils {
 
     core::vec3 rayDirectionThroughImage(core::vec2 uv, core::vec2 resolution,
                                         core::vec3 cameraDirection, float verticalFovDegrees) {
-        // Kept line-for-line equivalent to rayStartDirection in pjv_utils_DDA.sc. If that changes,
+        // Kept line-for-line equivalent to pjvPerspectiveRay in pjv_camera.sc. If that changes,
         // this has to change with it, or picks land next to what the user clicked.
         core::vec2 ndc = core::vec2(uv.x, 1.0f - uv.y) * 2.0f - 1.0f;
         float aspectRatio = resolution.y > 0.0f ? resolution.x / resolution.y : 1.0f;

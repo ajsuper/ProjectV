@@ -252,7 +252,7 @@ Every overlay the editor draws over the scene — the yellow selection box, the 
 
 Perpendicular is the whole point, and it is what separates this from the Inspector's **Look at this component**, which keeps the current angle and only slides. A face seen square-on is the one view in which a screen distance is a true distance along it — nothing to correct for by eye — so it is the view to line something up in, or to check a wall is flat from. The face normal arrives from `pickVoxel` in the *chunk's* voxel grid and has to be rotated into world space first; a rotated chunk is exactly where the two disagree, and where squaring up matters most.
 
-This is also the one place the camera is allowed to point **straight** up or down. Free-look stops at 1.55 radians, because a *drag* through the pole flips the image over — but a snap never passes through anything, and clicking the eyeball on a floor means perpendicular, not 1.2° short of it. The basis stays well defined at the pole because `computeCameraBasis` swings its reference axis to `+Z` there, exactly as `rayStartDirection` does on the GPU. Clicking the cube's `Y` face gets the same exactness for the same reason.
+This is also the one place the camera is allowed to point **straight** up or down. Free-look stops at 1.55 radians, because a *drag* through the pole flips the image over — but a snap never passes through anything, and clicking the eyeball on a floor means perpendicular, not 1.2° short of it. The basis stays well defined at the pole because `computeCameraBasis` swings its reference axis to `+Z` there, exactly as `pjvPerspectiveRay` does on the GPU. Clicking the cube's `Y` face gets the same exactness for the same reason.
 
 It shares the armed-picker treatment with the palette's eyedropper — an outline round the image and a sentence at the top — and arming either disarms the other, because two one-shots both waiting for the next click would resolve to whichever branch was tested first.
 
@@ -1137,7 +1137,7 @@ There are three ways in — clicking a voxel in the viewport (Select or Move too
 
 Whichever route it came by, the selection outlines every `.data` box it covers in **yellow** in the Viewport — the node itself if it's a Chunk or Grid, every occupied cell if it's a Grid, or every leaf beneath it if it's an Asset folder (`main.cpp`'s `collectLeafChunks`). The Inspector's "Boxes" count is the same set.
 
-The outline is drawn in screen space: each chunk's OBB corners (`header.position + header.rotation * localOffset`, the same convention `fetchVoxelColor` and `utils::pickVoxel` use) are projected with `worldToViewportPixel`, the exact inverse of the shader's `rayStartDirection` — so the box lines up with the geometry the raymarcher actually drew, at any camera angle. A corner behind the camera drops its edges rather than clipping them; adequate for a selection hint, wrong for anything claiming precision.
+The outline is drawn in screen space: each chunk's OBB corners (`header.position + header.rotation * localOffset`, the same convention `fetchVoxelColor` and `utils::pickVoxel` use) are projected with `worldToViewportPixel`, the exact inverse of the shader's `pjvPerspectiveRay` — so the box lines up with the geometry the raymarcher actually drew, at any camera angle. A corner behind the camera drops its edges rather than clipping them; adequate for a selection hint, wrong for anything claiming precision.
 
 ## Palette editing
 
@@ -1156,7 +1156,7 @@ The dropper button in the Palette panel's header (and in the Tool panel's materi
 
 That is deliberate. The GPU knows the answer, but reading it back stalls the pipeline and needs the viewport renderer to keep a G-buffer it otherwise has no use for. A CPU pick costs one ray on a click, needs nothing from the renderer, and hands back the exact voxel coordinate and chunk — which is what voxel editing will need next, not just a colour.
 
-`rayDirectionThroughImage` is a line-for-line port of `rayStartDirection` in `pjv_utils_DDA.sc`. If that shader's ray generation changes, this must change with it or picks land beside what was clicked.
+`rayDirectionThroughImage` is a line-for-line port of `pjvPerspectiveRay` in `pjv_camera.sc`. If that shader's ray generation changes, this must change with it or picks land beside what was clicked.
 
 ## Why the colour lookup uses the march's integer coordinate
 
@@ -1623,7 +1623,7 @@ Releasing the old scene and building the new one in the same frame keeps both re
 
 Clicking a row in the Assets panel outlines every `.data` box it covers in yellow in the Viewport — the node itself if it's a Chunk or Grid, every occupied cell if it's a Grid, or every leaf beneath it if it's an Asset folder (`main.cpp`'s `collectLeafChunks`). The Inspector's "Boxes" count is the same set.
 
-Implementing it was mostly a matter of getting the projection math exactly right rather than anything algorithmically hard: each chunk's OBB corners (`header.position + header.rotation * localOffset`, the convention `fetchVoxelColor` and `pickVoxel` already use) are projected with `worldToViewportPixel`, which is the algebraic inverse of the shader's `rayStartDirection` — build the same camera basis (right/up/forward from yaw+pitch), but instead of turning a screen UV into a ray direction, turn a world-space offset into a screen UV. No new render pass, no GPU work: it's ImGui line-drawing on top of the already-rendered frame, using the same per-frame camera state the render loop already tracks. The one bug it caught along the way was unrelated to the outline itself — a stale "last item" in the old hierarchy's click handler (see git history) that meant clicking a tree node never actually selected it.
+Implementing it was mostly a matter of getting the projection math exactly right rather than anything algorithmically hard: each chunk's OBB corners (`header.position + header.rotation * localOffset`, the convention `fetchVoxelColor` and `pickVoxel` already use) are projected with `worldToViewportPixel`, which is the algebraic inverse of the shader's `pjvPerspectiveRay` — build the same camera basis (right/up/forward from yaw+pitch), but instead of turning a screen UV into a ray direction, turn a world-space offset into a screen UV. No new render pass, no GPU work: it's ImGui line-drawing on top of the already-rendered frame, using the same per-frame camera state the render loop already tracks. The one bug it caught along the way was unrelated to the outline itself — a stale "last item" in the old hierarchy's click handler (see git history) that meant clicking a tree node never actually selected it.
 
 ## What's Next
 

@@ -16,7 +16,7 @@
 //
 // **Nothing authors it.** The GPU upload builds one from the scene's loose chunks on every flush
 // (graphics::flushSceneUpdates), and everything that reads the scene's tables gets it: every
-// renderer that includes pjv_utils_DDA.sc, with no change to the renderer. A few hundred leaves
+// renderer that includes pjv_scene.sc, with no change to the renderer. A few hundred leaves
 // build in well under a millisecond, so there is nothing worth caching across frames or on disk;
 // what *is* expensive -- the tight bounds of a chunk's voxels, a walk of its tree -- is cached per
 // geometry blob (GeometryBlob::contentMin/Max) and recomputed only when the geometry changes.

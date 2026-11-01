@@ -95,7 +95,7 @@ bool sameSurface(vec3 centreA, float sizeA, vec3 centreB, float sizeB) {
 // Capped so a face seen edge-on antialiases over a few pixels instead of smearing across the screen.
 #define MAX_FOOTPRINT_PIXELS 8.0
 
-// Copied from pjv_utils_DDA.sc rather than included: this pass has no business with the voxel
+// Copied from pjv_scene.sc rather than included: this pass has no business with the voxel
 // traversal, and including that header would pull in samplers this pass does not bind. It must stay
 // EXACTLY the forward map gbuffer.frag used, or the face test below is testing a different ray than
 // the one that produced the G-buffer.

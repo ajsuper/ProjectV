@@ -73,7 +73,7 @@ uniform vec4 restirSettings;  // x the G-buffer's trace loop bound (a uniform, s
 bool restirView(int view) { return abs(restirDenoise.z - float(view)) < 0.5; }
 
 // Where world point P lands on screen (uv, top-left origin) for a camera at `position` looking along
-// `forward` -- the inverse of the engine's rayStartDirection, basis and flip included.
+// `forward` -- the inverse of the engine's pjvPerspectiveRay, basis and flip included.
 vec2 restirWorldToUV(vec3 P, vec3 position, vec3 forward, vec2 res, out bool inFront) {
     return pjvPerspectiveUV(P, res, position, forward, pjvViewTanHalfFov(), inFront);
 }
@@ -146,7 +146,7 @@ RestirSurface restirSurface(vec4 a, vec4 b) {
 float restirLum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
 // The camera ray through uv (0..1 across this pass's target, the jitter already added), built as the
-// engine's rayStartDirection builds it.
+// engine's pjvPerspectiveRay builds it.
 vec3 restirViewDirection(vec2 uv) {
     return pjvViewRayDirection(uv, passTargetRes.xy);
 }

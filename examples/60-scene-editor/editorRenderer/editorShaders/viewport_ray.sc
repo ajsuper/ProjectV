@@ -21,7 +21,7 @@ vec2 viewportJitter() {
 
 // The primary ray, under whichever projection the editor has selected.
 //
-// Perspective is rayStartDirection's job and unchanged. Orthographic is the same
+// Perspective is pjvPerspectiveRay's job and unchanged. Orthographic is the same
 // camera basis used the other way round: every ray points along the view direction,
 // and it is the *origin* that slides across a plane `orthoHeight` world units tall.
 // The plane is pushed back by cameraProjection.z rather than left at the camera

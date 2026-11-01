@@ -138,7 +138,7 @@ vec2 cascadeJitter() {
     return fract(frameCount.x * vec2(0.7548776662, 0.5698402910)) - 0.5;
 }
 
-// ---- Camera projection (world -> screen UV), exact inverse of rayStartDirection. ----
+// ---- Camera projection (world -> screen UV), exact inverse of pjvPerspectiveRay. ----
 vec2 worldToUV(vec3 P, vec3 camPos, vec3 camDirV, vec2 res, float tanHalfFov, out bool valid) {
     bool inFront;
     vec2 uv = pjvPerspectiveUV(P, res, camPos, camDirV, tanHalfFov, inFront);

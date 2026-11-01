@@ -48,7 +48,7 @@ $input v_texcoord0
 
 SAMPLER2D(gPos, 0);
 
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 #define CASCADE_SCREEN_RES passTargetRes.xy

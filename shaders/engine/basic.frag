@@ -12,7 +12,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*
 #include <pjv_color.sc>
 

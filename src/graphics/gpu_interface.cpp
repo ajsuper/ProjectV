@@ -337,7 +337,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
     // Traversal LOD: how many extra levels *this chunk instance* wants the shader to stop short of
     // what's actually uploaded (r.uploadedLOD), on top of the ray-distance-based cutoff it already
-    // applies (see computeTargetLOD in pjv_utils_DDA.sc). Only meaningful when this instance wants
+    // applies (see computeTargetLOD in pjv_scene.sc). Only meaningful when this instance wants
     // *less* detail than the shared blob currently has resident -- e.g. one of several chunk
     // instances sharing a blob that another, closer instance forced finer. The `>` guard matters: in
     // a transient frame where reconciliation just lowered the blob's requested LOD but the upload
@@ -875,7 +875,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
     // The width is held to a multiple of GPU_HEADER_TEXELS so a header never straddles a row
     // boundary. That keeps a single-header update one updateTexture2D of a few texels, and lets the
     // shader resolve a header with one divide. The shader derives the same layout from textureSize()
-    // -- see headers() and PJV_HEADER_TEXELS in pjv_utils_DDA.sc -- so there is no uniform to keep in
+    // -- see headers() and PJV_HEADER_TEXELS in pjv_scene.sc -- so there is no uniform to keep in
     // sync, but the invariant is load-bearing on both sides.
     uint32_t headerTexWidth() {
         uint32_t w = maxTexSize();

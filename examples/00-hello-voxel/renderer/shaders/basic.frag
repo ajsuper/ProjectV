@@ -10,14 +10,14 @@ $input v_texcoord0
 // It is the engine's basic renderer (shaders/engine/basic.frag) with its look
 // written in, as a renderer folder: the starting point for one of your own.
 //
-// Everything specific to ProjectV is in the two calls below. rayStartDirection
-// turns a pixel into a camera ray, and raySceneIntersect marches it through the
-// voxel scene -- loose chunks or a grid alike. Both come from pjv_utils_DDA.sc,
-// the engine's shader library, which the build puts on shaderc's include path.
+// Everything specific to ProjectV is in the two calls below. pjvViewRayDirection
+// turns a pixel into a camera ray (pjv_camera.sc), and raySceneIntersect marches
+// it through the voxel scene -- loose chunks or a grid alike (pjv_scene.sc). Both
+// are the engine's shader library, which the build puts on shaderc's include path.
 // =============================================================================
 
 #include <bgfx_shader.sh>
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_color.sc>
 

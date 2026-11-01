@@ -10,7 +10,7 @@ projv_add_example(renderer_gallery
                         renderers/reconstruction/shaders
                         renderers/restir-pt/shaders
     # The example's own shader library: the sun/sky model and the cascade maths. The engine's
-    # pjv_utils_DDA.sc is on the include path already.
+    # pjv_scene.sc is on the include path already.
     SHADER_INCLUDE_DIRS sharedShaders
     INCLUDE_DIRS        include ../shared
     # The examples' game renderer, staged as voxelRenderer/ (--renderer voxel).

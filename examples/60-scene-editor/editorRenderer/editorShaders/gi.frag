@@ -74,7 +74,7 @@ $input v_texcoord0
 //                 3 = previewGlow. Only the geometry channels are read; the primary
 //                 albedo is deliberately not, since it is demodulated out.
 //                 The rays additionally read the scene through the samplers
-//                 pjv_utils_DDA.sc declares at slots 9-15.
+//                 pjv_scene.sc and pjv_material.sc declare at slots 9-15.
 // Output (FBO 5): giRaw.rgb -- irradiance/pi at the primary hit, MINUS the sun's direct
 //                 term, which shade.frag computes at full resolution instead.
 // =============================================================================
@@ -89,7 +89,7 @@ $input v_texcoord0
 // difference between eight layers of glass and sixty-four is not visible in a bounce.
 #define MAX_PEEL_ITERATIONS 9
 #define PJV_SCENE_TRANSPARENCY   // the gather's rays see through glass (pjv_scene.sc's gates)
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 #define TRANSPARENT_LAYERS 8u
 
 SAMPLER2D(previewColor,    0);

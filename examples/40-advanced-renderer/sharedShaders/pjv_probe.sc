@@ -66,7 +66,7 @@
 //
 // Requires (declared/included by the including file BEFORE this include):
 //   SAMPLER2D gPos (0), and prevIndirect at PROBE_PREV_SLOT if PROBE_MULTIBOUNCE is on
-//   #include <pjv_utils_DDA.sc>       (Ray/RayQuery/raySceneIntersect/materials + scene samplers)
+//   #include <pjv_scene.sc>       (Ray/RayQuery/raySceneIntersect/materials + scene samplers)
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 //   #include <pjv_cascade_common.sc>  (worldToUV, PI, WORLD_SCALE, and pjv_sun_sky beneath it)
 //   #include <pjv_face_key.sc>        (the face identity this seeds its sequence with)

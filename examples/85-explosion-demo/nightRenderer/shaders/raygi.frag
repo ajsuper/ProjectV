@@ -21,7 +21,7 @@ $input v_texcoord0
 #include <bgfx_shader.sh>
 #include <pjv_random.sc>     // pjvInterleavedGradientNoise
 #include <pjv_sampling.sc>   // pjvSampleCosineHemisphere
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 #include <grr_common.sc>
 
 SAMPLER2D(gPos,    0);

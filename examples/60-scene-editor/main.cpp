@@ -2451,7 +2451,7 @@ static projv::core::vec3 computeCameraDirection(const EditorState& editor) {
 }
 
 // The camera's screen axes: `right` points along +X of the image, `up` along -Y of it. Identical to
-// the basis rayStartDirection builds in pjv_utils_DDA.sc, and it has to stay identical -- the
+// the basis pjvPerspectiveRay builds in pjv_camera.sc, and it has to stay identical -- the
 // orthographic ray generator, the overlay projection, and the navigator cube all lay world geometry
 // over an image the shader produced, and a basis that disagrees by so much as a handedness puts every
 // outline in the wrong place.
@@ -2537,7 +2537,7 @@ static ViewportRay viewportRayThroughUV(const EditorState& editor, projv::core::
     vec3 right, up;
     computeCameraBasis(forward, right, up);
 
-    // Same NDC convention as rayStartDirection: the V axis is flipped because the image's origin is
+    // Same NDC convention as pjvPerspectiveRay: the V axis is flipped because the image's origin is
     // its top-left corner and the camera's up axis points the other way.
     float aspectRatio = std::max(resolution.x, 1.0f) / std::max(resolution.y, 1.0f);
     float ndcX = uv.x * 2.0f - 1.0f;
@@ -2573,7 +2573,7 @@ static float cameraFocusDepth(const EditorState& editor) {
 // defeats the gesture. What the free-look limit is actually protecting against is a *drag* passing
 // through the pole and flipping the image over, which a snap cannot do because it never passes through
 // anything. The basis stays well defined at the pole itself: computeCameraBasis swings its reference
-// axis to +Z there, exactly as rayStartDirection does on the GPU.
+// axis to +Z there, exactly as pjvPerspectiveRay does on the GPU.
 static void aimCameraAtFocus(EditorState& editor, projv::core::vec3 direction) {
     using namespace projv::core;
     vec3 forward = glm::normalize(direction);
@@ -4144,7 +4144,7 @@ static void collectLeafChunks(const projv::Scene& scene, projv::ComponentHandle 
 }
 
 // Projects a world-space point into a pixel position within the viewport image, matching the camera
-// model the albedo shader builds its rays from (rayStartDirection in pjv_utils_DDA.sc — the same
+// model the albedo shader builds its rays from (pjvPerspectiveRay in pjv_camera.sc — the same
 // basis utils::rayDirectionThroughImage uses for picking). This is that construction inverted: given
 // a world point instead of a screen UV, recover the screen UV it would have projected from.
 //
@@ -4186,7 +4186,7 @@ static bool worldToViewportPixel(projv::core::vec3 worldPos, projv::core::vec3 c
         ndcY = (glm::dot(toPoint, up) / depth) / scale;
     }
 
-    // Inverse of rayStartDirection's `vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;`.
+    // Inverse of pjvPerspectiveRay's `vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;`.
     float u = (ndcX + 1.0f) * 0.5f;
     float v = (1.0f - ndcY) * 0.5f;
     outScreenPos = ImVec2(imageMin.x + u * imageWidth, imageMin.y + v * imageHeight);

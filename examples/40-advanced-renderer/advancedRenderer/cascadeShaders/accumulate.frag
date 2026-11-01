@@ -145,7 +145,7 @@ SAMPLER2D(gKey,     9);
 // about why, because it looks like a bug in the accumulator and is not one.
 //
 // The blade is not geometry that moves; it is geometry that is CARVED OUT OF A STATIC ENVELOPE at
-// shade time (the envelope resolve in pjv_utils_DDA.sc). So from one frame to the next the
+// shade time (the envelope resolve in pjv_scene.sc). So from one frame to the next the
 // primary ray lands on a
 // different envelope voxel and a differently-oriented piece of blade. gKey changes -- so the exact
 // match fails -- and the face id packed in it changes too, so sameSurface's same-facing test fails

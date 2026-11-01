@@ -33,7 +33,11 @@ $input v_texcoord0
 
 #include <bgfx_shader.sh>
 
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
+
+// World-unit scale: the self-hit offset below was tuned for ~0.0727-unit voxels, and voxels are now
+// one unit, so world distances are ~13.76x larger.
+#define WORLD_SCALE 13.76
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 uniform vec4 windowRes;

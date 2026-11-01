@@ -6,7 +6,7 @@
 // inside a loop whose bound is a uniform: a traversal inlined at a second call site makes every ray in
 // the shader slower, and an unrollable bound would copy it anyway.
 
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include "restir_common.sc"
 

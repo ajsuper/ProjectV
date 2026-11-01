@@ -76,7 +76,7 @@ uniform vec4 frameCount;
 #define AO_POWER     2.0
 
 // Projects a world point into this frame's screen space. The exact inverse of the engine's
-// rayStartDirection, so the point this samples is the point the G-buffer describes.
+// pjvPerspectiveRay, so the point this samples is the point the G-buffer describes.
 vec2 worldToUV(vec3 P, vec3 camPos, vec3 camDir, vec2 res, float tanHalfFov, out bool valid) {
     bool inFront;
     vec2 uv = pjvPerspectiveUV(P, res, camPos, camDir, tanHalfFov, inFront);

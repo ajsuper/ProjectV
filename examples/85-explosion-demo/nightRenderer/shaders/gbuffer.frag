@@ -46,7 +46,7 @@ $input v_texcoord0
 #if GRR_STATS
 #define PJV_MARCH_STATS
 #endif
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <grr_common.sc>
 

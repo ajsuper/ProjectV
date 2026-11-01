@@ -26,5 +26,5 @@ One page per module, the file formats, the shader library, the glossary.
 | Page | What |
 |---|---|
 | [File formats](formats/README.md) | `compose.json`, `.data`, `entities.json`, `physics_materials.json`, renderer folders, tile table, tree64 |
-| [Shader library](shader-library.md) | `pjv_utils_DDA.sc`: bindings, queries, hits, materials |
+| [Shader library](shader-library.md) | `pjv_scene.sc`: bindings, queries, hits, materials |
 | [Glossary](glossary.md) | Engine terms |

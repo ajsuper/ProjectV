@@ -64,13 +64,13 @@ uniform vec4 renderParams;
 #define SEARCH_RADIUS 1
 #define MAX_FOOTPRINT_PIXELS 8.0
 
-// Exactly the forward map gbuffer.frag's rays used (rayStartDirection), or the coverage test would
+// Exactly the forward map gbuffer.frag's rays used (pjvPerspectiveRay), or the coverage test would
 // be against a different ray than the one that filled the G-buffer.
 vec3 rayDirection(vec2 uv, vec2 res) {
     return pjvViewRayDirection(uv, res);
 }
 
-// As pjv_utils_DDA.sc's rotationFromQuat: columns are the rotated x, y and z axes.
+// As pjv_scene.sc's rotationFromQuat: columns are the rotated x, y and z axes.
 mat3 rotationOf(vec4 q) {
     float x = q.x, y = q.y, z = q.z, w = q.w;
     return mat3(vec3(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y)),

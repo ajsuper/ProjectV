@@ -76,7 +76,7 @@ SAMPLER2D(gKey,    5);
 SAMPLER2D(probeR,  6);
 
 #if FILTER_VISIBILITY
-#include <pjv_utils_DDA.sc>
+#include <pjv_scene.sc>
 #endif
 
 // Writes AND reads the probe grid, so both are this pass's own target size.
