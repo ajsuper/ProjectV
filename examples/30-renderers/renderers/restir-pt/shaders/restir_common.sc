@@ -88,7 +88,7 @@ void restirBasis(vec3 n, out vec3 t, out vec3 b) {
 // fields go in as an integer: no bit casts, nothing a render target could flush or canonicalise.
 //   a unit vector     octahedral, 12 bits a coordinate (0.05 degrees)
 //   a colour 0..1     8 bits a channel, square-root encoded (dark albedo keeps its steps)
-//   a material        glossiness and metallic, 8 bits each (as decodeMaterial reads them)
+//   a material        glossiness and metallic, 8 bits each (as pjvDecodeMaterial reads them)
 float restirPackDir(vec3 n) {
     uvec2 q = uvec2(clamp(pjvOctEncode(n) * 0.5 + 0.5, 0.0, 1.0) * 4095.0 + 0.5);
     return float(q.x * 4096u + q.y);

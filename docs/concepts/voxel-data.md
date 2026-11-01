@@ -131,12 +131,12 @@ Two independent knobs:
 | Knob | Set with | Changes | For |
 |---|---|---|---|
 | Storage LOD | `setBlobRenderLOD(scene, pool, lod)`, `requestChunkLOD(scene, chunk, res)` | How many levels are **uploaded**; each step is 4× coarser per axis | **VRAM**. Distant geometry resident at a fraction of the cost. |
-| Traversal LOD | `RayQuery` fields in the shader (`pjvQueryLinearLOD`, `pjvQueryLODFootprint`) | How deep a ray descends, by distance | Shading detail |
+| Traversal LOD | `PjvRayQuery` fields in the shader (`pjvQueryLinearLOD`, `pjvQueryLODFootprint`) | How deep a ray descends, by distance | Shading detail |
 
 - **The CPU copy is always full resolution.** Storage LOD is applied at upload by
   `downsampleTileTable`; editing, saving and picking never see it.
 - **Storage LOD is not a frame-time fix.** It barely changes render cost. The warning, and what to
-  look at instead, is at the top of `RayQuery` in
+  look at instead, is at the top of `PjvRayQuery` in
   [`shaders/include/pjv_scene.sc`](../../shaders/include/pjv_scene.sc).
 - **A shared blob uploads once**, at the finest LOD any of its chunks asked for. Each chunk still
   caps its own traversal (`traversalLOD` in its GPU header).

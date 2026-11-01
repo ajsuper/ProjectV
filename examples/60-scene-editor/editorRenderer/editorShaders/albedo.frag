@@ -111,7 +111,7 @@ $input v_texcoord0
 // so an opaque scene runs one iteration and a body of clear glass runs the budget. On a test scene
 // with a lot of shallow water, 65 measured about twice 33 (168 vs 310 fps). That is the price of
 // agreeing with the render, and it is paid only by the person who asked to see it.
-#define MAX_PEEL_ITERATIONS 65
+#define PJV_MAX_PEEL_ITERATIONS 65
 
 // The traversal features this pass asks for (pjv_scene.sc's gates).
 #define PJV_SCENE_TRANSPARENCY
@@ -195,7 +195,7 @@ vec3 backgroundColor(vec3 direction) {
 // of it. That is the viewport's premise applied one ray deeper: a reflection here shows you the
 // colours that are in the file, the same way the direct view does. It is also the only answer this
 // renderer can give -- there is no sun and no sky in this mode to shade the reflected surface with.
-vec3 specularPreview(vec3 position, vec3 normal, vec3 viewDirection, VoxelMaterial m,
+vec3 specularPreview(vec3 position, vec3 normal, vec3 viewDirection, PjvVoxelMaterial m,
                      float voxelSize, inout uint seed) {
     // A dielectric's F0 is scaled by glossiness rather than being the usual fixed 0.04, matching
     // Render mode: a constant would be more physical, and it would also quietly put a sheen on every
@@ -230,11 +230,11 @@ vec3 specularPreview(vec3 position, vec3 normal, vec3 viewDirection, VoxelMateri
                    max(cosView * cosHalf, 1e-4));
     weight = min(weight, vec3(SPECULAR_WEIGHT_CLAMP));
 
-    Ray reflectRay;
+    PjvRay reflectRay;
     reflectRay.origin = position + normal * (REFLECT_ORIGIN_BIAS_VOXELS * voxelSize);
     reflectRay.direction = lightDirection;
 
-    RayQuery reflectQuery = pjvPrimaryQuery(100u);
+    PjvRayQuery reflectQuery = pjvPrimaryQuery(100u);
     reflectQuery.maxRaySteps = REFLECT_MAX_STEPS;
     // No distance LOD, matching the primary march: a reflection of a simplified scene is a picture
     // of the wrong thing, and it is the one place a blocky distant surface would be read as a
@@ -246,13 +246,13 @@ vec3 specularPreview(vec3 position, vec3 normal, vec3 viewDirection, VoxelMateri
     // Not the peel. A reflection ray that saw through glass would double this shader's unrolled
     // traversal code for the one case of a mirror looking at a window, so a transparent voxel
     // reflects as its own surface here. The primary ray is where transparency is answered.
-    SceneIntersectData reflectHit = raySceneIntersect(reflectRay, reflectQuery).hit;
+    PjvSceneIntersectData reflectHit = pjvRaySceneIntersect(reflectRay, reflectQuery).hit;
     if (reflectHit.foundBox.size < 0.0 || reflectHit.rayT <= 0.0 ||
         dot(reflectHit.normal, reflectHit.normal) < 0.5) {
         return weight * backgroundColor(lightDirection);
     }
 
-    VoxelMaterial reflected = fetchVoxelMaterialFromHit(reflectHit);
+    PjvVoxelMaterial reflected = pjvFetchVoxelMaterialFromHit(reflectHit);
     return weight * (reflected.albedo + reflected.emission);
 }
 
@@ -263,8 +263,8 @@ vec3 specularPreview(vec3 position, vec3 normal, vec3 viewDirection, VoxelMateri
 // Full-resolution primary march, matching the fast renderer. Distance LOD was measured there to buy
 // almost nothing while making distant geometry blocky, and a previewer is exactly where
 // blocky-at-distance would mislead.
-RayQuery viewportPrimaryQuery() {
-    RayQuery rayQuery = pjvPrimaryQuery(100u);
+PjvRayQuery viewportPrimaryQuery() {
+    PjvRayQuery rayQuery = pjvPrimaryQuery(100u);
     rayQuery.maxRaySteps = 256u;
     rayQuery.startLOD = 0;
     rayQuery.finishLOD = 2;
@@ -278,9 +278,9 @@ void main() {
     int  frame  = int(frameCount.x);
     vec2 uvJit  = v_texcoord0 + viewportJitter() / passTargetRes.xy;
 
-    Ray ray = primaryRay(uvJit);
+    PjvRay ray = primaryRay(uvJit);
 
-    RayQuery rayQuery = viewportPrimaryQuery();
+    PjvRayQuery rayQuery = viewportPrimaryQuery();
 
 #if defined(EDITOR_ALBEDO_LEAN)
     // The lean variant (albedo_lean.frag): a constant, so the peel, refraction and specular
@@ -298,9 +298,9 @@ void main() {
     ivec2 pixel = ivec2(v_texcoord0 * passTargetRes.xy);
     uint  seed = pjvHashSeed(uvec3(uint(pixel.x), uint(pixel.y), uint(frame)));
 
-    SceneIntersectData sceneHit;
+    PjvSceneIntersectData sceneHit;
     // The ray the hit was found on. Identical to `ray` on every path that does not refract.
-    Ray hitRay = ray;
+    PjvRay hitRay = ray;
     // Diagnostic only; see refractDebugMode.
     uint segmentsTaken = 0u;
     uint layersCrossed = 0u;
@@ -311,7 +311,7 @@ void main() {
     vec3 transmittance = vec3(1.0);
     vec3 glow = vec3(0.0);
     // Only the advanced path needs the whole material; the plain path fetches the colour alone.
-    VoxelMaterial material = emptyVoxelMaterial();
+    PjvVoxelMaterial material = pjvEmptyVoxelMaterial();
 
     if (advanced) {
         // Sees through transparency to the nearest opaque surface. A scene with no transparent
@@ -321,7 +321,7 @@ void main() {
         // ...and bends the ray at an interface whose IOR is not 1. Zero segments -- the default --
         // reproduces the peel exactly, which is what the Refraction slider at 0 has to mean.
         if (refractionSegments() > 0u) pjvQueryRefraction(rayQuery, refractionSegments());
-        SceneHit peeled = raySceneIntersect(ray, rayQuery);
+        PjvSceneHit peeled = pjvRaySceneIntersect(ray, rayQuery);
         sceneHit = peeled.hit;
         material = peeled.material;
         transmittance = peeled.transmittance;
@@ -338,7 +338,7 @@ void main() {
         // GI's reprojection and every screen-space tap downstream.
         hitRay = peeled.finalRay;
     } else {
-        sceneHit = raySceneIntersect(ray, rayQuery).hit;
+        sceneHit = pjvRaySceneIntersect(ray, rayQuery).hit;
     }
 
     // Trust the march's own hit data rather than re-intersecting foundBox: a fresh
@@ -522,8 +522,8 @@ void main() {
         // through the tree to rediscover the leaf it was standing in. Nothing is recovered from the
         // hit's world-space box, which is the float32 round trip that shades voxels with their
         // neighbour's colour once a chunk has been moved or rotated. See
-        // SceneIntersectData::materialListIndex.
-        albedo = fetchVoxelColorFromHit(sceneHit);
+        // PjvSceneIntersectData::materialListIndex.
+        albedo = pjvFetchVoxelColorFromHit(sceneHit);
     }
 
     gl_FragData[0] = vec4(albedo, 1.0);

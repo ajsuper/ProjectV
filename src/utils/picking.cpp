@@ -16,7 +16,7 @@ namespace projv::utils {
     namespace {
         // Rank of a child within a tree64 node's 64-bit occupancy mask: how many set children come
         // before it. mask1 holds children 0..31 with child 0 in the most significant bit, which is
-        // the layout the shader counts against (see calculateSiblingsBeforeThisZOrder) and the
+        // the layout the shader counts against (see pjvCalculateSiblingsBeforeThisZOrder) and the
         // serializer writes (mask1 = high half of the 64-bit row).
         uint64_t nodeOccupancy(uint32_t mask1, uint32_t mask2) {
             return (uint64_t(mask1) << 32) | uint64_t(mask2);
@@ -135,7 +135,7 @@ namespace projv::utils {
             if (!chunk.alive || chunk.header.scale <= 0.0f || chunk.geometryPoolIndex < 0) continue;
 
             // Into the chunk's frame: the header's rotation is about the chunk's own minimum
-            // corner, which is the convention fetchVoxelColor uses.
+            // corner, which is the convention pjvFetchVoxelColor uses.
             core::mat3 inverseRotation = glm::transpose(glm::mat3_cast(chunk.header.rotation));
             core::vec3 localOrigin = inverseRotation * (rayOrigin - chunk.header.position) + chunk.header.position;
             core::vec3 localDirection = inverseRotation * direction;

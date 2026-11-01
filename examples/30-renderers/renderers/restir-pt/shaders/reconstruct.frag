@@ -79,7 +79,7 @@ vec3 rayDirection(vec2 uv, vec2 res) {
     return pjvViewRayDirection(uv, res);
 }
 
-// As pjv_scene.sc's rotationFromQuat: columns are the rotated x, y and z axes.
+// As pjv_scene.sc's pjvRotationFromQuat: columns are the rotated x, y and z axes.
 mat3 rotationOf(vec4 q) {
     float x = q.x, y = q.y, z = q.z, w = q.w;
     return mat3(vec3(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y)),

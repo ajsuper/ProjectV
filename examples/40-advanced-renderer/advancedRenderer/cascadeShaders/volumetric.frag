@@ -105,11 +105,11 @@ uniform vec4 volParams;
 // Can the sun reach this point in the air? No surface, so no normal and no origin bias to apply --
 // the sample point is already in open space by construction.
 bool volSunVisible(vec3 p) {
-    Ray shadow;
+    PjvRay shadow;
     shadow.origin    = p;
     shadow.direction = SUN_DIR;
 
-    RayQuery rq = pjvPrimaryQuery(100u);
+    PjvRayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps         = VOL_SHADOW_STEPS;
     rq.startLOD            = 0u;
     rq.finishLOD           = uint(VOL_SHADOW_LOD);
@@ -119,7 +119,7 @@ bool volSunVisible(vec3 p) {
     // rest position or a voxel from it does not change whether it casts a shadow into fog, and the
     // resolve is the expensive half. With animation off the geometry march draws animated voxels
     // where they are stored, so a blade still occludes -- it just is not asked which voxel it is in.
-    return raySceneIntersectFrom(shadow, rq, 0.0).rayT < 0.0;
+    return pjvRaySceneIntersectFrom(shadow, rq, 0.0).rayT < 0.0;
 }
 
 void main() {

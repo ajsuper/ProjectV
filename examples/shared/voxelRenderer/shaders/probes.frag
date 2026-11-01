@@ -46,7 +46,7 @@ SAMPLER2D(giPacked, 4);
 #define SHADOW_STEPS   96u
 #define BIAS_VOXELS    0.3
 
-bool isMiss(SceneIntersectData h) {
+bool isMiss(PjvSceneIntersectData h) {
     return h.foundBox.size < 0.0 || h.rayT <= 0.0 || dot(h.normal, h.normal) < 0.5;
 }
 
@@ -100,8 +100,8 @@ void main() {
     vec3 radiance = vec3(0.0, 0.0, 0.0), albedo = vec3(0.0, 0.0, 0.0), hitNormal = vec3(0.0, 1.0, 0.0), hitPoint = probe;
     for (int step = 0; step < GI_RAYS * 2; step++) {
         if (ray >= GI_RAYS) break;
-        Ray r;
-        RayQuery query;
+        PjvRay r;
+        PjvRayQuery query;
         if (!shadowing) {
             dir = rayDirection(ray, GI_RAYS, turn);
             r.origin = probe;
@@ -114,7 +114,7 @@ void main() {
             query = pjvShadowQuery(SHADOW_STEPS, 1e6);
             pjvQueryLinearLOD(query, 2u, uint(32.0 / max(dot(hitNormal, sun), 0.05)));
         }
-        SceneIntersectData found = raySceneIntersectFrom(r, query, 0.0);
+        PjvSceneIntersectData found = pjvRaySceneIntersectFrom(r, query, 0.0);
         bool done = true;
         if (!shadowing) {
             if (isMiss(found)) {
@@ -125,7 +125,7 @@ void main() {
             } else {
                 hitNormal = normalize(found.normal);
                 hitPoint = probe + dir * found.rayT;
-                VoxelMaterial material = fetchVoxelMaterialFromHit(found);
+                PjvVoxelMaterial material = pjvFetchVoxelMaterialFromHit(found);
                 albedo = material.albedo;
                 float bounceWeight;
                 vec3 bounce = giNearest(hitPoint, hitNormal, bounceWeight);

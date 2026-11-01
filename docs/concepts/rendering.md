@@ -102,15 +102,15 @@ void main() {
     ray.origin    = pjvViewRayOrigin(v_texcoord0, passTargetRes.xy);
     ray.direction = pjvViewRayDirection(v_texcoord0, passTargetRes.xy);
 
-    SceneIntersectData hit = raySceneIntersect(ray, pjvPrimaryQuery(100u)).hit;
-    gl_FragColor = vec4(fetchVoxelColor(hit.foundBox, hit.headerIndex), 1.0);
+    PjvSceneIntersectData hit = pjvRaySceneIntersect(ray, pjvPrimaryQuery(100u)).hit;
+    gl_FragColor = vec4(pjvFetchVoxelColor(hit.foundBox, hit.headerIndex), 1.0);
 }
 ```
 
 Entry points, query options and materials: [Shader library](../reference/shader-library.md).
 
 !!! warning "One march call site per shader"
-    A second inlined `raySceneIntersect` (or `raySceneIntersectFrom`) call site roughly halved the
+    A second inlined `pjvRaySceneIntersect` (or `pjvRaySceneIntersectFrom`) call site roughly halved the
     speed of every mode of a renderer that had one. Branch inside one call instead.
 
 ## The scene on the GPU

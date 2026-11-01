@@ -1,6 +1,6 @@
 // ProjectV Terrain Generator (grid-based)
 // Generates a Perlin-noise heightfield terrain as voxel chunks in a SceneGrid,
-// streamed around the camera. The grid allows the shader's marchGrid DDA path
+// streamed around the camera. The grid allows the shader's pjvMarchGrid DDA path
 // to handle broadphase instead of brute-forcing every loose chunk per pixel.
 //
 // Controls: WASD/R/F + mouse to fly (mode 1). Press 2 for player mode with gravity/collision.

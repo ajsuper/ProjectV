@@ -76,7 +76,7 @@ mat3 chunkRotation(int headerIndex) {
     int row = headerIndex / headersPerRow;
     int column = (headerIndex - row * headersPerRow) * PJV_HEADER_TEXELS;
     uvec4 q = texelFetch(headerData, ivec2(column + 3, row), 0);
-    return rotationFromQuat(vec4(uintBitsToFloat(q.r), uintBitsToFloat(q.g),
+    return pjvRotationFromQuat(vec4(uintBitsToFloat(q.r), uintBitsToFloat(q.g),
                                  uintBitsToFloat(q.b), uintBitsToFloat(q.a)));
 }
 
@@ -99,7 +99,7 @@ struct ViewportGBuffer {
     float distance;  // along the primary ray, 0 on background
 };
 
-ViewportGBuffer backgroundTexel(Ray ray) {
+ViewportGBuffer backgroundTexel(PjvRay ray) {
     ViewportGBuffer g;
     g.color = vec4(backgroundColor(ray.direction), 0.0);
     g.normal = vec4(0.0, 0.0, 0.0, 0.0);
@@ -109,7 +109,7 @@ ViewportGBuffer backgroundTexel(Ray ray) {
     return g;
 }
 
-ViewportGBuffer surfaceTexel(vec3 albedo, vec3 normal, float size, Ray ray, float t) {
+ViewportGBuffer surfaceTexel(vec3 albedo, vec3 normal, float size, PjvRay ray, float t) {
     vec3 position = ray.origin + ray.direction * t;
     ViewportGBuffer g;
     g.color = vec4(albedo, 1.0);
@@ -120,7 +120,7 @@ ViewportGBuffer surfaceTexel(vec3 albedo, vec3 normal, float size, Ray ray, floa
     return g;
 }
 
-bool isMiss(SceneIntersectData hit) {
+bool isMiss(PjvSceneIntersectData hit) {
     return hit.foundBox.size < 0.0 || hit.rayT <= 0.0 || dot(hit.normal, hit.normal) < 0.5;
 }
 
@@ -162,13 +162,13 @@ bool occludedInFrontLayer(int headerIndex, vec3 centre, float size, int face, ve
     ivec2 endCell = ivec2(floor(end));
     if (cell.x == endCell.x && cell.y == endCell.y) return false;
 
-    chunkHeader header = headers(headerIndex);
+    PjvChunkHeader header = pjvHeader(headerIndex);
     float voxelSize = header.scale / float(header.resolution);
     if (abs(size - voxelSize) > voxelSize * 1e-3) return true;   // A coarse LOD node, not a voxel.
 
     // V's integer cell, recovered from its centre. Rounding a value that is within float error of an
     // integer plus one half is exact for any chunk resolution a float can address.
-    mat3 rotation = rotationFromQuat(header.rotation);
+    mat3 rotation = pjvRotationFromQuat(header.rotation);
     vec3 position = vec3(header.positionX, header.positionY, header.positionZ);
     vec3 cellCentre = ((centre - position) * rotation) / voxelSize;
     ivec3 voxel = ivec3(floor(cellCentre));
@@ -216,11 +216,11 @@ struct Reconstruction {
 
 // This pass's own ray, exactly as albedo.frag would cast it for this pixel.
 // uv is the pixel's v_texcoord0, passed in: bgfx's HLSL path makes varyings main's parameters.
-Ray reconstructionRay(vec2 uv) {
+PjvRay reconstructionRay(vec2 uv) {
     return primaryRay(uv + viewportJitter() / passTargetRes.xy);
 }
 
-Reconstruction reconstructPixel(Ray ray, vec2 uv) {
+Reconstruction reconstructPixel(PjvRay ray, vec2 uv) {
     ivec2 lowSize = ivec2(passInputRes[0].xy + 0.5);
     // The coarse texel whose centre is nearest this pixel's, and its 3x3 ring. With the coarse grid at
     // half resolution that reaches 1.5 coarse texels -- three full pixels -- each way.

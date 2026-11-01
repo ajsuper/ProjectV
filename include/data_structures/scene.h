@@ -391,7 +391,7 @@ namespace projv{
         float rotationW;
         // Levels dropped below `resolution` this specific chunk instance's ray traversal should cap
         // itself at, on top of whatever the ray-distance-based cutoff already allows (see
-        // computeTargetLOD/marchRayThroughTree64_DDA in pjv_scene.sc). Free/per-frame-safe: no
+        // pjvComputeTargetLOD/pjvMarchRayThroughTree64_DDA in pjv_scene.sc). Free/per-frame-safe: no
         // GPU data movement, just a shader-side "stop descending here" clamp. Computed in makeHeader
         // from Chunk::requestedLOD vs. the blob's actual uploadedLOD -- see the comment there.
         uint32_t traversalLOD;
@@ -436,7 +436,7 @@ namespace projv{
         // This is a **VRAM** lever, not a rendering performance one: a coarser LOD means fewer nodes
         // resident, which is what it exists to control. Do not reach for it to fix a frame-time
         // problem -- it has very little effect on render cost. The same warning, at length and with
-        // what to look at instead, is at the top of the RayQuery struct in shaders/include/pjv_scene.sc.
+        // what to look at instead, is at the top of the PjvRayQuery struct in shaders/include/pjv_scene.sc.
         uint32_t requestedLOD = 0;
         // Instancing: when >= 0, this chunk's geometry lives once in Scene.geometryPool[idx]
         // (shared across every instance of the same .data block) and geometryData above is left

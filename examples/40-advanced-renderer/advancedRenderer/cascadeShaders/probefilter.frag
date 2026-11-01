@@ -118,11 +118,11 @@ bool probesVisible(vec3 a, vec3 na, vec3 b, float voxelSize) {
     float dist = length(d);
     if (dist < 1e-5) return true;
 
-    Ray ray;
+    PjvRay ray;
     ray.origin    = a + na * max(0.5 * voxelSize, NORMAL_BIAS);
     ray.direction = d / dist;
 
-    RayQuery rq = pjvPrimaryQuery(100u);
+    PjvRayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = FILTER_VIS_STEPS;
     rq.startLOD = 0u; rq.finishLOD = 0u; rq.distanceToFinishLOD = 100000u;
 
@@ -140,7 +140,7 @@ bool probesVisible(vec3 a, vec3 na, vec3 b, float voxelSize) {
     // cannot see the envelope at all, and anything it hits is real geometry. There is nothing left to
     // skip, and a loop that can only run once is worth deleting rather than leaving as a shape that
     // implies otherwise.
-    SceneIntersectData h = raySceneIntersectFrom(ray, rq, 0.0);
+    PjvSceneIntersectData h = pjvRaySceneIntersectFrom(ray, rq, 0.0);
     if (h.rayT < 0.0 || h.foundBox.size < 0.0) return true;   // nothing in the way
     if (h.rayT >= blockBefore) return true;                   // that is the far probe itself
     return false;                                             // a real occluder

@@ -47,7 +47,7 @@ engine's basic renderer written out as a folder. To only see a scene, no folder 
   reproject into the frame before).
 
 `main.frag`: [basic.frag](../../examples/00-hello-voxel/renderer/shaders/basic.frag)
-(`pjvViewRayDirection` → `raySceneIntersect` → `fetchVoxelColor`).
+(`pjvViewRayDirection` → `pjvRaySceneIntersect` → `pjvFetchVoxelColor`).
 
 ## 2. Compile the shaders
 
@@ -174,7 +174,7 @@ renderer->dependencyGraph[2].enabled = false;                    // skip pass 2 
 - **Nine inputs per pass** (slots 0–8). The scene holds stages 9–15; a tenth input replaces a scene
   texture (warned once).
 - **Uniforms are `vec4`, `mat3x3` or `mat4x4`.**
-- **One `raySceneIntersect` call site per shader.** A second inlined one made every mode ~2× slower;
+- **One `pjvRaySceneIntersect` call site per shader.** A second inlined one made every mode ~2× slower;
   branch inside one call.
 
 ## Debugging
@@ -186,7 +186,7 @@ renderer->dependencyGraph[2].enabled = false;                    // skip pass 2 
 | A uniform has no effect | Declared in `resources.json`? Set from a non-const value? Named the same in the shader? |
 | Shader edit not picked up | A shared include outside the shader dir isn't tracked; delete the `.bin` files |
 | Loader throws about `resizable` | Old format: use `"sizeMode"` (see the [format](../reference/formats/renderer-folder.md)) |
-| Empty scene | `Loaded N chunk(s)` in the log, and `fetchVoxelColor` only on a hit |
+| Empty scene | `Loaded N chunk(s)` in the log, and `pjvFetchVoxelColor` only on a hit |
 
 Renderers to read, smallest first: [`00-hello-voxel`](../../examples/00-hello-voxel/),
 [`10-scene-previewer`](../../examples/10-scene-previewer/), the renderers in

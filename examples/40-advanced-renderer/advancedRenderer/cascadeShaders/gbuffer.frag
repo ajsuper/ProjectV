@@ -43,7 +43,7 @@ $input v_texcoord0
 // chunk's distance from the origin and then TRUNCATES -- a single ULP below an exact integer
 // drops the coordinate a whole cell. Measured over a chunk's voxels: 6% wrong for a small
 // translation, 10% for a rotation alone, 39% for both. That is the difference between a face key
-// that is stable and one that changes when you look at it. See SceneIntersectData::voxelCoord.
+// that is stable and one that changes when you look at it. See PjvSceneIntersectData::voxelCoord.
 // =============================================================================
 
 #include <bgfx_shader.sh>
@@ -75,7 +75,7 @@ uniform vec4 debugParams;
 // (pjv_gather.sc), v5's baked envelope (pjv_envelope.sc) and its fire resolve (pjv_fire.sc). Each
 // carried its OWN forked copy of the scene traversal -- raySceneIntersectWaving,
 // raySceneIntersectGathered, raySceneIntersectEnvelope, raySceneIntersectEnvelopeOccluder -- because
-// that was the only way to hook a leaf before the engine had a RayQuery to ask with.
+// that was the only way to hook a leaf before the engine had a PjvRayQuery to ask with.
 //
 // spirv-opt inlines every function into main, so four forked traversals are four full copies of the
 // march in this shader, on top of the engine's own. Adding the advection resolve to the engine path
@@ -149,7 +149,7 @@ uniform vec4 debugParams;
 // (sunDir.w) near zero to get the hard shadow this pass used to cast.
 // ---- WHY THIS RETURNS A SCALAR AND NOT THE TINT -----------------------------------------------
 //
-// raySceneTransmittance hands back a vec3, which is what puts COLOURED light on the floor under
+// pjvRaySceneTransmittance hands back a vec3, which is what puts COLOURED light on the floor under
 // stained glass. This example throws the hue away and keeps the luminance, because there is nowhere
 // to put it: the g-buffer's six targets are full, and sun visibility travels in `gDirect.a`, a single
 // channel. Folding the tint into the albedo instead would be wrong in a way that is worse than losing
@@ -159,7 +159,7 @@ uniform vec4 debugParams;
 // So: transparent occluders cast shadows of the right DEPTH here, but not of the right colour. The
 // editor, which shades forward and has the whole vec3 in hand, does both.
 float sunTransmittance(vec3 p, vec3 n, float voxelSize, inout uint seed) {
-    Ray shadow;
+    PjvRay shadow;
     shadow.direction = SUN_DIR;
 
     // ---- DO NOT SHADOW A SURFACE WITH GEOMETRY YOU CHOSE NOT TO DRAW ----------------------------
@@ -196,7 +196,7 @@ float sunTransmittance(vec3 p, vec3 n, float voxelSize, inout uint seed) {
     // Below the horizon of this surface: no trace needed, and tracing one would answer a question
     // about the wrong hemisphere.
     if (dot(shadow.direction, n) <= 0.0) return 0.0;
-    RayQuery rq = pjvPrimaryQuery(100u);
+    PjvRayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = 128u;
     // Finest LOD for the whole ray. A coarse-LOD shadow ray tests against merged boxes that
     // over-occlude, which shows up as false shadow -- so the cost is cut with the step budget
@@ -208,7 +208,7 @@ float sunTransmittance(vec3 p, vec3 n, float voxelSize, inout uint seed) {
     // is dropped here rather than carried.
     if (!animShadowsResolve()) {
         if (SHADOW_TRANSPARENT_LAYERS > 0u) pjvQueryTransparency(rq, SHADOW_TRANSPARENT_LAYERS, seed);
-        return dot(raySceneTransmittance(shadow, rq), vec3(0.2126, 0.7152, 0.0722));
+        return dot(pjvRaySceneTransmittance(shadow, rq), vec3(0.2126, 0.7152, 0.0722));
     }
     {
         // A shadow ray resolves animation only NEAR THE SURFACE. Sway reads as sway in the contact
@@ -220,7 +220,7 @@ float sunTransmittance(vec3 p, vec3 n, float voxelSize, inout uint seed) {
         // express: the fork that resolved sway dropped tMin, and the peel is built on tMin. A pane of
         // glass in front of swaying grass has to be right about both at once.
         if (SHADOW_TRANSPARENT_LAYERS > 0u) pjvQueryTransparency(rq, SHADOW_TRANSPARENT_LAYERS, seed);
-        return dot(raySceneTransmittance(shadow, rq), vec3(0.2126, 0.7152, 0.0722));
+        return dot(pjvRaySceneTransmittance(shadow, rq), vec3(0.2126, 0.7152, 0.0722));
     }
 }
 
@@ -242,7 +242,7 @@ void main() {
     vec2 jitter = (vec2(pjvHalton(frame + 1, 2), pjvHalton(frame + 1, 3)) - 0.5) * renderParams.w;
     vec2 uvJit  = v_texcoord0 + jitter / passTargetRes.xy;
 
-    Ray ray;
+    PjvRay ray;
     ray.origin = pjvViewPosition();
     ray.direction = pjvViewRayDirection(uvJit, passTargetRes.xy);
 
@@ -279,14 +279,14 @@ void main() {
     // filter. Coarsening exactly there is what closes that band: a level-1 node is 4 voxels, which at
     // the crossover is 4 pixels, comfortably resolvable and therefore reconstructable again.
     //
-    // THE ENGINE'S RAMP IS LINEAR, AND THAT IS THE BINDING CONSTRAINT. computeTargetLOD returns
+    // THE ENGINE'S RAMP IS LINEAR, AND THAT IS THE BINDING CONSTRAINT. pjvComputeTargetLOD returns
     // uint(mix(startLOD, finishLOD, d / distanceToFinishLOD)), so level k arrives at k*D/N -- EVENLY
     // spaced. The ideal onsets are exponential, since level k first fits in a pixel at 4^(k-1) *
     // CROSSOVER: 1x, 4x, 16x. A linear ramp can place ONE level exactly; everything after it arrives
     // early and is coarser than the pixel requires.
     //
     // The ramp is LOGARITHMIC, via the DDA's opt-in footprint mode (PJV_LOD_FOOTPRINT -- see the note
-    // at computeTargetLOD). The engine's ordinary ramp is linear and spaces its levels evenly, which
+    // at pjvComputeTargetLOD). The engine's ordinary ramp is linear and spaces its levels evenly, which
     // cannot match onsets that are a geometric series: it placed level 1 correctly and then level 2
     // arrived twice as early as it should, at 8 pixels a node, which is the coarseness that showed.
     //
@@ -318,10 +318,10 @@ void main() {
     // distance it is a dissolve, which the eye reads as a gradual change in detail.
     //
     // DITHERING THE CROSSOVER, not the level, is what keeps it correct. The chosen size comes from two
-    // places -- computeTargetLOD's round-up and the half-level test in the march -- and both derive it
+    // places -- pjvComputeTargetLOD's round-up and the half-level test in the march -- and both derive it
     // from this one distance. Perturbing the level in one of them makes the two disagree about which
     // size is wanted; perturbing the distance keeps them in step by construction, with no engine change
-    // and no new field on RayQuery.
+    // and no new field on PjvRayQuery.
     //
     // The reconstruction then does the crossfade for free. In the mixed band a pixel's neighbourhood
     // holds both a block and the finer voxels inside it, and upscale.frag composites them as ordinary
@@ -346,7 +346,7 @@ void main() {
     //   0.0  off. Hard boundaries, every neighbourhood uniform, reconstruction at full strength.
     #define PRIMARY_LOD_DITHER 0.0
 
-    RayQuery rq = pjvPrimaryQuery(100u);
+    PjvRayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps         = 512u;
 #if PRIMARY_LOD_ENABLE
     // Where one LOD-0 voxel projects to exactly one pixel. Derived from the live resolution, so it
@@ -373,10 +373,10 @@ void main() {
     rq.distanceToFinishLOD = 100000u;
 #endif
 
-    // The swaying query in place of raySceneIntersect. It hands back the material as well, because
+    // The swaying query in place of pjvRaySceneIntersect. It hands back the material as well, because
     // every branch inside it had to fetch one to decide which class a hit belonged to.
-    VoxelMaterial material;
-    SceneIntersectData hit;
+    PjvVoxelMaterial material;
+    PjvSceneIntersectData hit;
     // What the transparent layers in FRONT of the hit did to the light behind them, and what they
     // emitted on their own account. Both identities on every path that does not peel, so a scene with
     // no transparent material is arithmetically untouched by their presence here.
@@ -385,7 +385,7 @@ void main() {
     // Why the traversal stopped, which is the engine's replacement for the prototype's four
     // file-scope diagnostic statics. See the debug views below.
     uint stopReason = PJV_STOP_OPAQUE;
-    Ray hitRay = ray;
+    PjvRay hitRay = ray;
     {
         // The engine path: one query, one traversal, and the animation is a flag on it rather than a
         // different function to call. Past the cutoff the envelope is skipped and animated geometry
@@ -426,7 +426,7 @@ void main() {
         if (animRefractionSegments() > 0u) {
             pjvQueryRefraction(rq, animRefractionSegments());
         }
-        SceneHit sh = raySceneIntersect(ray, rq);
+        PjvSceneHit sh = pjvRaySceneIntersect(ray, rq);
         hit = sh.hit;
         stopReason = sh.stopReason;
         // The ray the hit was found ON, which is the ray handed in unless something bent it. Every
@@ -439,7 +439,7 @@ void main() {
         layerEmission = sh.emission;
         material = sh.materialValid ? sh.material
                  : ((hit.foundBox.size > 0.0 && hit.rayT >= 0.0)
-                        ? fetchVoxelMaterialFromHit(hit) : emptyVoxelMaterial());
+                        ? pjvFetchVoxelMaterialFromHit(hit) : pjvEmptyVoxelMaterial());
     }
     // NOTE: there is no fire side channel here any more, and its absence is the point.
     //
@@ -466,7 +466,7 @@ void main() {
         // A miss carries no reason and the reasons are not close together, so a hole in the canopy
         // and empty air look identical on screen. This separates them.
         //
-        // Read off SceneHit::stopReason rather than off the four file-scope statics the prototype
+        // Read off PjvSceneHit::stopReason rather than off the four file-scope statics the prototype
         // kept for it. That is the whole shape of the promotion in miniature: the traversal already
         // knew why it stopped, and the statics existed only because the hit record had nowhere to
         // put it -- with each one needing its own save/restore across the chunk loop, and one of them

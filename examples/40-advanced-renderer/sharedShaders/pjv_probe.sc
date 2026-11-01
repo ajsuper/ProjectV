@@ -66,7 +66,7 @@
 //
 // Requires (declared/included by the including file BEFORE this include):
 //   SAMPLER2D gPos (0), and prevIndirect at PROBE_PREV_SLOT if PROBE_MULTIBOUNCE is on
-//   #include <pjv_scene.sc>       (Ray/RayQuery/raySceneIntersect/materials + scene samplers)
+//   #include <pjv_scene.sc>       (Ray/PjvRayQuery/pjvRaySceneIntersect/materials + scene samplers)
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 //   #include <pjv_cascade_common.sc>  (worldToUV, PI, WORLD_SCALE, and pjv_sun_sky beneath it)
 //   #include <pjv_face_key.sc>        (the face identity this seeds its sequence with)
@@ -217,10 +217,10 @@ vec3 pjvProbeCosineDir(vec3 N, vec2 u) {
 // missing, while the ray terminated on the first shell voxel it met, so nothing about the frame time
 // pointed at it. An adjacent envelope cannot cause that: this ray sees the rest pose and nothing else.
 bool pjvProbeSunVisible(vec3 p, vec3 n) {
-    Ray shadow;
+    PjvRay shadow;
     shadow.origin    = p + n * (0.02 * WORLD_SCALE);
     shadow.direction = SUN_DIR;
-    RayQuery rq = pjvPrimaryQuery(100u);
+    PjvRayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = PROBE_SHADOW_STEPS;
     rq.startLOD = 0u; rq.finishLOD = 0u; rq.distanceToFinishLOD = 100000u;
     // rayT < 0 == genuine miss == lit.
@@ -229,7 +229,7 @@ bool pjvProbeSunVisible(vec3 p, vec3 n) {
     // with animation off the geometry march stops skipping animated voxels and draws them at their
     // REST position, so a blade still blocks this ray, it is just not asked which voxel it occupies
     // this frame. A bounce's shadow does not need that answer, and resolving it is the expensive half.
-    return raySceneIntersectFrom(shadow, rq, 0.0).rayT < 0.0;
+    return pjvRaySceneIntersectFrom(shadow, rq, 0.0).rayT < 0.0;
 }
 
 // Last frame's converged indirect at a world point, found by projecting it into the camera. Returns
@@ -305,11 +305,11 @@ bool pjvProbeSecondBounce(vec3 hitP, float voxelSize, out vec3 indirect) {
 vec3 pjvProbeTraceRay(vec3 P, vec3 N, vec3 dir, float voxelSize) {
     float lift = max(PROBE_ORIGIN_LIFT * voxelSize, NORMAL_BIAS);
 
-    Ray ray;
+    PjvRay ray;
     ray.origin    = P + N * lift;
     ray.direction = dir;
 
-    RayQuery rq = pjvPrimaryQuery(100u);
+    PjvRayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps         = PROBE_STEPS;
     rq.startLOD            = 0u;
     rq.finishLOD           = uint(PROBE_FINISH_LOD);
@@ -322,8 +322,8 @@ vec3 pjvProbeTraceRay(vec3 P, vec3 N, vec3 dir, float voxelSize) {
         // Animation is NOT requested -- see pjvProbeSunVisible for why -- so animated geometry is
         // gathered at its rest position. That is a deliberate approximation and a cheap one: a bounce
         // ray does not care which voxel a blade occupies this frame, only that a blade is there.
-        SceneHit sh = raySceneIntersect(ray, rq);
-        SceneIntersectData h = sh.hit;
+        PjvSceneHit sh = pjvRaySceneIntersect(ray, rq);
+        PjvSceneIntersectData h = sh.hit;
 
         // Escaped the scene (or ran out of steps, which reports the same way): the true sky. This is
         // the dominant light source outdoors and the reason the gather has to be world-space at all --
@@ -351,7 +351,7 @@ vec3 pjvProbeTraceRay(vec3 P, vec3 N, vec3 dir, float voxelSize) {
         // box and this gather had to step past each one by hand or return black. The envelope is an
         // adjacent structure now and a renderer that does not ask for animation cannot tell it exists,
         // so there is nothing here to see through.
-        VoxelMaterial m = sh.materialValid ? sh.material : fetchVoxelMaterialFromHit(h);
+        PjvVoxelMaterial m = sh.materialValid ? sh.material : pjvFetchVoxelMaterialFromHit(h);
 
         vec3 hP = ray.origin + dir * h.rayT;
         vec3 hN = normalize(h.normal);

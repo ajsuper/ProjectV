@@ -21,7 +21,7 @@
 //
 // Requires (declared/included by the thin file BEFORE this include):
 //   SAMPLER2D gPos, gNormal (+ upperCascade unless IS_TOP)
-//   #include <pjv_scene.sc>   (Ray/RayQuery/raySceneIntersect/fetchVoxelData + scene)
+//   #include <pjv_scene.sc>   (Ray/PjvRayQuery/pjvRaySceneIntersect/fetchVoxelData + scene)
 // pjv_cascade_common.sc (below) brings the cascade math, constants and pjv_sun_sky.
 // =============================================================================
 
@@ -61,13 +61,13 @@
 // purpose: a coarse-LOD shadow ray tests against big merged boxes that over-occlude -> false shadow ->
 // a dim bounce (the #1 cause of a dim world-space bounce). We cut cost via step count, not LOD.
 bool sunVisibleWS(vec3 p, vec3 n) {
-    Ray shadow;
+    PjvRay shadow;
     shadow.origin    = p + n * (0.02 * WORLD_SCALE);
     shadow.direction = SUN_DIR;
-    RayQuery rq = pjvPrimaryQuery(100u);
+    PjvRayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = SUN_SHADOW_STEPS;
     rq.startLOD = 0u; rq.finishLOD = 0u; rq.distanceToFinishLOD = 100000u;
-    return raySceneIntersect(shadow, rq).hit.rayT < 0.0;   // rayT < 0 == genuine miss == lit
+    return pjvRaySceneIntersect(shadow, rq).hit.rayT < 0.0;   // rayT < 0 == genuine miss == lit
 }
 
 // Unshadowed bounced sunlight (no shadow ray) -- used on the far cascades.
@@ -102,17 +102,17 @@ vec4 gatherRayWS(vec3 P, vec3 N, vec3 dir, int c, float vs) {
     // a per-hit test. vs = 0 (renderer 5) -> just NORMAL_BIAS.
     float lift = (vs > 0.0) ? max(ORIGIN_LIFT * vs, NORMAL_BIAS) : NORMAL_BIAS;
 
-    Ray ray;
+    PjvRay ray;
     ray.origin    = P + N * lift + dir * t0;          // start at this interval's near end, lifted off N
     ray.direction = dir;
 
-    RayQuery rq = pjvPrimaryQuery(100u);
+    PjvRayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps         = WS_STEPS;
     rq.startLOD            = 0u;
     rq.finishLOD           = uint(WS_FINISH_LOD);     // coarse far -> long rays stay cheap
     rq.distanceToFinishLOD = uint(WS_LOD_DIST);
 
-    SceneIntersectData h = raySceneIntersect(ray, rq).hit;
+    PjvSceneIntersectData h = pjvRaySceneIntersect(ray, rq).hit;
 
     // Note: the old distance-based grazing self-relief skip is gone -- the ORIGIN_LIFT above clears the
     // coplanar self-relief geometrically (a lifted near-tangent ray skims over it), so near hits are now
@@ -137,7 +137,7 @@ vec4 gatherRayWS(vec3 P, vec3 N, vec3 dir, int c, float vs) {
         }
         vec3  hP = ray.origin + dir * h.rayT;
         vec3  hN = normalize(h.normal);
-        vec3 v  = fetchVoxelColor(h.foundBox, h.headerIndex);
+        vec3 v  = pjvFetchVoxelColor(h.foundBox, h.headerIndex);
         return vec4(directSunWS(hP, hN, v, c), 0.0);   // bounced sun (shadowed on near cascades)
     }
     return vec4(0.0, 0.0, 0.0, 1.0);                       // passed through -> transparent

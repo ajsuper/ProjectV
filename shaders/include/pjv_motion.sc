@@ -27,7 +27,7 @@
 #define PJV_MOTION_SWAY   1u
 #define PJV_MOTION_ADVECT 2u
 
-struct MotionSet {
+struct PjvMotionSet {
     uint  kind;
     float amplitude;    // voxels
     float frequency;    // cycles per voxel
@@ -40,12 +40,12 @@ struct MotionSet {
     float travel;           // how far a parcel may rise from its source, in voxels
 };
 
-MotionSet pjvMotionSet(uint index) {
+PjvMotionSet pjvMotionSet(uint index) {
     uint base = 3u * min(index, 15u);
     vec4 a = pjvMotionSets[base];
     vec4 b = pjvMotionSets[base + 1u];
     vec4 c = pjvMotionSets[base + 2u];
-    MotionSet m;
+    PjvMotionSet m;
     m.kind = uint(a.x + 0.5);
     m.amplitude = a.y;
     m.frequency = a.z;
@@ -109,7 +109,7 @@ vec2 pjvValueNoise2(vec3 p) {
 // voxel is asking. That is the property the whole resolve depends on: two rays crossing one cell
 // must compute the same answer for it, or the voxel is drawn in two places at once and appears
 // sliced in half along the silhouette where the two rays disagree.
-vec3 pjvMotionDisplacement(MotionSet m, vec3 worldPos, float voxelSize, float t) {
+vec3 pjvMotionDisplacement(PjvMotionSet m, vec3 worldPos, float voxelSize, float t) {
     if (m.kind != PJV_MOTION_SWAY || m.amplitude <= 0.0) return vec3(0.0);
     // Sampled in VOXEL units so a set's frequency means the same thing whatever a chunk's scale is.
     vec3 p = worldPos / max(voxelSize, 1e-6);
@@ -134,7 +134,7 @@ vec3 pjvMotionDisplacement(MotionSet m, vec3 worldPos, float voxelSize, float t)
 // what makes a parcel appear to travel: the backward trace follows a path that itself moves, so one
 // cell resolves to a different part of the flame from frame to frame. A field that only oscillated
 // in place would shimmer without rising.
-vec3 pjvAdvectFlow(MotionSet m, vec3 worldPos, float voxelSize, float t, float ageFrac) {
+vec3 pjvAdvectFlow(PjvMotionSet m, vec3 worldPos, float voxelSize, float t, float ageFrac) {
     // Voxel units, so a set's frequency means the same thing whatever a chunk's scale is -- the same
     // convention pjvMotionDisplacement uses.
     vec3 p = worldPos / max(voxelSize, 1e-6);

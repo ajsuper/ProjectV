@@ -99,7 +99,7 @@ Both are reported at startup, along with the chunk and component counts:
 One pass: the engine's basic renderer, compiled into the library and installed with
 `graphics::installBasicRenderer` ([guide](../../docs/guides/draw-a-scene.md)). It is the renderer every
 feature example uses. It fires one ray per pixel through the voxel DDA (`pjv_scene.sc`) and shades
-`fetchVoxelColor` by a fixed sun (N·L) and a little sky light, so every face is readable. There is no
+`pjvFetchVoxelColor` by a fixed sun (N·L) and a little sky light, so every face is readable. There is no
 anti-aliasing and no tone map, so a lit face shows the palette colour almost unchanged.
 
 ## ProjectV Features Used

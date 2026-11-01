@@ -11,7 +11,7 @@
 #include "reconstruct_common.sc"
 
 void main() {
-    Ray ray = reconstructionRay(v_texcoord0);
+    PjvRay ray = reconstructionRay(v_texcoord0);
     Reconstruction r = reconstructPixel(ray, v_texcoord0);
     // In validation mode every pixel goes to the trace pass, which recomputes this and compares.
     bool validate = int(reconstructParams.x + 0.5) == 2;

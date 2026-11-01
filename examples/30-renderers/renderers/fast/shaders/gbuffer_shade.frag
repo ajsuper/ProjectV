@@ -59,8 +59,8 @@ struct Hit {
     uint  headerIndex;
 };
 
-Hit traceScene(Ray ray, uint maxSteps) {
-    RayQuery rq = pjvPrimaryQuery(100u);
+Hit traceScene(PjvRay ray, uint maxSteps) {
+    PjvRayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = maxSteps;
     // Full-resolution primary ray. Distance-LOD was tried here (distanceToFinishLOD 64)
     // but gave almost no speed-up while making distant geometry unrecognisably blocky --
@@ -70,8 +70,8 @@ Hit traceScene(Ray ray, uint maxSteps) {
     rq.distanceToFinishLOD = 10000;
 
     Hit h;
-    SceneIntersectData sceneHit = raySceneIntersect(ray, rq).hit;
-    // Trust the march's own hit data. Re-intersecting foundBox with getRayBoxEntry
+    PjvSceneIntersectData sceneHit = pjvRaySceneIntersect(ray, rq).hit;
+    // Trust the march's own hit data. Re-intersecting foundBox with pjvGetRayBoxEntry
     // returned <= 0 for boundary-exact hits (ULP disagreement between the voxel-space
     // march and the world-space slab test), which misclassified real hits as sky ->
     // fireflies. The march already knows the exact entry t and crossed face.
@@ -89,7 +89,7 @@ Hit traceScene(Ray ray, uint maxSteps) {
     h.distance = sceneHit.rayT;
     h.normal = normalize(nrm);
     h.position = ray.origin + ray.direction * sceneHit.rayT;
-    h.albedo = fetchVoxelColor(sceneHit.foundBox, sceneHit.headerIndex);
+    h.albedo = pjvFetchVoxelColor(sceneHit.foundBox, sceneHit.headerIndex);
     h.headerIndex = sceneHit.headerIndex;
     return h;
 }
@@ -101,16 +101,16 @@ Hit traceScene(Ray ray, uint maxSteps) {
 // buffer plus several header texture fetches per hit -- which is pure waste for a
 // visibility query. Only the primary ray, which needs the surface colour, still
 // pays for the full traceScene().
-float traceOccludedDist(Ray ray, uint maxSteps) {
-    RayQuery rq = pjvPrimaryQuery(100u);
+float traceOccludedDist(PjvRay ray, uint maxSteps) {
+    PjvRayQuery rq = pjvPrimaryQuery(100u);
     rq.maxRaySteps = maxSteps;
     rq.startLOD = 0;
     rq.finishLOD = 0;
     rq.distanceToFinishLOD = 30;
 
-    SceneIntersectData sceneHit = raySceneIntersect(ray, rq).hit;
+    PjvSceneIntersectData sceneHit = pjvRaySceneIntersect(ray, rq).hit;
     // Occlusion distance straight from the march (-1 on a genuine miss). Re-intersecting
-    // foundBox with getRayBoxEntry returned <= 0 for boundary-exact hits, so a shadow
+    // foundBox with pjvGetRayBoxEntry returned <= 0 for boundary-exact hits, so a shadow
     // ray grazing a voxel edge reported "unoccluded" and leaked full sun into shadow ->
     // fireflies in shadowed regions.
     return sceneHit.rayT;
@@ -118,7 +118,7 @@ float traceOccludedDist(Ray ray, uint maxSteps) {
 
 // Hard shadow ray toward the sun: is the sun disk visible from p?
 bool sunVisible(vec3 p, vec3 n) {
-    Ray shadow;
+    PjvRay shadow;
     shadow.origin = p + n * (0.02 * WORLD_SCALE);
     shadow.direction = SUN_DIR;
     // rayT >= 0 means the march found an occluder; only a genuine miss (-1) is unoccluded.
@@ -136,7 +136,7 @@ void main() {
     // temporal renderers next door.
     vec2  uvJit  = v_texcoord0;
 
-    Ray ray;
+    PjvRay ray;
     ray.origin = pjvViewPosition();
     ray.direction = pjvViewRayDirection(uvJit, windowRes.xy);
 

@@ -40,7 +40,7 @@ of. Plan and delivery log: `docs/plans/restir-pt.md`. Its reference is [pt-refer
 | 15–17 | `meter`, `exposure`, `dof`, `display` | | The post (P) and the engine's display transform, as restir had them |
 | | `motion_blur` | window | After the depth of field: a very subtle blur along each pixel's motion (M; part of P) |
 
-Every ray goes through the engine's `raySceneIntersectFrom` from one call site per pass, in a loop whose
+Every ray goes through the engine's `pjvRaySceneIntersectFrom` from one call site per pass, in a loop whose
 bound is a uniform (`restirPath`: 17 rays in `sample`, 12 in `spatial`). Transparent materials draw as
 solid. Secondary rays are exact — restir's coarse bricks shrank the material room's skylight and window
 and darkened its indirect light by a fifth, and cost little to give up (below).

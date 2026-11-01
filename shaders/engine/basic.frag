@@ -31,20 +31,20 @@ vec3 sky(vec3 direction) {
 
 void main() {
     vec2 resolution = passTargetRes.xy;
-    Ray ray;
+    PjvRay ray;
     ray.origin    = pjvViewPosition();
     ray.direction = pjvViewRayDirection(v_texcoord0, resolution);
 
     // A query carries the march's budget and level-of-detail policy. The march
     // stops at the first hit, so a large budget costs only the rays that need it:
     // the long ones across a streamed world hundreds of metres wide.
-    RayQuery rayQuery = pjvPrimaryQuery(1024u);
+    PjvRayQuery rayQuery = pjvPrimaryQuery(1024u);
     rayQuery.maxRaySteps = 1024u;
     rayQuery.startLOD = 0;
     rayQuery.finishLOD = 0;
     rayQuery.distanceToFinishLOD = 100000;
 
-    SceneIntersectData sceneHit = raySceneIntersect(ray, rayQuery).hit;
+    PjvSceneIntersectData sceneHit = pjvRaySceneIntersect(ray, rayQuery).hit;
 
     // A miss is reported through foundBox.size and rayT rather than a flag. Trust
     // the march's own hit data instead of re-intersecting the box: a fresh slab
@@ -54,7 +54,7 @@ void main() {
     if (sceneHit.foundBox.size < 0.0 || sceneHit.rayT <= 0.0 || dot(normal, normal) < 0.5) {
         colour = sky(ray.direction);
     } else {
-        vec3 albedo = fetchVoxelColor(sceneHit.foundBox, sceneHit.headerIndex);
+        vec3 albedo = pjvFetchVoxelColor(sceneHit.foundBox, sceneHit.headerIndex);
         normal = normalize(normal);
         float sun = max(dot(normal, pjvBasicSun.xyz), 0.0);
         vec3 skyLight = mix(pjvBasicAmbientBelow.xyz, pjvBasicAmbientAbove.xyz, normal.y * 0.5 + 0.5);

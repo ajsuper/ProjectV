@@ -28,8 +28,8 @@ vec2 viewportJitter() {
 // position, because parallel rays have no equivalent of "the camera is outside
 // everything in front of it" -- without the offset, anything the camera has flown
 // past would simply be missing from an orthographic view of the same scene.
-Ray primaryRay(vec2 uv) {
-    Ray ray;
+PjvRay primaryRay(vec2 uv) {
+    PjvRay ray;
     ray.origin = pjvViewRayOrigin(uv, passTargetRes.xy);
     ray.direction = pjvViewRayDirection(uv, passTargetRes.xy);
     return ray;

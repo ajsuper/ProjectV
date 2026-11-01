@@ -9,16 +9,16 @@ $input v_texcoord0
 // slower; the loop's bound comes from a uniform so the compiler cannot unroll it back into two copies.
 // (The physics demos' renderer, which this one grew from, measured both.)
 //
-// ---- WHY raySceneIntersectFrom AND NOT raySceneIntersect ------------------------------------------
-// raySceneIntersect is the engine's full query: it wraps the march in a loop that peels transparent
+// ---- WHY pjvRaySceneIntersectFrom AND NOT pjvRaySceneIntersect ------------------------------------------
+// pjvRaySceneIntersect is the engine's full query: it wraps the march in a loop that peels transparent
 // layers, bends at refracting interfaces and resolves materials, and all of that is compiled into the
-// shader whether a ray asks for it or not. raySceneIntersectFrom is the bare nearest-solid-voxel query
+// shader whether a ray asks for it or not. pjvRaySceneIntersectFrom is the bare nearest-solid-voxel query
 // underneath it. Measured here, at 0.4 scale:
 //
 //                                    Cave meadow    SanMiguel courtyard
-//     raySceneIntersect               2.19 ms        4.74 ms
+//     pjvRaySceneIntersect               2.19 ms        4.74 ms
 //       ...with transparency off      2.11 ms        4.67 ms
-//     raySceneIntersectFrom           1.21 ms        2.60 ms
+//     pjvRaySceneIntersectFrom           1.21 ms        2.60 ms
 //
 // So the cost was never the transparency a scene uses -- it is the machinery's mere presence. The
 // march counters say why it matters so much: a ray here takes only about ten tree steps across one or
@@ -83,8 +83,8 @@ vec3 previousPoint(vec3 P, uint slot, vec3 position, vec4 rotation) {
     vec4 was = texelFetch(prevPoses, at, 0);
     if (was.w < 0.5 || at.y >= int(textureSize(prevPoses, 0).y)) return P;
     vec4 wasRotation = texelFetch(prevPoses, at + ivec2(1, 0), 0);
-    vec3 local = (P - position) * rotationFromQuat(rotation);   // row-vector product: R^T (P - position)
-    return was.xyz + rotationFromQuat(wasRotation) * local;
+    vec3 local = (P - position) * pjvRotationFromQuat(rotation);   // row-vector product: R^T (P - position)
+    return was.xyz + pjvRotationFromQuat(wasRotation) * local;
 }
 
 // The screen motion of a world point, from where it is now to where it was (uv units).
@@ -96,28 +96,28 @@ vec2 screenMotion(vec2 uvNow, vec3 previous) {
 
 #define SKY_DEPTH 60000.0
 
-bool isMiss(SceneIntersectData h) {
+bool isMiss(PjvSceneIntersectData h) {
     return h.foundBox.size < 0.0 || h.rayT <= 0.0 || dot(h.normal, h.normal) < 0.5;
 }
 
 void main() {
     // Each frame through another sub-texel point, for the TAA to average.
     vec2 sampleUV = v_texcoord0 + jitterParams.xy * passTargetRes.zw;
-    Ray ray;
+    PjvRay ray;
     ray.origin = pjvViewPosition();
     ray.direction = grrCameraRay(sampleUV, passTargetRes.xy, pjvViewDirection());
     vec3 primaryDirection = ray.direction;
     vec3 sun = normalize(sunDir.xyz);
-    RayQuery query = pjvPrimaryQuery(PRIMARY_STEPS);
+    PjvRayQuery query = pjvPrimaryQuery(PRIMARY_STEPS);
 
 #if GRR_STATS
     vec4 statsOut = vec4(0.0, 0.0, 0.0, 0.0);
 #endif
-    SceneIntersectData hit;
+    PjvSceneIntersectData hit;
     float visibility = 1.0;
     int rays = renderParams.x > 0.5 ? 2 : 1;
     for (int i = 0; i < rays; i++) {
-        SceneIntersectData found = raySceneIntersectFrom(ray, query, 0.0);
+        PjvSceneIntersectData found = pjvRaySceneIntersectFrom(ray, query, 0.0);
         if (i == 0) {
             hit = found;
 #if GRR_STATS == 1
@@ -169,7 +169,7 @@ void main() {
     vec3 P = pjvViewPosition() + primaryDirection * hit.rayT;
     // The geometry-only query resolves no material, so the hit's is fetched here: one descent, for the
     // primary ray only.
-    VoxelMaterial material = fetchVoxelMaterialFromHit(hit);
+    PjvVoxelMaterial material = pjvFetchVoxelMaterialFromHit(hit);
     vec3 albedo = material.albedo;
     // Emission travels as a multiple of the albedo, so it fits the albedo target's spare channel: an
     // emitter's glow is its own colour, scaled.
@@ -178,10 +178,10 @@ void main() {
 
     // The voxel's centre is its minimum LOCAL corner plus the half-diagonal turned by the chunk's
     // rotation, so the face centre is right for a turned chunk as well as an axis-aligned one.
-    chunkHeader header = headers(int(hit.headerIndex));
+    PjvChunkHeader header = pjvHeader(int(hit.headerIndex));
     vec4 rotation = header.rotation;
     float voxelSize = hit.foundBox.size;
-    vec3 centre = hit.foundBox.position + rotationFromQuat(rotation) * vec3(voxelSize * 0.5);
+    vec3 centre = hit.foundBox.position + pjvRotationFromQuat(rotation) * vec3(voxelSize * 0.5);
     vec3 faceCentre = centre + normal * (voxelSize * 0.5);
 
     vec3 wasAt = previousPoint(P, hit.headerIndex, vec3(header.positionX, header.positionY, header.positionZ), rotation);

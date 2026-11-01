@@ -46,7 +46,7 @@ would otherwise re-implement.
 Earlier examples place chunks individually ("loose"). A streaming world cannot: with thousands of
 chunks, a shader that has to test every one of them per pixel spends all its time on broadphase.
 
-A `SceneGrid` is a regular lattice of cells, so the shader's `marchGrid` DDA path walks it
+A `SceneGrid` is a regular lattice of cells, so the shader's `pjvMarchGrid` DDA path walks it
 directly — the traversal *is* the broadphase, and cost stops scaling with chunk count. The grid
 also expands in either direction as you fly, including into negative coordinates, which is what
 `expandGridToInclude` and the `originCellCoord` rebasing exist for.

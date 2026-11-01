@@ -5,7 +5,7 @@
 // pjv_bsdf.sc -- ProjectV's surface model, in one place (docs/plans/restir-pt.md)
 // =============================================================================
 //
-// A voxel's material (decodeMaterial: albedo, glossiness, metallic) as a BSDF: a Lambertian diffuse
+// A voxel's material (pjvDecodeMaterial: albedo, glossiness, metallic) as a BSDF: a Lambertian diffuse
 // lobe under a GGX microfacet specular lobe, built from pjv_microfacet.sc's terms.
 //
 //   roughness   alpha = max(1 - glossiness, 0.03)^2

@@ -1,7 +1,7 @@
 // restir_trace.sc -- what the tracing passes (gbuffer, sample, spatial) include: the engine's scene query
 // behind one small function, then the pipeline's shared pieces.
 //
-// Every ray goes through raySceneIntersectFrom, the engine's bare nearest-solid query -- the one the
+// Every ray goes through pjvRaySceneIntersectFrom, the engine's bare nearest-solid query -- the one the
 // voxel renderer uses (no transparency peel, no refraction). Each pass calls restirTrace from ONE place,
 // inside a loop whose bound is a uniform: a traversal inlined at a second call site makes every ray in
 // the shader slower, and an unrollable bound would copy it anyway.
@@ -63,17 +63,17 @@ vec3 restirPreviousPoint(vec3 P, uint slot, vec3 position, vec4 rotation) {
     vec4 was = texelFetch(prevPoses, at, 0);
     if (was.w < 0.5) return P;
     vec4 wasRotation = texelFetch(prevPoses, at + ivec2(1, 0), 0);
-    vec3 local = (P - position) * rotationFromQuat(rotation);   // row-vector product: R^T (P - position)
-    return was.xyz + rotationFromQuat(wasRotation) * local;
+    vec3 local = (P - position) * pjvRotationFromQuat(rotation);   // row-vector product: R^T (P - position)
+    return was.xyz + pjvRotationFromQuat(wasRotation) * local;
 }
 #endif
 
 RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) {
-    Ray ray;
+    PjvRay ray;
     ray.origin = origin;
     ray.direction = direction;
     bool shadow = kind == RESTIR_KIND_SHADOW || kind == RESTIR_KIND_SHADOW_INDIRECT;
-    RayQuery query = shadow ? pjvShadowQuery(RESTIR_STEPS, maxDistance) : pjvPrimaryQuery(RESTIR_STEPS);
+    PjvRayQuery query = shadow ? pjvShadowQuery(RESTIR_STEPS, maxDistance) : pjvPrimaryQuery(RESTIR_STEPS);
 #if RESTIR_BOUNCE_LOD
     if (kind == RESTIR_KIND_BOUNCE) pjvQueryLinearLOD(query, 1u, uint(RESTIR_BOUNCE_LOD));
 #endif
@@ -87,7 +87,7 @@ RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) 
     // Where one voxel covers one pixel: the target's height over the view's tangent span.
     if (kind == RESTIR_KIND_CAMERA) pjvQueryLODFootprint(query, uint(passTargetRes.y / (2.0 * pjvViewTanHalfFov())), 2u);
 #endif
-    SceneIntersectData found = raySceneIntersectFrom(ray, query, 0.0);
+    PjvSceneIntersectData found = pjvRaySceneIntersectFrom(ray, query, 0.0);
     RestirHit h;
     h.hit = false;
     h.t = -1.0;
@@ -106,7 +106,7 @@ RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) 
     h.t = found.rayT;
     h.normal = found.normal;
     if (!shadow) {
-        VoxelMaterial material = fetchVoxelMaterialFromHit(found);
+        PjvVoxelMaterial material = pjvFetchVoxelMaterialFromHit(found);
         h.albedo = material.albedo;   // linear: the engine decodes the palette's sRGB (pjv_color.sc)
         h.emission = material.emission;
         // The paths' cap (restir_common.sc); the camera ray keeps the real one, for the sun's highlight
@@ -118,13 +118,13 @@ RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) 
     if (kind == RESTIR_KIND_CAMERA) {
         // What the reconstruction needs to know the whole voxel: its face's centre, its edge, and its
         // chunk's rotation (the voxel's minimum LOCAL corner plus the turned half-diagonal is its centre).
-        h.rotation = headers(int(found.headerIndex)).rotation;
+        h.rotation = pjvHeader(int(found.headerIndex)).rotation;
         float edge = found.foundBox.size;
-        vec3 centre = found.foundBox.position + rotationFromQuat(h.rotation) * vec3(edge * 0.5, edge * 0.5, edge * 0.5);
+        vec3 centre = found.foundBox.position + pjvRotationFromQuat(h.rotation) * vec3(edge * 0.5, edge * 0.5, edge * 0.5);
         h.face = vec4(centre + normalize(found.normal) * (edge * 0.5), edge);
         h.previous = origin + direction * found.rayT;
 #ifdef RESTIR_MOTION
-        chunkHeader header = headers(int(found.headerIndex));
+        PjvChunkHeader header = pjvHeader(int(found.headerIndex));
         h.previous = restirPreviousPoint(h.previous, found.headerIndex, vec3(header.positionX, header.positionY, header.positionZ), h.rotation);
 #endif
     }

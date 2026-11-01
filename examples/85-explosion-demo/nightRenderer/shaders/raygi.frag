@@ -39,7 +39,7 @@ uniform vec4 giParams;      // y = ray GI on
 // second bounce, roughly.
 #define HIT_AMBIENT     0.4
 
-bool isMiss(SceneIntersectData h) {
+bool isMiss(PjvSceneIntersectData h) {
     return h.foundBox.size < 0.0 || h.rayT <= 0.0 || dot(h.normal, h.normal) < 0.5;
 }
 
@@ -64,21 +64,21 @@ void main() {
     float v = fract(pjvInterleavedGradientNoise(pixel + vec2(31.0, 17.0)) + frame * 0.5698403);
     vec3 dir = cosineDir(u, v, N);
 
-    Ray ray;
+    PjvRay ray;
     ray.origin = pos.xyz + N * (BIAS_VOXELS * nv.w);
     ray.direction = dir;
-    RayQuery query = pjvShadowQuery(GI_STEPS, GI_DISTANCE_VOXELS * max(lightParams.w, 1e-4));
+    PjvRayQuery query = pjvShadowQuery(GI_STEPS, GI_DISTANCE_VOXELS * max(lightParams.w, 1e-4));
     vec3 sun = normalize(sunDir.xyz);
 
     vec3 radiance = grrSky(dir);
     vec3 albedo = vec3(0.0, 0.0, 0.0), hitNormal = vec3(0.0, 1.0, 0.0);
     float emission = 0.0;
     for (int i = 0; i < 2; i++) {
-        SceneIntersectData found = raySceneIntersectFrom(ray, query, 0.0);
+        PjvSceneIntersectData found = pjvRaySceneIntersectFrom(ray, query, 0.0);
         if (i == 0) {
             if (isMiss(found)) break;   // the sky
             hitNormal = normalize(found.normal);
-            VoxelMaterial material = fetchVoxelMaterialFromHit(found);
+            PjvVoxelMaterial material = pjvFetchVoxelMaterialFromHit(found);
             albedo = material.albedo;
             emission = max(max(material.emission.r, material.emission.g), material.emission.b);
             vec3 hitPoint = ray.origin + dir * found.rayT;

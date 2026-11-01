@@ -25,8 +25,8 @@
 
 void main() {
     vec2 uvJit = v_texcoord0 + viewportJitter() / passTargetRes.xy;
-    Ray ray = primaryRay(uvJit);
-    SceneIntersectData hit = raySceneIntersect(ray, viewportPrimaryQuery()).hit;
+    PjvRay ray = primaryRay(uvJit);
+    PjvSceneIntersectData hit = pjvRaySceneIntersect(ray, viewportPrimaryQuery()).hit;
 
     if (hit.foundBox.size < 0.0 || hit.rayT <= 0.0 || dot(hit.normal, hit.normal) < 0.5) {
         gl_FragData[0] = vec4(0.0, 0.0, 0.0, 0.0);
@@ -37,7 +37,7 @@ void main() {
     // foundBox.position is the voxel's MINIMUM corner in the chunk's own frame, carried into world
     // space by the chunk's rotation and translation -- so the centre is half an edge along each of the
     // chunk's rotated axes from it, not along the world's.
-    mat3 rotation = rotationFromQuat(headers(int(hit.headerIndex)).rotation);
+    mat3 rotation = pjvRotationFromQuat(pjvHeader(int(hit.headerIndex)).rotation);
     float size = hit.foundBox.size;
     vec3 centre = hit.foundBox.position + rotation * vec3(0.5 * size, 0.5 * size, 0.5 * size);
 
@@ -49,6 +49,6 @@ void main() {
     float component = axis == 0 ? localNormal.x : (axis == 1 ? localNormal.y : localNormal.z);
     int face = 2 * axis + (component > 0.0 ? 1 : 0);
 
-    gl_FragData[0] = vec4(fetchVoxelColorFromHit(hit), float((int(hit.headerIndex) + 1) * 8 + face));
+    gl_FragData[0] = vec4(pjvFetchVoxelColorFromHit(hit), float((int(hit.headerIndex) + 1) * 8 + face));
     gl_FragData[1] = vec4(centre, size);
 }

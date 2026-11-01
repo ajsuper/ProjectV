@@ -7,7 +7,7 @@ $input v_texcoord0
 // bounces sampled from the surface's BSDF (pjv_bsdf.sc), with next-event estimation to the sun at every
 // vertex. Both can find the sun -- a glossy lobe often does -- so each is weighted against the other by
 // the power heuristic. Emission is added wherever a path meets it. Every ray is exact (no coarse LOD) and
-// stops at the first solid voxel (raySceneIntersectFrom, as restir-pt: transparent materials draw solid).
+// stops at the first solid voxel (pjvRaySceneIntersectFrom, as restir-pt: transparent materials draw solid).
 //
 // No clamp, no denoise, no history heuristics: a still view converges to the answer, which is what
 // restir-pt is measured against. One restirTrace-style call site, in a loop whose bound is a uniform: a
@@ -32,21 +32,21 @@ struct RefHit {
     bool hit;
     float t;
     vec3 normal;
-    VoxelMaterial material;
+    PjvVoxelMaterial material;
 };
 
 RefHit refTrace(vec3 origin, vec3 direction, bool shadow, float maxDistance) {
-    Ray ray;
+    PjvRay ray;
     ray.origin = origin;
     ray.direction = direction;
-    RayQuery query = shadow ? pjvShadowQuery(REF_STEPS, maxDistance) : pjvPrimaryQuery(REF_STEPS);
-    SceneIntersectData found = raySceneIntersectFrom(ray, query, 0.0);
+    PjvRayQuery query = shadow ? pjvShadowQuery(REF_STEPS, maxDistance) : pjvPrimaryQuery(REF_STEPS);
+    PjvSceneIntersectData found = pjvRaySceneIntersectFrom(ray, query, 0.0);
     RefHit h;
     h.hit = !(found.foundBox.size < 0.0 || found.rayT <= 0.0 || dot(found.normal, found.normal) < 0.5);
     h.t = found.rayT;
     h.normal = found.normal;
-    h.material = emptyVoxelMaterial();
-    if (h.hit && !shadow) h.material = fetchVoxelMaterialFromHit(found);
+    h.material = pjvEmptyVoxelMaterial();
+    if (h.hit && !shadow) h.material = pjvFetchVoxelMaterialFromHit(found);
     return h;
 }
 

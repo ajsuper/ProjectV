@@ -87,7 +87,7 @@ $input v_texcoord0
 // Transparent voxels are seen through rather than treated as opaque, so a window does not black out
 // the light behind it. A smaller budget than the primary march's: this is indirect light, and the
 // difference between eight layers of glass and sixty-four is not visible in a bounce.
-#define MAX_PEEL_ITERATIONS 9
+#define PJV_MAX_PEEL_ITERATIONS 9
 #define PJV_SCENE_TRANSPARENCY   // the gather's rays see through glass (pjv_scene.sc's gates)
 #include <pjv_scene.sc>
 #define TRANSPARENT_LAYERS 8u
@@ -188,8 +188,8 @@ vec3 sampleSunCone(inout uint seed) {
            pjvSampleUniformCone(vec2(u1, u2), cos(sunDir.w)));
 }
 
-RayQuery walkQuery(uint maxSteps) {
-    RayQuery query = pjvPrimaryQuery(100u);
+PjvRayQuery walkQuery(uint maxSteps) {
+    PjvRayQuery query = pjvPrimaryQuery(100u);
     query.maxRaySteps = maxSteps;
     // No distance LOD. A bounce that gathers light from a coarsened version of the scene reports the
     // wrong colour, and unlike a primary ray there is nothing on screen to tell you it happened.
@@ -202,14 +202,14 @@ RayQuery walkQuery(uint maxSteps) {
 // How much sunlight reaches a point, as a tint rather than a yes/no -- so coloured glass puts
 // coloured light on the floor instead of casting a black shadow.
 vec3 sunVisibility(vec3 position, vec3 normal, float voxelSize, vec3 lightDirection) {
-    Ray shadowRay;
+    PjvRay shadowRay;
     shadowRay.origin = position + normal * (GI_ORIGIN_BIAS_VOXELS * voxelSize);
     shadowRay.direction = lightDirection;
-    RayQuery q = pjvShadowQuery(GI_SHADOW_STEPS, 1e30);
+    PjvRayQuery q = pjvShadowQuery(GI_SHADOW_STEPS, 1e30);
     // No distance LOD, for the same reason walkQuery gives.
     q.distanceToFinishLOD = 100000u;
     pjvQueryTransparency(q, TRANSPARENT_LAYERS, 0u);
-    return raySceneTransmittance(shadowRay, q);
+    return pjvRaySceneTransmittance(shadowRay, q);
 }
 
 void main() {
@@ -294,13 +294,13 @@ void main() {
         if (bounce == bounces) break;
 
         // --- Extend the path -------------------------------------------------------
-        Ray bounceRay;
+        PjvRay bounceRay;
         bounceRay.origin = position + normal * (GI_ORIGIN_BIAS_VOXELS * voxelSize);
         bounceRay.direction = cosineHemisphere(normal, seed);
 
-        RayQuery bounceQ = walkQuery(GI_PRIMARY_STEPS);
+        PjvRayQuery bounceQ = walkQuery(GI_PRIMARY_STEPS);
         pjvQueryTransparency(bounceQ, TRANSPARENT_LAYERS, seed);
-        SceneHit peeled = raySceneIntersect(bounceRay, bounceQ);
+        PjvSceneHit peeled = pjvRaySceneIntersect(bounceRay, bounceQ);
         // The query advanced its own copy of the seed; carry that back so this bounce and the next
         // do not make the same stochastic interface decision.
         seed = bounceQ.seed + peeled.layers * 2654435761u;
@@ -315,7 +315,7 @@ void main() {
             break;
         }
 
-        VoxelMaterial material = peeled.material;
+        PjvVoxelMaterial material = peeled.material;
         // An emitter's own glow is not scaled by its own albedo, so this is added before the albedo
         // folds into the throughput below.
         light += throughput * material.emission;

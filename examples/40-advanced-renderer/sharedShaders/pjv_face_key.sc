@@ -8,7 +8,7 @@
 // lives here, once, and gbuffer/accumulate/compose all include it.
 //
 // A face key is a vec4:
-//   xyz = the voxel's integer coordinate in its chunk's own voxel space (SceneIntersectData::voxelCoord)
+//   xyz = the voxel's integer coordinate in its chunk's own voxel space (PjvSceneIntersectData::voxelCoord)
 //   w   = headerIndex * 6 + faceId, where faceId is 0..5 for -X +X -Y +Y -Z +Z
 //
 // WHY THE CHUNK INDEX IS IN THERE: voxelCoord is chunk-LOCAL, so two chunks placed side by side
@@ -65,7 +65,7 @@ float pjvFaceId(vec3 n) {
     return float(axis * 2 + (sgn > 0.0 ? 1 : 0));
 }
 
-// The full key for a hit. voxelCoord must come from the march (SceneIntersectData::voxelCoord),
+// The full key for a hit. voxelCoord must come from the march (PjvSceneIntersectData::voxelCoord),
 // never from foundBox.position -- see the note in gbuffer.frag about the float32 round trip.
 vec4 pjvFaceKey(ivec3 voxelCoord, uint headerIndex, vec3 n) {
     return vec4(vec3(voxelCoord), float(headerIndex) * 6.0 + pjvFaceId(n));

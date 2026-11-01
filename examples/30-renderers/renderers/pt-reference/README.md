@@ -32,7 +32,7 @@ reference that disagrees with the renderer it checks about what a surface is can
 - **The path length** is two bounces (`PATH_BOUNCES` in main.cpp), as restir-pt's.
 
 Every ray is exact (restir-pt's secondary rays are coarse, and its paths cap glossiness: compare it on
-rough surfaces) and stops at the first solid voxel (`raySceneIntersectFrom`): transparent materials draw
+rough surfaces) and stops at the first solid voxel (`pjvRaySceneIntersectFrom`): transparent materials draw
 as solid, as in restir-pt. There is no next-event estimation to emissive voxels — a small bright emitter is
 found only by chance and shows as fireflies for a long time — and no firefly clamp: a clamp is a bias, and
 this renderer must not have one.

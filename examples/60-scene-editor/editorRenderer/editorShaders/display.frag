@@ -9,7 +9,7 @@ $input v_texcoord0
 // here it targets FBO 3, which the editor hands to ImGui as the image drawn in
 // the Viewport panel.) The lit renderers tone-map here because they produce
 // open-ended HDR radiance; this one produces reflectance, which is already in
-// [0, 1]: the palette's colour, decoded to linear by decodeMaterial (the colour
+// [0, 1]: the palette's colour, decoded to linear by pjvDecodeMaterial (the colour
 // convention, shaders/include/pjv_color.sc). Encoding it again is the exact inverse, so
 // an unlit voxel shows the colour that is in the file, to the bit.
 //

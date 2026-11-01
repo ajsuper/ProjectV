@@ -64,7 +64,7 @@ $input v_texcoord0
 // that starts INSIDE the volume crosses more still. So a budget of 4 ran out constantly on ordinary
 // geometry, and every ray that ran out produced an artifact rather than a slightly wrong colour.
 // One more iteration than layers, so the final opaque surface behind the last layer still resolves.
-#define MAX_PEEL_ITERATIONS 65
+#define PJV_MAX_PEEL_ITERATIONS 65
 
 // The traversal features this path tracer asks for (pjv_scene.sc's gates).
 #define PJV_SCENE_TRANSPARENCY
@@ -292,10 +292,10 @@ vec3 sampleSunCone(inout uint seed) {
 //
 // Orthographic and isometric views get no depth of field, and cannot: parallel rays have no lens
 // and no aperture to sample. The editor greys the control out in those modes for the same reason.
-Ray primaryRay(vec2 uv, inout uint seed) {
+PjvRay primaryRay(vec2 uv, inout uint seed) {
     PjvCameraBasis basis = pjvCameraBasis(pjvViewDirection());
 
-    Ray ray;
+    PjvRay ray;
     ray.origin = pjvViewRayOrigin(uv, passTargetRes.xy);
     ray.direction = pjvViewRayDirection(uv, passTargetRes.xy);
     if (!pjvViewIsOrthographic() && lensParams.x > 0.0) {
@@ -313,8 +313,8 @@ Ray primaryRay(vec2 uv, inout uint seed) {
     return ray;
 }
 
-RayQuery walkQuery(uint maxSteps) {
-    RayQuery query = pjvPrimaryQuery(100u);
+PjvRayQuery walkQuery(uint maxSteps) {
+    PjvRayQuery query = pjvPrimaryQuery(100u);
     query.maxRaySteps = maxSteps;
     // No distance LOD anywhere in this renderer. LOD trades geometric detail for march
     // steps, and this mode exists to show the scene as it is -- a converged image of a
@@ -346,7 +346,7 @@ void main() {
                         vec2(pjvRandomUnit(seed), pjvRandomUnit(seed))) - 0.5;
     vec2 uv = v_texcoord0 + jitter / passTargetRes.xy;
 
-    Ray ray = primaryRay(uv, seed);
+    PjvRay ray = primaryRay(uv, seed);
 
     // The camera segment, kept because the atmosphere below is integrated along exactly it. With
     // depth of field on, the origin is a point on the aperture rather than the camera, which is the
@@ -381,7 +381,7 @@ void main() {
     for (int bounce = 0; bounce <= BOUNCE_LIMIT; bounce++) {
         if (bounce > bounces) break;
 
-        RayQuery query = walkQuery(bounce == 0 ? PRIMARY_MAX_STEPS : SECONDARY_MAX_STEPS);
+        PjvRayQuery query = walkQuery(bounce == 0 ? PRIMARY_MAX_STEPS : SECONDARY_MAX_STEPS);
         // Sees through transparent voxels to the nearest opaque surface, reporting what the layers
         // in front of it did to the light. A scene with no transparent materials takes exactly the
         // old path: the peel stops at the first hit, and the material it fetched to decide that is
@@ -390,9 +390,9 @@ void main() {
         // ...and bends it at an interface whose IOR is not 1. Zero segments -- the default --
         // reproduces the peel exactly, which is what the Refraction slider at 0 has to mean.
         if (refractionSegments() > 0u) pjvQueryRefraction(query, refractionSegments());
-        SceneHit peeled = raySceneIntersect(ray, query);
+        PjvSceneHit peeled = pjvRaySceneIntersect(ray, query);
         seed = query.seed + peeled.layers * 2654435761u;
-        SceneIntersectData hit = peeled.hit;
+        PjvSceneIntersectData hit = peeled.hit;
 
         // ---- THE RAY BECOMES THE ONE THE HIT WAS FOUND ON ------------------------------------
         //
@@ -450,10 +450,10 @@ void main() {
         // The march's own integer cell, not its world-space box: recovering a coordinate
         // back out of world space is a float32 round trip that shades voxels with their
         // neighbour's colour once a chunk has been moved or rotated. See
-        // SceneIntersectData::voxelCoord.
+        // PjvSceneIntersectData::voxelCoord.
         // Already fetched by the peel to decide this voxel was the opaque one; refetching it would
         // be a second palette read per bounce for no new information.
-        VoxelMaterial material = peeled.material;
+        PjvVoxelMaterial material = peeled.material;
         vec3 albedo = material.albedo;
         vec3 normal = normalize(hit.normal);
         vec3 viewDirection = -ray.direction;
@@ -494,7 +494,7 @@ void main() {
         vec3 lightDirection = sampleSunCone(seed);
         float cosAtSurface = dot(normal, lightDirection);
         if (cosAtSurface > 0.0 && dot(sunRadiance, sunRadiance) > 0.0) {
-            Ray shadowRay;
+            PjvRay shadowRay;
             shadowRay.origin = position + normal * originBias;
             shadowRay.direction = lightDirection;
 
@@ -502,10 +502,10 @@ void main() {
             // glass cast a fully black shadow however transparent its material was; this carries the
             // tint through, which is what puts coloured light on the floor under a stained window.
             // Opaque geometry returns exactly zero, so an opaque scene behaves as it always did.
-            RayQuery shadowQ = walkQuery(SHADOW_MAX_STEPS);
+            PjvRayQuery shadowQ = walkQuery(SHADOW_MAX_STEPS);
             shadowQ.flags |= PJV_Q_OCCLUSION_ONLY;
             pjvQueryTransparency(shadowQ, TRANSPARENT_LAYERS, 0u);
-            vec3 shadowTransmittance = raySceneTransmittance(shadowRay, shadowQ);
+            vec3 shadowTransmittance = pjvRaySceneTransmittance(shadowRay, shadowQ);
             if (dot(shadowTransmittance, shadowTransmittance) > 0.0) {
                 // The estimator is f * cos * L / pdf, weighted against the chance the
                 // bounce sample below would have found the same disk on its own. For an
@@ -619,17 +619,17 @@ void main() {
 
             vec3 sunIrradiance = sunRadianceColor();
             if (dot(sunIrradiance, sunIrradiance) > 0.0) {
-                Ray shaftRay;
+                PjvRay shaftRay;
                 shaftRay.origin = scatterPoint;
                 shaftRay.direction = lightDirection;
 
                 // Same swap as the surface shadow ray above, and it earns its keep here: a shaft
                 // passing through coloured glass now carries that colour into the haze, instead of
                 // the window reading as a solid occluder that casts no shaft at all.
-                RayQuery shaftQ = walkQuery(SHADOW_MAX_STEPS);
+                PjvRayQuery shaftQ = walkQuery(SHADOW_MAX_STEPS);
                 shaftQ.flags |= PJV_Q_OCCLUSION_ONLY;
                 pjvQueryTransparency(shaftQ, TRANSPARENT_LAYERS, 0u);
-                vec3 shaftTransmittance = raySceneTransmittance(shaftRay, shaftQ);
+                vec3 shaftTransmittance = pjvRaySceneTransmittance(shaftRay, shaftQ);
                 if (dot(shaftTransmittance, shaftTransmittance) > 0.0) {
                     // The sun's cone was sampled uniformly, and integrating the disk's radiance
                     // over its own solid angle gives exactly the irradiance sunRadianceColor()

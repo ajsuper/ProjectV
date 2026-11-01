@@ -35,11 +35,11 @@ uniform vec4 frameCount;
 // One hard shadow ray. Soft shadows would need many, and this renderer is not the one making that
 // argument -- see renderers/pt-reference.
 bool inSunShadow(vec3 origin, vec3 normal) {
-    Ray shadow;
+    PjvRay shadow;
     shadow.origin    = origin + normal * 0.02;
     shadow.direction = normalize(sunDir.xyz);
-    RayQuery q = pjvShadowQuery(128u, 1e6);
-    return raySceneIntersect(shadow, q).hit.foundBox.size >= 0.0;
+    PjvRayQuery q = pjvShadowQuery(128u, 1e6);
+    return pjvRaySceneIntersect(shadow, q).hit.foundBox.size >= 0.0;
 }
 
 void main() {
@@ -48,17 +48,17 @@ void main() {
     // edges it rebuilds would move every frame with nothing downstream to average them. The
     // AdvancedRenderer hit exactly this and solved it by reconstructing BEFORE its temporal pass;
     // this demo has no temporal pass at all, so it simply stays deterministic.
-    Ray ray;
+    PjvRay ray;
     ray.origin    = pjvViewPosition();
     ray.direction = pjvViewRayDirection(v_texcoord0, windowRes.xy);
 
-    RayQuery q = pjvPrimaryQuery(100u);
+    PjvRayQuery q = pjvPrimaryQuery(100u);
     q.maxRaySteps = 256u;
     q.startLOD = 0;
     q.finishLOD = 0;
     q.distanceToFinishLOD = 10000;
 
-    SceneIntersectData hit = raySceneIntersect(ray, q).hit;
+    PjvSceneIntersectData hit = pjvRaySceneIntersect(ray, q).hit;
 
     vec3 normal = hit.normal;
     if (hit.foundBox.size < 0.0 || hit.rayT <= 0.0 || dot(normal, normal) < 0.5) {
@@ -74,7 +74,7 @@ void main() {
 
     normal = normalize(normal);
     vec3 P      = ray.origin + ray.direction * hit.rayT;
-    vec3 albedo = fetchVoxelColor(hit.foundBox, hit.headerIndex);
+    vec3 albedo = pjvFetchVoxelColor(hit.foundBox, hit.headerIndex);
 
     // The voxel the ray landed in, straight from the march: foundBox.position is its minimum corner
     // and foundBox.size its edge length. The face centre is the voxel centre pushed half an edge

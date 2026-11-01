@@ -10,7 +10,7 @@ It began as the `world-cascade` renderer of the [renderer gallery](../30-rendere
 
 | # | Pass | Writes | What it does |
 |---|------|--------|--------------|
-| 1 | `gbuffer` | position, normal, albedo, direct, **face key** | One primary ray per pixel, which is also where **animation, transparency and refraction** happen — one `raySceneIntersect` with a `RayQuery` that asks for all three. Writes the **crisp half of the image** (soft-shadowed direct sun plus voxel emission), kept out of every temporal filter downstream. |
+| 1 | `gbuffer` | position, normal, albedo, direct, **face key** | One primary ray per pixel, which is also where **animation, transparency and refraction** happen — one `pjvRaySceneIntersect` with a `PjvRayQuery` that asks for all three. Writes the **crisp half of the image** (soft-shadowed direct sun plus voxel emission), kept out of every temporal filter downstream. |
 | 2 | `godrays` | shafts (half res) | Screen-space sun shafts, from the depth buffer. Cheap, and wrong in the ways screen space is wrong. |
 | 3 | `volumetric` | shafts (half res) | The traced half of the same effect: real shadow rays through the fog. The expensive path, and the one that is right off-screen. |
 | 4 | `volblur` | shafts | Blur, because the two above are one sample per pixel at half resolution. |
@@ -374,11 +374,11 @@ The voxel traversal itself is not here — it is the engine's, at `shaders/inclu
 prototyped, through five versions, and what stood here was 2,720 lines of shader across
 `pjv_wave.sc`, `pjv_gather.sc`, `pjv_envelope.sc` and `pjv_fire.sc` — each carrying its **own forked
 copy of the scene traversal**, because hooking a leaf was the only way to do it before the engine had
-a `RayQuery` to ask with — plus about 600 lines of C++ to dilate a swept volume into the geometry tree
+a `PjvRayQuery` to ask with — plus about 600 lines of C++ to dilate a swept volume into the geometry tree
 and spend a palette entry per component marking it.
 
 All of it is deleted. The system is in the engine: an adjacent quarter-resolution envelope tree, a
-motion table, and one `raySceneIntersect`. What is left here is `pjv_anim_controls.sc` — two uniform
+motion table, and one `pjvRaySceneIntersect`. What is left here is `pjv_anim_controls.sc` — two uniform
 declarations and seven accessors — because the field's own parameters stopped being shader parameters
 at all. They are rows of `AnimationState`, which the engine uploads and the traversal reads.
 
@@ -552,7 +552,7 @@ PathTracer's copy of this renderer does not run on the current engine. Four thin
 
 1. **Render-target sizing.** `resources.json` declared every texture `"resizable": true` with a hardcoded `resX`/`resY`. That flag is gone and now fails the load with an explicit migration message. Each target declares `"sizeMode": "relative"` with a `"scale"` instead, and is sized `ceil(scale × renderResolution)`. All sixteen here are `1.0`.
 2. **`windowRes` / `texelSize` → `passTargetRes`.** Those were renderer-wide app uniforms, correct only while every pass shared one resolution. Since each pass now rasterizes at the size of *its own* target, the engine publishes `passTargetRes` = `(w, h, 1/w, 1/h)` per pass. A shader gets it by declaring it; it is not in `resources.json`. Everything measured in pixels — probe spacing, the direction-atlas layout, filter taps, sub-pixel jitter — reads it.
-3. **Material lookup.** `fetchVoxelColor(hit.foundBox, hit.headerIndex)` rebuilds an integer voxel coordinate out of a world-space box. That float32 round trip loses low bits in proportion to the chunk's distance from the origin and shades a growing fraction of voxels with their *neighbour's* colour — measured at 6% for a small translation and 39% for a translation plus a rotation. `fetchVoxelMaterialFromHit(hit)` uses the material index the march already carried out: two texelFetches, no re-descent, and correct under any transform.
+3. **Material lookup.** `pjvFetchVoxelColor(hit.foundBox, hit.headerIndex)` rebuilds an integer voxel coordinate out of a world-space box. That float32 round trip loses low bits in proportion to the chunk's distance from the origin and shades a growing fraction of voxels with their *neighbour's* colour — measured at 6% for a small translation and 39% for a translation plus a rotation. `pjvFetchVoxelMaterialFromHit(hit)` uses the material index the march already carried out: two texelFetches, no re-descent, and correct under any transform.
 4. **The scene.** `SponzaScene/` is a version-1 `.data` container with a compose file that predates versioning, so it no longer loads at all. This example takes its scene as an argument instead of embedding one.
 
 **Worth changing:**
@@ -564,7 +564,7 @@ PathTracer's copy of this renderer does not run on the current engine. Four thin
 
 **Transparency, since carried over** — and it was the note here that said it had not been, on the grounds that peeling the cascade gather is a real piece of work every one of its rays would pay for. That reasoning held and the conclusion was still avoidable: the **primary ray and the sun shadow ray** peel, and the **gather does not**. A transparent pane is seen through where the camera looks at it and treated as opaque by the bounce that lands on it, which is wrong in a way nobody can point at and right in the way that matters. Costs measured on a canopy interior: 10.2 → 11.9 ms with a transparent material present, 13.3 ms with a whole canopy at 50%.
 
-One limitation is worth stating rather than discovering: **shadows have the correct depth but not the correct colour.** `raySceneTransmittance` hands back a `vec3`, which is what puts coloured light on the floor under stained glass — and the G-buffer's sun-visibility channel is a scalar, so it is reduced to luminance on the way in. Fixing it needs a channel the G-buffer does not have.
+One limitation is worth stating rather than discovering: **shadows have the correct depth but not the correct colour.** `pjvRaySceneTransmittance` hands back a `vec3`, which is what puts coloured light on the floor under stained glass — and the G-buffer's sun-visibility channel is a scalar, so it is reduced to luminance on the way in. Fixing it needs a channel the G-buffer does not have.
 
 ## ProjectV features used
 
@@ -579,7 +579,7 @@ One limitation is worth stating rather than discovering: **shadows have the corr
 | **Disk I/O** | `loadRendererSpecification`, `loadShader` |
 | **Render Instance** | Window creation, renderer registry, active renderer |
 | **Perform Renderer** | `renderConstructedRenderer`, `setUniformToValue`, per-pass view rects and `passTargetRes` |
-| **Engine shader library** | `pjv_scene.sc` — `raySceneIntersect`, `fetchVoxelMaterialFromHit`; `pjv_camera.sc` — `pjvViewRayDirection` |
+| **Engine shader library** | `pjv_scene.sc` — `pjvRaySceneIntersect`, `pjvFetchVoxelMaterialFromHit`; `pjv_camera.sc` — `pjvViewRayDirection` |
 
 ## Tuning
 

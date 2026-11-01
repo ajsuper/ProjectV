@@ -2,9 +2,9 @@
 #define PJV_MATERIAL_SC
 
 // The engine's materials: the palette and per-voxel material bytes the scene uploads, and what a
-// palette entry decodes to (VoxelMaterial). Word layout: data_structures/scene.h, projv::Material.
+// palette entry decodes to (PjvVoxelMaterial). Word layout: data_structures/scene.h, projv::Material.
 
-#include <pjv_color.sc>   // stored colours are sRGB-encoded; decodeMaterial hands out linear ones
+#include <pjv_color.sc>   // stored colours are sRGB-encoded; pjvDecodeMaterial hands out linear ones
 #include <pjv_motion.sc>  // pjvMaterialIsAdvected asks the motion table
 
 USAMPLER2D(materialIDs, 9);
@@ -13,13 +13,13 @@ uniform vec4 voxelTypeDims;
 uniform vec4 paletteDims;
 
 // The material flags byte, as scene.h lays it out. Bit 0 says this material moves; bits 1-4 name the
-// motion set. Read straight off the palette word rather than through decodeMaterial, because the
+// motion set. Read straight off the palette word rather than through pjvDecodeMaterial, because the
 // traversal asks this question far more often than it needs a whole material.
 #define PJV_MAT_FLAG_ANIMATED   1u
 #define PJV_MAT_MOTION_SHIFT    1u
 #define PJV_MAT_MOTION_MASK     0xFu
 
-uint materialID(uint index) {
+uint pjvMaterialID(uint index) {
     uint w = uint(voxelTypeDims.x);
     uint shift = uint(voxelTypeDims.y);
     uint pixelIndex = uint(index) >> 2u;
@@ -36,7 +36,7 @@ uint materialID(uint index) {
 // three of them away. See the Material comment in data_structures/scene.h for the word layout and,
 // more importantly, for why all-zero words 1-3 mean "shade this exactly as the colour-only pipeline
 // did", which is what lets every compose.json already on disk render unchanged.
-uvec4 materialPaletteTexel(uint index) {
+uvec4 pjvMaterialPaletteTexel(uint index) {
     uint w = uint(paletteDims.x);
     uint shift = uint(paletteDims.y);
     int x = int(index & (w - 1u));
@@ -46,18 +46,18 @@ uvec4 materialPaletteTexel(uint index) {
 
 // Everything a shader can know about a voxel's surface. Decoded from that one texel; nothing in
 // here costs a second fetch.
-struct VoxelMaterial {
+struct PjvVoxelMaterial {
     vec3  albedo;
     vec3  emission;       // Already scaled by strength, so this is radiance rather than a colour.
     float glossiness;     // 0 = fully rough (Lambertian), 1 = mirror.
     float metallic;       // 0 = dielectric, 1 = conductor (the specular lobe takes the albedo tint).
-    float transparency;   // 0 = opaque. Read by the traversal -- see PeelAccum / raySceneIntersect.
+    float transparency;   // 0 = opaque. Read by the traversal -- see PjvPeelAccum / pjvRaySceneIntersect.
     float ior;            // 1.0 = no refraction.
     float transmission;
     uint  flags;
 };
 
-vec3 unpackPaletteRGB10(uint packed) {
+vec3 pjvUnpackPaletteRGB10(uint packed) {
     return vec3(float((packed >> 20u) & 0x3FFu),
                 float((packed >> 10u) & 0x3FFu),
                 float( packed         & 0x3FFu)) / 1023.0;
@@ -67,15 +67,15 @@ vec3 unpackPaletteRGB10(uint packed) {
 // because every march in this file stops at the first solid voxel. The traversal now makes it: a
 // query with PJV_Q_TRANSPARENCY reads the material at a leaf and decides there whether the voxel stops
 // the ray. The material fetch that costs is also the one the caller would have done anyway, so the
-// work moved rather than doubling -- see SceneHit::material.
+// work moved rather than doubling -- see PjvSceneHit::material.
 //
 // `ior` and `transmission` are still decoded and carried without being acted on. That one IS a
 // separate change: a refracted ray changes direction, so it is a new ray rather than a continuation
 // of the same march. PJV_Q_REFRACTION is where it will hang.
 // The material of nothing: black, non-emissive, fully rough, opaque. By the zero rule this is what a
 // palette entry of all zeroes decodes to, so "empty" and "never had properties set" agree.
-VoxelMaterial emptyVoxelMaterial() {
-    VoxelMaterial m;
+PjvVoxelMaterial pjvEmptyVoxelMaterial() {
+    PjvVoxelMaterial m;
     m.albedo = vec3(0.0);
     m.emission = vec3(0.0);
     m.glossiness = 0.0;
@@ -97,21 +97,21 @@ VoxelMaterial emptyVoxelMaterial() {
 // positionally, with a looser radius and a shorter mean. Collapsing the two into one flag is why
 // fire still flickered after grass had stopped: it was being offered grass's gate, which nothing
 // about fire can pass.
-bool pjvMaterialIsAnimated(VoxelMaterial m) { return (m.flags & PJV_MAT_FLAG_ANIMATED) != 0u; }
+bool pjvMaterialIsAnimated(PjvVoxelMaterial m) { return (m.flags & PJV_MAT_FLAG_ANIMATED) != 0u; }
 
 // ...and specifically by ADVECTION. Answered from the motion table rather than from a flag bit,
 // because "which kind of field moves this" is a property of the field and the material only names
 // one. The prototype spent a palette flag bit on it and had to keep the two in step by hand.
-bool pjvMaterialIsAdvected(VoxelMaterial m) {
+bool pjvMaterialIsAdvected(PjvVoxelMaterial m) {
     if ((m.flags & PJV_MAT_FLAG_ANIMATED) == 0u) return false;
     return pjvMotionSet((m.flags >> PJV_MAT_MOTION_SHIFT) & PJV_MAT_MOTION_MASK).kind == PJV_MOTION_ADVECT;
 }
 
-VoxelMaterial decodeMaterial(uvec4 texel) {
-    VoxelMaterial m;
+PjvVoxelMaterial pjvDecodeMaterial(uvec4 texel) {
+    PjvVoxelMaterial m;
     // A palette colour is stored sRGB-encoded (docs/plans/color-convention.md); shading wants linear light,
     // so it is decoded here, once, for every renderer. The emission colour likewise; its strength is linear.
-    m.albedo = pjvSrgbToLinear(unpackPaletteRGB10(texel.x));
+    m.albedo = pjvSrgbToLinear(pjvUnpackPaletteRGB10(texel.x));
 
     // Exponential, matching projv::unpackEmissiveStrength on the CPU: raw 0 is exactly zero, so a
     // legacy entry is not an emitter, and 1..255 spans roughly 0.004 to 245 with raw 128 sitting at
@@ -123,7 +123,7 @@ VoxelMaterial decodeMaterial(uvec4 texel) {
     // an emission colour picked, without giving up independent emission for the surfaces that need
     // it (a black voxel cannot glow if emission is albedo * strength). See
     // projv::materialEffectiveEmissionColor.
-    vec3 emissionColour = texel.y == 0u ? m.albedo : pjvSrgbToLinear(unpackPaletteRGB10(texel.y));
+    vec3 emissionColour = texel.y == 0u ? m.albedo : pjvSrgbToLinear(pjvUnpackPaletteRGB10(texel.y));
     m.emission = emissionColour * strength;
 
     m.glossiness   = float((texel.z >> 24u) & 0xFFu) / 255.0;

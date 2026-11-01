@@ -4242,7 +4242,7 @@ static void drawWorldBoxOutline(ImDrawList* drawList, const projv::core::vec3 co
 }
 
 // Draws one chunk's world-space OBB as a yellow wireframe box. header.rotation is about the chunk's
-// own minimum corner (position), matching the convention fetchVoxelColor uses on the GPU side and
+// own minimum corner (position), matching the convention pjvFetchVoxelColor uses on the GPU side and
 // utils::pickVoxel mirrors on the CPU side: worldCorner = position + rotation * (localOffset).
 static void drawChunkOutline(ImDrawList* drawList, const projv::Chunk& chunk, projv::core::vec3 cameraPos,
                              projv::core::vec3 cameraDirection, ImVec2 imageMin, ImVec2 imageMax,
@@ -10761,8 +10761,8 @@ static void snapshotToLists(const PartSnapshot& snapshot, std::vector<projv::cor
 }
 
 // Takes a component's geometry out of the render without destroying it, by removing it from the
-// loose list -- which is exactly what the renderer and the ray walk (see raySceneIntersect's
-// sceneLooseCount / looseListValue, and syncSceneTables, which builds that texture from this vector).
+// loose list -- which is exactly what the renderer and the ray walk (see pjvRaySceneIntersect's
+// pjvSceneLooseCount / pjvLooseListValue, and syncSceneTables, which builds that texture from this vector).
 //
 // The resolved result needs this: while the result is up, the *parts* must not be drawn, because two
 // overlapping copies of one form is worse than either alone -- but they must still be fully readable,

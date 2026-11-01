@@ -9,16 +9,16 @@ $input v_texcoord0
 // slower; the loop's bound comes from a uniform so the compiler cannot unroll it back into two copies.
 // (The physics demos' renderer, which this one grew from, measured both.)
 //
-// ---- WHY raySceneIntersectFrom AND NOT raySceneIntersect ------------------------------------------
-// raySceneIntersect is the engine's full query: it wraps the march in a loop that peels transparent
+// ---- WHY pjvRaySceneIntersectFrom AND NOT pjvRaySceneIntersect ------------------------------------------
+// pjvRaySceneIntersect is the engine's full query: it wraps the march in a loop that peels transparent
 // layers, bends at refracting interfaces and resolves materials, and all of that is compiled into the
-// shader whether a ray asks for it or not. raySceneIntersectFrom is the bare nearest-solid-voxel query
+// shader whether a ray asks for it or not. pjvRaySceneIntersectFrom is the bare nearest-solid-voxel query
 // underneath it. Measured here, at 0.4 scale:
 //
 //                                    Cave meadow    SanMiguel courtyard
-//     raySceneIntersect               2.19 ms        4.74 ms
+//     pjvRaySceneIntersect               2.19 ms        4.74 ms
 //       ...with transparency off      2.11 ms        4.67 ms
-//     raySceneIntersectFrom           1.21 ms        2.60 ms
+//     pjvRaySceneIntersectFrom           1.21 ms        2.60 ms
 //
 // So the cost was never the transparency a scene uses -- it is the machinery's mere presence. The
 // march counters say why it matters so much: a ray here takes only about ten tree steps across one or
@@ -114,7 +114,7 @@ bool traceEmbers(vec3 o, vec3 d, float tLimit, out float tHit, out vec3 nHit, ou
             int cube = int(texelFetch(emberIndex, texelOf(first + j, dataWide), 0).x);
             vec4 a = texelFetch(emberCubes, texelOf(cube * 4, dataWide), 0);
             vec4 q = texelFetch(emberCubes, texelOf(cube * 4 + 1, dataWide), 0);
-            mat3 R = rotationFromQuat(q);
+            mat3 R = pjvRotationFromQuat(q);
             vec3 lo = (o - a.xyz) * R;   // into the lump's frame (transpose(R) times)
             vec3 ld = d * R;
             vec3 sl = vec3(abs(ld.x) < 1e-6 ? 1e-6 : ld.x, abs(ld.y) < 1e-6 ? 1e-6 : ld.y, abs(ld.z) < 1e-6 ? 1e-6 : ld.z);
@@ -176,7 +176,7 @@ uniform vec4 renderParams;
 // The primary ray takes no LOD at all: at a reduced render scale "a node smaller than a render pixel"
 // is several output pixels, and the merged blocks read as a visible change of detail with distance.
 
-bool isMiss(SceneIntersectData h) {
+bool isMiss(PjvSceneIntersectData h) {
     return h.foundBox.size < 0.0 || h.rayT <= 0.0 || dot(h.normal, h.normal) < 0.5;
 }
 
@@ -186,17 +186,17 @@ void main() {
     int phase = frame - (frame / 16) * 16 + 1;
     vec2 jitter = (vec2(pjvHalton(phase, 2), pjvHalton(phase, 3)) - 0.5) * frameParams.y;
 
-    Ray ray;
+    PjvRay ray;
     ray.origin = pjvViewPosition();
     ray.direction = grrCameraRay(v_texcoord0 + jitter * passTargetRes.zw, passTargetRes.xy, pjvViewDirection());
     vec3 primaryDirection = ray.direction;
     vec3 sun = normalize(sunDir.xyz);
-    RayQuery query = pjvPrimaryQuery(PRIMARY_STEPS);
+    PjvRayQuery query = pjvPrimaryQuery(PRIMARY_STEPS);
 
 #if GRR_STATS
     vec4 statsOut = vec4(0.0, 0.0, 0.0, 0.0);
 #endif
-    SceneIntersectData hit;
+    PjvSceneIntersectData hit;
     float visibility = 1.0, flashVisibility = 0.0;
     // Up to three rays through ONE call of the march: the primary, the moon's shadow, and the shadow
     // toward the explosion's light. `next` says which the loop traces after the current one.
@@ -211,7 +211,7 @@ void main() {
     int emberCube = -1;
     vec3 emberVoxel = vec3(1.0, 1.0, 1.0);
     for (int i = 0; i < 3; i++) {
-        SceneIntersectData found = raySceneIntersectFrom(ray, query, 0.0);
+        PjvSceneIntersectData found = pjvRaySceneIntersectFrom(ray, query, 0.0);
         if (stage == 0) {
             hit = found;
 #if GRR_STATS == 1
@@ -272,7 +272,7 @@ void main() {
         float seed = texelFetch(emberCubes, texelOf(emberCube * 4 + 3, wide), 0).x;
         // The voxel: a third of the lump, its colour checkered and jittered as the old voxel chunks were.
         float sub = a.w * (2.0 / 3.0);
-        vec3 voxelCentre = a.xyz + rotationFromQuat(q) * ((emberVoxel + 0.5) * sub - a.w);
+        vec3 voxelCentre = a.xyz + pjvRotationFromQuat(q) * ((emberVoxel + 0.5) * sub - a.w);
         float checker = mod(emberVoxel.x + emberVoxel.y + emberVoxel.z, 2.0) < 0.5 ? 0.84 : 1.0;
         vec3 colour = look.rgb * checker * (0.9 + 0.2 * lumpHash(emberVoxel + 3.0, seed));
         gl_FragData[0] = vec4(surface, emberT);
@@ -301,7 +301,7 @@ void main() {
     vec3 P = pjvViewPosition() + primaryDirection * hit.rayT;
     // The geometry-only query resolves no material, so the hit's is fetched here: one descent, for the
     // primary ray only.
-    VoxelMaterial material = fetchVoxelMaterialFromHit(hit);
+    PjvVoxelMaterial material = pjvFetchVoxelMaterialFromHit(hit);
     vec3 albedo = material.albedo;
     // Emission travels as a multiple of the albedo, so it fits the albedo target's spare channel: an
     // emitter's glow is its own colour, scaled.
@@ -310,9 +310,9 @@ void main() {
 
     // The voxel's centre is its minimum LOCAL corner plus the half-diagonal turned by the chunk's
     // rotation, so the face centre is right for a turned chunk as well as an axis-aligned one.
-    vec4 rotation = headers(int(hit.headerIndex)).rotation;
+    vec4 rotation = pjvHeader(int(hit.headerIndex)).rotation;
     float voxelSize = hit.foundBox.size;
-    vec3 centre = hit.foundBox.position + rotationFromQuat(rotation) * vec3(voxelSize * 0.5);
+    vec3 centre = hit.foundBox.position + pjvRotationFromQuat(rotation) * vec3(voxelSize * 0.5);
     vec3 faceCentre = centre + normal * (voxelSize * 0.5);
 
     gl_FragData[0] = vec4(P, hit.rayT);

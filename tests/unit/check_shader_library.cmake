@@ -8,13 +8,16 @@
 # 2. A scan: no `uniform` or sampler outside pjv_engine.sc, and every symbol a file defines at file
 #    scope -- function, struct, #define -- starts with pjv / PJV (or is the file's include guard).
 #
-# pjv_scene.sc, pjv_material.sc and pjv_motion.sc are exempt from the scan until S5 prefixes them:
-# they declare the scene's samplers and predate the prefix. They are still compiled.
+# The scene's textures are the one exception to the uniform rule: engine-owned, but declared by the file
+# that reads them (pjv_scene.sc, pjv_material.sc) rather than in pjv_engine.sc, because every pass
+# includes the engine file and some bind their own inputs at the scene's stages.
 
 # A script run with -P sets no policy version, and if(... IN_LIST ...) needs one.
 cmake_minimum_required(VERSION 3.20)
 
-set(scanExempt pjv_scene.sc pjv_material.sc pjv_motion.sc)
+set(sceneTextureFiles pjv_scene.sc pjv_material.sc)
+set(sceneTextures tree64Data materialIDs materialPalette headerData gridInfo cellMap looseList
+                  tree64Dims voxelTypeDims paletteDims)
 set(profiles "spirv:linux" "440:linux" "metal:osx")
 
 file(GLOB libraryFiles "${LIBRARY}/*.sc")
@@ -55,17 +58,24 @@ foreach(file IN LISTS libraryFiles)
     list(APPEND allNames "${fileName}")
     compile_test("alone_${stem}" "${fileName}")
 
-    if(fileName IN_LIST scanExempt)
-        continue()
-    endif()
     file(STRINGS "${file}" lines)
     set(lineNumber 0)
     foreach(line IN LISTS lines)
         math(EXPR lineNumber "${lineNumber} + 1")
         if(fileName STREQUAL "pjv_engine.sc")
             # The one file that declares uniforms; its own guard is the only symbol it defines.
-        elseif(line MATCHES "^[ \t]*uniform[ \t]" OR line MATCHES "^[ \t]*[IU]?SAMPLER[A-Z0-9_]*\\(")
-            string(APPEND failures "\n${fileName}:${lineNumber}: declares a uniform; engine-owned ones go in pjv_engine.sc, a renderer's in the renderer")
+        else()
+            # One MATCHES per if(): CMake evaluates both sides of an OR, and the failing one clears
+            # CMAKE_MATCH_1.
+            set(declared "")
+            if(line MATCHES "^[ \t]*uniform[ \t]+[A-Za-z0-9_]+[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
+                set(declared "${CMAKE_MATCH_1}")
+            elseif(line MATCHES "^[ \t]*[IU]?SAMPLER[A-Z0-9_]*\\([ \t]*([A-Za-z_][A-Za-z0-9_]*)")
+                set(declared "${CMAKE_MATCH_1}")
+            endif()
+            if(declared AND NOT (fileName IN_LIST sceneTextureFiles AND declared IN_LIST sceneTextures))
+                string(APPEND failures "\n${fileName}:${lineNumber}: declares a uniform; engine-owned ones go in pjv_engine.sc, a renderer's in the renderer")
+            endif()
         endif()
         set(symbol "")
         if(line MATCHES "^#define[ \t]+([A-Za-z_][A-Za-z0-9_]*)")

@@ -11,7 +11,7 @@ $input v_texcoord0
 // written in, as a renderer folder: the starting point for one of your own.
 //
 // Everything specific to ProjectV is in the two calls below. pjvViewRayDirection
-// turns a pixel into a camera ray (pjv_camera.sc), and raySceneIntersect marches
+// turns a pixel into a camera ray (pjv_camera.sc), and pjvRaySceneIntersect marches
 // it through the voxel scene -- loose chunks or a grid alike (pjv_scene.sc). Both
 // are the engine's shader library, which the build puts on shaderc's include path.
 // =============================================================================
@@ -29,20 +29,20 @@ vec3 sky(vec3 direction) {
 }
 
 void main() {
-    Ray ray;
+    PjvRay ray;
     ray.origin    = pjvViewPosition();
     ray.direction = pjvViewRayDirection(v_texcoord0, passTargetRes.xy);   // passTargetRes: the engine's, this pass's size
 
     // A query carries the march's budget and level-of-detail policy. The march
     // stops at the first hit, so a large budget costs only the rays that need it:
     // the long ones across a streamed world hundreds of metres wide.
-    RayQuery rayQuery = pjvPrimaryQuery(1024u);
+    PjvRayQuery rayQuery = pjvPrimaryQuery(1024u);
     rayQuery.maxRaySteps = 1024u;
     rayQuery.startLOD = 0;
     rayQuery.finishLOD = 0;
     rayQuery.distanceToFinishLOD = 100000;
 
-    SceneIntersectData sceneHit = raySceneIntersect(ray, rayQuery).hit;
+    PjvSceneIntersectData sceneHit = pjvRaySceneIntersect(ray, rayQuery).hit;
 
     // A miss is reported through foundBox.size and rayT rather than a flag. Trust
     // the march's own hit data instead of re-intersecting the box: a fresh slab
@@ -52,7 +52,7 @@ void main() {
     if (sceneHit.foundBox.size < 0.0 || sceneHit.rayT <= 0.0 || dot(normal, normal) < 0.5) {
         colour = sky(ray.direction);
     } else {
-        vec3 albedo = fetchVoxelColor(sceneHit.foundBox, sceneHit.headerIndex);
+        vec3 albedo = pjvFetchVoxelColor(sceneHit.foundBox, sceneHit.headerIndex);
         normal = normalize(normal);
         float sun = max(dot(normal, SUN), 0.0);
         float skyLight = 0.3 + 0.1 * normal.y;   // more from above than below

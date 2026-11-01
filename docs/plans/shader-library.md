@@ -545,6 +545,28 @@ envelope view), all off by default.
 - Sizes are unchanged from the gates step: the umbrella added only `pjv_camera.sc` and
   `WORLD_SCALE`, and nothing else changed.
 
+*Prefix* (D2, D7). Every file-scope symbol of the three files has the prefix:
+- functions: `pjvRaySceneIntersect`, `pjvFetchVoxelMaterialFromHit`, `pjvDecodeMaterial`, ...; `headers`
+  is `pjvHeader`;
+- structs: `PjvRay`, `PjvRayQuery`, `PjvSceneHit`, `PjvSceneIntersectData`, `PjvVoxelMaterial`,
+  `PjvChunkHeader`, `PjvMotionSet`, ...;
+- defines: `PJV_MAX_PEEL_ITERATIONS`, `PJV_MAX_REFRACTION_SEGMENTS`, `PJV_MATERIAL_INDEX_NEEDS_DESCENT`.
+
+How it was done:
+- Shaders: renamed everywhere. `Ray`, `Grid`, `headers` and `tree64` are also English words, so in
+  comment text those four were left alone.
+- C++ comments and the docs (not the plans, which are history): only the names that are not also C++
+  identifiers (`VoxelMaterial`, `MotionSet` and `chunkHeader` are C++ types too).
+- Checked first: no renderer defined a symbol of any old name (the editor's `MAX_PEEL_ITERATIONS`
+  overrides renamed with it), and none of the new names existed anywhere.
+
+Result:
+- Sizes identical for all 100 shaders, as a pure rename gives: SPIR-V carries no names.
+- `ctest -R shader_library` scans every library file now. The scene's textures are its one
+  exception to the uniform rule: engine-owned, but declared by `pjv_scene.sc` and `pjv_material.sc`,
+  which read them. A deliberate stray uniform and an unprefixed function in `pjv_motion.sc` were both
+  caught.
+
 ## Open questions
 
 None open. Answered 2026-10-27: tolerance (D5), `projv::cam` (D4), embedded (D3), S5 in scope (D8).

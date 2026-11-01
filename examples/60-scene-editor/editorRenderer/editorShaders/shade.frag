@@ -86,7 +86,7 @@ $input v_texcoord0
 // vertex after it -- and if they disagreed about what glass does, the split would show as a seam
 // between the direct and indirect terms rather than as a slightly cheaper approximation.
 // Must be defined BEFORE the include to override the header's #ifndef default.
-#define MAX_PEEL_ITERATIONS 9
+#define PJV_MAX_PEEL_ITERATIONS 9
 #define PJV_SCENE_TRANSPARENCY   // shadow rays see through glass (pjv_scene.sc's gates)
 #include <pjv_scene.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
@@ -277,11 +277,11 @@ vec3 directSunLight(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
         return vec3(0.0);
     }
 
-    Ray shadowRay;
+    PjvRay shadowRay;
     shadowRay.origin = position + normal * (SUN_ORIGIN_BIAS_VOXELS * voxelSize);
     shadowRay.direction = lightDirection;
 
-    RayQuery query = pjvPrimaryQuery(100u);
+    PjvRayQuery query = pjvPrimaryQuery(100u);
     query.maxRaySteps = SUN_SHADOW_STEPS;
     // No LOD, for gi.frag's reason: a shadow cast by a coarsened version of the scene is the wrong
     // shape, and unlike a primary ray there is nothing on screen that tells you it happened.
@@ -292,7 +292,7 @@ vec3 directSunLight(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
     query.maxDistance = 1e30;
     query.flags |= PJV_Q_OCCLUSION_ONLY;
     pjvQueryTransparency(query, TRANSPARENT_LAYERS, 0u);
-    vec3 visibility = raySceneTransmittance(shadowRay, query);
+    vec3 visibility = pjvRaySceneTransmittance(shadowRay, query);
     return irradiance * visibility * (cosLight / PI);
 }
 
@@ -416,7 +416,7 @@ float ambientOcclusion(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
         if (tapDistance <= 0.0) {
             continue;   // Background: there is nothing there to be occluded by.
         }
-        Ray tapRay = primaryRay((vec2(tapTexel) + 0.5) * texelSize + jitterUV);
+        PjvRay tapRay = primaryRay((vec2(tapTexel) + 0.5) * texelSize + jitterUV);
         vec3 toSample = tapRay.origin + tapRay.direction * tapDistance - position;
 #else
         vec4 tap = texture2D(previewPosition, tapUV);
@@ -528,17 +528,17 @@ float sunShadow(vec3 position, vec3 normal, float voxelSize) {
         return SHADOW_DARKENING;
     }
 
-    Ray shadowRay;
+    PjvRay shadowRay;
     shadowRay.origin = position + normal * (SHADOW_ORIGIN_BIAS_VOXELS * voxelSize);
     shadowRay.direction = SUN_DIRECTION;
 
-    RayQuery shadowQuery = pjvPrimaryQuery(100u);
+    PjvRayQuery shadowQuery = pjvPrimaryQuery(100u);
     shadowQuery.maxRaySteps = SHADOW_MAX_STEPS;
     shadowQuery.startLOD = 0;
     shadowQuery.finishLOD = 0;
     shadowQuery.distanceToFinishLOD = 10000;
 
-    SceneIntersectData shadowHit = raySceneIntersect(shadowRay, shadowQuery).hit;
+    PjvSceneIntersectData shadowHit = pjvRaySceneIntersect(shadowRay, shadowQuery).hit;
     return shadowHit.rayT < 0.0 ? 1.0 : SHADOW_DARKENING;
 }
 

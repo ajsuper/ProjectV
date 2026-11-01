@@ -2,9 +2,9 @@
 #define PJV_SCENE_SC
 
 // The scene query: a ray through the engine's voxel scene -- loose chunks and grids, each a tile
-// table -- and what it hit. raySceneIntersect is the entry point; RayQuery says what is asked.
+// table -- and what it hit. pjvRaySceneIntersect is the entry point; PjvRayQuery says what is asked.
 
-#include <pjv_material.sc>  // VoxelMaterial, materialID, materialPaletteTexel
+#include <pjv_material.sc>  // PjvVoxelMaterial, pjvMaterialID, pjvMaterialPaletteTexel
 #include <pjv_motion.sc>    // the animated march's fields
 #include <pjv_random.sc>    // pjvRandomUnit, for the peel's stochastic interface
 
@@ -44,10 +44,10 @@ USAMPLER2D(cellMap, 13);
 USAMPLER2D(looseList, 11);
 
 uniform vec4 tree64Dims;
-// ---- RayQuery: everything the caller wants out of a traversal, in one place -------------------
+// ---- PjvRayQuery: everything the caller wants out of a traversal, in one place -------------------
 //
 // NOTE ON DEFAULTS: the initializers below are NOT dependable, and this is the single most important
-// thing to know about this struct. Every renderer builds a RayQuery by declaring one and assigning
+// thing to know about this struct. Every renderer builds a PjvRayQuery by declaring one and assigning
 // only the fields it cares about; the compiled result does not carry the values written here, so an
 // unassigned field is garbage. `doTransparency` sat in here unset and unread for as long as it
 // existed, which is why nobody noticed. Worse, when the peel's distance floor was first put here and
@@ -58,7 +58,7 @@ uniform vec4 tree64Dims;
 // growing it safe:
 //
 //   1. A query is PRODUCED BY A CONSTRUCTOR (pjvPrimaryQuery / pjvShadowQuery / pjvBounceQuery),
-//      never by a bare `RayQuery q;`. A constructor assigns every field, so nothing is left to a
+//      never by a bare `PjvRayQuery q;`. A constructor assigns every field, so nothing is left to a
 //      default that does not survive.
 //   2. `magic` is checked on entry to the scene query. A struct that did not come from a constructor
 //      almost certainly does not carry PJV_QUERY_MAGIC, and the traversal then CLAMPS THE FIELDS
@@ -72,7 +72,7 @@ uniform vec4 tree64Dims;
 //
 // What still may NOT live here: anything the march needs before the scene query has had a chance to
 // validate the struct. The peel's distance floor is the standing example and stays an explicit
-// function parameter of raySceneIntersectFrom.
+// function parameter of pjvRaySceneIntersectFrom.
 #define PJV_QUERY_MAGIC 0x51525931u   // 'QRY1'
 
 // Traversal behaviour the caller opts into. All-bits-zero is the plain nearest-opaque-hit march that
@@ -81,10 +81,10 @@ uniform vec4 tree64Dims;
 #define PJV_Q_REFRACTION    0x2u   // ...and bend the ray at an interface whose ior != 1
 #define PJV_Q_ANIMATION     0x4u   // resolve animated geometry against its envelope
 #define PJV_Q_OCCLUSION_ONLY 0x8u  // the caller wants transmittance, not a surface to shade
-// Populate SceneHit::material. Off by default, and deliberately so: resolving a material costs two
+// Populate PjvSceneHit::material. Off by default, and deliberately so: resolving a material costs two
 // texel fetches, a caller that is going to shade the hit has always paid them itself through
-// fetchVoxelMaterialFromHit, and turning this on unconditionally would make it pay them TWICE until
-// it migrated. Asking for it here and reading SceneHit::material is strictly cheaper than the old
+// pjvFetchVoxelMaterialFromHit, and turning this on unconditionally would make it pay them TWICE until
+// it migrated. Asking for it here and reading PjvSceneHit::material is strictly cheaper than the old
 // route -- the traversal already has the leaf in registers and needs no second descent. Implied by
 // PJV_Q_TRANSPARENCY, which cannot decide anything without the material.
 #define PJV_Q_WANT_MATERIAL 0x10u
@@ -96,9 +96,9 @@ uniform vec4 tree64Dims;
 // identical on screen -- a hole with the background through it -- and are nowhere near each other.
 #define PJV_Q_ANIM_DEBUG_SOLID 0x20u
 
-// A starting LOD no ordinary ramp can mean; selects footprint mode in computeTargetLOD, which
+// A starting LOD no ordinary ramp can mean; selects footprint mode in pjvComputeTargetLOD, which
 // reinterprets finishLOD and distanceToFinishLOD. Defined here so pjvQueryLODFootprint can name it;
-// the reasoning is at computeTargetLOD.
+// the reasoning is at pjvComputeTargetLOD.
 #define PJV_LOD_FOOTPRINT 255u
 
 // ============================================================================================
@@ -125,7 +125,7 @@ uniform vec4 tree64Dims;
 // This note exists because the mistake has been made repeatedly. Please leave it here.
 // ============================================================================================
 
-struct RayQuery {
+struct PjvRayQuery {
     // Set by the constructors; validated by the scene query. See the note above.
     uint  magic;
     uint  flags;                  // PJV_Q_*
@@ -139,7 +139,7 @@ struct RayQuery {
 
     // ---- added, and therefore only trustworthy when `magic` checks out ----
     // How many transparent layers the ray may cross before it gives up. Runtime, not a per-shader
-    // #define: the bound the loops unroll against is MAX_PEEL_ITERATIONS and is a ceiling, while this
+    // #define: the bound the loops unroll against is PJV_MAX_PEEL_ITERATIONS and is a ceiling, while this
     // is the budget, and the two were previously the same number in four different files.
     uint  maxTransparentLayers;
     // How many times a ray may be bent by refraction. 0 reproduces a pure filter exactly.
@@ -168,8 +168,8 @@ struct RayQuery {
 // They differ only in what a caller of that shape always wants, and they are deliberately three
 // rather than one-with-arguments: the name at the call site says what kind of ray this is, which is
 // the thing a reader wants to know and the thing a default cannot express.
-RayQuery pjvRayQueryRaw(uint maxSteps) {
-    RayQuery q;
+PjvRayQuery pjvRayQueryRaw(uint maxSteps) {
+    PjvRayQuery q;
     q.magic = PJV_QUERY_MAGIC;
     q.flags = 0u;
     q.startLOD = 0u;
@@ -185,13 +185,13 @@ RayQuery pjvRayQueryRaw(uint maxSteps) {
     return q;
 }
 // A camera or reflection ray: wants the nearest surface, over the whole ray.
-RayQuery pjvPrimaryQuery(uint maxSteps) { return pjvRayQueryRaw(maxSteps); }
+PjvRayQuery pjvPrimaryQuery(uint maxSteps) { return pjvRayQueryRaw(maxSteps); }
 // A bounce ray. Same shape as a primary today; named apart because its budgets diverge in practice
 // and a call site should say which it is.
-RayQuery pjvBounceQuery(uint maxSteps)  { return pjvRayQueryRaw(maxSteps); }
+PjvRayQuery pjvBounceQuery(uint maxSteps)  { return pjvRayQueryRaw(maxSteps); }
 // A shadow ray: bounded, and after transmittance rather than a surface.
-RayQuery pjvShadowQuery(uint maxSteps, float maxDistance) {
-    RayQuery q = pjvRayQueryRaw(maxSteps);
+PjvRayQuery pjvShadowQuery(uint maxSteps, float maxDistance) {
+    PjvRayQuery q = pjvRayQueryRaw(maxSteps);
     q.flags |= PJV_Q_OCCLUSION_ONLY;
     q.maxDistance = maxDistance;
     return q;
@@ -202,36 +202,36 @@ RayQuery pjvShadowQuery(uint maxSteps, float maxDistance) {
 // shaped around.
 // Each exists only in a shader that compiled its feature in; see the gates at the top.
 #ifdef PJV_SCENE_MATERIAL
-void pjvQueryWantMaterial(inout RayQuery q) { q.flags |= PJV_Q_WANT_MATERIAL; }
+void pjvQueryWantMaterial(inout PjvRayQuery q) { q.flags |= PJV_Q_WANT_MATERIAL; }
 #endif
 #ifdef PJV_SCENE_TRANSPARENCY
-void pjvQueryTransparency(inout RayQuery q, uint maxLayers, uint seed) {
+void pjvQueryTransparency(inout PjvRayQuery q, uint maxLayers, uint seed) {
     q.flags |= PJV_Q_TRANSPARENCY;
     q.maxTransparentLayers = maxLayers;
     q.seed = seed;
 }
 #endif
 #ifdef PJV_SCENE_REFRACTION
-void pjvQueryRefraction(inout RayQuery q, uint maxSegments) {
+void pjvQueryRefraction(inout PjvRayQuery q, uint maxSegments) {
     q.flags |= PJV_Q_REFRACTION;
     q.maxRefractionSegments = maxSegments;
 }
 #endif
 #ifdef PJV_SCENE_ANIMATION
-void pjvQueryAnimation(inout RayQuery q, float resolveDistance) {
+void pjvQueryAnimation(inout PjvRayQuery q, float resolveDistance) {
     q.flags |= PJV_Q_ANIMATION;
     q.animResolveDistance = resolveDistance;
 }
 #endif
 #ifdef PJV_SCENE_DEBUG
-void pjvQueryAnimationDebugSolid(inout RayQuery q) { q.flags |= PJV_Q_ANIM_DEBUG_SOLID; }
+void pjvQueryAnimationDebugSolid(inout PjvRayQuery q) { q.flags |= PJV_Q_ANIM_DEBUG_SOLID; }
 #endif
-void pjvQueryLinearLOD(inout RayQuery q, uint finishLOD, uint rampDistanceVoxels) {
+void pjvQueryLinearLOD(inout PjvRayQuery q, uint finishLOD, uint rampDistanceVoxels) {
     q.startLOD = 0u;
     q.finishLOD = finishLOD;
     q.distanceToFinishLOD = rampDistanceVoxels;
 }
-void pjvQueryLODFootprint(inout RayQuery q, uint crossoverVoxels, uint coarsestLevel) {
+void pjvQueryLODFootprint(inout PjvRayQuery q, uint crossoverVoxels, uint coarsestLevel) {
     q.startLOD = PJV_LOD_FOOTPRINT;
     q.finishLOD = coarsestLevel;
     q.distanceToFinishLOD = crossoverVoxels;
@@ -239,11 +239,11 @@ void pjvQueryLODFootprint(inout RayQuery q, uint crossoverVoxels, uint coarsestL
 
 // Whether this query came from a constructor. A false answer is not fatal -- see the clamp in
 // pjvValidateQuery -- but it is always worth reporting.
-bool pjvQueryIsValid(RayQuery q) { return q.magic == PJV_QUERY_MAGIC; }
+bool pjvQueryIsValid(PjvRayQuery q) { return q.magic == PJV_QUERY_MAGIC; }
 
 // Force an unconstructed query into a shape the traversal can trust. Only the fields added alongside
 // `magic` are touched; see the note above for why the older four are left as the caller set them.
-RayQuery pjvValidateQuery(RayQuery q) {
+PjvRayQuery pjvValidateQuery(PjvRayQuery q) {
     if (q.magic == PJV_QUERY_MAGIC) return q;
     q.magic = PJV_QUERY_MAGIC;
     q.flags = 0u;
@@ -257,12 +257,12 @@ RayQuery pjvValidateQuery(RayQuery q) {
 }
 
 //Box structure with a position(min of x, y, z) and a size.
-struct BoxAABB {
+struct PjvBoxAABB {
     vec3 position;
     float size;
 };
 
-struct Tree64NodeData {
+struct PjvTree64NodeData {
     uint data1;
     uint data2;
     uint data3;
@@ -270,12 +270,12 @@ struct Tree64NodeData {
 };
 
 //Ray structure with an origin, direction, and color.
-struct Ray {
+struct PjvRay {
     vec3 origin;
     vec3 direction;
 };
 
-struct IntersectionResult {
+struct PjvIntersectionResult {
     float distance;    // Distance from ray origin to intersection point
                        // -1.0f means no intersection
                        // 0.0f means ray starts inside box (for entry function)
@@ -285,7 +285,7 @@ struct IntersectionResult {
                        // For exit normals: points OUTWARD from box face
 };
 
-struct chunkHeader {
+struct PjvChunkHeader {
     uint chunkID;
     float positionX;
     float positionY;
@@ -303,8 +303,8 @@ struct chunkHeader {
     uint paletteOffset;
     vec4 rotation;
     // Levels dropped below `resolution` this chunk instance's traversal should cap itself at, on
-    // top of whatever the ray-distance-based cutoff (computeTargetLOD) already allows. See
-    // marchRayThroughTree64_DDA's cutoff check and makeHeader (gpu_interface.cpp) for how this is
+    // top of whatever the ray-distance-based cutoff (pjvComputeTargetLOD) already allows. See
+    // pjvMarchRayThroughTree64_DDA's cutoff check and makeHeader (gpu_interface.cpp) for how this is
     // computed on the CPU side.
     uint traversalLOD;
     // ---- The animation envelope (see DataBlock in compose.h) --------------------------------
@@ -326,7 +326,7 @@ struct chunkHeader {
 
 // Does this chunk carry an animation envelope at all? Almost never, and the traversal is written so
 // that answering "no" costs one comparison.
-bool chunkHasEnvelope(chunkHeader h) { return h.envelopeNodeCount > 0u; }
+bool pjvChunkHasEnvelope(PjvChunkHeader h) { return h.envelopeNodeCount > 0u; }
 
 // ---- March statistics (off unless a shader defines PJV_MARCH_STATS before including this) ----
 // Counters a debug view can paint as a heat map: tree marches started (one per chunk a ray reaches),
@@ -347,10 +347,10 @@ void pjvStatMarch(uint steps) { pjvStatMarches += 1u; pjvStatSteps += steps; }
 void pjvStatVisit() { pjvStatVisits += 1u; }
 #endif
 
-struct SceneIntersectData {
+struct PjvSceneIntersectData {
     uint steps;
     uint headerIndex;
-    BoxAABB foundBox;
+    PjvBoxAABB foundBox;
     // Authoritative hit data straight from the DDA's own arithmetic. Callers must use
     // these instead of re-intersecting foundBox analytically: a fresh slab test on a
     // boundary-exact hit disagrees with the march by ULPs and misclassifies the hit.
@@ -363,7 +363,7 @@ struct SceneIntersectData {
     // foundBox.position carries the same cell, but converted to world space (rotated and
     // translated by the chunk's transform), and recovering an integer back out of it is a
     // float32 round trip that does not survive. Two things go wrong at once: the local offset
-    // is added to the world translation P and subtracted back -- twice, since fetchVoxelColor
+    // is added to the world translation P and subtracted back -- twice, since pjvFetchVoxelColor
     // adds P and then immediately subtracts it again -- which loses low bits in proportion to
     // |P|; and the result is truncated rather than rounded, so an error of a single ULP below
     // an exact integer drops the coordinate a whole cell.
@@ -387,11 +387,11 @@ struct SceneIntersectData {
     // down the middle of the screen where the sign changes. The march knows the answer exactly.
     float exitT;
     // Flat index of this voxel's entry in the materialIDs texture, and the palette base to add to
-    // what that entry holds. Together they are everything fetchVoxelMaterialFromHit needs, which is
+    // what that entry holds. Together they are everything pjvFetchVoxelMaterialFromHit needs, which is
     // why they are here: they turn a material lookup into two texelFetches.
     //
     // Carried for the same reason voxelCoord and exitT are, and with more to gain than either. The
-    // alternative -- fetchVoxelMaterialAtCoord -- re-fetches the chunk header (PJV_HEADER_TEXELS texels) and then
+    // alternative -- pjvFetchVoxelMaterialAtCoord -- re-fetches the chunk header (PJV_HEADER_TEXELS texels) and then
     // re-descends the tree from the root, one texel and one popcount per level, to reach the leaf the
     // march was standing on when it returned. The march already had that leaf's occupancy mask and
     // material offset in hand, and the voxel's index within it on the top of the stack; the whole
@@ -401,17 +401,17 @@ struct SceneIntersectData {
     // the peel (once to decide whether the layer is opaque, once for the surface that stops it), so
     // it is the redundant work that scales worst with what the peel and the bounce loop ask for.
     //
-    // MATERIAL_INDEX_NEEDS_DESCENT means the march could not resolve it and the caller must fall back
-    // to fetchVoxelMaterialAtCoord. That is the LOD-cutoff hit: a coarsened interior node returned as
+    // PJV_MATERIAL_INDEX_NEEDS_DESCENT means the march could not resolve it and the caller must fall back
+    // to pjvFetchVoxelMaterialAtCoord. That is the LOD-cutoff hit: a coarsened interior node returned as
     // wholly solid has no single material to name, and the fallback's behaviour (the material of the
     // node's minimum-corner voxel) is what those hits have always shaded as.
     uint materialListIndex;
     uint paletteOffset;
 };
 
-// See SceneIntersectData::materialListIndex. Not a valid index -- the material list is nowhere near
+// See PjvSceneIntersectData::materialListIndex. Not a valid index -- the material list is nowhere near
 // this long, and a hit that carries it has no leaf to read.
-#define MATERIAL_INDEX_NEEDS_DESCENT 0xFFFFFFFFu
+#define PJV_MATERIAL_INDEX_NEEDS_DESCENT 0xFFFFFFFFu
 
 // ...and the other thing a materialListIndex can be: a LOCAL PALETTE SLOT, named directly, rather
 // than an entry in the materialIDs array to be read to find one.
@@ -421,7 +421,7 @@ struct SceneIntersectData {
 // tip, indexed by how far the parcel has travelled), and the slot it arrives at BELONGS TO NO VOXEL:
 // nothing in the geometry references it, so there is no materialIDs entry whose byte holds it and no
 // leaf-relative index that could name it. The alternative is a second material field on
-// SceneIntersectData, which every one of the two dozen sites that build a miss record would then have
+// PjvSceneIntersectData, which every one of the two dozen sites that build a miss record would then have
 // to initialise -- and one that forgot would shade a hit from garbage.
 //
 // Tagged rather than ranged: real leaf offsets are dense from zero and a chunk's material array is
@@ -430,8 +430,8 @@ struct SceneIntersectData {
 #define PJV_MATERIAL_DIRECT_SLOT 0x40000000u
 #define PJV_MATERIAL_SLOT_MASK   0x0000FFFFu
 
-float getRayBoxEntryDistance(Ray ray, BoxAABB box) {
-    IntersectionResult r;
+float pjvGetRayBoxEntryDistance(PjvRay ray, PjvBoxAABB box) {
+    PjvIntersectionResult r;
     if (box.size <= 0) {
         return -1.0;
     }
@@ -463,7 +463,7 @@ float getRayBoxEntryDistance(Ray ray, BoxAABB box) {
     return tNear;
 }
 
-float getRayBoxEntryDistanceForSureHit(Ray ray, BoxAABB box) {
+float pjvGetRayBoxEntryDistanceForSureHit(PjvRay ray, PjvBoxAABB box) {
     vec3 boxMin = box.position;
     vec3 boxMax = box.position + vec3(box.size);
 
@@ -481,8 +481,8 @@ float getRayBoxEntryDistanceForSureHit(Ray ray, BoxAABB box) {
     return max(tNear, 0.0);
 }
 
-IntersectionResult getRayBoxEntry(Ray ray, BoxAABB box) {
-    IntersectionResult r;
+PjvIntersectionResult pjvGetRayBoxEntry(PjvRay ray, PjvBoxAABB box) {
+    PjvIntersectionResult r;
     if (box.size <= 0) {
         r.distance = -1.0;
         r.normal = vec3(0.0);
@@ -534,11 +534,11 @@ IntersectionResult getRayBoxEntry(Ray ray, BoxAABB box) {
 }
 
 // =============================================================================
-// SceneHit -- what a scene query answers with
+// PjvSceneHit -- what a scene query answers with
 // =============================================================================
 //
-// One record for every kind of ray. It supersedes the bare SceneIntersectData a caller used to get
-// back from raySceneIntersect and the separate PeeledHit the transparency path returned, and it is a
+// One record for every kind of ray. It supersedes the bare PjvSceneIntersectData a caller used to get
+// back from pjvRaySceneIntersect and the separate PeeledHit the transparency path returned, and it is a
 // superset of both: on an opaque, unanimated scene queried without any flags, `transmittance` is
 // exactly one, `emission` is exactly zero, and `hit` carries what it always carried.
 //
@@ -547,17 +547,17 @@ IntersectionResult getRayBoxEntry(Ray ray, BoxAABB box) {
 // the chunk loop, because whichever chunk marched LAST wrote them and that is not necessarily the
 // chunk that won on distance). A returned struct cannot have that bug: the loser's copy is simply
 // not the one assigned.
-struct SceneHit {
+struct PjvSceneHit {
     // Where the ray stopped. `hit.rayT < 0` or `hit.foundBox.size < 0` is a miss, unchanged.
-    SceneIntersectData hit;
+    PjvSceneIntersectData hit;
     // The material at `hit`. Populated only when the query asked -- PJV_Q_WANT_MATERIAL, or
     // PJV_Q_TRANSPARENCY, which implies it. A caller that asked should use this rather than calling
-    // fetchVoxelMaterialFromHit: the traversal had the leaf in registers when it decided, so this
+    // pjvFetchVoxelMaterialFromHit: the traversal had the leaf in registers when it decided, so this
     // costs no second descent, and the work MOVES out of the caller rather than doubling.
-    VoxelMaterial material;
+    PjvVoxelMaterial material;
     // False when the traversal could not name a single material for the hit -- a coarsened LOD node
     // spans many voxels and has no one material. The caller must descend on `hit.voxelCoord`, which
-    // is what MATERIAL_INDEX_NEEDS_DESCENT has always meant. Carried as a bool as well because a
+    // is what PJV_MATERIAL_INDEX_NEEDS_DESCENT has always meant. Carried as a bool as well because a
     // caller reading `material` should not have to know the sentinel.
     bool  materialValid;
     // Product of every transparent layer crossed on the way. Multiply the radiance arriving from
@@ -594,7 +594,7 @@ struct SceneHit {
     // A bend happened iff all four are set.
     uint  diagBendFlags;
     float diagBendIor;
-    Ray   finalRay;
+    PjvRay   finalRay;
     // Total distance travelled along the whole polyline, which is what depth, fog and any
     // distance-based LOD want. Equal to hit.rayT when nothing bent.
     float pathLength;
@@ -614,13 +614,13 @@ struct SceneHit {
 #define PJV_STOP_LAYER_BUDGET  2u  // spent maxTransparentLayers
 #define PJV_STOP_TMIN_STALL    3u  // the resume floor failed to advance
 #define PJV_STOP_ABSORBED      4u  // fully absorbed; nothing behind can contribute
-#define PJV_STOP_ITERATIONS    5u  // spent MAX_PEEL_ITERATIONS
-#define PJV_STOP_BAD_QUERY     6u  // the RayQuery did not come from a constructor -- see pjvValidateQuery
+#define PJV_STOP_ITERATIONS    5u  // spent PJV_MAX_PEEL_ITERATIONS
+#define PJV_STOP_BAD_QUERY     6u  // the PjvRayQuery did not come from a constructor -- see pjvValidateQuery
 #define PJV_STOP_STEPS         7u  // a march spent maxRaySteps without reaching an answer
 #define PJV_STOP_SEGMENTS      8u  // spent maxRefractionSegments
 
-SceneHit pjvEmptySceneHit() {
-    SceneHit r;
+PjvSceneHit pjvEmptySceneHit() {
+    PjvSceneHit r;
     r.hit.foundBox.position = vec3(0.0);
     r.hit.foundBox.size = -1.0;
     r.hit.rayT = -1.0;
@@ -629,9 +629,9 @@ SceneHit pjvEmptySceneHit() {
     r.hit.voxelCoord = ivec3(0);
     r.hit.steps = 0u;
     r.hit.headerIndex = 0u;
-    r.hit.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
+    r.hit.materialListIndex = PJV_MATERIAL_INDEX_NEEDS_DESCENT;
     r.hit.paletteOffset = 0u;
-    r.material = emptyVoxelMaterial();
+    r.material = pjvEmptyVoxelMaterial();
     r.materialValid = false;
     r.transmittance = vec3(1.0);
     r.emission = vec3(0.0);
@@ -651,17 +651,17 @@ SceneHit pjvEmptySceneHit() {
 // Moved above the traversal (they used to sit with raySceneIntersectPeeled at the end of the
 // file) because the march itself now consults them: a transparent layer that lies inside an
 // interval no other component overlaps is consumed IN PLACE rather than by restarting the whole
-// scene query. See PeelAccum and the safe-interval note in raySceneIntersectFrom.
+// scene query. See PjvPeelAccum and the safe-interval note in pjvRaySceneIntersectFrom.
 // Compile-time bound the peel loops unroll against on the HLSL/SPIR-V path.
-// RayQuery::maxTransparentLayers is the runtime limit and must not exceed this.
-// How many times ONE ray may be bent, as a compile-time ceiling. RayQuery::maxRefractionSegments is
+// PjvRayQuery::maxTransparentLayers is the runtime limit and must not exceed this.
+// How many times ONE ray may be bent, as a compile-time ceiling. PjvRayQuery::maxRefractionSegments is
 // the runtime budget and must not exceed this; 0 there reproduces a non-refracting traversal exactly,
 // which is what every caller written before refraction existed gets.
 //
 // Small on purpose. Each segment is a fresh scene query, and the visual return falls off fast: the
 // first bend is what makes glass look like glass, the second is what makes a sphere show what is
 // behind it, and past four nobody can tell.
-#ifndef MAX_REFRACTION_SEGMENTS
+#ifndef PJV_MAX_REFRACTION_SEGMENTS
 // Eight, not four, and the reason is that a BEND IS PER INTERFACE, NOT PER OBJECT. A single pane of
 // glass costs two -- one entering, one leaving -- so a budget of two is exhausted by one pane and a
 // budget of four by two. That is not a quality ceiling, it is a correctness one: a ray that runs out
@@ -669,13 +669,13 @@ SceneHit pjvEmptySceneHit() {
 // hard edge through the image.
 //
 // Free to raise, now that the bend is a branch inside the peel loop rather than a loop of its own:
-// this is a clamp, not a trip count, so nothing unrolls against it. See the note at raySceneIntersect
+// this is a clamp, not a trip count, so nothing unrolls against it. See the note at pjvRaySceneIntersect
 // for why the outer segment loop had to go.
-#define MAX_REFRACTION_SEGMENTS 8
+#define PJV_MAX_REFRACTION_SEGMENTS 8
 #endif
 
-#ifndef MAX_PEEL_ITERATIONS
-#define MAX_PEEL_ITERATIONS 16
+#ifndef PJV_MAX_PEEL_ITERATIONS
+#define PJV_MAX_PEEL_ITERATIONS 16
 #endif
 
 // Absorption through `segmentLength` world units of a material's INTERIOR. Chromatic only.
@@ -693,7 +693,7 @@ SceneHit pjvEmptySceneHit() {
 //
 // An overall (achromatic) absorption coefficient would be a genuine medium property and belongs here
 // eventually; `transmission` in Material's word3 is the field reserved for it.
-vec3 mediumAbsorption(VoxelMaterial m, float segmentLength, float voxelSize) {
+vec3 pjvMediumAbsorption(PjvVoxelMaterial m, float segmentLength, float voxelSize) {
     float peak = max(max(m.albedo.r, max(m.albedo.g, m.albedo.b)), 1e-4);
     vec3 tint = clamp(m.albedo / peak, vec3(1e-6), vec3(1.0));
 
@@ -726,13 +726,13 @@ vec3 mediumAbsorption(VoxelMaterial m, float segmentLength, float voxelSize) {
 
 // One round of PCG, so the peel can make the stochastic interface decision below. Named apart from any
 // renderer's own generator on purpose; a caller passes its own seed in and gets it advanced.
-float peelRandom(inout uint seed) {
+float pjvPeelRandom(inout uint seed) {
     return pjvRandomUnit(seed);
 }
 
 // Whether two hits are the same material, continuing through one body rather than meeting a new
 // surface. Compared on the decoded values because two hits on one palette entry decode identically.
-bool sameMedium(VoxelMaterial a, VoxelMaterial b) {
+bool pjvSameMedium(PjvVoxelMaterial a, PjvVoxelMaterial b) {
     return a.transparency == b.transparency && all(equal(a.albedo, b.albedo));
 }
 
@@ -741,10 +741,10 @@ bool sameMedium(VoxelMaterial a, VoxelMaterial b) {
 // foundBox is axis-aligned in WORLD space, which is exact for an unrotated chunk and an approximation
 // for a rotated one, where the voxel is an oriented box. Clamped to the longest a ray can cross a
 // cube of this size (sqrt(3) * edge) so a rotated chunk cannot produce an absurd thickness.
-float peelSegmentLength(Ray ray, SceneIntersectData hit) {
+float pjvPeelSegmentLength(PjvRay ray, PjvSceneIntersectData hit) {
     // Straight from the march's own arithmetic. The previous version rebuilt the voxel as a world AABB
     // and slab-tested it, which collapsed the segment to zero for near-axis-aligned rays, and did so on
-    // only one side of the sign flip -- see SceneIntersectData::exitT.
+    // only one side of the sign flip -- see PjvSceneIntersectData::exitT.
     return clamp(hit.exitT - hit.rayT, 0.0, 1.7320508 * max(hit.foundBox.size, 1e-9));
 }
 
@@ -755,7 +755,7 @@ float peelSegmentLength(Ray ray, SceneIntersectData hit) {
 // strict, so setting tMin to the exit plane would also exclude the next voxel, whose entry sits at
 // the same t. And the exit plane is only approximate on a rotated chunk, where overshooting would
 // skip a layer outright -- undershooting merely costs an iteration.
-float peelNextTMin(SceneIntersectData hit, float segmentLength) {
+float pjvPeelNextTMin(PjvSceneIntersectData hit, float segmentLength) {
     float voxelSize = max(hit.foundBox.size, 1e-9);
     // Prefer a step that stays INSIDE the voxel being left: capped at half of what the ray actually
     // crossed, so a grazing ray that clips a sliver off a corner cannot have its step land beyond the
@@ -777,11 +777,11 @@ float peelNextTMin(SceneIntersectData hit, float segmentLength) {
     return hit.rayT + max(step, resolvable);
 }
 
-// ---- PeelAccum: consuming a transparent layer without restarting the scene query ---------------
+// ---- PjvPeelAccum: consuming a transparent layer without restarting the scene query ---------------
 //
 // The transparency loop at the bottom of this file works by re-issuing the WHOLE scene query with an
 // advancing distance floor, and the note there explains why it has to: which surface is actually in
-// front is decided in raySceneIntersectFrom, which brute-forces the loose chunks tracking
+// front is decided in pjvRaySceneIntersectFrom, which brute-forces the loose chunks tracking
 // closestDistance and only then marches the grids pruned by it. A march that peeled one chunk to
 // completion would hand back that chunk's nearest opaque hit while a transparent voxel belonging to a
 // DIFFERENT component sat in front of it, and two panes of glass in different components would
@@ -792,7 +792,7 @@ float peelNextTMin(SceneIntersectData hit, float segmentLength) {
 // ABOUT TO BE CONSUMED. Components are placed objects and rarely interpenetrate, so over most of most
 // rays there is nothing to interleave with and the ordering question does not arise.
 //
-// So the interval is made explicit. raySceneIntersectFrom computes how far the ray can be walked
+// So the interval is made explicit. pjvRaySceneIntersectFrom computes how far the ray can be walked
 // while only ONE component's bounding volume is live (see the safe-interval note there) and hands it
 // down as `limitT`. Inside that interval the march consumes a transparent voxel in place and keeps
 // stepping in the same DDA -- no restart, no re-descent from the root. Outside it, the voxel is
@@ -806,7 +806,7 @@ float peelNextTMin(SceneIntersectData hit, float segmentLength) {
 // That is deliberate and it fixes a bug class rather than a bug: with statics, whichever chunk
 // marched LAST writes them, which is not necessarily the chunk that won on distance, so every scene
 // query needs hand-written save/restore around its chunk loop and a missed one is silent.
-struct PeelAccum {
+struct PjvPeelAccum {
     bool  active;        // the caller asked for transparency at all
     bool  analytic;      // multiply by `transparency` instead of choosing stochastically. A shadow
                          // ray wants the expected attenuation with none of the variance a random
@@ -814,7 +814,7 @@ struct PeelAccum {
     uint  maxLayers;
     uint  layers;
     uint  seed;
-    float minTransmittance;   // see RayQuery::minTransmittance
+    float minTransmittance;   // see PjvRayQuery::minTransmittance
     vec3  transmittance;
     vec3  emission;
     // Interface-vs-interior tracking. Only an INTERFACE is charged the material's `transparency`;
@@ -822,7 +822,7 @@ struct PeelAccum {
     // is what made depth read as darkness (transparency^N goes black within a few voxels).
     bool  inMedium;
     float previousExit;
-    VoxelMaterial previous;
+    PjvVoxelMaterial previous;
     // Was the layer just consumed an INTERFACE rather than another voxel of the body already being
     // crossed? Reported rather than recomputed because the test is not trivial (same material AND
     // beginning where the previous one ended) and the caller needs the same answer the peel used:
@@ -842,7 +842,7 @@ struct PeelAccum {
     // The decision above had to read the material to make it, so handing it out is what keeps
     // transparency free on opaque geometry: the work MOVES out of the caller rather than doubling.
     // Valid only when `hitMaterialValid` -- a coarsened LOD node names no single material.
-    VoxelMaterial hitMaterial;
+    PjvVoxelMaterial hitMaterial;
     bool  hitMaterialValid;
     // Whether the caller intends to shade the hit. A pure visibility query (a shadow ray that only
     // wants to know if anything is there) leaves this false and the traversal skips two texel fetches
@@ -855,14 +855,14 @@ struct PeelAccum {
 #define PJV_PEEL_CONTINUE  1   // consumed as a transparent layer: keep stepping
 #define PJV_PEEL_ABORT     2   // budget spent or fully absorbed: abandon the ray as a miss
 
-PeelAccum pjvNoPeel() {
-    PeelAccum a;
+PjvPeelAccum pjvNoPeel() {
+    PjvPeelAccum a;
     a.active = false; a.analytic = false;
     a.maxLayers = 0u; a.layers = 0u; a.seed = 0u; a.minTransmittance = 0.002;
     a.transmittance = vec3(1.0); a.emission = vec3(0.0);
-    a.inMedium = false; a.previousExit = 0.0; a.previous = emptyVoxelMaterial();
+    a.inMedium = false; a.previousExit = 0.0; a.previous = pjvEmptyVoxelMaterial();
     a.stopped = false; a.stopReason = PJV_STOP_OPAQUE;
-    a.hitMaterial = emptyVoxelMaterial(); a.hitMaterialValid = false; a.wantMaterial = false;
+    a.hitMaterial = pjvEmptyVoxelMaterial(); a.hitMaterialValid = false; a.wantMaterial = false;
     a.crossedInterface = false; a.refracting = false;
     return a;
 }
@@ -872,7 +872,7 @@ PeelAccum pjvNoPeel() {
 // Returns one of PJV_PEEL_*. All distances are in whatever units the caller is working in -- the
 // march's local voxel units -- and only ratios of them are used, so nothing here needs to know the
 // chunk's world scale.
-int pjvPeelConsume(inout PeelAccum peel, VoxelMaterial m,
+int pjvPeelConsume(inout PjvPeelAccum peel, PjvVoxelMaterial m,
                    float rayT, float exitT, float cellSize, float limitT) {
     // Not peeling, or a genuinely opaque voxel: this is the surface the caller asked for.
     if (!peel.active || m.transparency <= 0.0) return PJV_PEEL_STOP_HERE;
@@ -896,7 +896,7 @@ int pjvPeelConsume(inout PeelAccum peel, VoxelMaterial m,
 
     // Interface or interior? A hit continues the previous body only if it is the same material AND
     // begins where the previous one ended.
-    bool entering = !peel.inMedium || !sameMedium(peel.previous, m) ||
+    bool entering = !peel.inMedium || !pjvSameMedium(peel.previous, m) ||
                     rayT > peel.previousExit + max(cellSize, 1e-9) * 0.5;
     peel.crossedInterface = entering;
 
@@ -909,7 +909,7 @@ int pjvPeelConsume(inout PeelAccum peel, VoxelMaterial m,
     //
     // This replaces a blunter fix that disabled in-place peeling altogether whenever the query
     // wanted refraction. That was correct about the ordering and quietly wrong about the budget: a
-    // scene-level restart per transparent voxel caps a body's depth at MAX_PEEL_ITERATIONS (16),
+    // scene-level restart per transparent voxel caps a body's depth at PJV_MAX_PEEL_ITERATIONS (16),
     // while the callers that want refraction are the same ones asking for 64 layers -- so a glass
     // body more than about fifteen voxels thick exhausted the loop and returned no hit at all,
     // which the renderer draws as background. Stopping only at the interfaces that actually bend
@@ -931,14 +931,14 @@ int pjvPeelConsume(inout PeelAccum peel, VoxelMaterial m,
             // water surface its specular reflection while still being see-through. Choosing the
             // interaction with exactly that probability makes both branches carry weight 1, so the
             // estimator needs no compensating factor and converges to the alpha-composited answer.
-            if (peelRandom(peel.seed) >= m.transparency) return PJV_PEEL_STOP_HERE;
+            if (pjvPeelRandom(peel.seed) >= m.transparency) return PJV_PEEL_STOP_HERE;
         }
     }
 
     float segmentLength = clamp(exitT - rayT, 0.0, 1.7320508 * max(cellSize, 1e-9));
     // Emission first: a layer's own glow is dimmed by what is in FRONT of it, not by itself.
     peel.emission += peel.transmittance * m.emission;
-    peel.transmittance *= mediumAbsorption(m, segmentLength, cellSize);
+    peel.transmittance *= pjvMediumAbsorption(m, segmentLength, cellSize);
     peel.layers++;
     peel.previous = m;
     peel.previousExit = exitT;
@@ -958,7 +958,7 @@ int pjvPeelConsume(inout PeelAccum peel, VoxelMaterial m,
 // Texels per header: GPUChunkHeader's size in RGBA32U texels (scene.h, GPU_HEADER_TEXELS).
 #define PJV_HEADER_TEXELS 6
 
-chunkHeader headers(int headerIndex) {
+PjvChunkHeader pjvHeader(int headerIndex) {
     // One header is PJV_HEADER_TEXELS consecutive texels (5 grew to 6 for the content box -- a texel
     // is atomic, so one new field forces a whole new texel). The texture is 2D (it used to be a
     // single row, which capped the scene at maxTextureSize/N chunks), and its width is always a
@@ -976,7 +976,7 @@ chunkHeader headers(int headerIndex) {
     uvec4 pixel4 = texelFetch(headerData, ivec2(index + 4, row), 0);
     uvec4 pixel5 = texelFetch(headerData, ivec2(index + 5, row), 0);
 
-    chunkHeader header;
+    PjvChunkHeader header;
     header.chunkID = pixel0.r;
     header.positionX = uintBitsToFloat(pixel0.g);
     header.positionY = uintBitsToFloat(pixel0.b);
@@ -1005,7 +1005,7 @@ chunkHeader headers(int headerIndex) {
 // Builds the rotation matrix R (R * v rotates v by q) from a quaternion [x, y, z, w].
 // R is orthonormal, so its inverse is transpose(R). Used to bring rays into a chunk's
 // local (axis-aligned) voxel frame and to push hit normals/positions back to world.
-mat3 rotationFromQuat(vec4 q) {
+mat3 pjvRotationFromQuat(vec4 q) {
     float x = q.x, y = q.y, z = q.z, w = q.w;
     float xx = x * x, yy = y * y, zz = z * z;
     float xy = x * y, xz = x * z, yz = y * z;
@@ -1020,7 +1020,7 @@ mat3 rotationFromQuat(vec4 q) {
 }
 
 // The Z-order index of (x, y, z) within a 4x4x4 node: the axes' bits interleaved x, y, z, two levels.
-uint calculateZOrderIndex4(uint x, uint y, uint z){
+uint pjvCalculateZOrderIndex4(uint x, uint y, uint z){
     uint ZOrder = 0;
     // i = 0
     ZOrder |= (x & 1u) | ((y & 1u) << 1) | ((z & 1u) << 2);
@@ -1029,7 +1029,7 @@ uint calculateZOrderIndex4(uint x, uint y, uint z){
     return ZOrder;
 }
 
-Tree64NodeData tree64(uint indexOfNode) {
+PjvTree64NodeData pjvTree64(uint indexOfNode) {
     //ivec2 texSize = textureSize(tree64Data, 0);
     //int pixelIndex = index / 4;
     //int x = pixelIndex % texSize.x;
@@ -1041,7 +1041,7 @@ Tree64NodeData tree64(uint indexOfNode) {
     int x = int(indexOfNode & (w - 1u));
     int y = int(indexOfNode >> shift);
     uvec4 pixel = texelFetch(tree64Data, ivec2(x, y), 0);
-    Tree64NodeData nodeData;
+    PjvTree64NodeData nodeData;
     nodeData.data1 = pixel.x;
     nodeData.data2 = pixel.y;
     nodeData.data3 = pixel.z;
@@ -1050,14 +1050,14 @@ Tree64NodeData tree64(uint indexOfNode) {
 }
 
 // One texel of tree64Data as it is: a tile table's mask or start entry, whose words are not a node's.
-uvec4 tree64Texel(uint index) {
+uvec4 pjvTree64Texel(uint index) {
     uint w = uint(tree64Dims.x);
     uint shift = uint(tree64Dims.y);
     return texelFetch(tree64Data, ivec2(int(index & (w - 1u)), int(index >> shift)), 0);
 }
 
 // See if the valid bit for this z order is set.
-bool checkZOrderInValidMasks(uint mask1, uint mask2, uint zOrder) {
+bool pjvCheckZOrderInValidMasks(uint mask1, uint mask2, uint zOrder) {
     uint idx = zOrder & 31u;                 // 0..31
     uint bit = 0x80000000u >> idx;           // bit position (31-idx)
 
@@ -1074,7 +1074,7 @@ bool checkZOrderInValidMasks(uint mask1, uint mask2, uint zOrder) {
 //
 // Serves two callers with the same arithmetic. For an INTERIOR node the children are nodes and the
 // rank offsets into the child array; for a LEAF node the children are voxels and the rank offsets
-// into the material list. fetchVoxelMaterialFromHit and fetchVoxelMaterialAtCoord both go through
+// into the material list. pjvFetchVoxelMaterialFromHit and pjvFetchVoxelMaterialAtCoord both go through
 // here so the two cannot drift.
 //
 // `countbits` is bgfx's portable popcount intrinsic (one instruction on every target this builds
@@ -1086,7 +1086,7 @@ bool checkZOrderInValidMasks(uint mask1, uint mask2, uint zOrder) {
 // below out of `0xFFFFFFFFu << 32u`, which is undefined in GLSL and masks to a shift of 0 in HLSL --
 // yielding a full mask and a rank of popcount(mask1) where the answer is 0. Any caller open-coding
 // this test needs the same guard.
-uint calculateSiblingsBeforeThisZOrder(uint branchingFactor, uint mask1, uint mask2, uint zOrder) {
+uint pjvCalculateSiblingsBeforeThisZOrder(uint branchingFactor, uint mask1, uint mask2, uint zOrder) {
     uint siblings = 0u;
 
     if (zOrder < 32u) {
@@ -1124,19 +1124,19 @@ uint calculateSiblingsBeforeThisZOrder(uint branchingFactor, uint mask1, uint ma
 // in bits 2 and up (see voxel.h). A uniform leaf stores ONE material byte for all 64 of its voxels,
 // so the rank is not needed and the popcount is skipped -- which is also why a homogeneous body of
 // water costs no more per voxel to look up than a single painted voxel does.
-uint leafMaterialListOffset(Tree64NodeData leaf, uint voxelZOrderInLeaf) {
+uint pjvLeafMaterialListOffset(PjvTree64NodeData leaf, uint voxelZOrderInLeaf) {
     bool leafIsUniform = (leaf.data3 & 2u) != 0u;
     uint materialOffset = leaf.data3 >> 2u;
     if (leafIsUniform) {
         return materialOffset;
     }
-    return materialOffset + calculateSiblingsBeforeThisZOrder(4, leaf.data1, leaf.data2, voxelZOrderInLeaf);
+    return materialOffset + pjvCalculateSiblingsBeforeThisZOrder(4, leaf.data1, leaf.data2, voxelZOrderInLeaf);
 }
 
 // Resolution is the resolution that we want it to find the intersect at. 
-// BoxAABB boundingBox is assumed to be positionted correctly in traversal space. (bottom left corner is where it actually lies in voxel coordinates, size is how many voxels it takes up)
-ivec3 determineTraversalCoordinatesFromRayAndBox(Ray ray, BoxAABB boundingBox) {
-    float t = getRayBoxEntryDistanceForSureHit(ray, boundingBox);
+// PjvBoxAABB boundingBox is assumed to be positionted correctly in traversal space. (bottom left corner is where it actually lies in voxel coordinates, size is how many voxels it takes up)
+ivec3 pjvDetermineTraversalCoordinatesFromRayAndBox(PjvRay ray, PjvBoxAABB boundingBox) {
+    float t = pjvGetRayBoxEntryDistanceForSureHit(ray, boundingBox);
 
     // Robust, scale-consistent entry: take the hit point and clamp it just inside the
     // box before flooring. Voxels are 1 unit, so the small inset off the max faces is
@@ -1179,7 +1179,7 @@ ivec3 determineTraversalCoordinatesFromRayAndBox(Ray ray, BoxAABB boundingBox) {
 // starting LOD of 255 is far past any real tree depth). Every call site in the tree
 // sets startLOD explicitly to 0, so nothing reaches this branch by accident and the
 // linear path below is bit-for-bit unchanged for all of them. A sentinel in an
-// existing field rather than a new RayQuery member on purpose: a new member would be
+// existing field rather than a new PjvRayQuery member on purpose: a new member would be
 // uninitialised garbage in every call site that did not know to set it.
 //
 // In this mode the other two fields are reinterpreted:
@@ -1200,8 +1200,8 @@ ivec3 determineTraversalCoordinatesFromRayAndBox(Ray ray, BoxAABB boundingBox) {
 // pixel. What it drops is, at the moment it drops it, below what the display can
 // resolve -- so the transition is invisible by construction at EVERY level, and the
 // level count stops being a quality compromise.
-// PJV_LOD_FOOTPRINT is defined next to RayQuery, so pjvQueryLODFootprint can name it.
-uint computeTargetLOD(float distanceInVoxels, RayQuery rayQuery) {
+// PJV_LOD_FOOTPRINT is defined next to PjvRayQuery, so pjvQueryLODFootprint can name it.
+uint pjvComputeTargetLOD(float distanceInVoxels, PjvRayQuery rayQuery) {
     if (rayQuery.startLOD == PJV_LOD_FOOTPRINT) {
         float crossover = max(float(rayQuery.distanceToFinishLOD), 1.0);
         if (distanceInVoxels <= crossover) {
@@ -1250,7 +1250,7 @@ uint computeTargetLOD(float distanceInVoxels, RayQuery rayQuery) {
 
 // Exit distance of the cell at `cellMin` with edge `cellSize`, for a ray already inside it. The same
 // expression the DDA stepper builds its own tMax from, so the two cannot disagree.
-float cellExitDistance(Ray ray, vec3 invRayDir, ivec3 cellMin, uint cellSize) {
+float pjvCellExitDistance(PjvRay ray, vec3 invRayDir, ivec3 cellMin, uint cellSize) {
     vec3 farPlanes = mix(vec3(cellMin), vec3(cellMin) + vec3(float(cellSize)), step(vec3(0.0), ray.direction));
     vec3 t = (farPlanes - ray.origin) * invRayDir;
     return min(min(t.x, t.y), t.z);
@@ -1259,8 +1259,8 @@ float cellExitDistance(Ray ray, vec3 invRayDir, ivec3 cellMin, uint cellSize) {
 // `materialIDStart` / `paletteOffsetIn` are the two header values that turn this march's leaf-local
 // material offset into an absolute palette lookup. They are passed IN rather than applied by the
 // caller afterwards because the march now has to read a material to decide whether a voxel stops the
-// ray -- see PeelAccum. The returned materialListIndex stays leaf-relative, exactly as it was, and
-// castRayThroughTree64 still adds the base to it; only the march's own private lookup is absolute.
+// ray -- see PjvPeelAccum. The returned materialListIndex stays leaf-relative, exactly as it was, and
+// pjvCastRayThroughTree64 still adds the base to it; only the march's own private lookup is absolute.
 //
 // `limitT` is how far along the ray the traversal may consume transparent voxels in place instead of
 // handing them back for the scene query to restart on -- the interval over which no other component's
@@ -1293,7 +1293,7 @@ float cellExitDistance(Ray ray, vec3 invRayDir, ivec3 cellMin, uint cellSize) {
 // outside the block box, so only the region read needs the box test; the block index is clamped, so its
 // read -- issued beside the region's, not after it -- never leaves the table. The march needs neither:
 // it is clipped to the block box, so every cell it reads is inside both boxes (pjvTileRegionIn).
-// How many cubes the march may leave per unit of RayQuery::maxRaySteps. The tree march it replaced
+// How many cubes the march may leave per unit of PjvRayQuery::maxRaySteps. The tree march it replaced
 // counted outer iterations, each of up to twelve DDA steps, so a budget meant more there than one step
 // per cube does here.
 #ifndef PJV_TABLE_STEP_SCALE
@@ -1312,7 +1312,7 @@ struct PjvTiles {
 };
 ivec3 pjvUnpack10(uint w) { return ivec3(int(w & 1023u), int((w >> 10u) & 1023u), int((w >> 20u) & 1023u)); }
 PjvTiles pjvTilesAt(uint start) {
-    uvec4 h = tree64Texel(start);
+    uvec4 h = pjvTree64Texel(start);
     PjvTiles t;
     t.regionOrigin = pjvUnpack10(h.x);
     t.regionDims = pjvUnpack10(h.y) + ivec3(1, 1, 1);
@@ -1338,7 +1338,7 @@ bool pjvInBox(ivec3 c, ivec3 origin, ivec3 dims) {
 // Region `region`'s masks (occupied hi lo, full hi lo), and in `rl` its index; empty outside the box.
 uvec4 pjvTileRegion(PjvTiles t, ivec3 region, out uint rl) {
     rl = pjvBoxIndex(region, t.regionOrigin, t.regionDims);
-    uvec4 m = tree64Texel(t.regionMasks + rl);
+    uvec4 m = pjvTree64Texel(t.regionMasks + rl);
     return pjvInBox(region, t.regionOrigin, t.regionDims) ? m : uvec4(0u, 0u, 0u, 0u);
 }
 uint pjvTileBlockIndex(PjvTiles t, ivec3 block) { return pjvBoxIndex(block, t.blockOrigin, t.blockDims); }
@@ -1354,7 +1354,7 @@ uint pjvTileBlockIn(PjvTiles t, ivec3 block) {
 
 // Region `rl`'s start: its full blocks' first material. Four regions to a texel, from `startsBase`.
 uint pjvTileRegionStart(uint startsBase, uint rl) {
-    uvec4 t = tree64Texel(startsBase + (rl >> 2u));
+    uvec4 t = pjvTree64Texel(startsBase + (rl >> 2u));
     uint k = rl & 3u;
     return k == 0u ? t.x : (k == 1u ? t.y : (k == 2u ? t.z : t.w));
 }
@@ -1362,13 +1362,13 @@ uint pjvTileRegionStart(uint startsBase, uint rl) {
 // Block `bl`'s starts: its first partial leaf and its full bricks' first material. Two blocks to a texel,
 // from `startsBase`.
 uvec2 pjvTileBlockStart(uint startsBase, uint bl) {
-    uvec4 t = tree64Texel(startsBase + (bl >> 1u));
+    uvec4 t = pjvTree64Texel(startsBase + (bl >> 1u));
     return (bl & 1u) != 0u ? t.zw : t.xy;
 }
 
 // A full child read as a leaf: all 64 voxels set, uniform, its one material byte at `materialOffset`.
-Tree64NodeData pjvTileLeafOf(uint materialOffset) {
-    Tree64NodeData leaf;
+PjvTree64NodeData pjvTileLeafOf(uint materialOffset) {
+    PjvTree64NodeData leaf;
     leaf.data1 = 0xFFFFFFFFu;
     leaf.data2 = 0xFFFFFFFFu;
     leaf.data3 = (materialOffset << 2u) | 3u;   // encodeLeafNode(materialOffset, uniform)
@@ -1379,16 +1379,16 @@ Tree64NodeData pjvTileLeafOf(uint materialOffset) {
 // The leaf of brick `zBrick` in block `bl`, whose masks are `block` (occupied xy, full zw) and whose
 // starts are read from `startsBase` on: a tile's synthetic leaf, or the stored one. The brick must be
 // occupied.
-Tree64NodeData pjvTileBrickLeaf(uvec4 block, uint startsBase, uint bl, uint leafStart, uint zBrick) {
+PjvTree64NodeData pjvTileBrickLeaf(uvec4 block, uint startsBase, uint bl, uint leafStart, uint zBrick) {
     uvec2 start = pjvTileBlockStart(startsBase, bl);   // first partial leaf, first full-brick material
-    if (checkZOrderInValidMasks(block.z, block.w, zBrick))
-        return pjvTileLeafOf(start.y + calculateSiblingsBeforeThisZOrder(4, block.z, block.w, zBrick));
-    return tree64(leafStart + start.x + calculateSiblingsBeforeThisZOrder(4, block.x & ~block.z, block.y & ~block.w, zBrick));
+    if (pjvCheckZOrderInValidMasks(block.z, block.w, zBrick))
+        return pjvTileLeafOf(start.y + pjvCalculateSiblingsBeforeThisZOrder(4, block.z, block.w, zBrick));
+    return pjvTree64(leafStart + start.x + pjvCalculateSiblingsBeforeThisZOrder(4, block.x & ~block.z, block.y & ~block.w, zBrick));
 }
 
 // The leaf covering the 4^3 brick that holds `voxel`: the region and block masks (addressed from the
 // cell), then a tile or the stored leaf. False when the brick is empty. `voxel` must lie inside.
-bool pjvTileLeaf(uint start, uint leafStart, uint resolution, ivec3 voxel, out Tree64NodeData leaf) {
+bool pjvTileLeaf(uint start, uint leafStart, uint resolution, ivec3 voxel, out PjvTree64NodeData leaf) {
     PjvTiles t = pjvTilesAt(start);
     uint rl;
     uvec4 region = pjvTileRegion(t, voxel >> 6, rl);
@@ -1396,15 +1396,15 @@ bool pjvTileLeaf(uint start, uint leafStart, uint resolution, ivec3 voxel, out T
     leaf = pjvTileLeafOf(0u);
     ivec3 inRegion = (voxel >> 4) & 3;
     ivec3 inBlock = (voxel >> 2) & 3;
-    uint zBlock = calculateZOrderIndex4(uint(inRegion.x), uint(inRegion.y), uint(inRegion.z));
-    if (!checkZOrderInValidMasks(region.x, region.y, zBlock)) return false;
-    if (checkZOrderInValidMasks(region.z, region.w, zBlock)) {   // a solid 16^3 tile
-        leaf = pjvTileLeafOf(pjvTileRegionStart(t.regionStarts, rl) + calculateSiblingsBeforeThisZOrder(4, region.z, region.w, zBlock));
+    uint zBlock = pjvCalculateZOrderIndex4(uint(inRegion.x), uint(inRegion.y), uint(inRegion.z));
+    if (!pjvCheckZOrderInValidMasks(region.x, region.y, zBlock)) return false;
+    if (pjvCheckZOrderInValidMasks(region.z, region.w, zBlock)) {   // a solid 16^3 tile
+        leaf = pjvTileLeafOf(pjvTileRegionStart(t.regionStarts, rl) + pjvCalculateSiblingsBeforeThisZOrder(4, region.z, region.w, zBlock));
         return true;
     }
-    uvec4 block = tree64Texel(t.blockMasks + bl);
-    uint zBrick = calculateZOrderIndex4(uint(inBlock.x), uint(inBlock.y), uint(inBlock.z));
-    if (!checkZOrderInValidMasks(block.x, block.y, zBrick)) return false;
+    uvec4 block = pjvTree64Texel(t.blockMasks + bl);
+    uint zBrick = pjvCalculateZOrderIndex4(uint(inBlock.x), uint(inBlock.y), uint(inBlock.z));
+    if (!pjvCheckZOrderInValidMasks(block.x, block.y, zBrick)) return false;
     leaf = pjvTileBrickLeaf(block, t.blockStarts, bl, leafStart, zBrick);
     return true;
 }
@@ -1415,35 +1415,35 @@ bool pjvTileLeaf(uint start, uint leafStart, uint resolution, ivec3 voxel, out T
 // which is where the tree's childPtr + rank arithmetic landed. Shading those hits empty instead made
 // coarse probe and shadow hits black and dimmed the voxel renderer's bounce by 6-8 levels in 255.
 // False only for an empty 64^3 region.
-// The position (0..3 per axis) of Z-order child `z` in its node: calculateZOrderIndex4 inverted.
-ivec3 reverseZOrder4(uint z) {
+// The position (0..3 per axis) of Z-order child `z` in its node: pjvCalculateZOrderIndex4 inverted.
+ivec3 pjvReverseZOrder4(uint z) {
     return ivec3(int((z & 1u) | (((z >> 3u) & 1u) << 1u)),
                  int(((z >> 1u) & 1u) | (((z >> 4u) & 1u) << 1u)),
                  int(((z >> 2u) & 1u) | (((z >> 5u) & 1u) << 1u)));
 }
 uint pjvNextPresentChild(uint data1, uint data2, uint z) {
     for (uint k = z; k < 64u; k++)
-        if (checkZOrderInValidMasks(data1, data2, k)) return k;
+        if (pjvCheckZOrderInValidMasks(data1, data2, k)) return k;
     for (uint k = 63u; k > 0u; k--)
-        if (checkZOrderInValidMasks(data1, data2, k)) return k;
+        if (pjvCheckZOrderInValidMasks(data1, data2, k)) return k;
     return 0u;
 }
-bool pjvTileLeafNearest(uint start, uint leafStart, uint resolution, ivec3 voxel, out Tree64NodeData leaf) {
+bool pjvTileLeafNearest(uint start, uint leafStart, uint resolution, ivec3 voxel, out PjvTree64NodeData leaf) {
     PjvTiles t = pjvTilesAt(start);
     uint rl;
     uvec4 region = pjvTileRegion(t, voxel >> 6, rl);
     leaf = pjvTileLeafOf(0u);
     if ((region.x | region.y) == 0u) return false;
     ivec3 inRegion = (voxel >> 4) & 3;
-    uint zBlock = pjvNextPresentChild(region.x, region.y, calculateZOrderIndex4(uint(inRegion.x), uint(inRegion.y), uint(inRegion.z)));
-    if (checkZOrderInValidMasks(region.z, region.w, zBlock)) {   // a solid 16^3 tile
-        leaf = pjvTileLeafOf(pjvTileRegionStart(t.regionStarts, rl) + calculateSiblingsBeforeThisZOrder(4, region.z, region.w, zBlock));
+    uint zBlock = pjvNextPresentChild(region.x, region.y, pjvCalculateZOrderIndex4(uint(inRegion.x), uint(inRegion.y), uint(inRegion.z)));
+    if (pjvCheckZOrderInValidMasks(region.z, region.w, zBlock)) {   // a solid 16^3 tile
+        leaf = pjvTileLeafOf(pjvTileRegionStart(t.regionStarts, rl) + pjvCalculateSiblingsBeforeThisZOrder(4, region.z, region.w, zBlock));
         return true;
     }
-    uint bl = pjvTileBlockIndex(t, ((voxel >> 6) << 2) + reverseZOrder4(zBlock));
-    uvec4 block = tree64Texel(t.blockMasks + bl);
+    uint bl = pjvTileBlockIndex(t, ((voxel >> 6) << 2) + pjvReverseZOrder4(zBlock));
+    uvec4 block = pjvTree64Texel(t.blockMasks + bl);
     ivec3 inBlock = (voxel >> 2) & 3;
-    uint zBrick = pjvNextPresentChild(block.x, block.y, calculateZOrderIndex4(uint(inBlock.x), uint(inBlock.y), uint(inBlock.z)));
+    uint zBrick = pjvNextPresentChild(block.x, block.y, pjvCalculateZOrderIndex4(uint(inBlock.x), uint(inBlock.y), uint(inBlock.z)));
     leaf = pjvTileBrickLeaf(block, t.blockStarts, bl, leafStart, zBrick);
     return true;
 }
@@ -1463,8 +1463,8 @@ bool pjvTileLeafNearest(uint start, uint leafStart, uint resolution, ivec3 voxel
 // gate, the zero-measure corner guard, the material fetch when the peel or the caller needs it, the
 // animated skip, and pjvPeelConsume. Query LOD maps onto the table's levels: level 1 treats a non-empty
 // 4^3 brick as solid, 2 a 16^3 block, 3 a 64^3 region -- never the chunk's root, as before.
-SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float tMin, BoxAABB boundingBox, uint tree64StartIndex, uint leafStart, uint tree64Resolution, uint chunkTraversalLOD, uint materialIDStart, uint paletteOffsetIn, float limitT, float localToWorld, bool skipAnimated, inout PeelAccum peel) {
-    SceneIntersectData returnData;
+PjvSceneIntersectData pjvMarchRayThroughTree64_DDA(PjvRay ray, PjvRayQuery rayQuery, float tMin, PjvBoxAABB boundingBox, uint tree64StartIndex, uint leafStart, uint tree64Resolution, uint chunkTraversalLOD, uint materialIDStart, uint paletteOffsetIn, float limitT, float localToWorld, bool skipAnimated, inout PjvPeelAccum peel) {
+    PjvSceneIntersectData returnData;
     returnData.rayT = -1.0;
     returnData.exitT = -1.0;
     returnData.normal = vec3(0.0);
@@ -1472,7 +1472,7 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
     returnData.foundBox.size = -1;
     returnData.voxelCoord = ivec3(0);
     returnData.steps = 0u;
-    returnData.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
+    returnData.materialListIndex = PJV_MATERIAL_INDEX_NEEDS_DESCENT;
 #ifdef PJV_SCENE_LEAF_MATERIAL
     bool needMaterial = peel.active || peel.wantMaterial || skipAnimated;
 #else
@@ -1528,26 +1528,26 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
     // turning solid halfway through. `entered` is the coarsest level whose cube the last step entered
     // (3 a 64^3 region, 2 a 16^3 block, 1 a 4^3 brick, 0 only a voxel), read off the boundary it
     // crossed (set above, from the box face the ray came in by). Remembering the three cubes' positions instead cost every ray, LOD or not, 5-12% at
-    // 2560x1440 in examples/99-ray-lab. (Skipping computeTargetLOD for queries that ask for no LOD was
+    // 2560x1440 in examples/99-ray-lab. (Skipping pjvComputeTargetLOD for queries that ask for no LOD was
     // also tried, and made the animated and transparent queries in the advanced renderer 50-60%
     // slower -- the compiler laid the bigger shaders out worse -- so the ramp is evaluated every step.)
 
     for (uint stepCount = 0u; stepCount < maxSteps; stepCount++) {
         returnData.steps = stepCount;
-        uint targetLOD = max(computeTargetLOD(rayT, rayQuery), chunkTraversalLOD);
+        uint targetLOD = max(pjvComputeTargetLOD(rayT, rayQuery), chunkTraversalLOD);
         bool pastTMin = tMin <= 0.0 || rayT >= tMin;
         ivec3 c1 = cell >> 4;
         uint rl = pjvTileRegionIn(tiles, cell >> 6);
         uint bl = pjvTileBlockIn(tiles, c1);
-        uvec4 region = tree64Texel(tiles.regionMasks + rl);   // occupied hi lo, full hi lo
-        uvec4 block = tree64Texel(tiles.blockMasks + bl);
+        uvec4 region = pjvTree64Texel(tiles.regionMasks + rl);   // occupied hi lo, full hi lo
+        uvec4 block = pjvTree64Texel(tiles.blockMasks + bl);
         ivec3 inRegion = c1 & 3;
         ivec3 inBlock = (cell >> 2) & 3;
         ivec3 inLeaf = cell & 3;
-        uint zBlock = calculateZOrderIndex4(uint(inRegion.x), uint(inRegion.y), uint(inRegion.z));
-        uint zBrick = calculateZOrderIndex4(uint(inBlock.x), uint(inBlock.y), uint(inBlock.z));
+        uint zBlock = pjvCalculateZOrderIndex4(uint(inRegion.x), uint(inRegion.y), uint(inRegion.z));
+        uint zBrick = pjvCalculateZOrderIndex4(uint(inBlock.x), uint(inBlock.y), uint(inBlock.z));
         // A block that is itself a tile stores nothing at its entry: every brick of it is full.
-        bool solidBlock = checkZOrderInValidMasks(region.z, region.w, zBlock);
+        bool solidBlock = pjvCheckZOrderInValidMasks(region.z, region.w, zBlock);
         bool newRegion = entered >= 3;
         bool newBlock = entered >= 2;
         bool newBrick = entered >= 1;
@@ -1558,32 +1558,32 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
             shift = 6;
         } else if (res > 64 && newRegion && targetLOD >= 3u) {
             shift = 6; coarse = true;
-        } else if (!checkZOrderInValidMasks(region.x, region.y, zBlock)) {
+        } else if (!pjvCheckZOrderInValidMasks(region.x, region.y, zBlock)) {
             shift = 4;
         } else if (res > 16 && newBlock && targetLOD >= 2u) {
             shift = 4; coarse = true;
-        } else if (!solidBlock && !checkZOrderInValidMasks(block.x, block.y, zBrick)) {
+        } else if (!solidBlock && !pjvCheckZOrderInValidMasks(block.x, block.y, zBrick)) {
             shift = 2;
         } else if (res > 4 && newBrick && targetLOD >= 1u) {
             shift = 2; coarse = true;
         } else {
-            Tree64NodeData leaf = solidBlock
-                ? pjvTileLeafOf(pjvTileRegionStart(tiles.regionStarts, rl) + calculateSiblingsBeforeThisZOrder(4, region.z, region.w, zBlock))
+            PjvTree64NodeData leaf = solidBlock
+                ? pjvTileLeafOf(pjvTileRegionStart(tiles.regionStarts, rl) + pjvCalculateSiblingsBeforeThisZOrder(4, region.z, region.w, zBlock))
                 : pjvTileBrickLeaf(block, tiles.blockStarts, bl, leafStart, zBrick);
-            uint zVoxel = calculateZOrderIndex4(uint(inLeaf.x), uint(inLeaf.y), uint(inLeaf.z));
-            if (checkZOrderInValidMasks(leaf.data1, leaf.data2, zVoxel)) {
-                float cellExitT = cellExitDistance(ray, invRayDir, cell, 1u);
+            uint zVoxel = pjvCalculateZOrderIndex4(uint(inLeaf.x), uint(inLeaf.y), uint(inLeaf.z));
+            if (pjvCheckZOrderInValidMasks(leaf.data1, leaf.data2, zVoxel)) {
+                float cellExitT = pjvCellExitDistance(ray, invRayDir, cell, 1u);
                 // The tMin gate (a layer the caller has consumed) and the zero-measure guard (a cell the
                 // ray only touches at an edge or corner): step on through the voxel in both cases.
                 if (pastTMin && cellExitT > rayT) {
-                    uint leafOffset = leafMaterialListOffset(leaf, zVoxel);
+                    uint leafOffset = pjvLeafMaterialListOffset(leaf, zVoxel);
                     int verdict = PJV_PEEL_STOP_HERE;
                     // Held locally until the verdict is known -- see the tree march's note on why.
-                    VoxelMaterial leafMaterial = emptyVoxelMaterial();
+                    PjvVoxelMaterial leafMaterial = pjvEmptyVoxelMaterial();
 #ifdef PJV_SCENE_LEAF_MATERIAL
                     if (needMaterial) {
-                        leafMaterial = decodeMaterial(materialPaletteTexel(
-                            materialID(leafOffset + materialIDStart) + paletteOffsetIn));
+                        leafMaterial = pjvDecodeMaterial(pjvMaterialPaletteTexel(
+                            pjvMaterialID(leafOffset + materialIDStart) + paletteOffsetIn));
 #ifdef PJV_SCENE_ANIMATION
                         // Within the resolve distance an animated voxel is drawn by pjvAnimatedMarch,
                         // where it actually is; here it is stepped through. Past it, it is ordinary
@@ -1627,13 +1627,13 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
         if (coarse) {
             if (pastTMin) {
                 // A coarsened cube is wholly solid and opaque, and names no single material: the
-                // caller descends on voxelCoord (MATERIAL_INDEX_NEEDS_DESCENT), as it always has.
+                // caller descends on voxelCoord (PJV_MATERIAL_INDEX_NEEDS_DESCENT), as it always has.
                 peel.hitMaterialValid = false;
                 returnData.foundBox.position = vec3(cubeLo);
                 returnData.voxelCoord = cubeLo;
                 returnData.foundBox.size = float(size);
                 returnData.rayT = rayT;
-                returnData.exitT = cellExitDistance(ray, invRayDir, cubeLo, uint(size));
+                returnData.exitT = pjvCellExitDistance(ray, invRayDir, cubeLo, uint(size));
                 returnData.normal = hitNormal;
                 return returnData;
             }
@@ -1671,19 +1671,19 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
 
 // Is a voxel set in an arbitrary tree64 range, and if so where is its material byte?
 //
-// Distinct from fetchVoxelMaterialAtCoord in the one way that matters here: it CHECKS THE VALID MASK
+// Distinct from pjvFetchVoxelMaterialAtCoord in the one way that matters here: it CHECKS THE VALID MASK
 // before descending. That function is written for coordinates already known to be occupied, and
 // following childPtr past an unset child reads a node belonging to some other branch. This probes
 // arbitrary coordinates -- most of them empty, by construction -- so the check is not optional.
 bool pjvProbeTree(uint startIndex, uint leafStart, uint resolution, ivec3 coord, out uint outLeafOffset) {
     outLeafOffset = 0u;
     if (any(lessThan(coord, ivec3(0))) || any(greaterThanEqual(coord, ivec3(int(resolution))))) return false;
-    Tree64NodeData leaf;
+    PjvTree64NodeData leaf;
     if (!pjvTileLeaf(startIndex, leafStart, resolution, coord, leaf)) return false;
     ivec3 inLeaf = coord & 3;
-    uint z = calculateZOrderIndex4(uint(inLeaf.x), uint(inLeaf.y), uint(inLeaf.z));
-    if (!checkZOrderInValidMasks(leaf.data1, leaf.data2, z)) return false;
-    outLeafOffset = leafMaterialListOffset(leaf, z);
+    uint z = pjvCalculateZOrderIndex4(uint(inLeaf.x), uint(inLeaf.y), uint(inLeaf.z));
+    if (!pjvCheckZOrderInValidMasks(leaf.data1, leaf.data2, z)) return false;
+    outLeafOffset = pjvLeafMaterialListOffset(leaf, z);
     return true;
 }
 
@@ -1698,7 +1698,7 @@ bool pjvProbeTree(uint startIndex, uint leafStart, uint resolution, ivec3 coord,
 // Without it the resolve pays a descent per candidate -- up to eight per cell, a dozen cells per
 // block -- and descents are what a resolve costs. The prototype measured this as the second largest
 // cost it had.
-bool pjvProbeLeafNode(uint startIndex, uint leafStart, uint resolution, ivec3 blockMin, out Tree64NodeData outLeaf) {
+bool pjvProbeLeafNode(uint startIndex, uint leafStart, uint resolution, ivec3 blockMin, out PjvTree64NodeData outLeaf) {
     // Through the tile table: the region and block masks, then a tile or the stored leaf.
     outLeaf = pjvTileLeafOf(0u);
     if (any(lessThan(blockMin, ivec3(0))) || any(greaterThanEqual(blockMin, ivec3(int(resolution))))) return false;
@@ -1707,8 +1707,8 @@ bool pjvProbeLeafNode(uint startIndex, uint leafStart, uint resolution, ivec3 bl
 
 // The entry face of an axis-aligned box, computed analytically.
 //
-// Needed because a march's carried normal is NOT always usable. marchRayThroughTree64_DDA seeds
-// hitNormal from getRayBoxEntry against the whole volume, and that function returns (0,0,0) when the
+// Needed because a march's carried normal is NOT always usable. pjvMarchRayThroughTree64_DDA seeds
+// hitNormal from pjvGetRayBoxEntry against the whole volume, and that function returns (0,0,0) when the
 // ray ORIGIN IS INSIDE the volume -- which is the normal case for a camera flying through a scene.
 // The seed is replaced on the first committed DDA step, so an ordinary hit is fine; a hit found
 // during the INITIAL DESCENT, before any step, keeps the zero.
@@ -1717,7 +1717,7 @@ bool pjvProbeLeafNode(uint startIndex, uint leafStart, uint resolution, ivec3 bl
 // size and distance checks -- AdvancedRenderer's gbuffer does exactly this -- so a hit carrying a zero
 // normal is read as SKY. The geometry is found, returned, and then discarded as background: it reads
 // on screen as a voxel you can see straight through, with no clue that anything was hit at all.
-vec3 pjvBoxEntryNormal(Ray ray, vec3 boxMin, float size) {
+vec3 pjvBoxEntryNormal(PjvRay ray, vec3 boxMin, float size) {
     vec3 invD = 1.0 / ray.direction;
     vec3 t0 = (boxMin - ray.origin) * invD;
     vec3 t1 = (boxMin + vec3(size) - ray.origin) * invD;
@@ -1772,35 +1772,35 @@ vec3 pjvBoxEntryNormal(Ray ray, vec3 boxMin, float size) {
 // that block is answered from its mask with no memory traffic beyond the two texel fetches the
 // material needs; one outside costs a descent, and those are budgeted by the caller because the
 // neighbourhood straddles a block boundary for exactly the cells at its edge.
-bool pjvAnimatedSourceAt(chunkHeader h, ivec3 voxel,
-                         Tree64NodeData blockLeaf, bool haveBlockLeaf, ivec3 blockMin,
+bool pjvAnimatedSourceAt(PjvChunkHeader h, ivec3 voxel,
+                         PjvTree64NodeData blockLeaf, bool haveBlockLeaf, ivec3 blockMin,
                          inout int descentBudget, inout uvec2 slotCache,
                          out uint outListIndex, out uint outMotionSet) {
-    outListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
+    outListIndex = PJV_MATERIAL_INDEX_NEEDS_DESCENT;
     outMotionSet = 0u;
     uint leafOffset;
 
     ivec3 rel = voxel - blockMin;
     if (haveBlockLeaf && all(greaterThanEqual(rel, ivec3(0))) && all(lessThan(rel, ivec3(4)))) {
-        uint z = calculateZOrderIndex4(uint(rel.x), uint(rel.y), uint(rel.z));
-        if (!checkZOrderInValidMasks(blockLeaf.data1, blockLeaf.data2, z)) return false;
-        leafOffset = leafMaterialListOffset(blockLeaf, z);
+        uint z = pjvCalculateZOrderIndex4(uint(rel.x), uint(rel.y), uint(rel.z));
+        if (!pjvCheckZOrderInValidMasks(blockLeaf.data1, blockLeaf.data2, z)) return false;
+        leafOffset = pjvLeafMaterialListOffset(blockLeaf, z);
     } else {
         if (descentBudget <= 0) return false;
         descentBudget--;
         // The SAME descent the in-block path is served by, aimed at the candidate's own block rather
         // than at this one. Deliberately not a general per-voxel probe: spirv-opt inlines every
         // function into main, so a second descent written out separately is a second copy of it in
-        // every call site of castRayThroughTree64 -- and gbuffer.frag sits close enough to the
+        // every call site of pjvCastRayThroughTree64 -- and gbuffer.frag sits close enough to the
         // SPIR-V id ceiling that one extra copy is the difference between a shader and a
         // zero-length .bin. One descent shape, used everywhere, is what keeps it under.
         ivec3 outBlock = voxel & ivec3(~3);
-        Tree64NodeData outLeaf;
+        PjvTree64NodeData outLeaf;
         if (!pjvProbeLeafNode(h.geometryStartIndex, h.leafStartIndex, h.resolution, outBlock, outLeaf)) return false;
-        uint zOut = calculateZOrderIndex4(uint(voxel.x - outBlock.x), uint(voxel.y - outBlock.y),
+        uint zOut = pjvCalculateZOrderIndex4(uint(voxel.x - outBlock.x), uint(voxel.y - outBlock.y),
                                           uint(voxel.z - outBlock.z));
-        if (!checkZOrderInValidMasks(outLeaf.data1, outLeaf.data2, zOut)) return false;
-        leafOffset = leafMaterialListOffset(outLeaf, zOut);
+        if (!pjvCheckZOrderInValidMasks(outLeaf.data1, outLeaf.data2, zOut)) return false;
+        leafOffset = pjvLeafMaterialListOffset(outLeaf, zOut);
     }
     // ---- TWO DEPENDENT FETCHES, AND WHY THE SECOND ONE IS USUALLY FREE ----------------------
     //
@@ -1815,18 +1815,18 @@ bool pjvAnimatedSourceAt(chunkHeader h, ivec3 voxel,
     //
     // Cached across the WHOLE block walk rather than per cell, since the palette is a property of
     // the chunk and pjvAnimatedMarch runs inside one. `slotCache.x` is the slot, `.y` its flags;
-    // 0xFFFFFFFF is the empty key, which materialID -- returning one byte -- cannot produce.
-    uint slot = materialID(leafOffset + h.materialIDStartIndex);
+    // 0xFFFFFFFF is the empty key, which pjvMaterialID -- returning one byte -- cannot produce.
+    uint slot = pjvMaterialID(leafOffset + h.materialIDStartIndex);
     uint flags;
     if (slot == slotCache.x) {
         flags = slotCache.y;
     } else {
-        flags = (materialPaletteTexel(slot + h.paletteOffset).w >> 8u) & 0xFFu;
+        flags = (pjvMaterialPaletteTexel(slot + h.paletteOffset).w >> 8u) & 0xFFu;
         slotCache = uvec2(slot, flags);
     }
     if ((flags & PJV_MAT_FLAG_ANIMATED) == 0u) return false;
     outMotionSet = (flags >> PJV_MAT_MOTION_SHIFT) & PJV_MAT_MOTION_MASK;
-    // LEAF-RELATIVE, deliberately: castRayThroughTree64 adds materialIDStartIndex to whatever comes
+    // LEAF-RELATIVE, deliberately: pjvCastRayThroughTree64 adds materialIDStartIndex to whatever comes
     // back from a march, and handing it an already-absolute index adds the base twice -- which reads
     // a byte from some other chunk's material array and shades the voxel an unrelated colour.
     outListIndex = leafOffset;
@@ -1836,14 +1836,14 @@ bool pjvAnimatedSourceAt(chunkHeader h, ivec3 voxel,
 // One moving voxel, intersected as a box at its drawn position. The shared primitive: an ember, a
 // splash droplet or a falling leaf is the same intersection with a different candidate source, which
 // is what stops a particle system being a second copy of this.
-struct MovingVoxelHit {
+struct PjvMovingVoxelHit {
     float rayT;
     float exitT;
     vec3  normal;
     vec3  drawnMin;
 };
 
-bool pjvMovingVoxelHit(Ray ray, vec3 invDir, vec3 restMin, vec3 displacement, out MovingVoxelHit hit) {
+bool pjvMovingVoxelHit(PjvRay ray, vec3 invDir, vec3 restMin, vec3 displacement, out PjvMovingVoxelHit hit) {
     vec3 lo = restMin + displacement;
     vec3 t0 = (lo - ray.origin) * invDir;
     vec3 t1 = (lo + vec3(1.0) - ray.origin) * invDir;
@@ -1890,7 +1890,7 @@ bool pjvMovingVoxelHit(Ray ray, vec3 invDir, vec3 restMin, vec3 displacement, ou
 // the hop count supplied by the parcel's age.
 //
 // LOCAL slot in, LOCAL slot out. The stored link is a component-local index, and so is what the hit
-// carries: castRayThroughTree64 leaves a direct slot alone and fetchVoxelMaterialFromHit adds the
+// carries: pjvCastRayThroughTree64 leaves a direct slot alone and pjvFetchVoxelMaterialFromHit adds the
 // palette base once, at the end. Re-adding it here as well would walk into another component's
 // palette on the second hop.
 //
@@ -1900,7 +1900,7 @@ uint pjvChainWalk(uint localSlot, uint paletteOffsetIn, int steps) {
     uint slot = localSlot;
     for (int i = 0; i < 3; i++) {
         if (i >= steps) break;
-        uint next = materialPaletteTexel(slot + paletteOffsetIn).w & 0xFFu;
+        uint next = pjvMaterialPaletteTexel(slot + paletteOffsetIn).w & 0xFFu;
         if (next == 0u) break;    // no link: the end of the chain
         slot = next;
     }
@@ -1917,7 +1917,7 @@ uint pjvChainWalk(uint localSlot, uint paletteOffsetIn, int steps) {
 // hands responsibility for drawing them here; a trace that stepped before its first test would never
 // look at the cell it started in, and the fuel would be drawn nowhere at all -- the same
 // invisible-geometry failure this system has had twice by other routes.
-bool pjvResolveAdvect(chunkHeader h, MotionSet ms, uint setIndex, ivec3 cell,
+bool pjvResolveAdvect(PjvChunkHeader h, PjvMotionSet ms, uint setIndex, ivec3 cell,
                       mat3 R, mat3 Rinv, vec3 chunkOriginWorld, float voxelWorldSize,
                       out uint outSlot) {
     outSlot = 0u;
@@ -1938,7 +1938,7 @@ bool pjvResolveAdvect(chunkHeader h, MotionSet ms, uint setIndex, ivec3 cell,
     // Same shape as the sway path's block leaf, for the same reason (see pjvProbeLeafNode): a tree64
     // leaf and a 4x4x4 block are the same box. `cacheMin` is the block the cached leaf covers;
     // ivec3(-1) is the empty key, which a real block corner cannot be.
-    Tree64NodeData cacheLeaf;
+    PjvTree64NodeData cacheLeaf;
     ivec3 cacheMin = ivec3(-1);
     bool haveCache = false;
     // ...and the slot cache on top of it, since a flame's fuel is a contiguous body of one material.
@@ -1964,20 +1964,20 @@ bool pjvResolveAdvect(chunkHeader h, MotionSet ms, uint setIndex, ivec3 cell,
             uint leafOffset = 0u;
             bool occupied = false;
             if (inBounds && haveCache) {
-                uint z = calculateZOrderIndex4(uint(c.x - blockMin.x), uint(c.y - blockMin.y),
+                uint z = pjvCalculateZOrderIndex4(uint(c.x - blockMin.x), uint(c.y - blockMin.y),
                                                uint(c.z - blockMin.z));
-                if (checkZOrderInValidMasks(cacheLeaf.data1, cacheLeaf.data2, z)) {
-                    leafOffset = leafMaterialListOffset(cacheLeaf, z);
+                if (pjvCheckZOrderInValidMasks(cacheLeaf.data1, cacheLeaf.data2, z)) {
+                    leafOffset = pjvLeafMaterialListOffset(cacheLeaf, z);
                     occupied = true;
                 }
             }
             if (occupied) {
-                uint slot = materialID(leafOffset + h.materialIDStartIndex);
+                uint slot = pjvMaterialID(leafOffset + h.materialIDStartIndex);
                 uint flags;
                 if (slot == slotCache.x) {
                     flags = slotCache.y;
                 } else {
-                    flags = (materialPaletteTexel(slot + h.paletteOffset).w >> 8u) & 0xFFu;
+                    flags = (pjvMaterialPaletteTexel(slot + h.paletteOffset).w >> 8u) & 0xFFu;
                     slotCache = uvec2(slot, flags);
                 }
                 // Only a voxel belonging to THIS field is a source. Another set's geometry standing
@@ -2048,13 +2048,13 @@ bool pjvResolveAdvect(chunkHeader h, MotionSet ms, uint setIndex, ivec3 cell,
 // because d varies slowly. Test those, ask each where IT is drawn, and keep the ones whose box
 // actually covers this cell. No inversion, no seam, and no cell can come up empty while a voxel
 // wants to be in it.
-void pjvResolveCell(Ray ray, vec3 invDir, chunkHeader h,
+void pjvResolveCell(PjvRay ray, vec3 invDir, PjvChunkHeader h,
                     ivec3 cell, ivec3 K, ivec3 spanVec, ivec3 prevStep, ivec3 envCell,
                     mat3 Rinv, vec3 chunkOriginWorld, mat3 R, float voxelWorldSize,
-                    Tree64NodeData blockLeaf, bool haveBlockLeaf, ivec3 blockMin,
+                    PjvTree64NodeData blockLeaf, bool haveBlockLeaf, ivec3 blockMin,
                     inout int descentBudget, inout uvec2 slotCache, float tMinDrawn,
                     inout float bestT, inout ivec3 outSource, inout uint outList,
-                    inout MovingVoxelHit outHit, inout bool found) {
+                    inout PjvMovingVoxelHit outHit, inout bool found) {
     // The candidate window is a PURE TRANSLATE of the cell: base = cell + K, with K held constant
     // across the whole envelope cell by the caller. That is exact rather than approximate --
     // floor(cell - d0) == cell + floor(-d0) for integer cell -- and it is what makes the dedupe
@@ -2104,7 +2104,7 @@ void pjvResolveCell(Ray ray, vec3 invDir, chunkHeader h,
         if (!pjvAnimatedSourceAt(h, q, blockLeaf, haveBlockLeaf, blockMin,
                                  descentBudget, slotCache, list, qSet)) continue;
 
-        MotionSet qms = pjvMotionSet(qSet);
+        PjvMotionSet qms = pjvMotionSet(qSet);
         if (qms.kind != PJV_MOTION_SWAY) continue;
 
         vec3 qWorld = R * ((vec3(q) + vec3(0.5)) * voxelWorldSize) + chunkOriginWorld;
@@ -2131,7 +2131,7 @@ void pjvResolveCell(Ray ray, vec3 invDir, chunkHeader h,
         // what the dedupe above needs, and it drops the sub-cell out of the accept path entirely.
         if (any(notEqual(ivec3(floor(drawnMin * 0.25)), envCell))) continue;
 
-        MovingVoxelHit mv;
+        PjvMovingVoxelHit mv;
         if (!pjvMovingVoxelHit(ray, invDir, vec3(q), dqSnapped, mv)) continue;
 
         // NEAREST wins, and now across the WHOLE envelope cell rather than within one sub-cell. The
@@ -2153,7 +2153,7 @@ void pjvResolveCell(Ray ray, vec3 invDir, chunkHeader h,
 
 // Walks this chunk's envelope and returns the nearest animated voxel actually drawn along the ray.
 //
-// `ray` is in the chunk's GEOMETRY voxel frame, the same one marchRayThroughTree64_DDA uses.
+// `ray` is in the chunk's GEOMETRY voxel frame, the same one pjvMarchRayThroughTree64_DDA uses.
 // `maxT` bounds the search: nothing drawn beyond it can win, because the geometry march already
 // found something nearer. Without it the envelope is walked along the WHOLE ray even when the answer
 // was settled in the first cell -- which on a canopy is most of the cost, since a ray that hits a
@@ -2164,24 +2164,24 @@ void pjvResolveCell(Ray ray, vec3 invDir, chunkHeader h,
 // peel at all. A peel restart raises tMin past the layer it just consumed and asks again; a march
 // that ignores that either returns the same voxel forever or -- as this one did -- is skipped on
 // every pass after the first, which makes animated geometry behind any transparent layer vanish.
-SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
+PjvSceneIntersectData pjvAnimatedMarch(PjvRay ray, PjvRayQuery rayQuery, PjvChunkHeader h,
                                     mat3 R, mat3 Rinv, vec3 chunkOriginWorld, float voxelWorldSize,
                                     float maxT, float tMin) {
-    SceneIntersectData miss;
+    PjvSceneIntersectData miss;
     miss.foundBox.size = -1.0; miss.rayT = -1.0; miss.exitT = -1.0; miss.normal = vec3(0.0);
     miss.voxelCoord = ivec3(0); miss.steps = 0u;
-    miss.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT; miss.paletteOffset = 0u;
+    miss.materialListIndex = PJV_MATERIAL_INDEX_NEEDS_DESCENT; miss.paletteOffset = 0u;
 
     uint envRes = max(h.resolution / 4u, 4u);
 
     // The envelope march runs in ENVELOPE cell units -- one cell is one unit -- so the geometry-frame
     // ray is scaled down by four. Only the origin scales; the direction is left alone, which is what
     // keeps t comparable between the two frames after the reciprocal scaling below.
-    Ray envRay;
+    PjvRay envRay;
     envRay.origin = ray.origin * 0.25;
     envRay.direction = ray.direction;
 
-    BoxAABB envBox;
+    PjvBoxAABB envBox;
     envBox.position = vec3(0.0);
     envBox.size = float(envRes);
 
@@ -2189,8 +2189,8 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
 
     // ---- WHY THE RESTART ADVANCES THE ORIGIN INSTEAD OF RAISING tMin -------------------------
     //
-    // marchRayThroughTree64_DDA always begins at the volume entry -- `rayT =
-    // getRayBoxEntryDistanceForSureHit(ray, boundingBox)` -- and enforces tMin by DISCARDING leaves
+    // pjvMarchRayThroughTree64_DDA always begins at the volume entry -- `rayT =
+    // pjvGetRayBoxEntryDistanceForSureHit(ray, boundingBox)` -- and enforces tMin by DISCARDING leaves
     // that fall before it. It does not skip ahead. So a restart at tMin re-walks every cell already
     // consumed, and crossing N cells costs N(N+1)/2 DDA steps rather than N.
     //
@@ -2201,8 +2201,8 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
     // Advancing the ORIGIN makes the skip real. The march's own entry computation then lands on the
     // restart point, so each restart costs one root descent plus the steps to the next set cell, and
     // the total is linear in cells crossed. Both entry helpers already handle an origin inside the
-    // box -- getRayBoxEntryDistanceForSureHit clamps its result to zero, and
-    // determineTraversalCoordinatesFromRayAndBox clamps the entry point into the box before flooring
+    // box -- pjvGetRayBoxEntryDistanceForSureHit clamps its result to zero, and
+    // pjvDetermineTraversalCoordinatesFromRayAndBox clamps the entry point into the box before flooring
     // -- which is the same path a camera standing inside a chunk takes every frame.
     //
     // The offset is applied to the ORIGINAL origin each time rather than accumulated onto the
@@ -2223,7 +2223,7 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
     vec3 envTFar = max(envT0, envT1);
     float envExitT = min(min(envTFar.x, envTFar.y), envTFar.z);
 
-    PeelAccum noPeel = pjvNoPeel();
+    PjvPeelAccum noPeel = pjvNoPeel();
 
     // The palette-flag cache, held for the whole march. See pjvAnimatedSourceAt for what it saves.
     // The key is a material slot; 0xFFFFFFFF is "empty", which a one-byte slot cannot collide with.
@@ -2232,14 +2232,14 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
     // The envelope is marched at FULL resolution, never coarsened, and this is not a quality choice.
     // An envelope cell is an occupancy oracle -- "something may be drawn in this 4x4x4 box" -- and a
     // coarsened node merging sixty-four of them answers a question nobody asked. Worse, it comes back
-    // with MATERIAL_INDEX_NEEDS_DESCENT, so the motion byte cannot be read and the cell resolves to
+    // with PJV_MATERIAL_INDEX_NEEDS_DESCENT, so the motion byte cannot be read and the cell resolves to
     // nothing; the ray then spends its whole restart budget on coarse nodes and reports a miss, and
     // the animated geometry inside them is drawn nowhere at all.
     //
     // The caller's query carries a distance-LOD ramp meant for geometry (AdvancedRenderer's primary
     // ray sets PJV_LOD_FOOTPRINT), so it cannot be reused here. A fresh one, with the step budget
     // capped: this tree is three levels deep and a ray that escapes it terminates on its own.
-    RayQuery envQuery = pjvPrimaryQuery(min(rayQuery.maxRaySteps, 128u));
+    PjvRayQuery envQuery = pjvPrimaryQuery(min(rayQuery.maxRaySteps, 128u));
 
     // ---- HOW MANY CELLS A RAY MAY CROSS, AND WHY THIS NUMBER IS NOT A QUALITY KNOB -------------
     //
@@ -2257,7 +2257,7 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
     // Raised to a bound that a ray crossing an entire chunk cannot reach: an envelope is
     // resolution/4 cells across, so 3*envRes/4 covers the body diagonal with room to spare. It stays
     // a bound rather than becoming unbounded, because a non-advancing tMin would otherwise hang the
-    // shader, and peelNextTMin's ULP floor makes non-advance unlikely rather than impossible.
+    // shader, and pjvPeelNextTMin's ULP floor makes non-advance unlikely rather than impossible.
     //
     // This is still the wrong SHAPE -- consuming a cell in place, the way the transparency peel does
     // within a safe interval, would avoid the restart entirely. That is a real piece of work and this
@@ -2267,10 +2267,10 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
         if (tAdvance >= envExitT) return miss;
         // The march starts where the last one left off. Its rayT is measured from THIS origin, so
         // every use of it below is lifted back to the whole ray by tAdvance.
-        Ray stepRay;
+        PjvRay stepRay;
         stepRay.origin = envOriginBase + ray.direction * tAdvance;
         stepRay.direction = ray.direction;
-        SceneIntersectData cellHit = marchRayThroughTree64_DDA(
+        PjvSceneIntersectData cellHit = pjvMarchRayThroughTree64_DDA(
             stepRay, envQuery, 0.0, envBox, h.envelopeStartIndex, h.envelopeLeafStartIndex, envRes, 0u,
             h.envelopeMotionStartIndex, h.paletteOffset, -1.0, 1.0, false, noPeel);
         if (cellHit.foundBox.size < 0.0 || cellHit.rayT < 0.0) return miss;
@@ -2281,19 +2281,19 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
 
         // Which motion set marked this cell.
         uint setIndex = 0u;
-        if (cellHit.materialListIndex != MATERIAL_INDEX_NEEDS_DESCENT) {
-            setIndex = uint(materialID(cellHit.materialListIndex + h.envelopeMotionStartIndex)) & PJV_MAT_MOTION_MASK;
+        if (cellHit.materialListIndex != PJV_MATERIAL_INDEX_NEEDS_DESCENT) {
+            setIndex = uint(pjvMaterialID(cellHit.materialListIndex + h.envelopeMotionStartIndex)) & PJV_MAT_MOTION_MASK;
         }
         // The cell's set is a bracketing HINT and nothing more -- see pjvResolveCell. It must not
         // gate whether the block is walked at all: a cell marked by one field routinely contains
         // sources belonging to another, and gating here would make those invisible for exactly the
         // reason the set must not gate the candidates either.
-        MotionSet ms = pjvMotionSet(setIndex);
+        PjvMotionSet ms = pjvMotionSet(setIndex);
 
 #ifdef PJV_SCENE_DEBUG
         if ((rayQuery.flags & PJV_Q_ANIM_DEBUG_SOLID) != 0u) {
             // The whole envelope cell, drawn where it is. No resolve, no candidates, no field.
-            SceneIntersectData dbg;
+            PjvSceneIntersectData dbg;
             dbg.voxelCoord = ivec3(cellHit.voxelCoord) * 4;
             dbg.foundBox.position = vec3(dbg.voxelCoord);
             dbg.foundBox.size = 4.0;
@@ -2318,7 +2318,7 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
             // Slot 0 of this component's palette, named directly.
             //
             // Not the envelope's own motion byte, which would be the "honest" choice and is not
-            // available: castRayThroughTree64 lifts every returned index by the GEOMETRY's material
+            // available: pjvCastRayThroughTree64 lifts every returned index by the GEOMETRY's material
             // base, and an index into the ENVELOPE's array lifted by the geometry's base points at
             // neither. Cancelling that add from in here would work by arithmetic and would be a trap
             // for whoever next changes either base.
@@ -2339,7 +2339,7 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
             ivec3 blockMin = envCell * 4;
             // One descent for the whole envelope cell. See pjvProbeLeafNode: the geometry leaf
             // covering this block and the envelope cell are the same box.
-            Tree64NodeData blockLeaf;
+            PjvTree64NodeData blockLeaf;
             bool haveBlockLeaf = pjvProbeLeafNode(h.geometryStartIndex, h.leafStartIndex, h.resolution, blockMin, blockLeaf);
 
             // ---- THE BRACKET HINT, ONCE PER ENVELOPE CELL RATHER THAN ONCE PER SUB-CELL --------
@@ -2400,8 +2400,8 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
             // stricter than the sub-cell order it replaces.
             float bestT = 1e30;
             bool found = false;
-            ivec3 bestSrc = cell; uint bestList = MATERIAL_INDEX_NEEDS_DESCENT;
-            MovingVoxelHit bestHit;
+            ivec3 bestSrc = cell; uint bestList = PJV_MATERIAL_INDEX_NEEDS_DESCENT;
+            PjvMovingVoxelHit bestHit;
             // Zero means "no previous window", which is how the first sub-cell probes all of its
             // candidates instead of deduping every one of them away.
             ivec3 prevStep = ivec3(0);
@@ -2450,7 +2450,7 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
                                          voxelWorldSize, advSlot)) {
                         // The drawn box is the sub-cell itself: advection moves the CONTENTS of a
                         // fixed lattice, where sway moves a fixed voxel to a new place.
-                        MovingVoxelHit amv;
+                        PjvMovingVoxelHit amv;
                         if (pjvMovingVoxelHit(ray, invDir, vec3(cell), vec3(0.0), amv) &&
                             amv.rayT < bestT && amv.rayT >= tMin) {
                             bestT = amv.rayT;
@@ -2474,7 +2474,7 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
             }
 
             if (found) {
-                SceneIntersectData out_;
+                PjvSceneIntersectData out_;
                 // Identity is the SOURCE cell, not the drawn one, and this matters downstream:
                 // voxelCoord is what a temporal filter gates its history on, and a drawn position
                 // moves every frame by construction. The source holds still.
@@ -2504,7 +2504,7 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
         //
         // With a tMin the march re-walked from the volume entry and rejected cells on `rayT >= tMin`,
         // so the floor had to land just INSIDE the cell being left: at its exit plane the gate would
-        // have excluded the next cell too, whose entry sits at exactly the same t. (peelNextTMin is
+        // have excluded the next cell too, whose entry sits at exactly the same t. (pjvPeelNextTMin is
         // that floor, and it says so.)
         //
         // Advancing the ORIGIN inverts the requirement, because there is no longer a gate -- where
@@ -2515,7 +2515,7 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
         // returns the exit unchanged.
         //
         // Nothing is skipped by this. The new origin sits just inside the NEXT cell, and
-        // determineTraversalCoordinatesFromRayAndBox floors it into that cell directly -- it is
+        // pjvDetermineTraversalCoordinatesFromRayAndBox floors it into that cell directly -- it is
         // already direction-aware on exact grid planes, which is the case this lands on.
         tAdvance = cellExitT + max(abs(cellExitT), 1.0) * 1e-5;
     }
@@ -2530,12 +2530,12 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
 // need it -- the broadphase already declines to enter a chunk whose whole box starts beyond it --
 // but a chunk the ray enters BEFORE that distance can easily hold all of its animated geometry
 // after it, and without this the envelope is then walked in full for an answer that cannot win.
-SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, uint headerIndex, float limitT, float nearestSoFar, inout PeelAccum peel) {
-    chunkHeader header = headers(headerIndex);
+PjvSceneIntersectData pjvCastRayThroughTree64(PjvRay ray, PjvRayQuery rayQuery, float tMin, uint headerIndex, float limitT, float nearestSoFar, inout PjvPeelAccum peel) {
+    PjvChunkHeader header = pjvHeader(headerIndex);
 
     uint tree64StartIndex = header.geometryStartIndex;
 
-    BoxAABB tree64BoundingBox;
+    PjvBoxAABB tree64BoundingBox;
     //tree64BoundingBox.position = vec3(header.positionX, header.positionY, header.positionZ);
     //tree64BoundingBox.size = header.scale;
     tree64BoundingBox.position = vec3(0.0, 0.0, 0.0);
@@ -2545,10 +2545,10 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
     // in the world by translation P, rotation R and uniform scale (scale/resolution), so the
     // inverse is: subtract P, rotate by R^-1 = transpose(R), then scale to voxel units.
     // R^-1 is orthonormal so ray length is preserved and the rayT scaling below is unchanged.
-    mat3 R = rotationFromQuat(header.rotation);
+    mat3 R = pjvRotationFromQuat(header.rotation);
     mat3 Rinv = transpose(R);
     vec3 P = vec3(header.positionX, header.positionY, header.positionZ);
-    Ray transformedRay;
+    PjvRay transformedRay;
     transformedRay.origin = (Rinv * (ray.origin - P)) * (tree64BoundingBox.size / header.scale);
     transformedRay.direction = Rinv * ray.direction;
 
@@ -2577,19 +2577,19 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
     // set of units throughout.
     float localTMin = tMin * (tree64BoundingBox.size / header.scale);
     // The peel's interval stays in WORLD units and the march is told how to convert into them. See
-    // the note on marchRayThroughTree64_DDA: the peel's state is shared with the scene-level loop, so
+    // the note on pjvMarchRayThroughTree64_DDA: the peel's state is shared with the scene-level loop, so
     // it has to be in one set of units and world is the one both paths can name.
     float localToWorld = header.scale / tree64BoundingBox.size;
 
-    IntersectionResult rootIntersect = getRayBoxEntry(transformedRay, tree64BoundingBox);
+    PjvIntersectionResult rootIntersect = pjvGetRayBoxEntry(transformedRay, tree64BoundingBox);
 
-    SceneIntersectData tree64Intersect;
+    PjvSceneIntersectData tree64Intersect;
     tree64Intersect.foundBox.size = -1;
     tree64Intersect.voxelCoord = ivec3(0);
     tree64Intersect.rayT = -1.0;
     tree64Intersect.exitT = -1.0;
     tree64Intersect.normal = vec3(0.0);
-    tree64Intersect.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
+    tree64Intersect.materialListIndex = PJV_MATERIAL_INDEX_NEEDS_DESCENT;
     tree64Intersect.paletteOffset = 0u;
 
     // ---- Is animated geometry in play for this chunk? -----------------------------------------
@@ -2601,7 +2601,7 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
     // bake did not produce an envelope renders its animated materials at rest, statically, which is
     // a degradation with a visible cause rather than a hole with none.
 #ifdef PJV_SCENE_ANIMATION
-    bool animate = (rayQuery.flags & PJV_Q_ANIMATION) != 0u && chunkHasEnvelope(header);
+    bool animate = (rayQuery.flags & PJV_Q_ANIMATION) != 0u && pjvChunkHasEnvelope(header);
 #else
     const bool animate = false;
 #endif
@@ -2613,7 +2613,7 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
     // most rays reach many chunks and hit at most one. Skipped for a chunk with an animation envelope,
     // whose animated voxels may be drawn outside the static content.
     tree64Intersect.steps = 0u;
-    if (header.hasContentBox && !chunkHasEnvelope(header)) {
+    if (header.hasContentBox && !pjvChunkHasEnvelope(header)) {
         vec3 inverse = 1.0 / transformedRay.direction;
         vec3 t0 = (header.contentMin - transformedRay.origin) * inverse;
         vec3 t1 = (header.contentMax - transformedRay.origin) * inverse;
@@ -2659,13 +2659,13 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
         // applied in the outer loop and a march that consumes in place crosses interfaces the outer
         // loop never hears about. The reasoning was right and the remedy was too broad: see
         // pjvPeelConsume, which now hands back the interfaces that actually bend and keeps peeling
-        // the ones that do not. A restart per transparent VOXEL caps a body at MAX_PEEL_ITERATIONS;
+        // the ones that do not. A restart per transparent VOXEL caps a body at PJV_MAX_PEEL_ITERATIONS;
         // a restart per refracting INTERFACE costs one per surface, which is what it has to cost.
         float geometryLimitT = (animate && peel.active) ? -1.0 : limitT;
 
-        tree64Intersect = marchRayThroughTree64_DDA(transformedRay, rayQuery, localTMin, tree64BoundingBox, tree64StartIndex, header.leafStartIndex, header.resolution, header.traversalLOD, header.materialIDStartIndex, header.paletteOffset, geometryLimitT, localToWorld, animate, peel);
+        tree64Intersect = pjvMarchRayThroughTree64_DDA(transformedRay, rayQuery, localTMin, tree64BoundingBox, tree64StartIndex, header.leafStartIndex, header.resolution, header.traversalLOD, header.materialIDStartIndex, header.paletteOffset, geometryLimitT, localToWorld, animate, peel);
 
-        SceneIntersectData animHit;
+        PjvSceneIntersectData animHit;
         animHit.foundBox.size = -1.0;
         animHit.rayT = -1.0;
         // Only with PJV_SCENE_ANIMATION. It is a whole second tree march inlined into every copy of
@@ -2696,7 +2696,7 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
             // The hit just changed to a voxel the GEOMETRY march never returned, so anything it
             // published about its own answer is now about a different voxel. Invalidate rather than
             // fetch: the animated hit carries its own materialListIndex, and by the time the caller
-            // reads it the palette base and offset have been folded in, so fetchVoxelMaterialFromHit
+            // reads it the palette base and offset have been folded in, so pjvFetchVoxelMaterialFromHit
             // resolves it correctly and cheaply. Leaving this true is what shaded an animated voxel
             // with the albedo of whatever stood behind it.
             //
@@ -2708,7 +2708,7 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
 
         // ---- A HIT FOUND WITHOUT A DDA STEP CARRIES A ZERO NORMAL, AND READS AS SKY -------------
         //
-        // marchRayThroughTree64_DDA seeds hitNormal from getRayBoxEntry against the WHOLE volume, and
+        // pjvMarchRayThroughTree64_DDA seeds hitNormal from pjvGetRayBoxEntry against the WHOLE volume, and
         // that function returns (0,0,0) when the ray origin is already inside the volume. The seed is
         // replaced on the first committed DDA step, so an ordinary hit is fine -- but a hit found
         // during the INITIAL DESCENT, before any step, keeps the zero. Every renderer's miss test is
@@ -2780,7 +2780,7 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
     // Neither the sentinel nor a direct palette slot is an index into the materialIDs array, so
     // neither takes the base. Offsetting the sentinel would turn "descend for this" into a wild read;
     // offsetting a direct slot would point it at an unrelated palette entry.
-    if (tree64Intersect.materialListIndex != MATERIAL_INDEX_NEEDS_DESCENT &&
+    if (tree64Intersect.materialListIndex != PJV_MATERIAL_INDEX_NEEDS_DESCENT &&
         (tree64Intersect.materialListIndex & PJV_MATERIAL_DIRECT_SLOT) == 0u) {
         tree64Intersect.materialListIndex += header.materialIDStartIndex;
     }
@@ -2801,11 +2801,11 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
 }
 
 // Geometry-only form: nearest solid voxel in one chunk, with no transparency and no material
-// resolved. This is what a caller reaching past raySceneIntersect into a single chunk almost always
+// resolved. This is what a caller reaching past pjvRaySceneIntersect into a single chunk almost always
 // wants, and it is what this function meant before the peel could run inside the march.
-SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, uint headerIndex) {
-    PeelAccum peel = pjvNoPeel();
-    return castRayThroughTree64(ray, rayQuery, tMin, headerIndex, -1.0, 1e30, peel);
+PjvSceneIntersectData pjvCastRayThroughTree64(PjvRay ray, PjvRayQuery rayQuery, float tMin, uint headerIndex) {
+    PjvPeelAccum peel = pjvNoPeel();
+    return pjvCastRayThroughTree64(ray, rayQuery, tMin, headerIndex, -1.0, 1e30, peel);
 }
 // The colour of one voxel, given the cell the march landed on **in the chunk's own voxel space**.
 //
@@ -2820,18 +2820,18 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
 // voxels: 6% wrong for a small translation, 10% for a rotation alone, 39% for both.
 //
 // The DDA holds the exact integer throughout, so the fix is to carry it rather than rebuild it --
-// see SceneIntersectData::voxelCoord.
+// see PjvSceneIntersectData::voxelCoord.
 //
 // The coordinate is clamped rather than trusted: a caller handing over a miss's zeroed struct should
 // read a defined voxel rather than index the tree out of bounds.
 //
-// This returns the WHOLE material. fetchVoxelColorAtCoord below is the albedo-only wrapper, and it
-// stays because a renderer that only wants a colour should not have to know what a VoxelMaterial is
+// This returns the WHOLE material. pjvFetchVoxelColorAtCoord below is the albedo-only wrapper, and it
+// stays because a renderer that only wants a colour should not have to know what a PjvVoxelMaterial is
 // -- and because every existing call site across the examples asks for exactly that. Splitting the
 // two costs nothing: the descent, the fetch and the decode are identical either way, and the unused
 // fields fold away in the compiler.
-VoxelMaterial fetchVoxelMaterialAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
-    chunkHeader h = headers(int(headerIndex));
+PjvVoxelMaterial pjvFetchVoxelMaterialAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
+    PjvChunkHeader h = pjvHeader(int(headerIndex));
     uint res = h.resolution;
 
     ivec3 voxelPos = clamp(hitVoxelCoord, ivec3(0), ivec3(int(res) - 1));
@@ -2839,26 +2839,26 @@ VoxelMaterial fetchVoxelMaterialAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
     // Through the tile table: the brick's leaf (or its tile) in two reads and at most one dependent one.
     // A voxel that is not there -- a coarsened hit's corner -- reads the material the tree descent
     // always gave it; see pjvTileLeafNearest.
-    Tree64NodeData tableLeaf;
-    if (!pjvTileLeafNearest(h.geometryStartIndex, h.leafStartIndex, res, voxelPos, tableLeaf)) return emptyVoxelMaterial();
+    PjvTree64NodeData tableLeaf;
+    if (!pjvTileLeafNearest(h.geometryStartIndex, h.leafStartIndex, res, voxelPos, tableLeaf)) return pjvEmptyVoxelMaterial();
     ivec3 inLeaf = voxelPos & 3;
-    uint zInLeaf = calculateZOrderIndex4(uint(inLeaf.x), uint(inLeaf.y), uint(inLeaf.z));
-    return decodeMaterial(materialPaletteTexel(
-        materialID(h.materialIDStartIndex + leafMaterialListOffset(tableLeaf, zInLeaf)) + h.paletteOffset));
+    uint zInLeaf = pjvCalculateZOrderIndex4(uint(inLeaf.x), uint(inLeaf.y), uint(inLeaf.z));
+    return pjvDecodeMaterial(pjvMaterialPaletteTexel(
+        pjvMaterialID(h.materialIDStartIndex + pjvLeafMaterialListOffset(tableLeaf, zInLeaf)) + h.paletteOffset));
 }
 
 // Albedo only, for the renderers that shade from a colour and nothing else.
-vec3 fetchVoxelColorAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
-    return fetchVoxelMaterialAtCoord(hitVoxelCoord, headerIndex).albedo;
+vec3 pjvFetchVoxelColorAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
+    return pjvFetchVoxelMaterialAtCoord(hitVoxelCoord, headerIndex).albedo;
 }
 
 // The material of a hit the march just returned. **This is what a renderer holding a
-// SceneIntersectData should call.**
+// PjvSceneIntersectData should call.**
 //
 // Two texelFetches: the material byte, then the palette entry. Nothing else -- no header fetch, no
 // tree descent, no popcount. The march resolved the leaf-relative offset from values it already had in
-// registers at the moment it decided to stop, and castRayThroughTree64 added the chunk's base while it
-// still had the header open. See SceneIntersectData::materialListIndex.
+// registers at the moment it decided to stop, and pjvCastRayThroughTree64 added the chunk's base while it
+// still had the header open. See PjvSceneIntersectData::materialListIndex.
 //
 // What this replaces, per call, is 5 header texels plus one texel and one popcount per tree level
 // (4 levels at resolution 256) to rediscover the leaf the march was standing in. The saving is largest
@@ -2869,27 +2869,27 @@ vec3 fetchVoxelColorAtCoord(ivec3 hitVoxelCoord, uint headerIndex) {
 // coarsened interior node returned whole -- carries the sentinel, and only because such a hit has no
 // single voxel whose material it could name. Every full-resolution hit takes the fast path, which is
 // every hit in the scene editor's viewport and in its path tracer.
-VoxelMaterial fetchVoxelMaterialFromHit(SceneIntersectData hit) {
-    if (hit.materialListIndex == MATERIAL_INDEX_NEEDS_DESCENT) {
-        return fetchVoxelMaterialAtCoord(hit.voxelCoord, hit.headerIndex);
+PjvVoxelMaterial pjvFetchVoxelMaterialFromHit(PjvSceneIntersectData hit) {
+    if (hit.materialListIndex == PJV_MATERIAL_INDEX_NEEDS_DESCENT) {
+        return pjvFetchVoxelMaterialAtCoord(hit.voxelCoord, hit.headerIndex);
     }
     // A direct slot names its palette entry outright and has no materialIDs byte to read. See
     // PJV_MATERIAL_DIRECT_SLOT; the palette base still applies, because the slot is component-local.
     uint matID = ((hit.materialListIndex & PJV_MATERIAL_DIRECT_SLOT) != 0u)
                ? (hit.materialListIndex & PJV_MATERIAL_SLOT_MASK)
-               : materialID(hit.materialListIndex);
-    return decodeMaterial(materialPaletteTexel(matID + hit.paletteOffset));
+               : pjvMaterialID(hit.materialListIndex);
+    return pjvDecodeMaterial(pjvMaterialPaletteTexel(matID + hit.paletteOffset));
 }
 
-// Albedo only, matching fetchVoxelColorAtCoord's relationship to the function above it.
-vec3 fetchVoxelColorFromHit(SceneIntersectData hit) {
-    return fetchVoxelMaterialFromHit(hit).albedo;
+// Albedo only, matching pjvFetchVoxelColorAtCoord's relationship to the function above it.
+vec3 pjvFetchVoxelColorFromHit(PjvSceneIntersectData hit) {
+    return pjvFetchVoxelMaterialFromHit(hit).albedo;
 }
 
 // The colour of the voxel a hit box names, recovered from the box itself.
 //
-// Prefer fetchVoxelColorFromHit (or fetchVoxelColorAtCoord with the hit's voxelCoord) in new code:
-// a SceneIntersectData already carries the exact cell. This is kept for the shaders across the
+// Prefer pjvFetchVoxelColorFromHit (or pjvFetchVoxelColorAtCoord with the hit's voxelCoord) in new code:
+// a PjvSceneIntersectData already carries the exact cell. This is kept for the shaders across the
 // examples that pass `foundBox` -- and made exact enough that they need not change.
 //
 // **It looks the voxel up at the box's centre, not its corner.** The box's position is its minimum
@@ -2901,18 +2901,18 @@ vec3 fetchVoxelColorFromHit(SceneIntersectData hit) {
 // half a voxel to choose wrong, which float32 does not do at any distance a scene uses. For a
 // coarsened LOD node (size > one voxel) the centre is a voxel inside the node, which is as good as a
 // node with no single material can do.
-vec3 fetchVoxelColor(BoxAABB voxelBoundingBox, uint headerIndex) {
-    chunkHeader h = headers(int(headerIndex));
+vec3 pjvFetchVoxelColor(PjvBoxAABB voxelBoundingBox, uint headerIndex) {
+    PjvChunkHeader h = pjvHeader(int(headerIndex));
     uint res = h.resolution;
     vec3 P = vec3(h.positionX, h.positionY, h.positionZ);
-    mat3 Rinv = transpose(rotationFromQuat(h.rotation));
+    mat3 Rinv = transpose(pjvRotationFromQuat(h.rotation));
 
     // The box is axis-aligned in the chunk's own frame, so its centre there is corner + size / 2.
     vec3 centre = Rinv * (voxelBoundingBox.position - P) + vec3(0.5 * voxelBoundingBox.size);
     vec3 unitPos = clamp(centre / h.scale, 0.0, 1.0 - 1e-6);
     ivec3 voxelPos = ivec3(unitPos * float(res));
 
-    return fetchVoxelColorAtCoord(voxelPos, headerIndex);
+    return pjvFetchVoxelColorAtCoord(voxelPos, headerIndex);
 }
 
 // ------------------------------------------------------------
@@ -2920,7 +2920,7 @@ vec3 fetchVoxelColor(BoxAABB voxelBoundingBox, uint headerIndex) {
 // gridInfo texel0 = {gridCount, looseChunkCount, headerCount, 0}; each grid then occupies
 // 3 texels: {origin.xyz, cellSize}, {dims.xyz, cellMapOffset}, {rotation quat xyzw}.
 // ------------------------------------------------------------
-struct Grid {
+struct PjvGrid {
     vec3 origin;
     float cellSize;
     ivec3 dims;
@@ -2928,18 +2928,18 @@ struct Grid {
     vec4 rotation;
 };
 
-uint sceneGridCount()  { return texelFetch(gridInfo, ivec2(0, 0), 0).r; }
-uint sceneLooseCount() { return texelFetch(gridInfo, ivec2(0, 0), 0).g; }
+uint pjvSceneGridCount()  { return texelFetch(gridInfo, ivec2(0, 0), 0).r; }
+uint pjvSceneLooseCount() { return texelFetch(gridInfo, ivec2(0, 0), 0).g; }
 // Nodes in the loose-chunk BVH (utils/loose_bvh.h); 0 when the scene has none and the loose list
 // is walked linearly.
-uint sceneLooseBVHNodeCount() { return texelFetch(gridInfo, ivec2(0, 0), 0).a; }
+uint pjvSceneLooseBVHNodeCount() { return texelFetch(gridInfo, ivec2(0, 0), 0).a; }
 
-Grid getGrid(int i) {
+PjvGrid pjvGetGrid(int i) {
     int base = 1 + i * 3;
     uvec4 p0 = texelFetch(gridInfo, ivec2(base + 0, 0), 0);
     uvec4 p1 = texelFetch(gridInfo, ivec2(base + 1, 0), 0);
     uvec4 p2 = texelFetch(gridInfo, ivec2(base + 2, 0), 0);
-    Grid g;
+    PjvGrid g;
     g.origin = vec3(uintBitsToFloat(p0.r), uintBitsToFloat(p0.g), uintBitsToFloat(p0.b));
     g.cellSize = uintBitsToFloat(p0.a);
     g.dims = ivec3(int(p1.r), int(p1.g), int(p1.b));
@@ -2949,7 +2949,7 @@ Grid getGrid(int i) {
 }
 
 // cellMap is flattened exactly like voxelTypeData (4 uints per RGBA32U texel).
-uint cellMapValue(uint index) {
+uint pjvCellMapValue(uint index) {
     ivec2 texSize = textureSize(cellMap, 0);
     int pixelIndex = int(index) / 4;
     int x = pixelIndex % texSize.x;
@@ -2962,7 +2962,7 @@ uint cellMapValue(uint index) {
 // looseList holds the header rows (chunk handles) of the loose chunks, flattened like cellMap.
 // The shader iterates [0, looseCount) of these instead of a positional header prefix, so a loose
 // chunk can be added/removed without any ordering constraint on the header texture.
-uint looseListValue(uint index) {
+uint pjvLooseListValue(uint index) {
     ivec2 texSize = textureSize(looseList, 0);
     int pixelIndex = int(index) / 4;
     int x = pixelIndex % texSize.x;
@@ -2973,24 +2973,24 @@ uint looseListValue(uint index) {
 }
 
 // One texel of the looseList texture, by texel index.
-uvec4 looseListTexel(int pixelIndex) {
+uvec4 pjvLooseListTexel(int pixelIndex) {
     ivec2 texSize = textureSize(looseList, 0);
     return texelFetch(looseList, ivec2(pixelIndex % texSize.x, pixelIndex / texSize.x), 0);
 }
 
 // A BVH node: two texels after the loose list, which starts at texel 0 and is padded to a texel.
 // Interior: a, b are the children. Leaf: a = 0x80000000 | first list index, b = count.
-struct LooseBVHNode {
+struct PjvLooseBVHNode {
     vec3 boxMin;
     vec3 boxMax;
     uint a;
     uint b;
 };
-LooseBVHNode looseBVHNode(int nodeIndex, int looseCount) {
+PjvLooseBVHNode pjvLooseBVHNode(int nodeIndex, int looseCount) {
     int base = (looseCount + 3) / 4 + nodeIndex * 2;
-    uvec4 t0 = looseListTexel(base);
-    uvec4 t1 = looseListTexel(base + 1);
-    LooseBVHNode node;
+    uvec4 t0 = pjvLooseListTexel(base);
+    uvec4 t1 = pjvLooseListTexel(base + 1);
+    PjvLooseBVHNode node;
     node.boxMin = vec3(uintBitsToFloat(t0.r), uintBitsToFloat(t0.g), uintBitsToFloat(t0.b));
     node.boxMax = vec3(uintBitsToFloat(t0.a), uintBitsToFloat(t1.r), uintBitsToFloat(t1.g));
     node.a = t1.b;
@@ -2999,7 +2999,7 @@ LooseBVHNode looseBVHNode(int nodeIndex, int looseCount) {
 }
 
 // Where a ray enters an axis-aligned box, or -1 when it misses or the box is behind it.
-float looseBVHEntry(vec3 origin, vec3 inverseDirection, vec3 boxMin, vec3 boxMax) {
+float pjvLooseBVHEntry(vec3 origin, vec3 inverseDirection, vec3 boxMin, vec3 boxMax) {
     vec3 t0 = (boxMin - origin) * inverseDirection;
     vec3 t1 = (boxMax - origin) * inverseDirection;
     vec3 lo = min(t0, t1);
@@ -3014,26 +3014,26 @@ float looseBVHEntry(vec3 origin, vec3 inverseDirection, vec3 boxMin, vec3 boxMax
 
 // Walks one grid volume with a uniform-grid DDA, front-to-back, and returns the nearest hit
 // closer than maxDistance (or a miss). The DDA runs in grid-local space (cells axis-aligned),
-// but each occupied cell is marched with the original WORLD ray via castRayThroughTree64 —
+// but each occupied cell is marched with the original WORLD ray via pjvCastRayThroughTree64 —
 // the chunk header already carries world placement + rotation. R^-1 is orthonormal, so the
 // grid-local ray parameter t matches world rayT and is directly comparable to maxDistance.
-SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float maxDistance, float tMin, float limitT, inout PeelAccum peel) {
-    SceneIntersectData miss;
+PjvSceneIntersectData pjvMarchGrid(PjvRay ray, PjvRayQuery rayQuery, int gridIndex, float maxDistance, float tMin, float limitT, inout PjvPeelAccum peel) {
+    PjvSceneIntersectData miss;
     miss.foundBox.size = -1;
     miss.voxelCoord = ivec3(0);
     miss.rayT = -1.0;
     miss.exitT = -1.0;
     miss.normal = vec3(0.0);
     miss.steps = 0;
-    miss.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
+    miss.materialListIndex = PJV_MATERIAL_INDEX_NEEDS_DESCENT;
     miss.paletteOffset = 0u;
 
-    Grid g = getGrid(gridIndex);
+    PjvGrid g = pjvGetGrid(gridIndex);
 
-    mat3 Rinv = transpose(rotationFromQuat(g.rotation));
+    mat3 Rinv = transpose(pjvRotationFromQuat(g.rotation));
     vec3 lo = Rinv * (ray.origin - g.origin);
     vec3 ld = Rinv * ray.direction;
-    // Sign-preserving, for the same reason as castRayThroughTree64's clamp above: a bare +eps flips a
+    // Sign-preserving, for the same reason as pjvCastRayThroughTree64's clamp above: a bare +eps flips a
     // small negative component and walks the cell DDA the wrong way along that axis.
     float eps = 1e-6;
     if (abs(ld.x) < eps) ld.x = ld.x < 0.0 ? -eps : eps;
@@ -3081,9 +3081,9 @@ SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float ma
         if (cell.x >= 0 && cell.y >= 0 && cell.z >= 0 &&
             cell.x < g.dims.x && cell.y < g.dims.y && cell.z < g.dims.z) {
             uint lin = uint(cell.x + g.dims.x * (cell.y + g.dims.y * cell.z));
-            uint chunkIdx = cellMapValue(g.cellMapOffset + lin);
+            uint chunkIdx = pjvCellMapValue(g.cellMapOffset + lin);
             if (chunkIdx != 0xFFFFFFFFu) {
-                SceneIntersectData hit = castRayThroughTree64(ray, rayQuery, tMin, int(chunkIdx), limitT, maxDistance, peel);
+                PjvSceneIntersectData hit = pjvCastRayThroughTree64(ray, rayQuery, tMin, int(chunkIdx), limitT, maxDistance, peel);
                 #ifdef PJV_MARCH_STATS
                 pjvStatMarch(hit.steps);
                 #endif
@@ -3106,17 +3106,17 @@ SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float ma
     return miss;
 }
 
-// Geometry-only form. See the note on castRayThroughTree64's.
-SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float maxDistance, float tMin) {
-    PeelAccum peel = pjvNoPeel();
-    return marchGrid(ray, rayQuery, gridIndex, maxDistance, tMin, -1.0, peel);
+// Geometry-only form. See the note on pjvCastRayThroughTree64's.
+PjvSceneIntersectData pjvMarchGrid(PjvRay ray, PjvRayQuery rayQuery, int gridIndex, float maxDistance, float tMin) {
+    PjvPeelAccum peel = pjvNoPeel();
+    return pjvMarchGrid(ray, rayQuery, gridIndex, maxDistance, tMin, -1.0, peel);
 }
 
 // ---- The safe interval -------------------------------------------------------------------------
 //
 // How far the ray can be walked while only ONE component's bounding volume is live. Inside such an
 // interval there is nothing for a nearer surface to arrive from, so a march may consume transparent
-// voxels IN PLACE instead of handing each one back for a full scene restart. See PeelAccum.
+// voxels IN PLACE instead of handing each one back for a full scene restart. See PjvPeelAccum.
 //
 // The two helpers below answer "where does this volume begin, along the ray" for the two kinds of
 // component. Both work in a rotation-only frame, and rotation preserves distance, so both return
@@ -3126,23 +3126,23 @@ SceneIntersectData marchGrid(Ray ray, RayQuery rayQuery, int gridIndex, float ma
 // Entries are clamped to zero by the caller: a ray whose origin is already inside two volumes has no
 // solo interval at all, and clamping is what makes that fall out as limit == 0 rather than as a
 // negative interval that would look inviting.
-float pjvLooseEntryT(Ray ray, uint headerIndex) {
-    chunkHeader h = headers(int(headerIndex));
+float pjvLooseEntryT(PjvRay ray, uint headerIndex) {
+    PjvChunkHeader h = pjvHeader(int(headerIndex));
     if (h.scale <= 0.0) return -1.0;
     vec3 P = vec3(h.positionX, h.positionY, h.positionZ);
-    mat3 Rinv = transpose(rotationFromQuat(h.rotation));
-    Ray localRay;
+    mat3 Rinv = transpose(pjvRotationFromQuat(h.rotation));
+    PjvRay localRay;
     localRay.origin = Rinv * (ray.origin - P);
     localRay.direction = Rinv * ray.direction;
-    BoxAABB box;
+    PjvBoxAABB box;
     box.position = vec3(0.0);
     box.size = h.scale;
-    return getRayBoxEntryDistance(localRay, box);
+    return pjvGetRayBoxEntryDistance(localRay, box);
 }
 
-float pjvGridEntryT(Ray ray, int gridIndex) {
-    Grid g = getGrid(gridIndex);
-    mat3 Rinv = transpose(rotationFromQuat(g.rotation));
+float pjvGridEntryT(PjvRay ray, int gridIndex) {
+    PjvGrid g = pjvGetGrid(gridIndex);
+    mat3 Rinv = transpose(pjvRotationFromQuat(g.rotation));
     vec3 lo = Rinv * (ray.origin - g.origin);
     vec3 ld = Rinv * ray.direction;
     float eps = 1e-6;
@@ -3159,24 +3159,24 @@ float pjvGridEntryT(Ray ray, int gridIndex) {
     return tEnter;
 }
 
-SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin, inout PeelAccum peel) {
+PjvSceneIntersectData pjvRaySceneIntersectFrom(PjvRay ray, PjvRayQuery rayQuery, float tMin, inout PjvPeelAccum peel) {
     // Nothing beyond the query's own limit can be the answer, so the search starts pruned there.
     float closestDistance = min(100000000.0, rayQuery.maxDistance);
     // (An any-hit opt-in for shadow rays -- stop at the first chunk with a hit -- was tried here and
     // measured: no gain on the gallery scenes, and its checks cost Voxel Mayhem's G-buffer 0.2 ms more
     // than the early exits saved. The grid walk already stops at a grid's first occupied hit.)
-    SceneIntersectData sceneIntersect;
+    PjvSceneIntersectData sceneIntersect;
     sceneIntersect.foundBox.size = -1;
     sceneIntersect.voxelCoord = ivec3(0);
     sceneIntersect.steps = 0;
     sceneIntersect.rayT = -1.0;
     sceneIntersect.exitT = -1.0;
     sceneIntersect.normal = vec3(0.0);
-    sceneIntersect.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
+    sceneIntersect.materialListIndex = PJV_MATERIAL_INDEX_NEEDS_DESCENT;
     sceneIntersect.paletteOffset = 0u;
 
-    int looseCount = int(sceneLooseCount());
-    int gridCount = int(sceneGridCount());
+    int looseCount = int(pjvSceneLooseCount());
+    int gridCount = int(pjvSceneGridCount());
 
     // ---- Pass 0: find the solo interval ------------------------------------------------------
     // The component whose bounding volume the ray enters FIRST is the only one live between its own
@@ -3197,7 +3197,7 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin,
         float bestEntry = 1e30;
         float secondEntry = 1e30;
         for (int i = 0; i < looseCount; i++) {
-            float e = pjvLooseEntryT(ray, looseListValue(uint(i)));
+            float e = pjvLooseEntryT(ray, pjvLooseListValue(uint(i)));
             if (e < 0.0) continue;
             e = max(e, 0.0);
             if (e < bestEntry) { secondEntry = bestEntry; bestEntry = e; soloKind = 0; soloIndex = i; }
@@ -3220,16 +3220,16 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin,
     // that wrote it LAST is not necessarily the one that won on distance -- a far chunk marched after
     // a near one would otherwise hand the near one its own material. This is the whole of the
     // save/restore that a file-scope static would need eleven copies of.
-    VoxelMaterial winnerMaterial = emptyVoxelMaterial();
+    PjvVoxelMaterial winnerMaterial = pjvEmptyVoxelMaterial();
     bool winnerMaterialValid = false;
 
     // Loose (transform-placed) chunks. With a BVH (utils/loose_bvh.h) only the chunks in leaves the
     // ray reaches before the nearest hit so far are visited, nearest leaves first; without one, the
-    // whole list is. Both feed ONE loop body with ONE castRayThroughTree64 call: the loop asks for
+    // whole list is. Both feed ONE loop body with ONE pjvCastRayThroughTree64 call: the loop asks for
     // the next list index -- the next in a leaf's range, or, when a range runs out, the next leaf the
     // traversal finds -- rather than duplicating the march into a second loop. (A second inlined
     // march call site was measured to cost every renderer about 2x, even where it never ran.)
-    int bvhNodes = int(sceneLooseBVHNodeCount());
+    int bvhNodes = int(pjvSceneLooseBVHNodeCount());
     vec3 inverseDirection = vec3(1.0) / ray.direction;
     int bvhStack[PJV_LOOSE_BVH_STACK];
     int stackTop = 0;
@@ -3244,8 +3244,8 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin,
             #ifdef PJV_MARCH_STATS
             pjvStatVisit();
             #endif
-            LooseBVHNode node = looseBVHNode(bvhStack[stackTop], looseCount);
-            float entry = looseBVHEntry(ray.origin, inverseDirection, node.boxMin, node.boxMax);
+            PjvLooseBVHNode node = pjvLooseBVHNode(bvhStack[stackTop], looseCount);
+            float entry = pjvLooseBVHEntry(ray.origin, inverseDirection, node.boxMin, node.boxMax);
             if (entry < 0.0 || entry >= closestDistance) continue;
             if ((node.a & 0x80000000u) != 0u) {
                 rangeNext = int(node.a & 0x7FFFFFFFu);
@@ -3253,10 +3253,10 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin,
                 continue;
             }
             // Near child last, so it is popped first.
-            LooseBVHNode left = looseBVHNode(int(node.a), looseCount);
-            LooseBVHNode right = looseBVHNode(int(node.b), looseCount);
-            float leftEntry = looseBVHEntry(ray.origin, inverseDirection, left.boxMin, left.boxMax);
-            float rightEntry = looseBVHEntry(ray.origin, inverseDirection, right.boxMin, right.boxMax);
+            PjvLooseBVHNode left = pjvLooseBVHNode(int(node.a), looseCount);
+            PjvLooseBVHNode right = pjvLooseBVHNode(int(node.b), looseCount);
+            float leftEntry = pjvLooseBVHEntry(ray.origin, inverseDirection, left.boxMin, left.boxMax);
+            float rightEntry = pjvLooseBVHEntry(ray.origin, inverseDirection, right.boxMin, right.boxMax);
             bool rightFirst = rightEntry >= 0.0 && (leftEntry < 0.0 || rightEntry < leftEntry);
             int nearChild = rightFirst ? int(node.b) : int(node.a);
             int farChild  = rightFirst ? int(node.a) : int(node.b);
@@ -3268,23 +3268,23 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin,
         if (rangeNext >= rangeEnd) break;
         int i = rangeNext++;
 
-        uint headerIndex = looseListValue(uint(i));
-        chunkHeader h = headers(int(headerIndex));
+        uint headerIndex = pjvLooseListValue(uint(i));
+        PjvChunkHeader h = pjvHeader(int(headerIndex));
         // A freed/dead slot carries a degenerate header (scale <= 0); skip it.
         if(h.scale <= 0.0) continue;
         vec3 P = vec3(h.positionX, h.positionY, h.positionZ);
-        mat3 Rinv = transpose(rotationFromQuat(h.rotation));
-        Ray localRay;
+        mat3 Rinv = transpose(pjvRotationFromQuat(h.rotation));
+        PjvRay localRay;
         localRay.origin = Rinv * (ray.origin - P);
         localRay.direction = Rinv * ray.direction;
-        BoxAABB tree64BoundingBox;
+        PjvBoxAABB tree64BoundingBox;
         tree64BoundingBox.position = vec3(0.0);
         tree64BoundingBox.size = h.scale;
-        float tBB = getRayBoxEntryDistance(localRay, tree64BoundingBox);
+        float tBB = pjvGetRayBoxEntryDistance(localRay, tree64BoundingBox);
         if(tBB < 0 || tBB >= closestDistance) continue;
 
         float limitT = (soloKind == 0 && soloIndex == i) ? soloLimit : -1.0;
-        SceneIntersectData tree64Intersect = castRayThroughTree64(ray, rayQuery, tMin, int(headerIndex), limitT, closestDistance, peel);
+        PjvSceneIntersectData tree64Intersect = pjvCastRayThroughTree64(ray, rayQuery, tMin, int(headerIndex), limitT, closestDistance, peel);
         #ifdef PJV_MARCH_STATS
         pjvStatMarch(tree64Intersect.steps);
         #endif
@@ -3301,14 +3301,14 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin,
 
     // Grid volumes: top-level uniform-grid DDA, pruned by the closest loose hit so far.
     //
-    // A second castRayThroughTree64 call site (inside marchGrid), against the loose loop's above. One
+    // A second pjvCastRayThroughTree64 call site (inside pjvMarchGrid), against the loose loop's above. One
     // candidate loop feeding both from a single call -- the lab's shape -- was tried and measured:
     // no gain on the gallery scenes, and Voxel Mayhem's G-buffer went from 2.3 to 3.6 ms and its probes
     // from 0.5 to 1.5 ms, the merged loop holding the BVH stack and the grid walk live at once.
     for(int gi = 0; gi < gridCount; gi++){
         if (peel.stopped) break;
         float limitT = (soloKind == 1 && soloIndex == gi) ? soloLimit : -1.0;
-        SceneIntersectData gh = marchGrid(ray, rayQuery, gi, closestDistance, tMin, limitT, peel);
+        PjvSceneIntersectData gh = pjvMarchGrid(ray, rayQuery, gi, closestDistance, tMin, limitT, peel);
         if(gh.foundBox.size > 0 && gh.rayT >= 0 && gh.rayT < closestDistance){
             sceneIntersect = gh;
             closestDistance = gh.rayT;
@@ -3323,19 +3323,19 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin,
 }
 
 // Geometry-only form: the nearest solid voxel beyond `tMin`, with no transparency and no material
-// resolved. raySceneIntersect below is what a renderer should call; this stays public because a
+// resolved. pjvRaySceneIntersect below is what a renderer should call; this stays public because a
 // caller that genuinely wants one unfiltered nearest-hit -- a picking ray, a distance probe -- should
 // not have to construct a peel to ask for it.
-SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin) {
-    PeelAccum peel = pjvNoPeel();
-    return raySceneIntersectFrom(ray, rayQuery, tMin, peel);
+PjvSceneIntersectData pjvRaySceneIntersectFrom(PjvRay ray, PjvRayQuery rayQuery, float tMin) {
+    PjvPeelAccum peel = pjvNoPeel();
+    return pjvRaySceneIntersectFrom(ray, rayQuery, tMin, peel);
 }
 // =============================================================================
-// raySceneIntersect -- the one scene query
+// pjvRaySceneIntersect -- the one scene query
 // =============================================================================
 //
-// Everything a caller wants out of a traversal is described by the RayQuery it passes in, and
-// everything the traversal found comes back in the SceneHit. There is no second entry point for
+// Everything a caller wants out of a traversal is described by the PjvRayQuery it passes in, and
+// everything the traversal found comes back in the PjvSceneHit. There is no second entry point for
 // transparency and no third for animation: those are flags, because they are properties of the
 // question rather than different questions.
 //
@@ -3343,9 +3343,9 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin)
 //
 // Seeing through a voxel is a TRAVERSAL change, not a shading one: every march in this file stops at
 // the first solid voxel it meets. The march can now keep going by itself, but only within an interval
-// where no other component's bounding volume is live (see PeelAccum and the pass-0 note in
-// raySceneIntersectFrom). Outside such an interval, which surface is actually in front is decided
-// HERE and nowhere below -- raySceneIntersectFrom brute-forces every loose chunk tracking
+// where no other component's bounding volume is live (see PjvPeelAccum and the pass-0 note in
+// pjvRaySceneIntersectFrom). Outside such an interval, which surface is actually in front is decided
+// HERE and nowhere below -- pjvRaySceneIntersectFrom brute-forces every loose chunk tracking
 // closestDistance and only then marches the grids pruned by it -- so the only correct way to get past
 // a transparent voxel is to re-ask "what is nearest now" from just beyond it.
 //
@@ -3361,7 +3361,7 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin)
 //
 // An origin nudged past a hit lands either inside the next voxel or exactly on a boundary, and this
 // marcher is degenerate at both. Inside a voxel, the descent reaches it immediately and returns a real
-// hit carrying rayT == 0 and a zero normal (SceneIntersectData::normal says so outright), which every
+// hit carrying rayT == 0 and a zero normal (PjvSceneIntersectData::normal says so outright), which every
 // renderer's miss test reads as a miss -- so a transparent surface showed the SKY behind it, not the
 // geometry. Exactly on a boundary, the zero-measure guard in the DDA step skips the cell's validity
 // check by design. Scaling the nudge by the voxel does not help: both failures are about where the
@@ -3394,16 +3394,16 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin)
 //     there, and continuing with it would march a ray with no direction -- every t is NaN and the
 //     result is whatever the first comparison against NaN happens to do. Reflected instead, which is
 //     both correct and what makes water read as water at grazing angles.
-SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
+PjvSceneHit pjvRaySceneIntersect(PjvRay ray, PjvRayQuery rayQueryIn) {
     // A query that did not come from a constructor carries garbage in the fields added alongside
     // `magic`. Clamp them and say so, rather than acting on them -- acting on them is how a bad
     // distance floor once rejected every hit in the scene with nothing on screen to attribute it to.
     bool queryOK = pjvQueryIsValid(rayQueryIn);
-    RayQuery q = pjvValidateQuery(rayQueryIn);
+    PjvRayQuery q = pjvValidateQuery(rayQueryIn);
 
-    SceneHit result = pjvEmptySceneHit();
+    PjvSceneHit result = pjvEmptySceneHit();
 
-    PeelAccum peel = pjvNoPeel();
+    PjvPeelAccum peel = pjvNoPeel();
     // Each from its flag only where its gate compiled the feature in; otherwise pjvNoPeel's false,
     // which the compiler folds through everything below.
 #ifdef PJV_SCENE_TRANSPARENCY
@@ -3427,13 +3427,13 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
 
     float tMin = 0.0;
     // Identity of the voxel the previous pass consumed, so a pass that fails to move on is caught
-    // exactly rather than being absorbed into the result. See peelNextTMin.
+    // exactly rather than being absorbed into the result. See pjvPeelNextTMin.
     uint  lastHeader = 0xFFFFFFFFu;
     ivec3 lastVoxel = ivec3(0x7FFFFFFF);
     uint  stop = PJV_STOP_ITERATIONS;
 
     // The ray the CURRENT segment marches. Advances only when something bends it.
-    Ray  cur = ray;
+    PjvRay  cur = ray;
     // Distance already travelled along the segments behind this one, so pathLength can be reported.
     float travelled = 0.0;
     uint  segments = 0u;
@@ -3480,19 +3480,19 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
     // traversals that example still included, each a full copy of the march. Worth recording so the
     // next id-space problem is diagnosed by counting call sites rather than by fighting unrolling.
 #ifdef PJV_SCENE_TRANSPARENCY
-    for (int iteration = 0; iteration < MAX_PEEL_ITERATIONS; iteration++) {
+    for (int iteration = 0; iteration < PJV_MAX_PEEL_ITERATIONS; iteration++) {
 #else
     // Without transparency the first pass always ends the query: an opaque hit, or nothing.
     for (int iteration = 0; iteration < 1; iteration++) {
 #endif
-        SceneIntersectData hit = raySceneIntersectFrom(cur, q, tMin, peel);
+        PjvSceneIntersectData hit = pjvRaySceneIntersectFrom(cur, q, tMin, peel);
 
         // The march gave up in place -- budget spent, or fully absorbed. Its own reason is the honest
         // one and it is already recorded.
         if (peel.stopped) { stop = peel.stopReason; break; }
 
         // The same voxel again: tMin failed to advance past it. Stop rather than attenuate it a second
-        // time. Belt and braces behind peelNextTMin's ULP floor -- cheap, and it turns any residual
+        // time. Belt and braces behind pjvPeelNextTMin's ULP floor -- cheap, and it turns any residual
         // non-advance into one lost layer instead of a black or invisible voxel.
         if (hit.headerIndex == lastHeader && all(equal(hit.voxelCoord, lastVoxel))) {
             stop = PJV_STOP_TMIN_STALL; break;
@@ -3511,13 +3511,13 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
         // The traversal fetched this while deciding, unless it had no reason to. A query that is
         // neither peeling nor shading needs no material at all -- pjvPeelConsume returns STOP_HERE
         // without reading it -- so fetching one here would be pure cost on every shadow ray.
-        VoxelMaterial m = emptyVoxelMaterial();
+        PjvVoxelMaterial m = pjvEmptyVoxelMaterial();
         if (peel.hitMaterialValid) {
             m = peel.hitMaterial;
         }
 #if defined(PJV_SCENE_TRANSPARENCY) || defined(PJV_SCENE_MATERIAL)
         else if (peel.active || peel.wantMaterial) {
-            m = fetchVoxelMaterialFromHit(hit);
+            m = pjvFetchVoxelMaterialFromHit(hit);
         }
 #endif
 
@@ -3626,7 +3626,7 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
             //
             // The nudge along `bent` keeps the origin off the face itself. It lands INSIDE the
             // interface voxel, which is correct and costs nothing: the march returns that voxel
-            // again, `sameMedium` makes it interior rather than a second interface (see the note on
+            // again, `pjvSameMedium` makes it interior rather than a second interface (see the note on
             // previousExit below), so it contributes its absorption and not another alpha -- which is
             // exactly what passing through the body of the glass should do.
             // The nudge is a PRECISION epsilon, not a geometric offset, so it is kept as small as
@@ -3683,7 +3683,7 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
             // What that gets wrong, stated plainly: a ray that leaves this body into air and later
             // meets the SAME material again reads as still-inside and is not charged that surface's
             // alpha. One uncharged interface, only after a bend, against a hard edge through every
-            // refracted surface -- and `sameMedium` still separates different materials, which is
+            // refracted surface -- and `pjvSameMedium` still separates different materials, which is
             // the case that actually carries the image.
             peel.previousExit = 1e30;
             segments++;
@@ -3693,7 +3693,7 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
 
         lastHeader = hit.headerIndex;
         lastVoxel = hit.voxelCoord;
-        tMin = peelNextTMin(hit, peelSegmentLength(cur, hit));
+        tMin = pjvPeelNextTMin(hit, pjvPeelSegmentLength(cur, hit));
 #endif  // PJV_SCENE_TRANSPARENCY
     }
 
@@ -3729,8 +3729,8 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
 // reach the light than the budget allows, so black turned the whole interior into a lattice of unlit
 // faces. Between the two errors, slightly-too-much light through deep glass is far less visible than a
 // black interior, and it degrades smoothly instead of per-voxel.
-vec3 raySceneTransmittance(Ray ray, RayQuery rayQuery) {
-    SceneHit r = raySceneIntersect(ray, rayQuery);
+vec3 pjvRaySceneTransmittance(PjvRay ray, PjvRayQuery rayQuery) {
+    PjvSceneHit r = pjvRaySceneIntersect(ray, rayQuery);
     // Genuinely blocked: an opaque surface between here and the light.
     if (r.stopReason == PJV_STOP_OPAQUE) return vec3(0.0);
     return r.transmittance;

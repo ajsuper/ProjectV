@@ -12,7 +12,7 @@
 //   1  gbuffer      one primary ray per pixel -> position, normal, albedo, and the CRISP half of
 //                   the image (soft-shadowed direct sun + voxel emission), kept out of every
 //                   temporal filter downstream. Animation, transparency and refraction all happen
-//                   HERE, in one raySceneIntersect with a RayQuery that asks for all three
+//                   HERE, in one pjvRaySceneIntersect with a PjvRayQuery that asks for all three
 //   2  godrays      screen-space sun shafts, from the depth buffer (half res)
 //   3  volumetric   the traced half of the same effect: real shadow rays through the fog (half res)
 //   4  volblur      blur, because both of the above are one sample per pixel at half resolution
@@ -62,7 +62,7 @@
 //                The two look identical on screen and are nowhere near each other.
 //   /         -- debug: WHY does this pixel look wrong? Off / 1 / 2. A miss carries no reason, so a
 //                hole in the canopy and empty air are the same return value. Read off
-//                SceneHit::stopReason: mode 1 paints MAGENTA where a march ran out of steps, mode 2
+//                PjvSceneHit::stopReason: mode 1 paints MAGENTA where a march ran out of steps, mode 2
 //                ORANGE where the transparency peel ran out of passes and BLUE where its resume floor
 //                stalled. Both mark surfaces as well as sky, which the prototype's versions could not
 //                -- a ray that gave up can carry on and hit something, and that pixel is a hit with
@@ -350,7 +350,7 @@ struct AnimControls {
     // means the geometry never had anywhere to be drawn. The two look identical on screen.
     bool  debugEnvelope = false;
     // Why is a pixel sky? A miss carries no reason, so a hole in the canopy and empty air are the same
-    // return value. Read off SceneHit::stopReason -- see the debug views in gbuffer.frag.
+    // return value. Read off PjvSceneHit::stopReason -- see the debug views in gbuffer.frag.
     //   0  off
     //   1  MAGENTA where the march ran out of steps
     //   2  ORANGE where the peel ran out of passes / BLUE where the resume floor stalled
@@ -368,7 +368,7 @@ struct AnimControls {
 // The whole of this example's side of it: name which materials move, describe the field as motion-
 // table rows, bake, and set the clock each frame. There is no shader here for the field, the
 // envelope, the resolve or the flame -- all four are in shaders/include/pjv_scene.sc, reached through a
-// RayQuery flag.
+// PjvRayQuery flag.
 //
 // That is worth stating as a size rather than a principle. What used to be under this banner was
 // 2,720 lines of prototype shader across four files, each carrying its own forked copy of the scene
@@ -1027,7 +1027,7 @@ struct SceneRequest {
 // ON (PRIMARY_LOD_ENABLE in gbuffer.frag) and its crossover distance is derived from passTargetRes.y,
 // so a lower render scale widens every pixel's footprint and coarsens each ray sooner. The dial buys
 // fewer rays AND shorter marches. Only the SHADOW ray is pinned to LOD 0 for its whole length, which
-// is a different decision made for a different reason (see the note at its RayQuery).
+// is a different decision made for a different reason (see the note at its PjvRayQuery).
 //
 // WHICH RAY IT IS. The camera ray, essentially alone. Turning the sun shadow ray off entirely (T key)
 // moves gbuffer by about 0.1ms out of 14.8 -- 0.7% of the pass. That is not a statement that ray

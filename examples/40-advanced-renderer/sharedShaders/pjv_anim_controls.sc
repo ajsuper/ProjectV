@@ -9,7 +9,7 @@
 // NOT ONE OF THOSE IS A SHADER PARAMETER ANY MORE, and that is the whole result of the promotion
 // rather than a tidying of it. The field lives in the engine's motion table -- `pjvMotionSets`,
 // uploaded from `AnimationState` -- so a shader does not describe the motion, it asks for it with a
-// RayQuery flag and the traversal reads the table. There is no shader code in this example for the
+// PjvRayQuery flag and the traversal reads the table. There is no shader code in this example for the
 // wind, the flame, the envelope, the quantiser or the resolve.
 //
 // What survives is what this EXAMPLE decides rather than what the engine does: how big a voxel is in

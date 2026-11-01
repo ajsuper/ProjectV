@@ -1137,7 +1137,7 @@ There are three ways in — clicking a voxel in the viewport (Select or Move too
 
 Whichever route it came by, the selection outlines every `.data` box it covers in **yellow** in the Viewport — the node itself if it's a Chunk or Grid, every occupied cell if it's a Grid, or every leaf beneath it if it's an Asset folder (`main.cpp`'s `collectLeafChunks`). The Inspector's "Boxes" count is the same set.
 
-The outline is drawn in screen space: each chunk's OBB corners (`header.position + header.rotation * localOffset`, the same convention `fetchVoxelColor` and `utils::pickVoxel` use) are projected with `worldToViewportPixel`, the exact inverse of the shader's `pjvPerspectiveRay` — so the box lines up with the geometry the raymarcher actually drew, at any camera angle. A corner behind the camera drops its edges rather than clipping them; adequate for a selection hint, wrong for anything claiming precision.
+The outline is drawn in screen space: each chunk's OBB corners (`header.position + header.rotation * localOffset`, the same convention `pjvFetchVoxelColor` and `utils::pickVoxel` use) are projected with `worldToViewportPixel`, the exact inverse of the shader's `pjvPerspectiveRay` — so the box lines up with the geometry the raymarcher actually drew, at any camera angle. A corner behind the camera drops its edges rather than clipping them; adequate for a selection hint, wrong for anything claiming precision.
 
 ## Palette editing
 
@@ -1164,7 +1164,7 @@ Worth writing down, because the symptom was subtle and the cause was not where i
 
 Once a component had been moved or rotated, some of its voxels rendered in a **neighbouring voxel's colour** — scattered among correct ones, stable for a given transform, absent at the origin, and not visible in the stored data at all. Clicking a wrong-looking voxel reported the *right* colour, because CPU picking (`pickVoxel`) hands its DDA's own integer coordinate straight to `queryVoxelMaterial` and never leaves voxel space.
 
-The GPU did leave voxel space. `marchRayThroughTree64` produced an exact `ivec3` and then converted it to a world-space box; `fetchVoxelColor` converted that box *back* — rotate by R⁻¹, subtract the chunk's world position, divide by scale, multiply by resolution, truncate. Algebraically an identity, but not in float32:
+The GPU did leave voxel space. `marchRayThroughTree64` produced an exact `ivec3` and then converted it to a world-space box; `pjvFetchVoxelColor` converted that box *back* — rotate by R⁻¹, subtract the chunk's world position, divide by scale, multiply by resolution, truncate. Algebraically an identity, but not in float32:
 
 * the local offset is added to the world translation **P** and subtracted back, losing low bits in proportion to `|P|` (twice, in fact — the old code added `P` and immediately subtracted it again);
 * the result is **truncated**, so an error of a single ULP below an exact integer drops the coordinate a whole cell.
@@ -1180,7 +1180,7 @@ Modelling that arithmetic in float32 over a chunk's voxels gives the rate direct
 
 The 0% at the origin is why it read as a gizmo bug: the shipped scenes load at the origin unrotated and are correct, so the artefact appears the moment anything is moved.
 
-The fix is to stop reconstructing what was already known. `SceneIntersectData` now carries `voxelCoord` straight from the DDA, and `fetchVoxelColorAtCoord` indexes with it. `fetchVoxelColor(BoxAABB, …)` is kept — a dozen shaders across the other examples still call it — but is now a thin wrapper over the exact path and marked as the lossy entry point. Those examples still have the bug; porting one is a matter of passing `hit.voxelCoord` instead of `hit.foundBox`.
+The fix is to stop reconstructing what was already known. `PjvSceneIntersectData` now carries `voxelCoord` straight from the DDA, and `pjvFetchVoxelColorAtCoord` indexes with it. `pjvFetchVoxelColor(BoxAABB, …)` is kept — a dozen shaders across the other examples still call it — but is now a thin wrapper over the exact path and marked as the lossy entry point. Those examples still have the bug; porting one is a matter of passing `hit.voxelCoord` instead of `hit.foundBox`.
 
 ## Undo
 
@@ -1623,7 +1623,7 @@ Releasing the old scene and building the new one in the same frame keeps both re
 
 Clicking a row in the Assets panel outlines every `.data` box it covers in yellow in the Viewport — the node itself if it's a Chunk or Grid, every occupied cell if it's a Grid, or every leaf beneath it if it's an Asset folder (`main.cpp`'s `collectLeafChunks`). The Inspector's "Boxes" count is the same set.
 
-Implementing it was mostly a matter of getting the projection math exactly right rather than anything algorithmically hard: each chunk's OBB corners (`header.position + header.rotation * localOffset`, the convention `fetchVoxelColor` and `pickVoxel` already use) are projected with `worldToViewportPixel`, which is the algebraic inverse of the shader's `pjvPerspectiveRay` — build the same camera basis (right/up/forward from yaw+pitch), but instead of turning a screen UV into a ray direction, turn a world-space offset into a screen UV. No new render pass, no GPU work: it's ImGui line-drawing on top of the already-rendered frame, using the same per-frame camera state the render loop already tracks. The one bug it caught along the way was unrelated to the outline itself — a stale "last item" in the old hierarchy's click handler (see git history) that meant clicking a tree node never actually selected it.
+Implementing it was mostly a matter of getting the projection math exactly right rather than anything algorithmically hard: each chunk's OBB corners (`header.position + header.rotation * localOffset`, the convention `pjvFetchVoxelColor` and `pickVoxel` already use) are projected with `worldToViewportPixel`, which is the algebraic inverse of the shader's `pjvPerspectiveRay` — build the same camera basis (right/up/forward from yaw+pitch), but instead of turning a screen UV into a ray direction, turn a world-space offset into a screen UV. No new render pass, no GPU work: it's ImGui line-drawing on top of the already-rendered frame, using the same per-frame camera state the render loop already tracks. The one bug it caught along the way was unrelated to the outline itself — a stale "last item" in the old hierarchy's click handler (see git history) that meant clicking a tree node never actually selected it.
 
 ## What's Next
 

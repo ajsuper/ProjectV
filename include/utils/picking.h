@@ -29,7 +29,7 @@ namespace projv::utils {
 
     /**
      * Reads the material of a single voxel straight out of a blob's tree64, without touching the GPU.
-     * Mirrors the descent the shader does in fetchVoxelColor, plus the emptiness test the shader can
+     * Mirrors the descent the shader does in pjvFetchVoxelColor, plus the emptiness test the shader can
      * skip (it only ever asks about voxels a ray already hit).
      *
      * @param blob The geometry to query.

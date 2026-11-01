@@ -8,7 +8,7 @@
 // =============================================================================
 //
 //   stored colour (palette "color" / "emission")   sRGB-encoded, 10 bits a channel
-//        | pjvSrgbToLinear, in decodeMaterial -- every renderer gets linear albedo
+//        | pjvSrgbToLinear, in pjvDecodeMaterial -- every renderer gets linear albedo
 //   shading                                        linear light
 //        | pjvDisplay: exposure -> pjvTonemapNeutral -> pjvLinearToSrgb -> pjvDither
 //   back buffer                                    RGBA8, sRGB-encoded by the shader

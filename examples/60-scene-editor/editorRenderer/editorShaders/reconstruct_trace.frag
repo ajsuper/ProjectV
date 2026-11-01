@@ -15,8 +15,8 @@ SAMPLER2D(reconstructMask, 2);
 void main() {
     if (texture2DLod(reconstructMask, v_texcoord0, 0.0).x < 0.5) discard;
 
-    Ray ray = reconstructionRay(v_texcoord0);
-    SceneIntersectData hit = raySceneIntersect(ray, viewportPrimaryQuery()).hit;
+    PjvRay ray = reconstructionRay(v_texcoord0);
+    PjvSceneIntersectData hit = pjvRaySceneIntersect(ray, viewportPrimaryQuery()).hit;
     bool traceMissed = isMiss(hit);
     int debugView = int(reconstructParams.x + 0.5);
 
@@ -28,7 +28,7 @@ void main() {
         bool agrees = true;
         if (r.trusted) {
             agrees = !traceMissed &&
-                     distance(fetchVoxelColorFromHit(hit), r.albedo) < 1e-3 &&
+                     distance(pjvFetchVoxelColorFromHit(hit), r.albedo) < 1e-3 &&
                      abs(hit.rayT - r.t) <= max(r.size * 0.01, r.t * 1e-4) &&
                      dot(normalize(hit.normal), r.normal) > 0.99;
         } else if (r.allSky) {
@@ -39,14 +39,14 @@ void main() {
         } else if (traceMissed) {
             result = backgroundTexel(ray);
         } else {
-            vec3 albedo = fetchVoxelColorFromHit(hit);
+            vec3 albedo = pjvFetchVoxelColorFromHit(hit);
             if (!r.trusted) albedo = mix(albedo, vec3(1.0, 0.0, 0.0), 0.6);
             result = surfaceTexel(albedo, normalize(hit.normal), hit.foundBox.size, ray, hit.rayT);
         }
     } else if (traceMissed) {
         result = backgroundTexel(ray);
     } else {
-        vec3 albedo = fetchVoxelColorFromHit(hit);
+        vec3 albedo = pjvFetchVoxelColorFromHit(hit);
         if (debugView == 1) albedo = mix(albedo, vec3(1.0, 0.0, 0.0), 0.6);
         result = surfaceTexel(albedo, normalize(hit.normal), hit.foundBox.size, ray, hit.rayT);
     }

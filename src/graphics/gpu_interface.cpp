@@ -337,7 +337,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
 
     // Traversal LOD: how many extra levels *this chunk instance* wants the shader to stop short of
     // what's actually uploaded (r.uploadedLOD), on top of the ray-distance-based cutoff it already
-    // applies (see computeTargetLOD in pjv_scene.sc). Only meaningful when this instance wants
+    // applies (see pjvComputeTargetLOD in pjv_scene.sc). Only meaningful when this instance wants
     // *less* detail than the shared blob currently has resident -- e.g. one of several chunk
     // instances sharing a blob that another, closer instance forced finer. The `>` guard matters: in
     // a transient frame where reconciliation just lowered the blob's requested LOD but the upload
@@ -529,7 +529,7 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             for (size_t h = 0; h < scene.components.size(); ++h) {
                 const ComponentRecord& comp = scene.components[h];
                 gpuData.componentPaletteOffsets[h] = palOff;
-                // Four words per entry, in the order the shader's decodeMaterial reads them.
+                // Four words per entry, in the order the shader's pjvDecodeMaterial reads them.
                 for (const Material& m : comp.materialPalette) {
                     globalPalette.push_back(m.packedColor);
                     globalPalette.push_back(m.packedEmission);
