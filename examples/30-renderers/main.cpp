@@ -51,8 +51,9 @@
 //   G            — the image / indirect light / direct light / ambient occlusion / indirect diffuse /
 //                  indirect specular / light shafts (restir-pt)
 //   J            — ReSTIR reuse on / off (restir-pt)
-//   P            — the final render / the raw path-traced image (restir-pt): off drops the post, the fog, the
-//                  light shafts and the SSAO. Within it: V vignette, B colour grade, E auto-exposure, K depth
+//   P            — the final render / the raw ReSTIR PT output (restir-pt): off drops the post, the fog, the
+//                  light shafts, the SSAO and every denoiser -- the a-trous, the GI accumulation and the
+//                  image history -- so each frame's estimate shows alone, noise and all. Within it: V vignette, B colour grade, E auto-exposure, K depth
 //                  of field, N bloom, M motion blur, O distance fog, L light shafts
 //   U            — soft sun shadow on / off (restir-pt)
 //   I            — blurred normals on / off: softer voxel edges (restir-pt; RESTIR_NORMAL_BLUR=w their width)
@@ -204,8 +205,9 @@ static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRendere
 // The post (display.frag): P turns it all off and on, V the vignette, B the grade, E the auto-exposure.
 static int  g_restirView = 0;
 static bool g_restirReuse = true;
-// K the depth of field. P is the final render as a whole: off, the raw path-traced image -- no post, and
-// none of what is laid over the light either: O the distance fog, L the light shafts, the SSAO. U, the
+// K the depth of field. P is the final render as a whole: off, the raw ReSTIR PT output -- no post, none of
+// what is laid over the light (O the distance fog, L the light shafts, the SSAO), and no denoiser: each
+// frame's estimate alone. The reuse stays (J): it is what ReSTIR is. U, the
 // sun's soft shadow, is the lighting's, not the final render's.
 struct RestirPost { bool on = true, vignette = true, grade = true, exposure = true, dof = true, bloom = true, motionBlur = true; };
 static RestirPost g_restirPost;
@@ -232,7 +234,7 @@ static constexpr float RESTIR_RENDER_SCALE = restir_pt::RENDER_SCALE;   // its G
 static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
     // The uniforms are restir_pt::upload's, from the gallery's switches (its keys, and these environment
     // variables for unattended captures and measuring).
-    // RESTIR_VIEW picks the starting view; RESTIR_POST=0 (the raw path trace), RESTIR_FOG=0, RESTIR_SHAFTS=0
+    // RESTIR_VIEW picks the starting view; RESTIR_POST=0 (the raw ReSTIR PT output), RESTIR_FOG=0, RESTIR_SHAFTS=0
     // and RESTIR_SOFT=0 start with the final render, the fog, the shafts or the soft shadow off;
     // RESTIR_VALIDATE=1 turns the paths' validation on (off by default: it bought nothing measurable);
     // RESTIR_REUSE=0 the reuse off, RESTIR_SSAO=0 the SSAO (for comparing with pt-reference, which has none).
@@ -293,6 +295,12 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     settings.validation = validation;
     settings.bounces = bounces;
     settings.stride = g_restirStride;
+    // P off: the raw ReSTIR PT output. No a-trous, no GI accumulation and no image history (the resolve's
+    // TAA): each frame's estimate alone, as noisy as it is.
+    if (!g_restirPost.on) {
+        settings.atrous = 0.0f;
+        settings.raw = true;
+    }
 
     // The post's frame length for the exposure's adaptation: its own clock (the gallery's frame timer
     // exists only in perf builds).
@@ -383,7 +391,7 @@ static std::vector<RendererModule> buildRendererRegistry() {
     // replayed where it is not), then denoised diffuse and specular apart.
     registry.push_back({
         "restir-pt",
-        "ReSTIR PT at a sixteenth of the pixels, through the materials; a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, P final render / raw path trace (V, B, E, K, N bloom, M motion blur, O fog, L light shafts), U soft shadow.",
+        "ReSTIR PT at a sixteenth of the pixels, through the materials; a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, P final render / raw ReSTIR output (V, B, E, K, N bloom, M motion blur, O fog, L light shafts), U soft shadow.",
         "./renderers/restir-pt/",
         uploadRestirUniforms
     });
@@ -965,7 +973,7 @@ void render(projv::Application& app) {
         // of field, N the bloom, M the motion blur, O the fog, L the shafts; U the soft shadow, which is the lighting's.
         struct PostKey { int key; bool* flag; const char* name; bool prev; };
         static PostKey postKeys[] = {
-            {GLFW_KEY_P, &g_restirPost.on, "final render (off: the raw path trace)", false},
+            {GLFW_KEY_P, &g_restirPost.on, "final render (off: the raw ReSTIR PT output, no denoising)", false},
             {GLFW_KEY_V, &g_restirPost.vignette, "vignette", false},
             {GLFW_KEY_B, &g_restirPost.grade, "colour grade", false},
             {GLFW_KEY_E, &g_restirPost.exposure, "auto-exposure", false},

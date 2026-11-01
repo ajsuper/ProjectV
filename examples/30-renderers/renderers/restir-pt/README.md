@@ -88,9 +88,10 @@ their history), and the resolve keeps 8 frames. Still drawn solid.
 
 ## Final render, and light shafts
 
-**P switches between the final render and the raw path trace.** Off, the image is what the paths and the
-sun light: no post (vignette, exposure, grade, depth of field), and none of what is laid over the light --
-the distance fog (O), the light shafts (L), the SSAO. On, those keys toggle each part. U, the soft sun
+**P switches between the final render and the raw ReSTIR PT output.** Off, the image is what the paths and
+the sun light, each frame alone: no post (vignette, exposure, grade, depth of field), none of what is laid
+over the light -- the distance fog (O), the light shafts (L), the SSAO -- and no denoiser: no a-trous, no GI
+accumulation, no image history. The reuse stays (J turns it off too, for one fresh path a GI pixel). On, those keys toggle each part. U, the soft sun
 shadow, is lighting and stays on its own key.
 
 **Light shafts** (`shafts.frag`, GI resolution; L, off by default -- subtle except looking into the sun): the sun's light scattered towards the camera by the
@@ -249,7 +250,7 @@ pixels changing between still frames to none.
 | **G** | The image / indirect light / direct light / ambient occlusion / indirect diffuse / indirect specular / light shafts |
 | **J** | ReSTIR reuse on/off: off is each GI pixel's one fresh path, denoised — the A/B for what reuse buys |
 | **Q** | The reconstruction bypassed: the render resolution point-sampled |
-| **P** | The final render / the raw path trace: the post (V, B, E, K), the fog (O), the light shafts (L), the SSAO |
+| **P** | The final render / the raw ReSTIR PT output: the post (V, B, E, K), the fog (O), the light shafts (L), the SSAO, and every denoiser |
 | **U** | The soft sun shadow |
 | **I** | The bevelled normals (`normal_blur`); `RESTIR_NORMAL_BLUR=w` their width, in voxel edges |
 | **C** | Print the camera's pose as the `--look` (and `GALLERY_SUN`) that puts it back, for `--capture` |
@@ -259,7 +260,7 @@ shows each frame's estimate alone (no GI accumulation, no image history), `RESTI
 `RESTIR_SPATIAL=0` and `RESTIR_VISIBILITY=0` turn off one part of the reuse. `RESTIR_JITTER=0` goes back to the four window-pixel
 centres instead of the TAA's Halton jitter; `GALLERY_BYPASS=1` starts with the reconstruction bypassed (Q).
 
-For `--capture`: `RESTIR_VIEW=n`, and `RESTIR_POST=0` (the raw path trace), `RESTIR_FOG=0`, `RESTIR_SHAFTS=0`, `RESTIR_SOFT=0`, `RESTIR_SSAO=0`,
+For `--capture`: `RESTIR_VIEW=n`, and `RESTIR_POST=0` (the raw ReSTIR PT output), `RESTIR_FOG=0`, `RESTIR_SHAFTS=0`, `RESTIR_SOFT=0`, `RESTIR_SSAO=0`,
 `RESTIR_REUSE=0`, `RESTIR_VALIDATE=0`, `RESTIR_ATROUS=0` each start with that part off; `RESTIR_UNTOLD=1`
 hides the sun's moves from the renderer (with `GALLERY_SUN_STEP_AT`); `RESTIR_EXPOSURE=0` a fixed exposure, to
 compare captures; `GALLERY_SUN=n` the sun n scroll notches from its default.
