@@ -1,11 +1,7 @@
 {
     "uniforms": [
-        {"name": "cameraPos", "type": "vec4"},
-        {"name": "cameraDir", "type": "vec4"},
         {"name": "sunDir", "type": "vec4"},
         {"name": "frameCount", "type": "vec4"},
-        {"name": "prevCameraPos", "type": "vec4"},
-        {"name": "prevCameraDir", "type": "vec4"},
         {"name": "restirReuse", "type": "vec4"},
         {"name": "restirDenoise", "type": "vec4"},
         {"name": "restirJitter", "type": "vec4"},

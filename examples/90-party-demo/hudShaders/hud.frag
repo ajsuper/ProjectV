@@ -16,12 +16,11 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 SAMPLER2D(frame, 0);
 
 uniform vec4 windowRes;
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 uniform vec4 hudTop0;
 uniform vec4 hudTop1;
 uniform vec4 hudBanner0;
@@ -46,17 +45,10 @@ uniform vec4 hudInfo1;
 uniform vec4 hudCharge;       // x how wound up the throw is, 0..1 (-1 not)
 uniform vec4 hudAim;          // first person: where a cube would go, w 1; w -1 just the crosshair; 0 neither
 
-#define FOV 60.0   // the shared renderer's (grr_common.sc's GRR_FOV)
 
 // The view ray through `uv`, as the shared renderer makes it.
 vec3 viewRay(vec2 uv, vec2 res) {
-    vec3 forward = normalize(cameraDir.xyz);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right = normalize(cross(forward, worldUp));
-    vec3 up = normalize(cross(right, forward));
-    vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float scale = tan(radians(FOV * 0.5));
-    return normalize(right * (ndc.x * scale * res.x / res.y) + up * (ndc.y * scale) + forward);
+    return pjvViewRayDirection(uv, res);
 }
 
 // The players' colours (arena.h's PLAYER_COLOURS).
@@ -172,7 +164,7 @@ void main() {
     // Where the bomb would land: a ring on the spot, seen through anything.
     if (hudMarker.w > 0.5) {
         vec3 direction = viewRay(v_texcoord0, res);
-        vec3 toMarker = hudMarker.xyz - cameraPos.xyz;
+        vec3 toMarker = hudMarker.xyz - pjvViewPosition();
         float along = dot(toMarker, direction);
         if (along > 0.0) {
             float off = length(toMarker - direction * along);
@@ -190,7 +182,7 @@ void main() {
     }
     if (hudAim.w > 0.5) {
         vec3 direction = viewRay(v_texcoord0, res);
-        vec3 toAim = hudAim.xyz - cameraPos.xyz;
+        vec3 toAim = hudAim.xyz - pjvViewPosition();
         float along = dot(toAim, direction);
         if (along > 0.0) {
             float off = length(toAim - direction * along);

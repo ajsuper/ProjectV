@@ -307,6 +307,7 @@ add_library(projectV STATIC
     src/core/paths.cpp
     src/core/time.cpp
 
+    src/graphics/camera.cpp
     src/graphics/disk_io.cpp
     src/graphics/engine_shaders.cpp
     src/graphics/gpu_interface.cpp

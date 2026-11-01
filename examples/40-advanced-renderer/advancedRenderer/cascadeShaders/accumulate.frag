@@ -101,6 +101,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 SAMPLER2D(indirect, 0);
 SAMPLER2D(accumR,   1);
@@ -111,8 +112,6 @@ SAMPLER2D(gNormal,  5);   // FBO1[1]: a = the hit voxel's edge length, the unit 
 SAMPLER2D(gAlbedo,  6);   // FBO1[2]: a = 1 on an ANIMATED surface (see gbuffer.frag)
 SAMPLER2D(gKey,     9);
 
-uniform vec4 prevCameraPos;
-uniform vec4 prevCameraDir;
 
 // Must match the cascades' face-anchored probe spacing (unused here directly, but the header's
 // probe helpers are compiled with it and a mismatch would be a trap for anyone editing this file).
@@ -218,7 +217,7 @@ uniform vec4 prevCameraDir;
 // World size of one output pixel at a given depth -- the scale that decides which of the two regimes
 // above a pixel is in, and the same quantity taa.frag and upscale.frag measure themselves against.
 float pixelFootprint(float curDepth) {
-    return curDepth * (2.0 * tan(radians(FOV * 0.5))) / passTargetRes.y;
+    return curDepth * (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;
 }
 
 // How completely the source grid resolves a voxel of this size at this depth: 0 sub-pixel, 1 several
@@ -260,7 +259,7 @@ float geometryResolved(float voxelSize, float curDepth) {
 // neighbourhood by its caller, which bounds whatever it does let through.
 bool sameSpot(vec4 hPos, vec3 curP, float voxelSize, float curDepth, float tolVoxels) {
     if (hPos.a < 0.0) return false;                       // that texel was sky
-    float footprint = curDepth * (2.0 * tan(radians(FOV * 0.5))) / passTargetRes.y;
+    float footprint = curDepth * (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;
     float tol = max(tolVoxels * max(voxelSize, 1e-4), SPOT_TOL_PIXELS * footprint);
     return distance(hPos.xyz, curP) < tol;
 }
@@ -359,8 +358,8 @@ void main() {
     // Branch on whether the CAMERA moved, not on frameCount.y -- that flag also rises when only the
     // sun moved, and a lighting change under a still camera should keep the identity-reprojected
     // still path rather than fall into the reprojecting one.
-    bool camMoved = any(notEqual(prevCameraPos.xyz, cameraPos.xyz)) ||
-                    any(notEqual(prevCameraDir.xyz, cameraDir.xyz));
+    bool camMoved = any(notEqual(pjvPrevViewPosition(), pjvViewPosition())) ||
+                    any(notEqual(pjvPrevViewDirection(), pjvViewDirection()));
     // The SUN moved, from its own flag rather than inferred from the scene-changed fold.
     //
     // It used to be (frameCount.y != 0 && !camMoved), and frameCount.y is raised by the grass sway on
@@ -478,8 +477,8 @@ void main() {
             // jump cannot tell the two apart -- it would defeat the mean on exactly the stable
             // moving surfaces it is meant to help. The moving history is already short.
             bool valid;
-            vec2 pUV = worldToUV(curP, prevCameraPos.xyz, prevCameraDir.xyz,
-                                 passTargetRes.xy, FOV, valid);
+            vec2 pUV = worldToUV(curP, pjvPrevViewPosition(), pjvPrevViewDirection(),
+                                 passTargetRes.xy, pjvViewFov(), valid);
             if (valid) {
                 vec2 baseUV = (floor(pUV * passTargetRes.xy) + 0.5) * passTargetRes.zw;
 

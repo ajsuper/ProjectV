@@ -6,13 +6,11 @@
 // it hit. Each of them has to produce the same ray for the same pixel and frame -- to the bit, for the
 // reconstruction -- so there is one copy of it.
 //
-// The including shader declares cameraPos, cameraDir, cameraProjection, frameCount and passTargetRes
-// first. passTargetRes has to be the viewport's full resolution, which it is for all three.
+// The camera is the engine's (pjv_camera.sc). The including shader declares frameCount first, and
+// passTargetRes has to be the viewport's full resolution, which it is for all three.
 // =============================================================================
 
-#ifndef FOV
-#define FOV 60.0
-#endif
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 // This frame's sub-pixel jitter, in pixels of whichever target the caller is writing: Halton in bases
 // 2 and 3 (pjvHalton), the same sequence the fast renderer uses, so edges converge at the same rate.
@@ -31,29 +29,8 @@ vec2 viewportJitter() {
 // everything in front of it" -- without the offset, anything the camera has flown
 // past would simply be missing from an orthographic view of the same scene.
 Ray primaryRay(vec2 uv) {
-    vec3 forward = normalize(cameraDir.xyz);
-
     Ray ray;
-    if (cameraProjection.x < 0.5) {
-        ray.origin = cameraPos.xyz;
-        ray.direction = rayStartDirection(uv, passTargetRes.xy, cameraPos.xyz, forward, FOV);
-        return ray;
-    }
-
-    // Identical to rayStartDirection's basis, including the +Z fallback for a view
-    // pointing straight up or down. The two must agree exactly: the editor projects
-    // its outlines and gizmo onto this image with the same construction on the CPU.
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right   = normalize(cross(forward, worldUp));
-    vec3 up      = normalize(cross(right, forward));
-
-    vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float aspectRatio = passTargetRes.x / passTargetRes.y;
-    float halfHeight = cameraProjection.y * 0.5;
-
-    ray.origin = cameraPos.xyz - forward * cameraProjection.z +
-                 right * (ndc.x * halfHeight * aspectRatio) +
-                 up * (ndc.y * halfHeight);
-    ray.direction = forward;
+    ray.origin = pjvViewRayOrigin(uv, passTargetRes.xy);
+    ray.direction = pjvViewRayDirection(uv, passTargetRes.xy);
     return ray;
 }

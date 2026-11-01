@@ -27,6 +27,7 @@ $input v_texcoord0
 // its texture when its shift settles, and the winner's at the end.
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include "restir_path.sc"
 
 SAMPLER2D(res0, 0);
@@ -56,7 +57,7 @@ void main() {
         gl_FragData[6] = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
-    vec3 wo1 = normalize(cameraPos.xyz - s.x);
+    vec3 wo1 = normalize(pjvViewPosition() - s.x);
     uint rng = uint(p.x) * 73856093u + uint(p.y) * 19349663u + uint(frameCount.x) * 83492791u;
     pjvPcg(rng);
 
@@ -121,7 +122,7 @@ void main() {
             if (j >= count) break;
             RestirSurface sj = restirSurface(texelFetch(surf0, at[j], 0), texelFetch(surf1, at[j], 0));
             PtShift sh;
-            float t = ptReconnectTarget(y, sj, normalize(cameraPos.xyz - sj.x), sh);
+            float t = ptReconnectTarget(y, sj, normalize(pjvViewPosition() - sj.x), sh);
             all += conf[j] * t;
             if (j == i) mine = conf[j] * t;
             if (j == 0) { here = t; shiftedHere = sh; }

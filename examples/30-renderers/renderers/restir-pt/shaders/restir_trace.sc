@@ -8,6 +8,7 @@
 
 #define PJV_NO_ANIMATION   // the gallery's scenes do not move; compiling the animated march out is faster
 #include <pjv_utils_DDA.sc>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include "restir_common.sc"
 
 #define RESTIR_KIND_CAMERA 0   // nearest surface, its material
@@ -85,7 +86,7 @@ RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) 
 #endif
 #if RESTIR_CAMERA_FOOTPRINT
     // Where one voxel covers one pixel: the target's height over the view's tangent span.
-    if (kind == RESTIR_KIND_CAMERA) pjvQueryLODFootprint(query, uint(passTargetRes.y / (2.0 * tan(radians(RESTIR_FOV * 0.5)))), 2u);
+    if (kind == RESTIR_KIND_CAMERA) pjvQueryLODFootprint(query, uint(passTargetRes.y / (2.0 * tan(radians(pjvViewFov() * 0.5)))), 2u);
 #endif
     SceneIntersectData found = raySceneIntersectFrom(ray, query, 0.0);
     RestirHit h;

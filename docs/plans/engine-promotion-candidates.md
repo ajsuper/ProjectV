@@ -302,7 +302,9 @@ a partial guarantee is worse than none. **Against:** none identified.
 `updateCamera`, `updateCameraPan`, `updateCameraZoom`, `frameScene`, `measureSceneBounds`,
 `aimCameraAtFocus`, `setCameraProjection`, `CameraFraming` (main.cpp ~2189-2910).
 
-`data_structures/camera.h` is a five-field struct plus a global `inline Camera cam`. The editor has
+`data_structures/camera.h` was a five-field struct plus a global `inline Camera cam`; shader-library S2
+replaced it with `CameraView` and the projection math in `graphics/camera.h`, which is that "defensible
+core" below. The editor has
 fly/orbit/pan/zoom, three projections, frame-to-scene-bounds, and a speed that scales with scene
 size. **For:** every example reimplements some of this. **Against:** input handling and feel are
 app design, and the engine would be taking on GLFW. The defensible core is probably

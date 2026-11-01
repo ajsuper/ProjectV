@@ -23,6 +23,7 @@ $input v_texcoord0
 // (normal_blur.frag) -- the shadow's plane and normal tests keep the G-buffer's.
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_random.sc>     // pjvInterleavedGradientNoise
 #include "restir_common.sc"
 
@@ -61,7 +62,7 @@ void main() {
     bsdf.alpha = sqrt(bsdf.alpha * bsdf.alpha + 0.25 * PATH_SUN_HALF_ANGLE * PATH_SUN_HALF_ANGLE + 2.0 * lostSlope);
     vec3 f;
     float pdf;
-    pjvBsdfEvaluate(bsdf, shadingN, normalize(cameraPos.xyz - P), toSun, f, pdf);
+    pjvBsdfEvaluate(bsdf, shadingN, normalize(pjvViewPosition() - P), toSun, f, pdf);
     vec3 sunLit = f * SUN_COLOR * facing;
     if (facing <= 0.0 || restirLook.z <= 0.0) { gl_FragColor = vec4(sunLit * ab.a, 0.0); return; }
 

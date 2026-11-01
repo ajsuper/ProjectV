@@ -47,6 +47,7 @@
 #include "core/paths.h"
 #include "graphics/disk_io.h"
 #include "graphics/engine_shaders.h"
+#include "graphics/camera.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/input.h"
 #include "graphics/manage_resources.h"
@@ -287,8 +288,10 @@ void render(projv::Application& app) {
     projv::core::vec2 resolution = renderInstance.getWindowResolution();
     projv::core::vec4 viewOptions{0.0f};   // x: a crosshair, which nothing here aims
     auto renderer = renderInstance.getActiveRenderer();
-    projv::graphics::setUniformToValue(renderer, "cameraPos", camera.position);
-    projv::graphics::setUniformToValue(renderer, "cameraDir", direction);
+    projv::CameraView view;
+    view.position = camera.position;
+    view.forward = direction;
+    projv::graphics::setCamera(*renderer, view);
     projv::graphics::setUniformToValue(renderer, "windowRes", resolution);
     projv::graphics::setUniformToValue(renderer, "viewOptions", viewOptions);
 

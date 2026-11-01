@@ -32,6 +32,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_sun_sky.sc>
 
 SAMPLER2D(gPos,      1);
@@ -39,13 +40,10 @@ SAMPLER2D(gNormal,   2);
 SAMPLER2D(blueNoise, 4);
 
 uniform vec4 windowRes;
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 uniform vec4 frameCount;
 // sunDir is declared by pjv_sun_sky.sc, which skyColor() needs; declaring it again here is a
 // redefinition shaderc rejects.
 
-#define FOV 60.0
 
 // Hemisphere samples per pixel. Cheaper than the ray-traced version's rays by a wide margin -- these
 // are texture reads, not traversals -- so this can afford more of them. The combine_blur pass
@@ -80,22 +78,9 @@ uniform vec4 frameCount;
 // Projects a world point into this frame's screen space. The exact inverse of the engine's
 // rayStartDirection, so the point this samples is the point the G-buffer describes.
 vec2 worldToUV(vec3 P, vec3 camPos, vec3 camDir, vec2 res, float fov, out bool valid) {
-    vec3 forward = normalize(camDir.xyz);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right   = normalize(cross(forward, worldUp));
-    vec3 up      = normalize(cross(right, forward));
-
-    vec3 v = P - camPos;
-    float z = dot(v, forward);
-    if (z <= 1e-4) { valid = false; return vec2(-1.0); }   // behind the camera
-
-    float scale  = tan(radians(fov * 0.5));
-    float aspect = res.x / res.y;
-    float ndcx = (dot(v, right) / z) / (scale * aspect);
-    float ndcy = (dot(v, up)    / z) / scale;
-
-    vec2 flip = (vec2(ndcx, ndcy) + 1.0) * 0.5;
-    vec2 uv = vec2(flip.x, 1.0 - flip.y);
+    bool inFront;
+    vec2 uv = pjvPerspectiveUV(P, res, camPos, camDir, fov, inFront);
+    if (!inFront) { valid = false; return vec2(-1.0); }   // behind the camera
     valid = all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)));
     return uv;
 }
@@ -158,7 +143,7 @@ void main() {
         vec3 dirSky = skyColor(dir);
 
         bool valid;
-        vec2 uv = worldToUV(samplePoint, cameraPos.xyz, cameraDir.xyz, windowRes.xy, FOV, valid);
+        vec2 uv = worldToUV(samplePoint, pjvViewPosition(), pjvViewDirection(), windowRes.xy, pjvViewFov(), valid);
         // Off-screen, or sky at that texel: nothing known to be in the way, so the sample sees sky.
         if (!valid) { skyLight += dirSky; continue; }
 
@@ -167,7 +152,7 @@ void main() {
 
         // Distance along the view from the camera. If what the G-buffer holds there is nearer than
         // the sample point, the sample is behind a surface.
-        float sampleDist = length(samplePoint - cameraPos.xyz);
+        float sampleDist = length(samplePoint - pjvViewPosition());
         float diff = sampleDist - occluder.a;
 
         // Range check: only blockers within the AO radius count. Without it a wall far behind a

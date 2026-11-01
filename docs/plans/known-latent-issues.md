@@ -243,3 +243,11 @@ calls libm ([windows.md](windows.md), D4; the same cause was found in a strike's
 hit by the golden recording, which has no spinning kinematic body, so nothing checks it. Fix: a
 quaternion from an angle built from `+ - * /` only (a Taylor series, or Jolt's deterministic `Sin`/`Cos`
 reached through `PhysicsWorld`), and a golden session that spins one.
+
+## 16. `editing_p1` and `edit_demo` no longer compile
+
+Found 2026-10-30, building the manual tests (`-DPROJV_BUILD_MANUAL_TESTS=ON`) during shader-library S2.
+Both still read a `GeometryBlob`'s `materialIDs` and `geometry` vectors, which the tile-table storage
+replaced ([voxel-storage-tiles.md](voxel-storage-tiles.md)); `edit_demo` also uses them in its own
+code (`main.cpp:264`, `:325`). Nothing in the default build compiles them, so nothing noticed. Fix: read
+and write through `utils/blob_voxels.h` as the engine does. `exit_path` is unaffected.

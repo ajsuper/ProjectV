@@ -79,8 +79,9 @@ Move a linked component through its entity's `Transform` instead ([Entities](ent
 ## Picking: which voxel is under the cursor
 
 ```cpp
-core::vec3 dir = utils::rayDirectionThroughImage(uv, resolution, cameraDirection, 60.0f);
-utils::VoxelPick pick = utils::pickVoxel(scene, cameraPosition, dir);
+// view: the CameraView the renderer draws with, so the pick lands on what is on screen
+core::vec3 dir = graphics::cameraRayDirection(view, uv, resolution);
+utils::VoxelPick pick = utils::pickVoxel(scene, graphics::cameraRayOrigin(view, uv, resolution), dir);
 if (pick.hit) {
     // pick.component, pick.chunk, pick.voxelCoord, pick.faceNormal, pick.materialSlot
     // add on the face:    voxelCoord + faceNormal

@@ -23,6 +23,7 @@ $input v_texcoord0
 // Inputs: 0 surf0, 1 surf1 (pass 2); 2-6 sres0..4 (the spatial pass, last frame). Outputs: res0..4.
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include "restir_path.sc"
 
 // Validation (step 2) found nothing worth its cost in what was measured (docs/plans/restir-pt.md), and
@@ -49,7 +50,7 @@ void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     RestirSurface s = restirSurface(texelFetch(surf0, p, 0), texelFetch(surf1, p, 0));
     if (s.t < 0.0) { Reservoir none = restirEmpty(); restirWrite(none); return; }
-    vec3 wo1 = normalize(cameraPos.xyz - s.x);
+    vec3 wo1 = normalize(pjvViewPosition() - s.x);
 
     uint seed = uint(p.x) * 7919u + uint(p.y) * 104729u + uint(frameCount.x) * 15485863u;
     pjvPcg(seed);
@@ -65,7 +66,7 @@ void main() {
     if (restirReuse.x > 0.5 && restirJitter.w < 0.5 && frameCount.z < 0.5) {
         vec2 res = passTargetRes.xy;
         bool inFront;
-        vec2 then = restirWorldToUV(s.x, prevCameraPos.xyz, prevCameraDir.xyz, res, inFront);
+        vec2 then = restirWorldToUV(s.x, pjvPrevViewPosition(), pjvPrevViewDirection(), res, inFront);
         pp = ivec2(floor(then * res));
         if (inFront && pp.x >= 0 && pp.y >= 0 && pp.x < int(res.x) && pp.y < int(res.y)) {
             Reservoir h = restirHistory(pp);
@@ -214,8 +215,8 @@ void main() {
             mh = min(h.M, restirReuse.w);
             then.x = h.x1;
             then.n = h.n1;
-            then.t = length(h.x1 - prevCameraPos.xyz);
-            woThen = normalize(prevCameraPos.xyz - h.x1);
+            then.t = length(h.x1 - pjvPrevViewPosition());
+            woThen = normalize(pjvPrevViewPosition() - h.x1);
         }
         PtShift unused;
         float cThen = history ? ptReconnectTarget(yc, then, woThen, unused) : 0.0;

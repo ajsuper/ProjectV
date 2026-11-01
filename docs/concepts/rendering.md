@@ -27,7 +27,10 @@ renderInstance.setActiveRenderer(
     graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vs));
 
 // each frame
-graphics::setUniformToValue(renderer, "cameraPos", cameraPos);
+CameraView view;
+view.position = eye;
+view.forward = direction;
+graphics::setCamera(*renderer, view);          // graphics/camera.h; last frame's view is kept for you
 graphics::renderConstructedRenderer(renderInstance, renderer, &gpuData);
 ```
 
@@ -83,20 +86,21 @@ Declare them in the shader; not listed in `resources.json`:
 | `pjvMotionSets[48]`, `pjvAnimTime` | The animation table and time (`GPUData::animation`) |
 
 Your own uniforms are `vec4`/`mat3`/`mat4` in `resources.json`, set with `setUniformToValue`
-(`float`/`vec2`/`vec3` are widened to `vec4`).
+(`float`/`vec2`/`vec3` are widened to `vec4`). The camera is not one of them: it is the engine's
+(`graphics::setCamera`), uploaded before every pass with the view this renderer last drew from as the
+previous frame, and read in a shader through `pjv_camera.sc`.
 
 ## Inside a shader
 
 ```glsl
 #include <bgfx_shader.sh>
 #include <pjv_utils_DDA.sc>
-
-uniform vec4 windowRes, cameraPos, cameraDir;
+#include <pjv_camera.sc>            // the engine camera
 
 void main() {
     Ray ray;
-    ray.origin    = cameraPos.xyz;
-    ray.direction = rayStartDirection(v_texcoord0, windowRes.xy, cameraPos.xyz, normalize(cameraDir.xyz), 60.0);
+    ray.origin    = pjvViewRayOrigin(v_texcoord0, passTargetRes.xy);
+    ray.direction = pjvViewRayDirection(v_texcoord0, passTargetRes.xy);
 
     SceneIntersectData hit = raySceneIntersect(ray, pjvPrimaryQuery(100u)).hit;
     gl_FragColor = vec4(fetchVoxelColor(hit.foundBox, hit.headerIndex), 1.0);

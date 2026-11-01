@@ -55,13 +55,12 @@ $input v_texcoord0
 #define PJV_MARCH_STATS
 #endif
 #include <pjv_utils_DDA.sc>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <grr_common.sc>
 
 SAMPLER2D(prevPoses, 0);   // per header slot: (position, 1 if known), (rotation)
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
-uniform vec4 prevCameraPos;
-uniform vec4 prevCameraDir;
 // xy = this frame's sub-texel jitter, in render texels (0 with TAA off)
 uniform vec4 jitterParams;
 // x = shadows on, y = AO on, z = reconstruction bypass, w = debug view
@@ -94,7 +93,7 @@ vec3 previousPoint(vec3 P, uint slot, vec3 position, vec4 rotation) {
 // The screen motion of a world point, from where it is now to where it was (uv units).
 vec2 screenMotion(vec2 uvNow, vec3 previous) {
     bool valid;
-    vec2 then = grrWorldToUV(previous, prevCameraPos.xyz, prevCameraDir.xyz, passTargetRes.xy, valid);
+    vec2 then = grrWorldToUV(previous, pjvPrevViewPosition(), pjvPrevViewDirection(), passTargetRes.xy, valid);
     return then - uvNow;
 }
 
@@ -108,8 +107,8 @@ void main() {
     // Each frame through another sub-texel point, for the TAA to average.
     vec2 sampleUV = v_texcoord0 + jitterParams.xy * passTargetRes.zw;
     Ray ray;
-    ray.origin = cameraPos.xyz;
-    ray.direction = grrCameraRay(sampleUV, passTargetRes.xy, cameraDir.xyz);
+    ray.origin = pjvViewPosition();
+    ray.direction = grrCameraRay(sampleUV, passTargetRes.xy, pjvViewDirection());
     vec3 primaryDirection = ray.direction;
     vec3 sun = normalize(sunDir.xyz);
     RayQuery query = pjvPrimaryQuery(PRIMARY_STEPS);
@@ -133,7 +132,7 @@ void main() {
             vec3 n = isMiss(found) ? vec3(0.0, 0.0, 0.0) : normalize(found.normal);
             // No shadow ray for the sky, or for a face turned from the sun: it is unlit either way.
             if (isMiss(found) || dot(n, sun) <= 0.0) break;
-            ray.origin = cameraPos.xyz + primaryDirection * found.rayT +
+            ray.origin = pjvViewPosition() + primaryDirection * found.rayT +
                          n * (SHADOW_BIAS_VOXELS * found.foundBox.size);
             ray.direction = sun;
             query = pjvShadowQuery(SHADOW_STEPS, 1e6);
@@ -163,14 +162,14 @@ void main() {
         gl_FragData[2] = statsOut;
 #endif
         // The sky moves only with the camera's turn: a point far along the ray, from where the camera was.
-        gl_FragData[3] = vec4(screenMotion(sampleUV, prevCameraPos.xyz + primaryDirection * 1.0e4), SKY_DEPTH, 0.0);
+        gl_FragData[3] = vec4(screenMotion(sampleUV, pjvPrevViewPosition() + primaryDirection * 1.0e4), SKY_DEPTH, 0.0);
         gl_FragData[4] = vec4(0.0, 0.0, 0.0, 0.0);
         gl_FragData[5] = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
     vec3 normal = normalize(hit.normal);
-    vec3 P = cameraPos.xyz + primaryDirection * hit.rayT;
+    vec3 P = pjvViewPosition() + primaryDirection * hit.rayT;
     // The geometry-only query resolves no material, so the hit's is fetched here: one descent, for the
     // primary ray only.
     VoxelMaterial material = fetchVoxelMaterialFromHit(hit);
@@ -195,7 +194,7 @@ void main() {
 #if GRR_STATS
     gl_FragData[2] = statsOut;
 #endif
-    gl_FragData[3] = vec4(screenMotion(sampleUV, wasAt), min(distance(wasAt, prevCameraPos.xyz), SKY_DEPTH * 0.5), 0.0);
+    gl_FragData[3] = vec4(screenMotion(sampleUV, wasAt), min(distance(wasAt, pjvPrevViewPosition()), SKY_DEPTH * 0.5), 0.0);
     gl_FragData[4] = vec4(faceCentre, voxelSize);
     gl_FragData[5] = rotation;
 }

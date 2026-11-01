@@ -13,6 +13,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <grr_common.sc>
 
 SAMPLER2D(giRay,     0);
@@ -22,8 +23,6 @@ SAMPLER2D(giHist,    7);
 SAMPLER2D(giHistPos, 8);
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
-uniform vec4 prevCameraPos;
-uniform vec4 prevCameraDir;
 
 #define MAX_FRAMES 24.0
 
@@ -43,7 +42,7 @@ void main() {
     float frames = 0.0;
     vec3 history = current;
     bool valid;
-    vec2 prevUV = grrWorldToUV(pos.xyz, prevCameraPos.xyz, prevCameraDir.xyz, passTargetRes.xy, valid);
+    vec2 prevUV = grrWorldToUV(pos.xyz, pjvPrevViewPosition(), pjvPrevViewDirection(), passTargetRes.xy, valid);
     if (valid) {
         prevUV = (floor(prevUV * passTargetRes.xy) + 0.5) * passTargetRes.zw;
         vec4 was = texture2D(giHistPos, prevUV);

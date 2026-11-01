@@ -66,11 +66,10 @@ $input v_texcoord0
 #define MAX_PEEL_ITERATIONS 65
 
 #include <pjv_utils_DDA.sc>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_bsdf.sc>   // the material model: GGX over Lambert, shared with the renderer gallery
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 // x = frame index, y = 1.0 on a frame the camera moved, z = the frame it last moved on.
 // Only x is read here, and only to decorrelate this frame's samples from the last one's.
 uniform vec4 frameCount;
@@ -78,7 +77,6 @@ uniform vec4 frameCount;
 // and 0.0 for perspective; y = the world height the image spans when it is; z = how far
 // back along the view direction the ray plane sits. Identical to albedo.frag's, so both
 // modes frame the scene the same way and switching between them does not move the camera.
-uniform vec4 cameraProjection;
 // xyz = normalized sun direction, w = the angular RADIUS of the sun disk in radians.
 // The radius is a control rather than a constant because it is the softness of every
 // shadow in the image: 0.005 is the real sun and razor-sharp, 0.3 is an overcast day.
@@ -302,42 +300,23 @@ vec3 sampleSunCone(inout uint seed) {
 // Orthographic and isometric views get no depth of field, and cannot: parallel rays have no lens
 // and no aperture to sample. The editor greys the control out in those modes for the same reason.
 Ray primaryRay(vec2 uv, inout uint seed) {
-    vec3 forward = normalize(cameraDir.xyz);
-
-    // Identical to rayStartDirection's basis, including the +Z fallback for a view pointing
-    // straight up or down. Needed by both branches below.
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right   = normalize(cross(forward, worldUp));
-    vec3 up      = normalize(cross(right, forward));
+    PjvCameraBasis basis = pjvCameraBasis(pjvViewDirection());
 
     Ray ray;
-    if (cameraProjection.x < 0.5) {
-        ray.origin = cameraPos.xyz;
-        ray.direction = rayStartDirection(uv, passTargetRes.xy, cameraPos.xyz, forward, 60.0);
+    ray.origin = pjvViewRayOrigin(uv, passTargetRes.xy);
+    ray.direction = pjvViewRayDirection(uv, passTargetRes.xy);
+    if (!pjvViewIsOrthographic() && lensParams.x > 0.0) {
+        // The focus distance is measured along the VIEW AXIS, not along this pixel's ray, so
+        // the plane in focus is a plane rather than a sphere centred on the camera. Dividing by
+        // the cosine between the two is what turns one into the other; without it the corners
+        // of the image focus nearer than the centre.
+        float axialCosine = max(dot(ray.direction, basis.forward), 1e-4);
+        vec3 focalPoint = ray.origin + ray.direction * (lensParams.y / axialCosine);
 
-        if (lensParams.x > 0.0) {
-            // The focus distance is measured along the VIEW AXIS, not along this pixel's ray, so
-            // the plane in focus is a plane rather than a sphere centred on the camera. Dividing by
-            // the cosine between the two is what turns one into the other; without it the corners
-            // of the image focus nearer than the centre.
-            float axialCosine = max(dot(ray.direction, forward), 1e-4);
-            vec3 focalPoint = ray.origin + ray.direction * (lensParams.y / axialCosine);
-
-            vec2 lensOffset = sampleConcentricDisk(seed) * lensParams.x;
-            ray.origin += right * lensOffset.x + up * lensOffset.y;
-            ray.direction = normalize(focalPoint - ray.origin);
-        }
-        return ray;
+        vec2 lensOffset = sampleConcentricDisk(seed) * lensParams.x;
+        ray.origin += basis.right * lensOffset.x + basis.up * lensOffset.y;
+        ray.direction = normalize(focalPoint - ray.origin);
     }
-
-    vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float aspectRatio = passTargetRes.x / passTargetRes.y;
-    float halfHeight = cameraProjection.y * 0.5;
-
-    ray.origin = cameraPos.xyz - forward * cameraProjection.z +
-                 right * (ndc.x * halfHeight * aspectRatio) +
-                 up * (ndc.y * halfHeight);
-    ray.direction = forward;
     return ray;
 }
 

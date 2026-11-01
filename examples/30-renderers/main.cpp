@@ -75,6 +75,7 @@
 #include "graphics/render_instance.h"
 #include "graphics/disk_io.h"
 #include "graphics/engine_shaders.h"
+#include "graphics/camera.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -106,8 +107,6 @@ static void sunScrollCallback(GLFWwindow* /*window*/, double /*xoffset*/, double
 struct FrameContext {
     projv::core::vec3 cameraPosition;
     projv::core::vec3 cameraDirection;
-    projv::core::vec3 prevCameraPosition;
-    projv::core::vec3 prevCameraDirection;
     bool              cameraMoved;    // the camera or the sun
     bool              sunMoved;       // the sun alone: the light changed, not just the view
     int               frameCount;
@@ -149,8 +148,10 @@ static void uploadCommonUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
 
     projv::core::vec4 sunDir = { ctx.sunDirection.x, ctx.sunDirection.y, ctx.sunDirection.z, 0.0f };
 
-    projv::graphics::setUniformToValue(renderer, "cameraPos",  cameraPosition);
-    projv::graphics::setUniformToValue(renderer, "cameraDir",  cameraDirection);
+    projv::CameraView camera;
+    camera.position = cameraPosition;
+    camera.forward = cameraDirection;
+    projv::graphics::setCamera(*renderer, camera);
     projv::graphics::setUniformToValue(renderer, "windowRes",  windowResolution);
     projv::graphics::setUniformToValue(renderer, "frameCount", frameCount);
     projv::graphics::setUniformToValue(renderer, "texelSize",  texelSize);
@@ -190,13 +191,9 @@ static void uploadReconstructionUniforms(std::shared_ptr<projv::ConstructedRende
     projv::graphics::setUniformToValue(renderer, "renderParams", renderParams);
 }
 
-// The fast renderer: its TAA reprojects, so it needs last frame's camera too.
+// The fast renderer. Its TAA reprojects by last frame's camera, which the engine keeps (pjvPrevView*).
 static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
     uploadCommonUniforms(renderer, ctx);
-    projv::core::vec3 prevCameraPosition = ctx.prevCameraPosition;
-    projv::core::vec3 prevCameraDirection = ctx.prevCameraDirection;
-    projv::graphics::setUniformToValue(renderer, "prevCameraPos", prevCameraPosition);
-    projv::graphics::setUniformToValue(renderer, "prevCameraDir", prevCameraDirection);
 }
 
 // The restir-pt renderer's switches: G cycles what it shows (the image, the indirect light alone, the
@@ -304,8 +301,6 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     restir_pt::Frame frame;
     frame.position = ctx.cameraPosition;
     frame.direction = ctx.cameraDirection;
-    frame.prevPosition = ctx.prevCameraPosition;
-    frame.prevDirection = ctx.prevCameraDirection;
     frame.sunDirection = ctx.sunDirection;
     // An untold sun is no move at all, as far as the renderer knows: the camera stands still in that test.
     frame.sunMoved = ctx.sunMoved && !untold;
@@ -829,11 +824,6 @@ void render(projv::Application& app) {
     static projv::core::vec3 cameraPosition;
     static bool cameraInitialized = false;
 
-    // Previous-frame camera, used by renderers that do temporal reprojection.
-    static projv::core::vec3 prevCameraPosition  = cameraPosition;
-    static projv::core::vec3 prevCameraDirection = projv::core::vec3(0.0, 0.0, 1.0);
-    static bool prevCameraInitialized = false;
-
     bool cameraMoved = false;
 
     // Pitch (look up/down). Yaw is stored in the persistent cameraPhi resource.
@@ -1031,15 +1021,6 @@ void render(projv::Application& app) {
         cameraMoved    = true;
     }
 
-
-    // On the first frame there is no history yet, so make the previous camera
-    // equal to the current one (identity reprojection) to avoid garbage.
-    if (!prevCameraInitialized) {
-        prevCameraPosition   = cameraPosition;
-        prevCameraDirection  = cameraDirection;
-        prevCameraInitialized = true;
-    }
-
     // Sun direction from the scroll wheel: the scroll angle traces a FULL great circle (rise ->
     // overhead -> set on the far side -> below the horizon / night -> back), orbiting all the way
     // around in a fixed vertical plane. The angle is unbounded (no clamp) so it never stops; sunDir
@@ -1069,8 +1050,6 @@ void render(projv::Application& app) {
     FrameContext ctx;
     ctx.cameraPosition         = cameraPosition;
     ctx.cameraDirection        = cameraDirection;
-    ctx.prevCameraPosition     = prevCameraPosition;
-    ctx.prevCameraDirection    = prevCameraDirection;
     ctx.cameraMoved            = cameraMoved;
     ctx.sunMoved               = sunMoved;
     ctx.frameCount             = app.frameCount;
@@ -1127,10 +1106,6 @@ void render(projv::Application& app) {
             bgfx::requestScreenShot(BGFX_INVALID_HANDLE, fmt::format("{}-{}", g_measure.capture, app.frameCount).c_str());
         if (app.frameCount > *std::max_element(frames.begin(), frames.end()) + 4) app.closeRequested = true;
     }
-
-    // Remember this frame's camera for next frame's reprojection.
-    prevCameraPosition  = cameraPosition;
-    prevCameraDirection = cameraDirection;
 }
 
 void shutdown(projv::Application& app) {

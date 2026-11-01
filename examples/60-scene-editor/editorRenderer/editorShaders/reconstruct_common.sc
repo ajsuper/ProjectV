@@ -82,11 +82,11 @@ mat3 chunkRotation(int headerIndex) {
 
 // Edge length of one voxel at distance t along this pixel's ray, in pixels of this pass's target.
 float projectedPixels(float size, float t, vec3 direction) {
-    if (cameraProjection.x > 0.5) {
-        return size * passTargetRes.y / max(cameraProjection.y, 1e-6);
+    if (pjvViewIsOrthographic()) {
+        return size * passTargetRes.y / max(pjvViewOrthographicHeight(), 1e-6);
     }
-    float depth = max(t * dot(direction, normalize(cameraDir.xyz)), 1e-6);
-    return size * (passTargetRes.y * 0.5 / tan(radians(FOV * 0.5))) / depth;
+    float depth = max(t * dot(direction, normalize(pjvViewDirection())), 1e-6);
+    return size * (passTargetRes.y * 0.5 / tan(radians(pjvViewFov() * 0.5))) / depth;
 }
 
 // The five targets albedo.frag writes, in its layout. Built by value and written once at the end of

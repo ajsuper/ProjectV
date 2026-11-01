@@ -121,14 +121,11 @@ $input v_texcoord0
 #define TRANSPARENT_LAYERS 64u
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 uniform vec4 frameCount;   // x = frame index
 // x = 1.0 for an orthographic projection (the editor's Orthographic and Isometric
 // modes) and 0.0 for perspective; y = the world height the image spans when it is;
 // z = how far back along the view direction the ray plane sits. See the editor's
 // cameraOrthoHeight / cameraOrthoBackoff, which compute all three.
-uniform vec4 cameraProjection;
 // x = advanced preview. y/z/w spare. Its own uniform rather than a fifth lane of renderSettings,
 // which has none left -- see the note beside renderSettings in the editor's render loop.
 uniform vec4 previewSettings;
@@ -143,7 +140,6 @@ uint refractionSegments() { return uint(max(previewSettings.y, 0.0) + 0.5); }
 int refractDebugMode() { return int(previewSettings.w + 0.5); }
 bool refractDebug() { return refractDebugMode() == 1; }
 
-#define FOV 60.0
 #include "viewport_ray.sc"
 
 #define PI 3.14159265359

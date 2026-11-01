@@ -19,6 +19,7 @@
 #include "core/world.h"
 #include "graphics/disk_io.h"
 #include "graphics/engine_shaders.h"
+#include "graphics/camera.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -235,11 +236,10 @@ namespace night_renderer {
             look.hasPrevious = true;
         }
         const bool moved = glm::length(position - look.prevPosition) > 1e-5f || glm::length(direction - look.prevDirection) > 1e-6f;
-        vec3 prevPosition = look.prevPosition, prevDirection = look.prevDirection;
-        setUniformToValue(renderer, "cameraPos", position);
-        setUniformToValue(renderer, "cameraDir", direction);
-        setUniformToValue(renderer, "prevCameraPos", prevPosition);
-        setUniformToValue(renderer, "prevCameraDir", prevDirection);
+        projv::CameraView camera;
+        camera.position = position;
+        camera.forward = direction;
+        projv::graphics::setCamera(*renderer, camera);
         vec4 key(look.day ? look.sun : look.moon, 0.0f);
         setUniformToValue(renderer, "sunDir", key);
         vec4 light(look.day ? look.sunLight : look.moonLight, look.day ? look.daySky : look.nightSky, look.exposure, look.finestVoxel);

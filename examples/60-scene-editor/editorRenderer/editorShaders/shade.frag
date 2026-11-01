@@ -88,6 +88,7 @@ $input v_texcoord0
 // Must be defined BEFORE the include to override the header's #ifndef default.
 #define MAX_PEEL_ITERATIONS 9
 #include <pjv_utils_DDA.sc>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #define TRANSPARENT_LAYERS 8u
 
 SAMPLER2D(previewColor,    0);
@@ -102,9 +103,7 @@ SAMPLER2D(giLight,         5);
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 // passInputRes: Per input slot; [5] is the traced light.
 
-uniform vec4 cameraPos;
 uniform vec4 frameCount;     // x = frame index
-uniform vec4 cameraDir;      // For viewport_ray.sc: the occlusion taps rebuild their rays.
 // x = ambient occlusion, y = normal shading, z = sun shadow, w = ray occlusion
 uniform vec4 renderSettings;
 // x = advanced preview. When it is on, the path traced light replaces the four aids above rather
@@ -113,7 +112,6 @@ uniform vec4 previewSettings;
 // x = 1.0 under an orthographic projection, y = the world height the image spans when
 // it is. Only the occlusion estimator reads it, and only to convert a world radius into
 // screen pixels -- see ambientOcclusion. Matches albedo.frag's uniform of the same name.
-uniform vec4 cameraProjection;
 // Render mode's light rig, and gi.frag's: xyz = the sun's direction, w = its angular RADIUS in
 // radians, which is the softness of its shadow. Read only by directSunLight below.
 uniform vec4 sunDir;
@@ -123,7 +121,6 @@ uniform vec4 renderParams;
 
 // Matches albedo.frag's primary ray. Only the vertical FOV is needed here, to turn
 // a world-space radius into the screen-space one the taps walk.
-#define FOV 60.0
 #include "viewport_ray.sc"
 
 #define TAU 6.28318530718
@@ -364,11 +361,11 @@ float ambientOcclusion(vec2 uv, vec3 position, vec3 normal, float voxelSize) {
     // one unit from the camera, under the same vertical-FOV convention
     // rayStartDirection builds the primary ray with.
     float radiusPixels;
-    if (cameraProjection.x > 0.5) {
-        radiusPixels = worldRadius * passTargetRes.y / max(cameraProjection.y, 0.0001);
+    if (pjvViewIsOrthographic()) {
+        radiusPixels = worldRadius * passTargetRes.y / max(pjvViewOrthographicHeight(), 0.0001);
     } else {
-        float distanceToCamera = max(length(position - cameraPos.xyz), 0.0001);
-        float projectionScale = passTargetRes.y * 0.5 / tan(radians(FOV * 0.5));
+        float distanceToCamera = max(length(position - pjvViewPosition()), 0.0001);
+        float projectionScale = passTargetRes.y * 0.5 / tan(radians(pjvViewFov() * 0.5));
         radiusPixels = worldRadius * projectionScale / distanceToCamera;
     }
     if (radiusPixels < AO_MIN_RADIUS_PIXELS) {

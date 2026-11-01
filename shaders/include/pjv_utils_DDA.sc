@@ -4,6 +4,7 @@
 #include <pjv_color.sc>   // stored colours are sRGB-encoded; decodeMaterial hands out linear ones
 #include <pjv_engine.sc>  // pjvAnimTime, pjvMotionSets
 #include <pjv_random.sc>  // pjvRandomUnit, pjvHash13/23, pjvValueNoise
+#include <pjv_camera.sc>  // pjvPerspectiveRay, behind rayStartDirection
 
 #define MAX_STACK_SIZE 12
 #define RENDER_MODE 3 //1-8
@@ -1542,21 +1543,8 @@ uint calculateZOrderIndex4(uint x, uint y, uint z){
  */
 //Calculate the starting ray direction for the inital ray trace
 vec3 rayStartDirection(vec2 uv, vec2 res, vec3 cameraPosition, vec3 cameraDirection, float fov){
-    // NDC in [-1, 1] with the usual top-left-origin UV flip.
-    vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float aspectRatio = res.x / res.y;
-    float scale = tan(radians(fov * 0.5)); // vertical-FOV convention
-
-    // Orthonormal camera basis. right/up are normalized so the effective FOV stays
-    // correct for ANY look direction (an un-normalized basis shrinks with the pitch
-    // angle and warps the FOV). Handedness and the UV flip match the previous version,
-    // so the reprojection inverse (worldToUV) stays exact.
-    vec3 forward = normalize(cameraDirection);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right   = normalize(cross(forward, worldUp));
-    vec3 up      = normalize(cross(right, forward));
-
-    return normalize(right * (ndc.x * scale * aspectRatio) + up * (ndc.y * scale) + forward);
+    // pjv_camera.sc's projection; cameraPosition is unused, kept for existing callers.
+    return pjvPerspectiveRay(uv, res, cameraDirection, fov);
 }
 
 uint calculateZOrderIntoBox(uint branchingFactor, vec3 intersectionOnBox, BoxAABB box) {

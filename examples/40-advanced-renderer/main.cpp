@@ -144,6 +144,7 @@
 #include "graphics/render_instance.h"
 #include "graphics/disk_io.h"
 #include "graphics/engine_shaders.h"
+#include "graphics/camera.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -1504,19 +1505,11 @@ static void uploadFrameUniforms(const std::shared_ptr<projv::ConstructedRenderer
                                 int frame) {
     using projv::graphics::setUniformToValue;
 
-    // Copied into locals rather than passed straight out of `state`. setUniformToValue deduces the
-    // uniform's type from its argument, and a member of a const struct arrives as `const vec3&`,
-    // which the deduction does not recognise -- the value is then silently never uploaded and the
-    // shader reads whatever bgfx last had under that name. The engine says as much when it happens,
-    // but the fix belongs here.
-    projv::core::vec3 cameraPosition = state.cameraPosition;
-    projv::core::vec3 prevCameraPosition = state.prevCameraPosition;
-    projv::core::vec3 prevCameraDirection = state.prevCameraDirection;
-
-    setUniformToValue(renderer, "cameraPos", cameraPosition);
-    setUniformToValue(renderer, "cameraDir", cameraDirection);
-    setUniformToValue(renderer, "prevCameraPos", prevCameraPosition);
-    setUniformToValue(renderer, "prevCameraDir", prevCameraDirection);
+    projv::CameraView camera;
+    camera.position = state.cameraPosition;
+    camera.forward = cameraDirection;
+    camera.verticalFovDegrees = CAMERA_VERTICAL_FOV_DEGREES;
+    projv::graphics::setCamera(*renderer, camera);
 
     // x = frame index (drives the per-frame jitter), y = did anything move this frame (which
     // temporal branch to take), z = the frame it last moved on, w = spare.

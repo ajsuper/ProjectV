@@ -20,15 +20,13 @@ $input v_texcoord0
 
 #define PJV_NO_ANIMATION   // the gallery's scenes do not move
 #include <pjv_utils_DDA.sc>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_path_light.sc>
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 uniform vec4 frameCount;      // x the frame index
 uniform vec4 ptSettings;      // x the loop's bound (rays), y the surface offset (world units), z bounces
 
-#define REF_FOV 60.0
 #define REF_STEPS 512u
 
 struct RefHit {
@@ -59,8 +57,8 @@ void main() {
     pjvPcg(seed);
     pjvPcg(seed);
     vec2 jitter = vec2(pjvRandomUnit24(seed), pjvRandomUnit24(seed)) - 0.5;
-    vec3 direction = rayStartDirection(v_texcoord0 + jitter * passTargetRes.zw, passTargetRes.xy, cameraPos.xyz,
-                                       normalize(cameraDir.xyz), REF_FOV);
+    vec3 direction = rayStartDirection(v_texcoord0 + jitter * passTargetRes.zw, passTargetRes.xy, pjvViewPosition(),
+                                       normalize(pjvViewDirection()), pjvViewFov());
 
     float sunPdf = 1.0 / pathSunSolidAngle();
     vec3 radiance = vec3(0.0, 0.0, 0.0);
@@ -71,12 +69,12 @@ void main() {
     int vertex = 0;
 
     // The walk: a path ray (camera or bounce), then -- at a surface facing the sun -- its shadow ray.
-    vec3 origin = cameraPos.xyz;
+    vec3 origin = pjvViewPosition();
     vec3 rayDir = direction;
     bool shadow = false;
     float maxDistance = 1e30;
     vec3 pending = vec3(0.0, 0.0, 0.0);   // the shadow ray's light, if nothing blocks it
-    vec3 x = cameraPos.xyz;
+    vec3 x = pjvViewPosition();
     vec3 n = vec3(0.0, 1.0, 0.0);
     vec3 wo = -direction;
     PjvBsdf surface = pjvBsdf(vec3(0.0, 0.0, 0.0), 0.0, 0.0);

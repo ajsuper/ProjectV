@@ -22,6 +22,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_random.sc>     // pjvBayer4
 #include <grr_common.sc>
 
@@ -82,7 +83,7 @@ void main() {
     float voxel = max(lightParams.w, 1e-4);
 
     // World size of one render pixel at this distance: world radii to screen radii.
-    float pixelWorld = pos.w * (2.0 * tan(radians(GRR_FOV * 0.5))) / passTargetRes.y;
+    float pixelWorld = pos.w * (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;
     float bias = max(BIAS_VOXELS * texture2D(gFace, v_texcoord0).w, pixelWorld * 0.05);
     vec2 pixel = floor(v_texcoord0 * passTargetRes.xy);
     vec2 centre = (pixel + 0.5) * passTargetRes.zw;

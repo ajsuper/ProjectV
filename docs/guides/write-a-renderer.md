@@ -22,9 +22,7 @@ Start from [`examples/shared/basicRenderer`](../../examples/shared/basicRenderer
 
 ```json
 {
-  "uniforms": [ {"name": "windowRes", "type": "vec4"},
-                {"name": "cameraPos", "type": "vec4"},
-                {"name": "cameraDir", "type": "vec4"} ],
+  "uniforms": [ {"name": "windowRes", "type": "vec4"} ],
   "shaders":  [ {"shaderID": 1, "path": "./myRenderer/shaders/main.bin"} ],
   "textures": [],
   "framebuffers": []
@@ -43,9 +41,12 @@ Start from [`examples/shared/basicRenderer`](../../examples/shared/basicRenderer
 - **Shader paths are relative to the working directory**, not to the folder.
 - **`-1` is the window.** A pass writing the window uses `gl_FragColor`.
 - **Every pass key is required**, `multiPass` included.
+- **The camera is not a uniform here.** Set it with `graphics::setCamera(*renderer, view)`; a shader
+  reads it through `pjv_camera.sc` (`pjvViewRayOrigin`/`pjvViewRayDirection`, and `pjvPrevViewUV` to
+  reproject into the frame before).
 
 `main.frag`: [basic.frag](../../examples/shared/basicRenderer/shaders/basic.frag)
-(`rayStartDirection` → `raySceneIntersect` → `fetchVoxelColor`).
+(`pjvViewRayDirection` → `raySceneIntersect` → `fetchVoxelColor`).
 
 ## 2. Compile the shaders
 
@@ -55,7 +56,8 @@ projv_compile_shaders(TARGET my_app SHADER_DIRS myRenderer/shaders INCLUDE_DIRS 
 ```
 
 `vs_*.sc` → vertex, `*.frag` → fragment, `.bin` beside each; other `.sc` files are includes.
-`pjv_utils_DDA.sc` and `bgfx_shader.sh` are always on the path. In-repo:
+The engine's shader library (`shaders/include/`: `pjv_camera.sc`, `pjv_utils_DDA.sc`, ...) and
+`bgfx_shader.sh` are always on the path. In-repo:
 `projv_add_example(... SHADERS dir SHADER_INCLUDE_DIRS dir)`.
 
 ## 3. A G-buffer: two passes

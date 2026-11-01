@@ -16,9 +16,10 @@ A brush: pick, add/remove, recolour, undo. Concepts:
 using namespace projv;
 
 core::vec2 uv = input.cursor / core::vec2(window.getWindowResolution());      // top-left origin
-core::vec3 dir = utils::rayDirectionThroughImage(uv, core::vec2(window.getWindowResolution()),
-                                                 cameraDirection, 60.0f);    // must match the shader's FOV
-utils::VoxelPick pick = utils::pickVoxel(scene, cameraPosition, dir);
+core::vec2 resolution(window.getWindowResolution());
+core::vec3 origin = graphics::cameraRayOrigin(view, uv, resolution);         // the CameraView you draw with
+core::vec3 dir = graphics::cameraRayDirection(view, uv, resolution);
+utils::VoxelPick pick = utils::pickVoxel(scene, origin, dir);
 if (!pick.hit) return;
 ```
 

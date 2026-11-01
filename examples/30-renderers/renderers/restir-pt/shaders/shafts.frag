@@ -30,6 +30,7 @@ $input v_texcoord0
 // Outputs: shafts (rgb the in-scattered light, a its history length), shaftDepth (t; 1e4 the sky).
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_random.sc>     // pjvInterleavedGradientNoise
 #include "restir_trace.sc"
 
@@ -49,7 +50,7 @@ void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     vec4 surface = texelFetch(surf0, p, 0);
     float t = surface.w < 0.0 ? 1.0e4 : surface.w;   // a miss holds a point 10^4 out along the ray
-    vec3 view = normalize(surface.xyz - cameraPos.xyz);
+    vec3 view = normalize(surface.xyz - pjvViewPosition());
     vec3 toSun = normalize(SUN_DIR);
     if (restirShafts.x <= 0.0 || restirLum(SUN_COLOR) <= 0.0) {
         gl_FragData[0] = vec4(0.0, 0.0, 0.0, 0.0);
@@ -67,7 +68,7 @@ void main() {
     float lambda = pick * total < nearWeight ? restirShafts.y : restirShaftsAir.y;
     float reach = 1.0 - exp(-lambda * t);
     float s = -log(max(1.0 - u * reach, 1e-6)) / lambda;
-    RestirHit hit = restirTrace(cameraPos.xyz + view * s, toSun, RESTIR_KIND_SHADOW_INDIRECT, 1e30);
+    RestirHit hit = restirTrace(pjvViewPosition() + view * s, toSun, RESTIR_KIND_SHADOW_INDIRECT, 1e30);
     // The aerial haze thickens with distance as the fog's does (restirFog): its point counts by s over the
     // onset length, so the open air just in front of the camera is clear rather than a sunlit veil.
     float onset = lambda == restirShafts.y ? 1.0 : min(s / max(restirShaftsAir.z, 1e-3), 2.0);
@@ -80,7 +81,7 @@ void main() {
     vec3 history = vec3(0.0, 0.0, 0.0);
     if (restirJitter.w < 0.5 && frameCount.z < 0.5) {
         bool inFront;
-        vec2 then = restirWorldToUV(cameraPos.xyz + view * min(t, 1.0e3), prevCameraPos.xyz, prevCameraDir.xyz, res, inFront);
+        vec2 then = restirWorldToUV(pjvViewPosition() + view * min(t, 1.0e3), pjvPrevViewPosition(), pjvPrevViewDirection(), res, inFront);
         ivec2 q = ivec2(floor(then * res));
         if (inFront && q.x >= 0 && q.y >= 0 && q.x < int(res.x) && q.y < int(res.y)) {
             float was = texelFetch(shaftDepth, q, 0).x;

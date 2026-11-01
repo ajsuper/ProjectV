@@ -19,6 +19,7 @@ $input v_texcoord0
 // Inputs: 0-6 the G-buffer (gPos 0, gNormal 1, gDirect 3, gFace 4). Output: gSoftNormal (xyz, unit; w the slope variance the waves' faded octaves took with them, water only).
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include "restir_common.sc"
 
 SAMPLER2D(gPos, 0);
@@ -136,7 +137,7 @@ void main() {
     float texel = max(restirSettings.w * surface.w, 1.0e-6);
     if (restirIsWater(texelFetch(gDirect, p, 0).a)) {
         float lost = 0.0;
-        vec3 waves = N.y > 0.5 ? restirWaves(surface.xyz, texel, normalize(cameraPos.xyz - surface.xyz), lost) : N;
+        vec3 waves = N.y > 0.5 ? restirWaves(surface.xyz, texel, normalize(pjvViewPosition() - surface.xyz), lost) : N;
         gl_FragColor = vec4(waves, lost);
         return;
     }

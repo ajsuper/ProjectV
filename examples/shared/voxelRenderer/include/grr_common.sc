@@ -9,11 +9,10 @@
 #ifndef GRR_COMMON_SC
 #define GRR_COMMON_SC
 
-#define GRR_PI  3.14159265
-#define GRR_FOV 60.0   // vertical, degrees; main.cpp's CAMERA_VERTICAL_FOV_DEGREES
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
+#define GRR_PI  3.14159265
+
 uniform vec4 sunDir;        // xyz toward the sun, unit length
 // x = sun intensity, y = sky intensity, z = exposure, w = the finest voxel's edge length (world units)
 uniform vec4 lightParams;
@@ -24,31 +23,22 @@ uniform vec4 fogParams;
 // ---- Camera ---------------------------------------------------------------------------------------
 
 void grrCameraBasis(vec3 direction, out vec3 forward, out vec3 right, out vec3 up) {
-    forward = normalize(direction);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    right = normalize(cross(forward, worldUp));
-    up = normalize(cross(right, forward));
+    PjvCameraBasis basis = pjvCameraBasis(direction);
+    forward = basis.forward;
+    right = basis.right;
+    up = basis.up;
 }
 
 // The ray through screen position uv -- the same map as the engine's rayStartDirection.
 vec3 grrCameraRay(vec2 uv, vec2 res, vec3 direction) {
-    vec3 forward, right, up;
-    grrCameraBasis(direction, forward, right, up);
-    vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float scale = tan(radians(GRR_FOV * 0.5));
-    return normalize(right * (ndc.x * scale * res.x / res.y) + up * (ndc.y * scale) + forward);
+    return pjvPerspectiveRay(uv, res, direction, pjvViewFov());
 }
 
 // Its inverse: where on screen a world point lands, for a camera at camPos looking along camDir.
 vec2 grrWorldToUV(vec3 P, vec3 camPos, vec3 camDir, vec2 res, out bool valid) {
-    vec3 forward, right, up;
-    grrCameraBasis(camDir, forward, right, up);
-    vec3 v = P - camPos;
-    float z = dot(v, forward);
-    if (z <= 1e-4) { valid = false; return vec2(-1.0, -1.0); }
-    float scale = tan(radians(GRR_FOV * 0.5));
-    vec2 ndc = vec2((dot(v, right) / z) / (scale * res.x / res.y), (dot(v, up) / z) / scale);
-    vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    bool inFront;
+    vec2 uv = pjvPerspectiveUV(P, res, camPos, camDir, pjvViewFov(), inFront);
+    if (!inFront) { valid = false; return vec2(-1.0, -1.0); }
     valid = all(greaterThanEqual(uv, vec2(0.0, 0.0))) && all(lessThanEqual(uv, vec2(1.0, 1.0)));
     return uv;
 }

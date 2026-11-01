@@ -3736,10 +3736,10 @@ void render(projv::Application& app) {
         f.position = cam.position;
         f.direction = camDir;
         f.sunDirection = sunDir;
-        f.prevPosition = restir.has ? restir.last.position : cam.position;
-        f.prevDirection = restir.has ? restir.last.direction : camDir;
+        const projv::core::vec3 prevPosition = restir.has ? restir.last.position : cam.position;
+        const projv::core::vec3 prevDirection = restir.has ? restir.last.direction : camDir;
         f.sunMoved = restir.has && sunDir != restir.last.sunDirection;
-        f.moved = f.sunMoved || projv::core::length(f.position - f.prevPosition) > 1e-5f || projv::core::length(f.direction - f.prevDirection) > 1e-6f;
+        f.moved = f.sunMoved || projv::core::length(f.position - prevPosition) > 1e-5f || projv::core::length(f.direction - prevDirection) > 1e-6f;
         f.first = !restir.has;
         f.count = restir.has ? restir.last.count + 1 : 0;
         f.window = ri.getWindowResolution();

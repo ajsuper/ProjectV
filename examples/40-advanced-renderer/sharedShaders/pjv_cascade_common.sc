@@ -10,6 +10,7 @@
 
 #include <pjv_sun_sky.sc>
 #include <pjv_math.sc>   // pjvOctDecode
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 // Engine-set, once per PASS rather than once per renderer: (w, h, 1/w, 1/h) of the framebuffer this
 // pass is writing into. It is not declared in resources.json -- a shader gets it just by declaring
@@ -29,8 +30,6 @@
 // Engine-set per BOUND INPUT, indexed by the sampler slot the engine bound it to, so
 // passInputRes[2] describes whatever texture SAMPLER2D(..., 2) names. 8 must equal
 // PROJV_MAX_PASS_INPUTS in constructedRenderer.h -- the engine sets exactly that many.
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 uniform vec4 frameCount;
 
 // ---- Two grids, and why they are no longer the same one ------------------------------------
@@ -88,7 +87,6 @@ vec2 pjvSnapToTexel(vec2 uv, vec2 res) {
 }
 
 #define PI 3.14159265358979
-#define FOV 60.0
 
 // World-unit scale factor. These shaders were tuned when a voxel was ~0.0727 world units
 // (fit-to-extent voxelizer). The voxelizer now emits voxelScale = 1 (1 voxel = 1 world unit),
@@ -218,19 +216,9 @@ vec2 cascadeJitter() {
 
 // ---- Camera projection (world -> screen UV), exact inverse of rayStartDirection. ----
 vec2 worldToUV(vec3 P, vec3 camPos, vec3 camDirV, vec2 res, float fov, out bool valid) {
-    vec3 forward = normalize(camDirV);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right   = normalize(cross(forward, worldUp));
-    vec3 up      = normalize(cross(right, forward));
-    vec3 v = P - camPos;
-    float z = dot(v, forward);
-    if (z <= 1e-4) { valid = false; return vec2(-1.0); }
-    float scale  = tan(radians(fov * 0.5));
-    float aspect = res.x / res.y;
-    float ndcx = (dot(v, right) / z) / (scale * aspect);
-    float ndcy = (dot(v, up)    / z) / scale;
-    vec2 flip = (vec2(ndcx, ndcy) + 1.0) * 0.5;
-    vec2 uv = vec2(flip.x, 1.0 - flip.y);
+    bool inFront;
+    vec2 uv = pjvPerspectiveUV(P, res, camPos, camDirV, fov, inFront);
+    if (!inFront) { valid = false; return vec2(-1.0); }
     valid = all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)));
     return uv;
 }

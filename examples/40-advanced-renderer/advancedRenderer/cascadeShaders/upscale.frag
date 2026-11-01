@@ -25,6 +25,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_filter.sc>     // pjvTexelTent
 
 // Slot order is declaration order across this pass's input framebuffers (render.json). FBO8 supplies
@@ -40,14 +41,11 @@ SAMPLER2D(gFace,       5);   // xyz voxel FACE CENTRE, w = voxel edge size
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
 // The camera the G-buffer was rendered with, so the ray rebuilt here and the ray that filled the
 // G-buffer agree.
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 // x = debug view (P key). Only the upscale view is read here; see the block at the end of main().
 uniform vec4 renderParams;
 // x = bypass this pass's reconstruction (Q key) and point-sample the render-resolution frame instead.
 uniform vec4 debugParams;
 
-#define FOV 60.0
 
 // Radius of the candidate search, in SOURCE texels. 1 is a centred 3x3.
 //
@@ -102,16 +100,7 @@ bool sameSurface(vec3 centreA, float sizeA, vec3 centreB, float sizeB) {
 // EXACTLY the forward map gbuffer.frag used, or the face test below is testing a different ray than
 // the one that produced the G-buffer.
 vec3 upscaleRayDirection(vec2 uv, vec2 res, vec3 camPos, vec3 camDirection) {
-    vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float aspectRatio = res.x / res.y;
-    float scale = tan(radians(FOV * 0.5));
-
-    vec3 forward = normalize(camDirection);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right   = normalize(cross(forward, worldUp));
-    vec3 up      = normalize(cross(right, forward));
-
-    return normalize(right * (ndc.x * scale * aspectRatio) + up * (ndc.y * scale) + forward);
+    return pjvPerspectiveRay(uv, res, camDirection, pjvViewFov());
 }
 
 // The overlap of two intervals, as a fraction of the second one: a slab of half-width `half` whose
@@ -348,17 +337,15 @@ void main() {
     // This pixel's position in source-texel units, unsnapped. centreTexel is its floor; the fractional
     // part is what the tent below needs and what nothing in this pass used to look at.
     vec2 srcPos = v_texcoord0 * srcRes;
-    vec3 rayDir = upscaleRayDirection(v_texcoord0, passTargetRes.xy, cameraPos.xyz, cameraDir.xyz);
+    vec3 rayDir = upscaleRayDirection(v_texcoord0, passTargetRes.xy, pjvViewPosition(), pjvViewDirection());
 
     // The camera basis and the angular size of one OUTPUT pixel, for the footprint Jacobian in
     // faceSample. Same construction as upscaleRayDirection, so the two agree by inspection. theta is
     // isotropic: the horizontal ndc range carries the aspect ratio, which cancels against the wider
     // pixel count, leaving 2*tan(fov/2)/height per pixel on both axes.
-    vec3 forward  = normalize(cameraDir.xyz);
-    vec3 worldUp  = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 camRight = normalize(cross(forward, worldUp));
-    vec3 camUp    = normalize(cross(camRight, forward));
-    float theta   = (2.0 * tan(radians(FOV * 0.5))) / passTargetRes.y;
+    PjvCameraBasis basis = pjvCameraBasis(pjvViewDirection());
+    vec3 forward = basis.forward, camRight = basis.right, camUp = basis.up;
+    float theta   = (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;
 
     // The two front-most faces with any coverage, kept in depth order. Two layers is enough for
     // the cases that matter and for the one the corners are made of: a silhouette is one face over
@@ -417,7 +404,7 @@ void main() {
         }
 
         float t, coverage, recorded, vsize; vec3 vc;
-        if (!voxelSample(candidateUV, cameraPos.xyz, rayDir, camRight, camUp, theta,
+        if (!voxelSample(candidateUV, pjvViewPosition(), rayDir, camRight, camUp, theta,
                          t, coverage, vc, recorded, vsize))
             continue;
 
@@ -696,7 +683,7 @@ void main() {
         #define FACES_PER_VOXEL 3.0
         // Recomputed locally: the reconstruction's own copies are scoped to the block below.
         vec2  snapUV = (floor(v_texcoord0 * passInputRes[0].xy) + 0.5) * passInputRes[0].zw;
-        float rad    = (2.0 * tan(radians(FOV * 0.5))) / passTargetRes.y;
+        float rad    = (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;
         vec4  nf = texture2D(gFace, snapUV);
         float nd = texture2D(gPos, snapUV).a;
         vec3 view;

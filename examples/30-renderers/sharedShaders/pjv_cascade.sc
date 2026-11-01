@@ -38,7 +38,7 @@ vec4 gatherRay(vec3 P, vec3 dir, int c) {
     float t0    = cascadeStart(c);
     float t1    = t0 + cascadeLen(c);
     float dt    = (t1 - t0) / float(MARCH_STEPS);
-    vec3  fwd   = normalize(cameraDir.xyz);
+    vec3  fwd   = normalize(pjvViewDirection());
 
     // Robust depth-CROSSING occlusion. A hit is when the ray goes from clearly IN FRONT of
     // the depth surface (open space) to BEHIND it -- not "lands in a thin shell", which the
@@ -54,14 +54,14 @@ vec4 gatherRay(vec3 P, vec3 dir, int c) {
         vec3  S = P + dir * t;
 
         bool valid;
-        vec2 uv = worldToUV(S, cameraPos.xyz, cameraDir.xyz, windowRes.xy, FOV, valid);
+        vec2 uv = worldToUV(S, pjvViewPosition(), pjvViewDirection(), windowRes.xy, pjvViewFov(), valid);
         if (!valid) return vec4(0.0, 0.0, 0.0, 1.0);   // left the screen -> continue upward
 
         vec4 g = texture2D(gPos, uv);
         if (g.a < 0.0) { armed = true; continue; }      // sky pixel -> open ahead -> arm
 
-        float camDistS = dot(S - cameraPos.xyz, fwd);
-        float camDistG = dot(g.xyz - cameraPos.xyz, fwd);
+        float camDistS = dot(S - pjvViewPosition(), fwd);
+        float camDistG = dot(g.xyz - pjvViewPosition(), fwd);
         float delta    = camDistS - camDistG;           // >0: ray is behind the surface
         float eps      = max(0.03, camDistG * 0.004);   // in-front margin (depth-scaled)
         float thick    = max(dt * DEPTH_THICKNESS_SCALE, eps * 2.0);

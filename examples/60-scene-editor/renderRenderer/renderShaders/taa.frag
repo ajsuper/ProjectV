@@ -53,6 +53,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 SAMPLER2D(traceColor,    0);
 SAMPLER2D(traceNormal,   1);
@@ -67,20 +68,14 @@ SAMPLER2D(taaColor,      3);
 // the resize case have just been allocated and never written. An uninitialised RGBA32F can be NaN,
 // and a single NaN entering a running mean never leaves it.
 uniform vec4 frameCount;
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 // Last frame's camera, for the reprojection. w carries last frame's orthographic
 // height (on cameraPos) and backoff (on cameraDir), so an orthographic view reprojects
 // against the parameters it was actually drawn with rather than this frame's.
-uniform vec4 prevCameraPos;
-uniform vec4 prevCameraDir;
 // x = 1.0 orthographic, y = ortho height, z = ortho backoff. Matches path_trace.frag.
-uniform vec4 cameraProjection;
 // x = bounces, y = sun intensity, z = sky intensity, w = firefly clamp. Unused here;
 // declared because every pass in a renderer shares one uniform set.
 uniform vec4 renderParams;
 
-#define FOV 60.0
 
 // How much of the current frame a MOVING camera takes each frame. Only the moving path
 // uses it -- the still path is a true mean with no blend factor at all. Low enough that
@@ -102,30 +97,9 @@ uniform vec4 renderParams;
 // the same handedness, the same UV flip. It has to be: an inverse that disagrees by a
 // fraction of a pixel smears the image every frame the camera moves.
 bool projectIntoPreviousFrame(vec3 worldPosition, out vec2 previousUV) {
-    vec3 forward = normalize(prevCameraDir.xyz);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right   = normalize(cross(forward, worldUp));
-    vec3 up      = normalize(cross(right, forward));
-    float aspectRatio = passTargetRes.x / passTargetRes.y;
-
-    vec2 ndc;
-    if (cameraProjection.x > 0.5) {
-        // Parallel rays: the plane the origins slide across sits prevCameraDir.w behind
-        // the camera, and the position maps onto it linearly. No depth term at all.
-        float halfHeight = max(prevCameraPos.w, 1e-6) * 0.5;
-        vec3 toPoint = worldPosition - (prevCameraPos.xyz - forward * prevCameraDir.w);
-        ndc = vec2(dot(toPoint, right) / (halfHeight * aspectRatio),
-                   dot(toPoint, up) / halfHeight);
-    } else {
-        vec3 toPoint = worldPosition - prevCameraPos.xyz;
-        float depth = dot(toPoint, forward);
-        if (depth <= 1e-4) return false;   // Behind the previous camera.
-        float scale = tan(radians(FOV * 0.5));
-        ndc = vec2(dot(toPoint, right) / (depth * scale * aspectRatio),
-                   dot(toPoint, up) / (depth * scale));
-    }
-
-    previousUV = vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    bool inFront;
+    previousUV = pjvPrevViewUV(worldPosition, passTargetRes.xy, inFront);
+    if (!inFront) return false;   // Behind the previous camera.
     return previousUV.x >= 0.0 && previousUV.x <= 1.0 &&
            previousUV.y >= 0.0 && previousUV.y <= 1.0;
 }

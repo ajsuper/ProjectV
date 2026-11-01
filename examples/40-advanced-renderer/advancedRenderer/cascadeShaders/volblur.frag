@@ -30,6 +30,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 SAMPLER2D(volRaw, 0);
 SAMPLER2D(gPos,   1);
@@ -102,18 +103,16 @@ void main() {
     //   zero. That case is computed straight from the camera basis instead. The two agree in the
     //   limit: just past the threshold the vanishing point is far off screen, so the direction toward
     //   it is already almost constant across the frame, which is what "parallel" means.
-    vec3 forward = normalize(cameraDir.xyz);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 camRight = normalize(cross(forward, worldUp));
-    vec3 camUp    = normalize(cross(camRight, forward));
+    PjvCameraBasis basis = pjvCameraBasis(pjvViewDirection());
+    vec3 forward = basis.forward, camRight = basis.right, camUp = basis.up;
 
     float zSun = dot(SUN_DIR, forward);
 
     vec2 axis;
     if (abs(zSun) > VOL_PARALLEL_EPS) {
         bool unused;
-        vec2 vpUV = worldToUV(cameraPos.xyz + SUN_DIR * (zSun > 0.0 ? 1.0 : -1.0),
-                              cameraPos.xyz, cameraDir.xyz, res, FOV, unused);
+        vec2 vpUV = worldToUV(pjvViewPosition() + SUN_DIR * (zSun > 0.0 ? 1.0 : -1.0),
+                              pjvViewPosition(), pjvViewDirection(), res, pjvViewFov(), unused);
         // In PIXELS, so the kernel is not stretched by the aspect ratio.
         axis = (uv - vpUV) * res;
     } else {

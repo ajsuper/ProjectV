@@ -20,7 +20,7 @@ myRenderer/
 ```json
 {
   "uniforms": [
-    { "name": "cameraPos", "type": "vec4" },
+    { "name": "sunDir",    "type": "vec4" },
     { "name": "viewProj",  "type": "mat4x4" }
   ],
   "shaders": [
@@ -42,7 +42,7 @@ myRenderer/
 
 | Key | Values |
 |---|---|
-| `name` | The name the shader declares (`uniform vec4 cameraPos;`) and `setUniformToValue` sets |
+| `name` | The name the shader declares (`uniform vec4 sunDir;`) and `setUniformToValue` sets. The engine's own uniforms (`pjv_engine.sc`: the camera, `passTargetRes`, ...) are not listed |
 | `type` | `"vec4"`, `"mat3x3"`, `"mat4x4"` |
 
 Engine uniforms (`passTargetRes`, `passInputRes`, `pjvMotionSets`, `pjvAnimTime`, the scene's

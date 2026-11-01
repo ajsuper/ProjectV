@@ -26,6 +26,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_filter.sc>     // pjvCatmullRomTaps
 #include <grr_common.sc>
 
@@ -34,8 +35,6 @@ SAMPLER2D(gPos,      1);
 SAMPLER2D(histColor, 7);
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
-uniform vec4 prevCameraPos;
-uniform vec4 prevCameraDir;
 uniform vec4 frameParams;    // x = frame, z = TAA on, w = camera moved this frame
 uniform vec4 renderParams;   // z = reconstruction bypass (taa steps aside too, so the A/B is raw)
 
@@ -94,12 +93,12 @@ void main() {
     if (nearest.w < 0.0) {
         // Sky: only the camera's turn moves it. A point far along this pixel's ray, offset by the
         // previous camera's position so translation does not move it at all.
-        world = prevCameraPos.xyz + grrCameraRay(uv, passTargetRes.xy, cameraDir.xyz) * 1.0e4;
+        world = pjvPrevViewPosition() + grrCameraRay(uv, passTargetRes.xy, pjvViewDirection()) * 1.0e4;
     } else {
         world = nearest.xyz;
     }
     bool valid;
-    vec2 prevUV = grrWorldToUV(world, prevCameraPos.xyz, prevCameraDir.xyz, passTargetRes.xy, valid);
+    vec2 prevUV = grrWorldToUV(world, pjvPrevViewPosition(), pjvPrevViewDirection(), passTargetRes.xy, valid);
     bool moved = frameParams.w > 0.5;
     if (!moved) prevUV = uv;   // exactly: no resampling blur at all while still
     if (!valid && moved) {

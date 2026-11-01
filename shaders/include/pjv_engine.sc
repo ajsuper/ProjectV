@@ -17,4 +17,14 @@ uniform vec4 pjvAnimTime;         // (seconds, 0, 0, 0)
 // pjv_utils_DDA.sc; all zero (nothing moves) unless the program configures it.
 uniform vec4 pjvMotionSets[48];
 
+// The camera this pass draws from, and the one its renderer last drew from (CameraView,
+// graphics::setCamera). Read through pjv_camera.sc rather than directly.
+uniform vec4 pjvCameraPos;        // xyz position; w vertical field of view, degrees
+uniform vec4 pjvCameraDir;        // xyz forward, need not be unit; w orthographic height (0: perspective)
+uniform vec4 pjvCameraLens;       // x orthographic backoff, y near, z far
+uniform vec4 pjvCameraJitter;     // xy this frame's sub-pixel jitter, zw the previous frame's (pixels)
+uniform vec4 pjvPrevCameraPos;
+uniform vec4 pjvPrevCameraDir;
+uniform vec4 pjvPrevCameraLens;
+
 #endif

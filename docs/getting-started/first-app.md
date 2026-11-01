@@ -54,6 +54,7 @@ which also stages the assets beside the binary.
 ```cpp
 #include "core/application.h"
 #include "core/paths.h"
+#include "graphics/camera.h"
 #include "graphics/disk_io.h"
 #include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
@@ -122,8 +123,10 @@ void render(Application& app) {
     auto renderer = window.getActiveRenderer();
 
     core::vec2 resolution = window.getWindowResolution();
-    graphics::setUniformToValue(renderer, "cameraPos", camera.position);
-    graphics::setUniformToValue(renderer, "cameraDir", camera.direction);
+    CameraView view;
+    view.position = camera.position;
+    view.forward = camera.direction;
+    graphics::setCamera(*renderer, view);
     graphics::setUniformToValue(renderer, "windowRes", resolution);
 
     graphics::renderConstructedRenderer(window, renderer, &app.world.ctx().get<GPUData>());

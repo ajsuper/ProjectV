@@ -9,7 +9,7 @@
 // path. If the two disagreed about how thick the air is, shafts would hang in clear space or fail to
 // appear in haze, and no amount of tuning either one separately would fix it.
 //
-// Requires pjv_sun_sky.sc (SUN_DIR, SUN_COLOR, pjvSkyBase, pjvMiePhase) and cameraPos, both of which
+// Requires pjv_sun_sky.sc (SUN_DIR, SUN_COLOR, pjvSkyBase, pjvMiePhase) and pjv_camera.sc, both of which
 // arrive with pjv_cascade_common.sc. Include this AFTER that.
 // =============================================================================
 
@@ -76,7 +76,7 @@ float fogOpticalDepth(vec3 origin, vec3 dir, float dist) {
 // appears where there is enough air in front of the camera to carry it. A pixel a metre away gets
 // none however much sky is behind it, which is the difference between a light shaft and a smear.
 float fogInscatterFraction(vec3 dir, float dist) {
-    return 1.0 - exp(-fogOpticalDepth(cameraPos.xyz, dir, dist));
+    return 1.0 - exp(-fogOpticalDepth(pjvViewPosition(), dir, dist));
 }
 
 // How far a sky pixel is. The G-buffer writes the background as `origin + direction * 1e5`, so this
@@ -119,6 +119,6 @@ vec3 fogInscatteredColor(vec3 dir) {
 
 // Beer-Lambert: what survives the trip, plus what the air added along the way.
 vec3 applyFog(vec3 color, vec3 dir, float dist) {
-    float transmittance = exp(-fogOpticalDepth(cameraPos.xyz, dir, dist));
+    float transmittance = exp(-fogOpticalDepth(pjvViewPosition(), dir, dist));
     return mix(fogInscatteredColor(dir), color, transmittance);
 }

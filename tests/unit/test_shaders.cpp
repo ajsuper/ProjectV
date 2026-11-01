@@ -1,12 +1,15 @@
-// The shader library's mechanisms that run without a GPU: the embedded engine shaders' table, and the
-// capture tolerance its milestones are checked by (docs/plans/shader-library.md, D3 and D5).
+// The shader library's mechanisms that run without a GPU: the embedded engine shaders' table, the
+// capture tolerance its milestones are checked by, and the CPU camera model (docs/plans/shader-library.md,
+// D3, D5 and D4).
 
 #include <doctest/doctest.h>
 
 #include <cstring>
 #include <vector>
 
+#include "graphics/camera.h"
 #include "graphics/engine_shaders.h"
+#include "utils/picking.h"
 #include "../../tools/imgdiff/imgdiff.h"
 
 TEST_CASE("engine shaders: vs_quad is embedded for the platform's renderer") {
@@ -57,4 +60,72 @@ TEST_CASE("imgdiff: the D5 limits") {
     SUBCASE("mismatched sizes do not pass") {
         CHECK_FALSE(projv::imgdiff::compare(a, std::vector<uint8_t>(4), pixels, 4).pass);
     }
+}
+
+// --- The camera model (S2) ----------------------------------------------------------------------
+
+namespace {
+    projv::CameraView testView(projv::core::vec3 forward) {
+        projv::CameraView view;
+        view.position = projv::core::vec3(3.0f, -2.0f, 7.5f);
+        view.forward = forward;
+        return view;
+    }
+}
+
+TEST_CASE("camera: the ray matches the picking ray the engine has always used") {
+    const projv::core::vec2 resolution(1280.0f, 720.0f);
+    for (projv::core::vec3 forward : {projv::core::vec3(0.3f, -0.2f, 1.0f), projv::core::vec3(-1.0f, 0.0f, 0.0f),
+                                      projv::core::vec3(0.0f, 1.0f, 0.0f), projv::core::vec3(0.001f, -1.0f, 0.0005f)}) {
+        projv::CameraView view = testView(forward);
+        for (projv::core::vec2 uv : {projv::core::vec2(0.5f), projv::core::vec2(0.0f), projv::core::vec2(0.9f, 0.13f)}) {
+            projv::core::vec3 a = projv::graphics::cameraRayDirection(view, uv, resolution);
+            projv::core::vec3 b = projv::utils::rayDirectionThroughImage(uv, resolution, forward, 60.0f);
+            CHECK(glm::length(a - b) < 1e-6f);
+            CHECK(projv::graphics::cameraRayOrigin(view, uv, resolution) == view.position);
+        }
+    }
+}
+
+TEST_CASE("camera: world to uv inverts the ray, perspective and orthographic") {
+    const projv::core::vec2 resolution(800.0f, 600.0f);
+    for (float orthoHeight : {0.0f, 12.0f}) {
+        projv::CameraView view = testView(projv::core::vec3(0.4f, -0.3f, 0.8f));
+        view.verticalFovDegrees = 45.0f;
+        view.orthographicHeight = orthoHeight;
+        view.orthographicBackoff = 5.0f;
+        for (projv::core::vec2 uv : {projv::core::vec2(0.5f), projv::core::vec2(0.1f, 0.85f), projv::core::vec2(0.97f, 0.02f)}) {
+            projv::core::vec3 point = projv::graphics::cameraRayOrigin(view, uv, resolution) +
+                                      projv::graphics::cameraRayDirection(view, uv, resolution) * 20.0f;
+            bool inFront = false;
+            projv::core::vec2 back = projv::graphics::cameraWorldToUV(view, point, resolution, &inFront);
+            CHECK(inFront);
+            CHECK(back.x == doctest::Approx(uv.x).epsilon(1e-4));
+            CHECK(back.y == doctest::Approx(uv.y).epsilon(1e-4));
+        }
+        bool inFront = true;
+        projv::graphics::cameraWorldToUV(view, view.position - glm::normalize(view.forward) * 50.0f, resolution, &inFront);
+        CHECK_FALSE(inFront);
+    }
+}
+
+TEST_CASE("camera: the uniforms are laid out as pjv_engine.sc declares them") {
+    projv::CameraView now = testView(projv::core::vec3(0.0f, 0.0f, 2.0f));
+    now.verticalFovDegrees = 50.0f;
+    now.orthographicHeight = 4.0f;
+    now.orthographicBackoff = 1.5f;
+    now.nearPlane = 0.1f;
+    now.farPlane = 900.0f;
+    now.jitter = projv::core::vec2(0.25f, -0.5f);
+    projv::CameraView before = testView(projv::core::vec3(1.0f, 0.0f, 0.0f));
+    before.jitter = projv::core::vec2(0.125f, 0.375f);
+
+    auto u = projv::graphics::cameraUniformValues(now, before);
+    CHECK(u[0] == projv::core::vec4(now.position, 50.0f));           // pjvCameraPos
+    CHECK(u[1] == projv::core::vec4(0.0f, 0.0f, 2.0f, 4.0f));        // pjvCameraDir, as set
+    CHECK(u[2] == projv::core::vec4(1.5f, 0.1f, 900.0f, 0.0f));      // pjvCameraLens
+    CHECK(u[3] == projv::core::vec4(0.25f, -0.5f, 0.125f, 0.375f));  // pjvCameraJitter
+    CHECK(u[4] == projv::core::vec4(before.position, 60.0f));        // pjvPrevCameraPos
+    CHECK(u[5] == projv::core::vec4(1.0f, 0.0f, 0.0f, 0.0f));        // pjvPrevCameraDir
+    CHECK(u[6] == projv::core::vec4(0.0f, 0.05f, 10000.0f, 0.0f));   // pjvPrevCameraLens
 }

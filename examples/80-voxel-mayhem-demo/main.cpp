@@ -1879,8 +1879,6 @@ struct Restir {
         restir_pt::Frame f;
         f.position = position;
         f.direction = direction;
-        f.prevPosition = prevPosition;
-        f.prevDirection = prevDirection;
         f.sunDirection = vec3(std::cos(view.sun) * -0.6402f, std::sin(view.sun), std::cos(view.sun) * 0.7682f);
         f.sunMoved = view.sun != prevSun;
         f.moved = f.sunMoved || glm::length(position - prevPosition) > 1e-5f || glm::length(direction - prevDirection) > 1e-6f;

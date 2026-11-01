@@ -34,14 +34,12 @@ $input v_texcoord0
 #include <bgfx_shader.sh>
 
 #include <pjv_utils_DDA.sc>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 uniform vec4 windowRes;
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 uniform vec4 frameCount;   // x = frame index
 
 #define PI 3.14159265358979
-#define FOV 60.0
 
 // Sun / sky description lives in pjv_sun_sky.sc, shared by all three
 // renderers so they read as the same scene under the same light.
@@ -135,13 +133,13 @@ void main() {
     vec2  uvJit  = v_texcoord0;
 
     Ray ray;
-    ray.origin = cameraPos.xyz;
+    ray.origin = pjvViewPosition();
     ray.direction = rayStartDirection(
         uvJit,
         windowRes.xy,
-        cameraPos.xyz,
-        normalize(cameraDir.xyz),
-        FOV
+        pjvViewPosition(),
+        normalize(pjvViewDirection()),
+        pjvViewFov()
     );
 
     Hit primary = traceScene(ray, 256u);

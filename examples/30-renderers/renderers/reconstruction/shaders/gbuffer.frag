@@ -25,14 +25,12 @@ $input v_texcoord0
 
 #include <bgfx_shader.sh>
 #include <pjv_utils_DDA.sc>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_sun_sky.sc>
 
 uniform vec4 windowRes;
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 uniform vec4 frameCount;
 
-#define FOV 60.0
 
 // One hard shadow ray. Soft shadows would need many, and this renderer is not the one making that
 // argument -- see renderers/pt-reference.
@@ -51,9 +49,9 @@ void main() {
     // AdvancedRenderer hit exactly this and solved it by reconstructing BEFORE its temporal pass;
     // this demo has no temporal pass at all, so it simply stays deterministic.
     Ray ray;
-    ray.origin    = cameraPos.xyz;
-    ray.direction = rayStartDirection(v_texcoord0, windowRes.xy, cameraPos.xyz,
-                                      normalize(cameraDir.xyz), FOV);
+    ray.origin    = pjvViewPosition();
+    ray.direction = rayStartDirection(v_texcoord0, windowRes.xy, pjvViewPosition(),
+                                      normalize(pjvViewDirection()), pjvViewFov());
 
     RayQuery q = pjvPrimaryQuery(100u);
     q.maxRaySteps = 256u;
@@ -101,7 +99,7 @@ void main() {
     // renderers/fast is where screen-space AO is shown.
     vec3 ambient = albedo * skyColor(normal) * 0.35;
 
-    gl_FragData[0] = vec4(P, length(P - cameraPos.xyz));
+    gl_FragData[0] = vec4(P, length(P - pjvViewPosition()));
     gl_FragData[1] = vec4(normal, voxelSize);
     gl_FragData[2] = vec4(ambient, 1.0);   // the unshadowed half of the lighting
     gl_FragData[3] = vec4(sunRadiance, visibility);

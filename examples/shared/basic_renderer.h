@@ -15,6 +15,7 @@
 #include "core/math.h"
 #include "graphics/disk_io.h"
 #include "graphics/engine_shaders.h"
+#include "graphics/camera.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -44,8 +45,10 @@ namespace basic_renderer {
         // Locals, not the arguments' members: setUniformToValue dispatches on its argument's exact type.
         projv::core::vec2 resolution = renderInstance.getWindowResolution();
         projv::core::vec4 view(options.crosshair ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
-        setUniformToValue(renderer, "cameraPos", position);
-        setUniformToValue(renderer, "cameraDir", direction);
+        projv::CameraView camera;
+        camera.position = position;
+        camera.forward = direction;
+        projv::graphics::setCamera(*renderer, camera);
         setUniformToValue(renderer, "windowRes", resolution);
         setUniformToValue(renderer, "viewOptions", view);
         projv::graphics::renderConstructedRenderer(renderInstance, renderer, &gpu);

@@ -55,6 +55,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 SAMPLER2D(previewColor,    0);
 SAMPLER2D(previewNormal,   1);
@@ -69,19 +70,13 @@ SAMPLER2D(giLight,         6);
 // x = frame index, y = the camera moved this frame, z = the frame it last moved on,
 // w = nonzero when there is no usable history at all (first frame, a resize, a scene load).
 uniform vec4 frameCount;
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 // The previous frame's camera. w lanes carry that frame's orthographic extent and backoff, because
 // an orthographic view has to be reprojected against the extent it was actually drawn with.
-uniform vec4 prevCameraPos;
-uniform vec4 prevCameraDir;
 // x = 1.0 under an orthographic projection, y = the world height the image spans when it is.
-uniform vec4 cameraProjection;
 // x = advanced preview. Off means gi.frag wrote black and there is nothing to integrate.
 uniform vec4 previewSettings;
 
 // Matches albedo.frag's primary ray and taa.frag's inverse of it.
-#define FOV 60.0
 
 // The weight this frame's samples carry when the history is good: an exponential moving average with
 // a window of roughly 1/HISTORY_ALPHA frames.
@@ -118,30 +113,9 @@ float depthKey(vec3 worldPosition, vec3 origin, vec3 forward) {
 // identical to taa.frag's, which inverts the same camera for Render mode. It has to be exact: an
 // inverse that disagrees by a fraction of a pixel smears every frame the camera moves.
 bool projectIntoPreviousFrame(vec3 worldPosition, out vec2 previousUV) {
-    vec3 forward = normalize(prevCameraDir.xyz);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right   = normalize(cross(forward, worldUp));
-    vec3 up      = normalize(cross(right, forward));
-    float aspectRatio = passTargetRes.x / passTargetRes.y;
-
-    vec2 ndc;
-    if (cameraProjection.x > 0.5) {
-        // Parallel rays: the plane the origins slide across sits prevCameraDir.w behind the camera,
-        // and the position maps onto it linearly. No depth term at all.
-        float halfHeight = max(prevCameraPos.w, 1e-6) * 0.5;
-        vec3 toPoint = worldPosition - (prevCameraPos.xyz - forward * prevCameraDir.w);
-        ndc = vec2(dot(toPoint, right) / (halfHeight * aspectRatio),
-                   dot(toPoint, up) / halfHeight);
-    } else {
-        vec3 toPoint = worldPosition - prevCameraPos.xyz;
-        float depth = dot(toPoint, forward);
-        if (depth <= 1e-4) return false;   // Behind the previous camera.
-        float scale = tan(radians(FOV * 0.5));
-        ndc = vec2(dot(toPoint, right) / (depth * scale * aspectRatio),
-                   dot(toPoint, up) / (depth * scale));
-    }
-
-    previousUV = vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    bool inFront;
+    previousUV = pjvPrevViewUV(worldPosition, passTargetRes.xy, inFront);
+    if (!inFront) return false;   // Behind the previous camera.
     return previousUV.x >= 0.0 && previousUV.x <= 1.0 &&
            previousUV.y >= 0.0 && previousUV.y <= 1.0;
 }
@@ -166,7 +140,7 @@ void main() {
         return;
     }
 
-    float currentKey = depthKey(surface.xyz, cameraPos.xyz, cameraDir.xyz);
+    float currentKey = depthKey(surface.xyz, pjvViewPosition(), pjvViewDirection());
 
     // Nothing safe to read at all -- the first frame, or the frame after the targets were
     // reallocated, when the history buffer holds whatever the driver left in it. An uninitialised
@@ -188,7 +162,7 @@ void main() {
     // along the previous frame's view axis, so recomputing that for the point being shaded now gives
     // the value it must have had if the two are the same surface. A disocclusion -- geometry that has
     // slid aside to reveal what was behind it -- fails this, which is exactly what it is for.
-    float expectedKey = depthKey(surface.xyz, prevCameraPos.xyz, prevCameraDir.xyz);
+    float expectedKey = depthKey(surface.xyz, pjvPrevViewPosition(), pjvPrevViewDirection());
     bool wroteASurface = history.a != 0.0;
     bool sameSurface = abs(history.a - expectedKey) <= DEPTH_TOLERANCE * max(abs(expectedKey), 1e-4);
 

@@ -24,6 +24,7 @@
 #include "core/world.h"
 #include "graphics/disk_io.h"
 #include "graphics/engine_shaders.h"
+#include "graphics/camera.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -145,11 +146,10 @@ namespace voxel_renderer {
             view.hasPrevious = true;
         }
         const bool moved = glm::length(position - view.prevPosition) > 1e-5f || glm::length(direction - view.prevDirection) > 1e-6f;
-        vec3 prevPosition = view.prevPosition, prevDirection = view.prevDirection;
-        setUniformToValue(renderer, "cameraPos", position);
-        setUniformToValue(renderer, "cameraDir", direction);
-        setUniformToValue(renderer, "prevCameraPos", prevPosition);
-        setUniformToValue(renderer, "prevCameraDir", prevDirection);
+        projv::CameraView camera;
+        camera.position = position;
+        camera.forward = direction;
+        projv::graphics::setCamera(*renderer, camera);
         vec4 sun(std::cos(view.sun) * -0.6402f, std::sin(view.sun), std::cos(view.sun) * 0.7682f, view.crosshair ? 1.0f : 0.0f);
         setUniformToValue(renderer, "sunDir", sun);
         // Sun, sky, exposure, the finest voxel's edge.

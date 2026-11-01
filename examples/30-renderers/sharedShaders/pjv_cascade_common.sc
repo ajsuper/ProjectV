@@ -10,14 +10,12 @@
 
 #include <pjv_sun_sky.sc>
 #include <pjv_math.sc>   // pjvOctDecode
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 uniform vec4 windowRes;
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 uniform vec4 frameCount;
 
 #define PI 3.14159265358979
-#define FOV 60.0
 
 // World-unit scale factor. These shaders were tuned when a voxel was ~0.0727 world units
 // (fit-to-extent voxelizer). The voxelizer now emits voxelScale = 1 (1 voxel = 1 world unit),
@@ -142,19 +140,9 @@ vec2 cascadeJitter() {
 
 // ---- Camera projection (world -> screen UV), exact inverse of rayStartDirection. ----
 vec2 worldToUV(vec3 P, vec3 camPos, vec3 camDirV, vec2 res, float fov, out bool valid) {
-    vec3 forward = normalize(camDirV);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right   = normalize(cross(forward, worldUp));
-    vec3 up      = normalize(cross(right, forward));
-    vec3 v = P - camPos;
-    float z = dot(v, forward);
-    if (z <= 1e-4) { valid = false; return vec2(-1.0); }
-    float scale  = tan(radians(fov * 0.5));
-    float aspect = res.x / res.y;
-    float ndcx = (dot(v, right) / z) / (scale * aspect);
-    float ndcy = (dot(v, up)    / z) / scale;
-    vec2 flip = (vec2(ndcx, ndcy) + 1.0) * 0.5;
-    vec2 uv = vec2(flip.x, 1.0 - flip.y);
+    bool inFront;
+    vec2 uv = pjvPerspectiveUV(P, res, camPos, camDirV, fov, inFront);
+    if (!inFront) { valid = false; return vec2(-1.0); }   // behind the camera
     valid = all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)));
     return uv;
 }

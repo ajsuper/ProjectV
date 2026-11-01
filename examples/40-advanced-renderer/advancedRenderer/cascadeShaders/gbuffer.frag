@@ -49,17 +49,15 @@ $input v_texcoord0
 #include <bgfx_shader.sh>
 #include <pjv_random.sc>     // pjvHashSeed, pjvHalton, pjvInterleavedGradientNoise
 #include <pjv_utils_DDA.sc>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 uniform vec4 frameCount;
 // x = the upscale bypass (Q key), read by upscale.frag and taa.frag rather than here.
 // y = SHADOW RAYS OFF (T key). See the gate at sunVisibility in main().
 uniform vec4 debugParams;
 
 #define PI 3.14159265358979
-#define FOV 60.0
 
 #include <pjv_sun_sky.sc>
 #include <pjv_face_key.sc>
@@ -240,9 +238,9 @@ void main() {
     vec2 uvJit  = v_texcoord0 + jitter / passTargetRes.xy;
 
     Ray ray;
-    ray.origin = cameraPos.xyz;
-    ray.direction = rayStartDirection(uvJit, passTargetRes.xy, cameraPos.xyz,
-                                      normalize(cameraDir.xyz), FOV);
+    ray.origin = pjvViewPosition();
+    ray.direction = rayStartDirection(uvJit, passTargetRes.xy, pjvViewPosition(),
+                                      normalize(pjvViewDirection()), pjvViewFov());
 
     // Per pixel and per frame. Feeds the sun-cone sample far below AND the peel's stochastic
     // interface decision, which is why it is declared up here rather than beside its first use --
@@ -349,7 +347,7 @@ void main() {
 #if PRIMARY_LOD_ENABLE
     // Where one LOD-0 voxel projects to exactly one pixel. Derived from the live resolution, so it
     // retunes itself with the window and the render scale.
-    float voxelsPerPixelPerUnit = (2.0 * tan(radians(FOV * 0.5))) / passTargetRes.y;
+    float voxelsPerPixelPerUnit = (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;
     float crossoverDistance     = PRIMARY_LOD_BIAS / max(voxelsPerPixelPerUnit, 1e-9);
 
     // Interleaved gradient noise, on the UNJITTERED pixel so it is frame-invariant. Chosen over a hash
@@ -634,7 +632,7 @@ void main() {
         direct += vec3(6.0, 3.3, 0.0);
     }
 
-    float camDist = dot(P - cameraPos.xyz, normalize(cameraDir.xyz));
+    float camDist = dot(P - pjvViewPosition(), normalize(pjvViewDirection()));
 
     // ---- The per-face anchor and the per-face identity -------------------------------------
     // The face centre, from the march's world-space box. A position, so the float32 round trip

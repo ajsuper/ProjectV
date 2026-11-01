@@ -21,6 +21,7 @@ $input v_texcoord0
 // dir(n1); -1 none) -- this frame's surfaces, for next frame's reprojection.
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include "restir_common.sc"
 
 SAMPLER2D(accDiff, 0);
@@ -57,8 +58,8 @@ void main() {
     if (restirDenoise.y > 0.5 && restirJitter.w < 0.5 && frameCount.z < 0.5) {   // the sun moved: start over
         bool nowInFront;
         bool thenInFront;
-        vec2 uvNow = restirWorldToUV(s.x, cameraPos.xyz, cameraDir.xyz, res, nowInFront);
-        vec2 uvThen = restirWorldToUV(s.x, prevCameraPos.xyz, prevCameraDir.xyz, res, thenInFront);
+        vec2 uvNow = restirWorldToUV(s.x, pjvViewPosition(), pjvViewDirection(), res, nowInFront);
+        vec2 uvThen = restirWorldToUV(s.x, pjvPrevViewPosition(), pjvPrevViewDirection(), res, thenInFront);
         vec2 pix = ((vec2(p) + 0.5) / res + (uvThen - uvNow)) * res - 0.5;
         if (thenInFront) {
             ivec2 base = ivec2(floor(pix));

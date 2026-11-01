@@ -59,6 +59,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_random.sc>     // pjvInterleavedGradientNoise
 
 SAMPLER2D(gPos,    0);   // FBO1[0]: xyz world pos, a = camDist (a < 0 => sky)
@@ -130,11 +131,11 @@ void main() {
     // to name. `valid` is ignored on purpose -- an off-screen sun still casts shafts INTO the frame,
     // and the edge fade below is what handles it. What cannot be ignored is the sun being BEHIND the
     // camera, where the projection is meaningless; that is the `facing` test.
-    vec3  forward = normalize(cameraDir.xyz);
+    vec3  forward = normalize(pjvViewDirection());
     float facing  = dot(forward, SUN_DIR);
     bool  unused;
-    vec2  sunUV   = worldToUV(cameraPos.xyz + SUN_DIR, cameraPos.xyz, cameraDir.xyz,
-                              passTargetRes.xy, FOV, unused);
+    vec2  sunUV   = worldToUV(pjvViewPosition() + SUN_DIR, pjvViewPosition(), pjvViewDirection(),
+                              passTargetRes.xy, pjvViewFov(), unused);
 
     vec2 uv = v_texcoord0;
 
@@ -159,7 +160,7 @@ void main() {
     // `origin + direction * 1e5`, so the direction back out of it is the true view direction either
     // way. Only the DISTANCE has to be substituted.
     vec4  gp   = texture2D(gPos, pjvSnapToTexel(uv, passInputRes[0].xy));
-    vec3  dir  = normalize(gp.xyz - cameraPos.xyz);
+    vec3  dir  = normalize(gp.xyz - pjvViewPosition());
     float dist = gp.a < 0.0 ? FOG_SKY_DISTANCE : gp.a;
     float air  = fogInscatterFraction(dir, dist);
 

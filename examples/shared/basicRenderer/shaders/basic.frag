@@ -18,14 +18,12 @@ $input v_texcoord0
 
 #include <bgfx_shader.sh>
 #include <pjv_utils_DDA.sc>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_color.sc>
 
 uniform vec4 windowRes;     // xy: the window, in pixels
-uniform vec4 cameraPos;     // xyz
-uniform vec4 cameraDir;     // xyz, need not be normalised
 uniform vec4 viewOptions;   // x: draw a crosshair (1) or not (0)
 
-#define FOV 60.0
 #define SUN normalize(vec3(0.35, 0.85, 0.4))
 
 vec3 sky(vec3 direction) {
@@ -35,9 +33,9 @@ vec3 sky(vec3 direction) {
 
 void main() {
     Ray ray;
-    ray.origin    = cameraPos.xyz;
+    ray.origin    = pjvViewPosition();
     ray.direction = rayStartDirection(
-        v_texcoord0, windowRes.xy, cameraPos.xyz, normalize(cameraDir.xyz), FOV);
+        v_texcoord0, windowRes.xy, pjvViewPosition(), normalize(pjvViewDirection()), pjvViewFov());
 
     // A query carries the march's budget and level-of-detail policy. The march
     // stops at the first hit, so a large budget costs only the rays that need it:

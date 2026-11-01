@@ -50,6 +50,7 @@ $input v_texcoord0
 #define PJV_MARCH_STATS
 #endif
 #include <pjv_utils_DDA.sc>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <grr_common.sc>
 
 // ---- The cloud's embers ------------------------------------------------------------------------------
@@ -189,8 +190,8 @@ void main() {
     vec2 jitter = (vec2(pjvHalton(phase, 2), pjvHalton(phase, 3)) - 0.5) * frameParams.y;
 
     Ray ray;
-    ray.origin = cameraPos.xyz;
-    ray.direction = grrCameraRay(v_texcoord0 + jitter * passTargetRes.zw, passTargetRes.xy, cameraDir.xyz);
+    ray.origin = pjvViewPosition();
+    ray.direction = grrCameraRay(v_texcoord0 + jitter * passTargetRes.zw, passTargetRes.xy, pjvViewDirection());
     vec3 primaryDirection = ray.direction;
     vec3 sun = normalize(sunDir.xyz);
     RayQuery query = pjvPrimaryQuery(PRIMARY_STEPS);
@@ -221,15 +222,15 @@ void main() {
                             isMiss(found) ? 0.0 : 1.0);
 #endif
             // An ember cube nearer than the scene's voxel wins.
-            ember = traceEmbers(cameraPos.xyz, primaryDirection, isMiss(found) ? 1.0e9 : found.rayT, emberT, emberNormal, emberCube, emberVoxel);
+            ember = traceEmbers(pjvViewPosition(), primaryDirection, isMiss(found) ? 1.0e9 : found.rayT, emberT, emberNormal, emberCube, emberVoxel);
             if (!ember && isMiss(found)) break;
             if (ember) {
                 n = emberNormal;
-                surface = cameraPos.xyz + primaryDirection * emberT;
+                surface = pjvViewPosition() + primaryDirection * emberT;
                 bias = SHADOW_BIAS_VOXELS * 0.3;
             } else {
                 n = normalize(found.normal);
-                surface = cameraPos.xyz + primaryDirection * found.rayT;
+                surface = pjvViewPosition() + primaryDirection * found.rayT;
                 bias = SHADOW_BIAS_VOXELS * found.foundBox.size;
             }
             wantMoon = renderParams.x > 0.5 && dot(n, sun) > 0.0;
@@ -300,7 +301,7 @@ void main() {
     }
 
     vec3 normal = normalize(hit.normal);
-    vec3 P = cameraPos.xyz + primaryDirection * hit.rayT;
+    vec3 P = pjvViewPosition() + primaryDirection * hit.rayT;
     // The geometry-only query resolves no material, so the hit's is fetched here: one descent, for the
     // primary ray only.
     VoxelMaterial material = fetchVoxelMaterialFromHit(hit);

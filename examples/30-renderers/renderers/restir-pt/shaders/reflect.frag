@@ -23,6 +23,7 @@ $input v_texcoord0
 // 6 gFace (w: a voxel's edge, the "same point" tolerance).
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include "restir_trace.sc"
 
 SAMPLER2D(gPos, 0);
@@ -59,7 +60,7 @@ void main() {
     vec3 P = surface.xyz;
     vec3 face = normalize(texelFetch(gNormal, p, 0).xyz + vec3(0.0, 1e-6, 0.0));
     vec3 N = normalize(texelFetch(gSoftNormal, p, 0).xyz + vec3(0.0, 1e-6, 0.0));
-    vec3 V = normalize(cameraPos.xyz - P);
+    vec3 V = normalize(pjvViewPosition() - P);
     vec3 R = reflect(-V, N);
     // A wave tilted far enough sends the ray into the face: fold it back out, about the face's plane.
     if (dot(R, face) < 0.0) R = R - 2.0 * dot(R, face) * face;
@@ -84,11 +85,11 @@ void main() {
         // The screen, where this frame shows the same point: last frame's light there.
         vec2 res = passTargetRes.xy;
         bool inFront;
-        vec2 uv = restirWorldToUV(H, cameraPos.xyz, cameraDir.xyz, res, inFront);
+        vec2 uv = restirWorldToUV(H, pjvViewPosition(), pjvViewDirection(), res, inFront);
         if (inFront && uv.x >= 0.0 && uv.y >= 0.0 && uv.x < 1.0 && uv.y < 1.0) {
             vec4 seen = texelFetch(gPos, ivec2(uv * res), 0);
             float within = 1.5 * texelFetch(gFace, ivec2(uv * res), 0).w + restirSettings.w * seen.w * 2.0;
-            vec2 then = restirWorldToUV(H, prevCameraPos.xyz, prevCameraDir.xyz, res, inFront);
+            vec2 then = restirWorldToUV(H, pjvPrevViewPosition(), pjvPrevViewDirection(), res, inFront);
             if (seen.w >= 0.0 && length(seen.xyz - H) < within && inFront &&
                 then.x >= 0.0 && then.y >= 0.0 && then.x < 1.0 && then.y < 1.0) {
                 vec2 edge = min(then, 1.0 - then);

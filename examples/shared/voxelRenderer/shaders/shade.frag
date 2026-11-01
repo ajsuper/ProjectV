@@ -23,6 +23,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <grr_common.sc>
 
 SAMPLER2D(gPos,    0);
@@ -61,12 +62,12 @@ bool sameSurface(float depth, vec3 normal, vec2 uv, out float sunSeen) {
 void main() {
     vec4 pos = texture2D(gPos, v_texcoord0);
     vec4 albedoE = texture2D(gAlbedo, v_texcoord0);
-    vec3 view = normalize(pos.xyz - cameraPos.xyz);
+    vec3 view = normalize(pos.xyz - pjvViewPosition());
     if (pos.w < 0.0) {
         // Sky: its colour is in gAlbedo. Fogged at a long distance so the horizon and the far
         // geometry in front of it meet at the same colour.
-        vec3 dir = grrCameraRay(v_texcoord0, passTargetRes.xy, cameraDir.xyz);
-        gl_FragColor = vec4(grrApplyFog(albedoE.rgb, cameraPos.xyz, dir, 1.0e5), 1.0);
+        vec3 dir = grrCameraRay(v_texcoord0, passTargetRes.xy, pjvViewDirection());
+        gl_FragColor = vec4(grrApplyFog(albedoE.rgb, pjvViewPosition(), dir, 1.0e5), 1.0);
         return;
     }
     float depth = pos.w;
@@ -143,5 +144,5 @@ void main() {
         gl_FragColor = vec4(vec3(occlusion, occlusion, occlusion), 1.0);
         return;
     }
-    gl_FragColor = vec4(grrApplyFog(colour, cameraPos.xyz, view, depth), 1.0);
+    gl_FragColor = vec4(grrApplyFog(colour, pjvViewPosition(), view, depth), 1.0);
 }

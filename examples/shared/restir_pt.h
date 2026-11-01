@@ -21,6 +21,7 @@
 #include "core/world.h"
 #include "graphics/disk_io.h"
 #include "graphics/engine_shaders.h"
+#include "graphics/camera.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
@@ -98,7 +99,6 @@ namespace restir_pt {
 
     struct Frame {
         vec3  position{0.0f}, direction{0.0f, 0.0f, 1.0f};
-        vec3  prevPosition{0.0f}, prevDirection{0.0f, 0.0f, 1.0f};
         vec3  sunDirection{0.0f, 1.0f, 0.0f};   // normalized
         bool  moved = false;      // the camera or the sun
         bool  sunMoved = false;   // the sun: the light changed, so every history starts over
@@ -181,8 +181,10 @@ namespace restir_pt {
         vec4 normals{s.normalBlur, clock, 0.0f, 0.0f};
         setUniformToValue(renderer, "restirNormals", normals);
 
-        vec4 cameraPos{frame.position, 1.0f}, cameraDir{frame.direction, 0.0f};
-        vec4 prevCameraPos{frame.prevPosition, 1.0f}, prevCameraDir{frame.prevDirection, 0.0f};
+        projv::CameraView camera;
+        camera.position = frame.position;
+        camera.forward = frame.direction;
+        projv::graphics::setCamera(*renderer, camera);
         vec4 sunDir{frame.sunDirection, 0.0f};
         // z: the sun moved -- the light changed, so every history (the reservoirs' cached light included) starts over.
         vec4 frameCount{float(frame.count), frame.moved ? 1.0f : 0.0f, frame.sunMoved ? 1.0f : 0.0f, 0.0f};
@@ -191,16 +193,12 @@ namespace restir_pt {
         vec4 jitter{float(offset[0]), float(offset[1]), float(giStride), frame.first ? 1.0f : 0.0f};
         // w: one render texel's width per unit of distance, for the tests that ask "is this the same surface?".
         const float renderHeight = std::max(frame.window.y * RENDER_SCALE, 1.0f);
-        const float pixelWidth = 2.0f * std::tan(30.0f * 3.14159265f / 180.0f) / renderHeight;
+        const float pixelWidth = 2.0f * std::tan(camera.verticalFovDegrees * 0.5f * 3.14159265f / 180.0f) / renderHeight;
         // The image's history: none when the sun moved (the light is new); short while the camera moves, so
         // changing light is not dragged along; 64 frames on a still view -- enough to average the jitter and
         // what noise is left, short enough that the GI's own history, not this one, decides how fast it settles.
         const float imageHistory = frame.sunMoved || s.raw ? 1.0f : frame.moved ? 16.0f : 64.0f;
         vec4 settings{6.0f, finest * 0.05f, imageHistory, pixelWidth};
-        setUniformToValue(renderer, "cameraPos", cameraPos);
-        setUniformToValue(renderer, "cameraDir", cameraDir);
-        setUniformToValue(renderer, "prevCameraPos", prevCameraPos);
-        setUniformToValue(renderer, "prevCameraDir", prevCameraDir);
         setUniformToValue(renderer, "sunDir", sunDir);
         setUniformToValue(renderer, "frameCount", frameCount);
         setUniformToValue(renderer, "restirReuse", reuse);

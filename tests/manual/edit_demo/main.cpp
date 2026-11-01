@@ -36,6 +36,7 @@
 #include "graphics/render_instance.h"
 #include "graphics/disk_io.h"
 #include "graphics/engine_shaders.h"
+#include "graphics/camera.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -72,20 +73,18 @@ struct FrameContext {
 static void uploadCommonUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
     projv::core::vec3 cameraPosition = ctx.cameraPosition;
     projv::core::vec3 cameraDirection = ctx.cameraDirection;
-    projv::core::vec3 prevCameraPosition = ctx.prevCameraPosition;
-    projv::core::vec3 prevCameraDirection = ctx.prevCameraDirection;
     projv::core::vec2 windowResolution = ctx.windowResolution;
     projv::core::vec4 frameCount = { (float)ctx.frameCount, (float)ctx.cameraMoved, (float)ctx.frameCameraLastMovedOn, 0 };
     projv::core::vec2 texelSize = { 1 / windowResolution.x, 1 / windowResolution.y };
     projv::core::vec4 sunDir = { ctx.sunDirection.x, ctx.sunDirection.y, ctx.sunDirection.z, 0.0f };
-    projv::graphics::setUniformToValue(renderer, "cameraPos",  cameraPosition);
-    projv::graphics::setUniformToValue(renderer, "cameraDir",  cameraDirection);
+    projv::CameraView camera;
+    camera.position = cameraPosition;
+    camera.forward = cameraDirection;
+    projv::graphics::setCamera(*renderer, camera);   // and last frame's, for the TAA, is the engine's
     projv::graphics::setUniformToValue(renderer, "windowRes",  windowResolution);
     projv::graphics::setUniformToValue(renderer, "frameCount", frameCount);
     projv::graphics::setUniformToValue(renderer, "texelSize",  texelSize);
     projv::graphics::setUniformToValue(renderer, "sunDir",     sunDir);
-    projv::graphics::setUniformToValue(renderer, "prevCameraPos", prevCameraPosition);
-    projv::graphics::setUniformToValue(renderer, "prevCameraDir", prevCameraDirection);
 }
 
 // =============================================================================

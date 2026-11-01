@@ -12,6 +12,7 @@
 #include "core/math.h"
 #include "data_structures/texture.h"
 #include "data_structures/framebuffer.h"
+#include "data_structures/camera_view.h"
 #include <bgfx/bgfx.h>
 
 namespace projv {
@@ -56,6 +57,10 @@ namespace projv {
         // A row whose kind is 0 is unused, which is what every renderer that never sets one has.
         bgfx::UniformHandle pjvMotionSets;
         bgfx::UniformHandle pjvAnimTime;    // (seconds, 0, 0, 0)
+        // The camera (CameraView) and the one this renderer last drew from, engine-owned like the
+        // rest: pjvCameraPos, pjvCameraDir, pjvCameraLens, pjvCameraJitter, pjvPrevCameraPos,
+        // pjvPrevCameraDir, pjvPrevCameraLens, in graphics::cameraUniformValues' order.
+        bgfx::UniformHandle pjvCamera[7];
     };
 
     // vec4 slots in the pjvMotionSets array: two per set, MAX_MOTION_SETS sets. Named here rather
@@ -105,6 +110,12 @@ namespace projv {
     struct ConstructedRenderer {
         BGFXResources resources;
         std::vector<BGFXDependencyGraph> dependencyGraph;
+        // What it draws from (graphics::setCamera), and what it drew from last: the previous frame,
+        // for reprojection. A renderer's own history, so two renderers in one program (the editor's
+        // viewport and its path tracer) each reproject against what they themselves drew.
+        CameraView camera;
+        CameraView drawnCamera;
+        bool hasDrawnCamera = false;
     };
 }
 

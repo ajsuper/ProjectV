@@ -47,6 +47,26 @@ bgfx, and the active renderer.
 | `validateFrameBufferAttachmentSizes` | Throws if one framebuffer's attachments disagree on size |
 | `readFile(path)` | |
 
+## `graphics/camera.h`
+
+[`include/graphics/camera.h`](../../include/graphics/camera.h): the engine's camera model on the CPU,
+the same arithmetic as [`pjv_camera.sc`](shader-library.md) on the GPU.
+
+| Name | What |
+|---|---|
+| `setCamera(renderer, CameraView)` | What the renderer draws from next. The driver uploads it, and what that renderer last drew from as the previous frame, before every pass |
+| `cameraBasis(forward)` | `{forward, right, up}`: no roll; world up +y, or +z within 0.999 of vertical |
+| `cameraRayOrigin`, `cameraRayDirection(camera, uv, resolution)` | The ray through a pixel (uv top-left origin); orthographic rays start on the plane `orthographicBackoff` behind the camera |
+| `cameraWorldToUV(camera, point, resolution, &inFront)` | Where a point lands: the ray's inverse |
+| `cameraUniformValues(camera, previous)` | The seven `pjvCamera*` uniforms' values, in order |
+
+```cpp
+projv::CameraView view;
+view.position = eye;
+view.forward = direction;           // need not be unit length
+graphics::setCamera(*renderer, view);
+```
+
 ## `graphics/engine_shaders.h`
 
 [`include/graphics/engine_shaders.h`](../../include/graphics/engine_shaders.h): the engine's own

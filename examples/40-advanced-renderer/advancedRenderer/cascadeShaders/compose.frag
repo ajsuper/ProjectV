@@ -47,6 +47,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 SAMPLER2D(accumR,   0);   // FBO7[0]: temporally accumulated indirect irradiance R, a = age
 SAMPLER2D(gPos,     3);   // FBO1[0]: xyz world pos, a = camDist (a < 0 => sky)
@@ -468,7 +469,7 @@ float ambientOcclusion(vec2 uv, vec3 P, vec3 N, float camDist, float voxelSize) 
 #if AO_ENABLE
     float radiusWorld = AO_RADIUS_VOXELS * max(voxelSize, 1e-4);
     // World units per pixel at this depth -- the same footprint the temporal gates measure against.
-    float pixelWorld  = max(camDist * (2.0 * tan(radians(FOV * 0.5))) / passTargetRes.y, 1e-6);
+    float pixelWorld  = max(camDist * (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y, 1e-6);
     float radiusPixels = min(radiusWorld / pixelWorld, AO_MAX_PIXELS);
     // Under about a pixel there is no neighbourhood left to sample and every tap would read this same
     // texel, which sums to zero occlusion anyway -- return early rather than pay 16 fetches for it.
@@ -634,7 +635,7 @@ vec3 filteredIndirect(vec2 uv, vec3 P, vec3 N, float camDist, float voxelSize) {
     // This is the deliberate trade: blur the far-field indirect term to buy temporal stability. It is
     // cheap to take because the term is low frequency by construction -- direct sun, emission and
     // albedo are all kept out of it upstream and stay per-pixel sharp.
-    float pixelWorld  = max(camDist * (2.0 * tan(radians(FOV * 0.5))) / passTargetRes.y, 1e-6);
+    float pixelWorld  = max(camDist * (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y, 1e-6);
     float subPixel    = 1.0 - smoothstep(0.75, 2.0, voxelSize / pixelWorld);
 
     float stride = mix(1.0, FILTER_MAX_STRIDE, max(t, subPixel));
@@ -713,7 +714,7 @@ void main() {
     if (gp.a < 0.0) {
         // gPos.xyz for a background pixel is `origin + direction * 1e5`, so the view direction comes
         // straight back out of it and the distance is FOG_SKY_DISTANCE by construction.
-        vec3 skyDir = normalize(gp.xyz - cameraPos.xyz);
+        vec3 skyDir = normalize(gp.xyz - pjvViewPosition());
         // Unfogged with a debug mode on, or the marker gbuffer.frag wrote here is erased. See animDebug.
         gl_FragData[0] = composeDebugMode() != 0
                        ? vec4(emission, 1.0)
@@ -728,7 +729,7 @@ void main() {
 
     // Toward the surface, and back toward the eye. Both from the G-buffer position rather than from a
     // reconstructed camera ray, so they are exact at any render scale and cost one normalize.
-    vec3 viewDir = normalize(P - cameraPos.xyz);
+    vec3 viewDir = normalize(P - pjvViewPosition());
     vec3 V = -viewDir;
 
     // Contact shading for the ambient terms. Deterministic, so it costs the temporal filters nothing.

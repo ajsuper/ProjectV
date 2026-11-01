@@ -1,6 +1,6 @@
 # Shader library and an engine basic renderer
 
-Status: **in progress**: S0 and S1 built 2026-10-28; S2 next. Approved 2026-10-27 (open questions answered:
+Status: **in progress**: S0 and S1 built 2026-10-28, S2 2026-10-30; S3 next. Approved 2026-10-27 (open questions answered:
 tolerance D5, `projv::cam` removed D4, embedded engine shaders D3, S5 in scope with modularity first D8). Comes before
 [ui.md](ui.md), whose passes (blur, composite) are built from it.
 
@@ -279,6 +279,74 @@ binaries swapped into its staged folders, and every pair is bit-identical:
 | Scene editor Render mode (path_trace) | `EDITOR_SAVE_RENDER=150`, SanMiguel |
 
 Sibenik cannot be used: its `.data` is version 1, which the loader rejects.
+
+**S2** (2026-10-30).
+
+*Where it differs from D4:*
+- `CameraView` is in `data_structures/camera_view.h` and namespace `projv`, with the other plain data
+  types, rather than `graphics::`. Its functions are in `graphics/camera.h`.
+- The camera is set per renderer (`graphics::setCamera(renderer, view)`, stored on
+  `ConstructedRenderer`), not read from `world.ctx()`. The driver (`renderConstructedRenderer`,
+  `performRenderPasses`) takes a renderer and has no world. More to the point, the previous frame has to
+  be the view that renderer last drew from: its history textures are from then. The editor's viewport
+  and path tracer each keep their own history, where before they shared the editor's.
+- Orientation is a forward vector with the engine's no-roll basis, the convention every renderer
+  already used. `CameraView` also has an orthographic height and backoff (the editor's orthographic
+  and isometric views), near/far, and a sub-pixel jitter. Every renderer still makes its own jitter
+  in its shader.
+
+*Built:*
+- Seven engine uniforms in `pjv_engine.sc`: `pjvCameraPos` (w: FOV), `pjvCameraDir` (w: orthographic
+  height), `pjvCameraLens`, `pjvCameraJitter`, and the previous frame's `Pos`/`Dir`/`Lens`. The driver
+  sets them before every pass.
+- `pjv_camera.sc`:
+  - any camera: `pjvCameraBasis`, `pjvPerspectiveRay`, `pjvOrthographicOrigin`,
+    `pjvPerspectiveUV`, `pjvOrthographicUV`;
+  - the engine's: `pjvView*`, `pjvViewRayOrigin`/`Direction`, and `pjvPrevViewUV`, which reprojects
+    under the projection that frame had.
+- `graphics/camera.h` is the same arithmetic on the CPU: `cameraBasis`, `cameraRayOrigin`/`Direction`,
+  `cameraWorldToUV`, `setCamera`, `cameraUniformValues`.
+- `pjv_utils_DDA.sc`'s `rayStartDirection` calls `pjvPerspectiveRay`.
+
+*Moved onto it:* every renderer's shaders. That is the gallery's five, the basic, voxel, night and
+advanced renderers, both editor renderers, and the party and playground HUDs.
+- The 23 `#define FOV 60.0` (and `GRR_FOV`, `RESTIR_FOV`, `REF_FOV`) are gone.
+- So are the declarations of `cameraPos`/`cameraDir`/`prevCameraPos`/`prevCameraDir`/`cameraProjection`,
+  and the 25 hand-copied bases.
+- The copied rays and inverses now call `pjv_camera.sc`: `worldToUV`, `grrCameraRay`, `grrWorldToUV`,
+  `restirWorldToUV`, `rayDirection`, `upscaleRayDirection`, `viewRay`, `primaryRay`,
+  `projectIntoPreviousFrame`.
+- C++: every `setUniformToValue("cameraPos"...)` is now `setCamera`. The gallery, the editor and
+  restir-pt's `Frame` no longer track the previous camera for upload. restir-pt's pixel-width term
+  reads the FOV from the camera rather than a literal 30°.
+
+*`projv::cam`:* `data_structures/camera.h` is deleted. The plan was wrong that the terrain generator
+used it: its 29 `cam.` uses are its own `CameraState cam`, and nothing included the header.
+
+*Sizes:* +0.2% in total (5903.2 → 5916.2 kB); 49 of 99 shaders unchanged.
+- The traversal shaders are within 0.4%.
+- The small post-processing passes grow 2-10%. The field of view is now a uniform, so
+  `tan(radians(fov / 2))` is computed at run time instead of folded into a constant. And the
+  editor's reprojections branch on the previous frame's own projection.
+
+*Captures:*
+- Gallery at the baseline view, five renderers: all pass. restir-pt mean 0.029%; the others ≤ 0.0015%,
+  a handful of silhouette pixels flipped. The window came up at 840×520, not 1072 tall, so the S1
+  captures were retaken at the same size, just before, from a build of S1.
+- Advanced renderer (frame 240): passes. Mean 0.0005%, 0.01% of pixels over 2/255.
+- Explosion demo and the editor (viewport, Render mode): S1 captured; S2 not yet.
+
+*Not done:* the timings D8.5 asks for (the gallery and the demos' benches, before and after,
+announced). And an orthographic editor capture, since the bench views are perspective only.
+
+*Tests:* `camera:*` in `test_shaders.cpp`:
+- the ray equals `utils::rayDirectionThroughImage` for four views, the near-vertical fallback
+  included;
+- `cameraWorldToUV` inverts the ray, perspective and orthographic, and rejects a point behind;
+- the uniforms' layout.
+
+The manual tests `editing_p1` and `edit_demo` were found not to compile, for reasons that predate this
+plan: known-latent-issues #16.
 
 ## Open questions
 

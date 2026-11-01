@@ -15,9 +15,9 @@ marching rays through the voxel scene; its comments are the full reference, this
 ## A complete primary ray
 
 ```glsl
-Ray ray;
-ray.origin    = cameraPos.xyz;
-ray.direction = rayStartDirection(v_texcoord0, windowRes.xy, cameraPos.xyz, normalize(cameraDir.xyz), 60.0);
+Ray ray;                                     // the engine camera, from pjv_camera.sc
+ray.origin    = pjvViewRayOrigin(v_texcoord0, passTargetRes.xy);
+ray.direction = pjvViewRayDirection(v_texcoord0, passTargetRes.xy);
 
 RayQuery q = pjvPrimaryQuery(256u);          // max steps
 pjvQueryWantMaterial(q);                     // have the march resolve the material
@@ -32,11 +32,12 @@ vec3 position   = ray.origin + ray.direction * sh.hit.rayT;   // only valid with
 
 | File | Holds | Plan |
 |---|---|---|
+| [`shaders/include/pjv_camera.sc`](../../shaders/include/pjv_camera.sc) | The camera model, as `graphics/camera.h` on the CPU. Any camera: `pjvCameraBasis`, `pjvPerspectiveRay`, `pjvOrthographicOrigin`, `pjvPerspectiveUV`, `pjvOrthographicUV`. The engine's (`graphics::setCamera`): `pjvViewPosition`/`Direction`/`Fov`, `pjvViewIsOrthographic`, `pjvViewRayOrigin`/`pjvViewRayDirection(uv, res)`, and the frame before: `pjvPrevView*`, `pjvPrevViewUV(P, res, inFront)`. | [shader-library](../plans/shader-library.md) |
 | [`shaders/include/pjv_math.sc`](../../shaders/include/pjv_math.sc) | `PJV_PI`, `PJV_TWO_PI`; `pjvBasisAround(n)` (tangent from +z, or +y near the poles); octahedral `pjvOctEncode`/`pjvOctDecode` in [-1, 1]². | [shader-library](../plans/shader-library.md) |
 | [`shaders/include/pjv_random.sc`](../../shaders/include/pjv_random.sc) | `pjvPcg(state)` (one PCG step); `pjvRandomUnit` (32 bits, may round to 1) and `pjvRandomUnit24` ([0, 1) exactly); `pjvHashSeed(uvec3)`; `pjvHash13`/`pjvHash23`/`pjvValueNoise` (−1..1); `pjvInterleavedGradientNoise(pixel)`; `pjvBayer4(pixel)`; `pjvHalton(index, base)`. | [shader-library](../plans/shader-library.md) |
 | [`shaders/include/pjv_sampling.sc`](../../shaders/include/pjv_sampling.sc) | Local-space (about +z) directions from `u` in [0, 1)²: `pjvSampleCosineHemisphere(u)`, `pjvSampleUniformCone(u, cosMax)`. The caller picks the basis: it is part of its noise pattern. | [shader-library](../plans/shader-library.md) |
 | [`shaders/include/pjv_filter.sc`](../../shaders/include/pjv_filter.sc) | `pjvTexelTent(tapCentre, srcPos)`; `pjvCatmullRomTaps(uv, res)`: the five-tap bicubic's tap positions and weights, sampled by the caller. | [shader-library](../plans/shader-library.md) |
-| [`shaders/include/pjv_engine.sc`](../../shaders/include/pjv_engine.sc) | Every engine-owned uniform, declared once: `passTargetRes`, `passInputRes[8]`, `pjvAnimTime`, `pjvMotionSets[48]`. Include it rather than declaring them. | [shader-library](../plans/shader-library.md) |
+| [`shaders/include/pjv_engine.sc`](../../shaders/include/pjv_engine.sc) | Every engine-owned uniform, declared once: `passTargetRes`, `passInputRes[8]`, `pjvAnimTime`, `pjvMotionSets[48]`, and the camera's seven `pjvCamera*`/`pjvPrevCamera*`. Include it rather than declaring them. | [shader-library](../plans/shader-library.md) |
 | [`shaders/include/pjv_color.sc`](../../shaders/include/pjv_color.sc) | The colour convention: `pjvSrgbToLinear`/`pjvLinearToSrgb`, `pjvTonemapNeutral`, `pjvDisplay` (exposure → tone curve → sRGB → dither), `pjvGrade`, `pjvVignette`. `decodeMaterial` uses it, so every renderer gets **linear** albedo from sRGB-stored palettes. | [color-convention](../plans/color-convention.md) |
 | [`shaders/include/pjv_bsdf.sc`](../../shaders/include/pjv_bsdf.sc) | The surface model: a Lambertian diffuse lobe under a GGX specular lobe (`pjvBsdfEvaluate`, `pjvBsdfSample`, `pjvPowerHeuristic`, ...). A default material (glossiness 0, metallic 0) costs nothing and changes nothing. The editor's path tracer, `pt-reference` and `restir-pt` all shade through it. | [restir-pt](../plans/restir-pt.md) |
 

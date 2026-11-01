@@ -22,6 +22,7 @@ $input v_texcoord0
 // Outputs: litDirect, litIndirect.
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include "restir_common.sc"
 
 SAMPLER2D(giDiffFinal, 0);
@@ -89,7 +90,7 @@ void main() {
     }
 
     vec2 material = restirUnpackMaterial(direct.a);
-    vec3 V = normalize(cameraPos.xyz - P);
+    vec3 V = normalize(pjvViewPosition() - P);
     // The paths' light comes back multiplied by what the paths saw: the capped glossiness.
     PjvBsdf paths = pjvBsdf(albedo, min(material.x, RESTIR_GI_MAX_GLOSSINESS), material.y);
     vec3 diffuse = paths.diffuseAlbedo * (sumD / total);

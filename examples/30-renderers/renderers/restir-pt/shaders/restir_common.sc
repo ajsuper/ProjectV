@@ -31,12 +31,9 @@
 #include <pjv_path_light.sc>   // the sun and sky pt-reference renders by, and pjv_bsdf.sc
 #include <pjv_math.sc>         // pjvOctEncode/Decode
 #include <pjv_random.sc>       // pjvPcg, pjvRandomUnit24: one PCG state word per pixel
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
-uniform vec4 prevCameraPos;   // last frame's camera, for every temporal pass
-uniform vec4 prevCameraDir;
 uniform vec4 frameCount;      // x = frame index, y = 1 when the camera or the sun moved this frame, z = 1 when the sun did
 uniform vec4 restirReuse;     // x temporal reuse, y spatial reuse, z visibility re-test, w temporal M cap
 uniform vec4 restirDenoise;   // x a-trous on, y GI accumulation on, z view (G), w the diffuse GI history cap
@@ -50,7 +47,6 @@ uniform vec4 restirHaze;      // the height fog: x density at the ground per wor
 uniform vec4 restirAir;       // the aerial haze: x, y, z as restirHaze's, w the distance its onset grows over
 uniform vec4 restirPath;      // x bounces after the visible point, y the sample pass's ray budget, z the spatial
                               // pass's, w validation: the relative change in a path's light that counts (0: off)
-#define RESTIR_FOV 60.0       // the gallery's, as every renderer here
 
 uniform vec4 restirSettings;  // x the G-buffer's trace loop bound (a uniform, so it is not unrolled), y surface
                               // offset (world units, a twentieth of the finest voxel), z the image's longest
@@ -78,16 +74,7 @@ bool restirView(int view) { return abs(restirDenoise.z - float(view)) < 0.5; }
 // Where world point P lands on screen (uv, top-left origin) for a camera at `position` looking along
 // `forward` -- the inverse of the engine's rayStartDirection, basis and flip included.
 vec2 restirWorldToUV(vec3 P, vec3 position, vec3 forward, vec2 res, out bool inFront) {
-    vec3 f = normalize(forward);
-    vec3 worldUp = abs(f.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right = normalize(cross(f, worldUp));
-    vec3 up = normalize(cross(right, f));
-    vec3 d = P - position;
-    float z = dot(d, f);
-    inFront = z > 1e-4;
-    float scale = tan(radians(RESTIR_FOV * 0.5));
-    vec2 ndc = vec2(dot(d, right) / (z * scale * (res.x / res.y)), dot(d, up) / (z * scale));
-    return vec2(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    return pjvPerspectiveUV(P, res, position, forward, pjvViewFov(), inFront);
 }
 
 // An orthonormal basis round unit n.
@@ -160,14 +147,7 @@ float restirLum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 // The camera ray through uv (0..1 across this pass's target, the jitter already added), built as the
 // engine's rayStartDirection builds it.
 vec3 restirViewDirection(vec2 uv) {
-    vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float scale = tan(radians(RESTIR_FOV * 0.5));
-    float aspect = passTargetRes.x / passTargetRes.y;
-    vec3 forward = normalize(cameraDir.xyz);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right = normalize(cross(forward, worldUp));
-    vec3 up = normalize(cross(right, forward));
-    return normalize(right * (ndc.x * scale * aspect) + up * (ndc.y * scale) + forward);
+    return pjvViewRayDirection(uv, passTargetRes.xy);
 }
 
 // Distance fog: height fog -- densest at the ground (restirHaze.y), thinning with altitude over
@@ -185,7 +165,7 @@ vec3 restirViewDirection(vec2 uv) {
 float restirLayerDepth(vec4 layer, vec3 d, float t) {
     if (layer.x <= 0.0) return 0.0;
     float H = max(layer.z, 1e-3);
-    float above = max(cameraPos.y - layer.y, -4.0 * H);
+    float above = max(pjvViewPosition().y - layer.y, -4.0 * H);
     float rise = max(d.y * t / H, -20.0);
     float alongRay = abs(rise) > 1e-3 ? (1.0 - exp(-rise)) / rise : 1.0 - 0.5 * rise;
     return layer.x * exp(-above / H) * t * alongRay;

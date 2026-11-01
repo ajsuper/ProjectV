@@ -15,12 +15,11 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 SAMPLER2D(frame, 0);
 
 uniform vec4 windowRes;
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 uniform vec4 hudTop0;
 uniform vec4 hudTop1;
 uniform vec4 hudBanner0;
@@ -55,17 +54,10 @@ uniform vec4 hudHelp9;
 uniform vec4 hudHelp10;
 uniform vec4 hudHelp11;
 
-#define FOV 60.0   // the shared renderer's (grr_common.sc's GRR_FOV)
 
 // The view ray through `uv`, as the shared renderer makes it.
 vec3 viewRay(vec2 uv, vec2 res) {
-    vec3 forward = normalize(cameraDir.xyz);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right = normalize(cross(forward, worldUp));
-    vec3 up = normalize(cross(right, forward));
-    vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float scale = tan(radians(FOV * 0.5));
-    return normalize(right * (ndc.x * scale * res.x / res.y) + up * (ndc.y * scale) + forward);
+    return pjvViewRayDirection(uv, res);
 }
 
 // The players' colours (world.h's PLAYER_COLOURS).
@@ -193,7 +185,7 @@ void main() {
     // The ring where the tool takes effect: a blast's reach, a dig's, the cell a block goes in.
     if (hudAim.w > 0.0) {
         vec3 direction = viewRay(v_texcoord0, res);
-        vec3 toAim = hudAim.xyz - cameraPos.xyz;
+        vec3 toAim = hudAim.xyz - pjvViewPosition();
         float along = dot(toAim, direction);
         if (along > 0.0) {
             float off = length(toAim - direction * along);

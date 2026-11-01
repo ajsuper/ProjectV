@@ -19,6 +19,7 @@ $input v_texcoord0
 // Output: litHDR.
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_random.sc>     // pjvInterleavedGradientNoise
 #include "restir_common.sc"
 
@@ -83,8 +84,8 @@ vec3 restirShaftsHere(ivec2 p, float t) {
     // The sun's point on screen, in GI pixels (or the antisolar point's).
     vec3 toSun = normalize(SUN_DIR);
     bool inFront;
-    vec2 sunUV = restirWorldToUV(cameraPos.xyz + toSun * 1.0e4, cameraPos.xyz, cameraDir.xyz, res, inFront);
-    if (!inFront) sunUV = restirWorldToUV(cameraPos.xyz - toSun * 1.0e4, cameraPos.xyz, cameraDir.xyz, res, inFront);
+    vec2 sunUV = restirWorldToUV(pjvViewPosition() + toSun * 1.0e4, pjvViewPosition(), pjvViewDirection(), res, inFront);
+    if (!inFront) sunUV = restirWorldToUV(pjvViewPosition() - toSun * 1.0e4, pjvViewPosition(), pjvViewDirection(), res, inFront);
     vec2 here = f + 0.5;
     vec2 toward = sunUV * res - here;
     float reach = sqrt(dot(toward, toward));

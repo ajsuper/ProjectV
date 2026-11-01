@@ -67,6 +67,7 @@
 // Requires (declared/included by the including file BEFORE this include):
 //   SAMPLER2D gPos (0), and prevIndirect at PROBE_PREV_SLOT if PROBE_MULTIBOUNCE is on
 //   #include <pjv_utils_DDA.sc>       (Ray/RayQuery/raySceneIntersect/materials + scene samplers)
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 //   #include <pjv_cascade_common.sc>  (worldToUV, PI, WORLD_SCALE, and pjv_sun_sky beneath it)
 //   #include <pjv_face_key.sc>        (the face identity this seeds its sequence with)
 // =============================================================================
@@ -243,7 +244,7 @@ bool pjvProbeSunVisible(vec3 p, vec3 n) {
 bool pjvProbeSecondBounce(vec3 hitP, float voxelSize, out vec3 indirect) {
     indirect = vec3(0.0);
     bool valid;
-    vec2 uv = worldToUV(hitP, cameraPos.xyz, cameraDir.xyz, passInputRes[0].xy, FOV, valid);
+    vec2 uv = worldToUV(hitP, pjvViewPosition(), pjvViewDirection(), passInputRes[0].xy, pjvViewFov(), valid);
     if (!valid) return false;
 
     // Is the surface the camera sees here the surface the ray hit? Point-sampled: a bilinear read

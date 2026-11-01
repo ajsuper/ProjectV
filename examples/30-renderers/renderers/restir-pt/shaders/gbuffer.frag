@@ -29,19 +29,20 @@ $input v_texcoord0
 // Input: prevPoses (resource, slot 0): every chunk's pose last frame (restir_trace.sc).
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 SAMPLER2D(prevPoses, 0);
 #define RESTIR_MOTION
 #include "restir_trace.sc"
 
 void main() {
     vec2 uv = v_texcoord0 + jitterParams.xy * passTargetRes.zw;
-    vec3 direction = rayStartDirection(uv, passTargetRes.xy, cameraPos.xyz, normalize(cameraDir.xyz), RESTIR_FOV);
+    vec3 direction = rayStartDirection(uv, passTargetRes.xy, pjvViewPosition(), normalize(pjvViewDirection()), pjvViewFov());
     vec3 toSun = normalize(SUN_DIR);
 
-    vec3 origin = cameraPos.xyz;
+    vec3 origin = pjvViewPosition();
     vec3 rayDir = direction;
     int kind = RESTIR_KIND_CAMERA;
-    vec4 position = vec4(cameraPos.xyz + direction * 1.0e4, -1.0);
+    vec4 position = vec4(pjvViewPosition() + direction * 1.0e4, -1.0);
     vec3 normal = vec3(0.0, 0.0, 0.0);
     vec3 albedo = vec3(0.0, 0.0, 0.0);
     vec3 direct = pathSkyView(direction);   // the sky, its clouds and the sun
@@ -51,14 +52,14 @@ void main() {
     float facing = 0.0;
     float visible = 0.0;
     float blocker = -1.0;
-    vec3 previous = prevCameraPos.xyz + direction * 1.0e4;   // the sky: moves with the camera's turn only
+    vec3 previous = pjvPrevViewPosition() + direction * 1.0e4;   // the sky: moves with the camera's turn only
     int rays = min(int(restirSettings.x), 2);
     for (int i = 0; i < rays; i++) {
         RestirHit hit = restirTrace(origin, rayDir, kind, 1e30);
         if (kind == RESTIR_KIND_CAMERA) {
             if (!hit.hit) break;
             normal = dot(hit.normal, hit.normal) > 0.5 ? normalize(hit.normal) : -direction;
-            position = vec4(cameraPos.xyz + direction * hit.t, hit.t);
+            position = vec4(pjvViewPosition() + direction * hit.t, hit.t);
             albedo = hit.albedo;
             direct = hit.emission;
             material = restirPackMaterial(hit.glossiness, hit.metallic)
@@ -84,7 +85,7 @@ void main() {
     gl_FragData[5] = rotation;
     bool nowInFront;
     bool thenInFront;
-    vec2 now = restirWorldToUV(position.xyz, cameraPos.xyz, cameraDir.xyz, passTargetRes.xy, nowInFront);
-    vec2 then = restirWorldToUV(previous, prevCameraPos.xyz, prevCameraDir.xyz, passTargetRes.xy, thenInFront);
+    vec2 now = restirWorldToUV(position.xyz, pjvViewPosition(), pjvViewDirection(), passTargetRes.xy, nowInFront);
+    vec2 then = restirWorldToUV(previous, pjvPrevViewPosition(), pjvPrevViewDirection(), passTargetRes.xy, thenInFront);
     gl_FragData[6] = vec4(thenInFront ? then - now : vec2(0.0, 0.0), 0.0, 0.0);
 }

@@ -62,6 +62,7 @@
 #include "graphics/render_instance.h"
 #include "graphics/disk_io.h"
 #include "graphics/engine_shaders.h"
+#include "graphics/camera.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
@@ -1655,12 +1656,8 @@ struct EditorState {
     // under the old setting, so the mean has to start again rather than fade across.
     bool renderParamsChanged = false;
 
-    // Last frame's camera, for taa.frag's reprojection. Only Render mode needs it -- the Viewport's
-    // accumulate pass resets rather than reprojects.
-    projv::core::vec3 prevCameraPosition = projv::core::vec3(0.0f);
-    projv::core::vec3 prevCameraDirection = projv::core::vec3(0.0f, 0.0f, 1.0f);
-    float prevOrthoHeight = 0.0f;
-    float prevOrthoBackoff = 0.0f;
+    // Whether the renderers' history holds a usable frame; the previous camera itself is the engine's
+    // (graphics::setCamera).
     bool prevCameraValid = false;
 
     // How many frames the current image has averaged, for the sample counter in the Render tab's
@@ -2498,6 +2495,19 @@ static float cameraOrthoBackoff(const EditorState& editor, projv::core::vec3 for
     float towardCenter = glm::dot(editor.framing.center - editor.cameraPosition,
                                   glm::normalize(forward));
     return std::max(0.0f, radius * 1.05f - towardCenter);
+}
+
+// The engine camera for both renderers (graphics::setCamera): the same view, so switching tabs does
+// not move the camera by a pixel.
+static projv::CameraView editorCameraView(const EditorState& editor, projv::core::vec3 cameraDirection, float orthoHeight,
+                                          float orthoBackoff) {
+    projv::CameraView view;
+    view.position = editor.cameraPosition;
+    view.forward = cameraDirection;
+    view.verticalFovDegrees = CAMERA_VERTICAL_FOV_DEGREES;
+    view.orthographicHeight = orthoHeight;
+    view.orthographicBackoff = orthoBackoff;
+    return view;
 }
 
 // A ray through one pixel of the viewport. Under perspective every ray shares the camera's position
@@ -26148,27 +26158,10 @@ void render(projv::Application& app) {
             0.0f
         };
 
-        projv::core::vec4 cameraProjection = {
-            orthoHeight > 0.0f ? 1.0f : 0.0f, orthoHeight, orthoBackoff, 0.0f
-        };
-        // Last frame's camera for the reprojection, with last frame's orthographic parameters in the
-        // spare lanes -- an orthographic view has to reproject against the extent it was actually
-        // drawn with, not this frame's.
-        projv::core::vec4 previousCameraPosition = {
-            editor.prevCameraPosition.x, editor.prevCameraPosition.y, editor.prevCameraPosition.z,
-            editor.prevOrthoHeight
-        };
-        projv::core::vec4 previousCameraDirection = {
-            editor.prevCameraDirection.x, editor.prevCameraDirection.y, editor.prevCameraDirection.z,
-            editor.prevOrthoBackoff
-        };
-
-        projv::graphics::setUniformToValue(renderer, "cameraPos", cameraPosition);
-        projv::graphics::setUniformToValue(renderer, "cameraDir", cameraDirection);
-        projv::graphics::setUniformToValue(renderer, "prevCameraPos", previousCameraPosition);
-        projv::graphics::setUniformToValue(renderer, "prevCameraDir", previousCameraDirection);
+        // The engine keeps the previous frame's camera, orthographic extent included, for the
+        // reprojection (gi_temporal.frag, taa.frag): each renderer reprojects against what it drew.
+        projv::graphics::setCamera(*renderer, editorCameraView(editor, cameraDirection, orthoHeight, orthoBackoff));
         projv::graphics::setUniformToValue(renderer, "frameCount", frameCount);
-        projv::graphics::setUniformToValue(renderer, "cameraProjection", cameraProjection);
         projv::graphics::setUniformToValue(renderer, "sunDir", sunDirection);
         projv::graphics::setUniformToValue(renderer, "renderParams", renderParams);
         projv::graphics::setUniformToValue(renderer, "lensParams", lensParams);
@@ -26192,11 +26185,7 @@ void render(projv::Application& app) {
         // frame's trace is also the number of samples averaged into what is on screen.
         editor.renderSampleCount = std::max(0, app.frameCount - editor.frameCameraLastMovedOn);
 
-        // This frame's camera becomes next frame's history.
-        editor.prevCameraPosition = editor.cameraPosition;
-        editor.prevCameraDirection = cameraDirection;
-        editor.prevOrthoHeight = orthoHeight;
-        editor.prevOrthoBackoff = orthoBackoff;
+        // The history now holds this frame.
         editor.prevCameraValid = true;
     } else if (editor.sceneLoaded && viewportIsSized) {
         projv::core::vec2 viewportResolution = { float(editor.viewportWidth), float(editor.viewportHeight) };
@@ -26232,16 +26221,6 @@ void render(projv::Application& app) {
             float(editor.refractDebugMode)
         };
 
-        // Which ray generator albedo.frag uses, and the two numbers the orthographic one needs.
-        // Both computed above the tab split -- Render mode's trace pass reads the same three values,
-        // and they have to agree exactly or the two tabs would not frame the same shot.
-        projv::core::vec4 cameraProjection = {
-            orthoHeight > 0.0f ? 1.0f : 0.0f,
-            orthoHeight,
-            orthoBackoff,
-            0.0f
-        };
-
         // The same light rig Render mode uses, because gi.frag is a preview OF Render mode and lights
         // with its sun and sky. Set whether or not the advanced toggle is on: gi.frag returns before
         // reading either when it is off, and a uniform the shader declares must still have a value.
@@ -26249,26 +26228,12 @@ void render(projv::Application& app) {
         projv::core::vec4 renderParams;
         editorLightRig(editor, sunDirection, renderParams);
 
-        // Last frame's camera, for gi_temporal.frag's reprojection. The spare lanes carry that
-        // frame's orthographic parameters, because an orthographic view has to be reprojected
-        // against the extent it was actually drawn with rather than this frame's.
-        projv::core::vec4 previousCameraPosition = {
-            editor.prevCameraPosition.x, editor.prevCameraPosition.y, editor.prevCameraPosition.z,
-            editor.prevOrthoHeight
-        };
-        projv::core::vec4 previousCameraDirection = {
-            editor.prevCameraDirection.x, editor.prevCameraDirection.y, editor.prevCameraDirection.z,
-            editor.prevOrthoBackoff
-        };
-
-        projv::graphics::setUniformToValue(renderer, "cameraPos", cameraPosition);
-        projv::graphics::setUniformToValue(renderer, "cameraDir", cameraDirection);
-        projv::graphics::setUniformToValue(renderer, "prevCameraPos", previousCameraPosition);
-        projv::graphics::setUniformToValue(renderer, "prevCameraDir", previousCameraDirection);
+        // The engine keeps the previous frame's camera, orthographic extent included, for the
+        // reprojection (gi_temporal.frag, taa.frag): each renderer reprojects against what it drew.
+        projv::graphics::setCamera(*renderer, editorCameraView(editor, cameraDirection, orthoHeight, orthoBackoff));
         projv::graphics::setUniformToValue(renderer, "frameCount", frameCount);
         projv::graphics::setUniformToValue(renderer, "renderSettings", renderSettings);
         projv::graphics::setUniformToValue(renderer, "previewSettings", previewSettings);
-        projv::graphics::setUniformToValue(renderer, "cameraProjection", cameraProjection);
         projv::graphics::setUniformToValue(renderer, "sunDir", sunDirection);
         projv::graphics::setUniformToValue(renderer, "renderParams", renderParams);
         selectViewportPrograms(renderer, editor, app.frameCount - editor.frameCameraLastMovedOn);
@@ -26283,13 +26248,7 @@ void render(projv::Application& app) {
                                              framebufferWidth, framebufferHeight,
                                              identityMatrix, identityMatrix, &gpuData);
 
-        // This frame's camera becomes next frame's history, exactly as Render mode does it. Recorded
-        // AFTER the passes, so the reprojection above read the camera from the frame the history was
-        // actually drawn with.
-        editor.prevCameraPosition = editor.cameraPosition;
-        editor.prevCameraDirection = cameraDirection;
-        editor.prevOrthoHeight = orthoHeight;
-        editor.prevOrthoBackoff = orthoBackoff;
+        // The history now holds this frame, as in Render mode.
         editor.prevCameraValid = true;
     }
 

@@ -109,7 +109,7 @@ folder, before construction. Paths: `data_structures/rendererSpecification.h`,
 
 | Header | Path | What |
 |---|---|---|
-| [`camera.h`](../../include/data_structures/camera.h) | `data_structures/camera.h` | `Camera` and a global `cam` (legacy; examples keep their own) |
+| [`camera_view.h`](../../include/data_structures/camera_view.h) | `data_structures/camera_view.h` | `CameraView`: where a renderer looks from and how it projects (perspective FOV or orthographic height and backoff, near/far, jitter). Set with `graphics::setCamera` |
 | [`color.h`](../../include/data_structures/color.h) | `data_structures/color.h` | `Color`: 8-bit RGB |
 | [`nodeStructure.h`](../../include/data_structures/nodeStructure.h) | `data_structures/nodeStructure.h` | `nodeStructure`, `nodeStructureTree64`: tree-building scratch |
 | [`posTexVertex.h`](../../include/data_structures/posTexVertex.h) | `data_structures/posTexVertex.h` | `PosTexVertex`: the full-screen quad's vertex |

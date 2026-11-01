@@ -56,6 +56,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_filter.sc>     // pjvTexelTent
 
 SAMPLER2D(composedHDR, 0);
@@ -64,27 +65,18 @@ SAMPLER2D(gFace,       5);   // xyz face centre, w = voxel edge
 SAMPLER2D(gRot,        6);   // the chunk's rotation, xyzw
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
-uniform vec4 cameraPos;
-uniform vec4 cameraDir;
 // z: bypass -- point-sample the render-resolution frame, what the frame is without this pass.
 // w: debug -- green where reconstructed geometry claimed the pixel, red where it fell back.
 uniform vec4 renderParams;
 uniform vec4 jitterParams;   // xy: where this frame's texels were traced, off their centres, in texels
 
-#define FOV 60.0
 #define SEARCH_RADIUS 1
 #define MAX_FOOTPRINT_PIXELS 8.0
 
 // Exactly the forward map gbuffer.frag's rays used (rayStartDirection), or the coverage test would
 // be against a different ray than the one that filled the G-buffer.
 vec3 rayDirection(vec2 uv, vec2 res) {
-    vec2 ndc = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float scale = tan(radians(FOV * 0.5));
-    vec3 forward = normalize(cameraDir.xyz);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right = normalize(cross(forward, worldUp));
-    vec3 up = normalize(cross(right, forward));
-    return normalize(right * (ndc.x * scale * res.x / res.y) + up * (ndc.y * scale) + forward);
+    return pjvViewRayDirection(uv, res);
 }
 
 // As pjv_utils_DDA.sc's rotationFromQuat: columns are the rotated x, y and z axes.
@@ -117,9 +109,9 @@ float faceCoverage(vec3 centre, vec3 n, vec3 u, vec3 v, float halfSide, vec3 ray
     outT = 1e30;
     float denom = dot(rayDir, n);
     if (abs(denom) < 1e-6) return 0.0;
-    float t = dot(centre - cameraPos.xyz, n) / denom;
+    float t = dot(centre - pjvViewPosition(), n) / denom;
     if (t <= 0.0) return 0.0;
-    vec3 d = cameraPos.xyz + rayDir * t - centre;
+    vec3 d = pjvViewPosition() + rayDir * t - centre;
     vec3 fx = t * theta * (camRight - rayDir * (dot(camRight, n) / denom));
     vec3 fy = t * theta * (camUp - rayDir * (dot(camUp, n) / denom));
     float cap = MAX_FOOTPRINT_PIXELS * t * theta;
@@ -167,11 +159,9 @@ void main() {
     vec2 srcPos = v_texcoord0 * srcRes - jitterParams.xy;
     vec2 centreTexel = floor(srcPos);
     vec3 rayDir = rayDirection(v_texcoord0, passTargetRes.xy);
-    vec3 forward = normalize(cameraDir.xyz);
-    vec3 worldUp = abs(forward.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 camRight = normalize(cross(forward, worldUp));
-    vec3 camUp = normalize(cross(camRight, forward));
-    float theta = (2.0 * tan(radians(FOV * 0.5))) / passTargetRes.y;   // one output pixel, in radians
+    PjvCameraBasis basis = pjvCameraBasis(pjvViewDirection());
+    vec3 forward = basis.forward, camRight = basis.right, camUp = basis.up;
+    float theta = (2.0 * tan(radians(pjvViewFov() * 0.5))) / passTargetRes.y;   // one output pixel, in radians
 
     // Three layers, nearest first: depth t, coverage a, colour sum c and its weight w, the voxel's
     // centre v, size s and rotation q, and which of its faces f (a bit each) are counted in a.

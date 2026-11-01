@@ -21,6 +21,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_random.sc>     // pjvInterleavedGradientNoise
 #include <grr_common.sc>
 
@@ -103,7 +104,7 @@ vec4 drawBlocks(vec3 dir, float tEnter, float tExit) {
     float sub = max(smokeBlocks.y, 1.0);
     float L = smokeBox.w / sub;
     float cells = N * sub;
-    vec3 start = cameraPos.xyz + dir * (tEnter + 1e-3);
+    vec3 start = pjvViewPosition() + dir * (tEnter + 1e-3);
     vec3 u = clamp((start - smokeBox.xyz) / L, vec3(0.0, 0.0, 0.0), vec3(cells - 1e-3, cells - 1e-3, cells - 1e-3));
     vec3 c = floor(u);
     vec3 stepDir = vec3(dir.x >= 0.0 ? 1.0 : -1.0, dir.y >= 0.0 ? 1.0 : -1.0, dir.z >= 0.0 ? 1.0 : -1.0);
@@ -159,14 +160,14 @@ void main() {
         gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
-    vec3 dir = grrCameraRay(v_texcoord0, passTargetRes.xy, cameraDir.xyz);
+    vec3 dir = grrCameraRay(v_texcoord0, passTargetRes.xy, pjvViewDirection());
     vec4 pos = texture2D(gPos, v_texcoord0);
     float surfaceT = pos.w < 0.0 ? 1.0e9 : pos.w;
 
     float N = smokeGridInfo.x;
     vec3 boxMin = smokeBox.xyz, boxMax = smokeBox.xyz + vec3(N, N, N) * smokeBox.w;
     vec3 safeDir = vec3(abs(dir.x) < 1e-6 ? 1e-6 : dir.x, abs(dir.y) < 1e-6 ? 1e-6 : dir.y, abs(dir.z) < 1e-6 ? 1e-6 : dir.z);
-    vec3 t0 = (boxMin - cameraPos.xyz) / safeDir, t1 = (boxMax - cameraPos.xyz) / safeDir;
+    vec3 t0 = (boxMin - pjvViewPosition()) / safeDir, t1 = (boxMax - pjvViewPosition()) / safeDir;
     vec3 tNear = min(t0, t1), tFar = max(t0, t1);
     float tEnter = max(max(tNear.x, tNear.y), max(tNear.z, 0.0));
     float tExit = min(min(min(tFar.x, tFar.y), tFar.z), surfaceT);
@@ -182,7 +183,7 @@ void main() {
     }
     if (smokeParams.z > 8.5) {
         float sum = 0.0;
-        for (int i = 0; i < 64; i++) sum += gridAt(cameraPos.xyz + dir * mix(tEnter, tExit, (float(i) + 0.5) / 64.0)).x;
+        for (int i = 0; i < 64; i++) sum += gridAt(pjvViewPosition() + dir * mix(tEnter, tExit, (float(i) + 0.5) / 64.0)).x;
         sum *= (tExit - tEnter) / 64.0;
         gl_FragColor = vec4(sum * 0.05, sum * 0.01, 0.0, 0.0);
         return;
@@ -208,7 +209,7 @@ void main() {
     float transmittance = 1.0;
     for (int i = 0; i < MAX_STEPS; i++) {
         if (t >= tExit || transmittance < 0.01) break;
-        vec3 p = cameraPos.xyz + dir * t;
+        vec3 p = pjvViewPosition() + dir * t;
         vec4 cell = gridAt(p);
         float ds = stepLength;
         if (cell.x > 1e-4) {

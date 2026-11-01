@@ -49,6 +49,7 @@ $input v_texcoord0
 SAMPLER2D(gPos, 0);
 
 #include <pjv_utils_DDA.sc>
+#include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 
 #define CASCADE_SCREEN_RES passTargetRes.xy
 #define CASCADE_ATLAS_RES  passTargetRes.xy
@@ -154,7 +155,7 @@ void main() {
     vec2 uv = v_texcoord0;
 
     vec4  gp   = texture2D(gPos, pjvSnapToTexel(uv, passInputRes[0].xy));
-    vec3  dir  = normalize(gp.xyz - cameraPos.xyz);
+    vec3  dir  = normalize(gp.xyz - pjvViewPosition());
     float dist = min(gp.a < 0.0 ? FOG_SKY_DISTANCE : gp.a, VOL_MAX_DISTANCE);
     if (dist <= 0.0) {
         gl_FragData[0] = vec4(0.0, 0.0, 0.0, gp.a);
@@ -196,13 +197,13 @@ void main() {
         // Stratified: one sample per equal segment, offset by the same per-pixel fraction so the
         // strata stay ordered and no two samples of one pixel can collide.
         float t = (float(i) + offset) / float(VOL_SAMPLES) * dist;
-        vec3  x = cameraPos.xyz + dir * t;
+        vec3  x = pjvViewPosition() + dir * t;
 
         // How much this point contributes to what the eye receives: the medium's density there, times
         // what survives the trip back. Used as the WEIGHT of this sample's visibility rather than as a
         // radiance, which is the whole point above.
         float density = fogParams.x * exp(clamp(-(x.y - fogParams.z) / H, -30.0, 6.0));
-        float T       = exp(-fogOpticalDepth(cameraPos.xyz, dir, t));
+        float T       = exp(-fogOpticalDepth(pjvViewPosition(), dir, t));
         float w       = density * T;
         if (w <= 0.0) continue;
 
