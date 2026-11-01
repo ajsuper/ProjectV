@@ -1184,9 +1184,12 @@ void startup(projv::Application& app) {
     renderInstance.resizable = std::getenv("ADVANCED_CAPTURE") == nullptr;
     renderInstance.initialize(1920, 1080, "ProjectV Advanced Renderer");
 
-    // Capture the cursor so mouse motion drives the camera (FPS-style mouse look).
-    glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    glfwSetScrollCallback(renderInstance.window, sunScrollCallback);
+    // Capture the cursor so mouse motion drives the camera (FPS-style mouse look) -- not in a capture
+    // run, which takes no input, and neither does the scroll wheel's sun.
+    if (renderInstance.resizable) {
+        glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        glfwSetScrollCallback(renderInstance.window, sunScrollCallback);
+    }
 
     // ctx().emplace returns the existing one if main() already made it, so a path given on
     // the command line survives to here and the default fills in when none was.
@@ -1603,10 +1606,12 @@ void render(projv::Application& app) {
     projv::GPUData& gpuData = app.world.ctx().get<projv::GPUData>();
     FrameState& state = app.world.ctx().get<FrameState>();
 
-    // ADVANCED_LOCK_CAMERA=1 ignores input entirely. Needed for any measurement or capture: the
-    // cursor is captured, so a pointer nudge from the window manager -- or from the screenshot tool
-    // itself -- turns the camera mid-run, and two builds then quietly measure different views.
-    static const bool cameraLocked = std::getenv("ADVANCED_LOCK_CAMERA") != nullptr;
+    // ADVANCED_LOCK_CAMERA=1 ignores input entirely; ADVANCED_CAPTURE implies it. Needed for any
+    // measurement or capture: the cursor is captured, so a pointer nudge from the window manager -- or
+    // from the screenshot tool itself -- turns the camera mid-run, and two builds then quietly measure
+    // different views.
+    static const bool cameraLocked = std::getenv("ADVANCED_LOCK_CAMERA") != nullptr ||
+                                     std::getenv("ADVANCED_CAPTURE") != nullptr;
 
     bool cameraMoved = false;
     if (!cameraLocked) {
