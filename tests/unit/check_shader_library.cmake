@@ -11,6 +11,9 @@
 # pjv_utils_DDA.sc is exempt from the scan until S5 splits it: it declares the scene's samplers and
 # predates the prefix. It is still compiled.
 
+# A script run with -P sets no policy version, and if(... IN_LIST ...) needs one.
+cmake_minimum_required(VERSION 3.20)
+
 set(scanExempt pjv_utils_DDA.sc)
 set(profiles "spirv:linux" "440:linux" "metal:osx")
 
