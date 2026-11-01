@@ -24,6 +24,22 @@ namespace projv::graphics {
             if (it->second.previous) it->second.previous(window, x, y);
         }
 
+        // Typed characters arrive the same way, and are kept the same way.
+        struct TextState {
+            std::vector<uint32_t> typed;
+            GLFWcharfun previous = nullptr;
+        };
+        std::unordered_map<GLFWwindow*, TextState>& textStates() {
+            static std::unordered_map<GLFWwindow*, TextState> states;
+            return states;
+        }
+        void onChar(GLFWwindow* window, unsigned int codepoint) {
+            auto it = textStates().find(window);
+            if (it == textStates().end()) return;
+            it->second.typed.push_back(codepoint);
+            if (it->second.previous) it->second.previous(window, codepoint);
+        }
+
         struct KeyMapping { Key key; int glfw; };
         constexpr KeyMapping KEY_MAP[] = {
             {Key::A, GLFW_KEY_A}, {Key::B, GLFW_KEY_B}, {Key::C, GLFW_KEY_C}, {Key::D, GLFW_KEY_D},
@@ -69,6 +85,9 @@ namespace projv::graphics {
         // Installing twice would make our callback its own `previous`, and every wheel tick count
         // twice -- then forever.
         if (scroll.previous == onScroll) scroll.previous = nullptr;
+        TextState& text = textStates()[renderInstance.window];
+        text.previous = glfwSetCharCallback(renderInstance.window, onChar);
+        if (text.previous == onChar) text.previous = nullptr;
 
         RenderInstance* instance = &renderInstance;
         auto firstFrame = std::make_shared<bool>(true);
@@ -95,6 +114,9 @@ namespace projv::graphics {
             ScrollState& state = scrollStates()[window];
             input.scroll = state.accumulated;
             state.accumulated = core::vec2(0.0f);
+            TextState& typed = textStates()[window];
+            input.text.swap(typed.typed);
+            typed.typed.clear();
 
             // The close button is an edge, not a level: request once, then clear GLFW's flag, so an
             // application that declines the request can be asked again.

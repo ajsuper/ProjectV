@@ -108,6 +108,7 @@ nav:
       - data_structures: reference/data-structures.md
       - runtime: reference/runtime.md
       - net: reference/net.md
+      - ui: reference/ui.md
       - Shader library: reference/shader-library.md
       - File formats:
           - reference/formats/README.md

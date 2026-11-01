@@ -442,6 +442,28 @@ set_source_files_properties(src/runtime/physics.cpp src/runtime/fracture.cpp PRO
 # Link only: Jolt's compile flags and defines stay on projv_physics.
 target_link_libraries(projectV PRIVATE $<LINK_ONLY:Jolt::Jolt>)
 
+# The UI (docs/plans/ui.md): the host now; the dev layer (Dear ImGui) and the user layer (RmlUi) join it,
+# each the only code that includes its library (the `layering` test enforces it). Compiled apart so
+# those libraries' include paths reach these files and no other.
+option(PROJV_BUILD_UI "Build the UI module (ui/): the host, the dev layer and the user layer" ON)
+if(PROJV_BUILD_UI)
+    add_library(projv_ui OBJECT
+        src/ui/host.cpp
+    )
+    target_include_directories(projv_ui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(projv_ui PRIVATE cxx_std_20)
+    target_compile_definitions(projv_ui PRIVATE ${PROJV_LOG_DEFS})
+    target_compile_options(projv_ui PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4>
+        ${PROJV_OPTIMISED_BUILD_FLAGS}
+    )
+    target_link_libraries(projv_ui PRIVATE
+        bgfx::bgfx bgfx::bx ${PROJV_GLFW_TARGET} ${PROJV_GLM_TARGET} ${PROJV_SPDLOG_TARGET} nlohmann_json::nlohmann_json EnTT::EnTT)
+    target_sources(projectV PRIVATE $<TARGET_OBJECTS:projv_ui>)
+    target_compile_definitions(projectV PUBLIC PROJV_UI)
+endif()
+
 # ENet, likewise reached from one file only.
 target_sources(projectV PRIVATE src/net/transport_enet.cpp)
 target_link_libraries(projectV PRIVATE $<LINK_ONLY:${PROJV_ENET_TARGET}>)

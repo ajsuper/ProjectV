@@ -61,6 +61,15 @@ namespace projv::graphics {
      * @param gpuData A pointer to our projv::Scene serialized as projv::GPUData.
      */
     void renderConstructedRenderer(RenderInstance &renderInstance, std::shared_ptr<ConstructedRenderer> constructedRenderer, GPUData* gpuData);
+
+    /**
+     * Ends the frame: draws the render instance's overlays (RenderInstance::addOverlay) over what the
+     * renderer drew, then submits it (bgfx::frame). renderConstructedRenderer ends with this; a program
+     * that submits its own passes calls it in place of bgfx::frame so the UI still draws.
+     * @param backBufferSize The back buffer's size, which the overlays draw at.
+     * @return bgfx::frame's frame number.
+     */
+    uint32_t endFrame(RenderInstance &renderInstance, core::ivec2 backBufferSize);
 }
 
 #endif

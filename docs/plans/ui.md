@@ -1,6 +1,6 @@
 # UI: a developer layer and a user layer
 
-Status: **proposal**, 2026-10-27. Nothing built. Follows [shader-library.md](shader-library.md): the
+Status: **in progress**: approved 2026-11-01 (RmlUi, D5; one shared demo style sheet, D13); U0 built 2026-11-01, U1 next. Follows [shader-library.md](shader-library.md): the
 UI's shaders are engine shaders (its S0) and its blur is the library's filters (its S1).
 
 **Mechanism, not policy** (as in the shader library): the engine provides the two layers, the render
@@ -136,6 +136,10 @@ check the panel registry and capture routing. Nothing new needs a display.
 ([color-convention.md](color-convention.md)); both layers draw after the display transform, into the
 same back buffer it writes, and U0 settles which conversion (if any) the UI shaders apply.
 
+**D13. The demos share one look.** `examples/shared/ui/` holds a common style sheet and fonts that the
+`_demo`s use; each demo adds its own documents beside it. *Why:* one look to polish, and the demos read
+as one project. It is the demos', not the engine's (the engine's default sheet stays a reset).
+
 ## Milestones
 
 | | What | Proven by |
@@ -153,9 +157,37 @@ Docs with each milestone: `docs/reference/ui.md` (a row per public header), a co
 panel; a HUD from a document), and `engine-promotion-candidates.md` gaining the ImGui backend as
 ruled.
 
+## As built
+
+**U0** (2026-11-01).
+- `projv_ui`: an object library folded into `projectV`, as `projv_physics` is, behind `PROJV_BUILD_UI`
+  (on), which defines `PROJV_UI` for consumers. It holds the host now; the two layers join it, each
+  compiled with its own library's include paths.
+- `ui/ui.h`:
+  - `Host` (in `world.ctx()`) holds one `Layer` per `Level` (`Dev`, `User`). `route(input)` offers the
+    input to the visible layers in that order, telling each what the ones before it took, and writes
+    `Input::wantCaptureKeyboard`/`Mouse` from the union. It is recomputed every frame.
+  - `draw(size)` draws the user layer in `USER_VIEW` (254), then the dev layer in `DEV_VIEW` (255).
+  - `installUi(app, renderInstance)` routes in a PreUpdate system ordered after `"platform"`, and draws
+    as an overlay. The overlay looks the host up each frame rather than holding it: `world.ctx()` may
+    move a small resource as it grows.
+- D3: `RenderInstance::addOverlay(order, fn)` / `drawOverlays(size)`. `graphics::endFrame(instance,
+  size)` draws the overlays, then `bgfx::frame()`; `renderConstructedRenderer` ends with it. The scene
+  editor, which submits its own frame, moves onto `endFrame` with its ImGui in U1.
+- D4: `Input::text`, the frame's typed code points, from GLFW's character callback, chained as the
+  scroll callback is. The translation into ImGui's and RmlUi's events is each layer's (U1, U3).
+- Layering (D2, `ctest -R layering`): core, graphics, utils, data_structures and net never include
+  `ui/`; in the engine, ImGui only from `src/ui/dev/` and `ui/dev.h`; RmlUi only from `src/ui/user/`,
+  anywhere in the tree.
+- Tests (`ui:*`, 7 cases, no window): routing order, a hidden layer skipped, capture reaching the next
+  layer and the game and reset each frame, text reaching the layers, draw order and views, overlay
+  order, and `installUi` routing after the platform system and drawing as an overlay. The GLFW
+  character callback itself needs a window and is not unit-tested.
+- Docs: `docs/reference/ui.md` (new module page, in the header check and the site), `Input::text`,
+  `endFrame` and the overlays in `graphics.md`.
+- Checked: Hello Voxel and the sandbox self-test run as before, with no overlay installed.
+
 ## Open questions
 
-1. **RmlUi** (D5): recommended, not yet agreed.
-2. **The demos' look.** Whether the demos share one style sheet (in `examples/shared/ui/`) or each
-   has its own; either way it is theirs, not the engine's.
-3. Engine shaders: embedded in the library (shader-library D3).
+None open. Answered 2026-11-01: RmlUi for the user layer (D5); the demos share one style sheet (D13);
+engine shaders are embedded in the library (shader-library D3).

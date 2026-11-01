@@ -61,6 +61,9 @@ add_executable(projv_unit_tests
     test_voxel_edits.cpp
 )
 target_link_libraries(projv_unit_tests PRIVATE projectV doctest::doctest)
+if(PROJV_BUILD_UI)
+    target_sources(projv_unit_tests PRIVATE test_ui.cpp)
+endif()
 if(WIN32)
     target_link_libraries(projv_unit_tests PRIVATE dbghelp)   # main.cpp's crash report
 endif()

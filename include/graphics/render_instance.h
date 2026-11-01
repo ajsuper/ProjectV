@@ -6,7 +6,9 @@
 #include <string>
 #include <unordered_map>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <vector>
 #include <iostream>
 
 #include "data_structures/rendererSpecification.h"
@@ -120,10 +122,27 @@ namespace projv::graphics {
             */
             RendererSpecification &getRendererSpecification(uint32_t rendererID);
 
+            /**
+            * Something drawn on top of the frame -- a UI layer -- after the renderer's passes and before
+            * the frame is submitted. It is handed the back buffer's size, and draws in bgfx views of
+            * its own numbered above every renderer's passes (ui::USER_VIEW, ui::DEV_VIEW).
+            */
+            using Overlay = std::function<void(core::ivec2 backBufferSize)>;
+
+            /**
+            * Adds an overlay. Overlays run in ascending `order`, and in the order added within one.
+            * Run by graphics::endFrame, which renderConstructedRenderer ends with.
+            */
+            void addOverlay(int order, Overlay overlay);
+
+            /** Runs every overlay, in order. graphics::endFrame calls this; a program that owns its frame can too. */
+            void drawOverlays(core::ivec2 backBufferSize);
+
             RenderInstance() = default;
         private:
             std::unordered_map<uint32_t, RendererSpecification> renderers;
             std::shared_ptr<ConstructedRenderer> constructedRenderer;
+            std::vector<std::pair<int, Overlay>> overlays;
     };
 }
 

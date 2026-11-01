@@ -1,5 +1,7 @@
 #include "graphics/render_instance.h"
 
+#include <algorithm>
+
 namespace projv::graphics {
     void RenderInstance::setActiveRenderer(const std::shared_ptr<ConstructedRenderer>& constructedRendererToUse) {
         this->constructedRenderer = constructedRendererToUse;
@@ -7,6 +9,17 @@ namespace projv::graphics {
 
     std::shared_ptr<ConstructedRenderer> RenderInstance::getActiveRenderer() {
         return this->constructedRenderer;
+    }
+
+    void RenderInstance::addOverlay(int order, Overlay overlay) {
+        // After every overlay of the same order or lower: equal orders run in the order added.
+        auto at = std::find_if(overlays.begin(), overlays.end(),
+                               [order](const std::pair<int, Overlay>& o) { return o.first > order; });
+        overlays.insert(at, {order, std::move(overlay)});
+    }
+
+    void RenderInstance::drawOverlays(core::ivec2 backBufferSize) {
+        for (auto& overlay : overlays) overlay.second(backBufferSize);
     }
 
     void RenderInstance::addRendererSpecification(uint32_t rendererID, const RendererSpecification &rendererSpecification) {

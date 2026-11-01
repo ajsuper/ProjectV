@@ -336,6 +336,11 @@ namespace projv::graphics {
         prevWindowWidth = windowWidth;
         prevWindowHeight = windowHeight;
 
-        bgfx::frame();
+        endFrame(renderInstance, core::ivec2(windowWidth, windowHeight));
+    }
+
+    uint32_t endFrame(RenderInstance &renderInstance, core::ivec2 backBufferSize) {
+        renderInstance.drawOverlays(backBufferSize);
+        return bgfx::frame();
     }
 }

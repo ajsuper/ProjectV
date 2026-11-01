@@ -20,6 +20,7 @@ One page per module, the file formats, the shader library, the glossary.
 | [graphics](graphics.md) | `include/graphics/`: window, input, renderers, GPU upload | `projv::graphics` (`projv` for `Input`) |
 | [runtime](runtime.md) | `include/runtime/`: Scene bridge, entities, prefabs, `NetId`, world loading, replication, physics, fracture | `projv::runtime` (`projv` for components) |
 | [net](net.md) | `include/net/`: transports (ENet, loopback) and the wire format | `projv::net` |
+| [ui](ui.md) | `include/ui/`: the UI host, its two layers' routing and views | `projv::ui` |
 
 ## Also here
 

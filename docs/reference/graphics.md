@@ -24,6 +24,7 @@ bgfx, and the active renderer.
 | `setActiveRenderer(constructed)`, `getActiveRenderer()` | The one `ConstructedRenderer` in use |
 | `window`, `shouldClose`, `pollEventsInRender` | The GLFW window; close flag; whether rendering polls events |
 | `resizable` | Set before `initialize`; false asks for exactly the size given (a tiling window manager floats it), for captures and benchmarks |
+| `addOverlay(order, fn)`, `drawOverlays(size)` | Drawn over the frame after the renderer's passes (the UI's layers); ascending `order` |
 
 ## `graphics/input.h`
 
@@ -31,7 +32,7 @@ bgfx, and the active renderer.
 
 | Name | What |
 |---|---|
-| `Input` | `down` / `pressed` / `released` for `Key` and `MouseButton`; `cursor`, `cursorDelta`, `scroll`, `cursorCaptured`, `wantCaptureKeyboard`/`Mouse` |
+| `Input` | `down` / `pressed` / `released` for `Key` and `MouseButton`; `cursor`, `cursorDelta`, `scroll`, `cursorCaptured`; `text` (this frame's typed code points); `wantCaptureKeyboard`/`Mouse` (a UI layer took it: [ui](ui.md)) |
 | `Key`, `MouseButton` | Engine key names, mapped from GLFW once |
 | `installPlatform(app, renderInstance)` | PreUpdate system: poll, fill `Input`, send `CloseRequested` / `WindowResized` |
 | `setCursorCaptured(app, renderInstance, bool)` | Mouse-look on/off |
@@ -129,7 +130,8 @@ renderer for one frame.
 
 | Name | What |
 |---|---|
-| `renderConstructedRenderer(renderInstance, renderer, &gpuData)` | Poll, upload uniforms, size targets to the window, run the passes, `bgfx::frame()` |
+| `renderConstructedRenderer(renderInstance, renderer, &gpuData)` | Poll, upload uniforms, size targets to the window, run the passes, `endFrame` |
+| `endFrame(renderInstance, backBufferSize)` | Draw the overlays, then `bgfx::frame()`: what a program that submits its own passes ends with |
 | `performRenderPasses(renderToPrimary, renderer, renderInstance, w, h, view, proj, &gpuData)` | The passes alone: for drawing into a panel |
 | `updateUniforms(handles, values)` | Upload uniform values |
 

@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
 
 #include "core/application.h"
 #include "core/math.h"
@@ -33,9 +34,9 @@ namespace projv {
     //
     // `pressed` and `released` are true for exactly the frame the change was seen.
     //
-    // An application that draws ImGui should copy io.WantCaptureKeyboard / WantCaptureMouse into
-    // the two `want` flags after ImGui's NewFrame, so gameplay can yield to a focused text field. The
-    // engine cannot do that itself: it does not depend on ImGui.
+    // With the UI installed (ui::installUi), the two `want` flags say a UI layer took the keyboard or
+    // the mouse this frame -- a focused text field, a panel under the cursor -- and gameplay should
+    // yield. Without it they stay false unless the program sets them.
     struct Input {
         bool down(Key key) const         { return bits(key) & DOWN; }
         bool pressed(Key key) const      { return bits(key) & PRESSED; }
@@ -51,6 +52,11 @@ namespace projv {
 
         bool wantCaptureKeyboard = false;
         bool wantCaptureMouse = false;
+
+        // The characters typed this frame, as Unicode code points, in order: what a text field wants,
+        // with the keyboard layout, shift and dead keys already applied (keys say which key, this says
+        // what was typed). Empty on a frame with no typing.
+        std::vector<uint32_t> text;
 
         // Written by the platform system. A key's state this frame from whether it is down now.
         void setKey(Key key, bool isDown)               { update(keys[static_cast<size_t>(key)], isDown); }
