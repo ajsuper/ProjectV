@@ -460,12 +460,6 @@ if(PROJV_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
-# Throwaway experiments (prototypes/README.md); off unless asked for.
-option(PROJV_BUILD_PROTOTYPES "Build the prototypes in prototypes/" OFF)
-if(PROJV_BUILD_PROTOTYPES)
-    add_subdirectory(prototypes/fluid)
-endif()
-
 # Unit tests: CPU only, no display, run with ctest. On in the dev preset.
 option(PROJV_BUILD_TESTS "Build the unit tests (CPU only, run with ctest)" OFF)
 if(PROJV_BUILD_TESTS)
