@@ -718,8 +718,9 @@ void startup(projv::Application& app) {
     // Capture the cursor so mouse motion drives the camera (FPS-style mouse look).
     glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
-    // Scroll wheel controls the sun's elevation (day cycle).
-    glfwSetScrollCallback(renderInstance.window, sunScrollCallback);
+    // Scroll wheel controls the sun's elevation (day cycle) -- not in an unattended run, which sets the sun
+    // with GALLERY_SUN and must not have it moved under it.
+    if (!unattendedRun) glfwSetScrollCallback(renderInstance.window, sunScrollCallback);
 
     projv::Scene& scene     = app.world.ctx().emplace<projv::Scene>();
     float& cameraPhi         = app.world.ctx().emplace<float>();
@@ -859,7 +860,7 @@ void render(projv::Application& app) {
     if (mouseCaptured && glfwGetKey(renderInstance.window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
         glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         mouseCaptured = false;
-    } else if (!mouseCaptured && glfwGetMouseButton(renderInstance.window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+    } else if (!unattended && !mouseCaptured && glfwGetMouseButton(renderInstance.window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
         glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         mouseCaptured = true;
     }
@@ -910,25 +911,28 @@ void render(projv::Application& app) {
     const bool fast = glfwGetKey(renderInstance.window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
     const float moveSpeed = framing.moveSpeed * moveSeconds * (fast ? 4.0f : 1.0f);
 
-    // Horizontal movement (W/A/S/D).
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_W)) { cameraPosition += forwardDirection * moveSpeed; cameraMoved = true; }
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_S)) { cameraPosition -= forwardDirection * moveSpeed; cameraMoved = true; }
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_A)) {
-        float leftPhi = cameraPhi + 3.14 / 2;
-        projv::core::vec3 leftDirection = { projv::core::cos(leftPhi), 0, projv::core::sin(leftPhi) };
-        cameraPosition -= leftDirection * moveSpeed;
-        cameraMoved = true;
-    }
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_D)) {
-        float rightPhi = cameraPhi - 3.14 / 2;
-        projv::core::vec3 rightDirection = { projv::core::cos(rightPhi), 0, projv::core::sin(rightPhi) };
-        cameraPosition -= rightDirection * moveSpeed;
-        cameraMoved = true;
-    }
+    // Horizontal movement (W/A/S/D). None of it in an unattended run: a key pressed while the window
+    // has focus would move the camera between two captures that are meant to compare.
+    if (!unattended) {
+        if (glfwGetKey(renderInstance.window, GLFW_KEY_W)) { cameraPosition += forwardDirection * moveSpeed; cameraMoved = true; }
+        if (glfwGetKey(renderInstance.window, GLFW_KEY_S)) { cameraPosition -= forwardDirection * moveSpeed; cameraMoved = true; }
+        if (glfwGetKey(renderInstance.window, GLFW_KEY_A)) {
+            float leftPhi = cameraPhi + 3.14 / 2;
+            projv::core::vec3 leftDirection = { projv::core::cos(leftPhi), 0, projv::core::sin(leftPhi) };
+            cameraPosition -= leftDirection * moveSpeed;
+            cameraMoved = true;
+        }
+        if (glfwGetKey(renderInstance.window, GLFW_KEY_D)) {
+            float rightPhi = cameraPhi - 3.14 / 2;
+            projv::core::vec3 rightDirection = { projv::core::cos(rightPhi), 0, projv::core::sin(rightPhi) };
+            cameraPosition -= rightDirection * moveSpeed;
+            cameraMoved = true;
+        }
 
-    // Vertical movement (R/F).
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_R)) { cameraPosition[1] += moveSpeed; cameraMoved = true; }
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_F)) { cameraPosition[1] -= moveSpeed; cameraMoved = true; }
+        // Vertical movement (R/F).
+        if (glfwGetKey(renderInstance.window, GLFW_KEY_R)) { cameraPosition[1] += moveSpeed; cameraMoved = true; }
+        if (glfwGetKey(renderInstance.window, GLFW_KEY_F)) { cameraPosition[1] -= moveSpeed; cameraMoved = true; }
+    }
 
     // Q toggles the reconstruction bypass (reconstruction renderer only). Edge-triggered: holding a
     // key down would flip it every frame.
