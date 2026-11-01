@@ -48,6 +48,11 @@ $input v_texcoord0
 
 #include <bgfx_shader.sh>
 #include <pjv_random.sc>     // pjvHashSeed, pjvHalton, pjvInterleavedGradientNoise
+// The traversal features this G-buffer asks for (pjv_scene.sc's gates).
+#define PJV_SCENE_TRANSPARENCY
+#define PJV_SCENE_REFRACTION
+#define PJV_SCENE_ANIMATION
+#define PJV_SCENE_MATERIAL
 #include <pjv_utils_DDA.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 

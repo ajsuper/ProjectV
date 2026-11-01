@@ -115,17 +115,27 @@ Constructors (one of these, always):
 | `pjvShadowQuery(maxSteps, maxDistance)` | Shadow rays: bounded, `PJV_Q_OCCLUSION_ONLY` |
 | `pjvRayQueryRaw(maxSteps)` | All defaults |
 
-Options (each sets its flag **and** its budget):
+Options (each sets its flag **and** its budget). A feature's option exists only in a shader that
+compiled the feature in, by defining its gate before including `pjv_scene.sc`:
 
-| Option | Flag | Effect |
-|---|---|---|
-| `pjvQueryWantMaterial(q)` | `PJV_Q_WANT_MATERIAL` | Fill `SceneHit::material` |
-| `pjvQueryTransparency(q, maxLayers, seed)` | `PJV_Q_TRANSPARENCY` | See through `transparency > 0`; accumulate `transmittance`, `emission` |
-| `pjvQueryRefraction(q, maxSegments)` | `PJV_Q_REFRACTION` | Bend at interfaces with `ior != 1` |
-| `pjvQueryAnimation(q, resolveDistance)` | `PJV_Q_ANIMATION` | Resolve animated voxels within that distance |
-| `pjvQueryAnimationDebugSolid(q)` | `PJV_Q_ANIM_DEBUG_SOLID` | Draw envelopes solid (diagnostic) |
-| `pjvQueryLinearLOD(q, finishLOD, rampVoxels)` | | Coarsen linearly with distance |
-| `pjvQueryLODFootprint(q, crossoverVoxels, coarsest)` | | Coarsen by pixel footprint |
+| Option | Gate | Flag | Effect |
+|---|---|---|---|
+| `pjvQueryWantMaterial(q)` | `PJV_SCENE_MATERIAL` | `PJV_Q_WANT_MATERIAL` | Fill `SceneHit::material` |
+| `pjvQueryTransparency(q, maxLayers, seed)` | `PJV_SCENE_TRANSPARENCY` | `PJV_Q_TRANSPARENCY` | See through `transparency > 0`; accumulate `transmittance`, `emission` |
+| `pjvQueryRefraction(q, maxSegments)` | `PJV_SCENE_REFRACTION` (needs transparency) | `PJV_Q_REFRACTION` | Bend at interfaces with `ior != 1` |
+| `pjvQueryAnimation(q, resolveDistance)` | `PJV_SCENE_ANIMATION` | `PJV_Q_ANIMATION` | Resolve animated voxels within that distance |
+| `pjvQueryAnimationDebugSolid(q)` | `PJV_SCENE_DEBUG` (needs animation) | `PJV_Q_ANIM_DEBUG_SOLID` | Draw envelopes solid (diagnostic) |
+| `pjvQueryLinearLOD(q, finishLOD, rampVoxels)` | | | Coarsen linearly with distance |
+| `pjvQueryLODFootprint(q, crossoverVoxels, coarsest)` | | | Coarsen by pixel footprint |
+
+```glsl
+#define PJV_SCENE_TRANSPARENCY   // this shader sees through glass
+#include <pjv_scene.sc>
+```
+
+Off, a feature's code is not in the shader at all: a shader's size costs speed, and a feature it
+never asks for used to be compiled in anyway (the editor's viewport and path tracer carried the
+animated march, 200 kB each). Asking for one that is off is a compile error.
 
 Fields: `flags`, `startLOD`, `finishLOD`, `distanceToFinishLOD`, `maxRaySteps`,
 `maxTransparentLayers`, `maxRefractionSegments`, `maxDistance`, `animResolveDistance`, `seed`,

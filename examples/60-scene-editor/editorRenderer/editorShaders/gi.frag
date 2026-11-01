@@ -88,6 +88,7 @@ $input v_texcoord0
 // the light behind it. A smaller budget than the primary march's: this is indirect light, and the
 // difference between eight layers of glass and sixty-four is not visible in a bounce.
 #define MAX_PEEL_ITERATIONS 9
+#define PJV_SCENE_TRANSPARENCY   // the gather's rays see through glass (pjv_scene.sc's gates)
 #include <pjv_utils_DDA.sc>
 #define TRANSPARENT_LAYERS 8u
 

@@ -24,7 +24,6 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
-#define PJV_NO_ANIMATION
 #include <pjv_utils_DDA.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <grr_common.sc>

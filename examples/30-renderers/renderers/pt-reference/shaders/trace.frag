@@ -18,7 +18,6 @@ $input v_texcoord0
 #include <bgfx_shader.sh>
 #include <pjv_random.sc>     // pjvPcg, pjvRandomUnit24
 
-#define PJV_NO_ANIMATION   // the gallery's scenes do not move
 #include <pjv_utils_DDA.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_path_light.sc>

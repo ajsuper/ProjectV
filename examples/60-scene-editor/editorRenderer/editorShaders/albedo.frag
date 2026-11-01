@@ -113,6 +113,9 @@ $input v_texcoord0
 // agreeing with the render, and it is paid only by the person who asked to see it.
 #define MAX_PEEL_ITERATIONS 65
 
+// The traversal features this pass asks for (pjv_scene.sc's gates).
+#define PJV_SCENE_TRANSPARENCY
+#define PJV_SCENE_REFRACTION
 #include <pjv_utils_DDA.sc>
 
 // Transparent layers the primary ray may see through. One fewer than the iteration bound above, so

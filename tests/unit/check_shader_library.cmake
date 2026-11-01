@@ -21,8 +21,13 @@ file(GLOB libraryFiles "${LIBRARY}/*.sc")
 file(MAKE_DIRECTORY "${WORK}")
 set(failures "")
 
+# compile_test(name includes [defines]): a fragment shader defining `defines`, then including `includes`.
 function(compile_test name includes)
-    set(source "$input v_texcoord0\n#include <bgfx_shader.sh>\n")
+    set(source "$input v_texcoord0\n")
+    foreach(define IN LISTS ARGN)
+        string(APPEND source "#define ${define}\n")
+    endforeach()
+    string(APPEND source "#include <bgfx_shader.sh>\n")
     foreach(include IN LISTS includes)
         string(APPEND source "#include <${include}>\n")
     endforeach()
@@ -77,6 +82,10 @@ foreach(file IN LISTS libraryFiles)
     endforeach()
 endforeach()
 compile_test("together" "${allNames}")
+# The scene's feature gates (pjv_scene.sc) leave their code out by default, so the default compile says
+# nothing about it: every gate on as well.
+compile_test("scene_all_gates" "pjv_scene.sc"
+             PJV_SCENE_TRANSPARENCY PJV_SCENE_REFRACTION PJV_SCENE_ANIMATION PJV_SCENE_MATERIAL PJV_SCENE_DEBUG)
 
 if(failures)
     message(FATAL_ERROR "shader library:${failures}")

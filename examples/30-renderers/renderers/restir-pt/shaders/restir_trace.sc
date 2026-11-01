@@ -6,7 +6,6 @@
 // inside a loop whose bound is a uniform: a traversal inlined at a second call site makes every ray in
 // the shader slower, and an unrollable bound would copy it anyway.
 
-#define PJV_NO_ANIMATION   // the gallery's scenes do not move; compiling the animated march out is faster
 #include <pjv_utils_DDA.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include "restir_common.sc"

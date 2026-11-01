@@ -66,6 +66,9 @@ $input v_texcoord0
 // One more iteration than layers, so the final opaque surface behind the last layer still resolves.
 #define MAX_PEEL_ITERATIONS 65
 
+// The traversal features this path tracer asks for (pjv_scene.sc's gates).
+#define PJV_SCENE_TRANSPARENCY
+#define PJV_SCENE_REFRACTION
 #include <pjv_utils_DDA.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_bsdf.sc>   // the material model: GGX over Lambert, shared with the renderer gallery

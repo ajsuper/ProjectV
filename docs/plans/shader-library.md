@@ -504,6 +504,37 @@ the ray-box exits, `tree64s`, `headersLength`, `rayStartDirection`, `returnStruc
 - Captures: pt-reference, fast, reconstruction and voxel at the baseline view are bit-identical to
   c664a39.
 
+*Gates* (D8.2). `PJV_SCENE_TRANSPARENCY`, `PJV_SCENE_REFRACTION` (needs transparency),
+`PJV_SCENE_ANIMATION`, `PJV_SCENE_MATERIAL` and `PJV_SCENE_DEBUG` (needs animation, for the
+envelope view), all off by default.
+- Off, a gate's code is not compiled, and neither is its opt-in (`pjvQueryTransparency`, ...).
+  Asking for a feature that is off is a compile error. Defining the old `PJV_NO_ANIMATION` is also
+  an error, so a stale define cannot pass silently.
+- What each gate takes out:
+  - transparency: the peel's consume in the march, the solo-interval pass, and every pass of the
+    scene query after the first;
+  - refraction: the bend, and the peel's hand-back of a bending interface;
+  - animation: the animated march and its resolve, and the march's animated skip;
+  - material: the march's leaf-material fetch, unless transparency or animation needs it anyway.
+- Shaders that ask:
+  - the advanced renderer's G-buffer, all four;
+  - its probe pass, material;
+  - the editor viewport and path tracer, transparency and refraction;
+  - the editor's GI and shade passes, transparency.
+  The six `PJV_NO_ANIMATION` defines are gone: off is now the default.
+- `ctest -R shader_library` also compiles `pjv_scene.sc` with every gate on.
+- Sizes, against S4: 25 shaders smaller, none larger, 6003.5 -> 5554.9 kB (-7.5%).
+  - The editor's viewport (`albedo`, 530.9 -> 326.5 kB) and path tracer (607.0 -> 395.7 kB) carried
+    the animated march without ever animating. They set their query flags at run time, so the
+    compiler could not prove the march dead.
+  - Shaders whose queries were constant (`pjvPrimaryQuery` with no options) had it folded away
+    already, and shrink 1-3% (the basic renderer, the gallery's G-buffers, the night renderer).
+  - The advanced G-buffer, which asks for everything, is -0.4%.
+- Captures, against c664a39, with your local `RESTIR_GI_MAX_GLOSSINESS` change applied to both:
+  - bit-identical: the gallery's five renderers at the baseline view, the sandbox's still scene, the
+    editor viewport and Render mode;
+  - the advanced renderer, largest difference 1/255.
+
 ## Open questions
 
 None open. Answered 2026-10-27: tolerance (D5), `projv::cam` (D4), embedded (D3), S5 in scope (D8).

@@ -41,9 +41,6 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
-// Nothing in this renderer animates, so the engine's animated march -- a second tree march inlined
-// into every scene query -- is left out of the shader. Its size alone costs occupancy.
-#define PJV_NO_ANIMATION
 // GRR_STATS -- a measurement build, never the shipped one. 1 writes the PRIMARY ray's march counters
 // into gAlbedo (r tree-loop iterations, g chunks marched, b grid cells visited, a = 1 if it hit), 2 the
 // SHADOW ray's (a = 1 where one was cast). Build with it defined and read the target back with

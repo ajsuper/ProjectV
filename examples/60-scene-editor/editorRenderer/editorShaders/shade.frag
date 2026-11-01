@@ -87,6 +87,7 @@ $input v_texcoord0
 // between the direct and indirect terms rather than as a slightly cheaper approximation.
 // Must be defined BEFORE the include to override the header's #ifndef default.
 #define MAX_PEEL_ITERATIONS 9
+#define PJV_SCENE_TRANSPARENCY   // shadow rays see through glass (pjv_scene.sc's gates)
 #include <pjv_utils_DDA.sc>
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #define TRANSPARENT_LAYERS 8u

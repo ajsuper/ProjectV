@@ -8,6 +8,35 @@
 #include <pjv_motion.sc>    // the animated march's fields
 #include <pjv_random.sc>    // pjvRandomUnit, for the peel's stochastic interface
 
+// ---- Feature gates (docs/plans/shader-library.md, D8) ------------------------------------------
+//
+// Each traversal feature is compiled only into a shader that asks for it, by defining its gate
+// before including this file. Off, its code is not in the shader, and its opt-in function does not
+// exist, so asking for a feature the shader did not compile in is a compile error rather than a
+// silent no-op. Within a shader that has a feature, the query's flag still picks per ray.
+//
+//   PJV_SCENE_TRANSPARENCY  see through transparent voxels (pjvQueryTransparency)
+//   PJV_SCENE_REFRACTION    bend at their interfaces (pjvQueryRefraction); needs TRANSPARENCY
+//   PJV_SCENE_ANIMATION     resolve animated voxels against their envelopes (pjvQueryAnimation)
+//   PJV_SCENE_MATERIAL      the march resolves the hit's material (pjvQueryWantMaterial)
+//   PJV_SCENE_DEBUG         draw envelopes solid (pjvQueryAnimationDebugSolid); needs ANIMATION
+//
+// A shader's compiled size costs speed directly: compiling the animated march out of the physics
+// demos' G-buffer took it from 9.3 to 3.4 ms. Hence everything off by default.
+#if defined(PJV_NO_ANIMATION)
+#error PJV_NO_ANIMATION is gone: animation is compiled in only by defining PJV_SCENE_ANIMATION
+#endif
+#if defined(PJV_SCENE_REFRACTION) && !defined(PJV_SCENE_TRANSPARENCY)
+#error PJV_SCENE_REFRACTION needs PJV_SCENE_TRANSPARENCY: only a transparent layer can bend a ray
+#endif
+#if defined(PJV_SCENE_DEBUG) && !defined(PJV_SCENE_ANIMATION)
+#error PJV_SCENE_DEBUG needs PJV_SCENE_ANIMATION: it draws the animation envelopes
+#endif
+// Whether anything compiled in reads a leaf's material inside the march.
+#if defined(PJV_SCENE_TRANSPARENCY) || defined(PJV_SCENE_MATERIAL) || defined(PJV_SCENE_ANIMATION)
+#define PJV_SCENE_LEAF_MATERIAL
+#endif
+
 USAMPLER2D(tree64Data, 14);
 USAMPLER2D(headerData, 15);
 USAMPLER2D(gridInfo, 12);
@@ -171,21 +200,32 @@ RayQuery pjvShadowQuery(uint maxSteps, float maxDistance) {
 // Opt-ins. Each one both sets its flag and supplies the budget that flag needs, so it is not possible
 // to enable a feature and leave its bound at garbage -- which is the failure mode this whole API is
 // shaped around.
+// Each exists only in a shader that compiled its feature in; see the gates at the top.
+#ifdef PJV_SCENE_MATERIAL
 void pjvQueryWantMaterial(inout RayQuery q) { q.flags |= PJV_Q_WANT_MATERIAL; }
+#endif
+#ifdef PJV_SCENE_TRANSPARENCY
 void pjvQueryTransparency(inout RayQuery q, uint maxLayers, uint seed) {
     q.flags |= PJV_Q_TRANSPARENCY;
     q.maxTransparentLayers = maxLayers;
     q.seed = seed;
 }
+#endif
+#ifdef PJV_SCENE_REFRACTION
 void pjvQueryRefraction(inout RayQuery q, uint maxSegments) {
     q.flags |= PJV_Q_REFRACTION;
     q.maxRefractionSegments = maxSegments;
 }
+#endif
+#ifdef PJV_SCENE_ANIMATION
 void pjvQueryAnimation(inout RayQuery q, float resolveDistance) {
     q.flags |= PJV_Q_ANIMATION;
     q.animResolveDistance = resolveDistance;
 }
+#endif
+#ifdef PJV_SCENE_DEBUG
 void pjvQueryAnimationDebugSolid(inout RayQuery q) { q.flags |= PJV_Q_ANIM_DEBUG_SOLID; }
+#endif
 void pjvQueryLinearLOD(inout RayQuery q, uint finishLOD, uint rampDistanceVoxels) {
     q.startLOD = 0u;
     q.finishLOD = finishLOD;
@@ -877,7 +917,9 @@ int pjvPeelConsume(inout PeelAccum peel, VoxelMaterial m,
     //
     // `peel.refracting` is cleared by the outer loop around its own call, or this would hand the
     // same voxel back forever.
+#ifdef PJV_SCENE_REFRACTION
     if (peel.refracting && entering && abs(m.ior - 1.0) > 1.0 / 256.0) return PJV_PEEL_STOP_HERE;
+#endif
 
     if (entering) {
         if (peel.analytic) {
@@ -1431,7 +1473,12 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
     returnData.voxelCoord = ivec3(0);
     returnData.steps = 0u;
     returnData.materialListIndex = MATERIAL_INDEX_NEEDS_DESCENT;
+#ifdef PJV_SCENE_LEAF_MATERIAL
     bool needMaterial = peel.active || peel.wantMaterial || skipAnimated;
+#else
+    // Nothing compiled in reads a leaf's material: the march never fetches one.
+    const bool needMaterial = false;
+#endif
 
     int res = int(tree64Resolution);
     PjvTiles tiles = pjvTilesAt(tree64StartIndex);
@@ -1533,20 +1580,27 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
                     int verdict = PJV_PEEL_STOP_HERE;
                     // Held locally until the verdict is known -- see the tree march's note on why.
                     VoxelMaterial leafMaterial = emptyVoxelMaterial();
+#ifdef PJV_SCENE_LEAF_MATERIAL
                     if (needMaterial) {
                         leafMaterial = decodeMaterial(materialPaletteTexel(
                             materialID(leafOffset + materialIDStart) + paletteOffsetIn));
+#ifdef PJV_SCENE_ANIMATION
                         // Within the resolve distance an animated voxel is drawn by pjvAnimatedMarch,
                         // where it actually is; here it is stepped through. Past it, it is ordinary
                         // geometry at its rest position.
                         if (skipAnimated && rayT * localToWorld <= rayQuery.animResolveDistance &&
                             (leafMaterial.flags & PJV_MAT_FLAG_ANIMATED) != 0u) {
                             verdict = PJV_PEEL_CONTINUE;
-                        } else {
+                        } else
+#endif
+                        {
+#ifdef PJV_SCENE_TRANSPARENCY
                             verdict = pjvPeelConsume(peel, leafMaterial, rayT * localToWorld,
                                                      cellExitT * localToWorld, localToWorld, limitT);
+#endif
                         }
                     }
+#endif
                     if (verdict == PJV_PEEL_ABORT) {
                         peel.hitMaterialValid = false;
                         return returnData;
@@ -1615,29 +1669,6 @@ SceneIntersectData marchRayThroughTree64_DDA(Ray ray, RayQuery rayQuery, float t
     return returnData;
 }
 
-// =============================================================================
-// Animation: resolving what is drawn inside an envelope cell
-// =============================================================================
-//
-// The geometry tree stores the REST POSE. The envelope -- a second, quarter-resolution tree in the
-// same texture -- marks every cell an animated voxel could be drawn in. Neither says where anything
-// IS; that is decided here, per frame, from the motion table.
-//
-// ---- Why this is a separate march rather than a hook in the geometry DDA ----
-//
-// Because an envelope cell can be marked where the geometry is EMPTY, and that is the entire point:
-// a blade that has swayed sideways is drawn in a cell its rest pose never occupied. The geometry
-// march steps straight past empty cells -- correctly -- so it can never visit them. Unioning the two
-// trees' masks during one descent would work and would mean carrying two node stacks in lockstep
-// through the hottest loop in the engine, with the envelope one level shallower than the geometry.
-// Marching the envelope separately costs one extra traversal of a small sparse tree, only for chunks
-// that have one, and leaves the geometry DDA untouched.
-//
-// The other half of not drawing anything twice lives in the geometry march: when animation is on, a
-// leaf voxel whose material is animated is SKIPPED there, because its drawn position is this
-// function's answer to give. With animation off, nothing skips and nothing resolves -- the geometry
-// tree renders the rest pose, which is exactly what an animation-blind renderer sees.
-
 // Is a voxel set in an arbitrary tree64 range, and if so where is its material byte?
 //
 // Distinct from fetchVoxelMaterialAtCoord in the one way that matters here: it CHECKS THE VALID MASK
@@ -1673,6 +1704,52 @@ bool pjvProbeLeafNode(uint startIndex, uint leafStart, uint resolution, ivec3 bl
     if (any(lessThan(blockMin, ivec3(0))) || any(greaterThanEqual(blockMin, ivec3(int(resolution))))) return false;
     return pjvTileLeaf(startIndex, leafStart, resolution, blockMin, outLeaf);
 }
+
+// The entry face of an axis-aligned box, computed analytically.
+//
+// Needed because a march's carried normal is NOT always usable. marchRayThroughTree64_DDA seeds
+// hitNormal from getRayBoxEntry against the whole volume, and that function returns (0,0,0) when the
+// ray ORIGIN IS INSIDE the volume -- which is the normal case for a camera flying through a scene.
+// The seed is replaced on the first committed DDA step, so an ordinary hit is fine; a hit found
+// during the INITIAL DESCENT, before any step, keeps the zero.
+//
+// That is not a cosmetic problem. A renderer's miss test is typically `dot(n, n) < 0.5` alongside the
+// size and distance checks -- AdvancedRenderer's gbuffer does exactly this -- so a hit carrying a zero
+// normal is read as SKY. The geometry is found, returned, and then discarded as background: it reads
+// on screen as a voxel you can see straight through, with no clue that anything was hit at all.
+vec3 pjvBoxEntryNormal(Ray ray, vec3 boxMin, float size) {
+    vec3 invD = 1.0 / ray.direction;
+    vec3 t0 = (boxMin - ray.origin) * invD;
+    vec3 t1 = (boxMin + vec3(size) - ray.origin) * invD;
+    vec3 tsmall = min(t0, t1);
+    // The entry is the LATEST of the three slab entries; that axis supplies the face.
+    vec3 sel = step(tsmall.yzx, tsmall) * step(tsmall.zxy, tsmall);
+    return -sign(ray.direction) * sel;
+}
+
+#ifdef PJV_SCENE_ANIMATION
+// =============================================================================
+// Animation: resolving what is drawn inside an envelope cell
+// =============================================================================
+//
+// The geometry tree stores the REST POSE. The envelope -- a second, quarter-resolution tree in the
+// same texture -- marks every cell an animated voxel could be drawn in. Neither says where anything
+// IS; that is decided here, per frame, from the motion table.
+//
+// ---- Why this is a separate march rather than a hook in the geometry DDA ----
+//
+// Because an envelope cell can be marked where the geometry is EMPTY, and that is the entire point:
+// a blade that has swayed sideways is drawn in a cell its rest pose never occupied. The geometry
+// march steps straight past empty cells -- correctly -- so it can never visit them. Unioning the two
+// trees' masks during one descent would work and would mean carrying two node stacks in lockstep
+// through the hottest loop in the engine, with the envelope one level shallower than the geometry.
+// Marching the envelope separately costs one extra traversal of a small sparse tree, only for chunks
+// that have one, and leaves the geometry DDA untouched.
+//
+// The other half of not drawing anything twice lives in the geometry march: when animation is on, a
+// leaf voxel whose material is animated is SKIPPED there, because its drawn position is this
+// function's answer to give. With animation off, nothing skips and nothing resolves -- the geometry
+// tree renders the rest pose, which is exactly what an animation-blind renderer sees.
 
 // Is an animated source stored at this voxel, and under WHICH motion set?
 //
@@ -2074,28 +2151,6 @@ void pjvResolveCell(Ray ray, vec3 invDir, chunkHeader h,
     }
 }
 
-// The entry face of an axis-aligned box, computed analytically.
-//
-// Needed because a march's carried normal is NOT always usable. marchRayThroughTree64_DDA seeds
-// hitNormal from getRayBoxEntry against the whole volume, and that function returns (0,0,0) when the
-// ray ORIGIN IS INSIDE the volume -- which is the normal case for a camera flying through a scene.
-// The seed is replaced on the first committed DDA step, so an ordinary hit is fine; a hit found
-// during the INITIAL DESCENT, before any step, keeps the zero.
-//
-// That is not a cosmetic problem. A renderer's miss test is typically `dot(n, n) < 0.5` alongside the
-// size and distance checks -- AdvancedRenderer's gbuffer does exactly this -- so a hit carrying a zero
-// normal is read as SKY. The geometry is found, returned, and then discarded as background: it reads
-// on screen as a voxel you can see straight through, with no clue that anything was hit at all.
-vec3 pjvBoxEntryNormal(Ray ray, vec3 boxMin, float size) {
-    vec3 invD = 1.0 / ray.direction;
-    vec3 t0 = (boxMin - ray.origin) * invD;
-    vec3 t1 = (boxMin + vec3(size) - ray.origin) * invD;
-    vec3 tsmall = min(t0, t1);
-    // The entry is the LATEST of the three slab entries; that axis supplies the face.
-    vec3 sel = step(tsmall.yzx, tsmall) * step(tsmall.zxy, tsmall);
-    return -sign(ray.direction) * sel;
-}
-
 // Walks this chunk's envelope and returns the nearest animated voxel actually drawn along the ray.
 //
 // `ray` is in the chunk's GEOMETRY voxel frame, the same one marchRayThroughTree64_DDA uses.
@@ -2235,6 +2290,7 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
         // reason the set must not gate the candidates either.
         MotionSet ms = pjvMotionSet(setIndex);
 
+#ifdef PJV_SCENE_DEBUG
         if ((rayQuery.flags & PJV_Q_ANIM_DEBUG_SOLID) != 0u) {
             // The whole envelope cell, drawn where it is. No resolve, no candidates, no field.
             SceneIntersectData dbg;
@@ -2274,6 +2330,7 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
             dbg.materialListIndex = 0u;
             return dbg;
         }
+#endif
 
         {
             // Walk the 4x4x4 geometry cells of this envelope cell in ray order. At most ten of the
@@ -2465,6 +2522,8 @@ SceneIntersectData pjvAnimatedMarch(Ray ray, RayQuery rayQuery, chunkHeader h,
     return miss;
 }
 
+#endif  // PJV_SCENE_ANIMATION
+
 //Cast the ray through the tree64 bounding box.
 // `nearestSoFar` is the closest hit the SCENE has produced up to this call, in world units, or 1e30
 // when nothing has been found yet. It bounds the animated march only. The geometry march does not
@@ -2541,7 +2600,11 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
     // find and the voxels are drawn NOWHERE -- not stale, not misplaced, absent. So a chunk whose
     // bake did not produce an envelope renders its animated materials at rest, statically, which is
     // a degradation with a visible cause rather than a hole with none.
+#ifdef PJV_SCENE_ANIMATION
     bool animate = (rayQuery.flags & PJV_Q_ANIMATION) != 0u && chunkHasEnvelope(header);
+#else
+    const bool animate = false;
+#endif
 
     // ---- Does the ray reach the voxels at all? ---------------------------------------------------
     // The chunk's cube is mostly air in a typical scene -- a crate's 1 m of voxels in a 4 m chunk, a
@@ -2605,12 +2668,10 @@ SceneIntersectData castRayThroughTree64(Ray ray, RayQuery rayQuery, float tMin, 
         SceneIntersectData animHit;
         animHit.foundBox.size = -1.0;
         animHit.rayT = -1.0;
-        // PJV_NO_ANIMATION (defined before including this file) leaves the animated march out of the
-        // shader. It is a whole second tree march inlined into every copy of this function, and the
-        // shader pays for its size whether or not a ray ever animates: measured in the physics demos'
-        // G-buffer, 9.3 ms -> 3.4 ms for the same frame. A renderer that never sets
-        // pjvQueryAnimation should define it.
-#ifndef PJV_NO_ANIMATION
+        // Only with PJV_SCENE_ANIMATION. It is a whole second tree march inlined into every copy of
+        // this function, and the shader pays for its size whether or not a ray ever animates:
+        // measured in the physics demos' G-buffer, 9.3 ms -> 3.4 ms for the same frame.
+#ifdef PJV_SCENE_ANIMATION
         if (animate) {
             // Bounded by whatever the geometry already found. An animated voxel behind an opaque
             // surface cannot be seen, and searching for it is the single largest avoidable cost here.
@@ -3131,6 +3192,7 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin,
     float soloLimit = -1.0;
     int   soloKind = -1;    // 0 = loose, 1 = grid
     int   soloIndex = -1;
+#ifdef PJV_SCENE_TRANSPARENCY
     if (peel.active) {
         float bestEntry = 1e30;
         float secondEntry = 1e30;
@@ -3152,6 +3214,7 @@ SceneIntersectData raySceneIntersectFrom(Ray ray, RayQuery rayQuery, float tMin,
         soloLimit = min(secondEntry, rayQuery.maxDistance);
         if (soloLimit <= bestEntry) { soloKind = -1; soloIndex = -1; soloLimit = -1.0; }
     }
+#endif
 
     // The winner's material, saved as it wins. Every march writes peel.hitMaterial, and the march
     // that wrote it LAST is not necessarily the one that won on distance -- a far chunk marched after
@@ -3341,7 +3404,11 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
     SceneHit result = pjvEmptySceneHit();
 
     PeelAccum peel = pjvNoPeel();
+    // Each from its flag only where its gate compiled the feature in; otherwise pjvNoPeel's false,
+    // which the compiler folds through everything below.
+#ifdef PJV_SCENE_TRANSPARENCY
     peel.active   = (q.flags & PJV_Q_TRANSPARENCY) != 0u;
+#endif
     // A shadow ray wants the EXPECTED attenuation. Multiplying by `transparency` once per interface is
     // exactly that, with none of the variance a random choice would add to every shadow in the image.
     peel.analytic = (q.flags & PJV_Q_OCCLUSION_ONLY) != 0u;
@@ -3349,10 +3416,14 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
     peel.seed = q.seed;
     peel.minTransmittance = q.minTransmittance;
     // Only when asked. See PJV_Q_WANT_MATERIAL for why this is opt-in rather than implied.
+#ifdef PJV_SCENE_MATERIAL
     peel.wantMaterial = (q.flags & PJV_Q_WANT_MATERIAL) != 0u;
+#endif
+#ifdef PJV_SCENE_REFRACTION
     // Tells the in-march peel to hand a refracting interface back rather than consume it, because
     // this loop is the only place the ray can be replaced. See pjvPeelConsume.
     peel.refracting = (q.flags & PJV_Q_REFRACTION) != 0u && q.maxRefractionSegments > 0u;
+#endif
 
     float tMin = 0.0;
     // Identity of the voxel the previous pass consumed, so a pass that fails to move on is caught
@@ -3366,7 +3437,9 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
     // Distance already travelled along the segments behind this one, so pathLength can be reported.
     float travelled = 0.0;
     uint  segments = 0u;
+#ifdef PJV_SCENE_REFRACTION
     bool  wantRefraction = (q.flags & PJV_Q_REFRACTION) != 0u && q.maxRefractionSegments > 0u;
+#endif
 
     // ---- A BEND IS ONE PASS OF THE LOOP BELOW, NOT A LOOP AROUND IT --------------------------
     //
@@ -3406,7 +3479,12 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
     // unrolled iteration. What actually overflowed the space was the four forked prototype
     // traversals that example still included, each a full copy of the march. Worth recording so the
     // next id-space problem is diagnosed by counting call sites rather than by fighting unrolling.
+#ifdef PJV_SCENE_TRANSPARENCY
     for (int iteration = 0; iteration < MAX_PEEL_ITERATIONS; iteration++) {
+#else
+    // Without transparency the first pass always ends the query: an opaque hit, or nothing.
+    for (int iteration = 0; iteration < 1; iteration++) {
+#endif
         SceneIntersectData hit = raySceneIntersectFrom(cur, q, tMin, peel);
 
         // The march gave up in place -- budget spent, or fully absorbed. Its own reason is the honest
@@ -3436,9 +3514,12 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
         VoxelMaterial m = emptyVoxelMaterial();
         if (peel.hitMaterialValid) {
             m = peel.hitMaterial;
-        } else if (peel.active || peel.wantMaterial) {
+        }
+#if defined(PJV_SCENE_TRANSPARENCY) || defined(PJV_SCENE_MATERIAL)
+        else if (peel.active || peel.wantMaterial) {
             m = fetchVoxelMaterialFromHit(hit);
         }
+#endif
 
         // One rule for every voxel. Opaque stops the ray; transparent is crossed. Nothing consults a
         // flag to decide whether a particular KIND of voxel occludes -- a fire parcel, a pane of
@@ -3446,10 +3527,14 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
         // Cleared around this one call. `peel.refracting` means "hand a refracting interface back to
         // the loop that can bend" -- and this IS that loop, so here the layer is consumed normally.
         // Left set, pjvPeelConsume would hand the same voxel back to the caller that just received it.
+#ifdef PJV_SCENE_TRANSPARENCY
         bool callerBends = peel.refracting;
         peel.refracting = false;
         int verdict = pjvPeelConsume(peel, m, hit.rayT, hit.exitT, hit.foundBox.size, 1e30);
         peel.refracting = callerBends;
+#else
+        int verdict = PJV_PEEL_STOP_HERE;   // nothing is transparent to a shader without the gate
+#endif
 
         if (verdict == PJV_PEEL_STOP_HERE) {
             result.hit = hit;
@@ -3459,6 +3544,8 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
             break;
         }
         if (verdict == PJV_PEEL_ABORT) { stop = peel.stopReason; break; }
+
+#ifdef PJV_SCENE_TRANSPARENCY
 
         // ---- The layer just crossed bends light ----------------------------------------------
         //
@@ -3488,6 +3575,7 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
         // than in geometry, and it degrades instead of tearing.
         //
         // PJV_STOP_SEGMENTS is what this reason was defined for, and a caller can now see it.
+#ifdef PJV_SCENE_REFRACTION
         bool bendableInterface = wantRefraction && peel.crossedInterface &&
                                  abs(m.ior - 1.0) > 1.0 / 256.0;
         if (bendableInterface && segments >= q.maxRefractionSegments) {
@@ -3601,10 +3689,12 @@ SceneHit raySceneIntersect(Ray ray, RayQuery rayQueryIn) {
             segments++;
             continue;
         }
+#endif  // PJV_SCENE_REFRACTION
 
         lastHeader = hit.headerIndex;
         lastVoxel = hit.voxelCoord;
         tMin = peelNextTMin(hit, peelSegmentLength(cur, hit));
+#endif  // PJV_SCENE_TRANSPARENCY
     }
 
     // Spent every segment the caller granted and still met refractive interfaces afterwards: the ray

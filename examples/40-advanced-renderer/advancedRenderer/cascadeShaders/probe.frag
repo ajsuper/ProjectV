@@ -43,6 +43,7 @@ SAMPLER2D(prevIndirect, 6);
 // The other components belong to other passes.
 uniform vec4 debugParams;
 
+#define PJV_SCENE_MATERIAL   // pjv_probe.sc has the march resolve each hit's material (pjv_scene.sc's gates)
 #include <pjv_utils_DDA.sc>
 
 // This pass does not address a cascade atlas -- the cascades are gone -- but pjv_cascade_common.sc
