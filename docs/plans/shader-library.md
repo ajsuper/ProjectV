@@ -1,6 +1,6 @@
 # Shader library and an engine basic renderer
 
-Status: **in progress**: S0 and S1 built 2026-10-28, S2 2026-10-30, S3 and S4 2026-11-01; S5 next. Approved 2026-10-27 (open questions answered:
+Status: **done**: S0 and S1 built 2026-10-28, S2 2026-10-30, S3, S4 and S5 2026-11-01. Approved 2026-10-27 (open questions answered:
 tolerance D5, `projv::cam` removed D4, embedded engine shaders D3, S5 in scope with modularity first D8). Comes before
 [ui.md](ui.md), whose passes (blur, composite) are built from it.
 
@@ -483,7 +483,7 @@ sun being normalised on the CPU.
 multiplayer `selftest.sh` and a windowed client. Hello Voxel and entities run with no errors, and
 `exit_path a` and `b` pass.
 
-**S5** (in progress, 2026-11-01). Four steps, each its own commit: split, gates, includes, prefix.
+**S5** (2026-11-01). Four steps, each its own commit: split, gates, includes, prefix.
 
 *Split.* `pjv_utils_DDA.sc` (4,419 lines) is now three files and a temporary umbrella:
 - `pjv_motion.sc` (the motion table, the sway and advection fields);
@@ -566,6 +566,31 @@ Result:
   exception to the uniform rule: engine-owned, but declared by `pjv_scene.sc` and `pjv_material.sc`,
   which read them. A deliberate stray uniform and an unprefixed function in `pjv_motion.sc` were both
   caught.
+
+*Timings* (D8.5). Before is c664a39 (S4), after is S5, each with the same uncommitted
+`RESTIR_GI_MAX_GLOSSINESS` 0.9. Interleaved before, after, before, after; GPU ms a frame.
+
+| | Before | After |
+|---|---:|---:|
+| Gallery, room: pt-reference / fast / reconstruction / restir-pt / voxel | 8.58, 8.61 / 2.09, 2.09 / 1.00, 1.00 / 4.36, 4.40 / 1.69, 1.66 | 8.58, 8.67 / 2.10, 2.10 / 1.05, 1.00 / 4.38, 4.43 / 1.60, 1.68 |
+| Gallery, SanMiguel: same order | 9.70, 9.76 / 2.11, 2.11 / 1.19, 1.19 / 4.67, 4.68 / 2.09, 2.06 | 9.56, 9.69 / 2.10, 2.11 / 1.22, 1.16 / 4.68, 4.71 / 2.04, 2.06 |
+| Voxel Mayhem (`MAYHEM_GPU=1`) | 7.95, 7.94 | 7.98, 7.97 |
+| Editor viewport, SanMiguel 960x600: albedo pass | 0.417, 0.421 | 0.410, 0.420 |
+| Editor Render mode, SanMiguel 960x600: path trace | 10.63, 10.75 | 10.78, 10.63 |
+
+- No worse anywhere. Every difference is inside run-to-run noise.
+- Not better either, against what D8 expected "where a shader shed features". The editor's
+  viewport and path tracer lost 38% and 35% of their code and run at the same speed. The animated
+  march they shed was dead at run time and, at these views, did not cost occupancy.
+- The 2x and 9.3 -> 3.4 ms results that motivated D8 came from a second inlined march call site and
+  from the physics demos' G-buffer, and neither was in play here. Smaller shaders still compile
+  faster and leave room under the SPIR-V id ceiling.
+
+*Final check* (after the prefix): `ctest --preset dev` passes. Captures against c664a39, with the
+same uncommitted glossiness change in both:
+- bit-identical: the gallery's five renderers at the baseline view, the sandbox, and the editor's
+  viewport and Render mode;
+- the advanced renderer, largest difference 1/255.
 
 ## Open questions
 
