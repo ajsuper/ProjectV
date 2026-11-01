@@ -336,8 +336,28 @@ used it: its 29 `cam.` uses are its own `CameraState cam`, and nothing included 
 - Advanced renderer (frame 240): passes. Mean 0.0005%, 0.01% of pixels over 2/255.
 - Explosion demo and the editor (viewport, Render mode): S1 captured; S2 not yet.
 
-*Not done:* the timings D8.5 asks for (the gallery and the demos' benches, before and after,
-announced). And an orthographic editor capture, since the bench views are perspective only.
+*Not done:* an orthographic editor capture, since the bench views are perspective only.
+
+*Timings* (D8.5, measured 2026-11-01, after S4). Before is S1 (f59f8a1) with only the gallery's
+fixed bench window and no-input commits cherry-picked, so both run at 1280x720. After is c664a39,
+which includes S3 and S4. Each was built in a clean worktree, and the runs were interleaved
+before, after, before, after.
+- Gallery `--bench` (GPU ms a frame, frames 120..360), at the baseline view and at SanMiguel's
+  default framing:
+
+  | Renderer | Room, before | Room, after | SanMiguel, before | SanMiguel, after |
+  |---|---:|---:|---:|---:|
+  | pt-reference | 8.65, 8.66 | 8.59, 8.67 | 9.71, 9.75 | 9.73, 9.72 |
+  | fast | 2.13, 2.09 | 2.12, 2.08 | 2.11, 2.10 | 2.09, 2.13 |
+  | reconstruction | 1.02, 1.01 | 1.02, 1.01 | 1.18, 1.20 | 1.21, 1.18 |
+  | restir-pt | 4.64, 4.70 | 4.63, 4.70 | 4.68, 4.68 | 4.68, 4.67 |
+  | voxel | 1.68, 1.60 | 1.69, 1.66 | 2.05, 2.03 | 2.06, 2.05 |
+
+- Voxel Mayhem, `MAYHEM_BENCH=cannon MAYHEM_GPU=1` (restir-pt): 8.03 and 7.93 ms before, 8.02 and
+  7.94 after.
+- No pass moved by more than 0.03 ms, which is inside run-to-run noise. Uploading the camera, and
+  then its tangent, costs nothing measurable.
+- `DEMOS_BENCH` no longer exists; the physics example has no render bench.
 
 *Tests:* `camera:*` in `test_shaders.cpp`:
 - the ray equals `utils::rayDirectionThroughImage` for four views, the near-vertical fallback
