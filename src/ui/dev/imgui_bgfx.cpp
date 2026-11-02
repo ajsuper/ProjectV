@@ -286,7 +286,10 @@ namespace projv::ui::dev {
                 bgfx::setScissor(uint16_t(clipMinX), uint16_t(clipMinY),
                                  uint16_t(clipMaxX - clipMinX), uint16_t(clipMaxY - clipMinY));
 
-                bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_MSAA |
+                // Colour only. The back buffer's alpha is the window's opacity to a compositor: blended
+                // like the colour, a 95%-opaque panel left it at 0.95 and the desktop showed through the
+                // panel. What drew the frame (the renderer, or a program's clear) decides it.
+                bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_MSAA |
                                BGFX_STATE_BLEND_FUNC(BGFX_STATE_BLEND_SRC_ALPHA, BGFX_STATE_BLEND_INV_SRC_ALPHA));
 
                 bgfx::TextureHandle texture = textureHandleFromImGuiID(command.GetTexID());

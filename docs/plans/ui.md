@@ -226,6 +226,10 @@ ruled.
   version cleared it, so a button released after a masked frame had no release edge, and a panel
   resize stayed held for good. Found by hand; `ui: a button released over a panel still ends its
   drag` is the regression test.)
+- **The UI writes colour, not alpha.** The backend blended alpha like colour, so a 95%-opaque panel
+  left the back buffer's alpha at 0.95 (127 at the panel's edge), and a compositor showed the desktop
+  through the panel. Found by hand. It now writes RGB only: the sandbox's capture under a panel and
+  the editor's whole window read alpha 255.
 - **Installed in** Hello Voxel, entities, the sandbox, physics, world loading, the multiplayer
   client, Voxel Mayhem, the explosion demo, and the party and playground clients: every program on the
   engine's platform layer. Not in the gallery, the advanced renderer, the terrain generator or the
