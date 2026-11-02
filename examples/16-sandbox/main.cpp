@@ -60,6 +60,7 @@
 #include "graphics/perform_renderer.h"
 #include "graphics/basic_renderer.h"
 #include "graphics/render_instance.h"
+#include "ui/ui.h"
 #include "runtime/entities.h"
 #include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
@@ -667,6 +668,7 @@ void startup(projv::Application& app) {
     auto& renderInstance = world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1600, 900, "ProjectV Sandbox");
     projv::graphics::installPlatform(app, renderInstance);
+    projv::ui::installUi(app, renderInstance);   // the dev layer: F1
     projv::graphics::setCursorCaptured(app, renderInstance, true);
 
     world.ctx().emplace<Camera>();
@@ -896,6 +898,7 @@ int writeAssets(const fs::path& dir) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    projv::ui::setCommandLine(argc, argv);
     if (argc >= 3 && std::strcmp(argv[1], "--write-assets") == 0) return writeAssets(argv[2]);
 
     projv::Application app;

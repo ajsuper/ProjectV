@@ -53,6 +53,7 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
+#include "ui/ui.h"
 #include "utils/material.h"
 #include "utils/voxel_management.h"
 
@@ -224,6 +225,7 @@ void startup(projv::Application& app) {
     // Events and Input from here on: the platform system polls the window at the top of every
     // frame, and turns the close button into a CloseRequested event, which ends the application.
     projv::graphics::installPlatform(app, renderInstance);
+    projv::ui::installUi(app, renderInstance);   // the dev layer: F1
     projv::graphics::setCursorCaptured(app, renderInstance, true);
 
     auto& scene   = app.world.ctx().emplace<projv::Scene>();
@@ -301,7 +303,8 @@ void shutdown(projv::Application& app) {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    projv::ui::setCommandLine(argc, argv);
     projv::Application app;
     app.addSystem(projv::Stage::Startup, "startup", startup);
     app.addSystem(projv::Stage::Update, "move camera", moveCamera);

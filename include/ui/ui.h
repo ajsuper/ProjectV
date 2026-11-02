@@ -3,10 +3,12 @@
 
 #include <array>
 #include <memory>
+#include <optional>
 
 #include <bgfx/bgfx.h>
 
 #include "core/math.h"
+#include "graphics/input.h"
 
 // The UI host: two layers over the frame -- the developer's (Dear ImGui: stats, inspectors, tools) and
 // the player's (RmlUi: HUD, menus) -- fed from one input stream and drawn in one order.
@@ -61,8 +63,9 @@ namespace projv::ui {
         void setLayer(Level level, std::unique_ptr<Layer> layer);
         Layer* layer(Level level) const;
 
-        // Offers `input` to the visible layers in routing order and records what they took in
-        // input.wantCaptureKeyboard / wantCaptureMouse. installUi runs it every PreUpdate.
+        // Offers `input` to the visible layers in routing order, records what they took in
+        // input.wantCaptureKeyboard / wantCaptureMouse, and removes it from `input` (Input::maskMouse,
+        // maskKeyboard) so the game does not act on it too. installUi runs it every PreUpdate.
         Capture route(Input& input);
 
         // Draws the visible layers: the user layer in USER_VIEW, the dev layer in DEV_VIEW.
@@ -72,10 +75,28 @@ namespace projv::ui {
         std::array<std::unique_ptr<Layer>, size_t(Level::Count)> layers;
     };
 
+    struct UiOptions {
+        // Whether the dev layer is installed. Unset: on in a build with PROJV_DEV_UI_DEFAULT (the dev
+        // preset); otherwise (the release preset) only when the command line says --dev-ui
+        // (setCommandLine). Off, F1 does nothing and panels cost nothing.
+        std::optional<bool> devLayer;
+        Key devToggle = Key::F1;   // shows and hides the dev layer
+        // Whether it starts shown. Unset: shown when the environment says PROJV_DEV_UI_SHOWN=1 (for
+        // captures and unattended runs, which cannot press F1).
+        std::optional<bool> devShown;
+    };
+
+    // Whether the command line asks for the dev layer (--dev-ui).
+    bool devUiRequested(int argc, char** argv);
+
+    // Records the program's command line for installUi's default (--dev-ui). Call it from main.
+    void setCommandLine(int argc, char** argv);
+
     // Emplaces the Host, routes input every PreUpdate (after the platform system, which fills Input),
-    // and draws the layers as an overlay of `renderInstance` (graphics::endFrame). Install it after
-    // graphics::installPlatform. `renderInstance` must outlive the application's loop.
-    Host& installUi(Application& app, graphics::RenderInstance& renderInstance);
+    // and draws the layers as an overlay of `renderInstance` (graphics::endFrame); installs the dev
+    // layer per `options`. Install it after graphics::installPlatform. `renderInstance` must outlive
+    // the application's loop.
+    Host& installUi(Application& app, graphics::RenderInstance& renderInstance, UiOptions options = {});
 }
 
 #endif

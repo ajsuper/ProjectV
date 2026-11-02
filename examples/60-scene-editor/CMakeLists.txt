@@ -1,17 +1,14 @@
 set(IMGUI_DIR "${CMAKE_SOURCE_DIR}/external/imgui")
 set(LUA_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/external/lua")
 
-# ImGui, docking branch, plus its GLFW backend. The bgfx backend is this example's own
-# (imgui_impl_bgfx.cpp) because ImGui does not ship one.
+# ImGui itself, and its bgfx renderer, are the engine's (ui/dev.h, built into projectV). The editor adds
+# ImGui's GLFW platform backend: its whole window is an ImGui interface, fed by ImGui's own callbacks
+# rather than by the engine's UI host.
 add_library(scene_editor_imgui STATIC
-    "${IMGUI_DIR}/imgui.cpp"
-    "${IMGUI_DIR}/imgui_draw.cpp"
-    "${IMGUI_DIR}/imgui_tables.cpp"
-    "${IMGUI_DIR}/imgui_widgets.cpp"
     "${IMGUI_DIR}/backends/imgui_impl_glfw.cpp"
 )
-target_include_directories(scene_editor_imgui PUBLIC "${IMGUI_DIR}" "${IMGUI_DIR}/backends")
-target_link_libraries(scene_editor_imgui PUBLIC ${PROJV_GLFW_TARGET})
+target_include_directories(scene_editor_imgui PUBLIC "${IMGUI_DIR}/backends")
+target_link_libraries(scene_editor_imgui PUBLIC ProjectV::projectV ${PROJV_GLFW_TARGET})
 
 # Lua, for the Brush Lab's programmable brushes.
 #
@@ -34,9 +31,8 @@ endif()
 target_compile_options(scene_editor_lua PRIVATE $<IF:$<C_COMPILER_ID:MSVC>,/w,-w>) # Third-party C; not our warnings to fix.
 
 projv_add_example(scene_editor
-    SOURCES    main.cpp imgui_impl_bgfx.cpp edit_history.cpp brush.cpp
+    SOURCES    main.cpp edit_history.cpp brush.cpp
     SHADERS    editorRenderer/editorShaders
-               editorRenderer/imguiShaders
                renderRenderer/renderShaders
     ASSET_DIRS editorRenderer renderRenderer brushes
     LIBRARIES  scene_editor_imgui scene_editor_lua

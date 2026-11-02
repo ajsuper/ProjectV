@@ -51,6 +51,7 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
+#include "ui/ui.h"
 #include "utils/material.h"
 #include "voxel_renderer.h"
 
@@ -708,6 +709,7 @@ namespace {
             auto& renderInstance = world.ctx().emplace<projv::graphics::RenderInstance>();
             renderInstance.initialize(1600, 900, "ProjectV Party");
             projv::graphics::installPlatform(app, renderInstance);
+            projv::ui::installUi(app, renderInstance);   // the dev layer: F1
             // The trackpad turns the camera: the window holds the cursor (Esc lets it go).
             projv::graphics::setCursorCaptured(app, renderInstance, true);
         }
@@ -762,6 +764,7 @@ namespace {
 }
 
 int main(int argc, char** argv) {
+    projv::ui::setCommandLine(argc, argv);
     for (int i = 1; i < argc; i++) {
         auto next = [&] { return i + 1 < argc ? argv[++i] : ""; };
         if (!std::strcmp(argv[i], "--host")) options.host = next();

@@ -103,11 +103,18 @@ namespace projv {
         // Systems registered on a stage, for diagnostics.
         const std::vector<std::string>& systemNames(Stage stage) const;
 
+        // How long each system ran in the last frame, in seconds, in systemNames' order: summed over
+        // the frame, so a FixedUpdate system that ran three steps reports all three. Measured with a
+        // wall clock and read only by diagnostics (the dev layer's systems panel); nothing that feeds
+        // the simulation may read it.
+        std::vector<double> systemSeconds(Stage stage) const;
+
     private:
         struct NamedSystem {
             std::string name;
             System      run;
             SystemOrder order;
+            double      seconds = 0.0;   // run time this frame
         };
         void runStage(Stage stage);
 

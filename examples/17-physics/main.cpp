@@ -84,6 +84,7 @@
 #include "graphics/perform_renderer.h"
 #include "graphics/basic_renderer.h"
 #include "graphics/render_instance.h"
+#include "ui/ui.h"
 #include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
 #include "utils/collision_geometry.h"
@@ -2680,6 +2681,7 @@ void startup(projv::Application& app) {
     auto& renderInstance = world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1600, 900, "ProjectV Physics");
     projv::graphics::installPlatform(app, renderInstance);
+    projv::ui::installUi(app, renderInstance);   // the dev layer: F1
     projv::graphics::setCursorCaptured(app, renderInstance, !unattended);
 
     world.ctx().emplace<Camera>();
@@ -2868,7 +2870,8 @@ void shutdown(projv::Application& app) { projv::graphics::destroyGPUData(app.wor
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    projv::ui::setCommandLine(argc, argv);
     projv::Application app;
     app.addSystem(projv::Stage::Startup,     "startup",   startup);
     app.addSystem(projv::Stage::FixedUpdate, "demos",     demoTick);

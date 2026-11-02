@@ -42,6 +42,7 @@
 #include "graphics/perform_renderer.h"
 #include "graphics/basic_renderer.h"
 #include "graphics/render_instance.h"
+#include "ui/ui.h"
 #include "runtime/loading.h"
 #include "runtime/physics.h"
 #include "utils/compose_io.h"
@@ -264,6 +265,7 @@ void startup(projv::Application& app) {
     auto& renderInstance = app.world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1280, 720, "ProjectV World Loading");
     projv::graphics::installPlatform(app, renderInstance);
+    projv::ui::installUi(app, renderInstance);   // the dev layer: F1
     app.world.ctx().emplace<Camera>();
     app.world.ctx().emplace<Stats>();
     auto& test = app.world.ctx().emplace<SelfTest>();
@@ -380,6 +382,7 @@ int headlessCheck() {
 }
 
 int main(int argc, char** argv) {
+    projv::ui::setCommandLine(argc, argv);
     g_regenerate = argc >= 2 && std::strcmp(argv[1], "--regenerate") == 0;
     if (argc >= 2 && std::strcmp(argv[1], "--headless-check") == 0) return headlessCheck();
 

@@ -84,7 +84,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder — building the default dock layout is not in the public API.
 #include "imgui_impl_glfw.h"
-#include "imgui_impl_bgfx.h"
+#include "ui/dev.h"          // ImGui on bgfx: the engine's renderer backend
 #include "brush.h"
 #include "edit_history.h"
 
@@ -16758,7 +16758,7 @@ static void drawViewportPanel(projv::Scene& scene, const std::shared_ptr<projv::
         bool originBottomLeft = bgfx::getCaps()->originBottomLeft;
         ImVec2 uv0 = originBottomLeft ? ImVec2(0.0f, 1.0f) : ImVec2(0.0f, 0.0f);
         ImVec2 uv1 = originBottomLeft ? ImVec2(1.0f, 0.0f) : ImVec2(1.0f, 1.0f);
-        ImGui::Image(ImTextureRef(projv::editor::imGuiTextureID(viewportTexture)), panelSize, uv0, uv1);
+        ImGui::Image(ImTextureRef(projv::ui::dev::textureID(viewportTexture)), panelSize, uv0, uv1);
 
         // Where the image landed on screen, so a click inside it can be turned into the same ray the
         // shader used for that pixel.
@@ -17517,7 +17517,7 @@ static void drawRenderModeInterface(projv::Scene& scene, EditorState& editor,
         bool originBottomLeft = bgfx::getCaps()->originBottomLeft;
         ImVec2 uv0 = originBottomLeft ? ImVec2(0.0f, 1.0f) : ImVec2(0.0f, 0.0f);
         ImVec2 uv1 = originBottomLeft ? ImVec2(1.0f, 0.0f) : ImVec2(1.0f, 1.0f);
-        ImGui::Image(ImTextureRef(projv::editor::imGuiTextureID(renderTexture)), panelSize, uv0, uv1);
+        ImGui::Image(ImTextureRef(projv::ui::dev::textureID(renderTexture)), panelSize, uv0, uv1);
 
         // The same gestures as the Viewport, driven by the same updateCamera: right-drag to fly with
         // WASD/R/F, middle-drag to pan, wheel to dolly, H to re-frame. Nothing had to be written for
@@ -19994,7 +19994,7 @@ static void drawBrushLabInterface(projv::Scene& scene, projv::GPUData& gpuData, 
         bool originBottomLeft = bgfx::getCaps()->originBottomLeft;
         ImVec2 uv0 = originBottomLeft ? ImVec2(0.0f, 1.0f) : ImVec2(0.0f, 0.0f);
         ImVec2 uv1 = originBottomLeft ? ImVec2(1.0f, 0.0f) : ImVec2(1.0f, 1.0f);
-        ImGui::Image(ImTextureRef(projv::editor::imGuiTextureID(viewportTexture)), imageSize, uv0, uv1);
+        ImGui::Image(ImTextureRef(projv::ui::dev::textureID(viewportTexture)), imageSize, uv0, uv1);
 
         editor.viewportImageMin = ImGui::GetItemRectMin();
         editor.viewportImageMax = ImGui::GetItemRectMax();
@@ -25579,7 +25579,7 @@ void startup(projv::Application& app) {
     io.ConfigWindowsMoveFromTitleBarOnly = true;
 
     // Explicit, rather than letting ImGui add a default font on first use: with no font source and
-    // ImGuiBackendFlags_RendererHasTextures set (our backend does, see imgui_impl_bgfx.cpp),
+    // ImGuiBackendFlags_RendererHasTextures set (the engine's backend does, see src/ui/dev/imgui_bgfx.cpp),
     // AddFontDefault() picks between two embedded fonts by an "expected context font size"
     // heuristic. AddFontDefaultBitmap() pins it to the classic ProggyClean rather than leaving the
     // choice to that heuristic.
@@ -25590,7 +25590,7 @@ void startup(projv::Application& app) {
     // force-bake of the whole ASCII + Latin-1 range here, to work around specific glyphs (capital I
     // and W among them) drawing as blank space. The cause was in the backend, not the bake -- it
     // created the atlas immutable, so every glyph rasterized after the first frame was silently
-    // dropped on upload (see updateImGuiTexture in imgui_impl_bgfx.cpp). That preload could not have
+    // dropped on upload (see updateImGuiTexture in src/ui/dev/imgui_bgfx.cpp). That preload could not have
     // fixed it in any case: it baked at LegacySize, while the interface renders at the DPI-scaled
     // size, so the size actually on screen went on baking lazily regardless.
 
@@ -25599,9 +25599,7 @@ void startup(projv::Application& app) {
     ImGui::GetStyle().FrameRounding = 3.0f;
 
     ImGui_ImplGlfw_InitForOther(renderInstance.window, true);
-    if (!projv::editor::initializeImGuiBgfx(EDITOR_IMGUI_VIEW_ID,
-                                            "./editorRenderer/imguiShaders/vs_imgui.bin",
-                                            "./editorRenderer/imguiShaders/imgui.bin")) {
+    if (!projv::ui::dev::initRenderer(EDITOR_IMGUI_VIEW_ID)) {
         projv::core::error("The editor cannot run without its interface shaders. Exiting.");
         app.closeRequested = true;
         return;
@@ -26259,7 +26257,7 @@ void render(projv::Application& app) {
     // view owns the clear.
     bgfx::setViewClear(EDITOR_IMGUI_VIEW_ID, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x14161cff, 1.0f, 0);
     bgfx::touch(EDITOR_IMGUI_VIEW_ID);
-    projv::editor::renderImGuiDrawData(ImGui::GetDrawData());
+    projv::ui::dev::renderDrawData(ImGui::GetDrawData());
 
     if (editor.renderSaveCountdown > 0 && editor.mode == EditorMode::Render) {
         if (--editor.renderSaveCountdown == 0) editor.renderSaveRequested = true;
@@ -26416,7 +26414,7 @@ void shutdown(projv::Application& app) {
     projv::GPUData& gpuData = app.world.ctx().get<projv::GPUData>();
     EditorState& editor = app.world.ctx().get<EditorState>();
 
-    projv::editor::shutdownImGuiBgfx();
+    projv::ui::dev::shutdownRenderer();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 

@@ -1,6 +1,6 @@
 # UI: a developer layer and a user layer
 
-Status: **in progress**: approved 2026-11-01 (RmlUi, D5; one shared demo style sheet, D13); U0 built 2026-11-01, U1 next. Follows [shader-library.md](shader-library.md): the
+Status: **in progress**: approved 2026-11-01 (RmlUi, D5; one shared demo style sheet, D13); U0 and U1 built 2026-11-01, U2 next. Follows [shader-library.md](shader-library.md): the
 UI's shaders are engine shaders (its S0) and its blur is the library's filters (its S1).
 
 **Mechanism, not policy** (as in the shader library): the engine provides the two layers, the render
@@ -17,8 +17,8 @@ Goal: two kinds of interface, drawn by the engine rather than by each program.
 ## Why: where it stands (2026-10-27)
 
 - **The engine draws no text.** ImGui exists only inside the scene editor, with its own bgfx backend
-  ([imgui_impl_bgfx.h](../../examples/60-scene-editor/imgui_impl_bgfx.h)) and shaders staged in its
-  renderer folder. No other program can use it without copying both.
+  (`imgui_impl_bgfx.h`, since promoted to [src/ui/dev/imgui_bgfx.cpp](../../src/ui/dev/imgui_bgfx.cpp))
+  and shaders staged in its renderer folder. No other program can use it without copying both.
 - **Player-facing UI is a fragment shader.** The party and playground demos draw their HUDs in
   `hudShaders/hud.frag` (266 and 279 lines): a 3x5 dot font, 24 characters a line packed six bits a
   character into two `vec4` uniforms, two dozen named uniforms (`hudTop0` ... `hudAim`). Every new
@@ -186,6 +186,54 @@ ruled.
 - Docs: `docs/reference/ui.md` (new module page, in the header check and the site), `Input::text`,
   `endFrame` and the overlays in `graphics.md`.
 - Checked: Hello Voxel and the sandbox self-test run as before, with no overlay installed.
+
+**U1** (2026-11-01).
+- **ImGui, once.** Dear ImGui (`external/imgui`, 1.92.9b docking) is compiled into `projv_ui`; its
+  headers are public on `projectV` (and installed under `third_party/imgui`), because `ui/dev.h`
+  includes `imgui.h`. The scene editor's own build of it is gone: it keeps ImGui's GLFW platform
+  backend only.
+- **The backend, promoted (D9).** The editor's `imgui_impl_bgfx` is `src/ui/dev/imgui_bgfx.cpp`
+  (`ui::dev::initRenderer`, `renderDrawData`, `textureID`, `shutdownRenderer`).
+  - Its shaders are engine shaders (`shaders/engine/imgui/`). `projv_embed_engine_shaders` now takes
+    several directories, each with its own `varying.def.sc`.
+  - Its state is per ImGui context (`io.BackendRendererUserData`), so the editor's context and the
+    dev layer's cannot clobber each other.
+  - The editor draws through it. Its UI screenshot (`EDITOR_UI_SHOT`) shows the whole interface as
+    before.
+- **The dev layer (`ui/dev.h`, `ui/dev_layer.h`).** Its own ImGui context, fed from `Input`, not
+  ImGui's GLFW callbacks (D4): keys and modifiers on their edges, typed text, the cursor, buttons and
+  the wheel.
+  - F1 (`UiOptions::devToggle`) shows it. While shown, it releases a captured mouse-look cursor (and
+    keeps releasing it if the program recaptures), and gives it back when hidden.
+  - Panels: `addPanel(app, name, fn)`, each a window built in Render while shown; registered panels
+    cost nothing otherwise.
+  - The engine's panels: **Frame** (frame time and its graph; every system's time by stage, from the
+    new `Application::systemSeconds`) and **Log** (an spdlog ring-buffer sink, 4000 lines, by
+    category, filterable).
+  - Its GPU resources go in a Shutdown system ordered before `"shutdown"`, since Voxel Mayhem shuts
+    bgfx down in its own. It exits cleanly with the layer shown.
+- **D10.** `PROJV_DEV_UI_DEFAULT` (on; off in the `release` preset). Off, only `--dev-ui` installs the
+  layer: `ui::setCommandLine(argc, argv)` from `main`. `PROJV_DEV_UI_SHOWN=1` starts it shown, for
+  captures.
+- **Where it differs from D4: the host removes what a layer took.** D4 had it only set
+  `Input::wantCapture*`, leaving each program to check. The ten programs read input in about 200
+  places, so `Host::route` also masks the taken mouse or keyboard out of `Input`
+  (`Input::maskMouse`, `maskKeyboard`). A click on a panel never reaches the game, with no change to
+  any program.
+- **Installed in** Hello Voxel, entities, the sandbox, physics, world loading, the multiplayer
+  client, Voxel Mayhem, the explosion demo, and the party and playground clients: every program on the
+  engine's platform layer. Not in the gallery, the advanced renderer, the terrain generator or the
+  scene previewer, which poll GLFW themselves. They move onto `installPlatform` first.
+- **Tests** (`ui:*`, 12 cases, headless):
+  - U0's, and the masking;
+  - a panel registered before the layer exists, drawn only while shown;
+  - a real ImGui context with no GPU that takes the mouse over its panel and not elsewhere;
+  - `--dev-ui`;
+  - `systemSeconds`.
+- **Checked by eye:** the sandbox's capture with `PROJV_DEV_UI_SHOWN=1` shows the Frame and Log
+  panels over the scene. F1 by hand in each program is still to do.
+- **Docs:** `docs/concepts/ui.md` (new), the guide [Add a dev panel](../guides/dev-panel.md), and
+  `ui/dev.h`, `ui/dev_layer.h` and the options in `docs/reference/ui.md`.
 
 ## Open questions
 

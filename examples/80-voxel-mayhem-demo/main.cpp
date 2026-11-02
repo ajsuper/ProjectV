@@ -88,6 +88,7 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
+#include "ui/ui.h"
 #include "runtime/physics.h"
 #include "runtime/entities.h"
 #include "runtime/scene_bridge.h"
@@ -2676,6 +2677,7 @@ void startup(projv::Application& app) {
     auto& renderInstance = world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1600, 900, "Voxel Mayhem");
     projv::graphics::installPlatform(app, renderInstance);
+    projv::ui::installUi(app, renderInstance);   // the dev layer: F1
     projv::graphics::setCursorCaptured(app, renderInstance, !unattended);
 
     world.ctx().emplace<Camera>();
@@ -2953,7 +2955,8 @@ void shutdown(projv::Application& app) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    projv::ui::setCommandLine(argc, argv);
     projv::Application app;
     app.addSystem(projv::Stage::Startup,     "startup",      startup);
     // "physics" is added at startup, between whatever names it in `before` and in `after`: so those

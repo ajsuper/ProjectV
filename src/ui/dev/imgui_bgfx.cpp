@@ -1,15 +1,27 @@
+// Dear ImGui's renderer backend for bgfx (ui/dev.h). ImGui ships platform backends and renderer
+// backends for the common APIs, but not for bgfx, which keeps its own integration inside its example
+// framework. This is the same job against the engine's primitives: its embedded shaders
+// (shaders/engine/imgui/), geometry through bgfx transient buffers.
+//
+// Textures use ImGui 1.92's ImTextureData protocol: ImGui asks the backend to create, update and
+// destroy its atlases through ImDrawData::Textures, rather than the backend building one font texture
+// up front. That is what ImGuiBackendFlags_RendererHasTextures advertises.
+//
+// The state is per ImGui context (io.BackendRendererUserData), so a program's own context (the scene
+// editor's) and the dev layer's cannot share or clobber it.
+
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 
-#include "imgui_impl_bgfx.h"
+#include "ui/dev.h"
 
-#include "graphics/disk_io.h"
 #include "core/log.h"
+#include "graphics/engine_shaders.h"
 
-namespace projv::editor {
+namespace projv::ui::dev {
 
-    // Everything the backend owns. There is one ImGui context in the editor, so one instance of
-    // this at file scope is the whole of the backend's state.
+    // Everything the backend owns for one context.
     struct ImGuiBgfxState {
         bgfx::ViewId viewID = 0;
         bgfx::VertexLayout vertexLayout;
@@ -18,7 +30,9 @@ namespace projv::editor {
         bool initialized = false;
     };
 
-    static ImGuiBgfxState g_backend;
+    static ImGuiBgfxState* backend() {
+        return ImGui::GetCurrentContext() ? static_cast<ImGuiBgfxState*>(ImGui::GetIO().BackendRendererUserData) : nullptr;
+    }
 
     // ImGui stores one backend-defined value per texture. A bgfx handle is a 16-bit index, so it
     // goes in and out of ImTextureID (a 64-bit integer) directly, with no allocation.
@@ -37,7 +51,7 @@ namespace projv::editor {
         return ImTextureID(handle.idx + 1);
     }
 
-    ImTextureID imGuiTextureID(bgfx::TextureHandle handle) {
+    ImTextureID textureID(bgfx::TextureHandle handle) {
         return imGuiIDFromTextureHandle(handle);
     }
 
@@ -98,43 +112,46 @@ namespace projv::editor {
         }
     }
 
-    bool initializeImGuiBgfx(bgfx::ViewId viewID, const std::string& vertexShaderPath, const std::string& fragmentShaderPath) {
+    bool initRenderer(bgfx::ViewId viewID) {
         ImGuiIO& io = ImGui::GetIO();
         IM_ASSERT(io.BackendRendererUserData == nullptr && "An ImGui renderer backend is already installed.");
 
-        bgfx::ShaderHandle vertexShader = graphics::loadShader(vertexShaderPath);
-        bgfx::ShaderHandle fragmentShader = graphics::loadShader(fragmentShaderPath);
+        bgfx::ShaderHandle vertexShader = graphics::loadEngineShader("vs_imgui");
+        bgfx::ShaderHandle fragmentShader = graphics::loadEngineShader("imgui");
         if (!bgfx::isValid(vertexShader) || !bgfx::isValid(fragmentShader)) {
-            core::error("ImGui backend: could not load '{}' / '{}'. Run ./compEditor.sh to compile the editor's shaders.",
-                        vertexShaderPath, fragmentShaderPath);
+            core::error("ImGui backend: no engine ImGui shaders for this renderer");
+            if (bgfx::isValid(vertexShader)) bgfx::destroy(vertexShader);
+            if (bgfx::isValid(fragmentShader)) bgfx::destroy(fragmentShader);
             return false;
         }
 
-        g_backend.viewID = viewID;
-        g_backend.shaderProgram = bgfx::createProgram(vertexShader, fragmentShader, true);
-        g_backend.textureSampler = bgfx::createUniform("s_imguiTexture", bgfx::UniformType::Sampler);
+        ImGuiBgfxState* state = IM_NEW(ImGuiBgfxState)();
+        state->viewID = viewID;
+        state->shaderProgram = bgfx::createProgram(vertexShader, fragmentShader, true);
+        state->textureSampler = bgfx::createUniform("s_imguiTexture", bgfx::UniformType::Sampler);
 
         // Matches ImDrawVert exactly. The colour is normalized on the way in so the shader sees the
         // 0..1 vertex colour ImGui intends, not a 0..255 byte.
-        g_backend.vertexLayout.begin()
+        state->vertexLayout.begin()
             .add(bgfx::Attrib::Position,  2, bgfx::AttribType::Float)
             .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
             .add(bgfx::Attrib::Color0,    4, bgfx::AttribType::Uint8, true)
             .end();
 
-        io.BackendRendererName = "imgui_impl_bgfx (ProjectV)";
-        io.BackendRendererUserData = &g_backend;
+        io.BackendRendererName = "imgui_bgfx (ProjectV)";
+        io.BackendRendererUserData = state;
         // VtxOffset lets one draw list hold more than 64k vertices with 16-bit indices, which a
         // dense scene hierarchy reaches. HasTextures opts into the ImTextureData protocol above.
         io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
         io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
 
-        g_backend.initialized = true;
+        state->initialized = true;
         return true;
     }
 
-    void shutdownImGuiBgfx() {
-        if (!g_backend.initialized) {
+    void shutdownRenderer() {
+        ImGuiBgfxState* state = backend();
+        if (state == nullptr) {
             return;
         }
 
@@ -151,25 +168,26 @@ namespace projv::editor {
             texture->SetStatus(ImTextureStatus_Destroyed);
         }
 
-        if (bgfx::isValid(g_backend.shaderProgram)) {
-            bgfx::destroy(g_backend.shaderProgram);
+        if (bgfx::isValid(state->shaderProgram)) {
+            bgfx::destroy(state->shaderProgram);
         }
-        if (bgfx::isValid(g_backend.textureSampler)) {
-            bgfx::destroy(g_backend.textureSampler);
+        if (bgfx::isValid(state->textureSampler)) {
+            bgfx::destroy(state->textureSampler);
         }
 
         ImGuiIO& io = ImGui::GetIO();
         io.BackendRendererName = nullptr;
         io.BackendRendererUserData = nullptr;
         io.BackendFlags &= ~(ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures);
-
-        g_backend = ImGuiBgfxState();
+        IM_DELETE(state);
     }
 
-    void renderImGuiDrawData(ImDrawData* drawData) {
-        if (!g_backend.initialized || drawData == nullptr) {
+    void renderDrawData(ImDrawData* drawData) {
+        ImGuiBgfxState* state = backend();
+        if (state == nullptr || !state->initialized || drawData == nullptr) {
             return;
         }
+        const ImGuiBgfxState& backendState = *state;
 
         // Create/update/destroy requests must be served before the draw calls that reference them.
         if (drawData->Textures != nullptr) {
@@ -207,9 +225,9 @@ namespace projv::editor {
 
         // Sequential mode keeps the draw calls in submission order: ImGui's painter's algorithm
         // (panel background, then its contents, then anything on top) depends on it.
-        bgfx::setViewMode(g_backend.viewID, bgfx::ViewMode::Sequential);
-        bgfx::setViewTransform(g_backend.viewID, nullptr, orthoProjection);
-        bgfx::setViewRect(g_backend.viewID, 0, 0, uint16_t(framebufferWidth), uint16_t(framebufferHeight));
+        bgfx::setViewMode(backendState.viewID, bgfx::ViewMode::Sequential);
+        bgfx::setViewTransform(backendState.viewID, nullptr, orthoProjection);
+        bgfx::setViewRect(backendState.viewID, 0, 0, uint16_t(framebufferWidth), uint16_t(framebufferHeight));
 
         const ImVec2 clipOffset = drawData->DisplayPos;
         const ImVec2 clipScale = drawData->FramebufferScale;
@@ -221,7 +239,7 @@ namespace projv::editor {
 
             // Transient buffers live for exactly one frame, which is the lifetime of ImGui geometry.
             // A list that does not fit is dropped rather than partially drawn.
-            if (bgfx::getAvailTransientVertexBuffer(vertexCount, g_backend.vertexLayout) < vertexCount ||
+            if (bgfx::getAvailTransientVertexBuffer(vertexCount, backendState.vertexLayout) < vertexCount ||
                 bgfx::getAvailTransientIndexBuffer(indexCount, sizeof(ImDrawIdx) == 4) < indexCount) {
                 core::warn("ImGui backend: out of transient buffer space, dropping a draw list.");
                 continue;
@@ -229,7 +247,7 @@ namespace projv::editor {
 
             bgfx::TransientVertexBuffer vertexBuffer;
             bgfx::TransientIndexBuffer indexBuffer;
-            bgfx::allocTransientVertexBuffer(&vertexBuffer, vertexCount, g_backend.vertexLayout);
+            bgfx::allocTransientVertexBuffer(&vertexBuffer, vertexCount, backendState.vertexLayout);
             bgfx::allocTransientIndexBuffer(&indexBuffer, indexCount, sizeof(ImDrawIdx) == 4);
 
             memcpy(vertexBuffer.data, drawList->VtxBuffer.Data, vertexCount * sizeof(ImDrawVert));
@@ -272,11 +290,11 @@ namespace projv::editor {
                                BGFX_STATE_BLEND_FUNC(BGFX_STATE_BLEND_SRC_ALPHA, BGFX_STATE_BLEND_INV_SRC_ALPHA));
 
                 bgfx::TextureHandle texture = textureHandleFromImGuiID(command.GetTexID());
-                bgfx::setTexture(0, g_backend.textureSampler, texture);
+                bgfx::setTexture(0, backendState.textureSampler, texture);
 
                 bgfx::setVertexBuffer(0, &vertexBuffer, command.VtxOffset, vertexCount - command.VtxOffset);
                 bgfx::setIndexBuffer(&indexBuffer, command.IdxOffset, command.ElemCount);
-                bgfx::submit(g_backend.viewID, g_backend.shaderProgram);
+                bgfx::submit(backendState.viewID, backendState.shaderProgram);
             }
         }
     }

@@ -203,6 +203,12 @@ Builds directly on item 7 (the pass runs inside the dense window).
 
 ---
 
+### 21. The ImGui renderer backend — **engine** (built)
+
+The scene editor's `imgui_impl_bgfx` became the dev layer's ([ui.md](ui.md) D9, U1):
+`src/ui/dev/imgui_bgfx.cpp`, with its shaders as engine shaders, its state per ImGui context. The
+editor draws through it and keeps only ImGui's GLFW platform backend of its own.
+
 ## Not yet discussed
 
 Listed in the order they were going to be raised. Justification and the strongest counter-argument

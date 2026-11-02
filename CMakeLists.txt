@@ -446,11 +446,29 @@ target_link_libraries(projectV PRIVATE $<LINK_ONLY:Jolt::Jolt>)
 # each the only code that includes its library (the `layering` test enforces it). Compiled apart so
 # those libraries' include paths reach these files and no other.
 option(PROJV_BUILD_UI "Build the UI module (ui/): the host, the dev layer and the user layer" ON)
+option(PROJV_DEV_UI_DEFAULT "The dev layer is on unless a program says otherwise (off: only --dev-ui turns it on)" ON)
 if(PROJV_BUILD_UI)
+    # Dear ImGui (docking branch, external/imgui), compiled once, here: the dev layer draws with it, and
+    # a program's panels -- or its whole interface, as the scene editor's -- use the same copy.
+    set(PROJV_IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui")
     add_library(projv_ui OBJECT
         src/ui/host.cpp
+        src/ui/dev/dev_layer.cpp
+        src/ui/dev/imgui_bgfx.cpp
+        "${PROJV_IMGUI_DIR}/imgui.cpp"
+        "${PROJV_IMGUI_DIR}/imgui_draw.cpp"
+        "${PROJV_IMGUI_DIR}/imgui_tables.cpp"
+        "${PROJV_IMGUI_DIR}/imgui_widgets.cpp"
     )
-    target_include_directories(projv_ui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    # Third-party: not our warnings to fix.
+    set_source_files_properties(
+        "${PROJV_IMGUI_DIR}/imgui.cpp" "${PROJV_IMGUI_DIR}/imgui_draw.cpp"
+        "${PROJV_IMGUI_DIR}/imgui_tables.cpp" "${PROJV_IMGUI_DIR}/imgui_widgets.cpp"
+        PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/w,-w>")
+    target_include_directories(projv_ui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include "${PROJV_IMGUI_DIR}")
+    if(PROJV_DEV_UI_DEFAULT)
+        target_compile_definitions(projv_ui PRIVATE PROJV_DEV_UI_DEFAULT)
+    endif()
     target_compile_features(projv_ui PRIVATE cxx_std_20)
     target_compile_definitions(projv_ui PRIVATE ${PROJV_LOG_DEFS})
     target_compile_options(projv_ui PRIVATE
@@ -462,6 +480,10 @@ if(PROJV_BUILD_UI)
         bgfx::bgfx bgfx::bx ${PROJV_GLFW_TARGET} ${PROJV_GLM_TARGET} ${PROJV_SPDLOG_TARGET} nlohmann_json::nlohmann_json EnTT::EnTT)
     target_sources(projectV PRIVATE $<TARGET_OBJECTS:projv_ui>)
     target_compile_definitions(projectV PUBLIC PROJV_UI)
+    # ui/dev.h includes imgui.h: a panel is ImGui code.
+    target_include_directories(projectV PUBLIC
+        $<BUILD_INTERFACE:${PROJV_IMGUI_DIR}>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/projv/third_party/imgui>)
 endif()
 
 # ENet, likewise reached from one file only.
@@ -477,7 +499,7 @@ endif()
 
 include(ProjectVShaders)
 include(ProjectVEngineShaders)
-projv_embed_engine_shaders(TARGET projectV SHADER_DIR shaders/engine INCLUDE_DIR shaders/include)
+projv_embed_engine_shaders(TARGET projectV SHADER_DIRS shaders/engine shaders/engine/imgui INCLUDE_DIR shaders/include)
 
 if(PROJV_BUILD_EXAMPLES)
     add_subdirectory(examples)
@@ -543,6 +565,14 @@ if(PROJV_INSTALL)
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/projv/shaders
         FILES_MATCHING PATTERN "*.sc"
     )
+
+    # ImGui's headers, for ui/dev.h and a program's own ImGui code.
+    if(PROJV_BUILD_UI)
+        install(DIRECTORY external/imgui/
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/projv/third_party/imgui
+            FILES_MATCHING PATTERN "*.h" PATTERN "backends" EXCLUDE PATTERN "examples" EXCLUDE
+            PATTERN "misc" EXCLUDE PATTERN "docs" EXCLUDE PATTERN ".git*" EXCLUDE)
+    endif()
 
     # A vendored EnTT has no install of its own, so it gets one here: its headers, and a config
     # package that recreates the EnTT::EnTT target the export set names.

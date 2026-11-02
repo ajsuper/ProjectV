@@ -41,6 +41,7 @@
 #include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
 #include "graphics/disk_io.h"
+#include "ui/ui.h"
 #include "net/transport.h"
 #include "net/wire.h"
 #include "runtime/entities.h"
@@ -298,6 +299,7 @@ namespace {
             auto& renderInstance = app.world.ctx().emplace<projv::graphics::RenderInstance>();
             renderInstance.initialize(1280, 720, ("ProjectV Multiplayer: " + options.name).c_str());
             projv::graphics::installPlatform(app, renderInstance);
+            projv::ui::installUi(app, renderInstance);   // the dev layer: F1
             projv::graphics::setCursorCaptured(app, renderInstance, true);
         }
         const std::string folder = (here / arena::FOLDER).string();
@@ -364,6 +366,7 @@ namespace {
 }
 
 int main(int argc, char** argv) {
+    projv::ui::setCommandLine(argc, argv);
     for (int i = 1; i < argc; i++) {
         auto next = [&] { return i + 1 < argc ? argv[++i] : ""; };
         if (!std::strcmp(argv[i], "--host")) options.host = next();

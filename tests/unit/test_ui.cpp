@@ -93,6 +93,29 @@ TEST_CASE("ui: what a layer takes reaches the layers after it, and the game thro
     CHECK_FALSE(input.wantCaptureKeyboard);
 }
 
+TEST_CASE("ui: what a layer took is gone from the Input the game reads") {
+    Layers l;
+    projv::Input input;
+    input.setMouse(projv::MouseButton::Left, true);
+    input.setKey(projv::Key::W, true);
+    input.scroll = {0.0f, 2.0f};
+    input.text = {U'w'};
+    l.dev->takes.mouse = true;
+    l.host.route(input);
+    CHECK(l.user->seenTaken.mouse);
+    CHECK_FALSE(input.pressed(projv::MouseButton::Left));   // the panel's click
+    CHECK(input.scroll.y == 0.0f);
+    CHECK(input.down(projv::Key::W));                        // the keyboard was not taken
+    CHECK(input.text.size() == 1);
+
+    l.user->takes.keyboard = true;
+    input.setKey(projv::Key::W, true);
+    input.text = {U'w'};
+    l.host.route(input);
+    CHECK_FALSE(input.down(projv::Key::W));
+    CHECK(input.text.empty());
+}
+
 TEST_CASE("ui: the typed text reaches the layers") {
     Layers l;
     projv::Input input;
@@ -128,7 +151,7 @@ TEST_CASE("ui: installUi routes after the platform fills Input, and draws as an 
     bool keyboardSeenByGame = false;
     // Stands in for graphics::installPlatform's system, added after the host's on purpose: the host
     // orders itself after "platform" whichever is added first.
-    projv::ui::Host& host = projv::ui::installUi(app, instance);
+    projv::ui::Host& host = projv::ui::installUi(app, instance, {.devLayer = false});
     auto user = std::make_unique<FakeLayer>("user", log);
     user->takes.keyboard = true;
     host.setLayer(projv::ui::Level::User, std::move(user));
@@ -146,4 +169,87 @@ TEST_CASE("ui: installUi routes after the platform fills Input, and draws as an 
 
     instance.drawOverlays({800, 600});
     CHECK(log.back() == "user draw " + std::to_string(projv::ui::USER_VIEW));
+}
+
+// ---- The dev layer, headless (D11): a real ImGui context, no GPU. ------------------------------------
+
+#include <chrono>
+#include <thread>
+
+#include "ui/dev.h"
+#include "ui/dev_layer.h"
+
+namespace {
+    // One frame of the dev layer as the host runs it: input, then draw.
+    projv::ui::Capture devFrame(projv::ui::dev::DevLayer& layer, projv::Input& input) {
+        projv::ui::Capture took = layer.input(input, {});
+        layer.draw(projv::ui::DEV_VIEW, {1280, 720});
+        return took;
+    }
+}
+
+TEST_CASE("ui: dev panels registered before the layer exists are drawn once it is shown, and not while hidden") {
+    projv::Application app;
+    int drawn = 0;
+    projv::ui::dev::addPanel(app, "Counter", [&drawn](projv::Application&) { drawn++; });
+    CHECK_FALSE(projv::ui::dev::shown(app));
+
+    projv::ui::Host& host = app.world.ctx().emplace<projv::ui::Host>();
+    auto layer = std::make_unique<projv::ui::dev::DevLayer>(app, nullptr);
+    projv::ui::dev::DevLayer& dev = *layer;
+    host.setLayer(projv::ui::Level::Dev, std::move(layer));
+
+    projv::Input input;
+    host.route(input);
+    host.draw({1280, 720});
+    CHECK(drawn == 0);   // hidden: neither offered input nor drawn
+
+    dev.setShown(true);
+    CHECK(projv::ui::dev::shown(app));
+    host.route(input);
+    host.draw({1280, 720});
+    CHECK(drawn == 1);
+}
+
+TEST_CASE("ui: the dev layer takes the mouse over its panels and leaves it elsewhere") {
+    projv::Application app;
+    projv::ui::dev::DevLayer dev(app, nullptr);
+    dev.setShown(true);
+    projv::Input input;
+
+    // The engine's Frame panel opens at (10, 10), 420 wide. ImGui decides hover from the frame before.
+    input.cursor = {50.0f, 50.0f};
+    devFrame(dev, input);
+    devFrame(dev, input);
+    projv::ui::Capture over = devFrame(dev, input);
+    CHECK(over.mouse);
+    CHECK_FALSE(over.keyboard);
+
+    input.cursor = {1200.0f, 700.0f};
+    devFrame(dev, input);
+    projv::ui::Capture away = devFrame(dev, input);
+    CHECK_FALSE(away.mouse);
+}
+
+TEST_CASE("ui: --dev-ui on the command line asks for the dev layer") {
+    char program[] = "game", other[] = "--fast", dev[] = "--dev-ui";
+    char* without[] = {program, other};
+    char* with[] = {program, other, dev};
+    CHECK_FALSE(projv::ui::devUiRequested(2, without));
+    CHECK(projv::ui::devUiRequested(3, with));
+}
+
+TEST_CASE("application: each system's run time is reported for the last frame") {
+    projv::Application app;
+    app.addSystem(projv::Stage::Update, "quick", [](projv::Application&) {});
+    app.addSystem(projv::Stage::Update, "slow", [](projv::Application&) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    });
+    app.runStartup();
+    app.runFrame();
+    std::vector<double> seconds = app.systemSeconds(projv::Stage::Update);
+    REQUIRE(seconds.size() == 2);
+    CHECK(app.systemNames(projv::Stage::Update)[1] == "slow");
+    CHECK(seconds[1] >= 0.003);
+    CHECK(seconds[0] < seconds[1]);
 }

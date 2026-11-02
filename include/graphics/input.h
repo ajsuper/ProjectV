@@ -35,8 +35,9 @@ namespace projv {
     // `pressed` and `released` are true for exactly the frame the change was seen.
     //
     // With the UI installed (ui::installUi), the two `want` flags say a UI layer took the keyboard or
-    // the mouse this frame -- a focused text field, a panel under the cursor -- and gameplay should
-    // yield. Without it they stay false unless the program sets them.
+    // the mouse this frame -- a focused text field, a panel under the cursor -- and what it took is
+    // already gone from Input (maskKeyboard / maskMouse), so gameplay needs no check of its own. Without
+    // the UI they stay false unless the program sets them.
     struct Input {
         bool down(Key key) const         { return bits(key) & DOWN; }
         bool pressed(Key key) const      { return bits(key) & PRESSED; }
@@ -57,6 +58,13 @@ namespace projv {
         // with the keyboard layout, shift and dead keys already applied (keys say which key, this says
         // what was typed). Empty on a frame with no typing.
         std::vector<uint32_t> text;
+
+        // Removes this frame's keyboard (every key, and the typed text) or mouse (buttons, wheel and
+        // motion; the cursor's position stays) from what later readers see: the UI host does this to
+        // what a layer took, so the game never acts on a click meant for a panel. A key held through
+        // a masked frame reads as pressed again on the next one.
+        void maskKeyboard() { keys.fill(0); text.clear(); }
+        void maskMouse()    { mouse.fill(0); scroll = core::vec2(0.0f); cursorDelta = core::vec2(0.0f); }
 
         // Written by the platform system. A key's state this frame from whether it is down now.
         void setKey(Key key, bool isDown)               { update(keys[static_cast<size_t>(key)], isDown); }

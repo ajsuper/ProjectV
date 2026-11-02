@@ -63,6 +63,7 @@
 #include "core/paths.h"
 #include "graphics/input.h"
 #include "graphics/render_instance.h"
+#include "ui/ui.h"
 
 #include "explosion.h"
 #include "maps.h"
@@ -1244,6 +1245,7 @@ void startup(projv::Application& app) {
         glfwSetWindowSize(renderInstance.window, width, height);
     }
     projv::graphics::installPlatform(app, renderInstance);
+    projv::ui::installUi(app, renderInstance);   // the dev layer: F1
 
     world.ctx().emplace<Shake>();
     Look& look = world.ctx().emplace<Look>();
@@ -1397,6 +1399,7 @@ const char* option(int argc, char** argv, int& i, const char* name) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    projv::ui::setCommandLine(argc, argv);
     for (int i = 1; i < argc; i++) {
         if (const char* value = option(argc, argv, i, "graphics")) {
             graphicsLevel = std::atoi(value);

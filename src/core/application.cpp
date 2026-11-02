@@ -73,13 +73,25 @@ namespace projv {
         return names[static_cast<size_t>(stage)];
     }
 
+    std::vector<double> Application::systemSeconds(Stage stage) const {
+        std::vector<double> seconds;
+        for (const NamedSystem& system : stages[static_cast<size_t>(stage)]) seconds.push_back(system.seconds);
+        return seconds;
+    }
+
     void Application::runStage(Stage stage) {
         // By index, and re-reading the size each step: a system may add another system to the stage
         // it is running in, which then runs this frame, after it.
         std::vector<NamedSystem>& systems = stages[static_cast<size_t>(stage)];
         for (size_t i = 0; i < systems.size(); i++) {
             System run = systems[i].run;   // a copy: addSystem may reallocate the vector under the call
+            const size_t before = systems.size();
+            auto start = std::chrono::steady_clock::now();
             run(*this);
+            std::chrono::duration<double> took = std::chrono::steady_clock::now() - start;
+            // A system that added systems may now sit at another index; its one sample is dropped
+            // rather than charged to a neighbour. That happens once, at startup-like moments.
+            if (systems.size() == before) systems[i].seconds += took.count();
         }
     }
 
@@ -91,6 +103,8 @@ namespace projv {
 
     void Application::runFrame() {
         int fixedSteps = timeResource->advance(clock());
+        for (auto& systems : stages)
+            for (NamedSystem& system : systems) system.seconds = 0.0;
 
         runStage(Stage::PreUpdate);
         for (int step = 0; step < fixedSteps; step++) {

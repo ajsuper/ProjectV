@@ -6,10 +6,13 @@
 # and renderer type. Nothing is read from disk at run time, so a program cannot run with engine
 # shaders that belong to another build of the engine.
 #
-#   projv_embed_engine_shaders(TARGET projectV SHADER_DIR shaders/engine INCLUDE_DIR shaders/include)
+#   projv_embed_engine_shaders(TARGET projectV SHADER_DIRS shaders/engine shaders/engine/imgui
+#                              INCLUDE_DIR shaders/include)
 #
 # Same conventions as projv_compile_shaders: vs_*.sc are vertex shaders, *.frag fragment shaders,
-# varying.def.sc beside them. A shader is named by its file's base name ("vs_quad").
+# varying.def.sc beside them -- one per directory, which is why a shader with other varyings (ImGui's
+# 2D vertices) has a directory of its own. A shader is named by its file's base name ("vs_quad"), so
+# names are unique across the directories.
 #
 # PROJV_ENGINE_SHADER_PROFILES picks the profiles: the one the platform's renderer runs on by default
 # (render_instance.cpp: Metal on Apple, Vulkan elsewhere). Add one for another backend; each profile
@@ -24,8 +27,7 @@ set(PROJV_ENGINE_SHADER_PROFILES "${_projvDefaultEngineProfiles}" CACHE STRING
     "shaderc profiles the engine's embedded shaders are compiled for (spirv, metal)")
 
 function(projv_embed_engine_shaders)
-    cmake_parse_arguments(ARG "" "TARGET;SHADER_DIR;INCLUDE_DIR" "" ${ARGN})
-    get_filename_component(shaderDir "${ARG_SHADER_DIR}" ABSOLUTE)
+    cmake_parse_arguments(ARG "" "TARGET;INCLUDE_DIR" "SHADER_DIRS" ${ARGN})
     get_filename_component(includeDir "${ARG_INCLUDE_DIR}" ABSOLUTE)
     set(outDir "${CMAKE_CURRENT_BINARY_DIR}/generated/engine_shaders")
     file(MAKE_DIRECTORY "${outDir}")
@@ -33,8 +35,15 @@ function(projv_embed_engine_shaders)
     _projv_find_shaderc(shaderc)
     _projv_bgfx_shader_include(bgfxShaderInclude)
 
-    file(GLOB vertexShaders CONFIGURE_DEPENDS "${shaderDir}/vs_*.sc")
-    file(GLOB fragmentShaders CONFIGURE_DEPENDS "${shaderDir}/*.frag")
+    set(vertexShaders "")
+    set(fragmentShaders "")
+    foreach(dir IN LISTS ARG_SHADER_DIRS)
+        get_filename_component(dir "${dir}" ABSOLUTE)
+        file(GLOB found CONFIGURE_DEPENDS "${dir}/vs_*.sc")
+        list(APPEND vertexShaders ${found})
+        file(GLOB found CONFIGURE_DEPENDS "${dir}/*.frag")
+        list(APPEND fragmentShaders ${found})
+    endforeach()
     file(GLOB libraryIncludes CONFIGURE_DEPENDS "${includeDir}/*.sc")
 
     set(headers "")
@@ -58,6 +67,7 @@ function(projv_embed_engine_shaders)
                 set(shaderType f)
             endif()
             get_filename_component(name "${shader}" NAME_WE)
+            get_filename_component(shaderDir "${shader}" DIRECTORY)
             set(symbol "pjv_engine_${name}_${profile}")
             set(header "${outDir}/${name}_${profile}.h")
             add_custom_command(

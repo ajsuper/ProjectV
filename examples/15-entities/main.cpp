@@ -46,6 +46,7 @@
 #include "graphics/perform_renderer.h"
 #include "graphics/basic_renderer.h"
 #include "graphics/render_instance.h"
+#include "ui/ui.h"
 #include "runtime/entities.h"
 #include "runtime/scene_bridge.h"
 #include "utils/compose_io.h"
@@ -236,6 +237,7 @@ void startup(projv::Application& app) {
     auto& renderInstance = app.world.ctx().emplace<projv::graphics::RenderInstance>();
     renderInstance.initialize(1280, 720, "ProjectV Entities");
     projv::graphics::installPlatform(app, renderInstance);
+    projv::ui::installUi(app, renderInstance);   // the dev layer: F1
     projv::graphics::setCursorCaptured(app, renderInstance, true);
     app.world.ctx().emplace<Camera>();
 
@@ -269,6 +271,7 @@ void shutdown(projv::Application& app) {
 }
 
 int main(int argc, char** argv) {
+    projv::ui::setCommandLine(argc, argv);
     if (argc >= 3 && std::strcmp(argv[1], "--write-scene") == 0) return writeScene(argv[2]);
 
     projv::Application app;

@@ -14,4 +14,5 @@ ones above it.
 | [Rendering](rendering.md) | Renderers as data, passes, the GPU mirror of the scene, uniforms |
 | [Entities](entities.md) | The runtime: entities linked to components, authored entities, prefabs, `NetId` |
 | [Physics](physics.md) | Bodies from voxels, ticks and commands, determinism, fracture |
+| [The UI](ui.md) | The dev and user layers, input routing and capture, where they draw |
 | [Where data goes](where-data-goes.md) | Which file, field or component a piece of data belongs in |
