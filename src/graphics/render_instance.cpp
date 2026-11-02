@@ -1,4 +1,5 @@
 #include "graphics/render_instance.h"
+#include "graphics/engine_shaders.h"
 
 #include <algorithm>
 
@@ -20,6 +21,54 @@ namespace projv::graphics {
 
     void RenderInstance::drawOverlays(core::ivec2 backBufferSize) {
         for (auto& overlay : overlays) overlay.second(backBufferSize);
+    }
+
+    bgfx::FrameBufferHandle RenderInstance::windowTarget(core::ivec2 size) {
+        if (!frameWanted || size.x <= 0 || size.y <= 0) return BGFX_INVALID_HANDLE;
+        if (!bgfx::isValid(frameTarget) || frameSize != size) {
+            if (bgfx::isValid(frameTarget)) bgfx::destroy(frameTarget);   // destroys its texture too
+            frameColour = bgfx::createTexture2D(uint16_t(size.x), uint16_t(size.y), false, 1, bgfx::TextureFormat::RGBA8,
+                                                BGFX_TEXTURE_RT | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP);
+            frameTarget = bgfx::createFrameBuffer(1, &frameColour, true);
+            frameSize = size;
+        }
+        redirected = true;
+        return frameTarget;
+    }
+
+    void RenderInstance::finishFrame(core::ivec2 size) {
+        if (redirected && !consumed && bgfx::isValid(frameColour)) {
+            if (!bgfx::isValid(frameCopy)) {
+                bgfx::ShaderHandle vs = loadEngineShader("vs_quad");
+                bgfx::ShaderHandle fs = loadEngineShader("frame_copy");
+                if (bgfx::isValid(vs) && bgfx::isValid(fs)) frameCopy = bgfx::createProgram(vs, fs, true);
+                frameSampler = bgfx::createUniform("s_frame", bgfx::UniformType::Sampler);
+            }
+            if (bgfx::isValid(frameCopy)) {
+                bgfx::setViewName(FRAME_COPY_VIEW, "frame copy");
+                bgfx::setViewFrameBuffer(FRAME_COPY_VIEW, BGFX_INVALID_HANDLE);
+                bgfx::setViewRect(FRAME_COPY_VIEW, 0, 0, uint16_t(size.x), uint16_t(size.y));
+                bgfx::setViewTransform(FRAME_COPY_VIEW, nullptr, nullptr);
+                bgfx::setVertexBuffer(0, vertexBuffer);
+                bgfx::setIndexBuffer(indexBuffer);
+                bgfx::setTexture(0, frameSampler, frameColour);
+                bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);
+                bgfx::submit(FRAME_COPY_VIEW, frameCopy);
+            }
+        }
+        redirected = false;
+        consumed = false;
+    }
+
+    void RenderInstance::releaseFrameTexture() {
+        if (bgfx::isValid(frameTarget)) bgfx::destroy(frameTarget);
+        if (bgfx::isValid(frameCopy)) bgfx::destroy(frameCopy);
+        if (bgfx::isValid(frameSampler)) bgfx::destroy(frameSampler);
+        frameTarget = BGFX_INVALID_HANDLE;
+        frameColour = BGFX_INVALID_HANDLE;
+        frameCopy = BGFX_INVALID_HANDLE;
+        frameSampler = BGFX_INVALID_HANDLE;
+        frameWanted = redirected = consumed = false;
     }
 
     void RenderInstance::addRendererSpecification(uint32_t rendererID, const RendererSpecification &rendererSpecification) {

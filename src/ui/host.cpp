@@ -74,11 +74,13 @@ namespace projv::ui {
         host.setLayer(Level::User, std::make_unique<user::UserLayer>(app, &renderInstance, options.userReload.value_or(devByDefault)));
         // Both layers' GPU resources go before bgfx does: ahead of a program's "shutdown", which is
         // where a program that shuts bgfx down itself does so.
-        app.addSystem(Stage::Shutdown, "ui: shutdown", [](Application& a) {
+        graphics::RenderInstance* instance = &renderInstance;
+        app.addSystem(Stage::Shutdown, "ui: shutdown", [instance](Application& a) {
             if (Host* h = a.world.ctx().find<Host>()) {
                 h->setLayer(Level::Dev, nullptr);
                 h->setLayer(Level::User, nullptr);
             }
+            instance->releaseFrameTexture();   // the user layer's (D18)
         }, {.before = "shutdown", .after = ""});
 
         if (options.devLayer.value_or(devByDefault || g_devUiOnCommandLine)) {

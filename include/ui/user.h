@@ -23,6 +23,11 @@
 // - **Input it takes.** The mouse while it is over an element that takes pointer events (a HUD's
 //   body sets `pointer-events: none` to let the game have the rest), the keyboard while a text field
 //   has focus, and everything while a `modal` document is shown (a pause menu).
+// - **Fades are style.** A shown document's body has the class `ui-shown`, added the frame after it is
+//   shown and removed when it is hidden, so a style sheet can transition between the two:
+//   `body { opacity: 0; transition: opacity 0.3s quadratic-out; } body.ui-shown { opacity: 1; }`.
+//   DocumentOptions::fadeOut keeps it drawn while it fades out. A fading document is not modal; one
+//   that sets `pointer-events: none` without ui-shown ignores the mouse too.
 // - **Edits apply live.** In a dev build a document is reloaded when its .rml, or an .rcss beside
 //   it, changes on disk; what it showed comes back as it was.
 //
@@ -47,6 +52,8 @@ namespace projv::ui::user {
         bool shown = true;
         // While shown, it takes all of the mouse and keyboard, over an element or not: a pause menu.
         bool modal = false;
+        // Seconds it is still drawn after hide, for its style sheet's transition out. 0: gone at once.
+        float fadeOut = 0.0f;
     };
 
     // Loads an .rml document under `name`, which UiAction::document carries and the calls below take.

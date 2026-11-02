@@ -25,6 +25,8 @@ bgfx, and the active renderer.
 | `window`, `shouldClose`, `pollEventsInRender` | The GLFW window; close flag; whether rendering polls events |
 | `resizable` | Set before `initialize`; false asks for exactly the size given (a tiling window manager floats it), for captures and benchmarks |
 | `addOverlay(order, fn)`, `drawOverlays(size)` | Drawn over the frame after the renderer's passes (the UI's layers); ascending `order` |
+| `wantFrameTexture(bool)`, `frameRedirected()`, `frameTexture()`, `markFrameConsumed()` | The frame as a texture (ui.md D18): while wanted, passes that write the window write an engine RGBA8 texture instead; a reader writes the window from it and says so, else `endFrame` copies it (`FRAME_COPY_VIEW`, 127). The user layer asks while a document is shown |
+| `windowTarget(size)`, `finishFrame(size)`, `releaseFrameTexture()` | Its plumbing: the framebuffer a window pass writes (`performRenderPasses`), the copy (`endFrame`), freeing it before bgfx goes (the UI's shutdown) |
 
 ## `graphics/input.h`
 
@@ -131,7 +133,7 @@ renderer for one frame.
 | Name | What |
 |---|---|
 | `renderConstructedRenderer(renderInstance, renderer, &gpuData)` | Poll, upload uniforms, size targets to the window, run the passes, `endFrame` |
-| `endFrame(renderInstance, backBufferSize)` | Draw the overlays, then `bgfx::frame()`: what a program that submits its own passes ends with |
+| `endFrame(renderInstance, backBufferSize)` | Draw the overlays, copy an unconsumed frame texture to the window, then `bgfx::frame()`: what a program that submits its own passes ends with |
 | `performRenderPasses(renderToPrimary, renderer, renderInstance, w, h, view, proj, &gpuData)` | The passes alone: for drawing into a panel |
 | `updateUniforms(handles, values)` | Upload uniform values |
 

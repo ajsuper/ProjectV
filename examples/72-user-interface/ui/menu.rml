@@ -5,11 +5,14 @@
     <link type="text/rcss" href="ui.rcss"/>
 </head>
 <!-- The menu: buttons send UiActions (onclick="name args"); the controls write the variables they are
-     bound to (data-value, data-checked), which the program reads each frame. -->
+     bound to (data-value, data-checked), which the program reads each frame. A frosted panel over a
+     dimmed scene, fading in and out (ui.rcss: body.ui-shown). -->
 <body class="menu-screen" data-model="hud">
+    <div class="shade"></div>
     <div class="panel menu">
         <h1>User interface</h1>
-        <button id="resume" onclick="resume">Resume</button>
+        <p class="subtitle">RmlUi documents, drawn by the engine</p>
+        <button id="resume" class="primary" onclick="resume">Resume</button>
         <button id="click" onclick="count 1">Count a click</button>
         <button id="quit" onclick="quit">Quit</button>
 

@@ -28,7 +28,7 @@ default), which defines `PROJV_UI` for consumers. Plan: [ui.md](../plans/ui.md).
 | `Level` | `Dev`, `User`: routing order (the dev layer is offered input first, and drawn on top) |
 | `Layer` | One level's UI: `visible()`, `input(input, taken)` returning a `Capture`, `draw(view, size)` |
 | `Capture` | What a layer took: `keyboard`, `mouse`. The host ORs them into `Input::wantCaptureKeyboard`/`Mouse` and removes them from `Input` (`maskKeyboard`, `maskMouse`) |
-| `USER_VIEW`, `DEV_VIEW` | bgfx views 254 and 255: above any renderer's passes |
+| `USER_VIEWS_FIRST`..`USER_VIEW`, `DEV_VIEW` | bgfx views 128-254 (the user layer, a new one at each framebuffer switch) and 255: above any renderer's passes |
 
 ```cpp
 projv::graphics::installPlatform(app, renderInstance);
@@ -93,7 +93,7 @@ it again after. A pass's name is its shader's file name (`BGFXDependencyGraph::n
 
 | Name | What |
 |---|---|
-| `open(app, name, path, DocumentOptions)`, `openFromMemory(app, name, rml, ...)` | Loads a document under `name`. `DocumentOptions`: `shown` (true), `modal` (takes all input while shown) |
+| `open(app, name, path, DocumentOptions)`, `openFromMemory(app, name, rml, ...)` | Loads a document under `name`. `DocumentOptions`: `shown` (true), `modal` (takes all input while shown), `fadeOut` (seconds it is still drawn after `hide`, for a transition out) |
 | `show`, `hide`, `close`, `isOpen`, `isShown` | By name |
 | `loadFont(app, path, fallback)` | A TTF/OTF face for every document |
 | `model(app, name)` -> `Model` | A data model: `.bind(name, &value)` for `float`, `int`, `bool`, `std::string`, before opening a document that names it (`data-model`). Bound values are compared each frame and redrawn when they change; controls bound to one (`data-value`, `data-checked`) write it |
@@ -112,6 +112,19 @@ app.events().on<ui::UiAction>([](const ui::UiAction& a) { if (a.name == "pause")
 | the keyboard | while a text field (`input type="text"`, `textarea`) has focus |
 | both | while a `modal` document is shown |
 
+**Fades are style.** A shown document's body has the class `ui-shown`, added the frame after it is
+shown (so a transition starts from the hidden state) and removed on `hide`:
+
+```css
+body { opacity: 0; pointer-events: none; transition: opacity 0.35s quadratic-in-out; }
+body.ui-shown { opacity: 1; pointer-events: auto; }
+.panel { backdrop-filter: blur(0dp); transition: backdrop-filter 0.4s cubic-out; }   /* composited apart */
+.ui-shown .panel { backdrop-filter: blur(18dp); }
+```
+
+A fading document is not modal. A backdrop filter is not dimmed by the element's opacity, so it
+fades by its own radius.
+
 A dev build (`UiOptions::userReload`, on with `PROJV_DEV_UI_DEFAULT`) reloads a document when its
 `.rml`, or an `.rcss` beside it, changes; shown documents stay shown.
 
@@ -122,8 +135,26 @@ A dev build (`UiOptions::userReload`, on with `PROJV_DEV_UI_DEFAULT`) reloads a 
 
 | Name | What |
 |---|---|
-| `UserLayer(app, renderInstance, reloadOnChange)` | An RmlUi context fed from `Input`, drawn in `USER_VIEW` through the engine's `vs_rmlui`/`rmlui` shaders: geometry, textures (PNG, TGA, JPEG through bimg), scissor, clip masks (the back buffer's stencil), transforms. `renderInstance` nullptr is headless: a recording render interface (tests) |
+| `UserLayer(app, renderInstance, reloadOnChange)` | An RmlUi context fed from `Input`, drawn through the engine's `vs_rmlui` and `rmlui*` shaders: geometry, textures (PNG, TGA, JPEG through bimg), scissor, clip masks, transforms, layers, filters and gradients. `renderInstance` nullptr is headless: a recording render interface (tests) |
 | `visible()` | Whether any document is shown |
 | `drawCallsRecorded()`, `elementText(document, id)`, `elementBox(document, id, ...)` | For tests: what the headless interface drew, an element's text and border box |
 
-Layers, filters and shaders (blur, `backdrop-filter`, shadows) are U4: RmlUi draws without them.
+What a style sheet can use, drawn by the bgfx render interface (RmlUi's GL3 backend, ported):
+
+| | |
+|---|---|
+| `filter`, `backdrop-filter` | `opacity`, `blur`, `drop-shadow`, `brightness`, `contrast`, `invert`, `grayscale`, `sepia`, `hue-rotate`, `saturate` |
+| `box-shadow`, `mask-image` | through layers |
+| `decorator` | `linear-gradient`, `radial-gradient`, `conic-gradient`, and their `repeating-` forms (up to 16 stops); images |
+| `transition`, `animation`, `transform` | RmlUi's own, on the layer's clock |
+
+```text
+ renderer's window passes ──▶ frame texture (while a document is shown)
+ user layer: base layer ◀─ frame texture; documents drawn into it (layers, filters: views 128..)
+             base layer ──▶ window (replaces it)      dev layer ──▶ view 255
+```
+
+A backdrop filter blurs the scene because the base layer starts from the frame texture. A program
+that draws its own frame without `performRenderPasses` gets the UI blended over the window instead,
+and a backdrop sees only the UI under it. OpenGL is not handled (its render targets are bottom-up).
+Decorators that run a program's own shaders are not built.

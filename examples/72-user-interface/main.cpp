@@ -13,7 +13,8 @@
 //
 // Edit ui/*.rml or ui/ui.rcss in the build folder while it runs: the documents reload (a dev build).
 //
-// UI_CAPTURE=<file>: the menu open, frame 90 saved as <file>.tga, then it exits (an unattended look).
+// UI_CAPTURE=<file>: the menu open (UI_CAPTURE_MENU=0: closed), frame 90 (UI_CAPTURE_AT=n: frame n)
+// saved as <file>.tga, then it exits (an unattended look).
 //
 // Controls:
 //   M        -- the menu (frees the cursor; Resume or M again to go back)
@@ -52,9 +53,9 @@ namespace {
     };
 
     struct Camera {
-        projv::core::vec3 position{-34.0f, 30.0f, -34.0f};
-        float yaw = 0.785f;
-        float pitch = -0.4f;
+        projv::core::vec3 position{-4.0f, 17.0f, -6.0f};
+        float yaw = 0.9f;
+        float pitch = -0.42f;
     };
 
     // A floor and a few pillars, so the UI has something to sit over. One loose 64^3 chunk, as in
@@ -131,7 +132,7 @@ namespace {
             .bind("crosshair", &state.crosshair)
             .bind("menuOpen", &state.menuOpen);
         projv::ui::user::open(app, "hud", dir + "/ui/hud.rml");
-        projv::ui::user::open(app, "menu", dir + "/ui/menu.rml", {.shown = false});
+        projv::ui::user::open(app, "menu", dir + "/ui/menu.rml", {.shown = false, .fadeOut = 0.4f});   // ui.rcss fades it
 
         // The menu's buttons. Handled in Update, after the frame's input: a UI action is input.
         app.events().on<projv::ui::UiAction>([&app](const projv::ui::UiAction& action) {
@@ -189,9 +190,11 @@ namespace {
         basic.options.crosshair = state.crosshair;
 
         if (const char* capture = std::getenv("UI_CAPTURE")) {
-            if (app.frameCount == 2) setMenuOpen(app, true);
-            if (app.frameCount == 90) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capture);
-            if (app.frameCount == 95) app.closeRequested = true;
+            const char* menu = std::getenv("UI_CAPTURE_MENU");
+            if (app.frameCount == 2 && !(menu && std::string(menu) == "0")) setMenuOpen(app, true);
+            static const int at = std::getenv("UI_CAPTURE_AT") ? std::atoi(std::getenv("UI_CAPTURE_AT")) : 90;
+            if (app.frameCount == at) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capture);
+            if (app.frameCount == at + 5) app.closeRequested = true;
         }
 
         auto& view = app.world.ctx().get<projv::CameraView>();

@@ -21,4 +21,6 @@ M opens the menu (and frees the cursor); W/S/A/D, R/F and the mouse fly; F1 is t
 reloads within half a second. The next build copies the sources over them again -- copy back what
 you keep.
 
-The look is plain until U4 (blur, shadows, animation).
+The look is the demos' shared one (`shared_ui/base.rcss`): frosted panels -- the scene behind them
+blurred (`backdrop-filter`) -- soft shadows, gradients, transitions, and the menu fading in and
+out (`ui.rcss`: `body.ui-shown`, which the engine sets on a shown document). `UI_CAPTURE_MENU=0` with `UI_CAPTURE` captures the HUD alone.

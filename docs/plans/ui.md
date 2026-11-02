@@ -1,6 +1,6 @@
 # UI: a developer layer and a user layer
 
-Status: **in progress**: approved 2026-11-01 (RmlUi, D5; one shared demo style sheet, D13); U0 and U1 built 2026-11-01, U2 and U3 2026-11-02, U4 next. Follows [shader-library.md](shader-library.md): the
+Status: **in progress**: approved 2026-11-01 (RmlUi, D5; one shared demo style sheet, D13); U0 and U1 built 2026-11-01, U2, U3 and U4 2026-11-02, U5 next. Follows [shader-library.md](shader-library.md): the
 UI's shaders are engine shaders (its S0) and its blur is the library's filters (its S1).
 
 **Mechanism, not policy** (as in the shader library): the engine provides the two layers, the render
@@ -185,6 +185,29 @@ stale and the image smears. Editing the program's own variable has neither probl
 
 Headless tests (D11): each panel absent without its subject and drawn with it; the inspector lists a
 registered component's JSON; the layering rule.
+
+### U4: layers, filters and backdrops (agreed 2026-11-02, "keep going")
+
+**D18. The frame as a texture, while the UI is up.** `backdrop-filter: blur()` blurs what is behind a
+panel, and RmlUi reads that from the layer it draws into -- so the layer must start with the scene in
+it, and bgfx cannot read the back buffer. While the user layer has a document shown it asks
+(`RenderInstance::wantFrameTexture`), and the renderer's passes that write the window write an engine
+frame texture instead. The user layer starts from a copy of it and writes the whole window -- scene
+and UI -- in its final composite; a frame where it did not draw is copied by `endFrame`. *Why:* the
+alternatives are a backdrop that blurs only other UI, or every renderer learning about the UI. One
+full-window copy, only while UI is shown.
+
+**D19. The user layer draws in a range of views (128-254), a new one at each framebuffer switch.**
+bgfx gives a view one framebuffer, and runs views in order; RmlUi's layer stack switches target at
+every push, filter pass and composite. Layers are window-sized RGBA8 targets sharing one stencil
+(the clip masks), made on first use and remade with the window. A frame that runs out of views
+draws what it has and logs it once.
+
+**D20. Filters and shaders are RmlUi's GL3 backend, ported to bgfx:** opacity, blur (halving
+downsamples, then a separable 7-tap Gaussian), drop-shadow, the colour-matrix filters (brightness,
+contrast, invert, grayscale, sepia, hue-rotate, saturate), mask images; linear, radial and conic
+gradients, repeating or not. Decorators that run a program's own shaders wait for a program that
+needs one.
 
 ## Milestones
 
@@ -390,6 +413,39 @@ colour in the graph, and the GPU by pass.
   by design, shader-library D6).
 - Not done: installing RmlUi and FreeType with the vendored dependencies (`PROJV_INSTALL` with the
   submodules) is untested, as is the vcpkg preset with the `rmlui` and `freetype` ports.
+
+**U4** (2026-11-02).
+- **D18, the frame as a texture**: `RenderInstance::wantFrameTexture`, read by `performRenderPasses`
+  for passes with `frameBufferOutputID` -1 (`windowTarget`); `endFrame` copies a frame nobody
+  consumed (`finishFrame`, the engine's `frame_copy.frag` over `vs_quad`, view 127). The user layer
+  asks for it in `input` while a document is shown, starts its base layer from it with a blit, and
+  writes the window from the base layer (replace). Released by the UI's shutdown system.
+- **D19, views**: 128-254 (`USER_VIEWS_FIRST`..`USER_VIEW`), a new one at each change of framebuffer
+  or of view size (a blur's half-size downsamples). Running out logs once and drops the rest of the
+  frame's UI. Layers: window-sized RGBA8 (`RT | BLIT_DST`), one shared stencil (D24S8 where it can be
+  rendered to, else D0S8), remade with the window. Blits (layer copies, save-as-texture) each take a
+  view of their own, since a blit runs at its view's start.
+- **D20, filters and gradients**: `render_bgfx.cpp` follows RmlUi's GL3 backend step for step --
+  four postprocess targets, the blur's halvings and seven taps, drop-shadow, the colour matrices,
+  mask images; six new engine fragment shaders (`rmlui_pass`, `_matrix`, `_mask`, `_blur`,
+  `_shadow`, `_gradient`). bgfx has no float-array uniforms: the stop positions pack into four vec4s,
+  the blur's four weights into one. Where it differs: the blur's upscale is one bilinear draw into
+  the region, not GL's two framebuffer blits.
+- **The example** is the polished one now: a frosted menu (backdrop blur and saturate, a gradient
+  sheen, a box shadow) over a vignette; hover transitions on the controls; HUD text with a drop
+  shadow; a frosted chip. The look is the demos' shared `base.rcss` (D13). `UI_CAPTURE_MENU=0`
+  captures with the menu closed, `UI_CAPTURE_AT=n` at frame n.
+- **Fades, from the user's check.** The menu first slid in on a keyframe animation; the user found
+  it too sudden and wanted a fade in and out. Hiding a document removed it at once, so a fade out
+  needed a mechanism: the layer sets `ui-shown` on a shown document's body the frame after it is
+  shown and removes it on `hide`, and `DocumentOptions::fadeOut` keeps it drawn that long. The look
+  stays the style sheet's: the menu fades its opacity with a 6 dp rise. A backdrop filter is
+  composited apart from opacity (a capture mid-fade showed the blur at full strength while the panel
+  was half faded), so the menu transitions its blur radius too.
+- Checked in captures: the backdrop blurs the pillar behind the panel, the panel's shadow, the
+  gradient button, the HUD text's shadow, the chip, the fade's midpoint. Live by the user: the look,
+  the blur, the frame rate (good); the fade asked for above.
+- Not built: decorators running a program's own shaders (D20); OpenGL.
 
 ## Open questions
 

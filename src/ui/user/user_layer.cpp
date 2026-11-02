@@ -121,6 +121,8 @@ namespace projv::ui::user {
             std::string source;   // the RML, when opened from memory
             DocumentOptions options;
             bool shown = false;
+            bool reveal = false;          // add ui-shown after the next update, so a transition starts from hidden
+            double fadeUntil = -1.0;      // hidden, but drawn until then (DocumentOptions::fadeOut)
             std::map<std::string, std::filesystem::file_time_type> watched;   // the .rml and the .rcss beside it
         };
         struct Bound {
@@ -178,7 +180,10 @@ namespace projv::ui::user {
                 core::error("ui: could not load the document '{}' ({})", name, d.path.empty() ? "from memory" : d.path);
                 return false;
             }
-            if (d.shown) d.element->Show(d.options.modal ? Rml::ModalFlag::Modal : Rml::ModalFlag::None);
+            if (d.shown) {
+                d.element->Show(d.options.modal ? Rml::ModalFlag::Modal : Rml::ModalFlag::None);
+                d.reveal = true;
+            }
             watch(d);
             documents[name] = std::move(d);
             return true;
@@ -232,6 +237,27 @@ namespace projv::ui::user {
 
         bool anyShown() const {
             return std::any_of(documents.begin(), documents.end(), [](const auto& e) { return e.second.shown; });
+        }
+        // Shown, or hidden and still fading out: what is drawn.
+        bool anyDrawn() const {
+            return std::any_of(documents.begin(), documents.end(),
+                               [](const auto& e) { return e.second.shown || e.second.fadeUntil >= 0.0; });
+        }
+
+        // After an update: ui-shown on a document just shown, and a faded-out one hidden for good.
+        void updateFades() {
+            const double now = systemInterface().seconds;
+            for (auto& [name, d] : documents) {
+                if (!d.element) continue;
+                if (d.reveal) {
+                    d.element->SetClass("ui-shown", true);
+                    d.reveal = false;
+                }
+                if (d.fadeUntil >= 0.0 && now >= d.fadeUntil) {
+                    d.element->Hide();
+                    d.fadeUntil = -1.0;
+                }
+            }
         }
         bool modalShown() const {
             return std::any_of(documents.begin(), documents.end(), [](const auto& e) { return e.second.shown && e.second.options.modal; });
@@ -324,7 +350,7 @@ namespace projv::ui::user {
         // The render interface goes last: RmlUi releases its textures and geometry through it.
     }
 
-    bool UserLayer::visible() const { return state->anyShown(); }
+    bool UserLayer::visible() const { return state->anyDrawn(); }
 
     int UserLayer::drawCallsRecorded() const { return state->recording ? state->recording->drawCalls : 0; }
 
@@ -393,6 +419,8 @@ namespace projv::ui::user {
             took.keyboard = takesText(s.context->GetFocusElement());
         }
         if (s.modalShown()) took = {true, true};
+        // D18: while a document is up, the renderer writes the frame to a texture the UI starts from.
+        if (s.gpu && s.renderInstance) s.renderInstance->wantFrameTexture(s.anyDrawn());
         return took;
     }
 
@@ -401,12 +429,20 @@ namespace projv::ui::user {
         if (s.reloadOnChange && ++s.frames % 30 == 0) s.reloadChanged();
         s.updateModels();
         s.context->Update();
-        if (s.gpu) {
-            s.gpu->beginFrame(view, size.x, size.y);
-        } else {
+        s.updateFades();
+        if (!s.gpu) {
             s.recording->beginFrame();
+            s.context->Render();
+            return;
         }
+        // Views USER_VIEWS_FIRST..view (the host's USER_VIEW). The scene, if the renderer wrote it to the
+        // frame texture this frame; the base layer, scene and UI, then replaces the window.
+        const bool fromFrame = s.renderInstance && s.renderInstance->frameRedirected();
+        const bgfx::ViewId first = view > USER_VIEWS_FIRST ? USER_VIEWS_FIRST : view;
+        s.gpu->beginFrame(first, view, size.x, size.y, fromFrame ? s.renderInstance->frameTexture() : bgfx::TextureHandle{bgfx::kInvalidHandle});
         s.context->Render();
+        s.gpu->endFrame();
+        if (fromFrame) s.renderInstance->markFrameConsumed();
     }
 
     // ---- ui/user.h -------------------------------------------------------------------------------
@@ -440,8 +476,12 @@ namespace projv::ui::user {
         if (!s) return;
         auto it = s->documents.find(name);
         if (it == s->documents.end()) return;
-        it->second.shown = true;
-        it->second.element->Show(it->second.options.modal ? Rml::ModalFlag::Modal : Rml::ModalFlag::None);
+        UserLayer::Impl::Document& d = it->second;
+        if (d.shown) return;
+        d.shown = true;
+        d.fadeUntil = -1.0;
+        d.element->Show(d.options.modal ? Rml::ModalFlag::Modal : Rml::ModalFlag::None);
+        d.reveal = true;
     }
 
     void hide(Application& app, const std::string& name) {
@@ -449,8 +489,13 @@ namespace projv::ui::user {
         if (!s) return;
         auto it = s->documents.find(name);
         if (it == s->documents.end()) return;
-        it->second.shown = false;
-        it->second.element->Hide();
+        UserLayer::Impl::Document& d = it->second;
+        if (!d.shown) return;
+        d.shown = false;
+        d.reveal = false;
+        d.element->SetClass("ui-shown", false);
+        if (d.options.fadeOut > 0.0f) d.fadeUntil = systemInterface().seconds + d.options.fadeOut;
+        else d.element->Hide();
     }
 
     bool isOpen(const Application& app, const std::string& name) {

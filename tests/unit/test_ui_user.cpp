@@ -197,3 +197,19 @@ TEST_CASE("ui: the user layer's calls fail, logged, without the UI installed") {
     CHECK_FALSE(user::model(app, "m").valid());
     CHECK_FALSE(user::isOpen(app, "x"));
 }
+
+TEST_CASE("ui: a hidden document with a fadeOut is still drawn until it has faded, and is not modal meanwhile") {
+    Fixture f;
+    REQUIRE(user::openFromMemory(f.app, "menu", document("<p>Menu</p>"), {.shown = true, .modal = true, .fadeOut = 0.5f}));
+    f.app.time().unscaledDelta = 0.1f;   // the layer's clock runs on the frame's unscaled time
+    f.frame();
+    user::hide(f.app, "menu");
+    CHECK_FALSE(user::isShown(f.app, "menu"));
+    CHECK(f.layer->visible());           // fading out
+    projv::ui::Capture took = f.frame();
+    CHECK_FALSE(took.keyboard);          // no longer modal
+    for (int i = 0; i < 6; i++) f.frame();
+    CHECK_FALSE(f.layer->visible());     // faded: hidden for good
+    user::show(f.app, "menu");
+    CHECK(f.layer->visible());
+}

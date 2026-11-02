@@ -1,6 +1,7 @@
 /* The demos' shared style (docs/plans/ui.md, D13): what every element needs to lay out at all --
-   RmlUi has no built-in style sheet -- and a plain look for text and controls. Each program's own
-   sheet adds to it. Fonts: fonts/ beside this file (Lato, SIL OFL: fonts/LICENSE-Lato.txt). */
+   RmlUi has no built-in style sheet -- and the demos' one look: frosted panels over the scene, soft
+   shadows, quiet controls. Each program's own sheet adds to it. Fonts: fonts/ beside this file
+   (Lato, SIL OFL: fonts/LICENSE-Lato.txt). */
 
 body, div, p, h1, h2, h3, form, label, span.block { display: block; }
 h1, h2, h3, p { margin: 0; }
@@ -9,33 +10,54 @@ body {
     font-family: LatoLatin;
     font-weight: normal;
     font-size: 18dp;
-    color: #e8ecf0;
+    color: #eef2f6;
 }
 
-h1 { font-size: 32dp; font-weight: bold; margin-bottom: 12dp; }
-h2 { font-size: 22dp; font-weight: bold; margin-bottom: 8dp; }
+h1 { font-size: 30dp; font-weight: bold; margin-bottom: 14dp; color: #ffffff; }
+h2 { font-size: 21dp; font-weight: bold; margin-bottom: 8dp; }
 
+/* A frosted panel: the scene behind it blurred (backdrop-filter), a faint tint and edge, a soft
+   shadow under it. */
 .panel {
-    background-color: #141a22e6;
-    border: 1dp #3a4656;
-    border-radius: 8dp;
-    padding: 18dp 20dp;
+    padding: 22dp 24dp;
+    border-radius: 14dp;
+    border: 1dp #ffffff26;
+    background-color: #0e141c99;
+    decorator: linear-gradient(180deg, #ffffff12, #ffffff00 60%);
+    backdrop-filter: blur(18dp) saturate(1.3);
+    box-shadow: #00000080 0dp 14dp 40dp 0dp;
+}
+
+/* A chip: a small frosted label (HUD readouts). */
+.chip {
+    padding: 6dp 12dp;
+    border-radius: 9dp;
+    background-color: #0a0f1599;
+    backdrop-filter: blur(10dp);
+    border: 1dp #ffffff1f;
 }
 
 button {
     display: block;
-    padding: 9dp 14dp;
-    margin: 6dp 0;
-    background-color: #2a3646;
-    border: 1dp #46566c;
-    border-radius: 5dp;
+    padding: 10dp 14dp;
+    margin: 7dp 0;
+    border-radius: 8dp;
+    border: 1dp #ffffff1f;
+    background-color: #ffffff14;
     text-align: center;
     cursor: pointer;
+    transition: background-color border-color 0.14s cubic-out;
 }
-button:hover { background-color: #36475c; }
-button:active { background-color: #1f2a37; }
+button:hover { background-color: #ffffff2b; border-color: #ffffff45; }
+button:active { background-color: #ffffff0d; }
+button.primary {
+    background-color: #4f86c6d9;
+    border-color: #8fb8ea80;
+    decorator: linear-gradient(180deg, #ffffff26, #ffffff00);
+}
+button.primary:hover { background-color: #5f96d6f2; }
 
-label { margin-top: 10dp; color: #aab6c4; font-size: 15dp; }
+label { margin-top: 12dp; color: #b9c4d0; font-size: 15dp; }
 
 input.text {
     display: block;
@@ -44,42 +66,47 @@ input.text {
     /* Room for a whole line: the content box (height less padding) must be at least the font's line
        height, or the field clips descenders -- p, g, j. */
     height: 36dp;
-    padding: 5dp 8dp;
-    margin-top: 4dp;
-    background-color: #0c1118;
-    border: 1dp #46566c;
-    border-radius: 4dp;
+    padding: 5dp 10dp;
+    margin-top: 5dp;
+    border-radius: 7dp;
+    background-color: #00000059;
+    border: 1dp #ffffff26;
+    transition: border-color 0.14s cubic-out;
 }
-input.text:focus { border-color: #7aa7e0; }
+input.text:focus { border-color: #8fb8ea; }
 
 input.checkbox {
     width: 20dp;
     height: 20dp;
     margin-right: 8dp;
     vertical-align: middle;
-    background-color: #0c1118;
-    border: 1dp #46566c;
-    border-radius: 3dp;
+    border-radius: 5dp;
+    background-color: #00000059;
+    border: 1dp #ffffff40;
+    transition: background-color 0.14s cubic-out;
 }
-input.checkbox:checked { background-color: #4f86c6; }
+input.checkbox:checked { background-color: #4f86c6; border-color: #8fb8ea; }
 
 input.range {
     display: block;
     width: 100%;
-    height: 20dp;
+    height: 22dp;
     margin-top: 6dp;
 }
 input.range slidertrack {
-    margin-top: 8dp;
+    margin-top: 9dp;
     height: 4dp;
-    background-color: #0c1118;
     border-radius: 2dp;
+    background-color: #ffffff26;
 }
 input.range sliderbar {
-    width: 16dp;
-    height: 20dp;
-    background-color: #7aa7e0;
-    border-radius: 4dp;
+    width: 18dp;
+    height: 18dp;
+    margin-top: 2dp;
+    border-radius: 9dp;
+    background-color: #e8f0fa;
+    box-shadow: #00000066 0dp 2dp 6dp 0dp;
+    transition: background-color 0.14s cubic-out;
 }
-input.range sliderbar:hover { background-color: #9cc0ec; }
+input.range sliderbar:hover { background-color: #ffffff; }
 input.range sliderarrowdec, input.range sliderarrowinc { width: 0; height: 0; }

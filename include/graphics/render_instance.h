@@ -37,6 +37,9 @@
 #include "GLFW/glfw3native.h"
 
 namespace projv::graphics {
+    /** The view endFrame copies an unconsumed frame texture to the window in: under every overlay's. */
+    inline constexpr bgfx::ViewId FRAME_COPY_VIEW = 127;
+
 
     /**
      * Contains the logic and data for a bgfx renderer. Manages our window, default vertex buffer, and renderers/constructedRenderer.
@@ -138,8 +141,40 @@ namespace projv::graphics {
             /** Runs every overlay, in order. graphics::endFrame calls this; a program that owns its frame can too. */
             void drawOverlays(core::ivec2 backBufferSize);
 
+            // ---- The frame as a texture (docs/plans/ui.md, D18) ----------------------------------------
+            // While wanted, the renderer's passes that write the window (frameBufferOutputID -1) write
+            // an engine texture of the back buffer's size instead, so something drawn over the frame
+            // can read it: the UI's backdrop filters, which blur what is behind a panel. Whoever reads
+            // it writes the window from it and says so (markFrameConsumed); a frame nobody consumed is
+            // copied to the window by endFrame, in FRAME_COPY_VIEW, below every overlay's views.
+
+            /** Asks for the frame as a texture from the next pass that writes the window on. */
+            void wantFrameTexture(bool want) { frameWanted = want; }
+            /** Whether this frame's window passes went to frameTexture(). */
+            bool frameRedirected() const { return redirected; }
+            bgfx::TextureHandle frameTexture() const { return frameColour; }
+            /** The window has been written from frameTexture() this frame: endFrame need not copy it. */
+            void markFrameConsumed() { consumed = true; }
+            /**
+            * The framebuffer a window pass should write at `size`: the frame texture's when wanted (made
+            * or remade at that size), else BGFX_INVALID_HANDLE, the back buffer. performRenderPasses
+            * calls it.
+            */
+            bgfx::FrameBufferHandle windowTarget(core::ivec2 size);
+            /** Copies an unconsumed redirected frame to the window, and starts the next frame. endFrame calls it. */
+            void finishFrame(core::ivec2 backBufferSize);
+            /** Frees the frame texture: before bgfx goes. */
+            void releaseFrameTexture();
+
             RenderInstance() = default;
         private:
+            bool frameWanted = false, redirected = false, consumed = false;
+            core::ivec2 frameSize{0, 0};
+            bgfx::TextureHandle frameColour = BGFX_INVALID_HANDLE;
+            bgfx::FrameBufferHandle frameTarget = BGFX_INVALID_HANDLE;
+            bgfx::ProgramHandle frameCopy = BGFX_INVALID_HANDLE;
+            bgfx::UniformHandle frameSampler = BGFX_INVALID_HANDLE;
+
             std::unordered_map<uint32_t, RendererSpecification> renderers;
             std::shared_ptr<ConstructedRenderer> constructedRenderer;
             std::vector<std::pair<int, Overlay>> overlays;

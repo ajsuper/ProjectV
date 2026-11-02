@@ -137,6 +137,10 @@ namespace projv::graphics {
 #endif
                 bgfx::setViewFrameBuffer(renderPass.renderPassID, constructedRenderer->resources.framebuffers.frameBufferHandlesAlternate[renderPass.targetFrameBufferID]);
             }
+            // A pass that writes the window writes the frame texture instead while one is wanted (D18).
+            if (renderPass.targetFrameBufferID < 0) {
+                bgfx::setViewFrameBuffer(renderPass.renderPassID, renderInstance.windowTarget(backBufferSize));
+            }
 
             //bgfx::setViewClear(renderPass.renderPassID, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000FF, 1.0f, 0);
             bgfx::setViewClear(renderPass.renderPassID, BGFX_CLEAR_NONE, 0xFF00FFFF, 1.0f, 0);
@@ -345,6 +349,7 @@ namespace projv::graphics {
 
     uint32_t endFrame(RenderInstance &renderInstance, core::ivec2 backBufferSize) {
         renderInstance.drawOverlays(backBufferSize);
+        renderInstance.finishFrame(backBufferSize);   // D18: a redirected frame nobody drew from
         return bgfx::frame();
     }
 }

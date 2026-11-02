@@ -8,8 +8,8 @@
 <body class="hud" data-model="hud">
     <div class="corner">
         <p class="big">{{fps}} fps</p>
-        <p>Hello, {{name}}. Clicks: {{clicks}}</p>
+        <p class="small">Hello, {{name}}. Clicks: {{clicks}}</p>
     </div>
-    <p class="hint" data-if="!menuOpen">M: menu</p>
+    <p class="hint chip" data-if="!menuOpen">M: menu</p>
 </body>
 </rml>

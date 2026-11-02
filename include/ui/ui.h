@@ -32,6 +32,9 @@ namespace projv::graphics {
 namespace projv::ui {
     // The bgfx views the layers draw in: the top of bgfx's range, above any renderer's passes.
     inline constexpr bgfx::ViewId USER_VIEW = 254;
+    // The user layer draws in USER_VIEWS_FIRST..USER_VIEW, a new view at each change of framebuffer
+    // (its layers and filters: docs/plans/ui.md, D19). Renderers' passes stay below.
+    inline constexpr bgfx::ViewId USER_VIEWS_FIRST = 128;
     inline constexpr bgfx::ViewId DEV_VIEW = 255;
 
     // The two levels, in routing order: the one first offered input.

@@ -1,10 +1,37 @@
-/* This program's own look, over the shared base.rcss. Edit it while the program runs: the
+/* This program's own look, over the demos' shared base.rcss. Edit it while the program runs: the
    documents reload (a dev build). */
 
 body.hud { width: 100%; height: 100%; pointer-events: none; }
-.corner { position: absolute; left: 20dp; top: 16dp; }
-.big { font-size: 28dp; font-weight: bold; }
-.hint { position: absolute; right: 20dp; bottom: 16dp; color: #c8d0da; }
+.corner { position: absolute; left: 18dp; top: 16dp; }
+.big { font-size: 26dp; font-weight: bold; }
+.small { font-size: 15dp; color: #c8d2dc; }
+/* Text over a bright scene stays readable: a soft shadow under it. */
+.corner p { filter: drop-shadow(#000000b0 0dp 1dp 4dp); }
+.hint { position: absolute; right: 18dp; bottom: 16dp; font-size: 15dp; }
 
-body.menu-screen { width: 100%; height: 100%; }
-.menu { position: absolute; left: 50%; top: 50%; width: 320dp; margin-left: -160dp; margin-top: -230dp; }
+/* The menu fades in and out: the engine sets ui-shown on a shown document's body (and keeps it drawn
+   for its fadeOut after it is hidden). Faded out, it takes no mouse. */
+body.menu-screen {
+    width: 100%; height: 100%;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.35s quadratic-in-out;
+}
+body.menu-screen.ui-shown { opacity: 1; pointer-events: auto; }
+/* The scene dims behind the menu, a radial vignette. */
+.shade {
+    position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+    decorator: radial-gradient(circle farthest-corner, #00000000 30%, #00000099);
+}
+.menu {
+    position: absolute; left: 50%; top: 50%; width: 330dp; margin-left: -165dp; margin-top: -250dp;
+}
+/* With the fade, a slight rise -- gentle, not a slide -- and the frost thickening: a backdrop filter is
+   composited apart from the element's opacity, so it fades by its own radius. */
+.menu {
+    transform: translateY(6dp);
+    backdrop-filter: blur(0dp) saturate(1);
+    transition: transform backdrop-filter 0.4s cubic-out;
+}
+.ui-shown .menu { transform: translateY(0dp); backdrop-filter: blur(18dp) saturate(1.3); }
+.subtitle { font-size: 15dp; color: #b9c4d0; margin-top: -8dp; margin-bottom: 12dp; }
