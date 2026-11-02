@@ -19,6 +19,18 @@
         {
             "name": "fastSettings",
             "type": "vec4"
+        },
+        {
+            "name": "jitterParams",
+            "type": "vec4"
+        },
+        {
+            "name": "renderParams",
+            "type": "vec4"
+        },
+        {
+            "name": "fastTemporal",
+            "type": "vec4"
         }
     ],
     "shaders": [
@@ -35,7 +47,15 @@
             "path": "./renderers/fast/shaders/combine_blur.bin"
         },
         {
+            "shaderID": 4,
+            "path": "./renderers/fast/shaders/reconstruct.bin"
+        },
+        {
             "shaderID": 5,
+            "path": "./renderers/fast/shaders/resolve.bin"
+        },
+        {
+            "shaderID": 6,
             "path": "./renderers/fast/shaders/display.bin"
         }
     ],
@@ -51,47 +71,87 @@
         },
         {
             "texID": 2,
-            "name": "gDirect",
-            "format": "RGBA16_FLOAT",
+            "name": "gPos",
+            "format": "RGBA32_FLOAT",
             "sizeMode": "relative",
-            "scale": 1.0,
+            "scale": 0.5,
             "origin": "CreateNew"
         },
         {
             "texID": 3,
-            "name": "gPos",
-            "format": "RGBA32_FLOAT",
+            "name": "gNormal",
+            "format": "RGBA16_FLOAT",
             "sizeMode": "relative",
-            "scale": 1.0,
+            "scale": 0.5,
             "origin": "CreateNew"
         },
         {
             "texID": 4,
-            "name": "gNormal",
+            "name": "gAlbedo",
             "format": "RGBA16_FLOAT",
             "sizeMode": "relative",
-            "scale": 1.0,
+            "scale": 0.5,
             "origin": "CreateNew"
         },
         {
             "texID": 5,
-            "name": "gAmbient",
+            "name": "gDirect",
             "format": "RGBA16_FLOAT",
             "sizeMode": "relative",
-            "scale": 1.0,
+            "scale": 0.5,
             "origin": "CreateNew"
         },
         {
             "texID": 6,
+            "name": "gFace",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 7,
+            "name": "gRot",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 8,
+            "name": "gMotion",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 9,
             "name": "aoRaw",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 10,
+            "name": "shaded",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 11,
+            "name": "reconstructed",
             "format": "RGBA16_FLOAT",
             "sizeMode": "relative",
             "scale": 1.0,
             "origin": "CreateNew"
         },
         {
-            "texID": 7,
-            "name": "shaded",
+            "texID": 12,
+            "name": "resolved",
             "format": "RGBA16_FLOAT",
             "sizeMode": "relative",
             "scale": 1.0,
@@ -105,19 +165,34 @@
                 2,
                 3,
                 4,
-                5
+                5,
+                6,
+                7,
+                8
             ]
         },
         {
             "fboID": 2,
             "textureIDs": [
-                6
+                9
             ]
         },
         {
             "fboID": 3,
             "textureIDs": [
-                7
+                10
+            ]
+        },
+        {
+            "fboID": 4,
+            "textureIDs": [
+                11
+            ]
+        },
+        {
+            "fboID": 5,
+            "textureIDs": [
+                12
             ]
         }
     ]

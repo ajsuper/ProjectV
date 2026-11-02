@@ -14,7 +14,7 @@
 //   restir-pt           ReSTIR PT: two-bounce paths through the materials, reused at a sixteenth of the
 //                       pixels, denoised, then a temporal resolve
 //   pt-reference        the ground truth: a plain path tracer on the engine's BSDF, accumulated while still
-//   fast                direct sun + screen-space AO, anti-aliased by TAA. Cheapest.
+//   fast                direct sun + screen-space AO at half resolution, rebuilt to the window, TAA. Cheapest.
 //
 // The Gallery panel (the dev layer, F1) switches between them and holds each one's settings. A renderer
 // is built the first time it is picked and kept, so switching back is instant (docs/plans/gallery-ui.md).
@@ -163,19 +163,40 @@ static void uploadReferenceUniforms(std::shared_ptr<projv::ConstructedRenderer> 
     projv::graphics::setUniformToValue(renderer, "ptSettings", settings);
 }
 
-// The fast renderer. Its TAA reprojects by last frame's camera, which the engine keeps (pjvPrevView*). Its
-// settings are its SSAO's (ssao.frag) and whether combine_blur.frag denoises it.
+// The fast renderer (docs/plans/fast-renderer.md): half-resolution G-buffer, SSAO and blur, the window
+// rebuilt by face identity, then TAA. Its settings are its SSAO's (ssao.frag), whether combine_blur.frag
+// denoises it, and the TAA and the reconstruction, each on or off for the A/B.
 struct FastSettings {
     float aoRadius = 4.0f;      // world units an occluder may sit from the point
     float aoIntensity = 1.0f;   // how much of the occlusion is applied
     float aoPower = 2.0f;       // how hard its response bends
     bool  blur = true;          // the bilateral denoise of the AO
+    bool  taa = true;           // jittered rays and the temporal resolve
+    bool  reconstruct = true;   // off: the half-resolution frame point-sampled
 };
 static FastSettings g_fast;
 static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
     uploadCommonUniforms(renderer, ctx);
     projv::core::vec4 settings{g_fast.aoRadius, g_fast.aoIntensity, g_fast.aoPower, g_fast.blur ? 1.0f : 0.0f};
     projv::graphics::setUniformToValue(renderer, "fastSettings", settings);
+    // The jitter: 16 Halton phases inside the render texel, so the resolve's history supersamples it; the
+    // texel's centre with TAA off.
+    auto halton = [](int index, int base) {
+        float f = 1.0f, r = 0.0f;
+        for (; index > 0; index /= base) { f /= float(base); r += f * float(index % base); }
+        return r;
+    };
+    const int phase = ctx.frameCount % 16 + 1;
+    projv::core::vec4 jitter = g_fast.taa ? projv::core::vec4(halton(phase, 2) - 0.5f, halton(phase, 3) - 0.5f, 0.0f, 0.0f)
+                                          : projv::core::vec4(0.0f);
+    projv::graphics::setUniformToValue(renderer, "jitterParams", jitter);
+    projv::core::vec4 renderParams{0.0f, 0.0f, g_fast.reconstruct ? 0.0f : 1.0f, 0.0f};   // z: the reconstruction bypassed
+    projv::graphics::setUniformToValue(renderer, "renderParams", renderParams);
+    // x: the still history's length (1: none); y: no history yet -- the first frame, or a switch back.
+    static bool first = true;
+    projv::core::vec4 temporal{g_fast.taa ? 64.0f : 1.0f, first || ctx.switched ? 1.0f : 0.0f, 0.0f, 0.0f};
+    first = false;
+    projv::graphics::setUniformToValue(renderer, "fastTemporal", temporal);
 }
 
 // The restir-pt renderer's switches: G cycles what it shows (the image, the indirect light alone, the
@@ -296,7 +317,7 @@ static std::vector<RendererModule> buildRendererRegistry() {
 
     registry.push_back({
         "fast",
-        "Direct sun plus screen-space AO, anti-aliased by TAA. The cheapest renderer here.",
+        "Direct sun plus screen-space AO at half resolution, rebuilt to the window and anti-aliased by TAA. The cheapest renderer here.",
         "./renderers/fast/",
         uploadReprojectionUniforms
     });
@@ -742,6 +763,10 @@ static void fastSettings(Gallery&) {
     ImGui::SliderFloat("AO intensity", &g_fast.aoIntensity, 0.0f, 1.0f, "%.2f");
     ImGui::SliderFloat("AO power", &g_fast.aoPower, 0.5f, 4.0f, "%.2f");
     ImGui::Checkbox("AO denoise blur", &g_fast.blur);
+    ImGui::Checkbox("TAA", &g_fast.taa);
+    ImGui::SetItemTooltip("Off: no jitter and no temporal resolve -- each frame alone, edges aliased");
+    ImGui::Checkbox("reconstruct to full resolution", &g_fast.reconstruct);
+    ImGui::SetItemTooltip("Off: the half-resolution frame point-sampled");
     if (ImGui::Button("Defaults")) g_fast = FastSettings{};
 }
 

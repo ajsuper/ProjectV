@@ -33,7 +33,7 @@ keeps its history ([plan](../../docs/plans/gallery-ui.md)).
 |---|---|---|---|
 | [restir-pt](renderers/restir-pt/) | two bounces through the materials, ReSTIR PT at 1/16 of the pixels | path reuse (reconnect / replay) + diffuse and specular denoised apart; ½-res G-buffer reconstructed, then accumulated | The default. Panel: the view, the final render or the raw output, post, fog, shafts, SSAO, bounces, reuse and its parts, denoise, reconstruction. `--restir-gi 2`: a quarter of the pixels. |
 | [pt-reference](renderers/pt-reference/) | two-bounce path trace through the materials | accumulate; hard reset on camera or sun move | The ground truth: exact, slow, converges while parked. What the others are measured against. Panel: bounces (1-6), restart, frames accumulated. |
-| [fast](renderers/fast/) | none — direct + screen-space AO | deterministic; TAA for AA only | Cheapest. Nothing to converge because nothing is random. Panel: AO radius, intensity and power, the AO's denoise blur. |
+| [fast](renderers/fast/) | none — direct + screen-space AO | deterministic; TAA for AA only | Cheapest: half-resolution trace rebuilt to the window by face identity, then TAA. Panel: AO radius, intensity and power, its blur, TAA, the reconstruction. |
 
 The gallery used to carry more: `reconstruction` (half-resolution tracing rebuilt from voxel face
 identity; restir-pt's reconstruction is its descendant) and the demos' `voxel` renderer, removed from

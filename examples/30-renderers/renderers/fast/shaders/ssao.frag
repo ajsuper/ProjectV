@@ -21,7 +21,9 @@ $input v_texcoord0
 // on screen, cast real rays: 30-renderers' tree64 and taa both do, and AdvancedRenderer's probe
 // gather does it properly.
 //
-// Input  (FBO 1): 1 gPos (xyz world hit, a = camDist; a < 0 => sky), 2 gNormal, 4 blueNoise.
+// Runs at the G-buffer's resolution: half the window each way.
+//
+// Input: 0 gPos (xyz world hit, a = distance; a < 0 => sky), 1 gNormal (xyz, as stored), 2 blueNoise.
 // Output (FBO 2): INCOMING SKY RADIANCE, occluded -- not a bare AO scalar.
 //
 // That distinction matters: combine_blur multiplies this by surface albedo and adds the untouched
@@ -35,11 +37,10 @@ $input v_texcoord0
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
 #include <pjv_sun_sky.sc>
 
-SAMPLER2D(gPos,      1);
-SAMPLER2D(gNormal,   2);
-SAMPLER2D(blueNoise, 4);
+SAMPLER2D(gPos,      0);
+SAMPLER2D(gNormal,   1);
+SAMPLER2D(blueNoise, 2);
 
-uniform vec4 windowRes;
 uniform vec4 frameCount;
 uniform vec4 fastSettings;   // x the AO radius, y its intensity, z its power (the gallery's panel); w combine_blur's
 // sunDir is declared by pjv_sun_sky.sc, which skyColor() needs; declaring it again here is a
@@ -119,7 +120,9 @@ void main() {
     }
 
     vec3 P = posSample.xyz;
-    vec3 N = normalize(texture2D(gNormal, v_texcoord0).xyz * 2.0 - 1.0);
+    // As stored: a float target holds the normal itself. (It was decoded `* 2 - 1`, as if packed into
+    // unsigned bytes, so every sample was taken round the wrong normal.)
+    vec3 N = normalize(texture2D(gNormal, v_texcoord0).xyz);
 
     // Per-pixel rotation from the blue-noise LUT, so neighbouring pixels sample different
     // directions and the blur in the next pass turns AO_SAMPLES into many more effective ones.
@@ -151,7 +154,7 @@ void main() {
         vec3 dirSky = skyColor(dir);
 
         bool valid;
-        vec2 uv = worldToUV(samplePoint, pjvViewPosition(), pjvViewDirection(), windowRes.xy, pjvViewTanHalfFov(), valid);
+        vec2 uv = worldToUV(samplePoint, pjvViewPosition(), pjvViewDirection(), passTargetRes.xy, pjvViewTanHalfFov(), valid);
         // Off-screen, or sky at that texel: nothing known to be in the way, so the sample sees sky.
         if (!valid) { skyLight += dirSky; continue; }
 

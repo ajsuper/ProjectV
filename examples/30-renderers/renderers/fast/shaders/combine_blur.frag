@@ -15,32 +15,29 @@ $input v_texcoord0
 //
 // The gathered value is the cosine-weighted MEAN incoming radiance Li (occluded
 // sky + one bounce). The diffuse response of a surface is albedo * mean(Li), so we
-// multiply the blurred sky-light by the surface albedo (carried in gAmbient) and
+// multiply the blurred sky-light by the surface albedo (carried in gAlbedo) and
 // add the untouched direct sun. This replaces the old "flat ambient * AO scalar":
 // the ambient is now real, occluded, coloured and directional.
 //
-// Inputs (flattened FBO-input order):
-//   0 gDirect  1 gPos  2 gNormal  3 gAmbient(albedo)   (FBO 1)
-//   4 skyAccum  5 skyPos  6 skyNormal                  (FBO 5, only skyAccum used)
-// Outputs (FBO 3):
-//   0 curColor  rgb = direct + albedo*skyLight, a = hit mask
-//   1 curPos    carried forward for TAA
-//   2 curNormal carried forward for TAA
+// Runs at the G-buffer's resolution (half the window each way); reconstruct.frag takes it to the window.
+//
+// Inputs: 0 gDirect, 1 gPos, 2 gNormal, 3 gAlbedo, 4 aoRaw (ssao.frag's occluded sky light).
+// Output: rgb = direct + albedo * skyLight, the lit frame at render resolution.
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#include <pjv_engine.sc>   // passTargetRes
 
 SAMPLER2D(gDirect,  0);
 SAMPLER2D(gPos,     1);
 SAMPLER2D(gNormal,  2);
-SAMPLER2D(gAmbient, 3);
+SAMPLER2D(gAlbedo, 3);
 // Register 4 = FBO 5's first texture: the temporally-accumulated sky term
 // (sky_reproject.frag output). Same slot the raw sky occupied before the temporal
 // pass was inserted; the bilateral blur below is unchanged, it just now smooths an
 // already-denoised signal instead of raw few-ray noise.
 SAMPLER2D(aoRaw,    4);
 
-uniform vec4 windowRes;
 uniform vec4 fastSettings;   // w: the blur on (1) or off (0), from the gallery's panel; xyz are ssao.frag's
 
 #define BLUR_RADIUS 2      // 5x5 taps.
@@ -65,7 +62,7 @@ void main() {
     float hitMask = direct4.a;
     vec4  pos4    = texture2D(gPos,     uv);
     vec3  N0      = texture2D(gNormal,  uv).xyz;
-    vec3  albedo  = texture2D(gAmbient, uv).rgb;
+    vec3  albedo  = texture2D(gAlbedo, uv).rgb;
 
     // Sky / background: no AO, pass the sky colour straight through.
     if (hitMask < 0.5) {
@@ -74,7 +71,7 @@ void main() {
     }
 
     vec3  P0     = pos4.xyz;
-    vec2  texel  = 1.0 / windowRes.xy;
+    vec2  texel  = passTargetRes.zw;   // this pass's own texels: it runs at the G-buffer's half resolution
 
     vec4  sky0   = texture2D(aoRaw, uv);   // rgb = accumulated AO, a = temporal age
 
