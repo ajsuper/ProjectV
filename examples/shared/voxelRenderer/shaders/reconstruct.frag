@@ -10,9 +10,10 @@ $input v_texcoord0
 // pixels whose whole 3x3 window recorded one face measured SLOWER (0.44 -> 0.50 ms), because its own
 // nine face reads cost more than the arithmetic they saved.
 //
-// The method is 30-renderers' reconstruction renderer (renderers/reconstruction/shaders/
-// reconstruct.frag, where every step is argued at length); this is that pass made to work for
-// voxels in TURNED chunks, which a physics scene is full of. In short:
+// The method is the one 30-renderers' reconstruction renderer argued step by step at length (its
+// renderers/reconstruction/shaders/reconstruct.frag, removed from the gallery 2026-11-01 and kept in
+// git history); this is that pass made to work for voxels in TURNED chunks, which a physics scene is
+// full of. In short:
 //
 // - A G-buffer texel that saw a voxel knows that whole voxel: its face centre, edge length, normal
 //   and -- new here -- the chunk's rotation (gRot) give the cube exactly. So for each output pixel,

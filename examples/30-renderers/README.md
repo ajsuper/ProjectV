@@ -1,6 +1,6 @@
 # 30 — Renderers
 
-Several renderers, one scene, one camera. The comparison is the point: each answers "how should this
+Three renderers, one scene, one camera. The comparison is the point: each answers "how should this
 scene be lit" differently, and the only way to judge that is to put them side by side under
 identical conditions.
 
@@ -19,22 +19,26 @@ renderers/<name>/
     README.md        what it does and when to reach for it
 ```
 
-`main.cpp` supplies the window, the camera, the scene and the per-frame uniforms. Everything that
-makes one renderer differ from another lives in its folder. Adding another is dropping in a
-directory and adding one entry to `buildRendererRegistry()`.
+`main.cpp` supplies the window, the camera, the scene, the per-frame uniforms and the **Gallery**
+panel. Everything that makes one renderer differ from another lives in its folder. Adding another is
+dropping in a directory and adding one entry to `buildRendererRegistry()`.
 
-That is also why this example is the right place to learn the renderer format: there are several
-worked examples of it, at every scale from four passes to ten.
+The panel (the dev layer: [The UI](../../docs/concepts/ui.md), F1 hides it) switches renderers and sets
+the sun. A renderer is built the first time it is picked and kept, so switching back is instant and
+keeps its history ([plan](../../docs/plans/gallery-ui.md)).
 
 ## The renderers
 
 | Renderer | Lighting | Noise strategy | Notes |
 |---|---|---|---|
-| [pt-reference](renderers/pt-reference/) | two-bounce path trace through the materials | accumulate; hard reset on camera or sun move | The reference: exact, slow, converges while parked. What the others are measured against. The default. |
-| [fast](renderers/fast/) | none — direct + RTAO | deterministic; TAA for AA only | Cheapest. Nothing to converge because nothing is random. |
-| [reconstruction](renderers/reconstruction/) | none — direct sun and an ambient term | none needed | Traces at half resolution and rebuilds full from voxel face identity. Q toggles it. |
 | [restir-pt](renderers/restir-pt/) | two bounces through the materials, ReSTIR PT at 1/16 of the pixels | path reuse (reconnect / replay) + diffuse and specular denoised apart; ½-res G-buffer reconstructed, then accumulated | G views, J reuse, Q reconstruction, P final render / raw ReSTIR output, no denoising (V vignette, B grade, E auto-exposure, K depth of field, O fog, L sun shafts, SSAO), U soft sun shadow. `--restir-gi 2`: a quarter of the pixels. |
-| voxel | ray-traced GI from a probe grid | TAA | The examples' game renderer, from `examples/shared/voxelRenderer`. T toggles TAA. |
+| [pt-reference](renderers/pt-reference/) | two-bounce path trace through the materials | accumulate; hard reset on camera or sun move | The ground truth: exact, slow, converges while parked. What the others are measured against. |
+| [fast](renderers/fast/) | none — direct + screen-space AO | deterministic; TAA for AA only | Cheapest. Nothing to converge because nothing is random. |
+
+The gallery used to carry more: `reconstruction` (half-resolution tracing rebuilt from voxel face
+identity; restir-pt's reconstruction is its descendant) and the demos' `voxel` renderer, removed from
+the gallery on 2026-11-01. The voxel renderer lives on in `examples/shared/voxelRenderer`
+(`MAYHEM_RENDERER=voxel ./voxel_mayhem_demo` draws with it).
 
 `pt-reference` replaced the gallery's two older path tracers, `tree64` and `taa`, and `restir-pt` replaced
 `restir` (ReSTIR GI), all on 2026-10-22: neither old path tracer knew about materials, and a reference
@@ -54,8 +58,7 @@ cmake --build --preset dev --target renderer_gallery
 
 That builds every renderer's shaders too. All of them share the engine's voxel DDA
 (`pjv_scene.sc`, on the shader include path automatically) and this example's own
-`sharedShaders/` — the sun/sky model (with `pjv_path_light.sc`, the path tracers' version of it) and
-the cascade maths — so they stay in step with each other and with the engine.
+`sharedShaders/` — the sun/sky model (with `pjv_path_light.sc`, the path tracers' version of it) — so they stay in step with each other and with the engine.
 
 ## How to run
 
@@ -65,7 +68,7 @@ cd build/examples/renderer_gallery
 ```
 
 ```
---renderer <name>    which renderer to run (default: pt-reference)
+--renderer <name>    which renderer to start on (default: restir-pt)
 --scene <directory>  any folder holding a compose.json (default: SanMiguel), or material-room
 --list               print the available renderers and exit
 --look x,y,z,tx,ty,tz  start the camera at x,y,z looking at tx,ty,tz

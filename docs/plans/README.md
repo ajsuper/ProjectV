@@ -94,7 +94,8 @@ The twelve shader experiments:
 
 | Plan | Status | What |
 |---|---|---|
-| [ui.md](ui.md) | proposal | Two UI levels on one host: Dear ImGui for developers, RmlUi for players. After shader-library |
+| [ui.md](ui.md) | in progress (U0, U1 built) | Two UI levels on one host: Dear ImGui for developers, RmlUi for players |
+| [gallery-ui.md](gallery-ui.md) | in progress | The renderer gallery cut to restir-pt, pt-reference and fast, switched and tuned from the dev layer |
 
 ## Platforms
 

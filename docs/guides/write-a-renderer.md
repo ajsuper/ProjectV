@@ -152,8 +152,8 @@ vec2 oneTargetPixel = passTargetRes.zw;
 vec2 oneSourceTexel = passInputRes[0].zw;
 ```
 
-[`30-renderers/renderers/reconstruction`](../../examples/30-renderers/renderers/reconstruction/)
-traces at half resolution and reconstructs to full.
+[`30-renderers/renderers/restir-pt`](../../examples/30-renderers/renderers/restir-pt/) traces its
+G-buffer at half resolution and reconstructs to full (`shaders/reconstruct.frag`).
 
 ## 7. Drive it from C++
 

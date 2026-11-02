@@ -1,40 +1,38 @@
 // ProjectV Renderer Gallery
 //
-// One host application, several renderers, the same scene and the same camera. The point is the
+// One host application, three renderers, the same scene and the same camera. The point is the
 // comparison: each renderer answers "how should this scene be lit" differently, and the only way
 // to judge that is to put them side by side under identical conditions.
 //
 // A renderer here is *data*, not code -- a folder holding render.json (the pass order),
 // resources.json (the shaders, render targets and framebuffers) and the shaders themselves. This
 // file supplies the window, the camera, the scene and the per-frame uniforms; everything that
-// makes one renderer differ from another lives in its folder. Adding another is dropping in a
-// directory and adding one entry to buildRendererRegistry() below.
+// makes one renderer differ from another lives in its folder.
 //
 // Each renderer has its own README in renderers/<name>/, and the example's README compares them.
 //
-//   pt-reference        the reference: a plain path tracer on the engine's BSDF, accumulated while still
-//   fast                direct sun + ray-traced AO, anti-aliased by TAA. Cheapest.
-//   reconstruction      half-resolution tracing rebuilt to full from voxel face identity
 //   restir-pt           ReSTIR PT: two-bounce paths through the materials, reused at a sixteenth of the
 //                       pixels, denoised, then a temporal resolve
-//   voxel               the examples' game renderer (examples/shared/voxelRenderer): what the physics
-//                       demos, the explosion and the multiplayer games draw with
+//   pt-reference        the ground truth: a plain path tracer on the engine's BSDF, accumulated while still
+//   fast                direct sun + screen-space AO, anti-aliased by TAA. Cheapest.
+//
+// The Gallery panel (the dev layer, F1) switches between them and holds each one's settings. A renderer
+// is built the first time it is picked and kept, so switching back is instant (docs/plans/gallery-ui.md).
 //
 // Usage:
 //   ./renderer_gallery [--renderer <name>] [--scene <directory>] [--list]
 //
-//   --renderer   which renderer to run (default: pt-reference)
+//   --renderer   which renderer to start on (default: restir-pt)
 //   --scene      a folder holding a compose.json (default: SanMiguel, from the scene previewer), or
 //                material-room: a room built here, to compare materials in (glossy floor, metal, mirror)
 //   --list       print the available renderers and exit
 //
-// Measuring (unattended; the window opens and closes by itself):
+// Measuring (unattended; the window opens and closes by itself, the panel hidden):
 //   --bench            each pass's GPU time over frames 120..360, printed, then exit
 //   --capture <prefix> saves frames 300, 301 and 302 as <prefix>-<frame>.tga, then exits
 //                      (--capture and --bench open a fixed 1280x720 window, so runs compare)
 //   --look x,y,z,tx,ty,tz   stands the camera at x,y,z looking at tx,ty,tz (default: the framing)
 //   --pan <rad>        turns the camera this much a frame (a moving-camera measurement)
-//   --voxel-folder <f> which staged folder the voxel renderer loads (default: voxelRenderer)
 //   --restir-gi <n>    restir-pt traces paths for one pixel in n x n: 4 (a sixteenth, default) or 2 (a quarter)
 //
 // Selection is a flag rather than a prompt so the gallery can be scripted: a benchmark or a
@@ -44,20 +42,11 @@
 //   W/S          — move forward / backward (Shift: four times as fast)
 //   A/D          — strafe left / right
 //   R/F          — move up / down
-//   Mouse        — look around (cursor is captured; Esc releases it, left-click re-captures)
-//   Scroll wheel — sun elevation
-//   T            — TAA on / off (voxel)
-//   Q            — reconstruction bypassed: point-sample the render resolution (reconstruction, restir-pt)
-//   G            — the image / indirect light / direct light / ambient occlusion / indirect diffuse /
-//                  indirect specular / light shafts (restir-pt)
-//   J            — ReSTIR reuse on / off (restir-pt)
-//   P            — the final render / the raw ReSTIR PT output (restir-pt): off drops the post, the fog, the
-//                  light shafts, the SSAO and every denoiser -- the a-trous, the GI accumulation and the
-//                  image history -- so each frame's estimate shows alone, noise and all. Within it: V vignette, B colour grade, E auto-exposure, K depth
-//                  of field, N bloom, M motion blur, O distance fog, L light shafts
-//   U            — soft sun shadow on / off (restir-pt)
-//   I            — blurred normals on / off: softer voxel edges (restir-pt; RESTIR_NORMAL_BLUR=w their width)
+//   Mouse        — look around (Esc releases the cursor, a click on the scene captures it again)
+//   Scroll wheel — sun elevation (also in the panel)
+//   H            — re-frame on the scene
 //   C            — print where the camera stands, as the --look (and GALLERY_SUN) that puts it back
+//   F1           — the panel: the renderer and its settings
 
 #include <algorithm>
 #include <chrono>
@@ -82,23 +71,22 @@
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
 #include "graphics/type_mapping.h"
+#include "graphics/input.h"
+#include "ui/dev.h"
+#include "ui/ui.h"
 #include "utils/blob_voxels.h"
 #include "utils/compose_io.h"
 #include "utils/material.h"
 #include "utils/picking.h"
 #include "utils/voxel_management.h"
 #include "restir_pt.h"
-#include "voxel_renderer.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-// Mouse scroll wheel drives the sun's elevation (a day cycle -- see render()). GLFW scroll
-// callbacks are plain C function pointers, so the accumulated wheel offset lives at file scope.
+// The sun's elevation (a day cycle -- see render()), in scroll-wheel notches: the wheel over the scene, the
+// panel's slider, or GALLERY_SUN.
 static double g_sunScrollAccum = 0.0;
-static void sunScrollCallback(GLFWwindow* /*window*/, double /*xoffset*/, double yoffset) {
-    g_sunScrollAccum += yoffset;
-}
 
 // =============================================================================
 // Renderer modularity
@@ -111,6 +99,7 @@ struct FrameContext {
     projv::core::vec3 cameraDirection;
     bool              cameraMoved;    // the camera or the sun
     bool              sunMoved;       // the sun alone: the light changed, not just the view
+    bool              switched;       // the renderer was switched to this frame: its histories start over
     int               frameCount;
     int               frameCameraLastMovedOn;
     projv::core::vec2 windowResolution;
@@ -130,15 +119,6 @@ struct RendererModule {
     // Optional: loads the renderer itself, in place of the generic load of `directory`.
     std::function<void(projv::Application&, projv::graphics::RenderInstance&, const projv::Scene&)> install;
 };
-
-// The voxel renderer's staged folder (--voxel-folder), and its TAA (T).
-static std::string g_voxelFolder = "voxelRenderer";
-static bool g_voxelTAA = true;
-
-// Bypass the reconstruction and point-sample the render-resolution frame instead (Q). Only the
-// `reconstruction` renderer reads it; the others declare no such uniform. Flipping between the two
-// on the same view is the only honest way to judge an upscaler, so the demo carries the A/B.
-static bool g_reconstructBypass = false;
 
 // Uniforms shared by every renderer in the project.
 static void uploadCommonUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
@@ -182,17 +162,6 @@ static void uploadReferenceUniforms(std::shared_ptr<projv::ConstructedRenderer> 
     projv::graphics::setUniformToValue(renderer, "ptSettings", settings);
 }
 
-// The reconstruction demo. Its G-buffer and compose run at half resolution and the reconstruction
-// magnifies to the output grid, so it needs the two uniforms that pass reads: debugParams.x carries
-// the bypass, renderParams.x a debug view it does not use here.
-static void uploadReconstructionUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
-    uploadCommonUniforms(renderer, ctx);
-    projv::core::vec4 debugParams  = { g_reconstructBypass ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
-    projv::core::vec4 renderParams = { 0.0f, 0.0f, 0.0f, 0.0f };
-    projv::graphics::setUniformToValue(renderer, "debugParams",  debugParams);
-    projv::graphics::setUniformToValue(renderer, "renderParams", renderParams);
-}
-
 // The fast renderer. Its TAA reprojects by last frame's camera, which the engine keeps (pjvPrevView*).
 static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
     uploadCommonUniforms(renderer, ctx);
@@ -204,6 +173,7 @@ static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRendere
 // reconstruction, as for the reconstruction renderer.
 // The post (display.frag): P turns it all off and on, V the vignette, B the grade, E the auto-exposure.
 static int  g_restirView = 0;
+static bool g_restirBypass = false;   // the reconstruction bypassed: the render resolution point-sampled
 static bool g_restirReuse = true;
 // K the depth of field. P is the final render as a whole: off, the raw ReSTIR PT output -- no post, none of
 // what is laid over the light (O the distance fog, L the light shafts, the SSAO), and no denoiser: each
@@ -281,7 +251,7 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     settings.visibility = visibility;
     settings.atrous = atrous;
     settings.raw = raw;
-    settings.bypass = g_reconstructBypass != bypassAtStart;
+    settings.bypass = g_restirBypass != bypassAtStart;
     settings.halton16 = halton16;
     settings.post = {g_restirPost.on, g_restirPost.vignette, g_restirPost.grade, g_restirPost.exposure, g_restirPost.dof,
                      g_restirPost.bloom, g_restirPost.motionBlur};
@@ -314,7 +284,7 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     // An untold sun is no move at all, as far as the renderer knows: the camera stands still in that test.
     frame.sunMoved = ctx.sunMoved && !untold;
     frame.moved = ctx.cameraMoved && !(ctx.sunMoved && untold);
-    frame.first = first;
+    frame.first = first || ctx.switched;   // a switch back: every history starts over
     frame.count = ctx.frameCount;
     frame.window = ctx.windowResolution;
     frame.seconds = std::chrono::duration<float>(now - lastFrame).count();
@@ -323,86 +293,36 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     restir_pt::upload(renderer, frame, {finestVoxel(*ctx.world), g_sceneRadius, g_sceneGround, g_sceneHeight}, settings, ctx.world);
 }
 
-static bool measureSceneBounds(const projv::Scene& scene, projv::core::vec3& boundsMin, projv::core::vec3& boundsMax);
-
-// The examples' game renderer: its own loader (it scales its targets by the View's render scale) and its
-// own uniforms, from the View. The scene sets its scale: the finest voxel, and the haze across it.
-static void installVoxelRenderer(projv::Application& app, projv::graphics::RenderInstance& renderInstance, const projv::Scene& scene) {
-    voxel_renderer::View& view = app.world.ctx().emplace<voxel_renderer::View>();
-    float finest = 0.0f;
-    for (const projv::Chunk& chunk : scene.chunks)
-        if (chunk.alive && chunk.header.voxelScale > 0.0f) finest = finest > 0.0f ? std::min(finest, chunk.header.voxelScale) : chunk.header.voxelScale;
-    if (finest > 0.0f) view.finestVoxel = finest;
-    projv::core::vec3 boundsMin, boundsMax;
-    if (measureSceneBounds(scene, boundsMin, boundsMax)) view.hazeRadius = std::max(projv::core::length(boundsMax - boundsMin), 1.0f);
-    voxel_renderer::install(app.world, renderInstance, std::filesystem::current_path(), g_voxelFolder);
-}
-
-static void uploadVoxelUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
-    voxel_renderer::View& view = ctx.world->ctx().get<voxel_renderer::View>();
-    static const int debugView = std::getenv("GALLERY_DEBUG") ? std::atoi(std::getenv("GALLERY_DEBUG")) : 0;
-    view.debugView = debugView;
-    static const float jitter = std::getenv("GALLERY_JITTER") ? float(std::atof(std::getenv("GALLERY_JITTER"))) : 1.0f;
-    view.jitter = jitter;
-    view.sun = ctx.sunAngle;
-    view.taa = g_voxelTAA;
-    voxel_renderer::upload(*ctx.world, renderer, ctx.cameraPosition, ctx.cameraDirection);
-}
-
-// The registry. One entry per folder under renderers/; adding a renderer means adding a directory and
-// one push_back here.
-//
-// The `id` must match the directory name: --renderer takes it, and it is what the per-renderer
-// README is filed under.
+// The registry: the three renderers the gallery shows (docs/plans/gallery-ui.md), one folder each under
+// renderers/. The `id` is the folder's name, what --renderer takes, and what the panel lists.
 static std::vector<RendererModule> buildRendererRegistry() {
     std::vector<RendererModule> registry;
-
-    // The reference: one path per pixel per frame through the engine's BSDF (pjv_bsdf.sc), nothing
-    // reused or filtered, averaged while the view is still. Slow and exact -- what the others are
-    // measured against, restir-pt above all (the same sun, sky, path length and display).
-    registry.push_back({
-        "pt-reference",
-        "Reference path tracer: two bounces through the materials, accumulated while still. What the others are measured against.",
-        "./renderers/pt-reference/",
-        uploadReferenceUniforms
-    });
-    registry.push_back({
-        "fast",
-        "Direct sun plus screen-space AO, anti-aliased by TAA. The cheapest renderer here.",
-        "./renderers/fast/",
-        uploadReprojectionUniforms
-    });
-
-    // Rendering below native resolution and rebuilding the missing pixels from voxel FACE identity
-    // rather than blurring between samples. The single most effective thing here for a weak GPU:
-    // half resolution is a quarter of the pixels traced, and the reconstruction gives most of the
-    // detail back because a voxel face is a flat quad whose whole extent one sample describes.
-    //
-    // Press Q to bypass it and point-sample instead -- that A/B is the demo.
-    registry.push_back({
-        "reconstruction",
-        "Traces at half resolution and reconstructs to full from voxel face identity. Q toggles it.",
-        "./renderers/reconstruction/",
-        uploadReconstructionUniforms
-    });
 
     // ReSTIR PT: two-bounce paths through the materials, traced for a sixteenth of the pixels and
     // shared between pixels and frames by resampling whole paths (reconnected where that is safe,
     // replayed where it is not), then denoised diffuse and specular apart.
     registry.push_back({
         "restir-pt",
-        "ReSTIR PT at a sixteenth of the pixels, through the materials; a half-res G-buffer reconstructed to full. G view, J reuse, Q reconstruction, P final render / raw ReSTIR output (V, B, E, K, N bloom, M motion blur, O fog, L light shafts), U soft shadow.",
+        "ReSTIR PT at a sixteenth of the pixels, through the materials; a half-res G-buffer reconstructed to full.",
         "./renderers/restir-pt/",
         uploadRestirUniforms
     });
 
-    // The one the games use, from examples/shared/voxelRenderer (staged as voxelRenderer/).
+    // The reference: one path per pixel per frame through the engine's BSDF (pjv_bsdf.sc), nothing
+    // reused or filtered, averaged while the view is still. Slow and exact -- what the others are
+    // measured against, restir-pt above all (the same sun, sky, path length and display).
     registry.push_back({
-        "voxel",
-        "The examples' game renderer: G-buffer, AO and bounce, ray-traced GI, reconstruction, TAA. T toggles TAA.",
-        "./voxelRenderer/",
-        uploadVoxelUniforms,
-        installVoxelRenderer
+        "pt-reference",
+        "Reference path tracer: paths through the materials, accumulated while still. The ground truth.",
+        "./renderers/pt-reference/",
+        uploadReferenceUniforms
+    });
+
+    registry.push_back({
+        "fast",
+        "Direct sun plus screen-space AO, anti-aliased by TAA. The cheapest renderer here.",
+        "./renderers/fast/",
+        uploadReprojectionUniforms
     });
 
     return registry;
@@ -411,7 +331,7 @@ static std::vector<RendererModule> buildRendererRegistry() {
 // Command line. Selection is a flag rather than a prompt so the gallery can be driven by a
 // script -- a benchmark across all four renderers should not need someone at the keyboard.
 struct Options {
-    std::string rendererId = "pt-reference";
+    std::string rendererId = "restir-pt";
     std::string scenePath;                // Empty: use the bundled scene beside the binary.
     bool        listAndExit = false;
 };
@@ -450,12 +370,10 @@ static bool parseCommandLine(int argc, char** argv, const std::vector<RendererMo
             return true;
         }
         if (argument == "--bench") { g_measure.bench = true; continue; }
-        if ((argument == "--capture" || argument == "--look" || argument == "--pan" || argument == "--voxel-folder" ||
-             argument == "--restir-gi") && i + 1 < argc) {
+        if ((argument == "--capture" || argument == "--look" || argument == "--pan" || argument == "--restir-gi") && i + 1 < argc) {
             const char* value = argv[++i];
             if (argument == "--capture") g_measure.capture = value;
             else if (argument == "--pan") g_measure.pan = float(std::atof(value));
-            else if (argument == "--voxel-folder") g_voxelFolder = value;
             else if (argument == "--restir-gi") g_restirStride = std::atoi(value) == 2 ? 2 : 4;
             else if (std::sscanf(value, "%f,%f,%f,%f,%f,%f", &g_measure.from.x, &g_measure.from.y, &g_measure.from.z,
                                  &g_measure.at.x, &g_measure.at.y, &g_measure.at.z) == 6) g_measure.look = true;
@@ -709,10 +627,92 @@ static void frameMaterialRoom(CameraFraming& framing) {
 // =============================================================================
 
 // Chosen by main() before the loop starts; the ECS stage signature takes only the Application.
-static RendererModule g_selectedRenderer;
-static std::string    g_scenePath;
+// The gallery's renderers: which is drawing, and which are built. A renderer is built the first time it
+// is picked and kept, so switching back is instant (docs/plans/gallery-ui.md, D2).
+struct Gallery {
+    std::vector<RendererModule> registry;
+    std::vector<std::shared_ptr<projv::ConstructedRenderer>> built;   // nullptr until first picked
+    int  active = 0;
+    bool switched = false;     // switched this frame: the renderer's histories start over
+    bool reframe = false;      // the panel's buttons, done by render()
+    bool printPose = false;
+};
+static std::vector<RendererModule> g_registry;
+static int         g_startRenderer = 0;
+static std::string g_scenePath;
 
-// Startup: create the window, load the scene and the chosen renderer, upload all GPU resources.
+// Loads, constructs and returns one renderer, as renderer slot `index + 1`.
+static std::shared_ptr<projv::ConstructedRenderer> buildRenderer(projv::graphics::RenderInstance& renderInstance,
+                                                                 const RendererModule& module, int index) {
+    projv::RendererSpecification rendererSpec = projv::graphics::loadRendererSpecification(module.directory);
+    // restir-pt's path targets are its quarter-size ones; --restir-gi sets how far below the window they are.
+    if (module.id == "restir-pt")
+        for (projv::Texture& texture : rendererSpec.resources.textures)
+            if (texture.scale == 0.25f && texture.name.rfind("bloom", 0) != 0)   // the bloom's own quarter level is not one
+                texture.scale = 1.0f / float(g_restirStride);
+    const uint32_t slot = uint32_t(index + 1);
+    renderInstance.addRendererSpecification(slot, rendererSpec);
+
+    static const bgfx::ShaderHandle vsh = projv::graphics::loadEngineShader("vs_quad");
+    std::shared_ptr<projv::ConstructedRenderer> renderer =
+        projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(slot), vsh);
+
+    // The blue-noise LUT the path tracers decorrelate their samples with -- into texture 1, for the renderers
+    // that declare it there as a CPU-fed texture. (restir's texture 1 is a render target.)
+    bool wantsBlueNoise = false;
+    for (const projv::Texture& texture : rendererSpec.resources.textures)
+        if (texture.textureID == 1 && texture.origin == projv::CPUBuffer) wantsBlueNoise = true;
+    if (wantsBlueNoise) {
+        int width, height, channels;
+        unsigned char* img = stbi_load("LDR_RGBA_7.png", &width, &height, &channels, 4);
+        if (img) {
+            projv::graphics::setTextureToData(renderer, 1, img, width, height);
+            stbi_image_free(img);
+        } else {
+            projv::core::warn("Could not load LDR_RGBA_7.png; sampling will be correlated and noisier.");
+        }
+    }
+    projv::core::info("Renderer built: {}", module.id);
+    return renderer;
+}
+
+// Makes renderer `index` the one drawing, building it if this is its first time.
+static void activateRenderer(projv::graphics::RenderInstance& renderInstance, Gallery& gallery, int index) {
+    if (!gallery.built[index]) gallery.built[index] = buildRenderer(renderInstance, gallery.registry[index], index);
+    renderInstance.setActiveRenderer(gallery.built[index]);
+    gallery.active = index;
+    gallery.switched = true;
+    glfwSetWindowTitle(renderInstance.window, ("ProjectV — " + gallery.registry[index].id).c_str());
+}
+
+// The sun's angle up its arc, from the wheel's notches (see render()), and back.
+static float sunAngleFromNotches(double notches) { return 0.86f + float(notches) * 0.08f; }
+static double notchesFromSunAngle(float angle) { return double(angle - 0.86f) / 0.08; }
+
+// The Gallery panel: the renderer, and the view.
+static void galleryPanel(projv::Application& app) {
+    auto& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
+    Gallery& gallery = app.world.ctx().get<Gallery>();
+    ImGui::SeparatorText("Renderer");
+    for (int i = 0; i < int(gallery.registry.size()); i++) {
+        if (ImGui::RadioButton(gallery.registry[i].id.c_str(), gallery.active == i) && gallery.active != i)
+            activateRenderer(renderInstance, gallery, i);
+        if (i + 1 < int(gallery.registry.size())) ImGui::SameLine();
+    }
+    ImGui::TextWrapped("%s", gallery.registry[gallery.active].description.c_str());
+
+    ImGui::SeparatorText("View");
+    float sunDegrees = sunAngleFromNotches(g_sunScrollAccum) * 180.0f / 3.14159265f;
+    if (ImGui::SliderFloat("sun", &sunDegrees, -30.0f, 210.0f, "%.1f deg"))
+        g_sunScrollAccum = notchesFromSunAngle(sunDegrees * 3.14159265f / 180.0f);
+    ImGui::SetItemTooltip("The sun's height up its arc (the scroll wheel, over the scene)");
+    if (ImGui::Button("Re-frame (H)")) gallery.reframe = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Print pose (C)")) gallery.printPose = true;
+    ImGui::TextDisabled("Esc frees the cursor for the panel; a click on the scene takes it back.");
+}
+
+// Startup: create the window, load the scene and the starting renderer, upload all GPU resources.
 void startup(projv::Application& app) {
 
     projv::graphics::RenderInstance& renderInstance = app.world.ctx().emplace<projv::graphics::RenderInstance>();
@@ -720,28 +720,26 @@ void startup(projv::Application& app) {
     // whatever the desktop's layout is doing.
     const bool unattendedRun = g_measure.bench || !g_measure.capture.empty();
     renderInstance.resizable = !unattendedRun;
-    renderInstance.initialize(unattendedRun ? 1280 : 1920, unattendedRun ? 720 : 1080,
-                              ("ProjectV — " + g_selectedRenderer.id).c_str());
+    renderInstance.initialize(unattendedRun ? 1280 : 1920, unattendedRun ? 720 : 1080, "ProjectV");
 
-    // Capture the cursor so mouse motion drives the camera (FPS-style mouse look).
-    glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-
-    // Scroll wheel controls the sun's elevation (day cycle) -- not in an unattended run, which sets the sun
-    // with GALLERY_SUN and must not have it moved under it.
-    if (!unattendedRun) glfwSetScrollCallback(renderInstance.window, sunScrollCallback);
+    // Input through the engine, and the dev layer over it: the panel drives the gallery (D4, D5). An
+    // unattended run hides it and leaves the cursor alone, so captures and measurements are unchanged.
+    projv::graphics::installPlatform(app, renderInstance);
+    projv::ui::installUi(app, renderInstance, {.devShown = !unattendedRun});
+    projv::ui::dev::addPanel(app, "Gallery", galleryPanel);
 
     projv::Scene& scene     = app.world.ctx().emplace<projv::Scene>();
     float& cameraPhi         = app.world.ctx().emplace<float>();
     projv::GPUData& gpuData  = app.world.ctx().emplace<projv::GPUData>();
-    RendererModule& selectedRenderer = app.world.ctx().emplace<RendererModule>();
     CameraFraming& framing = app.world.ctx().emplace<CameraFraming>();
-    selectedRenderer = g_selectedRenderer;
+    Gallery& gallery = app.world.ctx().emplace<Gallery>();
+    gallery.registry = g_registry;
+    gallery.built.resize(g_registry.size());
 
     // Eager load: loads all scene geometry up front.
     const bool materialRoom = g_scenePath == "material-room/";
     projv::core::info("Loading scene: {}", g_scenePath);
     scene = materialRoom ? buildMaterialRoom() : projv::utils::loadComposeFromDisk(g_scenePath);
-    projv::core::info("Renderer: {}", selectedRenderer.id);
 
     // A scene can parse and still hold no geometry -- most often because its .data containers are
     // a version the loader rejects, which it reports above. Say so here rather than presenting an
@@ -757,40 +755,7 @@ void startup(projv::Application& app) {
     if (materialRoom) frameMaterialRoom(framing);
     cameraPhi = framing.yaw;
 
-    if (selectedRenderer.install) {
-        selectedRenderer.install(app, renderInstance, scene);
-        gpuData = projv::graphics::createTexturesForScene(scene);
-        return;
-    }
-
-    projv::RendererSpecification rendererSpec = projv::graphics::loadRendererSpecification(selectedRenderer.directory);
-    // restir-pt's path targets are its quarter-size ones; --restir-gi sets how far below the window they are.
-    if (selectedRenderer.id == "restir-pt")
-        for (projv::Texture& texture : rendererSpec.resources.textures)
-            if (texture.scale == 0.25f && texture.name.rfind("bloom", 0) != 0)   // the bloom's own quarter level is not one
-                texture.scale = 1.0f / float(g_restirStride);
-    renderInstance.addRendererSpecification(1, rendererSpec);
-
-    bgfx::ShaderHandle vsh = projv::graphics::loadEngineShader("vs_quad");
-    std::shared_ptr<projv::ConstructedRenderer> constructedRenderer = projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vsh);
-
-    // Load the blue-noise LUT used by the path tracers for sample decorrelation -- into texture 1, for
-    // the renderers that declare it there as a CPU-fed texture. (restir's texture 1 is a render target.)
-    bool wantsBlueNoise = false;
-    for (const projv::Texture& texture : rendererSpec.resources.textures)
-        if (texture.textureID == 1 && texture.origin == projv::CPUBuffer) wantsBlueNoise = true;
-    if (wantsBlueNoise) {
-        int width, height, channels;
-        unsigned char* img = stbi_load("LDR_RGBA_7.png", &width, &height, &channels, 4);
-        if (img) {
-            projv::core::info("Blue-noise texture: {}x{}", width, height);
-            projv::graphics::setTextureToData(constructedRenderer, 1, img, width, height);
-        } else {
-            projv::core::warn("Could not load LDR_RGBA_7.png; sampling will be correlated and noisier.");
-        }
-    }
-
-    renderInstance.setActiveRenderer(constructedRenderer);
+    activateRenderer(renderInstance, gallery, g_startRenderer);
     gpuData = projv::graphics::createTexturesForScene(scene);
 }
 
@@ -832,7 +797,8 @@ void render(projv::Application& app) {
     projv::graphics::RenderInstance& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
     projv::GPUData& gpuData          = app.world.ctx().get<projv::GPUData>();
     float& cameraPhi                 = app.world.ctx().get<float>();
-    RendererModule& selectedRenderer = app.world.ctx().get<RendererModule>();
+    Gallery& gallery                 = app.world.ctx().get<Gallery>();
+    const projv::Input& input        = app.world.ctx().get<projv::Input>();
     CameraFraming& framing           = app.world.ctx().get<CameraFraming>();
 
     // Seeded from the automatic framing on the first frame, so --scene works at any scale.
@@ -861,44 +827,21 @@ void render(projv::Application& app) {
         cameraMoved = true;
     }
 
-    // Cursor capture toggle: Esc releases the cursor (so it can leave the
-    // window), left-click re-captures it. Only look around while captured.
-    static bool mouseCaptured = !unattended;
-    if (unattended) glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-    if (mouseCaptured && glfwGetKey(renderInstance.window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-        glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        mouseCaptured = false;
-    } else if (!unattended && !mouseCaptured && glfwGetMouseButton(renderInstance.window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-        glfwSetInputMode(renderInstance.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        mouseCaptured = true;
+    // The cursor: Esc frees it (for the panel), a click on the scene captures it again -- a click on the
+    // panel never arrives here, the UI host keeps it (docs/concepts/ui.md). Nothing in an unattended run.
+    if (!unattended) {
+        if (input.cursorCaptured && input.pressed(projv::Key::Escape)) projv::graphics::setCursorCaptured(app, renderInstance, false);
+        else if (!input.cursorCaptured && input.pressed(projv::MouseButton::Left)) projv::graphics::setCursorCaptured(app, renderInstance, true);
     }
 
-    // Mouse look. The cursor is captured (GLFW_CURSOR_DISABLED), so we read its
-    // absolute position each frame and apply the delta to yaw/pitch.
-    static double lastMouseX = 0.0, lastMouseY = 0.0;
-    static bool mouseInitialized = false;
-    double mouseX, mouseY;
-    glfwGetCursorPos(renderInstance.window, &mouseX, &mouseY);
-    // Reset the reference point whenever tracking (re)starts, so re-capturing
-    // after a release doesn't apply one huge jump.
-    if (!mouseInitialized || !mouseCaptured) {
-        lastMouseX = mouseX;
-        lastMouseY = mouseY;
-        mouseInitialized = true;
-    }
-    double mouseDeltaX = mouseX - lastMouseX;
-    double mouseDeltaY = mouseY - lastMouseY;
-    lastMouseX = mouseX;
-    lastMouseY = mouseY;
-
+    // Mouse look, while the cursor is captured.
     const float mouseSensitivity = 0.0025f;
-    if (mouseCaptured && (mouseDeltaX != 0.0 || mouseDeltaY != 0.0)) {
-        cameraPhi   += (float)mouseDeltaX * mouseSensitivity;  // right → look right
-        cameraPitch -= (float)mouseDeltaY * mouseSensitivity;  // up    → look up
+    if (input.cursorCaptured && (input.cursorDelta.x != 0.0f || input.cursorDelta.y != 0.0f)) {
+        cameraPhi   += input.cursorDelta.x * mouseSensitivity;  // right -> look right
+        cameraPitch -= input.cursorDelta.y * mouseSensitivity;  // up    -> look up
         // Clamp pitch just shy of straight up/down to avoid gimbal flip.
-        const float pitchLimit = 1.55f; // ~89°
-        if (cameraPitch >  pitchLimit) cameraPitch =  pitchLimit;
-        if (cameraPitch < -pitchLimit) cameraPitch = -pitchLimit;
+        const float pitchLimit = 1.55f; // ~89 degrees
+        cameraPitch = std::clamp(cameraPitch, -pitchLimit, pitchLimit);
         cameraMoved = true;
     }
 
@@ -912,25 +855,22 @@ void render(projv::Application& app) {
 
     // Movement: the framing's speed (world units a second, from the scene's size -- see frameScene) times
     // this frame's length, so it does not change with the frame rate. Shift moves four times as fast.
-    static auto lastMove = std::chrono::steady_clock::now();
-    const auto moveNow = std::chrono::steady_clock::now();
-    const float moveSeconds = std::min(std::chrono::duration<float>(moveNow - lastMove).count(), 0.1f);
-    lastMove = moveNow;
-    const bool fast = glfwGetKey(renderInstance.window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+    const float moveSeconds = std::min(app.time().unscaledDelta, 0.1f);
+    const bool fast = input.down(projv::Key::LeftShift);
     const float moveSpeed = framing.moveSpeed * moveSeconds * (fast ? 4.0f : 1.0f);
 
     // Horizontal movement (W/A/S/D). None of it in an unattended run: a key pressed while the window
     // has focus would move the camera between two captures that are meant to compare.
     if (!unattended) {
-        if (glfwGetKey(renderInstance.window, GLFW_KEY_W)) { cameraPosition += forwardDirection * moveSpeed; cameraMoved = true; }
-        if (glfwGetKey(renderInstance.window, GLFW_KEY_S)) { cameraPosition -= forwardDirection * moveSpeed; cameraMoved = true; }
-        if (glfwGetKey(renderInstance.window, GLFW_KEY_A)) {
+        if (input.down(projv::Key::W)) { cameraPosition += forwardDirection * moveSpeed; cameraMoved = true; }
+        if (input.down(projv::Key::S)) { cameraPosition -= forwardDirection * moveSpeed; cameraMoved = true; }
+        if (input.down(projv::Key::A)) {
             float leftPhi = cameraPhi + 3.14 / 2;
             projv::core::vec3 leftDirection = { projv::core::cos(leftPhi), 0, projv::core::sin(leftPhi) };
             cameraPosition -= leftDirection * moveSpeed;
             cameraMoved = true;
         }
-        if (glfwGetKey(renderInstance.window, GLFW_KEY_D)) {
+        if (input.down(projv::Key::D)) {
             float rightPhi = cameraPhi - 3.14 / 2;
             projv::core::vec3 rightDirection = { projv::core::cos(rightPhi), 0, projv::core::sin(rightPhi) };
             cameraPosition -= rightDirection * moveSpeed;
@@ -938,76 +878,75 @@ void render(projv::Application& app) {
         }
 
         // Vertical movement (R/F).
-        if (glfwGetKey(renderInstance.window, GLFW_KEY_R)) { cameraPosition[1] += moveSpeed; cameraMoved = true; }
-        if (glfwGetKey(renderInstance.window, GLFW_KEY_F)) { cameraPosition[1] -= moveSpeed; cameraMoved = true; }
+        if (input.down(projv::Key::R)) { cameraPosition[1] += moveSpeed; cameraMoved = true; }
+        if (input.down(projv::Key::F)) { cameraPosition[1] -= moveSpeed; cameraMoved = true; }
     }
 
-    // Q toggles the reconstruction bypass (reconstruction renderer only). Edge-triggered: holding a
-    // key down would flip it every frame.
-    {
-        static bool prevQ = false;
-        bool q = glfwGetKey(renderInstance.window, GLFW_KEY_Q) == GLFW_PRESS;
-        if (q && !prevQ) {
-            g_reconstructBypass = !g_reconstructBypass;
-            projv::core::info("Reconstruction: {}",
-                              g_reconstructBypass ? "BYPASSED (point sampled)" : "on");
-        }
-        prevQ = q;
+    // Q: restir-pt's reconstruction bypassed, point-sampling the render resolution.
+    if (input.pressed(projv::Key::Q)) {
+        g_restirBypass = !g_restirBypass;
+        projv::core::info("Reconstruction: {}", g_restirBypass ? "BYPASSED (point sampled)" : "on");
     }
 
     {
-        static bool prevT = false;
-        bool t = glfwGetKey(renderInstance.window, GLFW_KEY_T) == GLFW_PRESS;
-        if (t && !prevT) {
-            g_voxelTAA = !g_voxelTAA;
-            projv::core::info("TAA: {}", g_voxelTAA ? "on" : "off");
-        }
-        prevT = t;
-    }
-
-    {
-        static bool prevG = false, prevJ = false;
-        bool g = glfwGetKey(renderInstance.window, GLFW_KEY_G) == GLFW_PRESS;
-        bool j = glfwGetKey(renderInstance.window, GLFW_KEY_J) == GLFW_PRESS;
+        const bool g = input.pressed(projv::Key::G);
+        const bool j = input.pressed(projv::Key::J);
         // The final render's toggles: P all of it, V the vignette, B the grade, E the auto-exposure, K the depth
         // of field, N the bloom, M the motion blur, O the fog, L the shafts; U the soft shadow, which is the lighting's.
-        struct PostKey { int key; bool* flag; const char* name; bool prev; };
+        struct PostKey { projv::Key key; bool* flag; const char* name; bool prev; };
         static PostKey postKeys[] = {
-            {GLFW_KEY_P, &g_restirPost.on, "final render (off: the raw ReSTIR PT output, no denoising)", false},
-            {GLFW_KEY_V, &g_restirPost.vignette, "vignette", false},
-            {GLFW_KEY_B, &g_restirPost.grade, "colour grade", false},
-            {GLFW_KEY_E, &g_restirPost.exposure, "auto-exposure", false},
-            {GLFW_KEY_K, &g_restirPost.dof, "depth of field", false},
-            {GLFW_KEY_N, &g_restirPost.bloom, "bloom", false},
-            {GLFW_KEY_M, &g_restirPost.motionBlur, "motion blur", false},
-            {GLFW_KEY_O, &g_restirFog, "distance fog", false},
-            {GLFW_KEY_L, &g_restirShafts, "light shafts", false},
-            {GLFW_KEY_U, &g_restirSoftShadow, "soft sun shadow", false},
-            {GLFW_KEY_I, &g_restirSoftNormals, "blurred normals", false},
+            {projv::Key::P, &g_restirPost.on, "final render (off: the raw ReSTIR PT output, no denoising)", false},
+            {projv::Key::V, &g_restirPost.vignette, "vignette", false},
+            {projv::Key::B, &g_restirPost.grade, "colour grade", false},
+            {projv::Key::E, &g_restirPost.exposure, "auto-exposure", false},
+            {projv::Key::K, &g_restirPost.dof, "depth of field", false},
+            {projv::Key::N, &g_restirPost.bloom, "bloom", false},
+            {projv::Key::M, &g_restirPost.motionBlur, "motion blur", false},
+            {projv::Key::O, &g_restirFog, "distance fog", false},
+            {projv::Key::L, &g_restirShafts, "light shafts", false},
+            {projv::Key::U, &g_restirSoftShadow, "soft sun shadow", false},
+            {projv::Key::I, &g_restirSoftNormals, "blurred normals", false},
         };
         for (PostKey& k : postKeys) {
-            bool down = glfwGetKey(renderInstance.window, k.key) == GLFW_PRESS;
-            if (down && !k.prev) {
+            if (input.pressed(k.key)) {
                 *k.flag = !*k.flag;
                 const bool partOfPost = k.flag != &g_restirPost.on && k.flag != &g_restirSoftShadow && k.flag != &g_restirSoftNormals;
                 projv::core::info("ReSTIR {}: {}{}", k.name, *k.flag ? "on" : "off",
                                   partOfPost && !g_restirPost.on ? " (the final render is off: P)" : "");
             }
-            k.prev = down;
         }
-        if (g && !prevG) {
+        if (g) {
             g_restirView = (g_restirView + 1) % RESTIR_VIEWS;
             static const char* views[] = {"the image", "indirect light only", "direct light only", "ambient occlusion",
                                           "indirect diffuse only", "indirect specular only", "the light shafts only"};
             projv::core::info("ReSTIR view: {}", views[g_restirView]);
         }
-        if (j && !prevJ) {
+        if (j) {
             g_restirReuse = !g_restirReuse;
             projv::core::info("ReSTIR reuse: {}", g_restirReuse ? "on" : "off (one fresh path per GI pixel)");
         }
-        prevG = g;
-        prevJ = j;
     }
+
+    // GALLERY_SWITCH_AT=n:id,m:id switches renderer at those frames, as the panel does: a switch unattended.
+    static const std::vector<std::pair<int, std::string>> switches = [] {
+        std::vector<std::pair<int, std::string>> list;
+        if (const char* v = std::getenv("GALLERY_SWITCH_AT")) {
+            std::string all = v;
+            for (size_t at = 0; at < all.size();) {
+                size_t comma = all.find(',', at);
+                std::string item = all.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+                size_t colon = item.find(':');
+                if (colon != std::string::npos) list.emplace_back(std::atoi(item.c_str()), item.substr(colon + 1));
+                at = comma == std::string::npos ? all.size() : comma + 1;
+            }
+        }
+        return list;
+    }();
+    for (const auto& [frame, id] : switches)
+        if (frame == app.frameCount) {
+            const int index = findRenderer(gallery.registry, id);
+            if (index >= 0 && index != gallery.active) activateRenderer(renderInstance, gallery, index);
+        }
 
     // GALLERY_STEP_AT=n sidesteps the camera half a second's walk to the right at frame n: with --capture and
     // GALLERY_CAPTURE_AT, how what that uncovers settles (disocclusion).
@@ -1021,18 +960,17 @@ void render(projv::Application& app) {
     // C prints where the camera stands as the arguments that put it back there (--look, and the sun's
     // GALLERY_SUN), so a view found by hand can be captured unattended.
     {
-        static bool prevC = false;
-        bool c = glfwGetKey(renderInstance.window, GLFW_KEY_C) == GLFW_PRESS;
-        if (c && !prevC) {
+        if (input.pressed(projv::Key::C) || gallery.printPose) {
+            gallery.printPose = false;
             projv::core::vec3 at = cameraPosition + cameraDirection * 10.0f;
             projv::core::info("GALLERY_SUN={} --look {:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}", g_sunScrollAccum,
                               cameraPosition.x, cameraPosition.y, cameraPosition.z, at.x, at.y, at.z);
         }
-        prevC = c;
     }
 
     // H re-frames on the scene, for when navigation has left the subject behind.
-    if (glfwGetKey(renderInstance.window, GLFW_KEY_H)) {
+    if (input.pressed(projv::Key::H) || gallery.reframe) {
+        gallery.reframe = false;
         cameraPosition = framing.position;
         cameraPhi      = framing.yaw;
         cameraPitch    = framing.pitch;
@@ -1049,6 +987,7 @@ void render(projv::Application& app) {
         if (const char* v = std::getenv("GALLERY_SUN")) g_sunScrollAccum = std::atof(v);
         return g_sunScrollAccum;
     }();
+    if (!unattended) g_sunScrollAccum += input.scroll.y;   // over the panel, the UI host keeps the wheel
     // GALLERY_SUN_STEP_AT=n lowers the sun three notches (~14 degrees) at frame n: with --capture and
     // GALLERY_CAPTURE_AT, how fast the image follows a change of light.
     static const int sunStepAt = std::getenv("GALLERY_SUN_STEP_AT") ? std::atoi(std::getenv("GALLERY_SUN_STEP_AT")) : -1;
@@ -1059,7 +998,8 @@ void render(projv::Application& app) {
     projv::core::vec3 sunDirection = { ca * sunAzX, sa, ca * sunAzZ };
     bool sunMoved = (g_sunScrollAccum != prevSunScroll);
     prevSunScroll = g_sunScrollAccum;
-    cameraMoved = cameraMoved || sunMoved;
+    // Switching to a renderer is a move for it: its history is from wherever it last drew.
+    cameraMoved = cameraMoved || sunMoved || gallery.switched;
 
     // Track the frame the camera last moved on so the shader can reset accumulation.
     static int frameCameraLastMovedOn = 0;
@@ -1070,6 +1010,7 @@ void render(projv::Application& app) {
     ctx.cameraDirection        = cameraDirection;
     ctx.cameraMoved            = cameraMoved;
     ctx.sunMoved               = sunMoved;
+    ctx.switched               = gallery.switched;
     ctx.frameCount             = app.frameCount;
     ctx.frameCameraLastMovedOn = frameCameraLastMovedOn;
     ctx.windowResolution       = renderInstance.getWindowResolution();
@@ -1077,7 +1018,10 @@ void render(projv::Application& app) {
     ctx.sunAngle               = sunAngle;
     ctx.world                  = &app.world;
 
+    // The active renderer as of now: the switch hook above may have changed it this frame.
+    const RendererModule& selectedRenderer = gallery.registry[gallery.active];
     selectedRenderer.uploadUniforms(renderInstance.getActiveRenderer(), ctx);
+    gallery.switched = false;
 
     projv::graphics::renderConstructedRenderer(renderInstance, renderInstance.getActiveRenderer(), &gpuData);
 
@@ -1096,7 +1040,7 @@ void render(projv::Application& app) {
             samples++;
         }
         if (app.frameCount == 361) {
-            const projv::RendererSpecification& spec = renderInstance.getRendererSpecification(1);
+            const projv::RendererSpecification& spec = renderInstance.getRendererSpecification(uint32_t(gallery.active + 1));
             std::string line = fmt::format("BENCH {} {}x{}: frame {:.2f} ms |", selectedRenderer.id, int(ctx.windowResolution.x),
                                            int(ctx.windowResolution.y), samples ? frameMs / samples : 0.0);
             const auto& passes = spec.dependencyGraph.renderPasses;
@@ -1149,7 +1093,9 @@ int main(int argc, char** argv) {
         printRenderers(registry);
         return 2;
     }
-    g_selectedRenderer = registry[selected];
+    g_registry = registry;
+    g_startRenderer = selected;
+    projv::ui::setCommandLine(argc, argv);
 
     // The renderer folders and the bundled scene are staged beside the binary by the build, and
     // resources.json names its shaders relative to the working directory -- so run from here.
