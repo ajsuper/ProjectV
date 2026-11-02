@@ -1440,6 +1440,12 @@ namespace projv::runtime {
         return out;
     }
 
+    SessionRole sessionRole(const World& world) {
+        if (world.ctx().find<ServerSession>()) return SessionRole::Server;
+        if (world.ctx().find<ClientSession>()) return SessionRole::Client;
+        return SessionRole::None;
+    }
+
     SessionStats sessionStats(const World& world) {
         SessionStats out;
         if (const ServerSession* s = world.ctx().find<ServerSession>()) {

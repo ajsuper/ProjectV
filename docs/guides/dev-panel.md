@@ -52,6 +52,21 @@ The engine's own panels, always there: **Frame** (CPU and GPU time, stacked grap
 render pass, each with its average, min and max) and **Log** (the last 4000 lines, by category,
 filterable). [Reference](../reference/ui.md#uidev_layerh).
 
+## Let the Renderer panel edit a value
+
+The Renderer panel shows every uniform read-only. To make one editable, bind the variable the program
+writes it from -- never the uniform itself, which the program overwrites each frame:
+
+```cpp
+// once, when the renderer is built; g_fast outlives it
+ui::dev::editable(app, *renderer, "fastSettings", &g_fast.aoRadius, {.label = "AO radius", .min = 0.5f, .max = 16.0f});
+ui::dev::editable(app, *renderer, "jitterParams", &g_fast.taa, {.label = "TAA"});
+```
+
+An edit changes the program's variable, so anything the program derives from it (a history reset
+when the light moves) stays right. `forgetEditables(app, *renderer)` before the renderer or the
+variables go.
+
 ## A reading that holds still
 
 A number redrawn every frame flickers past reading. `Meter` averages it over a period and keeps the

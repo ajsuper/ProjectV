@@ -57,6 +57,11 @@ namespace projv::runtime {
     template<typename T>
     void registerComponent(World& world);
 
+    // The entity's components that have a codec (registerComponent), as entities.json would write
+    // them -- key, then value with its "v" -- in key order. For inspecting (the dev layer's Entities
+    // panel); nothing here changes the entity.
+    std::vector<std::pair<std::string, nlohmann::json>> registeredComponents(const World& world, Entity entity);
+
     // Where an entity came from: every entity spawned from an entities.json carries one, and
     // saveEntities writes a folder's entities from it.
     struct Authored {

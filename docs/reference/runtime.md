@@ -35,6 +35,7 @@ components.
 |---|---|
 | `ComponentTraits<T>` | Specialise: `key`, `version`, `save`, `load` |
 | `registerComponent<T>(world)` | Make `T` loadable and savable |
+| `registeredComponents(world, entity)` | The entity's registered components as entities.json writes them (key, JSON with `"v"`), key order. For inspecting: the dev layer's Entities panel |
 | `spawnEntities(world)`, `spawnEntitiesUnder(world, node)` | Spawn every `entities.json` (inner folders first) |
 | `saveEntities(world, document, folder)` | Write one folder's file |
 | `instantiatePrefab(world, folder, pos, rot, scale, onUnlink)` | Graft a folder and spawn its entities; cached and shared |
@@ -85,6 +86,7 @@ input reaches the server. Plan: [networking](../plans/networking.md).
 | `setClientLoadRule` | What a client is sent: only what is near its player |
 | `sceneFilesHash(folder)` | The handshake's check that both sides have the same files |
 | `clientStats`, `SessionStats`, `ClientStats` | Bytes, mismatches, prediction corrections |
+| `sessionRole(world)`, `SessionRole` | `None`, `Server` or `Client`: which of `sessionStats`' fields apply (the dev layer's Network panel) |
 | `ClientJoined`, `ClientLeft`, `JoinedServer`, `LeftServer` | Events |
 
 Voxel edits and breaks of entities with a `NetId` are replicated as what happened (`VoxelsEdited`,

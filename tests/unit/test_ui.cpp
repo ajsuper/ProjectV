@@ -4,6 +4,7 @@
 
 #include "doctest/doctest.h"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -330,4 +331,105 @@ TEST_CASE("ui: the Frame panel samples every frame while shown, headless") {
     for (int i = 0; i < 300; i++) devFrame(dev, input);   // more frames than a graph holds
     dev.setShown(false);
     CHECK_FALSE(dev.visible());
+}
+
+// ---- U2: the engine's panels -----------------------------------------------------------------------
+
+#include "nlohmann/json.hpp"
+#include "runtime/entities.h"
+#include "runtime/physics.h"
+#include "runtime/scene_bridge.h"
+
+namespace {
+    struct Tag { int n = 0; };
+
+    bool drew(const projv::ui::dev::DevLayer& dev, const std::string& name) {
+        const auto& drawn = dev.windowsDrawn();
+        return std::find(drawn.begin(), drawn.end(), name) != drawn.end();
+    }
+
+    void openAll(projv::ui::dev::DevLayer& dev) {
+        for (const char* name : {"Physics", "Network", "Renderer", "Entities"}) dev.setPanelOpen(name, true);
+    }
+}
+
+template<> struct projv::runtime::ComponentTraits<Tag> {
+    static constexpr const char* key = "test.tag";
+    static constexpr uint32_t version = 2;
+    static nlohmann::json save(const Tag& t) { return {{"n", t.n}}; }
+    static std::optional<Tag> load(const nlohmann::json& j, uint32_t) { return Tag{j.value("n", 0)}; }
+};
+
+TEST_CASE("ui: the engine's panels beyond Frame and Log start closed, and open from the Panels menu") {
+    projv::Application app;
+    projv::ui::dev::DevLayer dev(app, nullptr);
+    dev.setShown(true);
+    projv::Input input;
+    devFrame(dev, input);
+    CHECK(drew(dev, "Frame"));
+    CHECK(drew(dev, "Log"));
+    CHECK_FALSE(drew(dev, "Entities"));
+    dev.setPanelOpen("Entities", true);
+    devFrame(dev, input);
+    CHECK(drew(dev, "Entities"));
+    dev.setPanelOpen("Frame", false);
+    devFrame(dev, input);
+    CHECK_FALSE(drew(dev, "Frame"));
+}
+
+TEST_CASE("ui: a panel whose subject is absent has no window") {
+    projv::Application app;
+    projv::ui::dev::DevLayer dev(app, nullptr);
+    dev.setShown(true);
+    openAll(dev);
+    projv::Input input;
+    devFrame(dev, input);
+    CHECK_FALSE(drew(dev, "Physics"));    // no physics installed
+    CHECK_FALSE(drew(dev, "Network"));    // no session
+    CHECK_FALSE(drew(dev, "Renderer"));   // headless: no renderer
+    CHECK(drew(dev, "Entities"));         // a world always has entities to list
+}
+
+TEST_CASE("ui: the Physics panel is drawn once there is physics, and reads it every frame") {
+    projv::Application app;
+    app.world.ctx().emplace<projv::Scene>();
+    double now = 0.0;
+    app.clock = [&now] { return now; };
+    projv::runtime::installSceneBridge(app);
+    projv::runtime::installPhysics(app);
+    app.runStartup();
+    projv::ui::dev::DevLayer dev(app, nullptr);
+    dev.setShown(true);
+    openAll(dev);
+    projv::Input input;
+    for (int i = 0; i < 30; i++) {
+        now += 1.0 / 60.0;
+        app.runFrame();
+        devFrame(dev, input);
+    }
+    CHECK(drew(dev, "Physics"));
+    CHECK_FALSE(drew(dev, "Network"));
+}
+
+TEST_CASE("ui: an entity's registered components come out as entities.json writes them") {
+    projv::Application app;
+    projv::runtime::registerComponent<Tag>(app.world);
+    const projv::Entity tagged = app.world.create();
+    app.world.emplace<Tag>(tagged, Tag{7});
+    const projv::Entity bare = app.world.create();
+
+    const auto components = projv::runtime::registeredComponents(app.world, tagged);
+    REQUIRE(components.size() == 1);
+    CHECK(components[0].first == "test.tag");
+    CHECK(components[0].second["n"] == 7);
+    CHECK(components[0].second["v"] == 2);
+    CHECK(projv::runtime::registeredComponents(app.world, bare).empty());
+
+    // The inspector, open on a world with both, draws without trouble.
+    projv::ui::dev::DevLayer dev(app, nullptr);
+    dev.setShown(true);
+    dev.setPanelOpen("Entities", true);
+    projv::Input input;
+    devFrame(dev, input);
+    CHECK(drew(dev, "Entities"));
 }

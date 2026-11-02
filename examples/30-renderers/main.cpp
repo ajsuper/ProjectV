@@ -675,9 +675,25 @@ static std::shared_ptr<projv::ConstructedRenderer> buildRenderer(projv::graphics
     return renderer;
 }
 
+// What the dev layer's Renderer panel may edit on a renderer (docs/plans/ui.md, D17): the variables the
+// gallery writes its uniforms from, never the uniforms. Only the fast renderer's, so far.
+static void offerEditables(projv::Application& app, const projv::ConstructedRenderer& renderer, const std::string& id) {
+    using projv::ui::dev::editable;
+    if (id != "fast") return;
+    editable(app, renderer, "fastSettings", &g_fast.aoRadius, {.label = "AO radius", .min = 0.5f, .max = 16.0f});
+    editable(app, renderer, "fastSettings", &g_fast.aoIntensity, {.label = "AO intensity", .min = 0.0f, .max = 2.0f});
+    editable(app, renderer, "fastSettings", &g_fast.aoPower, {.label = "AO power", .min = 0.5f, .max = 4.0f});
+    editable(app, renderer, "fastSettings", &g_fast.blur, {.label = "AO blur"});
+    editable(app, renderer, "jitterParams", &g_fast.taa, {.label = "TAA"});
+    editable(app, renderer, "renderParams", &g_fast.reconstruct, {.label = "reconstruct"});
+}
+
 // Makes renderer `index` the one drawing, building it if this is its first time.
-static void activateRenderer(projv::graphics::RenderInstance& renderInstance, Gallery& gallery, int index) {
-    if (!gallery.built[index]) gallery.built[index] = buildRenderer(renderInstance, gallery.registry[index], index);
+static void activateRenderer(projv::Application& app, projv::graphics::RenderInstance& renderInstance, Gallery& gallery, int index) {
+    if (!gallery.built[index]) {
+        gallery.built[index] = buildRenderer(renderInstance, gallery.registry[index], index);
+        if (gallery.built[index]) offerEditables(app, *gallery.built[index], gallery.registry[index].id);
+    }
     renderInstance.setActiveRenderer(gallery.built[index]);
     gallery.active = index;
     gallery.switched = true;
@@ -777,7 +793,7 @@ static void galleryPanel(projv::Application& app) {
     ImGui::SeparatorText("Renderer");
     for (int i = 0; i < int(gallery.registry.size()); i++) {
         if (ImGui::RadioButton(gallery.registry[i].id.c_str(), gallery.active == i) && gallery.active != i)
-            activateRenderer(renderInstance, gallery, i);
+            activateRenderer(app, renderInstance, gallery, i);
         if (i + 1 < int(gallery.registry.size())) ImGui::SameLine();
     }
     ImGui::TextWrapped("%s", gallery.registry[gallery.active].description.c_str());
@@ -847,7 +863,7 @@ void startup(projv::Application& app) {
     if (materialRoom) frameMaterialRoom(framing);
     cameraPhi = framing.yaw;
 
-    activateRenderer(renderInstance, gallery, g_startRenderer);
+    activateRenderer(app, renderInstance, gallery, g_startRenderer);
     gpuData = projv::graphics::createTexturesForScene(scene);
 }
 
@@ -992,7 +1008,7 @@ void render(projv::Application& app) {
     for (const auto& [frame, id] : switches)
         if (frame == app.frameCount) {
             const int index = findRenderer(gallery.registry, id);
-            if (index >= 0 && index != gallery.active) activateRenderer(renderInstance, gallery, index);
+            if (index >= 0 && index != gallery.active) activateRenderer(app, renderInstance, gallery, index);
         }
 
     // GALLERY_STEP_AT=n sidesteps the camera half a second's walk to the right at frame n: with --capture and

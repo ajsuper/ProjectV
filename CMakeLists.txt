@@ -454,6 +454,7 @@ if(PROJV_BUILD_UI)
     add_library(projv_ui OBJECT
         src/ui/host.cpp
         src/ui/dev/dev_layer.cpp
+        src/ui/dev/panels.cpp
         src/ui/dev/imgui_bgfx.cpp
         "${PROJV_IMGUI_DIR}/imgui.cpp"
         "${PROJV_IMGUI_DIR}/imgui_draw.cpp"

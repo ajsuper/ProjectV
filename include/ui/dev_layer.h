@@ -1,7 +1,10 @@
 #ifndef PROJV_UI_DEV_LAYER_H
 #define PROJV_UI_DEV_LAYER_H
 
+#include <map>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "ui/ui.h"
 
@@ -36,8 +39,19 @@ namespace projv::ui::dev {
         // hiding turns it off again.
         struct Profiler;
 
+        // Opens or closes a window by name, as the Panels menu does: Frame, Log, Physics, Network,
+        // Renderer, Entities, or a program's panel. The engine's four beyond Frame and Log start closed.
+        void setPanelOpen(const std::string& name, bool open);
+        // The windows the last draw built, in order. For tests.
+        const std::vector<std::string>& windowsDrawn() const { return drawn; }
+
     private:
+        bool& isOpen(const std::string& name);
+
         std::unique_ptr<Profiler> profiler;
+        std::unique_ptr<struct PanelState> panelState;
+        std::map<std::string, bool> open;
+        std::vector<std::string> drawn;
         Application* app;
         graphics::RenderInstance* renderInstance;
         ImGuiContext* context = nullptr;

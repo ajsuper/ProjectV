@@ -1,6 +1,6 @@
 # UI: a developer layer and a user layer
 
-Status: **in progress**: approved 2026-11-01 (RmlUi, D5; one shared demo style sheet, D13); U0 and U1 built 2026-11-01, U2 next. Follows [shader-library.md](shader-library.md): the
+Status: **in progress**: approved 2026-11-01 (RmlUi, D5; one shared demo style sheet, D13); U0 and U1 built 2026-11-01, U2 2026-11-02, U3 next. Follows [shader-library.md](shader-library.md): the
 UI's shaders are engine shaders (its S0) and its blur is the library's filters (its S1).
 
 **Mechanism, not policy** (as in the shader library): the engine provides the two layers, the render
@@ -140,6 +140,52 @@ same back buffer it writes, and U0 settles which conversion (if any) the UI shad
 `_demo`s use; each demo adds its own documents beside it. *Why:* one look to polish, and the demos read
 as one project. It is the demos', not the engine's (the engine's default sheet stays a reset).
 
+### U2: the engine's panels (agreed 2026-11-02)
+
+**D14. The engine's panels live in the dev layer, which may see the runtime.** `src/ui/dev/panels.cpp`:
+physics, networking, renderer, entities. `ui/` sits on core, graphics *and* runtime; runtime never
+includes `ui/` (a new `layering` rule). A panel whose subject is absent draws nothing and has no
+window -- no physics, no Physics panel. *Why:* the alternative, runtime registering its own panels,
+puts `#ifdef PROJV_UI` and ImGui code into runtime, the layer that must stay deterministic; the dev
+layer is optional and reading-only by default, so it is the right side of the dependency.
+
+**D15. Every number is a `Meter`, every series a graph** -- the Frame panel's form: physics step time,
+bodies (awake of all), round trip and loss per client, bytes a second. The physics panel is counters
+and timings only in U2 (decided 2026-11-02): no tuning, no picking.
+
+**D16. The entity inspector reads components through what already names them** (read-only in U2,
+decided 2026-11-02). The list: every
+entity, named by its `Authored` name, else its id; a filter by name or component. Per entity: every
+component type it has, by EnTT's type name (`projv::Transform`), and for those with a codec
+(`ComponentTraits`, the entities.json key) their value as JSON. *Why:* no second reflection system;
+a component a program registers for saving is inspectable for free.
+
+**D17. The renderer panel shows the active renderer, and edits only what the program offers.** Its
+uniforms read-only (vec4s as four numbers, matrices as rows), its passes (name, target, size, on/off,
+GPU time from the Frame panel), each target as a thumbnail, click for full size. A program makes a
+value editable by binding *its own variable*, the one it writes the uniform from:
+
+```cpp
+ui::dev::editable(app, renderer, "sunDir", &sun.height, {.min = 0.0f, .max = 1.5f});
+```
+
+The row then has a control for that variable (float, int, bool, vec3, vec4; an optional range). *Why:*
+a program writes most uniforms every frame, so an edit to the uniform table is overwritten before it
+is uploaded; and a value forced past the program (an override at upload) is one it never sees change,
+so what it derives from it -- restir-pt's "the sun moved", which resets its accumulation -- goes
+stale and the image smears. Editing the program's own variable has neither problem. Decided
+2026-11-02: no overrides, no pins; unbound uniforms are read-only.
+
+| Panel | Proven by |
+|---|---|
+| Physics | `physics` (`DEMOS_SELFTEST=1` unchanged), Voxel Mayhem |
+| Networking | `mp_client` against `mp_server`; the party demo's server and clients |
+| Renderer | `renderer_gallery`, every renderer |
+| Entities | the sandbox, Voxel Mayhem |
+
+Headless tests (D11): each panel absent without its subject and drawn with it; the inspector lists a
+registered component's JSON; the layering rule.
+
 ## Milestones
 
 | | What | Proven by |
@@ -278,6 +324,28 @@ colour in the graph, and the GPU by pass.
   Vulkan scissors, logged, showed the 1.7x. The scene editor resets bgfx to the framebuffer size and
   has its own ImGui, so it was never affected.
 - Checked by eye: sandbox (one pass) and Voxel Mayhem (restir-pt), live and in captures.
+
+**U2** (2026-11-02).
+- **Four panels**, `src/ui/dev/panels.cpp`, sharing the Frame panel's widgets and its profiler
+  through `src/ui/dev/internal.h` (not public): Physics, Network, Renderer, Entities, as D14-D17.
+  A **Panels** menu bar opens and closes every window; the four start closed, and a panel whose
+  subject is absent (`hasPhysics`, `sessionRole`, an active renderer) has no window.
+- **Runtime, for the panels**: `sessionRole(world)` and `registeredComponents(world, entity)` (the
+  codecs' JSON). `layering`: runtime never includes `ui/`.
+- **Renderer**: `editable(app, renderer, uniform, &value, range)` binds a program's variable (D17);
+  the gallery offers the fast renderer's six settings. Targets draw through `opaqueImage` (a draw-list
+  marker the backend reads: no blend), so a target whose alpha is data still shows; integer and depth
+  formats are listed, not drawn. Textures keep their resources.json names
+  (`ConstructedTextures::textureNames`) for the labels.
+- **Entities**: EnTT 4's storages name every type (`storage.info().name()`); the list is clipped
+  (`ImGuiListClipper`), sorted by index. Read-only, as decided.
+- `PROJV_DEV_UI_OPEN=Physics,Renderer` opens windows from the start, for captures.
+- Tests (`ui:*`, 19 cases): the four start closed and open from the menu; each absent without its
+  subject; Physics drawn over 30 frames of a real physics world; `registeredComponents` and the
+  inspector on it.
+- Checked in captures: the gallery's fast renderer (Renderer: passes, uniforms, the bound settings),
+  the sandbox (Physics, Entities). Network checked live by the user: the party demo hosting with
+  bots, and a second window joined to it as a client.
 
 ## Open questions
 

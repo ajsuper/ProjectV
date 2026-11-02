@@ -84,6 +84,7 @@ namespace projv::graphics {
                 constructedTextures.pingPongFlags[texture.textureID] = true;
             }
             constructedTextures.textureFormats[texture.textureID] = texture.format;
+            constructedTextures.textureNames[texture.textureID] = texture.name;
             // The size the handle actually has, not the size that was declared. These two used to be
             // allowed to drift; resolveTargetSize reads this to decide a pass's view rect, so it has to
             // be what the texture is, always.

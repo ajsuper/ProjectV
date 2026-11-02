@@ -46,6 +46,9 @@ is ImGui code. Guide: [Add a dev panel](../guides/dev-panel.md).
 | `addPanel(app, name, fn)` | A window shown with the dev layer, built in Render while it is shown; kept and free when it is not |
 | `shown(app)` | Whether the dev layer is installed and shown |
 | `Meter` | A reading that holds still: `add(value, seconds)`; `average()`, `min()`, `max()` over the last complete period (`setPeriod`, 0.5 s), republished once a period; `ready()`, `last()`, `samples()`. The Frame panel reads every timing through one |
+| `editable(app, renderer, uniform, &value, EditRange)` | Lets the Renderer panel edit a program's own variable (`float`, `int`, `bool`, `vec3`, `vec4`), shown on `uniform`'s row while `renderer` is active. `EditRange`: `label`, `min`/`max` (a slider; equal: a drag), `speed`. Unbound uniforms are read-only |
+| `forgetEditables(app, renderer)` | Drops `renderer`'s bindings, before it or the variables go |
+| `opaqueImage(handle, size, uv0, uv1)` | `ImGui::Image` drawn without blending: a target whose alpha is data |
 | `initRenderer(view)`, `shutdownRenderer()`, `renderDrawData(drawData)` | ImGui on bgfx, for the current context: the engine's embedded `vs_imgui`/`imgui` shaders. For a program with an ImGui context of its own (the scene editor) |
 | `textureID(handle)` | An engine texture as an `ImTextureID`, for `ImGui::Image` |
 
@@ -56,6 +59,7 @@ is ImGui code. Guide: [Add a dev panel](../guides/dev-panel.md).
 | Name | What |
 |---|---|
 | `DevLayer(app, renderInstance)` | Its own ImGui context, fed from `Input`, drawn in `DEV_VIEW`. `renderInstance` nullptr is headless (tests) |
+| `setPanelOpen(name, open)`, `windowsDrawn()` | The Panels menu's toggles, and what the last draw built (tests). `PROJV_DEV_UI_OPEN=Physics,Renderer` opens windows from the start |
 | `setShown(bool)`, `visible()` | F1's two states. Showing releases a captured cursor, hiding captures it again. While shown the program may capture it (a click on the scene) and play on; the panels then see no mouse until it is released (Esc) |
 
 Panels it always has:
@@ -64,6 +68,13 @@ Panels it always has:
 |---|---|
 | **Frame** | Every reading a `Meter`: average, min and max over the period (0.25-2 s), a max well over the average in orange; `pause` freezes it. **CPU**: frame time, a stacked graph by stage (and time in no system), each stage's and system's time (`Application::systemSeconds`). **GPU**: GPU frame time, a stacked graph by pass, and the active renderer's passes in order -- name, target size, time, share -- then any other view (the UI's). **bgfx**: backend, draws, render-thread submit and waits, memory |
 | **Log** | The last 4000 lines, by category, filterable |
+| **Physics** | `PhysicsStats`: step time, steps and ms a frame (graphed), bodies, awake, debris; the counters that should stay 0 (dropped contacts, refusals, non-finite recoveries, left the world) in red when not. Only with physics |
+| **Network** | A server: each client's round trip, loss, KiB/s each way (sent, stacked by client), inputs waiting, entities. A client: snapshots a second, corrections, mismatches. Only in a session |
+| **Renderer** | The active renderer: its passes (target, size, GPU time), its uniforms read-only with the program's `editable` controls under them, its targets as thumbnails (click: full size) |
+| **Entities** | Every entity by authored name, filterable by name, id or component type; the selected one's component types (EnTT's names) and its registered components' JSON. Read-only |
+
+A menu bar (**Panels**) opens and closes each; Frame, Log and a program's panels start open, the
+four above closed. A panel whose subject is absent has no window.
 
 The graphs keep 240 columns (frames; GPU frames for the GPU), scaled to the 97th percentile, so a
 hitch is cut and marked red rather than flattening the rest; guides at 120, 60 and 30 fps. Hover

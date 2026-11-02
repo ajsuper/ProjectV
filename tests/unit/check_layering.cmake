@@ -69,7 +69,7 @@ if(enet_violations)
 endif()
 message(STATUS "layering: ENet is included only by src/net/transport_enet.cpp")
 
-# The UI (docs/plans/ui.md, D2). It sits on core and graphics, so nothing beneath it includes it. ImGui
+# The UI (docs/plans/ui.md, D2, D14). It sits on core, graphics and runtime, so nothing beneath it includes it. ImGui
 # is reachable in the engine only from the dev layer (src/ui/dev/) and the one header that hands it to
 # panel code (ui/dev.h); RmlUi only from the user layer (src/ui/user/), anywhere in the tree, so it can
 # be replaced without touching a program.
@@ -78,7 +78,9 @@ file(GLOB_RECURSE beneathUi
     "${PROJV_ROOT}/include/graphics/*" "${PROJV_ROOT}/src/graphics/*"
     "${PROJV_ROOT}/include/utils/*" "${PROJV_ROOT}/src/utils/*"
     "${PROJV_ROOT}/include/data_structures/*"
-    "${PROJV_ROOT}/include/net/*" "${PROJV_ROOT}/src/net/*")
+    "${PROJV_ROOT}/include/net/*" "${PROJV_ROOT}/src/net/*"
+    # The runtime too (D14): the dev layer's panels read it, so it must never read them.
+    "${PROJV_ROOT}/include/runtime/*" "${PROJV_ROOT}/src/runtime/*")
 file(GLOB_RECURSE engine "${PROJV_ROOT}/include/*" "${PROJV_ROOT}/src/*")
 set(ui_violations "")
 foreach(file IN LISTS beneathUi)

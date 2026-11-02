@@ -174,6 +174,11 @@ namespace projv::runtime {
     };
     SessionStats sessionStats(const World& world);
 
+    // Which end of a session this world is, if either: what decides between sessionStats' server and
+    // client fields, and whether there is a session to show at all (the dev layer's Network panel).
+    enum class SessionRole { None, Server, Client };
+    SessionRole sessionRole(const World& world);
+
     // A server's view of each client (N7), in client id order.
     struct ClientStats {
         ClientId    id = 0;

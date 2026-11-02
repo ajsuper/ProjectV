@@ -152,6 +152,16 @@ namespace projv::runtime {
         }
     }
 
+    std::vector<std::pair<std::string, nlohmann::json>> registeredComponents(const World& world, Entity entity) {
+        std::vector<std::pair<std::string, nlohmann::json>> out;
+        const ComponentRegistry* registry = registryOf(world);
+        if (!registry || !world.valid(entity)) return out;
+        for (const auto& [key, codec] : registry->codecs) {
+            if (std::optional<nlohmann::json> value = codec.save(world, entity)) out.emplace_back(key, std::move(*value));
+        }
+        return out;
+    }
+
     namespace detail {
         void addCodec(World& world, const std::string& key, ComponentCodec codec) {
             registryOf(world).codecs[key] = std::move(codec);

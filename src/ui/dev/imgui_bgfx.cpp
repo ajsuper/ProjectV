@@ -55,6 +55,19 @@ namespace projv::ui::dev {
         return imGuiIDFromTextureHandle(handle);
     }
 
+    namespace {
+        // Draw-list markers around an opaque image: the backend draws what is between them without
+        // blending. Compared by address, never called.
+        void opaqueBegin(const ImDrawList*, const ImDrawCmd*) {}
+    }
+
+    void opaqueImage(bgfx::TextureHandle handle, ImVec2 size, ImVec2 uv0, ImVec2 uv1) {
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        drawList->AddCallback(opaqueBegin, nullptr);
+        ImGui::Image(ImTextureRef(textureID(handle)), size, uv0, uv1);
+        drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+    }
+
     // Honours one texture request from ImGui. ImGui owns the pixels and tells us what changed; the
     // backend owns the GPU object and reports back through SetTexID/SetStatus.
     static void updateImGuiTexture(ImTextureData* texture) {
@@ -253,13 +266,18 @@ namespace projv::ui::dev {
             memcpy(vertexBuffer.data, drawList->VtxBuffer.Data, vertexCount * sizeof(ImDrawVert));
             memcpy(indexBuffer.data, drawList->IdxBuffer.Data, indexCount * sizeof(ImDrawIdx));
 
+            bool opaque = false;   // between opaqueImage's markers
             for (int commandIndex = 0; commandIndex < drawList->CmdBuffer.Size; commandIndex++) {
                 const ImDrawCmd& command = drawList->CmdBuffer[commandIndex];
 
                 if (command.UserCallback != nullptr) {
-                    // ImDrawCallback_ResetRenderState asks the backend to restore its state; every
-                    // draw below sets its own state in full, so there is nothing to restore.
-                    if (command.UserCallback != ImDrawCallback_ResetRenderState) {
+                    // ImDrawCallback_ResetRenderState asks the backend to restore its state: every
+                    // draw sets its own in full, so it only ends an opaque run.
+                    if (command.UserCallback == opaqueBegin) {
+                        opaque = true;
+                    } else if (command.UserCallback == ImDrawCallback_ResetRenderState) {
+                        opaque = false;
+                    } else {
                         command.UserCallback(drawList, &command);
                     }
                     continue;
@@ -289,8 +307,9 @@ namespace projv::ui::dev {
                 // Colour only. The back buffer's alpha is the window's opacity to a compositor: blended
                 // like the colour, a 95%-opaque panel left it at 0.95 and the desktop showed through the
                 // panel. What drew the frame (the renderer, or a program's clear) decides it.
-                bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_MSAA |
-                               BGFX_STATE_BLEND_FUNC(BGFX_STATE_BLEND_SRC_ALPHA, BGFX_STATE_BLEND_INV_SRC_ALPHA));
+                bgfx::setState(opaque ? (BGFX_STATE_WRITE_RGB | BGFX_STATE_MSAA)
+                                      : (BGFX_STATE_WRITE_RGB | BGFX_STATE_MSAA |
+                                         BGFX_STATE_BLEND_FUNC(BGFX_STATE_BLEND_SRC_ALPHA, BGFX_STATE_BLEND_INV_SRC_ALPHA)));
 
                 bgfx::TextureHandle texture = textureHandleFromImGuiID(command.GetTexID());
                 bgfx::setTexture(0, backendState.textureSampler, texture);

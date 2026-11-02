@@ -53,6 +53,7 @@ namespace projv{
         std::unordered_map<uint32_t, float> relativeTextureScales;
         std::unordered_map<uint32_t, projv::core::ivec2> textureResolutions;
         std::unordered_map<uint32_t, bgfx::TextureFormat::Enum> textureFormats;
+        std::unordered_map<uint32_t, std::string> textureNames;   // resources.json's "name", for tools
         // The bgfx creation flags each texture was built with, so a resize can rebuild it as the
         // same kind of texture. Without this a resize recreates every target with BGFX_TEXTURE_RT
         // alone, which silently drops BGFX_TEXTURE_READ_BACK | BGFX_TEXTURE_BLIT_DST -- a texture
