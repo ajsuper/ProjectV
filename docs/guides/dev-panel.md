@@ -48,5 +48,17 @@ ui::dev::addPanel(app, "Tuning", [](Application& app) {
 | `UiOptions{.devLayer = false}` | never |
 | `PROJV_DEV_UI_SHOWN=1` | starts shown (captures, unattended runs) |
 
-The engine's own panels, always there: **Frame** (frame time, its graph, and every system's time by
-stage) and **Log** (the last 4000 lines, by category, filterable).
+The engine's own panels, always there: **Frame** (CPU and GPU time, stacked graphs by stage and by
+render pass, each with its average, min and max) and **Log** (the last 4000 lines, by category,
+filterable). [Reference](../reference/ui.md#uidev_layerh).
+
+## A reading that holds still
+
+A number redrawn every frame flickers past reading. `Meter` averages it over a period and keeps the
+period's least and greatest:
+
+```cpp
+static ui::dev::Meter step;   // 0.5 s; setPeriod to change
+step.add(stepMs, app.time().unscaledDelta);
+if (step.ready()) ImGui::Text("step %.2f ms  (%.2f .. %.2f)", step.average(), step.min(), step.max());
+```

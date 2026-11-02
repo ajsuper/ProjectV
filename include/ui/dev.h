@@ -36,6 +36,42 @@ namespace projv::ui::dev {
     // Whether the dev layer is installed and shown.
     bool shown(const Application& app);
 
+    // A reading that holds still long enough to read: the mean, least and greatest of the samples
+    // added over the last complete period, republished once a period. The engine's Frame panel reads
+    // every timing through one; a panel of a program's own may too.
+    //
+    //     static ui::dev::Meter step;
+    //     step.add(stepMs, app.time().unscaledDelta);
+    //     ImGui::Text("step %.2f ms (%.2f .. %.2f)", step.average(), step.min(), step.max());
+    class Meter {
+    public:
+        Meter() = default;
+        explicit Meter(double periodSeconds) : period(periodSeconds) {}
+
+        // One sample, for a stretch of `seconds` (a frame's length). Each sample weighs the same.
+        void add(double value, double seconds);
+        // Takes effect from the next period.
+        void setPeriod(double seconds) { period = seconds; }
+        double periodSeconds() const { return period; }
+
+        // A period has completed: before that, the readings are 0.
+        bool ready() const { return published > 0; }
+        double average() const { return mean; }
+        double min() const { return least; }
+        double max() const { return greatest; }
+        // The newest sample, unaveraged.
+        double last() const { return newest; }
+        // How many samples the published reading is over.
+        int samples() const { return published; }
+
+    private:
+        double period = 0.5;
+        double elapsed = 0.0, sum = 0.0, low = 0.0, high = 0.0, newest = 0.0;
+        int count = 0;
+        double mean = 0.0, least = 0.0, greatest = 0.0;
+        int published = 0;
+    };
+
     // ---- ImGui on bgfx -----------------------------------------------------------------------------
     // For the current ImGui context. The dev layer uses these; so may a program with an ImGui context
     // of its own. The shaders are the engine's (vs_imgui, imgui), compiled into the library.

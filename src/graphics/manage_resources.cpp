@@ -1,6 +1,7 @@
 #include "graphics/manage_resources.h"
 #include "data_structures/texture.h"
 #include <bgfx/bgfx.h>
+#include <filesystem>
 
 namespace projv::graphics {
     std::vector<bgfx::Attachment> getTextureAttachments(const std::unordered_map<uint32_t, bgfx::TextureHandle>& textureHandles, std::vector<uint32_t> textureIDs) {
@@ -175,6 +176,26 @@ namespace projv::graphics {
         return dependencyGraphs;
     }
 
+    // Each pass is named after its shader's file ("gbuffer_shade"), for the profiler; a shader used by
+    // more than one pass numbers them ("blur 1", "blur 2").
+    static void nameRenderPasses(std::vector<BGFXDependencyGraph>& passes, const std::vector<Shader>& shaders, const std::vector<RenderPass>& renderPasses) {
+        std::unordered_map<uint32_t, std::string> stems;
+        for (const Shader& shader : shaders) {
+            if (shader.filePath.empty()) continue;
+            std::string stem = std::filesystem::path(shader.filePath).stem().string();
+            stems[shader.shaderID] = std::move(stem);
+        }
+        std::unordered_map<std::string, int> uses, seen;
+        for (size_t i = 0; i < passes.size() && i < renderPasses.size(); i++) {
+            auto stem = stems.find(renderPasses[i].shaderID);
+            passes[i].name = stem != stems.end() ? stem->second : "pass " + std::to_string(i);
+            uses[passes[i].name]++;
+        }
+        for (BGFXDependencyGraph& pass : passes) {
+            if (uses[pass.name] > 1) pass.name += " " + std::to_string(++seen[pass.name]);
+        }
+    }
+
     std::shared_ptr<ConstructedRenderer> constructRendererSpecification(RendererSpecification &renderer, bgfx::ShaderHandle vertexShader) {
         ConstructedRenderer constructedRenderer;
         constructedRenderer.resources.defaultVertexShader = vertexShader;
@@ -201,6 +222,7 @@ namespace projv::graphics {
         constructedRenderer.resources.shaderHandles = constructShaders(resources.shaders);
         core::info("Constructed shaders!");
         constructedRenderer.dependencyGraph = constructRenderPasses(constructedRenderer.resources, resources.FrameBuffers, renderPasses);
+        nameRenderPasses(constructedRenderer.dependencyGraph, resources.shaders, renderPasses);
         core::info("Constructed render passes!");
         constructedRenderer.resources.textures = assignTexturesToTheirFramebuffers(constructedRenderer.resources.framebuffers, constructedRenderer.resources.textures);
 

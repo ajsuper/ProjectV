@@ -105,6 +105,12 @@ namespace projv {
         // The application owns the decision, and owns invalidating any history the pass keeps when it
         // turns it back on.
         bool enabled = true;
+        // What the profiler calls it (bgfx::setViewName, each frame it is drawn): its shader file's
+        // name, numbered when a renderer runs one shader in more than one pass. "pass <i>" for a
+        // shader with no file.
+        std::string name;
+        // The size it last rasterized at (its target's, resolved per frame); 0x0 until drawn.
+        core::ivec2 drawnSize{0, 0};
     };
 
     struct ConstructedRenderer {

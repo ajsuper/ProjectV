@@ -37,7 +37,9 @@ namespace projv::graphics {
         shader.shaderFileContents.assign(fragment.begin(), fragment.end());
         specification.resources.shaders.push_back(std::move(shader));
         specification.dependencyGraph.renderPasses.push_back(RenderPass{1, {}, {}, -1, 0, 0});
-        return constructRendererSpecification(specification, loadEngineShader("vs_quad"));
+        std::shared_ptr<ConstructedRenderer> renderer = constructRendererSpecification(specification, loadEngineShader("vs_quad"));
+        if (renderer && !renderer->dependencyGraph.empty()) renderer->dependencyGraph[0].name = "basic";
+        return renderer;
     }
 
     void drawBasicRenderer(RenderInstance& renderInstance, const std::shared_ptr<ConstructedRenderer>& renderer,

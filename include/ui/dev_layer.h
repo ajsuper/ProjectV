@@ -1,6 +1,8 @@
 #ifndef PROJV_UI_DEV_LAYER_H
 #define PROJV_UI_DEV_LAYER_H
 
+#include <memory>
+
 #include "ui/ui.h"
 
 struct ImGuiContext;
@@ -29,7 +31,13 @@ namespace projv::ui::dev {
         // game's, and the panels see no mouse until it is released (Esc, by the examples' convention).
         void setShown(bool show);
 
+        // The Frame panel's readings: sampled every frame while shown, whether or not its window is
+        // open. Showing turns on bgfx's profiler (BGFX_DEBUG_PROFILER) for the per-pass GPU times;
+        // hiding turns it off again.
+        struct Profiler;
+
     private:
+        std::unique_ptr<Profiler> profiler;
         Application* app;
         graphics::RenderInstance* renderInstance;
         ImGuiContext* context = nullptr;

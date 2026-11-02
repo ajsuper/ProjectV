@@ -62,6 +62,7 @@ A program rendering into an ImGui panel rather than the window calls `resizeRend
 | **Feedback** | A pass reading its own output framebuffer gets a **ping-pong** pair automatically |
 | **Repeats** | `"multiPass": N` runs the pass N more times. Each copy gets its own `multiPassPassNumber<i>` uniform (`i` = its index in the pass list) holding its repeat number. |
 | **Skipping** | `BGFXDependencyGraph::enabled = false`: nothing submitted, the target keeps its contents |
+| **Profiling** | A pass is a bgfx view, named after its shader file (`BGFXDependencyGraph::name`), with the size it last drew at (`drawnSize`): the dev layer's Frame panel times each one |
 
 ## Texture stages
 

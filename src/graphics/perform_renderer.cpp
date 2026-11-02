@@ -60,6 +60,10 @@ namespace projv::graphics {
 #endif
             bgfx::setViewTransform(renderPass.renderPassID, glm::value_ptr(viewMat), glm::value_ptr(projMat));
             bgfx::setViewRect(renderPass.renderPassID, 0, 0, uint16_t(targetSize.x), uint16_t(targetSize.y));
+            // Every frame, not once: two renderers in one program share view IDs, and the profiler
+            // (bgfx::Stats::viewStats) should name whichever drew there.
+            if (!renderPass.name.empty()) bgfx::setViewName(renderPass.renderPassID, renderPass.name.c_str());
+            renderPass.drawnSize = targetSize;
 
             // What the shader must measure its own pixels against. See BGFXResources::passTargetRes.
             const float passTargetRes[4] = {

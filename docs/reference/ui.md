@@ -45,6 +45,7 @@ is ImGui code. Guide: [Add a dev panel](../guides/dev-panel.md).
 |---|---|
 | `addPanel(app, name, fn)` | A window shown with the dev layer, built in Render while it is shown; kept and free when it is not |
 | `shown(app)` | Whether the dev layer is installed and shown |
+| `Meter` | A reading that holds still: `add(value, seconds)`; `average()`, `min()`, `max()` over the last complete period (`setPeriod`, 0.5 s), republished once a period; `ready()`, `last()`, `samples()`. The Frame panel reads every timing through one |
 | `initRenderer(view)`, `shutdownRenderer()`, `renderDrawData(drawData)` | ImGui on bgfx, for the current context: the engine's embedded `vs_imgui`/`imgui` shaders. For a program with an ImGui context of its own (the scene editor) |
 | `textureID(handle)` | An engine texture as an `ImTextureID`, for `ImGui::Image` |
 
@@ -57,5 +58,17 @@ is ImGui code. Guide: [Add a dev panel](../guides/dev-panel.md).
 | `DevLayer(app, renderInstance)` | Its own ImGui context, fed from `Input`, drawn in `DEV_VIEW`. `renderInstance` nullptr is headless (tests) |
 | `setShown(bool)`, `visible()` | F1's two states. Showing releases a captured cursor, hiding captures it again. While shown the program may capture it (a click on the scene) and play on; the panels then see no mouse until it is released (Esc) |
 
-Panels it always has: **Frame** (frame time and graph, each system's time by stage, from
-`Application::systemSeconds`) and **Log** (the last 4000 lines, by category, filterable).
+Panels it always has:
+
+| Panel | What |
+|---|---|
+| **Frame** | Every reading a `Meter`: average, min and max over the period (0.25-2 s), a max well over the average in orange; `pause` freezes it. **CPU**: frame time, a stacked graph by stage (and time in no system), each stage's and system's time (`Application::systemSeconds`). **GPU**: GPU frame time, a stacked graph by pass, and the active renderer's passes in order -- name, target size, time, share -- then any other view (the UI's). **bgfx**: backend, draws, render-thread submit and waits, memory |
+| **Log** | The last 4000 lines, by category, filterable |
+
+The graphs keep 240 columns (frames; GPU frames for the GPU), scaled to the 97th percentile, so a
+hitch is cut and marked red rather than flattening the rest; guides at 120, 60 and 30 fps. Hover
+one for that column's breakdown. Sampling runs every frame the layer is shown, the Frame window open
+or not. While shown, the layer turns on bgfx's profiler (`BGFX_DEBUG_PROFILER`, per-view GPU
+timestamps) and turns it off when hidden: a program that sets it itself (the `*_GPU` benchmarks) sets
+it again after. A pass's name is its shader's file name (`BGFXDependencyGraph::name`, given to
+`bgfx::setViewName` each frame it draws), numbered when one shader runs in several passes.

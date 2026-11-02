@@ -246,6 +246,39 @@ ruled.
 - **Docs:** `docs/concepts/ui.md` (new), the guide [Add a dev panel](../guides/dev-panel.md), and
   `ui/dev.h`, `ui/dev_layer.h` and the options in `docs/reference/ui.md`.
 
+**Frame panel, a profiler** (2026-11-02, between U1 and U2). Asked for: readings that hold still,
+colour in the graph, and the GPU by pass.
+- **`ui::dev::Meter`** (public, for programs' panels too): the mean, least and greatest over the last
+  complete period, republished once a period. Every reading in the panel is one; the period is chosen
+  in the panel (0.25-2 s, default 0.5 s). A max over 1.5x the average shows orange.
+- **Sampled in the layer, not the window**: `DevLayer::Profiler` samples every frame the layer is
+  shown, before the panels, so a collapsed Frame window keeps its history. `pause` freezes it.
+- **Stacked graphs**, drawn with ImGui's draw list: CPU by stage plus time in no system, GPU by pass
+  plus the gap between passes; 240 columns, scaled to the 97th percentile (a hitch is cut and marked
+  red), guides at 120/60/30 fps, a tooltip per column. Stage and pass colours match the tables'
+  swatches; passes take a palette by view, so they keep their colours.
+- **GPU by pass**: showing the layer sets `BGFX_DEBUG_PROFILER`, hiding clears it (hidden costs
+  nothing). GPU samples are taken when `Stats::gpuFrameNum` moves, not every frame. Passes are named
+  for the profiler: `BGFXDependencyGraph::name` (its shader file's stem, numbered when a shader is
+  in several passes; the basic renderer's is "basic"), given to `bgfx::setViewName` each frame the
+  pass draws, since renderers in one program share view IDs. `drawnSize` is the size it last drew
+  at. The table lists the active renderer's passes in order, an `enabled = false` one as "off",
+  then any other view ("dev ui"). A view whose name changes (the gallery switching renderers)
+  starts its readings over.
+- **bgfx** section: backend, back buffer, draws/computes/blits, render-thread submit and waits,
+  texture, target and GPU memory.
+- Tests (`ui:*`, 15 cases): a Meter's period, a sample longer than its period, and 300 headless frames
+  shown.
+- **Fixed with it: the dev layer's scissors on a scaled display.** The layer took
+  `DisplayFramebufferScale` from `glfwGetFramebufferSize`, but the engine resets bgfx's back buffer
+  to the window's (logical) size, so at 170% Wayland scaling every scissor came out 1.7x too large
+  and too far down: a window's first line cut off, the Log's contents clipped away entirely (since
+  U1), and ImGui's font rasterised at 1.7x and drawn shrunk. The scale is now the back buffer's
+  (`bgfx::Stats::width`/`height`) over the window's. Found from the panel's captures; bgfx's
+  Vulkan scissors, logged, showed the 1.7x. The scene editor resets bgfx to the framebuffer size and
+  has its own ImGui, so it was never affected.
+- Checked by eye: sandbox (one pass) and Voxel Mayhem (restir-pt), live and in captures.
+
 ## Open questions
 
 None open. Answered 2026-11-01: RmlUi for the user layer (D5); the demos share one style sheet (D13);

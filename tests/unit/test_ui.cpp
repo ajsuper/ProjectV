@@ -287,3 +287,47 @@ TEST_CASE("application: each system's run time is reported for the last complete
     CHECK(seconds[1] >= 0.003);
     CHECK(seconds[0] < seconds[1]);
 }
+
+TEST_CASE("ui: a Meter reads nothing until a period completes, then holds that period's mean, least and greatest") {
+    projv::ui::dev::Meter meter(0.5);
+    meter.add(10.0, 0.2);
+    meter.add(30.0, 0.2);
+    CHECK_FALSE(meter.ready());
+    CHECK(meter.average() == 0.0);
+    CHECK(meter.last() == 30.0);
+    meter.add(20.0, 0.2);   // 0.6 s: the period is complete
+    REQUIRE(meter.ready());
+    CHECK(meter.average() == doctest::Approx(20.0));
+    CHECK(meter.min() == 10.0);
+    CHECK(meter.max() == 30.0);
+    CHECK(meter.samples() == 3);
+
+    // The next period's samples do not move the reading until it, too, completes.
+    meter.add(100.0, 0.2);
+    CHECK(meter.max() == 30.0);
+    meter.add(50.0, 0.4);
+    CHECK(meter.average() == doctest::Approx(75.0));
+    CHECK(meter.min() == 50.0);
+    CHECK(meter.max() == 100.0);
+}
+
+TEST_CASE("ui: a Meter's sample longer than its period publishes on its own") {
+    projv::ui::dev::Meter meter(0.25);
+    meter.add(40.0, 1.0);
+    REQUIRE(meter.ready());
+    CHECK(meter.average() == 40.0);
+    CHECK(meter.samples() == 1);
+    meter.setPeriod(2.0);
+    CHECK(meter.periodSeconds() == 2.0);
+}
+
+TEST_CASE("ui: the Frame panel samples every frame while shown, headless") {
+    projv::Application app;
+    app.addSystem(projv::Stage::Update, "work", [](projv::Application&) {});
+    projv::ui::dev::DevLayer dev(app, nullptr);
+    dev.setShown(true);
+    projv::Input input;
+    for (int i = 0; i < 300; i++) devFrame(dev, input);   // more frames than a graph holds
+    dev.setShown(false);
+    CHECK_FALSE(dev.visible());
+}
