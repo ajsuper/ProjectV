@@ -123,8 +123,15 @@ void main() {
 
     // Per-pixel rotation from the blue-noise LUT, so neighbouring pixels sample different
     // directions and the blur in the next pass turns AO_SAMPLES into many more effective ones.
-    vec2 noiseUV = v_texcoord0 * (windowRes.xy / 256.0) + fract(frameCount.x * 0.618);
-    float rot = texture2D(blueNoise, noiseUV).r;
+    //
+    // Fetched by the pixel's own coordinate, wrapped to the 256x256 tile by hand, and moved a
+    // different whole number of texels each frame. It used to be texture2D at uv * (window / 256):
+    // the engine samples every texture CLAMPED, so only the top-left 256x256 pixels read noise, the
+    // rest repeated the tile's last row or column -- a vertical-striped band down the left, a
+    // horizontal one along the top, and one shared rotation everywhere else.
+    ivec2 frameOffset = ivec2(fract(frameCount.x * vec2(0.7548777, 0.5698403)) * 256.0);   // R2, per frame
+    ivec2 noiseTexel = (ivec2(gl_FragCoord.xy) + frameOffset) & ivec2(255, 255);
+    float rot = texelFetch(blueNoise, noiseTexel, 0).r;
 
     float radius = fastSettings.x;
 

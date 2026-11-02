@@ -783,7 +783,10 @@ void startup(projv::Application& app) {
     // whatever the desktop's layout is doing.
     const bool unattendedRun = g_measure.bench || !g_measure.capture.empty();
     renderInstance.resizable = !unattendedRun;
-    renderInstance.initialize(unattendedRun ? 1280 : 1920, unattendedRun ? 720 : 1080, "ProjectV");
+    // GALLERY_SIZE=WxH: an unattended run at another fixed size (measuring at the size a user plays at).
+    int width = unattendedRun ? 1280 : 1920, height = unattendedRun ? 720 : 1080;
+    if (const char* size = std::getenv("GALLERY_SIZE")) std::sscanf(size, "%dx%d", &width, &height);
+    renderInstance.initialize(width, height, "ProjectV");
 
     // Input through the engine, and the dev layer over it: the panel drives the gallery (D4, D5). An
     // unattended run hides it and leaves the cursor alone, so captures and measurements are unchanged.
@@ -1119,6 +1122,7 @@ int main(int argc, char** argv) {
     g_startRenderer = selected;
     projv::ui::setCommandLine(argc, argv);
     readRestirEnvironment();
+    if (const char* v = std::getenv("GALLERY_FAST_BLUR")) g_fast.blur = std::atoi(v) != 0;   // the fast renderer's AO blur, unattended
 
     // The renderer folders and the bundled scene are staged beside the binary by the build, and
     // resources.json names its shaders relative to the working directory -- so run from here.
