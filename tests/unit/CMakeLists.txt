@@ -62,13 +62,14 @@ add_executable(projv_unit_tests
 )
 target_link_libraries(projv_unit_tests PRIVATE projectV doctest::doctest)
 if(PROJV_BUILD_UI)
-    target_sources(projv_unit_tests PRIVATE test_ui.cpp)
+    target_sources(projv_unit_tests PRIVATE test_ui.cpp test_ui_user.cpp)
 endif()
 if(WIN32)
     target_link_libraries(projv_unit_tests PRIVATE dbghelp)   # main.cpp's crash report
 endif()
 # Committed test data: the golden physics recording (test_physics_golden.cpp).
-target_compile_definitions(projv_unit_tests PRIVATE PROJV_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+target_compile_definitions(projv_unit_tests PRIVATE PROJV_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+    PROJV_SHARED_UI_DIR="${PROJECT_SOURCE_DIR}/examples/shared/ui")
 target_compile_options(projv_unit_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra>
 )

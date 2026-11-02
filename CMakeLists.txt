@@ -275,6 +275,52 @@ else()
     set(PROJV_VENDORED_DEPS ON)
 endif()
 
+# The UI's user layer (docs/plans/ui.md, D5, D8): RmlUi 6.3, with FreeType 2.14.3 as its font engine.
+# Only src/ui/user/ includes RmlUi (the `layering` test enforces it). Installed copies are found first
+# (vcpkg's `rmlui` and `freetype`); otherwise the submodules are built, static, FreeType without its
+# optional codecs (zlib, bzip2, png, brotli, HarfBuzz), which RmlUi does not need.
+option(PROJV_BUILD_UI "Build the UI module (ui/): the host, the dev layer and the user layer" ON)
+if(PROJV_BUILD_UI)
+    find_package(Freetype QUIET)
+    if(NOT TARGET Freetype::Freetype)
+        if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/freetype/CMakeLists.txt")
+            message(FATAL_ERROR "FreeType was not found and external/freetype is missing: run "
+                                "`git submodule update --init external/freetype`, or install FreeType.")
+        endif()
+        foreach(codec ZLIB BZIP2 PNG HARFBUZZ BROTLI)
+            set(FT_DISABLE_${codec} ON CACHE BOOL "" FORCE)
+        endforeach()
+        set(PROJV_SAVED_SHARED ${BUILD_SHARED_LIBS})
+        set(BUILD_SHARED_LIBS OFF)
+        add_subdirectory(external/freetype EXCLUDE_FROM_ALL)
+        set(BUILD_SHARED_LIBS ${PROJV_SAVED_SHARED})
+        set_target_properties(freetype PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        target_compile_options(freetype PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/w,-w>)
+        add_library(Freetype::Freetype ALIAS freetype)
+        set(PROJV_VENDORED_DEPS ON)
+    endif()
+
+    find_package(RmlUi CONFIG QUIET)
+    if(TARGET RmlUi::Core)
+        set(PROJV_RMLUI_TARGET RmlUi::Core)
+    else()
+        if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/RmlUi/CMakeLists.txt")
+            message(FATAL_ERROR "RmlUi was not found and external/RmlUi is missing: run "
+                                "`git submodule update --init external/RmlUi`, or install RmlUi.")
+        endif()
+        set(RMLUI_SAMPLES OFF CACHE BOOL "" FORCE)
+        set(RMLUI_FONT_ENGINE "freetype" CACHE STRING "" FORCE)
+        set(RMLUI_PRECOMPILED_HEADERS OFF CACHE BOOL "" FORCE)
+        set(PROJV_SAVED_SHARED ${BUILD_SHARED_LIBS})
+        set(BUILD_SHARED_LIBS OFF)
+        add_subdirectory(external/RmlUi EXCLUDE_FROM_ALL)
+        set(BUILD_SHARED_LIBS ${PROJV_SAVED_SHARED})
+        set_target_properties(rmlui_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        set(PROJV_RMLUI_TARGET RmlUi::Core)
+        set(PROJV_VENDORED_DEPS ON)
+    endif()
+endif()
+
 # GLFW has no submodule; it is a system package on every platform ProjectV supports.
 find_package(glfw3 CONFIG QUIET)
 if(glfw3_FOUND)
@@ -445,7 +491,6 @@ target_link_libraries(projectV PRIVATE $<LINK_ONLY:Jolt::Jolt>)
 # The UI (docs/plans/ui.md): the host now; the dev layer (Dear ImGui) and the user layer (RmlUi) join it,
 # each the only code that includes its library (the `layering` test enforces it). Compiled apart so
 # those libraries' include paths reach these files and no other.
-option(PROJV_BUILD_UI "Build the UI module (ui/): the host, the dev layer and the user layer" ON)
 option(PROJV_DEV_UI_DEFAULT "The dev layer is on unless a program says otherwise (off: only --dev-ui turns it on)" ON)
 if(PROJV_BUILD_UI)
     # Dear ImGui (docking branch, external/imgui), compiled once, here: the dev layer draws with it, and
@@ -481,6 +526,31 @@ if(PROJV_BUILD_UI)
         bgfx::bgfx bgfx::bx ${PROJV_GLFW_TARGET} ${PROJV_GLM_TARGET} ${PROJV_SPDLOG_TARGET} nlohmann_json::nlohmann_json EnTT::EnTT)
     target_sources(projectV PRIVATE $<TARGET_OBJECTS:projv_ui>)
     target_compile_definitions(projectV PUBLIC PROJV_UI)
+
+    # The user layer (D5): RmlUi, compiled apart so its include paths reach src/ui/user/ and nothing else.
+    # Images for documents decode through bimg.
+    if(TARGET bgfx::bimg_decode)
+        set(PROJV_BIMG_DECODE_TARGET bgfx::bimg_decode)
+    else()
+        set(PROJV_BIMG_DECODE_TARGET bimg_decode)
+    endif()
+    add_library(projv_ui_user OBJECT
+        src/ui/user/user_layer.cpp
+        src/ui/user/render_bgfx.cpp
+    )
+    target_include_directories(projv_ui_user PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(projv_ui_user PRIVATE cxx_std_20)
+    target_compile_definitions(projv_ui_user PRIVATE ${PROJV_LOG_DEFS})
+    target_compile_options(projv_ui_user PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4>
+        ${PROJV_OPTIMISED_BUILD_FLAGS}
+    )
+    target_link_libraries(projv_ui_user PRIVATE
+        ${PROJV_RMLUI_TARGET} ${PROJV_BIMG_DECODE_TARGET} bgfx::bgfx bgfx::bimg bgfx::bx ${PROJV_GLFW_TARGET}
+        ${PROJV_GLM_TARGET} ${PROJV_SPDLOG_TARGET} nlohmann_json::nlohmann_json EnTT::EnTT)
+    target_sources(projectV PRIVATE $<TARGET_OBJECTS:projv_ui_user>)
+    target_link_libraries(projectV PRIVATE $<LINK_ONLY:${PROJV_RMLUI_TARGET}> $<LINK_ONLY:${PROJV_BIMG_DECODE_TARGET}>)
     # ui/dev.h includes imgui.h: a panel is ImGui code.
     target_include_directories(projectV PUBLIC
         $<BUILD_INTERFACE:${PROJV_IMGUI_DIR}>
@@ -500,7 +570,7 @@ endif()
 
 include(ProjectVShaders)
 include(ProjectVEngineShaders)
-projv_embed_engine_shaders(TARGET projectV SHADER_DIRS shaders/engine shaders/engine/imgui INCLUDE_DIR shaders/include)
+projv_embed_engine_shaders(TARGET projectV SHADER_DIRS shaders/engine shaders/engine/imgui shaders/engine/rmlui INCLUDE_DIR shaders/include)
 
 if(PROJV_BUILD_EXAMPLES)
     add_subdirectory(examples)

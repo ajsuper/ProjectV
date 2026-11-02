@@ -7,6 +7,7 @@
 #include "graphics/input.h"
 #include "graphics/render_instance.h"
 #include "ui/dev_layer.h"
+#include "ui/user_layer.h"
 
 namespace projv::ui {
     void Host::setLayer(Level level, std::unique_ptr<Layer> layer) {
@@ -70,6 +71,16 @@ namespace projv::ui {
 #else
         const bool devByDefault = false;
 #endif
+        host.setLayer(Level::User, std::make_unique<user::UserLayer>(app, &renderInstance, options.userReload.value_or(devByDefault)));
+        // Both layers' GPU resources go before bgfx does: ahead of a program's "shutdown", which is
+        // where a program that shuts bgfx down itself does so.
+        app.addSystem(Stage::Shutdown, "ui: shutdown", [](Application& a) {
+            if (Host* h = a.world.ctx().find<Host>()) {
+                h->setLayer(Level::Dev, nullptr);
+                h->setLayer(Level::User, nullptr);
+            }
+        }, {.before = "shutdown", .after = ""});
+
         if (options.devLayer.value_or(devByDefault || g_devUiOnCommandLine)) {
             auto devLayer = std::make_unique<dev::DevLayer>(app, &renderInstance);
             const char* shownEnv = std::getenv("PROJV_DEV_UI_SHOWN");
@@ -84,11 +95,6 @@ namespace projv::ui {
                 if (!input || !devLayer) return;
                 if (input->pressed(toggle)) devLayer->setShown(!devLayer->visible());
             }, {.before = "ui: route input", .after = "platform"});
-            // Its GPU resources go before bgfx does: ahead of a program's "shutdown", which is where
-            // a program that shuts bgfx down itself does so.
-            app.addSystem(Stage::Shutdown, "ui: shutdown", [](Application& a) {
-                if (Host* h = a.world.ctx().find<Host>()) h->setLayer(Level::Dev, nullptr);
-            }, {.before = "shutdown", .after = ""});
         }
         return host;
     }

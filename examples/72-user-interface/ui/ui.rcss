@@ -1,0 +1,10 @@
+/* This program's own look, over the shared base.rcss. Edit it while the program runs: the
+   documents reload (a dev build). */
+
+body.hud { width: 100%; height: 100%; pointer-events: none; }
+.corner { position: absolute; left: 20dp; top: 16dp; }
+.big { font-size: 28dp; font-weight: bold; }
+.hint { position: absolute; right: 20dp; bottom: 16dp; color: #c8d0da; }
+
+body.menu-screen { width: 100%; height: 100%; }
+.menu { position: absolute; left: 50%; top: 50%; width: 320dp; margin-left: -160dp; margin-top: -230dp; }

@@ -1,6 +1,6 @@
 # ui
 
-The UI: two layers over the frame, the developer's (Dear ImGui) and the player's (RmlUi), fed from
+The UI: two layers over the frame, the developer's (Dear ImGui) and the player's (RmlUi 6.3, FreeType 2.14.3), fed from
 one input stream and drawn in one order. Namespace `projv::ui`. Built with `PROJV_BUILD_UI` (on by
 default), which defines `PROJV_UI` for consumers. Plan: [ui.md](../plans/ui.md).
 
@@ -21,7 +21,8 @@ default), which defines `PROJV_UI` for consumers. Plan: [ui.md](../plans/ui.md).
 | Name | What |
 |---|---|
 | `installUi(app, renderInstance, options)` | Emplaces the `Host`, routes input each PreUpdate after `"platform"`, draws the layers as an overlay, installs the dev layer per `options`. After `graphics::installPlatform` |
-| `UiOptions` | `devLayer` (unset: on in a `PROJV_DEV_UI_DEFAULT` build, else only with `--dev-ui`), `devToggle` (F1), `devShown` (unset: `PROJV_DEV_UI_SHOWN=1`) |
+| `UiOptions` | `devLayer` (unset: on in a `PROJV_DEV_UI_DEFAULT` build, else only with `--dev-ui`), `devToggle` (F1), `devShown` (unset: `PROJV_DEV_UI_SHOWN=1`), `userReload` (unset: on with `PROJV_DEV_UI_DEFAULT`) |
+| `installUi` | Also installs the user layer (`ui/user.h`) |
 | `setCommandLine(argc, argv)`, `devUiRequested(argc, argv)` | `--dev-ui`: call `setCommandLine` from `main` |
 | `Host` | The `world.ctx()` resource. `setLayer(level, layer)`, `layer(level)`, `route(input)`, `draw(size)` |
 | `Level` | `Dev`, `User`: routing order (the dev layer is offered input first, and drawn on top) |
@@ -83,3 +84,46 @@ or not. While shown, the layer turns on bgfx's profiler (`BGFX_DEBUG_PROFILER`, 
 timestamps) and turns it off when hidden: a program that sets it itself (the `*_GPU` benchmarks) sets
 it again after. A pass's name is its shader's file name (`BGFXDependencyGraph::name`, given to
 `bgfx::setViewName` each frame it draws), numbered when one shader runs in several passes.
+
+## `ui/user.h`
+
+[`include/ui/user.h`](../../include/ui/user.h): the user layer, what the player sees. RmlUi documents
+(`.rml`, `.rcss`) beside the program; no RmlUi type in the header. Guide:
+[A HUD from a document](../guides/ui-document.md).
+
+| Name | What |
+|---|---|
+| `open(app, name, path, DocumentOptions)`, `openFromMemory(app, name, rml, ...)` | Loads a document under `name`. `DocumentOptions`: `shown` (true), `modal` (takes all input while shown) |
+| `show`, `hide`, `close`, `isOpen`, `isShown` | By name |
+| `loadFont(app, path, fallback)` | A TTF/OTF face for every document |
+| `model(app, name)` -> `Model` | A data model: `.bind(name, &value)` for `float`, `int`, `bool`, `std::string`, before opening a document that names it (`data-model`). Bound values are compared each frame and redrawn when they change; controls bound to one (`data-value`, `data-checked`) write it |
+| `UiAction` (in `projv::ui`) | The event an element's `on<event>="name arg..."` sends: `document`, `name`, `args`, `event` |
+
+```cpp
+ui::user::loadFont(app, "shared_ui/fonts/LatoLatin-Regular.ttf");
+ui::user::model(app, "hud").bind("score", &score);
+ui::user::open(app, "hud", "ui/hud.rml");
+app.events().on<ui::UiAction>([](const ui::UiAction& a) { if (a.name == "pause") pause(); });
+```
+
+| Input it takes | When |
+|---|---|
+| the mouse | over an element that takes pointer events (`pointer-events: none` on a HUD's body gives the rest to the game) |
+| the keyboard | while a text field (`input type="text"`, `textarea`) has focus |
+| both | while a `modal` document is shown |
+
+A dev build (`UiOptions::userReload`, on with `PROJV_DEV_UI_DEFAULT`) reloads a document when its
+`.rml`, or an `.rcss` beside it, changes; shown documents stay shown.
+
+## `ui/user_layer.h`
+
+[`include/ui/user_layer.h`](../../include/ui/user_layer.h): the user layer as the host holds it.
+`installUi` makes it.
+
+| Name | What |
+|---|---|
+| `UserLayer(app, renderInstance, reloadOnChange)` | An RmlUi context fed from `Input`, drawn in `USER_VIEW` through the engine's `vs_rmlui`/`rmlui` shaders: geometry, textures (PNG, TGA, JPEG through bimg), scissor, clip masks (the back buffer's stencil), transforms. `renderInstance` nullptr is headless: a recording render interface (tests) |
+| `visible()` | Whether any document is shown |
+| `drawCallsRecorded()`, `elementText(document, id)`, `elementBox(document, id, ...)` | For tests: what the headless interface drew, an element's text and border box |
+
+Layers, filters and shaders (blur, `backdrop-filter`, shadows) are U4: RmlUi draws without them.

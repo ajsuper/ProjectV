@@ -1,0 +1,25 @@
+<rml>
+<head>
+    <title>Menu</title>
+    <link type="text/rcss" href="../shared_ui/base.rcss"/>
+    <link type="text/rcss" href="ui.rcss"/>
+</head>
+<!-- The menu: buttons send UiActions (onclick="name args"); the controls write the variables they are
+     bound to (data-value, data-checked), which the program reads each frame. -->
+<body class="menu-screen" data-model="hud">
+    <div class="panel menu">
+        <h1>User interface</h1>
+        <button id="resume" onclick="resume">Resume</button>
+        <button id="click" onclick="count 1">Count a click</button>
+        <button id="quit" onclick="quit">Quit</button>
+
+        <label>Sun height</label>
+        <input id="sun" type="range" class="range" min="0.05" max="1.5" step="0.01" data-value="sunHeight"/>
+
+        <label><input id="crosshair" type="checkbox" class="checkbox" data-checked="crosshair"/>Crosshair</label>
+
+        <label>Name</label>
+        <input id="name" type="text" class="text" data-value="name"/>
+    </div>
+</body>
+</rml>

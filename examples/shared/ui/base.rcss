@@ -1,0 +1,85 @@
+/* The demos' shared style (docs/plans/ui.md, D13): what every element needs to lay out at all --
+   RmlUi has no built-in style sheet -- and a plain look for text and controls. Each program's own
+   sheet adds to it. Fonts: fonts/ beside this file (Lato, SIL OFL: fonts/LICENSE-Lato.txt). */
+
+body, div, p, h1, h2, h3, form, label, span.block { display: block; }
+h1, h2, h3, p { margin: 0; }
+
+body {
+    font-family: LatoLatin;
+    font-weight: normal;
+    font-size: 18dp;
+    color: #e8ecf0;
+}
+
+h1 { font-size: 32dp; font-weight: bold; margin-bottom: 12dp; }
+h2 { font-size: 22dp; font-weight: bold; margin-bottom: 8dp; }
+
+.panel {
+    background-color: #141a22e6;
+    border: 1dp #3a4656;
+    border-radius: 8dp;
+    padding: 18dp 20dp;
+}
+
+button {
+    display: block;
+    padding: 9dp 14dp;
+    margin: 6dp 0;
+    background-color: #2a3646;
+    border: 1dp #46566c;
+    border-radius: 5dp;
+    text-align: center;
+    cursor: pointer;
+}
+button:hover { background-color: #36475c; }
+button:active { background-color: #1f2a37; }
+
+label { margin-top: 10dp; color: #aab6c4; font-size: 15dp; }
+
+input.text {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    /* Room for a whole line: the content box (height less padding) must be at least the font's line
+       height, or the field clips descenders -- p, g, j. */
+    height: 36dp;
+    padding: 5dp 8dp;
+    margin-top: 4dp;
+    background-color: #0c1118;
+    border: 1dp #46566c;
+    border-radius: 4dp;
+}
+input.text:focus { border-color: #7aa7e0; }
+
+input.checkbox {
+    width: 20dp;
+    height: 20dp;
+    margin-right: 8dp;
+    vertical-align: middle;
+    background-color: #0c1118;
+    border: 1dp #46566c;
+    border-radius: 3dp;
+}
+input.checkbox:checked { background-color: #4f86c6; }
+
+input.range {
+    display: block;
+    width: 100%;
+    height: 20dp;
+    margin-top: 6dp;
+}
+input.range slidertrack {
+    margin-top: 8dp;
+    height: 4dp;
+    background-color: #0c1118;
+    border-radius: 2dp;
+}
+input.range sliderbar {
+    width: 16dp;
+    height: 20dp;
+    background-color: #7aa7e0;
+    border-radius: 4dp;
+}
+input.range sliderbar:hover { background-color: #9cc0ec; }
+input.range sliderarrowdec, input.range sliderarrowinc { width: 0; height: 0; }

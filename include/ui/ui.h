@@ -84,6 +84,9 @@ namespace projv::ui {
         // Whether it starts shown. Unset: shown when the environment says PROJV_DEV_UI_SHOWN=1 (for
         // captures and unattended runs, which cannot press F1).
         std::optional<bool> devShown;
+        // Whether the user layer reloads a document when its files change (D6). Unset: in a build with
+        // PROJV_DEV_UI_DEFAULT (the dev preset).
+        std::optional<bool> userReload;
     };
 
     // Whether the command line asks for the dev layer (--dev-ui).
@@ -93,8 +96,8 @@ namespace projv::ui {
     void setCommandLine(int argc, char** argv);
 
     // Emplaces the Host, routes input every PreUpdate (after the platform system, which fills Input),
-    // and draws the layers as an overlay of `renderInstance` (graphics::endFrame); installs the dev
-    // layer per `options`. Install it after graphics::installPlatform. `renderInstance` must outlive
+    // and draws the layers as an overlay of `renderInstance` (graphics::endFrame); installs the user
+    // layer (ui/user.h), and the dev layer per `options`. Install it after graphics::installPlatform. `renderInstance` must outlive
     // the application's loop.
     Host& installUi(Application& app, graphics::RenderInstance& renderInstance, UiOptions options = {});
 }

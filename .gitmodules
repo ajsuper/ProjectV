@@ -47,3 +47,9 @@
 [submodule "external/enet"]
 	path = external/enet
 	url = https://github.com/lsalzman/enet.git
+[submodule "external/RmlUi"]
+	path = external/RmlUi
+	url = https://github.com/mikke89/RmlUi.git
+[submodule "external/freetype"]
+	path = external/freetype
+	url = https://github.com/freetype/freetype.git

@@ -100,6 +100,7 @@ nav:
       - Draw a scene: guides/draw-a-scene.md
       - Write a renderer: guides/write-a-renderer.md
       - Add a dev panel: guides/dev-panel.md
+      - A HUD from a document: guides/ui-document.md
       - Logging: guides/logging.md
       - Testing: guides/testing.md
   - Reference:
@@ -137,6 +138,7 @@ nav:
       - 50 terrain-generator: examples/50-terrain-generator/README.md
       - 60 scene-editor: examples/60-scene-editor/README.md
       - 70 multiplayer: examples/70-multiplayer/README.md
+      - 72 user-interface: examples/72-user-interface/README.md
       - 80 voxel-mayhem-demo: examples/80-voxel-mayhem-demo/README.md
       - 85 explosion-demo: examples/85-explosion-demo/README.md
       - 90 party-demo: examples/90-party-demo/README.md

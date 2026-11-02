@@ -14,6 +14,7 @@
 #       INCLUDE_DIRS include                            # optional
 #       LIBRARIES    ...                                # optional extra deps
 #       RENDERER     ../shared/voxelRenderer            # optional: renderer folder(s) several examples share
+#       SHARED_UI                                       # optional: examples/shared/ui staged as shared_ui/
 #   )
 #
 # A shared RENDERER folder holds render.json, resources.json, shaders/ and, if it has any, include/
@@ -26,10 +27,33 @@
 # it in resources.json. Running the example from its own build directory is what makes those
 # paths resolve.
 
+# Copies `source` to `destination` for example `name`. With CMake 3.26+ on every build of it, changed
+# files only, so an edited document, style sheet or renderer JSON reaches the build folder without
+# touching a .cpp; before 3.26, after each link, as it always was. A file edited in the build folder
+# (a UI document being reloaded live) is overwritten by the next build when its source differs: copy
+# back what you keep.
+function(projv_stage_directory name source destination)
+    get_filename_component(leaf "${destination}" NAME)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.26)
+        add_custom_target(${name}_stage_${leaf} ALL
+            COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different "${source}" "${destination}"
+            COMMENT "Staging ${leaf} for ${name}"
+            VERBATIM
+        )
+        add_dependencies(${name} ${name}_stage_${leaf})
+    else()
+        add_custom_command(TARGET ${name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${source}" "${destination}"
+            COMMENT "Staging ${leaf} for ${name}"
+            VERBATIM
+        )
+    endif()
+endfunction()
+
 function(projv_add_example name)
     set(multiValueArgs SOURCES SHADERS SHADER_INCLUDE_DIRS ASSET_DIRS ASSET_FILES
                        INCLUDE_DIRS LIBRARIES RENDERER)
-    cmake_parse_arguments(ARG "" "" "${multiValueArgs}" ${ARGN})
+    cmake_parse_arguments(ARG "SHARED_UI" "" "${multiValueArgs}" ${ARGN})
 
     if(NOT ARG_SOURCES)
         message(FATAL_ERROR "projv_add_example(${name}): SOURCES is required")
@@ -92,14 +116,14 @@ function(projv_add_example name)
                 "projv_add_example(${name}): ASSET_DIRS contains \"${assetDir}\", which is also "
                 "the target name -- staging it would collide with the executable. Rename one.")
         endif()
-        add_custom_command(TARGET ${name} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "${CMAKE_CURRENT_SOURCE_DIR}/${assetDir}"
-                    "${exampleBinaryDir}/${assetDir}"
-            COMMENT "Staging ${assetDir} for ${name}"
-            VERBATIM
-        )
+        projv_stage_directory(${name} "${CMAKE_CURRENT_SOURCE_DIR}/${assetDir}" "${exampleBinaryDir}/${assetDir}")
     endforeach()
+
+    # The demos' shared UI (docs/plans/ui.md, D13): a style sheet and fonts, beside the program's own
+    # documents, which name it as ../shared_ui/ from their ui/ folder.
+    if(ARG_SHARED_UI)
+        projv_stage_directory(${name} "${PROJECT_SOURCE_DIR}/examples/shared/ui" "${exampleBinaryDir}/shared_ui")
+    endif()
 
     # Each shared renderer is compiled once, by a target of its own, and staged beside every example
     # that names it. Its shaders see its own include/ and the include/ beside it (examples/shared/

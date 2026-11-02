@@ -18,6 +18,9 @@ add_subdirectory(30-renderers)
 add_subdirectory(40-advanced-renderer)
 add_subdirectory(50-terrain-generator)
 add_subdirectory(70-multiplayer)
+if(PROJV_BUILD_UI)
+    add_subdirectory(72-user-interface)
+endif()
 
 # Demos.
 add_subdirectory(80-voxel-mayhem-demo)

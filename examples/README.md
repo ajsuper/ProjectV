@@ -44,6 +44,7 @@ cd build/examples/hello_voxel && ./hello_voxel
 | **50** | [terrain-generator](50-terrain-generator/) | Procedural generation and streaming: chunks built on worker threads and uploaded while you fly. | — |
 | **60** | [scene-editor](60-scene-editor/) | A complete tool. ImGui docking, the scene living inside a panel, tools, undo, and Lua-scripted brushes. | ImGui + Lua submodules |
 | **70** | [multiplayer](70-multiplayer/) | A dedicated server and clients as separate programs over UDP: a headless server simulating every player, clients that join, see each other and walk. `selftest.sh` runs all three headless. | — |
+| **72** | [user-interface](72-user-interface/) | The player's UI: RmlUi documents beside the program -- a HUD with bound values, a menu whose buttons send actions and whose slider, checkbox and text field write the program's variables. Edit them while it runs. | — |
 
 ## Demos
 

@@ -38,6 +38,7 @@ cd build/examples/advanced_renderer && ./advanced_renderer
 cd build/examples/terrain_generator && ./terrain_generator
 cd build/examples/scene_editor      && ./scene_editor
 cd build/examples/mp_server         && ./mp_server          # then ./mp_client in build/examples/mp_client (selftest.sh: all headless)
+cd build/examples/user_interface    && ./user_interface     # the player's UI (RmlUi); UI_CAPTURE=/tmp/ui saves a frame
 # Demos (_demo: many features at once, the full renderers)
 cd build/examples/voxel_mayhem_demo && ./voxel_mayhem_demo  # MAYHEM_SELFTEST=1 checks it; MAYHEM_BENCH=cannon times a break
 cd build/examples/explosion_demo    && ./explosion_demo --map city|house|forest --graphics 1|2|3
@@ -46,7 +47,7 @@ cd build/examples/playground_demo   && ./playground_demo    # a sandbox to break
 ```
 
 Examples live in `examples/`, numbered in reading order (`00-hello-voxel` .. `95-playground-demo`).
-Two kinds: **feature examples** (`00`-`70`) teach one part of the engine and draw with
+Two kinds: **feature examples** (`00`-`72`) teach one part of the engine and draw with
 the engine's basic renderer (one pass: albedo under a fixed sun; `graphics::installBasicRenderer`, `graphics/basic_renderer.h`), unless
 rendering is what they teach (`30-renderers`, `40-advanced-renderer`, the scene editor's viewport), or the
 look is the point (`50-terrain-generator` draws with the gallery's restir-pt, its uniforms in
@@ -217,7 +218,7 @@ Full version: `CONTRIBUTING.md`.
 | `include/` `src/` | The engine. `core/`, `graphics/`, `utils/`, `data_structures/`, `runtime/`. |
 | `shaders/` | The engine's shaders. `include/`: the shader library, on every shader's include path (`pjv_engine.sc` declares the engine-owned uniforms). `engine/`: shaders compiled into the library (`graphics::loadEngineShader("vs_quad")`). Plan: `docs/plans/shader-library.md`. |
 | `cmake/` | `ProjectVConfig.cmake.in`, plus the `projv_compile_shaders()` and `projv_add_example()` helpers. |
-| `examples/` | Twelve feature examples and four `_demo`s, numbered in reading order; `shared/` holds their renderers. See `examples/README.md`. |
+| `examples/` | Thirteen feature examples and four `_demo`s, numbered in reading order; `shared/` holds their renderers. See `examples/README.md`. |
 | `tests/unit/` | The automated suite (doctest, ctest). CPU only. |
 | `tests/manual/` | Harnesses that need a display. Not examples. See `tests/README.md`. |
 | `docs/` | The documentation, plain Markdown. `getting-started/`, `concepts/` (how it works), `guides/` (one task each), `reference/` (a page per module, plus `reference/formats/`: `.data`, compose.json, entities.json, physics materials, renderer folders, tile table, tree64), `contributing/`. |

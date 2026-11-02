@@ -1,0 +1,15 @@
+<rml>
+<head>
+    <title>HUD</title>
+    <link type="text/rcss" href="../shared_ui/base.rcss"/>
+    <link type="text/rcss" href="ui.rcss"/>
+</head>
+<!-- The HUD: values the program binds (data-model="hud"), and no pointer events, so the game keeps the mouse. -->
+<body class="hud" data-model="hud">
+    <div class="corner">
+        <p class="big">{{fps}} fps</p>
+        <p>Hello, {{name}}. Clicks: {{clicks}}</p>
+    </div>
+    <p class="hint" data-if="!menuOpen">M: menu</p>
+</body>
+</rml>

@@ -1,6 +1,6 @@
 # UI: a developer layer and a user layer
 
-Status: **in progress**: approved 2026-11-01 (RmlUi, D5; one shared demo style sheet, D13); U0 and U1 built 2026-11-01, U2 2026-11-02, U3 next. Follows [shader-library.md](shader-library.md): the
+Status: **in progress**: approved 2026-11-01 (RmlUi, D5; one shared demo style sheet, D13); U0 and U1 built 2026-11-01, U2 and U3 2026-11-02, U4 next. Follows [shader-library.md](shader-library.md): the
 UI's shaders are engine shaders (its S0) and its blur is the library's filters (its S1).
 
 **Mechanism, not policy** (as in the shader library): the engine provides the two layers, the render
@@ -346,6 +346,50 @@ colour in the graph, and the GPU by pass.
 - Checked in captures: the gallery's fast renderer (Renderer: passes, uniforms, the bound settings),
   the sandbox (Physics, Entities). Network checked live by the user: the party demo hosting with
   bots, and a second window joined to it as a client.
+
+**U3** (2026-11-02).
+- **Dependencies (D5, D8).** RmlUi 6.3 and FreeType 2.14.3 as submodules (`external/RmlUi`,
+  `external/freetype`), found first as packages (vcpkg's `rmlui`, `freetype`), else built static:
+  FreeType without its optional codecs, aliased as `Freetype::Freetype` for RmlUi. `projv_ui_user`, an
+  object library apart from `projv_ui`, is the only code with RmlUi's include paths.
+- **The render interface (D5)**, `src/ui/user/render_bgfx.cpp`: geometry in static buffers, textures
+  (generated, and PNG/TGA/JPEG files through bimg, premultiplied on load), scissor, clip masks in the
+  back buffer's stencil (cleared at the view's start; Set and SetInverse rewrite it with a full-screen
+  draw, Intersect increments it), transforms. One engine shader pair (`vs_rmlui`, `rmlui`), premultiplied
+  blend, RGB only. Without shaders (no bgfx: the `installUi` test) it makes nothing on the GPU and
+  documents still work through the recording interface. Layers, filters and shaders are U4.
+- **The system interface**: time (unscaled), RmlUi's log through `core/log.h`, the clipboard from GLFW.
+- **Input (D4)**: from `Input` -- the cursor (window pixels, which are the back buffer's: the dev
+  layer's U1 lesson), buttons, wheel, keys with modifiers, typed text. It takes the mouse while RmlUi
+  says it is interacting (`IsMouseInteracting`: over an element that takes pointer events), the keyboard
+  while a text field has focus, and both while a `modal` document is shown.
+- **Values in (D7)**: `ui::user::model(app, name).bind(...)` for `float`, `int`, `bool`, `std::string`.
+  The layer compares each bound value every frame and dirties what changed, so a program never marks
+  anything dirty. Controls bound to one write it.
+- **Actions out (D7), where it differs:** an element's `on<event>="name args"`, not
+  `data-event-click="name"`. RmlUi's data events call callbacks registered by name in a model, so every
+  action would need registering first; its inline listeners reach one engine-wide instancer, which
+  sends `UiAction{document, name, args, event}` for any name.
+- **Hot reload (D6)**: every 30 frames, in a dev build (`UiOptions::userReload`): a document whose
+  `.rml` or a sibling `.rcss` changed is reloaded (style sheet and template caches cleared), shown as it was.
+- **D13**: `examples/shared/ui/` holds `base.rcss` (a reset and plain controls; RmlUi has no built-in
+  style) and Lato (SIL OFL, its licence beside it). `projv_add_example(... SHARED_UI)` stages it as
+  `shared_ui/`.
+- **The example, `72-user-interface`**, started here rather than in U4: a HUD with bound values, a
+  menu with buttons, a slider, a checkbox and a text field. Plain until U4 makes it polished.
+- Tests (`ui:*`, 8 new, headless): shown and hidden; a bound value shown and followed; an `onclick`'s
+  UiAction; a checkbox writing its bound bool; the mouse over an element and not through
+  `pointer-events: none`; modal and text-field capture; a reload on a file change; the calls failing
+  without the UI.
+- Checked in a capture, and live by the user: the menu, its buttons, slider, checkbox and name field,
+  the HUD's bound values. The user's one find, descenders clipped in the text field, was base.rcss (its
+  content box shorter than Lato's line) -- and behind it, that an example's assets were staged only on
+  a relink, so the fixed style never reached the build folder. `projv_add_example` now stages on every
+  build, changed files only (CMake 3.26+).
+- Not in the UI's scope, noted by the user: the basic renderer casts no sun shadows (one primary ray
+  by design, shader-library D6).
+- Not done: installing RmlUi and FreeType with the vendored dependencies (`PROJV_INSTALL` with the
+  submodules) is untested, as is the vcpkg preset with the `rmlui` and `freetype` ports.
 
 ## Open questions
 

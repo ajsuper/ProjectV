@@ -6,7 +6,7 @@ Two layers over the frame, drawn by the engine rather than by each program
 | Layer | Who sees it | For | Library |
 |---|---|---|---|
 | **Dev** | whoever runs a dev build (F1), or a release build with `--dev-ui` | frame and system timings, the log, a program's panels, tools | Dear ImGui |
-| **User** | the player | HUD, menus, settings | RmlUi (not built yet: ui.md U3) |
+| **User** | the player | HUD, menus, settings: documents beside the program | RmlUi |
 
 ## One input stream, one order
 
@@ -28,6 +28,18 @@ Two layers over the frame, drawn by the engine rather than by each program
 - **Drawing.** The layers draw after the renderer's passes and before the frame is submitted, through
   `RenderInstance::addOverlay`, in bgfx views above any renderer's. A program that submits its own
   frame ends it with `graphics::endFrame` instead of `bgfx::frame` so they still draw.
+
+## Values in, actions out
+
+The user layer never calls the game. Values go in through a **data model** -- the program binds its
+own variables by name, and the layer redraws what shows one when it changes -- and actions come out
+as **events**: an element's `onclick="buy sword 2"` is a `UiAction{document, "buy", {"sword", "2"}}`,
+handled in Update. A control bound to a value (a slider, a checkbox) writes the program's variable.
+
+```text
+ program variables --bind--> data model --{{name}}--> document
+ document --onclick="name args"--> UiAction event --> Update
+```
 
 ## Mechanism, not policy
 

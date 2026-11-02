@@ -80,6 +80,11 @@ sites out, so a consumer built with a different set behaves differently, not jus
 Examples land in `build/examples/<name>/` with their assets staged beside them. **Run each from its
 own directory**: `resources.json` names shader paths relative to the working directory.
 
+Assets are staged on every build of the example, changed files only (CMake 3.26+; older CMake copies
+them after each link, so an asset-only edit needs a relink). A file edited in the build folder -- a UI
+document being reloaded live -- is overwritten by the next build if its source differs: copy back what
+you keep.
+
 To be independent of the working directory, build asset paths from
 `projv::core::executableDirectory()` ([`core/paths.h`](../../include/core/paths.h)):
 
