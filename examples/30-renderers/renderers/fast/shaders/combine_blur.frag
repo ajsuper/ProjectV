@@ -41,6 +41,7 @@ SAMPLER2D(gAmbient, 3);
 SAMPLER2D(aoRaw,    4);
 
 uniform vec4 windowRes;
+uniform vec4 fastSettings;   // w: the blur on (1) or off (0), from the gallery's panel; xyz are ssao.frag's
 
 #define BLUR_RADIUS 2      // 5x5 taps.
 #define SIGMA_N     16.0   // Normal edge-stop sharpness.
@@ -78,7 +79,7 @@ void main() {
     vec4  sky0   = texture2D(aoRaw, uv);   // rgb = accumulated AO, a = temporal age
 
     vec3 skyLight;
-    if (sky0.a >= CONVERGED_AGE) {
+    if (sky0.a >= CONVERGED_AGE || fastSettings.w < 0.5) {   // off: the raw SSAO, to see what the blur does
         // Converged: the temporal accumulator has already driven this pixel noise-free.
         // Use it directly and skip the whole bilateral kernel.
         skyLight = sky0.rgb;

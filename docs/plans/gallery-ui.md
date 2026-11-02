@@ -1,6 +1,6 @@
 # The renderer gallery, driven from the UI
 
-Status: **in progress**: approved 2026-11-01 (the four questions below, answered by the user); G1 built 2026-11-01, G2 next. Builds on
+Status: **built** 2026-11-01 (G1, G2); approved the same day (the four questions below, answered by the user). Builds on
 [ui.md](ui.md) U1 (the dev layer).
 
 Goal: `examples/30-renderers` shows three renderers -- **restir-pt**, **pt-reference** (the ground
@@ -82,6 +82,31 @@ click or a wheel over the panel never moves the camera or the sun.
   - A run switching restir-pt -> pt-reference -> fast -> restir-pt -> fast built each renderer once,
     and its last frame is bit-identical to a run that only drew fast.
 - restir-pt's keys still work (now through `Input`) until G2 replaces them with the panel.
+
+**G2** (2026-11-01).
+- Each renderer's settings, under "<renderer> settings" in the panel:
+  - **restir-pt**: `restir_pt::Settings`, edited in place, replacing the gallery's dozen globals and
+    its once-read `static const` copies of the environment.
+    - The view; Final render and its parts (post, fog, aerial haze, shafts, SSAO and far-field SSAO).
+    - Lighting: path bounces 1-4, soft shadow, blurred normals and their width.
+    - ReSTIR: reuse and its temporal, spatial and visibility parts; path validation.
+    - Denoise and reconstruction: a-trous, accumulation, the reconstruction, the 16-phase jitter.
+    - `readRestirEnvironment()` seeds it once from the `RESTIR_*` and `GALLERY_BYPASS` variables, so
+      unattended runs start where they did.
+  - **pt-reference**: bounces 1-6 (a change restarts accumulation), frames accumulated, Restart.
+  - **fast**: AO radius, intensity and power, and its denoise blur. These were `#define`s in
+    `ssao.frag` and `combine_blur.frag`; they are now one uniform, `fastSettings`, with the old values
+    as defaults.
+- The keys are gone (D3): G, J, Q, P, V, B, E, K, N, M, O, L, U, I. The camera, H, C and F1 stay.
+- Engine fix found on the way: `Application::systemSeconds` reported the current, unfinished frame, so
+  the Frame panel (drawn in Render) always showed 0 for Render's own systems. It now reports the last
+  completed frame.
+- Checked:
+  - At default settings, the captures still match the G1 baseline: pt-reference and restir-pt
+    bit-identical, fast within 1/255 (its constants became uniforms).
+  - A capture with `PROJV_DEV_UI_SHOWN=1` shows the panel with every section.
+  - `ctest --preset dev` passes.
+  - Not yet: driving each renderer's settings by hand (the user's).
 
 ## Open questions
 

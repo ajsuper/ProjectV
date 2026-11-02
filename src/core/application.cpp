@@ -75,7 +75,7 @@ namespace projv {
 
     std::vector<double> Application::systemSeconds(Stage stage) const {
         std::vector<double> seconds;
-        for (const NamedSystem& system : stages[static_cast<size_t>(stage)]) seconds.push_back(system.seconds);
+        for (const NamedSystem& system : stages[static_cast<size_t>(stage)]) seconds.push_back(system.lastSeconds);
         return seconds;
     }
 
@@ -104,7 +104,10 @@ namespace projv {
     void Application::runFrame() {
         int fixedSteps = timeResource->advance(clock());
         for (auto& systems : stages)
-            for (NamedSystem& system : systems) system.seconds = 0.0;
+            for (NamedSystem& system : systems) {
+                system.lastSeconds = system.seconds;
+                system.seconds = 0.0;
+            }
 
         runStage(Stage::PreUpdate);
         for (int step = 0; step < fixedSteps; step++) {

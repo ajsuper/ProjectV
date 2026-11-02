@@ -88,13 +88,14 @@ their history), and the resolve keeps 8 frames. Still drawn solid.
 
 ## Final render, and light shafts
 
-**P switches between the final render and the raw ReSTIR PT output.** Off, the image is what the paths and
-the sun light, each frame alone: no post (vignette, exposure, grade, depth of field), none of what is laid
-over the light -- the distance fog (O), the light shafts (L), the SSAO -- and no denoiser: no a-trous, no GI
-accumulation, no image history. The reuse stays (J turns it off too, for one fresh path a GI pixel). On, those keys toggle each part. U, the soft sun
-shadow, is lighting and stays on its own key.
+**"final render" in the panel switches between the final render and the raw ReSTIR PT output.** Off, the
+image is what the paths and the sun light, each frame alone: no post (vignette, exposure, grade, depth of
+field), none of what is laid over the light -- the distance fog, the light shafts, the SSAO -- and no
+denoiser: no a-trous, no GI accumulation, no image history. The reuse stays ("reuse" turns it off too, for
+one fresh path a GI pixel). On, the panel toggles each part. The soft sun shadow is lighting, and stays
+under Lighting.
 
-**Light shafts** (`shafts.frag`, GI resolution; L, off by default -- subtle except looking into the sun): the sun's light scattered towards the camera by the
+**Light shafts** (`shafts.frag`, GI resolution; off by default -- subtle except looking into the sun): the sun's light scattered towards the camera by the
 air, in world space, so a shaft comes down through a skylight whether or not the sun is on screen. One
 coarse shadow ray per GI pixel per frame, from a point on its view ray drawn from the air's falloff
 (`exp(-s / 48 finest voxels)`: open sunlit air is a light haze, not glare), so the estimate's only noise is
@@ -243,22 +244,25 @@ width at that distance (`restirSameSurface`, the denoiser's edge-stopping), and 
 camera's history unconditionally — as restir did; on Lee Chemicals that took the shimmer from 23% of
 pixels changing between still frames to none.
 
-## Keys
+## Settings
 
-| Key | |
+In the gallery's panel (F1), under "restir-pt settings":
+
+| Setting | |
 |---|---|
-| **G** | The image / indirect light / direct light / ambient occlusion / indirect diffuse / indirect specular / light shafts |
-| **J** | ReSTIR reuse on/off: off is each GI pixel's one fresh path, denoised — the A/B for what reuse buys |
-| **Q** | The reconstruction bypassed: the render resolution point-sampled |
-| **P** | The final render / the raw ReSTIR PT output: the post (V, B, E, K), the fog (O), the light shafts (L), the SSAO, and every denoiser |
-| **U** | The soft sun shadow |
-| **I** | The bevelled normals (`normal_blur`); `RESTIR_NORMAL_BLUR=w` their width, in voxel edges |
-| **C** | Print the camera's pose as the `--look` (and `GALLERY_SUN`) that puts it back, for `--capture` |
+| **view** | The image / indirect light / direct light / ambient occlusion / indirect diffuse / indirect specular / light shafts |
+| **Final render** | The final render / the raw ReSTIR PT output; under it the post (vignette, grade, auto-exposure, depth of field, bloom, motion blur), the fog, the aerial haze, the light shafts, the SSAO and its far-field scale |
+| **Lighting** | Path bounces (1-4), the soft sun shadow, the bevelled normals (`normal_blur`) and their width, in voxel edges |
+| **ReSTIR** | Reuse on/off -- off is each GI pixel's one fresh path, denoised, the A/B for what reuse buys -- and its temporal, spatial and visibility parts; path validation |
+| **Denoise and reconstruction** | The a-trous; accumulation (GI and image history); the reconstruction (off: the render resolution point-sampled); the 16-phase jitter |
+
+C prints the camera's pose as the `--look` (and `GALLERY_SUN`) that puts it back, for `--capture`. The
+`RESTIR_*` variables below set the starting values.
 
 For measuring: `GALLERY_STEP_AT=n` sidesteps the camera at frame n (what it uncovers), `RESTIR_RAW=1`
 shows each frame's estimate alone (no GI accumulation, no image history), `RESTIR_TEMPORAL=0`,
 `RESTIR_SPATIAL=0` and `RESTIR_VISIBILITY=0` turn off one part of the reuse. `RESTIR_JITTER=0` goes back to the four window-pixel
-centres instead of the TAA's Halton jitter; `GALLERY_BYPASS=1` starts with the reconstruction bypassed (Q).
+centres instead of the TAA's Halton jitter; `GALLERY_BYPASS=1` starts with the reconstruction bypassed.
 
 For `--capture`: `RESTIR_VIEW=n`, and `RESTIR_POST=0` (the raw ReSTIR PT output), `RESTIR_FOG=0`, `RESTIR_SHAFTS=0`, `RESTIR_SOFT=0`, `RESTIR_SSAO=0`,
 `RESTIR_REUSE=0`, `RESTIR_VALIDATE=0`, `RESTIR_ATROUS=0` each start with that part off; `RESTIR_UNTOLD=1`

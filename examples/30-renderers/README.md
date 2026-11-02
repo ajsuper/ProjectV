@@ -31,9 +31,9 @@ keeps its history ([plan](../../docs/plans/gallery-ui.md)).
 
 | Renderer | Lighting | Noise strategy | Notes |
 |---|---|---|---|
-| [restir-pt](renderers/restir-pt/) | two bounces through the materials, ReSTIR PT at 1/16 of the pixels | path reuse (reconnect / replay) + diffuse and specular denoised apart; ½-res G-buffer reconstructed, then accumulated | G views, J reuse, Q reconstruction, P final render / raw ReSTIR output, no denoising (V vignette, B grade, E auto-exposure, K depth of field, O fog, L sun shafts, SSAO), U soft sun shadow. `--restir-gi 2`: a quarter of the pixels. |
-| [pt-reference](renderers/pt-reference/) | two-bounce path trace through the materials | accumulate; hard reset on camera or sun move | The ground truth: exact, slow, converges while parked. What the others are measured against. |
-| [fast](renderers/fast/) | none — direct + screen-space AO | deterministic; TAA for AA only | Cheapest. Nothing to converge because nothing is random. |
+| [restir-pt](renderers/restir-pt/) | two bounces through the materials, ReSTIR PT at 1/16 of the pixels | path reuse (reconnect / replay) + diffuse and specular denoised apart; ½-res G-buffer reconstructed, then accumulated | The default. Panel: the view, the final render or the raw output, post, fog, shafts, SSAO, bounces, reuse and its parts, denoise, reconstruction. `--restir-gi 2`: a quarter of the pixels. |
+| [pt-reference](renderers/pt-reference/) | two-bounce path trace through the materials | accumulate; hard reset on camera or sun move | The ground truth: exact, slow, converges while parked. What the others are measured against. Panel: bounces (1-6), restart, frames accumulated. |
+| [fast](renderers/fast/) | none — direct + screen-space AO | deterministic; TAA for AA only | Cheapest. Nothing to converge because nothing is random. Panel: AO radius, intensity and power, the AO's denoise blur. |
 
 The gallery used to carry more: `reconstruction` (half-resolution tracing rebuilt from voxel face
 identity; restir-pt's reconstruction is its descendant) and the demos' `voxel` renderer, removed from
@@ -75,8 +75,10 @@ cd build/examples/renderer_gallery
 --capture <prefix>   save frames 300-302 as <prefix>-<frame>.tga, then exit
 ```
 
-For measuring: `GALLERY_CAPTURE_AT=4,8,16,300` captures those frames instead, and
-`GALLERY_SUN_STEP_AT=n` lowers the sun ~14° at frame n (how fast an image follows a change of light).
+For measuring: `GALLERY_CAPTURE_AT=4,8,16,300` captures those frames instead,
+`GALLERY_SUN_STEP_AT=n` lowers the sun ~14° at frame n (how fast an image follows a change of light), and
+`GALLERY_SWITCH_AT=120:pt-reference,240:fast` switches renderer at those frames, as the panel does. An
+unattended run hides the panel (`PROJV_DEV_UI_SHOWN=1` shows it, to capture it).
 
 Selection is a flag rather than a prompt so the gallery can be scripted. A screenshot matrix or a
 benchmark across all of them is a shell loop:
@@ -93,8 +95,11 @@ done
 | `A` / `D` | Strafe left / right |
 | `R` / `F` | Move up / down |
 | `Shift` | Move four times as fast (the base speed crosses the scene in about ten seconds, at most 80 voxels a second) |
-| Mouse | Look around (cursor is captured; `Esc` releases it, left-click re-captures) |
-| Scroll wheel | Raise / lower the sun |
+| Mouse | Look around while the cursor is captured: a click on the scene captures it, `Esc` frees it for the panel |
+| Scroll wheel | Raise / lower the sun (also the panel's slider) |
+| `H` | Re-frame on the scene |
+| `C` | Print the camera's pose as the `--look` and `GALLERY_SUN` that put it back |
+| `F1` | Hide / show the panel: the renderer, its settings, the sun |
 
 When the camera is stationary the accumulating renderers refine each frame. Movement, or a sun
 change, resets accumulation in `pt-reference` and shortens the history in the reprojecting ones.

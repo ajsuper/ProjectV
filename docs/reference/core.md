@@ -21,7 +21,7 @@ the loop.
 | `Stage` | `Startup`, `PreUpdate`, `FixedUpdate`, `Update`, `PostUpdate`, `Render`, `Shutdown` |
 | `System` | `std::function<void(Application&)>` |
 | `SystemOrder` | `{before, after}`: order a system relative to others by name |
-| `Application` | `world`, `addSystem`, `run`, `runFrame`/`runStartup`/`runShutdown`, `time()`, `events()`, `clock`, `closeRequested`, `closeOnRequest`, `frameCount`, `systemNames`, `systemSeconds` (each system's run time last frame: diagnostics only) |
+| `Application` | `world`, `addSystem`, `run`, `runFrame`/`runStartup`/`runShutdown`, `time()`, `events()`, `clock`, `closeRequested`, `closeOnRequest`, `frameCount`, `systemNames`, `systemSeconds` (each system's run time in the last completed frame: diagnostics only) |
 | `CloseRequested`, `WindowResized` | Events the platform sends |
 | `stageName(Stage)` | The stage's name, for logs |
 

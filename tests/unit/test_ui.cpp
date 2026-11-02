@@ -271,13 +271,15 @@ TEST_CASE("ui: --dev-ui on the command line asks for the dev layer") {
     CHECK(projv::ui::devUiRequested(3, with));
 }
 
-TEST_CASE("application: each system's run time is reported for the last frame") {
+TEST_CASE("application: each system's run time is reported for the last completed frame") {
     projv::Application app;
     app.addSystem(projv::Stage::Update, "quick", [](projv::Application&) {});
     app.addSystem(projv::Stage::Update, "slow", [](projv::Application&) {
         std::this_thread::sleep_for(std::chrono::milliseconds(3));
     });
     app.runStartup();
+    app.runFrame();
+    CHECK(app.systemSeconds(projv::Stage::Update)[1] == 0.0);   // the frame is not done until the next begins
     app.runFrame();
     std::vector<double> seconds = app.systemSeconds(projv::Stage::Update);
     REQUIRE(seconds.size() == 2);

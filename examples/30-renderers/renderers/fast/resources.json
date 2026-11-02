@@ -15,6 +15,10 @@
         {
             "name": "texelSize",
             "type": "vec4"
+        },
+        {
+            "name": "fastSettings",
+            "type": "vec4"
         }
     ],
     "shaders": [

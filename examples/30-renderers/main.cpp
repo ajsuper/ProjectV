@@ -154,17 +154,28 @@ static float finestVoxel(const projv::World& world) {
 }
 
 // The reference path tracer: the common uniforms, and its settings -- the loop's bound (a path ray and
-// a shadow ray per vertex), the surface offset, and the bounces (restir-pt's path length).
-static constexpr int PATH_BOUNCES = 2;   // restir's: cheap; a third bounce cost half again for little light
+// a shadow ray per vertex), the surface offset, and the bounces. Two by default: restir-pt's path length,
+// so the two compare; the panel goes to six.
+static int g_referenceBounces = restir_pt::PATH_BOUNCES;
 static void uploadReferenceUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
     uploadCommonUniforms(renderer, ctx);
-    projv::core::vec4 settings{float(2 * (PATH_BOUNCES + 1)), finestVoxel(*ctx.world) * 0.05f, float(PATH_BOUNCES), 0.0f};
+    projv::core::vec4 settings{float(2 * (g_referenceBounces + 1)), finestVoxel(*ctx.world) * 0.05f, float(g_referenceBounces), 0.0f};
     projv::graphics::setUniformToValue(renderer, "ptSettings", settings);
 }
 
-// The fast renderer. Its TAA reprojects by last frame's camera, which the engine keeps (pjvPrevView*).
+// The fast renderer. Its TAA reprojects by last frame's camera, which the engine keeps (pjvPrevView*). Its
+// settings are its SSAO's (ssao.frag) and whether combine_blur.frag denoises it.
+struct FastSettings {
+    float aoRadius = 4.0f;      // world units an occluder may sit from the point
+    float aoIntensity = 1.0f;   // how much of the occlusion is applied
+    float aoPower = 2.0f;       // how hard its response bends
+    bool  blur = true;          // the bilateral denoise of the AO
+};
+static FastSettings g_fast;
 static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
     uploadCommonUniforms(renderer, ctx);
+    projv::core::vec4 settings{g_fast.aoRadius, g_fast.aoIntensity, g_fast.aoPower, g_fast.blur ? 1.0f : 0.0f};
+    projv::graphics::setUniformToValue(renderer, "fastSettings", settings);
 }
 
 // The restir-pt renderer's switches: G cycles what it shows (the image, the indirect light alone, the
@@ -172,102 +183,67 @@ static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRendere
 // ReSTIR's reuse off -- each GI pixel's one fresh path, denoised -- for the A/B, and Q bypasses the
 // reconstruction, as for the reconstruction renderer.
 // The post (display.frag): P turns it all off and on, V the vignette, B the grade, E the auto-exposure.
-static int  g_restirView = 0;
-static bool g_restirBypass = false;   // the reconstruction bypassed: the render resolution point-sampled
-static bool g_restirReuse = true;
-// K the depth of field. P is the final render as a whole: off, the raw ReSTIR PT output -- no post, none of
-// what is laid over the light (O the distance fog, L the light shafts, the SSAO), and no denoiser: each
-// frame's estimate alone. The reuse stays (J): it is what ReSTIR is. U, the
-// sun's soft shadow, is the lighting's, not the final render's.
-struct RestirPost { bool on = true, vignette = true, grade = true, exposure = true, dof = true, bloom = true, motionBlur = true; };
-static RestirPost g_restirPost;
-static bool g_restirFog = true;
-static bool g_restirShafts = true;   // L, part of the final render (P)
-static bool g_restirSoftShadow = true;
-static bool g_restirAir = true;      // RESTIR_AIR=0: no aerial haze (nor its shafts), for comparing
-static bool g_restirFarAO = true;    // RESTIR_FAR_AO=0: no far-field SSAO scale, for comparing
-static bool g_restirSoftNormals = true;   // I: the blurred normals (restir_pt::NORMAL_BLUR); RESTIR_NORMAL_BLUR=w its width
+// restir-pt's settings: restir_pt::Settings (examples/shared/restir_pt.h, where its uniforms are worked
+// out for every program that draws with it), changed from the Gallery panel. Their starting values come
+// from the environment, for unattended runs (readRestirEnvironment).
+static restir_pt::Settings g_restir;
+static bool  g_restirSoftNormals = true;               // the blurred normals; g_restirNormalBlur their width
 static float g_restirNormalBlur = restir_pt::NORMAL_BLUR;
-// The constants are restir_pt's (examples/shared/restir_pt.h), where its uniforms are worked out for
-// every program that draws with it.
-static constexpr float RESTIR_SSAO = restir_pt::SSAO;
-static constexpr float RESTIR_VALIDATION = restir_pt::VALIDATION;
-static constexpr int RESTIR_VIEWS = restir_pt::VIEWS;
+static bool  g_restirUntold = false;                   // RESTIR_UNTOLD=1: see readRestirEnvironment
 static float g_sceneRadius = 100.0f;                  // frameScene's, for the fog's length
 static float g_sceneGround = 0.0f;                    // ...and the scene's lowest point, for the fog's height
 static float g_sceneHeight = 0.0f;                    // ...and its height, for the aerial haze's
 static int  g_restirStride = 4;   // --restir-gi: GI for one window pixel in stride x stride (4 or 2)
 static constexpr float RESTIR_RENDER_SCALE = restir_pt::RENDER_SCALE;   // its G-buffer, each way
 
-// ReSTIR GI at a sixteenth (or a quarter) of the window's pixels, a G-buffer at half resolution each way
-// rebuilt to the window by the voxel renderer's reconstruction, then a temporal resolve.
-static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
-    // The uniforms are restir_pt::upload's, from the gallery's switches (its keys, and these environment
-    // variables for unattended captures and measuring).
-    // RESTIR_VIEW picks the starting view; RESTIR_POST=0 (the raw ReSTIR PT output), RESTIR_FOG=0, RESTIR_SHAFTS=0
-    // and RESTIR_SOFT=0 start with the final render, the fog, the shafts or the soft shadow off;
-    // RESTIR_VALIDATE=1 turns the paths' validation on (off by default: it bought nothing measurable);
-    // RESTIR_REUSE=0 the reuse off, RESTIR_SSAO=0 the SSAO (for comparing with pt-reference, which has none).
-    // RESTIR_UNTOLD=1 moves the sun without telling the renderer -- no history starts over -- as a game's
-    // light changes: what only validation can catch. RESTIR_JITTER=0: the old four window-pixel centres.
-    // RESTIR_TEMPORAL=0 / RESTIR_SPATIAL=0: one half of the reuse alone; RESTIR_RAW=1: no GI accumulation
-    // and no image history; RESTIR_BOUNCES=n: the paths' length; RESTIR_EXPOSURE=0: a fixed exposure.
-    static bool untold = false;
-    static float validation = 0.0f;
-    static float ssao = RESTIR_SSAO;
-    static const bool fromEnv = [] {
-        if (const char* v = std::getenv("RESTIR_VIEW")) g_restirView = std::clamp(std::atoi(v), 0, RESTIR_VIEWS - 1);
-        if (const char* v = std::getenv("RESTIR_VALIDATE")) validation = std::atoi(v) != 0 ? RESTIR_VALIDATION : 0.0f;
-        if (const char* v = std::getenv("RESTIR_REUSE")) g_restirReuse = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_SSAO")) ssao = std::atoi(v) != 0 ? RESTIR_SSAO : 0.0f;
-        if (const char* v = std::getenv("RESTIR_UNTOLD")) untold = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_POST")) g_restirPost.on = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_FOG")) g_restirFog = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_SHAFTS")) g_restirShafts = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_AIR")) g_restirAir = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_FAR_AO")) g_restirFarAO = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_BLOOM")) g_restirPost.bloom = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_MBLUR")) g_restirPost.motionBlur = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_EXPOSURE")) g_restirPost.exposure = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_SOFT")) g_restirSoftShadow = std::atoi(v) != 0;
-        if (const char* v = std::getenv("RESTIR_NORMAL_BLUR")) g_restirNormalBlur = float(std::atof(v));
-        return true;
-    }();
-    (void)fromEnv;
-    static const bool halton16 = !std::getenv("RESTIR_JITTER") || std::atoi(std::getenv("RESTIR_JITTER")) != 0;
-    static const bool bypassAtStart = std::getenv("GALLERY_BYPASS") && std::atoi(std::getenv("GALLERY_BYPASS")) != 0;
-    static const bool temporal = !std::getenv("RESTIR_TEMPORAL") || std::atoi(std::getenv("RESTIR_TEMPORAL")) != 0;
-    static const bool spatial = !std::getenv("RESTIR_SPATIAL") || std::atoi(std::getenv("RESTIR_SPATIAL")) != 0;
-    static const bool visibility = !std::getenv("RESTIR_VISIBILITY") || std::atoi(std::getenv("RESTIR_VISIBILITY")) != 0;
-    static const float atrous = std::getenv("RESTIR_ATROUS") ? float(std::atoi(std::getenv("RESTIR_ATROUS")) != 0) : 1.0f;
-    static const bool raw = std::getenv("RESTIR_RAW") && std::atoi(std::getenv("RESTIR_RAW")) != 0;
-    static const float bounces = std::getenv("RESTIR_BOUNCES") ? float(std::atoi(std::getenv("RESTIR_BOUNCES"))) : float(PATH_BOUNCES);
+// The environment's starting values: RESTIR_VIEW the view; RESTIR_POST=0 (the raw ReSTIR PT output),
+// RESTIR_FOG=0, RESTIR_SHAFTS=0, RESTIR_AIR=0, RESTIR_FAR_AO=0, RESTIR_BLOOM=0, RESTIR_MBLUR=0,
+// RESTIR_EXPOSURE=0 and RESTIR_SOFT=0 start with that part off; RESTIR_VALIDATE=1 the paths' validation on;
+// RESTIR_REUSE=0 the reuse off, RESTIR_TEMPORAL=0 / RESTIR_SPATIAL=0 / RESTIR_VISIBILITY=0 one part of it;
+// RESTIR_SSAO=0 the SSAO (for comparing with pt-reference, which has none); RESTIR_ATROUS=0 the a-trous;
+// RESTIR_RAW=1 no GI accumulation and no image history; RESTIR_BOUNCES=n the paths' length;
+// RESTIR_NORMAL_BLUR=w the blurred normals' width; RESTIR_JITTER=0 the old four window-pixel centres;
+// GALLERY_BYPASS=1 the reconstruction bypassed. RESTIR_UNTOLD=1 moves the sun without telling the
+// renderer -- no history starts over -- as a game's light changes: what only validation can catch.
+static void readRestirEnvironment() {
+    auto flag = [](const char* name, bool& value) {
+        if (const char* v = std::getenv(name)) value = std::atoi(v) != 0;
+    };
+    if (const char* v = std::getenv("RESTIR_VIEW")) g_restir.view = std::clamp(std::atoi(v), 0, restir_pt::VIEWS - 1);
+    if (const char* v = std::getenv("RESTIR_VALIDATE")) g_restir.validation = std::atoi(v) != 0 ? restir_pt::VALIDATION : 0.0f;
+    if (const char* v = std::getenv("RESTIR_SSAO")) g_restir.ssao = std::atoi(v) != 0 ? restir_pt::SSAO : 0.0f;
+    if (const char* v = std::getenv("RESTIR_ATROUS")) g_restir.atrous = std::atoi(v) != 0 ? 1.0f : 0.0f;
+    if (const char* v = std::getenv("RESTIR_BOUNCES")) g_restir.bounces = float(std::max(1, std::atoi(v)));
+    if (const char* v = std::getenv("RESTIR_NORMAL_BLUR")) g_restirNormalBlur = float(std::atof(v));
+    flag("RESTIR_REUSE", g_restir.reuse);
+    flag("RESTIR_TEMPORAL", g_restir.temporal);
+    flag("RESTIR_SPATIAL", g_restir.spatial);
+    flag("RESTIR_VISIBILITY", g_restir.visibility);
+    flag("RESTIR_RAW", g_restir.raw);
+    flag("RESTIR_JITTER", g_restir.halton16);
+    flag("GALLERY_BYPASS", g_restir.bypass);
+    flag("RESTIR_POST", g_restir.post.on);
+    flag("RESTIR_BLOOM", g_restir.post.bloom);
+    flag("RESTIR_MBLUR", g_restir.post.motionBlur);
+    flag("RESTIR_EXPOSURE", g_restir.post.exposure);
+    flag("RESTIR_FOG", g_restir.fog);
+    flag("RESTIR_SHAFTS", g_restir.shafts);
+    flag("RESTIR_AIR", g_restir.air);
+    flag("RESTIR_FAR_AO", g_restir.farAO);
+    flag("RESTIR_SOFT", g_restir.softShadow);
+    flag("RESTIR_UNTOLD", g_restirUntold);
+}
 
-    restir_pt::Settings settings;
-    settings.view = g_restirView;
-    settings.reuse = g_restirReuse;
-    settings.temporal = temporal;
-    settings.spatial = spatial;
-    settings.visibility = visibility;
-    settings.atrous = atrous;
-    settings.raw = raw;
-    settings.bypass = g_restirBypass != bypassAtStart;
-    settings.halton16 = halton16;
-    settings.post = {g_restirPost.on, g_restirPost.vignette, g_restirPost.grade, g_restirPost.exposure, g_restirPost.dof,
-                     g_restirPost.bloom, g_restirPost.motionBlur};
-    settings.fog = g_restirFog;
-    settings.shafts = g_restirShafts;
+// ReSTIR PT at a sixteenth (or a quarter) of the window's pixels, a G-buffer at half resolution each way
+// rebuilt to the window, then a temporal resolve.
+static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const FrameContext& ctx) {
+    const bool untold = g_restirUntold;
+    restir_pt::Settings settings = g_restir;
     settings.normalBlur = g_restirSoftNormals ? g_restirNormalBlur : 0.0f;
-    settings.softShadow = g_restirSoftShadow;
-    settings.air = g_restirAir;
-    settings.farAO = g_restirFarAO;
-    settings.ssao = ssao;
-    settings.validation = validation;
-    settings.bounces = bounces;
     settings.stride = g_restirStride;
     // P off: the raw ReSTIR PT output. No a-trous, no GI accumulation and no image history (the resolve's
     // TAA): each frame's estimate alone, as noisy as it is.
-    if (!g_restirPost.on) {
+    if (!settings.post.on) {
         settings.atrous = 0.0f;
         settings.raw = true;
     }
@@ -636,6 +612,8 @@ struct Gallery {
     bool switched = false;     // switched this frame: the renderer's histories start over
     bool reframe = false;      // the panel's buttons, done by render()
     bool printPose = false;
+    bool restart = false;      // the panel asked for the active renderer's history to start over
+    int  stillFrames = 0;      // frames since the camera, the sun or the renderer last changed
 };
 static std::vector<RendererModule> g_registry;
 static int         g_startRenderer = 0;
@@ -689,7 +667,85 @@ static void activateRenderer(projv::graphics::RenderInstance& renderInstance, Ga
 static float sunAngleFromNotches(double notches) { return 0.86f + float(notches) * 0.08f; }
 static double notchesFromSunAngle(float angle) { return double(angle - 0.86f) / 0.08; }
 
-// The Gallery panel: the renderer, and the view.
+// ---- The panel's per-renderer sections ---------------------------------------------------------------------
+// Each changes the settings its renderer reads every frame; the one change that invalidates a history
+// (pt-reference's bounces) asks for a restart.
+
+static void restirSettings(Gallery&) {
+    restir_pt::Settings& r = g_restir;
+    static const char* views[restir_pt::VIEWS] = {"the image", "indirect light", "direct light", "ambient occlusion",
+                                                  "indirect diffuse", "indirect specular", "light shafts"};
+    ImGui::Combo("view", &r.view, views, restir_pt::VIEWS);
+
+    ImGui::SeparatorText("Final render");
+    ImGui::Checkbox("final render", &r.post.on);
+    ImGui::SetItemTooltip("Off: the raw ReSTIR PT output -- no post, no fog or shafts, no SSAO, and no denoiser");
+    ImGui::BeginDisabled(!r.post.on);
+    ImGui::Checkbox("vignette", &r.post.vignette);      ImGui::SameLine(160.0f);
+    ImGui::Checkbox("colour grade", &r.post.grade);
+    ImGui::Checkbox("auto-exposure", &r.post.exposure); ImGui::SameLine(160.0f);
+    ImGui::Checkbox("depth of field", &r.post.dof);
+    ImGui::Checkbox("bloom", &r.post.bloom);            ImGui::SameLine(160.0f);
+    ImGui::Checkbox("motion blur", &r.post.motionBlur);
+    ImGui::Checkbox("distance fog", &r.fog);            ImGui::SameLine(160.0f);
+    ImGui::Checkbox("aerial haze", &r.air);
+    ImGui::Checkbox("light shafts", &r.shafts);
+    ImGui::SliderFloat("SSAO", &r.ssao, 0.0f, 1.0f, "%.2f");
+    ImGui::Checkbox("far-field SSAO", &r.farAO);
+    ImGui::EndDisabled();
+
+    ImGui::SeparatorText("Lighting");
+    int bounces = int(r.bounces);
+    if (ImGui::SliderInt("path bounces", &bounces, 1, 4)) r.bounces = float(bounces);
+    ImGui::Checkbox("soft sun shadow", &r.softShadow);
+    ImGui::Checkbox("blurred normals", &g_restirSoftNormals);
+    ImGui::BeginDisabled(!g_restirSoftNormals);
+    ImGui::SliderFloat("blur width", &g_restirNormalBlur, 0.01f, 0.5f, "%.2f");
+    ImGui::EndDisabled();
+
+    ImGui::SeparatorText("ReSTIR");
+    ImGui::Checkbox("reuse", &r.reuse);
+    ImGui::SetItemTooltip("Off: each GI pixel's one fresh path, denoised");
+    ImGui::BeginDisabled(!r.reuse);
+    ImGui::Checkbox("temporal", &r.temporal); ImGui::SameLine();
+    ImGui::Checkbox("spatial", &r.spatial);   ImGui::SameLine();
+    ImGui::Checkbox("visibility", &r.visibility);
+    ImGui::EndDisabled();
+    bool validation = r.validation > 0.0f;
+    if (ImGui::Checkbox("path validation", &validation)) r.validation = validation ? restir_pt::VALIDATION : 0.0f;
+
+    ImGui::SeparatorText("Denoise and reconstruction");
+    ImGui::BeginDisabled(!r.post.on);
+    bool atrous = r.atrous > 0.0f;
+    if (ImGui::Checkbox("a-trous denoise", &atrous)) r.atrous = atrous ? 1.0f : 0.0f;
+    bool accumulate = !r.raw;
+    if (ImGui::Checkbox("accumulate (GI and image history)", &accumulate)) r.raw = !accumulate;
+    ImGui::EndDisabled();
+    bool reconstruct = !r.bypass;
+    if (ImGui::Checkbox("reconstruct to full resolution", &reconstruct)) r.bypass = !reconstruct;
+    ImGui::SetItemTooltip("Off: the half-resolution G-buffer point-sampled");
+    ImGui::Checkbox("16-phase jitter", &r.halton16);
+    ImGui::TextDisabled("GI for one pixel in %dx%d (--restir-gi 2 or 4, at start)", g_restirStride, g_restirStride);
+}
+
+static void referenceSettings(Gallery& gallery) {
+    if (ImGui::SliderInt("bounces", &g_referenceBounces, 1, 6)) gallery.restart = true;
+    ImGui::SetItemTooltip("Two matches restir-pt's paths, which is what makes it restir-pt's reference");
+    ImGui::Text("%d frames accumulated", gallery.stillFrames);
+    ImGui::SameLine();
+    if (ImGui::Button("Restart")) gallery.restart = true;
+    ImGui::TextDisabled("Accumulates while the camera and the sun are still.");
+}
+
+static void fastSettings(Gallery&) {
+    ImGui::SliderFloat("AO radius", &g_fast.aoRadius, 0.5f, 16.0f, "%.1f");
+    ImGui::SliderFloat("AO intensity", &g_fast.aoIntensity, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("AO power", &g_fast.aoPower, 0.5f, 4.0f, "%.2f");
+    ImGui::Checkbox("AO denoise blur", &g_fast.blur);
+    if (ImGui::Button("Defaults")) g_fast = FastSettings{};
+}
+
+// The Gallery panel: the renderer, its settings, and the view.
 static void galleryPanel(projv::Application& app) {
     auto& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
     Gallery& gallery = app.world.ctx().get<Gallery>();
@@ -700,6 +756,13 @@ static void galleryPanel(projv::Application& app) {
         if (i + 1 < int(gallery.registry.size())) ImGui::SameLine();
     }
     ImGui::TextWrapped("%s", gallery.registry[gallery.active].description.c_str());
+
+    const std::string& id = gallery.registry[gallery.active].id;
+    if (ImGui::CollapsingHeader((id + " settings").c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (id == "restir-pt") restirSettings(gallery);
+        else if (id == "pt-reference") referenceSettings(gallery);
+        else if (id == "fast") fastSettings(gallery);
+    }
 
     ImGui::SeparatorText("View");
     float sunDegrees = sunAngleFromNotches(g_sunScrollAccum) * 180.0f / 3.14159265f;
@@ -725,7 +788,8 @@ void startup(projv::Application& app) {
     // Input through the engine, and the dev layer over it: the panel drives the gallery (D4, D5). An
     // unattended run hides it and leaves the cursor alone, so captures and measurements are unchanged.
     projv::graphics::installPlatform(app, renderInstance);
-    projv::ui::installUi(app, renderInstance, {.devShown = !unattendedRun});
+    // Unattended: hidden unless PROJV_DEV_UI_SHOWN=1 asks (to capture the panel itself).
+    projv::ui::installUi(app, renderInstance, {.devShown = unattendedRun ? std::nullopt : std::optional<bool>(true)});
     projv::ui::dev::addPanel(app, "Gallery", galleryPanel);
 
     projv::Scene& scene     = app.world.ctx().emplace<projv::Scene>();
@@ -882,51 +946,6 @@ void render(projv::Application& app) {
         if (input.down(projv::Key::F)) { cameraPosition[1] -= moveSpeed; cameraMoved = true; }
     }
 
-    // Q: restir-pt's reconstruction bypassed, point-sampling the render resolution.
-    if (input.pressed(projv::Key::Q)) {
-        g_restirBypass = !g_restirBypass;
-        projv::core::info("Reconstruction: {}", g_restirBypass ? "BYPASSED (point sampled)" : "on");
-    }
-
-    {
-        const bool g = input.pressed(projv::Key::G);
-        const bool j = input.pressed(projv::Key::J);
-        // The final render's toggles: P all of it, V the vignette, B the grade, E the auto-exposure, K the depth
-        // of field, N the bloom, M the motion blur, O the fog, L the shafts; U the soft shadow, which is the lighting's.
-        struct PostKey { projv::Key key; bool* flag; const char* name; bool prev; };
-        static PostKey postKeys[] = {
-            {projv::Key::P, &g_restirPost.on, "final render (off: the raw ReSTIR PT output, no denoising)", false},
-            {projv::Key::V, &g_restirPost.vignette, "vignette", false},
-            {projv::Key::B, &g_restirPost.grade, "colour grade", false},
-            {projv::Key::E, &g_restirPost.exposure, "auto-exposure", false},
-            {projv::Key::K, &g_restirPost.dof, "depth of field", false},
-            {projv::Key::N, &g_restirPost.bloom, "bloom", false},
-            {projv::Key::M, &g_restirPost.motionBlur, "motion blur", false},
-            {projv::Key::O, &g_restirFog, "distance fog", false},
-            {projv::Key::L, &g_restirShafts, "light shafts", false},
-            {projv::Key::U, &g_restirSoftShadow, "soft sun shadow", false},
-            {projv::Key::I, &g_restirSoftNormals, "blurred normals", false},
-        };
-        for (PostKey& k : postKeys) {
-            if (input.pressed(k.key)) {
-                *k.flag = !*k.flag;
-                const bool partOfPost = k.flag != &g_restirPost.on && k.flag != &g_restirSoftShadow && k.flag != &g_restirSoftNormals;
-                projv::core::info("ReSTIR {}: {}{}", k.name, *k.flag ? "on" : "off",
-                                  partOfPost && !g_restirPost.on ? " (the final render is off: P)" : "");
-            }
-        }
-        if (g) {
-            g_restirView = (g_restirView + 1) % RESTIR_VIEWS;
-            static const char* views[] = {"the image", "indirect light only", "direct light only", "ambient occlusion",
-                                          "indirect diffuse only", "indirect specular only", "the light shafts only"};
-            projv::core::info("ReSTIR view: {}", views[g_restirView]);
-        }
-        if (j) {
-            g_restirReuse = !g_restirReuse;
-            projv::core::info("ReSTIR reuse: {}", g_restirReuse ? "on" : "off (one fresh path per GI pixel)");
-        }
-    }
-
     // GALLERY_SWITCH_AT=n:id,m:id switches renderer at those frames, as the panel does: a switch unattended.
     static const std::vector<std::pair<int, std::string>> switches = [] {
         std::vector<std::pair<int, std::string>> list;
@@ -998,12 +1017,15 @@ void render(projv::Application& app) {
     projv::core::vec3 sunDirection = { ca * sunAzX, sa, ca * sunAzZ };
     bool sunMoved = (g_sunScrollAccum != prevSunScroll);
     prevSunScroll = g_sunScrollAccum;
-    // Switching to a renderer is a move for it: its history is from wherever it last drew.
-    cameraMoved = cameraMoved || sunMoved || gallery.switched;
+    // Switching to a renderer is a move for it: its history is from wherever it last drew. So is the panel's
+    // restart.
+    cameraMoved = cameraMoved || sunMoved || gallery.switched || gallery.restart;
+    gallery.restart = false;
 
     // Track the frame the camera last moved on so the shader can reset accumulation.
     static int frameCameraLastMovedOn = 0;
     if (cameraMoved) frameCameraLastMovedOn = app.frameCount;
+    gallery.stillFrames = app.frameCount - frameCameraLastMovedOn;
 
     FrameContext ctx;
     ctx.cameraPosition         = cameraPosition;
@@ -1096,6 +1118,7 @@ int main(int argc, char** argv) {
     g_registry = registry;
     g_startRenderer = selected;
     projv::ui::setCommandLine(argc, argv);
+    readRestirEnvironment();
 
     // The renderer folders and the bundled scene are staged beside the binary by the build, and
     // resources.json names its shaders relative to the working directory -- so run from here.

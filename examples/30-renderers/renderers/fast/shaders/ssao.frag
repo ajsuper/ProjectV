@@ -41,6 +41,7 @@ SAMPLER2D(blueNoise, 4);
 
 uniform vec4 windowRes;
 uniform vec4 frameCount;
+uniform vec4 fastSettings;   // x the AO radius, y its intensity, z its power (the gallery's panel); w combine_blur's
 // sunDir is declared by pjv_sun_sky.sc, which skyColor() needs; declaring it again here is a
 // redefinition shaderc rejects.
 
@@ -59,7 +60,8 @@ uniform vec4 frameCount;
 // function of where you are standing, so occlusion strengthens as you back away and the boundary
 // of the scaling shows up as a dark ring at a fixed distance from the camera. A voxel scene has
 // absolute feature sizes; the AO radius should be one of them.
-#define AO_RADIUS 4.0
+//
+// fastSettings.x, from the gallery's panel (4.0 by default).
 
 // Guards against a surface occluding itself through depth-buffer precision at grazing angles.
 #define AO_BIAS 0.05
@@ -71,9 +73,8 @@ uniform vec4 frameCount;
 // How much of the computed occlusion to apply, and how hard to bend its response. Both are here
 // because AO only ever modulates the AMBIENT term -- direct sun is added untouched afterwards -- so
 // on a sunlit surface even full occlusion moves the pixel very little. These are the knobs to reach
-// for if the effect reads as too subtle or too heavy.
-#define AO_INTENSITY 1.0
-#define AO_POWER     2.0
+// for if the effect reads as too subtle or too heavy: fastSettings.y and .z, from the gallery's panel
+// (1.0 and 2.0 by default).
 
 // Projects a world point into this frame's screen space. The exact inverse of the engine's
 // pjvPerspectiveRay, so the point this samples is the point the G-buffer describes.
@@ -125,7 +126,7 @@ void main() {
     vec2 noiseUV = v_texcoord0 * (windowRes.xy / 256.0) + fract(frameCount.x * 0.618);
     float rot = texture2D(blueNoise, noiseUV).r;
 
-    float radius = AO_RADIUS;
+    float radius = fastSettings.x;
 
     // Sum the sky arriving from each unoccluded direction. Cosine weighting is already in the
     // sample distribution, so this is a plain mean.
@@ -171,12 +172,12 @@ void main() {
 
     skyLight /= float(AO_SAMPLES);
 
-    // Shape the occlusion. AO_INTENSITY scales how much of it is applied and AO_POWER bends the
+    // Shape the occlusion. fastSettings.y scales how much of it is applied and fastSettings.z bends the
     // response so light contact darkening stays subtle while deep creases go properly dark; a raw
     // linear mean reads as a uniform grey haze rather than as occlusion.
     float ao = 1.0 - clamp(occlusion / float(AO_SAMPLES), 0.0, 1.0);
-    ao = pow(ao, AO_POWER);
-    ao = mix(1.0, ao, AO_INTENSITY);
+    ao = pow(ao, fastSettings.z);
+    ao = mix(1.0, ao, fastSettings.y);
 
     gl_FragData[0] = vec4(skyLight * ao, 1.0);
 }
