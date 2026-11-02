@@ -251,3 +251,14 @@ Both still read a `GeometryBlob`'s `materialIDs` and `geometry` vectors, which t
 replaced ([voxel-storage-tiles.md](voxel-storage-tiles.md)); `edit_demo` also uses them in its own
 code (`main.cpp:264`, `:325`). Nothing in the default build compiles them, so nothing noticed. Fix: read
 and write through `utils/blob_voxels.h` as the engine does. `exit_path` is unaffected.
+
+## 17. One hit in the physics example's first demo wakes every block, and the frame stalls
+
+Found 2026-11-02 by hand, with the dev layer's Physics panel open (`./physics`, first demo: two towers
+and a pyramid of blocks). Hitting one box sets every block awake -- the panel's awake count jumps to
+the whole stack -- though most of them do not move, and the frame takes a large spike while they are.
+Not yet looked into. Candidates: the blocks resting on one another form a single island, so one
+contact wakes all of it (Jolt's islands, as designed, but then the stack should fall back asleep
+quickly); or the engine wakes bodies itself (a break, an impact-load pass, `teleport`/`setVelocity`
+on a group) more widely than the hit. Reproduce with the Physics panel's awake count and step time;
+`DEMOS_ONLY=1` for that demo alone.
