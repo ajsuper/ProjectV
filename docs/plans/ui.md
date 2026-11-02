@@ -203,8 +203,11 @@ ruled.
 - **The dev layer (`ui/dev.h`, `ui/dev_layer.h`).** Its own ImGui context, fed from `Input`, not
   ImGui's GLFW callbacks (D4): keys and modifiers on their edges, typed text, the cursor, buttons and
   the wheel.
-  - F1 (`UiOptions::devToggle`) shows it. While shown, it releases a captured mouse-look cursor (and
-    keeps releasing it if the program recaptures), and gives it back when hidden.
+  - F1 (`UiOptions::devToggle`) shows it. Showing releases a captured mouse-look cursor, and hiding
+    gives it back. While shown, a click on the scene captures it again and play goes on with the
+    panels up: a captured cursor is the game's, and the panels see no mouse until Esc releases it.
+    (The first version kept releasing it, which left no way back into the game with the panels
+    shown. Found by hand in Voxel Mayhem.)
   - Panels: `addPanel(app, name, fn)`, each a window built in Render while shown; registered panels
     cost nothing otherwise.
   - The engine's panels: **Frame** (frame time and its graph; every system's time by stage, from the
@@ -219,7 +222,10 @@ ruled.
   `Input::wantCapture*`, leaving each program to check. The ten programs read input in about 200
   places, so `Host::route` also masks the taken mouse or keyboard out of `Input`
   (`Input::maskMouse`, `maskKeyboard`). A click on a panel never reaches the game, with no change to
-  any program.
+  any program. The mask is a view: the keys' and buttons' state underneath is kept. (The first
+  version cleared it, so a button released after a masked frame had no release edge, and a panel
+  resize stayed held for good. Found by hand; `ui: a button released over a panel still ends its
+  drag` is the regression test.)
 - **Installed in** Hello Voxel, entities, the sandbox, physics, world loading, the multiplayer
   client, Voxel Mayhem, the explosion demo, and the party and playground clients: every program on the
   engine's platform layer. Not in the gallery, the advanced renderer, the terrain generator or the
@@ -227,7 +233,8 @@ ruled.
 - **Tests** (`ui:*`, 12 cases, headless):
   - U0's, and the masking;
   - a panel registered before the layer exists, drawn only while shown;
-  - a real ImGui context with no GPU that takes the mouse over its panel and not elsewhere;
+  - a real ImGui context with no GPU that takes the mouse over its panel and not elsewhere, nor
+    over it while the cursor is captured;
   - `--dev-ui`;
   - `systemSeconds`.
 - **Checked by eye:** the sandbox's capture with `PROJV_DEV_UI_SHOWN=1` shows the Frame and Log

@@ -23,13 +23,11 @@ namespace projv::ui::dev {
         Capture input(const Input& input, Capture taken) override;
         void draw(bgfx::ViewId view, core::ivec2 size) override;
 
-        // Shows or hides it. Showing releases a captured cursor; hiding captures it again.
+        // Shows or hides it. Showing releases a captured cursor, so the panels can be reached; hiding
+        // captures it again if showing released it. While shown, the program may capture the cursor
+        // again (a click on the scene, in a mouse-look program) and play on: a captured cursor is the
+        // game's, and the panels see no mouse until it is released (Esc, by the examples' convention).
         void setShown(bool show);
-
-        // While shown the cursor is the panels': a program that captures it again (mouse-look's
-        // click-to-capture) has it released, and captured once the layer hides. Run every frame
-        // before routing (installUi does).
-        void keepCursor();
 
     private:
         Application* app;

@@ -55,8 +55,7 @@ is ImGui code. Guide: [Add a dev panel](../guides/dev-panel.md).
 | Name | What |
 |---|---|
 | `DevLayer(app, renderInstance)` | Its own ImGui context, fed from `Input`, drawn in `DEV_VIEW`. `renderInstance` nullptr is headless (tests) |
-| `setShown(bool)`, `visible()` | F1's two states. Shown, it releases a captured cursor; hidden, it captures it again |
-| `keepCursor()` | While shown, releases a cursor the program captured again; `installUi` runs it each frame |
+| `setShown(bool)`, `visible()` | F1's two states. Showing releases a captured cursor, hiding captures it again. While shown the program may capture it (a click on the scene) and play on; the panels then see no mouse until it is released (Esc) |
 
 Panels it always has: **Frame** (frame time and graph, each system's time by stage, from
 `Application::systemSeconds`) and **Log** (the last 4000 lines, by category, filterable).

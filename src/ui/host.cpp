@@ -83,7 +83,6 @@ namespace projv::ui {
                 auto* devLayer = h ? static_cast<dev::DevLayer*>(h->layer(Level::Dev)) : nullptr;
                 if (!input || !devLayer) return;
                 if (input->pressed(toggle)) devLayer->setShown(!devLayer->visible());
-                devLayer->keepCursor();
             }, {.before = "ui: route input", .after = "platform"});
             // Its GPU resources go before bgfx does: ahead of a program's "shutdown", which is where
             // a program that shuts bgfx down itself does so.

@@ -36,15 +36,15 @@ namespace projv {
     //
     // With the UI installed (ui::installUi), the two `want` flags say a UI layer took the keyboard or
     // the mouse this frame -- a focused text field, a panel under the cursor -- and what it took is
-    // already gone from Input (maskKeyboard / maskMouse), so gameplay needs no check of its own. Without
+    // already hidden from Input (maskKeyboard / maskMouse), so gameplay needs no check of its own. Without
     // the UI they stay false unless the program sets them.
     struct Input {
         bool down(Key key) const         { return bits(key) & DOWN; }
         bool pressed(Key key) const      { return bits(key) & PRESSED; }
         bool released(Key key) const     { return bits(key) & RELEASED; }
-        bool down(MouseButton b) const     { return mouse[static_cast<size_t>(b)] & DOWN; }
-        bool pressed(MouseButton b) const  { return mouse[static_cast<size_t>(b)] & PRESSED; }
-        bool released(MouseButton b) const { return mouse[static_cast<size_t>(b)] & RELEASED; }
+        bool down(MouseButton b) const     { return bits(b) & DOWN; }
+        bool pressed(MouseButton b) const  { return bits(b) & PRESSED; }
+        bool released(MouseButton b) const { return bits(b) & RELEASED; }
 
         core::vec2 cursor{0.0f};        // window coordinates, in screen units
         core::vec2 cursorDelta{0.0f};   // since the previous frame; zero on the first
@@ -59,26 +59,32 @@ namespace projv {
         // what was typed). Empty on a frame with no typing.
         std::vector<uint32_t> text;
 
-        // Removes this frame's keyboard (every key, and the typed text) or mouse (buttons, wheel and
+        // Hides this frame's keyboard (every key, and the typed text) or mouse (buttons, wheel and
         // motion; the cursor's position stays) from what later readers see: the UI host does this to
-        // what a layer took, so the game never acts on a click meant for a panel. A key held through
-        // a masked frame reads as pressed again on the next one.
-        void maskKeyboard() { keys.fill(0); text.clear(); }
-        void maskMouse()    { mouse.fill(0); scroll = core::vec2(0.0f); cursorDelta = core::vec2(0.0f); }
+        // what a layer took, so the game never acts on a click meant for a panel. A view only: the
+        // keys' and buttons' own state is kept, so a button released over a panel still ends its drag,
+        // and nothing reads as pressed again when the mask lifts. Lifted by the next setKey/setMouse
+        // pass (the platform system, every frame).
+        void maskKeyboard() { keyboardMasked = true; text.clear(); }
+        void maskMouse()    { mouseMasked = true; scroll = core::vec2(0.0f); cursorDelta = core::vec2(0.0f); }
 
-        // Written by the platform system. A key's state this frame from whether it is down now.
-        void setKey(Key key, bool isDown)               { update(keys[static_cast<size_t>(key)], isDown); }
-        void setMouse(MouseButton button, bool isDown)  { update(mouse[static_cast<size_t>(button)], isDown); }
+        // Written by the platform system. A key's state this frame from whether it is down now. A new
+        // frame's state lifts the masks.
+        void setKey(Key key, bool isDown)               { keyboardMasked = false; update(keys[static_cast<size_t>(key)], isDown); }
+        void setMouse(MouseButton button, bool isDown)  { mouseMasked = false; update(mouse[static_cast<size_t>(button)], isDown); }
 
     private:
         static constexpr uint8_t DOWN = 1, PRESSED = 2, RELEASED = 4;
-        uint8_t bits(Key key) const { return keys[static_cast<size_t>(key)]; }
+        uint8_t bits(Key key) const { return keyboardMasked ? 0 : keys[static_cast<size_t>(key)]; }
+        uint8_t bits(MouseButton b) const { return mouseMasked ? 0 : mouse[static_cast<size_t>(b)]; }
         static void update(uint8_t& state, bool isDown) {
             bool wasDown = state & DOWN;
             state = (isDown ? DOWN : 0) | (isDown && !wasDown ? PRESSED : 0) | (!isDown && wasDown ? RELEASED : 0);
         }
         std::array<uint8_t, static_cast<size_t>(Key::Count)> keys{};
         std::array<uint8_t, static_cast<size_t>(MouseButton::Count)> mouse{};
+        bool keyboardMasked = false;
+        bool mouseMasked = false;
     };
 }
 

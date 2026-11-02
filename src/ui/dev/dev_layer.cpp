@@ -4,6 +4,7 @@
 // when hidden.
 
 #include <algorithm>
+#include <cfloat>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -224,13 +225,6 @@ namespace projv::ui::dev {
         }
     }
 
-    void DevLayer::keepCursor() {
-        const Input* input = app->world.ctx().find<Input>();
-        if (!isShown || !renderInstance || !input || !input->cursorCaptured) return;
-        graphics::setCursorCaptured(*app, *renderInstance, false);
-        restoreCapture = true;
-    }
-
     Capture DevLayer::input(const Input& input, Capture taken) {
         if (renderInstance && !rendererReady) return {};
         ImGuiContext* previous = ImGui::GetCurrentContext();
@@ -259,7 +253,12 @@ namespace projv::ui::dev {
             io.AddKeyEvent(ImGuiMod_Super, input.down(Key::LeftSuper) || input.down(Key::RightSuper));
             for (uint32_t c : input.text) io.AddInputCharacter(c);
         }
-        if (!taken.mouse) {
+        if (input.cursorCaptured) {
+            // The game's (mouse-look): the panels see no cursor, so they neither hover nor take a
+            // click, and the game keeps all of it. Buttons still end, so nothing stays held.
+            io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+            for (int b = 0; b < 3; b++) io.AddMouseButtonEvent(b, false);
+        } else if (!taken.mouse) {
             io.AddMousePosEvent(input.cursor.x, input.cursor.y);
             const MouseButton buttons[] = {MouseButton::Left, MouseButton::Right, MouseButton::Middle};
             for (int b = 0; b < 3; b++) {

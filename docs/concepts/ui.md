@@ -21,8 +21,10 @@ Two layers over the frame, drawn by the engine rather than by each program
   layer. What a layer takes -- the mouse over a panel, the keyboard in a text field -- is removed from
   `Input` before the game reads it, and `Input::wantCaptureMouse`/`Keyboard` say so. A click on a panel
   never also fires a gun.
-- **The cursor.** While the dev layer is shown the cursor is the panels': a mouse-look capture is
-  released, and comes back when the layer hides.
+- **The cursor.** Showing the dev layer releases a mouse-look capture so the panels can be reached.
+  A click on the scene captures it again and plays on with the panels still up; a captured cursor is
+  the game's, and the panels see no mouse until it is released (Esc, in the examples). Hiding the
+  layer captures it again if showing released it.
 - **Drawing.** The layers draw after the renderer's passes and before the frame is submitted, through
   `RenderInstance::addOverlay`, in bgfx views above any renderer's. A program that submits its own
   frame ends it with `graphics::endFrame` instead of `bgfx::frame` so they still draw.

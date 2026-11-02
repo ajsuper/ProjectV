@@ -116,6 +116,22 @@ TEST_CASE("ui: what a layer took is gone from the Input the game reads") {
     CHECK(input.text.empty());
 }
 
+TEST_CASE("ui: a button released over a panel still ends its drag") {
+    // The mask is a view: the button's own state is kept, so the release is an edge the layers see.
+    // Clearing the state instead left a panel resize held forever (found by hand in Voxel Mayhem).
+    Layers l;
+    l.dev->takes.mouse = true;
+    projv::Input input;
+    input.setMouse(projv::MouseButton::Left, true);   // the platform, frame 1: pressed on a panel
+    l.host.route(input);
+    CHECK_FALSE(input.down(projv::MouseButton::Left)); // hidden from the game
+    input.setMouse(projv::MouseButton::Left, true);   // frame 2: still held
+    CHECK_FALSE(input.pressed(projv::MouseButton::Left));
+    l.host.route(input);
+    input.setMouse(projv::MouseButton::Left, false);  // frame 3: let go
+    CHECK(input.released(projv::MouseButton::Left));   // what the layers are offered
+}
+
 TEST_CASE("ui: the typed text reaches the layers") {
     Layers l;
     projv::Input input;
@@ -229,6 +245,22 @@ TEST_CASE("ui: the dev layer takes the mouse over its panels and leaves it elsew
     devFrame(dev, input);
     projv::ui::Capture away = devFrame(dev, input);
     CHECK_FALSE(away.mouse);
+}
+
+TEST_CASE("ui: a captured cursor is the game's, even over a dev panel") {
+    projv::Application app;
+    projv::ui::dev::DevLayer dev(app, nullptr);
+    dev.setShown(true);
+    projv::Input input;
+    input.cursor = {50.0f, 50.0f};   // over the Frame panel
+    input.cursorCaptured = true;     // the game took it back with a click
+    devFrame(dev, input);
+    devFrame(dev, input);
+    CHECK_FALSE(devFrame(dev, input).mouse);
+    input.cursorCaptured = false;    // released (Esc): the panel has it again
+    devFrame(dev, input);
+    devFrame(dev, input);
+    CHECK(devFrame(dev, input).mouse);
 }
 
 TEST_CASE("ui: --dev-ui on the command line asks for the dev layer") {
