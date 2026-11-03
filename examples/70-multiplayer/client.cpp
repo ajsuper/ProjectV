@@ -42,6 +42,7 @@
 #include "graphics/render_instance.h"
 #include "graphics/disk_io.h"
 #include "ui/ui.h"
+#include "ui/user.h"
 #include "net/transport.h"
 #include "net/wire.h"
 #include "runtime/entities.h"
@@ -336,7 +337,9 @@ namespace {
         // throw or a blast aims at. This example is about the network; the party and playground demos
         // draw better. Players, crates and rubble come and go as chunks: it uploads them, and where
         // they moved to, each frame.
-        projv::graphics::installBasicRenderer(app, renderInstance, {.crosshair = true});
+        projv::graphics::installBasicRenderer(app, renderInstance);
+        // The crosshair is UI: the demos' shared document (docs/plans/ui.md, D24).
+        projv::ui::user::open(app, "crosshair", (projv::core::executableDirectory() / "shared_ui/crosshair.rml").string());
         app.world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
     }
 

@@ -50,8 +50,10 @@
 #include "graphics/input.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
+#include "graphics/camera.h"
 #include "graphics/render_instance.h"
 #include "ui/ui.h"
+#include "ui/user.h"
 #include "utils/material.h"
 #include "voxel_renderer.h"
 
@@ -111,6 +113,24 @@ namespace {
         // What a headless client saw, for its checks.
         int      states = 0, banners = 0, knocks = 0, placed = 0;
         uint16_t firstRound = 0, rounds = 0;
+    };
+
+    // What the HUD document shows (ui/hud.rml), bound to its model "hud" and filled each frame.
+    struct Hud {
+        std::string top, banner, bannerColour = "#ffffff", hint, info, fuseColour = "#ffa626";
+        std::vector<std::vector<std::string>> scores;   // name, points, extra, colour, "1" for yours
+        float fuse = -1.0f, shove = 0.0f, toss = -1.0f, charge = -1.0f, flash = 0.0f;
+        bool  fuseMine = false, alive = false, crosshair = false;
+        bool  markerShown = false, aimShown = false;
+        float markerX = 0, markerY = 0, markerR = 0, aimX = 0, aimY = 0, aimR = 0;
+        int   fps = 0;
+        bool  showFps = false;
+    };
+    // The shared menu's settings (examples/shared/ui/menu.rml), bound to its model "menu".
+    struct Menu {
+        std::string game = "Party";
+        float sensitivity = 1.0f;
+        bool  invertY = false, showFps = false, open = false;
     };
 
     float unit(Client& c) { return std::uniform_real_distribution<float>(-1.0f, 1.0f)(c.random); }
@@ -287,6 +307,42 @@ namespace {
         c.hop = false;
     }
 
+    // Opens or closes the shared menu (D23): the cursor is the menu's while it is open.
+    void setMenu(projv::Application& app, bool open) {
+        Menu& menu = app.world.ctx().get<Menu>();
+        auto& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
+        menu.open = open;
+        if (open) projv::ui::user::show(app, "menu");
+        else projv::ui::user::hide(app, "menu");
+        projv::graphics::setCursorCaptured(app, renderInstance, !open);
+    }
+
+    // The HUD and the menu: documents over the frame (docs/plans/ui.md, U5).
+    void installHud(projv::Application& app, const fs::path& here) {
+        World& world = app.world;
+        Hud& h = world.ctx().emplace<Hud>();
+        Menu& m = world.ctx().emplace<Menu>();
+        const std::string ui = (here / "shared_ui").string();
+        projv::ui::user::loadFont(app, ui + "/fonts/LatoLatin-Regular.ttf");
+        projv::ui::user::loadFont(app, ui + "/fonts/LatoLatin-Bold.ttf");
+        projv::ui::user::model(app, "hud")
+            .bind("top", &h.top).bind("banner", &h.banner).bind("bannerColour", &h.bannerColour).bind("hint", &h.hint)
+            .bind("info", &h.info).bind("scores", &h.scores).bind("fuse", &h.fuse).bind("fuseMine", &h.fuseMine)
+            .bind("fuseColour", &h.fuseColour).bind("alive", &h.alive).bind("shove", &h.shove).bind("toss", &h.toss)
+            .bind("charge", &h.charge).bind("flash", &h.flash).bind("crosshair", &h.crosshair)
+            .bind("markerShown", &h.markerShown).bind("markerX", &h.markerX).bind("markerY", &h.markerY).bind("markerR", &h.markerR)
+            .bind("aimShown", &h.aimShown).bind("aimX", &h.aimX).bind("aimY", &h.aimY).bind("aimR", &h.aimR)
+            .bind("fps", &h.fps).bind("showFps", &h.showFps);
+        projv::ui::user::model(app, "menu")
+            .bind("game", &m.game).bind("sensitivity", &m.sensitivity).bind("invertY", &m.invertY).bind("showFps", &m.showFps);
+        projv::ui::user::open(app, "hud", (here / "ui/hud.rml").string());
+        projv::ui::user::open(app, "menu", ui + "/menu.rml", {.shown = false, .modal = true, .fadeOut = 0.35f});
+        app.events().on<projv::ui::UiAction>([&app](const projv::ui::UiAction& action) {
+            if (action.name == "resume") setMenu(app, false);
+            else if (action.name == "leave") app.closeRequested = true;
+        });
+    }
+
     void controls(projv::Application& app) {
         World& world = app.world;
         Client& c = world.ctx().get<Client>();
@@ -369,9 +425,12 @@ namespace {
         const auto& input = world.ctx().get<projv::Input>();
         // The camera: the trackpad (the window holds the cursor; Esc lets it go, a click takes it back)
         // or the arrow keys. V: first person or third.
+        // Esc: the menu (D23), which frees the cursor; it does not pause the game, which is the server's.
+        Menu& menu = world.ctx().get<Menu>();
+        if (input.pressed(projv::Key::Escape)) setMenu(app, !menu.open);
+        if (menu.open) return;
         const bool captured = input.cursorCaptured;
-        if (captured && input.pressed(projv::Key::Escape)) projv::graphics::setCursorCaptured(app, renderInstance, false);
-        else if (!captured && input.pressed(projv::MouseButton::Left)) {
+        if (!captured && !input.wantCaptureMouse && input.pressed(projv::MouseButton::Left)) {
             projv::graphics::setCursorCaptured(app, renderInstance, true);
             return;   // that click was for the cursor
         }
@@ -381,8 +440,9 @@ namespace {
         c.yaw = wrapAngle(c.yaw + turn * 2.2f * dt);
         c.pitch = std::clamp(c.pitch + (float(input.down(projv::Key::Up)) - float(input.down(projv::Key::Down))) * 1.2f * dt, lowest, highest);
         if (captured) {
-            c.yaw = wrapAngle(c.yaw + input.cursorDelta.x * 0.0025f);
-            c.pitch = std::clamp(c.pitch - input.cursorDelta.y * 0.0025f, lowest, highest);
+            const float speed = 0.0025f * menu.sensitivity;
+            c.yaw = wrapAngle(c.yaw + input.cursorDelta.x * speed);
+            c.pitch = std::clamp(c.pitch - input.cursorDelta.y * speed * (menu.invertY ? -1.0f : 1.0f), lowest, highest);
         }
 
         const vec3 forward = forwardOf(c.yaw), right(-std::sin(c.yaw), 0.0f, std::cos(c.yaw));
@@ -490,48 +550,13 @@ namespace {
 
     // ---- Drawing ------------------------------------------------------------------------------------
 
-    constexpr const char* HUD_UNIFORMS[] = {"windowRes", "hudTop0", "hudTop1", "hudBanner0", "hudBanner1", "hudBannerColour",
-                                            "hudHint0", "hudHint1", "hudScore0", "hudScore1", "hudScore2", "hudScore3", "hudScore4",
-                                            "hudScore5", "hudScore6", "hudScore7", "hudScoreSlots", "hudMe", "hudBars", "hudMarker",
-                                            "hudInfo0", "hudInfo1", "hudCharge", "hudAim"};
-
-    // The shared renderer (examples/shared/voxelRenderer), with one pass more: its display pass draws
-    // into a texture instead of the window, and the HUD (hudShaders/hud.frag) draws that and itself
-    // over it to the window. Built from the shared renderer's own files, so it changes as they do.
+    // The shared renderer (examples/shared/voxelRenderer), drawing to the window; the HUD is a
+    // document over it (ui/hud.rml).
     void installRenderer(World& world, projv::graphics::RenderInstance& renderInstance, const fs::path& here) {
         voxel_renderer::View& view = world.ctx().emplace<voxel_renderer::View>();
         view.finestVoxel = 0.125f;
         view.hazeRadius = 200.0f;
-        projv::RendererSpecification spec = voxel_renderer::specification(world, here);
-        uint32_t textureId = 0, frameBufferId = 0, shaderId = 0;
-        for (const auto& t : spec.resources.textures) textureId = std::max(textureId, t.textureID + 1);
-        for (const auto& f : spec.resources.FrameBuffers) frameBufferId = std::max(frameBufferId, f.frameBufferID + 1);
-        for (const auto& s : spec.resources.shaders) shaderId = std::max(shaderId, s.shaderID + 1);
-
-        projv::Texture shown;
-        shown.textureID = textureId;
-        shown.name = "shown";
-        shown.format = bgfx::TextureFormat::RGBA8;
-        shown.sizeMode = projv::TextureSizeMode::Relative;
-        shown.scale = 1.0f;
-        shown.origin = projv::CreateNew;
-        spec.resources.textures.push_back(shown);
-        spec.resources.FrameBuffers.push_back(projv::FrameBuffer{frameBufferId, {textureId}});
-        projv::Shader hud;
-        hud.shaderID = shaderId;
-        hud.filePath = (here / "hudShaders/hud.bin").string();
-        hud.shaderFileContents = projv::graphics::readFile(hud.filePath);
-        spec.resources.shaders.push_back(hud);
-        for (const char* name : HUD_UNIFORMS) spec.resources.uniforms.push_back(projv::Uniform{0, projv::Vec4, name});
-        for (projv::RenderPass& pass : spec.dependencyGraph.renderPasses)
-            if (pass.frameBufferOutputID == -1) pass.frameBufferOutputID = int(frameBufferId);
-        projv::RenderPass pass{};
-        pass.shaderID = shaderId;
-        pass.frameBufferInputIDs = {frameBufferId};
-        pass.frameBufferOutputID = -1;
-        spec.dependencyGraph.renderPasses.push_back(pass);
-
-        renderInstance.addRendererSpecification(1, spec);
+        renderInstance.addRendererSpecification(1, voxel_renderer::specification(world, here));
         bgfx::ShaderHandle vertexShader = projv::graphics::loadEngineShader("vs_quad");
         renderInstance.setActiveRenderer(projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader));
     }
@@ -554,78 +579,100 @@ namespace {
         }
     }
 
-    void uploadHud(World& world, projv::graphics::RenderInstance& renderInstance) {
+    std::string hex(vec3 colour) {
+        char text[8];
+        std::snprintf(text, sizeof text, "#%02x%02x%02x", int(std::clamp(colour.x, 0.0f, 1.0f) * 255.0f + 0.5f),
+                      int(std::clamp(colour.y, 0.0f, 1.0f) * 255.0f + 0.5f), int(std::clamp(colour.z, 0.0f, 1.0f) * 255.0f + 0.5f));
+        return text;
+    }
+
+    // A ring of `radius` metres round a point in the world, facing the camera, as an element (D22):
+    // its centre and radius in window pixels, or false behind the camera.
+    bool project(const projv::CameraView& camera, vec3 point, float radius, projv::core::vec2 window, float& x, float& y, float& r) {
+        bool inFront = false;
+        const projv::core::vec2 uv = projv::graphics::cameraWorldToUV(camera, point, window, &inFront);
+        if (!inFront) return false;
+        const vec3 side = point + projv::graphics::cameraBasis(camera.forward).right * radius;
+        const projv::core::vec2 edge = projv::graphics::cameraWorldToUV(camera, side, window);
+        x = uv.x * window.x;
+        y = uv.y * window.y;
+        r = std::max(std::abs(edge.x - uv.x) * window.x, 3.0f);
+        return true;
+    }
+
+    // What the HUD shows: everything hud.frag drew, as values for ui/hud.rml.
+    void updateHud(World& world, projv::graphics::RenderInstance& renderInstance, const projv::CameraView& camera, float dt) {
         Client& c = world.ctx().get<Client>();
-        auto renderer = renderInstance.getActiveRenderer();
-        auto set = [&](const char* name, vec4 value) { projv::graphics::setUniformToValue(renderer, name, value); };
-        auto text = [&](const char* a, const char* b, const std::string& line) {
-            vec4 first, second;
-            packText(line, first, second);
-            set(a, first);
-            set(b, second);
-        };
+        Hud& h = world.ctx().get<Hud>();
         const State& s = c.state;
         const bool joined = runtime::sessionStats(world).connected && c.haveState;
-        const projv::core::vec2 resolution = renderInstance.getWindowResolution();
-        set("windowRes", vec4(resolution.x, resolution.y, 0.0f, 0.0f));
+        const projv::core::vec2 window = renderInstance.getWindowResolution();
 
-        std::string top;
+        h.top.clear();
         if (joined) {
-            top = std::string(modeName(s.mode)) + "  " + std::to_string(s.round) + "/" + std::to_string(s.rounds);
-            if (s.phase == Playing) top += "  " + clockText(s.clock);
+            h.top = std::string(modeName(s.mode)) + "   " + std::to_string(s.round) + "/" + std::to_string(s.rounds);
+            if (s.phase == Playing) h.top += "   " + clockText(s.clock);
         }
-        text("hudTop0", "hudTop1", top);
-        text("hudBanner0", "hudBanner1", c.bannerFor > 0.0f ? c.banner : "");
-        set("hudBannerColour", vec4(c.bannerColour, c.bannerFor > 0.0f ? 1.0f : 0.0f));
+        h.banner = c.bannerFor > 0.0f ? c.banner : "";
+        h.bannerColour = hex(c.bannerColour);
 
-        std::string hint;
         const bool up = joined && alive(c);
-        if (!joined) hint = "JOINING...";
-        else if (s.phase == Intro) hint = std::string(ruleOf(s.mode)) + " " + std::to_string(int(std::ceil(s.clock)));
-        else if (s.phase == Playing && !up) hint = "OUT - WATCHING";
-        else if (s.phase == Playing && s.you >= 0 && s.players[s.you].carrier) hint = "YOU HAVE THE BOMB!";
-        else if (s.phase == Playing && s.mode == Dash && s.you >= 0 && s.players[s.you].place) hint = "HOME!";
-        text("hudHint0", "hudHint1", hint);
+        h.hint.clear();
+        if (!joined) h.hint = "Joining...";
+        else if (s.phase == Intro) h.hint = std::string(ruleOf(s.mode)) + "   " + std::to_string(int(std::ceil(s.clock)));
+        else if (s.phase == Playing && !up) h.hint = "Out - watching";
+        else if (s.phase == Playing && s.you >= 0 && s.players[s.you].carrier) h.hint = "You have the bomb!";
+        else if (s.phase == Playing && s.mode == Dash && s.you >= 0 && s.players[s.you].place) h.hint = "Home!";
 
-        // The scoreboard: everyone by points, their colour beside them; how far along (Sky Dash) or how
-        // how high (Sky Climb), how much of the shape (Blueprint).
+        // The scoreboard: everyone by points; how far along (Sky Dash), how high (Sky Climb), how much of
+        // the shape (Blueprint).
         int order[MAX_PLAYERS] = {0, 1, 2, 3};
         std::stable_sort(order, order + MAX_PLAYERS, [&](int a, int b) {
             if (s.players[a].present != s.players[b].present) return s.players[a].present;
             return s.players[a].points > s.players[b].points;
         });
-        vec4 slots(-1.0f);
-        float meLine = -1.0f;
-        const char* names[8] = {"hudScore0", "hudScore1", "hudScore2", "hudScore3", "hudScore4", "hudScore5", "hudScore6", "hudScore7"};
-        for (int line = 0; line < MAX_PLAYERS; line++) {
+        h.scores.clear();
+        for (int line = 0; line < MAX_PLAYERS && joined; line++) {
             const State::Player& p = s.players[order[line]];
-            std::string row;
-            if (joined && p.present) {
-                row = p.name.substr(0, 10);
-                row += std::string(std::max<size_t>(1, 12 - row.size()), ' ') + std::to_string(p.points);
-                static const char* places[] = {"", "1ST", "2ND", "3RD", "4TH"};
-                if (s.mode == Dash && s.phase != Intro) row += "  " + (p.place ? std::string(places[p.place]) : std::to_string(int(p.extra)) + "M");
-                if (s.mode == Climb && s.phase != Intro) row += "  " + std::to_string(int(p.extra)) + "M";
-                if (s.mode == Blueprint && s.phase != Intro) row += "  " + std::to_string(int(p.extra * 100.0f + 0.5f)) + "PC";
-                if (!p.alive && s.phase == Playing) row += "  OUT";
-                slots[line] = float(order[line]);
-                if (order[line] == s.you) meLine = float(line);
-            }
-            // Left-aligned in the shader's centred line: padded out to 24.
-            row.resize(24, ' ');
-            text(names[line * 2], names[line * 2 + 1], row);
+            if (!p.present) continue;
+            static const char* places[] = {"", "1st", "2nd", "3rd", "4th"};
+            std::string extra;
+            if (s.mode == Dash && s.phase != Intro) extra = p.place ? places[p.place] : std::to_string(int(p.extra)) + " m";
+            if (s.mode == Climb && s.phase != Intro) extra = std::to_string(int(p.extra)) + " m";
+            if (s.mode == Blueprint && s.phase != Intro) extra = std::to_string(int(p.extra * 100.0f + 0.5f)) + "%";
+            if (!p.alive && s.phase == Playing) extra = "out";
+            h.scores.push_back({p.name, std::to_string(p.points), extra, hex(PLAYER_COLOURS[order[line]]), order[line] == s.you ? "1" : ""});
         }
-        set("hudScoreSlots", slots);
-        set("hudMe", vec4(meLine, up ? 1.0f : 0.0f, c.flash, float(s.you)));
-        // The bars: the bomb's fuse (and whether it is yours), the shove's and the bomb's cooldowns.
-        const bool mine = up && s.you >= 0 && s.players[s.you].carrier;
-        set("hudBars", vec4(s.phase == Playing ? s.fuse : -1.0f, mine ? 1.0f : 0.0f, s.shove, s.toss));
-        set("hudMarker", c.marker ? vec4(*c.marker, 1.0f) : vec4(0.0f));
-        set("hudCharge", vec4(c.charge >= 0.0f ? std::min(c.charge, 1.0f) : -1.0f, 0.0f, 0.0f, 0.0f));
-        // First person: the crosshair, and the ring on the cell a cube would go in.
-        set("hudAim", c.aim ? vec4(*c.aim, 1.0f) : vec4(0.0f, 0.0f, 0.0f, c.firstPerson && up ? -1.0f : 0.0f));
+
+        // The fuse (orange, red when low; pulsing when the bomb is yours), and the cooldowns.
+        h.fuse = s.phase == Playing ? s.fuse : -1.0f;
+        h.fuseMine = up && s.you >= 0 && s.players[s.you].carrier;
+        h.fuseColour = hex(glm::mix(vec3(0.95f, 0.15f, 0.1f), vec3(1.0f, 0.65f, 0.15f), std::clamp(s.fuse * 2.0f, 0.0f, 1.0f)));
+        h.alive = up;
+        h.shove = s.shove;
+        h.toss = s.toss;
+        h.charge = c.charge >= 0.0f ? std::min(c.charge, 1.0f) : -1.0f;
         const int blocks = BLOCKS[s.mode] ? int(s.blocks) : -1;
-        text("hudInfo0", "hudInfo1", up && s.phase == Playing && blocks >= 0 ? "C BLOCKS " + std::to_string(blocks) : "");
+        h.info = up && s.phase == Playing && blocks >= 0 ? "C  blocks: " + std::to_string(blocks) : "";
+        h.flash = c.flash * 0.6f;
+
+        // In the world: where a bomb would land (a 2.2 m ring), and in first person the crosshair and the
+        // cell a cube would go in (0.55 m).
+        h.markerShown = c.marker && project(camera, *c.marker, 2.2f, window, h.markerX, h.markerY, h.markerR);
+        h.crosshair = c.firstPerson && up;
+        h.aimShown = c.aim && project(camera, *c.aim, 0.55f, window, h.aimX, h.aimY, h.aimR);
+
+        // The frame rate, when the menu asks for it.
+        static float timer = 0.0f;
+        static int frames = 0;
+        timer += dt;
+        frames++;
+        if (timer >= 0.5f) {
+            h.fps = int(std::lround(frames / timer));
+            timer = 0.0f;
+            frames = 0;
+        }
+        h.showFps = world.ctx().get<Menu>().showFps;
     }
 
     void render(projv::Application& app) {
@@ -646,7 +693,10 @@ namespace {
             eye += amount * 0.25f * vec3(std::sin(t * 37.0f), std::sin(t * 41.0f + 1.0f), std::sin(t * 53.0f + 2.0f));
         }
         voxel_renderer::upload(world, renderInstance, eye, c.look);
-        uploadHud(world, renderInstance);
+        projv::CameraView camera;
+        camera.position = eye;
+        camera.forward = c.look;
+        updateHud(world, renderInstance, camera, app.time().unscaledDelta);
         projv::graphics::renderConstructedRenderer(renderInstance, renderInstance.getActiveRenderer(), &gpu);
 
         c.titleClock -= app.time().unscaledDelta;
@@ -658,6 +708,16 @@ namespace {
             glfwSetWindowTitle(renderInstance.window, title.c_str());
         }
         if (renderInstance.shouldClose) app.closeRequested = true;
+
+        // PARTY_CAPTURE=<file>: frame PARTY_CAPTURE_AT (default 900) saved as <file>.tga, then it exits;
+        // PARTY_CAPTURE_MENU=1 with the menu open. An unattended look at the HUD.
+        if (const char* capture = std::getenv("PARTY_CAPTURE")) {
+            static const int at = std::getenv("PARTY_CAPTURE_AT") ? std::atoi(std::getenv("PARTY_CAPTURE_AT")) : 900;
+            const char* menu = std::getenv("PARTY_CAPTURE_MENU");
+            if (menu && std::string(menu) == "1" && app.frameCount == at - 60) setMenu(app, true);
+            if (app.frameCount == at) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capture);
+            if (app.frameCount == at + 5) app.closeRequested = true;
+        }
     }
 
     // Headless: finish on time, after checking.
@@ -749,6 +809,7 @@ namespace {
         if (options.headless) return;
         installRenderer(world, world.ctx().get<projv::graphics::RenderInstance>(), here);
         world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
+        installHud(app, here);
     }
 
     void shutdown(projv::Application& app) {

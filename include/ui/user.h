@@ -81,8 +81,11 @@ namespace projv::ui::user {
         Model& bind(const std::string& name, int* value);
         Model& bind(const std::string& name, bool* value);
         Model& bind(const std::string& name, std::string* value);
-        // Bound values are compared each frame, so this is only for a change the comparison cannot
-        // see -- there is none for these types today; kept for the list bindings to come.
+        // Lists (D21): `data-for="item : name"`, and rows of text, `{{row[0]}}`. Compared each frame.
+        Model& bind(const std::string& name, std::vector<std::string>* value);
+        Model& bind(const std::string& name, std::vector<std::vector<std::string>>* value);
+        // Bound values are compared each frame, so this is only for a change the comparison cannot see:
+        // there is none for these types; it is here for types to come.
         void dirty(const std::string& variable);
         bool valid() const { return app != nullptr; }
 

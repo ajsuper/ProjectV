@@ -86,7 +86,7 @@ namespace projv::ui::user {
         void fullscreen(uint8_t stencilValue);
         // A quad over the current view's [0,w]x[0,h], sampling `source` from uv0 to uv1.
         void quad(bgfx::TextureHandle source, int w, int h, float u0, float v0, float u1, float v1, Program program,
-                  uint64_t state, const Rect* scissor);
+                  uint64_t state, const Rect* scissor, uint32_t stencil = BGFX_STENCIL_NONE);
         Rect region() const;   // the scissor, or the whole window
         void copy(const Target& from, const Target& to);
         void renderBlur(float sigma, Target& sourceDestination, Target& temp, Rect window);

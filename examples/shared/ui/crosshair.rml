@@ -1,0 +1,17 @@
+<rml>
+<head>
+    <title>Crosshair</title>
+    <style>
+        body { width: 100%; height: 100%; pointer-events: none; }
+        /* Two bars through the centre, dark-edged so they read on any background (docs/plans/ui.md, D24). */
+        div { display: block; position: absolute; background-color: #ffffffe6; border-radius: 1dp; box-shadow: #000000b0 0dp 0dp 3dp 0dp; }
+        .across { left: 50%; top: 50%; width: 16dp; height: 2dp; margin-left: -8dp; margin-top: -1dp; }
+        .down { left: 50%; top: 50%; width: 2dp; height: 16dp; margin-left: -1dp; margin-top: -8dp; }
+    </style>
+</head>
+<!-- A crosshair, shown and hidden by name ("crosshair"). -->
+<body>
+    <div class="across"></div>
+    <div class="down"></div>
+</body>
+</rml>

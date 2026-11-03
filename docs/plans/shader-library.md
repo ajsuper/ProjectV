@@ -451,6 +451,8 @@ calls are now `pjvViewRayDirection`.
 - **The crosshair stays**, as `BasicRendererOptions::crosshair`, until a program can draw its own. The
   sandbox, physics and multiplayer client aim with it, and there is no UI layer yet. It goes in
   [ui.md](ui.md) U5. Asked 2026-11-01.
+  *Gone 2026-11-02* (ui.md U5, D24): the sandbox, the physics example and the multiplayer client
+  draw it as a document, `examples/shared/ui/crosshair.rml`.
 - **The camera comes from a `CameraView` in `world.ctx()`**, which the system copies to the renderer
   with `setCamera`. That is D4's first idea, which S2 moved off the driver: the driver still takes the
   camera per renderer, and only this system reads the ctx.

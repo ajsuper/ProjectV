@@ -25,7 +25,7 @@ bgfx, and the active renderer.
 | `window`, `shouldClose`, `pollEventsInRender` | The GLFW window; close flag; whether rendering polls events |
 | `resizable` | Set before `initialize`; false asks for exactly the size given (a tiling window manager floats it), for captures and benchmarks |
 | `addOverlay(order, fn)`, `drawOverlays(size)` | Drawn over the frame after the renderer's passes (the UI's layers); ascending `order` |
-| `wantFrameTexture(bool)`, `frameRedirected()`, `frameTexture()`, `markFrameConsumed()` | The frame as a texture (ui.md D18): while wanted, passes that write the window write an engine RGBA8 texture instead; a reader writes the window from it and says so, else `endFrame` copies it (`FRAME_COPY_VIEW`, 127). The user layer asks while a document is shown |
+| `wantFrameTexture(bool)`, `frameRedirected()`, `frameTexture()`, `markFrameConsumed()` | The frame as a texture (ui.md D18): while wanted, passes that write the window write an engine RGBA8 texture instead; a reader writes the window from it and says so, else `endFrame` copies it (`FRAME_COPY_VIEW`, 63). The user layer asks while a document is shown |
 | `windowTarget(size)`, `finishFrame(size)`, `releaseFrameTexture()` | Its plumbing: the framebuffer a window pass writes (`performRenderPasses`), the copy (`endFrame`), freeing it before bgfx goes (the UI's shutdown) |
 
 ## `graphics/input.h`
@@ -80,13 +80,13 @@ sky; its shader is embedded (`basic`, below). Guide: [Draw a scene](../guides/dr
 | Name | What |
 |---|---|
 | `installBasicRenderer(app, renderInstance, options)` | Creates it, makes it active, emplaces `BasicRenderer` and a `CameraView`, and adds the Render system `"basic renderer"`: flush the `Scene` into the `GPUData`, draw from the `CameraView` (all `world.ctx()`) |
-| `BasicRendererOptions` | The look: `sunDirection`, `sunColour`, `ambientAbove`/`Below`, `skyAbove`/`Below` (sRGB), `crosshair` (until programs draw UI) |
+| `BasicRendererOptions` | The look: `sunDirection`, `sunColour`, `ambientAbove`/`Below`, `skyAbove`/`Below` (sRGB). No crosshair: that is UI ([ui](ui.md#uiuserh)) |
 | `BasicRenderer` | The `world.ctx()` resource: `renderer`, `options` (change any time) |
 | `createBasicRenderer()` | → `std::shared_ptr<ConstructedRenderer>`, or nullptr (logged); bgfx must be up |
 | `drawBasicRenderer(renderInstance, renderer, gpu, view, options)` | One frame, submitted; uploads nothing |
 
 ```cpp
-graphics::installBasicRenderer(app, window, {.crosshair = true});
+graphics::installBasicRenderer(app, window);
 app.world.ctx().get<CameraView>() = view;   // each frame
 ```
 

@@ -7,6 +7,7 @@ projv_add_example(mp_server
 projv_add_example(mp_client
     SOURCES      client.cpp
     ASSET_DIRS   arena
+    SHARED_UI
 )
 projv_add_example(mp_bots
     SOURCES    bots.cpp

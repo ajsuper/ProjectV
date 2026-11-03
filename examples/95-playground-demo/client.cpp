@@ -47,8 +47,10 @@
 #include "graphics/input.h"
 #include "graphics/manage_resources.h"
 #include "graphics/perform_renderer.h"
+#include "graphics/camera.h"
 #include "graphics/render_instance.h"
 #include "ui/ui.h"
+#include "ui/user.h"
 #include "utils/material.h"
 #include "voxel_renderer.h"
 
@@ -104,6 +106,25 @@ namespace {
         double clock = 0.0;
         // What a headless client saw, for its checks.
         int states = 0, banners = 0, knocks = 0, uses = 0;
+    };
+
+    // What the HUD document shows (ui/hud.rml), bound to its model "hud" and filled each frame.
+    struct Hud {
+        std::string top, banner, bannerColour = "#ffffff", toolName;
+        std::vector<std::vector<std::string>> players;   // name, colour, "1" for you
+        std::vector<std::vector<std::string>> tools;     // number, name, readiness 0..1, "1" in hand
+        std::vector<std::string> help;
+        float reset = -1.0f, flash = 0.0f;
+        bool  joined = false, ringShown = false;
+        float ringX = 0, ringY = 0, ringR = 0;
+        int   fps = 0;
+        bool  showFps = false;
+    };
+    // The shared menu's settings (examples/shared/ui/menu.rml), bound to its model "menu".
+    struct Menu {
+        std::string game = "Playground";
+        float sensitivity = 1.0f;
+        bool  invertY = false, showFps = false, open = false;
     };
 
     float unit(Client& c) { return std::uniform_real_distribution<float>(-1.0f, 1.0f)(c.random); }
@@ -334,6 +355,39 @@ namespace {
         sendUse(world, tool, head, dir);
     }
 
+    // Opens or closes the shared menu (D23): the cursor is the menu's while it is open.
+    void setMenu(projv::Application& app, bool open) {
+        Menu& menu = app.world.ctx().get<Menu>();
+        auto& renderInstance = app.world.ctx().get<projv::graphics::RenderInstance>();
+        menu.open = open;
+        if (open) projv::ui::user::show(app, "menu");
+        else projv::ui::user::hide(app, "menu");
+        projv::graphics::setCursorCaptured(app, renderInstance, !open);
+    }
+
+    // The HUD and the menu: documents over the frame (docs/plans/ui.md, U5).
+    void installHud(projv::Application& app, const fs::path& here) {
+        World& world = app.world;
+        Hud& h = world.ctx().emplace<Hud>();
+        Menu& m = world.ctx().emplace<Menu>();
+        const std::string ui = (here / "shared_ui").string();
+        projv::ui::user::loadFont(app, ui + "/fonts/LatoLatin-Regular.ttf");
+        projv::ui::user::loadFont(app, ui + "/fonts/LatoLatin-Bold.ttf");
+        projv::ui::user::model(app, "hud")
+            .bind("top", &h.top).bind("banner", &h.banner).bind("bannerColour", &h.bannerColour).bind("toolName", &h.toolName)
+            .bind("players", &h.players).bind("tools", &h.tools).bind("help", &h.help).bind("reset", &h.reset)
+            .bind("flash", &h.flash).bind("joined", &h.joined).bind("ringShown", &h.ringShown).bind("ringX", &h.ringX)
+            .bind("ringY", &h.ringY).bind("ringR", &h.ringR).bind("fps", &h.fps).bind("showFps", &h.showFps);
+        projv::ui::user::model(app, "menu")
+            .bind("game", &m.game).bind("sensitivity", &m.sensitivity).bind("invertY", &m.invertY).bind("showFps", &m.showFps);
+        projv::ui::user::open(app, "hud", (here / "ui/hud.rml").string());
+        projv::ui::user::open(app, "menu", ui + "/menu.rml", {.shown = false, .modal = true, .fadeOut = 0.35f});
+        app.events().on<projv::ui::UiAction>([&app](const projv::ui::UiAction& action) {
+            if (action.name == "resume") setMenu(app, false);
+            else if (action.name == "leave") app.closeRequested = true;
+        });
+    }
+
     void controls(projv::Application& app) {
         World& world = app.world;
         Client& c = world.ctx().get<Client>();
@@ -351,9 +405,12 @@ namespace {
         const auto& input = world.ctx().get<projv::Input>();
         // The camera: the trackpad (the window holds the cursor; Esc lets it go, a click takes it back)
         // or the arrow keys.
+        // Esc: the menu (D23), which frees the cursor; it does not pause the game, which is the server's.
+        Menu& menu = world.ctx().get<Menu>();
+        if (input.pressed(projv::Key::Escape)) setMenu(app, !menu.open);
+        if (menu.open) return;
         const bool captured = input.cursorCaptured;
-        if (captured && input.pressed(projv::Key::Escape)) projv::graphics::setCursorCaptured(app, renderInstance, false);
-        else if (!captured && input.pressed(projv::MouseButton::Left)) {
+        if (!captured && !input.wantCaptureMouse && input.pressed(projv::MouseButton::Left)) {
             projv::graphics::setCursorCaptured(app, renderInstance, true);
             c.useClock = 0.3f;   // that click was for the cursor
         }
@@ -363,8 +420,9 @@ namespace {
         c.yaw = wrapAngle(c.yaw + turn * 2.2f * dt);
         c.pitch = std::clamp(c.pitch + (float(input.down(projv::Key::Up)) - float(input.down(projv::Key::Down))) * 1.2f * dt, -1.5f, 1.45f);
         if (captured) {
-            c.yaw = wrapAngle(c.yaw + input.cursorDelta.x * 0.0025f);
-            c.pitch = std::clamp(c.pitch - input.cursorDelta.y * 0.0025f, -1.5f, 1.45f);
+            const float speed = 0.0025f * menu.sensitivity;
+            c.yaw = wrapAngle(c.yaw + input.cursorDelta.x * speed);
+            c.pitch = std::clamp(c.pitch - input.cursorDelta.y * speed * (menu.invertY ? -1.0f : 1.0f), -1.5f, 1.45f);
         }
 
         // The tool: 1-8, the wheel, Q and E.
@@ -452,105 +510,84 @@ namespace {
 
     // ---- Drawing ------------------------------------------------------------------------------------
 
-    constexpr const char* HUD_UNIFORMS[] = {"windowRes",  "hudTop0",    "hudTop1",    "hudBanner0", "hudBanner1", "hudBannerColour",
-                                            "hudList0",   "hudList1",   "hudList2",   "hudList3",   "hudList4",   "hudList5",
-                                            "hudList6",   "hudList7",   "hudListSlots", "hudMe",    "hudTools",   "hudCooldowns0",
-                                            "hudCooldowns1", "hudAim",  "hudInfo0",   "hudInfo1",   "hudHelp0",   "hudHelp1",
-                                            "hudHelp2",   "hudHelp3",   "hudHelp4",   "hudHelp5",   "hudHelp6",   "hudHelp7",
-                                            "hudHelp8",   "hudHelp9",   "hudHelp10",  "hudHelp11"};
-
-    // The shared renderer (examples/shared/voxelRenderer), with one pass more: its display pass draws
-    // into a texture instead of the window, and the HUD (hudShaders/hud.frag) draws that and itself
-    // over it to the window. Built from the shared renderer's own files, so it changes as they do.
+    // The shared renderer (examples/shared/voxelRenderer), drawing to the window; the HUD is a
+    // document over it (ui/hud.rml).
     void installRenderer(World& world, projv::graphics::RenderInstance& renderInstance, const fs::path& here) {
         voxel_renderer::View& view = world.ctx().emplace<voxel_renderer::View>();
         view.finestVoxel = 0.1f;
         view.hazeRadius = 180.0f;
-        projv::RendererSpecification spec = voxel_renderer::specification(world, here);
-        uint32_t textureId = 0, frameBufferId = 0, shaderId = 0;
-        for (const auto& t : spec.resources.textures) textureId = std::max(textureId, t.textureID + 1);
-        for (const auto& f : spec.resources.FrameBuffers) frameBufferId = std::max(frameBufferId, f.frameBufferID + 1);
-        for (const auto& s : spec.resources.shaders) shaderId = std::max(shaderId, s.shaderID + 1);
-
-        projv::Texture shown;
-        shown.textureID = textureId;
-        shown.name = "shown";
-        shown.format = bgfx::TextureFormat::RGBA8;
-        shown.sizeMode = projv::TextureSizeMode::Relative;
-        shown.scale = 1.0f;
-        shown.origin = projv::CreateNew;
-        spec.resources.textures.push_back(shown);
-        spec.resources.FrameBuffers.push_back(projv::FrameBuffer{frameBufferId, {textureId}});
-        projv::Shader hud;
-        hud.shaderID = shaderId;
-        hud.filePath = (here / "hudShaders/hud.bin").string();
-        hud.shaderFileContents = projv::graphics::readFile(hud.filePath);
-        spec.resources.shaders.push_back(hud);
-        for (const char* name : HUD_UNIFORMS) spec.resources.uniforms.push_back(projv::Uniform{0, projv::Vec4, name});
-        for (projv::RenderPass& pass : spec.dependencyGraph.renderPasses)
-            if (pass.frameBufferOutputID == -1) pass.frameBufferOutputID = int(frameBufferId);
-        projv::RenderPass pass{};
-        pass.shaderID = shaderId;
-        pass.frameBufferInputIDs = {frameBufferId};
-        pass.frameBufferOutputID = -1;
-        spec.dependencyGraph.renderPasses.push_back(pass);
-
-        renderInstance.addRendererSpecification(1, spec);
+        renderInstance.addRendererSpecification(1, voxel_renderer::specification(world, here));
         bgfx::ShaderHandle vertexShader = projv::graphics::loadEngineShader("vs_quad");
         renderInstance.setActiveRenderer(projv::graphics::constructRendererSpecification(renderInstance.getRendererSpecification(1), vertexShader));
     }
 
-    const char* HELP[6] = {"WASD MOVE  SPACE JUMP", "CLICK OR F: USE TOOL", "1-8 / WHEEL / Q E: TOOL",
-                           "V CAMERA  G GRAVITY", "HOLD BACKSPACE: REBUILD", "H HELP  ESC CURSOR"};
+    const char* HELP[6] = {"W A S D  move,  Space  jump", "Click or F  use the tool", "1-8, the wheel, Q E  the tool",
+                           "V  camera,  G  gravity", "Hold Backspace  rebuild", "H  this help,  Esc  the menu"};
 
-    void uploadHud(World& world, projv::graphics::RenderInstance& renderInstance) {
+    std::string hex(vec3 colour) {
+        char text[8];
+        std::snprintf(text, sizeof text, "#%02x%02x%02x", int(std::clamp(colour.x, 0.0f, 1.0f) * 255.0f + 0.5f),
+                      int(std::clamp(colour.y, 0.0f, 1.0f) * 255.0f + 0.5f), int(std::clamp(colour.z, 0.0f, 1.0f) * 255.0f + 0.5f));
+        return text;
+    }
+
+    // A ring of `radius` metres round a point in the world, facing the camera, as an element (D22):
+    // its centre and radius in window pixels, or false behind the camera.
+    bool project(const projv::CameraView& camera, vec3 point, float radius, projv::core::vec2 window, float& x, float& y, float& r) {
+        bool inFront = false;
+        const projv::core::vec2 uv = projv::graphics::cameraWorldToUV(camera, point, window, &inFront);
+        if (!inFront) return false;
+        const vec3 side = point + projv::graphics::cameraBasis(camera.forward).right * radius;
+        const projv::core::vec2 edge = projv::graphics::cameraWorldToUV(camera, side, window);
+        x = uv.x * window.x;
+        y = uv.y * window.y;
+        r = std::max(std::abs(edge.x - uv.x) * window.x, 3.0f);
+        return true;
+    }
+
+    // What the HUD shows: everything hud.frag drew, as values for ui/hud.rml.
+    void updateHud(World& world, projv::graphics::RenderInstance& renderInstance, const projv::CameraView& camera, float dt) {
         Client& c = world.ctx().get<Client>();
-        auto renderer = renderInstance.getActiveRenderer();
-        auto set = [&](const char* name, vec4 value) { projv::graphics::setUniformToValue(renderer, name, value); };
-        auto text = [&](const char* a, const char* b, const std::string& line) {
-            vec4 first, second;
-            packText(line, first, second);
-            set(a, first);
-            set(b, second);
-        };
+        Hud& h = world.ctx().get<Hud>();
         const State& s = c.state;
         const bool joined = runtime::sessionStats(world).connected && c.haveState;
-        const projv::core::vec2 resolution = renderInstance.getWindowResolution();
-        set("windowRes", vec4(resolution.x, resolution.y, 0.0f, 0.0f));
+        const projv::core::vec2 window = renderInstance.getWindowResolution();
 
-        std::string top = joined ? std::string(s.moon ? "MOON GRAVITY" : "PLAYGROUND") + "  PIECES " + std::to_string(s.pieces) : "JOINING...";
-        text("hudTop0", "hudTop1", top);
-        text("hudBanner0", "hudBanner1", c.bannerFor > 0.0f ? c.banner : "");
-        set("hudBannerColour", vec4(c.bannerColour, c.bannerFor > 0.0f ? 1.0f : 0.0f));
+        h.joined = joined;
+        h.top = joined ? std::string(s.moon ? "Moon gravity" : "Playground") + "   pieces: " + std::to_string(s.pieces) : "Joining...";
+        h.banner = c.bannerFor > 0.0f ? c.banner : "";
+        h.bannerColour = hex(c.bannerColour);
 
-        // Who is here, top left, by their colour.
-        vec4 slots(-1.0f);
-        float meLine = -1.0f;
-        const char* names[8] = {"hudList0", "hudList1", "hudList2", "hudList3", "hudList4", "hudList5", "hudList6", "hudList7"};
-        int line = 0;
-        for (int slot = 0; slot < MAX_PLAYERS; slot++) {
-            if (!joined || !s.players[slot].present) continue;
-            std::string row = s.players[slot].name.substr(0, 10);
-            row.resize(24, ' ');   // left-aligned in the shader's centred line
-            text(names[line * 2], names[line * 2 + 1], row);
-            slots[line] = float(slot);
-            if (slot == s.you) meLine = float(line);
-            line++;
+        h.players.clear();
+        for (int slot = 0; slot < MAX_PLAYERS && joined; slot++)
+            if (s.players[slot].present) h.players.push_back({s.players[slot].name, hex(PLAYER_COLOURS[slot]), slot == s.you ? "1" : ""});
+
+        // The tools: each one's number and readiness, the one in hand marked; the reset being held.
+        h.tools.clear();
+        for (int t = 0; t < TOOLS; t++) {
+            char ready[16];
+            std::snprintf(ready, sizeof ready, "%.3f", 1.0f - std::clamp(s.cooldown[t], 0.0f, 1.0f));
+            h.tools.push_back({std::to_string(t + 1), toolName(Tool(t)), ready, t == int(c.tool) ? "1" : ""});
         }
-        for (; line < MAX_PLAYERS; line++) text(names[line * 2], names[line * 2 + 1], "");
-        set("hudListSlots", slots);
-        set("hudMe", vec4(meLine, joined ? 1.0f : 0.0f, c.flash, float(s.you)));
+        h.toolName = joined ? toolName(c.tool) : "";
+        h.reset = c.resetHeld >= 0.0f ? std::min(c.resetHeld / RESET_HOLD, 1.0f) : -1.0f;
+        h.flash = c.flash * 0.6f;
+        h.help.clear();
+        if (c.helpFor > 0.0f) h.help.assign(std::begin(HELP), std::end(HELP));
 
-        // The tools along the bottom, the one in hand marked, each filling as it gets ready; the
-        // reset being held; the crosshair.
-        set("hudTools", vec4(float(c.tool), joined ? 1.0f : 0.0f, c.resetHeld >= 0.0f ? std::min(c.resetHeld / RESET_HOLD, 1.0f) : -1.0f, 1.0f));
-        set("hudCooldowns0", vec4(s.cooldown[0], s.cooldown[1], s.cooldown[2], s.cooldown[3]));
-        set("hudCooldowns1", vec4(s.cooldown[4], s.cooldown[5], s.cooldown[6], s.cooldown[7]));
-        set("hudAim", c.ring ? vec4(*c.ring, RING[c.tool]) : vec4(0.0f));
-        text("hudInfo0", "hudInfo1", joined ? toolName(c.tool) : "");
-        const char* help[12] = {"hudHelp0", "hudHelp1", "hudHelp2", "hudHelp3", "hudHelp4", "hudHelp5",
-                                "hudHelp6", "hudHelp7", "hudHelp8", "hudHelp9", "hudHelp10", "hudHelp11"};
-        for (int i = 0; i < 6; i++) text(help[i * 2], help[i * 2 + 1], c.helpFor > 0.0f ? HELP[i] : "");
+        // Where the tool takes effect: a ring of its reach, in the world.
+        h.ringShown = c.ring && RING[c.tool] > 0.0f && project(camera, *c.ring, RING[c.tool], window, h.ringX, h.ringY, h.ringR);
+
+        static float timer = 0.0f;
+        static int frames = 0;
+        timer += dt;
+        frames++;
+        if (timer >= 0.5f) {
+            h.fps = int(std::lround(frames / timer));
+            timer = 0.0f;
+            frames = 0;
+        }
+        h.showFps = world.ctx().get<Menu>().showFps;
     }
 
     void render(projv::Application& app) {
@@ -571,7 +608,10 @@ namespace {
             eye += amount * 0.25f * vec3(std::sin(t * 37.0f), std::sin(t * 41.0f + 1.0f), std::sin(t * 53.0f + 2.0f));
         }
         voxel_renderer::upload(world, renderInstance, eye, c.look);
-        uploadHud(world, renderInstance);
+        projv::CameraView camera;
+        camera.position = eye;
+        camera.forward = c.look;
+        updateHud(world, renderInstance, camera, app.time().unscaledDelta);
         projv::graphics::renderConstructedRenderer(renderInstance, renderInstance.getActiveRenderer(), &gpu);
 
         c.titleClock -= app.time().unscaledDelta;
@@ -582,6 +622,16 @@ namespace {
             glfwSetWindowTitle(renderInstance.window, title.c_str());
         }
         if (renderInstance.shouldClose) app.closeRequested = true;
+
+        // PLAY_CAPTURE=<file>: frame PLAY_CAPTURE_AT (default 900) saved as <file>.tga, then it exits;
+        // PLAY_CAPTURE_MENU=1 with the menu open. An unattended look at the HUD.
+        if (const char* capture = std::getenv("PLAY_CAPTURE")) {
+            static const int at = std::getenv("PLAY_CAPTURE_AT") ? std::atoi(std::getenv("PLAY_CAPTURE_AT")) : 900;
+            const char* menu = std::getenv("PLAY_CAPTURE_MENU");
+            if (menu && std::string(menu) == "1" && app.frameCount == at - 60) setMenu(app, true);
+            if (app.frameCount == at) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capture);
+            if (app.frameCount == at + 5) app.closeRequested = true;
+        }
     }
 
     // Headless: finish on time, after checking.
@@ -668,6 +718,7 @@ namespace {
         if (options.headless) return;
         installRenderer(world, world.ctx().get<projv::graphics::RenderInstance>(), here);
         world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
+        installHud(app, here);
     }
 
     void shutdown(projv::Application& app) {

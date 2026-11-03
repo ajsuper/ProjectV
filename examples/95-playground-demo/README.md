@@ -30,7 +30,8 @@ cd build/examples/playground_demo_server && ./playground_demo_server            
 | | |
 |---|---|
 | **W/A/S/D**, **Space** | walk, jump |
-| **trackpad** or **arrows** | look (Esc frees the cursor, a click takes it back) |
+| **trackpad** or **arrows** | look |
+| **Esc** | the menu: resume, mouse sensitivity, invert Y, the frame rate shown, leave (the game goes on) |
 | **click** or **F** | use the tool in hand; held, it goes on as fast as the tool allows |
 | **1–8**, **wheel**, **Q/E** | pick the tool |
 | **V** | first person or third (over the shoulder: the crosshair is where the tool goes either way) |
@@ -68,3 +69,11 @@ was sent matches the server's. `ctest --preset net` runs it.
 
 The scene folder (`playground/`) is generated: `playground_demo_server --write-assets <dir>` writes it from
 `world.h`, and the server and every client must have the same files.
+
+## The HUD
+
+A document, `ui/hud.rml` (its style `ui/hud.rcss`, over the demos' shared `base.rcss`), filled each
+frame from the client's state (`updateHud` in `client.cpp`); the menu is the demos' shared
+`shared_ui/menu.rml`. Edit them in the build folder while it runs: they reload. Markers in the world
+are elements placed where `graphics::cameraWorldToUV` projects them. `PLAY_CAPTURE=/tmp/play
+./playground_demo` saves frame 900 (`PLAY_CAPTURE_AT`; `PLAY_CAPTURE_MENU=1` with the menu open) and exits.

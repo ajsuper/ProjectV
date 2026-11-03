@@ -133,6 +133,7 @@ namespace {
             .bind("menuOpen", &state.menuOpen);
         projv::ui::user::open(app, "hud", dir + "/ui/hud.rml");
         projv::ui::user::open(app, "menu", dir + "/ui/menu.rml", {.shown = false, .fadeOut = 0.4f});   // ui.rcss fades it
+        projv::ui::user::open(app, "crosshair", dir + "/shared_ui/crosshair.rml", {.shown = false});
 
         // The menu's buttons. Handled in Update, after the frame's input: a UI action is input.
         app.events().on<projv::ui::UiAction>([&app](const projv::ui::UiAction& action) {
@@ -187,7 +188,12 @@ namespace {
         }
         auto& basic = app.world.ctx().get<projv::graphics::BasicRenderer>();
         basic.options.sunDirection = {0.35f * std::cos(state.sunHeight), std::sin(state.sunHeight), 0.4f * std::cos(state.sunHeight)};
-        basic.options.crosshair = state.crosshair;
+        static bool shownCrosshair = false;   // the shared crosshair document, shown as the checkbox says
+        if (state.crosshair != shownCrosshair) {
+            if (state.crosshair) projv::ui::user::show(app, "crosshair");
+            else projv::ui::user::hide(app, "crosshair");
+            shownCrosshair = state.crosshair;
+        }
 
         if (const char* capture = std::getenv("UI_CAPTURE")) {
             const char* menu = std::getenv("UI_CAPTURE_MENU");

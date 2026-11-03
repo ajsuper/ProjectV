@@ -45,6 +45,18 @@ namespace projv::ui::user {
         constexpr uint32_t STENCIL_KEEP = BGFX_STENCIL_OP_FAIL_S_KEEP | BGFX_STENCIL_OP_FAIL_Z_KEEP;
         constexpr uint64_t TARGET_FLAGS = BGFX_TEXTURE_RT | BGFX_TEXTURE_BLIT_DST | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
 
+        // The layers are multisampled where the GPU can render and resolve RGBA8 and the stencil so:
+        // RmlUi's rounded geometry and its clip masks have hard edges, which RmlUi's own backends smooth
+        // the same way. bgfx resolves a multisampled target when it is next sampled.
+        uint64_t layerSamples() {
+            const bgfx::Caps* caps = bgfx::getCaps();
+            const bool d24s8 = caps->formats[bgfx::TextureFormat::D24S8] & BGFX_CAPS_FORMAT_TEXTURE_FRAMEBUFFER;
+            const uint16_t colour = caps->formats[bgfx::TextureFormat::RGBA8];
+            const uint16_t depth = caps->formats[d24s8 ? bgfx::TextureFormat::D24S8 : bgfx::TextureFormat::D0S8];
+            const bool msaa = (colour & BGFX_CAPS_FORMAT_TEXTURE_MSAA) && (depth & BGFX_CAPS_FORMAT_TEXTURE_MSAA);
+            return msaa ? BGFX_TEXTURE_RT_MSAA_X4 : BGFX_TEXTURE_RT;
+        }
+
         uint32_t stencilTest(uint8_t value) {
             return BGFX_STENCIL_TEST_EQUAL | BGFX_STENCIL_FUNC_REF(value) | BGFX_STENCIL_FUNC_RMASK(0xff) |
                    STENCIL_KEEP | BGFX_STENCIL_OP_PASS_Z_KEEP;
@@ -188,9 +200,11 @@ namespace projv::ui::user {
                 const bool d24s8 = bgfx::getCaps()->formats[bgfx::TextureFormat::D24S8] & BGFX_CAPS_FORMAT_TEXTURE_FRAMEBUFFER;
                 stencil = bgfx::createTexture2D(uint16_t(width), uint16_t(height), false, 1,
                                                 d24s8 ? bgfx::TextureFormat::D24S8 : bgfx::TextureFormat::D0S8,
-                                                BGFX_TEXTURE_RT_WRITE_ONLY);
+                                                layerSamples() | BGFX_TEXTURE_RT_WRITE_ONLY);   // the colour's sample count
             }
-            t.colour = bgfx::createTexture2D(uint16_t(width), uint16_t(height), false, 1, bgfx::TextureFormat::RGBA8, TARGET_FLAGS);
+            // Multisampled (no blits into or out of it: what it holds is drawn in and sampled out).
+            t.colour = bgfx::createTexture2D(uint16_t(width), uint16_t(height), false, 1, bgfx::TextureFormat::RGBA8,
+                                             layerSamples() | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP);
             const bgfx::TextureHandle attachments[2] = {t.colour, stencil};
             t.framebuffer = bgfx::createFrameBuffer(2, attachments, false);
         }
@@ -267,7 +281,11 @@ namespace projv::ui::user {
         Target& base = layer(0);
         startedFromFrame = bgfx::isValid(frame);
         if (startedFromFrame) {
-            if (open(base.framebuffer, w, h, BGFX_CLEAR_STENCIL)) bgfx::blit(view, base.colour, 0, 0, frame, 0, 0, uint16_t(w), uint16_t(h));
+            if (open(base.framebuffer, w, h, BGFX_CLEAR_STENCIL)) {
+                const float one[4] = {1, 1, 1, 1};
+                bgfx::setUniform(uColour, one);
+                quad(frame, w, h, 0, 0, 1, 1, Pass, REPLACE, nullptr);
+            }
         } else {
             open(base.framebuffer, w, h, BGFX_CLEAR_COLOR | BGFX_CLEAR_STENCIL);
         }
@@ -303,7 +321,7 @@ namespace projv::ui::user {
     }
 
     void BgfxRenderInterface::quad(bgfx::TextureHandle source, int w, int h, float u0, float v0, float u1, float v1,
-                                   Program program, uint64_t state, const Rect* clip) {
+                                   Program program, uint64_t state, const Rect* clip, uint32_t stencilState) {
         if (bgfx::getAvailTransientVertexBuffer(4, vertexLayout) < 4 || bgfx::getAvailTransientIndexBuffer(6, true) < 6) return;
         bgfx::TransientVertexBuffer tvb;
         bgfx::TransientIndexBuffer tib;
@@ -323,6 +341,7 @@ namespace projv::ui::user {
         bgfx::setTexture(0, sampler, bgfx::isValid(source) ? source : white);
         if (clip && clip->w > 0 && clip->h > 0) bgfx::setScissor(uint16_t(clip->x), uint16_t(clip->y), uint16_t(clip->w), uint16_t(clip->h));
         bgfx::setState(state);
+        bgfx::setStencil(stencilState);
         bgfx::submit(view, programs[program]);
     }
 
@@ -460,9 +479,12 @@ namespace projv::ui::user {
     // ---- Layers --------------------------------------------------------------------------------
 
     void BgfxRenderInterface::copy(const Target& from, const Target& to) {
-        // A blit runs at the start of its view: a view of its own, after what drew `from`.
+        // Drawn, not blitted: `from` may be a multisampled layer, which a blit cannot read; sampling it
+        // resolves it.
         if (!open(to.framebuffer, width, height)) return;
-        bgfx::blit(view, to.colour, 0, 0, from.colour, 0, 0, uint16_t(width), uint16_t(height));
+        const float one[4] = {1, 1, 1, 1};
+        bgfx::setUniform(uColour, one);
+        quad(from.colour, width, height, 0, 0, 1, 1, Pass, REPLACE, nullptr);
     }
 
     Rml::LayerHandle BgfxRenderInterface::PushLayer() {
@@ -484,8 +506,10 @@ namespace projv::ui::user {
         const float one[4] = {1, 1, 1, 1};
         bgfx::setUniform(uColour, one);
         const Rect clip = region();
+        // Through the clip mask when one is on: a backdrop is composited back through the element's
+        // rounded border this way (RmlUi's GL3 backend leaves its stencil test on for this draw).
         quad(post(0).colour, width, height, 0, 0, 1, 1, Pass, mode == Rml::BlendMode::Replace ? REPLACE : PREMULTIPLIED,
-             scissorOn ? &clip : nullptr);
+             scissorOn ? &clip : nullptr, clipMaskOn ? stencilTest(clipValue) : BGFX_STENCIL_NONE);
     }
 
     Rml::TextureHandle BgfxRenderInterface::SaveLayerAsTexture() {
@@ -493,8 +517,12 @@ namespace projv::ui::user {
         if (bounds.w <= 0 || bounds.h <= 0) return 0;
         bgfx::TextureHandle texture = bgfx::createTexture2D(uint16_t(bounds.w), uint16_t(bounds.h), false, 1, bgfx::TextureFormat::RGBA8,
                                                             BGFX_TEXTURE_BLIT_DST | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP);
-        if (!bgfx::isValid(texture) || !open(top().framebuffer, width, height)) return 0;
-        bgfx::blit(view, texture, 0, 0, top().colour, uint16_t(bounds.x), uint16_t(bounds.y), uint16_t(bounds.w), uint16_t(bounds.h));
+        if (!bgfx::isValid(texture)) return 0;
+        // Resolved into a postprocess target first (a layer is multisampled), then blitted out of it in
+        // a view of its own, after the copy.
+        copy(top(), post(0));
+        if (!open(post(1).framebuffer, width, height)) return toRml(texture);
+        bgfx::blit(view, texture, 0, 0, post(0).colour, uint16_t(bounds.x), uint16_t(bounds.y), uint16_t(bounds.w), uint16_t(bounds.h));
         return toRml(texture);
     }
 

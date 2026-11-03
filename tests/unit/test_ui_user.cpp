@@ -213,3 +213,24 @@ TEST_CASE("ui: a hidden document with a fadeOut is still drawn until it has fade
     user::show(f.app, "menu");
     CHECK(f.layer->visible());
 }
+
+TEST_CASE("ui: a model binds lists and rows, and a document follows them as they change") {
+    Fixture f;
+    std::vector<std::vector<std::string>> scores = {{"ANN", "3"}, {"BO", "1"}};
+    std::vector<std::string> tools = {"hammer", "saw"};
+    user::model(f.app, "board").bind("scores", &scores).bind("tools", &tools);
+    REQUIRE(user::openFromMemory(f.app, "board", document(
+        "<div id='rows'><p data-for='row : scores'>{{row[0]}}={{row[1]}};</p></div>"
+        "<div id='tools'><span data-for='t : tools'>{{t}},</span></div>", "data-model='board'")));
+    f.frame();
+    const std::string rows = f.layer->elementText("board", "rows");
+    CHECK(rows.find("ANN=3;") != std::string::npos);
+    CHECK(rows.find("BO=1;") != std::string::npos);
+    CHECK(f.layer->elementText("board", "tools").find("saw,") != std::string::npos);
+    scores.push_back({"CY", "7"});
+    scores[0][1] = "4";
+    f.frame();
+    const std::string after = f.layer->elementText("board", "rows");
+    CHECK(after.find("ANN=4;") != std::string::npos);
+    CHECK(after.find("CY=7;") != std::string::npos);
+}

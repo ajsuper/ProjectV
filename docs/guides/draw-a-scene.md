@@ -60,10 +60,11 @@ after the frame is drawn (timings, a screenshot) orders itself `{.after = "basic
 | `sunColour` | `0.75` grey | Linear |
 | `ambientAbove`, `ambientBelow` | `0.4`, `0.2` grey | Linear light on a face turned up, down; mixed by the normal |
 | `skyAbove`, `skyBelow` | `(0.42, 0.55, 0.72)`, `(0.10, 0.11, 0.14)` | sRGB, as picked; mixed by the ray's height, squared |
-| `crosshair` | `false` | Two bars through the centre. Temporary: goes when programs can draw UI ([ui.md](../plans/ui.md)) |
 
 ```cpp
-graphics::installBasicRenderer(app, window, {.sunDirection = {-0.3f, 0.6f, 0.2f}, .crosshair = true});
+graphics::installBasicRenderer(app, window, {.sunDirection = {-0.3f, 0.6f, 0.2f}});
+// A crosshair is UI: a document over the frame (examples/shared/ui/crosshair.rml).
+ui::user::open(app, "crosshair", "shared_ui/crosshair.rml");
 app.world.ctx().get<graphics::BasicRenderer>().options.sunColour = {1.0f, 0.8f, 0.6f};   // any time
 ```
 

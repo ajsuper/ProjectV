@@ -33,7 +33,8 @@ Made for a laptop: the trackpad or the arrow keys look about, the rest is on the
 |---|---|
 | **W/A/S/D** | walk, the way the camera faces |
 | **Space** | jump |
-| **trackpad** or **arrows** | turn the camera (up and down tilt it); Esc frees the cursor, a click takes it back |
+| **trackpad** or **arrows** | turn the camera (up and down tilt it) |
+| **Esc** | the menu: resume, mouse sensitivity, invert Y, the frame rate shown, leave (the game goes on) |
 | **V** | first person or third |
 | **F** or click | shove whoever is in front of you |
 | **C** or right click | lay a block: a tile into the gap in front, or a cube -- in front of you, or in first person where the crosshair points (a green ring marks the cell) |
@@ -80,3 +81,11 @@ runs it.
 
 The scene folder (`party/`) is generated: `party_demo_server --write-assets <dir>` writes it from
 `arena.h`, and the server and every client must have the same files.
+
+## The HUD
+
+A document, `ui/hud.rml` (its style `ui/hud.rcss`, over the demos' shared `base.rcss`), filled each
+frame from the client's state (`updateHud` in `client.cpp`); the menu is the demos' shared
+`shared_ui/menu.rml`. Edit them in the build folder while it runs: they reload. Markers in the world
+are elements placed where `graphics::cameraWorldToUV` projects them. `PARTY_CAPTURE=/tmp/party
+./party_demo` saves frame 900 (`PARTY_CAPTURE_AT`; `PARTY_CAPTURE_MENU=1` with the menu open) and exits.

@@ -1,0 +1,63 @@
+<rml>
+<head>
+    <title>Party HUD</title>
+    <link type="text/rcss" href="../shared_ui/base.rcss"/>
+    <link type="text/rcss" href="hud.rcss"/>
+</head>
+<!-- The party's HUD (docs/plans/ui.md, U5): what hud.frag drew as a dot font, as a document. The
+     program fills model "hud" every frame (client.cpp, updateHud). No pointer events: the game keeps
+     the mouse. -->
+<body class="hud" data-model="hud">
+    <!-- Shoved: the screen's edges flash white. -->
+    <div class="flash" data-style-opacity="flash"></div>
+
+    <!-- Where a bomb thrown now would land, and in first person the cell a cube would go in. -->
+    <div class="ring landing" data-if="markerShown"
+         data-style-left="(markerX - markerR) + 'px'" data-style-top="(markerY - markerR) + 'px'"
+         data-style-width="(markerR * 2) + 'px'" data-style-height="(markerR * 2) + 'px'"></div>
+    <div class="ring aim" data-if="aimShown"
+         data-style-left="(aimX - aimR) + 'px'" data-style-top="(aimY - aimR) + 'px'"
+         data-style-width="(aimR * 2) + 'px'" data-style-height="(aimR * 2) + 'px'"></div>
+    <div class="cross" data-if="crosshair"><div class="across"></div><div class="down"></div></div>
+
+    <!-- The game, the round and the clock; the bomb's fuse under them. -->
+    <div class="top">
+        <p class="chip game" data-if="top != ''">{{top}}</p>
+        <div class="fuse" data-if="fuse >= 0" data-class-mine="fuseMine">
+            <div class="fill" data-style-width="(fuse * 100) + '%'" data-style-background-color="fuseColour"></div>
+        </div>
+    </div>
+
+    <!-- Everyone by points, their colour beside them; yours marked. Rows: name, points, extra, colour, mine. -->
+    <div class="panel scores" data-if="scores.size > 0">
+        <div class="row" data-for="row : scores" data-class-me="row[4] == '1'">
+            <span class="swatch" data-style-background-color="row[3]"></span>
+            <span class="name">{{row[0]}}</span>
+            <span class="extra">{{row[2]}}</span>
+            <span class="points">{{row[1]}}</span>
+        </div>
+    </div>
+
+    <p class="fps chip" data-if="showFps">{{fps}} fps</p>
+
+    <!-- The banner, and the one rule of the game being introduced. -->
+    <p class="banner" data-if="banner != ''" data-style-color="bannerColour">{{banner}}</p>
+    <p class="hint chip" data-if="hint != ''">{{hint}}</p>
+
+    <!-- How soon you can shove (F) and throw (R) again, full when ready; the throw being wound up; your blocks. -->
+    <div class="actions" data-if="alive">
+        <div class="charge" data-if="charge >= 0"><div class="fill" data-style-width="(charge * 100) + '%'"></div></div>
+        <div class="cooldowns">
+            <div class="cooldown" data-class-ready="shove <= 0">
+                <span class="key">F</span>
+                <div class="bar"><div class="fill" data-style-width="((1 - shove) * 100) + '%'"></div></div>
+            </div>
+            <div class="cooldown throw" data-if="toss >= 0" data-class-ready="toss <= 0">
+                <span class="key">R</span>
+                <div class="bar"><div class="fill" data-style-width="((1 - toss) * 100) + '%'"></div></div>
+            </div>
+        </div>
+        <p class="info" data-if="info != ''">{{info}}</p>
+    </div>
+</body>
+</rml>

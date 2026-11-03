@@ -126,18 +126,21 @@ namespace projv::ui::user {
             std::map<std::string, std::filesystem::file_time_type> watched;   // the .rml and the .rcss beside it
         };
         struct Bound {
-            enum Kind { Float, Int, Bool, String } kind = Float;
+            enum Kind { Float, Int, Bool, String, List, Rows } kind = Float;
             std::string name;
             void* value = nullptr;
             float f = 0.0f;
             int i = 0;
             bool b = false;
             std::string s;
+            std::vector<std::string> list;
+            std::vector<std::vector<std::string>> rows;
         };
         struct Model {
             Rml::DataModelConstructor constructor;
             Rml::DataModelHandle handle;
             std::vector<Bound> bound;
+            bool listsRegistered = false;   // RmlUi needs the list types registered once a model
         };
 
         Application* app = nullptr;
@@ -229,6 +232,18 @@ namespace projv::ui::user {
                         case Bound::Int: changed = *static_cast<int*>(b.value) != b.i; b.i = *static_cast<int*>(b.value); break;
                         case Bound::Bool: changed = *static_cast<bool*>(b.value) != b.b; b.b = *static_cast<bool*>(b.value); break;
                         case Bound::String: changed = *static_cast<std::string*>(b.value) != b.s; b.s = *static_cast<std::string*>(b.value); break;
+                        case Bound::List: {
+                            const auto& now = *static_cast<std::vector<std::string>*>(b.value);
+                            changed = now != b.list;
+                            if (changed) b.list = now;
+                            break;
+                        }
+                        case Bound::Rows: {
+                            const auto& now = *static_cast<std::vector<std::vector<std::string>>*>(b.value);
+                            changed = now != b.rows;
+                            if (changed) b.rows = now;
+                            break;
+                        }
                     }
                     if (changed && model.handle) model.handle.DirtyVariable(b.name);
                 }
@@ -544,6 +559,13 @@ namespace projv::ui::user {
             if (!s) return;
             auto it = s->models.find(model);
             if (it == s->models.end()) return;
+            if constexpr (std::is_same_v<T, std::vector<std::string>> || std::is_same_v<T, std::vector<std::vector<std::string>>>) {
+                if (!it->second.listsRegistered) {
+                    it->second.constructor.RegisterArray<std::vector<std::string>>();
+                    it->second.constructor.RegisterArray<std::vector<std::vector<std::string>>>();
+                    it->second.listsRegistered = true;
+                }
+            }
             if (!it->second.constructor.Bind(name, value)) {
                 core::error("ui: could not bind '{}' in the data model '{}' (bind before opening a document that uses it)", name, model);
                 return;
@@ -556,6 +578,8 @@ namespace projv::ui::user {
             if constexpr (std::is_same_v<T, int>) b.i = *value;
             if constexpr (std::is_same_v<T, bool>) b.b = *value;
             if constexpr (std::is_same_v<T, std::string>) b.s = *value;
+            if constexpr (std::is_same_v<T, std::vector<std::string>>) b.list = *value;
+            if constexpr (std::is_same_v<T, std::vector<std::vector<std::string>>>) b.rows = *value;
             it->second.bound.push_back(std::move(b));
         }
     }
@@ -564,6 +588,8 @@ namespace projv::ui::user {
     Model& Model::bind(const std::string& variable, int* value) { bindValue(app, name, variable, value, UserLayer::Impl::Bound::Int); return *this; }
     Model& Model::bind(const std::string& variable, bool* value) { bindValue(app, name, variable, value, UserLayer::Impl::Bound::Bool); return *this; }
     Model& Model::bind(const std::string& variable, std::string* value) { bindValue(app, name, variable, value, UserLayer::Impl::Bound::String); return *this; }
+    Model& Model::bind(const std::string& variable, std::vector<std::string>* value) { bindValue(app, name, variable, value, UserLayer::Impl::Bound::List); return *this; }
+    Model& Model::bind(const std::string& variable, std::vector<std::vector<std::string>>* value) { bindValue(app, name, variable, value, UserLayer::Impl::Bound::Rows); return *this; }
 
     void Model::dirty(const std::string& variable) {
         if (!app) return;

@@ -102,33 +102,6 @@ namespace party {
     // Where a racer comes back after a fall: its last checkpoint, its own lane.
     inline vec3 checkpoint(int index, int slot) { return vec3(DASH_X + (float(slot) - 1.5f) * 2.2f, 0.05f, DASH_CHECKPOINTS[index]); }
 
-    // ---- Text for the HUD ---------------------------------------------------------------------------
-    // 24 characters packed three to a float, six bits each, centred: what hud.frag draws.
-    inline uint32_t textCode(char c) {
-        if (c >= '0' && c <= '9') return uint32_t(c - '0') + 1;
-        if (c >= 'a' && c <= 'z') c = char(c - 'a' + 'A');
-        if (c >= 'A' && c <= 'Z') return uint32_t(c - 'A') + 11;
-        switch (c) {
-            case ':': return 37;
-            case '!': return 38;
-            case '-': return 39;
-            case '/': return 40;
-            case '.': return 41;
-            case '>': return 42;
-            case '+': return 43;
-            default:  return 0;
-        }
-    }
-    inline void packText(const std::string& text, projv::core::vec4& a, projv::core::vec4& b) {
-        uint32_t codes[24] = {};
-        const size_t length = std::min<size_t>(text.size(), 24), pad = (24 - length) / 2;
-        for (size_t i = 0; i < length; i++) codes[pad + i] = textCode(text[i]);
-        float packed[8];
-        for (int f = 0; f < 8; f++) packed[f] = float(codes[f * 3] + codes[f * 3 + 1] * 64u + codes[f * 3 + 2] * 4096u);
-        a = projv::core::vec4(packed[0], packed[1], packed[2], packed[3]);
-        b = projv::core::vec4(packed[4], packed[5], packed[6], packed[7]);
-    }
-
     // ---- Messages -----------------------------------------------------------------------------------
     //
     // A client says where its player faces and when it shoves or throws (walking is

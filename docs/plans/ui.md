@@ -1,6 +1,6 @@
 # UI: a developer layer and a user layer
 
-Status: **in progress**: approved 2026-11-01 (RmlUi, D5; one shared demo style sheet, D13); U0 and U1 built 2026-11-01, U2, U3 and U4 2026-11-02, U5 next. Follows [shader-library.md](shader-library.md): the
+Status: **in progress**: approved 2026-11-01 (RmlUi, D5; one shared demo style sheet, D13); U0 and U1 built 2026-11-01, U2-U5 2026-11-02, U6 next. Follows [shader-library.md](shader-library.md): the
 UI's shaders are engine shaders (its S0) and its blur is the library's filters (its S1).
 
 **Mechanism, not policy** (as in the shader library): the engine provides the two layers, the render
@@ -208,6 +208,26 @@ downsamples, then a separable 7-tap Gaussian), drop-shadow, the colour-matrix fi
 contrast, invert, grayscale, sepia, hue-rotate, saturate), mask images; linear, radial and conic
 gradients, repeating or not. Decorators that run a program's own shaders wait for a program that
 needs one.
+
+### U5: the demos' HUDs as documents (agreed 2026-11-02, "keep going")
+
+**D21. A model binds lists:** `bind(name, &std::vector<std::string>)` and `bind(name,
+&std::vector<std::vector<std::string>>)`, compared each frame like the rest. A scoreboard is
+`data-for="row : scores"` with `{{row[0]}}`; a row's colour is a string a style reads
+(`data-style-background-color="row[3]"`). *Why:* the HUDs' lists (players, tools) are rows of text;
+a typed struct registry would be a second reflection system for no gain yet.
+
+**D22. A marker in the world is an element where it lands.** The program projects the point
+(`graphics::cameraWorldToUV`, the CPU twin of the shader library's) and binds the element's centre
+and radius in pixels; the ring is style. *Why:* the HUD shaders drew rings by marching each pixel's
+view ray; projecting one point is the same picture for a ring that faces the camera.
+
+**D23. The networked demos share one menu**, `examples/shared/ui/menu.rml`: Esc opens it (modal,
+the cursor freed) -- Resume, Settings (mouse sensitivity, invert Y, the frame rate shown), Leave.
+It does not pause: the game is the server's.
+
+**D24. The crosshair leaves the basic renderer** (shader-library S4 said it would): the sandbox, the
+physics example and the multiplayer client draw it as a document, `examples/shared/ui/crosshair.rml`.
 
 ## Milestones
 
@@ -446,6 +466,46 @@ colour in the graph, and the GPU by pass.
   gradient button, the HUD text's shadow, the chip, the fade's midpoint. Live by the user: the look,
   the blur, the frame rate (good); the fade asked for above.
 - Not built: decorators running a program's own shaders (D20); OpenGL.
+
+**U5** (2026-11-02).
+- **D21**: `Model::bind` takes `std::vector<std::string>` and `std::vector<std::vector<std::string>>`
+  (RmlUi's arrays, registered once a model), compared each frame. Test: rows and a list followed as
+  they change and grow.
+- **The party and playground HUDs are documents** (`ui/hud.rml`, `ui/hud.rcss` in each), filled each
+  frame by `updateHud` from the client's state: the scoreboard / who is here (rows with each player's
+  colour), the game and clock, the fuse (its colour and pulse), banners (a keyframe on creation), the
+  hint, cooldowns, the charge, the tools (rows: number, name, readiness). `hud.frag` (twice), its
+  pass, its two dozen uniforms and `packText` are gone; the shared renderer draws to the window.
+- **D22**: the landing ring, the aim ring and the playground's tool ring are elements at
+  `graphics::cameraWorldToUV`'s projection, their radius the projected offset of a point that far to
+  the camera's right. The shove flash is a full-window radial gradient, its opacity bound.
+- **D23**: `examples/shared/ui/menu.rml` (model "menu": game, sensitivity, invertY, showFps;
+  actions resume, leave), opened modal with a fade out; Esc toggles it in both demos and frees the
+  cursor; sensitivity and invert Y feed the camera, showFps a readout in the HUD.
+- **D24**: `BasicRendererOptions::crosshair`, its uniform and its shader code are gone; the sandbox, the
+  physics example and the multiplayer client open `examples/shared/ui/crosshair.rml`, and the UI
+  example's checkbox shows and hides it. The shared voxel renderer's own crosshair (Voxel Mayhem) is
+  left as it is.
+- **Found on the way: filters are views.** The first playground HUD put a drop-shadow filter on every
+  line of text and a backdrop blur on each of the eight tool boxes; each costs about ten views, the
+  frame ran out of the user layer's 127, and the tool row was not drawn (logged once). The text
+  shadows are `font-effect: shadow` now -- drawn with the glyphs, no layer -- the tool boxes plain, and
+  the range is 64-254 (`USER_VIEWS_FIRST`; the frame copy moved to view 63).
+- `PARTY_CAPTURE`, `PLAY_CAPTURE` (with `_AT`, `_MENU`): unattended looks at each HUD.
+- **Found by the user: square backdrops and jagged corners.** A frosted panel's blur showed past its
+  rounded corners to its square box, and every rounded edge stepped. Two causes, both the render
+  interface's: RmlUi composites a backdrop back through the element's rounded clip mask, and
+  `CompositeLayers` drew without the stencil test (RmlUi's GL3 backend leaves it on for that draw) --
+  it applies it now; and RmlUi's rounded geometry and clip masks are hard-edged, which its backends
+  smooth with multisampled layers -- the layers and their shared stencil are 4x MSAA now where the GPU
+  can render and resolve both (`layerSamples`). A multisampled target cannot be blitted, so layer
+  copies, the frame into the base layer and save-as-texture draw (sampling resolves) instead. On the
+  way: `BGFX_TEXTURE_RT_MSAA_X4` includes the RT bit, and masking it off gave the stencil 2x under a
+  4x colour attachment -- a crash in the driver's draw.
+- Checked: the party and playground self-tests, the multiplayer self-test, the sandbox's self-test,
+  the unit suite; captures of both HUDs, the party's menu, the sandbox's crosshair. Not run: the
+  physics example's `DEMOS_SELFTEST` (the user stopped it; only its startup changed). Live, by the
+  user: the party's HUD and menu ("pretty good"), then the corners after the fix below.
 
 ## Open questions
 

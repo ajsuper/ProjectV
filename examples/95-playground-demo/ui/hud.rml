@@ -1,0 +1,49 @@
+<rml>
+<head>
+    <title>Playground HUD</title>
+    <link type="text/rcss" href="../shared_ui/base.rcss"/>
+    <link type="text/rcss" href="hud.rcss"/>
+</head>
+<!-- The playground's HUD (docs/plans/ui.md, U5): what hud.frag drew as a dot font, as a document.
+     The program fills model "hud" every frame (client.cpp, updateHud). No pointer events: the game
+     keeps the mouse. -->
+<body class="hud" data-model="hud">
+    <!-- Knocked: the screen's edges flash white. -->
+    <div class="flash" data-style-opacity="flash"></div>
+
+    <!-- Where the tool in hand takes effect, and the crosshair. -->
+    <div class="ring" data-if="ringShown"
+         data-style-left="(ringX - ringR) + 'px'" data-style-top="(ringY - ringR) + 'px'"
+         data-style-width="(ringR * 2) + 'px'" data-style-height="(ringR * 2) + 'px'"></div>
+    <div class="cross" data-if="joined"><div class="across"></div><div class="down"></div></div>
+
+    <div class="top"><p class="chip">{{top}}</p></div>
+
+    <!-- Who is here, by their colour. Rows: name, colour, "1" for you. -->
+    <div class="panel players" data-if="players.size > 0">
+        <div class="row" data-for="row : players" data-class-me="row[2] == '1'">
+            <span class="swatch" data-style-background-color="row[1]"></span>{{row[0]}}
+        </div>
+    </div>
+
+    <div class="panel help" data-if="help.size > 0">
+        <p data-for="line : help">{{line}}</p>
+    </div>
+
+    <p class="fps chip" data-if="showFps">{{fps}} fps</p>
+    <p class="banner" data-if="banner != ''" data-style-color="bannerColour">{{banner}}</p>
+
+    <!-- The reset being held, then the eight tools: the one in hand marked, each filling as it gets ready.
+         Rows: number, name, readiness 0..1 (as a string), "1" for the one in hand. -->
+    <div class="bottom" data-if="joined">
+        <div class="reset" data-if="reset >= 0"><div class="fill" data-style-width="(reset * 100) + '%'"></div></div>
+        <p class="tool-name">{{toolName}}</p>
+        <div class="tools">
+            <div class="tool" data-for="t : tools" data-class-held="t[3] == '1'">
+                <div class="ready" data-style-height="(t[2] * 100) + '%'"></div>
+                <span class="number">{{t[0]}}</span>
+            </div>
+        </div>
+    </div>
+</body>
+</rml>

@@ -38,11 +38,7 @@ namespace projv::graphics {
         core::vec3 ambientBelow{0.2f, 0.2f, 0.2f};      ///< and straight down; mixed by the normal.
         core::vec3 skyAbove{0.42f, 0.55f, 0.72f};       ///< The sky straight up, sRGB (as picked),
         core::vec3 skyBelow{0.10f, 0.11f, 0.14f};       ///< and straight down.
-        /**
-         * Two bars through the centre, for aiming. A crosshair is UI; it is here only until a
-         * program can draw its own (docs/plans/ui.md), and goes then.
-         */
-        bool crosshair = false;
+        // No crosshair: a crosshair is UI, drawn by the program (examples/shared/ui/crosshair.rml).
     };
 
     /**

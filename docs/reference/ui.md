@@ -28,7 +28,7 @@ default), which defines `PROJV_UI` for consumers. Plan: [ui.md](../plans/ui.md).
 | `Level` | `Dev`, `User`: routing order (the dev layer is offered input first, and drawn on top) |
 | `Layer` | One level's UI: `visible()`, `input(input, taken)` returning a `Capture`, `draw(view, size)` |
 | `Capture` | What a layer took: `keyboard`, `mouse`. The host ORs them into `Input::wantCaptureKeyboard`/`Mouse` and removes them from `Input` (`maskKeyboard`, `maskMouse`) |
-| `USER_VIEWS_FIRST`..`USER_VIEW`, `DEV_VIEW` | bgfx views 128-254 (the user layer, a new one at each framebuffer switch) and 255: above any renderer's passes |
+| `USER_VIEWS_FIRST`..`USER_VIEW`, `DEV_VIEW` | bgfx views 64-254 (the user layer, a new one at each framebuffer switch; a filter or backdrop costs about ten) and 255: above any renderer's passes |
 
 ```cpp
 projv::graphics::installPlatform(app, renderInstance);
@@ -96,7 +96,7 @@ it again after. A pass's name is its shader's file name (`BGFXDependencyGraph::n
 | `open(app, name, path, DocumentOptions)`, `openFromMemory(app, name, rml, ...)` | Loads a document under `name`. `DocumentOptions`: `shown` (true), `modal` (takes all input while shown), `fadeOut` (seconds it is still drawn after `hide`, for a transition out) |
 | `show`, `hide`, `close`, `isOpen`, `isShown` | By name |
 | `loadFont(app, path, fallback)` | A TTF/OTF face for every document |
-| `model(app, name)` -> `Model` | A data model: `.bind(name, &value)` for `float`, `int`, `bool`, `std::string`, before opening a document that names it (`data-model`). Bound values are compared each frame and redrawn when they change; controls bound to one (`data-value`, `data-checked`) write it |
+| `model(app, name)` -> `Model` | A data model: `.bind(name, &value)` for `float`, `int`, `bool`, `std::string`, and lists -- `std::vector<std::string>` (`data-for="item : name"`) and rows, `std::vector<std::vector<std::string>>` (`{{row[0]}}`) -- before opening a document that names it (`data-model`). Bound values are compared each frame and redrawn when they change; controls bound to one (`data-value`, `data-checked`) write it |
 | `UiAction` (in `projv::ui`) | The event an element's `on<event>="name arg..."` sends: `document`, `name`, `args`, `event` |
 
 ```cpp
@@ -150,7 +150,7 @@ What a style sheet can use, drawn by the bgfx render interface (RmlUi's GL3 back
 
 ```text
  renderer's window passes ──▶ frame texture (while a document is shown)
- user layer: base layer ◀─ frame texture; documents drawn into it (layers, filters: views 128..)
+ user layer: base layer ◀─ frame texture; documents drawn into it (layers, filters: views 64..)
              base layer ──▶ window (replaces it)      dev layer ──▶ view 255
 ```
 

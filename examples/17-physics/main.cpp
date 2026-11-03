@@ -85,6 +85,7 @@
 #include "graphics/basic_renderer.h"
 #include "graphics/render_instance.h"
 #include "ui/ui.h"
+#include "ui/user.h"
 #include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
 #include "utils/collision_geometry.h"
@@ -2823,7 +2824,9 @@ void startup(projv::Application& app) {
         }
     });
 
-    projv::graphics::installBasicRenderer(app, renderInstance, {.crosshair = true});
+    projv::graphics::installBasicRenderer(app, renderInstance);
+    // The crosshair is UI: the demos' shared document (docs/plans/ui.md, D24).
+    projv::ui::user::open(app, "crosshair", (projv::core::executableDirectory() / "shared_ui/crosshair.rml").string());
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
     demos.unattended = unattended;

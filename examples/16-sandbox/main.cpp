@@ -61,6 +61,7 @@
 #include "graphics/basic_renderer.h"
 #include "graphics/render_instance.h"
 #include "ui/ui.h"
+#include "ui/user.h"
 #include "runtime/entities.h"
 #include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
@@ -732,7 +733,9 @@ void startup(projv::Application& app) {
 
     // The engine's basic renderer, with a crosshair to aim the throws and pops. Each frame it uploads
     // new prefabs' geometry, moved bodies' headers and deleted components in one flush, then draws.
-    projv::graphics::installBasicRenderer(app, renderInstance, {.crosshair = true});
+    projv::graphics::installBasicRenderer(app, renderInstance);
+    // The crosshair is UI: the demos' shared document (docs/plans/ui.md, D24).
+    projv::ui::user::open(app, "crosshair", (projv::core::executableDirectory() / "shared_ui/crosshair.rml").string());
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
     projv::core::info("Sandbox: {} spawner(s) found in the arena. Left click throws, right click pops.",

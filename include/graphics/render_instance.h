@@ -38,7 +38,7 @@
 
 namespace projv::graphics {
     /** The view endFrame copies an unconsumed frame texture to the window in: under every overlay's. */
-    inline constexpr bgfx::ViewId FRAME_COPY_VIEW = 127;
+    inline constexpr bgfx::ViewId FRAME_COPY_VIEW = 63;
 
 
     /**

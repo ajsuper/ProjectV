@@ -16,8 +16,7 @@ namespace projv::graphics {
     namespace {
         // The uniforms basic.frag declares, in its order.
         const char* const basicUniformNames[] = {"pjvBasicSun",          "pjvBasicSunColour", "pjvBasicAmbientAbove",
-                                                 "pjvBasicAmbientBelow", "pjvBasicSkyAbove",  "pjvBasicSkyBelow",
-                                                 "pjvBasicOptions"};
+                                                 "pjvBasicAmbientBelow", "pjvBasicSkyAbove",  "pjvBasicSkyBelow"};
     }
 
     std::shared_ptr<ConstructedRenderer> createBasicRenderer() {
@@ -52,7 +51,6 @@ namespace projv::graphics {
             core::vec4(options.ambientBelow, 0.0f),
             core::vec4(options.skyAbove, 0.0f),
             core::vec4(options.skyBelow, 0.0f),
-            core::vec4(options.crosshair ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f),
         };
         for (size_t i = 0; i < std::size(values); i++) {
             setUniformToValue(renderer, basicUniformNames[i], values[i]);

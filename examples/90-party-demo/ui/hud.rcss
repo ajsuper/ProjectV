@@ -1,0 +1,68 @@
+/* The party's HUD, over the demos' shared base.rcss. Edit it while the game runs: it reloads. */
+
+body.hud { width: 100%; height: 100%; pointer-events: none; }
+/* Text shadows as a font effect, drawn with the glyphs: a filter on each would cost a layer and a blur. */
+p, .row { font-effect: shadow(0dp 1dp #000000b0); }
+
+.flash {
+    position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+    decorator: radial-gradient(circle farthest-corner, #ffffff00 45%, #ffffffb0);
+}
+
+.ring { position: absolute; border-radius: 9999dp; box-sizing: border-box; }
+.landing { border: 3dp #ff8c1ae6; background-color: #ffb03322; }
+.aim { border: 2dp #9cff9cd9; }
+.cross { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+.cross div { position: absolute; display: block; background-color: #ffffffe6; box-shadow: #000000b0 0dp 0dp 3dp 0dp; }
+.cross .across { left: 50%; top: 50%; width: 16dp; height: 2dp; margin-left: -8dp; margin-top: -1dp; }
+.cross .down { left: 50%; top: 50%; width: 2dp; height: 16dp; margin-left: -1dp; margin-top: -8dp; }
+
+.top { position: absolute; left: 0; top: 16dp; width: 100%; text-align: center; }
+.game { display: inline-block; font-size: 22dp; font-weight: bold; padding: 6dp 16dp; }
+.fuse {
+    width: 400dp; height: 12dp; margin: 10dp auto 0 auto;
+    border-radius: 6dp; background-color: #00000080; border: 1dp #ffffff26;
+}
+.fuse .fill { height: 100%; border-radius: 6dp; }
+.fuse.mine { border: 2dp #ff2a14; animation: 0.25s linear-in-out infinite alternate fuse-pulse; }
+@keyframes fuse-pulse { from { border-color: #ff2a14ff; } to { border-color: #ff2a1433; } }
+
+.scores { position: absolute; left: 16dp; top: 16dp; width: 240dp; padding: 8dp 10dp; }
+.row { padding: 3dp 8dp; border-radius: 6dp; font-size: 16dp; }
+.row.me { background-color: #ffffff1f; }
+.swatch { display: inline-block; width: 14dp; height: 14dp; border-radius: 3dp; margin-right: 10dp; vertical-align: middle; }
+.name { display: inline-block; width: 100dp; }
+.extra { display: inline-block; width: 56dp; color: #c8d2dc; font-size: 14dp; }
+.points { float: right; font-weight: bold; }
+
+.fps { position: absolute; right: 16dp; top: 16dp; font-size: 15dp; }
+
+.banner {
+    position: absolute; left: 0; top: 26%; width: 100%; text-align: center;
+    font-size: 64dp; font-weight: bold;
+    filter: drop-shadow(#000000c0 0dp 3dp 10dp);
+    animation: 0.4s back-out 1 banner-in;
+}
+@keyframes banner-in { from { opacity: 0; transform: scale(0.8); } to { opacity: 1; transform: scale(1); } }
+.hint {
+    position: absolute; left: 50%; top: 41%; width: 520dp; margin-left: -260dp;
+    text-align: center; font-size: 22dp; color: #ffeb99;
+}
+
+.actions { position: absolute; left: 0; bottom: 18dp; width: 100%; text-align: center; }
+.charge {
+    width: 320dp; height: 10dp; margin: 0 auto 10dp auto;
+    border-radius: 5dp; background-color: #00000080;
+}
+.charge .fill { height: 100%; border-radius: 5dp; decorator: linear-gradient(90deg, #ffd94d, #ff5a1a); }
+.cooldowns { text-align: center; }
+.cooldown { display: inline-block; margin: 0 14dp; }
+.key { display: inline-block; width: 22dp; font-weight: bold; vertical-align: middle; }
+.bar {
+    display: inline-block; width: 140dp; height: 14dp; vertical-align: middle;
+    border-radius: 7dp; background-color: #00000080; border: 1dp #ffffff26;
+}
+.bar .fill { height: 100%; border-radius: 7dp; background-color: #737373; }
+.cooldown.ready .bar .fill { background-color: #f2f2e6; }
+.cooldown.throw.ready .bar .fill { background-color: #ff8c26; }
+.info { margin-top: 8dp; font-size: 15dp; color: #e6e6d9; }

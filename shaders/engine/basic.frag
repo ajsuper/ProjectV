@@ -22,7 +22,6 @@ uniform vec4 pjvBasicAmbientAbove;  // xyz: linear light on a face turned straig
 uniform vec4 pjvBasicAmbientBelow;  // xyz: ... and straight down
 uniform vec4 pjvBasicSkyAbove;      // xyz: the sky straight up, sRGB
 uniform vec4 pjvBasicSkyBelow;      // xyz: ... and straight down
-uniform vec4 pjvBasicOptions;       // x: draw a crosshair (1) or not (0)
 
 vec3 sky(vec3 direction) {
     float height = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
@@ -62,15 +61,6 @@ void main() {
     }
 
     colour = pjvDisplay(colour, 1.0, gl_FragCoord.xy);   // linear light out to the screen
-
-    // Crosshair: two short bars through the centre, inverted against what is behind.
-    // Here until a program can draw its own (docs/plans/shader-library.md, S4).
-    if (pjvBasicOptions.x > 0.5) {
-        vec2 offset = abs(v_texcoord0 * resolution - resolution * 0.5);
-        bool bar = (offset.x < 1.0 && offset.y < 9.0 && offset.y > 3.0) ||
-                   (offset.y < 1.0 && offset.x < 9.0 && offset.x > 3.0);
-        if (bar) colour = vec3(1.0, 1.0, 1.0) - colour * 0.8;
-    }
 
     gl_FragColor = vec4(colour, 1.0);
 }
