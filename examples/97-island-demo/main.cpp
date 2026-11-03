@@ -12,6 +12,7 @@
 //   ISLAND_CAPTURE=/tmp/i ./island_demo --seed 42   240 frames into play saved as /tmp/i.tga, then it exits (no save)
 //                                  (ISLAND_VIEW=overview: from high above the shore)
 //                                  (ISLAND_MENU=pause|graphics: that menu open)
+//                                  (ISLAND_SLOT=n: hotbar slot n in hand, as 6 for stone)
 //
 // Controls: W/A/S/D walk, Space jump, the mouse looks; Esc the menu (resume, save and quit);
 // 1/2 or the wheel pick the pickaxe or the chisel, the left button swings it (held: again); E turns
@@ -190,6 +191,8 @@ namespace {
         int lastSlot = -1;
         bool aiming = false;
         std::string prompt;      // "collect 3.4 stone, 1.2 dirt" (the HUD puts the key before it)
+        std::string build;       // while dragging a box: its size and price ("4 x 3 x 1   12.0 of 31.4 stone")
+        bool buildOk = true;     // ...and whether it can be placed
         bool collecting = false;
     };
 
@@ -204,6 +207,7 @@ namespace {
         std::string material;    // what the blocks are built of
         double before = 0.0;     // the inventory of it before
         std::vector<projv::core::ivec3> blocks;   // the cells built in
+        int filled = 0;                            // voxels the box filled
         bool  failed = false;
         std::string report;
     };
@@ -605,6 +609,9 @@ namespace {
 
         hud.aiming = t.aiming;
         hud.prompt = g.prompt.rfind("E: ", 0) == 0 ? g.prompt.substr(3) : g.prompt;
+        const build::Build& b = world.ctx().get<build::Build>();
+        hud.build = b.status;
+        hud.buildOk = b.affordable;
         hud.collecting = g.collect;
     }
 
@@ -619,7 +626,8 @@ namespace {
         // ISLAND_SWING_FRAME=n: one swing at frame n (for a capture of the swing and its particles).
         if (const char* at = std::getenv("ISLAND_SWING_FRAME"); at && app.frameCount - world.ctx().get<Session>().playFrame == uint64_t(std::atoi(at))) use = true;
         tools::update(world, input, app.time().unscaledDelta, player.eye, player.forward(), use);
-        build::update(world, app.time().unscaledDelta, player.eye, player.forward(), use);
+        // A drag is dropped by the right button, or by the cursor leaving the game (the menu): never placed by it.
+        build::update(world, player.eye, player.forward(), use, !input.cursorCaptured || input.pressed(projv::MouseButton::Right));
         gather::update(world, input, app.time().unscaledDelta, player.eye, player.forward(), input.cursorCaptured && !world.ctx().get<SelfTest>().on);
         updateHud(world, app.time().unscaledDelta);
     }
@@ -713,22 +721,29 @@ namespace {
                 st.step = 22;
                 break;
             }
-            case 22: {   // three blocks of what there is most of, on the ground round the start
+            case 22: {   // a box of three blocks of what there is most of, dragged along the ground ahead (D17)
                 gather::Inventory& inventory = world.ctx().get<gather::Inventory>();
                 for (const char* m : gather::MATERIALS)
                     if (st.material.empty() || inventory.voxels[m] > inventory.voxels[st.material]) st.material = m;
                 st.before = inventory.voxels[st.material];
                 build::Build& b = world.ctx().get<build::Build>();
                 const vec3 f = glm::normalize(vec3(player.forward().x, 0.0f, player.forward().z)), r(-f.z, 0.0f, f.x);
-                const vec3 spots[3] = {spawn + f * 2.6f - r * 1.6f, spawn + f * 2.6f + r * 1.6f, spawn + f * 3.6f};
-                for (const vec3& spot : spots) {
-                    const vec3 target = spot - vec3(0.0f, 3.0f, 0.0f);
-                    const auto hit = runtime::castRay(world, spawn, glm::normalize(target - spawn), 8.0f, 0xffffffffu, t.walker);
-                    if (!hit || hit->entity != t.island) continue;
-                    const projv::core::ivec3 cell = build::cellFor(hit->position, hit->normal);
-                    if (build::place(world, b, st.material, cell)) st.blocks.push_back(cell);
+                const vec3 target = spawn + f * 3.0f - r * 0.75f - vec3(0.0f, 3.0f, 0.0f);
+                const auto hit = runtime::castRay(world, spawn, glm::normalize(target - spawn), 8.0f, 0xffffffffu, t.walker);
+                if (hit && hit->entity == t.island) {
+                    // From the cell aimed at, two cells along the ground to the right: a 3 x 1 x 1 box.
+                    const projv::core::ivec3 anchor = build::cellFor(hit->position, hit->normal);
+                    const projv::core::ivec3 along = std::abs(r.x) > std::abs(r.z) ? projv::core::ivec3(r.x > 0.0f ? 1 : -1, 0, 0)
+                                                                                    : projv::core::ivec3(0, 0, r.z > 0.0f ? 1 : -1);
+                    const build::Box box = build::boxOf(anchor, anchor + along * (2 * build::BLOCK));
+                    if (build::placeBox(world, b, st.material, box)) {
+                        st.filled = b.lastFilled;
+                        for (int z = box.lo.z; z <= box.hi.z; z += build::BLOCK)
+                            for (int y = box.lo.y; y <= box.hi.y; y += build::BLOCK)
+                                for (int x = box.lo.x; x <= box.hi.x; x += build::BLOCK) st.blocks.push_back({x, y, z});
+                    }
                 }
-                check(st, st.blocks.size() == 3, "three " + st.material + " blocks placed (" + std::to_string(st.blocks.size()) + ")" +
+                check(st, st.blocks.size() == 3, "a box of three " + st.material + " blocks placed (" + std::to_string(st.blocks.size()) + " cells)" +
                                                      (b.refused.empty() ? "" : "; " + b.refused));
                 st.wait = 20;
                 st.step = 23;
@@ -747,8 +762,8 @@ namespace {
                 }
                 check(st, full == int(st.blocks.size()) && full > 0, "they are in the island (" + std::to_string(full) + " cells full)");
                 const double spent = st.before - world.ctx().get<gather::Inventory>().voxels[st.material];
-                check(st, std::abs(spent - 3.0 * gather::VOXELS_PER_BLOCK) < 1e-6,
-                      "and cost " + std::to_string(int(spent)) + " voxels of " + st.material + " (64 a block)");
+                check(st, st.filled > 0 && std::abs(spent - double(st.filled)) < 1e-6 && st.filled <= 3 * build::BLOCK * build::BLOCK * build::BLOCK,
+                      "and cost the " + std::to_string(int(spent)) + " voxels of " + st.material + " it filled (" + std::to_string(st.filled) + ", at most 192)");
                 st.step = 4;
                 break;
             }
@@ -1022,6 +1037,8 @@ namespace {
         fx::install(world, world.ctx().get<Island>().component);
         for (const auto& [material, voxels] : session.info.inventory) world.ctx().get<gather::Inventory>().voxels[material] = voxels;
         world.ctx().get<gather::Gather>().collect = session.info.collect;
+        // ISLAND_SLOT=n: hotbar slot n in hand from the start (for captures of what it shows).
+        if (const char* slot = std::getenv("ISLAND_SLOT")) world.ctx().get<tools::Tools>().slot = std::clamp(std::atoi(slot) - 1, 0, 8);
         session.saver.savedSignature = editSignature(world);
         session.sessionStart = app.time().elapsed;
         const double tLife = lap();
@@ -1174,7 +1191,7 @@ namespace {
         projv::ui::user::model(app, "pause").bind("world", &menu.world).bind("saved", &menu.saved).bind("graphics", &menu.graphics);
         Hud& hud = world.ctx().get<Hud>();
         projv::ui::user::model(app, "island").bind("slots", &hud.slots).bind("compass", &hud.compass).bind("heading", &hud.heading)
-            .bind("held", &hud.held).bind("heldShown", &hud.heldShown).bind("aiming", &hud.aiming).bind("prompt", &hud.prompt)
+            .bind("held", &hud.held).bind("heldShown", &hud.heldShown).bind("aiming", &hud.aiming).bind("prompt", &hud.prompt).bind("build", &hud.build).bind("buildOk", &hud.buildOk)
             .bind("collecting", &hud.collecting);
         app.events().on<projv::ui::UiAction>([&app](const projv::ui::UiAction& action) {
             World& w = app.world;

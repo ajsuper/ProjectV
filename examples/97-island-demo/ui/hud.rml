@@ -35,6 +35,9 @@
                        color: #f6e7c8; font-effect: shadow(1dp 1dp #170d06); }
         .key { color: #ffd23f; }
         .prompt { position: absolute; left: 0; top: 50%; margin-top: 14dp; width: 100%; text-align: center; }
+        /* A box being dragged (build.h): its size and price, red when it cannot be placed. */
+        .building { position: absolute; left: 0; top: 50%; margin-top: 32dp; width: 100%; text-align: center; }
+        .building.bad .bevel { background-color: #7a2c24; border-color: #d0705e #3a120e #3a120e #d0705e; }
 
         /* The hotbar: a board (icons.h's hud-hotbar) of nine slots sunk into the wood, the tools then the
            materials, each with its icon and count; the one in hand framed in gold and raised. Its name over
@@ -61,7 +64,7 @@
     </style>
 </head>
 <!-- The island demo's HUD (docs/plans/island-demo.md, D9). Model "island": compass (rows: label, left,
-     class), heading, slots (rows: icon, count, class: sel, none), held, heldShown, aiming, prompt,
+     class), heading, slots (rows: icon, count, class: sel, none), held, heldShown, aiming, prompt, build, buildOk,
      collecting. No actions: it takes no input. -->
 <body data-model="island">
     <div class="compass">
@@ -81,6 +84,10 @@
 
     <div class="prompt" data-if="prompt != ''">
         <div class="chip"><div class="bevel"><span class="key">E</span> {{prompt}}</div></div>
+    </div>
+
+    <div class="building" data-if="build != ''" data-class-bad="!buildOk">
+        <div class="chip"><div class="bevel">{{build}}</div></div>
     </div>
 
     <div class="held" data-class-shown="heldShown">{{held}}</div>

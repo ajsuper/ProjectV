@@ -1,6 +1,6 @@
 # Island demo: break it, gather it, build with it
 
-Status: **in progress** (2026-11-03): I0-I5 built (on the branch `island-demo`); I6 and I7 proposed. Asked for: "the most advanced example yet" -- a procedurally generated
+Status: **in progress** (2026-11-03): I0-I7 built (on the branch `island-demo`); I6's walking and I7's building await the user's hands. Asked for: "the most advanced example yet" -- a procedurally generated
 sandbox with hills, rock and trees; tools to break the world; E to collect the rubble you look at into
 a hotbar beside the tools; a click to place it; a compass at the top.
 
@@ -209,7 +209,7 @@ ground already overcharged, and with boxes against slopes that is most of them.
 | **I4** | Saving and loading: the start screen, autosave, save and quit | a world built in, quit, loaded back as it was (done, 2026-11-02); the self-test's reload |
 | **I5** | The HUD: hotbar, compass, prompt, menu; the look | the user's check (built 2026-11-03; captures at 840 x 520) |
 | **I6** | The loading screen (D15, D16); the eye eased over steps (D20) | a new world shows its progress and the window keeps drawing (built 2026-11-03); walking (the user's) |
-| **I7** | Drag to place, its preview and its price (D17-D19) | the self-test drags a 3 x 2 x 1 box and checks its cells and cost; building by hand (the user's) |
+| **I7** | Drag to place, its preview and its price (D17-D19) | the self-test places a 3 x 1 x 1 box through the drag's path and checks its cells and that it cost what it filled (built 2026-11-03); building by hand (the user's) |
 
 ## Open questions
 
@@ -316,3 +316,15 @@ mid-load waits for the thread. Captures, `ISLAND_MENU` and `ISLAND_SWING_FRAME` 
 began (`Session::playFrame`), as a load now takes frames. The log says where the time went (`island: entered
 in ...`). On the laptop: a new world 19.0 s (17.1 making it, 4 CPU-minutes over 15 threads), a saved one 3.1 s
 (2.7 the GPU's copy). The eye: `camera` (D20).
+
+**I7** (2026-11-03). `build.h`: `Box` (two cell corners) and `boxOf` (16 cells a side at most); `fillFor`
+works out a box's voxels and plants, leaving out cells you stand in; `fillOf` caches it by box, material and
+what you have, so a drag works it out only when the box changes; `placeBox` checks the price and makes one
+edit, charging the voxels filled (`place` is a one-cell box). `update` is the drag: press on a face (only
+the island's) anchors, held grows the box to the aimed cell or the anchor's distance along the view, release
+places it, the right button -- or the cursor leaving the game, so opening the menu never places -- drops
+it; without a drag it shows the cell a click would fill. The preview: 2 x 24 arms of five 3 cm voxels in a
+glowing palette, gold and red sets, laid along the box's edges at its corners (`showPreview`, moved only when
+the box changes). The HUD's `building` chip says the size and price while dragging, red when it cannot be
+placed. The self-test's box against the slope at the start filled 82 voxels of 192 and cost 82.
+`ISLAND_SLOT=n` puts slot n in hand for captures.
