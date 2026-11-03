@@ -237,8 +237,8 @@ images named `*.pixel.<ext>` sampled nearest.
 | `ui/fonts/PixelifySans.ttf` | Pixelify Sans (SIL OFL, `LICENSE-PixelifySans.txt`), a variable font: RmlUi loads its weights. Text at 10dp, titles 20dp and 30dp |
 | `ui/pixel.rcss` | The look: a frame is an outline round a two-tone bevel; buttons light on hover and sink when pressed; sunk text fields. A palette of nine colours, listed at its top |
 | `ui/hud.rml` | Model `island`: the compass (a strip, a dp a degree, 60 either side; N red; the heading under a caret), the crosshair (gold on something in reach), the prompt under it, the hotbar (nine slots, icon and count in blocks, the one in hand gold and raised, empty materials dim), what is in hand over it for 1.6 s after it is picked, and collecting at its right |
-| `ui/start.rml`, `ui/pause.rml` | The start screen and the Esc menu, restyled; their models and actions as I4 |
-| `icons.h` | The icons, made at startup into `icons/` beside the program as 16 x 16 `.pixel.tga`: the tools from the held tools' own pictures (`fx::PICKAXE_ART`, `CHISEL_ART`, their inks now a table), the materials as small blocks in the island's shades (grass over dirt, planks, cracked stone, spotted mushroom...) |
+| `ui/start.rml`, `ui/pause.rml` | The start screen -- a wooden board in a beam frame, iron corners, vines hanging down it (the user's ask: no blue, plain wording: Saved worlds, New world, Create world) -- and the Esc menu; their models and actions as I4 |
+| `icons.h` | The icons, made at startup into `icons/` beside the program as 16 x 16 `.pixel.tga`: the tools from the held tools' own pictures (`fx::PICKAXE_ART`, `CHISEL_ART`, their inks now a table), the materials as small blocks in the island's shades (grass over dirt, planks, cracked stone, spotted mushroom...); the start screen's board, 208 x 264 |
 
 Compass north is -z. The self-test is unchanged and passes.
 

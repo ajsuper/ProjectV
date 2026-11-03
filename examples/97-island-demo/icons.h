@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include "build.h"
 #include "fx.h"
@@ -31,17 +32,19 @@ namespace icons {
     inline Rgba scaled(Rgba c, float light) { return opaque(int(c.r * light), int(c.g * light), int(c.b * light)); }
 
     // Uncompressed 32-bit TGA, top row first: the smallest thing the user layer reads.
-    inline bool write(const std::filesystem::path& path, const Picture& p) {
+    inline bool write(const std::filesystem::path& path, const Rgba* pixels, int width, int height) {
         std::ofstream out(path, std::ios::binary);
         if (!out) return false;
-        const uint8_t header[18] = {0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, SIZE, 0, SIZE, 0, 32, 0x28};
+        const uint8_t header[18] = {0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, uint8_t(width), uint8_t(width >> 8),
+                                    uint8_t(height), uint8_t(height >> 8), 32, 0x28};
         out.write(reinterpret_cast<const char*>(header), sizeof header);
-        for (const Rgba& c : p) {
-            const char bgra[4] = {char(c.b), char(c.g), char(c.r), char(c.a)};
+        for (int i = 0; i < width * height; i++) {
+            const char bgra[4] = {char(pixels[i].b), char(pixels[i].g), char(pixels[i].r), char(pixels[i].a)};
             out.write(bgra, 4);
         }
         return bool(out);
     }
+    inline bool write(const std::filesystem::path& path, const Picture& p) { return write(path, p.data(), SIZE, SIZE); }
 
     inline Picture tool(const char* const art[16]) {
         Picture p{};
@@ -101,12 +104,103 @@ namespace icons {
         return p;
     }
 
+    // The start screen's board (start.rml): planks in a beam frame with iron corners, vines climbing over
+    // the top and hanging down its sides. Drawn at one art pixel a dp, so the document sizes it exactly.
+    constexpr int BOARD_W = 208, BOARD_H = 264, BOARD_FRAME = 8;
+    inline std::vector<Rgba> board() {
+        const int W = BOARD_W, H = BOARD_H, F = BOARD_FRAME;
+        std::vector<Rgba> p(size_t(W) * H);
+        auto at = [&](int x, int y) -> Rgba* { return x >= 0 && y >= 0 && x < W && y < H ? &p[size_t(y) * W + x] : nullptr; };
+        auto put = [&](int x, int y, Rgba c) { if (Rgba* q = at(x, y)) *q = c; };
+        auto noise = [](int x, int y, uint32_t salt) { return island::unit(island::hash(x, y, salt)); };
+
+        // The planks: rows of 11, each its own shade, grain in streaks along it, a knot now and then.
+        for (int y = F; y < H - F; y++) {
+            const int plank = (y - F) / 12, row = (y - F) % 12;
+            const float tone = 0.85f + 0.25f * noise(plank, 0, 21u);
+            for (int x = F; x < W - F; x++) {
+                const int shift = int(noise(plank, 1, 22u) * 60.0f);   // where the plank's butt joint is
+                Rgba c = opaque(int(118 * tone), int(78 * tone), int(46 * tone));
+                if (noise((x + shift) / 7, y, 23u) < 0.22f) c = scaled(c, 0.82f);     // grain
+                if (row == 0) c = scaled(c, 1.18f);                                     // lit edge
+                if (row == 11 || (x - F + shift * 2) % 97 == 0) c = opaque(46, 28, 16);   // seam, joint
+                put(x, y, c);
+            }
+            if (row == 5 && noise(plank, 2, 24u) < 0.6f) {   // a knot
+                const int kx = F + 10 + int(noise(plank, 3, 25u) * float(W - 2 * F - 20));
+                for (int dx = -2; dx <= 2; dx++) put(kx + dx, y, opaque(70, 44, 26));
+                put(kx - 1, y - 1, opaque(84, 54, 32)); put(kx + 1, y + 1, opaque(84, 54, 32));
+            }
+        }
+        // The frame: a beam round it, lit on its top and left, an outline outside and a shadow inside.
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                const int d = std::min(std::min(x, y), std::min(W - 1 - x, H - 1 - y));
+                if (d >= F) continue;
+                Rgba c = opaque(92, 58, 34);
+                if (noise(x / 5 + y, x + y / 5, 26u) < 0.25f) c = opaque(78, 48, 28);
+                if (d == 1) c = scaled(c, x < W / 2 && y < H / 2 ? 1.35f : 1.15f);
+                if (d == F - 2) c = scaled(c, 0.75f);
+                if (d == 0 || d == F - 1) c = opaque(26, 15, 8);
+                put(x, y, c);
+            }
+        // Iron at the corners, a rivet in each.
+        for (int cy : {0, H - 12})
+            for (int cx : {0, W - 12})
+                for (int y = 0; y < 12; y++)
+                    for (int x = 0; x < 12; x++) {
+                        const bool edge = x == 0 || y == 0 || x == 11 || y == 11;
+                        Rgba c = edge ? opaque(28, 28, 32) : (x == 1 || y == 1 ? opaque(150, 152, 160) : opaque(98, 100, 110));
+                        if ((x == 5 || x == 6) && (y == 5 || y == 6)) c = x == 5 && y == 5 ? opaque(190, 192, 200) : opaque(40, 40, 46);
+                        put(cx + x, cy + y, c);
+                    }
+
+        // Vines. A leaf is a little lozenge in two greens, outlined dark on its underside.
+        const Rgba stem = opaque(44, 86, 36), light = opaque(120, 184, 76), mid = opaque(78, 140, 54), dark = opaque(30, 62, 28);
+        auto leaf = [&](int x, int y, int side) {
+            put(x + side, y - 1, light); put(x + 2 * side, y - 1, light);
+            put(x + side, y, mid); put(x + 2 * side, y, light); put(x + 3 * side, y, mid);
+            put(x + side, y + 1, dark); put(x + 2 * side, y + 1, mid); put(x + 3 * side, y + 1, dark);
+            put(x + 2 * side, y + 2, dark);
+        };
+        auto flower = [&](int x, int y, uint32_t h) {
+            const Rgba petal = h % 2 ? opaque(246, 240, 228) : opaque(240, 150, 190);
+            put(x - 1, y, petal); put(x + 1, y, petal); put(x, y - 1, petal); put(x, y + 1, petal); put(x, y, opaque(250, 210, 70));
+        };
+        uint32_t seed = 1;
+        // Along the top beam, wandering over it.
+        for (int x = 2, y = 3; x < W - 2; x++) {
+            if (noise(x, 0, 30u) < 0.3f) y = std::clamp(y + (noise(x, 1, 31u) < 0.5f ? -1 : 1), 2, 6);
+            put(x, y, stem);
+            if (x % 4 == 0) leaf(x, y + (x % 8 ? 1 : 0), x % 8 ? 1 : -1);
+            if (x % 61 == 23) flower(x, y + 2, island::hash(seed++));
+        }
+        // Hanging: long ones down the sides (clear of the writing), short ones over the top.
+        struct Hang { int x, length; };
+        const Hang hangs[] = {{5, 150}, {14, 90}, {22, 46}, {34, 18}, {58, 9}, {83, 14}, {120, 7}, {146, 12},
+                              {170, 22}, {186, 60}, {195, 120}, {203, 70}};
+        for (const Hang& h : hangs) {
+            int x = h.x;
+            for (int i = 0; i < h.length; i++) {
+                const int y = 4 + i;
+                if (i > 0 && noise(h.x, i, 32u) < 0.18f) x += noise(h.x, i, 33u) < 0.5f ? -1 : 1;
+                x = std::clamp(x, h.x - 4, h.x + 4);
+                put(x, y, stem);
+                if (i > 1 && i % 3 == 0) leaf(x, y, (i / 3) % 2 ? 1 : -1);
+                if (i > 6 && noise(h.x, i, 34u) < 0.012f) flower(x + 2, y, island::hash(seed++));
+            }
+            put(x, 4 + h.length, light);   // a bud at the end
+        }
+        return p;
+    }
+
     // Writes every icon into `folder` (made if missing). False if one could not be written.
     inline bool writeAll(const std::filesystem::path& folder) {
         std::error_code error;
         std::filesystem::create_directories(folder, error);
         bool ok = write(folder / "pickaxe.pixel.tga", tool(fx::PICKAXE_ART)) && write(folder / "chisel.pixel.tga", tool(fx::CHISEL_ART));
         for (const char* m : gather::MATERIALS) ok = write(folder / (std::string(m) + ".pixel.tga"), material(m)) && ok;
+        ok = write(folder / "board.pixel.tga", board().data(), BOARD_W, BOARD_H) && ok;
         return ok;
     }
 }
