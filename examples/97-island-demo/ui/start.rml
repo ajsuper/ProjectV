@@ -1,0 +1,48 @@
+<rml>
+<head>
+    <title>Island: start</title>
+    <link type="text/rcss" href="../shared_ui/base.rcss"/>
+    <style>
+        body { width: 100%; height: 100%; }
+        .shade { position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+                 decorator: radial-gradient(circle farthest-corner, #00000010 30%, #00000080); }
+        .start { position: absolute; left: 50%; top: 12%; width: 560dp; margin-left: -280dp; }
+        h1 { font-size: 40dp; margin-bottom: 4dp; }
+        .tagline { color: #c8d2dc; font-size: 15dp; margin-bottom: 18dp; }
+        h2 { font-size: 18dp; margin-top: 18dp; margin-bottom: 6dp; color: #dbe3ec; }
+        .world { display: block; padding: 8dp 12dp; margin-bottom: 6dp; border-radius: 6dp; background-color: #ffffff14; }
+        .world:hover { background-color: #ffffff2a; }
+        .world .name { font-size: 18dp; font-weight: bold; }
+        .world .meta { font-size: 13dp; color: #b9c4d0; }
+        .row { display: block; margin-bottom: 8dp; }
+        .row label { display: inline-block; width: 70dp; color: #c8d2dc; }
+        input.text { width: 300dp; }
+        .status { color: #ffb0a0; margin-top: 8dp; }
+        #quit { margin-top: 18dp; }
+    </style>
+</head>
+<!-- The island demo's start screen (docs/plans/island-demo.md, D11): a placeholder look until I5's pixel
+     art. Model "start": worlds (rows: folder, name, seed, last played, time played), hasWorlds, newName,
+     newSeed, status. Actions: play <folder>, new, quit. -->
+<body data-model="start">
+    <div class="shade"></div>
+    <div class="panel start">
+        <h1>Island</h1>
+        <p class="tagline">Break it, gather it, build with it.</p>
+
+        <h2 data-if="hasWorlds">Your worlds</h2>
+        <div class="world" data-for="w : worlds" data-attr-onclick="'play ' + w[0]">
+            <div class="name">{{w[1]}}</div>
+            <div class="meta">{{w[2]}}  ·  {{w[3]}}  ·  {{w[4]}}</div>
+        </div>
+
+        <h2>A new world</h2>
+        <div class="row"><label>Name</label><input type="text" class="text" data-value="newName"/></div>
+        <div class="row"><label>Seed</label><input type="text" class="text" data-value="newSeed" placeholder="random"/></div>
+        <button id="new" class="primary" onclick="new">Make it</button>
+        <p class="status" data-if="status != ''">{{status}}</p>
+
+        <button id="quit" onclick="quit">Quit</button>
+    </div>
+</body>
+</rml>

@@ -4,6 +4,7 @@ projv_add_example(island_demo
     SOURCES      main.cpp
     INCLUDE_DIRS ../shared   # restir_pt.h
     ASSET_FILES  physics_materials.json
+    ASSET_DIRS   ui         # the start screen and the menu
     SHARED_UI
 )
 
