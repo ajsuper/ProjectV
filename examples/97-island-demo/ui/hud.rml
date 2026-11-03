@@ -1,0 +1,93 @@
+<rml>
+<head>
+    <title>Island: HUD</title>
+    <link type="text/rcss" href="pixel.rcss"/>
+    <style>
+        body { width: 100%; height: 100%; pointer-events: none; }
+
+        /* The compass: a strip of ticks and letters sliding with the view, one dp a degree, the heading
+           under a caret at its middle. */
+        .compass { position: absolute; left: 50%; top: 4dp; width: 125dp; margin-left: -63dp; }
+        .compass .bevel { height: 12dp; overflow: hidden; position: relative; }
+        .mark { position: absolute; top: 0; width: 15dp; margin-left: -7dp; text-align: center; color: #a3abcf; }
+        .mark.card { color: #f6ecd2; }
+        .mark.north { color: #ff8a78; }
+        .mark.tick .bar { position: absolute; left: 7dp; top: 4dp; width: 1dp; height: 3dp; background-color: #5f70b0; }
+        .mark.tick.half .bar { top: 3dp; height: 5dp; background-color: #7d8fd0; }
+        .caret { position: absolute; left: 62dp; top: 14dp; width: 1dp; height: 2dp; background-color: #ffd23f; }
+        .caret.wide { left: 61dp; top: 16dp; width: 3dp; height: 1dp; }
+        .heading { position: absolute; left: 0; top: 17dp; width: 125dp; text-align: center; color: #ffd23f; }
+
+        /* The crosshair: a plus, gold over something in reach. */
+        .cross { position: absolute; left: 50%; top: 50%; background-color: #f6ecd2; }
+        .cross.h { width: 5dp; height: 1dp; margin-left: -2dp; }
+        .cross.v { width: 1dp; height: 5dp; margin-top: -2dp; }
+        .cross.on { background-color: #ffd23f; }
+        .cross.ring { width: 7dp; height: 7dp; margin-left: -3dp; margin-top: -3dp; background-color: transparent;
+                      border: 1dp #160f1e; opacity: 0.45; }
+
+        /* What E would collect, under the crosshair. */
+        .prompt { position: absolute; left: 0; top: 50%; margin-top: 14dp; width: 100%; text-align: center; }
+        .prompt .frame { display: inline-block; }
+        .prompt .bevel { padding: 1dp 4dp 2dp 4dp; }
+        .key { color: #ffd23f; }
+
+        /* The hotbar: nine slots, the tools then the materials, each a sunk frame with its icon and count;
+           the one in hand gold and raised. Its name over it a moment after it is picked. */
+        .hotbar { position: absolute; left: 50%; bottom: 5dp; width: 233dp; margin-left: -117dp; }
+        .slot { display: inline-block; position: relative; width: 22dp; height: 22dp; margin-right: 1dp;
+                border: 1dp #160f1e; }
+        .slot .bevel { width: 20dp; height: 20dp; border-color: #1a1f3c #5f70b0 #5f70b0 #1a1f3c; background-color: #1d2341; }
+        .slot img { position: absolute; left: 2dp; top: 2dp; width: 16dp; height: 16dp; }
+        .slot.none img { opacity: 0.35; }
+        .slot .count { position: absolute; right: 1dp; bottom: -1dp; color: #f6ecd2; font-effect: shadow(1dp 1dp #160f1e); }
+        .slot.sel { margin-top: -3dp; border-color: #ffd23f; }
+        .slot.sel .bevel { border-color: #fff3b0 #b38a12 #b38a12 #fff3b0; background-color: #3a4573; }
+        .held { position: absolute; left: 0; bottom: 31dp; width: 100%; text-align: center; color: #ffd23f;
+                font-effect: shadow(1dp 1dp #160f1e); opacity: 0; transition: opacity 0.5s linear-in-out; }
+        .held.shown { opacity: 1; transition: opacity 0.05s linear-in-out; }
+
+        /* Collecting, at the hotbar's right: the key, and ON or off. */
+        .collect { position: absolute; left: 50%; bottom: 7dp; margin-left: 120dp; }
+        .collect .bevel { padding: 1dp 4dp 2dp 4dp; color: #a3abcf; }
+        .collect.on .bevel { background-color: #2f5a2d; border-color: #8be06a #1f3d1d #1f3d1d #8be06a; color: #f6ecd2; }
+        .collect .state { color: #a3abcf; }
+        .collect.on .state { color: #8be06a; }
+    </style>
+</head>
+<!-- The island demo's HUD (docs/plans/island-demo.md, D9). Model "island": compass (rows: label, left,
+     class), heading, slots (rows: icon, count, class: sel, none), held, heldShown, aiming, prompt,
+     collecting. No actions: it takes no input. -->
+<body data-model="island">
+    <div class="compass">
+        <div class="frame"><div class="bevel">
+            <div data-for="m : compass" data-attr-class="'mark ' + m[2]" data-style-left="m[1]">
+                <div class="bar" data-if="m[0] == ''"></div>{{m[0]}}
+            </div>
+        </div></div>
+        <div class="caret"></div>
+        <div class="caret wide"></div>
+        <div class="heading shadow">{{heading}}</div>
+    </div>
+
+    <div class="cross ring"></div>
+    <div class="cross h" data-class-on="aiming"></div>
+    <div class="cross v" data-class-on="aiming"></div>
+
+    <div class="prompt" data-if="prompt != ''">
+        <div class="frame"><div class="bevel"><span class="key">E</span> {{prompt}}</div></div>
+    </div>
+
+    <div class="held" data-class-shown="heldShown">{{held}}</div>
+    <div class="hotbar">
+        <div data-for="s : slots" data-attr-class="'slot ' + s[2]">
+            <div class="bevel"></div>
+            <img data-attr-src="s[0]"/>
+            <div class="count">{{s[1]}}</div>
+        </div>
+    </div>
+    <div class="collect" data-class-on="collecting">
+        <div class="frame"><div class="bevel"><span class="key">E</span> Collect <span class="state">{{collecting ? 'ON' : 'off'}}</span></div></div>
+    </div>
+</body>
+</rml>

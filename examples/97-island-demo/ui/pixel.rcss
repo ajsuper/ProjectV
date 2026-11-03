@@ -1,0 +1,64 @@
+/* The island's look (docs/plans/island-demo.md, D9): pixel art, not the other demos' frosted glass.
+   The program keeps the dp ratio a whole number (ui::user::setDpRatio), so 1dp is one art pixel, always
+   whole screen pixels: every size here is whole dp, nothing is rounded, blurred or faded by a radius.
+   Text is Pixelify Sans (SIL OFL: fonts/LICENSE-PixelifySans.txt), drawn at 10dp or 20dp, the
+   multiples its pixels sit on. Images named *.pixel.* are sampled nearest.
+
+   A frame is two boxes: .frame, a dark outline, round .bevel, a light top and left, a dark bottom and
+   right. The palette: */
+/*   outline #160f1e   panel #2b3354   light #5f70b0   dark #1a1f3c
+     text #f6ecd2      muted #a3abcf   gold #ffd23f    green #8be06a   red #ff8a78 */
+
+body, div, p, h1, h2, form, label { display: block; }
+h1, h2, p { margin: 0; }
+
+body {
+    font-family: "Pixelify Sans";
+    font-weight: normal;
+    font-size: 10dp;
+    line-height: 12dp;
+    color: #f6ecd2;
+}
+
+h1 { font-size: 20dp; line-height: 22dp; color: #ffd23f; font-effect: shadow(1dp 1dp #160f1e); }
+h2 { font-size: 10dp; color: #a3abcf; margin-bottom: 3dp; }
+
+.frame { border: 1dp #160f1e; }
+.bevel {
+    border-width: 1dp;
+    border-color: #5f70b0 #1a1f3c #1a1f3c #5f70b0;
+    background-color: #2b3354;
+}
+.panel { padding: 8dp 9dp; }
+.shadow { font-effect: shadow(1dp 1dp #160f1e); }
+
+/* Buttons: a frame that lights on hover and sinks when pressed (the bevel turned over). */
+button {
+    display: block;
+    margin: 3dp 0 0 0;
+    border: 1dp #160f1e;
+    cursor: pointer;
+}
+button .bevel { padding: 2dp 6dp 3dp 6dp; text-align: center; }
+button:hover .bevel { background-color: #3a4573; border-color: #7d8fd0 #1a1f3c #1a1f3c #7d8fd0; }
+button:active .bevel { border-color: #1a1f3c #5f70b0 #5f70b0 #1a1f3c; padding: 3dp 6dp 2dp 6dp; }
+button.primary .bevel { background-color: #3d7a3a; border-color: #8be06a #1f3d1d #1f3d1d #8be06a; }
+button.primary:hover .bevel { background-color: #4b8f46; }
+button.primary:active .bevel { border-color: #1f3d1d #8be06a #8be06a #1f3d1d; }
+
+input.text {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    height: 18dp;   /* room for a descender under the line */
+    padding: 3dp 3dp;
+    border-width: 1dp;
+    border-color: #1a1f3c #5f70b0 #5f70b0 #1a1f3c;   /* sunk */
+    background-color: #1d2341;
+    color: #f6ecd2;
+}
+input.text:focus { background-color: #232a50; border-color: #ffd23f; }
+
+/* RmlUi has no built-in sheet: a text field's caret and selection. */
+input.text, textarea { cursor: text; }
+input.text selection { background-color: #5f70b0; color: #f6ecd2; }

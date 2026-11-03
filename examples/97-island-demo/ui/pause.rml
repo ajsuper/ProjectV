@@ -1,26 +1,26 @@
 <rml>
 <head>
     <title>Island: menu</title>
-    <link type="text/rcss" href="../shared_ui/base.rcss"/>
+    <link type="text/rcss" href="pixel.rcss"/>
     <style>
-        body { width: 100%; height: 100%; opacity: 0; pointer-events: none; transition: opacity 0.2s quadratic-in-out; }
+        body { width: 100%; height: 100%; opacity: 0; pointer-events: none; transition: opacity 0.15s linear-in-out; }
         body.ui-shown { opacity: 1; pointer-events: auto; }
-        .shade { position: absolute; left: 0; top: 0; width: 100%; height: 100%;
-                 decorator: radial-gradient(circle farthest-corner, #00000033 20%, #000000a8); }
-        .menu { position: absolute; left: 50%; top: 50%; width: 320dp; margin-left: -160dp; margin-top: -120dp; }
-        .saved { color: #b9c4d0; font-size: 14dp; margin-top: -6dp; margin-bottom: 14dp; }
-        #savequit { margin-top: 10dp; }
+        .shade { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background-color: #160f1e8c; }
+        .menu { position: absolute; left: 50%; top: 50%; width: 130dp; margin-left: -65dp; margin-top: -45dp; }
+        h1 { text-align: center; }
+        .saved { color: #a3abcf; text-align: center; margin-bottom: 6dp; }
+        #savequit { margin-top: 4dp; }
     </style>
 </head>
-<!-- The island demo's menu (docs/plans/island-demo.md, D11): Esc. A placeholder look until I5. Model
-     "pause": world, saved. Actions: resume, savequit. -->
+<!-- The island demo's menu (docs/plans/island-demo.md, D11): Esc. Pixel art (D9). Model "pause": world,
+     saved. Actions: resume, savequit. -->
 <body data-model="pause">
     <div class="shade"></div>
-    <div class="panel menu">
+    <div class="menu frame"><div class="bevel panel">
         <h1>{{world}}</h1>
         <p class="saved">{{saved}}</p>
-        <button id="resume" class="primary" onclick="resume">Resume</button>
-        <button id="savequit" onclick="savequit">Save and quit</button>
-    </div>
+        <button id="resume" class="primary" onclick="resume"><div class="bevel">Resume</div></button>
+        <button id="savequit" onclick="savequit"><div class="bevel">Save and quit</div></button>
+    </div></div>
 </body>
 </rml>

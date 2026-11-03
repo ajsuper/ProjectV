@@ -1,6 +1,6 @@
 # Island demo: break it, gather it, build with it
 
-Status: **in progress** (2026-11-02): I0-I4 built (on the branch `island-demo`); I5 next. Asked for: "the most advanced example yet" -- a procedurally generated
+Status: **in progress** (2026-11-03): I0-I5 built (on the branch `island-demo`); I5 awaits the user's look. Asked for: "the most advanced example yet" -- a procedurally generated
 sandbox with hills, rock and trees; tools to break the world; E to collect the rubble you look at into
 a hotbar beside the tools; a click to place it; a compass at the top.
 
@@ -163,7 +163,7 @@ means a saved island is an ordinary scene.
 | **I2** | Rubble and gathering; the inventory; the tools seen and swung | gathering by hand (done, 2026-11-02); the self-test's counts |
 | **I3** | Placing blocks | building by hand (done, 2026-11-02); the self-test's placing |
 | **I4** | Saving and loading: the start screen, autosave, save and quit | a world built in, quit, loaded back as it was (done, 2026-11-02); the self-test's reload |
-| **I5** | The HUD: hotbar, compass, prompt, menu; the look | the user's check |
+| **I5** | The HUD: hotbar, compass, prompt, menu; the look | the user's check (built 2026-11-03; captures at 840 x 520) |
 
 ## Open questions
 
@@ -226,11 +226,29 @@ it, and reads the save back: `world.json` has the inventory and the player's pla
 from disk has the same voxels, cell for cell. `ISLAND_START_CAPTURE` and `ISLAND_START_PICK` are for
 captures and for testing the restart.
 
+**I5** (2026-11-03). The HUD and both menus are pixel art (D9), sharing `ui/pixel.rcss` (not the shared
+frosted sheet: `SHARED_UI` is no longer staged). The engine gained two small mechanisms for it
+(`ui/user.h`): `setDpRatio` -- the program keeps it a whole number, about one per 450 back-buffer pixels
+of height, so 1dp is one art pixel and every border, icon and glyph lands on whole screen pixels -- and
+images named `*.pixel.<ext>` sampled nearest.
+
+| File | What |
+|---|---|
+| `ui/fonts/PixelifySans.ttf` | Pixelify Sans (SIL OFL, `LICENSE-PixelifySans.txt`), a variable font: RmlUi loads its weights. Text at 10dp, titles 20dp and 30dp |
+| `ui/pixel.rcss` | The look: a frame is an outline round a two-tone bevel; buttons light on hover and sink when pressed; sunk text fields. A palette of nine colours, listed at its top |
+| `ui/hud.rml` | Model `island`: the compass (a strip, a dp a degree, 60 either side; N red; the heading under a caret), the crosshair (gold on something in reach), the prompt under it, the hotbar (nine slots, icon and count in blocks, the one in hand gold and raised, empty materials dim), what is in hand over it for 1.6 s after it is picked, and collecting at its right |
+| `ui/start.rml`, `ui/pause.rml` | The start screen and the Esc menu, restyled; their models and actions as I4 |
+| `icons.h` | The icons, made at startup into `icons/` beside the program as 16 x 16 `.pixel.tga`: the tools from the held tools' own pictures (`fx::PICKAXE_ART`, `CHISEL_ART`, their inks now a table), the materials as small blocks in the island's shades (grass over dirt, planks, cracked stone, spotted mushroom...) |
+
+Compass north is -z. The self-test is unchanged and passes.
+
 Notes for I5 on:
 
 - A world folder is made only when missing: after a generator change, delete `worlds/` (or the old
   island loads).
 - Runs that capture often die on exit (a segfault or FPE in bgfx's Vulkan present, in the NVIDIA
   driver), after the capture is written: pre-existing, not this program's.
+- An `island-42` world made before a generator change loads the old island (and spawned the walker inside it,
+  a black capture, on 2026-11-03): delete it.
 - Working agreements: plans first; one commit per milestone; stage explicit paths; ask the user to look
   at anything visual; the HUD is pixel art (D9).

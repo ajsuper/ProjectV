@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <utility>
@@ -394,13 +395,21 @@ namespace projv::ui::user {
         }
         dimensions = {int(image->m_width), int(image->m_height)};
         bimg::imageFree(image);
-        return GenerateTexture(pixels, dimensions);
+        // Pixel art (a name ending ".pixel", as "pickaxe.pixel.png") is sampled nearest, so it stays crisp
+        // when drawn larger.
+        const std::string stem = std::filesystem::path(source).stem().string();
+        const bool pixel = stem.size() >= 6 && stem.compare(stem.size() - 6, 6, ".pixel") == 0;
+        return createTexture(pixels, dimensions, pixel ? BGFX_SAMPLER_POINT : 0);
     }
 
     Rml::TextureHandle BgfxRenderInterface::GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i dimensions) {
+        return createTexture(source, dimensions, 0);
+    }
+
+    Rml::TextureHandle BgfxRenderInterface::createTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i dimensions, uint64_t sampler) {
         if (dimensions.x <= 0 || dimensions.y <= 0 || source.size() < size_t(dimensions.x) * dimensions.y * 4) return 0;
         bgfx::TextureHandle handle = bgfx::createTexture2D(uint16_t(dimensions.x), uint16_t(dimensions.y), false, 1,
-                                                           bgfx::TextureFormat::RGBA8, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP,
+                                                           bgfx::TextureFormat::RGBA8, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | sampler,
                                                            bgfx::copy(source.data(), uint32_t(size_t(dimensions.x) * dimensions.y * 4)));
         return bgfx::isValid(handle) ? toRml(handle) : 0;
     }

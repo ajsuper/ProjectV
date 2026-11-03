@@ -4,8 +4,7 @@ projv_add_example(island_demo
     SOURCES      main.cpp
     INCLUDE_DIRS ../shared   # restir_pt.h
     ASSET_FILES  physics_materials.json
-    ASSET_DIRS   ui         # the start screen and the menu
-    SHARED_UI
+    ASSET_DIRS   ui         # the HUD, the start screen and the menu, their style and font
 )
 
 set(restirSource "${CMAKE_CURRENT_SOURCE_DIR}/../30-renderers/renderers/restir-pt")

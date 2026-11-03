@@ -101,19 +101,22 @@ namespace fx {
     constexpr float TOOL_DEPTH = 2;                  // voxels thick
     const vec3 GRIP(1.0f, 3.0f, 6.5f);               // in voxels: low on the handle
 
+    // The art's inks (the HUD's icons, icons.h, draw the same pictures).
+    struct Ink { char key; int r, g, b; };
+    constexpr Ink INKS[] = {{'#', 40, 34, 30}, {'o', 215, 220, 228}, {'m', 150, 156, 168}, {'h', 160, 110, 62}, {'d', 110, 72, 40}};
+    inline const Ink* inkOf(char key) {
+        for (const Ink& ink : INKS)
+            if (ink.key == key) return &ink;
+        return nullptr;
+    }
+
     inline std::vector<projv::PendingVoxelOp> artVoxels(const char* const art[16]) {
         std::vector<projv::PendingVoxelOp> v;
         for (int row = 0; row < 16; row++)
             for (int col = 0; col < 16; col++) {
-                uint32_t c;
-                switch (art[row][col]) {
-                    case '#': c = rgb(40, 34, 30); break;
-                    case 'o': c = rgb(215, 220, 228); break;
-                    case 'm': c = rgb(150, 156, 168); break;
-                    case 'h': c = rgb(160, 110, 62); break;
-                    case 'd': c = rgb(110, 72, 40); break;
-                    default: continue;
-                }
+                const Ink* ink = inkOf(art[row][col]);
+                if (!ink) continue;
+                const uint32_t c = rgb(ink->r, ink->g, ink->b);
                 for (int x = 0; x < int(TOOL_DEPTH); x++) v.push_back({true, ivec3(x, 15 - row, col), c});
             }
         return v;

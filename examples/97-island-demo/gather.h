@@ -173,7 +173,7 @@ namespace gather {
         pull(world, g, eye, dt);
     }
 
-    // The inventory as a line of text (a placeholder for I5's hotbar).
+    // The inventory as a line of text (the self-test's report; the HUD shows it as the hotbar).
     inline std::string inventoryText(const Inventory& inventory) {
         std::string out;
         for (size_t i = 0; i < std::size(MATERIALS); i++) {

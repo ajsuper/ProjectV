@@ -17,6 +17,7 @@
 //   ISLAND_SELFTEST=1 ./island_demo   checks itself and exits 0 or 1 (D10; what it checks grows per milestone)
 
 #include <algorithm>
+#include <cctype>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -52,6 +53,7 @@
 #include "build.h"
 #include "critters.h"
 #include "fx.h"
+#include "icons.h"
 #include "gather.h"
 #include "island.h"
 #include "saving.h"
@@ -127,13 +129,17 @@ namespace {
         std::string saved;             // "Saved 2 min ago"
     };
 
-    // What the HUD shows (a placeholder until I5's pixel-art HUD: a crosshair and the tool in hand).
+    // What the HUD shows (ui/hud.rml, D9), model "island".
     struct Hud {
-        std::string tool = "Pickaxe";
+        std::vector<std::vector<std::string>> slots;     // the hotbar: icon, count, class ("sel", "none")
+        std::vector<std::vector<std::string>> compass;   // the marks in view: label, left ("37dp"), class
+        std::string heading;     // "042"
+        std::string held;        // what is in hand, shown a moment after it is picked
+        bool heldShown = false;
+        float heldFor = 0.0f;    // seconds it has been in hand
+        int lastSlot = -1;
         bool aiming = false;
-        std::string prompt;      // "E: gather 3.4 stone, 1.2 dirt"
-        std::string inventory;   // blocks by material
-        std::string collect = "Collect: off  (E)";
+        std::string prompt;      // "collect 3.4 stone, 1.2 dirt" (the HUD puts the key before it)
         bool collecting = false;
     };
 
@@ -331,6 +337,57 @@ namespace {
         runtime::setCharacterInput(world, player.walker, player.velocity, input.pressed(projv::Key::Space), 5.5f);
     }
 
+    // The HUD's model (ui/hud.rml): the hotbar, the compass, what is in hand, the prompt.
+    void updateHud(World& world, float dt) {
+        Hud& hud = world.ctx().get<Hud>();
+        const tools::Tools& t = world.ctx().get<tools::Tools>();
+        const gather::Inventory& inventory = world.ctx().get<gather::Inventory>();
+        const gather::Gather& g = world.ctx().get<gather::Gather>();
+
+        // The hotbar: the pickaxe, the chisel, then the materials, each with how many blocks of it you have.
+        hud.slots.resize(int(tools::Tool::Count) + std::size(gather::MATERIALS));
+        for (int i = 0; i < int(hud.slots.size()); i++) {
+            const char* material = build::materialOf(i);
+            const std::string name = material ? material : (i == 0 ? "pickaxe" : "chisel");
+            const double blocks = material ? inventory.blocks(material) : 1.0;
+            hud.slots[i] = {"../icons/" + name + ".pixel.tga", material && blocks > 0.0 ? gather::blocksText(blocks * gather::VOXELS_PER_BLOCK) : "",
+                            std::string(i == t.slot ? "sel " : "") + (blocks < 1.0 ? "none" : "")};
+        }
+        if (t.slot != hud.lastSlot) {
+            hud.lastSlot = t.slot;
+            hud.heldFor = 0.0f;
+        }
+        hud.heldFor += dt;
+        if (const char* material = build::materialOf(t.slot)) {
+            std::string name = material;
+            name[0] = char(std::toupper(name[0]));
+            hud.held = name + " block" + (inventory.blocks(material) < 1.0 ? " - none yet" : "");
+        } else {
+            hud.held = tools::toolName(t.selected);
+        }
+        hud.heldShown = hud.heldFor < 1.6f;
+
+        // The compass: north is -z, a degree a dp, 60 either side of the heading (the strip is 121dp inside).
+        const Player& player = world.ctx().get<Player>();
+        float heading = glm::degrees(std::atan2(std::cos(player.yaw), -std::sin(player.yaw)));
+        heading = std::fmod(heading + 360.0f, 360.0f);
+        char text[8];
+        std::snprintf(text, sizeof text, "%03d", int(std::lround(heading)) % 360);
+        hud.heading = text;
+        hud.compass.clear();
+        static const char* const NAMES[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+        for (int a = int(std::ceil((heading - 60.0f) / 15.0f)) * 15; float(a) <= heading + 60.0f; a += 15) {
+            const int at = ((a % 360) + 360) % 360, off = int(std::lround(float(a) - heading));
+            const std::string left = std::to_string(off + 60) + "dp";
+            if (at % 45 != 0) hud.compass.push_back({"", left, "tick"});
+            else if (std::abs(off) <= 52) hud.compass.push_back({NAMES[at / 45], left, at == 0 ? "card north" : at % 90 == 0 ? "card" : "inter"});   // whole, inside the strip
+        }
+
+        hud.aiming = t.aiming;
+        hud.prompt = g.prompt.rfind("E: ", 0) == 0 ? g.prompt.substr(3) : g.prompt;
+        hud.collecting = g.collect;
+    }
+
     // The tools (tools.h): the left button uses the one in hand while the cursor is the game's.
     void useTools(projv::Application& app) {
         World& world = app.world;
@@ -343,20 +400,8 @@ namespace {
         if (const char* at = std::getenv("ISLAND_SWING_FRAME"); at && app.frameCount == uint64_t(std::atoi(at))) use = true;
         tools::update(world, input, app.time().unscaledDelta, player.eye, player.forward(), use);
         build::update(world, app.time().unscaledDelta, player.eye, player.forward(), use);
-        Hud& hud = world.ctx().get<Hud>();
-        const tools::Tools& t = world.ctx().get<tools::Tools>();
-        if (const char* material = build::materialOf(t.slot)) {
-            const double have = world.ctx().get<gather::Inventory>().blocks(material);
-            hud.tool = "[" + std::to_string(t.slot + 1) + "] " + material + " block" + (have < 1.0 ? "  (none left)" : "");
-        } else {
-            hud.tool = "[" + std::to_string(t.slot + 1) + "] " + tools::toolName(t.selected);
-        }
-        hud.aiming = t.aiming;
         gather::update(world, input, app.time().unscaledDelta, player.eye, player.forward(), input.cursorCaptured && !world.ctx().get<SelfTest>().on);
-        hud.prompt = world.ctx().get<gather::Gather>().prompt;
-        hud.inventory = gather::inventoryText(world.ctx().get<gather::Inventory>());
-        hud.collecting = world.ctx().get<gather::Gather>().collect;
-        hud.collect = hud.collecting ? "Collect: ON  (E)" : "Collect: off  (E)";
+        updateHud(world, app.time().unscaledDelta);
     }
 
     // ---- The self-test ---------------------------------------------------------------------------------
@@ -693,6 +738,10 @@ namespace {
         World& world = app.world;
         Session& session = world.ctx().get<Session>();
         const fs::path here = projv::core::executableDirectory();
+        // The pixel art is drawn at a whole number of screen pixels per art pixel (D9): about 450 screen
+        // pixels tall make one.
+        if (const bgfx::Stats* stats = bgfx::getStats(); stats && stats->height > 0)
+            projv::ui::user::setDpRatio(app, float(std::max(1, int(std::lround(float(stats->height) / 450.0f)))));
         // ISLAND_START_PICK=<folder>: the start screen picks that world at frame 60 (to test the restart into it).
         if (const char* pick = std::getenv("ISLAND_START_PICK"); pick && !session.playing && app.frameCount == 60) session.pending = pick;
         if (!session.playing && (session.pendingNew || !session.pending.empty())) {
@@ -789,14 +838,15 @@ namespace {
         StartScreen& start = world.ctx().emplace<StartScreen>();
         PauseMenu& menu = world.ctx().emplace<PauseMenu>();
 
-        projv::ui::user::loadFont(app, (here / "shared_ui/fonts/LatoLatin-Regular.ttf").string());
-        projv::ui::user::loadFont(app, (here / "shared_ui/fonts/LatoLatin-Bold.ttf").string());
+        projv::ui::user::loadFont(app, (here / "ui/fonts/PixelifySans.ttf").string());
+        if (!icons::writeAll(here / "icons")) projv::core::warn("island: the HUD's icons could not be written to '{}'", (here / "icons").string());
         projv::ui::user::model(app, "start").bind("worlds", &start.worlds).bind("hasWorlds", &start.hasWorlds).bind("newName", &start.newName)
             .bind("newSeed", &start.newSeed).bind("status", &start.status);
         projv::ui::user::model(app, "pause").bind("world", &menu.world).bind("saved", &menu.saved);
         Hud& hud = world.ctx().get<Hud>();
-        projv::ui::user::model(app, "island").bind("tool", &hud.tool).bind("aiming", &hud.aiming).bind("prompt", &hud.prompt).bind("inventory", &hud.inventory)
-            .bind("collect", &hud.collect).bind("collecting", &hud.collecting);
+        projv::ui::user::model(app, "island").bind("slots", &hud.slots).bind("compass", &hud.compass).bind("heading", &hud.heading)
+            .bind("held", &hud.held).bind("heldShown", &hud.heldShown).bind("aiming", &hud.aiming).bind("prompt", &hud.prompt)
+            .bind("collecting", &hud.collecting);
         app.events().on<projv::ui::UiAction>([&app](const projv::ui::UiAction& action) {
             World& w = app.world;
             Session& s = w.ctx().get<Session>();
@@ -844,29 +894,9 @@ namespace {
         projv::ui::user::open(app, "pause", (here / "ui/pause.rml").string(), {.shown = false, .modal = true, .fadeOut = 0.2f});
     }
 
-    // The HUD: a placeholder until I5 (a crosshair, the tool in hand, the inventory).
+    // The HUD (ui/hud.rml, D9): the compass, the crosshair, the prompt, the hotbar.
     void openHud(projv::Application& app) {
-        projv::ui::user::openFromMemory(app, "hud", R"(<rml><head><style>
-            body { width: 100%; height: 100%; pointer-events: none; font-family: LatoLatin; }
-            .cross { position: absolute; left: 50%; top: 50%; width: 6dp; height: 6dp; margin-left: -3dp; margin-top: -3dp;
-                     background-color: #ffffffa0; }
-            .cross.on { background-color: #ffffffff; width: 8dp; height: 8dp; margin-left: -4dp; margin-top: -4dp; }
-            .tool { position: absolute; left: 0; bottom: 24dp; width: 100%; text-align: center; font-size: 20dp; color: #ffffff;
-                    font-effect: shadow(0dp 2dp #000000c0); }
-            .inventory { position: absolute; left: 0; bottom: 52dp; width: 100%; text-align: center; font-size: 17dp; color: #ffffffd0;
-                    font-effect: shadow(0dp 2dp #000000c0); }
-            .collect { position: absolute; right: 24dp; bottom: 24dp; font-size: 18dp; color: #ffffffa0;
-                    font-effect: shadow(0dp 2dp #000000c0); }
-            .collect.on { color: #b8ff9c; }
-            .prompt { position: absolute; left: 0; top: 56%; width: 100%; text-align: center; font-size: 18dp; color: #fff6c8;
-                    font-effect: shadow(0dp 2dp #000000c0); }
-            </style></head><body data-model="island">
-            <div class="cross" data-class-on="aiming"></div>
-            <div class="tool">{{tool}}</div>
-            <div class="inventory">{{inventory}}</div>
-            <div class="collect" data-class-on="collecting">{{collect}}</div>
-            <div class="prompt" data-if="prompt != ''">{{prompt}}</div>
-            </body></rml>)");
+        projv::ui::user::open(app, "hud", (projv::core::executableDirectory() / "ui/hud.rml").string());
     }
 
     void shutdown(projv::Application& app) {

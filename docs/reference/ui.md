@@ -96,6 +96,7 @@ it again after. A pass's name is its shader's file name (`BGFXDependencyGraph::n
 | `open(app, name, path, DocumentOptions)`, `openFromMemory(app, name, rml, ...)` | Loads a document under `name`. `DocumentOptions`: `shown` (true), `modal` (takes all input while shown), `fadeOut` (seconds it is still drawn after `hide`, for a transition out) |
 | `show`, `hide`, `close`, `isOpen`, `isShown` | By name |
 | `loadFont(app, path, fallback)` | A TTF/OTF face for every document |
+| `setDpRatio(app, ratio)`, `dpRatio(app)` | Pixels per `dp` in every document (1 unless set): the display's scale, or a whole number for pixel art. Images named `*.pixel.<ext>` are sampled nearest |
 | `model(app, name)` -> `Model` | A data model: `.bind(name, &value)` for `float`, `int`, `bool`, `std::string`, and lists -- `std::vector<std::string>` (`data-for="item : name"`) and rows, `std::vector<std::vector<std::string>>` (`{{row[0]}}`) -- before opening a document that names it (`data-model`). Bound values are compared each frame and redrawn when they change; controls bound to one (`data-value`, `data-checked`) write it |
 | `UiAction` (in `projv::ui`) | The event an element's `on<event>="name arg..."` sends: `document`, `name`, `args`, `event` |
 

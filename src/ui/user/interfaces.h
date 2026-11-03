@@ -37,6 +37,8 @@ namespace projv::ui::user {
         Rml::TextureHandle LoadTexture(Rml::Vector2i& dimensions, const Rml::String& source) override;
         Rml::TextureHandle GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i dimensions) override;
         void ReleaseTexture(Rml::TextureHandle texture) override;
+        // GenerateTexture with extra sampler flags (BGFX_SAMPLER_POINT for pixel art).
+        Rml::TextureHandle createTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i dimensions, uint64_t sampler);
 
         void EnableScissorRegion(bool enable) override;
         void SetScissorRegion(Rml::Rectanglei region) override;

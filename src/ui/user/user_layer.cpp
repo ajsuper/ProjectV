@@ -525,6 +525,17 @@ namespace projv::ui::user {
         return it != layer->impl().documents.end() && it->second.shown;
     }
 
+    void setDpRatio(Application& app, float ratio) {
+        UserLayer::Impl* s = implOf(app, "ui::user::setDpRatio");
+        if (!s || !(ratio > 0.0f) || s->context->GetDensityIndependentPixelRatio() == ratio) return;
+        s->context->SetDensityIndependentPixelRatio(ratio);
+    }
+
+    float dpRatio(const Application& app) {
+        const UserLayer* layer = layerOf(app);
+        return layer ? layer->impl().context->GetDensityIndependentPixelRatio() : 1.0f;
+    }
+
     bool loadFont(Application& app, const std::string& path, bool fallback) {
         if (!implOf(app, "ui::user::loadFont")) return false;
         if (!Rml::LoadFontFace(path, fallback)) {

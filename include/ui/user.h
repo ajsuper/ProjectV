@@ -69,6 +69,12 @@ namespace projv::ui::user {
     bool isOpen(const Application& app, const std::string& name);
     bool isShown(const Application& app, const std::string& name);
 
+    // How many pixels one `dp` is in every document: 1 unless set. A program can follow the display's
+    // scale with it or, for pixel art, keep it a whole number so 1dp is whole pixels. Images whose name
+    // ends ".pixel" ("pickaxe.pixel.png") are sampled nearest, so they stay crisp drawn larger.
+    void setDpRatio(Application& app, float ratio);
+    float dpRatio(const Application& app);
+
     // A font face for every document (TTF or OTF). `fallback`: used for characters the others lack.
     bool loadFont(Application& app, const std::string& path, bool fallback = false);
 
