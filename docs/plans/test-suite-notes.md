@@ -87,12 +87,17 @@ by trying to build them.
 is no per-example library list left to go stale. "Every example builds" is still worth a CI job,
 but it no longer guards against this specific failure.
 
-## 5. Shader compilation — gap
+## 5. Shader compilation — partly covered
 
 The twelve `comp*.sh` scripts are gone, replaced by `projv_compile_shaders()`. What needs
 testing is now the CMake rule: that every shader in the tree still compiles, and that the
-engine's shader library (`pjv_utils_DDA.sc`) and each example's own `sharedShaders/` are both
+engine's shader library (`shaders/include/`) and each example's own `sharedShaders/` are both
 on the include path.
+
+Covered: `tests/unit/check_shader_library.cmake` (every library file compiles alone and together,
+SPIR-V / GLSL 440 / Metal; no stray uniforms, every symbol prefixed) and `test_shaders.cpp` (the
+engine's embedded shaders, the camera uniforms' layout against `pjv_engine.sc`). Not covered: a
+check that every example shader compiles from source rather than the build merely succeeding.
 
 Worth noting what the scripts' removal settled: the ScenePreviewer README claimed PathTracer's
 scripts were missing `-i $PROJECTV_DIR/include`. All seven had it and all seven compiled clean,
@@ -110,13 +115,16 @@ selection, and `--list` enumerates them, so an unreachable folder is now impossi
 construction rather than merely noticed. Worth a test anyway: assert that every directory under
 `renderers/` appears in `--list`.
 
-## 6. Scene / Compose I/O — gap, and the highest-value pure-CPU target
+## 6. Scene / Compose I/O — partly covered
 
-Needs no window, so it is the cheapest thing to run in CI:
+Covered: `test_scene_loading.cpp` (loading, partial and streamed loads against the eager loader),
+`test_local_ids.cpp` and `test_attachments.cpp` (save/load round-trips), `test_tile_table.cpp`
+(`.data` v4 round-trip, v3 still reads), `test_palette_overflow.cpp` (the 255-entry boundary).
+Still uncovered: v1 rejection, every bundled scene loading, `removeMaterial` and reindexing.
 
 - Round-trip: `saveComposeToDisk` → `loadComposeFromDisk` preserves chunk count, component
   count, transforms, and palettes.
-- `.data` container versions: v2 and v3 load; v1 is rejected with a clear message. Several
+- `.data` container versions: v2, v3 and v4 load; v1 is rejected with a clear message. Several
   bundled scenes are still v1 and load as **zero chunks** — currently documented in prose
   rather than asserted anywhere.
 - Every bundled scene under `examples/` loads and reports a plausible bounding box. A scene
@@ -129,12 +137,17 @@ Needs no window, so it is the cheapest thing to run in CI:
 Z-order round-trips (`calculateZOrderIndex` ↔ `inverseZOrderIndex`), header position
 packing. Pure functions, no fixtures — these should be the first unit tests written.
 
-## 8. Editing — gap
+## 8. Editing — partly covered
+
+Covered: `test_voxel_edits.cpp` (removals on Chunk and Grid components), `test_slot_reuse.cpp`
+(an edit forks one instance's shared blob; refcounts let go), `test_scene_delete.cpp` (deletion
+releases geometry). Still uncovered: grid growth into negative coordinates with `originCellCoord`
+rebasing, and `editing_p1`'s checks as unit tests.
 
 `queueVoxelAdd`/`queueVoxelRemove` → `updateScene` on both Chunk and Grid components;
 grid expansion into negative coordinates with `originCellCoord` rebasing; COW fork
 semantics and `refCount`. Much of this already exists as assertions inside
-`docs/examples/editing_p1/main.cpp`, which is a test driver wearing an example's clothes —
+`tests/manual/editing_p1/main.cpp`, which is a test driver wearing an example's clothes —
 it should become the seed of the real suite rather than being deleted.
 
 ## 9. Packaging — gap, needed by the current work

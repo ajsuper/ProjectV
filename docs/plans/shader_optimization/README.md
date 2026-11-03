@@ -1,5 +1,7 @@
 # Shader Optimization Plans
 
+> **Superseded.** `include/pjv_utils_DDA.sc`, which these plans copy, was deleted in `fe7ab9e`; the march is now the tile-table one in `shaders/include/` ([voxel-storage-tiles.md](../voxel-storage-tiles.md)). Kept as a record.
+
 These plans are designed to be executed independently by separate LLM sessions.
 Each plan instructs the LLM to **copy** `include/pjv_utils_DDA.sc` to a new file
 `include/pjv_utils_DDA_<suffix>.sc` and make changes only in that copy. This

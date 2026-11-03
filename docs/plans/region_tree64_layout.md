@@ -1,7 +1,9 @@
 # Region-Based Tree64 Texture Layout
 
 **Date:** 2026-07-15
-**Status:** planned
+**Status:** superseded by [voxel-storage-tiles.md](voxel-storage-tiles.md), never built. The GPU now
+holds tile tables, not tree64 nodes: there is no node traversal (`tree64()`, `childPtr`) to lay out,
+and the eight `pjv_utils_DDA*.sc` variants it edits are gone.
 
 Replace the 1D linear tree64 texture allocator with a column-based region allocator
 where each blob occupies a fixed-width (64 texel) column of dynamic height. Blob

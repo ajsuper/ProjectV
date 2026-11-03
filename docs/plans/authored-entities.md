@@ -1,6 +1,6 @@
 # Authored entities: gameplay data saved as ECS components
 
-Status: **implemented** on `main`, after `c56dfdc` (uncommitted when this was written). It
+Status: **implemented** on `main`, as `bcdd35e`. It
 supersedes the spawning half of `runtime-spine-entt.md` D6 and narrows `component-attachments.md`.
 
 ## The problem it fixes

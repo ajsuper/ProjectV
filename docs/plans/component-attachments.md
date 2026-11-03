@@ -1,6 +1,6 @@
 # Component attachments: program data that travels with scene components
 
-Status: **AT0–AT2 implemented** on branch `component-attachments` (uncommitted). AT3 not started.
+Status: **AT0–AT2 built** on `main` (`65faef9`). AT3 not started.
 See "As built" at the end for where the implementation differs from this text. This comes
 **before** the runtime spine
 (`runtime-spine-entt.md`). That plan's spawn path reads attachments, and its hierarchy decision

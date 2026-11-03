@@ -1,10 +1,11 @@
-# Editing phases 1–10 — delivery log
+# Editing phases 1–6 — delivery log
 
 Moved out of `AGENTS.md`, where ~360 lines of dated changelog sat between the build commands and
 the coding conventions and buried both. It is a record of what each phase of the editing work
 delivered, not guidance, so it belongs with the other plans.
 
-Status as recorded: 2026-07-11.
+Status as recorded: 2026-07-11. Later: P8 partly built (`saveComposeToDisk`; see [edit_p8.md](edit_p8.md)),
+P10 built (`cb96f9a`, [edit_p10.md](edit_p10.md)).
 
 ---
 
@@ -367,4 +368,4 @@ Status as recorded: 2026-07-11.
   not a tutorial.
 
 ### What's Next (Phase 7+)
-- Removal of legacy `chunkQueue`, mutability policies, persistence.
+- ~~Removal of legacy `chunkQueue`~~ (done: it no longer exists), mutability policies, persistence.

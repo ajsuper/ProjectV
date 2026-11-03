@@ -4,8 +4,9 @@ Design notes, delivery logs and living lists. **Plans live here, in the repo, an
 current as work lands.** When you build from one, update its status line, and say where the
 build differed.
 
-Status: **proposal** (not agreed) · **approved** (not started) · **in progress** · **built** ·
-**superseded** · **log** (a record) · **living** (kept current).
+Status: **proposal** / **draft** (not agreed) · **approved** (not started) · **in progress** ·
+**built** / **done** / **delivered** · **partly built** / **delivered in part** · **not built**
+(agreed, set aside) · **superseded** · **log** (a record) · **living** (kept current).
 
 ## Living documents
 
@@ -45,7 +46,7 @@ The editing system was delivered in phases. [edit-phases-changelog.md](edit-phas
 | [edit_p6.md](edit_p6.md) | built | Hierarchical component tree, identity, transform API |
 | [edit_p7.md](edit_p7.md) | not built | `EditingPolicy`, per-component drain, `SceneDiff`. None of these exist in the code |
 | [edit_p8.md](edit_p8.md) | partly built | Writing a Scene back to disk (`saveComposeToDisk`) is built; per-mutability write-back is not |
-| [edit_p9.md](edit_p9.md) | not built | Direct tree64 edits, transactions, factory functions |
+| [edit_p9.md](edit_p9.md) | not built; the tree64 edits superseded by [voxel-storage-tiles.md](voxel-storage-tiles.md) | Direct tree64 edits, transactions, factory functions |
 | [edit_p10.md](edit_p10.md) | built | One material byte per voxel and per-component palettes, replacing `voxelTypeData` |
 
 ## Scene editor tools
@@ -74,8 +75,8 @@ differ, the README is what the code does.
 | [restir-pt.md](restir-pt.md) | delivered in part | ReSTIR PT: paths with materials, reused. Replaced `restir` in the gallery and the terrain generator |
 | [restir-pt-performance.md](restir-pt-performance.md) | delivered (P3 deferred) | restir-pt's presets: today's as quality, a performance one for integrated GPUs (a render scale, fewer rays, passes off), and optimizations for both |
 | [color-convention.md](color-convention.md) | K0–K2 built | One meaning for a stored colour (sRGB), one transform to the screen |
-| [region_tree64_layout.md](region_tree64_layout.md) | proposal | Column-based region allocator for the tree64 texture |
-| [shader_optimization/](shader_optimization/README.md) | stale | Twelve independent DDA shader experiments, written against the pre-Phase-10 shader (`voxelTypeData`, the old `docs/examples/` paths) |
+| [region_tree64_layout.md](region_tree64_layout.md) | superseded by [voxel-storage-tiles.md](voxel-storage-tiles.md) | Column-based region allocator for the tree64 texture |
+| [shader_optimization/](shader_optimization/README.md) | superseded (its base, `pjv_utils_DDA.sc`, went in `fe7ab9e`) | Twelve independent DDA shader experiments, written against the pre-Phase-10 shader (`voxelTypeData`, the old `docs/examples/` paths) |
 
 The twelve shader experiments:
 [01 subtree-empty flag](shader_optimization/01_subtree_empty_flag.md) ·
@@ -103,13 +104,13 @@ The twelve shader experiments:
 
 | Plan | Status | What |
 |---|---|---|
-| [windows.md](windows.md) | in progress (W0) | Building, testing (on CI) and drawing on Windows: MSVC, Vulkan, a hand check on a real GPU |
+| [windows.md](windows.md) | in progress (W0–W3 done; W4 by hand next) | Building, testing (on CI) and drawing on Windows: MSVC, Vulkan, a hand check on a real GPU |
 
 ## Content
 
 | Plan | Status | What |
 |---|---|---|
-| [biome-canyonlands.md](biome-canyonlands.md) | approved; C1, C2 built | The terrain generator's first biome: a Colorado Plateau canyon network |
+| [biome-canyonlands.md](biome-canyonlands.md) | approved; C1, C2 built; C3 in progress | The terrain generator's first biome: a Colorado Plateau canyon network |
 | [island-demo.md](island-demo.md) | delivered (wind deferred) | A generated island to break, gather and build with: tools, rubble into a hotbar, blocks placed back, a compass, saved worlds |
 
 ## Infrastructure

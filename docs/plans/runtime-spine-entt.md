@@ -1,8 +1,7 @@
 # Runtime spine: EnTT, a scheduler, time, events, and the Scene bridge
 
-Status: **P1 through P4 implemented** on branch `runtime-spine` (off `component-attachments`),
-uncommitted. P5 stays unscheduled, as planned. See **As built** at the end for where the code
-differs from the decisions below. Prerequisites, done: C++20 (`a870fea`), the unit-test suite, and
+Status: **P1 through P4 built** on `main` (`14678cb`). P5 stays unscheduled, as planned. See
+**As built** at the end for where the code differs from the decisions below. Prerequisites, done: C++20 (`a870fea`), the unit-test suite, and
 component attachments with `op` moved out of the engine (`65faef9`).
 
 **What changed in this revision, and why:**

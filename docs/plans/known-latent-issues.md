@@ -12,7 +12,7 @@ The old `assignSystemStage` stored `app.Startup = [=, &app]() { system(app); };`
 captured `app` by reference and lived inside `app` -- so an `Application` could not be moved,
 copied or returned from a factory without every stage pointing at the old object.
 
-**Fixed by the runtime spine (branch `runtime-spine`).** `core/ecs.h` and `assignSystemStage` are
+**Fixed by the runtime spine (`14678cb`).** `core/ecs.h` and `assignSystemStage` are
 gone. `projv::Application` (`core/application.h`) stores `std::function<void(Application&)>`
 systems and passes itself in when it runs them, so nothing captures it. It is also deliberately
 neither copyable nor movable: it keeps pointers to its own `Time` and `Events` and connects a
@@ -22,7 +22,8 @@ neither copyable nor movable: it keeps pointers to its own `Time` and `Events` a
 
 ## 2. `core::perf` is unqualified in two examples' profiler blocks
 
-`docs/examples/PathTracer/main.cpp:269` and `docs/examples/edit_demo/main.cpp:467` call
+`docs/examples/PathTracer/main.cpp:269` and `docs/examples/edit_demo/main.cpp:467` (now
+`examples/30-renderers/main.cpp` and `tests/manual/edit_demo/main.cpp`) call
 `core::perf(...)` where the enclosing scope has no `core` — it needs `projv::core::perf`,
 which is what `ScenePreviewer` and `terrain_generator` correctly use.
 
@@ -37,10 +38,11 @@ exactly as predicted here. Both are now `projv::core::perf`.
 
 ## 3. Public headers leak implementation dependencies
 
-`<iostream>` is included by eight public headers (`gpu_interface.h`, `manage_resources.h`,
-`perform_renderer.h`, `render_instance.h`, `type_mapping.h`, `voxel_math.h`,
-`voxel_management.h`, `ecs.h`), `disk_io.h` pulls in `nlohmann/json.hpp`, and
-`render_instance.h` pulls in `GLFW/glfw3.h` and `glfw3native.h`.
+`<iostream>` is included by eight public headers (`graphics/`: `disk_io.h`, `gpu_interface.h`,
+`manage_resources.h`, `perform_renderer.h`, `render_instance.h`, `type_mapping.h`; `utils/`:
+`voxel_math.h`, `voxel_management.h`); `nlohmann/json.hpp` by six (`graphics/disk_io.h`,
+`runtime/entities.h`, `runtime/loading.h`, `runtime/net.h`, `runtime/physics.h`,
+`utils/attachments.h`); and `render_instance.h` pulls in `GLFW/glfw3.h` and `glfw3native.h`.
 
 The consequence is that any consumer of the graphics API needs spdlog, glm, bx, bgfx,
 GLFW and nlohmann on its include path — which is exactly what the example Makefiles were
@@ -71,20 +73,20 @@ configuration, which is what they should always have had.
 
 ## 5. Most bundled scenes are `.data` version 1 and load as zero chunks
 
-The loader accepts container versions 2 and 3 and rejects version 1 with a clear message, then
+The loader accepts container versions 2 to 4 and rejects version 1 with a clear message, then
 skips the block. A scene whose every `.data` is v1 therefore *parses* — its `compose.json` is
 fine, its components are counted — and contains no geometry at all.
 
-Fourteen bundled `.data` files are still v1, about 250 MB:
+Nine bundled `.data` files are still v1, about 210 MB (fourteen, 250 MB, before the trees went):
 
 | Asset | Consequence |
 |---|---|
-| `PathTracer/SponzaScene/model.data` | **The path tracer renders an empty scene.** All six renderers start, submit frames and show nothing. AdvancedRenderer, which loads the same scene, is empty for the same reason. |
-| `PathTracer/QuadSponza/sponza_{a,b,c,d}/model.data` | Same, for the four-instance scene. |
-| `edit_demo/SponzaScene/model.data` | Same. |
+| `examples/30-renderers/SponzaScene/model.data` | **The renderer gallery renders an empty scene.** All six renderers start, submit frames and show nothing. (`40-advanced-renderer` no longer embeds it; it takes a scene as an argument.) |
+| `examples/30-renderers/QuadSponza/sponza_{a,b,c,d}/model.data` | Same, for the four-instance scene. |
+| `tests/manual/edit_demo/SponzaScene/model.data` | Same. |
 | ~~`MeshVoxelizer/trees/*` (8 assets)~~ | **Resolved:** removed. The terrain generator's trees are now grown by the scene editor's tree brush (`50-terrain-generator/biomes/<biome>/assets/`, current format). |
-| `ScenePreviewer/scenes/{Sibenik,LostEmpire}/model.data` | Already documented in that example's README. |
-| `ScenePreviewer/scenes/StonehillCastle/model.data` | Unreferenced leftover; that scene loads from its v2 components. |
+| `examples/10-scene-previewer/scenes/{Sibenik,LostEmpire}/model.data` | Already documented in that example's README. |
+| `examples/10-scene-previewer/scenes/StonehillCastle/model.data` | Unreferenced leftover; that scene loads from its v2 components. |
 
 This is pre-existing content rot — the files have not changed since 2026-08-01 — and it is
 invisible from the outside because nothing fails loudly. An example that starts, renders and
@@ -95,7 +97,10 @@ then, "the example runs" is not evidence the example works: check the `Loaded N 
 
 ## 6. `editing_p1` fails 6 of its 86 self-checks
 
-Against a scene that loads (`ScenePreviewer/scenes/SmallVox`), the driver reports 80 `[OK]` and
+**It does not currently compile** ([#16](#16-editing_p1-and-edit_demo-no-longer-compile)), so this is the
+last result it gave.
+
+Against a scene that loads (`examples/10-scene-previewer/scenes/SmallVox`), the driver reports 80 `[OK]` and
 6 `CHECK FAILED`:
 
 ```
@@ -247,7 +252,7 @@ derive the effective set without writing the user-facing options.
 ## 15. `ConstantVelocity`'s spin calls libm, which feeds a kinematic pose
 
 `runtime/physics.cpp` turns a kinematic body flying on a `ConstantVelocity` with
-`glm::angleAxis(turn, axis)` (about line 2454), which calls `sin` and `cos`. Those can differ in the
+`glm::angleAxis(turn, axis)` (about line 2471), which calls `sin` and `cos`. Those can differ in the
 last bit between glibc and the Windows C runtime, and the result is the pose given to Jolt each step,
 so a spinning body on Linux and on Windows would drift apart. The rule is that nothing feeding a step
 calls libm ([windows.md](windows.md), D4; the same cause was found in a strike's `cbrt` and fixed). Not
