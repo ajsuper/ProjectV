@@ -247,7 +247,9 @@ program, timed on the first play when it has none, the Esc menu's **Graphics** b
 
 Later still (2026-11-03): the Esc menu and the graphics panel are wooden boards with vines, as the start
 screen (the user's ask). `icons.h` draws a board at any size (`BOARDS`: one per menu, the side vines keeping
-to their edges); the wood look is `.board` in `ui/pixel.rcss`, shared by the three.
+to their edges); the wood look is `.board` in `ui/pixel.rcss`, shared by the three. The HUD followed: the compass is a plank (`hud-compass`, 125 x 16), the hotbar a
+board (`hud-hotbar`, 246 x 32: a thin frame, its vine along the top only) with nine slots sunk into the wood,
+the one in hand framed in gold; the prompt and collecting are oak chips, collecting moss green when on.
 
 Notes for I5 on:
 
