@@ -1,6 +1,6 @@
 # Island demo: break it, gather it, build with it
 
-Status: **in progress** (2026-11-02): I0-I3 built (on the branch `island-demo`); I4 next. Asked for: "the most advanced example yet" -- a procedurally generated
+Status: **in progress** (2026-11-02): I0-I4 built (on the branch `island-demo`); I5 next. Asked for: "the most advanced example yet" -- a procedurally generated
 sandbox with hills, rock and trees; tools to break the world; E to collect the rubble you look at into
 a hotbar beside the tools; a click to place it; a compass at the top.
 
@@ -140,11 +140,16 @@ worlds/<name>/
   world.json               the seed, the player's position and look, the inventory, the time played
 ```
 
-**Autosave** every two minutes while playing, and on Quit (the menu's Leave becomes **Save and quit**)
-and on closing the window. Only the island's edited cells are written after the first save (a grid
-cell rewrites its `.data` when its voxels changed), on a worker thread from a copy, so an autosave
-does not hitch the game; quitting waits for it. Rubble lying about is not saved: it is what you have
-not gathered yet, and cheap debris expires anyway. *Why:* the user asked for it; the engine's format
+**Autosave** every minute (was two: bgfx's Vulkan timer query crashes now and then on the user's driver,
+and a crash saves nothing), and on **Save and quit** (the Esc menu) and on closing the window. The voxels
+are written only when they changed since the last save, and then whole -- a `.data` is one file, so "only
+the edited cells" (as first planned) is not to be had -- copied out of the scene on the main thread and
+written on a worker thread, to a temporary file renamed over the old; quitting waits for it. Rubble lying about is not saved: it is what you have
+not gathered yet, and cheap debris expires anyway. **A program plays one world.** Choosing a world on the start screen restarts the program straight into
+it (`--world <folder>`; the window closes and opens again): swapping a world into the running program --
+the GPU's copy of the scene destroyed and made again under a renderer that held the old one -- crashed
+the driver a few seconds in, twice; and the engine's systems (physics, the bridge) cannot be uninstalled,
+so a second world could not be entered cleanly anyway. *Why:* the user asked for it; the engine's format
 means a saved island is an ordinary scene.
 
 
@@ -157,7 +162,7 @@ means a saved island is an ordinary scene.
 | **I1** | Tools and breaking: the pickaxe, the chisel; trees fall | breaking by hand (done, 2026-11-02); the self-test's break |
 | **I2** | Rubble and gathering; the inventory; the tools seen and swung | gathering by hand (done, 2026-11-02); the self-test's counts |
 | **I3** | Placing blocks | building by hand (done, 2026-11-02); the self-test's placing |
-| **I4** | Saving and loading: the start screen, autosave, save and quit | a world built in, quit, loaded back as it was; the self-test's reload |
+| **I4** | Saving and loading: the start screen, autosave, save and quit | a world built in, quit, loaded back as it was (done, 2026-11-02); the self-test's reload |
 | **I5** | The HUD: hotbar, compass, prompt, menu; the look | the user's check |
 
 ## Open questions
@@ -211,7 +216,17 @@ island; it costs 64 voxels and clears the plants in its cell. The block in hand 
 self-test places three blocks and checks the cells are full and 192 voxels were spent. No placement
 preview yet.
 
-Notes for I4 on:
+**I4** (2026-11-02). `saving.h`: `world.json` (name, seed, the player's feet and look, the inventory,
+collecting, time played, last played), the world list, folder names from world names, and the voxel
+writer (one save in flight, a worker thread, temporary files renamed). `main.cpp`: the start screen
+(`ui/start.rml`) and the Esc menu (`ui/pause.rml`), placeholders until I5; a `Session` (which world,
+saving on or off -- off for captures); the restart into a chosen world; autosave, Save and quit, a save on
+closing. The self-test plays a fresh world (`worlds/selftest-<seed>/`, hidden from the start screen), saves
+it, and reads the save back: `world.json` has the inventory and the player's place, and the island loaded
+from disk has the same voxels, cell for cell. `ISLAND_START_CAPTURE` and `ISLAND_START_PICK` are for
+captures and for testing the restart.
+
+Notes for I5 on:
 
 - A world folder is made only when missing: after a generator change, delete `worlds/` (or the old
   island loads).
