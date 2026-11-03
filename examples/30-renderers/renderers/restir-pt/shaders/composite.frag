@@ -16,6 +16,11 @@ $input v_texcoord0
 //
 // The views (G): 4 shows the indirect diffuse alone, 5 the indirect specular, as the indirect light.
 //
+// Simple lighting (restirPreset.w: a preset's clean look, with the path passes skipped): no paths, so
+// nothing noisy. The diffuse is the sky above the normal (pathSky, opened by how far the normal faces up)
+// and the sun's light bounced off the ground below it (an albedo of RESTIR_SIMPLE_GROUND); the specular the same
+// sky (a rough reflection of it). The SSAO (ao_apply) shades it into corners, as it does the paths' light.
+//
 // Inputs, each bound by itself (resourceTexturesIDs): 0 giDiffFinal, 1 giSpecFinal (the last a-trous
 // level), 2 surf0, 3 surf1 (the GI pixels' surfaces), 4 gPos, 5 gNormal, 6 gAlbedo, 7 gDirect, 8 reflection
 // (reflect.frag: a mirror's specular, a 1 where it replaces the paths').
@@ -34,6 +39,9 @@ SAMPLER2D(gNormal, 5);
 SAMPLER2D(gAlbedo, 6);
 SAMPLER2D(gDirect, 7);
 SAMPLER2D(reflection, 8);
+
+#define RESTIR_SIMPLE_GROUND 0.3
+#define RESTIR_SIMPLE_SKY 0.6      // the share of the open sky a surface sees, on average: hills and trees hide the rest
 
 bool restirMatches(ivec2 g, vec3 P, vec3 N, float t) {
     vec4 gs = texelFetch(surf0, g, 0);
@@ -54,6 +62,25 @@ void main() {
 
     vec3 P = surface.xyz;
     float t = surface.w;
+    if (restirPreset.w > 0.5) {
+        vec2 mat = restirUnpackMaterial(direct.a);
+        vec3 V = normalize(pjvViewPosition() - P);
+        vec3 n = normalize(N + vec3(0.0, 1e-6, 0.0));
+        vec3 sunLight = SUN_COLOR * max(normalize(SUN_DIR).y, 0.0);
+        vec3 sky = RESTIR_SIMPLE_SKY * pathSky(normalize(n + vec3(0.0, 1.0, 0.0))) * (0.5 + 0.5 * n.y);
+        vec3 ground = sunLight * (RESTIR_SIMPLE_GROUND / RESTIR_PI) * (0.5 - 0.5 * n.y);
+        PjvBsdf bsdf = pjvBsdf(albedo, mat.x, mat.y);
+        vec3 simpleDiffuse = bsdf.diffuseAlbedo * (sky + ground);
+        vec3 simpleSpecular = pjvSpecularAlbedo(bsdf, max(dot(n, V), 0.0)) * sky;   // the soft sky: no streaks of blue
+        vec4 mirror = texelFetch(reflection, q, 0);
+        simpleSpecular = mix(simpleSpecular, mirror.rgb, mirror.a);
+        vec3 simple = simpleDiffuse + simpleSpecular;
+        if (restirView(RESTIR_VIEW_DIFFUSE)) simple = simpleDiffuse;
+        else if (restirView(RESTIR_VIEW_SPECULAR)) simple = simpleSpecular;
+        gl_FragData[0] = vec4(direct.rgb, 1.0);
+        gl_FragData[1] = vec4(simple, 1.0);
+        return;
+    }
     ivec2 giSize = ivec2(textureSize(giDiffFinal, 0));
     float stride = restirJitter.z;
     vec2 f = (vec2(q) + 0.5) / stride - 0.5;

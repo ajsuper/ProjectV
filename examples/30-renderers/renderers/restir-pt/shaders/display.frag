@@ -22,6 +22,7 @@ SAMPLER2D(bloomUp1, 2);
 uniform vec4 restirPost;      // x vignette strength (0 off), y grade on, z auto-exposure on, w seconds since last frame
 uniform vec4 restirDenoise;   // z the view (0 the image)
 uniform vec4 restirDof;       // y the bloom's share of the image (0: off)
+uniform vec4 restirUpscale;   // x how much an upscaled image is sharpened (0: not at all)
 
 // The grade: a touch of contrast about middle grey, a touch of colour, and a slightly warm white.
 #define GRADE_CONTRAST   1.08
@@ -40,7 +41,12 @@ vec3 restirImage(vec2 uv, vec2 size) {
     vec3 b = texelFetch(mbColor, clamp(base + ivec2(1, 0), ivec2(0, 0), last), 0).rgb;
     vec3 c = texelFetch(mbColor, clamp(base + ivec2(0, 1), ivec2(0, 0), last), 0).rgb;
     vec3 d = texelFetch(mbColor, clamp(base + ivec2(1, 1), ivec2(0, 0), last), 0).rgb;
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    vec3 blend = mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    // Sharpened against the four texels' mean, limited to their range so an edge gains no halo: an
+    // upscale's softness taken back a little.
+    vec3 mean = 0.25 * (a + b + c + d);
+    vec3 lo = min(min(a, b), min(c, d)), hi = max(max(a, b), max(c, d));
+    return clamp(blend + restirUpscale.x * (blend - mean) * 2.0, lo, hi);
 }
 
 void main() {

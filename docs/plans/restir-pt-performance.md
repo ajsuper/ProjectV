@@ -1,6 +1,6 @@
 # restir-pt: a performance preset, and optimizations
 
-Status: **in progress** (2026-11-03): P0-P2 built, P2 awaiting the user's look; P3 next. Asked for: restir-pt is unusable on the user's laptop; today's
+Status: **in progress** (2026-11-03): P0-P2 built; performance remade clean (D7-D9) after the user's look; P3 next. Asked for: restir-pt is unusable on the user's laptop; today's
 configuration becomes the **quality** preset, and a simple **performance** preset is added, plus
 optimizations. The user's target for performance: **60 fps on the laptop, a softer image accepted**.
 
@@ -85,6 +85,23 @@ program (`settings.json`, next to `worlds/`). *Why:* the laptop is the machine i
 reports the vendor and device, and RADV/Mesa names an integrated part (the island already reads
 `bgfx::getCaps`). Open question 2.
 
+**D7. Performance is clean, not rich** (2026-11-03, after the user's look at P2: "very not clean" -- blotchy
+noisy light, blurry, shimmer and smear in motion; "a clean image over a complicated one"). Its lighting is
+**simple**: no paths -- the sky over the normal (60% of it: hills and trees hide the rest) and the sun
+bounced off the ground below, shaded by an SSAO four times as wide and at full strength -- so nothing is
+noisy, and the path passes and their denoiser are skipped. The time that frees buys **three quarters** of
+the window's resolution (not half), **sharpened** in the upscale (against the four texels' mean, held to
+their range: no halo); the image history while moving is **6 frames** (not 16), as there is no noise to
+average, so nothing smears.
+
+**D8. Traced lighting stays a setting**: one or two bounces, as before, for anyone who wants the richer,
+noisier light at its cost.
+
+**D9. Every setting in the island's menu.** The Esc menu's **Graphics** opens a panel: preset, resolution
+(50/75/100%), lighting (simple, traced 1 or 2 bounces), reflections (screen space, traced), shadows (soft,
+hard), ambient occlusion, bloom, light shafts, depth of field, motion blur. A click cycles one; a change
+makes the preset **Custom**; all of it is kept in `settings.json`.
+
 ## Milestones
 
 | | What | Proven by |
@@ -134,3 +151,14 @@ settle) are timed and frames over 25 ms on average pick performance -- bgfx does
 integrated, so the island asks how fast it is instead (this laptop: performance). The Esc menu's
 **Graphics** button switches and keeps the choice; `--graphics quality|performance` sets one run's and
 keeps nothing; captures and the self-test draw quality. The gallery: `--preset`, and the panel's preset.
+
+**D7-D9** (2026-11-03). `Settings::simpleLighting` and `sharpen`; `restirPreset.w` (simple lighting,
+`composite.frag`), the new uniform `restirUpscale` (`display.frag`'s sharpening). Under simple lighting
+`upload` skips `surface`, `sample`, `spatial`, `gi_accumulate` and the four a-trous passes. Performance at
+1280 x 720, the island's spawn, the laptop: **6.9 ms** (`gbuffer` 3.9 of it, at 0.75). The island's panel:
+`ui/graphics.rml` (model `graphics`: rows of label, value, key); `settings.json` keeps
+`{"graphics": "custom", "base": ..., "settings": {...}}` for custom ones; Esc in the panel goes back to the
+menu. `ISLAND_MENU=pause|graphics` opens one for a capture.
+
+Shaded ground under simple lighting is brighter and flatter than quality's: it has no occlusion but the
+SSAO's. A look for the user to judge.

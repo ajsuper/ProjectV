@@ -93,19 +93,23 @@ namespace restir_pt {
         int   spatialNeighbours = 5;   // the spatial reuse's neighbours (at most 5)
         float cameraShadowLod = 0.0f;  // the camera hit's sun coarse past this many voxels (0: exact)
         bool  screenReflections = false;   // mirrors and water reflected in screen space, not by a traced ray
+        bool  simpleLighting = false;      // no paths: the sky and a ground bounce, clean (their passes skipped)
+        float sharpen = 0.35f;             // how much an image drawn below the window's size is sharpened
     };
 
     // Two configurations, for the program to offer. Quality: the renderer as tuned on a desktop GPU. Performance:
-    // for an integrated one (the plan's D2-D4) -- half the window's resolution, one bounce, two neighbours,
-    // the camera's sun coarse past 16 voxels, screen-space reflections, no bloom or shafts.
+    // for an integrated one, clean rather than rich (the plan's D7) -- three quarters of the window's
+    // resolution, sharpened; simple lighting (no paths, so no noise); the camera's sun coarse past 16 voxels;
+    // screen-space reflections; no bloom, shafts, depth of field or motion blur.
     enum class Preset { Quality, Performance };
     inline const char* presetName(Preset p) { return p == Preset::Quality ? "quality" : "performance"; }
 
     inline Settings settingsFor(Preset preset) {
         Settings s;
         if (preset == Preset::Performance) {
-            s.renderScale = 0.5f;
-            s.bounces = 1.0f;
+            s.renderScale = 0.75f;
+            s.simpleLighting = true;
+            s.bounces = 1.0f;          // for a program that turns the paths back on
             s.spatialNeighbours = 2;   // the visibility ray stays: without it light leaks into shadow (P2)
             s.cameraShadowLod = 16.0f;
             s.screenReflections = true;
@@ -113,7 +117,6 @@ namespace restir_pt {
             s.post.dof = false;
             s.post.motionBlur = false;
             s.shafts = false;
-            s.ssao = 0.0f;
         }
         return s;
     }
@@ -165,6 +168,8 @@ namespace restir_pt {
                                  "bloom_up4", "bloom_up3", "bloom_up2", "bloom_up1"})
             projv::graphics::setPassEnabled(*renderer, pass, bloom);
         projv::graphics::setPassEnabled(*renderer, "shafts", shaftsOn);
+        for (const char* pass : {"surface", "sample", "spatial", "gi_accumulate", "atrous1", "atrous2", "atrous4", "atrous8"})
+            projv::graphics::setPassEnabled(*renderer, pass, !s.simpleLighting);   // the paths, and their denoiser
         Frame scaled = frame;
         scaled.window = projv::core::vec2(projv::graphics::renderTargetSize(projv::core::ivec2(frame.window), s.renderScale));
         uploadUniforms(renderer, scaled, scene, s, world);
@@ -174,8 +179,11 @@ namespace restir_pt {
     inline void uploadUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const Frame& frame, const SceneScale& scene,
                                const Settings& s, projv::World* world) {
         using projv::graphics::setUniformToValue;
-        vec4 preset{s.screenReflections ? 1.0f : 0.0f, float(std::clamp(s.spatialNeighbours, 0, 5)), s.cameraShadowLod, 0.0f};
+        vec4 preset{s.screenReflections ? 1.0f : 0.0f, float(std::clamp(s.spatialNeighbours, 0, 5)), s.cameraShadowLod,
+                    s.simpleLighting ? 1.0f : 0.0f};
         setUniformToValue(renderer, "restirPreset", preset);
+        vec4 upscale{s.renderScale < 0.999f ? s.sharpen : 0.0f, 0.0f, 0.0f, 0.0f};
+        setUniformToValue(renderer, "restirUpscale", upscale);
         // Surfaces are offset a twentieth of the finest voxel before a ray leaves them; the same-surface
         // tests are scaled from it too.
         const float finest = scene.finest;
@@ -208,7 +216,8 @@ namespace restir_pt {
         const float fogLength = scene.fogLength > 0.0f ? scene.fogLength : std::clamp(1.6f * scene.radius, 300.0f, 3000.0f);
         // The SSAO and the fog are the final render's, not the path tracer's.
         const bool finalRender = s.post.on;
-        vec4 look{6.0f * finest, finalRender ? s.ssao : 0.0f, s.softShadow ? 2.0f * std::tan(SUN_HALF_ANGLE) : 0.0f, s.farAO ? 1.0f : 0.0f};
+        // Simple lighting has no occlusion of its own: the SSAO reaches four times as far and darkens fully.
+        vec4 look{(s.simpleLighting ? 24.0f : 6.0f) * finest, finalRender ? (s.simpleLighting && s.ssao > 0.0f ? 1.0f : s.ssao) : 0.0f, s.softShadow ? 2.0f * std::tan(SUN_HALF_ANGLE) : 0.0f, s.farAO ? 1.0f : 0.0f};
         // The height fog: at the ground, 0.6 of an e-fold over the fog's length (about 45% hidden there,
         // gathering from nothing), thinning over 0.15 of it in height, never more than 90%.
         vec4 haze{finalRender && s.fog ? 0.6f / fogLength : 0.0f, scene.ground, 0.15f * fogLength, 0.9f};
@@ -247,7 +256,8 @@ namespace restir_pt {
         // The image's history: none when the sun moved (the light is new); short while the camera moves, so
         // changing light is not dragged along; 64 frames on a still view -- enough to average the jitter and
         // what noise is left, short enough that the GI's own history, not this one, decides how fast it settles.
-        const float imageHistory = frame.sunMoved || s.raw ? 1.0f : frame.moved ? 16.0f : 64.0f;
+        // Simple lighting has no noise to average: a short history while moving, so nothing smears.
+        const float imageHistory = frame.sunMoved || s.raw ? 1.0f : frame.moved ? (s.simpleLighting ? 6.0f : 16.0f) : 64.0f;
         vec4 settings{6.0f, finest * 0.05f, imageHistory, pixelWidth};
         setUniformToValue(renderer, "sunDir", sunDir);
         setUniformToValue(renderer, "frameCount", frameCount);

@@ -251,15 +251,16 @@ pixels changing between still frames to none.
 
 | | Quality | Performance |
 |---|---|---|
-| render scale (`ConstructedRenderer::renderScale`) | 1 | 0.5: every target at half the window, `display` upscales bilinearly |
-| bounces | 2 | 1 |
-| spatial neighbours (`restirPreset.y`) | 5 | 2 (with the visibility ray: without it, light leaks into shadow) |
+| render scale (`ConstructedRenderer::renderScale`) | 1 | 0.75: every target at three quarters of the window, `display` upscales bilinearly and sharpens (`restirUpscale.x`) |
+| indirect light | paths, 2 bounces | **simple** (`restirPreset.w`, `composite.frag`): the sky over the normal and a ground bounce, under a wide SSAO -- no paths, no noise; the path passes and the a-trous skipped |
+| image history while moving | 16 frames | 6 (nothing to average: nothing smears) |
 | the camera hit's sun (`restirPreset.z`) | exact | coarse past 16 voxels |
 | mirrors and water | `reflect`'s traced ray | screen space (`restirPreset.x`): a march through the G-buffer, last frame's image where it hits, the sky where it leaves the screen |
 | bloom, light shafts | on | off, and their passes skipped (`graphics::setPassEnabled`) |
-| depth of field, motion blur, SSAO | on | off (their passes run as copies: the post chain reads them) |
+| depth of field, motion blur | on | off (their passes run as copies: the post chain reads them) |
 
-The Radeon 860M (an integrated GPU), 1280×720, the island demo's spawn: quality 40.2 ms, performance 8.5 ms.
+The Radeon 860M (an integrated GPU), 1280×720, the island demo's spawn: quality 40.2 ms, performance 6.9 ms.
+Traced lighting under performance (`simpleLighting = false`) takes 1 bounce, 2 spatial neighbours.
 
 ## Settings
 
