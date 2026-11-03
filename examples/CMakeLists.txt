@@ -27,6 +27,9 @@ add_subdirectory(80-voxel-mayhem-demo)
 add_subdirectory(85-explosion-demo)
 add_subdirectory(90-party-demo)
 add_subdirectory(95-playground-demo)
+if(PROJV_BUILD_UI)
+    add_subdirectory(97-island-demo)
+endif()
 
 # Examples with third-party dependencies of their own. Each is skipped, with a reason, when its
 # submodule is not checked out -- an uninitialised submodule should not fail the whole build.

@@ -1,6 +1,6 @@
 # Island demo: break it, gather it, build with it
 
-Status: **approved** (2026-11-02); I0 next. Asked for: "the most advanced example yet" -- a procedurally generated
+Status: **in progress** (2026-11-02): I0 started, paused mid-way -- see [Hand-off](#hand-off-2026-11-02). Asked for: "the most advanced example yet" -- a procedurally generated
 sandbox with hills, rock and trees; tools to break the world; E to collect the rubble you look at into
 a hotbar beside the tools; a click to place it; a compass at the top.
 
@@ -132,3 +132,75 @@ means a saved island is an ordinary scene.
 
 None. Answered 2026-11-02: 192 m at 0.25 m; the name; saves in the build folder; the chisel's voxel is
 rubble; the menus and HUD pixel art.
+
+## Hand-off (2026-11-02)
+
+Paused at the user's request to continue on another computer. The work is on the branch
+**`island-demo`** (not `main`: I0 is not finished). `main` has this plan up to its approval.
+
+```bash
+git fetch && git checkout island-demo
+git submodule update --init --recursive        # RmlUi and FreeType arrived with ui.md U3
+cmake --preset dev && cmake --build --preset dev -j$(nproc)
+cd build/examples/island_demo && ./island_demo --seed 42
+ISLAND_VIEW=overview ISLAND_CAPTURE=/tmp/isl ./island_demo --seed 42   # a still from above, then it exits
+```
+
+**What is built** (`examples/97-island-demo/`):
+
+| File | What |
+|---|---|
+| `island.h` | The generator: seed in, world folder out (`worlds/island-<seed>/`: `compose.json`, `island.data`, one grid of 64^3 cells at 0.25 m, 12 x 4 x 12). A **2D heightfield** (fBm under a radial falloff into the sea), beaches, rock on steep or high ground, grass over dirt, a one-voxel sea, procedural trees stamped per cell. Fifteen palette shades, each naming a physics material. Generates in about 1 s (seed 42: 196 of 576 cells non-empty, 22 MB) |
+| `main.cpp` | Generates the folder if it is missing, then loads it (D11's path: a new world and a saved one load the same way); physics with tile collision, cheap debris (64 voxels), impact fracture; the island a `StaticCollider` with `splits` and `anchorBase`; a first-person `CharacterController` walker; restir-pt as Voxel Mayhem draws it. `--seed n`, `ISLAND_CAPTURE`, `ISLAND_VIEW=overview` |
+| `physics_materials.json` | grass, dirt, sand (crumble), stone (shatter), wood (splinter, grain up), leaves (weak), water (unbreakable) |
+| `CMakeLists.txt` | target `island_demo`; stages restir-pt from `30-renderers` and the shared UI (`SHARED_UI`) |
+
+Checked: it builds, generates seed 42, and draws the island from above (green hills, a sand rim,
+round-crowned trees, a flat blue sea). Walking was not yet checked by hand.
+
+**The user's last request, not yet done:** "use a 3D noise with a rock texture and more verticality
+and trees". The rework that was about to be written:
+
+- **A 3D density field** instead of the heightfield: solid where `base(x, z) - y + A * noise3(x, y, z) > 0`.
+  `base` taller and ridged (`1 - |noise|` octaves; peaks near 50 m, under the 64 m ceiling) so there
+  are mountains and cliffs; the 3D term (A about 6-10 m, stronger where the ground is steep) makes
+  overhangs and ledges. The island mask still takes it down into the sea. Evaluated only in the band
+  where the surface can be (`base +- A`): solid below it, air above, so the cost stays near the
+  heightfield's.
+- **Column-major generation**: a job per column of cells (12 x 12 jobs, four cells high each), since a
+  voxel's material depends on its depth under the surface above it, which may be in a higher cell.
+  Per column: the solid run from the density, then materials top down by depth from the last air.
+- **Materials from the surface's normal**: the density's gradient at each air-to-solid crossing (six
+  more samples, once per surface, reused down its run). Facing sideways (normal.y under about 0.65),
+  or high (over about 38 m): rock. Gentle near the sea: sand. Else grass on top, dirt to about 3 m,
+  stone below.
+- **A rock texture**: five or six stone shades in strata -- banded by height, warped by 2D noise --
+  with darker cracks, so a cliff reads as layered rock.
+- **More trees**: candidates every 4 m instead of 7, higher odds; each stands on the real surface,
+  found by walking the density down from the top at its (x, z); only on gentle grass below the rock
+  line.
+- `spawnPoint` then finds its ground the same way.
+
+**Then the rest of I0**: walk it by hand (the user checks I0 by eye), then commit I0 and go on to
+I1-I5 as above. One commit per milestone, on `main` once a milestone is finished (this branch merges
+then).
+
+**Working agreements with this user** (from the sessions that made this; also in `AGENTS.md`):
+
+- Plans first, agreed before code; one commit per milestone with its tests and docs; push after
+  each. **Stage explicit paths**, never `git add -A` (other sessions share the tree). Never
+  force-push `main`; fetch before pushing.
+- **Ask the user to look**: anything visual or felt (a renderer's look, a menu's feel) is the user's
+  call. Unattended captures (`*_CAPTURE` variables, `bgfx::requestScreenShot`) are fine; do not
+  screenshot the user's screen without asking.
+- The engine ships mechanisms, not looks: a look belongs to the program's files.
+- The island's HUD is **pixel art** (D9), not the frosted look of the other demos.
+- On the user's main machine the display is Wayland at 170% scaling: GLFW's framebuffer is 1.7x
+  the window and bgfx's back buffer is the window's size. Anything clipped or offset by about 1.7x
+  is that. Another machine may differ.
+
+**Open elsewhere** (not this demo's): ui.md U6 not started (gamepads, a document on a texture,
+MSDF); [known-latent-issues.md](known-latent-issues.md) #17 (one hit in the physics example's first
+demo wakes every block); the vendored RmlUi and FreeType untested in an install and the vcpkg preset;
+the physics example's `DEMOS_SELFTEST` not run since ui.md U5 changed its startup; the basic renderer
+has no sun shadows (asked about, not planned).
