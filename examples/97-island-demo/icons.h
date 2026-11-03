@@ -107,12 +107,13 @@ namespace icons {
     // The menus' boards (start.rml, pause.rml, graphics.rml): planks in a beam frame with iron corners, vines
     // climbing over the top and hanging down its sides. Drawn at one art pixel a dp, so a document sizes its
     // panel to its board exactly.
-    constexpr int BOARD_FRAME = 8;
-    struct BoardSize { const char* name; int width, height; };
-    constexpr BoardSize BOARDS[] = {{"board", 208, 264}, {"board-pause", 184, 156}, {"board-graphics", 244, 272}};
+    // The HUD's pieces are boards too, with a thin frame and only the top's vine and short ones at the ends.
+    struct BoardSize { const char* name; int width, height, frame; };
+    constexpr BoardSize BOARDS[] = {{"board", 208, 264, 8}, {"board-pause", 184, 156, 8}, {"board-graphics", 244, 272, 8},
+                                    {"hud-hotbar", 246, 32, 3}, {"hud-compass", 125, 16, 2}};
 
-    inline std::vector<Rgba> board(int W, int H) {
-        const int F = BOARD_FRAME;
+    inline std::vector<Rgba> board(int W, int H, int F = 8) {
+        const bool small = H < 100;   // a HUD piece: the vines keep off what it holds
         std::vector<Rgba> p(size_t(W) * H);
         auto at = [&](int x, int y) -> Rgba* { return x >= 0 && y >= 0 && x < W && y < H ? &p[size_t(y) * W + x] : nullptr; };
         auto put = [&](int x, int y, Rgba c) { if (Rgba* q = at(x, y)) *q = c; };
@@ -148,14 +149,16 @@ namespace icons {
                 if (d == 0 || d == F - 1) c = opaque(26, 15, 8);
                 put(x, y, c);
             }
-        // Iron at the corners, a rivet in each.
-        for (int cy : {0, H - 12})
-            for (int cx : {0, W - 12})
-                for (int y = 0; y < 12; y++)
-                    for (int x = 0; x < 12; x++) {
-                        const bool edge = x == 0 || y == 0 || x == 11 || y == 11;
+        // Iron at the corners, a rivet in each (12 square; on a thin frame, a little more than the frame).
+        const int C = F >= 8 ? 12 : F + 3, r = C / 2 - 1;
+        for (int cy : {0, H - C})
+            for (int cx : {0, W - C})
+                for (int y = 0; y < C; y++)
+                    for (int x = 0; x < C; x++) {
+                        const bool edge = x == 0 || y == 0 || x == C - 1 || y == C - 1;
                         Rgba c = edge ? opaque(28, 28, 32) : (x == 1 || y == 1 ? opaque(150, 152, 160) : opaque(98, 100, 110));
-                        if ((x == 5 || x == 6) && (y == 5 || y == 6)) c = x == 5 && y == 5 ? opaque(190, 192, 200) : opaque(40, 40, 46);
+                        if (C >= 8 && (x == r || x == r + 1) && (y == r || y == r + 1)) c = x == r && y == r ? opaque(190, 192, 200) : opaque(40, 40, 46);
+                        else if (C < 8 && x == r + 1 && y == r + 1) c = opaque(190, 192, 200);
                         put(cx + x, cy + y, c);
                     }
 
@@ -173,8 +176,8 @@ namespace icons {
         };
         uint32_t seed = 1;
         // Along the top beam, wandering over it.
-        for (int x = 2, y = 3; x < W - 2; x++) {
-            if (noise(x, 0, 30u) < 0.3f) y = std::clamp(y + (noise(x, 1, 31u) < 0.5f ? -1 : 1), 2, 6);
+        for (int x = 2, y = small ? 1 : 3; x < W - 2; x++) {
+            if (noise(x, 0, 30u) < 0.3f) y = std::clamp(y + (noise(x, 1, 31u) < 0.5f ? -1 : 1), small ? 1 : 2, small ? std::max(1, F - 1) : 6);
             put(x, y, stem);
             if (x % 4 == 0) leaf(x, y + (x % 8 ? 1 : 0), x % 8 ? 1 : -1);
             if (x % 61 == 23) flower(x, y + 2, island::hash(seed++));
@@ -188,6 +191,7 @@ namespace icons {
         for (Hang h : hangs) {
             if (h.x < 40) h.length = h.length * H / 264;
             else if (h.x > 168) { h.x = W - (208 - h.x); h.length = h.length * H / 264; }
+            else if (small) continue;   // nothing hangs over what a HUD piece holds
             else h.x = h.x * W / 208;
             int x = h.x;
             for (int i = 0; i < h.length; i++) {
@@ -210,7 +214,7 @@ namespace icons {
         bool ok = write(folder / "pickaxe.pixel.tga", tool(fx::PICKAXE_ART)) && write(folder / "chisel.pixel.tga", tool(fx::CHISEL_ART));
         for (const char* m : gather::MATERIALS) ok = write(folder / (std::string(m) + ".pixel.tga"), material(m)) && ok;
         for (const BoardSize& b : BOARDS)
-            ok = write(folder / (std::string(b.name) + ".pixel.tga"), board(b.width, b.height).data(), b.width, b.height) && ok;
+            ok = write(folder / (std::string(b.name) + ".pixel.tga"), board(b.width, b.height, b.frame).data(), b.width, b.height) && ok;
         return ok;
     }
 }

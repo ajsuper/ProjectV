@@ -5,19 +5,21 @@
     <style>
         body { width: 100%; height: 100%; pointer-events: none; }
 
-        /* The compass: a strip of ticks and letters sliding with the view, one dp a degree, the heading
-           under a caret at its middle. */
+        /* The compass: a plank (icons.h's hud-compass) with a strip of ticks and letters sliding with the view,
+           one dp a degree, the heading under a caret at its middle. */
         .compass { position: absolute; left: 50%; top: 4dp; width: 125dp; margin-left: -63dp; }
-        .compass .bevel { height: 12dp; overflow: hidden; position: relative; }
-        .mark { position: absolute; top: 0; width: 15dp; margin-left: -7dp; text-align: center; color: #a3abcf; }
+        .strip { position: relative; width: 125dp; height: 16dp; decorator: image(../icons/hud-compass.pixel.tga); }
+        .inside { position: absolute; left: 2dp; top: 2dp; width: 121dp; height: 12dp; overflow: hidden; }
+        .mark { position: absolute; top: 0; width: 15dp; margin-left: -7dp; text-align: center; color: #e9c98a;
+                font-effect: shadow(1dp 1dp #170d06); }
         .mark.off { display: none; }
-        .mark.card { color: #f6ecd2; }
+        .mark.card { color: #f6e7c8; }
         .mark.north { color: #ff8a78; }
-        .mark.tick .bar { position: absolute; left: 7dp; top: 4dp; width: 1dp; height: 3dp; background-color: #5f70b0; }
-        .mark.tick.half .bar { top: 3dp; height: 5dp; background-color: #7d8fd0; }
-        .caret { position: absolute; left: 62dp; top: 14dp; width: 1dp; height: 2dp; background-color: #ffd23f; }
-        .caret.wide { left: 61dp; top: 16dp; width: 3dp; height: 1dp; }
-        .heading { position: absolute; left: 0; top: 17dp; width: 125dp; text-align: center; color: #ffd23f; }
+        .mark.tick .bar { position: absolute; left: 7dp; top: 4dp; width: 1dp; height: 3dp; background-color: #e9c98a; }
+        .caret { position: absolute; left: 62dp; top: 16dp; width: 1dp; height: 2dp; background-color: #ffd23f; }
+        .caret.wide { left: 61dp; top: 18dp; width: 3dp; height: 1dp; }
+        .heading { position: absolute; left: 0; top: 19dp; width: 125dp; text-align: center; color: #ffd23f;
+                   font-effect: shadow(1dp 1dp #170d06); }
 
         /* The crosshair: a plus, gold over something in reach. */
         .cross { position: absolute; left: 50%; top: 50%; background-color: #f6ecd2; }
@@ -27,33 +29,35 @@
         .cross.ring { width: 7dp; height: 7dp; margin-left: -3dp; margin-top: -3dp; background-color: transparent;
                       border: 1dp #160f1e; opacity: 0.45; }
 
-        /* What E would collect, under the crosshair. */
-        .prompt { position: absolute; left: 0; top: 50%; margin-top: 14dp; width: 100%; text-align: center; }
-        .prompt .frame { display: inline-block; }
-        .prompt .bevel { padding: 1dp 4dp 2dp 4dp; }
+        /* Chips -- what E would collect, and collecting's state: an oak button's look, moss when on. */
+        .chip { display: inline-block; border: 1dp #170d06; }
+        .chip .bevel { padding: 1dp 4dp 2dp 4dp; background-color: #7a4f2c; border-color: #c08a52 #3a2310 #3a2310 #c08a52;
+                       color: #f6e7c8; font-effect: shadow(1dp 1dp #170d06); }
         .key { color: #ffd23f; }
+        .prompt { position: absolute; left: 0; top: 50%; margin-top: 14dp; width: 100%; text-align: center; }
 
-        /* The hotbar: nine slots, the tools then the materials, each a sunk frame with its icon and count;
-           the one in hand gold and raised. Its name over it a moment after it is picked. */
-        .hotbar { position: absolute; left: 50%; bottom: 5dp; width: 233dp; margin-left: -117dp; }
-        .slot { display: inline-block; position: relative; width: 22dp; height: 22dp; margin-right: 1dp;
-                border: 1dp #160f1e; }
-        .slot .bevel { width: 20dp; height: 20dp; border-color: #1a1f3c #5f70b0 #5f70b0 #1a1f3c; background-color: #1d2341; }
+        /* The hotbar: a board (icons.h's hud-hotbar) of nine slots sunk into the wood, the tools then the
+           materials, each with its icon and count; the one in hand framed in gold and raised. Its name over
+           it a moment after it is picked. */
+        .hotbar { position: absolute; left: 50%; bottom: 4dp; width: 246dp; height: 32dp; margin-left: -123dp;
+                  box-sizing: border-box; padding: 4dp 5dp 4dp 6dp; decorator: image(../icons/hud-hotbar.pixel.tga); }
+        .slot { display: inline-block; position: relative; width: 22dp; height: 22dp; margin-right: 2dp;
+                border: 1dp #170d06; }
+        .slot .bevel { width: 20dp; height: 20dp; border-color: #170d06 #9a6a3e #9a6a3e #170d06; background-color: #2c1a0d; }
         .slot img { position: absolute; left: 2dp; top: 2dp; width: 16dp; height: 16dp; }
         .slot.none img { opacity: 0.35; }
-        .slot .count { position: absolute; right: 1dp; bottom: -1dp; color: #f6ecd2; font-effect: shadow(1dp 1dp #160f1e); }
+        .slot .count { position: absolute; right: 1dp; bottom: -1dp; color: #f6e7c8; font-effect: shadow(1dp 1dp #170d06); }
         .slot.sel { margin-top: -3dp; border-color: #ffd23f; }
-        .slot.sel .bevel { border-color: #fff3b0 #b38a12 #b38a12 #fff3b0; background-color: #3a4573; }
-        .held { position: absolute; left: 0; bottom: 31dp; width: 100%; text-align: center; color: #ffd23f;
-                font-effect: shadow(1dp 1dp #160f1e); opacity: 0; transition: opacity 0.5s linear-in-out; }
+        .slot.sel .bevel { border-color: #f3d9a0 #6b4320 #6b4320 #f3d9a0; background-color: #5e3c22; }
+        .held { position: absolute; left: 0; bottom: 39dp; width: 100%; text-align: center; color: #ffd23f;
+                font-effect: shadow(1dp 1dp #170d06); opacity: 0; transition: opacity 0.5s linear-in-out; }
         .held.shown { opacity: 1; transition: opacity 0.05s linear-in-out; }
 
-        /* Collecting, at the hotbar's right: the key, and ON or off. */
-        .collect { position: absolute; left: 50%; bottom: 7dp; margin-left: 120dp; }
-        .collect .bevel { padding: 1dp 4dp 2dp 4dp; color: #a3abcf; }
-        .collect.on .bevel { background-color: #2f5a2d; border-color: #8be06a #1f3d1d #1f3d1d #8be06a; color: #f6ecd2; }
-        .collect .state { color: #a3abcf; }
-        .collect.on .state { color: #8be06a; }
+        /* Collecting, at the hotbar's right. */
+        .collect { position: absolute; left: 50%; bottom: 11dp; margin-left: 127dp; }
+        .collect .state { color: #e9c98a; }
+        .collect.on .bevel { background-color: #4a7a32; border-color: #92c464 #23401a #23401a #92c464; }
+        .collect.on .state { color: #d4f7a8; }
     </style>
 </head>
 <!-- The island demo's HUD (docs/plans/island-demo.md, D9). Model "island": compass (rows: label, left,
@@ -61,7 +65,7 @@
      collecting. No actions: it takes no input. -->
 <body data-model="island">
     <div class="compass">
-        <div class="frame"><div class="bevel">
+        <div class="strip"><div class="inside">
             <div data-for="m : compass" data-attr-class="'mark ' + m[2]" data-style-left="m[1]">
                 <div class="bar" data-if="m[0] == ''"></div>{{m[0]}}
             </div>
@@ -76,7 +80,7 @@
     <div class="cross v" data-class-on="aiming"></div>
 
     <div class="prompt" data-if="prompt != ''">
-        <div class="frame"><div class="bevel"><span class="key">E</span> {{prompt}}</div></div>
+        <div class="chip"><div class="bevel"><span class="key">E</span> {{prompt}}</div></div>
     </div>
 
     <div class="held" data-class-shown="heldShown">{{held}}</div>
@@ -87,8 +91,8 @@
             <div class="count">{{s[1]}}</div>
         </div>
     </div>
-    <div class="collect" data-class-on="collecting">
-        <div class="frame"><div class="bevel"><span class="key">E</span> Collect <span class="state">{{collecting ? 'ON' : 'off'}}</span></div></div>
+    <div class="collect chip" data-class-on="collecting">
+        <div class="bevel"><span class="key">E</span> Collect <span class="state">{{collecting ? 'ON' : 'off'}}</span></div>
     </div>
 </body>
 </rml>
