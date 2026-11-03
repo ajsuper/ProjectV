@@ -62,3 +62,25 @@ input.text:focus { background-color: #232a50; border-color: #ffd23f; }
 /* RmlUi has no built-in sheet: a text field's caret and selection. */
 input.text, textarea { cursor: text; }
 input.text selection { background-color: #5f70b0; color: #f6ecd2; }
+
+/* A board: a wooden panel in a beam frame with vines, a picture the program draws (icons.h, at one art
+   pixel a dp). A document gives it its picture and that picture's size:
+       .board { width: 208dp; height: 264dp; decorator: image(../icons/board.pixel.tga); }
+   On it: cream text, fields sunk into the wood, buttons of oak and moss. */
+.board { position: relative; box-sizing: border-box; padding: 16dp 18dp 14dp 18dp; color: #f6e7c8;
+         font-effect: shadow(1dp 1dp #170d06); }
+.board h1 { font-effect: shadow(1dp 1dp #170d06); }
+.board h2 { color: #e9c98a; font-effect: shadow(1dp 1dp #170d06); }
+.board input.text { background-color: #2c1a0d; border-color: #170d06 #9a6a3e #9a6a3e #170d06; color: #f6e7c8; }
+.board input.text:focus { background-color: #36210f; border-color: #e9c98a; }
+.board input.text selection { background-color: #8a5a32; }
+.board button { border-color: #170d06; }
+.board button .bevel { background-color: #7a4f2c; border-color: #c08a52 #3a2310 #3a2310 #c08a52; }
+.board button:hover .bevel { background-color: #8c5d35; border-color: #d8a066 #3a2310 #3a2310 #d8a066; }
+.board button:active .bevel { border-color: #3a2310 #c08a52 #c08a52 #3a2310; }
+.board button.primary .bevel { background-color: #4a7a32; border-color: #92c464 #23401a #23401a #92c464; }
+.board button.primary:hover .bevel { background-color: #578c3b; }
+.board button.primary:active .bevel { border-color: #23401a #92c464 #92c464 #23401a; }
+.board scrollbarvertical { width: 3dp; }
+.board scrollbarvertical slidertrack { background-color: #2c1a0d; }
+.board scrollbarvertical sliderbar { background-color: #c08a52; }

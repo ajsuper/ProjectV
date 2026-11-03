@@ -245,6 +245,10 @@ Compass north is -z. The self-test is unchanged and passes.
 Later (2026-11-03): restir-pt's preset (`docs/plans/restir-pt-performance.md`, D6): `settings.json` beside the
 program, timed on the first play when it has none, the Esc menu's **Graphics** button, `--graphics`.
 
+Later still (2026-11-03): the Esc menu and the graphics panel are wooden boards with vines, as the start
+screen (the user's ask). `icons.h` draws a board at any size (`BOARDS`: one per menu, the side vines keeping
+to their edges); the wood look is `.board` in `ui/pixel.rcss`, shared by the three.
+
 Notes for I5 on:
 
 - A world folder is made only when missing: after a generator change, delete `worlds/` (or the old

@@ -104,11 +104,15 @@ namespace icons {
         return p;
     }
 
-    // The start screen's board (start.rml): planks in a beam frame with iron corners, vines climbing over
-    // the top and hanging down its sides. Drawn at one art pixel a dp, so the document sizes it exactly.
-    constexpr int BOARD_W = 208, BOARD_H = 264, BOARD_FRAME = 8;
-    inline std::vector<Rgba> board() {
-        const int W = BOARD_W, H = BOARD_H, F = BOARD_FRAME;
+    // The menus' boards (start.rml, pause.rml, graphics.rml): planks in a beam frame with iron corners, vines
+    // climbing over the top and hanging down its sides. Drawn at one art pixel a dp, so a document sizes its
+    // panel to its board exactly.
+    constexpr int BOARD_FRAME = 8;
+    struct BoardSize { const char* name; int width, height; };
+    constexpr BoardSize BOARDS[] = {{"board", 208, 264}, {"board-pause", 184, 156}, {"board-graphics", 244, 272}};
+
+    inline std::vector<Rgba> board(int W, int H) {
+        const int F = BOARD_FRAME;
         std::vector<Rgba> p(size_t(W) * H);
         auto at = [&](int x, int y) -> Rgba* { return x >= 0 && y >= 0 && x < W && y < H ? &p[size_t(y) * W + x] : nullptr; };
         auto put = [&](int x, int y, Rgba c) { if (Rgba* q = at(x, y)) *q = c; };
@@ -179,7 +183,12 @@ namespace icons {
         struct Hang { int x, length; };
         const Hang hangs[] = {{5, 150}, {14, 90}, {22, 46}, {34, 18}, {58, 9}, {83, 14}, {120, 7}, {146, 12},
                               {170, 22}, {186, 60}, {195, 120}, {203, 70}};
-        for (const Hang& h : hangs) {
+        // Laid out for a 208 x 264 board: the sides' vines keep to their edge and hang as far down in
+        // proportion, the top's spread across it.
+        for (Hang h : hangs) {
+            if (h.x < 40) h.length = h.length * H / 264;
+            else if (h.x > 168) { h.x = W - (208 - h.x); h.length = h.length * H / 264; }
+            else h.x = h.x * W / 208;
             int x = h.x;
             for (int i = 0; i < h.length; i++) {
                 const int y = 4 + i;
@@ -200,7 +209,8 @@ namespace icons {
         std::filesystem::create_directories(folder, error);
         bool ok = write(folder / "pickaxe.pixel.tga", tool(fx::PICKAXE_ART)) && write(folder / "chisel.pixel.tga", tool(fx::CHISEL_ART));
         for (const char* m : gather::MATERIALS) ok = write(folder / (std::string(m) + ".pixel.tga"), material(m)) && ok;
-        ok = write(folder / "board.pixel.tga", board().data(), BOARD_W, BOARD_H) && ok;
+        for (const BoardSize& b : BOARDS)
+            ok = write(folder / (std::string(b.name) + ".pixel.tga"), board(b.width, b.height).data(), b.width, b.height) && ok;
         return ok;
     }
 }

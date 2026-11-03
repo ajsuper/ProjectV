@@ -7,11 +7,9 @@
         .start { position: absolute; left: 50%; top: 50%; width: 208dp; margin-left: -104dp; margin-top: -150dp; }
         h1 { font-size: 30dp; line-height: 32dp; text-align: center; margin-bottom: 4dp; font-effect: shadow(2dp 2dp #170d06); }
 
-        /* The board: a wooden panel with vines, drawn by the program (icons.h) at one art pixel a dp,
-           so it is exactly its picture's size. */
-        .board { position: relative; box-sizing: border-box; width: 208dp; height: 264dp; padding: 16dp 18dp 14dp 18dp;
-                 decorator: image(../icons/board.pixel.tga); color: #f6e7c8; font-effect: shadow(1dp 1dp #170d06); }
-        .board h2 { color: #e9c98a; margin-top: 4dp; margin-bottom: 2dp; font-effect: shadow(1dp 1dp #170d06); }
+        /* The board (pixel.rcss): this one 208 x 264. */
+        .board { width: 208dp; height: 264dp; decorator: image(../icons/board.pixel.tga); }
+        .board h2 { margin-top: 4dp; margin-bottom: 2dp; }
         .worlds { max-height: 70dp; overflow-y: auto; margin-bottom: 2dp; }
         .world { margin-bottom: 2dp; border: 1dp #170d06; cursor: pointer; }
         .world .bevel { padding: 1dp 4dp 2dp 4dp; background-color: #5e3c22; border-color: #9a6a3e #33200f #33200f #9a6a3e; }
@@ -19,24 +17,9 @@
         .world .meta { color: #d2b48a; }
         .row { display: block; margin-bottom: 2dp; }
         .row label { color: #e9c98a; }
-
-        /* On the board: fields sunk into the wood, buttons of oak and moss. */
-        .board input.text { background-color: #2c1a0d; border-color: #170d06 #9a6a3e #9a6a3e #170d06; color: #f6e7c8; }
-        .board input.text:focus { background-color: #36210f; border-color: #e9c98a; }
-        .board input.text selection { background-color: #8a5a32; }
-        .board button { border-color: #170d06; }
-        .board button .bevel { background-color: #7a4f2c; border-color: #c08a52 #3a2310 #3a2310 #c08a52; }
-        .board button:hover .bevel { background-color: #8c5d35; border-color: #d8a066 #3a2310 #3a2310 #d8a066; }
-        .board button:active .bevel { border-color: #3a2310 #c08a52 #c08a52 #3a2310; }
-        .board button.primary .bevel { background-color: #4a7a32; border-color: #92c464 #23401a #23401a #92c464; }
-        .board button.primary:hover .bevel { background-color: #578c3b; }
-        .board button.primary:active .bevel { border-color: #23401a #92c464 #92c464 #23401a; }
         .status { color: #ff9a84; margin-top: 2dp; }
         #quit { position: absolute; left: 18dp; bottom: 14dp; width: 172dp; }
 
-        scrollbarvertical { width: 3dp; }
-        scrollbarvertical slidertrack { background-color: #2c1a0d; }
-        scrollbarvertical sliderbar { background-color: #c08a52; }
     </style>
 </head>
 <!-- The island demo's start screen (docs/plans/island-demo.md, D11): a wooden board with vines (D9). Model
