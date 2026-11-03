@@ -93,7 +93,7 @@ chunk C ─┘                                               blob 7 keeps A and 
   the caller repoints its chunk and releases. A sole owner (refCount 1) is edited in place.
 - **`releaseBlob` at refCount 0** frees the slot (`blobFreeList`) and, on the next flush, the GPU range.
 - **`contentStamp` names a blob's voxels.** Equal stamps, equal geometry. Physics caches collision
-  shapes by it. Code that replaces `blob.geometry` in place calls `markBlobContentChanged(blob)`,
+  shapes by it. Code that replaces a blob's voxels in place calls `markBlobContentChanged(blob)`,
   which also clears the cached content bounds. Never clear `contentBoundsValid` alone.
 - **`renderLOD`** coarsens only the GPU copy. See [Voxel data](voxel-data.md#level-of-detail).
 

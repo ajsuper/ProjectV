@@ -19,13 +19,13 @@ Explained in: [The scene](../concepts/scene.md), [Voxel data](../concepts/voxel-
 | `Chunk`, `ChunkHeader` | A placed cube of voxels; `geometryPoolIndex`, `gridIndex`/`cellIndex`, `alive`, `requestedLOD` |
 | `GPUChunkHeader` | The packed header row the shader reads (`GPU_HEADER_TEXELS` texels) |
 | `SceneGrid` | `origin`, `cellSize`, `dims`, `rotation`, `cellToChunk`, `originCellCoord`, `rendered` |
-| `GeometryBlob` | `geometry`, `materialIDs`, `envelope`, `brickMap`, `refCount`, `contentStamp`, `dirty`, `renderLOD` |
+| `GeometryBlob` | `voxelForm`, `treeNodes`, `treeMaterials`, `tiles`, `derivedStamp` (read and write through [`utils/blob_voxels.h`](../../include/utils/blob_voxels.h)), `envelope`, `brickMap`, `refCount`, `contentStamp`, `dirty`, `renderLOD` |
 | `Material` | Four GPU words + `name` + `physics`; `pack*` / `material*` accessors, `setMaterialAnimation` |
 | `Mutability` | `Locked`, `Direct`, `Copy` |
 | `PendingVoxelOp`, `ComponentEditQueue`, `DataReference` | Edit queue entries |
 | `AttachmentStore`, `AttachmentTable`, `AttachmentScope`, `OnDuplicate` | Attachment storage (use `utils/attachments.h`) |
 | `poolInsertBlob`, `releaseBlob`, `internChunkGeometry`, `forkBlob` | Geometry pool operations |
-| `markBlobContentChanged(blob)` | Call after replacing `geometry` in place |
+| `markBlobContentChanged(blob)` | Call after replacing the blob's voxels in place |
 | `setBlobRenderLOD`, `requestChunkLOD`, `replaceChunkGeometry` | LOD and regenerated geometry |
 
 ## `data_structures/voxel.h`

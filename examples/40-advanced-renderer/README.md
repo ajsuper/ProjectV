@@ -594,17 +594,16 @@ Every knob is a `#define`, and each one names what it costs.
 | `gbuffer.frag` | `SHADOW_ORIGIN_BIAS_VOXELS` | Where the shadow ray leaves the surface, in voxel edge lengths. |
 | | `PRIMARY_TRANSPARENT_LAYERS`, `SHADOW_TRANSPARENT_LAYERS` | How many transparent layers each ray may cross. **16 and 4** — a shadow ray needs far fewer, because what it is estimating is an attenuation rather than a surface. |
 | | `ENVELOPE_SHADOW_RESOLVE_VOXELS` | How far along a *shadow* ray animation is resolved. **24** — measured, not reasoned: 24 voxels saved 0.2 ms and 4 saved 1.0 ms, with the two images indistinguishable apart from the wind phase. The shadow ray leaves the grass within a few voxels of its origin, which is why it buys so little. |
-| `compose.frag` | `FLAT_MIN_FACE_PIXELS` | How large a face must be on screen before it gets one flat value instead of the per-pixel filter. |
-| | `SPEC_ENABLE`, `SPEC_STRENGTH`, `SPEC_SHININESS` | The sun sheen. On, weak, Fresnel-gated. |
-| | `FOG_PHASE_G` | How tightly the fog throws sunlight forward. Higher is a narrower glow around the sun, not a dimmer one. |
+| `compose.frag` | `SPEC_ENABLE`, `SPEC_STRENGTH`, `SPEC_SHININESS` | The sun sheen. On, weak, Fresnel-gated. |
+| `pjv_cascade_atmosphere.sc` | `FOG_PHASE_G` | How tightly the fog throws sunlight forward. Higher is a narrower glow around the sun, not a dimmer one. |
 | `pjv_sun_sky.sc` | `SUN_WARMTH`, `SKY_WARMTH` | The warm-key/cool-fill split. Both `vec3(1.0)` restores the scene editor's rig exactly. |
 | | `SUN_GLOW_STRENGTH`, `SUN_GLOW_G` | The sun's aureole. Strength is measured against the sky it is added to — see the note there before raising it. |
 | `pjv_face_key.sc` | `PJV_PER_VOXEL_LIGHTING` | Reads the `U` toggle. Every branch the per-voxel mode has tests this; see [Per-face or per-voxel](#per-face-or-per-voxel). |
 | `compose.frag` | `SSS_POWER`, `SSS_STRENGTH`, `SSS_TINT` | The foliage translucency's width, gain and transmitted colour. |
 | | `SSS_EDGE_POWER`, `SSS_EDGE_FLOOR`, `SSS_EDGE_SUN_BIAS` | The gradient across a face in per-face mode: how tightly the glow pulls into the edge, how dark the middle gets, and how far the sun skews it. `SSS_EDGE_FLOOR 1.0` gives the flat per-voxel look. |
 | | `PER_VOXEL_BRIGHTNESS_MATCH` | Per-voxel only. 1.0 = the brightest face (exposure-neutral, the default), 0.0 = the six-face mean (energy-conserving, much darker). |
-| `resolve.frag` | `FIREFLY_MAX` | Luminance cap on the indirect term. Matters more per-face: one bad probe is a whole face. |
-| `display.frag` | `EXPOSURE`, `TINT`, `CONTRAST`, `SATURATION`, `VIGNETTE`, `DITHER` | All colour grading. |
+| `pjv_probe.sc` | `PROBE_FIREFLY_MAX` | Luminance cap on a single gather ray, scaled to keep its hue. Matters more per-face: one bad probe is a whole face. |
+| `display.frag` | `EXPOSURE`, `TINT`, `CONTRAST`, `SATURATION`, `VIGNETTE` | All colour grading (the dither is the engine's, in `pjvDisplay`). |
 | | `BLOOM_STRENGTH` | How much bloom is added back. The first dial to reach for. |
 | | `BLOOM_CORE` | Balance of the two scales. 1.0 = core only (tight, hard), 0.0 = tail only (the flat diamond the single-scale version produced). |
 | `bloomdown.frag` | `BLOOM_THRESHOLD`, `BLOOM_KNEE` | What counts as bright, in **linear HDR measured against the frame**: lit surface 0.46, sky zenith 1.08, sky horizon 1.32, sky near the sun 2.77, sun disk 6.02. Setting this below the sky is what made the first version a screen-sized wash. |

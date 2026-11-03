@@ -83,7 +83,7 @@ binary. Run them from there — the engine resolves relative paths against the w
 cd build/examples/hello_voxel && ./hello_voxel
 ```
 
-The examples are numbered in reading order. Feature examples (`00`–`70`) each teach one part of the
+The examples are numbered in reading order. Feature examples (`00`–`72`) each teach one part of the
 engine: `00-hello-voxel` is the smallest thing that draws a voxel, and `60-scene-editor` is a complete tool.
 Demos (`80` and up, named `_demo`) put many features together to show what the engine can do. See
 [examples/README.md](/examples/README.md).
@@ -232,8 +232,8 @@ const auto assets = projv::core::executableDirectory() / "assets";
 scene = projv::utils::loadComposeFromDisk((assets / "scenes/Castle").string());
 ```
 
-For worked examples, see [examples/README.md](/examples/README.md): twelve feature examples, ordered so
-that reading them in sequence teaches the engine, and four demos.
+For worked examples, see [examples/README.md](/examples/README.md): thirteen feature examples, ordered so
+that reading them in sequence teaches the engine, and five demos.
 
 ### Contributing
 

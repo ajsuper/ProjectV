@@ -19,7 +19,7 @@ $input v_texcoord0
 //               ->  pjvDisplay                      (the engine's neutral tone curve, the sRGB curve, a
 //                                                   dither: shaders/include/pjv_color.sc)
 //
-// Every knob is a #define right here. Recompile the renderer (compAdvanced.sh) after editing.
+// Every knob is a #define right here. The CMake build recompiles the shaders after editing.
 //
 //   EXPOSURE   - overall brightness BEFORE tone mapping. This is the main "brighter/darker" dial;
 //                because it is applied in linear light before ACES, it rolls highlights off

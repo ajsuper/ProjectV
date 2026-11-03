@@ -67,7 +67,7 @@ Folders: [tests/README.md](../../tests/README.md). Coverage wishlist:
 
 - Add `tests/unit/test_<subject>.cpp` to `add_executable(projv_unit_tests ...)` in
   [`tests/unit/CMakeLists.txt`](../../tests/unit/CMakeLists.txt) (no glob).
-- `main.cpp` holds `DOCTEST_CONFIG_IMPLEMENT`; don't define it elsewhere.
+- `main.cpp` defines `DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN`; don't define it elsewhere.
 
 ```cpp
 // Palettes: interning dedupes, and an entry's physics material keeps it apart.

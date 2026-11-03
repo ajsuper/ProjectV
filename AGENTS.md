@@ -55,7 +55,8 @@ look is the point (`50-terrain-generator` draws with the gallery's restir-pt, it
 `shared/restir_pt.h`).
 **Demos** (`80`+, `_demo` suffix on the folder and the target) combine many features to show them off, and
 draw with the full renderers (`shared/voxelRenderer`, the explosion's `nightRenderer`; Voxel Mayhem
-draws with the gallery's restir-pt, its uniforms in `shared/restir_pt.h`, `MAYHEM_RENDERER=voxel` the voxel renderer).
+draws with the gallery's restir-pt, its uniforms in `shared/restir_pt.h`, `MAYHEM_RENDERER=voxel` the voxel renderer;
+the island demo draws with restir-pt too).
 Target names are not the directory names: `00-hello-voxel` builds `hello_voxel`, `30-renderers`
 builds `renderer_gallery`.
 
@@ -66,7 +67,8 @@ ctest --preset dev
 ```
 
 Real sockets on localhost are left out too: `ctest --preset net` (ENet, and the multiplayer example as
-three headless processes, and a hundred bot clients against a server: `scale.sh`). `--preset clang` builds the
+three headless processes, a hundred bot clients against a server: `scale.sh`, and the party and
+playground demos as processes: `party_selftest`, `playground_selftest`). `--preset clang` builds the
 tests with Clang, to check the golden physics recording on a second compiler.
 
 The physics soak (2000 bodies, ten simulated minutes, ~30 s) is left out of that run; run it
@@ -82,12 +84,18 @@ Manual test harnesses live in `tests/manual/` and are opt-in:
 cmake --preset dev -DPROJV_BUILD_MANUAL_TESTS=ON
 ```
 
-Presets: `dev` (default), `release` (`PROJV_LOG_MINIMAL=ON`), `vcpkg` (every dependency through
-`find_package`, so the install carries only ProjectV rather than the vendored copies too).
+Presets: `dev` (default), `release` (`PROJV_LOG_MINIMAL=ON`, `PROJV_PHYSICS_ASSERTS=OFF`,
+`PROJV_DEV_UI_DEFAULT=OFF`), `clang` (tests only, with Clang), `windows` (MSVC + Ninja, library and
+tests; test presets `windows-net`, `windows-soak`), `windows-examples` (with the examples), `vcpkg`
+(every dependency through `find_package`, so the install carries only ProjectV rather than the
+vendored copies too).
 
-Options: `PROJV_PHYSICS_ASSERTS` (Jolt's asserts; off in `release`), `PROJV_BUILD_EXAMPLES`, `PROJV_BUILD_TESTS`, `PROJV_BUILD_MANUAL_TESTS`, `PROJV_USE_X11`, `PROJV_LOG_MINIMAL`,
-and the seven `PROJV_LOG_<CATEGORY>` switches. They are `PUBLIC` on the target, so consumers
-inherit them.
+Options: `PROJV_PHYSICS_ASSERTS` (Jolt's asserts; off in `release`), `PROJV_BUILD_EXAMPLES`, `PROJV_BUILD_TESTS`, `PROJV_BUILD_MANUAL_TESTS`,
+`PROJV_BUILD_UI` (the `ui/` module; gates `72-user-interface` and `97-island-demo`), `PROJV_DEV_UI_DEFAULT`
+(the dev layer on unless a program says otherwise; off: only `--dev-ui`), `PROJV_INSTALL` (install and
+export rules), `PROJV_USE_X11`, `PROJV_LOG_MINIMAL`, and the seven `PROJV_LOG_<CATEGORY>` switches.
+The log switches (`PROJV_ENABLE_<CATEGORY>`), `PROJV_USE_X11` and `PROJV_BUILD_UI` (`PROJV_UI`) are
+`PUBLIC` defines on the target, so consumers inherit them.
 
 Full build documentation, including platform notes and troubleshooting: `docs/getting-started/build.md`.
 
@@ -106,7 +114,8 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 ## Codebase Conventions
 
 - Namespace `projv` for core types, `projv::utils` for utilities, `projv::graphics` for GPU,
-  `projv::runtime` for the Scene bridge.
+  `projv::runtime` for the Scene bridge, `projv::net` for transport and wire format, `projv::ui`
+  (`ui::dev`, `ui::user`) for the UI.
 - `projv::Application` (`core/application.h`) owns the loop; add systems with `addSystem(Stage, name, fn)`.
   `World` is an `entt::registry` (`core/world.h`); global resources live in `world.ctx()`.
 - **Layering:** `utils/` and `data_structures/` never include EnTT, `core/world.h`/`application.h`/
@@ -155,8 +164,7 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 - Chunk handle = index into `Scene.chunks` (stable).
 - Component handle = index into `Scene.components` (stable).
 - Geometry pool blobs are refcounted; `chunk.geometryPoolIndex < 0` = unpooled.
-- `chunkQueue` on Chunk is the legacy edit staging area (to be removed after P1 verification).
-- `editQueue` on ComponentRecord is the new per-component edit queue (P1+).
+- `editQueue` on ComponentRecord is the per-component edit queue.
 - `forkBlob` creates a COW copy without decrementing the original's refCount.
 - A blob's voxels are a **tile table** (`utils/tile_table.h`): dense region and block masks, tiles for
   solid one-material children, leaves only for partly filled bricks. It is what the GPU marches, what
@@ -192,8 +200,9 @@ Full version: `CONTRIBUTING.md`.
 - **Parallel sessions use their own git worktree and branch.** Don't touch another session's
   uncommitted files.
 - **Before committing**: `ctest --preset dev`; after physics changes also `ctest --preset soak` and
-  `DEMOS_SELFTEST=1 ./physics`. There is no CI for the code; the only workflow publishes the docs
-  (`.github/workflows/docs.yml`).
+  `DEMOS_SELFTEST=1 ./physics`. CI is Windows only (`.github/workflows/windows.yml`: MSVC, the
+  unit, net and soak tests and an examples build, on a push or PR to `main`); the Linux checks are run locally.
+  `.github/workflows/docs.yml` publishes the docs.
 - **Ask the user for camera positions and for how things feel.** If you are struggling to find a camera
   position that shows something, or need to judge how a change looks or feels (a renderer's look, a
   control's feel), ask the user to do it rather than burning turns on it. In the renderer gallery, C
@@ -216,7 +225,7 @@ Full version: `CONTRIBUTING.md`.
 
 | Path | What |
 |---|---|
-| `include/` `src/` | The engine. `core/`, `graphics/`, `utils/`, `data_structures/`, `runtime/`. |
+| `include/` `src/` | The engine. `core/`, `graphics/`, `utils/`, `data_structures/`, `runtime/`, `net/`, `ui/`. |
 | `shaders/` | The engine's shaders. `include/`: the shader library, on every shader's include path (`pjv_engine.sc` declares the engine-owned uniforms). `engine/`: shaders compiled into the library (`graphics::loadEngineShader("vs_quad")`). Plan: `docs/plans/shader-library.md`. |
 | `cmake/` | `ProjectVConfig.cmake.in`, plus the `projv_compile_shaders()` and `projv_add_example()` helpers. |
 | `examples/` | Thirteen feature examples and five `_demo`s, numbered in reading order; `shared/` holds their renderers. See `examples/README.md`. |

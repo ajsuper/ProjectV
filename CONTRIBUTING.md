@@ -22,8 +22,9 @@ plan (docs/plans/)  ──▶  build in milestones  ──▶  tests + a demo  �
 - **Commits go to `main`.** Large or experimental work gets a branch (`runtime-spine`,
   `component-attachments`, `surface-voxels`). Parallel sessions get their own git worktree, so one
   doesn't trample another's working tree.
-- **There is no CI for the code.** The checks below are run locally before committing. The one workflow,
-  `.github/workflows/docs.yml`, builds and publishes the documentation site.
+- **CI is Windows only.** `.github/workflows/windows.yml` builds with MSVC, runs the unit, net and
+  soak tests and builds the examples on a push or PR to `main`; the Linux checks below are run locally before committing.
+  `.github/workflows/docs.yml` builds and publishes the documentation site.
 - **Defects found along the way** that are out of scope go in
   [`known-latent-issues.md`](docs/plans/known-latent-issues.md), not into an unrelated commit.
 
@@ -31,7 +32,7 @@ plan (docs/plans/)  ──▶  build in milestones  ──▶  tests + a demo  �
 
 - [ ] `ctest --preset dev` passes: the unit suite, the `layering` check and the `docs` link check
 - [ ] After physics changes: `ctest --preset soak`, and the demos' self-test
-      (`cd build/examples/physics_demos && DEMOS_SELFTEST=1 ./physics_demos`)
+      (`cd build/examples/physics && DEMOS_SELFTEST=1 ./physics`)
 - [ ] After runtime/sandbox changes: `SANDBOX_SELFTEST=600 ./sandbox`
 - [ ] A behaviour change has a test in `tests/unit/` ([tests/README.md](tests/README.md)); a bug
       fix has the test that would have caught it

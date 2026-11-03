@@ -152,7 +152,7 @@ it. It is invalidated by `markBlobContentChanged`. See [The scene](scene.md#the-
 ## Animation envelopes
 
 A blob may carry a second, quarter-resolution tree (`envelope`) marking where animated voxels
-*could* be drawn, plus a motion-set byte per cell. `geometry` always stays the rest pose, so
+*could* be drawn, plus a motion-set byte per cell. The blob's voxels always stay the rest pose, so
 everything animation-blind (picking, physics, the voxelizer) is unaffected. Baked by
 `utils::bakeAnimationEnvelope` ([`utils/animation.h`](../../include/utils/animation.h)); design in
 [plans/animation.md](../plans/animation.md).
