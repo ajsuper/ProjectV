@@ -1,6 +1,6 @@
 # Island demo: break it, gather it, build with it
 
-Status: **in progress** (2026-11-02): I0 built (on the branch `island-demo`); I1 next. Asked for: "the most advanced example yet" -- a procedurally generated
+Status: **in progress** (2026-11-02): I0 and I1 built (on the branch `island-demo`); I2 next. Asked for: "the most advanced example yet" -- a procedurally generated
 sandbox with hills, rock and trees; tools to break the world; E to collect the rubble you look at into
 a hotbar beside the tools; a click to place it; a compass at the top.
 
@@ -138,7 +138,7 @@ means a saved island is an ordinary scene.
 | | What | Proven by |
 |---|---|---|
 | **I0** | The island: generator, materials, grid, restir-pt; walking it; plants and life | the user's walk (done, 2026-11-02); seeds give different islands |
-| **I1** | Tools and breaking: the pickaxe, the chisel; trees fall | breaking by hand; the self-test's break |
+| **I1** | Tools and breaking: the pickaxe, the chisel; trees fall | breaking by hand (done, 2026-11-02); the self-test's break |
 | **I2** | Rubble and gathering; the inventory | the prompt, gathering by hand; the self-test's counts |
 | **I3** | Placing blocks | building by hand; the self-test's placing |
 | **I4** | Saving and loading: the start screen, autosave, save and quit | a world built in, quit, loaded back as it was; the self-test's reload |
@@ -160,7 +160,26 @@ rubble; the menus and HUD pixel art.
 | `main.cpp` | Generates the folder if missing, then loads it; physics with tile collision, cheap debris (512 voxels: the same size of piece as 64 at 0.25 m), impact fracture; the island a `StaticCollider` with `splits` and `anchorBase` (the plants are not spawned: no collider); a first-person walker spawned clear of crowns, facing its most open view; restir-pt. `--seed n`, `ISLAND_CAPTURE`, `ISLAND_VIEW=overview`, `ISLAND_LOOK="x,y,z,tx,ty,tz"` |
 | `physics_materials.json` | grass, dirt, sand, stone, mushroom, wood, leaves, water |
 
-Notes for I1 on:
+**I1** (2026-11-02). `tools.h`: the pickaxe is `runtime::fracture` by energy (35 kJ: a 0.75 m bite in
+dirt, 0.62 m in wood, 0.52 m in stone; 0.25 m shards pushed out of the face, every 0.4 s held); the chisel
+a strike by reach of 0.55 voxels at the struck voxel's centre (a reach under half a voxel breaks nothing;
+under one, only that voxel), to a shard of one voxel. 1/2 and the wheel pick, the left button uses.
+Plants over a break are cleared (D12): round each strike, every plant voxel whose column neither stands
+on the island nor hangs from it, and over every voxel a break took as a piece, its columns -- a break's
+cheap debris lists no voxels (`BodyBroken::debris`), so the strike point is where to look. A placeholder
+HUD (crosshair, tool) until I5. `ISLAND_SELFTEST=1` checks the pickaxe (shards, plants cleared), the
+chisel (exactly one voxel) and a felled tree; `ISLAND_DEBUG_BREAKS=1` logs every break.
+
+For a cut tree to fall alone, trees are kept apart in the generator: the physics joins voxels through
+faces, edges and corners, so touching crowns held each other up, and a crown brushing a slope was held by
+the ground. Where crowns overlap a voxel is the first tree's (in list order), a tree leaves a voxel's gap
+wherever it would touch another (all 26 neighbours), and leaves never touch the ground. About 0.7 s more
+generation.
+
+restir-pt runs at about 30 fps on the island (the user's machine): playable; optimising it is the
+renderer's work, not this demo's.
+
+Notes for I2 on:
 
 - A world folder is made only when missing: after a generator change, delete `worlds/` (or the old
   island loads).

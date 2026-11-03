@@ -10,8 +10,10 @@
 //   ISLAND_CAPTURE=/tmp/i ./island_demo --seed 42   frame 240 saved as /tmp/i.tga, then it exits
 //                                  (ISLAND_VIEW=overview: from high above the shore)
 //
-// Controls: W/A/S/D walk, Space jump, the mouse looks (Esc frees the cursor, a click takes it back),
-// F1 the dev layer.
+// Controls: W/A/S/D walk, Space jump, the mouse looks (Esc frees the cursor, a click takes it back);
+// 1/2 or the wheel pick the pickaxe or the chisel, the left button uses it (held: again); F1 the dev layer.
+//
+//   ISLAND_SELFTEST=1 ./island_demo   checks itself and exits 0 or 1 (D10; what it checks grows per milestone)
 
 #include <algorithm>
 #include <atomic>
@@ -37,10 +39,12 @@
 #include "runtime/physics.h"
 #include "runtime/scene_bridge.h"
 #include "ui/ui.h"
+#include "ui/user.h"
 #include "utils/compose_io.h"
 
 #include "critters.h"
 #include "island.h"
+#include "tools.h"
 
 namespace fs = std::filesystem;
 using projv::Entity;
@@ -58,6 +62,7 @@ namespace {
         bool     seeded = false;
     };
     Options options;
+    int exitCode = 0;   // what main returns: the self-test's verdict
 
     struct Player {
         Entity walker = projv::NullEntity;
@@ -71,7 +76,25 @@ namespace {
         uint32_t seed = 0;
         fs::path folder;
         projv::ComponentHandle component = projv::INVALID_COMPONENT_HANDLE;
+        projv::ComponentHandle plants = projv::INVALID_COMPONENT_HANDLE;   // drawn, no collider (D12)
         Entity entity = projv::NullEntity;
+    };
+
+    // What the HUD shows (a placeholder until I5's pixel-art HUD: a crosshair and the tool in hand).
+    struct Hud {
+        std::string tool = "Pickaxe";
+        bool aiming = false;
+    };
+
+    // ISLAND_SELFTEST=1: the program checks itself (D10), growing with each milestone. I1: a pickaxe
+    // strike breaks the ground and clears the plants over it, a chisel strike breaks exactly one voxel,
+    // and strikes at a trunk bring its tree down.
+    struct SelfTest {
+        bool  on = false;
+        int   step = 0, wait = 0, tries = 0;
+        int   shardsBefore = 0, breaksBefore = 0;
+        bool  failed = false;
+        std::string report;
     };
 
     // restir-pt, as Voxel Mayhem draws it (examples/shared/restir_pt.h): the camera, the sun, the scene's scale.
@@ -129,6 +152,7 @@ namespace {
         auto& scene = world.ctx().emplace<projv::Scene>(projv::utils::loadComposeFromDisk(island.folder.string()));
         for (size_t i = 0; i < scene.components.size(); i++)
             if (scene.components[i].name == "island") island.component = projv::ComponentHandle(i);
+            else if (scene.components[i].name == "plants") island.plants = projv::ComponentHandle(i);
         if (island.component == projv::INVALID_COMPONENT_HANDLE) {
             projv::core::error("island: '{}' has no island in it", island.folder.string());
             return false;
@@ -224,6 +248,137 @@ namespace {
         runtime::setCharacterInput(world, player.walker, player.velocity, input.pressed(projv::Key::Space), 5.5f);
     }
 
+    // The tools (tools.h): the left button uses the one in hand while the cursor is the game's.
+    void useTools(projv::Application& app) {
+        World& world = app.world;
+        const auto& input = world.ctx().get<projv::Input>();
+        Player& player = world.ctx().get<Player>();
+        const bool use = input.cursorCaptured && !input.wantCaptureMouse && input.down(projv::MouseButton::Left) &&
+                         !world.ctx().get<SelfTest>().on;
+        tools::update(world, input, app.time().unscaledDelta, player.eye, player.forward(), use);
+        Hud& hud = world.ctx().get<Hud>();
+        const tools::Tools& t = world.ctx().get<tools::Tools>();
+        hud.tool = std::string("[") + (t.selected == tools::Tool::Pickaxe ? "1" : "2") + "] " + tools::toolName(t.selected);
+        hud.aiming = t.aiming;
+    }
+
+    // ---- The self-test ---------------------------------------------------------------------------------
+
+    void check(SelfTest& st, bool ok, const std::string& what) {
+        st.report += std::string(ok ? "  ok    " : "  FAIL  ") + what + "\n";
+        if (!ok) st.failed = true;
+    }
+
+    // Strikes with `tool` from `eye` toward `target`; false if nothing is in reach that way.
+    bool selfStrike(World& world, tools::Tool tool, vec3 eye, vec3 target) {
+        tools::Tools& t = world.ctx().get<tools::Tools>();
+        const vec3 forward = glm::normalize(target - eye);
+        const auto a = tools::aim(world, eye, forward, t.walker);
+        if (!a) return false;
+        tools::strike(world, t, tool, *a, forward);
+        return true;
+    }
+
+    void selfTest(projv::Application& app) {
+        World& world = app.world;
+        SelfTest& st = world.ctx().get<SelfTest>();
+        if (!st.on) return;
+        tools::Tools& t = world.ctx().get<tools::Tools>();
+        const Island& island = world.ctx().get<Island>();
+        const Player& player = world.ctx().get<Player>();
+        if (st.wait > 0) { st.wait--; return; }
+        const vec3 spawn = player.eye;
+        switch (st.step) {
+            case 0:   // let the world settle
+                st.wait = 90;
+                st.step++;
+                break;
+            case 1: {   // the pickaxe, at the ground two metres ahead
+                st.breaksBefore = t.breaks;
+                st.shardsBefore = t.shards;
+                const vec3 ahead = spawn + glm::normalize(vec3(player.forward().x, 0.0f, player.forward().z)) * 2.0f;
+                check(st, selfStrike(world, tools::Tool::Pickaxe, spawn, ahead - vec3(0.0f, 3.0f, 0.0f)), "the pickaxe reaches the ground ahead");
+                st.wait = 30;
+                st.step++;
+                break;
+            }
+            case 2: {
+                check(st, t.breaks > st.breaksBefore, "the pickaxe broke the ground");
+                check(st, t.shards - st.shardsBefore > 8, "into many shards (" + std::to_string(t.shards - st.shardsBefore) + ")");
+                check(st, t.plantsCleared > 0, "and cleared the plants over it (" + std::to_string(t.plantsCleared) + " voxels)");
+                // The chisel, at the ground to the side.
+                st.breaksBefore = t.breaks;
+                st.shardsBefore = t.shards;
+                const vec3 f = player.forward();
+                const vec3 side = spawn + glm::normalize(vec3(-f.z, 0.0f, f.x)) * 1.5f;
+                check(st, selfStrike(world, tools::Tool::Chisel, spawn, side - vec3(0.0f, 3.0f, 0.0f)), "the chisel reaches the ground beside");
+                st.wait = 30;
+                st.step++;
+                break;
+            }
+            case 3: {
+                check(st, t.breaks == st.breaksBefore + 1 && t.shards - st.shardsBefore == 1,
+                      "the chisel broke exactly one voxel (" + std::to_string(t.shards - st.shardsBefore) + " shard)");
+                st.step++;
+                break;
+            }
+            case 4: {   // a tree near the start: strike its trunk until it comes down
+                const auto trees = island::treesNear(spawn - vec3(40.0f), spawn + vec3(40.0f), island.seed);
+                const island::Tree* pick = nullptr;
+                float best = 1e9f;
+                for (const island::Tree& tree : trees) {
+                    if (tree.kind != island::TreeKind::Broad) continue;
+                    const float d = glm::length(vec3(tree.base.x - spawn.x, 0.0f, tree.base.z - spawn.z));
+                    if (d < best) { best = d; pick = &tree; }
+                }
+                if (!pick) { check(st, false, "a broadleaf tree near the start"); st.step = 6; break; }
+                const vec3 trunk = pick->base + pick->lean * (1.4f / pick->height) + vec3(0.0f, 1.4f + 0.3f * float(st.tries), 0.0f);
+                bool reached = false;
+                if (st.tries == 0) {
+                    // The first: aimed, from whichever side has a clear line to the trunk.
+                    for (int k = 0; k < 8 && !reached; k++) {
+                        const float a = float(k) * 0.785398f;
+                        const vec3 from = trunk + vec3(std::cos(a) * 1.8f, 0.3f, std::sin(a) * 1.8f);
+                        const vec3 forward = glm::normalize(trunk - from);
+                        const auto hit = tools::aim(world, from, forward, t.walker);
+                        if (!hit || glm::length(vec3(hit->point.x - trunk.x, 0.0f, hit->point.z - trunk.z)) > pick->trunk + 0.6f) continue;
+                        tools::strike(world, t, tools::Tool::Pickaxe, *hit, forward);
+                        reached = true;
+                    }
+                    check(st, reached, "the pickaxe reaches a trunk");
+                } else {
+                    // Then at the trunk's middle, a little higher each time, as a player chopping round it would.
+                    runtime::Strike s;
+                    s.at = trunk;
+                    s.energy = tools::PICKAXE_ENERGY;
+                    s.shardSize = tools::PICKAXE_SHARD;
+                    runtime::fracture(world, island.entity, s);
+                    reached = true;
+                }
+                if (!reached) { st.step = 6; break; }
+                st.tries++;
+                st.wait = 25;
+                st.step++;
+                break;
+            }
+            case 5:
+                if (t.fallen > 0) {
+                    check(st, true, "the tree came down after " + std::to_string(st.tries) + " strikes");
+                    st.step++;
+                } else if (st.tries >= 8) {
+                    check(st, false, "the tree came down within 8 strikes");
+                    st.step++;
+                } else st.step = 4;
+                break;
+            default:
+                projv::core::info("island self-test:\n{}island self-test: {}", st.report, st.failed ? "FAILED" : "passed");
+                exitCode = st.failed ? 1 : 0;
+                app.closeRequested = true;
+                st.on = false;
+                break;
+        }
+    }
+
     // Butterflies and falling leaves (critters.h): written to Transforms before the bridge reads them.
     void life(projv::Application& app) {
         critters::update(app.world, app.time().delta, app.world.ctx().get<Player>().eye);
@@ -282,6 +437,25 @@ namespace {
         installWorld(app, here);
         spawnPlayer(world);
         critters::install(world, world.ctx().get<Island>().seed, world.ctx().get<Player>().eye);
+        tools::install(app, world.ctx().get<Island>().entity, world.ctx().get<Island>().plants, world.ctx().get<Player>().walker);
+        world.ctx().emplace<SelfTest>().on = std::getenv("ISLAND_SELFTEST") != nullptr;
+
+        // The HUD: a placeholder until I5 (a crosshair, the tool in hand).
+        Hud& hud = world.ctx().emplace<Hud>();
+        projv::ui::user::loadFont(app, (here / "shared_ui/fonts/LatoLatin-Regular.ttf").string());
+        projv::ui::user::loadFont(app, (here / "shared_ui/fonts/LatoLatin-Bold.ttf").string());
+        projv::ui::user::model(app, "island").bind("tool", &hud.tool).bind("aiming", &hud.aiming);
+        projv::ui::user::openFromMemory(app, "hud", R"(<rml><head><style>
+            body { width: 100%; height: 100%; pointer-events: none; font-family: LatoLatin; }
+            .cross { position: absolute; left: 50%; top: 50%; width: 6dp; height: 6dp; margin-left: -3dp; margin-top: -3dp;
+                     background-color: #ffffffa0; }
+            .cross.on { background-color: #ffffffff; width: 8dp; height: 8dp; margin-left: -4dp; margin-top: -4dp; }
+            .tool { position: absolute; left: 0; bottom: 24dp; width: 100%; text-align: center; font-size: 20dp; color: #ffffff;
+                    font-effect: shadow(0dp 2dp #000000c0); }
+            </style></head><body data-model="island">
+            <div class="cross" data-class-on="aiming"></div>
+            <div class="tool">{{tool}}</div>
+            </body></rml>)");
 
         if (!restir_pt::install(renderInstance)) std::exit(1);
         Restir& restir = world.ctx().emplace<Restir>();
@@ -310,9 +484,11 @@ int main(int argc, char** argv) {
     app.addSystem(projv::Stage::Startup, "startup", startup);
     app.addSystem(projv::Stage::Update, "controls", controls);
     app.addSystem(projv::Stage::Update, "life", life);
+    app.addSystem(projv::Stage::Update, "tools", useTools, {.after = "controls"});
+    app.addSystem(projv::Stage::Update, "self-test", selfTest, {.after = "tools"});
     app.addSystem(projv::Stage::PostUpdate, "camera", camera, {.after = "physics: present"});
     app.addSystem(projv::Stage::Render, "render", render);
     app.addSystem(projv::Stage::Shutdown, "shutdown", shutdown);
     app.run();
-    return 0;
+    return exitCode;
 }

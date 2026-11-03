@@ -36,6 +36,7 @@
 
 namespace island {
     using projv::core::vec3;
+    using projv::core::ivec3;
 
     constexpr int   RES = 64;                 // voxels per cell edge
     constexpr float VOXEL = 0.125f;           // metres
@@ -907,16 +908,55 @@ namespace island {
                 // A boulder's top can carry grass too, but nothing grows under it.
             });
         }
-        for (const Tree& t : trees) {
-            if (t.base.x < ox - TREE_REACH || t.base.x > ox + RES * VOXEL + TREE_REACH ||
-                t.base.z < oz - TREE_REACH || t.base.z > oz + RES * VOXEL + TREE_REACH) continue;
+        // Each tree stands alone, so a cut one falls by itself (D3, I1): where crowns overlap a voxel belongs
+        // to the first tree in the list that fills it, a tree leaves a voxel's gap wherever it would touch
+        // another (across faces, edges or corners), and leaves never touch the ground (a crown brushing a
+        // slope would be held up by it).
+        // Pure functions of position, so neighbouring columns agree; the checks cost only where trees meet.
+        std::vector<size_t> near;
+        for (size_t i = 0; i < trees.size(); i++) {
+            const Tree& t = trees[i];
+            if (t.base.x + t.reach + VOXEL >= ox - VOXEL && t.base.x - t.reach - VOXEL <= ox + RES * VOXEL + VOXEL &&
+                t.base.z + t.reach + VOXEL >= oz - VOXEL && t.base.z - t.reach - VOXEL <= oz + RES * VOXEL + VOXEL)
+                near.push_back(i);
+        }
+        auto inBox = [](const Tree& t, vec3 q) {
+            return std::abs(q.x - t.base.x) <= t.reach + VOXEL && std::abs(q.z - t.base.z) <= t.reach + VOXEL && q.y >= t.base.y - VOXEL &&
+                   q.y <= t.top + VOXEL;
+        };
+        auto owner = [&](vec3 q) -> long {
+            for (size_t i : near)
+                if (inBox(trees[i], q) && treeAt(trees[i], q) != SLOTS) return long(i);
+            return -1;
+        };
+        // All 26 neighbours: the physics joins voxels through faces, edges and corners.
+        std::vector<ivec3> steps;
+        for (int dz = -1; dz <= 1; dz++)
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++)
+                    if (dx || dy || dz) steps.push_back(ivec3(dx, dy, dz));
+        for (size_t i : near) {
+            const Tree& t = trees[i];
             const vec3 boxLo(t.base.x - t.reach, t.base.y, t.base.z - t.reach);
             const vec3 boxHi(t.base.x + t.reach, t.top, t.base.z + t.reach);
             stamp(boxLo, boxHi, [&](int x, int y, int z, vec3 p) {
                 const uint8_t slot = treeAt(t, p);
                 if (slot == SLOTS) return;
+                const bool wood = slot == Bark || slot == Wood;
                 uint8_t& m = mat(x, y, z);
-                if (slot >= Leaves0 && slot <= Leaves2 && m != SLOTS && m != Water) return;   // leaves never replace ground
+                if (!wood && m != SLOTS && m != Water) return;   // leaves never replace ground
+                // Another tree here or beside: the first one's, and a gap between them.
+                bool crowded = false;
+                for (size_t j : near)
+                    if (j != i && (inBox(trees[j], p) || inBox(trees[j], p + vec3(VOXEL)) || inBox(trees[j], p - vec3(VOXEL)))) { crowded = true; break; }
+                if (crowded) {
+                    if (owner(p) != long(i)) return;
+                    for (const ivec3& d : steps)
+                        if (const long o = owner(p + vec3(d) * VOXEL); o != -1 && o != long(i)) return;
+                }
+                if (!wood)
+                    for (const ivec3& d : steps)
+                        if (at(x + M + d.x, std::clamp(y + d.y, 0, COLUMN - 1), z + M + d.z)) return;
                 m = slot;
                 plant(x, y, z) = SLOTS;
             });
