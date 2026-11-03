@@ -69,7 +69,7 @@ void main() {
     PtShift win = own;
     float radius = RESTIR_SPATIAL_RADIUS / restirJitter.z;
     ivec2 size = ivec2(passTargetRes.xy);
-    int samples = restirReuse.y > 0.5 ? RESTIR_SPATIAL_SAMPLES : 0;
+    int samples = restirReuse.y > 0.5 ? int(min(float(RESTIR_SPATIAL_SAMPLES), restirPreset.y)) : 0;   // a preset may take fewer
 
     bool blocked = false;
 #if !RESTIR_REPLAY
@@ -91,7 +91,7 @@ void main() {
     conf[0] = restirLoad(p).M;
     count = 1;
     bool fresh = conf[0] <= 1.5;
-    int wanted = samples > 0 ? (fresh ? RESTIR_GBH_MAX - 1 : samples) : 0;
+    int wanted = samples > 0 ? (fresh ? min(RESTIR_GBH_MAX - 1, 2 * samples) : samples) : 0;
     float reachOut = fresh ? radius * 2.0 : radius;
     for (int k = 0; k < 2 * (RESTIR_GBH_MAX - 1); k++) {
         if (count > wanted) break;

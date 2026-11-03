@@ -28,9 +28,24 @@ uniform vec4 restirDof;       // y the bloom's share of the image (0: off)
 #define GRADE_SATURATION 1.10
 #define GRADE_WHITE      vec3(1.02, 1.0, 0.97)
 
+// The image at uv. Drawn at the window's size, it is read texel for texel; smaller (a render scale under 1:
+// ConstructedRenderer::renderScale), it is upscaled bilinearly -- by hand: it is a float target.
+vec3 restirImage(vec2 uv, vec2 size) {
+    if (abs(size.x - u_viewRect.z) < 0.5 && abs(size.y - u_viewRect.w) < 0.5) return texelFetch(mbColor, ivec2(uv * size), 0).rgb;
+    vec2 pix = uv * size - 0.5;
+    ivec2 base = ivec2(floor(pix));
+    vec2 f = pix - floor(pix);
+    ivec2 last = ivec2(size) - ivec2(1, 1);
+    vec3 a = texelFetch(mbColor, clamp(base, ivec2(0, 0), last), 0).rgb;
+    vec3 b = texelFetch(mbColor, clamp(base + ivec2(1, 0), ivec2(0, 0), last), 0).rgb;
+    vec3 c = texelFetch(mbColor, clamp(base + ivec2(0, 1), ivec2(0, 0), last), 0).rgb;
+    vec3 d = texelFetch(mbColor, clamp(base + ivec2(1, 1), ivec2(0, 0), last), 0).rgb;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
 void main() {
     vec2 size = vec2(textureSize(mbColor, 0));
-    vec3 c = texelFetch(mbColor, ivec2(v_texcoord0 * size), 0).rgb;
+    vec3 c = restirImage(v_texcoord0, size);
     if (restirDenoise.z < 0.5) {
         // The glow: the bloom's five levels, averaged, mixed in -- a share of the light moved, not added.
         if (restirDof.y > 0.0) c = mix(c, texture2D(bloomUp1, v_texcoord0).rgb * 0.2, restirDof.y);

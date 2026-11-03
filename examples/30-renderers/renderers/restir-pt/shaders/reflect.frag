@@ -17,6 +17,11 @@ $input v_texcoord0
 // own ray, not from a march through the screen whose hit or miss turns on a texel's worth of depth, so it
 // holds still while the camera moves (screen-space reflection flickered there).
 //
+// A preset may ask for screen-space reflections instead (restirPreset.x: the performance preset): a march
+// along the reflected ray through this frame's G-buffer, last frame's image where it meets a surface, the
+// sky where it leaves the screen or finds nothing. No ray is traced, so it costs a few texel reads -- and
+// it flickers where a hit turns on a texel of depth, and shows nothing that is off the screen.
+//
 // Output: reflection -- rgb the reflected light times the mirror's specular albedo (its Fresnel, for the
 // view and the shading normal), a 1 where it replaces the paths' specular (0: not a mirror).
 // Inputs (resources): 0 gPos, 1 gNormal, 2 gAlbedo, 3 gDirect, 4 gSoftNormal, 5 resolved (last frame),
@@ -48,6 +53,37 @@ vec3 restirLastFrame(vec2 uv) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
+#define RESTIR_SSR_STEPS 24
+#define RESTIR_SSR_GROWTH 1.2      // each step this much longer than the last: near detail, far reach
+
+// The reflected ray from `origin` along R, marched through the screen: last frame's light where it meets what
+// this frame's G-buffer shows, `sky` where it does not. Steps start at half restirLook.x (3 finest voxels).
+vec3 restirScreenReflection(vec3 origin, vec3 face, vec3 R, vec3 sky) {
+    vec2 res = passTargetRes.xy;
+    float stride = 0.5 * restirLook.x;
+    vec3 Q = origin;
+    for (int i = 0; i < RESTIR_SSR_STEPS; i++) {
+        Q += R * stride;
+        bool inFront;
+        vec2 uv = restirWorldToUV(Q, pjvViewPosition(), pjvViewDirection(), res, inFront);
+        if (!inFront || uv.x < 0.0 || uv.y < 0.0 || uv.x >= 1.0 || uv.y >= 1.0) break;
+        vec4 seen = texelFetch(gPos, ivec2(uv * res), 0);
+        float depth = length(Q - pjvViewPosition());
+        // Behind what the screen shows there, by less than a step and a bit: the ray went into it -- unless
+        // what is there lies in the mirror's own plane (a grazing ray just over water "hits" the water beyond
+        // it, whose texels are a little nearer than the ray's exact direction), which no flat mirror shows.
+        bool ownPlane = abs(dot(seen.xyz - origin, face)) < 0.5 * restirLook.x;
+        if (seen.w >= 0.0 && !ownPlane && depth > seen.w && depth - seen.w < stride * 1.5 + restirLook.x) {
+            vec2 then = restirWorldToUV(seen.xyz, pjvPrevViewPosition(), pjvPrevViewDirection(), res, inFront);
+            if (!inFront || then.x < 0.0 || then.y < 0.0 || then.x >= 1.0 || then.y >= 1.0) return sky;
+            vec2 edge = min(then, 1.0 - then);
+            return mix(sky, restirLastFrame(then), smoothstep(0.0, 0.08, min(edge.x, edge.y)));
+        }
+        stride *= RESTIR_SSR_GROWTH;
+    }
+    return sky;
+}
+
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     vec4 surface = texelFetch(gPos, p, 0);
@@ -67,8 +103,15 @@ void main() {
     vec3 origin = P + face * restirSettings.y;
 
     vec3 toSun = normalize(SUN_DIR);
-    RestirHit hit = restirTrace(origin, R, RESTIR_KIND_BOUNCE_SHARP, 1e30);
     vec3 light;
+    if (restirPreset.x > 0.5) {
+        float cover;
+        light = restirScreenReflection(origin, face, R, pathClouds(R, pathSky(R), cover));
+        PjvBsdf mirror = pjvBsdf(texelFetch(gAlbedo, p, 0).rgb, material.x, material.y);
+        gl_FragColor = vec4(pjvSpecularAlbedo(mirror, max(dot(N, V), 0.0)) * light, 1.0);
+        return;
+    }
+    RestirHit hit = restirTrace(origin, R, RESTIR_KIND_BOUNCE_SHARP, 1e30);
     if (!hit.hit) {
         float cover;
         light = pathClouds(R, pathSky(R), cover);   // the disc is the direct light's highlight (shadow_soft)

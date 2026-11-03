@@ -242,6 +242,9 @@ images named `*.pixel.<ext>` sampled nearest.
 
 Compass north is -z. The self-test is unchanged and passes.
 
+Later (2026-11-03): restir-pt's preset (`docs/plans/restir-pt-performance.md`, D6): `settings.json` beside the
+program, timed on the first play when it has none, the Esc menu's **Graphics** button, `--graphics`.
+
 Notes for I5 on:
 
 - A world folder is made only when missing: after a generator change, delete `worlds/` (or the old

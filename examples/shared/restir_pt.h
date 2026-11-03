@@ -88,7 +88,35 @@ namespace restir_pt {
         float validation = 0.0f;    // the paths' validation (VALIDATION): off, it bought nothing measurable
         float bounces = float(PATH_BOUNCES);
         int   stride = 4;           // GI for one window pixel in stride x stride (4 or 2)
+        // What a preset trades for time (Preset; docs/plans/restir-pt-performance.md):
+        float renderScale = 1.0f;   // the renderer's targets at this share of the window, upscaled (ConstructedRenderer::renderScale)
+        int   spatialNeighbours = 5;   // the spatial reuse's neighbours (at most 5)
+        float cameraShadowLod = 0.0f;  // the camera hit's sun coarse past this many voxels (0: exact)
+        bool  screenReflections = false;   // mirrors and water reflected in screen space, not by a traced ray
     };
+
+    // Two configurations, for the program to offer. Quality: the renderer as tuned on a desktop GPU. Performance:
+    // for an integrated one (the plan's D2-D4) -- half the window's resolution, one bounce, two neighbours,
+    // the camera's sun coarse past 16 voxels, screen-space reflections, no bloom or shafts.
+    enum class Preset { Quality, Performance };
+    inline const char* presetName(Preset p) { return p == Preset::Quality ? "quality" : "performance"; }
+
+    inline Settings settingsFor(Preset preset) {
+        Settings s;
+        if (preset == Preset::Performance) {
+            s.renderScale = 0.5f;
+            s.bounces = 1.0f;
+            s.spatialNeighbours = 2;   // the visibility ray stays: without it light leaks into shadow (P2)
+            s.cameraShadowLod = 16.0f;
+            s.screenReflections = true;
+            s.post.bloom = false;
+            s.post.dof = false;
+            s.post.motionBlur = false;
+            s.shafts = false;
+            s.ssao = 0.0f;
+        }
+        return s;
+    }
 
     // The scene's scale: the finest voxel (what surfaces are offset by), and its size, lowest point and
     // height (the fog's and the haze's). fogLength 0: from the radius (below); a scene that streams
@@ -123,9 +151,31 @@ namespace restir_pt {
 
     // Every uniform its resources.json declares. `world`, given, uploads last frame's pose of every chunk for
     // the G-buffer's motion vectors (resources.json: prevPoses, texture 99).
+    inline void uploadUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const Frame& frame, const SceneScale& scene,
+                               const Settings& s, projv::World* world);
+
     inline void upload(std::shared_ptr<projv::ConstructedRenderer> renderer, const Frame& frame, const SceneScale& scene,
                        const Settings& s, projv::World* world) {
         using projv::graphics::setUniformToValue;
+        // What is skipped outright, not just told to do nothing: the bloom's ten passes, the shafts (both read
+        // only when on). The render scale, and frame.window as the renderer's own size from here on.
+        renderer->renderScale = s.renderScale;
+        const bool bloom = s.post.on && s.post.bloom, shaftsOn = s.post.on && s.shafts;
+        for (const char* pass : {"bloom_down1", "bloom_down2", "bloom_down3", "bloom_down4", "bloom_down5",
+                                 "bloom_up4", "bloom_up3", "bloom_up2", "bloom_up1"})
+            projv::graphics::setPassEnabled(*renderer, pass, bloom);
+        projv::graphics::setPassEnabled(*renderer, "shafts", shaftsOn);
+        Frame scaled = frame;
+        scaled.window = projv::core::vec2(projv::graphics::renderTargetSize(projv::core::ivec2(frame.window), s.renderScale));
+        uploadUniforms(renderer, scaled, scene, s, world);
+    }
+
+    // upload's uniforms, with frame.window already the renderer's size.
+    inline void uploadUniforms(std::shared_ptr<projv::ConstructedRenderer> renderer, const Frame& frame, const SceneScale& scene,
+                               const Settings& s, projv::World* world) {
+        using projv::graphics::setUniformToValue;
+        vec4 preset{s.screenReflections ? 1.0f : 0.0f, float(std::clamp(s.spatialNeighbours, 0, 5)), s.cameraShadowLod, 0.0f};
+        setUniformToValue(renderer, "restirPreset", preset);
         // Surfaces are offset a twentieth of the finest voxel before a ray leaves them; the same-surface
         // tests are scaled from it too.
         const float finest = scene.finest;

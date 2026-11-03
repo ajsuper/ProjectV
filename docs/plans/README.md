@@ -72,6 +72,7 @@ differ, the README is what the code does.
 | [block-table-traversal.md](block-table-traversal.md) | done | Walking the tree64 without descending it (the dense block table) |
 | [voxel-renderer.md](voxel-renderer.md) | in progress (R0–R3, R5 built; R4, R6 open) | The `_demo` examples' renderer: rebuilt for speed, then feel, then looks |
 | [restir-pt.md](restir-pt.md) | delivered in part | ReSTIR PT: paths with materials, reused. Replaced `restir` in the gallery and the terrain generator |
+| [restir-pt-performance.md](restir-pt-performance.md) | in progress (P0-P2 built; P3 next) | restir-pt's presets: today's as quality, a performance one for integrated GPUs (a render scale, fewer rays, passes off), and optimizations for both |
 | [color-convention.md](color-convention.md) | K0–K2 built | One meaning for a stored colour (sRGB), one transform to the screen |
 | [region_tree64_layout.md](region_tree64_layout.md) | proposal | Column-based region allocator for the tree64 texture |
 | [shader_optimization/](shader_optimization/README.md) | stale | Twelve independent DDA shader experiments, written against the pre-Phase-10 shader (`voxelTypeData`, the old `docs/examples/` paths) |

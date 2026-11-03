@@ -7,6 +7,8 @@
 //   ./island_demo                  the start screen: a new world, or a saved one (worlds/ beside it)
 //   ./island_demo --seed 42        straight into worlds/island-42/: made the first time, loaded after
 //   ./island_demo --world <folder> straight into worlds/<folder>/ (the start screen starts a world so)
+//   ./island_demo --graphics performance   restir-pt's preset for this run (else settings.json's, else timed:
+//                                  the Esc menu switches it and keeps the choice)
 //   ISLAND_CAPTURE=/tmp/i ./island_demo --seed 42   frame 240 saved as /tmp/i.tga, then it exits (no save)
 //                                  (ISLAND_VIEW=overview: from high above the shore)
 //
@@ -25,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <string>
 
@@ -74,6 +77,7 @@ namespace {
         uint32_t seed = 0;
         bool     seeded = false;
         std::string world;     // --world <folder>: straight into worlds/<folder>/ (how the start screen starts one)
+        std::string graphics;  // --graphics quality|performance: this run's preset (not saved)
     };
     Options options;
     int exitCode = 0;   // what main returns: the self-test's verdict
@@ -127,7 +131,21 @@ namespace {
         bool open = false;
         std::string world;             // the world's name, as a title
         std::string saved;             // "Saved 2 min ago"
+        std::string graphics;          // "Graphics: quality"
     };
+
+    // restir-pt's preset (docs/plans/restir-pt-performance.md, D6), kept in settings.json beside the program.
+    // With none there, the first play is timed: frames over 25 ms on average pick performance, and that is
+    // kept. The Esc menu switches it (and keeps the choice); --graphics sets it for one run.
+    struct Graphics {
+        restir_pt::Preset preset = restir_pt::Preset::Quality;
+        bool  chosen = false;          // false: timed on the first play
+        bool  keep = true;             // false under --graphics, captures and the self-test: nothing written
+        float timed = 0.0f;            // seconds of play timed so far
+        float total = 0.0f;            // and the frames' time in it, after the settling
+        int   frames = 0;
+    };
+    constexpr float GRAPHICS_SETTLE = 1.0f, GRAPHICS_TIMED = 3.0f, GRAPHICS_SLOW = 0.025f;
 
     // What the HUD shows (ui/hud.rml, D9), model "island".
     struct Hud {
@@ -191,6 +209,56 @@ namespace {
             frame++;
         }
     };
+
+    // ---- The graphics preset ------------------------------------------------------------------------
+
+    fs::path settingsPath() { return projv::core::executableDirectory() / "settings.json"; }
+
+    void readGraphics(Graphics& g) {
+        std::ifstream in(settingsPath());
+        if (!in) return;
+        const nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+        if (j.is_discarded() || !j.is_object() || !j.contains("graphics") || !j["graphics"].is_string()) return;
+        const std::string name = j["graphics"].get<std::string>();
+        if (name != "quality" && name != "performance") return;
+        g.preset = name == "quality" ? restir_pt::Preset::Quality : restir_pt::Preset::Performance;
+        g.chosen = true;
+    }
+
+    // The preset drawn from now on (every history starts over), shown in the menu, and kept when it may be.
+    void setGraphics(World& world, restir_pt::Preset preset) {
+        Graphics& g = world.ctx().get<Graphics>();
+        g.preset = preset;
+        g.chosen = true;
+        Restir& restir = world.ctx().get<Restir>();
+        const int view = restir.settings.view;
+        restir.settings = restir_pt::settingsFor(preset);
+        restir.settings.view = view;
+        restir.has = false;
+        std::string name = restir_pt::presetName(preset);
+        name[0] = char(std::toupper(name[0]));
+        world.ctx().get<PauseMenu>().graphics = "Graphics: " + name;
+        if (g.keep) {
+            nlohmann::json j;
+            j["graphics"] = restir_pt::presetName(preset);
+            std::ofstream(settingsPath()) << j.dump(2) << "\n";
+        }
+    }
+
+    // While no preset is chosen: the first seconds of play timed, after a moment to settle.
+    void timeGraphics(World& world, float dt) {
+        Graphics& g = world.ctx().get<Graphics>();
+        if (g.chosen) return;
+        g.timed += dt;
+        if (g.timed <= GRAPHICS_SETTLE) return;
+        g.total += dt;
+        g.frames++;
+        if (g.timed < GRAPHICS_SETTLE + GRAPHICS_TIMED) return;
+        const float average = g.total / float(std::max(g.frames, 1));
+        const restir_pt::Preset preset = average > GRAPHICS_SLOW ? restir_pt::Preset::Performance : restir_pt::Preset::Quality;
+        projv::core::info("island: frames took {:.1f} ms on average: the {} preset from now on", average * 1000.0f, restir_pt::presetName(preset));
+        setGraphics(world, preset);
+    }
 
     // ---- The island ------------------------------------------------------------------------------
 
@@ -283,6 +351,9 @@ namespace {
         }
         player.eye = at + vec3(0.0f, EYE, 0.0f);
         if (const char* pitch = std::getenv("ISLAND_PITCH")) player.pitch = float(std::atof(pitch));   // for captures
+        const vec3 look = player.eye + player.forward() * 10.0f;   // as the gallery's --look takes it
+        projv::core::info("island: the player stands at {:.2f},{:.2f},{:.2f} looking at {:.2f},{:.2f},{:.2f}", player.eye.x, player.eye.y,
+                          player.eye.z, look.x, look.y, look.z);
     }
 
     // ---- Each frame --------------------------------------------------------------------------------
@@ -773,6 +844,7 @@ namespace {
             return;
         }
         if (!session.playing) return;
+        timeGraphics(world, app.time().unscaledDelta);
         session.saver.sinceSave += app.time().unscaledDelta;
         if (session.saver.sinceSave >= saving::AUTOSAVE_SECONDS && !session.saver.busy) saveWorld(app, false);
     }
@@ -845,7 +917,7 @@ namespace {
         if (!icons::writeAll(here / "icons")) projv::core::warn("island: the HUD's icons could not be written to '{}'", (here / "icons").string());
         projv::ui::user::model(app, "start").bind("worlds", &start.worlds).bind("hasWorlds", &start.hasWorlds).bind("newName", &start.newName)
             .bind("newSeed", &start.newSeed).bind("status", &start.status);
-        projv::ui::user::model(app, "pause").bind("world", &menu.world).bind("saved", &menu.saved);
+        projv::ui::user::model(app, "pause").bind("world", &menu.world).bind("saved", &menu.saved).bind("graphics", &menu.graphics);
         Hud& hud = world.ctx().get<Hud>();
         projv::ui::user::model(app, "island").bind("slots", &hud.slots).bind("compass", &hud.compass).bind("heading", &hud.heading)
             .bind("held", &hud.held).bind("heldShown", &hud.heldShown).bind("aiming", &hud.aiming).bind("prompt", &hud.prompt)
@@ -857,6 +929,8 @@ namespace {
             else if (action.name == "new" && !s.playing) s.pendingNew = true;
             else if (action.name == "quit") app.closeRequested = true;
             else if (action.name == "resume") setPause(app, false);
+            else if (action.name == "graphics")
+                setGraphics(w, w.ctx().get<Graphics>().preset == restir_pt::Preset::Quality ? restir_pt::Preset::Performance : restir_pt::Preset::Quality);
             else if (action.name == "savequit") {
                 saveWorld(app, true);
                 s.saves = false;   // saved: nothing more to save on the way out
@@ -870,6 +944,23 @@ namespace {
         restir.scene.radius = island::SIZE * 0.75f;
         restir.scene.ground = 0.0f;
         restir.scene.height = 80.0f;   // the clouds are up to 80 m
+
+        // The preset: settings.json's, else timed on the first play; --graphics, captures and the self-test
+        // choose for themselves and keep nothing.
+        Graphics& graphics = world.ctx().emplace<Graphics>();
+        readGraphics(graphics);
+        const bool unattended = std::getenv("ISLAND_CAPTURE") || std::getenv("ISLAND_START_CAPTURE") || world.ctx().get<SelfTest>().on;
+        if (!options.graphics.empty() || unattended) {
+            graphics.keep = false;
+            graphics.chosen = true;
+            graphics.preset = options.graphics == "performance" ? restir_pt::Preset::Performance
+                            : options.graphics == "quality" || unattended ? restir_pt::Preset::Quality : graphics.preset;
+        }
+        const bool chosen = graphics.chosen, keep = graphics.keep;   // drawn now; not yet chosen or written
+        graphics.keep = false;
+        setGraphics(world, graphics.preset);
+        graphics.chosen = chosen;
+        graphics.keep = keep;
         world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(world.ctx().get<projv::Scene>()));
 
         // Captures, the self-test and --seed go straight into a world; otherwise the start screen.
@@ -917,6 +1008,12 @@ int main(int argc, char** argv) {
             options.seeded = true;
         } else if (!std::strcmp(argv[i], "--world") && i + 1 < argc) {
             options.world = argv[++i];
+        } else if (!std::strcmp(argv[i], "--graphics") && i + 1 < argc) {
+            options.graphics = argv[++i];
+            if (options.graphics != "quality" && options.graphics != "performance") {
+                std::fprintf(stderr, "--graphics takes quality or performance\n");
+                return 2;
+            }
         }
 
     projv::Application app;

@@ -244,6 +244,23 @@ width at that distance (`restirSameSurface`, the denoiser's edge-stopping), and 
 camera's history unconditionally — as restir did; on Lee Chemicals that took the shimmer from 23% of
 pixels changing between still frames to none.
 
+## Presets
+
+`restir_pt::Preset` (`examples/shared/restir_pt.h`), `restir_pt::settingsFor(preset)`: the gallery's
+`--preset` and its panel's **preset**, the island demo's Esc menu. Plan: `docs/plans/restir-pt-performance.md`.
+
+| | Quality | Performance |
+|---|---|---|
+| render scale (`ConstructedRenderer::renderScale`) | 1 | 0.5: every target at half the window, `display` upscales bilinearly |
+| bounces | 2 | 1 |
+| spatial neighbours (`restirPreset.y`) | 5 | 2 (with the visibility ray: without it, light leaks into shadow) |
+| the camera hit's sun (`restirPreset.z`) | exact | coarse past 16 voxels |
+| mirrors and water | `reflect`'s traced ray | screen space (`restirPreset.x`): a march through the G-buffer, last frame's image where it hits, the sky where it leaves the screen |
+| bloom, light shafts | on | off, and their passes skipped (`graphics::setPassEnabled`) |
+| depth of field, motion blur, SSAO | on | off (their passes run as copies: the post chain reads them) |
+
+The Radeon 860M (an integrated GPU), 1280×720, the island demo's spawn: quality 40.2 ms, performance 8.5 ms.
+
 ## Settings
 
 In the gallery's panel (F1), under "restir-pt settings":

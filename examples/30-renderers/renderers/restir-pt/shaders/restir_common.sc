@@ -46,6 +46,9 @@ uniform vec4 restirLook;      // x SSAO radius (world units), y its strength on 
 uniform vec4 restirHaze;      // the height fog: x density at the ground per world unit (0: off), y the ground's
                               // height, z the height it thins over (e-folding), w the most it hides
 uniform vec4 restirAir;       // the aerial haze: x, y, z as restirHaze's, w the distance its onset grows over
+uniform vec4 restirPreset;    // what a preset (restir_pt::Preset) trades for time: x screen-space reflections (reflect.frag)
+                              // instead of its traced ray, y spatial neighbours (at most RESTIR_SPATIAL_SAMPLES),
+                              // z the camera hit's sun traced coarse past this many voxels (0: exact)
 uniform vec4 restirPath;      // x bounces after the visible point, y the sample pass's ray budget, z the spatial
                               // pass's, w validation: the relative change in a path's light that counts (0: off)
 

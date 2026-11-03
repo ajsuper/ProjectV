@@ -82,6 +82,8 @@ RestirHit restirTrace(vec3 origin, vec3 direction, int kind, float maxDistance) 
 #endif
 #if RESTIR_SHADOW_LOD
     if (kind == RESTIR_KIND_SHADOW) pjvQueryLinearLOD(query, 1u, uint(RESTIR_SHADOW_LOD));
+#else
+    if (kind == RESTIR_KIND_SHADOW && restirPreset.z > 0.0) pjvQueryLinearLOD(query, 1u, uint(restirPreset.z));   // a preset's
 #endif
 #if RESTIR_CAMERA_FOOTPRINT
     // Where one voxel covers one pixel: the target's height over the view's tangent span.

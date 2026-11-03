@@ -16,7 +16,8 @@
         {"name": "restirHaze", "type": "vec4"},
         {"name": "restirAir", "type": "vec4"},
         {"name": "restirShaftsAir", "type": "vec4"},
-        {"name": "restirNormals", "type": "vec4"}
+        {"name": "restirNormals", "type": "vec4"},
+        {"name": "restirPreset", "type": "vec4"}
     ],
     "shaders": [
         {"shaderID": 1, "path": "./renderers/restir-pt/shaders/gbuffer.bin"},

@@ -34,6 +34,7 @@
 //   --look x,y,z,tx,ty,tz   stands the camera at x,y,z looking at tx,ty,tz (default: the framing)
 //   --pan <rad>        turns the camera this much a frame (a moving-camera measurement)
 //   --restir-gi <n>    restir-pt traces paths for one pixel in n x n: 4 (a sixteenth, default) or 2 (a quarter)
+//   --preset <name>    restir-pt's preset: quality (default) or performance (restir_pt::Preset); RESTIR_* still apply
 //
 // Selection is a flag rather than a prompt so the gallery can be scripted: a benchmark or a
 // screenshot matrix across all of them is a shell loop.
@@ -208,6 +209,8 @@ static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRendere
 // out for every program that draws with it), changed from the Gallery panel. Their starting values come
 // from the environment, for unattended runs (readRestirEnvironment).
 static restir_pt::Settings g_restir;
+static restir_pt::Preset   g_restirPreset = restir_pt::Preset::Quality;   // --preset, and the panel's
+static bool  g_restirRestart = false;                  // the panel changed the preset: every history starts over
 static bool  g_restirSoftNormals = true;               // the blurred normals; g_restirNormalBlur their width
 static float g_restirNormalBlur = restir_pt::NORMAL_BLUR;
 static bool  g_restirUntold = false;                   // RESTIR_UNTOLD=1: see readRestirEnvironment
@@ -281,7 +284,8 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     // An untold sun is no move at all, as far as the renderer knows: the camera stands still in that test.
     frame.sunMoved = ctx.sunMoved && !untold;
     frame.moved = ctx.cameraMoved && !(ctx.sunMoved && untold);
-    frame.first = first || ctx.switched;   // a switch back: every history starts over
+    frame.first = first || ctx.switched || g_restirRestart;   // a switch back, or a preset: every history starts over
+    g_restirRestart = false;
     frame.count = ctx.frameCount;
     frame.window = ctx.windowResolution;
     frame.seconds = std::chrono::duration<float>(now - lastFrame).count();
@@ -367,9 +371,14 @@ static bool parseCommandLine(int argc, char** argv, const std::vector<RendererMo
             return true;
         }
         if (argument == "--bench") { g_measure.bench = true; continue; }
-        if ((argument == "--capture" || argument == "--look" || argument == "--pan" || argument == "--restir-gi") && i + 1 < argc) {
+        if ((argument == "--capture" || argument == "--look" || argument == "--pan" || argument == "--restir-gi" || argument == "--preset") && i + 1 < argc) {
             const char* value = argv[++i];
             if (argument == "--capture") g_measure.capture = value;
+            else if (argument == "--preset") {
+                if (std::string(value) != "quality" && std::string(value) != "performance") { std::cerr << "--preset takes quality or performance\n"; return false; }
+                g_restirPreset = std::string(value) == "performance" ? restir_pt::Preset::Performance : restir_pt::Preset::Quality;
+                g_restir = restir_pt::settingsFor(g_restirPreset);
+            }
             else if (argument == "--pan") g_measure.pan = float(std::atof(value));
             else if (argument == "--restir-gi") g_restirStride = std::atoi(value) == 2 ? 2 : 4;
             else if (std::sscanf(value, "%f,%f,%f,%f,%f,%f", &g_measure.from.x, &g_measure.from.y, &g_measure.from.z,
@@ -713,6 +722,17 @@ static void restirSettings(Gallery&) {
     static const char* views[restir_pt::VIEWS] = {"the image", "indirect light", "direct light", "ambient occlusion",
                                                   "indirect diffuse", "indirect specular", "light shafts"};
     ImGui::Combo("view", &r.view, views, restir_pt::VIEWS);
+    int preset = int(g_restirPreset);
+    static const char* presets[2] = {"quality", "performance"};
+    if (ImGui::Combo("preset", &preset, presets, 2)) {
+        const int view = r.view;
+        g_restirPreset = restir_pt::Preset(preset);
+        r = restir_pt::settingsFor(g_restirPreset);   // every setting below as the preset has it
+        r.view = view;
+        g_restirRestart = true;
+    }
+    ImGui::SetItemTooltip("Quality: as tuned on a desktop GPU. Performance: for an integrated one -- half the\n"
+                          "resolution, one bounce, fewer rays, screen-space reflections, no bloom or shafts");
 
     ImGui::SeparatorText("Final render");
     ImGui::Checkbox("final render", &r.post.on);
