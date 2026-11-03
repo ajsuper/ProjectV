@@ -215,6 +215,17 @@ Seen in this repository after a build was killed with `pkill`: three objects wer
 (`compose_io.cpp.o` and two Lua translation units), and the resulting `libprojectV.a` was missing
 every symbol from `compose_io.cpp` while containing 173 other `projv::utils::` symbols.
 
+**Also (2026-11-02):** a machine that went down mid-build left zero-byte **dependency files** --
+`*.o.d` and the link step's `link.d` -- and CMake's dependency scan aborts on them, not make:
+
+```
+cmGccStyleDependency ... Assertion '!this->empty()' failed.
+```
+
+`find build \( -name '*.o.d' -o -name 'link.d' \) -size 0 -delete` (with the `.o` beside each `.o.d`)
+clears it. Do not delete `compiler_depend.make` by hand: configure writes it, and the build fails without
+it until the next `cmake --preset dev`.
+
 ---
 
 ## 13. `50-terrain-generator` keeps its own chunk free list
@@ -262,3 +273,83 @@ contact wakes all of it (Jolt's islands, as designed, but then the stack should 
 quickly); or the engine wakes bodies itself (a break, an impact-load pass, `teleport`/`setVelocity`
 on a group) more widely than the hit. Reproduce with the Physics panel's awake count and step time;
 `DEMOS_ONLY=1` for that demo alone.
+
+## 18. A scene's GPU data cannot be replaced under a running renderer
+
+Found 2026-11-02 in the island demo (`examples/97-island-demo`, docs/plans/island-demo.md, I4). Its start
+screen drew an empty scene, then loaded the chosen world into the same `Scene`, called
+`graphics::destroyGPUData` on the old `GPUData` and `createTexturesForScene` for the new, and drew on
+with restir-pt. A few seconds in, twice in two tries, the process died in the NVIDIA driver (the stack in
+\#25, after a fault). Making the `GPUData` once, before the first frame, has never failed. Not
+investigated; the likely cause is that a renderer (restir-pt at least) keeps the handles of the textures it
+was first given -- in its uniforms or samplers -- and draws with them after they are destroyed. The demo
+now restarts the program into the chosen world. Fix: either renderers re-bind the `GPUData` they are handed
+each frame (and the engine says replacing it is supported), or the engine says plainly that a `GPUData` is
+made once per renderer. Reproduce: the island demo before commit `f3dd8d6`, a world chosen on its start
+screen.
+
+## 19. Systems cannot be uninstalled
+
+`Application::addSystem` has no inverse, and `installPhysics`, `installSceneBridge`, `installUi`,
+`installImpactFracture` add systems for good, with no teardown for the state they keep in `world.ctx()`.
+So a program cannot leave one world and enter another -- a "back to the title screen" -- without
+restarting; the island demo restarts itself (#18 is the other half of why). Fix: an uninstall per
+install (or a way to reset the physics world and the bridge for a new scene), and a way to remove a
+system by name.
+
+## 20. Cheap debris does not say which voxels it took
+
+`BodyBroken` lists every body piece's voxels (`pieceVoxels`, in the broken component's voxel space) and
+the dust's (`dust`), but the pieces made cheap debris only as entities (`debris`), with no voxels. A game
+that must react to exactly what a break removed -- the island demo clears the plants standing on removed
+ground -- cannot for a break that became debris, which with `PhysicsConfig::debris` on is most of a
+strike's shards. The demo looks in a sphere round `BodyBroken::at` instead. Fix: `debrisVoxels` beside
+`pieceVoxels` (or one list for all pieces, debris marked), filled where `pieceVoxels` is
+(`src/runtime/physics.cpp`, the break pass).
+
+## 21. No physics material that does not collide
+
+Every palette entry with a physics material collides; one without collides with its body's own values.
+So decoration that should be passed through -- grass, flowers, reeds -- cannot live in the ground's grid,
+and the island demo keeps it in a second component with no collider. Then a break of the ground does not
+touch it, and the demo clears floating plants by hand (#20). Fix: a material flag (`"collides": false`)
+that leaves those voxels out of the collision shapes and the support pass, and lets a break take them with
+the ground.
+
+## 22. A strike's reach under half a voxel breaks nothing, silently
+
+`runtime::Strike::reach` is in metres; the fracture turns it into voxels and returns at once if that is
+under 0.5 (`src/runtime/physics.cpp`, about line 877: "not enough to break a voxel"). The header says
+nothing of it, and nothing is logged, so a strike meant to break one voxel -- the island demo's chisel, at
+0.45 voxels -- breaks nothing and looks like a bug elsewhere. Fix: say it in `Strike::reach`'s comment
+(and that between 0.5 and 1 voxel breaks just the struck one), or log the refusal once.
+
+## 23. Support is flooded through edges and corners, and the docs do not say so
+
+The support pass (`localSupport`, `src/runtime/physics.cpp`) joins voxels through faces, edges and
+corners. `StaticCollider::splits` says "face-connected island". So two things that only touch at an edge
+or a corner hold each other up: the island demo's trees, crowns touching diagonally, stood when a trunk was
+cut through, until the generator kept a one-voxel gap round each tree in all 26 directions. Fix: correct
+`splits`' comment (and `BodyBroken`'s, which also says face-connected), or flood through faces only if
+that was the intent.
+
+## 24. Pieces of a static collider keep its link policy
+
+A piece that breaks off is linked with the broken entity's `OnUnlink` (`src/runtime/physics.cpp`, about
+line 1011), which for a static collider is usually the default `Keep`. Destroying such a piece's entity
+leaves its voxels in the scene, drawn and orphaned. Cheap debris, by contrast, is always linked
+`OnUnlink::Destroy`. A game that removes pieces (the island demo gathering rubble) has to delete the
+component itself (`utils::deleteComponent`) for one kind and not the other. Fix: pieces linked
+`OnUnlink::Destroy` (they are made by the break, owned by nothing else), or say in `BodyBroken` which
+policy pieces get.
+
+## 25. bgfx's Vulkan frame timer crashes now and then on the NVIDIA driver
+
+`bgfx::vk::TimerQueryVK::begin`, called from `RendererContextVK::submit`, segfaults inside
+`libnvidia-glcore.so.580.119.02` in about one run in five, on any program, after start-up, with no
+profiler on (the dev layer's `BGFX_DEBUG_PROFILER` is not the cause: this is bgfx's always-on frame
+timer). Seen across many builds and programs (the advanced renderer, the island demo). The same driver
+also kills runs on exit, after a capture (a segfault or a floating-point exception in `SwapChainVK::present`).
+Not the engine's code, but every program pays for it: the island demo autosaves every minute because a
+crash saves nothing. Fix: a bgfx upgrade, a patch that lets the frame timer be turned off (as the
+Jolt submodule carries one, `cmake/patches/`), or a report upstream.
