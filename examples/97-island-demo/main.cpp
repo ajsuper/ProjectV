@@ -11,6 +11,7 @@
 //                                  the Esc menu switches it and keeps the choice)
 //   ISLAND_CAPTURE=/tmp/i ./island_demo --seed 42   frame 240 saved as /tmp/i.tga, then it exits (no save)
 //                                  (ISLAND_VIEW=overview: from high above the shore)
+//                                  (ISLAND_MENU=pause|graphics: that menu open)
 //
 // Controls: W/A/S/D walk, Space jump, the mouse looks; Esc the menu (resume, save and quit);
 // 1/2 or the wheel pick the pickaxe or the chisel, the left button swings it (held: again); E turns
@@ -131,14 +132,19 @@ namespace {
         bool open = false;
         std::string world;             // the world's name, as a title
         std::string saved;             // "Saved 2 min ago"
-        std::string graphics;          // "Graphics: quality"
+        std::string graphics = "Graphics";   // the button to the graphics panel
     };
 
-    // restir-pt's preset (docs/plans/restir-pt-performance.md, D6), kept in settings.json beside the program.
-    // With none there, the first play is timed: frames over 25 ms on average pick performance, and that is
-    // kept. The Esc menu switches it (and keeps the choice); --graphics sets it for one run.
+    // restir-pt's settings (docs/plans/restir-pt-performance.md, D6, D9), kept in settings.json beside the
+    // program: a preset, or custom ones. With none there, the first play is timed: frames over 25 ms on
+    // average pick performance, and that is kept. The Esc menu's Graphics panel changes them (and keeps the
+    // change); --graphics sets a preset for one run.
     struct Graphics {
         restir_pt::Preset preset = restir_pt::Preset::Quality;
+        bool  custom = false;          // the settings were changed one by one: the preset is only where they began
+        std::vector<std::vector<std::string>> rows;   // the panel's (model "graphics"): label, value, key, class
+        std::string note;
+        bool  open = false;            // the panel is shown (over the paused game)
         bool  chosen = false;          // false: timed on the first play
         bool  keep = true;             // false under --graphics, captures and the self-test: nothing written
         float timed = 0.0f;            // seconds of play timed so far
@@ -210,39 +216,142 @@ namespace {
         }
     };
 
-    // ---- The graphics preset ------------------------------------------------------------------------
+    // ---- The graphics settings ----------------------------------------------------------------------
 
     fs::path settingsPath() { return projv::core::executableDirectory() / "settings.json"; }
 
-    void readGraphics(Graphics& g) {
+    // The settings the panel offers, as settings.json keeps them.
+    nlohmann::json settingsJson(const restir_pt::Settings& s) {
+        nlohmann::json j;
+        j["resolution"] = s.renderScale;
+        j["lighting"] = s.simpleLighting ? 0 : int(s.bounces);
+        j["screenReflections"] = s.screenReflections;
+        j["softShadows"] = s.softShadow;
+        j["ambientOcclusion"] = s.ssao > 0.0f;
+        j["bloom"] = s.post.bloom;
+        j["lightShafts"] = s.shafts;
+        j["depthOfField"] = s.post.dof;
+        j["motionBlur"] = s.post.motionBlur;
+        return j;
+    }
+    void settingsFromJson(const nlohmann::json& j, restir_pt::Settings& s) {
+        if (j.contains("resolution") && j["resolution"].is_number()) s.renderScale = std::clamp(j["resolution"].get<float>(), 0.25f, 1.0f);
+        if (j.contains("lighting") && j["lighting"].is_number_integer()) {
+            const int l = std::clamp(j["lighting"].get<int>(), 0, 2);
+            s.simpleLighting = l == 0;
+            if (l > 0) s.bounces = float(l);
+        }
+        auto flag = [&](const char* key, bool& value) { if (j.contains(key) && j[key].is_boolean()) value = j[key].get<bool>(); };
+        flag("screenReflections", s.screenReflections);
+        flag("softShadows", s.softShadow);
+        bool ao = s.ssao > 0.0f;
+        flag("ambientOcclusion", ao);
+        s.ssao = ao ? restir_pt::SSAO : 0.0f;
+        flag("bloom", s.post.bloom);
+        flag("lightShafts", s.shafts);
+        flag("depthOfField", s.post.dof);
+        flag("motionBlur", s.post.motionBlur);
+    }
+
+    void readGraphics(Graphics& g, restir_pt::Settings& s) {
         std::ifstream in(settingsPath());
         if (!in) return;
         const nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
         if (j.is_discarded() || !j.is_object() || !j.contains("graphics") || !j["graphics"].is_string()) return;
         const std::string name = j["graphics"].get<std::string>();
-        if (name != "quality" && name != "performance") return;
-        g.preset = name == "quality" ? restir_pt::Preset::Quality : restir_pt::Preset::Performance;
+        if (name != "quality" && name != "performance" && name != "custom") return;
+        g.preset = name == "performance" ? restir_pt::Preset::Performance : restir_pt::Preset::Quality;
+        if (j.contains("base") && j["base"] == "performance") g.preset = restir_pt::Preset::Performance;
+        s = restir_pt::settingsFor(g.preset);
+        if (name == "custom" && j.contains("settings") && j["settings"].is_object()) {
+            settingsFromJson(j["settings"], s);
+            g.custom = true;
+        }
         g.chosen = true;
     }
 
-    // The preset drawn from now on (every history starts over), shown in the menu, and kept when it may be.
+    std::string capitalised(std::string text) {
+        if (!text.empty()) text[0] = char(std::toupper(text[0]));
+        return text;
+    }
+
+    // The panel's rows, from the settings drawn now.
+    void graphicsRows(World& world) {
+        Graphics& g = world.ctx().get<Graphics>();
+        const restir_pt::Settings& s = world.ctx().get<Restir>().settings;
+        auto onOff = [](bool on) { return std::string(on ? "On" : "Off"); };
+        char resolution[16];
+        std::snprintf(resolution, sizeof resolution, "%d%%", int(std::lround(s.renderScale * 100.0f)));
+        g.rows = {
+            {"Preset", g.custom ? "Custom" : capitalised(restir_pt::presetName(g.preset)), "preset", "preset"},
+            {"Resolution", resolution, "resolution", ""},
+            {"Lighting", s.simpleLighting ? "Simple" : s.bounces < 1.5f ? "Traced, 1 bounce" : "Traced, 2 bounces", "lighting", ""},
+            {"Reflections", s.screenReflections ? "Screen space" : "Traced", "reflections", ""},
+            {"Shadows", s.softShadow ? "Soft" : "Hard", "shadows", ""},
+            {"Ambient occlusion", onOff(s.ssao > 0.0f), "ao", ""},
+            {"Bloom", onOff(s.post.bloom), "bloom", ""},
+            {"Light shafts", onOff(s.shafts), "shafts", ""},
+            {"Depth of field", onOff(s.post.dof), "dof", ""},
+            {"Motion blur", onOff(s.post.motionBlur), "mblur", ""},
+        };
+        g.note = s.simpleLighting ? "Simple lighting: clean and fast, no bounced light" : "Traced lighting: richer, noisier, slower";
+    }
+
+    // The settings drawn from now on (every history starts over), the panel's rows, and settings.json when
+    // it may be written.
+    void applyGraphics(World& world) {
+        Graphics& g = world.ctx().get<Graphics>();
+        g.chosen = true;
+        Restir& restir = world.ctx().get<Restir>();
+        restir.has = false;
+        world.ctx().get<PauseMenu>().graphics = "Graphics";   // the panel says which
+        graphicsRows(world);
+        if (g.keep) {
+            nlohmann::json j;
+            j["graphics"] = g.custom ? "custom" : restir_pt::presetName(g.preset);
+            if (g.custom) {
+                j["base"] = restir_pt::presetName(g.preset);
+                j["settings"] = settingsJson(restir.settings);
+            }
+            std::ofstream(settingsPath()) << j.dump(2) << "\n";
+        }
+    }
+
     void setGraphics(World& world, restir_pt::Preset preset) {
         Graphics& g = world.ctx().get<Graphics>();
         g.preset = preset;
-        g.chosen = true;
+        g.custom = false;
         Restir& restir = world.ctx().get<Restir>();
         const int view = restir.settings.view;
         restir.settings = restir_pt::settingsFor(preset);
         restir.settings.view = view;
-        restir.has = false;
-        std::string name = restir_pt::presetName(preset);
-        name[0] = char(std::toupper(name[0]));
-        world.ctx().get<PauseMenu>().graphics = "Graphics: " + name;
-        if (g.keep) {
-            nlohmann::json j;
-            j["graphics"] = restir_pt::presetName(preset);
-            std::ofstream(settingsPath()) << j.dump(2) << "\n";
+        applyGraphics(world);
+    }
+
+    // A click on a row of the panel: its setting's next value (the preset's: the other preset).
+    void cycleGraphics(World& world, const std::string& key) {
+        Graphics& g = world.ctx().get<Graphics>();
+        restir_pt::Settings& s = world.ctx().get<Restir>().settings;
+        if (key == "preset") {
+            setGraphics(world, g.custom || g.preset == restir_pt::Preset::Performance ? restir_pt::Preset::Quality : restir_pt::Preset::Performance);
+            return;
         }
+        if (key == "resolution") s.renderScale = s.renderScale < 0.6f ? 0.75f : s.renderScale < 0.9f ? 1.0f : 0.5f;
+        else if (key == "lighting") {
+            if (s.simpleLighting) { s.simpleLighting = false; s.bounces = 1.0f; }
+            else if (s.bounces < 1.5f) s.bounces = 2.0f;
+            else s.simpleLighting = true;
+        }
+        else if (key == "reflections") s.screenReflections = !s.screenReflections;
+        else if (key == "shadows") s.softShadow = !s.softShadow;
+        else if (key == "ao") s.ssao = s.ssao > 0.0f ? 0.0f : restir_pt::SSAO;
+        else if (key == "bloom") s.post.bloom = !s.post.bloom;
+        else if (key == "shafts") s.shafts = !s.shafts;
+        else if (key == "dof") s.post.dof = !s.post.dof;
+        else if (key == "mblur") s.post.motionBlur = !s.post.motionBlur;
+        else return;
+        g.custom = true;
+        applyGraphics(world);
     }
 
     // While no preset is chosen: the first seconds of play timed, after a moment to settle.
@@ -361,6 +470,21 @@ namespace {
     bool playing(const World& world) { return world.ctx().get<Session>().playing; }
     void saveWorld(projv::Application& app, bool wait);   // below
 
+    // The graphics panel, in place of the menu while it is open.
+    void showGraphics(projv::Application& app, bool open) {
+        Graphics& g = app.world.ctx().get<Graphics>();
+        if (g.open == open) return;
+        g.open = open;
+        if (open) {
+            graphicsRows(app.world);
+            projv::ui::user::hide(app, "pause");
+            projv::ui::user::show(app, "graphics");
+        } else {
+            projv::ui::user::hide(app, "graphics");
+            if (app.world.ctx().get<PauseMenu>().open) projv::ui::user::show(app, "pause");
+        }
+    }
+
     void setPause(projv::Application& app, bool open) {
         World& world = app.world;
         PauseMenu& menu = world.ctx().get<PauseMenu>();
@@ -374,6 +498,7 @@ namespace {
             projv::ui::user::show(app, "pause");
         } else {
             projv::ui::user::hide(app, "pause");
+            showGraphics(app, false);
         }
         projv::graphics::setCursorCaptured(app, world.ctx().get<projv::graphics::RenderInstance>(), !open);
     }
@@ -386,7 +511,10 @@ namespace {
         Player& player = world.ctx().get<Player>();
         const float dt = app.time().unscaledDelta;
 
-        if (input.pressed(projv::Key::Escape)) setPause(app, !world.ctx().get<PauseMenu>().open);
+        if (input.pressed(projv::Key::Escape)) {
+            if (world.ctx().get<Graphics>().open) showGraphics(app, false);   // back to the menu
+            else setPause(app, !world.ctx().get<PauseMenu>().open);
+        }
         else if (!input.cursorCaptured && !world.ctx().get<PauseMenu>().open && !input.wantCaptureMouse && input.pressed(projv::MouseButton::Left))
             projv::graphics::setCursorCaptured(app, renderInstance, true);
         if (input.cursorCaptured) {
@@ -887,6 +1015,11 @@ namespace {
             if (app.frameCount == 120) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capture);
             if (app.frameCount == 125) app.closeRequested = true;
         }
+        // ISLAND_MENU=pause|graphics: that menu open at frame 200 (for a capture of it).
+        if (const char* menu = std::getenv("ISLAND_MENU"); menu && playing(world) && app.frameCount == 200) {
+            setPause(app, true);
+            if (std::string(menu) == "graphics") showGraphics(app, true);
+        }
         if (const char* capture = std::getenv("ISLAND_CAPTURE")) {
             if (app.frameCount == 240) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capture);
             if (app.frameCount == 245) app.closeRequested = true;
@@ -929,8 +1062,9 @@ namespace {
             else if (action.name == "new" && !s.playing) s.pendingNew = true;
             else if (action.name == "quit") app.closeRequested = true;
             else if (action.name == "resume") setPause(app, false);
-            else if (action.name == "graphics")
-                setGraphics(w, w.ctx().get<Graphics>().preset == restir_pt::Preset::Quality ? restir_pt::Preset::Performance : restir_pt::Preset::Quality);
+            else if (action.name == "graphics") showGraphics(app, true);
+            else if (action.name == "back") showGraphics(app, false);
+            else if (action.name == "cycle" && !action.args.empty()) cycleGraphics(w, action.args[0]);
             else if (action.name == "savequit") {
                 saveWorld(app, true);
                 s.saves = false;   // saved: nothing more to save on the way out
@@ -948,7 +1082,7 @@ namespace {
         // The preset: settings.json's, else timed on the first play; --graphics, captures and the self-test
         // choose for themselves and keep nothing.
         Graphics& graphics = world.ctx().emplace<Graphics>();
-        readGraphics(graphics);
+        readGraphics(graphics, restir.settings);
         const bool unattended = std::getenv("ISLAND_CAPTURE") || std::getenv("ISLAND_START_CAPTURE") || world.ctx().get<SelfTest>().on;
         if (!options.graphics.empty() || unattended) {
             graphics.keep = false;
@@ -958,9 +1092,11 @@ namespace {
         }
         const bool chosen = graphics.chosen, keep = graphics.keep;   // drawn now; not yet chosen or written
         graphics.keep = false;
-        setGraphics(world, graphics.preset);
+        if (graphics.custom && options.graphics.empty() && !unattended) applyGraphics(world);   // settings.json's own
+        else setGraphics(world, graphics.preset);
         graphics.chosen = chosen;
         graphics.keep = keep;
+        projv::ui::user::model(app, "graphics").bind("rows", &graphics.rows).bind("note", &graphics.note);
         world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(world.ctx().get<projv::Scene>()));
 
         // Captures, the self-test and --seed go straight into a world; otherwise the start screen.
@@ -986,6 +1122,7 @@ namespace {
             projv::graphics::setCursorCaptured(app, renderInstance, false);
         }
         projv::ui::user::open(app, "pause", (here / "ui/pause.rml").string(), {.shown = false, .modal = true, .fadeOut = 0.2f});
+        projv::ui::user::open(app, "graphics", (here / "ui/graphics.rml").string(), {.shown = false, .modal = true, .fadeOut = 0.15f});
     }
 
     // The HUD (ui/hud.rml, D9): the compass, the crosshair, the prompt, the hotbar.

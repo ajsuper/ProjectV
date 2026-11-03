@@ -13,7 +13,7 @@
     </style>
 </head>
 <!-- The island demo's menu (docs/plans/island-demo.md, D11): Esc. Pixel art (D9). Model "pause": world,
-     saved, graphics ("Graphics: Quality"). Actions: resume, graphics (the other preset), savequit. -->
+     saved, graphics (its button's text). Actions: resume, graphics (the graphics panel, graphics.rml), savequit. -->
 <body data-model="pause">
     <div class="shade"></div>
     <div class="menu frame"><div class="bevel panel">
