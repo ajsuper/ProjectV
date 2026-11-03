@@ -1,6 +1,6 @@
 # Island demo: break it, gather it, build with it
 
-Status: **in progress** (2026-11-03): I0-I7 built (on the branch `island-demo`); I6's walking and I7's building await the user's hands. Asked for: "the most advanced example yet" -- a procedurally generated
+Status: **delivered** (2026-11-03): I0-I7 built and checked by the user (walking and building "much better"); merged to `main`. Deferred: wind (below). Asked for: "the most advanced example yet" -- a procedurally generated
 sandbox with hills, rock and trees; tools to break the world; E to collect the rubble you look at into
 a hotbar beside the tools; a click to place it; a compass at the top.
 
@@ -207,9 +207,9 @@ ground already overcharged, and with boxes against slopes that is most of them.
 | **I2** | Rubble and gathering; the inventory; the tools seen and swung | gathering by hand (done, 2026-11-02); the self-test's counts |
 | **I3** | Placing blocks | building by hand (done, 2026-11-02); the self-test's placing |
 | **I4** | Saving and loading: the start screen, autosave, save and quit | a world built in, quit, loaded back as it was (done, 2026-11-02); the self-test's reload |
-| **I5** | The HUD: hotbar, compass, prompt, menu; the look | the user's check (built 2026-11-03; captures at 840 x 520) |
-| **I6** | The loading screen (D15, D16); the eye eased over steps (D20) | a new world shows its progress and the window keeps drawing (built 2026-11-03); walking (the user's) |
-| **I7** | Drag to place, its preview and its price (D17-D19) | the self-test places a 3 x 1 x 1 box through the drag's path and checks its cells and that it cost what it filled (built 2026-11-03); building by hand (the user's) |
+| **I5** | The HUD: hotbar, compass, prompt, menu; the look | the user's check (done, 2026-11-03) |
+| **I6** | The loading screen (D15, D16); the eye eased over steps (D20) | a new world shows its progress and the window keeps drawing (built 2026-11-03); walking (the user's: done, 2026-11-03) |
+| **I7** | Drag to place, its preview and its price (D17-D19) | the self-test places a 3 x 1 x 1 box through the drag's path and checks its cells and that it cost what it filled (built 2026-11-03); building by hand (the user's: done, 2026-11-03) |
 
 ## Open questions
 

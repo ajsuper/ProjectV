@@ -1,6 +1,6 @@
 # restir-pt: a performance preset, and optimizations
 
-Status: **in progress** (2026-11-03): P0-P2 built; performance remade clean (D7-D9) after the user's look; P3 next. Asked for: restir-pt is unusable on the user's laptop; today's
+Status: **delivered** (2026-11-03): P0-P2 built, performance remade clean (D7-D9), approved by the user; **P3 deferred** (the user: graphics are fine as they are). Asked for: restir-pt is unusable on the user's laptop; today's
 configuration becomes the **quality** preset, and a simple **performance** preset is added, plus
 optimizations. The user's target for performance: **60 fps on the laptop, a softer image accepted**.
 
