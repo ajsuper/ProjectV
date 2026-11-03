@@ -109,7 +109,7 @@ The twelve shader experiments:
 | Plan | Status | What |
 |---|---|---|
 | [biome-canyonlands.md](biome-canyonlands.md) | approved; C1, C2 built | The terrain generator's first biome: a Colorado Plateau canyon network |
-| [island-demo.md](island-demo.md) | in progress (I0 paused; branch `island-demo`) | A generated island to break, gather and build with: tools, rubble into a hotbar, blocks placed back, a compass, saved worlds |
+| [island-demo.md](island-demo.md) | in progress (I0 built; branch `island-demo`) | A generated island to break, gather and build with: tools, rubble into a hotbar, blocks placed back, a compass, saved worlds |
 
 ## Infrastructure
 

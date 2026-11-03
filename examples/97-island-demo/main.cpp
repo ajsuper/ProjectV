@@ -1,7 +1,8 @@
 // ProjectV Island demo (docs/plans/island-demo.md)
 //
 // A generated island to break, gather and build with: hills, rock and trees made from a seed, walked in
-// first person, drawn with the renderer gallery's restir-pt. Built up milestone by milestone (I0: the
+// first person, drawn with the renderer gallery's restir-pt; grass and flowers, butterflies and falling
+// leaves. Built up milestone by milestone (I0: the
 // island and walking it).
 //
 //   ./island_demo                  a new island from a random seed (worlds/island-<seed>/)
@@ -16,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -37,6 +39,7 @@
 #include "ui/ui.h"
 #include "utils/compose_io.h"
 
+#include "critters.h"
 #include "island.h"
 
 namespace fs = std::filesystem;
@@ -142,7 +145,7 @@ namespace {
         // The island collides as its voxels' tile tables, read in place: nothing built at load.
         physics.collision.representation = projv::utils::CollisionRepresentation::Tiles;
         // A break's small pieces are cheap debris: drawn, falling, gathered (D7), never in the solver.
-        physics.debris.maxVoxels = 64;
+        physics.debris.maxVoxels = 512;   // 64 voxels of 0.25 m: the same size of piece
         physics.debris.seconds = 60.0f;
         physics.maxPieces = 1500;
         physics.fracture.minImpactBreak = 2.0f;
@@ -172,9 +175,21 @@ namespace {
         character.strength = 600.0f;
         world.emplace<projv::CharacterController>(player.walker, character);
         world.emplace<projv::CollisionGroups>(player.walker, projv::CollisionGroups{{"player"}, {}, 0});
-        // Facing the island's middle.
-        const vec3 d = vec3(island::CENTRE, at.y, island::CENTRE) - at;
-        player.yaw = glm::length(d) > 1.0f ? std::atan2(d.z, d.x) : 0.0f;
+        // Facing the most open view: the direction the ground stays under eye height the furthest.
+        float best = -1.0f;
+        for (int i = 0; i < 24; i++) {
+            const float yaw = float(i) / 24.0f * 6.2831853f;
+            float clear = 0.0f;
+            for (float r = 2.0f; r <= 40.0f; r += 2.0f) {
+                const float x = at.x + std::cos(yaw) * r, z = at.z + std::sin(yaw) * r;
+                if (island::surfaceAt(x, z, island.seed) > at.y + EYE + r * 0.1f) break;
+                clear = r;
+            }
+            if (clear > best) {
+                best = clear;
+                player.yaw = yaw;
+            }
+        }
         player.eye = at + vec3(0.0f, EYE, 0.0f);
     }
 
@@ -209,6 +224,11 @@ namespace {
         runtime::setCharacterInput(world, player.walker, player.velocity, input.pressed(projv::Key::Space), 5.5f);
     }
 
+    // Butterflies and falling leaves (critters.h): written to Transforms before the bridge reads them.
+    void life(projv::Application& app) {
+        critters::update(app.world, app.time().delta, app.world.ctx().get<Player>().eye);
+    }
+
     // After physics presents: the eye where the walker is drawn.
     void camera(projv::Application& app) {
         Player& player = app.world.ctx().get<Player>();
@@ -227,6 +247,14 @@ namespace {
         if (const char* view = std::getenv("ISLAND_VIEW"); view && std::string(view) == "overview") {
             eye = vec3(island::CENTRE - 30.0f, 85.0f, -55.0f);
             look = glm::normalize(vec3(island::CENTRE, 10.0f, island::CENTRE * 0.9f) - eye);
+        }
+        // ISLAND_LOOK="x,y,z,tx,ty,tz": the eye at x,y,z looking at tx,ty,tz (for captures).
+        if (const char* at = std::getenv("ISLAND_LOOK")) {
+            float v[6];
+            if (std::sscanf(at, "%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) == 6) {
+                eye = vec3(v[0], v[1], v[2]);
+                look = glm::normalize(vec3(v[3], v[4], v[5]) - eye);
+            }
         }
         world.ctx().get<Restir>().draw(world, renderInstance, eye, look);
         projv::graphics::renderConstructedRenderer(renderInstance, renderInstance.getActiveRenderer(), &gpu);
@@ -253,13 +281,14 @@ namespace {
         if (!loadIsland(app, here)) std::exit(1);
         installWorld(app, here);
         spawnPlayer(world);
+        critters::install(world, world.ctx().get<Island>().seed, world.ctx().get<Player>().eye);
 
         if (!restir_pt::install(renderInstance)) std::exit(1);
         Restir& restir = world.ctx().emplace<Restir>();
         restir.scene.finest = island::VOXEL;
         restir.scene.radius = island::SIZE * 0.75f;
         restir.scene.ground = 0.0f;
-        restir.scene.height = island::HEIGHT;
+        restir.scene.height = 80.0f;   // the clouds are up to 80 m
         world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(world.ctx().get<projv::Scene>()));
         glfwSetWindowTitle(renderInstance.window, ("ProjectV Island  |  seed " + std::to_string(world.ctx().get<Island>().seed)).c_str());
     }
@@ -280,6 +309,7 @@ int main(int argc, char** argv) {
     projv::Application app;
     app.addSystem(projv::Stage::Startup, "startup", startup);
     app.addSystem(projv::Stage::Update, "controls", controls);
+    app.addSystem(projv::Stage::Update, "life", life);
     app.addSystem(projv::Stage::PostUpdate, "camera", camera, {.after = "physics: present"});
     app.addSystem(projv::Stage::Render, "render", render);
     app.addSystem(projv::Stage::Shutdown, "shutdown", shutdown);

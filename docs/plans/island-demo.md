@@ -1,6 +1,6 @@
 # Island demo: break it, gather it, build with it
 
-Status: **in progress** (2026-11-02): I0 started, paused mid-way -- see [Hand-off](#hand-off-2026-11-02). Asked for: "the most advanced example yet" -- a procedurally generated
+Status: **in progress** (2026-11-02): I0 built (on the branch `island-demo`); I1 next. Asked for: "the most advanced example yet" -- a procedurally generated
 sandbox with hills, rock and trees; tools to break the world; E to collect the rubble you look at into
 a hotbar beside the tools; a click to place it; a compass at the top.
 
@@ -8,7 +8,7 @@ Decided with the user (2026-11-02): **single player**; **a generated island**, a
 **restir-pt**; rubble placed as **blocks of its material**; two tools, a **pickaxe** (the big one) and a
 **chisel** (one voxel, dropped as rubble); **worlds saved and loaded** -- a start screen to make a new
 one or pick a saved one, autosaved as you play and when you quit -- in the build folder (it shows how
-such a system works; nobody's progress is at stake); **192 m at 0.25 m**; **a pixel-art look** for its
+such a system works; nobody's progress is at stake); **192 m at 0.125 m** (0.25 m at first: too coarse, "a giant on a mountain"); **a pixel-art look** for its
 menus and HUD, not the other demos' frosted glass; the name **island demo**.
 
 Folder `examples/97-island-demo`, target `island_demo` (a `_demo`: many features at once, a full
@@ -28,24 +28,28 @@ renderer). Everything it needs is in the engine already; what it adds is the gam
 ## Decisions
 
 **D1. One program, one island, generated at startup.** A seed (`--seed n`, shown in the menu) makes a
-deterministic island: a fBm heightfield under a radial falloff into the sea, beaches at the edge, rock
-where it is steep or high, grass over dirt elsewhere, trees in clumps away from the shore and the rock.
+deterministic island from a **3D density field** -- rolling hills and rounded mountains under a radial
+falloff into the sea, plus a strong, warped, vertically squashed 3D noise (shelves, overhangs) and
+carved tunnels and chambers (arches where they cut a slope, caves where they do not). The user asked for
+it whimsical and "somewhat over the top", round and soft: no ruled lines, no strata, no cell noise.
 Generated on worker threads into **one Grid component** (one lattice-aligned world is one grid), cell
 by cell, before the first frame; a loading line in the window while it runs. *Why:* the user chose a
 fixed island; everything loaded means breaking, rubble and placing never meet an unloaded cell.
 
-**D2. Size: 192 m across at 0.25 m voxels**: 768 x 768 voxels, 64 m tall, in grid cells of 64^3
-(12 x 4 x 12). *Why:* 0.25 m is fine enough that a pickaxe's rubble
-looks like rubble and a block is a sensible size, coarse enough that the island generates in seconds
-and the tile tables keep the solid ground cheap. (Open question 1.)
+**D2. Size: 192 m across at 0.125 m voxels**: 1536 x 1536 voxels, 56 m tall, in grid cells of 64^3
+(24 x 7 x 24). *Why:* at 0.25 m the player was seven voxels tall and the world read as giant-sized; the
+user asked for twice as fine. It still generates in about 2.5 s (the density sampled on a 0.5 m lattice
+and interpolated, a cheap fine noise added per voxel near the surface) and saves as about 190 MB.
 
-**D3. Trees are part of the island**, generated in place: a trunk of wood, a crown of leaves, each tree
-different (height, lean, crown size) from the seed. Wood and leaves break as wood and leaves; cut a
+**D3. Trees are part of the island**, generated in place, each different from the seed: broadleaf trees
+(6-9 lumpy leaf clusters in a wide dome, each on a branch; some blossom, some autumn, some with fruit),
+pines (tiered drooping skirts), bushes (some with berries). Forests close overhead in their hearts; a
+crown's underside keeps 2.7 m clear, since leaves are ground. Wood and leaves break as wood and leaves; cut a
 trunk and the crown, unsupported, falls (`splits`; the ground is the anchor). *Why:* the same grid,
 the same break and support rules as the ground -- no second kind of thing.
 
-**D4. Materials: six, each with a physics material** (`physics_materials.json` beside the program):
-grass, dirt, sand, stone, wood, leaves -- strength, density, fracture pattern each (stone shatters,
+**D4. Materials: seven, each with a physics material** (`physics_materials.json` beside the program):
+grass, dirt, sand, stone, wood, leaves, mushroom -- strength, density, fracture pattern each (stone shatters,
 wood splinters, dirt and sand crumble, leaves crumble easily). The island's palette has a few shades
 of each, every shade naming its material's physics. *Why:* breaking needs a strength; counting
 rubble needs a material per voxel.
@@ -79,6 +83,18 @@ lattice, into the island grid itself (`editVoxels`, the material's own palette e
 block is ground like any other: walk on it, break it, gather it again. Not inside yourself, not
 floating free (it must touch something). *Why:* the user chose blocks of the material; editing the
 island keeps one world.
+
+**D12. Grass and flowers are a second component with no collider** (`plants`, `plants.data` beside
+`island.data`): blades, flowers, reeds, small mushrooms, pebbles and shells, hanging vines, glowing
+mushrooms in caves. Drawn, never collided with. *Why:* the engine has no non-colliding physics material,
+and blades in the island's grid would trip the walker and the tools. *Cost:* breaking the ground leaves
+its plants floating; I1 clears the plants over what a strike removes. The ground's props -- boulders,
+fallen logs, stumps, driftwood, giant mushrooms (climbable) -- are in the island grid.
+
+**D13. Life is looks only** (`critters.h`): butterflies and bees over the flower fields, leaves falling
+from trees near the player, rabbits hopping in the meadows, gulls circling, clouds and dandelion fluff on
+the wind. Each is a few voxels in a component of its own, moved through its entity's Transform (the
+engine has no particles). Not physics, not saved. *Why:* the user found the island "empty and unalive".
 
 **D9. The HUD is documents, in a pixel-art style of its own** (`ui/` beside it; not the shared
 frosted look -- the user asked for pixel art): a pixel font (an OFL one, added at I5), hard edges, no
@@ -121,7 +137,7 @@ means a saved island is an ordinary scene.
 
 | | What | Proven by |
 |---|---|---|
-| **I0** | The island: generator, materials, grid, restir-pt; walking it | a capture from the shore; seeds give different islands |
+| **I0** | The island: generator, materials, grid, restir-pt; walking it; plants and life | the user's walk (done, 2026-11-02); seeds give different islands |
 | **I1** | Tools and breaking: the pickaxe, the chisel; trees fall | breaking by hand; the self-test's break |
 | **I2** | Rubble and gathering; the inventory | the prompt, gathering by hand; the self-test's counts |
 | **I3** | Placing blocks | building by hand; the self-test's placing |
@@ -130,77 +146,25 @@ means a saved island is an ordinary scene.
 
 ## Open questions
 
-None. Answered 2026-11-02: 192 m at 0.25 m; the name; saves in the build folder; the chisel's voxel is
+None. Answered 2026-11-02: 192 m (at 0.25 m, then 0.125 m: D2); the name; saves in the build folder; the chisel's voxel is
 rubble; the menus and HUD pixel art.
 
-## Hand-off (2026-11-02)
+## As built
 
-Paused at the user's request to continue on another computer. The work is on the branch
-**`island-demo`** (not `main`: I0 is not finished). `main` has this plan up to its approval.
-
-```bash
-git fetch && git checkout island-demo
-git submodule update --init --recursive        # RmlUi and FreeType arrived with ui.md U3
-cmake --preset dev && cmake --build --preset dev -j$(nproc)
-cd build/examples/island_demo && ./island_demo --seed 42
-ISLAND_VIEW=overview ISLAND_CAPTURE=/tmp/isl ./island_demo --seed 42   # a still from above, then it exits
-```
-
-**What is built** (`examples/97-island-demo/`):
+**I0** (2026-11-02, branch `island-demo`). `examples/97-island-demo/`:
 
 | File | What |
 |---|---|
-| `island.h` | The generator: seed in, world folder out (`worlds/island-<seed>/`: `compose.json`, `island.data`, one grid of 64^3 cells at 0.25 m, 12 x 4 x 12). A **2D heightfield** (fBm under a radial falloff into the sea), beaches, rock on steep or high ground, grass over dirt, a one-voxel sea, procedural trees stamped per cell. Fifteen palette shades, each naming a physics material. Generates in about 1 s (seed 42: 196 of 576 cells non-empty, 22 MB) |
-| `main.cpp` | Generates the folder if it is missing, then loads it (D11's path: a new world and a saved one load the same way); physics with tile collision, cheap debris (64 voxels), impact fracture; the island a `StaticCollider` with `splits` and `anchorBase`; a first-person `CharacterController` walker; restir-pt as Voxel Mayhem draws it. `--seed n`, `ISLAND_CAPTURE`, `ISLAND_VIEW=overview` |
-| `physics_materials.json` | grass, dirt, sand (crumble), stone (shatter), wood (splinter, grain up), leaves (weak), water (unbreakable) |
-| `CMakeLists.txt` | target `island_demo`; stages restir-pt from `30-renderers` and the shared UI (`SHARED_UI`) |
+| `island.h` | The generator (D1-D4, D12): seed in, world folder out (`worlds/island-<seed>/`: `compose.json`, `island.data`, `plants.data`). Column-major jobs (24 x 24, all seven cells high), the density on a 0.5 m lattice; materials from depth under the surface and its normal, every threshold wavering with noise; rock bumped a voxel or two; regions (rocky, forest, meadow); trees, boulders and props stamped from global lists. Seed 42: about 1130 ground cells, 200 trees, 80 boulders, 130 props, in about 2.5 s |
+| `critters.h` | The life (D13) |
+| `main.cpp` | Generates the folder if missing, then loads it; physics with tile collision, cheap debris (512 voxels: the same size of piece as 64 at 0.25 m), impact fracture; the island a `StaticCollider` with `splits` and `anchorBase` (the plants are not spawned: no collider); a first-person walker spawned clear of crowns, facing its most open view; restir-pt. `--seed n`, `ISLAND_CAPTURE`, `ISLAND_VIEW=overview`, `ISLAND_LOOK="x,y,z,tx,ty,tz"` |
+| `physics_materials.json` | grass, dirt, sand, stone, mushroom, wood, leaves, water |
 
-Checked: it builds, generates seed 42, and draws the island from above (green hills, a sand rim,
-round-crowned trees, a flat blue sea). Walking was not yet checked by hand.
+Notes for I1 on:
 
-**The user's last request, not yet done:** "use a 3D noise with a rock texture and more verticality
-and trees". The rework that was about to be written:
-
-- **A 3D density field** instead of the heightfield: solid where `base(x, z) - y + A * noise3(x, y, z) > 0`.
-  `base` taller and ridged (`1 - |noise|` octaves; peaks near 50 m, under the 64 m ceiling) so there
-  are mountains and cliffs; the 3D term (A about 6-10 m, stronger where the ground is steep) makes
-  overhangs and ledges. The island mask still takes it down into the sea. Evaluated only in the band
-  where the surface can be (`base +- A`): solid below it, air above, so the cost stays near the
-  heightfield's.
-- **Column-major generation**: a job per column of cells (12 x 12 jobs, four cells high each), since a
-  voxel's material depends on its depth under the surface above it, which may be in a higher cell.
-  Per column: the solid run from the density, then materials top down by depth from the last air.
-- **Materials from the surface's normal**: the density's gradient at each air-to-solid crossing (six
-  more samples, once per surface, reused down its run). Facing sideways (normal.y under about 0.65),
-  or high (over about 38 m): rock. Gentle near the sea: sand. Else grass on top, dirt to about 3 m,
-  stone below.
-- **A rock texture**: five or six stone shades in strata -- banded by height, warped by 2D noise --
-  with darker cracks, so a cliff reads as layered rock.
-- **More trees**: candidates every 4 m instead of 7, higher odds; each stands on the real surface,
-  found by walking the density down from the top at its (x, z); only on gentle grass below the rock
-  line.
-- `spawnPoint` then finds its ground the same way.
-
-**Then the rest of I0**: walk it by hand (the user checks I0 by eye), then commit I0 and go on to
-I1-I5 as above. One commit per milestone, on `main` once a milestone is finished (this branch merges
-then).
-
-**Working agreements with this user** (from the sessions that made this; also in `AGENTS.md`):
-
-- Plans first, agreed before code; one commit per milestone with its tests and docs; push after
-  each. **Stage explicit paths**, never `git add -A` (other sessions share the tree). Never
-  force-push `main`; fetch before pushing.
-- **Ask the user to look**: anything visual or felt (a renderer's look, a menu's feel) is the user's
-  call. Unattended captures (`*_CAPTURE` variables, `bgfx::requestScreenShot`) are fine; do not
-  screenshot the user's screen without asking.
-- The engine ships mechanisms, not looks: a look belongs to the program's files.
-- The island's HUD is **pixel art** (D9), not the frosted look of the other demos.
-- On the user's main machine the display is Wayland at 170% scaling: GLFW's framebuffer is 1.7x
-  the window and bgfx's back buffer is the window's size. Anything clipped or offset by about 1.7x
-  is that. Another machine may differ.
-
-**Open elsewhere** (not this demo's): ui.md U6 not started (gamepads, a document on a texture,
-MSDF); [known-latent-issues.md](known-latent-issues.md) #17 (one hit in the physics example's first
-demo wakes every block); the vendored RmlUi and FreeType untested in an install and the vcpkg preset;
-the physics example's `DEMOS_SELFTEST` not run since ui.md U5 changed its startup; the basic renderer
-has no sun shadows (asked about, not planned).
+- A world folder is made only when missing: after a generator change, delete `worlds/` (or the old
+  island loads).
+- Runs that capture often die on exit (a segfault or FPE in bgfx's Vulkan present, in the NVIDIA
+  driver), after the capture is written: pre-existing, not this program's.
+- Working agreements: plans first; one commit per milestone; stage explicit paths; ask the user to look
+  at anything visual; the HUD is pixel art (D9).

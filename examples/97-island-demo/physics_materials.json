@@ -6,6 +6,7 @@
         { "name": "sand",   "density": 1600, "friction": 0.7, "restitution": 0.0, "strength": 12000, "fracture": "crumble", "shardSize": 0.4 },
         { "name": "stone",  "density": 2500, "friction": 0.7, "restitution": 0.05, "strength": 60000, "fracture": "shatter", "shardSize": 0.5 },
         { "name": "wood",   "density": 650,  "friction": 0.6, "restitution": 0.1, "strength": 35000, "fracture": "splinter", "shardSize": 0.5, "grain": [0, 1, 0] },
+        { "name": "mushroom", "density": 400,  "friction": 0.7, "restitution": 0.2, "strength": 8000,  "fracture": "crumble", "shardSize": 0.4 },
         { "name": "leaves", "density": 200,  "friction": 0.5, "restitution": 0.0, "strength": 4000,  "fracture": "crumble", "shardSize": 0.4 },
         { "name": "water",  "density": 1000, "friction": 0.3, "restitution": 0.0 }
     ]
