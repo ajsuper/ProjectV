@@ -46,6 +46,7 @@ namespace tools {
     constexpr float PICKAXE_SHARD = 0.25f;     // m: the size it breaks to
     constexpr float PICKAXE_EVERY = 0.45f;     // s between strikes, held: one swing
     constexpr float CHISEL_EVERY = 0.2f;
+    constexpr int   HOTBAR = 9;                // slots: two tools, seven materials
     constexpr float PICKAXE_IMPACT = 0.16f;    // s into the swing that it lands
     constexpr float CHISEL_IMPACT = 0.06f;
     // Of a pickaxe strike's shards, this share is kept as rubble; the rest go as dust. Each kept one
@@ -82,7 +83,10 @@ namespace tools {
     }
 
     struct Tools {
-        Tool   selected = Tool::Pickaxe;
+        // The hotbar slot in hand: 0 the pickaxe, 1 the chisel, 2.. the materials (build.h places them).
+        int    slot = 0;
+        Tool   selected = Tool::Pickaxe;   // the tool in slot 0 or 1 (the last one held)
+        bool   holdingTool() const { return slot < int(Tool::Count); }
         float  cooldown = 0.0f;
         Entity island = projv::NullEntity, walker = projv::NullEntity;
         projv::ComponentHandle plants = projv::INVALID_COMPONENT_HANDLE;
@@ -239,10 +243,14 @@ namespace tools {
     inline void update(World& world, const projv::Input& input, float dt, vec3 eye, vec3 forward, bool use) {
         Tools& t = world.ctx().get<Tools>();
         if (!input.wantCaptureKeyboard) {
-            if (input.pressed(projv::Key::Num1)) t.selected = Tool::Pickaxe;
-            if (input.pressed(projv::Key::Num2)) t.selected = Tool::Chisel;
+            const projv::Key keys[] = {projv::Key::Num1, projv::Key::Num2, projv::Key::Num3, projv::Key::Num4, projv::Key::Num5,
+                                       projv::Key::Num6, projv::Key::Num7, projv::Key::Num8, projv::Key::Num9};
+            for (int k = 0; k < HOTBAR; k++)
+                if (input.pressed(keys[k])) t.slot = k;
         }
-        if (input.scroll.y != 0.0f) t.selected = Tool((int(t.selected) + (input.scroll.y < 0.0f ? 1 : int(Tool::Count) - 1)) % int(Tool::Count));
+        if (input.scroll.y != 0.0f) t.slot = (t.slot + (input.scroll.y < 0.0f ? 1 : HOTBAR - 1)) % HOTBAR;
+        if (t.holdingTool()) t.selected = Tool(t.slot);
+        if (!t.holdingTool()) use = false;   // a block in hand: build.h
         t.time += dt;
         t.cooldown = std::max(0.0f, t.cooldown - dt);
         const std::optional<Aim> a = aim(world, eye, forward, t.walker);

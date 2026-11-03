@@ -20,6 +20,7 @@
 #include "utils/editing.h"
 #include "utils/scene_query.h"
 
+#include "build.h"
 #include "critters.h"
 #include "island.h"
 #include "tools.h"
@@ -44,8 +45,12 @@ namespace fx {
         float  spin = 0.0f;
         uint8_t slot = 0xff;              // the colour it has now
     };
+    constexpr float HELD_BLOCK_VOXEL = 0.035f;   // the block in hand: 4 of them a side, 14 cm
+
     struct Fx {
-        Entity pickaxe = projv::NullEntity, chisel = projv::NullEntity;
+        Entity pickaxe = projv::NullEntity, chisel = projv::NullEntity, block = projv::NullEntity;
+        projv::ComponentHandle blockComponent = projv::INVALID_COMPONENT_HANDLE;
+        std::string blockMaterial;   // what the block in hand is shaded as now
         std::vector<Particle> particles;
         size_t next = 0;
         critters::Random random{12345u};
@@ -130,8 +135,25 @@ namespace fx {
         std::vector<std::pair<Entity*, projv::ComponentHandle>> link;
         heldTool(scene, "pickaxe (held)", pickaxeVoxels(), link, f.pickaxe);
         heldTool(scene, "chisel (held)", chiselVoxels(), link, f.chisel);
-        // The particles: each a chunk with the island's palette, its one voxel set by slot when it is used.
         const std::vector<projv::Material> palette = scene.components[islandComponent].materialPalette;
+        // The block in hand: 4 x 4 x 4 voxels on the island's palette, reshaded when the material changes.
+        {
+            const projv::ComponentHandle a = critters::asset(scene, "block (held)", projv::INVALID_COMPONENT_HANDLE);
+            f.blockComponent = critters::chunk(scene, "block (held) voxels", a, HELD_BLOCK_VOXEL, -vec3(2.0f) * HELD_BLOCK_VOXEL, {}, 4);
+            scene.components[f.blockComponent].materialPalette = palette;
+            scene.components[f.blockComponent].paletteVersion++;
+            std::vector<projv::PendingVoxelOp> ops;
+            for (int z = 0; z < 4; z++)
+                for (int y = 0; y < 4; y++)
+                    for (int x = 0; x < 4; x++) {
+                        projv::PendingVoxelOp op{true, ivec3(x, y, z), 0};
+                        op.slot = uint8_t(island::Dirt0);
+                        ops.push_back(op);
+                    }
+            projv::utils::queueVoxelAdd(scene, f.blockComponent, ops);
+            link.push_back({&f.block, a});
+        }
+        // The particles: each a chunk with the island's palette, its one voxel set by slot when it is used.
         std::vector<projv::ComponentHandle> handles;
         for (int i = 0; i < PARTICLES; i++) {
             const projv::ComponentHandle h =
@@ -191,7 +213,7 @@ namespace fx {
         const vec3 sway = right * (0.012f * std::sin(f.bob)) + up * (0.01f * std::abs(std::cos(f.bob)));
 
         // The swing: back a little, down hard to the strike, and back up; the chisel jabs forward instead.
-        const bool pick = t.selected == tools::Tool::Pickaxe;
+        const bool pick = t.holdingTool() && t.selected == tools::Tool::Pickaxe;
         float angle = 0.0f, jab = 0.0f;
         if (t.swing >= 0.0f) {
             const float impact = t.swingTool == tools::Tool::Pickaxe ? tools::PICKAXE_IMPACT : tools::CHISEL_IMPACT;
@@ -207,8 +229,25 @@ namespace fx {
         // At rest the tool leans forward and in, the head up and to the front.
         const quat rest = glm::angleAxis(-0.35f, vec3(1, 0, 0)) * glm::angleAxis(0.25f, vec3(0, 0, 1)) * glm::angleAxis(0.4f, vec3(0, 1, 0));
         const quat held = view * glm::angleAxis(angle, vec3(1, 0, 0)) * rest;
-        place(world, f.pickaxe, pick ? grip : HIDDEN, held);
-        place(world, f.chisel, pick ? HIDDEN : grip, held);
+        const bool tool = t.holdingTool();
+        place(world, f.pickaxe, tool && pick ? grip : HIDDEN, held);
+        place(world, f.chisel, tool && !pick ? grip : HIDDEN, held);
+        // A material in hand: a little block of it, reshaded when the material changes.
+        if (const char* material = build::materialOf(t.slot); material && f.blockMaterial != material) {
+            std::vector<projv::PendingVoxelOp> ops;
+            for (int z = 0; z < 4; z++)
+                for (int y = 0; y < 4; y++)
+                    for (int x = 0; x < 4; x++) {
+                        projv::PendingVoxelOp op{true, ivec3(x, y, z), 0};
+                        op.slot = build::shadeAt(material, ivec3(x, y, z));
+                        ops.push_back(op);
+                    }
+            projv::utils::queueVoxelAdd(scene, f.blockComponent, ops);
+            projv::utils::updateScene(scene);
+            f.blockMaterial = material;
+        }
+        const quat blockHeld = view * glm::angleAxis(angle * 0.5f, vec3(1, 0, 0)) * glm::angleAxis(0.6f, vec3(0, 1, 0)) * glm::angleAxis(0.2f, vec3(1, 0, 0));
+        place(world, f.block, tool ? HIDDEN : grip + up * 0.08f, blockHeld);
 
         // Bursts: particles from the pool, coloured by slot (one voxel edit each, applied together).
         bool edited = false;

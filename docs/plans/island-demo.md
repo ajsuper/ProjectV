@@ -1,6 +1,6 @@
 # Island demo: break it, gather it, build with it
 
-Status: **in progress** (2026-11-02): I0-I2 built (on the branch `island-demo`); I3 next. Asked for: "the most advanced example yet" -- a procedurally generated
+Status: **in progress** (2026-11-02): I0-I3 built (on the branch `island-demo`); I4 next. Asked for: "the most advanced example yet" -- a procedurally generated
 sandbox with hills, rock and trees; tools to break the world; E to collect the rubble you look at into
 a hotbar beside the tools; a click to place it; a compass at the top.
 
@@ -156,7 +156,7 @@ means a saved island is an ordinary scene.
 | **I0** | The island: generator, materials, grid, restir-pt; walking it; plants and life | the user's walk (done, 2026-11-02); seeds give different islands |
 | **I1** | Tools and breaking: the pickaxe, the chisel; trees fall | breaking by hand (done, 2026-11-02); the self-test's break |
 | **I2** | Rubble and gathering; the inventory; the tools seen and swung | gathering by hand (done, 2026-11-02); the self-test's counts |
-| **I3** | Placing blocks | building by hand; the self-test's placing |
+| **I3** | Placing blocks | building by hand (done, 2026-11-02); the self-test's placing |
 | **I4** | Saving and loading: the start screen, autosave, save and quit | a world built in, quit, loaded back as it was; the self-test's reload |
 | **I5** | The HUD: hotbar, compass, prompt, menu; the look | the user's check |
 
@@ -203,7 +203,15 @@ the island's link policy). `tools.h`: the 30% rubble share, swings (the strike l
 gathers a pickaxe strike's rubble and checks it comes to about what was broken (seed 42: 406 of 422
 voxels). `ISLAND_PITCH`, `ISLAND_SWING_FRAME` are for captures.
 
-Notes for I3 on:
+**I3** (2026-11-02). `build.h`: the hotbar is nine slots (1 pickaxe, 2 chisel, 3-9 the materials in
+`gather::MATERIALS` order; the wheel cycles). A material in hand places a 0.5 m block on a 0.5 m grid in
+the cell just outside the aimed face (`runtime::editVoxels` into the island, each voxel one of the
+material's palette shades), only into empty voxels, never inside the walker, never on anything but the
+island; it costs 64 voxels and clears the plants in its cell. The block in hand is drawn (`fx.h`). The
+self-test places three blocks and checks the cells are full and 192 voxels were spent. No placement
+preview yet.
+
+Notes for I4 on:
 
 - A world folder is made only when missing: after a generator change, delete `worlds/` (or the old
   island loads).

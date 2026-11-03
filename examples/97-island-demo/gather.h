@@ -176,10 +176,10 @@ namespace gather {
     // The inventory as a line of text (a placeholder for I5's hotbar).
     inline std::string inventoryText(const Inventory& inventory) {
         std::string out;
-        for (const char* m : MATERIALS) {
-            const double b = inventory.blocks(m);
+        for (size_t i = 0; i < std::size(MATERIALS); i++) {
+            const double b = inventory.blocks(MATERIALS[i]);
             if (b <= 0.0) continue;
-            out += (out.empty() ? "" : "   ") + std::string(m) + " " + blocksText(b * VOXELS_PER_BLOCK);
+            out += (out.empty() ? "" : "   ") + ("[" + std::to_string(i + 3) + "] ") + MATERIALS[i] + " " + blocksText(b * VOXELS_PER_BLOCK);
         }
         return out;
     }

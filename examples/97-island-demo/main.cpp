@@ -43,6 +43,7 @@
 #include "ui/user.h"
 #include "utils/compose_io.h"
 
+#include "build.h"
 #include "critters.h"
 #include "fx.h"
 #include "gather.h"
@@ -101,6 +102,9 @@ namespace {
         int   step = 0, wait = 0, tries = 0;
         int   shardsBefore = 0, breaksBefore = 0;
         vec3  struck{0.0f};      // where the pickaxe hit the ground
+        std::string material;    // what the blocks are built of
+        double before = 0.0;     // the inventory of it before
+        std::vector<projv::core::ivec3> blocks;   // the cells built in
         bool  failed = false;
         std::string report;
     };
@@ -267,9 +271,15 @@ namespace {
         // ISLAND_SWING_FRAME=n: one swing at frame n (for a capture of the swing and its particles).
         if (const char* at = std::getenv("ISLAND_SWING_FRAME"); at && app.frameCount == uint64_t(std::atoi(at))) use = true;
         tools::update(world, input, app.time().unscaledDelta, player.eye, player.forward(), use);
+        build::update(world, app.time().unscaledDelta, player.eye, player.forward(), use);
         Hud& hud = world.ctx().get<Hud>();
         const tools::Tools& t = world.ctx().get<tools::Tools>();
-        hud.tool = std::string("[") + (t.selected == tools::Tool::Pickaxe ? "1" : "2") + "] " + tools::toolName(t.selected);
+        if (const char* material = build::materialOf(t.slot)) {
+            const double have = world.ctx().get<gather::Inventory>().blocks(material);
+            hud.tool = "[" + std::to_string(t.slot + 1) + "] " + material + " block" + (have < 1.0 ? "  (none left)" : "");
+        } else {
+            hud.tool = "[" + std::to_string(t.slot + 1) + "] " + tools::toolName(t.selected);
+        }
         hud.aiming = t.aiming;
         gather::update(world, input, app.time().unscaledDelta, player.eye, player.forward(), input.cursorCaptured && !world.ctx().get<SelfTest>().on);
         hud.prompt = world.ctx().get<gather::Gather>().prompt;
@@ -363,6 +373,45 @@ namespace {
             case 21: {
                 const gather::Gather& g = world.ctx().get<gather::Gather>();
                 check(st, g.pulling.empty(), "and the pieces pulled in are gone");
+                st.step = 22;
+                break;
+            }
+            case 22: {   // three blocks of what there is most of, on the ground round the start
+                gather::Inventory& inventory = world.ctx().get<gather::Inventory>();
+                for (const char* m : gather::MATERIALS)
+                    if (st.material.empty() || inventory.voxels[m] > inventory.voxels[st.material]) st.material = m;
+                st.before = inventory.voxels[st.material];
+                build::Build& b = world.ctx().get<build::Build>();
+                const vec3 f = glm::normalize(vec3(player.forward().x, 0.0f, player.forward().z)), r(-f.z, 0.0f, f.x);
+                const vec3 spots[3] = {spawn + f * 2.6f - r * 1.6f, spawn + f * 2.6f + r * 1.6f, spawn + f * 3.6f};
+                for (const vec3& spot : spots) {
+                    const vec3 target = spot - vec3(0.0f, 3.0f, 0.0f);
+                    const auto hit = runtime::castRay(world, spawn, glm::normalize(target - spawn), 8.0f, 0xffffffffu, t.walker);
+                    if (!hit || hit->entity != t.island) continue;
+                    const projv::core::ivec3 cell = build::cellFor(hit->position, hit->normal);
+                    if (build::place(world, b, st.material, cell)) st.blocks.push_back(cell);
+                }
+                check(st, st.blocks.size() == 3, "three " + st.material + " blocks placed (" + std::to_string(st.blocks.size()) + ")" +
+                                                     (b.refused.empty() ? "" : "; " + b.refused));
+                st.wait = 20;
+                st.step = 23;
+                break;
+            }
+            case 23: {
+                auto& scene = world.ctx().get<projv::Scene>();
+                const projv::SceneGrid* ground = build::gridOf(world, island.component);
+                int full = 0;
+                for (const projv::core::ivec3& cell : st.blocks) {
+                    int solid = 0;
+                    for (int z = 0; z < build::BLOCK; z++)
+                        for (int y = 0; y < build::BLOCK; y++)
+                            for (int x = 0; x < build::BLOCK; x++) solid += tools::plantAt(scene, *ground, cell + projv::core::ivec3(x, y, z)) ? 1 : 0;
+                    if (solid == build::BLOCK * build::BLOCK * build::BLOCK) full++;
+                }
+                check(st, full == int(st.blocks.size()) && full > 0, "they are in the island (" + std::to_string(full) + " cells full)");
+                const double spent = st.before - world.ctx().get<gather::Inventory>().voxels[st.material];
+                check(st, std::abs(spent - 3.0 * gather::VOXELS_PER_BLOCK) < 1e-6,
+                      "and cost " + std::to_string(int(spent)) + " voxels of " + st.material + " (64 a block)");
                 st.step = 4;
                 break;
             }
@@ -491,6 +540,7 @@ namespace {
         critters::install(world, world.ctx().get<Island>().seed, world.ctx().get<Player>().eye);
         tools::install(app, world.ctx().get<Island>().entity, world.ctx().get<Island>().plants, world.ctx().get<Player>().walker);
         gather::install(world);
+        build::install(world);
         fx::install(world, world.ctx().get<Island>().component);
         world.ctx().emplace<SelfTest>().on = std::getenv("ISLAND_SELFTEST") != nullptr;
 
