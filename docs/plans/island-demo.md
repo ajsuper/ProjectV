@@ -1,6 +1,6 @@
 # Island demo: break it, gather it, build with it
 
-Status: **in progress** (2026-11-03): I0-I5 built (on the branch `island-demo`); I5 awaits the user's look. Asked for: "the most advanced example yet" -- a procedurally generated
+Status: **in progress** (2026-11-03): I0-I5 built (on the branch `island-demo`); I6 and I7 proposed. Asked for: "the most advanced example yet" -- a procedurally generated
 sandbox with hills, rock and trees; tools to break the world; E to collect the rubble you look at into
 a hotbar beside the tools; a click to place it; a compass at the top.
 
@@ -154,6 +154,50 @@ means a saved island is an ordinary scene.
 
 
 
+## Loading and building, reviewed (2026-11-03)
+
+Asked for: look at the gameplay and at loading into a game, and add a **Scrap Mechanic-style drag** to place
+a line, plane or volume of blocks -- very simple. What was found, on the laptop (16 cores, Radeon 860M):
+
+| | Now | |
+|---|---|---|
+| A new world | generated in **16.9 s** before the first frame: the window is blank and frozen, no word of what is happening | D1 planned "a loading line in the window"; it was never built. The 2.5 s in D2 was the desktop |
+| Choosing a world | the window closes and opens again (D11's relaunch), then freezes for the load | the relaunch stays (it is what keeps the driver up) |
+| A saved world | about **3 s** frozen; most of it `createTexturesForScene`, whose textures are made at their largest (about 3.2 GB) whatever the scene -- and twice under `--world`: an empty set at startup, then the world's | |
+| Placing | one 0.5 m block a click (four a second, held), **no preview** of where it goes; 64 voxels a block even where most of its cell was already ground | I3 left the preview for later |
+
+**D15. A loading screen.** From the first frame, a board like the menus' (D9) says what is happening --
+"Making the island" with how much of it is done (the generator's column jobs, of 576), then "Loading" --
+while the generation and the disk read run on a worker thread and the window keeps drawing. The relaunch's
+new program opens straight onto it. *Why:* 17 s of a frozen window reads as a crash.
+
+**D16. The GPU's copy stays as it is, for now** (revised on measuring: the empty copy made at startup takes
+12 ms, not half the load). Entering a saved world is 3.1 s, **2.7 s of it `createTexturesForScene`** packing
+and uploading the island on the main thread. Making that faster is the engine's work (`graphics/`), not
+this demo's; the loading screen says "Preparing the world" before it holds the frame.
+
+**D20. The eye eases over the voxels' steps** (the user: walking "a little rough", "I can tell I am walking
+on voxel terrain"). The character controller climbs and drops the 12.5 cm voxels whole; the camera followed
+the feet exactly, so each step jolted the view. On the ground the eye's height now eases towards the feet's
+(14/s, never more than 0.35 m behind); in the air it follows exactly. The same steps will shake **wheels on
+sloped voxel ground** (a car): that needs smoother collision -- the physics' to decide, a question for its
+own plan, not this demo.
+
+**D17. Drag to place** (Scrap Mechanic's): with a material in hand, **press** on a face: that cell is one
+corner of a box. **While held**, the other corner is the cell you aim at now -- against a face, or, aiming
+at nothing within reach, at the anchor's distance along your view, so a box can rise into the air. **Release**
+places the whole box; a click without a drag is one block, as now. **Right click** while dragging cancels.
+A box is at most 16 blocks (8 m) a side.
+
+**D18. The box is shown before it is placed**: brackets of small voxels at its eight corners, gold when you
+can afford it, red when you cannot; the HUD reads `4 x 3 x 1  12 blocks  (stone 31)`. *Why:* a volume
+placed blind is a volume placed wrong.
+
+**D19. A box costs the voxels it fills** (64 for a block in open air, fewer where its cell was partly
+ground), checked before anything is placed: not enough, and it is refused (red). Cells you stand in are left
+out of it; plants in it are cleared; it is one edit. *Why:* a 64-voxel price for a cell that was mostly
+ground already overcharged, and with boxes against slopes that is most of them.
+
 ## Milestones
 
 | | What | Proven by |
@@ -164,6 +208,8 @@ means a saved island is an ordinary scene.
 | **I3** | Placing blocks | building by hand (done, 2026-11-02); the self-test's placing |
 | **I4** | Saving and loading: the start screen, autosave, save and quit | a world built in, quit, loaded back as it was (done, 2026-11-02); the self-test's reload |
 | **I5** | The HUD: hotbar, compass, prompt, menu; the look | the user's check (built 2026-11-03; captures at 840 x 520) |
+| **I6** | The loading screen (D15, D16); the eye eased over steps (D20) | a new world shows its progress and the window keeps drawing (built 2026-11-03); walking (the user's) |
+| **I7** | Drag to place, its preview and its price (D17-D19) | the self-test drags a 3 x 2 x 1 box and checks its cells and cost; building by hand (the user's) |
 
 ## Open questions
 
@@ -261,3 +307,12 @@ Notes for I5 on:
   a black capture, on 2026-11-03): delete it.
 - Working agreements: plans first; one commit per milestone; stage explicit paths; ask the user to look
   at anything visual; the HUD is pixel art (D9).
+
+**I6** (2026-11-03). `ui/loading.rml` (model `loading`: title, world, the bar's fill, detail), on the
+menu's board. `beginWorld` starts a `Loader` thread -- `island::generate` with its cell counter, then
+`loadComposeFromDisk` -- and `loadingSystem` shows its stage each frame, then, once "Preparing the world"
+has been drawn, `finishWorld` takes the scene in (`takeIsland`) and does the rest on the main thread. Quitting
+mid-load waits for the thread. Captures, `ISLAND_MENU` and `ISLAND_SWING_FRAME` count frames from when play
+began (`Session::playFrame`), as a load now takes frames. The log says where the time went (`island: entered
+in ...`). On the laptop: a new world 19.0 s (17.1 making it, 4 CPU-minutes over 15 threads), a saved one 3.1 s
+(2.7 the GPU's copy). The eye: `camera` (D20).

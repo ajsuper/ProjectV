@@ -9,7 +9,7 @@
 //   ./island_demo --world <folder> straight into worlds/<folder>/ (the start screen starts a world so)
 //   ./island_demo --graphics performance   restir-pt's preset for this run (else settings.json's, else timed:
 //                                  the Esc menu switches it and keeps the choice)
-//   ISLAND_CAPTURE=/tmp/i ./island_demo --seed 42   frame 240 saved as /tmp/i.tga, then it exits (no save)
+//   ISLAND_CAPTURE=/tmp/i ./island_demo --seed 42   240 frames into play saved as /tmp/i.tga, then it exits (no save)
 //                                  (ISLAND_VIEW=overview: from high above the shore)
 //                                  (ISLAND_MENU=pause|graphics: that menu open)
 //
@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cctype>
 #include <atomic>
+#include <thread>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -71,6 +72,8 @@ namespace runtime = projv::runtime;
 
 namespace {
     constexpr float EYE = 1.62f;          // eye height above the feet, m
+    constexpr float STEP_EASE = 14.0f;    // 1/s: how fast the eye's height catches up with a step on the ground
+    constexpr float STEP_LAG = 0.35f;     // m: the most it may trail behind
     constexpr float WALK_SPEED = 4.5f;    // m/s
     constexpr float WALK_GRIP = 12.0f, AIR_GRIP = 2.0f;
 
@@ -92,6 +95,7 @@ namespace {
         float  yaw = 0.0f, pitch = -0.1f;
         vec3   velocity{0.0f};
         vec3   eye{0.0f};
+        bool   eased = false;   // the eye has a height to ease from (not on the first frame)
         vec3 forward() const { return vec3(std::cos(pitch) * std::cos(yaw), std::sin(pitch), std::cos(pitch) * std::sin(yaw)); }
     };
 
@@ -117,7 +121,29 @@ namespace {
         double sessionStart = 0.0;     // app time the world was entered (for the time played)
         saving::Saver saver;
         uint64_t editSignature = 0;    // what the voxels' edit count was at the last frame
+        uint64_t playFrame = 0;        // the frame play began: captures and timed tests count from it
     };
+
+    // Entering a world (D15): made if it is new and read from disk on a worker thread, the window drawing the
+    // loading screen meanwhile; then taken in on the main thread.
+    struct Loader {
+        enum Stage { Idle, Making, Reading, Ready, Failed };
+        std::thread thread;
+        std::atomic<int> stage{Idle};
+        std::atomic<int> cells{0};     // made so far, of island::CELLS * LAYERS * CELLS
+        projv::Scene scene;            // what was read: the world's once Ready
+        double seconds = 0.0;          // the making's
+        int readyFrames = 0;           // frames "Preparing" has been on screen
+        std::chrono::steady_clock::time_point began;
+    };
+    // The loading screen's model ("loading").
+    struct LoadingScreen {
+        std::string title = "Loading";
+        std::string world;
+        std::string fill = "0dp";      // the bar's width, of LOADING_BAR
+        std::string detail;
+    };
+    constexpr int LOADING_BAR = 142;
 
     // The start screen's model ("start"): the saved worlds, a new world's name and seed.
     struct StartScreen {
@@ -373,25 +399,17 @@ namespace {
 
     // Loads the world in `folder` (made from `seed` first if it has none yet): a new world and a saved one
     // come in the same way (D11).
-    bool loadIsland(projv::Application& app, const fs::path& folder, uint32_t seed) {
+    // The island in `scene` (read from `folder` by the loader, below) becomes the world's.
+    bool takeIsland(projv::Application& app, const fs::path& folder, uint32_t seed, projv::Scene&& scene) {
         World& world = app.world;
         Island& island = world.ctx().emplace<Island>();
         island.seed = seed;
         island.folder = folder;
-        if (!fs::exists(island.folder / "compose.json")) {
-            const auto start = std::chrono::steady_clock::now();
-            if (!island::generate(island.folder, island.seed)) {
-                projv::core::error("island: could not write '{}'", island.folder.string());
-                return false;
-            }
-            projv::core::info("island: generated in {:.1f} s",
-                              std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
-        }
-        auto& scene = world.ctx().get<projv::Scene>();
-        scene = projv::utils::loadComposeFromDisk(island.folder.string());
-        for (size_t i = 0; i < scene.components.size(); i++)
-            if (scene.components[i].name == "island") island.component = projv::ComponentHandle(i);
-            else if (scene.components[i].name == "plants") island.plants = projv::ComponentHandle(i);
+        world.ctx().get<projv::Scene>() = std::move(scene);
+        const projv::Scene& taken = world.ctx().get<projv::Scene>();
+        for (size_t i = 0; i < taken.components.size(); i++)
+            if (taken.components[i].name == "island") island.component = projv::ComponentHandle(i);
+            else if (taken.components[i].name == "plants") island.plants = projv::ComponentHandle(i);
         if (island.component == projv::INVALID_COMPONENT_HANDLE) {
             projv::core::error("island: '{}' has no island in it", island.folder.string());
             return false;
@@ -599,7 +617,7 @@ namespace {
         bool use = input.cursorCaptured && !input.wantCaptureMouse && input.down(projv::MouseButton::Left) &&
                    !world.ctx().get<SelfTest>().on;
         // ISLAND_SWING_FRAME=n: one swing at frame n (for a capture of the swing and its particles).
-        if (const char* at = std::getenv("ISLAND_SWING_FRAME"); at && app.frameCount == uint64_t(std::atoi(at))) use = true;
+        if (const char* at = std::getenv("ISLAND_SWING_FRAME"); at && app.frameCount - world.ctx().get<Session>().playFrame == uint64_t(std::atoi(at))) use = true;
         tools::update(world, input, app.time().unscaledDelta, player.eye, player.forward(), use);
         build::update(world, app.time().unscaledDelta, player.eye, player.forward(), use);
         gather::update(world, input, app.time().unscaledDelta, player.eye, player.forward(), input.cursorCaptured && !world.ctx().get<SelfTest>().on);
@@ -835,10 +853,21 @@ namespace {
     }
 
     // After physics presents: the eye where the walker is drawn.
+    // The eye over the walker's feet. On the ground its height eases over the voxels' steps (the controller
+    // climbs and drops them whole, 12.5 cm at a time, which the view felt as a jolt); in the air it follows.
     void camera(projv::Application& app) {
         if (!playing(app.world)) return;
         Player& player = app.world.ctx().get<Player>();
-        if (const projv::Transform* t = app.world.try_get<projv::Transform>(player.walker)) player.eye = t->position + vec3(0.0f, EYE, 0.0f);
+        const projv::Transform* t = app.world.try_get<projv::Transform>(player.walker);
+        if (!t) return;
+        const vec3 target = t->position + vec3(0.0f, EYE, 0.0f);
+        float y = target.y;
+        if (player.eased && runtime::characterState(app.world, player.walker).onGround) {
+            y = player.eye.y + (target.y - player.eye.y) * (1.0f - std::exp(-STEP_EASE * app.time().unscaledDelta));
+            y = std::clamp(y, target.y - STEP_LAG, target.y + STEP_LAG);
+        }
+        player.eye = vec3(target.x, y, target.z);
+        player.eased = true;
     }
 
     // ---- Worlds: saving, loading, the start screen --------------------------------------------------------
@@ -901,11 +930,90 @@ namespace {
     void openHud(projv::Application& app);   // below
 
     // Loads the world in session.folder (new: made from session.info.seed) and starts playing it.
-    void beginWorld(projv::Application& app, const fs::path& here) {
+    void finishWorld(projv::Application& app, const fs::path& here);   // below
+
+    // Starts entering the world in session.folder (new: made from session.info.seed): the loader's thread
+    // makes and reads it while the loading screen shows; finishWorld takes it in when it is read.
+    void beginWorld(projv::Application& app, const fs::path&) {
         World& world = app.world;
         Session& session = world.ctx().get<Session>();
-        if (!loadIsland(app, session.folder, session.info.seed)) std::exit(1);
+        Loader& loader = world.ctx().get<Loader>();
+        loader.began = std::chrono::steady_clock::now();
+        loader.stage = fs::exists(session.folder / "compose.json") ? Loader::Reading : Loader::Making;
+        const fs::path folder = session.folder;
+        const uint32_t seed = session.info.seed;
+        loader.thread = std::thread([&loader, folder, seed] {
+            if (loader.stage == Loader::Making) {
+                const auto start = std::chrono::steady_clock::now();
+                if (!island::generate(folder, seed, &loader.cells)) {
+                    projv::core::error("island: could not write '{}'", folder.string());
+                    loader.stage = Loader::Failed;
+                    return;
+                }
+                loader.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                projv::core::info("island: generated in {:.1f} s", loader.seconds);
+                loader.stage = Loader::Reading;
+            }
+            loader.scene = projv::utils::loadComposeFromDisk(folder.string());
+            loader.stage = Loader::Ready;
+        });
+        world.ctx().get<LoadingScreen>().world = session.info.name;
+        projv::ui::user::hide(app, "start");
+        projv::ui::user::show(app, "loading");
+        projv::graphics::setCursorCaptured(app, world.ctx().get<projv::graphics::RenderInstance>(), false);
+    }
+
+    // Each frame while a world is being entered: the loading screen, and the world taken in once it is read
+    // (after "Preparing" has been drawn: what follows holds the frame for a few seconds).
+    void loadingSystem(projv::Application& app) {
+        World& world = app.world;
+        Loader& loader = world.ctx().get<Loader>();
+        const int stage = loader.stage;
+        if (stage == Loader::Idle) return;
+        LoadingScreen& screen = world.ctx().get<LoadingScreen>();
+        const float total = float(island::CELLS * island::LAYERS * island::CELLS);
+        const float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - loader.began).count();
+        if (stage == Loader::Failed) {
+            if (loader.thread.joinable()) loader.thread.join();
+            std::exit(1);
+        }
+        if (stage == Loader::Making) {
+            const float done = std::min(float(loader.cells) / total, 1.0f);
+            screen.title = "Making the island";
+            screen.fill = std::to_string(int(done * 0.9f * float(LOADING_BAR))) + "dp";   // the last tenth is reading it
+            screen.detail = std::to_string(int(done * 100.0f)) + "%  -  " + std::to_string(int(elapsed)) + " s";
+        } else if (stage == Loader::Reading) {
+            screen.title = "Loading the island";
+            screen.fill = std::to_string(int(0.92f * float(LOADING_BAR))) + "dp";
+            screen.detail = "Reading it from disk";
+        } else if (stage == Loader::Ready) {
+            screen.title = "Preparing the world";
+            screen.fill = std::to_string(LOADING_BAR) + "dp";
+            screen.detail = "Almost there";
+            if (++loader.readyFrames < 3) return;   // drawn first
+            loader.thread.join();
+            loader.stage = Loader::Idle;
+            finishWorld(app, projv::core::executableDirectory());
+        }
+    }
+
+    // Takes the read world in: physics, the player, life, tools, the GPU's copy; then play.
+    void finishWorld(projv::Application& app, const fs::path& here) {
+        World& world = app.world;
+        Session& session = world.ctx().get<Session>();
+        Loader& loader = world.ctx().get<Loader>();
+        // How long each part of entering a world takes, for the log.
+        auto clock = std::chrono::steady_clock::now();
+        auto lap = [&clock]() {
+            const auto now = std::chrono::steady_clock::now();
+            const double s = std::chrono::duration<double>(now - clock).count();
+            clock = now;
+            return s;
+        };
+        if (!takeIsland(app, session.folder, session.info.seed, std::move(loader.scene))) std::exit(1);
+        const double tRead = lap();
         installWorld(app, here);
+        const double tInstall = lap();
         spawnPlayer(world, session.info);
         critters::install(world, world.ctx().get<Island>().seed, world.ctx().get<Player>().eye);
         tools::install(app, world.ctx().get<Island>().entity, world.ctx().get<Island>().plants, world.ctx().get<Player>().walker);
@@ -916,19 +1024,26 @@ namespace {
         world.ctx().get<gather::Gather>().collect = session.info.collect;
         session.saver.savedSignature = editSignature(world);
         session.sessionStart = app.time().elapsed;
+        const double tLife = lap();
 
         // The scene changed whole: the GPU's copy is made again.
         if (auto* gpu = world.ctx().find<projv::GPUData>()) projv::graphics::destroyGPUData(*gpu);
         world.ctx().insert_or_assign<projv::GPUData>(projv::graphics::createTexturesForScene(world.ctx().get<projv::Scene>()));
         world.ctx().get<Restir>().has = false;
+        const double tGpu = lap();
+        projv::core::info("island: entered in {:.2f} s, {:.2f} s of it on the main thread -- taken in {:.2f}, physics and world {:.2f}, "
+                          "player and life {:.2f}, GPU {:.2f}",
+                          std::chrono::duration<double>(std::chrono::steady_clock::now() - loader.began).count(),
+                          tRead + tInstall + tLife + tGpu, tRead, tInstall, tLife, tGpu);
 
         session.playing = true;
         if (session.saves) {
             session.info.lastPlayed = saving::now();
             saving::writeInfo(session.folder, session.info);   // so it is on the start screen from now on
         }
-        projv::ui::user::hide(app, "start");
+        projv::ui::user::hide(app, "loading");
         openHud(app);
+        session.playFrame = app.frameCount;
         projv::graphics::setCursorCaptured(app, world.ctx().get<projv::graphics::RenderInstance>(), true);
         glfwSetWindowTitle(world.ctx().get<projv::graphics::RenderInstance>().window,
                            ("ProjectV Island  |  " + session.info.name + "  |  seed " + std::to_string(session.info.seed)).c_str());
@@ -1016,13 +1131,14 @@ namespace {
             if (app.frameCount == 125) app.closeRequested = true;
         }
         // ISLAND_MENU=pause|graphics: that menu open at frame 200 (for a capture of it).
-        if (const char* menu = std::getenv("ISLAND_MENU"); menu && playing(world) && app.frameCount == 200) {
+        const uint64_t played = playing(world) ? app.frameCount - world.ctx().get<Session>().playFrame : 0;   // frames since play began
+        if (const char* menu = std::getenv("ISLAND_MENU"); menu && played == 200) {
             setPause(app, true);
             if (std::string(menu) == "graphics") showGraphics(app, true);
         }
         if (const char* capture = std::getenv("ISLAND_CAPTURE")) {
-            if (app.frameCount == 240) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capture);
-            if (app.frameCount == 245) app.closeRequested = true;
+            if (played == 240) bgfx::requestScreenShot(BGFX_INVALID_HANDLE, capture);
+            if (played == 245) app.closeRequested = true;
         }
     }
 
@@ -1044,12 +1160,17 @@ namespace {
         world.ctx().emplace<SelfTest>().on = std::getenv("ISLAND_SELFTEST") != nullptr;
         world.ctx().emplace<Hud>();
         StartScreen& start = world.ctx().emplace<StartScreen>();
+        world.ctx().emplace<Loader>();
+        LoadingScreen& loading = world.ctx().emplace<LoadingScreen>();
         PauseMenu& menu = world.ctx().emplace<PauseMenu>();
 
         projv::ui::user::loadFont(app, (here / "ui/fonts/PixelifySans.ttf").string());
         if (!icons::writeAll(here / "icons")) projv::core::warn("island: the HUD's icons could not be written to '{}'", (here / "icons").string());
         projv::ui::user::model(app, "start").bind("worlds", &start.worlds).bind("hasWorlds", &start.hasWorlds).bind("newName", &start.newName)
             .bind("newSeed", &start.newSeed).bind("status", &start.status);
+        projv::ui::user::model(app, "loading").bind("title", &loading.title).bind("world", &loading.world).bind("fill", &loading.fill)
+            .bind("detail", &loading.detail);
+        projv::ui::user::open(app, "loading", (here / "ui/loading.rml").string(), {.shown = false});
         projv::ui::user::model(app, "pause").bind("world", &menu.world).bind("saved", &menu.saved).bind("graphics", &menu.graphics);
         Hud& hud = world.ctx().get<Hud>();
         projv::ui::user::model(app, "island").bind("slots", &hud.slots).bind("compass", &hud.compass).bind("heading", &hud.heading)
@@ -1131,6 +1252,7 @@ namespace {
     }
 
     void shutdown(projv::Application& app) {
+        if (auto* loader = app.world.ctx().find<Loader>(); loader && loader->thread.joinable()) loader->thread.join();   // a world half made
         // Closing the window saves too (the menu's Save and quit has already, and turned this off).
         if (auto* session = app.world.ctx().find<Session>(); session && session->playing && session->saves) saveWorld(app, true);
         if (auto* gpu = app.world.ctx().find<projv::GPUData>()) projv::graphics::destroyGPUData(*gpu);
@@ -1156,6 +1278,7 @@ int main(int argc, char** argv) {
     projv::Application app;
     app.addSystem(projv::Stage::Startup, "startup", startup);
     app.addSystem(projv::Stage::Update, "session", sessionSystem);
+    app.addSystem(projv::Stage::Update, "loading", loadingSystem, {.after = "session"});
     app.addSystem(projv::Stage::Update, "controls", controls);
     app.addSystem(projv::Stage::Update, "life", life);
     app.addSystem(projv::Stage::Update, "tools", useTools, {.after = "controls"});
