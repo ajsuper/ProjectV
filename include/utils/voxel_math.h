@@ -11,20 +11,6 @@
 
 namespace projv::utils {
     /**
-     * Converts a 3D vector to a single uint32_t storing that position.
-     * @param vec3 The 3d vector to convert to a single uint32_t.
-     * @return A single uint32_t storing the 3D vector.
-     */
-    uint32_t convertVec3ToHeaderPosition(core::ivec3 vec3);
-
-    /**
-     * Converts a single uint32_t storing a 3D vector to an std::array<int, 3>.
-     * @param headerPosition A single uint32_t storing a 3D vector.
-     * @return A core::ivec3 containing the 3D vector.
-     */
-    core::ivec3 convertHeaderPositionToVec3(uint32_t headerPosition);
-
-    /**
      * Creates the Z-Order Index of a point in 3D space with a certain bit depth.
      * @param x, y, z Position in 3D space to calculate Z-Order of.
      * @param bitDepth How many bits the index takes up.

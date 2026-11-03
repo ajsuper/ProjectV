@@ -57,14 +57,6 @@ namespace projv {
         core::vec3 direction{1.0f, 0.0f, 0.0f};   // wind / rise direction, normalised on upload
         float turbulence = 0.0f;        // 0..1, how much the field departs from a plane wave
 
-        // Whether this field can move geometry vertically -- DERIVED from the direction rather than
-        // stored beside it, so the two cannot disagree.
-        //
-        // Worth having at all because it HALVES both the bake and the resolve: a horizontal field can
-        // only ever draw a voxel in its own row, so neither has to look up or down. Wind is
-        // horizontal, which is the common case; a rising plume is not.
-        bool isVertical() const { return direction.y > 1e-4f || direction.y < -1e-4f; }
-
         // ---- ADVECTION ONLY (MotionKind::Advect); ignored by Sway ----------------------------
         //
         // How readily a risen parcel burns out, 0..1. The GAPS this leaves are what make a flame read

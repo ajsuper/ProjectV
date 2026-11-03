@@ -46,13 +46,6 @@ namespace projv {
 } // namespace projv
 
 namespace projv::utils {
-    VoxelGrid createVoxelGrid() {
-        // Initialize the 3D vector with `voxel` instances.
-        VoxelGrid voxels;
-        voxels.max = 0;
-        return voxels;
-    }
-
     void addPointersTree64(std::vector<uint32_t>& tree64) {
         uint32_t pointerMask = 0b11111111111111111111111111111110;
         int childCounter = 0;

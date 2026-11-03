@@ -80,8 +80,6 @@ when disabled.
 |---|---|
 | `vec2..4`, `ivec2..4`, `dvec2..4`, `mat2..4`, `quat` | glm types |
 | `normalize`, `dot`, `cross`, `mix`, `clamp`, `lookAt`, ... | glm functions, re-exported |
-| `projectionMatrix(fovy, aspect, near, far, homogeneousDepth)` | Via `bx::mtxProj` |
-| `evaluateCurve(input, points)` | A piecewise spline |
 
 ## `core/paths.h`
 

@@ -130,7 +130,9 @@ not an API.
 ## `utils/block_table.h`
 
 [`include/utils/block_table.h`](../../include/utils/block_table.h): the dense top of a **tree64**,
-for the older GPU march (`PJV_TREE64_MARCH` in the shader). Built at upload, never authored or stored.
+once marched by the GPU. That march is gone (the GPU marches tile tables); the engine uses only
+`tree64Resolution` (a tree's resolution, for building its tile table). `blockTableTexels`,
+`buildBlockTable` and `blockTableVoxel` remain for the tests, which check the tile table against them.
 Plan: [block-table-traversal](../plans/block-table-traversal.md). A tile table has these levels in
 its own layout.
 
@@ -175,7 +177,7 @@ authoring path and the older form; a blob's voxels are a [tile table](formats/ti
 | `updateChunkFromBrickMap(chunk, map)`, `buildTree64FromBrickMap(map, res)` | Brick map → tree64 |
 | `brickMapFromTree64(geometry, materialIDs, res)` | tree64 → brick map |
 | `downsampleTree64(...)` | Drop levels of a tree. The engine's storage LOD is `downsampleTileTable`. |
-| `createChunk(header)`, `createChunkScaleFromVoxelScaleAndResolution`, `createVoxelGrid`, `buildVoxelGridFromBrickMap` | Older helpers |
+| `createChunk(header)`, `createChunkScaleFromVoxelScaleAndResolution` | Older helpers |
 
 ## `utils/voxel_math.h`
 
@@ -186,7 +188,6 @@ authoring path and the older form; a blob's voxels are a [tile table](formats/ti
 | `createZOrderIndex`, `reverseZOrderIndex` | Morton order ↔ coordinates |
 | `floorDiv`, `floorMod` | Rounding toward −∞ (cell of a negative voxel) |
 | `computeBrickDims(res)`, `computeBrickCoord`, `computeBrickLocalPos`, `computeBrickZOrder`, `computeLocalZOrder` | Brick addressing |
-| `convertVec3ToHeaderPosition`, `convertHeaderPositionToVec3` | Packed positions |
 
 ## `utils/animation.h`
 

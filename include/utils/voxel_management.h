@@ -22,13 +22,6 @@
 
 namespace projv::utils {
     /**
-     * Initiates an empty grid of voxel's of size resolution.
-     * @param size A power of 2 size of the voxel grid.
-     * @return A grid with xyz dimensions of size and all voxel initialized to white and empty.
-     */
-    VoxelGrid createVoxelGrid();
-
-    /**
      * Creates a Chunk object using an existing ChunkHeader.
      * @param chunkHeader The metadata describing the chunk's location, scale, and resolution.
      * @return A new Chunk initialized with the given header.
@@ -91,11 +84,6 @@ namespace projv::utils {
     std::unique_ptr<VoxelBrickMap> brickMapFromTree64(const std::vector<uint32_t>& geometry,
                                                       const std::vector<uint8_t>& materialIDs,
                                                       uint32_t resolution);
-
-    /**
-     * Build a sorted VoxelGrid (by chunk-space Z-order) from a brick map.
-     */
-    VoxelGrid buildVoxelGridFromBrickMap(const VoxelBrickMap& map);
 
     /**
      * Build a tree64 directly from brick map bitmasks, skipping the intermediate VoxelGrid.

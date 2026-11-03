@@ -391,10 +391,6 @@ namespace projv::utils {
     }
 
     namespace {
-        // The key every compose.json written before attachments existed used for the scene editor's
-        // boolean op, which is now that program's attachment. See readLegacyOp.
-        constexpr const char* LEGACY_OP_ATTACHMENT = "projv.editor.csg";
-
         // An `attachments` object: key -> value, each value kept as JSON text. Values are not
         // looked inside -- what they mean is the business of whichever program owns the key -- so
         // anything that parsed as JSON is kept, including shapes no program here would write.
@@ -409,24 +405,6 @@ namespace projv::utils {
             }
             for (const auto& [key, value] : block.items()) attachments[key] = value.dump();
             return attachments;
-        }
-
-        // **A migration, and the one place the engine names an editor key.** Boolean ops used to be
-        // a top-level `op` field on each entry, owned by the engine format although only the scene
-        // editor ever acted on one. That field is now the editor's `projv.editor.csg` attachment.
-        //
-        // The value is moved, not read: whatever string the file held -- including one the editor
-        // will not recognise -- goes across verbatim, and the editor decides what it means. `none`
-        // is dropped, because an absent attachment already means that. An entry that has both keeps
-        // the attachment, which is the newer of the two.
-        //
-        // The file is rewritten in the new form on its next save. Remove this once the bundled
-        // scenes have all been re-saved.
-        void readLegacyOp(const nlohmann::json& entry, std::map<std::string, std::string>& attachments) {
-            if (!entry.contains("op") || !entry["op"].is_string()) return;
-            std::string op = entry["op"].get<std::string>();
-            if (op == "none" || attachments.count(LEGACY_OP_ATTACHMENT) != 0) return;
-            attachments[LEGACY_OP_ATTACHMENT] = nlohmann::json{{"v", 1}, {"op", op}}.dump();
         }
     }
 
@@ -533,7 +511,6 @@ namespace projv::utils {
             else c.mutability = Mutability::Locked;
 
             c.attachments = readAttachments(jc, composeJsonPath);
-            readLegacyOp(jc, c.attachments);
 
             // The palette, in slot order -- the .data's material bytes are indices into it, so the
             // order is data and a reordering here recolours the geometry. Colours are [R, G, B] at

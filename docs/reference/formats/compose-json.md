@@ -152,12 +152,6 @@ API: [`utils/attachments.h`](../../../include/utils/attachments.h). Attachments 
 voxel structure written by tools. What a running program *does* goes in
 [`entities.json`](entities-json.md).
 
-### Legacy `op`
-
-Older files had a top-level `"op"` on each entry (`none` / `union` / `subtract` / `intersect`). The
-loader moves it into the `projv.editor.csg` attachment (`{"v": 1, "op": ...}`), verbatim, dropping
-`none`. If both exist, the attachment wins. The next save writes the new form.
-
 ## Loading rules
 
 ### Path resolution

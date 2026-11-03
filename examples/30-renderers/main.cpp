@@ -203,7 +203,7 @@ static void uploadReprojectionUniforms(std::shared_ptr<projv::ConstructedRendere
 // The restir-pt renderer's switches: G cycles what it shows (the image, the indirect light alone, the
 // direct alone, the ambient occlusion, the indirect diffuse alone, the indirect specular alone), J turns
 // ReSTIR's reuse off -- each GI pixel's one fresh path, denoised -- for the A/B, and Q bypasses the
-// reconstruction, as for the reconstruction renderer.
+// reconstruction.
 // The post (display.frag): P turns it all off and on, V the vignette, B the grade, E the auto-exposure.
 // restir-pt's settings: restir_pt::Settings (examples/shared/restir_pt.h, where its uniforms are worked
 // out for every program that draws with it), changed from the Gallery panel. Their starting values come

@@ -186,11 +186,6 @@ namespace projv{
         m.packedExtra = (m.packedExtra & ~(0xFFu << 8)) | ((flags & 0xFFu) << 8);
     }
 
-    // Whether an entry carries anything beyond its colour. Used by the serializer to keep
-    // colour-only palettes writing exactly the JSON they used to.
-    inline bool materialHasExtendedProperties(const Material& m) {
-        return m.packedEmission != 0u || m.packedSurface != 0u || m.packedExtra != 0u;
-    }
     // Stable slot handle for a chunk. A chunk keeps its handle for its whole life, and the handle IS
     // its row in the GPU header texture and its index into Scene.chunks. Grids and the loose list
     // reference chunks by handle so add/remove never has to rebase anything. See Scene below.

@@ -77,21 +77,6 @@ namespace projv::core {
     using glm::log2;
 
     using glm::lookAt;
-    inline mat4 projectionMatrix(float fovy, float aspect, float nearPlane, float farPlane, bool homogeneousDepth) {
-        float out[16];
-        bx::mtxProj(out, fovy, aspect, nearPlane, farPlane, homogeneousDepth);
-        return glm::make_mat4(out);
-    }
-    
-    /**
-     * A simple spline function that takes in an input that is modified by the points vector.
-     * 
-     * @param input The input to be modified.
-     * @param points The vector of points that outline the spline that the input will follow.
-     * 
-     * @return Returns the modified point.
-     */
-    float evaluateCurve(float input, std::vector<vec2> points);
 }
 
 #endif

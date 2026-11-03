@@ -349,7 +349,6 @@ endif()
 add_library(projectV STATIC
     src/core/application.cpp
     src/core/events.cpp
-    src/core/math.cpp
     src/core/paths.cpp
     src/core/time.cpp
 
