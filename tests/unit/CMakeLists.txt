@@ -55,6 +55,7 @@ add_executable(projv_unit_tests
     test_scene_bridge.cpp
     test_scene_delete.cpp
     test_scene_loading.cpp
+    test_render_passes.cpp
     test_shaders.cpp
     test_world_loading.cpp
     test_time.cpp

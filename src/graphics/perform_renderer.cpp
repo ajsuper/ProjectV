@@ -336,7 +336,8 @@ namespace projv::graphics {
         if (prevWindowWidth != windowWidth || prevWindowHeight != windowHeight) {
             bgfx::reset(uint32_t(windowWidth), uint32_t(windowHeight), BGFX_RESET_NONE, bgfx::TextureFormat::Count);
         }
-        resizeRenderTargets(constructedRenderer->resources.textures, constructedRenderer->resources.framebuffers, windowWidth, windowHeight);
+        const core::ivec2 targets = renderTargetSize(core::ivec2(windowWidth, windowHeight), constructedRenderer->renderScale);
+        resizeRenderTargets(constructedRenderer->resources.textures, constructedRenderer->resources.framebuffers, targets.x, targets.y);
         performRenderPasses(true, constructedRenderer, renderInstance, windowWidth, windowHeight, view, proj, gpuData);
 
         //renderToPrimary = !renderToPrimary;
@@ -345,6 +346,21 @@ namespace projv::graphics {
         prevWindowHeight = windowHeight;
 
         endFrame(renderInstance, core::ivec2(windowWidth, windowHeight));
+    }
+
+    core::ivec2 renderTargetSize(core::ivec2 window, float renderScale) {
+        const float scale = renderScale > 0.0f ? renderScale : 1.0f;
+        return core::ivec2(std::max(1, int(std::lround(float(window.x) * scale))), std::max(1, int(std::lround(float(window.y) * scale))));
+    }
+
+    int setPassEnabled(ConstructedRenderer& renderer, const std::string& name, bool enabled) {
+        int named = 0;
+        for (BGFXDependencyGraph& pass : renderer.dependencyGraph)
+            if (pass.name == name) {
+                pass.enabled = enabled;
+                named++;
+            }
+        return named;
     }
 
     uint32_t endFrame(RenderInstance &renderInstance, core::ivec2 backBufferSize) {

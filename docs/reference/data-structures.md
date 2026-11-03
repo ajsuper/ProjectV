@@ -68,9 +68,9 @@ a renderer as bgfx objects.
 
 | Name | What |
 |---|---|
-| `ConstructedRenderer` | `resources` + `dependencyGraph` (the passes) |
+| `ConstructedRenderer` | `resources` + `dependencyGraph` (the passes); `renderScale` (1): its targets at that share of the window, the passes writing the back buffer upscaling |
 | `BGFXResources` | Handles, uniform values, textures, framebuffers, and the engine uniforms `passTargetRes`, `passInputRes`, `pjvMotionSets`, `pjvAnimTime` |
-| `BGFXDependencyGraph` | One pass: inputs, target, program, `enabled` |
+| `BGFXDependencyGraph` | One pass: inputs, target, program, `name`, `enabled` (`graphics::setPassEnabled`) |
 | `PROJV_MAX_PASS_SAMPLERS` (9), `PROJV_MAX_PASS_INPUTS` (8), `PROJV_MOTION_SET_VEC4S` (48) | Limits |
 
 ## `data_structures/rendererSpecification.h`, `resources.h`, `dependencyGraph.h`

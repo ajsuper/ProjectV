@@ -132,7 +132,9 @@ renderer for one frame.
 
 | Name | What |
 |---|---|
-| `renderConstructedRenderer(renderInstance, renderer, &gpuData)` | Poll, upload uniforms, size targets to the window, run the passes, `endFrame` |
+| `renderConstructedRenderer(renderInstance, renderer, &gpuData)` | Poll, upload uniforms, size targets to the window (times the renderer's `renderScale`), run the passes, `endFrame` |
+| `renderTargetSize(window, renderScale)` | What window-relative targets are made at: `window * renderScale`, rounded, at least 1x1 |
+| `setPassEnabled(renderer, name, enabled)` | Skip passes by name (the shader file's stem, `"dof"`) or run them again; returns how many it named |
 | `endFrame(renderInstance, backBufferSize)` | Draw the overlays, copy an unconsumed frame texture to the window, then `bgfx::frame()`: what a program that submits its own passes ends with |
 | `performRenderPasses(renderToPrimary, renderer, renderInstance, w, h, view, proj, &gpuData)` | The passes alone: for drawing into a panel |
 | `updateUniforms(handles, values)` | Upload uniform values |

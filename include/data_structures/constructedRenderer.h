@@ -122,6 +122,10 @@ namespace projv {
         CameraView camera;
         CameraView drawnCamera;
         bool hasDrawnCamera = false;
+        // Its window-relative targets are sized from the window times this (graphics::renderTargetSize);
+        // the passes that write the back buffer still cover it, so they upscale. Below 1 trades
+        // sharpness for time. A change is a resize: a renderer keeping histories restarts them.
+        float renderScale = 1.0f;
     };
 }
 

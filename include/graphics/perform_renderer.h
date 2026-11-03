@@ -63,6 +63,20 @@ namespace projv::graphics {
     void renderConstructedRenderer(RenderInstance &renderInstance, std::shared_ptr<ConstructedRenderer> constructedRenderer, GPUData* gpuData);
 
     /**
+     * The size a renderer's window-relative targets are made at for a window of `window`:
+     * `window * renderScale`, rounded, at least 1x1. renderConstructedRenderer sizes them so.
+     */
+    core::ivec2 renderTargetSize(core::ivec2 window, float renderScale);
+
+    /**
+     * Turns the passes named `name` (BGFXDependencyGraph::name: the shader file's stem, "dof") on or
+     * off. An off pass is skipped outright: nothing drawn, its target keeps what it last held, so it
+     * suits a pass whose output the frame no longer reads. Returns how many passes it named (0: none,
+     * which is likely a typo).
+     */
+    int setPassEnabled(ConstructedRenderer& renderer, const std::string& name, bool enabled);
+
+    /**
      * Ends the frame: draws the render instance's overlays (RenderInstance::addOverlay) over what the
      * renderer drew, then submits it (bgfx::frame). renderConstructedRenderer ends with this; a program
      * that submits its own passes calls it in place of bgfx::frame so the UI still draws.
