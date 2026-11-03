@@ -382,6 +382,9 @@ namespace {
             if (at % 45 != 0) hud.compass.push_back({"", left, "tick"});
             else if (std::abs(off) <= 52) hud.compass.push_back({NAMES[at / 45], left, at == 0 ? "card north" : at % 90 == 0 ? "card" : "inter"});   // whole, inside the strip
         }
+        // Always as many rows, the spare ones hidden: a list that changes length as you turn has the
+        // document read a row that is gone for a frame.
+        while (hud.compass.size() < 9) hud.compass.push_back({"", "0dp", "off"});
 
         hud.aiming = t.aiming;
         hud.prompt = g.prompt.rfind("E: ", 0) == 0 ? g.prompt.substr(3) : g.prompt;

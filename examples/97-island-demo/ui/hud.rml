@@ -10,6 +10,7 @@
         .compass { position: absolute; left: 50%; top: 4dp; width: 125dp; margin-left: -63dp; }
         .compass .bevel { height: 12dp; overflow: hidden; position: relative; }
         .mark { position: absolute; top: 0; width: 15dp; margin-left: -7dp; text-align: center; color: #a3abcf; }
+        .mark.off { display: none; }
         .mark.card { color: #f6ecd2; }
         .mark.north { color: #ff8a78; }
         .mark.tick .bar { position: absolute; left: 7dp; top: 4dp; width: 1dp; height: 3dp; background-color: #5f70b0; }
