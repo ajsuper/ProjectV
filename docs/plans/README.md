@@ -94,7 +94,7 @@ The twelve shader experiments:
 
 | Plan | Status | What |
 |---|---|---|
-| [ui.md](ui.md) | in progress (U0, U1 built) | Two UI levels on one host: Dear ImGui for developers, RmlUi for players |
+| [ui.md](ui.md) | in progress (U0-U5 built, U6 not started) | Two UI levels on one host: Dear ImGui for developers, RmlUi for players |
 | [gallery-ui.md](gallery-ui.md) | built (G1, G2) | The renderer gallery cut to restir-pt, pt-reference and fast, switched and tuned from the dev layer |
 | [fast-renderer.md](fast-renderer.md) | built (F1) | The gallery's fast renderer at half resolution, rebuilt by face identity, with TAA |
 
@@ -109,6 +109,7 @@ The twelve shader experiments:
 | Plan | Status | What |
 |---|---|---|
 | [biome-canyonlands.md](biome-canyonlands.md) | approved; C1, C2 built | The terrain generator's first biome: a Colorado Plateau canyon network |
+| [island-demo.md](island-demo.md) | approved | A generated island to break, gather and build with: tools, rubble into a hotbar, blocks placed back, a compass, saved worlds |
 
 ## Infrastructure
 
