@@ -21,7 +21,11 @@
 #include "core/log.h"
 #include "graphics/input.h"
 #include "runtime/physics.h"
+#include <map>
+
+#include "utils/blob_voxels.h"
 #include "utils/editing.h"
+#include "utils/tile_table.h"
 #include "utils/picking.h"
 
 #include "island.h"
@@ -40,8 +44,42 @@ namespace tools {
     constexpr float PICKAXE_ENERGY = 35000.0f; // J: a 0.75 m bite in dirt, 0.62 m in wood, 0.52 m in stone
     constexpr float PICKAXE_PUSH = 2.5f;       // m/s out of the face
     constexpr float PICKAXE_SHARD = 0.25f;     // m: the size it breaks to
-    constexpr float PICKAXE_EVERY = 0.4f;      // s between strikes, held
-    constexpr float CHISEL_EVERY = 0.15f;
+    constexpr float PICKAXE_EVERY = 0.45f;     // s between strikes, held: one swing
+    constexpr float CHISEL_EVERY = 0.2f;
+    constexpr float PICKAXE_IMPACT = 0.16f;    // s into the swing that it lands
+    constexpr float CHISEL_IMPACT = 0.06f;
+    // Of a pickaxe strike's shards, this share is kept as rubble; the rest go as dust. Each kept one
+    // stands for the ones that went (Rubble::weight), so gathering gives back what was broken, on average.
+    constexpr float RUBBLE_KEPT = 0.3f;
+
+    // A shard that is rubble: what gathering one of it is worth, in voxels per voxel.
+    struct Rubble { float weight = 1.0f; float born = 0.0f; };   // born: Tools::time when it was made
+
+    // A piece's voxels by material, counted once (a piece's voxels never change).
+    struct RubbleCount {
+        std::vector<std::pair<std::string, int>> voxels;
+        int total = 0;
+    };
+    inline RubbleCount countVoxels(const projv::Scene& scene, projv::ComponentHandle h) {
+        RubbleCount out;
+        if (h >= scene.components.size()) return out;
+        const projv::ComponentRecord& record = scene.components[h];
+        if (record.kind != projv::ComponentKind::Chunk || record.chunkHandle >= scene.chunks.size()) return out;
+        const projv::Chunk& chunk = scene.chunks[record.chunkHandle];
+        if (chunk.geometryPoolIndex < 0 || size_t(chunk.geometryPoolIndex) >= scene.geometryPool.size()) return out;
+        const int res = int(chunk.header.resolution);
+        std::map<std::string, int> by;
+        projv::utils::forEachTileVoxelIn(projv::utils::blobTiles(scene.geometryPool[size_t(chunk.geometryPoolIndex)]), ivec3(0), ivec3(res - 1),
+                                         [&](ivec3, uint8_t slot) {
+                                             if (slot < record.materialPalette.size() && !record.materialPalette[slot].physics.empty())
+                                                 by[record.materialPalette[slot].physics]++;
+                                         });
+        for (const auto& [material, n] : by) {
+            out.voxels.push_back({material, n});
+            out.total += n;
+        }
+        return out;
+    }
 
     struct Tools {
         Tool   selected = Tool::Pickaxe;
@@ -51,20 +89,30 @@ namespace tools {
         std::vector<ivec3> removed;   // island voxels a break took as pieces, whose plants are still to clear
         std::vector<std::pair<vec3, float>> struck;   // where strikes broke (as cheap debris, which lists no voxels): look there
         // Counts, for the self-test and the HUD.
-        int strikes = 0, breaks = 0, shards = 0, fallen = 0, plantsCleared = 0;
+        int strikes = 0, breaks = 0, shards = 0, fallen = 0, plantsCleared = 0, rubbleKept = 0;
+        double brokenVoxels = 0.0;   // voxels the pickaxe's strikes threw off as shards, kept or not
         bool aiming = false;          // the crosshair is on something within reach
+        float time = 0.0f;            // seconds this session
+        float swing = -1.0f;          // seconds into the swing under way; < 0 none
+        Tool  swingTool = Tool::Pickaxe;
+        bool  landed = true;          // the swing under way has struck
+        // Bursts of little particles (fx.h) for strikes that landed: where, which way out, the palette
+        // slot of what was hit (on the island's palette), how many, how hard.
+        struct Burst { vec3 at, normal; uint8_t slot; int count; float speed; };
+        std::vector<Burst> bursts;
     };
 
     struct Aim {
         Entity entity = projv::NullEntity;
         vec3   point{0.0f}, normal{0.0f};
         float  distance = 0.0f;
+        uint8_t slot = 0;   // the palette slot hit (the hit component's)
     };
 
     inline std::optional<Aim> aim(const World& world, vec3 eye, vec3 forward, Entity walker) {
         const auto hit = runtime::castRay(world, eye, forward, REACH, 0xffffffffu, walker);
         if (!hit || hit->entity == projv::NullEntity) return std::nullopt;
-        return Aim{hit->entity, hit->position, hit->normal, hit->distance};
+        return Aim{hit->entity, hit->position, hit->normal, hit->distance, hit->materialSlot};
     }
 
     // The centre of the voxel just inside the surface at a hit, on the island's lattice.
@@ -89,6 +137,11 @@ namespace tools {
         s.striker = t.walker;
         runtime::fracture(world, a.entity, s);
         t.strikes++;
+        // Island and pieces share the island's palette slots for what the generator made; anything else
+        // still bursts, in whatever its slot names on the island's palette.
+        const uint8_t slot = a.slot < island::SLOTS ? a.slot : uint8_t(island::Dirt0);
+        if (runtime::canBreak(world, a.entity))
+            t.bursts.push_back({a.point, a.normal, slot, tool == Tool::Pickaxe ? 26 : 8, tool == Tool::Pickaxe ? 3.0f : 1.8f});
     }
 
     // ---- The plants over a break ---------------------------------------------------------------------
@@ -161,6 +214,20 @@ namespace tools {
             if (e.entity != t.island) return;
             t.breaks++;
             t.shards += int(e.shards + e.debris.size());
+            // A pickaxe's strike (by energy) keeps a share of its shards; a chisel's (by reach) keeps its one.
+            const bool pickaxe = e.cause == projv::BreakCause::Strike && e.energy > 0.0f;
+            for (size_t i = 0; i < e.debris.size(); i++) {
+                const Entity d = e.debris[i];
+                if (!world.valid(d)) continue;
+                if (pickaxe && world.all_of<projv::VoxelComponent>(d))
+                    t.brokenVoxels += countVoxels(world.ctx().get<projv::Scene>(), world.get<projv::VoxelComponent>(d).handle).total;
+                if (pickaxe && island::unit(island::hash(uint32_t(i) * 2654435761u + uint32_t(t.breaks) * 40503u)) >= RUBBLE_KEPT) {
+                    world.destroy(d);   // dust: its component goes with it (debris is linked OnUnlink::Destroy)
+                    continue;
+                }
+                world.emplace_or_replace<Rubble>(d, Rubble{pickaxe ? 1.0f / RUBBLE_KEPT : 1.0f, t.time});
+                t.rubbleKept++;
+            }
             if (e.cause == projv::BreakCause::Strike || e.cause == projv::BreakCause::Impact) t.struck.push_back({e.at, 1.1f});
             t.fallen += int(e.pieces.size() - e.shards);   // what came away whole: a felled crown, a cut-off ledge
             for (const auto& piece : e.pieceVoxels) t.removed.insert(t.removed.end(), piece.begin(), piece.end());
@@ -176,12 +243,24 @@ namespace tools {
             if (input.pressed(projv::Key::Num2)) t.selected = Tool::Chisel;
         }
         if (input.scroll.y != 0.0f) t.selected = Tool((int(t.selected) + (input.scroll.y < 0.0f ? 1 : int(Tool::Count) - 1)) % int(Tool::Count));
+        t.time += dt;
         t.cooldown = std::max(0.0f, t.cooldown - dt);
         const std::optional<Aim> a = aim(world, eye, forward, t.walker);
         t.aiming = a.has_value();
-        if (use && a && t.cooldown <= 0.0f && runtime::canBreak(world, a->entity)) {
-            strike(world, t, t.selected, *a, forward);
+        // A click starts a swing (fx.h draws it); it lands a moment in, on whatever is aimed at then.
+        if (use && t.cooldown <= 0.0f) {
+            t.swing = 0.0f;
+            t.swingTool = t.selected;
+            t.landed = false;
             t.cooldown = t.selected == Tool::Pickaxe ? PICKAXE_EVERY : CHISEL_EVERY;
+        }
+        if (t.swing >= 0.0f) {
+            t.swing += dt;
+            if (!t.landed && t.swing >= (t.swingTool == Tool::Pickaxe ? PICKAXE_IMPACT : CHISEL_IMPACT)) {
+                t.landed = true;
+                if (a && runtime::canBreak(world, a->entity)) strike(world, t, t.swingTool, *a, forward);
+            }
+            if (t.swing > (t.swingTool == Tool::Pickaxe ? PICKAXE_EVERY : CHISEL_EVERY)) t.swing = -1.0f;
         }
         clearPlants(world, t);
     }

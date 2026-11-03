@@ -11,7 +11,8 @@
 //                                  (ISLAND_VIEW=overview: from high above the shore)
 //
 // Controls: W/A/S/D walk, Space jump, the mouse looks (Esc frees the cursor, a click takes it back);
-// 1/2 or the wheel pick the pickaxe or the chisel, the left button uses it (held: again); F1 the dev layer.
+// 1/2 or the wheel pick the pickaxe or the chisel, the left button swings it (held: again); E turns
+// collecting on or off (on: rubble near you and where you look comes in as it lands); F1 the dev layer.
 //
 //   ISLAND_SELFTEST=1 ./island_demo   checks itself and exits 0 or 1 (D10; what it checks grows per milestone)
 
@@ -43,6 +44,8 @@
 #include "utils/compose_io.h"
 
 #include "critters.h"
+#include "fx.h"
+#include "gather.h"
 #include "island.h"
 #include "tools.h"
 
@@ -84,6 +87,10 @@ namespace {
     struct Hud {
         std::string tool = "Pickaxe";
         bool aiming = false;
+        std::string prompt;      // "E: gather 3.4 stone, 1.2 dirt"
+        std::string inventory;   // blocks by material
+        std::string collect = "Collect: off  (E)";
+        bool collecting = false;
     };
 
     // ISLAND_SELFTEST=1: the program checks itself (D10), growing with each milestone. I1: a pickaxe
@@ -93,6 +100,7 @@ namespace {
         bool  on = false;
         int   step = 0, wait = 0, tries = 0;
         int   shardsBefore = 0, breaksBefore = 0;
+        vec3  struck{0.0f};      // where the pickaxe hit the ground
         bool  failed = false;
         std::string report;
     };
@@ -215,6 +223,7 @@ namespace {
             }
         }
         player.eye = at + vec3(0.0f, EYE, 0.0f);
+        if (const char* pitch = std::getenv("ISLAND_PITCH")) player.pitch = float(std::atof(pitch));   // for captures
     }
 
     // ---- Each frame --------------------------------------------------------------------------------
@@ -253,13 +262,20 @@ namespace {
         World& world = app.world;
         const auto& input = world.ctx().get<projv::Input>();
         Player& player = world.ctx().get<Player>();
-        const bool use = input.cursorCaptured && !input.wantCaptureMouse && input.down(projv::MouseButton::Left) &&
-                         !world.ctx().get<SelfTest>().on;
+        bool use = input.cursorCaptured && !input.wantCaptureMouse && input.down(projv::MouseButton::Left) &&
+                   !world.ctx().get<SelfTest>().on;
+        // ISLAND_SWING_FRAME=n: one swing at frame n (for a capture of the swing and its particles).
+        if (const char* at = std::getenv("ISLAND_SWING_FRAME"); at && app.frameCount == uint64_t(std::atoi(at))) use = true;
         tools::update(world, input, app.time().unscaledDelta, player.eye, player.forward(), use);
         Hud& hud = world.ctx().get<Hud>();
         const tools::Tools& t = world.ctx().get<tools::Tools>();
         hud.tool = std::string("[") + (t.selected == tools::Tool::Pickaxe ? "1" : "2") + "] " + tools::toolName(t.selected);
         hud.aiming = t.aiming;
+        gather::update(world, input, app.time().unscaledDelta, player.eye, player.forward(), input.cursorCaptured && !world.ctx().get<SelfTest>().on);
+        hud.prompt = world.ctx().get<gather::Gather>().prompt;
+        hud.inventory = gather::inventoryText(world.ctx().get<gather::Inventory>());
+        hud.collecting = world.ctx().get<gather::Gather>().collect;
+        hud.collect = hud.collecting ? "Collect: ON  (E)" : "Collect: off  (E)";
     }
 
     // ---- The self-test ---------------------------------------------------------------------------------
@@ -270,12 +286,13 @@ namespace {
     }
 
     // Strikes with `tool` from `eye` toward `target`; false if nothing is in reach that way.
-    bool selfStrike(World& world, tools::Tool tool, vec3 eye, vec3 target) {
+    bool selfStrike(World& world, tools::Tool tool, vec3 eye, vec3 target, vec3* where = nullptr) {
         tools::Tools& t = world.ctx().get<tools::Tools>();
         const vec3 forward = glm::normalize(target - eye);
         const auto a = tools::aim(world, eye, forward, t.walker);
         if (!a) return false;
         tools::strike(world, t, tool, *a, forward);
+        if (where) *where = a->point;
         return true;
     }
 
@@ -297,7 +314,7 @@ namespace {
                 st.breaksBefore = t.breaks;
                 st.shardsBefore = t.shards;
                 const vec3 ahead = spawn + glm::normalize(vec3(player.forward().x, 0.0f, player.forward().z)) * 2.0f;
-                check(st, selfStrike(world, tools::Tool::Pickaxe, spawn, ahead - vec3(0.0f, 3.0f, 0.0f)), "the pickaxe reaches the ground ahead");
+                check(st, selfStrike(world, tools::Tool::Pickaxe, spawn, ahead - vec3(0.0f, 3.0f, 0.0f), &st.struck), "the pickaxe reaches the ground ahead");
                 st.wait = 30;
                 st.step++;
                 break;
@@ -305,6 +322,8 @@ namespace {
             case 2: {
                 check(st, t.breaks > st.breaksBefore, "the pickaxe broke the ground");
                 check(st, t.shards - st.shardsBefore > 8, "into many shards (" + std::to_string(t.shards - st.shardsBefore) + ")");
+                check(st, t.rubbleKept > 0 && t.rubbleKept < t.shards - st.shardsBefore,
+                      "of which a share is kept as rubble (" + std::to_string(t.rubbleKept) + ")");
                 check(st, t.plantsCleared > 0, "and cleared the plants over it (" + std::to_string(t.plantsCleared) + " voxels)");
                 // The chisel, at the ground to the side.
                 st.breaksBefore = t.breaks;
@@ -319,7 +338,32 @@ namespace {
             case 3: {
                 check(st, t.breaks == st.breaksBefore + 1 && t.shards - st.shardsBefore == 1,
                       "the chisel broke exactly one voxel (" + std::to_string(t.shards - st.shardsBefore) + " shard)");
-                st.step++;
+                st.wait = 90;   // the rubble settles
+                st.step = 20;
+                break;
+            }
+            case 20: {   // gather the pickaxe's rubble, as E would
+                gather::Gather& g = world.ctx().get<gather::Gather>();
+                gather::Inventory& inventory = world.ctx().get<gather::Inventory>();
+                g.near.clear();
+                g.offer.clear();
+                gather::lookAround(world, g, st.struck, t.island, t.walker);
+                const size_t pieces = g.near.size();
+                gather::take(world, g, inventory);
+                const double ratio = t.brokenVoxels > 0.0 ? g.gathered / t.brokenVoxels : 0.0;
+                check(st, pieces > 0 && g.gathered > 0.0, "gathering at the strike took " + std::to_string(pieces) + " pieces, " +
+                                                              std::to_string(int(g.gathered)) + " voxels");
+                check(st, ratio > 0.3 && ratio < 2.5, "about what was broken (" + std::to_string(int(t.brokenVoxels)) + " voxels; ratio " +
+                                                          std::to_string(ratio).substr(0, 4) + ")");
+                check(st, !gather::inventoryText(inventory).empty(), "into the inventory: " + gather::inventoryText(inventory));
+                st.wait = 30;
+                st.step = 21;
+                break;
+            }
+            case 21: {
+                const gather::Gather& g = world.ctx().get<gather::Gather>();
+                check(st, g.pulling.empty(), "and the pieces pulled in are gone");
+                st.step = 4;
                 break;
             }
             case 4: {   // a tree near the start: strike its trunk until it comes down
@@ -384,6 +428,14 @@ namespace {
         critters::update(app.world, app.time().delta, app.world.ctx().get<Player>().eye);
     }
 
+    // After the camera: the tool in hand, its swing, and the particles strikes throw off (fx.h).
+    void toolLook(projv::Application& app) {
+        World& world = app.world;
+        Player& player = world.ctx().get<Player>();
+        const float walking = std::min(1.0f, glm::length(vec3(player.velocity.x, 0.0f, player.velocity.z)) / WALK_SPEED);
+        fx::update(world, app.time().unscaledDelta, player.eye, player.yaw, player.pitch, walking);
+    }
+
     // After physics presents: the eye where the walker is drawn.
     void camera(projv::Application& app) {
         Player& player = app.world.ctx().get<Player>();
@@ -438,13 +490,16 @@ namespace {
         spawnPlayer(world);
         critters::install(world, world.ctx().get<Island>().seed, world.ctx().get<Player>().eye);
         tools::install(app, world.ctx().get<Island>().entity, world.ctx().get<Island>().plants, world.ctx().get<Player>().walker);
+        gather::install(world);
+        fx::install(world, world.ctx().get<Island>().component);
         world.ctx().emplace<SelfTest>().on = std::getenv("ISLAND_SELFTEST") != nullptr;
 
         // The HUD: a placeholder until I5 (a crosshair, the tool in hand).
         Hud& hud = world.ctx().emplace<Hud>();
         projv::ui::user::loadFont(app, (here / "shared_ui/fonts/LatoLatin-Regular.ttf").string());
         projv::ui::user::loadFont(app, (here / "shared_ui/fonts/LatoLatin-Bold.ttf").string());
-        projv::ui::user::model(app, "island").bind("tool", &hud.tool).bind("aiming", &hud.aiming);
+        projv::ui::user::model(app, "island").bind("tool", &hud.tool).bind("aiming", &hud.aiming).bind("prompt", &hud.prompt).bind("inventory", &hud.inventory)
+            .bind("collect", &hud.collect).bind("collecting", &hud.collecting);
         projv::ui::user::openFromMemory(app, "hud", R"(<rml><head><style>
             body { width: 100%; height: 100%; pointer-events: none; font-family: LatoLatin; }
             .cross { position: absolute; left: 50%; top: 50%; width: 6dp; height: 6dp; margin-left: -3dp; margin-top: -3dp;
@@ -452,9 +507,19 @@ namespace {
             .cross.on { background-color: #ffffffff; width: 8dp; height: 8dp; margin-left: -4dp; margin-top: -4dp; }
             .tool { position: absolute; left: 0; bottom: 24dp; width: 100%; text-align: center; font-size: 20dp; color: #ffffff;
                     font-effect: shadow(0dp 2dp #000000c0); }
+            .inventory { position: absolute; left: 0; bottom: 52dp; width: 100%; text-align: center; font-size: 17dp; color: #ffffffd0;
+                    font-effect: shadow(0dp 2dp #000000c0); }
+            .collect { position: absolute; right: 24dp; bottom: 24dp; font-size: 18dp; color: #ffffffa0;
+                    font-effect: shadow(0dp 2dp #000000c0); }
+            .collect.on { color: #b8ff9c; }
+            .prompt { position: absolute; left: 0; top: 56%; width: 100%; text-align: center; font-size: 18dp; color: #fff6c8;
+                    font-effect: shadow(0dp 2dp #000000c0); }
             </style></head><body data-model="island">
             <div class="cross" data-class-on="aiming"></div>
             <div class="tool">{{tool}}</div>
+            <div class="inventory">{{inventory}}</div>
+            <div class="collect" data-class-on="collecting">{{collect}}</div>
+            <div class="prompt" data-if="prompt != ''">{{prompt}}</div>
             </body></rml>)");
 
         if (!restir_pt::install(renderInstance)) std::exit(1);
@@ -487,6 +552,7 @@ int main(int argc, char** argv) {
     app.addSystem(projv::Stage::Update, "tools", useTools, {.after = "controls"});
     app.addSystem(projv::Stage::Update, "self-test", selfTest, {.after = "tools"});
     app.addSystem(projv::Stage::PostUpdate, "camera", camera, {.after = "physics: present"});
+    app.addSystem(projv::Stage::PostUpdate, "tool look", toolLook, {.before = "scene bridge", .after = "camera"});
     app.addSystem(projv::Stage::Render, "render", render);
     app.addSystem(projv::Stage::Shutdown, "shutdown", shutdown);
     app.run();

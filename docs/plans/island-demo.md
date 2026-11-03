@@ -1,6 +1,6 @@
 # Island demo: break it, gather it, build with it
 
-Status: **in progress** (2026-11-02): I0 and I1 built (on the branch `island-demo`); I2 next. Asked for: "the most advanced example yet" -- a procedurally generated
+Status: **in progress** (2026-11-02): I0-I2 built (on the branch `island-demo`); I3 next. Asked for: "the most advanced example yet" -- a procedurally generated
 sandbox with hills, rock and trees; tools to break the world; E to collect the rubble you look at into
 a hotbar beside the tools; a click to place it; a compass at the top.
 
@@ -68,17 +68,22 @@ Space to jump, the mouse to look; Esc for the shared menu.
 user's two -- one to clear ground fast, one to shape exactly. The chisel's voxel is removed by
 `editVoxels` and dropped as a piece of rubble of its material, so it is gathered like any other.
 
-**D7. Rubble is whatever a break throws off, and E gathers it.** Looking at rubble within reach
-(5 m), the HUD says what is there ("E: gather 37 stone, 12 dirt"); E takes every piece within 1.5 m
-of where you look: body pieces from `overlapSphere`, cheap debris from a pass over `Debris` (it is
+**D7. Rubble is whatever a break throws off, and E toggles collecting it.** (Was: E takes what you look
+at -- swing, E, swing was a chore, the user found.) With collecting on, rubble that has landed (a third of
+a second old) within 2.5 m of you or 1.5 m of where you look comes in by itself; off, looking at rubble
+within 5 m says what is there ("E: collect 4.0 grass, 3.2 dirt"). A pickaxe strike keeps only 30% of
+its shards as rubble (the rest go as dust: far too much rubble, the user found), each kept one counting
+for the ones that went, so what you gather is what you broke on average; the chisel's one voxel counts
+once. Rubble is found as body pieces from `overlapSphere`, cheap debris from a pass over `Debris` (it is
 in no query). Each piece's voxels are counted by their palette entry's **material** and added to the
 inventory; the pieces are destroyed (with a short pull toward you first, so it reads). Pieces too
 big to carry (over 512 voxels) are not rubble. *Why:* "piles of rubble" are the pieces; counting
 voxels keeps it honest -- what you gather is what you broke.
 
-**D8. The inventory is voxels of a material, and a block costs eight.** Gathered material appears in
+**D8. The inventory is voxels of a material, and a block costs 64** (eight at 0.25 m; a 0.5 m block is
+4 x 4 x 4 voxels at 0.125 m). Gathered material appears in
 the hotbar after the tools, a slot per material, with its count in blocks. Selecting one and clicking
-places a **0.5 m block** (2 x 2 x 2 voxels) of it against the face you aim at, snapped to the island's
+places a **0.5 m block** (4 x 4 x 4 voxels) of it against the face you aim at, snapped to the island's
 lattice, into the island grid itself (`editVoxels`, the material's own palette entry), so a placed
 block is ground like any other: walk on it, break it, gather it again. Not inside yourself, not
 floating free (it must touch something). *Why:* the user chose blocks of the material; editing the
@@ -95,6 +100,17 @@ fallen logs, stumps, driftwood, giant mushrooms (climbable) -- are in the island
 from trees near the player, rabbits hopping in the meadows, gulls circling, clouds and dandelion fluff on
 the wind. Each is a few voxels in a component of its own, moved through its entity's Transform (the
 engine has no particles). Not physics, not saved. *Why:* the user found the island "empty and unalive".
+
+**D14. The tools are seen and felt** (`fx.h`): the tool in hand is drawn at the right of the view, pixel
+art in voxels (a 16 x 16 picture two voxels thick, chunky like a game's tool), and swung when used -- a
+strike lands partway through the swing, on what is aimed at then. Each strike throws off little voxels
+(4 cm) in the colours of what was hit, which fly, fall and shrink away in 0.3-0.4 s. Looks only. *Why:*
+the user asked for a pickaxe that swings and for "more whimsy".
+
+**Wind (deferred, 2026-11-02).** Leaves swaying in the wind was considered and put off by the user. The
+design, for when it comes back: each tree's leaves as swaying components with no collision until the tree
+is first struck, then baked into the island at rest (stationary, breakable, falling with a felled crown);
+per cluster, with branch gaps between them, only near the player (restir-pt is at about 30 fps).
 
 **D9. The HUD is documents, in a pixel-art style of its own** (`ui/` beside it; not the shared
 frosted look -- the user asked for pixel art): a pixel font (an OFL one, added at I5), hard edges, no
@@ -139,7 +155,7 @@ means a saved island is an ordinary scene.
 |---|---|---|
 | **I0** | The island: generator, materials, grid, restir-pt; walking it; plants and life | the user's walk (done, 2026-11-02); seeds give different islands |
 | **I1** | Tools and breaking: the pickaxe, the chisel; trees fall | breaking by hand (done, 2026-11-02); the self-test's break |
-| **I2** | Rubble and gathering; the inventory | the prompt, gathering by hand; the self-test's counts |
+| **I2** | Rubble and gathering; the inventory; the tools seen and swung | gathering by hand (done, 2026-11-02); the self-test's counts |
 | **I3** | Placing blocks | building by hand; the self-test's placing |
 | **I4** | Saving and loading: the start screen, autosave, save and quit | a world built in, quit, loaded back as it was; the self-test's reload |
 | **I5** | The HUD: hotbar, compass, prompt, menu; the look | the user's check |
@@ -179,7 +195,15 @@ generation.
 restir-pt runs at about 30 fps on the island (the user's machine): playable; optimising it is the
 renderer's work, not this demo's.
 
-Notes for I2 on:
+**I2** (2026-11-02). `gather.h`: collecting (D7) and the inventory (D8; by physics material, in blocks
+of 64 voxels); rubble is debris and body pieces of up to 4096 voxels, counted once per piece by palette
+physics material, pulled to you for 0.3 s and then gone (a body piece's component deleted: pieces keep
+the island's link policy). `tools.h`: the 30% rubble share, swings (the strike lands 0.16 s in), bursts.
+`fx.h`: D14. The HUD placeholder shows the inventory, the collect state and the prompt. The self-test
+gathers a pickaxe strike's rubble and checks it comes to about what was broken (seed 42: 406 of 422
+voxels). `ISLAND_PITCH`, `ISLAND_SWING_FRAME` are for captures.
+
+Notes for I3 on:
 
 - A world folder is made only when missing: after a generator change, delete `worlds/` (or the old
   island loads).
