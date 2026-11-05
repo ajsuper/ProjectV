@@ -196,3 +196,5 @@ speed and lifts the weight, holds it when let go, and lets it unwind on Down; ea
 predict. `DEMOS_ONLY=9` (or `DEMOS_ONLY=2,10`) runs just those demos. Then, for the whole session: no step
 dropped contacts, no body went non-finite or fell through the floor, and the recording replays
 identically. `DEMOS_CAPTURE=<prefix>` saves a frame of each demo as `<prefix>-<n>.tga`.
+`DEMOS_PROFILE=1` prints, at exit, each demo's frame and physics step times (mean, p95, worst) and
+its systems' cost per frame (`Application::systemSeconds`).

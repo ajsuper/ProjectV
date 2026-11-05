@@ -60,6 +60,7 @@
 //
 //   DEMOS_SELFTEST=1 ./physics    runs every demo unattended and checks it
 //   (DEMOS_ONLY=9 or DEMOS_ONLY=2,10: just those)
+//   DEMOS_PROFILE=1                each demo's frame, step and system times, printed at exit
 
 #include <algorithm>
 #include <chrono>
@@ -2671,6 +2672,91 @@ void selfTest(projv::Application& app) {
 }
 
 // =========================================================================================
+// DEMOS_PROFILE=1: per demo, what a frame cost and where it went (Application's system timings),
+// printed at exit.
+// =========================================================================================
+
+struct Profile {
+    struct Series { std::vector<double> v; void add(double x) { v.push_back(x); } };
+    struct PerDemo {
+        Series frame, step, fixedPerFrame;
+        std::map<std::string, Series> systems;   // "<stage>/<name>", ms per frame
+        uint32_t maxBodies = 0, maxAwake = 0;
+        uint64_t steps = 0, dropped = 0;
+    };
+    std::map<int, PerDemo> demos;
+    int lastDemo = 0;
+    uint64_t lastFixed = 0, lastDropped = 0;
+    double lastClock = -1.0;
+};
+
+double pct(std::vector<double> v, double q) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    return v[std::min(v.size() - 1, size_t(q * double(v.size())))];
+}
+double mean(const std::vector<double>& v) {
+    double s = 0.0; for (double x : v) s += x; return v.empty() ? 0.0 : s / double(v.size());
+}
+
+void profileFrame(projv::Application& app) {
+    auto* prof = app.world.ctx().find<Profile>();
+    if (!prof) return;
+    using clock = std::chrono::steady_clock;
+    double now = std::chrono::duration<double, std::milli>(clock::now().time_since_epoch()).count();
+    const auto& time = app.time();
+    if (prof->lastClock >= 0.0 && prof->lastDemo > 0) {
+        auto& d = prof->demos[prof->lastDemo];
+        d.frame.add(now - prof->lastClock);
+        uint64_t fixed = time.fixedStep - prof->lastFixed;
+        d.fixedPerFrame.add(double(fixed));
+        d.steps += fixed;
+        d.dropped += time.droppedFixedSteps - prof->lastDropped;
+        for (int s = 0; s < int(projv::STAGE_COUNT); s++) {
+            auto stage = projv::Stage(s);
+            const auto& names = app.systemNames(stage);
+            auto secs = app.systemSeconds(stage);
+            for (size_t i = 0; i < names.size() && i < secs.size(); i++)
+                d.systems[std::string(projv::stageName(stage)) + "/" + names[i]].add(secs[i] * 1000.0);
+        }
+        const auto& st = runtime::physicsWorld(app.world).stats();
+        d.maxBodies = std::max(d.maxBodies, st.bodies);
+        d.maxAwake = std::max(d.maxAwake, st.awakeBodies);
+    }
+    prof->lastClock = now;
+    prof->lastFixed = time.fixedStep;
+    prof->lastDropped = time.droppedFixedSteps;
+    prof->lastDemo = app.world.ctx().get<Demos>().current;
+}
+
+void profileStep(projv::Application& app) {
+    auto* prof = app.world.ctx().find<Profile>();
+    if (!prof) return;
+    int cur = app.world.ctx().get<Demos>().current;
+    if (cur > 0) prof->demos[cur].step.add(runtime::physicsWorld(app.world).stats().lastStepMilliseconds);
+}
+
+void profileReport(projv::Application& app) {
+    auto* prof = app.world.ctx().find<Profile>();
+    if (!prof) return;
+    for (auto& [demo, d] : prof->demos) {
+        projv::core::info("PROFILE demo {}: {} frames, frame ms mean {:.2f} p50 {:.2f} p95 {:.2f} max {:.2f}; {} steps ({:.2f}/frame), {} dropped; "
+                          "jolt step ms mean {:.2f} p95 {:.2f} max {:.2f}; bodies max {} awake max {}",
+                          demo, d.frame.v.size(), mean(d.frame.v), pct(d.frame.v, 0.5), pct(d.frame.v, 0.95), pct(d.frame.v, 1.0),
+                          d.steps, mean(d.fixedPerFrame.v), d.dropped, mean(d.step.v), pct(d.step.v, 0.95), pct(d.step.v, 1.0),
+                          d.maxBodies, d.maxAwake);
+        std::vector<std::pair<double, std::string>> rows;
+        for (auto& [name, s] : d.systems) rows.push_back({mean(s.v), name});
+        std::sort(rows.rbegin(), rows.rend());
+        for (auto& [m, name] : rows) {
+            if (m < 0.05) continue;
+            const auto& v = d.systems[name].v;
+            projv::core::info("PROFILE demo {}:   {:<40} mean {:7.2f}  p95 {:7.2f}  max {:7.2f} ms/frame", demo, name, m, pct(v, 0.95), pct(v, 1.0));
+        }
+    }
+}
+
+// =========================================================================================
 // Stages
 // =========================================================================================
 
@@ -2830,6 +2916,7 @@ void startup(projv::Application& app) {
     world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
 
     demos.unattended = unattended;
+    if (std::getenv("DEMOS_PROFILE")) world.ctx().emplace<Profile>();
     if (unattended) {
         SelfTest& test = world.ctx().emplace<SelfTest>();
         if (const char* only = std::getenv("DEMOS_ONLY"))
@@ -2869,7 +2956,7 @@ void view(projv::Application& app) {
     view.forward = direction;
 }
 
-void shutdown(projv::Application& app) { projv::graphics::destroyGPUData(app.world.ctx().get<projv::GPUData>()); }
+void shutdown(projv::Application& app) { profileReport(app); projv::graphics::destroyGPUData(app.world.ctx().get<projv::GPUData>()); }
 
 }  // namespace
 
@@ -2877,6 +2964,8 @@ int main(int argc, char** argv) {
     projv::ui::setCommandLine(argc, argv);
     projv::Application app;
     app.addSystem(projv::Stage::Startup,     "startup",   startup);
+    app.addSystem(projv::Stage::PreUpdate,   "profile",   profileFrame);
+    app.addSystem(projv::Stage::FixedUpdate, "profile step", profileStep, {.after = "physics"});
     app.addSystem(projv::Stage::FixedUpdate, "demos",     demoTick);
     app.addSystem(projv::Stage::FixedUpdate, "camera shake", shakeOnImpact, {.after = "physics"});
     app.addSystem(projv::Stage::Update,      "controls",  controls);
