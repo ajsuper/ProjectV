@@ -237,6 +237,20 @@ if(NOT TARGET Jolt::Jolt)
                         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/external/JoltPhysics"
                         RESULT_VARIABLE PROJV_JOLT_PATCHED OUTPUT_QUIET ERROR_QUIET)
         if(NOT PROJV_JOLT_PATCHED EQUAL 0)
+            # An earlier version of the patch may be in place: the files it touches carry nothing
+            # else, so they go back to the pinned commit before this one is applied.
+            execute_process(COMMAND "${GIT_EXECUTABLE}" apply --check "${PROJV_JOLT_PATCH}"
+                            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/external/JoltPhysics"
+                            RESULT_VARIABLE PROJV_JOLT_PATCH_CLEAN OUTPUT_QUIET ERROR_QUIET)
+            if(NOT PROJV_JOLT_PATCH_CLEAN EQUAL 0)
+                message(STATUS "Replacing an earlier jolt-applied-impulses.patch in external/JoltPhysics")
+                execute_process(COMMAND "${GIT_EXECUTABLE}" checkout --
+                                        Jolt/Physics/Constraints/ContactConstraintManager.cpp
+                                        Jolt/Physics/Constraints/ContactConstraintManager.h
+                                        Jolt/Physics/PhysicsSystem.h
+                                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/external/JoltPhysics"
+                                OUTPUT_QUIET ERROR_QUIET)
+            endif()
             execute_process(COMMAND "${GIT_EXECUTABLE}" apply "${PROJV_JOLT_PATCH}"
                             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/external/JoltPhysics"
                             RESULT_VARIABLE PROJV_JOLT_PATCH_FAILED)

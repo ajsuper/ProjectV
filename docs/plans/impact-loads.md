@@ -54,9 +54,12 @@ The diagnosis (`test_physics_tiles.cpp`, the skipped "tiles diagnosis": a 6 x 1.
 
 `cmake/patches/jolt-applied-impulses.patch`, applied to `external/JoltPhysics` at configure time when
 it is not already applied (a failed apply stops the configure). It adds one read-only accessor:
-`PhysicsSystem::GetAppliedContactImpulses`, the solver's cached normal impulses per manifold, read from
-the contact cache in the same sorted order as `SaveState`. That order does not depend on threads: the
-thread test holds at 0, 4 and 12 threads. A Jolt found through `find_package` lacks the patch, and
+`PhysicsSystem::GetAppliedContactImpulses(body1, body2, out)`, the solver's cached normal impulses for
+one body pair, a manifold each, looked up in the contact cache and in sub-shape order (as `SaveState`
+sorts them). That order does not depend on threads: the thread test holds at 0, 4 and 12 threads.
+One pair, not every pair: the first version gathered the whole cache once a step, which cost the
+17-physics pyramid about a tenth of its step. A configure finding an earlier version of the patch
+applied resets the three files it touches and applies this one. A Jolt found through `find_package` lacks the patch, and
 `PROJV_JOLT_APPLIED_IMPULSES` is then undefined: shares are 1 (energy alone, as before). A Jolt
 upgrade re-makes the patch.
 

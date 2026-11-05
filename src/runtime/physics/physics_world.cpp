@@ -816,9 +816,7 @@ namespace projv::runtime {
         MaterialContacts                      contacts;
         std::vector<Impact>                   impacts;   // the last step's, ordered
 #ifdef PROJV_JOLT_APPLIED_IMPULSES
-        JPH::Array<JPH::ContactConstraintManager::AppliedImpulse> applied;   // shareImpacts', kept for its memory
-        std::map<std::pair<uint32_t, uint32_t>, ContactLoad> loads;   // the last step's, by pair (low id first)
-        bool                                  loadsRead = false;
+        JPH::Array<JPH::ContactConstraintManager::AppliedImpulse> applied;   // contactLoad's, kept for its memory
 #endif
         float                                 minImpactSpeed = 1.0f;
         // ---- Contact reports (BodyDesc::reportContacts, sensors) ----
@@ -2705,7 +2703,6 @@ namespace projv::runtime {
     // impulse its hardest-pushed point took, and that point. An impact the solver did not take -- a
     // continuous body's sweep stops it with an impulse of its own, outside it -- is left unknown.
     void PhysicsWorld::shareImpacts() {
-        impl->loadsRead = false;
         for (Impact& i : impl->impacts) {
             std::optional<ContactLoad> load = contactLoad(i.a, i.b);
             if (!load) { i.share = -1.0f; continue; }
@@ -2717,35 +2714,25 @@ namespace projv::runtime {
 
     std::optional<ContactLoad> PhysicsWorld::contactLoad(BodyId a, BodyId b) const {
 #ifdef PROJV_JOLT_APPLIED_IMPULSES
-        if (!impl->loadsRead) {
-            // Every pair's, once a step, when first asked: in the order Jolt's cache sorts pairs and
-            // parts, which does not depend on threads.
-            impl->loadsRead = true;
-            impl->loads.clear();
-            impl->applied.clear();
-            impl->system.GetAppliedContactImpulses(impl->applied);
-            struct Hardest { float largest = 0.0f; JPH::BodyID body1; JPH::Vec3 point1 = JPH::Vec3::sZero(); };
-            std::map<std::pair<uint32_t, uint32_t>, Hardest> hardest;
-            for (const JPH::ContactConstraintManager::AppliedImpulse& m : impl->applied) {
-                uint32_t x = m.mBody1ID.GetIndexAndSequenceNumber(), y = m.mBody2ID.GetIndexAndSequenceNumber();
-                std::pair<uint32_t, uint32_t> key{std::min(x, y), std::max(x, y)};
-                impl->loads[key].impulse += m.mNormalImpulse;
-                Hardest& h = hardest[key];
-                if (m.mLargestPointImpulse > h.largest) h = {m.mLargestPointImpulse, m.mBody1ID, m.mPoint1};
-            }
-            const JPH::BodyLockInterfaceNoLock& bodies = impl->system.GetBodyLockInterfaceNoLock();
-            for (auto it = impl->loads.begin(); it != impl->loads.end();) {
-                const Hardest& h = hardest[it->first];
-                const JPH::Body* body = bodies.TryGetBody(h.body1);
-                if (!(it->second.impulse > 0.0f) || !body) { it = impl->loads.erase(it); continue; }
-                it->second.share = std::clamp(h.largest / it->second.impulse, 0.0f, 1.0f);
-                JPH::RVec3 p = body->GetCenterOfMassTransform() * h.point1;
-                it->second.point = core::vec3(float(p.GetX()), float(p.GetY()), float(p.GetZ()));
-                ++it;
-            }
+        // The pair's manifolds alone, looked up in Jolt's contact cache: in sub-shape order, which
+        // does not depend on threads. (Gathering every pair's once a step cost the pyramid ~10% of
+        // its step, for the handful of pairs asked about.)
+        if (!a.valid() || !b.valid()) return std::nullopt;
+        impl->system.GetAppliedContactImpulses(JPH::BodyID(a.value), JPH::BodyID(b.value), impl->applied);
+        ContactLoad load;
+        float largest = 0.0f;
+        JPH::BodyID body1;
+        JPH::Vec3 point1 = JPH::Vec3::sZero();
+        for (const JPH::ContactConstraintManager::AppliedImpulse& m : impl->applied) {
+            load.impulse += m.mNormalImpulse;
+            if (m.mLargestPointImpulse > largest) { largest = m.mLargestPointImpulse; body1 = m.mBody1ID; point1 = m.mPoint1; }
         }
-        auto found = impl->loads.find({std::min(a.value, b.value), std::max(a.value, b.value)});
-        if (found != impl->loads.end()) return found->second;
+        const JPH::Body* body = impl->system.GetBodyLockInterfaceNoLock().TryGetBody(body1);
+        if (!(load.impulse > 0.0f) || !body) return std::nullopt;
+        load.share = std::clamp(largest / load.impulse, 0.0f, 1.0f);
+        JPH::RVec3 p = body->GetCenterOfMassTransform() * point1;
+        load.point = core::vec3(float(p.GetX()), float(p.GetY()), float(p.GetZ()));
+        return load;
 #else
         (void)a;
         (void)b;
