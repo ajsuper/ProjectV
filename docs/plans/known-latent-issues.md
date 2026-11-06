@@ -358,3 +358,13 @@ also kills runs on exit, after a capture (a segfault or a floating-point excepti
 Not the engine's code, but every program pays for it: the island demo autosaves every minute because a
 crash saves nothing. Fix: a bgfx upgrade, a patch that lets the frame timer be turned off (as the
 Jolt submodule carries one, `cmake/patches/`), or a report upstream.
+
+## 26. The physics example's walker checks depend on how F's blow happens to break
+
+Demo 11's self-test sends a walker at "the biggest piece F threw past the wall" and expects it to be
+stopped or to climb. Which pieces F makes depends on the session's step timing: windowed (steps paced
+by the real clock) the piece is big enough, but `./physics --headless` (one step a frame) leaves a
+32-voxel piece, which the walker shoves 2.8 m along, so the check fails, before and after the
+2026-11-05 support change alike. "F's shards went on through the wall" (more than 60% of them) is as
+borderline: 50-60% in some windowed runs. Fix: build the walker's obstacle and the shards' target
+for the test (a piece of known size, a strike of known energy) rather than picking from what F made.

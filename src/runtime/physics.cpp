@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <unordered_set>
 #include <span>
 #include <map>
 #include <queue>
@@ -1230,27 +1231,56 @@ namespace projv::runtime {
             return around;
         }
 
-        // The island pass of a static collider too big to look over whole (a level's world, billions of
-        // cells): what the change cut loose is found from the change outward. Each solid voxel beside
-        // what went -- an edit's removals, a strike's shards -- starts a flood through solid voxels,
-        // lowest first so that one standing on the ground finds it quickly. A flood that reaches an
-        // anchor (anchor material; with anchorBase, the component's lowest row of blocks, where a level's
-        // ground is), a voxel an earlier flood found held, or more than localSupportVoxels voxels, is
-        // held; one that closes off first is an island, and comes away with the strike's shards. Voxels
-        // are joined through faces, edges and corners (aroundVoxel).
-        // Chunks are decoded as the floods reach them. Deterministic: the seeds are taken in voxel order
-        // and each flood in (y, z, x) order.
+        // Whether anything could hold a splitting static collider up: its base (anchorBase), or an anchor
+        // material its palette names.
+        bool canAnchor(World& world, PhysicsRuntime& physics, const Scene& scene, Entity entity, ComponentHandle owner,
+                       bool anchorBase) {
+            if (anchorBase) return true;
+            utils::SlotMaterials slotMaterials;
+            slotMaterialsOf(physics, scene, owner, slotMaterials);
+            const uint16_t own = ownMaterial(world, physics, entity);
+            const size_t entries = std::min<size_t>(scene.components[owner].materialPalette.size(), 256);
+            for (size_t slot = 0; slot < entries; slot++) {
+                const uint16_t m = slotMaterials[slot] ? slotMaterials[slot] : own;
+                if (m != 0 && physics.world->material(m).anchor) return true;
+            }
+            return false;
+        }
+
+        // The island pass of a static collider found from the change outward, not by flooding the whole
+        // body: for one too big to look over whole (a level's world, billions of cells), and for any
+        // struck one (a boulder's hit is dozens of strikes on one wall in a step, and a whole pass each
+        // was a stall). Each solid voxel beside what went -- an edit's removals, a strike's shards --
+        // starts a flood through solid voxels, lowest first so that one standing on the ground finds it
+        // quickly. A flood that reaches an anchor (anchor material; with anchorBase, a voxel below
+        // `baseTop`), a voxel an earlier flood found held, or more than `budget` voxels, is held; one
+        // that closes off first is an island, and comes away with the strike's shards. Voxels are joined
+        // through faces, edges and corners (aroundVoxel). With no budget to speak of, it finds what the
+        // whole pass would, of a body that was all held before the change.
+        // Chunks are decoded as the floods reach them. Deterministic: the seeds are taken in voxel order,
+        // each flood in (y, z, x) order, and the islands come away in voxel order of their lowest voxel.
         void localSupport(World& world, PhysicsRuntime& physics, Scene& scene, Entity entity, ComponentHandle h,
-                          const VoxelSource& source, ComponentHandle owner, bool anchorBase, core::ivec3 low,
+                          const VoxelSource& source, ComponentHandle owner, bool anchorBase, int baseTop, uint32_t budget,
                           const BodyState& state, const PhysicsRuntime::Break* strike, std::vector<core::ivec3> removed) {
             // The voxels that went: an edit's removals and the strike's shards (cut below, so not solid).
+            // Looked up by hash, never iterated: the seeds below are sorted.
             using Key = std::tuple<int, int, int>;
             auto key = [](core::ivec3 p) { return Key{p.x, p.y, p.z}; };
-            std::set<Key> gone;
-            for (core::ivec3 p : removed) gone.insert(key(p));
+            struct Hash {
+                size_t operator()(const Key& k) const {
+                    uint64_t h = uint64_t(uint32_t(std::get<0>(k))) * 0x9e3779b97f4a7c15ull;
+                    h ^= uint64_t(uint32_t(std::get<1>(k))) * 0xc2b2ae3d27d4eb4full + (h >> 29);
+                    h ^= uint64_t(uint32_t(std::get<2>(k))) * 0x165667b19e3779f9ull + (h >> 32);
+                    return size_t(h);
+                }
+            };
+            std::vector<core::ivec3> goneList = std::move(removed);
             if (strike)
                 for (const auto& shard : strike->shards)
-                    for (const FractureVoxel& v : shard) gone.insert(key(v.position));
+                    for (const FractureVoxel& v : shard) goneList.push_back(v.position);
+            std::unordered_set<Key, Hash> gone;
+            gone.reserve(goneList.size());
+            for (core::ivec3 p : goneList) gone.insert(key(p));
 
             // The parts by block, decoded on demand, each with a mark per cell: 0 not reached, 1 reached
             // by the flood under way, 2 held, 3 an island's.
@@ -1265,12 +1295,21 @@ namespace projv::runtime {
             // every cell's slot + 1 (0 empty) and its mark.
             struct Block { std::array<uint16_t, 4096> cells{}; std::array<uint8_t, 4096> mark{}; };   // 16 bits: slot 255 + 1
             std::map<Key, Block> blocks;
+            // The last block reached: a flood's next voxel is nearly always in it.
+            core::ivec3 lastCoord(std::numeric_limits<int>::min());
+            Block* last = nullptr;
             // The voxel at p: whether it is solid, its slot, and its mark (null if not solid).
             auto at = [&](core::ivec3 p, uint8_t& slot) -> uint8_t* {
                 if (gone.count(key(p))) return nullptr;
                 const core::ivec3 blockCoord(utils::floorDiv(p.x, 16), utils::floorDiv(p.y, 16), utils::floorDiv(p.z, 16));
-                auto [b, fresh] = blocks.try_emplace(key(blockCoord));
-                Block& block = b->second;
+                bool fresh = false;
+                if (!last || blockCoord != lastCoord) {
+                    auto [b, made] = blocks.try_emplace(key(blockCoord));
+                    last = &b->second;
+                    lastCoord = blockCoord;
+                    fresh = made;
+                }
+                Block& block = *last;
                 if (fresh) {
                     auto it = partAt.find(key(core::ivec3(utils::floorDiv(p.x, res), utils::floorDiv(p.y, res), utils::floorDiv(p.z, res))));
                     if (it != partAt.end()) {
@@ -1301,15 +1340,13 @@ namespace projv::runtime {
                 const uint16_t m = slotMaterials[slot] ? slotMaterials[slot] : own;
                 anchorSlot[slot] = m != 0 && physics.world->material(m).anchor;
             }
-            const int baseTop = low.y + res;   // anchorBase: the lowest row of blocks holds
             auto anchored = [&](core::ivec3 p, uint8_t slot) { return anchorSlot[slot] || (anchorBase && p.y < baseTop); };
 
             const std::array<core::ivec3, 26>& around = aroundVoxel();
             std::vector<core::ivec3> seeds;
-            for (const Key& k : gone) {
-                const core::ivec3 p(std::get<0>(k), std::get<1>(k), std::get<2>(k));
+            seeds.reserve(goneList.size() * around.size());
+            for (core::ivec3 p : goneList)
                 for (core::ivec3 f : around) seeds.push_back(p + f);
-            }
             std::sort(seeds.begin(), seeds.end(), [](core::ivec3 a, core::ivec3 b) {
                 return std::make_tuple(a.z, a.y, a.x) < std::make_tuple(b.z, b.y, b.x);
             });
@@ -1327,7 +1364,7 @@ namespace projv::runtime {
                     }
                     cuts.push_back(std::move(cut));
                 }
-            const uint32_t budget = physics.fractureLimits.localSupportVoxels;
+            const size_t shardCuts = cuts.size();
             uint32_t islands = 0;
             for (core::ivec3 seed : seeds) {
                 uint8_t slot = 0;
@@ -1373,6 +1410,11 @@ namespace projv::runtime {
                 }
                 cuts.push_back(std::move(cut));
             }
+            // The islands in voxel order (their members are), as the whole pass has them.
+            std::sort(cuts.begin() + std::ptrdiff_t(shardCuts), cuts.end(), [&](const Cut& a, const Cut& b) {
+                const core::ivec3 p = voxels[a.members.front()].position, q = voxels[b.members.front()].position;
+                return std::make_tuple(p.z, p.y, p.x) < std::make_tuple(q.z, q.y, q.x);
+            });
             core::trace("physics: entity {}: local support pass from {} voxels gone: {} islands, {} 16^3 blocks decoded",
                         static_cast<uint32_t>(entity), gone.size(), islands, blocks.size());
             if (cuts.empty()) return;
@@ -1442,7 +1484,23 @@ namespace projv::runtime {
                     removed = std::move(it->second);
                     physics.removed.erase(it);
                 }
-                localSupport(world, physics, scene, entity, h, source, owner, anchorBase, low, state, strike, std::move(removed));
+                // A level's ground is its lowest row of blocks.
+                const int baseTop = low.y + int(source.parts.front().resolution);
+                localSupport(world, physics, scene, entity, h, source, owner, anchorBase, baseTop,
+                             physics.fractureLimits.localSupportVoxels, state, strike, std::move(removed));
+                return;
+            }
+            // Struck: from the strike outward (localSupport), unbounded, with the whole pass's base (its
+            // own y = 0 and below). Not when part of it is not loaded (what is missing holds it, which
+            // only the whole pass weighs), nor when nothing could hold it (the whole pass says so).
+            if (whole && strike && rest == Rest::Anchored && !partlyLoaded && canAnchor(world, physics, scene, entity, owner, anchorBase)) {
+                std::vector<core::ivec3> removed;
+                if (auto it = physics.removed.find(entity); it != physics.removed.end()) {
+                    removed = std::move(it->second);
+                    physics.removed.erase(it);
+                }
+                localSupport(world, physics, scene, entity, h, source, owner, anchorBase, 1,
+                             uint32_t(std::min<uint64_t>(cells, UINT32_MAX)), state, strike, std::move(removed));
                 return;
             }
             if (whole && cells > MAX_ISLAND_CELLS) {

@@ -61,6 +61,7 @@
 //   DEMOS_SELFTEST=1 ./physics    runs every demo unattended and checks it
 //   (DEMOS_ONLY=9 or DEMOS_ONLY=2,10: just those)
 //   DEMOS_PROFILE=1                each demo's frame, step and system times, printed at exit
+//   ./physics --headless           the self-test with no window, renderer or UI, a step a frame
 
 #include <algorithm>
 #include <chrono>
@@ -71,6 +72,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <glm/gtc/quaternion.hpp>
@@ -105,6 +107,9 @@ using projv::core::vec3;
 namespace fs = std::filesystem;
 namespace runtime = projv::runtime;
 namespace utils = projv::utils;
+
+// --headless: no window, renderer, UI or input; the self-test drives (it implies DEMOS_SELFTEST).
+bool headless = false;
 
 namespace {
 
@@ -1876,6 +1881,7 @@ void moveBeam(projv::Application& app) {
 }
 
 void controls(projv::Application& app) {
+    if (headless) return;
     World& world = app.world;
     auto& renderInstance = world.ctx().get<projv::graphics::RenderInstance>();
     const auto& input = world.ctx().get<projv::Input>();
@@ -2024,6 +2030,7 @@ void followCamera(projv::Application& app) {
 }
 
 void titleBar(projv::Application& app) {
+    if (headless) return;
     auto& demos = app.world.ctx().get<Demos>();
     demos.titleTimer -= app.time().unscaledDelta;
     if (demos.titleTimer > 0.0f) return;
@@ -2095,7 +2102,7 @@ void selfTest(projv::Application& app) {
     // DEMOS_CAPTURE=<prefix>: a frame of each demo, mid-action, as <prefix>-<demo>.tga.
     static int captured = 0;
     const float captureAt[LAST_DEMO + 1] = {0, 14.6f, 2.6f, 5.0f, 9.0f, 3.3f, 5.6f, 6.5f, 12.0f, 6.1f, 3.4f, 4.0f};
-    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && stage >= 1 && stage <= LAST_DEMO && captured < stage &&
+    if (const char* prefix = std::getenv("DEMOS_CAPTURE"); prefix && !headless && stage >= 1 && stage <= LAST_DEMO && captured < stage &&
         t > captureAt[stage]) {
         bgfx::requestScreenShot(BGFX_INVALID_HANDLE, (std::string(prefix) + "-" + std::to_string(stage)).c_str());
         captured = stage;
@@ -2673,7 +2680,7 @@ void selfTest(projv::Application& app) {
 
 // =========================================================================================
 // DEMOS_PROFILE=1: per demo, what a frame cost and where it went (Application's system timings),
-// printed at exit.
+// printed at exit. Headless, only the frames that ran a physics step.
 // =========================================================================================
 
 struct Profile {
@@ -2705,7 +2712,9 @@ void profileFrame(projv::Application& app) {
     using clock = std::chrono::steady_clock;
     double now = std::chrono::duration<double, std::milli>(clock::now().time_since_epoch()).count();
     const auto& time = app.time();
-    if (prof->lastClock >= 0.0 && prof->lastDemo > 0) {
+    // Headless, most frames run no step and take no time: only those that stepped are counted.
+    const bool stepped = time.fixedStep != prof->lastFixed;
+    if (prof->lastClock >= 0.0 && prof->lastDemo > 0 && (stepped || !headless)) {
         auto& d = prof->demos[prof->lastDemo];
         d.frame.add(now - prof->lastClock);
         uint64_t fixed = time.fixedStep - prof->lastFixed;
@@ -2749,7 +2758,7 @@ void profileReport(projv::Application& app) {
         for (auto& [name, s] : d.systems) rows.push_back({mean(s.v), name});
         std::sort(rows.rbegin(), rows.rend());
         for (auto& [m, name] : rows) {
-            if (m < 0.05) continue;
+            if (m < 0.05 && pct(d.systems[name].v, 1.0) < 1.0) continue;
             const auto& v = d.systems[name].v;
             projv::core::info("PROFILE demo {}:   {:<40} mean {:7.2f}  p95 {:7.2f}  max {:7.2f} ms/frame", demo, name, m, pct(v, 0.95), pct(v, 1.0));
         }
@@ -2763,13 +2772,15 @@ void profileReport(projv::Application& app) {
 void startup(projv::Application& app) {
     World& world = app.world;
     const fs::path here = projv::core::executableDirectory();
-    const bool unattended = std::getenv("DEMOS_SELFTEST") != nullptr;
+    const bool unattended = headless || std::getenv("DEMOS_SELFTEST") != nullptr;
 
-    auto& renderInstance = world.ctx().emplace<projv::graphics::RenderInstance>();
-    renderInstance.initialize(1600, 900, "ProjectV Physics");
-    projv::graphics::installPlatform(app, renderInstance);
-    projv::ui::installUi(app, renderInstance);   // the dev layer: F1
-    projv::graphics::setCursorCaptured(app, renderInstance, !unattended);
+    if (!headless) {
+        auto& renderInstance = world.ctx().emplace<projv::graphics::RenderInstance>();
+        renderInstance.initialize(1600, 900, "ProjectV Physics");
+        projv::graphics::installPlatform(app, renderInstance);
+        projv::ui::installUi(app, renderInstance);   // the dev layer: F1
+        projv::graphics::setCursorCaptured(app, renderInstance, !unattended);
+    }
 
     world.ctx().emplace<Camera>();
     world.ctx().emplace<Shake>();
@@ -2910,10 +2921,12 @@ void startup(projv::Application& app) {
         }
     });
 
-    projv::graphics::installBasicRenderer(app, renderInstance);
-    // The crosshair is UI: the demos' shared document (docs/plans/ui.md, D24).
-    projv::ui::user::open(app, "crosshair", (projv::core::executableDirectory() / "shared_ui/crosshair.rml").string());
-    world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
+    if (!headless) {
+        projv::graphics::installBasicRenderer(app, world.ctx().get<projv::graphics::RenderInstance>());
+        // The crosshair is UI: the demos' shared document (docs/plans/ui.md, D24).
+        projv::ui::user::open(app, "crosshair", (projv::core::executableDirectory() / "shared_ui/crosshair.rml").string());
+        world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
+    }
 
     demos.unattended = unattended;
     if (std::getenv("DEMOS_PROFILE")) world.ctx().emplace<Profile>();
@@ -2932,6 +2945,7 @@ void startup(projv::Application& app) {
 }
 
 void view(projv::Application& app) {
+    if (headless) return;
     World& world = app.world;
     const auto& camera = world.ctx().get<Camera>();
     vec3 position = camera.position, direction = camera.forward();
@@ -2956,13 +2970,22 @@ void view(projv::Application& app) {
     view.forward = direction;
 }
 
-void shutdown(projv::Application& app) { profileReport(app); projv::graphics::destroyGPUData(app.world.ctx().get<projv::GPUData>()); }
+void shutdown(projv::Application& app) {
+    profileReport(app);
+    if (auto* gpu = app.world.ctx().find<projv::GPUData>()) projv::graphics::destroyGPUData(*gpu);
+}
 
 }  // namespace
 
 int main(int argc, char** argv) {
     projv::ui::setCommandLine(argc, argv);
+    for (int i = 1; i < argc; i++) headless = headless || std::string_view(argv[i]) == "--headless";
     projv::Application app;
+    if (headless) {
+        // A clock that advances one fixed step a frame: every headless run simulates the same session,
+        // however long its steps take, so runs compare step for step.
+        app.clock = [&app, t = 0.0]() mutable { return t += double(app.time().fixedDelta); };
+    }
     app.addSystem(projv::Stage::Startup,     "startup",   startup);
     app.addSystem(projv::Stage::PreUpdate,   "profile",   profileFrame);
     app.addSystem(projv::Stage::FixedUpdate, "profile step", profileStep, {.after = "physics"});

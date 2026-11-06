@@ -197,4 +197,6 @@ predict. `DEMOS_ONLY=9` (or `DEMOS_ONLY=2,10`) runs just those demos. Then, for 
 dropped contacts, no body went non-finite or fell through the floor, and the recording replays
 identically. `DEMOS_CAPTURE=<prefix>` saves a frame of each demo as `<prefix>-<n>.tga`.
 `DEMOS_PROFILE=1` prints, at exit, each demo's frame and physics step times (mean, p95, worst) and
-its systems' cost per frame (`Application::systemSeconds`).
+its systems' cost per frame (`Application::systemSeconds`). `./physics --headless` runs the self-test
+with no window, renderer or UI, on a clock that advances one step a frame: every run simulates the
+same session, so runs compare step for step.

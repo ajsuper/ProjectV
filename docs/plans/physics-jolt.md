@@ -629,6 +629,10 @@ They are all one thing: voxels that were part of one body and now are a body of 
    whole (2^24 cells), or one whose rest always stays (a static collider that does not split, a
    kinematic body), reads only the shards. The push, `bodyVelocity` and the striker's unused energy
    happen in the pass, for shards only.
+   *2026-11-05:* a struck static collider that splits finds what the strike cut loose from the strike
+   outward (`localSupport`, unbounded, the whole pass's base rule and island order), not by a pass over
+   the whole body: the trebuchet's walls took dozens of strikes a step at ~6.5 ms of whole pass each,
+   a 0.9 s stall. Not when part of it is unloaded, or nothing could anchor it (the whole pass weighs those).
 3. **Every piece takes after its parent.** A piece of a moving body copies its RigidBody; a piece
    of a static collider gets one from the collider's friction, restitution, material and
    breaksOnImpact. Debris breaks on impact if what it came from did (user's call: it should).

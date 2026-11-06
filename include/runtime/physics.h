@@ -435,7 +435,8 @@ namespace projv::runtime {
             // A static collider that splits but is too big to look over whole (a level's world): what
             // a change cut loose is searched for from the change outward instead, and a search that
             // reaches more than this many voxels (1024 .. 16M) without closing off counts as held.
-            // The most a falling piece of it can be.
+            // The most a falling piece of it can be. (A struck collider of any size is searched from
+            // the strike outward too, with no limit.)
             uint32_t localSupportVoxels = 1u << 21;
         } fracture;
     };

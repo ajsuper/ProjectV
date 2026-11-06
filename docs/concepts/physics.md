@@ -231,8 +231,11 @@ bodies exist, so a handler can shape them in the step that made them.
   component's own y = 0 and below. A collider with neither drops nothing, and says so. Off by default:
   floating terrain falling is a choice. Islands join across edges and corners for a static collider (a
   diagonal brace is a staircase of voxels touching at corners); a moving body's islands are by faces.
-- **A collider too big to look over whole** (a level's world) is searched from the change outward
-  (`FractureLimits::localSupportVoxels`).
+- **A struck collider, and one too big to look over whole** (a level's world), are searched from the
+  change outward: a flood from beside what went, which stops at an anchor. A struck one is searched
+  with no limit, and finds what a pass over the whole body would; a level's search stops at
+  `FractureLimits::localSupportVoxels` and counts as held. A boulder's hit is dozens of strikes on
+  one wall in a step, and a whole pass for each was a stall of most of a second.
 - **No world rollback.** `savePhysics` does not rewind across anything that makes or removes bodies,
   by design.
 - **An edit that removes every voxel**: the body goes, the entity stays, `BodyEmptied` is sent.

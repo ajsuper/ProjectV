@@ -1144,6 +1144,47 @@ TEST_CASE("support: a strike that breaks a pillar through brings the top down") 
     CHECK(countOf(f.scene, h).voxels > 0);
 }
 
+TEST_CASE("support: two strikes on one collider in a step each bring down what they cut, from the strike outward") {
+    // Two 1 m pillars 6.5 m high on one ground slab, one collider of stone that splits, struck through
+    // in the same step at different heights: the second strike's pass sees the first one's cut, and each
+    // top falls with its own strike's shards. A struck collider's islands are found from the strike
+    // outward (a boulder's hit is dozens of strikes on one wall in a step, and a pass over the whole
+    // body for each was a stall), so this is what that finds.
+    Fixture f;
+    ComponentHandle h = utils::addComponent(f.scene, projv::ComponentKind::Chunk, "pillars", INVALID_COMPONENT_HANDLE, 16, 0.25f);
+    utils::queueVoxelAdd(f.scene, h, fill({0, 0, 0}, {19, 1, 3}, GREY));     // the ground
+    utils::queueVoxelAdd(f.scene, h, fill({0, 2, 0}, {3, 27, 3}, GREY));     // pillar A
+    utils::queueVoxelAdd(f.scene, h, fill({16, 2, 0}, {19, 27, 3}, GREY));   // pillar B
+    utils::updateScene(f.scene);
+    REQUIRE(utils::setMaterialPhysics(f.scene, h, slotOf(f.scene, h, GREY), "stone"));
+    Entity e = runtime::spawnComponent(f.app.world, h);
+    projv::StaticCollider c;
+    c.splits = true;
+    c.anchorBase = true;
+    f.app.world.emplace<projv::StaticCollider>(e, c);
+    f.frames(2);
+    const uint64_t before = countOf(f.scene, h).voxels;
+    runtime::fracture(f.app.world, e, vec3(0.5f, 2.5f, 0.0f), Fixture::energyFor(1.5f));
+    runtime::fracture(f.app.world, e, vec3(4.5f, 4.0f, 0.0f), Fixture::energyFor(1.5f));
+    f.frames(2);
+    REQUIRE(f.fractures.size() == 2);
+    CHECK(f.splits.empty());
+    uint64_t fell = 0;
+    for (const projv::BodyBroken& broke : f.fractures) {
+        CHECK(broke.entity == e);
+        // Each strike's top came away with it: a piece wholly above the break.
+        float highest = 0.0f;
+        for (Entity piece : broke.pieces) highest = std::max(highest, runtime::bodyPose(f.app.world, piece).centerOfMass.y);
+        CHECK(highest > 4.5f);
+        fell += f.shardVoxels(broke);
+    }
+    // Nothing lost, and what stands is the ground and the two feet: less than half a pillar each.
+    const uint64_t left = countOf(f.scene, h).voxels;
+    CHECK(left + fell == before);
+    CHECK(left < uint64_t(20 * 2 * 4 + 2 * 16 * 13));
+    CHECK(left > uint64_t(20 * 2 * 4));
+}
+
 namespace {
     // A free-floating stone bar, 4 m x 0.5 m x 0.5 m of quarter-metre voxels, at (0, 50, 0), moving
     // at `velocity` with no gravity.
