@@ -913,19 +913,19 @@ namespace island {
         // another (across faces, edges or corners), and leaves never touch the ground (a crown brushing a
         // slope would be held up by it).
         // Pure functions of position, so neighbouring columns agree; the checks cost only where trees meet.
-        std::vector<size_t> near;
+        std::vector<size_t> nearby;
         for (size_t i = 0; i < trees.size(); i++) {
             const Tree& t = trees[i];
             if (t.base.x + t.reach + VOXEL >= ox - VOXEL && t.base.x - t.reach - VOXEL <= ox + RES * VOXEL + VOXEL &&
                 t.base.z + t.reach + VOXEL >= oz - VOXEL && t.base.z - t.reach - VOXEL <= oz + RES * VOXEL + VOXEL)
-                near.push_back(i);
+                nearby.push_back(i);
         }
         auto inBox = [](const Tree& t, vec3 q) {
             return std::abs(q.x - t.base.x) <= t.reach + VOXEL && std::abs(q.z - t.base.z) <= t.reach + VOXEL && q.y >= t.base.y - VOXEL &&
                    q.y <= t.top + VOXEL;
         };
         auto owner = [&](vec3 q) -> long {
-            for (size_t i : near)
+            for (size_t i : nearby)
                 if (inBox(trees[i], q) && treeAt(trees[i], q) != SLOTS) return long(i);
             return -1;
         };
@@ -935,7 +935,7 @@ namespace island {
             for (int dy = -1; dy <= 1; dy++)
                 for (int dx = -1; dx <= 1; dx++)
                     if (dx || dy || dz) steps.push_back(ivec3(dx, dy, dz));
-        for (size_t i : near) {
+        for (size_t i : nearby) {
             const Tree& t = trees[i];
             const vec3 boxLo(t.base.x - t.reach, t.base.y, t.base.z - t.reach);
             const vec3 boxHi(t.base.x + t.reach, t.top, t.base.z + t.reach);
@@ -947,7 +947,7 @@ namespace island {
                 if (!wood && m != SLOTS && m != Water) return;   // leaves never replace ground
                 // Another tree here or beside: the first one's, and a gap between them.
                 bool crowded = false;
-                for (size_t j : near)
+                for (size_t j : nearby)
                     if (j != i && (inBox(trees[j], p) || inBox(trees[j], p + vec3(VOXEL)) || inBox(trees[j], p - vec3(VOXEL)))) { crowded = true; break; }
                 if (crowded) {
                     if (owner(p) != long(i)) return;

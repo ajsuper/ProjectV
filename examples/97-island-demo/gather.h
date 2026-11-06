@@ -53,7 +53,7 @@ namespace gather {
     struct Pull { Entity entity; float time = 0.0f; bool debris = true; };
 
     struct Gather {
-        std::vector<Entity> near;           // what E would take now
+        std::vector<Entity> inReach;           // what E would take now
         std::map<std::string, double> offer;   // and what it is worth, voxels by material
         std::string prompt;
         bool collect = false;               // E toggles: rubble near you and where you look is taken as it lands
@@ -81,13 +81,13 @@ namespace gather {
     inline void lookAround(World& world, Gather& g, vec3 at, Entity island, Entity walker, float radius = GATHER_RADIUS, float youngest = 1e30f) {
         auto take = [&](Entity e) {
             if (world.all_of<Pull>(e)) return;   // already on its way
-            if (std::find(g.near.begin(), g.near.end(), e) != g.near.end()) return;
+            if (std::find(g.inReach.begin(), g.inReach.end(), e) != g.inReach.end()) return;
             if (const tools::Rubble* r = world.try_get<tools::Rubble>(e); r && r->born > youngest) return;
             const tools::RubbleCount& c = countOf(world, e);
             if (c.total == 0 || c.total > MAX_RUBBLE_VOXELS) return;
             const float weight = world.all_of<tools::Rubble>(e) ? world.get<tools::Rubble>(e).weight : 1.0f;
             for (const auto& [material, n] : c.voxels) g.offer[material] += double(n) * weight;
-            g.near.push_back(e);
+            g.inReach.push_back(e);
         };
         for (auto [e, d] : world.view<projv::Debris>().each())
             if (world.all_of<projv::VoxelComponent>(e) && glm::distance(debrisCentre(d), at) < radius) take(e);
@@ -101,12 +101,12 @@ namespace gather {
             inventory.voxels[material] += n;
             g.gathered += n;
         }
-        for (Entity e : g.near) {
+        for (Entity e : g.inReach) {
             const bool debris = world.all_of<projv::Debris>(e);
             world.emplace_or_replace<Pull>(e, Pull{e, 0.0f, debris});
             g.pulling.push_back(Pull{e, 0.0f, debris});
         }
-        g.near.clear();
+        g.inReach.clear();
         g.offer.clear();
     }
 
@@ -147,7 +147,7 @@ namespace gather {
         Gather& g = world.ctx().get<Gather>();
         const tools::Tools& t = world.ctx().get<tools::Tools>();
         g.prompt.clear();
-        g.near.clear();
+        g.inReach.clear();
         g.offer.clear();
         if (allowed && !input.wantCaptureKeyboard && input.pressed(projv::Key::E)) g.collect = !g.collect;
         const auto hit = runtime::castRay(world, eye, forward, REACH, 0xffffffffu, t.walker);
@@ -156,17 +156,17 @@ namespace gather {
             const float youngest = t.time - SETTLE;
             if (hit) lookAround(world, g, hit->position, t.island, t.walker, GATHER_RADIUS, youngest);
             lookAround(world, g, eye - vec3(0.0f, 1.2f, 0.0f), t.island, t.walker, MAGNET, youngest);
-            if (!g.near.empty()) take(world, g, world.ctx().get<Inventory>());
+            if (!g.inReach.empty()) take(world, g, world.ctx().get<Inventory>());
         } else if (hit) {
             // Off: say what is there, and how to take it.
             lookAround(world, g, hit->position, t.island, t.walker);
-            if (!g.near.empty()) {
+            if (!g.inReach.empty()) {
                 std::vector<std::pair<double, std::string>> parts;
                 for (const auto& [material, n] : g.offer) parts.push_back({n, material});
                 std::sort(parts.rbegin(), parts.rend());
                 g.prompt = "E: collect";
                 for (size_t i = 0; i < parts.size() && i < 4; i++) g.prompt += (i ? ", " : " ") + blocksText(parts[i].first) + " " + parts[i].second;
-                g.near.clear();
+                g.inReach.clear();
                 g.offer.clear();
             }
         }

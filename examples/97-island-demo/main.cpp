@@ -700,10 +700,10 @@ namespace {
             case 20: {   // gather the pickaxe's rubble, as E would
                 gather::Gather& g = world.ctx().get<gather::Gather>();
                 gather::Inventory& inventory = world.ctx().get<gather::Inventory>();
-                g.near.clear();
+                g.inReach.clear();
                 g.offer.clear();
                 gather::lookAround(world, g, st.struck, t.island, t.walker);
-                const size_t pieces = g.near.size();
+                const size_t pieces = g.inReach.size();
                 gather::take(world, g, inventory);
                 const double ratio = t.brokenVoxels > 0.0 ? g.gathered / t.brokenVoxels : 0.0;
                 check(st, pieces > 0 && g.gathered > 0.0, "gathering at the strike took " + std::to_string(pieces) + " pieces, " +

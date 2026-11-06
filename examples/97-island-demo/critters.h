@@ -193,9 +193,9 @@ namespace critters {
     inline std::vector<vec3> homes(uint32_t seed, vec3 start, int count, Random& random) {
         std::vector<vec3> out;
         for (int tries = 0; tries < 6000 && int(out.size()) < count; tries++) {
-            const bool near = int(out.size()) < count / 2;
-            const float a = random.range(0.0f, 6.2831853f), r = near ? random.range(3.0f, 28.0f) : random.range(0.0f, 70.0f);
-            const vec3 c = near ? start : vec3(island::CENTRE, 0.0f, island::CENTRE);
+            const bool closeIn = int(out.size()) < count / 2;
+            const float a = random.range(0.0f, 6.2831853f), r = closeIn ? random.range(3.0f, 28.0f) : random.range(0.0f, 70.0f);
+            const vec3 c = closeIn ? start : vec3(island::CENTRE, 0.0f, island::CENTRE);
             const float x = c.x + std::cos(a) * r, z = c.z + std::sin(a) * r;
             if (island::flowerField(x, z, seed) < (tries < 4000 ? 0.35f : 0.0f)) continue;
             const float ground = island::surfaceAt(x, z, seed);
@@ -406,12 +406,12 @@ namespace critters {
         });
     }
 
-    // A leaf starts again inside a crown near `near` (any tree if none is near).
-    inline void respawn(Critters& c, Leaf& leaf, vec3 near) {
+    // A leaf starts again inside a crown near `around` (any tree if none is near).
+    inline void respawn(Critters& c, Leaf& leaf, vec3 around) {
         const island::Tree* pick = nullptr;
         for (int tries = 0; tries < 24 && !pick; tries++) {
             const island::Tree& t = c.trees[size_t(c.random.next() * float(c.trees.size())) % c.trees.size()];
-            const float dx = t.base.x - near.x, dz = t.base.z - near.z;
+            const float dx = t.base.x - around.x, dz = t.base.z - around.z;
             if (dx * dx + dz * dz < 35.0f * 35.0f || tries == 23) pick = &t;
         }
         const island::Tree& t = *pick;
