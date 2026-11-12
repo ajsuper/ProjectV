@@ -76,7 +76,10 @@ cd build/examples/renderer_gallery
 ```
 
 For measuring: `GALLERY_CAPTURE_AT=4,8,16,300` captures those frames instead,
-`GALLERY_SUN_STEP_AT=n` lowers the sun ~14° at frame n (how fast an image follows a change of light), and
+`GALLERY_SUN_STEP_AT=n` lowers the sun ~14° at frame n (how fast an image follows a change of light),
+`GALLERY_WOBBLE=s` strafes the camera at s times walking speed, 8 frames right and 8 back, so it moves every
+frame but stands at the `--look` pose on every 16th one (with the same jitter phase): those frames against
+each other are flicker under motion, and against a still run's what motion costs, and
 `GALLERY_SWITCH_AT=120:pt-reference,240:fast` switches renderer at those frames, as the panel does. An
 unattended run hides the panel (`PROJV_DEV_UI_SHOWN=1` shows it, to capture it).
 

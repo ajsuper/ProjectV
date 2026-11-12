@@ -229,3 +229,18 @@ reproject through the camera only, so a moving body's indirect light lags.
 Fog over dark interiors: the haze's in-scatter is scaled by how lit the air in front of a surface is (the
 surface's received light against the air's brightness, rising to full over the fog's length); extinction is
 unchanged. Before, a sky-coloured veil over black interiors read as medium grey once auto-exposure rose.
+
+### 2026-11-12 -- GI history kept on busy geometry and grazing surfaces
+
+Under motion, on busy geometry (posts, fences, trees, fine roofs) and grazing surfaces (a street seen along
+its length), the GI flickered and uncovered areas were noisy. A debug view of the GI history length
+(Frustrum, `GALLERY_WOBBLE`) showed why: `gi_accumulate` threw the history away there -- a quarter of
+those pixels even under a still camera, since each GI pixel samples a different render texel a frame and
+lands on another voxel face than last frame's, or its bilinear footprint straddles an edge. Each restarted
+from one path, which the a-trous turned into blotches that changed every frame. Where none of the four
+bilinear texels is the same surface it now looks at the 3x3 round them (SVGF's fallback), and then the 5x5
+at a stride of 2, whose history counts as at most 4 frames (light from beside here: the wall behind a post
+the camera passed). GI pixels with 0-3 frames of history: still 24% -> 0.5%, walking 11% -> 0.3%, running
+27% -> 6%. 0.01 ms. Disproven on the way: the temporal reservoir reuse, the history's surface test as such,
+and the resolve's 3x3 clamp (three variance-clip variants measured the same) were not the cause. Judged
+much better in the gallery on Lee Chemicals.

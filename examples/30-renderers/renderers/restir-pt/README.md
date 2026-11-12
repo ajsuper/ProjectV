@@ -28,7 +28,7 @@ of. Plan and delivery log: `docs/plans/restir-pt.md`. Its reference is [pt-refer
 | 2 | `surface` | ¼ × ¼ | Each GI pixel's visible point — one render texel of its block, a different one each frame — packed into two texels, so the path passes read two inputs rather than the G-buffer's six |
 | 3 | `sample` | ¼ × ¼ | A new path from the visible point; last frame's reservoir for the same surface, its path validated (a quarter of them a frame) and shifted here: temporal reuse |
 | 4 | `spatial` | ¼ × ¼ | Five neighbours' paths shifted here: spatial reuse, and a visibility ray for a borrowed reconnection. Resolves to the indirect diffuse light (divided by the diffuse albedo) and specular (divided by the lobe's directional albedo); hands its reservoirs on as next frame's temporal history |
-| 5 | `gi_accumulate` | ¼ × ¼ | Temporal accumulation of both: the diffuse 12 frames at most, the specular 2 (a mirror) to 12 (rough), with luminance moments |
+| 5 | `gi_accumulate` | ¼ × ¼ | Temporal accumulation of both: the diffuse 12 frames at most, the specular 2 (a mirror) to 12 (rough), with luminance moments. Where none of the four history texels is this surface, the 3×3 round them; then the 5×5 at a stride of 2, borrowed as at most 4 frames |
 | 6–9 | `atrous1/2/4/8` | ¼ × ¼ | À-trous filter at steps 1, 2, 4 and 8, both lobes, edge-stopped by normal and plane; the diffuse by a loose luminance test against its 3×3 mean, the specular by the lobe's reach instead |
 | 10 | `ssao` | ½ × ½ | Subtle screen-space AO, in a fixed 4×4 rotation pattern |
 | 10b | `shadow_soft` | ½ × ½ | The sun through the BSDF — diffuse and highlight — with a soft shadow (PCSS-style, in screen space). The lobe is widened by the sun's disc, so a mirror shows a sun the disc's size |
@@ -277,7 +277,7 @@ In the gallery's panel (F1), under "restir-pt settings":
 C prints the camera's pose as the `--look` (and `GALLERY_SUN`) that puts it back, for `--capture`. The
 `RESTIR_*` variables below set the starting values.
 
-For measuring: `GALLERY_STEP_AT=n` sidesteps the camera at frame n (what it uncovers), `RESTIR_RAW=1`
+For measuring: `GALLERY_STEP_AT=n` sidesteps the camera at frame n (what it uncovers), `GALLERY_WOBBLE=s` keeps it moving (flicker under motion), `RESTIR_RAW=1`
 shows each frame's estimate alone (no GI accumulation, no image history), `RESTIR_TEMPORAL=0`,
 `RESTIR_SPATIAL=0` and `RESTIR_VISIBILITY=0` turn off one part of the reuse. `RESTIR_JITTER=0` goes back to the four window-pixel
 centres instead of the TAA's Halton jitter; `GALLERY_BYPASS=1` starts with the reconstruction bypassed.

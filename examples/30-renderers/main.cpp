@@ -33,6 +33,7 @@
 //                      (--capture and --bench open a fixed 1280x720 window, so runs compare)
 //   --look x,y,z,tx,ty,tz   stands the camera at x,y,z looking at tx,ty,tz (default: the framing)
 //   --pan <rad>        turns the camera this much a frame (a moving-camera measurement)
+//   GALLERY_WOBBLE=s   strafes at s x walking speed, 8 frames right and 8 back: every 16th frame at the --look pose
 //   --restir-gi <n>    restir-pt traces paths for one pixel in n x n: 4 (a sixteenth, default) or 2 (a quarter)
 //   --preset <name>    restir-pt's preset: quality (default) or performance (restir_pt::Preset); RESTIR_* still apply
 //
@@ -952,6 +953,21 @@ void render(projv::Application& app) {
     const bool unattended = g_measure.bench || !g_measure.capture.empty();
     if (g_measure.pan != 0.0f) {
         cameraPhi += g_measure.pan;
+        cameraMoved = true;
+    }
+    // GALLERY_WOBBLE=s: the camera strafes at s times walking speed (a 60 Hz frame's walk each frame), 8
+    // frames right then 8 back, so it moves every frame but stands at its starting pose (--look) on every
+    // 16th frame, with the same jitter phase: what differs between those frames is flicker under motion,
+    // and what differs from a still run's same frame is what the motion costs (--capture, GALLERY_CAPTURE_AT).
+    static const float wobble = std::getenv("GALLERY_WOBBLE") ? float(std::atof(std::getenv("GALLERY_WOBBLE"))) : 0.0f;
+    if (wobble != 0.0f) {
+        static projv::core::vec3 applied{0.0f};   // the offset from the starting pose, in the world
+        const int k = int(app.frameCount % 16);
+        const float steps = wobble * float(k < 8 ? k : 16 - k);
+        const float rightPhi = cameraPhi - 3.14159265f / 2.0f;
+        const projv::core::vec3 offset = projv::core::vec3(-projv::core::cos(rightPhi), 0.0f, -projv::core::sin(rightPhi)) * (framing.moveSpeed / 60.0f * steps);
+        cameraPosition += offset - applied;
+        applied = offset;
         cameraMoved = true;
     }
 

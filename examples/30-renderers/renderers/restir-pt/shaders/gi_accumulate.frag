@@ -33,6 +33,8 @@ SAMPLER2D(giSpec, 5);
 SAMPLER2D(surf0, 6);
 SAMPLER2D(surf1, 7);
 
+#define RESTIR_BORROWED_HISTORY 4.0   // frames, at most, for history taken from further away
+
 // The specular history's cap for a lobe of roughness alpha.
 float restirSpecularCap(float alpha) { return mix(2.0, restirDenoise.w, smoothstep(0.0, 0.3, alpha)); }
 
@@ -77,6 +79,47 @@ void main() {
                 moments += texelFetch(accMom, q, 0).xy * w;
                 historyLength += hd.a * w;
                 weight += w;
+            }
+            // None of the four is this surface -- on busy geometry and at grazing angles the visible point
+            // lands on another face than last frame's, or the bilinear footprint straddles an edge: the
+            // 3x3 round them, each that is this surface counting equally (SVGF's fallback). Without it
+            // those pixels restart from one path every few frames, and flicker as they move.
+            if (weight <= 1e-3) {
+                ivec2 centre = ivec2(floor(pix + 0.5));
+                for (int y = -1; y <= 1; y++)
+                    for (int x = -1; x <= 1; x++) {
+                        ivec2 q = centre + ivec2(x, y);
+                        if (q.x < 0 || q.y < 0 || q.x >= int(res.x) || q.y >= int(res.y)) continue;
+                        vec4 was = texelFetch(accSurf, q, 0);
+                        if (was.w < 0.0 || !restirSameSurface(was.xyz, restirUnpackDir(was.w), s.x, s.n, s.t)) continue;
+                        vec4 hd = texelFetch(accDiff, q, 0);
+                        diffuseHistory += hd.rgb;
+                        specularHistory += texelFetch(accSpec, q, 0).rgb;
+                        moments += texelFetch(accMom, q, 0).xy;
+                        historyLength += hd.a;
+                        weight += 1.0;
+                    }
+            }
+            // Still nothing: uncovered, most likely -- the wall behind a post the camera passed. The same
+            // surface was usually on screen a few pixels away last frame: the 5x5 at a stride of 2 (eight GI
+            // pixels across), its history counted as at most RESTIR_BORROWED_HISTORY frames, since it is
+            // light from beside here. Better than one path, which the filter turns into blotches that change
+            // every frame.
+            if (weight <= 1e-3) {
+                ivec2 centre = ivec2(floor(pix + 0.5));
+                for (int y = -2; y <= 2; y++)
+                    for (int x = -2; x <= 2; x++) {
+                        ivec2 q = centre + ivec2(x, y) * 2;
+                        if (q.x < 0 || q.y < 0 || q.x >= int(res.x) || q.y >= int(res.y)) continue;
+                        vec4 was = texelFetch(accSurf, q, 0);
+                        if (was.w < 0.0 || !restirSameSurface(was.xyz, restirUnpackDir(was.w), s.x, s.n, s.t)) continue;
+                        vec4 hd = texelFetch(accDiff, q, 0);
+                        diffuseHistory += hd.rgb;
+                        specularHistory += texelFetch(accSpec, q, 0).rgb;
+                        moments += texelFetch(accMom, q, 0).xy;
+                        historyLength += min(hd.a, RESTIR_BORROWED_HISTORY);
+                        weight += 1.0;
+                    }
             }
         }
     }
