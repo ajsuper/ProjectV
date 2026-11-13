@@ -89,6 +89,12 @@
 // The sun's elevation (a day cycle -- see render()), in scroll-wheel notches: the wheel over the scene, the
 // panel's slider, or GALLERY_SUN.
 static double g_sunScrollAccum = 0.0;
+// How cloudy it is: 0 clear .. 1 a closed deck (sunDir.w; sharedShaders/pjv_sun_sky.sc's pjvOvercast). The
+// panel's slider, or GALLERY_OVERCAST.
+static float g_overcast = 0.0f;
+// The sun's orbit, in degrees a second round its full circle (0 still; the sign picks the way). The panel's
+// slider, or GALLERY_SUN_SPEED.
+static float g_sunSpeed = 0.0f;
 
 // =============================================================================
 // Renderer modularity
@@ -106,6 +112,7 @@ struct FrameContext {
     int               frameCameraLastMovedOn;
     projv::core::vec2 windowResolution;
     projv::core::vec3 sunDirection;   // normalized; scroll-wheel controlled (see render()).
+    float             overcast;       // 0 clear .. 1 a closed cloud deck (sunDir.w)
     float             sunAngle;       // the same, as its angle up the arc
     projv::World*     world;
 };
@@ -130,7 +137,7 @@ static void uploadCommonUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     projv::core::vec4 frameCount = { (float)ctx.frameCount, (float)ctx.cameraMoved, (float)ctx.frameCameraLastMovedOn, 0 };
     projv::core::vec2 texelSize = { 1 / windowResolution.x, 1 / windowResolution.y };
 
-    projv::core::vec4 sunDir = { ctx.sunDirection.x, ctx.sunDirection.y, ctx.sunDirection.z, 0.0f };
+    projv::core::vec4 sunDir = { ctx.sunDirection.x, ctx.sunDirection.y, ctx.sunDirection.z, ctx.overcast };
 
     projv::CameraView camera;
     camera.position = cameraPosition;
@@ -282,6 +289,7 @@ static void uploadRestirUniforms(std::shared_ptr<projv::ConstructedRenderer> ren
     frame.position = ctx.cameraPosition;
     frame.direction = ctx.cameraDirection;
     frame.sunDirection = ctx.sunDirection;
+    frame.overcast = ctx.overcast;
     // An untold sun is no move at all, as far as the renderer knows: the camera stands still in that test.
     frame.sunMoved = ctx.sunMoved && !untold;
     frame.moved = ctx.cameraMoved && !(ctx.sunMoved && untold);
@@ -831,6 +839,10 @@ static void galleryPanel(projv::Application& app) {
     if (ImGui::SliderFloat("sun", &sunDegrees, -30.0f, 210.0f, "%.1f deg"))
         g_sunScrollAccum = notchesFromSunAngle(sunDegrees * 3.14159265f / 180.0f);
     ImGui::SetItemTooltip("The sun's height up its arc (the scroll wheel, over the scene)");
+    ImGui::SliderFloat("sun speed", &g_sunSpeed, -30.0f, 30.0f, "%.1f deg/s");
+    ImGui::SetItemTooltip("The sun orbits on its own, this fast; negative the other way (double-click to type 0)");
+    ImGui::SliderFloat("overcast", &g_overcast, 0.0f, 1.0f, "%.2f");
+    ImGui::SetItemTooltip("How cloudy: more cloud, a dimmer and blurrier sun, softer shadows, a greyer sky that lights more");
     if (ImGui::Button("Re-frame (H)")) gallery.reframe = true;
     ImGui::SameLine();
     if (ImGui::Button("Print pose (C)")) gallery.printPose = true;
@@ -1062,8 +1074,8 @@ void render(projv::Application& app) {
         if (input.pressed(projv::Key::C) || gallery.printPose) {
             gallery.printPose = false;
             projv::core::vec3 at = cameraPosition + cameraDirection * 10.0f;
-            projv::core::info("GALLERY_SUN={} --look {:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}", g_sunScrollAccum,
-                              cameraPosition.x, cameraPosition.y, cameraPosition.z, at.x, at.y, at.z);
+            projv::core::info("GALLERY_SUN={} GALLERY_OVERCAST={:.2f} --look {:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}", g_sunScrollAccum,
+                              g_overcast, cameraPosition.x, cameraPosition.y, cameraPosition.z, at.x, at.y, at.z);
         }
     }
 
@@ -1091,12 +1103,41 @@ void render(projv::Application& app) {
     // GALLERY_CAPTURE_AT, how fast the image follows a change of light.
     static const int sunStepAt = std::getenv("GALLERY_SUN_STEP_AT") ? std::atoi(std::getenv("GALLERY_SUN_STEP_AT")) : -1;
     if (app.frameCount == sunStepAt) g_sunScrollAccum -= 3.0;
+    // GALLERY_SUN_SPEED=d starts the sun orbiting d degrees a second. It turns by the wall clock, so at a
+    // constant speed whatever the frame rate, and its angle is kept to one turn (from straight down) so the
+    // panel's slider and C stay readable. An orbit is a move, not a change of light: a sun that moves a
+    // little every frame would otherwise start every history over every frame (no image at all, only
+    // noise) -- as a move the histories follow it, a few frames behind.
+    static const bool sunSpeedSet = [] {
+        if (const char* v = std::getenv("GALLERY_SUN_SPEED")) g_sunSpeed = float(std::atof(v));
+        return true;
+    }();
+    (void)sunSpeedSet;
+    static auto lastOrbit = std::chrono::steady_clock::now();
+    const auto orbitNow = std::chrono::steady_clock::now();
+    const double orbitSeconds = std::min(std::chrono::duration<double>(orbitNow - lastOrbit).count(), 0.1);
+    lastOrbit = orbitNow;
+    bool sunOrbited = false;
+    if (g_sunSpeed != 0.0f && !unattended) {
+        g_sunScrollAccum += double(g_sunSpeed) * 3.14159265 / 180.0 * orbitSeconds / 0.08;
+        const double turn = 2.0 * 3.14159265 / 0.08;                  // notches in a full circle
+        const double down = notchesFromSunAngle(-3.14159265f / 2.0f);  // straight down
+        g_sunScrollAccum = down + std::fmod(std::fmod(g_sunScrollAccum - down, turn) + turn, turn);
+        sunOrbited = true;
+    }
     float sunAngle = 0.86f + (float)g_sunScrollAccum * 0.08f;  // radians; ~0.86 default, ~4.6deg/notch
     const float sunAzX = -0.6402f, sunAzZ = 0.7682f;          // = normalize(vec2(-0.5, 0.6))
     float ca = projv::core::cos(sunAngle), sa = projv::core::sin(sunAngle);
     projv::core::vec3 sunDirection = { ca * sunAzX, sa, ca * sunAzZ };
-    bool sunMoved = (g_sunScrollAccum != prevSunScroll);
+    // GALLERY_OVERCAST=o starts the sky that cloudy. A change of it is a change of light, as the sun's is.
+    static float prevOvercast = [] {
+        if (const char* v = std::getenv("GALLERY_OVERCAST")) g_overcast = std::clamp(float(std::atof(v)), 0.0f, 1.0f);
+        return g_overcast;
+    }();
+    bool sunMoved = (!sunOrbited && g_sunScrollAccum != prevSunScroll) || (g_overcast != prevOvercast);
+    cameraMoved = cameraMoved || sunOrbited;
     prevSunScroll = g_sunScrollAccum;
+    prevOvercast = g_overcast;
     // Switching to a renderer is a move for it: its history is from wherever it last drew. So is the panel's
     // restart.
     cameraMoved = cameraMoved || sunMoved || gallery.switched || gallery.restart;
@@ -1117,6 +1158,7 @@ void render(projv::Application& app) {
     ctx.frameCameraLastMovedOn = frameCameraLastMovedOn;
     ctx.windowResolution       = renderInstance.getWindowResolution();
     ctx.sunDirection           = sunDirection;
+    ctx.overcast               = g_overcast;
     ctx.sunAngle               = sunAngle;
     ctx.world                  = &app.world;
 

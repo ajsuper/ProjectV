@@ -265,3 +265,12 @@ materials' values, and the matte side's -- divided by a tiny albedo -- was large
 a change of glossiness (over 0.1), the composite takes the specular from same-glossiness GI pixels only
 (the surface's own where none is), and `spatial` leaves out a lobe fainter than 1% instead of dividing by it.
 
+### 2026-11-12 (night) -- overcast, puddles, an orbiting sun
+
+The gallery's panel has an overcast slider (0 clear .. 1 a closed deck, in `sunDir.w`): the shared sun
+and sky (`pjv_sun_sky.sc`, `pjv_path_light.sc`, so pt-reference matches) thicken their clouds, dim and
+desaturate the sun, widen its disc to 0.15 rad and grey the sky towards a CIE overcast deck. From 0.35 the
+G-buffer wets upward faces and opens puddles (six octaves of turned value noise, a frayed shore, depth
+from the same noise) -- by changing the material alone, at the user's request, rather than an extra ray.
+A sun speed slider orbits the sun at a constant rate; the orbit is a camera move to the histories, not a
+change of light, since a reset every frame left only noise. Judged by eye on Lee Chemicals and Frustrum.

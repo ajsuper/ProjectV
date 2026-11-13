@@ -9,7 +9,10 @@
 //   * the sun as a real disc, PATH_SUN_HALF_ANGLE across each way, whose radiance integrates to the rig's
 //     irradiance (SUN_COLOR). pjv_sun_sky.sc's 0.3-radian disc is a display convenience; a glossy floor
 //     would mirror it as a blob a sixth of the sky across. 0.02 is about four times the real sun's, the
-//     soft shadow restir-pt draws (its host's RESTIR_SUN_HALF_ANGLE).
+//     soft shadow restir-pt draws (its host's SUN_HALF_ANGLE); cloud widens it to PATH_SUN_OVERCAST_ANGLE
+//     (the sun seen through thin cloud is a blur, and its shadows soften to nothing).
+//   * overcast (pjv_sun_sky.sc's pjvOvercast): the sky turns into the cloud deck, the clouds close, and a
+//     glow spreads round the sun while the cloud is thin.
 // =============================================================================
 
 #ifndef PJV_PATH_LIGHT_SC
@@ -19,8 +22,12 @@
 #include <pjv_bsdf.sc>   // pjvBasisAround
 #include <pjv_atmosphere.sc>   // pjvPhaseHenyeyGreenstein
 
-#define PATH_SUN_HALF_ANGLE 0.02
+#define PATH_SUN_CLEAR_ANGLE    0.02
+#define PATH_SUN_OVERCAST_ANGLE 0.15   // the disc's half angle under a closed deck (restir_pt.h: the same)
 #define PATH_PI 3.14159265359
+
+float pathSunHalfAngle() { return mix(PATH_SUN_CLEAR_ANGLE, PATH_SUN_OVERCAST_ANGLE, pjvOvercast()); }
+#define PATH_SUN_HALF_ANGLE pathSunHalfAngle()
 
 float pathSunSolidAngle() { return 2.0 * PATH_PI * (1.0 - cos(PATH_SUN_HALF_ANGLE)); }
 
@@ -44,7 +51,8 @@ vec3 pathHorizon(vec3 d) {
     vec2 hs = normalize(sunDir.xz + vec2(1e-5, 0.0));
     float towards = max(dot(hd, hs), 0.0);
     vec3 horizon = mix(vec3(0.020, 0.025, 0.045), vec3(0.62, 0.70, 0.80), day);
-    return mix(horizon, vec3(0.95, 0.48, 0.20), warm * (0.3 + 0.7 * towards * towards));
+    vec3 clear = mix(horizon, vec3(0.95, 0.48, 0.20), warm * (0.3 + 0.7 * towards * towards));
+    return mix(clear, pjvOvercastSky(0.0), smoothstep(0.0, 0.9, pjvOvercast()));
 }
 
 // The sky along d, without the sun's disc: what a bounce that escapes gathers (the disc is counted by
@@ -56,8 +64,15 @@ vec3 pathSky(vec3 d) {
     float band = pow(1.0 - clamp(d.y, 0.0, 1.0), 5.0);   // the horizon's brightness, low and narrow
     vec3 sky = mix(zenith, horizon, band);
     if (d.y < 0.0) sky = mix(horizon, horizon * 0.35, smoothstep(0.0, 0.4, -d.y));
+    // Overcast: the sky becomes the cloud deck (the horizon, above, already has).
+    float o = pjvOvercast();
+    if (d.y >= 0.0) sky = mix(sky, pjvOvercastSky(d.y), smoothstep(0.0, 0.9, o));
     // The aureole: the haze scattering sunlight forwards, brightest round the disc, strongest low down.
     sky += SUN_COLOR * (0.012 * pjvPhaseHenyeyGreenstein(dot(d, normalize(SUN_DIR)), 0.8) * (0.4 + 0.6 * band));
+    // Thin cloud: the sun's light scattered forwards through it, a wide glow -- most at half cover, gone
+    // when clear (no cloud) and when closed (too thick to see the sun through).
+    if (d.y >= -0.05)
+        sky += pjvSunColorClear() * (0.12 * o * (1.0 - o) * pjvPhaseHenyeyGreenstein(dot(d, normalize(SUN_DIR)), 0.7));
     return sky;
 }
 
@@ -93,11 +108,15 @@ vec3 pathClouds(vec3 d, vec3 sky, out float cover) {
     if (d.y <= 0.0) return sky;
     vec2 p = d.xz / (d.y + 0.08) * 1.4;
     float n = pathFbm(p);
-    cover = smoothstep(0.50, 0.78, n) * smoothstep(0.02, 0.25, d.y);
-    float thick = smoothstep(0.55, 0.95, n);
+    // More cloud: the coverage's threshold falls until the layer closes, and it thickens.
+    float o = pjvOvercast();
+    cover = smoothstep(mix(0.50, 0.05, o), mix(0.78, 0.40, o), n) * smoothstep(0.02, 0.25, d.y);
+    float thick = smoothstep(mix(0.55, 0.15, o), mix(0.95, 0.70, o), n);
     float c = dot(d, normalize(SUN_DIR));
     vec3 ambient = mix(pathHorizon(d), sky, 0.5);
     vec3 lit = ambient * 0.9 + SUN_COLOR * (0.07 * (1.0 - 0.6 * thick) + 0.05 * pow(max(c, 0.0), 8.0) * (1.0 - thick));
+    // Under a deck the thick parts are its darker undersides: the texture that makes it read as cloud.
+    lit *= 1.0 - 0.35 * o * thick;
     return mix(sky, lit, 0.9 * cover);
 }
 

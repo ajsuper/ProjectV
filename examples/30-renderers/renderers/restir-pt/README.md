@@ -222,6 +222,14 @@ for specular.
   disc 0.02 radians across each way. The camera also sees clouds (fractal noise on a plane, lit by the
   sun with a silver lining towards it, hiding the disc where thick); they do not light the scene, which
   would only add noise to the GI. pt-reference shows the same.
+- **Overcast** (the panel's slider, `sunDir.w`; `sharedShaders/pjv_sun_sky.sc`): more and thicker cloud,
+  a sun dimmed to 3% and desaturated behind it, its disc widened from 0.02 to 0.15 radians (softer
+  shadows), and the sky mixing towards a grey deck (CIE overcast, brighter overhead) that lights the scene
+  more evenly. From 0.35 up the ground gets wet (`gbuffer.frag`, `restirWetGround`): upward faces darken
+  and take a sheen, and puddles open in six-octave world-space noise, more and wider as it thickens --
+  a frayed shore, soaked ground round it, shallow edges rougher and darker than the deep middle, which is
+  a mirror. Only the G-buffer's material changes, so the glossy and mirror passes draw them; nothing
+  tests for a roof.
 - **TAA**: every render texel is traced through a different point of itself each frame (a 16-phase Halton
   sequence over the whole texel, so over the 2x2 window pixels it covers and within each), and the
   resolve's history averages them -- supersampling while still, and a voxel thinner than a texel is found

@@ -39,7 +39,9 @@ namespace restir_pt {
     constexpr float BLUR_PIXELS = 12.0f;    // ...and its longest streak at 1080 lines: very subtle
     constexpr float SSAO = 0.85f;           // how far the obscurance darkens the indirect light
     constexpr float SUN_HALF_ANGLE = 0.02f; // radians, ~4x the real sun's: penumbrae a little soft
-                                            // (pjv_path_light.sc's PATH_SUN_HALF_ANGLE: the same disc)
+                                            // (pjv_path_light.sc's PATH_SUN_CLEAR_ANGLE: the same disc)
+    constexpr float SUN_OVERCAST_HALF_ANGLE = 0.15f; // ...widened by cloud to this under a closed deck
+                                                     // (PATH_SUN_OVERCAST_ANGLE)
     // The light shafts (shafts.frag): the haze's optical depth over its falloff, the falloff's length in the
     // finest voxels (the air further out than about that is not counted: open sunlit air reads as a light
     // haze, not glare), the phase function's forward scattering, and the frames they are accumulated over.
@@ -131,6 +133,7 @@ namespace restir_pt {
     struct Frame {
         vec3  position{0.0f}, direction{0.0f, 0.0f, 1.0f};
         vec3  sunDirection{0.0f, 1.0f, 0.0f};   // normalized
+        float overcast = 0.0f;    // 0 clear .. 1 a closed cloud deck (sunDir.w; pjv_sun_sky.sc's pjvOvercast)
         bool  moved = false;      // the camera or the sun
         bool  sunMoved = false;   // the sun: the light changed, so every history starts over
         bool  first = false;      // the first frame drawn
@@ -216,8 +219,10 @@ namespace restir_pt {
         const float fogLength = scene.fogLength > 0.0f ? scene.fogLength : std::clamp(1.6f * scene.radius, 300.0f, 3000.0f);
         // The SSAO and the fog are the final render's, not the path tracer's.
         const bool finalRender = s.post.on;
+        const float overcast = std::clamp(frame.overcast, 0.0f, 1.0f);
+        const float sunHalfAngle = SUN_HALF_ANGLE + (SUN_OVERCAST_HALF_ANGLE - SUN_HALF_ANGLE) * overcast;
         // Simple lighting has no occlusion of its own: the SSAO reaches four times as far and darkens fully.
-        vec4 look{(s.simpleLighting ? 24.0f : 6.0f) * finest, finalRender ? (s.simpleLighting && s.ssao > 0.0f ? 1.0f : s.ssao) : 0.0f, s.softShadow ? 2.0f * std::tan(SUN_HALF_ANGLE) : 0.0f, s.farAO ? 1.0f : 0.0f};
+        vec4 look{(s.simpleLighting ? 24.0f : 6.0f) * finest, finalRender ? (s.simpleLighting && s.ssao > 0.0f ? 1.0f : s.ssao) : 0.0f, s.softShadow ? 2.0f * std::tan(sunHalfAngle) : 0.0f, s.farAO ? 1.0f : 0.0f};
         // The height fog: at the ground, 0.6 of an e-fold over the fog's length (about 45% hidden there,
         // gathering from nothing), thinning over 0.15 of it in height, never more than 90%.
         vec4 haze{finalRender && s.fog ? 0.6f / fogLength : 0.0f, scene.ground, 0.15f * fogLength, 0.9f};
@@ -244,7 +249,7 @@ namespace restir_pt {
         camera.position = frame.position;
         camera.forward = frame.direction;
         projv::graphics::setCamera(*renderer, camera);
-        vec4 sunDir{frame.sunDirection, 0.0f};
+        vec4 sunDir{frame.sunDirection, std::clamp(frame.overcast, 0.0f, 1.0f)};
         // z: the sun moved -- the light changed, so every history (the reservoirs' cached light included) starts over.
         vec4 frameCount{float(frame.count), frame.moved ? 1.0f : 0.0f, frame.sunMoved ? 1.0f : 0.0f, 0.0f};
         vec4 reuse{s.reuse && s.temporal ? 1.0f : 0.0f, s.reuse && s.spatial ? 1.0f : 0.0f, s.visibility ? 1.0f : 0.0f, 4.0f};   // temporal, spatial, visibility, M cap

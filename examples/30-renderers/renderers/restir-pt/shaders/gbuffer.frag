@@ -34,6 +34,52 @@ SAMPLER2D(prevPoses, 0);
 #define RESTIR_MOTION
 #include "restir_trace.sc"
 
+// Overcast's wet ground (pjvOvercast, sunDir.w): only the material written here changes -- no ray. From
+// RESTIR_WET_FROM of overcast up, every face turned up is damp (darker, a sheen) and puddles open in it,
+// more and wider as the cloud thickens: world-space fractal noise over the ground (RESTIR_PUDDLE_OCTAVES,
+// each turned against the last so no axis shows, the finest about a voxel across), a puddle where it passes
+// a threshold that falls with the wetness. The edge band is narrow, so the fine octaves fray the shore
+// rather than a smooth curve; the same noise above the threshold is the puddle's depth -- a shallow one is
+// darker ground showing through and a little rougher, a deep one a still mirror -- and a margin just below
+// it is soaked ground around the shore. A puddle has no metal, its glossiness rising through the glossy
+// range to RESTIR_PUDDLE_GLOSS, so the specular passes that draw every glossy surface (reflect.frag, its
+// filters, the mirrors' sharp ray) draw it too. Nothing tests for a roof: a covered floor gets puddles as an
+// open one does.
+#define RESTIR_WET_FROM       0.35
+#define RESTIR_PUDDLE_SIZE    32.0    // finest voxels across the coarsest octave's noise cell
+#define RESTIR_PUDDLE_OCTAVES 6
+#define RESTIR_PUDDLE_GLOSS   0.97
+float restirPuddleNoise(vec2 p) {
+    // fBm, in [0, 1] about 0.5. Each octave turned by ~37 degrees and offset, lacunarity 2.03 (not 2: the
+    // lattices never line up).
+    float sum = 0.0;
+    float amplitude = 0.5;
+    float norm = 0.0;
+    for (int i = 0; i < RESTIR_PUDDLE_OCTAVES; i++) {
+        sum += amplitude * pjvValueNoise(vec3(p.x, 0.0, p.y));
+        norm += amplitude;
+        p = vec2(0.8 * p.x - 0.6 * p.y, 0.6 * p.x + 0.8 * p.y) * 2.03 + vec2(17.3, 5.9);
+        amplitude *= 0.52;
+    }
+    return 0.5 + 0.5 * sum / norm;
+}
+void restirWetGround(vec3 x, vec3 n, float finest, inout vec3 albedo, inout float glossiness, inout float metallic) {
+    float wet = smoothstep(RESTIR_WET_FROM, 1.0, pjvOvercast());
+    if (wet <= 0.0 || n.y < 0.95) return;
+    float noise = restirPuddleNoise(x.xz / (finest * RESTIR_PUDDLE_SIZE));
+    float threshold = mix(0.72, 0.47, wet);
+    float puddle = smoothstep(threshold, threshold + 0.012, noise) * wet;
+    float depth = smoothstep(threshold, threshold + 0.12, noise);
+    float soaked = smoothstep(threshold - 0.06, threshold, noise) * wet;
+    // Damp: wet porous ground darkens and takes a sheen; more so by the shore.
+    albedo *= mix(1.0, 0.75, wet) * mix(1.0, 0.8, soaked);
+    glossiness = max(glossiness, mix(0.3, 0.5, soaked) * wet);
+    // The puddle: water over the floor, the floor showing through where it is shallow.
+    albedo *= mix(1.0, mix(0.6, 0.3, depth), puddle);
+    glossiness = mix(glossiness, mix(0.8, RESTIR_PUDDLE_GLOSS, depth), puddle);
+    metallic *= 1.0 - puddle;
+}
+
 void main() {
     vec2 uv = v_texcoord0 + jitterParams.xy * passTargetRes.zw;
     vec3 direction = pjvViewRayDirection(uv, passTargetRes.xy);
@@ -62,8 +108,11 @@ void main() {
             position = vec4(pjvViewPosition() + direction * hit.t, hit.t);
             albedo = hit.albedo;
             direct = hit.emission;
-            material = restirPackMaterial(hit.glossiness, hit.metallic)
-                     + (restirIsWaterMaterial(hit.transparency, hit.glossiness) ? RESTIR_WATER_BIT : 0.0);
+            bool water = restirIsWaterMaterial(hit.transparency, hit.glossiness);
+            float glossiness = hit.glossiness;
+            float metallic = hit.metallic;
+            if (!water && hit.transparency <= 0.0) restirWetGround(position.xyz, normal, 20.0 * restirSettings.y, albedo, glossiness, metallic);
+            material = restirPackMaterial(glossiness, metallic) + (water ? RESTIR_WATER_BIT : 0.0);
             face = hit.face;
             rotation = hit.rotation;
             previous = hit.previous;

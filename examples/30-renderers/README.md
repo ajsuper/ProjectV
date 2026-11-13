@@ -77,6 +77,9 @@ cd build/examples/renderer_gallery
 
 For measuring: `GALLERY_CAPTURE_AT=4,8,16,300` captures those frames instead,
 `GALLERY_SUN_STEP_AT=n` lowers the sun ~14° at frame n (how fast an image follows a change of light),
+`GALLERY_OVERCAST=o` starts the sky that cloudy (0-1, the panel's slider), `GALLERY_SUN_SPEED=d` starts the
+sun orbiting d degrees a second (negative the other way; the panel's slider, an orbit counts as a camera
+move rather than a change of light, so the histories follow it instead of starting over each frame),
 `GALLERY_WOBBLE=s` strafes the camera at s times walking speed, 8 frames right and 8 back, so it moves every
 frame but stands at the `--look` pose on every 16th one (with the same jitter phase): those frames against
 each other are flicker under motion, and against a still run's what motion costs, and
@@ -101,8 +104,8 @@ done
 | Mouse | Look around while the cursor is captured: a click on the scene captures it, `Esc` frees it for the panel |
 | Scroll wheel | Raise / lower the sun (also the panel's slider) |
 | `H` | Re-frame on the scene |
-| `C` | Print the camera's pose as the `--look` and `GALLERY_SUN` that put it back |
-| `F1` | Hide / show the panel: the renderer, its settings, the sun |
+| `C` | Print the camera's pose as the `--look`, `GALLERY_SUN` and `GALLERY_OVERCAST` that put it back |
+| `F1` | Hide / show the panel: the renderer, its settings, the sun (height, orbit speed) and the overcast |
 
 When the camera is stationary the accumulating renderers refine each frame. Movement, or a sun
 change, resets accumulation in `pt-reference` and shortens the history in the reprojecting ones.
