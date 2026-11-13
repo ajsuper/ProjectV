@@ -75,6 +75,7 @@ differ, the README is what the code does.
 | [voxel-renderer.md](voxel-renderer.md) | in progress (R0–R3, R5 built; R4, R6 open) | The `_demo` examples' renderer: rebuilt for speed, then feel, then looks |
 | [restir-pt.md](restir-pt.md) | delivered in part | ReSTIR PT: paths with materials, reused. Replaced `restir` in the gallery and the terrain generator |
 | [restir-pt-performance.md](restir-pt-performance.md) | delivered (P3 deferred) | restir-pt's presets: today's as quality, a performance one for integrated GPUs (a render scale, fewer rays, passes off), and optimizations for both |
+| [foliage-translucency.md](foliage-translucency.md) | proposal | Light through leaves in restir-pt: a far-side sun ray, canopies that dim rather than block, and a transmission lobe in the paths |
 | [color-convention.md](color-convention.md) | K0–K2 built | One meaning for a stored colour (sRGB), one transform to the screen |
 | [region_tree64_layout.md](region_tree64_layout.md) | superseded by [voxel-storage-tiles.md](voxel-storage-tiles.md) | Column-based region allocator for the tree64 texture |
 | [shader_optimization/](shader_optimization/README.md) | superseded (its base, `pjv_utils_DDA.sc`, went in `fe7ab9e`) | Twelve independent DDA shader experiments, written against the pre-Phase-10 shader (`voxelTypeData`, the old `docs/examples/` paths) |
