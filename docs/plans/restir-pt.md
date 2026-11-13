@@ -256,3 +256,12 @@ filters follow it: `reflect_spatial` (12 taps over the lobe's footprint, Karis-w
 `reflect_temporal` (reprojected, clamped, 32 to 4 frames by glossiness). 0.17 ms together. The ray's
 estimate for points off the screen now traces the sky as well as the sun, so a reflected interior or roof
 underside is dark rather than lit as if open.
+
+### 2026-11-12 (evening) -- no bright fringe where materials meet
+
+Where a glossy surface met a matte one (a road's edge against dirt) its reflection had a bright band. The
+paths' specular is divided by the lobe's albedo; the a-trous and the composite's upsample mixed the two
+materials' values, and the matte side's -- divided by a tiny albedo -- was large. The a-trous now stops at
+a change of glossiness (over 0.1), the composite takes the specular from same-glossiness GI pixels only
+(the surface's own where none is), and `spatial` leaves out a lobe fainter than 1% instead of dividing by it.
+

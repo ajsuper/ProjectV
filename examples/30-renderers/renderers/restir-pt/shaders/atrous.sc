@@ -72,7 +72,9 @@ void main() {
             float wz = exp(-abs(dot(qs.xyz - s.x, s.n)) / sigmaZ);
             float wd = kx * ky * wn * wz * exp(-abs(restirLum(qd.rgb) - ld) / sigmaD);
             float offset = length(vec2(float(x), float(y))) * float(RESTIR_STEP);
-            float ws = kx * ky * wn * wz * (offset <= reach ? 1.0 : 0.0);
+            // ... and only from its own material: a lobe's light divided by another's albedo is not this one's.
+            float sameGloss = abs(restirUnpackMaterial(qm.z).x - s.glossiness) <= 0.1 ? 1.0 : 0.0;
+            float ws = kx * ky * wn * wz * sameGloss * (offset <= reach ? 1.0 : 0.0);
             sumD += qd.rgb * wd;
             varianceD += qd.a * wd * wd;
             totalD += wd;

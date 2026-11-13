@@ -48,6 +48,10 @@ bool restirMatches(ivec2 g, vec3 P, vec3 N, float t) {
     return gs.w >= 0.0 && restirSameSurface(gs.xyz, pjvOctDecode(texelFetch(surf1, g, 0).xy), P, N, t);
 }
 
+bool restirSameGloss(ivec2 g, float gloss) {
+    return abs(restirUnpackMaterial(texelFetch(surf1, g, 0).z).x - gloss) <= 0.1;
+}
+
 void main() {
     ivec2 q = ivec2(gl_FragCoord.xy);
     vec4 surface = texelFetch(gPos, q, 0);
@@ -87,34 +91,50 @@ void main() {
     ivec2 base = ivec2(floor(f));
     vec2 frac = f - floor(f);
 
+    // The specular only from GI pixels of this texel's own material (glossiness, as the paths saw it): a
+    // lobe's light is divided by that lobe's albedo, so another material's is the wrong size here -- a
+    // glossy road beside dirt took the dirt's and shone along the edge. Where none is (a glossy sliver
+    // narrower than a GI pixel), the surface's, as the diffuse.
+    float gloss = min(restirUnpackMaterial(direct.a).x, RESTIR_GI_MAX_GLOSSINESS);
     vec3 sumD = vec3(0.0, 0.0, 0.0);
     vec3 sumS = vec3(0.0, 0.0, 0.0);
+    vec3 anyS = vec3(0.0, 0.0, 0.0);
     float total = 0.0;
+    float totalS = 0.0;
     for (int k = 0; k < 4; k++) {
         ivec2 o = ivec2(k & 1, k >> 1);
         ivec2 g = clamp(base + o, ivec2(0, 0), giSize - ivec2(1, 1));
         if (!restirMatches(g, P, N, t)) continue;
         float w = (o.x == 1 ? frac.x : 1.0 - frac.x) * (o.y == 1 ? frac.y : 1.0 - frac.y) + 1e-3;
+        vec3 sg = texelFetch(giSpecFinal, g, 0).rgb;
+        float ws = restirSameGloss(g, gloss) ? w : 0.0;
         sumD += texelFetch(giDiffFinal, g, 0).rgb * w;
-        sumS += texelFetch(giSpecFinal, g, 0).rgb * w;
+        anyS += sg * w;
+        sumS += sg * ws;
         total += w;
+        totalS += ws;
     }
     if (total <= 0.0) {
         for (int y = -1; y <= 2; y++)
             for (int x = -1; x <= 2; x++) {
                 ivec2 g = clamp(base + ivec2(x, y), ivec2(0, 0), giSize - ivec2(1, 1));
                 if (!restirMatches(g, P, N, t)) continue;
+                vec3 sg = texelFetch(giSpecFinal, g, 0).rgb;
+                float ws = restirSameGloss(g, gloss) ? 1.0 : 0.0;
                 sumD += texelFetch(giDiffFinal, g, 0).rgb;
-                sumS += texelFetch(giSpecFinal, g, 0).rgb;
+                anyS += sg;
+                sumS += sg * ws;
                 total += 1.0;
+                totalS += ws;
             }
     }
     if (total <= 0.0) {
         ivec2 g = clamp(ivec2(round(f)), ivec2(0, 0), giSize - ivec2(1, 1));
         sumD = texelFetch(giDiffFinal, g, 0).rgb;
-        sumS = texelFetch(giSpecFinal, g, 0).rgb;
+        anyS = texelFetch(giSpecFinal, g, 0).rgb;
         total = 1.0;
     }
+    sumS = totalS > 0.0 ? sumS * (total / totalS) : anyS;
 
     vec2 material = restirUnpackMaterial(direct.a);
     vec3 V = normalize(pjvViewPosition() - P);

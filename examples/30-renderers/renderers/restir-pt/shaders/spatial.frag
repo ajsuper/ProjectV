@@ -47,6 +47,8 @@ Reservoir restirLoad(ivec2 at) {
                         texelFetch(res3, at, 0), texelFetch(res4, at, 0));
 }
 
+#define RESTIR_FAINTEST_LOBE 0.01   // specular albedo below which a lobe's light is not estimated
+
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     RestirSurface s = restirSurface(texelFetch(surf0, p, 0), texelFetch(surf1, p, 0));
@@ -249,7 +251,10 @@ void main() {
         vec3 light = win.rest * r.W;
         diffuse = diffuseFactor * light;
         vec3 specularAlbedo = pjvSpecularAlbedo(b, dot(s.n, wo1));
-        specular = spec * light / max(specularAlbedo, vec3(1e-3, 1e-3, 1e-3));
+        // A lobe too faint to see (a few thousandths: dirt, grass) is not estimated: divided by its
+        // albedo, its noise came out hundreds of times too bright, and the denoiser spread that onto the
+        // glossy surface beside it -- a bright fringe along a road's edge. Multiplied back, it was nothing.
+        specular = restirLum(specularAlbedo) >= RESTIR_FAINTEST_LOBE ? spec * light / specularAlbedo : vec3(0.0, 0.0, 0.0);
     }
     // NaN never enters the histories: it would never leave.
     diffuse = vec3(diffuse.r > 0.0 ? diffuse.r : 0.0, diffuse.g > 0.0 ? diffuse.g : 0.0, diffuse.b > 0.0 ? diffuse.b : 0.0);
