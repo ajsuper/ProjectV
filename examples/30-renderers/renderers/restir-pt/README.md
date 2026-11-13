@@ -5,8 +5,9 @@
 **As built now: the cheap configuration.** The diffuse and specular *look* of the materials, not sharp
 reflections: the paths see every surface's glossiness capped at 0.5 (`RESTIR_GI_MAX_GLOSSINESS`), take two
 bounces, and trace coarse past 64 voxels (their sun past 16); validation and random replay are compiled
-out. Mirrors -- glossiness 0.9 and up (`RESTIR_MIRROR_GLOSSINESS`) -- get a screen-space reflection
-instead. About 1.2x restir's frame (below). Everything in the sections after that describes the full
+out. Surfaces glossier than the cap get a traced reflection ray instead (`reflect`): sharp on mirrors --
+glossiness 0.9 and up (`RESTIR_MIRROR_GLOSSINESS`) -- and drawn from the surface's own lobe, then
+filtered, between the two. About 1.2x restir's frame (below). Everything in the sections after that describes the full
 machinery, which the defines in `restir_path.sc` / `restir_trace.sc` / `sample.frag` turn back on.
 
 Three-bounce paths through the scene's materials — glossy, metallic, mirror — traced for a sixteenth of the
@@ -32,7 +33,9 @@ of. Plan and delivery log: `docs/plans/restir-pt.md`. Its reference is [pt-refer
 | 6–9 | `atrous1/2/4/8` | ¼ × ¼ | À-trous filter at steps 1, 2, 4 and 8, both lobes, edge-stopped by normal and plane; the diffuse by a loose luminance test against its 3×3 mean, the specular by the lobe's reach instead |
 | 10 | `ssao` | ½ × ½ | Subtle screen-space AO, in a fixed 4×4 rotation pattern |
 | 10b | `shadow_soft` | ½ × ½ | The sun through the BSDF — diffuse and highlight — with a soft shadow (PCSS-style, in screen space). The lobe is widened by the sun's disc, so a mirror shows a sun the disc's size |
-| 10c | `reflect` | ½ × ½ | Mirrors and water: one ray reflected about the shading normal; what it finds is lit from last frame's image where this frame shows it, else by the ray's own estimate (albedo, the sun through a shadow ray, the sky) |
+| 10c | `reflect` | ½ × ½ | Everything glossier than the paths' cap: one ray, reflected about the shading normal on mirrors and water, about a half vector from the surface's own GGX lobe on glossy ones; what it finds is lit from last frame's image where this frame shows it, else by the ray's own estimate (albedo, the sun and the sky each through a ray) |
+| 10d | `reflect_spatial` | ½ × ½ | The glossy ray shared with its neighbours: 12 taps on a turning Vogel disc, as wide as the lobe spreads the reflection (ray length × alpha, at most 24 texels), same face, plane and glossiness, weighted 1 / (1 + luminance) |
+| 10e | `reflect_temporal` | ½ × ½ | The glossy reflection's history, reprojected by the motion vectors, the same surface only, clamped to the 3×3 (YCoCg, ±1.25σ): 32 frames at the cap down to 4 just under the mirrors. Mirrors and water pass through both |
 | 11 | `composite` | ½ × ½ | Edge-aware upsample of both lobes; the diffuse times the texel's diffuse albedo, the specular times its specular albedo: the demodulation put back at full resolution |
 | 12 | `ao_apply` | ½ × ½ | The SSAO on the indirect light, the sun's light added, the distance fog, the views (G) |
 | 13 | `reconstruct` | window | The voxel renderer's reconstruction, copied: voxel by voxel, antialiased |
@@ -58,16 +61,22 @@ textures.
 | secondary rays | exact | coarse past 64 / 16 voxels | restir's; costs the material room about a fifth of its indirect light |
 | random replay | `RESTIR_REPLAY 1` | compiled out | never used under the cap; its state on every ray cost occupancy. The spatial pass traces one visibility ray |
 | validation | `RESTIR_VALIDATE 1` (and `RESTIR_VALIDATE=1`) | compiled out | measured no benefit |
-| mirrors | the paths | a traced reflection ray (`reflect`) | the cap blurs them |
+| glossy and mirrors | the paths | a traced reflection ray (`reflect`), filtered on glossy lobes | the cap blurs them, and above ~0.55 a path cannot reconnect at all |
 
 The camera ray keeps the real glossiness: the sun's highlight (`shadow_soft`) and the mirror test use it,
 and the composite multiplies the paths' specular back by the capped lobe's albedo, as the paths saw it.
 
+**Glossy surfaces** (glossiness 0.5-0.9: polished floors, tarmac, painted metal): the same ray, reflected
+about a half vector drawn from the surface's real GGX lobe, stratified per pixel and turned each frame. It
+takes over from the paths' specular over the first 0.1 above the cap, so nothing changes at the seam.
+`reflect_spatial` shares each ray with the neighbours the lobe could have sent it to and `reflect_temporal`
+accumulates it on the surface; together 0.17 ms.
+
 **Mirrors and water** (`reflect.frag`): one ray, reflected about the shading normal, finds what is
 reflected. Where this frame's G-buffer shows that same point (within a voxel), its light is last frame's
 image there, read bilinearly through last frame's camera -- shadows and GI included; off the screen or
-hidden, the ray's own estimate stands in (emission, plus the albedo under the sun through one shadow ray and
-the sky above), blended in towards the screen's edges. A miss is the sky and its clouds. Each texel's answer
+hidden, the ray's own estimate stands in (emission, plus the albedo under the sun and the sky, each through
+one ray: a roof's underside or an alley reflected from outside is dark, not lit as in a field), blended in towards the screen's edges. A miss is the sky and its clouds. Each texel's answer
 is its own ray's, so it holds still as the camera moves: the screen-space march it replaced (32 steps
 through the G-buffer, then the paths' blur where it missed) turned on a texel of depth, and flickered. Two
 rays a mirror texel, none elsewhere. The resolve keeps 8 frames on a mirror while the camera moves.

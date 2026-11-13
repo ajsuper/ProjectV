@@ -244,3 +244,15 @@ the camera passed). GI pixels with 0-3 frames of history: still 24% -> 0.5%, wal
 27% -> 6%. 0.01 ms. Disproven on the way: the temporal reservoir reuse, the history's surface test as such,
 and the resolve's 3x3 clamp (three variance-clip variants measured the same) were not the cause. Judged
 much better in the gallery on Lee Chemicals.
+
+### 2026-11-12 (later) -- glossy surfaces reflect
+
+Teardown's roads and polished floors (with the importer's glossiness no longer halved) showed almost no
+specular, and raising `RESTIR_GI_MAX_GLOSSINESS` to 0.9 made them black under anything but the sun: a path
+cannot reconnect at a vertex glossier than ~0.55 (`RESTIR_ROUGH_ALPHA`) with replay compiled out. The cap
+stays at 0.5; `reflect` now covers everything above it, a GGX-sampled ray on glossy lobes (the sharp ray
+on mirrors as before), taking over from the paths across 0.5-0.6. One ray a texel was very noisy, so two
+filters follow it: `reflect_spatial` (12 taps over the lobe's footprint, Karis-weighted) and
+`reflect_temporal` (reprojected, clamped, 32 to 4 frames by glossiness). 0.17 ms together. The ray's
+estimate for points off the screen now traces the sky as well as the sun, so a reflected interior or roof
+underside is dark rather than lit as if open.
