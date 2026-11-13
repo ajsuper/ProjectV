@@ -93,7 +93,7 @@ namespace {
             std::string type = t == matl->end() ? "_diffuse" : t->second;
             float rough = dictFloat(*matl, "_rough", 1.0f);
             if (type == "_metal" || type == "_plastic" || type == "_blend") {
-                gloss = 0.5f * (1.0f - rough);
+                gloss = std::min(1.0f - rough, MAX_SHINY_GLOSS);   // as makeMaterial's shininess
                 metal = dictFloat(*matl, "_metal", 0.0f);
             } else if (type == "_glass") {
                 alpha = std::min(alpha, 0.5f);

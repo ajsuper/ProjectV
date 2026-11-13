@@ -326,10 +326,12 @@ namespace {
         return 1;
     }
 
-    // Terrain from the loaded image: red is height, green grass, blue "special" -- in the shipped
-    // heightmaps it marks bare cliffs and shore, and is taken as rock. The materials are the ones
-    // ground.lua creates, by handle: 1 rock, 2 dirt, 3-4 grass, 8-15 the grass map's gradient. Only a shell under the surface is filled -- the inside of a
-    // hill is never seen and would cost hundreds of millions of voxels.
+    // Terrain from the loaded image: red is height, green grass, and where there is no grass blue is the
+    // paving -- 255 tarmac (the roads and car parks), 10 its painted lines, 20 its tyre tracks, 0 bare
+    // dirt (read off Lee Chemicals' and Evertide Mall's heightmaps against their levels). The materials
+    // are the ones ground.lua creates, by handle: 1 rock, 2 dirt, 3-4 grass, 5 tarmac, 6 tarmac track,
+    // 7 tarmac line, 8-15 the grass map's gradient. Only a shell under the surface is filled -- the
+    // inside of a hill is never seen and would cost hundreds of millions of voxels.
     int l_Heightmap(lua_State* L) {
         Run* r = run(L);
         const Image& img = r->image;
@@ -349,8 +351,8 @@ namespace {
                 const uint8_t* p = img.at(px, py);
                 const int h = height(px, py);
                 const int floorH = std::min({height(px - 1, py), height(px + 1, py), height(px, py - 1), height(px, py + 1), h}) - 3;
-                // Green is grass (tinted by the grass map when there is one); blue marks bare
-                // ground -- rock where it is strong, dirt where it is faint.
+                // Green is grass (tinted by the grass map when there is one); otherwise blue is the
+                // paving (above). A blue between the codes is a blend's edge: tarmac from half up.
                 MatId top;
                 if (p[1] > 0) {
                     if (r->hasGrass && px < r->grass.w && py < r->grass.h) {
@@ -358,7 +360,11 @@ namespace {
                     } else {
                         top = mat(3 + int(std::uniform_int_distribution<int>(0, 1)(r->rng)));
                     }
-                } else top = mat(p[2] > 127 ? 1 : 2);
+                } else if (p[2] == 10) {
+                    top = mat(7);
+                } else if (p[2] == 20) {
+                    top = mat(6);
+                } else top = mat(p[2] > 127 ? 5 : 2);
                 if (!top) top = mat(2);
                 for (int y = std::max(0, floorH); y <= h; y++) {
                     MatId m = y == h ? top : (h - y <= 3 ? mat(2) : mat(1));

@@ -64,6 +64,10 @@ private:
 // The process-wide table. Conversion is single-level-at-a-time and the table only grows.
 MaterialTable& materials();
 
+// The most glossiness a highlight (Teardown's shininess, a MATL's roughness) is given: just short of 0.9,
+// where restir-pt draws a surface as a mirror. Only reflectivity makes a mirror.
+constexpr float MAX_SHINY_GLOSS = 0.85f;
+
 // Teardown material parameters, as CreateMaterial and voxbox `pbr` give them.
 VoxMaterial makeMaterial(Substance s, float r, float g, float b, float alpha = 1.0f, float reflect = 0.0f,
                          float shiny = 0.0f, float metal = 0.0f, float emissive = 0.0f);

@@ -70,7 +70,10 @@ VoxMaterial makeMaterial(Substance s, float r, float g, float b, float alpha, fl
     m.b = toByte(b);
     m.substance = s;
     m.alpha = toByte(s == Substance::Glass && alpha >= 1.0f ? 0.5f : alpha);
-    m.gloss = toByte(std::max(reflect, shiny * 0.5f));
+    // Teardown's reflectivity (mirror reflection) and shininess (the highlight) both become glossiness,
+    // at full value: halved, tarmac's 0.4 shone as 0.2 -- a lobe so broad and dim (F0 0.008) it did not
+    // show. Shininess stops short of the renderers' mirrors (MAX_SHINY_GLOSS); only reflectivity is one.
+    m.gloss = toByte(std::max(reflect, std::min(shiny, MAX_SHINY_GLOSS)));
     m.metal = toByte(metal);
     m.emissive = uint8_t(std::clamp(std::lround(emissive * 16.0f), 0L, 255L));
     return m;

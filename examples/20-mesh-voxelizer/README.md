@@ -347,7 +347,12 @@ decoded; the run fails if a voxel is missing. `--td-verify <dir>...` repeats tha
 - **Prefabs**, groups, scripts, vehicles and rigs, with the editor's `instance=` wrapper transform
   dropped the way the game drops it. The `sandbox` layer is active.
 - **Materials**: palette colour plus MATL (metal, glass, emission); the substance, from Teardown's
-  palette rows, becomes a physics material name. A world with more than 256 materials is clustered
+  palette rows, becomes a physics material name. Glossiness is the larger of the reflectivity and the
+  shininess (`CreateMaterial`), or `1 - roughness` (MATL), held to 0.85 (`MAX_SHINY_GLOSS`) so only
+  water and glass reach the renderers' mirrors: a road is as glossy as the game draws it, not half.
+- **Heightmap ground** takes its top material from the map's blue channel where no grass grows, as
+  `ground.lua` does: 255 tarmac, 20 track, 10 road line, anything else dirt (it was all rock and dirt,
+  so Lee Chemicals' roads were matte). A world with more than 256 materials is clustered
   in Oklab; the log reports the largest colour shift.
 - **Water**: rectangles, polygons and unbounded planes (held to the level plus 20 m).
 - MagicaVoxel `XYZI` models and Teardown's own compressed `TDCZ` chunk, which is not held to 256 per axis.
