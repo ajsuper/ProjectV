@@ -1,6 +1,6 @@
 # ProjectV Examples
 
-Eighteen programs of two kinds. Each one is a complete application, not a snippet, and each has its own
+Nineteen programs of two kinds. Each one is a complete application, not a snippet, and each has its own
 README explaining how to run it, why it exists and what it does differently from its neighbours.
 
 - **Feature examples** (`00`–`72`) each teach one part of the engine, and reading them in order teaches
@@ -9,7 +9,8 @@ README explaining how to run it, why it exists and what it does differently from
   under a fixed sun, and nothing else. The image is plain, so what you see is the feature. The exceptions
   are the examples whose subject is rendering: [30-renderers](30-renderers/),
   [40-advanced-renderer](40-advanced-renderer/), and the scene editor's viewport; and
-  [50-terrain-generator](50-terrain-generator/), whose look is the point, draws with the gallery's restir-pt.
+  [50-terrain-generator](50-terrain-generator/), whose look is the point, draws with the gallery's restir-pt, and
+  [55-mountains](55-mountains/) draws with a renderer of its own (the gallery's fast, with an atmosphere).
 - **Demos** (`80` and up, named `_demo`) put many features together to show what the engine can do. They
   draw with the full renderers: [`shared/voxelRenderer`](shared/voxelRenderer/) (probe-grid GI, AO,
   voxel reconstruction, TAA), and the explosion's own night-capable fork of it. Voxel Mayhem and the
@@ -44,6 +45,7 @@ cd build/examples/hello_voxel && ./hello_voxel
 | **30** | [renderers](30-renderers/) | Three renderers over one scene and one camera — the comparison is the point: restir-pt, pt-reference and fast. | — |
 | **40** | [advanced-renderer](40-advanced-renderer/) | The good renderer, brought up to the engine as it is today: fourteen passes, world-space probe GI, animation, transparency and refraction. | — |
 | **50** | [terrain-generator](50-terrain-generator/) | Procedural generation and streaming: chunks built on worker threads and uploaded while you fly. | — |
+| **55** | [mountains](55-mountains/) | Mountains in the style of the Sangre de Cristo at Santa Fe, in voxels from 0.25 m to a horizon 130 km out: a clipmap of eleven voxel rings streamed around the camera, erosion every ring agrees on, trees, and a renderer with the air of 2 km up. `mountains_lab` draws the landform in 2D. | — |
 | **60** | [scene-editor](60-scene-editor/) | A complete tool. ImGui docking, the scene living inside a panel, tools, undo, and Lua-scripted brushes. | ImGui + Lua submodules |
 | **70** | [multiplayer](70-multiplayer/) | A dedicated server and clients as separate programs over UDP: a headless server simulating every player, clients that join, see each other and walk. `selftest.sh` runs all three headless. | — |
 | **72** | [user-interface](72-user-interface/) | The player's UI: RmlUi documents beside the program -- a HUD with bound values, a menu whose buttons send actions and whose slider, checkbox and text field write the program's variables. Edit them while it runs. | — |
