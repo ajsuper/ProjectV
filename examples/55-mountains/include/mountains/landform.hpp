@@ -21,6 +21,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace mountains {
@@ -149,6 +150,9 @@ inline Noise gullies(double x, double z, double dirX, double dirZ, uint32_t seed
     if (mag < 1e-12 || wsum < 1e-12) return {};
     const double c = re / mag, s = im / mag;
     const double coherence = smoothstep(0.1, 0.5, mag / wsum);
+    // The derivative of the stripe alone, ignoring how the weights and the coherence change: smooth
+    // where the exact one spikes (where the phasors cancel), which is what an interpolated slope and the
+    // next octave's direction want.
     Noise n;
     n.v = c * coherence;
     const double k = -s * kTau * coherence;
@@ -374,8 +378,8 @@ struct Settings {
     // Erosion: octaves from `erosionWavelength` down, each `kErosion * wavelength * slope` tall.
     double erosionWavelength = 4500.0;
     double erosionFinest = 6.0;
-    double kErosion = 0.42;
-    double erosionGain = 0.62;       // per octave, on top of the wavelength halving
+    double kErosion = 0.32;
+    double erosionGain = 0.55;       // per octave, on top of the wavelength halving
     double erosionSlopeCap = 0.7;
     double erosionBias = 0.25;       // valleys cut deeper than ridges stand up
     // Detail: damped fBm from `detailWavelength` down to the footprint.
@@ -475,110 +479,145 @@ public:
         return m;
     }
 
-    Sample sample(double x, double z, double footprint) const {
-        Sample out;
-        const Macro m = macro(x, z);
-        double h = m.height;
-        out.core = m.core;
-        out.basalt = m.basalt;
+    // ---- Sampling ----
+    //
+    // Erosion is chaotic: each octave's gullies follow the slope left by the octaves before it, so a
+    // small change in that slope moves them. For every ring of the clipmap to agree, the slope each
+    // octave follows is therefore part of the definition: octave k reads the surface so far
+    // interpolated (Hermite) from a global lattice of spacing wavelength_k / 8, and every caller
+    // computes the same lattice (Catmull-Rom: C1, and its slope comes from the values themselves, so no
+    // lattice-aligned bumps where a stored slope would disagree with them). Heights are the macro surface (exact, not interpolated: scarps stay
+    // sharp) plus the erosion so far plus detail. A caller whose voxels are coarser than a lattice
+    // evaluates that octave per point instead; what it then differs by is that octave alone, smaller
+    // than its voxels.
 
-        // The macro surface's gradient, by central differences (it is smooth at this scale).
-        const double e = 60.0;
-        double gx = (macro(x + e, z).height - macro(x - e, z).height) / (2.0 * e);
-        double gz = (macro(x, z + e).height - macro(x, z - e).height) / (2.0 * e);
+    // The state a lattice node carries: the surface so far, split into macro and erosion.
+    struct Node {
+        double m = 0, mgx = 0, mgz = 0;   // macro height and gradient
+        double e = 0, egx = 0, egz = 0;   // erosion so far
+        double relief = 0, core = 0, basalt = 0, badland = 0;
+    };
 
-        // Soft sediment: the piedmont, low and gently sloping, away from the cores and caps.
-        out.badland = (1.0 - m.core) * (1.0 - m.basalt) * smoothstep(1700.0, 1900.0, h) *
-                      (1.0 - smoothstep(2350.0, 2500.0, h));
+    // Things that are the same for every sample of a tile.
+    struct CirqueSite {
+        Range range;
+        double tk = 0, sk = 0, radius = 0, floor = 0;
+        int side = 1;
+        bool tarn = false;
+    };
+    struct TileContext {
+        std::vector<CirqueSite> cirques;
+        bool nearRiver = true;
+    };
 
-        // Erosion.
-        const double relief = std::max(m.height - m.base, 0.0);
-        // The piedmont (a few hundred metres over the base) keeps shallow arroyos; the mountains get
-        // their canyons.
-        double reliefCap = 0.3 * relief * smoothstep(150.0, 700.0, relief) + 7.0;
-        double wavelength = s_.erosionWavelength;
-        double gain = 1.0;
+    double octaveWavelength(int k) const { return s_.erosionWavelength / double(1u << k); }
+    double latticeSpacing(int k) const { return octaveWavelength(k) / 8.0; }
+
+    // Samples at (x0 + i * step, z0 + j * step), i < nx, j < nz, into out[j * nx + i], with gradients
+    // by central differences at `step`. `footprint` is what each sample stands for (usually `step`).
+    void sampleGrid(double x0, double z0, double step, int nx, int nz, double footprint,
+                    std::vector<Sample>& out) const {
+        // One sample of border on each side, for the differences.
+        const int bx = nx + 2, bz = nz + 2;
+        const double ox = x0 - step, oz = z0 - step;
+        const double x1 = ox + step * (bx - 1), z1 = oz + step * (bz - 1);
+
+        // Which octaves come from lattices: those whose lattice is no finer than the samples (or 4 m).
         const double cutoff = std::max(s_.erosionFinest, 2.0 * footprint);
-        for (int octave = 0; wavelength >= cutoff * 0.5; ++octave) {
-            const double fade = smoothstep(cutoff * 0.5, cutoff, wavelength);
-            const double slope = std::sqrt(gx * gx + gz * gz);
-            if (slope > 1e-5) {
-                const double summit = 1.0 - 0.5 * smoothstep(s_.summitStart, s_.summitFull, h);
-                const double capFlat = 1.0 - 0.7 * m.basalt;
-                // All octaves together cut no deeper than about 0.6x what stands above the base: a
-                // 100 m scarp gets gullies, not 4 km-wavelength spikes, and the piedmont keeps its
-                // shallow arroyos.
-                const double amp = std::min(s_.kErosion * gain * wavelength * std::min(slope, s_.erosionSlopeCap),
-                                            reliefCap) *
-                                   summit * capFlat * fade;
-                const Noise n = gullies(x / wavelength, z / wavelength, gx / slope, gz / slope,
-                                        s_.seed * 977U + uint32_t(octave) * 131U);
-                // Biased: valleys (v < 0) cut deeper than ridges (v > 0) stand up.
-                const double v = n.v - s_.erosionBias * (1.0 - n.v * n.v);
-                const double dv = 1.0 + 2.0 * s_.erosionBias * n.v;
-                h += amp * v;
-                gx += amp * dv * n.dx / wavelength;
-                gz += amp * dv * n.dz / wavelength;
-            }
-            wavelength *= 0.5;
-            gain *= s_.erosionGain;
-            reliefCap *= 0.6;
-        }
+        int octaves = 0;
+        for (double w = s_.erosionWavelength; w >= cutoff * 0.5; w *= 0.5) ++octaves;
+        const double finest = std::max(4.0, step);
+        int levels = 0;   // lattice level k holds the state before octave k; levels 0 .. levels-1
+        while (levels < octaves && latticeSpacing(levels) >= finest) ++levels;
+        levels = std::max(levels, 1);   // level 0 (the macro alone) always: it gives octave 0 its slope
 
-        // Detail.
+        // Lattice levels, coarsest first. Level k covers what level k+1 (or the samples) needs, plus two
+        // cells for the Catmull-Rom neighbours.
+        struct Level { double g; int64_t i0, j0; int w, h; std::vector<Node> nodes; };
+        std::vector<Level> lat(static_cast<size_t>(levels));
         {
-            double lambda = s_.detailWavelength;
-            double ddx = 0.0, ddz = 0.0;
-            const double slope = std::sqrt(gx * gx + gz * gz);
-            const double rough = 0.4 + 1.2 * smoothstep(0.2, 0.8, slope);
-            for (int octave = 0; lambda >= footprint; ++octave) {
-                const double fade = smoothstep(footprint, 2.0 * footprint, lambda);
-                const Noise n = gradientNoise(x / lambda, z / lambda, s_.seed * 31U + 5000U + uint32_t(octave));
-                ddx += n.dx;
-                ddz += n.dz;
-                const double amp = s_.detailAmplitude * lambda * rough * fade / (1.0 + ddx * ddx + ddz * ddz);
-                h += amp * n.v;
-                gx += amp * n.dx / lambda;
-                gz += amp * n.dz / lambda;
-                lambda *= 0.5;
+            double lo_x = ox, lo_z = oz, hi_x = x1, hi_z = z1;
+            for (int k = levels - 1; k >= 0; --k) {
+                Level& L = lat[size_t(k)];
+                L.g = latticeSpacing(k);
+                L.i0 = int64_t(std::floor(lo_x / L.g)) - 2;
+                L.j0 = int64_t(std::floor(lo_z / L.g)) - 2;
+                const int64_t i1 = int64_t(std::floor(hi_x / L.g)) + 3, j1 = int64_t(std::floor(hi_z / L.g)) + 3;
+                L.w = int(i1 - L.i0 + 1);
+                L.h = int(j1 - L.j0 + 1);
+                lo_x = double(L.i0) * L.g; lo_z = double(L.j0) * L.g;
+                hi_x = double(i1) * L.g; hi_z = double(j1) * L.g;
             }
         }
-
-        // Cirques under the high crests.
-        out.cirque = 0.0;
-        for (const Range& r : ranges_) carveCirques(r, x, z, h, out.cirque);
-
-        // The river: its gorge cut through anything above it.
-        if (!river_.points.empty()) {
-            double d, re;
-            river_.nearest(x, z, d, re);
-            const double gorge = re + std::max(d - 45.0, 0.0) * 1.15;
-            if (gorge < h + 30.0) {
-                const double before = h;
-                h = smin(h, gorge, 30.0);
-                if (h < before - 0.5) {
-                    // The gorge's walls replace the slope there; good enough for shading.
-                    const double w = clamp01((before - h) / 20.0);
-                    double rx = 0, rz = 0;
-                    const double eps = 25.0;
-                    double d1, e1, d2, e2;
-                    river_.nearest(x + eps, z, d1, e1);
-                    river_.nearest(x - eps, z, d2, e2);
-                    rx = (d1 - d2) / (2.0 * eps) * 1.15;
-                    river_.nearest(x, z + eps, d1, e1);
-                    river_.nearest(x, z - eps, d2, e2);
-                    rz = (d1 - d2) / (2.0 * eps) * 1.15;
-                    gx = mix(gx, rx, w);
-                    gz = mix(gz, rz, w);
+        for (int k = 0; k < levels; ++k) {
+            Level& L = lat[size_t(k)];
+            L.nodes.resize(size_t(L.w) * size_t(L.h));
+            for (int j = 0; j < L.h; ++j)
+                for (int i = 0; i < L.w; ++i) {
+                    const double x = double(L.i0 + i) * L.g, z = double(L.j0 + j) * L.g;
+                    Node n;
+                    if (k == 0) {
+                        n = macroNode(x, z);
+                    } else {
+                        n = interpolate(lat[size_t(k - 1)], x, z);
+                        erode(n, x, z, k - 1, 1.0);
+                    }
+                    L.nodes[size_t(j) * size_t(L.w) + size_t(i)] = n;
                 }
-            }
-            out.river = 1.0 - smoothstep(30.0, 60.0, d);
         }
 
-        out.height = h;
-        out.gx = gx;
-        out.gz = gz;
-        return out;
+        const TileContext ctx = tileContext(ox, oz, x1, z1);
+        std::vector<double> hs(size_t(bx) * size_t(bz));
+        std::vector<Sample> raw(size_t(bx) * size_t(bz));
+        const Level& last = lat[size_t(levels - 1)];
+        for (int j = 0; j < bz; ++j) {
+            const double z = oz + step * j;
+            for (int i = 0; i < bx; ++i) {
+                const double x = ox + step * i;
+                Node n = interpolate(last, x, z);
+                // Octaves from `levels - 1` on are per point (the lattice at `levels - 1` is the state
+                // before that octave).
+                for (int k = levels - 1; k < octaves; ++k) {
+                    const double w = octaveWavelength(k);
+                    erode(n, x, z, k, smoothstep(cutoff * 0.5, cutoff, w));
+                }
+                const Macro m = macro(x, z);
+                Sample& sm = raw[size_t(j) * size_t(bx) + size_t(i)];
+                hs[size_t(j) * size_t(bx) + size_t(i)] = finishPoint(n, m, x, z, footprint, ctx, sm);
+            }
+        }
+        out.resize(size_t(nx) * size_t(nz));
+        for (int j = 0; j < nz; ++j)
+            for (int i = 0; i < nx; ++i) {
+                const size_t c = size_t(j + 1) * size_t(bx) + size_t(i + 1);
+                Sample sm = raw[c];
+                sm.height = hs[c];
+                sm.gx = (hs[c + 1] - hs[c - 1]) / (2.0 * step);
+                sm.gz = (hs[c + size_t(bx)] - hs[c - size_t(bx)]) / (2.0 * step);
+                out[size_t(j) * size_t(nx) + size_t(i)] = sm;
+            }
+    }
+
+    // One point (slow: it builds the lattices for itself). For tests and spot checks.
+    Sample sample(double x, double z, double footprint) const {
+        std::vector<Sample> one;
+        sampleGrid(x, z, footprint, 1, 1, footprint, one);
+        return one[0];
+    }
+
+    // What a tile covering [x0, x1] x [z0, z1] needs from the fine stage.
+    TileContext tileContext(double x0, double z0, double x1, double z1) const {
+        TileContext ctx;
+        collectCirques(x0, z0, x1, z1, ctx.cirques);
+        if (!river_.points.empty()) {
+            double d, e;
+            river_.nearest((x0 + x1) * 0.5, (z0 + z1) * 0.5, d, e);
+            // The gorge reaches no farther than (relief over the river) / 1.15, under ~2.3 km here.
+            ctx.nearRiver = d - 0.5 * std::hypot(x1 - x0, z1 - z0) < 2600.0;
+        } else {
+            ctx.nearRiver = false;
+        }
+        return ctx;
     }
 
     double height(double x, double z, double footprint) const { return sample(x, z, footprint).height; }
@@ -660,38 +699,191 @@ private:
         return true;
     }
 
+    Node macroNode(double x, double z) const {
+        Node n;
+        const Macro m = macro(x, z);
+        n.m = m.height;
+        n.core = m.core;
+        n.basalt = m.basalt;
+        n.relief = std::max(m.height - m.base, 0.0);
+        return n;   // its slope comes from the lattice (interpolate)
+    }
+
+    // One erosion octave at a point, in place, following the slope of the surface so far.
+    void erode(Node& n, double x, double z, int octave, double fade) const {
+        const double gx = n.mgx + n.egx, gz = n.mgz + n.egz;
+        const double slope = std::sqrt(gx * gx + gz * gz);
+        if (slope <= 1e-5 || fade <= 0.0) return;
+        const double wavelength = octaveWavelength(octave);
+        const double gain = std::pow(s_.erosionGain, double(octave));
+        // All octaves together cut no deeper than about 0.6x what stands above the base: a 100 m
+        // scarp gets gullies, not 4 km-wavelength spikes, and the piedmont (a few hundred metres over
+        // the base) keeps shallow arroyos while the mountains get their canyons.
+        const double reliefCap = (0.3 * n.relief * smoothstep(150.0, 700.0, n.relief) + 7.0) *
+                                 std::pow(0.6, double(octave));
+        const double summit = 1.0 - 0.5 * smoothstep(s_.summitStart, s_.summitFull, n.m + n.e);
+        const double capFlat = 1.0 - 0.7 * n.basalt;
+        const double amp = std::min(s_.kErosion * gain * wavelength * std::min(slope, s_.erosionSlopeCap), reliefCap) *
+                           summit * capFlat * fade;
+        const Noise g = gullies(x / wavelength, z / wavelength, gx / slope, gz / slope,
+                                s_.seed * 977U + uint32_t(octave) * 131U);
+        // Biased: mid-slopes sit lower than a plain wave, so valleys read as cut, ridges as left.
+        const double v = g.v - s_.erosionBias * (1.0 - g.v * g.v);
+        const double dv = 1.0 + 2.0 * s_.erosionBias * g.v;
+        n.e += amp * v;
+        n.egx += amp * dv * g.dx / wavelength;
+        n.egz += amp * dv * g.dz / wavelength;
+    }
+
+    // A lattice level at a point: Catmull-Rom over the 4 x 4 nodes around it for the macro and erosion
+    // heights, with their slopes from the same patch; the rest bilinear.
+    template <typename LevelT>
+    static Node interpolate(const LevelT& L, double x, double z) {
+        const double fx = x / L.g - double(L.i0), fz = z / L.g - double(L.j0);
+        const int ci = std::clamp(int(std::floor(fx)), 1, L.w - 3), cj = std::clamp(int(std::floor(fz)), 1, L.h - 3);
+        const double u = fx - ci, v = fz - cj;
+        auto weights = [](double t, double w[4], double d[4]) {
+            const double t2 = t * t, t3 = t2 * t;
+            w[0] = 0.5 * (-t3 + 2.0 * t2 - t);
+            w[1] = 0.5 * (3.0 * t3 - 5.0 * t2 + 2.0);
+            w[2] = 0.5 * (-3.0 * t3 + 4.0 * t2 + t);
+            w[3] = 0.5 * (t3 - t2);
+            d[0] = 0.5 * (-3.0 * t2 + 4.0 * t - 1.0);
+            d[1] = 0.5 * (9.0 * t2 - 10.0 * t);
+            d[2] = 0.5 * (-9.0 * t2 + 8.0 * t + 1.0);
+            d[3] = 0.5 * (3.0 * t2 - 2.0 * t);
+        };
+        double wu[4], du[4], wv[4], dv[4];
+        weights(u, wu, du);
+        weights(v, wv, dv);
+        Node n;
+        double m = 0, mu = 0, mv = 0, e = 0, eu = 0, ev = 0;
+        for (int j = 0; j < 4; ++j)
+            for (int i = 0; i < 4; ++i) {
+                const Node& p = L.nodes[size_t(cj - 1 + j) * size_t(L.w) + size_t(ci - 1 + i)];
+                const double a = wu[i] * wv[j], au = du[i] * wv[j], av = wu[i] * dv[j];
+                m += a * p.m; mu += au * p.m; mv += av * p.m;
+                e += a * p.e; eu += au * p.e; ev += av * p.e;
+            }
+        n.m = m; n.mgx = mu / L.g; n.mgz = mv / L.g;
+        n.e = e; n.egx = eu / L.g; n.egz = ev / L.g;
+        const Node& a = L.nodes[size_t(cj) * size_t(L.w) + size_t(ci)];
+        const Node& b = L.nodes[size_t(cj) * size_t(L.w) + size_t(ci + 1)];
+        const Node& c = L.nodes[size_t(cj + 1) * size_t(L.w) + size_t(ci)];
+        const Node& d = L.nodes[size_t(cj + 1) * size_t(L.w) + size_t(ci + 1)];
+        auto bl = [&](double Node::*f) { return mix(mix(a.*f, b.*f, u), mix(c.*f, d.*f, u), v); };
+        n.relief = bl(&Node::relief);
+        n.core = bl(&Node::core);
+        n.basalt = bl(&Node::basalt);
+        return n;
+    }
+
+    // The height at a point from its erosion state and its exact macro: detail, cirques, the river.
+    double finishPoint(const Node& n, const Macro& m, double x, double z, double footprint, const TileContext& ctx,
+                       Sample& out) const {
+        double h = m.height + n.e;
+        // Detail, roughest on steep ground.
+        {
+            const double gx = n.mgx + n.egx, gz = n.mgz + n.egz;
+            const double slope = std::sqrt(gx * gx + gz * gz);
+            const double rough = 0.4 + 1.2 * smoothstep(0.2, 0.8, slope);
+            double lambda = s_.detailWavelength;
+            double ddx = 0.0, ddz = 0.0;
+            for (int octave = 0; lambda >= footprint; ++octave) {
+                const double fade = smoothstep(footprint, 2.0 * footprint, lambda);
+                const Noise d = gradientNoise(x / lambda, z / lambda, s_.seed * 31U + 5000U + uint32_t(octave));
+                ddx += d.dx;
+                ddz += d.dz;
+                h += s_.detailAmplitude * lambda * rough * fade / (1.0 + ddx * ddx + ddz * ddz) * d.v;
+                lambda *= 0.5;
+            }
+        }
+        out.core = m.core;
+        out.basalt = m.basalt;
+        // Soft sediment: the piedmont, low and gently sloping, away from the cores and caps.
+        out.badland = (1.0 - m.core) * (1.0 - m.basalt) * smoothstep(1700.0, 1900.0, m.height) *
+                      (1.0 - smoothstep(2350.0, 2500.0, m.height));
+        out.cirque = 0.0;
+        for (const CirqueSite& c : ctx.cirques) carveCirque(c, x, z, h, out.cirque);
+        out.river = 0.0;
+        if (ctx.nearRiver && !river_.points.empty()) {
+            double d, re;
+            river_.nearest(x, z, d, re);
+            h = smin(h, re + std::max(d - 45.0, 0.0) * 1.15, 30.0);   // the gorge
+            out.river = 1.0 - smoothstep(30.0, 60.0, d);
+        }
+        return h;
+    }
+
+    // The ranges whose cirques could reach [x0, x1] x [z0, z1].
+    void forEachRangeNear(double x0, double z0, double x1, double z1, const std::function<void(const Range&)>& fn) const {
+        auto near = [&](const Range& r) {
+            const double reach = r.reach();
+            return !(r.cx + reach < x0 || r.cx - reach > x1 || r.cz + reach < z0 || r.cz - reach > z1);
+        };
+        for (const Range& r : ranges_) if (near(r)) fn(r);
+        const double cell = s_.provinceCell;
+        const int64_t i0 = int64_t(std::floor(x0 / cell)) - 1, i1 = int64_t(std::floor(x1 / cell)) + 1;
+        const int64_t j0 = int64_t(std::floor(z0 / cell)) - 1, j1 = int64_t(std::floor(z1 / cell)) + 1;
+        for (int64_t j = j0; j <= j1; ++j)
+            for (int64_t i = i0; i <= i1; ++i) {
+                Province p;
+                if (province(i, j, p) && p.kind == Province::RangeKind && near(p.range)) fn(p.range);
+            }
+    }
+
     // Bowls bitten out of a crest's north- and east-facing flanks where it is high enough.
-    void carveCirques(const Range& r, double x, double z, double& h, double& cirque) const {
-        double t, s;
-        r.local(x, z, t, s);
-        if (std::abs(t) > r.halfLength || std::abs(s) > 8000.0) return;
+    void collectCirques(double x0, double z0, double x1, double z1, std::vector<CirqueSite>& out) const {
         const double spacing = s_.cirqueSpacing;
-        const int64_t k0 = int64_t(std::floor(t / spacing));
-        for (int64_t k = k0 - 1; k <= k0 + 1; ++k) {
-            for (int side = -1; side <= 1; side += 2) {
-                const uint32_t hh = hash2(k, side, r.seed * 31U + 77U);
-                if (unit(hh) < 0.45) continue;
-                // Outward from the crest, on this side.
-                const double ox = side * r.az, oz = -side * r.ax;
-                if (ox * 0.62 + oz * 0.78 < -0.2) continue;   // only north- and east-facing
-                const double tk = (double(k) + 0.25 + 0.5 * unit(hash32(hh))) * spacing;
-                const double crestAbs = base(r.cx + r.ax * tk, r.cz + r.az * tk) + r.crestRelief(tk);
-                if (crestAbs < s_.cirqueCrest) continue;
-                const double radius = s_.cirqueRadius * (0.75 + 0.5 * unit(hash32(hh + 1)));
-                const double sk = r.crestOffset(tk) + side * radius * 1.05;
-                // Local frame: u outward, v along the crest.
-                const double u = (s - sk) * side;
-                const double v = t - tk;
-                const double uu = u > 0.0 ? u * 0.4 : u;   // open downhill
-                const double d = std::sqrt(v * v + uu * uu) / radius;
-                if (d > 1.6) continue;
-                const double floor = crestAbs - s_.cirqueDepth * (0.8 + 0.4 * unit(hash32(hh + 2)));
-                const double bowl = floor + 1100.0 * std::pow(d, 2.6);
-                if (bowl < h) {
-                    h = smin(h, bowl, 35.0);
-                    cirque = std::max(cirque, (1.0 - smoothstep(0.1, 0.35, d)) * (unit(hash32(hh + 3)) < 0.5 ? 1.0 : 0.85));
+        const double margin = s_.cirqueRadius * 1.25 * 1.6 / 0.4;   // the bowl's reach, downhill
+        forEachRangeNear(x0 - margin, z0 - margin, x1 + margin, z1 + margin, [&](const Range& r) {
+            double tmin = 1e300, tmax = -1e300, smin = 1e300, smax = -1e300;
+            for (int k = 0; k < 4; ++k) {
+                double t, s;
+                r.local((k & 1) ? x1 : x0, (k & 2) ? z1 : z0, t, s);
+                tmin = std::min(tmin, t); tmax = std::max(tmax, t);
+                smin = std::min(smin, s); smax = std::max(smax, s);
+            }
+            if (smax < -r.wander * 1.5 - 8000.0 || smin > r.wander * 1.5 + 8000.0) return;
+            const int64_t k0 = int64_t(std::floor((std::max(tmin, -r.halfLength) - margin) / spacing));
+            const int64_t k1 = int64_t(std::floor((std::min(tmax, r.halfLength) + margin) / spacing));
+            for (int64_t k = k0; k <= k1; ++k) {
+                for (int side = -1; side <= 1; side += 2) {
+                    const uint32_t hh = hash2(k, side, r.seed * 31U + 77U);
+                    if (unit(hh) < 0.45) continue;
+                    // Outward from the crest, on this side: only north- and east-facing.
+                    const double ox = side * r.az, oz = -side * r.ax;
+                    if (ox * 0.62 + oz * 0.78 < -0.2) continue;
+                    CirqueSite c;
+                    c.range = r;
+                    c.side = side;
+                    c.tk = (double(k) + 0.25 + 0.5 * unit(hash32(hh))) * spacing;
+                    if (std::abs(c.tk) > r.halfLength) continue;
+                    const double crestAbs = base(r.cx + r.ax * c.tk, r.cz + r.az * c.tk) + r.crestRelief(c.tk);
+                    if (crestAbs < s_.cirqueCrest) continue;
+                    c.radius = s_.cirqueRadius * (0.75 + 0.5 * unit(hash32(hh + 1)));
+                    c.sk = r.crestOffset(c.tk) + side * c.radius * 1.05;
+                    c.floor = crestAbs - s_.cirqueDepth * (0.8 + 0.4 * unit(hash32(hh + 2)));
+                    c.tarn = unit(hash32(hh + 3)) < 0.5;
+                    out.push_back(c);
                 }
             }
+        });
+    }
+
+    static void carveCirque(const CirqueSite& c, double x, double z, double& h, double& cirque) {
+        double t, s;
+        c.range.local(x, z, t, s);
+        // Local frame: u outward, v along the crest.
+        const double u = (s - c.sk) * c.side;
+        const double v = t - c.tk;
+        const double uu = u > 0.0 ? u * 0.4 : u;   // open downhill
+        const double d = std::sqrt(v * v + uu * uu) / c.radius;
+        if (d > 1.6) return;
+        const double bowl = c.floor + 1100.0 * std::pow(d, 2.6);
+        if (bowl < h) {
+            h = smin(h, bowl, 35.0);
+            cirque = std::max(cirque, (1.0 - smoothstep(0.1, 0.35, d)) * (c.tarn ? 1.0 : 0.85));
         }
     }
 

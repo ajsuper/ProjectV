@@ -10,6 +10,7 @@
 //   ./mountains_lab [--seed N] [--out DIR] [--only region|local|profile|pano] [--at X,Z (km)]
 //                   [--curvature]
 #include "mountains/landform.hpp"
+#include "mountains/surface.hpp"
 
 #include <bimg/bimg.h>
 #include <bx/file.h>
@@ -20,6 +21,7 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -27,11 +29,6 @@
 using namespace mountains;
 
 namespace {
-
-struct Rgb { double r = 0, g = 0, b = 0; };
-Rgb operator*(Rgb a, double k) { return {a.r * k, a.g * k, a.b * k}; }
-Rgb operator+(Rgb a, Rgb b) { return {a.r + b.r, a.g + b.g, a.b + b.b}; }
-Rgb lerp(Rgb a, Rgb b, double t) { return a * (1.0 - t) + b * t; }
 
 struct Image {
     int w, h;
@@ -67,76 +64,8 @@ void parallelFor(int n, const std::function<void(int)>& fn) {
     for (auto& th : pool) th.join();
 }
 
-// ---- Surface colour (a first pass at M4/M5's bands; sRGB-ish albedo) ----
-
-const Rgb kSoil{0.72, 0.58, 0.45}, kGrama{0.72, 0.63, 0.46}, kPinyon{0.22, 0.28, 0.17},
-    kPonderosa{0.19, 0.26, 0.15}, kFir{0.11, 0.18, 0.12}, kSpruce{0.09, 0.15, 0.12},
-    kAspenBare{0.56, 0.53, 0.49}, kTundra{0.60, 0.55, 0.41}, kGranite{0.63, 0.50, 0.46},
-    kGneiss{0.50, 0.48, 0.47}, kSediment{0.82, 0.67, 0.53}, kBasalt{0.26, 0.24, 0.23},
-    kSnow{0.93, 0.95, 0.99}, kWater{0.22, 0.32, 0.40};
-
 Rgb surfaceColour(const Sample& s, double x, double z, double footprint) {
-    const double slope = std::sqrt(s.gx * s.gx + s.gz * s.gz);
-    const double aspectW = smoothstep(0.03, 0.2, slope);
-    const double northness = slope > 1e-6 ? -s.gz / slope * aspectW : 0.0;
-    const double h = s.height;
-    const double e = h + 170.0 * northness;   // north slopes live higher
-
-    // Ground under the trees.
-    Rgb ground = lerp(kSoil, kGrama, 0.5 + 0.5 * fbm(x / 900.0, z / 900.0, 2, 71));
-    ground = lerp(ground, kSediment, s.badland * smoothstep(0.08, 0.3, slope));
-    ground = lerp(ground, kTundra, smoothstep(3450.0, 3600.0, e));
-
-    // Tree cover and which trees.
-    double cover = 0.0;
-    Rgb tree = kPinyon;
-    if (e < 2300.0) {
-        cover = 0.25 * smoothstep(1880.0, 2000.0, e);
-        tree = kPinyon;
-    } else if (e < 2600.0) {
-        const double t = smoothstep(2300.0, 2600.0, e);
-        cover = mix(0.25, 0.5, t);
-        tree = lerp(kPinyon, kPonderosa, t);
-    } else if (e < 3000.0) {
-        const double t = smoothstep(2600.0, 3000.0, e);
-        cover = mix(0.5, 0.75, t);
-        tree = lerp(kPonderosa, kFir, smoothstep(2550.0, 2800.0, e));
-    } else {
-        cover = 0.78 * (1.0 - smoothstep(3450.0, 3600.0, e));
-        tree = lerp(kFir, kSpruce, smoothstep(3000.0, 3200.0, e));
-        const double aspen = smoothstep(0.25, 0.45, fbm(x / 1500.0, z / 1500.0, 3, 91)) *
-                             (1.0 - smoothstep(3300.0, 3450.0, e));
-        tree = lerp(tree, kAspenBare, aspen);
-    }
-    // South-facing low slopes are drier; patches and clearings everywhere.
-    cover *= 1.0 - 0.35 * std::max(-northness, 0.0) * (1.0 - smoothstep(2500.0, 2900.0, e));
-    cover *= clamp01(0.75 + 0.6 * fbm(x / 700.0, z / 700.0, 3, 93));
-    cover *= 1.0 - smoothstep(0.7, 1.1, slope);
-    cover *= 1.0 - s.basalt * 0.6;
-    // At a fine footprint the open woodland is dots, not a tint.
-    if (footprint < 6.0) {
-        const double dots = fbm(x / 5.0, z / 5.0, 2, 95);
-        cover = smoothstep(0.55, 0.6, cover + dots * 0.9 + 0.1);
-    }
-    Rgb c = lerp(ground, tree, cover);
-
-    // Bare rock on steep ground and in cirques.
-    Rgb rock = lerp(kGranite, kGneiss, 0.5 + 0.5 * fbm(x / 2500.0, z / 2500.0, 2, 97));
-    rock = lerp(kSediment * 0.95, rock, s.core);
-    rock = lerp(rock, kBasalt, s.basalt);
-    const double rockiness = std::max(smoothstep(0.75, 1.1, slope), s.cirque * 0.6);
-    c = lerp(c, rock, rockiness);
-    c = lerp(c, kBasalt, s.basalt * smoothstep(0.35, 0.7, slope));   // dark scarp faces
-
-    // Late November snow: low on north faces, only the top on south ones.
-    const double snowline = 3450.0 - 250.0 * northness;
-    double snow = smoothstep(snowline, snowline + 180.0, h) * (1.0 - smoothstep(1.0, 1.5, slope));
-    snow *= 1.0 - 0.55 * cover;   // under trees, less of it shows from above
-    c = lerp(c, kSnow, snow);
-
-    if (s.river > 0.0) c = lerp(c, kWater, s.river);
-    if (s.cirque > 0.9) c = lerp(c, kWater, 0.8);   // tarn
-    return c;
+    return mixColour(surfaceMix(s, x, z, footprint));
 }
 
 double shade(const Sample& s, double lx, double ly, double lz) {
@@ -152,14 +81,23 @@ void map(const Landform& land, const std::string& path, double cx, double cz, do
     Image img(pixels, pixels);
     const double step = size / pixels;
     const double l = 1.0 / std::sqrt(0.36 + 0.81 + 0.36);
-    parallelFor(pixels, [&](int row) {
-        for (int col = 0; col < pixels; ++col) {
-            const double x = cx - size * 0.5 + (col + 0.5) * step;
-            const double z = cz + size * 0.5 - (row + 0.5) * step;
-            const Sample s = land.sample(x, z, step);
-            const double lit = 0.3 + 0.85 * shade(s, -0.6 * l, 0.9 * l, 0.6 * l);
-            img.set(col, row, surfaceColour(s, x, z, step) * lit);
-        }
+    const int tile = 64, tiles = (pixels + tile - 1) / tile;
+    parallelFor(tiles * tiles, [&](int t) {
+        const int ti = t % tiles, tj = t / tiles;
+        const int nx = std::min(tile, pixels - ti * tile), nz = std::min(tile, pixels - tj * tile);
+        // Rows run north to south: sample from the tile's south edge up.
+        const double x0 = cx - size * 0.5 + (ti * tile + 0.5) * step;
+        const double zTop = cz + size * 0.5 - (tj * tile + 0.5) * step;
+        const double z0 = zTop - (nz - 1) * step;
+        std::vector<Sample> g;
+        land.sampleGrid(x0, z0, step, nx, nz, step, g);
+        for (int j = 0; j < nz; ++j)
+            for (int i = 0; i < nx; ++i) {
+                const Sample& s = g[size_t(j * nx + i)];
+                const double x = x0 + i * step, z = z0 + j * step;
+                const double lit = 0.3 + 0.85 * shade(s, -0.6 * l, 0.9 * l, 0.6 * l);
+                img.set(ti * tile + i, tj * tile + (nz - 1 - j), surfaceColour(s, x, z, step) * lit);
+            }
     });
     if (markPlaza) {
         const int pcx = int((0.0 - (cx - size * 0.5)) / step), pcz = int(((cz + size * 0.5) - 0.0) / step);
@@ -197,8 +135,13 @@ void profile(const Landform& land, const std::string& path) {
     const Line lines[] = {{0.0, {0.55, 0.3, 0.2}}, {17000.0, {0.2, 0.3, 0.55}}};
     for (const Line& line : lines) {
         std::vector<double> e(static_cast<size_t>(w));
-        parallelFor(w, [&](int c) {
-            e[size_t(c)] = land.height(x0 + (c + 0.5) * (x1 - x0) / w, line.z, (x1 - x0) / w);
+        const double step = (x1 - x0) / w;
+        const int chunk = 64;
+        parallelFor((w + chunk - 1) / chunk, [&](int t) {
+            const int n = std::min(chunk, w - t * chunk);
+            std::vector<Sample> g;
+            land.sampleGrid(x0 + (t * chunk + 0.5) * step, line.z, step, n, 1, step, g);
+            for (int i = 0; i < n; ++i) e[size_t(t * chunk + i)] = g[size_t(i)].height;
         });
         for (int c = 0; c < w; ++c) {
             const int r = std::clamp(rowOf(e[size_t(c)]), 0, h - 1);
@@ -222,19 +165,65 @@ void profile(const Landform& land, const std::string& path) {
 
 // ---- Panorama from the Plaza ----
 
-void panorama(const Landform& land, const std::string& path, double heading, bool curvature, double eyeHeight) {
+// Height rings around a point, the lab's own small clipmap: ring k is 512^2 samples 0.5 * 2^k m apart.
+struct HeightRings {
+    struct Ring { double x0, z0, step; int n; std::vector<Sample> s; };
+    std::vector<Ring> rings;
+    HeightRings(const Landform& land, double cx, double cz, int count) {
+        const int n = 512, tile = 64;
+        for (int k = 0; k < count; ++k) {
+            Ring r;
+            r.step = 0.5 * double(1 << k);
+            r.n = n;
+            r.x0 = cx - r.step * n * 0.5;
+            r.z0 = cz - r.step * n * 0.5;
+            r.s.resize(size_t(n) * size_t(n));
+            const int tiles = n / tile;
+            parallelFor(tiles * tiles, [&](int t) {
+                const int ti = t % tiles, tj = t / tiles;
+                std::vector<Sample> g;
+                land.sampleGrid(r.x0 + ti * tile * r.step, r.z0 + tj * tile * r.step, r.step, tile, tile, r.step, g);
+                for (int j = 0; j < tile; ++j)
+                    for (int i = 0; i < tile; ++i)
+                        r.s[size_t(tj * tile + j) * size_t(n) + size_t(ti * tile + i)] = g[size_t(j * tile + i)];
+            });
+            rings.push_back(std::move(r));
+        }
+    }
+    // The finest ring holding (x, z) with a sample of border: the nearest sample, its height bilinear.
+    const Sample* at(double x, double z, double& step, double* height = nullptr) const {
+        for (const Ring& r : rings) {
+            const double fi = (x - r.x0) / r.step, fj = (z - r.z0) / r.step;
+            if (fi < 1 || fj < 1 || fi >= r.n - 2 || fj >= r.n - 2) continue;
+            step = r.step;
+            if (height) {
+                const int i = int(fi), j = int(fj);
+                const double u = fi - i, v = fj - j;
+                auto hh = [&](int a, int b) { return r.s[size_t(b) * size_t(r.n) + size_t(a)].height; };
+                *height = mix(mix(hh(i, j), hh(i + 1, j), u), mix(hh(i, j + 1), hh(i + 1, j + 1), u), v);
+            }
+            return &r.s[size_t(std::lround(fj)) * size_t(r.n) + size_t(std::lround(fi))];
+        }
+        return nullptr;
+    }
+};
+
+void panorama(const Landform& land, const HeightRings& rings, const std::string& path, double heading,
+              bool curvature, double eyeHeight) {
     const int w = 2400, h = 640;
     const double hfov = 90.0 * kPi / 180.0;
     const double focal = w * 0.5 / std::tan(hfov * 0.5);
     const double horizon = h * 0.70;
     const double ex = 0.0, ez = 0.0;
-    const double eye = land.height(ex, ez, 1.0) + eyeHeight;
+    double unused;
+    const double eye = rings.at(ex, ez, unused)->height + eyeHeight;
     // Late afternoon: the sun low in the west-southwest, lighting the range's west face.
     const double sunAz = 250.0 * kPi / 180.0, sunEl = 22.0 * kPi / 180.0;   // azimuth from north, clockwise
     const double lx = std::sin(sunAz) * std::cos(sunEl), lz = std::cos(sunAz) * std::cos(sunEl),
                  ly = std::sin(sunEl);
     const Rgb haze{0.66, 0.75, 0.90};
     const double extinction = 1.0 / 70000.0;   // ~270 km visual range
+    (void)land;
     Image img(w, h);
     parallelFor(w, [&](int col) {
         const double a = heading + std::atan((col + 0.5 - w * 0.5) / focal);
@@ -244,22 +233,24 @@ void panorama(const Landform& land, const std::string& path, double heading, boo
         int yMax = h;
         double d = 3.0;
         while (d < 150000.0 && yMax > 0) {
-            const double step = std::max(1.5, d * 0.004);
             const double x = ex + dx * d, z = ez + dz * d;
-            const Sample s = land.sample(x, z, std::max(0.5, d * 0.0012));
-            double rel = s.height - eye;
+            double step = 1.0;
+            double height = 0.0;
+            const Sample* s = rings.at(x, z, step, &height);
+            if (!s) break;
+            double rel = height - eye;
             if (curvature) rel -= d * d / (2.0 * 6371000.0) * 0.87;
             const double y = horizon - rel / (d * colScale) * focal;
             const int yi = int(std::ceil(y));
             if (yi < yMax) {
-                const double lit = 0.32 + 0.8 * shade(s, lx, ly, lz);
-                Rgb c = surfaceColour(s, x, z, std::max(0.5, d * 0.0012)) * lit;
+                const double lit = 0.32 + 0.8 * shade(*s, lx, ly, lz);
+                Rgb c = surfaceColour(*s, x, z, step) * lit;
                 const double t = std::exp(-d * extinction);
                 c = c * t + haze * (1.0 - t);
                 for (int r = std::max(yi, 0); r < yMax; ++r) img.set(col, r, c);
                 yMax = std::max(yi, 0);
             }
-            d += step;
+            d += std::max(0.5, step * 0.7);
         }
         for (int r = 0; r < yMax; ++r) {
             const double up = clamp01((horizon - r) / horizon);
@@ -267,6 +258,39 @@ void panorama(const Landform& land, const std::string& path, double heading, boo
         }
     });
     img.save(path);
+}
+
+// ---- The grid sampler against the point sampler ----
+
+void check(const Landform& land) {
+    // A ring and the next coarser one over the same ground: where their samples coincide, they may
+    // differ only by what the coarser leaves out (octaves and detail finer than its voxels).
+    struct Case { const char* name; double x, z, step; };
+    const Case cases[] = {{"0.25 m vs 0.5 m, foothills", 9000, 2000, 0.25},
+                          {"0.25 m vs 0.5 m, crest", 15000, 15000, 0.25},
+                          {"2 m vs 4 m, Plaza", -60, -40, 2.0},
+                          {"16 m vs 32 m, cirques", 14000, 9000, 16.0},
+                          {"16 m vs 32 m, gorge", -29000, 6000, 16.0},
+                          {"128 m vs 256 m", -40000, 0, 128.0}};
+    std::printf("%-30s %9s %9s %12s %12s\n", "64^2 vs 32^2", "max |dh|", "rms dh", "fine us", "coarse us");
+    for (const Case& c : cases) {
+        std::vector<Sample> fine, coarse;
+        const auto t0 = std::chrono::steady_clock::now();
+        land.sampleGrid(c.x, c.z, c.step, 64, 64, c.step, fine);
+        const auto t1 = std::chrono::steady_clock::now();
+        land.sampleGrid(c.x, c.z, c.step * 2.0, 32, 32, c.step * 2.0, coarse);
+        const auto t2 = std::chrono::steady_clock::now();
+        double maxd = 0, sum2 = 0;
+        for (int j = 0; j < 32; ++j)
+            for (int i = 0; i < 32; ++i) {
+                const double d = coarse[size_t(j * 32 + i)].height - fine[size_t(j * 2 * 64 + i * 2)].height;
+                maxd = std::max(maxd, std::abs(d));
+                sum2 += d * d;
+            }
+        std::printf("%-30s %9.3f %9.3f %12.2f %12.2f\n", c.name, maxd, std::sqrt(sum2 / 1024.0),
+                    std::chrono::duration<double, std::micro>(t1 - t0).count() / 4096.0,
+                    std::chrono::duration<double, std::micro>(t2 - t1).count() / 1024.0);
+    }
 }
 
 // ---- Reference points ----
@@ -285,12 +309,15 @@ void report(const Landform& land) {
         double best = -1e9, bx = r.x, bz = r.z;
         if (r.peak) {
             // The highest point within 2.5 km (the generator places its own peaks).
-            for (int j = -25; j <= 25; ++j)
-                for (int i = -25; i <= 25; ++i) {
-                    const double x = r.x * 1000.0 + i * 100.0, z = r.z * 1000.0 + j * 100.0;
-                    const double e = land.height(x, z, 50.0);
-                    if (e > best) { best = e; bx = x / 1000.0; bz = z / 1000.0; }
-                }
+            std::vector<Sample> g;
+            land.sampleGrid(r.x * 1000.0 - 2500.0, r.z * 1000.0 - 2500.0, 50.0, 101, 101, 50.0, g);
+            for (int j = 0; j < 101; ++j)
+                for (int i = 0; i < 101; ++i)
+                    if (g[size_t(j * 101 + i)].height > best) {
+                        best = g[size_t(j * 101 + i)].height;
+                        bx = r.x - 2.5 + i * 0.05;
+                        bz = r.z - 2.5 + j * 0.05;
+                    }
         } else {
             best = land.height(r.x * 1000.0, r.z * 1000.0, 5.0);
         }
@@ -313,6 +340,7 @@ int main(int argc, char** argv) {
         else if (a == "--only" && i + 1 < argc) only = argv[++i];
         else if (a == "--at" && i + 1 < argc) std::sscanf(argv[++i], "%lf,%lf", &atX, &atZ);
         else if (a == "--curvature") curvature = true;
+        else if (a == "--check") { check(Landform(settings)); return 0; }
         else if (a == "--eye" && i + 1 < argc) eyeHeight = std::stod(argv[++i]);
         else {
             std::fprintf(stderr, "usage: mountains_lab [--seed N] [--out DIR] [--only region|local|profile|pano] "
@@ -334,8 +362,10 @@ int main(int argc, char** argv) {
         timed("local", [&] { map(land, out + "/local.png", 7000.0 + atX * 1000.0, 8000.0 + atZ * 1000.0, 24000.0, 2000, true); });
     if (only.empty() || only == "profile") timed("profile", [&] { profile(land, out + "/profile.png"); });
     if (only.empty() || only == "pano") {
-        timed("pano east", [&] { panorama(land, out + "/pano_east.png", 75.0 * kPi / 180.0, curvature, eyeHeight); });
-        timed("pano west", [&] { panorama(land, out + "/pano_west.png", 255.0 * kPi / 180.0, curvature, eyeHeight); });
+        std::unique_ptr<HeightRings> rings;
+        timed("pano rings", [&] { rings = std::make_unique<HeightRings>(land, 0.0, 0.0, 10); });
+        timed("pano east", [&] { panorama(land, *rings, out + "/pano_east.png", 75.0 * kPi / 180.0, curvature, eyeHeight); });
+        timed("pano west", [&] { panorama(land, *rings, out + "/pano_west.png", 255.0 * kPi / 180.0, curvature, eyeHeight); });
     }
     report(land);
     return 0;

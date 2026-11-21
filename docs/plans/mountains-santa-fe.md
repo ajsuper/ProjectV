@@ -127,10 +127,20 @@ threads).
   sides under crests above 3,450 m, about half of them, some with tarns. **River gorge** cut last.
 - Reference elevations (target / got): Plaza 2133 / 2185, Tesuque Pk 3671 / 3816, Baldy 3850 / 3846,
   Redondo 3431 / 3406, Sandia 3255 / 3193, Ortiz 2712 / ~2400, Cochiti 1620 / 1612.
-- Cost: ~25 us a sample at full detail (16 threads: a 1600^2 map in 4 s). Too slow for M2 as is: the macro
-  is evaluated five times per sample (for its gradient) and every octave per column. M2 splits the sampler
-  in two: the macro and the long-wavelength octaves on a coarse lattice per chunk, interpolated (height
-  and gradient), and the short octaves per column.
+- **Every ring computes the same erosion (D5).** Erosion is chaotic: each octave follows the slope the
+  octaves before it left, so any difference in that slope moves the gullies (a lattice-interpolated
+  sampler first disagreed with the point sampler by up to 240 m, at any lattice spacing). So the slope
+  is part of the definition: octave k reads the surface so far from a global lattice of spacing
+  wavelength_k / 8, Catmull-Rom (Hermite from stored slopes left lattice-aligned bumps wherever the
+  slopes disagreed with the values), and heights are the exact macro plus erosion plus detail. A grid
+  coarser than a lattice runs that octave per point, and differs by that octave alone. `sampleGrid` is
+  the sampler; `sample` is a 1 x 1 grid. `mountains_lab --check`: a 64^2 grid against the next coarser
+  one differs by 0.01 m at 0.25/0.5 m, 0.02 m at 2/4 m, 12 m at 16/32 m and 24 m at 128/256 m (max;
+  rms 1-2 m), all well under the coarser voxel. 4-7 us a sample.
+- Slopes tuned to a mean of 22 degrees across the range (erosion 0.32, gain 0.55; it was 35 with a
+  quarter over 49 degrees). Rock from 40 degrees.
+- `include/mountains/surface.hpp`: material classes (14 x 16 shades), the mix at a point from elevation,
+  slope, aspect and the province, blended for the lab and dithered per voxel.
 - Open: random provinces outside the layout read as isolated stamps (capsule ranges, round mesas). Basin
   and range chains, en-echelon ranges and dissected basins are later work; the Santa Fe layout is the
   priority.
