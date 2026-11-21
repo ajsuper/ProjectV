@@ -233,6 +233,15 @@ Ahead of M4, because the dotted juniper hills are what reads as Santa Fe. `inclu
 - Open: crowns are one green each; ponderosas read as lollipops; snags, shrubs (chamisa) and the
   canyonlands juniper and pinyon assets for the nearest ring.
 
+## M6, so far (2026-11-21)
+
+- `examples/55-mountains/README.md`; a row in `examples/README.md`; a run line in AGENTS.md.
+- `./mountains --selftest` (headless, ~45 s): generates every ring around the Plaza, then flies 5 km east
+  in 250 m steps; each step checks that every column produced ground, every grid cell names a live chunk
+  of its own ring, and rows and blobs stay bounded (rows track the live chunks: freed rows are reused).
+- Camera presets `plaza`, `atalaya`, `baldy`, `aerial` exist but are rough: the user is to place the
+  showcase views (AGENTS.md: camera positions are asked for, not searched for).
+
 ## Open questions
 
 1. N per ring: 512 (cheaper, ~2.7 px voxels at range) or 1024 (~1.3 px, ~4x memory). Measured in M2.

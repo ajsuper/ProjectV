@@ -16,6 +16,7 @@
 //
 //   ./mountains                    fly from the Plaza
 //   ./mountains --bench            headless: generate every ring around the camera, report, exit
+//   ./mountains --selftest         headless: generate, fly 5 km, check for holes, stray cells and leaks
 //
 //   MOUNTAINS_SEED, MOUNTAINS_RINGS (11), MOUNTAINS_N (voxels from the centre to a ring's edge: 512)
 //   MOUNTAINS_CAMERA=plaza|atalaya|baldy|aerial, or "x,z,above,yaw,pitch" (m, radians; yaw 0 = east)
@@ -409,7 +410,7 @@ void placeCamera(Camera& cam, const Landform& land) {
     float yaw = 0.0f, pitch = 0.05f;   // east, a little up
     if (spec == "plaza") { above = 1.7; }
     else if (spec == "atalaya") { x = 6900; z = 300; above = 3; yaw = 3.14159f; pitch = -0.05f; }
-    else if (spec == "baldy") { x = 14800; z = 15700; above = 3; yaw = 3.4f; pitch = -0.06f; }
+    else if (spec == "baldy") { x = 15700; z = 15400; above = 40; yaw = 3.3f; pitch = -0.08f; }
     else if (spec == "aerial") { x = -12000; z = -9000; above = 2500; yaw = 0.65f; pitch = -0.18f; }
     else std::sscanf(spec.c_str(), "%lf,%lf,%lf,%f,%f", &x, &z, &above, &yaw, &pitch);
     cam.x = x;
@@ -827,11 +828,87 @@ int bench() {
     return 0;
 }
 
+// ---- Headless: check the clipmap ------------------------------------------------------------------
+//
+// Generates every ring around the Plaza, then flies 5 km east in 250 m steps, letting everything
+// generate at each. Checks, every step: every column the rings hold produced ground (no holes); every
+// grid cell names a live chunk of its own ring; and the scene's rows and blobs stay bounded (columns
+// dropped behind are freed and their rows reused, not leaked). Exit code 0 on success.
+int selftest() {
+    projv::Scene scene;
+    State st;
+    Settings settings;
+    settings.seed = uint32_t(envInt("MOUNTAINS_SEED", 1));
+    st.land = std::make_unique<Landform>(settings);
+    setUpRings(st, scene);
+    st.camera.x = 0.0;
+    st.camera.z = 0.0;
+    st.camera.y = st.land->height(0.0, 0.0, 0.25) + 1.7;
+    st.cameraAbove = 1.7;
+    st.pool = std::make_unique<Pool>(*st.land, st.palette, std::max(2u, std::thread::hardware_concurrency()));
+    int failures = 0;
+    auto fail = [&](const std::string& what) {
+        if (failures < 20) std::printf("FAIL: %s\n", what.c_str());
+        ++failures;
+    };
+    size_t firstRows = 0, firstBlobs = 0;
+    const auto t0 = Clock::now();
+    for (int step = 0; step <= 20; ++step) {
+        st.camera.x = 250.0 * step;
+        st.camera.y = st.land->height(st.camera.x, 0.0, 0.25) + 1.7;
+        placeRings(st.clipmap, scene, st.pool.get(), st.camera.x, st.camera.z, st.cameraAbove);
+        for (;;) {
+            installResults(st.clipmap, scene, *st.pool, 50.0);
+            int pending = 0;
+            for (const Ring& r : st.clipmap.ring) pending += r.pending;
+            if (pending == 0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        for (int k = 0; k < st.clipmap.rings; ++k) rebuildGrid(st.clipmap, scene, k);
+        size_t liveChunks = 0, liveBlobs = 0;
+        for (const projv::Chunk& c : scene.chunks) liveChunks += c.alive ? 1 : 0;
+        for (const projv::GeometryBlob& b : scene.geometryPool) liveBlobs += b.refCount > 0 ? 1 : 0;
+        for (const Ring& r : st.clipmap.ring) {
+            if (int64_t(r.columns.size()) != st.clipmap.span() * st.clipmap.span())
+                fail("ring " + std::to_string(r.k) + " holds " + std::to_string(r.columns.size()) + " columns");
+            for (const auto& [key, col] : r.columns) {
+                if (!col.done) fail("ring " + std::to_string(r.k) + ": a column never finished");
+                else if (col.chunks.empty())
+                    fail("ring " + std::to_string(r.k) + ": column " + std::to_string(col.ix) + "," + std::to_string(col.iz) + " has no ground");
+                for (const auto& [iy, h] : col.chunks)
+                    if (h >= scene.chunks.size() || !scene.chunks[h].alive) fail("ring " + std::to_string(r.k) + ": a dead chunk");
+            }
+            const projv::SceneGrid& g = scene.grids[size_t(r.gridIndex)];
+            for (int32_t h : g.cellToChunk)
+                if (h >= 0 && (size_t(h) >= scene.chunks.size() || !scene.chunks[size_t(h)].alive ||
+                               scene.chunks[size_t(h)].gridIndex != r.gridIndex))
+                    fail("ring " + std::to_string(r.k) + ": a grid cell names a chunk that is not its own");
+        }
+        if (step == 0) {
+            firstRows = liveChunks;
+            firstBlobs = liveBlobs;
+        }
+        // Flying moves the rings over different ground, so the counts drift; leaking would grow them
+        // without bound, and the rows would keep growing past the live ones.
+        if (liveChunks > firstRows * 3 / 2) fail("live chunks grew from " + std::to_string(firstRows) + " to " + std::to_string(liveChunks));
+        if (liveBlobs > firstBlobs * 3 / 2) fail("live blobs grew from " + std::to_string(firstBlobs) + " to " + std::to_string(liveBlobs));
+        if (scene.chunks.size() > liveChunks * 2 + 64) fail("chunk rows " + std::to_string(scene.chunks.size()) + " for " + std::to_string(liveChunks) + " live: not reused");
+        std::printf("step %2d  x %5.0f m  %zu chunks live, %zu rows, %zu blobs\n", step, st.camera.x, liveChunks,
+                    scene.chunks.size(), liveBlobs);
+    }
+    st.pool.reset();
+    std::printf("%s: %d failure(s), %.1f s\n", failures ? "FAILED" : "passed", failures,
+                std::chrono::duration<double>(Clock::now() - t0).count());
+    return failures ? 1 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    for (int i = 1; i < argc; ++i)
+    for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--bench") return bench();
+        if (std::string(argv[i]) == "--selftest") return selftest();
+    }
     projv::Application app;
     app.addSystem(projv::Stage::Startup, "startup", startup);
     app.addSystem(projv::Stage::Update, "move camera", moveCamera);

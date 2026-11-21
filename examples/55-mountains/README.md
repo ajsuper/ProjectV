@@ -36,7 +36,8 @@ cd build/examples/mountains && ./mountains
 | `MOUNTAINS_DEBUG` | `noshadow`, `noskip`: turn parts of the renderer off to measure them |
 
 `./mountains --bench` generates every ring around the camera with no window and reports the time and
-memory per ring. `./mountains_lab` draws the landform in 2D in seconds -- a relief map of 160 km, a
+memory per ring. `./mountains --selftest` generates, flies 5 km and checks for holes, stray cells and
+leaks (exit code 0 when it passes). `./mountains_lab` draws the landform in 2D in seconds -- a relief map of 160 km, a
 closer one of the Plaza to the crest, profiles and panoramas from the Plaza -- and prints elevations at
 reference points (the Plaza, Atalaya, Baldy, Redondo, Sandia Crest, ...) against their real values;
 `--check` measures how well each ring agrees with the next.
