@@ -891,6 +891,14 @@ it leaves to data or systems (policy); every default leaves behaviour as it is.
   dynamic bodies are capped at one chunk.
 - **R11. Joints.** A true lock, a gear joint (two hinges at a ratio), a mass-ratio warning; ropes as
   a system over Distance joints rather than an engine primitive. ("What the demos showed" 6.)
+  *Scope agreed 2026-11-06 (user), next; a plan with decisions, milestones and open questions comes
+  before code:*
+  - **A true lock:** two bodies held rigidly together.
+  - **Joints coupled to one another at a ratio**, not "a gear joint": one joint's motion drives another's
+    at a set ratio. Gears (hinge to hinge) are one case; a hinge driving a slider (rack and pinion) and
+    one joint driving several are others.
+  - **A mass-ratio warning:** joined bodies whose masses differ too much to simulate stably are reported.
+  - **Ropes: left out** of this step.
 - **R12. Scale.** Start-asleep for authored stacks; a profile of a settling pyramid. (8.)
 - **R13. A debug view** of shapes, contacts, joints and sleep. (9.)
 - **R14. Settled debris merged back into static geometry**, as a system a game installs (policy:
